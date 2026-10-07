@@ -8147,6 +8147,20 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     37 to 163; head-on 5.4 / 5.4, was 24 / 19; clip 2.3 / 10.4, was 60 / 11.5;
     retreating target 1.4 / 2.7, was 13 / 11.
 
+- `RB-PHYSICS-001-FR-145` (a short boost press keeps its throttle for the
+  minimum burn; implemented and verified): the throttle the drive code sees
+  (`effective_throttle`, `air_throttle`) is "boosting" while the burn runs
+  its `BOOST_MIN_TIME` (0.1 s), not only while the button is held.
+  - Why: a 6-tick boost press with throttle held, in the air: the game's boost
+    kept pushing for 12 ticks (boost level falling, 8.8 uu/s per tick), while
+    the port's throttle fell back to raw input after the 6 ticks and added the
+    air throttle (66.7 uu/s^2) on top of the boost: 4 uu/s too fast for good.
+  - **Verification**: `drive` test
+    `a_short_boost_press_keeps_the_boost_throttle_until_the_minimum_burn_ends`
+    (fails on the old code); golden `ja_thr` (a jump, boost tap and throttle)
+    velocity error 4.2 -> 1.3 uu/s, mean position error 1.9 -> 0.5 uu at tick 120;
+    every other recording unchanged.
+
 - `RB-PHYSICS-001-FR-144` (the engine fades with the car's absolute speed;
   implemented and verified on seven recordings): `drive_speed_taper` is read
   at `abs(forward speed)`, not at the speed along the throttle's direction
@@ -8224,6 +8238,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.147.0 (2026-10-07): `RB-PHYSICS-001-FR-145` (a short boost press keeps its
+  throttle for the minimum burn). 468 tests in `rb_physics_bullet`.
 - 0.146.0 (2026-10-07): `RB-PHYSICS-001-FR-144` (the engine fades with the
   absolute forward speed; reverse powerslides now agree). 468 tests in
   `rb_physics_bullet`.

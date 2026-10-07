@@ -661,6 +661,15 @@ pub fn apply_driven_forces(
 
 /// Throttle as the pedals see it: RocketSim treats a boosting car with
 /// boost left as full throttle.
+/// Whether the car boosts this tick, as `boost::update_boosting` will set it
+/// at the end of the step: held (with fuel), or still inside the burn's
+/// `BOOST_MIN_TIME` after a short press (`RB-PHYSICS-001-FR-145`: the game
+/// keeps the boost's throttle, and no air throttle, for those ticks).
+fn is_boosting(input: &ControllerInput, state: &DriveState) -> bool {
+    state.boost_amount > 0.0
+        && (input.boost || (state.boosting && state.boosting_time < boost::BOOST_MIN_TIME))
+}
+
 /// Throttle for `air::apply_air_throttle` (`RB-PHYSICS-001-FR-096`):
 /// none while boosting. `BOOST_ACCEL_AIR` (3175/3) is the grounded boost
 /// (2975/3) plus a full `THROTTLE_AIR_ACCEL` (200/3), so boost already
@@ -668,7 +677,7 @@ pub fn apply_driven_forces(
 /// top, but the capture's car boosting with throttle -1 (4.99-5.18 s)
 /// gains the full 3175/3.
 fn air_throttle(input: &ControllerInput, state: &DriveState) -> f32 {
-    if input.boost && state.boost_amount > 0.0 {
+    if is_boosting(input, state) {
         0.0
     } else {
         input.throttle.clamp(-1.0, 1.0)
@@ -676,7 +685,7 @@ fn air_throttle(input: &ControllerInput, state: &DriveState) -> f32 {
 }
 
 fn effective_throttle(input: &ControllerInput, state: &DriveState) -> f32 {
-    if input.boost && state.boost_amount > 0.0 {
+    if is_boosting(input, state) {
         1.0
     } else {
         input.throttle.clamp(-1.0, 1.0)
