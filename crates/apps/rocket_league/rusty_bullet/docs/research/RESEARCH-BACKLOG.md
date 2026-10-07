@@ -800,35 +800,8 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   fresh match each time with the pad list as the only variable.
 - **Status**: Open. **Owner**: baileyrd.
 
-
-### RB-RESEARCH-O022 — A nose-down car bouncing on the floor under boost (fuzz_512)
-
-- **Evidence (2026-10-07)**: `fuzz_512` (seeds 501-524 batch, the worst of the
-  holdout: 1474 uu mean, 5512 max). The first real divergence is not the dodge at
-  tick 255. From tick 187 the recorded car holds an origin height of 76 to 84 uu
-  while boosting with, it seems, the nose down; its vertical speed falls 14 uu/s a tick
-  (gravity plus boost along a downward nose) and is kicked up by +95 to +100 uu/s
-  every 14 ticks (ticks 190 to 191 and 204 to 206: -61 to +39, -148 to -55 to
-  +30), with no jump input and nothing else in the arena (one car, the ball
-  3500 uu away). Inferred, not yet checked against the recorded
-  orientation: the car's nose or corner on the floor, bouncing off a
-  nose-first contact while the boost presses it down. The port has kicks at
-  other ticks (202 to 205: +36, then the boost changes it again), so by tick 224
-  the position error is 10 uu and by tick 250 it is 300 uu/s in speed. A jump
-  press at tick 255 then makes the port double-jump (+294 uu/s up, its press is
-  available: the game ignored the press, no impulse in 4 rows), probably because
-  the two disagree on whether the flip was spent by then (not traced); a second,
-  smaller difference.
-- **Related**: `hard_landing_nose_first` (O011: start-sensitive in the game
-  itself), ADR-0069 (box against mesh edges), O019 (suspension).
-- **Next**: take the nose-down boost-into-floor regime as a probe (state-set a
-  car 90 uu up, pitched down, boost for 1 s, repeat 5 times), run it, and compare
-  the kick size and timing with `impulse_fit.py`; `fuzz_508` (first over 10 uu at
-  tick 244, z 45, throttle, steer, boost and handbrake held) may be the same
-  family. Not started.
 ## Change history
 
-- 2026-10-07: Added RB-RESEARCH-O022 (nose-down floor bounce under boost).
 - 2026-10-07: Added RB-RESEARCH-O021 (boost pads).
 - 2026-10-07: Added RB-RESEARCH-O020 (a resting ball hit from above).
 - 2026-10-07: Added RB-RESEARCH-O019 (suspension damper reading order).
