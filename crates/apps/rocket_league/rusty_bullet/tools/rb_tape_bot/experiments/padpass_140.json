@@ -1,0 +1,45 @@
+{
+ "name": "padpass_140: a car with no boost drives past the small pad at (0,-1024), 140 uu to the side",
+ "settle_ticks": 60,
+ "car": {
+  "location": [
+   140,
+   -2200,
+   17
+  ],
+  "rotation": [
+   -0.0096,
+   1.5707963,
+   0
+  ],
+  "velocity": [
+   0,
+   900,
+   0
+  ],
+  "angular_velocity": [
+   0,
+   0,
+   0
+  ],
+  "boost": 0
+ },
+ "ball": {
+  "location": [
+   3500,
+   3500,
+   93.15
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ]
+ },
+ "steps": [
+  {
+   "ticks": 240,
+   "throttle": 1
+  }
+ ]
+}

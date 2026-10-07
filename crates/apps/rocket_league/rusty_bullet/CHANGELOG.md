@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- `padpass_*` probes and `RB-RESEARCH-O021` (boost pads are in the recordings, not in the
+  port; their geometry is not settled).
 - `gen_wall_fuzz.py` and `wallfuzz_401` to `416` (random tapes from a wall start): median 132 uu
   of mean position error, the weakest regime.
 - `gen_hit_fuzz.py`, `hitfuzz_301` to `324` and `bsl_*` probes (a resting ball clipped by a
