@@ -39,10 +39,10 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## rusty_tick on CopilotKit: a React page and runtime
 **2026-10-06** · [#534](https://github.com/Rusty-Mill/rusty_mill/pull/534) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · `crates/apps/rusty_tick/copilotkit-demo`
 
-- **Added:** a Node project with CopilotKit 1.77's runtime (`runtime.mjs`: `CopilotRuntime` with `rusty_tick`'s `POST /api/agent` as an `@ag-ui/client` `HttpAgent`, bearer token held server side, loopback only) and a Vite React page (`CopilotChat`, a `create_task` tool through `useFrontendTool`, a task list). Typing `add buy milk` streams the assistant's text, runs the tool in the page, and shows the assistant's confirmation on the follow-up run.
+- **Added:** a Node project with CopilotKit 1.77's runtime (`runtime.mjs`: `CopilotRuntime` with `rusty_tick`'s `POST /api/agent` as an `@ag-ui/client` `HttpAgent`, bearer token held server side, loopback only) and a Vite React page (`CopilotChat`, a `create_task` tool through `useFrontendTool`), and two runtime routes, `GET` and `POST /api/demo/tasks`, that read and add tasks in `rusty_tick`'s Inbox (title validated, body capped, `502` on a `rusty_tick` failure). The page lists the Inbox, so tasks persist and reloads show them. Typing `add buy milk` streams the assistant's text, runs the tool in the page, and shows the assistant's confirmation on the follow-up run.
 - **Added:** nothing leaves the machine: `COPILOTKIT_TELEMETRY_DISABLED` is set by the runtime, the page sets `enableInspector={false}` (the inspector otherwise fetches Google Fonts and `cdn.copilotkit.ai/notifications`), and `scarfSettings` disables install-time analytics. The browser's network panel shows only the page's own origin.
 - **Verified:** `tsc --noEmit`, `vite build`, and a headless Chromium run against a real `rusty_tick`, the runtime and Vite: the task appeared and the assistant confirmed. This is the first check of the AG-UI endpoint against CopilotKit's own runtime and React SDK; before it, only the reference client had driven it.
-- **Known limitations:** run by hand, not in CI; pins CopilotKit `1.77.0` and `@ag-ui/client` `1.0.2`; `rusty_tick`'s agent understands only `add <title>`; the page's task list is its own state, not `rusty_tick`'s store.
+- **Known limitations:** run by hand, not in CI; pins CopilotKit `1.77.0` and `@ag-ui/client` `1.0.2`; `rusty_tick`'s agent understands only `add <title>` and does not read the task list; only the Inbox is shown.
 
 ---
 
