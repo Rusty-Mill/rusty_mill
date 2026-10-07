@@ -313,6 +313,10 @@ un_batch.ps1 -Repeat 5 -Scenarios (501..524 | % { "fuzz_$_" } | Join-String -Sep
 python -I tools/rb_tape_bot/spread_report.py replays/batch_<stamp>
 ```
 
+`gen_pad_probes.py` writes 24 `padp_*` boost pad probes (a car with no boost passes
+pad 14 or 18 at known offsets, or drops onto pad 14); read the pickups off the
+`.pads.jsonl` sidecar.
+
 ### Beyond the probes: fuzz tapes and contact impulses
 
 `gen_fuzz.py [count [first_seed]]` writes seeded random 6 s tapes
