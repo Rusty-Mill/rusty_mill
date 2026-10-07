@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- `docs/roadmap/PARITY-PLAN.md`: the plan to parity with Rocket League (measures, ranked gaps, workstreams A to G, order, owner decisions).
 - Scoreboard: random drives on fresh seeds 501 to 524, before FR-144 against now: 354 -> 239 uu
   mean of means (median 143 -> 104).
 - `padpass_*` probes and `RB-RESEARCH-O021` (boost pads are in the recordings, not in the

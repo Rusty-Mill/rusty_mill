@@ -25,6 +25,8 @@ version: `a245d35`).
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`;
   60 real recordings gate `cargo test` (ADR-0066)
 
+- Plan to parity with Rocket League: [PARITY-PLAN.md](./roadmap/PARITY-PLAN.md)
+
 ## Phases
 
 | Phase | Status |
