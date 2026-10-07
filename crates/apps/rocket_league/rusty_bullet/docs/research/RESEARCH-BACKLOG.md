@@ -596,8 +596,27 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   ball); harmless for scoring if scenarios set a nonzero velocity.
 - **Status**: Open (low priority). **Owner**: baileyrd.
 
+### RB-RESEARCH-O018 — Car bumps and demolitions
+
+- **Evidence (2026-10-07)**: 18 two-car recordings (hivemind bot, teammates).
+  The game's bump gives the bumped car an extra velocity along the bumper's
+  heading: 424 / 632 / 828 / 1011 uu/s at bumper speeds 540 / 804 / 1054 /
+  1287 (the line through (0, 5/6), (1400, 1100), (2200, 1530)), 0.2 of the
+  speed upward, once per pair per 0.25 s, when the contact is on the bumper's
+  nose (64.5 uu ahead of its origin); both cars in a head-on.
+- **Done**: `RB-PHYSICS-001-FR-140` (the bump) and `FR-141` (box-box contacts
+  as `dBoxBox`), ADR-0068; thirteen scenarios within about 10 uu per car.
+- **Open**: demolitions (opposing teams, a supersonic bumper, the demolished
+  car's respawn), a victim in the air, a bumper on a wall or ceiling, the
+  bump's cooldown against a second car; bumper speed 2100 (second car 10 uu)
+  and the off-centre clip (10 / 37 uu max) are the loosest fits.
+- **Next**: a team-aware hive (a second bot on team 1) for demolitions.
+- **Status**: Partly done. **Owner**: baileyrd.
+
 ## Change history
 
+- 2026-10-07: Added RB-RESEARCH-O018 (car bumps and demolitions): bumps
+  modelled (FR-140, FR-141), demolitions open.
 - 2026-10-07: Added RB-RESEARCH-O012 (wall and ramp climb), O013 (powerslide
   reverse slide), O014 (car landing on the ball), O015 (smaller residuals),
   O016 (ball hovering when set at rest). RB-RESEARCH-O009's tape-start delay is

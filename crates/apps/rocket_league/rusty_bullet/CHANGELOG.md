@@ -5,6 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0068 (`RB-PHYSICS-001-FR-140`, `FR-141`, spec 0.143.0): car bumps. A car
+  whose nose touches another gives it an extra velocity along its heading
+  (about 0.8 of its speed, 0.2 upward, once per pair per 0.25 s), as measured
+  on 13 two-car recordings; and box-box contacts as `dBoxBox` (a clipped
+  incident face, the 1.05 edge-axis fudge factor). Bump scenarios from
+  100 to 430 uu of error to within about 10 uu per car; nine are in the golden
+  gate. Demolitions are not modelled (RB-RESEARCH-O018).
+### Added
 - ADR-0067 (`RB-VERIFY-003-FR-018`, spec 0.29.0): scenarios with several cars
   (`others`), a hivemind bot `rb_tape_hive` that drives them all on one clock,
   and `rb-verify` scoring every car. First car-vs-car ground truth: a 500 uu/s

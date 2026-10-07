@@ -8113,8 +8113,62 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     - Not run: the owner's `test2`/`hitjump`/`front`/`side` k = 30 gate (the
       recordings are not on the machine that ran this).
 
+- `RB-PHYSICS-001-FR-140` (car bumps; implemented and verified on 13 two-car
+  recordings, ADR-0068): a car whose nose touches another gives it an extra
+  velocity. A contact point on the bumper at least `BUMP_MIN_FORWARD_DIST`
+  (64.5 uu) ahead of its origin makes it a bumper of the other car; the extra
+  velocity goes on the bumped car at the end of the tick, along the bumper's
+  horizontal heading, by `BUMP_VELOCITY_CURVE` of the bumper's speed along it
+  (0 -> 5/6, 1400 -> 1100, 2200 -> 1530 uu/s) plus 0.2 of that speed upward,
+  and the 2300 uu/s cap applies; once per pair per 0.25 s. Both cars bump in a
+  head-on. Demolitions are not modelled.
+  - Why: the first car-vs-car recordings (`RB-VERIFY-003-FR-018`). A car at 500
+    uu/s pushing a stopped one sent it to 1293 uu/s and up (vz +110) in the
+    game; the port gave it 496 uu/s. Rear hits at 540 / 804 / 1054 / 1287
+    uu/s: the victim got 433 / 635 / 835 / 1021 uu/s more than a plain
+    collision (the curve gives 424 / 632 / 828 / 1011), and vz 109 / 162 / 213
+    / 259 (0.20 of the speed). The extra follows the bumper's heading, not the
+    line between the cars (a 45 uu off-centre clip: x about -7 uu/s), uses the
+    bumper's own speed, not the closing speed (a car retreating at 900 uu/s
+    got 1082 from a bumper doing 1337), applies to side hits (the bumper's
+    nose, the victim's flank) and to both cars in a head-on, and is absent
+    when the bumper hits with its tail.
+  - **Verification**: `world` tests `a_rear_hit_bumps_the_stopped_car_forward_and_up`,
+    `a_head_on_bumps_both_cars`, `a_side_hit_bumps_only_the_car_that_hit_with_its_nose`,
+    `a_car_that_hits_with_its_tail_bumps_nobody`,
+    `the_bump_goes_on_once_per_cooldown`; nine two-car recordings in the
+    golden gate (`tools/rb_tape_bot/fixtures/bump*`, ADR-0066). Mean position
+    error per car, rear hits at 300 to 2100 uu/s 0.1 to 1.6 (second car 0.3 to
+    10.1), was 3 to 162 and 59 to 293; side hits 1.2 to 1.4 (2.7 to 7.2), was
+    37 to 163; head-on 5.4 / 5.4, was 24 / 19; clip 2.3 / 10.4, was 60 / 11.5;
+    retreating target 1.4 / 2.7, was 13 / 11.
+
+- `RB-PHYSICS-001-FR-141` (box-box contact as `dBoxBox`; implemented and
+  verified on the same recordings): two changes to `collision::box_vs_box`.
+  The incident face is clipped to the reference face's rectangle
+  (Sutherland-Hodgman, depth interpolated) instead of keeping only the corners
+  strictly inside it, and at most four points are kept (`cull_contacts`); and
+  an edge-edge axis replaces a face axis only when its overlap times
+  `fudge_factor` (1.05) is under the best so far, instead of by 1e-4 uu.
+  - Why: with the bump in, the fast hits still failed (a boosting car at 1740
+    uu/s: victim 1752 uu/s and 5.5 rad/s of spin, the game's 2267 and 1.5).
+    Two cars on one floor have faces of equal height to hundredths of a uu;
+    the lower corners fell 0.01 outside the rectangle and were dropped,
+    leaving two top points and a pitching torque. Then a head-on at a hair of
+    relative pitch picked a near-tied edge axis and gave one edge point.
+  - **Verification**: `collision` test
+    `two_faces_of_equal_height_a_hair_apart_clip_to_four_contacts` (fails
+    on the old code); the golden gate's bump recordings, which move with the
+    factor (head-on 23 -> 5.4 uu, a 1500 uu/s rear hit 16 -> 1.5; checked by
+    setting it to 1.0); the 30 one-car recordings unchanged.
+    `world` test `cars_bounce_off_each_other_instead_of_passing_through` now
+    checks the bounce 40 ticks after contact: the cars then fall asleep (their
+    +-20 uu/s is under the sleep threshold) and the old check at 3 s read zero.
+
 ## Change history
 
+- 0.143.0 (2026-10-07): `RB-PHYSICS-001-FR-140` (car bumps, ADR-0068) and
+  `FR-141` (box-box contact as `dBoxBox`). 464 tests in `rb_physics_bullet`.
 - 0.142.0 (2026-10-07): `RB-PHYSICS-001-FR-139` — a jump press just after a
   jump is ignored (ADR-0065). 457 tests in `rb_physics_bullet`.
 - 0.141.0 (2026-10-06): `RB-PHYSICS-001-FR-138` — a wheel ray that hits the
