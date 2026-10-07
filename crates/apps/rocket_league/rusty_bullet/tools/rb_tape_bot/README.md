@@ -262,6 +262,21 @@ three that do not are the next physics targets, see the run sheet.
 | New: inputs not recorded for the bot car | open, RB-RESEARCH-O008 |
 | New: one 5-tick hole per capture | open, RB-RESEARCH-O009 |
 
+## Several cars
+
+A scenario may list more cars under `others` (a start and steps each, on the
+first car's clock):
+
+```json
+"others": [ { "car": { "location": [0, 0, 17] }, "steps": [ { "ticks": 120 } ] } ]
+```
+
+`rb_run_tapes` then starts `rb_tape_hive`, one hivemind bot that drives every
+car of team 0 from one process, so the tapes cannot drift apart. The cars are
+teammates: bumps are measured, demolitions (opposing teams) are not yet.
+`rb-verify` scores each car (`car 1 error: ...`; `RB_OTHERS=1` lists the
+second car's states). ADR-0067.
+
 ## Fidelity gate and probes
 
 `experiments/probe_*.json` (made by `gen_probes.py`) probe one mechanic each:

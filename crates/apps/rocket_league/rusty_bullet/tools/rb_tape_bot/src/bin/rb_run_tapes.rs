@@ -208,7 +208,13 @@ fn ensure_core(out: &Path) -> Result<()> {
     Err("core did not accept connections within 60 s".into())
 }
 
-fn match_configuration(name: &str, scenario_path: &Path) -> Result<MatchConfiguration> {
+/// The match for a scenario: one tape bot for a one-car scenario, or one
+/// hivemind process driving `car_count` cars of team 0 (they share one clock).
+fn match_configuration(
+    name: &str,
+    scenario_path: &Path,
+    car_count: usize,
+) -> Result<MatchConfiguration> {
     let tape = scenario_path
         .to_str()
         .ok_or("scenario path is not UTF-8")?
@@ -217,29 +223,42 @@ fn match_configuration(name: &str, scenario_path: &Path) -> Result<MatchConfigur
         .to_str()
         .ok_or("package path is not UTF-8")?
         .to_owned();
+    let hive = car_count > 1;
     let bot = CustomBot {
         name: format!("RB Tape: {name}"),
         root_dir,
         // cmd.exe needs backslashes here (see bots/*.bot.toml).
-        run_command: r"target\release\rb_tape_bot.exe".into(),
-        agent_id: "rusty_bullet/tape_bot".into(),
-        hivemind: false,
+        run_command: if hive {
+            r"target\release\rb_tape_hive.exe".into()
+        } else {
+            r"target\release\rb_tape_bot.exe".into()
+        },
+        agent_id: if hive {
+            "rusty_bullet/tape_hive".into()
+        } else {
+            "rusty_bullet/tape_bot".into()
+        },
+        hivemind: hive,
         environment: Some(vec![EnvironmentVariable {
             name: "RB_TAPE".into(),
             value: tape,
         }]),
         ..Default::default()
     };
+    // Core wants every car of a hivemind as its own player entry.
+    let players = (0..car_count.max(1))
+        .map(|_| PlayerConfiguration {
+            variety: PlayerClass::CustomBot(Box::new(bot.clone())),
+            team: 0,
+            player_id: 0,
+        })
+        .collect();
     Ok(MatchConfiguration {
         launcher: Launcher::Epic,
         auto_start_agents: true,
         wait_for_agents: true,
         game_map_upk: "Stadium_P".into(),
-        player_configurations: vec![PlayerConfiguration {
-            variety: PlayerClass::CustomBot(Box::new(bot)),
-            team: 0,
-            player_id: 0,
-        }],
+        player_configurations: players,
         game_mode: GameMode::Soccar,
         // Core crashes on a missing mutator table.
         mutators: Some(Box::new(MutatorSettings {
@@ -372,7 +391,7 @@ fn run_one_inner(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<
         .car
         .location
         .ok_or_else(|| format!("{name} has no car.location to detect the start by"))?;
-    let config = match_configuration(name, path)?;
+    let config = match_configuration(name, path, scenario.car_count())?;
     ensure_game_up(dir, &config)?;
 
     send_job(dir, &format!(r#"{{"start": "{}"}}"#, json_escape(capture)?))?;
@@ -484,7 +503,7 @@ mod tests {
     #[test]
     fn match_configuration_is_freeplay_with_state_setting_and_the_tape() {
         let (name, path) = list_scenarios(&["pogo".into()]).expect("list").remove(0);
-        let config = match_configuration(&name, &path).expect("config");
+        let config = match_configuration(&name, &path, 1).expect("config");
         assert!(config.freeplay && config.enable_state_setting);
         let PlayerClass::CustomBot(bot) = &config.player_configurations[0].variety else {
             panic!("not a custom bot");
@@ -496,6 +515,23 @@ mod tests {
             "{}",
             env[0].value
         );
+    }
+
+    #[test]
+    fn a_two_car_scenario_is_one_hivemind_team_of_two_players() {
+        let (name, path) = list_scenarios(&["pogo".into()]).expect("list").remove(0);
+        let config = match_configuration(&name, &path, 2).expect("config");
+        assert_eq!(config.player_configurations.len(), 2);
+        for player in &config.player_configurations {
+            let PlayerClass::CustomBot(bot) = &player.variety else {
+                panic!("not a custom bot");
+            };
+            assert!(bot.hivemind, "both cars are one hivemind");
+            assert!(bot.run_command.ends_with("rb_tape_hive.exe"));
+            assert_eq!(player.team, 0);
+        }
+        let single = match_configuration(&name, &path, 1).expect("config");
+        assert_eq!(single.player_configurations.len(), 1);
     }
 
     #[test]

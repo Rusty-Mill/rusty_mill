@@ -275,6 +275,25 @@ fn run_scenario_against(
             pb = fmt_vec(&row.predicted_ball),
         );
     }
+    if std::env::var_os("RB_OTHERS").is_some() {
+        for (index, rows) in comparison.other_rows.iter().enumerate() {
+            for (tick, recorded, predicted) in rows {
+                if tick % every.max(1) != 0 {
+                    continue;
+                }
+                println!(
+                    "car {} tick {tick:>4}: rec pos {} vel {} spin {} | pred pos {} vel {} spin {}",
+                    index + 1,
+                    fmt_vec(&recorded.position),
+                    fmt_vec(&recorded.velocity),
+                    fmt_vec(&recorded.angular_velocity),
+                    fmt_vec(&predicted.position),
+                    fmt_vec(&predicted.velocity),
+                    fmt_vec(&predicted.angular_velocity),
+                );
+            }
+        }
+    }
     let first = |threshold: f32| {
         comparison
             .first_position_error_over(threshold)

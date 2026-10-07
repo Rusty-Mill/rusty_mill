@@ -374,6 +374,16 @@ them.
   quarter). Tests: the bound check over all cases, a shifted recording
   exceeds its bound, every fixture has a case. Reverting FR-139 fails it.
 
+- `RB-VERIFY-003-FR-018` (implemented): scenarios with several cars (ADR-0067).
+  `rb_scenario::Scenario::others` lists further cars with their own start and
+  steps on the first car's clock; `simulate_scenario` steps every car; both
+  comparisons keep every car's rows (`ScenarioComparison::other_rows`,
+  `mean_other_error`/`max_other_error`), pick the lag on all cars and the ball,
+  and the recorded-input replay feeds each car its own recorded input;
+  `rb-verify` prints `car N error: mean .. max ..`. Tests:
+  `a_second_car_is_simulated_and_scored_beside_the_first` and, in
+  `rb_scenario`, `other_cars_have_their_own_start_and_tape_on_one_clock`.
+
 - `RB-VERIFY-003-FR-014` (implemented): car-ball hit sweeps, the second
   caller of `rb_env::Env` (ADR-0060, ADR-0061). `rb-verify --sweep-hit <k>
   <capture> <from> <to> [<capture> <from> <to>]...` scores a grid of
@@ -619,6 +629,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.29.0 (2026-10-07): `RB-VERIFY-003-FR-018` implemented: scenarios with
+  several cars (ADR-0067).
 - 0.28.0 (2026-10-07): the recorded-input replay finds the start lag; the
   golden-capture gate holds 30 fixtures (bounds re-measured under the lag
   search).
