@@ -298,6 +298,21 @@ trimmed to their tapes by `make_fixture.py <scenario> <capture>`, and
 gets worse on any of them (ADR-0066). After a physics change that improves a
 scenario, lower its bound there; to add a fixture, add its case.
 
+### Game spread and boost pad logs
+
+`rb_run_tapes` writes `<capture>.pads.jsonl` beside every capture (ADR-0071):
+the field's boost pad list and each pad's `is_active`/`timer` whenever one
+changes, with the car's position and boost at that physics frame.
+`spread_report.py <batch>` compares the runs of each tape with each other and
+with the port. To measure the game's spread (about 50 minutes unattended):
+
+```powershell
+powershell -File tools
+b_tape_bot
+un_batch.ps1 -Repeat 5 -Scenarios (501..524 | % { "fuzz_$_" } | Join-String -Separator ",")
+python -I tools/rb_tape_bot/spread_report.py replays/batch_<stamp>
+```
+
 ### Beyond the probes: fuzz tapes and contact impulses
 
 `gen_fuzz.py [count [first_seed]]` writes seeded random 6 s tapes

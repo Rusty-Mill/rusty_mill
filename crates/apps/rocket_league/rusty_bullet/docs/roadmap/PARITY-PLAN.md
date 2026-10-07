@@ -164,7 +164,7 @@ Part-time cycles (one cycle is roughly a session of a few PRs):
 
 | Step | Work | Cycles |
 |---|---|---|
-| 1 | F: game spread measurement | 0.5 |
+| 1 | F: game spread measurement (tooling done, ADR-0071; the 24 x 5 run is next) | 0.5 |
 | 2 | C step 1 and 2: pad data (fits on the same tape-bot runs as F) | 1 |
 | 3 | A steps 1 and 2: instrument and clean probes | 1 to 2 |
 | 4 | C step 3: pads in the port | 1 |
@@ -178,17 +178,15 @@ Physics parity (steps 1 to 8) is about 8 to 14 cycles, dominated by A, which may
 turn out to be a handful of facet-crossing details or one structural
 mistake; the instrument in A.1 is what decides.
 
-## 5. Decisions needed from the owner
+## 5. Decisions (owner, 2026-10-07)
 
-1. Is parity measured for bot-controlled cars only (the measurable thing), with
-   keyboard captures as a legacy mode, or both? (Affects ADR-0070's flag.)
-2. Is a full match (E) in scope for "parity", or physics only? The existing
-   roadmap puts determinism and netcode after physics.
-3. Boost pads: new public API on `PhysicsWorld` and `Env`, on by default in
-   `Env`? (Recommended: on in `Env`, off in `PhysicsWorld::new` so existing
-   scenarios do not change.)
-4. Run budget: workstreams C, D and F each need unattended runs of the game
-   (about 10 minutes per 24 tapes); is overnight batching acceptable?
+1. Parity is measured for bot-driven cars only; keyboard captures stay a legacy
+   mode (ADR-0070 flag) plus the one-time gate check of G.
+2. Physics only for now; E (match flow) stays last and optional.
+3. Boost pads on by default in `Env`, off in `PhysicsWorld::new` (existing
+   fixtures and the golden gate unchanged).
+4. Unattended overnight game runs are acceptable (C, D and F, about 10 minutes
+   per 24 tapes).
 
 ## 6. Risks
 
