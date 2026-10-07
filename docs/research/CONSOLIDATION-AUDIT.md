@@ -6,6 +6,7 @@ Date: 2026-10-07 · Status: report only (no code, issues or PRs) · Base: `main`
 
 - Nexus **frozen** (Q1 answered "freeze first"): excluded from the workspace, not deleted; `crates/apps/nexus/FROZEN.md`. Deletion still needs separate approval.
 - Priority step 1 **done** for rows 1 and 2 (non-Nexus sites): `rusty_crypto_key::constant_time_eq`, `rusty_oauth::bearer::token_from_authorization`. Left: the two Nexus `ct_eq` copies and `nexus-memory-hub`'s Bearer parse (frozen), `rusty_acp/examples/authenticated_server.rs` (example kept standalone).
+- Priority step 2: row 3 **done** (`Emitter::{text_delta, end_text, tool_call, tool_result}` in `rusty_agui`; `adk-agui`, `rk-agui`, `rusty_tick`, `echo_agent` use them). Row 4 (`strip_ansi`) **not done, on purpose**: after the Nexus freeze only two live copies remain. `rusty_provider/crates/router/src/rtk.rs` strips CSI only; `rusty_lines/tests/pty.rs` also drops OSC and two-byte `ESC x` sequences. `rusty_ansi::strip_ansi` (`libs/ui/rusty_ansi/src/lib.rs`) drops only the `ESC` byte of a two-byte sequence and leaves the next character as text, and drops other C0 controls, so swapping it in would change both outputs and likely break the `rusty_lines` PTY assertions. Making it worthwhile means first extending the `rusty_ansi` parser (new token or consuming the byte), then adopting it in both: one real consumer of a new `unicode-width` edge for a 15-line function. Re-rate row 4 as S–M, low value; needs your call.
 
 ## 0. Scope, method, limits
 
