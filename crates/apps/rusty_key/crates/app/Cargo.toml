@@ -32,6 +32,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", 
 # "Hoisted from rusty_key"/"Hoisted from rusty_adk" comment blocks in the
 # root Cargo.toml for why it is tracked as a migration, not drift.
 rmcp = { version = "3.1", features = ["server", "transport-io"], optional = true }
+rusty-mcp = { workspace = true, optional = true }
 axum = { version = "0.7", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
@@ -40,7 +41,7 @@ futures = { version = "0.3", optional = true }
 [features]
 # MCP server mode (`rusty-keys --mcp`): expose Session::send() over JSON-RPC
 # (ADR-0029). Off by default (pulls rmcp); enable for IDE integration.
-mcp-server = ["dep:rmcp", "rk-mcp/rmcp"]
+mcp-server = ["dep:rmcp", "dep:rusty-mcp", "rk-mcp/rmcp"]
 # Web gateway (`rusty-keys --gateway`): axum HTTP/SSE over Session::send()
 # (PRD 06). Off by default (pulls axum); enable for web/desktop clients.
 gateway = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures", "tokio/net"]

@@ -10771,6 +10771,7 @@ dependencies = [
  "rk-mcp",
  "rk-observe",
  "rmcp",
+ "rusty-mcp",
  "rusty_crypto_key",
  "rusty_oauth",
  "serde",

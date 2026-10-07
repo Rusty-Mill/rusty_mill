@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - rk-app MCP server on rusty-mcp (pending review)
+
+- **Changed:** `rusty-keys --mcp` uses `rusty_mcp::serve`; compiles clean under clippy `-D warnings` with `--features mcp-server`, and the crate's tests pass.
+- **Known limitation:** the MCP path is still not exercised end to end (needs a live model; the file header already says so), so the protocol-version change and shutdown behaviour are compile-checked only. Try `rusty-keys --mcp` from an MCP client before relying on it.
+
+---
+
 ## 2026-10-07 - rusty_dirs (pending review)
 
 - **Added:** `rusty_dirs`; `rusty_term` and `rusty-croc` use it.
