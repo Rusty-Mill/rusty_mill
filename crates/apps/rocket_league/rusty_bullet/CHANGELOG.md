@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- `gen_wall_fuzz.py` and `wallfuzz_401` to `416` (random tapes from a wall start): median 132 uu
+  of mean position error, the weakest regime.
+- `gen_hit_fuzz.py`, `hitfuzz_301` to `324` and `bsl_*` probes (a resting ball clipped by a
+  jumping car); `RB-RESEARCH-O020` recorded (the floor's push back on the first
+  tick of a hit is in the game in half the cases): not fixed.
 - `gen_ball_fuzz.py` and `ballfuzz_201` to `224`: random ball launches against the game, mean
   ball error 8.3 uu over 6 s; two in the golden gate (62 recordings).
 - Tools: `impulse_fit.py` (a contact's impulse and line of action off a recording),
