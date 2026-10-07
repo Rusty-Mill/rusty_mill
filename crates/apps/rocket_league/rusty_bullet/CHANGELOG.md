@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- `gen_ball_fuzz.py` and `ballfuzz_201` to `224`: random ball launches against the game, mean
+  ball error 8.3 uu over 6 s; two in the golden gate (62 recordings).
 - Tools: `impulse_fit.py` (a contact's impulse and line of action off a recording),
   `kstep_regimes.py` (the k-step error by controls and speed), probe scenarios
   `bs_*` (boost and full steer at low speed), `wj_*` (wall jumps), all agreeing

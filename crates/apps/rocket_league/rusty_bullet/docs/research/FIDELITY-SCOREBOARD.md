@@ -4,7 +4,7 @@ State on 2026-10-07 (spec `RB-PHYSICS-001` 0.150.0). Every number is the mean
 position error in uu between the port, fed the input the game recorded
 (`rb-verify --scenario S --against C --recorded-inputs`), and a tape-bot
 recording of real Rocket League: the car, and where it matters the ball and a
-second car. The recordings are `replays/` (gitignored); 60 of them, trimmed to
+second car. The recordings are `replays/` (gitignored); 62 of them, trimmed to
 their tapes, are in `tools/rb_tape_bot/fixtures/` and fail `cargo test` if the
 port gets worse (ADR-0066). How it was measured: `tools/rb_tape_bot/README.md`;
 the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
@@ -56,6 +56,15 @@ one tick, and a wall or goal-post hit amplifies. The smoother number is the
 grip, powerslide steer, rise and fall rates, lateral curve end, pushback ERP,
 sticky force) worsens it when moved: the remaining error is structural, not a
 constant.
+
+## Random ball launches
+
+`gen_ball_fuzz.py`: 24 seeded 6 s launches (random place, velocity 500 to 2500 uu/s,
+spin up to 5 rad/s; the car parked and idle), bouncing off the floor, walls,
+ceiling, corners, goals and posts: mean ball position error per tape **8.3 uu**
+(median 8.0, worst tape 15.4, worst moment 53 uu). The one-step ball prediction
+from every recorded frame is exact to 0.1 uu, including the bounces; the drift is
+0.01 uu per tick of accumulated rounding. Two tapes are in the golden gate.
 
 ## What changed on 2026-10-07
 
