@@ -275,6 +275,23 @@ fn run_scenario_against(
             pb = fmt_vec(&row.predicted_ball),
         );
     }
+    // `RB_STATES=1` lists the first car's recorded and predicted velocity and
+    // spin per row, to see which component a position error starts in.
+    if std::env::var_os("RB_STATES").is_some() {
+        for row in &comparison.rows {
+            if row.tick % every.max(1) != 0 {
+                continue;
+            }
+            println!(
+                "car 0 tick {tick:>4}: rec vel {} spin {} | pred vel {} spin {}",
+                fmt_vec(&row.recorded.velocity),
+                fmt_vec(&row.recorded.angular_velocity),
+                fmt_vec(&row.predicted.velocity),
+                fmt_vec(&row.predicted.angular_velocity),
+                tick = row.tick,
+            );
+        }
+    }
     if std::env::var_os("RB_OTHERS").is_some() {
         for (index, rows) in comparison.other_rows.iter().enumerate() {
             for (tick, recorded, predicted) in rows {

@@ -18,7 +18,7 @@
 //! since `RB-PHYSICS-001-FR-042`).
 
 use crate::body::{RigidBody, Shape};
-use crate::mesh::StaticMesh;
+use crate::mesh::{StaticMesh, Triangle};
 use rb_domain::{Quat, Vec3};
 
 /// A single contact point between a dynamic body and a static plane.
@@ -220,6 +220,10 @@ struct ManifoldPoint {
     on_surface: Vec3,
 }
 
+/// How much larger than the triangle normal's gap another separating axis's
+/// must be to take over (uu): ties stay with the corner-on-face contact.
+const SAT_PREFERENCE: f32 = 0.05;
+
 /// Deepest a box corner may sit behind a mesh triangle and still be taken
 /// as touching it (uu); deeper, it is past some other part of the wall.
 const MESH_MAX_DEPTH: f32 = 50.0;
@@ -280,9 +284,143 @@ impl BoxCorners<'_> {
             return (corner, sharp);
         }
         let local_normal = self.body.orientation.conjugate().rotate(normal);
-        let signs = Vec3::new(local.x.signum(), local.y.signum(), local.z.signum());
+        let h = self.half_extents;
+        let on_face = |value: f32, half: f32| {
+            if value.abs() >= half - 1e-3 {
+                value.signum()
+            } else {
+                0.0
+            }
+        };
+        let signs = Vec3::new(
+            on_face(local.x, h.x),
+            on_face(local.y, h.y),
+            on_face(local.z, h.z),
+        );
         let rounding = crate::body::BOX_COLLISION_MARGIN * (signs.dot(&local_normal) + 1.0);
         (corner, sharp - rounding)
+    }
+
+    /// The contact of this box with `triangle` along the separating axis of
+    /// least penetration, when that axis is not the triangle's normal: a
+    /// triangle vertex against a box face, or a triangle edge against a box
+    /// edge (Bullet's GJK finds those as the closest features). The corner
+    /// against the triangle's face stays with the caller.
+    fn separating_axis_contact(&self, triangle: &Triangle) -> Option<(Vec3, Vec3, f32, Vec3, f32)> {
+        let body = self.body;
+        let center = body.shape_center();
+        let axes = [
+            body.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0)),
+            body.orientation.rotate(&Vec3::new(0.0, 1.0, 0.0)),
+            body.orientation.rotate(&Vec3::new(0.0, 0.0, 1.0)),
+        ];
+        let h = [
+            self.half_extents.x,
+            self.half_extents.y,
+            self.half_extents.z,
+        ];
+        let v = triangle.vertices;
+        let edges = [v[1] - v[0], v[2] - v[1], v[0] - v[2]];
+        let centroid = (v[0] + v[1] + v[2]) * (1.0 / 3.0);
+        // Gap of the box above the triangle along unit `l` pointing at the box.
+        let gap_along = |l: &Vec3| {
+            let radius: f32 = (0..3).map(|i| h[i] * l.dot(&axes[i]).abs()).sum();
+            let top = v.iter().map(|p| p.dot(l)).fold(f32::MIN, f32::max);
+            center.dot(l) - radius - top
+        };
+        let oriented = |l: Vec3| {
+            let unit = l.normalize()?;
+            Some(if unit.dot(&(center - centroid)) >= 0.0 {
+                unit
+            } else {
+                -unit
+            })
+        };
+        let mut best_gap = gap_along(&triangle.normal);
+        let mut best: Option<(usize, usize, Vec3)> = None; // (face or edge, box edge, axis)
+        let mut consider = |kind: usize, other: usize, axis: Option<Vec3>| {
+            if let Some(l) = axis {
+                let gap = gap_along(&l);
+                if gap > best_gap + SAT_PREFERENCE {
+                    best_gap = gap;
+                    best = Some((kind, other, l));
+                }
+            }
+        };
+        for (i, axis) in axes.iter().enumerate() {
+            consider(i, 3, oriented(*axis));
+        }
+        for (j, edge) in edges.iter().enumerate() {
+            for (k, axis) in axes.iter().enumerate() {
+                consider(3 + j, k, oriented(edge.cross(axis)));
+            }
+        }
+        let (kind, box_edge, l) = best?;
+        if best_gap >= self.breaking {
+            return None;
+        }
+        let inverse = body.orientation.conjugate();
+        if kind < 3 {
+            // A triangle vertex against the box face.
+            let vertex = *v.iter().max_by(|a, b| a.dot(&l).total_cmp(&b.dot(&l)))?;
+            let on_box = vertex + l * best_gap;
+            let local = inverse.rotate(&(on_box - center));
+            let clamp = |value: f32, half: f32| value.clamp(-half, half);
+            let local = Vec3::new(
+                clamp(local.x, h[0]),
+                clamp(local.y, h[1]),
+                clamp(local.z, h[2]),
+            );
+            return Some((local, l, l.dot(&vertex), vertex, best_gap));
+        }
+        // A triangle edge against a box edge along `axes[box_edge]`.
+        let edge_index = kind - 3;
+        let (start, direction) = (v[edge_index], edges[edge_index]);
+        let along = axes[box_edge];
+        let local_normal = inverse.rotate(&l);
+        let pick = |axis: usize, value: f32| -> f32 {
+            if axis == box_edge {
+                0.0
+            } else if value > 0.0 {
+                -h[axis]
+            } else {
+                h[axis]
+            }
+        };
+        let base_local = Vec3::new(
+            pick(0, local_normal.x),
+            pick(1, local_normal.y),
+            pick(2, local_normal.z),
+        );
+        let base = center + body.orientation.rotate(&base_local);
+        // Closest points of the lines `start + s * direction` and
+        // `base + t * along`.
+        let w = start - base;
+        let (a, b, c) = (
+            direction.dot(&direction),
+            direction.dot(&along),
+            along.dot(&along),
+        );
+        let (d, e) = (direction.dot(&w), along.dot(&w));
+        let denominator = a * c - b * b;
+        if denominator.abs() < 1e-6 {
+            return None;
+        }
+        let s = (b * e - c * d) / denominator;
+        let t = (a * e - b * d) / denominator;
+        if !(0.0..=1.0).contains(&s) || t.abs() > h[box_edge] {
+            return None;
+        }
+        let on_triangle = start + direction * s;
+        let on_box = base + along * t;
+        let mut local = base_local;
+        match box_edge {
+            0 => local.x = t,
+            1 => local.y = t,
+            _ => local.z = t,
+        }
+        let _ = on_box;
+        Some((local, l, l.dot(&on_triangle), on_triangle, best_gap))
     }
 
     fn locals(&self) -> [Vec3; 8] {
@@ -341,8 +479,22 @@ impl ContactManifold {
             Vec3::new(m.x.max(p.x), m.y.max(p.y), m.z.max(p.z))
         }) + pad;
         let candidates: Vec<(Vec3, Vec3, f32)> = mesh
-            .near(min, max)
-            .filter_map(|triangle| {
+            .near_indexed(min, max)
+            .filter_map(|(index, triangle)| {
+                if let Some((local, normal, offset, on_triangle, gap)) =
+                    corners.separating_axis_contact(triangle)
+                {
+                    // Bullet's internal-edge adjustment of the contact normal
+                    // (FR-109), as for the ball: a seam between flat facets
+                    // gives the facet's own normal.
+                    let adjusted = mesh.adjust_edge_normal(index, &on_triangle, normal);
+                    let offset = if adjusted == normal {
+                        offset
+                    } else {
+                        adjusted.dot(&corners.world(&local)) - gap
+                    };
+                    return Some((local, adjusted, offset));
+                }
                 locals
                     .iter()
                     .map(|local| {
@@ -2797,6 +2949,105 @@ mod tests {
         // margin-rounded corner (FR-124).
         assert!(touching[0].penetration_depth > 0.0 && touching[0].penetration_depth < 2.0);
         assert!((touching[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    /// A side wall as the arena has it at x = 4091: a lower ramp facet leaning
+    /// 17 degrees, an upper one 6 degrees, each a quad of two coplanar
+    /// triangles (the lip is z = 204). Returns the upper facet's normal.
+    fn lipped_wall() -> (StaticMesh, Vec3) {
+        let inside = Vec3::new(0.0, 0.0, 0.0);
+        let lower = [
+            Vec3::new(4091.0, -1536.0, 204.0),
+            Vec3::new(4076.0, -2048.0, 156.0),
+            Vec3::new(4091.0, -2048.0, 204.0),
+            Vec3::new(4076.0, -1536.0, 156.0),
+        ];
+        let upper = [
+            Vec3::new(4091.0, -1536.0, 204.0),
+            Vec3::new(4091.0, -2048.0, 204.0),
+            Vec3::new(4106.0, -2048.0, 355.0),
+            Vec3::new(4106.0, -1536.0, 355.0),
+        ];
+        let triangles: Vec<_> = [
+            (lower, [(0, 1, 2), (0, 3, 1)]),
+            (upper, [(0, 1, 2), (0, 2, 3)]),
+        ]
+        .iter()
+        .flat_map(|(quad, split)| {
+            split.iter().filter_map(move |&(a, b, c)| {
+                crate::mesh::Triangle::facing(
+                    quad[a],
+                    quad[b],
+                    quad[c],
+                    inside + Vec3::new(3000.0, -1700.0, 250.0),
+                )
+            })
+        })
+        .collect();
+        let normal = triangles
+            .iter()
+            .map(|t| t.normal)
+            .max_by(|a, b| a.z.total_cmp(&b.z).reverse())
+            .unwrap_or(Vec3::ZERO);
+        (StaticMesh::new(triangles), normal)
+    }
+
+    #[test]
+    fn a_box_edge_just_under_a_facet_takes_the_facets_own_normal_not_the_ramp_below() {
+        // The recorded `probe_wall_land` hit: a car turned 45 degrees to the
+        // wall meets it with a vertical edge just below the lip. The game's
+        // impulse is along the upper facet's normal (6 degrees up), where
+        // the corner-on-plane test saw only the lower ramp (17 degrees).
+        let (mesh, upper_normal) = lipped_wall();
+        let mut car = RigidBody::car_box(CAR_HALF_EXTENTS, 1.0, Vec3::ZERO);
+        car.orientation = Quat::new(
+            0.0,
+            0.0,
+            (0.25 * std::f32::consts::PI).sin(),
+            (0.25 * std::f32::consts::PI).cos(),
+        );
+        car.position = Vec3::new(4010.0, -1583.0, 215.0);
+        let reach = car
+            .orientation
+            .rotate(&Vec3::new(CAR_HALF_EXTENTS.x, CAR_HALF_EXTENTS.y, 0.0))
+            .x
+            .max(
+                car.orientation
+                    .rotate(&Vec3::new(CAR_HALF_EXTENTS.x, -CAR_HALF_EXTENTS.y, 0.0))
+                    .x,
+            );
+        car.position.x = 4091.0 - reach - 0.5;
+        let contacts = ContactManifold::default().update_mesh(&car, &mesh);
+        assert!(
+            contacts
+                .iter()
+                .any(|c| (c.normal - upper_normal).length() < 1e-3),
+            "{contacts:?} vs {upper_normal:?}"
+        );
+    }
+
+    #[test]
+    fn a_box_face_beside_a_lone_triangle_edge_is_pushed_along_its_own_normal() {
+        // An unshared edge is a real edge: a box whose flat side comes up to
+        // it (no corner over the triangle) is pushed along that side's
+        // normal, as Bullet's closest-feature search finds, where the
+        // corner-on-plane test saw nothing.
+        let flat = crate::mesh::Triangle::facing(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(100.0, 0.0, 0.0),
+            Vec3::new(0.0, 100.0, 0.0),
+            Vec3::new(10.0, 10.0, 50.0),
+        );
+        let mesh = StaticMesh::new(flat.into_iter().collect());
+        let mut car = RigidBody::car_box(CAR_HALF_EXTENTS, 1.0, Vec3::ZERO);
+        car.position = Vec3::new(-CAR_HALF_EXTENTS.x - 0.5, 50.0, 0.0);
+        let contacts = ContactManifold::default().update_mesh(&car, &mesh);
+        assert!(
+            contacts
+                .iter()
+                .any(|c| (c.normal - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-3),
+            "{contacts:?}"
+        );
     }
 
     #[test]
