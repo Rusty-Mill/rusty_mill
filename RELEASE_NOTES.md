@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - One Bearer parser (pending review)
+
+- **Changed:** `rusty_oauth::bearer::token_from_authorization` replaces nine call-site copies. Behaviour change: scheme matched case-insensitively and an empty token is rejected up front. New `rusty_oauth` edges: `remind_me_core`, `remind_me_api`, `remind_me_remote`, `rp-server`, `rk-app`, `rusty_fair_play`, `rusty_tick`.
+- **Known limitation:** `remind_me_api`'s and `remind_me_remote`'s flat-key check still compares the whole header to `"Bearer <secret>"` in constant time (exact case); only the scoped-key and OAuth paths use the parser.
+
+---
+
 ## 2026-10-07 - One constant_time_eq (pending review)
 
 - **Changed:** `rusty_crypto_key::constant_time_eq` replaces seven hand-written copies and the one inside `SecretBytes::eq`; the length is folded into the accumulator and the shorter side zero-padded, so a wrong-length token no longer returns early. New edges: `rusty_oauth`, `remind_me_core`, `remind_me_hub`, `rk-app`, `rusty_fair_play`, `rusty_tick` depend on `rusty_crypto_key`.

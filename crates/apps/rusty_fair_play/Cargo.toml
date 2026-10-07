@@ -11,6 +11,7 @@ publish = false
 layer = "apps"
 
 [dependencies]
+rusty_oauth = { workspace = true }
 rusty_crypto_key = { workspace = true }
 # The domain, embedded: the three stacks, the queries, the seed loader
 # with the deck inside it (a libs crate, so this app depends on no other

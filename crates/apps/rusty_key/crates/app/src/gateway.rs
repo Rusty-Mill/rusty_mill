@@ -141,7 +141,7 @@ where
         let presented = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
+            .and_then(rusty_oauth::bearer::token_from_authorization)
             .map(str::to_string);
         match &self.secret {
             Some(expected) => match &presented {

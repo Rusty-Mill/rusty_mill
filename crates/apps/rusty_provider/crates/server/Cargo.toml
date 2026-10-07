@@ -8,6 +8,7 @@ license = "MIT"
 layer = "apps"
 
 [dependencies]
+rusty_oauth = { workspace = true }
 rp-core.workspace = true
 rp-mcp.workspace = true
 rp-providers.workspace = true

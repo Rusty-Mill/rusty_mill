@@ -70,7 +70,7 @@ impl Authenticator {
     /// [`Denied`], for a missing header, a scheme other than `Bearer`, and a
     /// token that is unknown, revoked, disabled or wrong alike.
     pub fn authenticate(&mut self, header: Option<&str>) -> Result<UserKey, Denied> {
-        let presented = header.and_then(|h| h.strip_prefix("Bearer "));
+        let presented = header.and_then(rusty_oauth::bearer::token_from_authorization);
         match self {
             Self::Single { token, user } => {
                 let ok =

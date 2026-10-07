@@ -246,7 +246,7 @@ impl Api {
             return true;
         };
         header
-            .and_then(|h| h.strip_prefix("Bearer "))
+            .and_then(rusty_oauth::bearer::token_from_authorization)
             .is_some_and(|p| constant_time_eq(p.as_bytes(), token.as_bytes()))
     }
 }

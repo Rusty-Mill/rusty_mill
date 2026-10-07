@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- **One Bearer parser** (consolidation audit step 1, `rusty_oauth::bearer::token_from_authorization`): replaces nine hand-written `strip_prefix("Bearer ")` sites (`rusty_channel` Teams, `remind_me_core` webhook, `remind_me_api`, `remind_me_remote` ×2, `rp-server`, `rk-app`, `rusty_fair_play`, `rusty_tick`). The scheme is now case-insensitive (RFC 7235) and an empty token is `None`; before, only `Bearer ` and (Teams alone) `bearer ` matched and `Bearer ` with no token reached the comparison as `""`. `rusty_acp`'s example and the Nexus copy are untouched.
 - **One `constant_time_eq`** (consolidation audit step 1, `rusty_crypto_key::constant_time_eq`): the length-padded, `black_box`ed comparison now lives in `rusty_crypto_key` and replaces seven private copies (`remind_me_core` daemon and webhook, `remind_me_hub`, `rk-app` gateway, `rusty_fair_play`, `rusty_tick`, `rusty_oauth::crypto::hmac`) and `SecretBytes::eq`. `remind_me_core::webhook::constant_time_eq` and `rusty_oauth::crypto::hmac::constant_time_eq` stay as re-exports, so their importers are unchanged. Stricter than two of the old copies: they returned early on a length mismatch. Nexus copies left alone (frozen).
 - **Nexus frozen**: its 41 crates move from `[workspace] members` to `exclude` (not deleted; `crates/apps/nexus/FROZEN.md` explains how to unfreeze). `Cargo.lock` loses 162 packages, 41 of them `nexus-*`, and no package is added or upgraded. `docs/WORKSPACE-MAP.md` regenerated. Nothing outside Nexus depended on it.
 

@@ -2,6 +2,11 @@
 
 Date: 2026-10-07 · Status: report only (no code, issues or PRs) · Base: `main` @ 4506e96
 
+## Status (2026-10-07)
+
+- Nexus **frozen** (Q1 answered "freeze first"): excluded from the workspace, not deleted; `crates/apps/nexus/FROZEN.md`. Deletion still needs separate approval.
+- Priority step 1 **done** for rows 1 and 2 (non-Nexus sites): `rusty_crypto_key::constant_time_eq`, `rusty_oauth::bearer::token_from_authorization`. Left: the two Nexus `ct_eq` copies and `nexus-memory-hub`'s Bearer parse (frozen), `rusty_acp/examples/authenticated_server.rs` (example kept standalone).
+
 ## 0. Scope, method, limits
 
 - Prior decisions honoured (remind-me + repo docs):
