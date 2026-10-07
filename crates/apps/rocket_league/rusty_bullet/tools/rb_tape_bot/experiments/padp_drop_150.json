@@ -1,11 +1,11 @@
 {
-  "name": "padp_s_120: small pad 14, car 120 uu to the side",
+  "name": "padp_drop_150: car falls from 400 uu onto small pad 14, 150 uu to the side",
   "settle_ticks": 60,
   "car": {
     "location": [
-      120,
-      -1700,
-      17
+      150,
+      -1024,
+      400
     ],
     "rotation": [
       -0.0096,
@@ -38,11 +38,7 @@
   },
   "steps": [
     {
-      "ticks": 600
-    },
-    {
-      "ticks": 240,
-      "throttle": 0.5
+      "ticks": 150
     }
   ]
 }

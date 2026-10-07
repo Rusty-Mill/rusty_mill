@@ -1,5 +1,5 @@
 {
-  "name": "padp_s_260: small pad 14, car 260 uu to the side, 900 uu/s",
+  "name": "padp_s_260: small pad 14, car 260 uu to the side",
   "settle_ticks": 60,
   "car": {
     "location": [
@@ -14,7 +14,7 @@
     ],
     "velocity": [
       0,
-      900,
+      0,
       0
     ],
     "angular_velocity": [
@@ -38,8 +38,11 @@
   },
   "steps": [
     {
-      "ticks": 150,
-      "throttle": 1
+      "ticks": 600
+    },
+    {
+      "ticks": 240,
+      "throttle": 0.5
     }
   ]
 }

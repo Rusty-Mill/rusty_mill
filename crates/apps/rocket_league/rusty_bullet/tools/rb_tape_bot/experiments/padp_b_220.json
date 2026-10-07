@@ -1,10 +1,10 @@
 {
-  "name": "padp_s_20: small pad 14, car 20 uu to the side, 900 uu/s",
+  "name": "padp_b_220: big pad 18, car 220 uu toward the centre",
   "settle_ticks": 60,
   "car": {
     "location": [
-      20,
-      -1700,
+      3364,
+      -700,
       17
     ],
     "rotation": [
@@ -14,7 +14,7 @@
     ],
     "velocity": [
       0,
-      900,
+      0,
       0
     ],
     "angular_velocity": [
@@ -38,8 +38,11 @@
   },
   "steps": [
     {
-      "ticks": 150,
-      "throttle": 1
+      "ticks": 600
+    },
+    {
+      "ticks": 240,
+      "throttle": 0.5
     }
   ]
 }
