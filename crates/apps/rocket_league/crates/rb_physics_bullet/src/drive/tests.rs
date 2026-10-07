@@ -625,6 +625,18 @@ fn pedals_follow_rocketsims_throttle_and_brake_rules() {
     );
 }
 
+/// `RB-PHYSICS-001-FR-144`: under the handbrake (no brake) a reverse throttle
+/// pushes against a forward-moving car with the engine, and the engine fades
+/// with the car's speed in either direction, so at 1400 uu/s it barely
+/// slows the car (the game: 1400 -> 1309 uu/s over 0.75 s) and at 600 uu/s it
+/// slows it clearly.
+#[test]
+fn a_reverse_throttle_under_the_handbrake_fades_with_speed_like_a_forward_one() {
+    let drop_at = |speed: f32| speed - ground_tick(Vec3::new(speed, 0.0, 0.0), -1.0, 1.0).x;
+    assert!(drop_at(1400.0) < 2.0, "1400 uu/s: {}", drop_at(1400.0));
+    assert!(drop_at(600.0) > 4.0, "600 uu/s: {}", drop_at(600.0));
+}
+
 #[test]
 fn tire_grip_follows_the_slip_curve_and_blends_in_the_handbrake() {
     assert_eq!(tire_grip(0.0, 0.0), (1.0, 1.0));

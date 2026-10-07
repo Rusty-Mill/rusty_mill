@@ -8147,6 +8147,24 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     37 to 163; head-on 5.4 / 5.4, was 24 / 19; clip 2.3 / 10.4, was 60 / 11.5;
     retreating target 1.4 / 2.7, was 13 / 11.
 
+- `RB-PHYSICS-001-FR-144` (the engine fades with the car's absolute speed;
+  implemented and verified on seven recordings): `drive_speed_taper` is read
+  at `abs(forward speed)`, not at the speed along the throttle's direction
+  (clamped at zero), as RocketSim does.
+  - Why: under the handbrake a reverse throttle on a forward-moving car is not
+    a brake; the engine pushes back, faded by speed. The port read the taper as
+    "standing start" and pushed at full strength: a car at 1400 uu/s held
+    reverse + handbrake slows 1400 -> 1309 uu/s in 0.75 s in the game, to under
+    900 in the port (212 uu mean error); at 600 uu/s it slows by 520 in 0.75 s
+    in both. Without the handbrake the same press brakes, unchanged.
+  - **Verification**: `drive` test
+    `a_reverse_throttle_under_the_handbrake_fades_with_speed_like_a_forward_one`
+    (fails on the old code); golden gate: `hb_rev_1400` 212 -> 0.2 uu,
+    `hb_rev_600` 55.8 -> 0.2, `hb_rev_steer` 131 -> 3.6, `hb_boost_rev` 0.1,
+    and the long reverse powerslides (RB-RESEARCH-O013) `probe_powerslide`
+    35.2 -> 4.8, `probe_ps_boost` 18.4 -> 4.9, `probe_ps_slow` 11.8 -> 7.3;
+    every other recording unchanged.
+
 - `RB-PHYSICS-001-FR-143` (a bumper in the air; implemented and verified on
   two recordings, both cars airborne): the victim of a bumper that is not on
   the ground gets `BUMP_AIR_VELOCITY_CURVE` (0 -> 5/6, 1400 -> 1390, 2200 ->
@@ -8206,6 +8224,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.146.0 (2026-10-07): `RB-PHYSICS-001-FR-144` (the engine fades with the
+  absolute forward speed; reverse powerslides now agree). 468 tests in
+  `rb_physics_bullet`.
 - 0.145.0 (2026-10-07): `RB-PHYSICS-001-FR-143` (a bumper in the air) and the
   bump's nose test by mean forward position (FR-140). 467 tests in
   `rb_physics_bullet`.

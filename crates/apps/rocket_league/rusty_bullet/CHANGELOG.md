@@ -4,6 +4,14 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Fixed
+- `RB-PHYSICS-001-FR-144` (spec 0.146.0): the engine's speed fade reads the
+  absolute forward speed, as RocketSim. A reverse throttle under the handbrake
+  on a fast forward car no longer pushes at full strength: `hb_rev_1400` 212 ->
+  0.2 uu, the long reverse powerslides `probe_powerslide` 35 -> 4.8,
+  `probe_ps_boost` 18 -> 4.9, `probe_ps_slow` 12 -> 7.3 (RB-RESEARCH-O013 closed).
+  Seven more recordings in the golden gate (54 in all).
+
 ### Added
 - `RB-PHYSICS-001-FR-143` (spec 0.145.0): a bumper in the air throws its victim
   forward by 0.99 of its speed and down 178 uu/s (second car 165 -> 1.2 to 5.9
