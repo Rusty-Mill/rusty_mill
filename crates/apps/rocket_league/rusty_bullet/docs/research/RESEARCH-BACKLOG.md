@@ -732,10 +732,16 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   `bsl_840_76` -211.1; no pattern in the rest time (so not sleeping). With the floor
   dropped, the one-step prediction of the car and the ball matches the game to
   2 to 4 uu/s where it applies (`hitfuzz_306`: ball error 261 -> 5, car 53 -> 1).
-- **Likely cause**: the resting ball sits 1.9 uu above the world sphere, at the
-  threshold where its floor contact is generated, and a sub-uu difference in its
-  height decides whether the contact exists on the hit tick. Not reproducible
-  without Bullet's exact resting micro-motion.
+- **Likely cause**: the order in which the solver visits the floor and the car-ball
+  constraints. The recorded car and ball just before the hit are identical to 0.01 uu
+  in the seven `bsl_*_76` recordings (`bsl_N_76`, N = 0 to 840 ticks of waiting),
+  yet the outcome is -47.7 (the floor resisted) in four and -211.1 (it did
+  not) in three: Bullet's `SOLVER_RANDMIZE_ORDER` shuffles the constraint order
+  each solve from a running pseudo-random seed, so the real game is not
+  deterministic here, whatever its tick count. (Earlier guesses, sleeping and
+  a contact-generation threshold at the ball's 1.9 uu rest gap, do not explain
+  identical states giving both outcomes.) The port, deterministic, cannot match
+  both; either fixed order is right about half the time.
 - **Tried (scratch)**: dropping the ball's world contacts on the first tick of a
   car-ball contact: `hitfuzz` car error 203 -> 170 uu, ball 77 -> 60, but a ball
   already rolling (`hitfuzz_320`: ball error 6 -> 250) and half the resting

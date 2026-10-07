@@ -34,7 +34,7 @@ the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
 |---|---|---|
 | Climbing a wall or ramp | `wall_ride` 9, `wall_ride_slow` 16, `wall_ride_boost` 12 to 19, `corner_slide` 22 | The port climbs about 10% slowly; a family of suspension and pushback constants trades errors (O012) |
 | A car hitting the ceiling | `ceiling` 31 | A nose landing on the ceiling plane; not yet traced (O017) |
-| A resting ball hit from above by a car | `hitfuzz_304/306` ball 4 to 260 uu/s of velocity | The floor's push back on the hit tick is there in half the game's cases (O020) |
+| A resting ball hit from above by a car | `hitfuzz_304/306` ball 4 to 260 uu/s of velocity | The game's solver order is random: the floor's push back on the hit tick is there in half the cases (O020) |
 | Wheels on the ball | `car_over_ball` 27 car / 44 ball | Ordinary hits agree; the wheel-on-ball contact does not (O014) |
 | A flip into a car | `bumpf_flip` 39 / 65 | The dodge's own impulse is in play |
 | Respawn after a demolition | not modelled | The game brings the car back after exactly 3 s at a spawn point it picks (O018) |
