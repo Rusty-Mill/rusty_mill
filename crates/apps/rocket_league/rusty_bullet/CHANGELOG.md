@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0066 (`RB-VERIFY-003-FR-017`, spec 0.27.0): a fidelity gate in `cargo test`.
+  24 real Rocket League tape-bot recordings (`tools/rb_tape_bot/fixtures/`,
+  4.4 MB) are replayed with their recorded input and the port's car and ball
+  error must stay within bounds; undoing FR-139 fails it. Also 42 mechanics
+  probe scenarios (`gen_probes.py`, `experiments/probe_*`): driving, powerslide,
+  dodges, boost, wall rides, ball bounces, car-ball hits.
+### Added
 - `RB-VERIFY-003-FR-016` (spec 0.26.0): `rb-verify --scenario --against
   --recorded-inputs` replays the recording's own input in the port, so what is
   left is physics, not the tape bot's variable start delay. Probes: `brake`
