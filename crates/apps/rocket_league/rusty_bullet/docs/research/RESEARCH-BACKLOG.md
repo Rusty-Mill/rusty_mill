@@ -639,11 +639,19 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   still takes the collision: 2300 -> 1042 uu/s); enemies hit at 1300 and 2100
   are bumped; a teammate at 2300 is bumped. The scenario's `team` makes a
   second car an enemy (its own passive bot).
+- **Refined (2026-10-07)**: the nose test uses the contact's mean forward
+  position (a crossing hit bumped only the car whose nose landed); a bumper in
+  the air gives 0.99 of its speed forward and 178 uu/s down
+  (`RB-PHYSICS-001-FR-143`, both cars airborne only). Drifting attackers (the
+  bump follows the heading, 0.3 / 0.1 uu), a flank hit on a moving car (4.1 /
+  3.0) and a corner clip (11 / 6) match.
 - **Open**: the respawn (three seconds later, at a spawn point the game picks,
-  still, with 0 or 33 boost), a victim in the air, a bumper on a wall or
-  ceiling, the bump's cooldown against a second car; bumper speed 2100
-  (second car 10 uu) and the off-centre clip (10 / 37 uu max) are the loosest
-  fits.
+  still, with 0 or 33 boost), a ground bumper on an airborne victim and the
+  reverse, a bumper on a wall or ceiling, a flip into a car (`bumpf_flip`: 39 /
+  65 uu, the dodge's own impulse is in play), a victim in the air reached by
+  boosting (`bumpa_victim_air`), the bump's cooldown against a second car;
+  bumper speed 2100 (second car 10 uu) and the off-centre clip (10 / 37 uu max)
+  are the loosest fits.
 - **Status**: Mostly done. **Owner**: baileyrd.
 
 ## Change history

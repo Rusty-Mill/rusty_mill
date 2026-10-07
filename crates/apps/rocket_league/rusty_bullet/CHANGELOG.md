@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `RB-PHYSICS-001-FR-143` (spec 0.145.0): a bumper in the air throws its victim
+  forward by 0.99 of its speed and down 178 uu/s (second car 165 -> 1.2 to 5.9
+  uu); and the bump's nose test uses the contact's mean forward position, so a
+  crossing hit bumps only the car whose nose lands (second car 244 -> 3.0 uu).
+  Four more recordings in the golden gate (47 in all).
+### Added
 - `RB-PHYSICS-001-FR-142` (spec 0.144.0): demolition. A supersonic car whose nose
   touches an enemy-team car removes it (teams in `PhysicsWorld`, `Env` and
   scenarios; `"team": 1` makes a scenario car an enemy and its own passive

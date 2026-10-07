@@ -125,6 +125,14 @@ const BUMP_VELOCITY_CURVE: [(f32, f32); 3] = [(0.0, 5.0 / 6.0), (1400.0, 1100.0)
 /// The extra upward speed per uu/s of bumper speed (measured 0.20 on the same
 /// hits: 109, 162, 213, 259 uu/s at 540, 804, 1054, 1287).
 const BUMP_UPWARD_SCALE: f32 = 0.2;
+/// A bumper in the air (`RB-PHYSICS-001-FR-143`): both cars airborne at 1000
+/// and 1400 uu/s gave the victim 990 and 1382 uu/s more forward speed (about
+/// 0.99 of the bumper's, against 0.79 on the ground) and a downward kick of
+/// about 180 uu/s either time instead of the ground's upward 0.2. Only the
+/// both-airborne case was measured.
+const BUMP_AIR_VELOCITY_CURVE: [(f32, f32); 3] =
+    [(0.0, 5.0 / 6.0), (1400.0, 1390.0), (2200.0, 1850.0)];
+const BUMP_AIR_DOWNWARD_SPEED: f32 = 178.0;
 
 /// `SUPERSONIC_START_SPEED` and `SUPERSONIC_MAINTAIN_MIN_SPEED` (uu/s): a car
 /// is supersonic from 2200 until it falls under 2100. A supersonic car
@@ -196,12 +204,16 @@ fn extra_ball_hit_velocity(ball: &RigidBody, car: &RigidBody, tuning: &CarBallTu
 /// (`RB-PHYSICS-001-FR-140`): along the bumper's horizontal heading, by the
 /// bumper's speed along it, plus a share of that speed upward. Not the line
 /// between the two cars (an off-centre clip pushes straight ahead).
-fn bump_velocity_of(bumper: &RigidBody) -> Vec3 {
+fn bump_velocity_of(bumper: &RigidBody, bumper_airborne: bool) -> Vec3 {
     let forward = drive::forward_axis(bumper);
     let Some(heading) = Vec3::new(forward.x, forward.y, 0.0).normalize() else {
         return Vec3::ZERO;
     };
     let speed = bumper.linear_velocity.dot(&heading).max(0.0);
+    if bumper_airborne {
+        return heading * piecewise_linear(&BUMP_AIR_VELOCITY_CURVE, speed)
+            - Vec3::new(0.0, 0.0, BUMP_AIR_DOWNWARD_SPEED);
+    }
     heading * piecewise_linear(&BUMP_VELOCITY_CURVE, speed)
         + Vec3::new(0.0, 0.0, speed * BUMP_UPWARD_SCALE)
 }
@@ -1235,16 +1247,27 @@ impl PhysicsWorld {
                 // Either car bumps the other when its own nose is what touched
                 // (RB-PHYSICS-001-FR-140); both do in a head-on.
                 for (bumper, victim) in [(i, j), (j, i)] {
-                    let front = contacts.iter().any(|contact| {
-                        let on_bumper = if bumper == i {
+                    let forward = drive::forward_axis(&self.cars[bumper]);
+                    // The contact's centre, not any one point of it: two cars
+                    // crossing at right angles touch along the bumper's whole
+                    // flank (points from -20 to +66 uu ahead of its origin),
+                    // which is not a nose hit; the car whose nose lands has
+                    // every point at 66 to 67.
+                    let on_bumper = |contact: &collision::Contact| {
+                        if bumper == i {
                             contact.point_on_a()
                         } else {
                             contact.point
-                        };
-                        (on_bumper - self.cars[bumper].position)
-                            .dot(&drive::forward_axis(&self.cars[bumper]))
-                            > BUMP_MIN_FORWARD_DIST
-                    });
+                        }
+                    };
+                    let mean_forward = contacts
+                        .iter()
+                        .map(|contact| {
+                            (on_bumper(contact) - self.cars[bumper].position).dot(&forward)
+                        })
+                        .sum::<f32>()
+                        / contacts.len() as f32;
+                    let front = mean_forward > BUMP_MIN_FORWARD_DIST;
                     let last = &mut self.bump_ticks[bumper][victim];
                     if front
                         && last.is_none_or(|tick| self.tick_count >= tick + BUMP_COOLDOWN_TICKS)
@@ -1257,7 +1280,10 @@ impl PhysicsWorld {
                             // collision itself still happens this tick).
                             newly_demolished.push(victim);
                         } else {
-                            bump_velocity[victim] += bump_velocity_of(&self.cars[bumper]);
+                            bump_velocity[victim] += bump_velocity_of(
+                                &self.cars[bumper],
+                                !drive::is_on_ground(&car_wheels[bumper]),
+                            );
                         }
                     }
                 }
@@ -2460,7 +2486,12 @@ mod tests {
             car.linear_velocity = velocity;
             world = world.with_car(car);
         }
-        world.gravity = Vec3::ZERO;
+        // Floating cars (z above the wheels' reach) are airborne with gravity
+        // off, so only their collision acts; cars at rest height stand on the
+        // ground.
+        if cars.iter().all(|(position, _, _)| position.z > 100.0) {
+            world.gravity = Vec3::ZERO;
+        }
         world
     }
 
@@ -2475,11 +2506,11 @@ mod tests {
     fn a_rear_hit_bumps_the_stopped_car_forward_and_up() {
         let mut world = bump_world([
             (
-                Vec3::new(0.0, -130.0, 500.0),
+                Vec3::new(0.0, -130.0, 17.0),
                 FACING_PLUS_Y,
                 Vec3::new(0.0, 1000.0, 0.0),
             ),
-            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
         ]);
         for _ in 0..4 {
             world.step(1.0 / 120.0);
@@ -2503,27 +2534,27 @@ mod tests {
     fn a_head_on_bumps_both_cars() {
         let mut world = bump_world([
             (
-                Vec3::new(0.0, -100.0, 500.0),
+                Vec3::new(0.0, -100.0, 17.0),
                 FACING_PLUS_Y,
                 Vec3::new(0.0, 500.0, 0.0),
             ),
             (
-                Vec3::new(0.0, 100.0, 500.0),
+                Vec3::new(0.0, 100.0, 17.0),
                 FACING_MINUS_Y,
                 Vec3::new(0.0, -500.0, 0.0),
             ),
         ]);
-        for _ in 0..40 {
+        for _ in 0..12 {
             world.step(1.0 / 120.0);
         }
         // Not asserting an exact figure: both go up, and both are thrown back.
         assert!(
-            world.cars[0].linear_velocity.z > 60.0,
+            world.cars[0].linear_velocity.z > 40.0,
             "{:?}",
             world.cars[0].linear_velocity
         );
         assert!(
-            world.cars[1].linear_velocity.z > 60.0,
+            world.cars[1].linear_velocity.z > 40.0,
             "{:?}",
             world.cars[1].linear_velocity
         );
@@ -2537,11 +2568,11 @@ mod tests {
     fn a_side_hit_bumps_only_the_car_that_hit_with_its_nose() {
         let mut world = bump_world([
             (
-                Vec3::new(-130.0, 0.0, 500.0),
+                Vec3::new(-130.0, 0.0, 17.0),
                 0.0,
                 Vec3::new(800.0, 0.0, 0.0),
             ),
-            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
         ]);
         for _ in 0..6 {
             world.step(1.0 / 120.0);
@@ -2613,16 +2644,41 @@ mod tests {
         assert_eq!(hit(2300.0, true), 1);
     }
 
+    /// `RB-PHYSICS-001-FR-143`: with both cars in the air the game threw the
+    /// victim 990 uu/s forward (not the ground's 786) and 180 down (not up) at
+    /// 1000 uu/s.
+    #[test]
+    fn a_bumper_in_the_air_pushes_harder_and_down() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 500.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 1000.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        // The floating cars are airborne (no wheel touches anything).
+        let victim = world.cars[1].linear_velocity;
+        assert!(
+            victim.y > 1400.0,
+            "a ground bump gives about 1330: {victim:?}"
+        );
+        assert!(victim.z < -100.0, "thrown down, not up: {victim:?}");
+    }
+
     /// A car reversing into another with its tail does not bump it.
     #[test]
     fn a_car_that_hits_with_its_tail_bumps_nobody() {
         let mut world = bump_world([
             (
-                Vec3::new(0.0, -130.0, 500.0),
+                Vec3::new(0.0, -130.0, 17.0),
                 FACING_MINUS_Y,
                 Vec3::new(0.0, 1000.0, 0.0),
             ),
-            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
         ]);
         for _ in 0..6 {
             world.step(1.0 / 120.0);
@@ -2637,11 +2693,11 @@ mod tests {
     fn the_bump_goes_on_once_per_cooldown() {
         let mut world = bump_world([
             (
-                Vec3::new(0.0, -130.0, 500.0),
+                Vec3::new(0.0, -130.0, 17.0),
                 FACING_PLUS_Y,
                 Vec3::new(0.0, 1000.0, 0.0),
             ),
-            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
         ]);
         for _ in 0..4 {
             world.step(1.0 / 120.0);

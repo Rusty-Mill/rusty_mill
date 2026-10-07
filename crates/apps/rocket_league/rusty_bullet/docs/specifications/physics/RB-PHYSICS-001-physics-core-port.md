@@ -8121,7 +8121,11 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   horizontal heading, by `BUMP_VELOCITY_CURVE` of the bumper's speed along it
   (0 -> 5/6, 1400 -> 1100, 2200 -> 1530 uu/s) plus 0.2 of that speed upward,
   and the 2300 uu/s cap applies; once per pair per 0.25 s. Both cars bump in a
-  head-on. Demolitions are not modelled.
+  head-on. The contact counts as a nose hit by its *average* forward position
+  over its points (not by any one point): two cars crossing at right angles
+  touch along the attacker's whole flank (points from -20 to +66 uu ahead of
+  its origin) and only the car whose nose lands bumps (`bumpv_moving_side`:
+  second car 244 -> 3.0 uu).
   - Why: the first car-vs-car recordings (`RB-VERIFY-003-FR-018`). A car at 500
     uu/s pushing a stopped one sent it to 1293 uu/s and up (vz +110) in the
     game; the port gave it 496 uu/s. Rear hits at 540 / 804 / 1054 / 1287
@@ -8142,6 +8146,18 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     10.1), was 3 to 162 and 59 to 293; side hits 1.2 to 1.4 (2.7 to 7.2), was
     37 to 163; head-on 5.4 / 5.4, was 24 / 19; clip 2.3 / 10.4, was 60 / 11.5;
     retreating target 1.4 / 2.7, was 13 / 11.
+
+- `RB-PHYSICS-001-FR-143` (a bumper in the air; implemented and verified on
+  two recordings, both cars airborne): the victim of a bumper that is not on
+  the ground gets `BUMP_AIR_VELOCITY_CURVE` (0 -> 5/6, 1400 -> 1390, 2200 ->
+  1850, from 990 and 1382 uu/s at 1000 and 1400) along the bumper's heading
+  and a fixed 178 uu/s downward, instead of the ground's curve and +0.2 of the
+  speed upward.
+  - Not measured: a bumper on the ground hitting a victim in the air, or the
+    reverse (the choice by the bumper's ground state is a guess); a wall.
+  - **Verification**: `world` test `a_bumper_in_the_air_pushes_harder_and_down`;
+    the golden gate's `bumpa_air_1000` and `bumpa_air_1400` (second car 1.2 and
+    2.2 uu mean, was 165); `bumpa_air_1800` 3.2 / 5.9 (capped at 2300).
 
 - `RB-PHYSICS-001-FR-142` (demolition; implemented and verified on six
   two-car recordings, ADR-0068): a supersonic car whose nose bumps an
@@ -8190,6 +8206,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.145.0 (2026-10-07): `RB-PHYSICS-001-FR-143` (a bumper in the air) and the
+  bump's nose test by mean forward position (FR-140). 467 tests in
+  `rb_physics_bullet`.
 - 0.144.0 (2026-10-07): `RB-PHYSICS-001-FR-142` (demolition: a supersonic nose
   on an enemy removes it; teams in `PhysicsWorld`, `Env` and scenarios).
   466 tests in `rb_physics_bullet`.
