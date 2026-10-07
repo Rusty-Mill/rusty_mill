@@ -10,7 +10,7 @@
 // THREADED, THREADEDUNLOAD exist. `PLUGINTYPE_FREEPLAY` is this plugin's
 // primary use case (see README); it doesn't gate loading during a normal
 // match, since there's no bit for one to begin with.
-BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.2", PLUGINTYPE_FREEPLAY)
+BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.3", PLUGINTYPE_FREEPLAY)
 
 namespace
 {
@@ -88,7 +88,7 @@ std::string inputJson(ControllerInput input)
 // `rb_replay_ingest::convert::boost_raw_to_percent`'s doc comment) --
 // `BoostWrapper::GetCurrentBoostAmount()` is the 0.0-1.0 fraction, so scale
 // it here to keep both ingestion adapters in the same unit.
-std::string carJson(int playerId, CarWrapper car)
+std::string carJson(int playerId, CarWrapper car, const ControllerInput &input)
 {
     std::ostringstream out;
     out << "{\"player_id\":" << playerId << ",";
@@ -102,7 +102,7 @@ std::string carJson(int playerId, CarWrapper car)
     BoostWrapper boost = car.GetBoostComponent();
     float boostAmount = boost.IsNull() ? 0.0f : boost.GetCurrentBoostAmount() * 100.0f;
     out << ",\"boost_amount\":" << boostAmount;
-    out << ",\"input\":" << inputJson(car.GetInput());
+    out << ",\"input\":" << inputJson(input);
     out << "}";
     return out.str();
 }
@@ -160,6 +160,11 @@ void RustyBulletCapturePlugin::startCapture(std::vector<std::string> args)
     lastPhysicsFrame_ = -1;
     haveStartTime_ = false;
     lastTimestampSecs_ = -1.0f;
+    lastInputs_.clear();
+    // Log the two input sources for the first few ticks of every recording,
+    // so a capture whose inputs read all-zero can be diagnosed from
+    // bakkesmod.log without rebuilding.
+    debugTicksLeft_ = 5;
     cvarManager->log("rusty_bullet_capture: recording to '" + path + "'");
 }
 
@@ -175,11 +180,27 @@ void RustyBulletCapturePlugin::stopCapture(std::vector<std::string> /*args*/)
     cvarManager->log("rusty_bullet_capture: stopped recording");
 }
 
-void RustyBulletCapturePlugin::onVehicleInput(CarWrapper car, void * /*params*/, std::string /*eventName*/)
+void RustyBulletCapturePlugin::onVehicleInput(CarWrapper car, void *params, std::string /*eventName*/)
 {
     if (!capturing_ || !isLive(car))
     {
         return;
+    }
+
+    // `SetVehicleInput(ControllerInput& NewInput)`: `params` is the input
+    // the game is applying to this car this tick, whoever produced it.
+    // `CarWrapper::GetInput()` stayed all-zero for an RLBot-driven car in
+    // every tape-bot capture of 2026-10-06 (RB-RESEARCH-O008) while the car
+    // visibly jumped and dodged, so the argument is the record, with
+    // `GetInput()` only as the fallback for a null argument.
+    ControllerInput input = params != nullptr ? *static_cast<ControllerInput *>(params) : car.GetInput();
+    lastInputs_[car.memory_address] = input;
+    if (debugTicksLeft_ > 0)
+    {
+        --debugTicksLeft_;
+        ControllerInput stored = car.GetInput();
+        cvarManager->log("rusty_bullet_capture: input argument " + inputJson(input) + " | CarWrapper::GetInput() " +
+                         inputJson(stored));
     }
 
     ServerWrapper server = gameWrapper->GetCurrentGameState();
@@ -266,7 +287,9 @@ void RustyBulletCapturePlugin::writeFrame(ServerWrapper server, BallWrapper ball
                 line << ",";
             }
             first = false;
-            line << carJson(nextPlayerId, car);
+            auto hooked = lastInputs_.find(car.memory_address);
+            ControllerInput input = hooked != lastInputs_.end() ? hooked->second : car.GetInput();
+            line << carJson(nextPlayerId, car, input);
             ++nextPlayerId;
         }
     }

@@ -7,8 +7,10 @@
 #include "bakkesmod/wrappers/GameObject/BallWrapper.h"
 #include "bakkesmod/wrappers/GameObject/CarWrapper.h"
 
+#include <cstdint>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Records a JSON-Lines capture file matching ADR-0005 / RB-VERIFY-002-FR-001:
@@ -43,4 +45,11 @@ private:
     float startPhysicsTime_ = 0.0f;
     // Last timestamp written, so a ball respawn can't make time jump back.
     float lastTimestampSecs_ = -1.0f;
+    // The input each car's `SetVehicleInput` was called with most recently,
+    // keyed by the car actor's address; what the capture records as `input`
+    // (1.3; `CarWrapper::GetInput()` is not updated for an RLBot-driven car).
+    std::unordered_map<std::uintptr_t, ControllerInput> lastInputs_;
+    // Ticks left to log the input argument against `GetInput()` after a
+    // `rb_capture_start`, for diagnosis.
+    int debugTicksLeft_ = 0;
 };
