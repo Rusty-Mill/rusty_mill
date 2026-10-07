@@ -352,7 +352,8 @@ fn pump(
 /// cannot say when a pad was taken; this can (PARITY-PLAN workstream C).
 struct PadLog {
     out: File,
-    field_written: bool,
+    /// The last `field` line written; a different `FieldInfo` writes a new one.
+    last_field: Option<String>,
     last_active: Option<Vec<bool>>,
 }
 
@@ -360,20 +361,26 @@ impl PadLog {
     fn create(path: &Path) -> Result<Self> {
         Ok(Self {
             out: File::create(path)?,
-            field_written: false,
+            last_field: None,
             last_active: None,
         })
     }
 
-    /// Remembers the field description (it arrives once, before the packets).
+    /// Writes the field description when it differs from the last one written.
+    /// Core can send a stale one (the previous match's map, 38 pads instead of
+    /// 34, seen on the first run after the GUI's match), so the reader uses
+    /// the last `field` line before the first `pads` line.
     fn field(&mut self, info: &FieldInfo) -> Result<()> {
-        // An empty list is core's answer before any match exists; wait for
-        // the real one.
-        if self.field_written || info.boost_pads.is_empty() {
+        // An empty list is core's answer before any match exists.
+        if info.boost_pads.is_empty() {
             return Ok(());
         }
-        self.field_written = true;
-        writeln!(self.out, "{}", field_line(info))?;
+        let line = field_line(info);
+        if self.last_field.as_deref() == Some(line.as_str()) {
+            return Ok(());
+        }
+        writeln!(self.out, "{line}")?;
+        self.last_field = Some(line);
         Ok(())
     }
 
@@ -674,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn pad_log_skips_an_empty_field_and_writes_the_first_real_one() {
+    fn pad_log_skips_an_empty_field_and_rewrites_only_a_changed_one() {
         let path = std::env::temp_dir().join(format!("rb_pad_field_{}.jsonl", std::process::id()));
         let mut log = PadLog::create(&path).expect("create");
         log.field(&FieldInfo::default()).expect("empty");
@@ -689,9 +696,17 @@ mod tests {
         });
         log.field(&info).expect("real");
         log.field(&info).expect("again");
+        info.boost_pads[0].location.x = 5.0;
+        log.field(&info).expect("changed");
         let lines = read_lines(&path);
         let _ = fs::remove_file(&path);
-        assert_eq!(lines, [r#"{"field":[{"x":1,"y":2,"z":3,"big":true}]}"#]);
+        assert_eq!(
+            lines,
+            [
+                r#"{"field":[{"x":1,"y":2,"z":3,"big":true}]}"#,
+                r#"{"field":[{"x":5,"y":2,"z":3,"big":true}]}"#,
+            ]
+        );
     }
 
     #[test]
