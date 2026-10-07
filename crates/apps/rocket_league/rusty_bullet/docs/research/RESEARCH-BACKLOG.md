@@ -745,8 +745,34 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   in RocketSim's ball-world code.
 - **Status**: Open. **Owner**: baileyrd.
 
+### RB-RESEARCH-O021 — Boost pads are in the recordings and not in the port
+
+- **Evidence (2026-10-07)**: 190 boost pickups in the recordings on disk (a car's
+  boost rising by 12, or by 100 to a full tank, between two frames, after the
+  state-set): small pads 12, big pads 100, at positions that match RLBot's pad
+  list (the 6 big and 28 small pads), with the car's origin 146 to 180 uu from a
+  small pad's centre and 196 to 212 from a big one's at the frame the boost
+  rises (a car moves 8 to 19 uu a tick), at heights up to 162 uu (a car in the air
+  over a pad picks it up). The port has no pads: `PhysicsWorld` never adds boost,
+  so after a pickup the port's tank is 12 short (matters only for a car that
+  boosts to empty).
+- **Not settled**: the geometry. `padpass_*` (a car with no boost driving past the
+  small pad at (0, -1024) at 0 to 240 uu to the side): pickups at 60, 100, 140
+  and 160 uu (the car's origin 157 to 184 uu from the centre at the frame),
+  none at 0, 120, 180, 200, 240; and the three that did not pick up had 48 boost
+  from the state-set already (the teleport from the spawn passes over pads, a
+  gain of 12 per pad, a game artifact), so they may be a different story.
+  Neither a cylinder around the origin, the hitbox centre, an axis-aligned box nor
+  the hitbox's xy distance separated pickup frames from the frames before them.
+- **Next**: dump `FieldInfo` (the pad list and kinds) from the tape bot's `new`;
+  record the pad `is_active`/`timer` per tick (the game packet has them), which
+  says exactly when a pad is taken, and drive over one pad at many offsets from a
+  fresh match each time with the pad list as the only variable.
+- **Status**: Open. **Owner**: baileyrd.
+
 ## Change history
 
+- 2026-10-07: Added RB-RESEARCH-O021 (boost pads).
 - 2026-10-07: Added RB-RESEARCH-O020 (a resting ball hit from above).
 - 2026-10-07: Added RB-RESEARCH-O019 (suspension damper reading order).
 - 2026-10-07: O013 fixed (FR-144, the engine fades with absolute speed).
