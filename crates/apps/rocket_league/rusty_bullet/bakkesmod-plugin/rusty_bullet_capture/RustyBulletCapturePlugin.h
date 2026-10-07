@@ -8,7 +8,9 @@
 #include "bakkesmod/wrappers/GameObject/CarWrapper.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -34,6 +36,16 @@ private:
     void startCapture(std::vector<std::string> args);
     void stopCapture(std::vector<std::string> args);
 
+    // Job-file trigger (1.4): once a second, looks for `job.json` in
+    // `<BakkesMod data>/rusty_bullet_capture/`, runs it through the same
+    // `startCapture`/`stopCapture` as the console commands, then deletes it
+    // (the delete is the runner's acknowledgement). Also rewrites
+    // `heartbeat.txt` there every poll. `alive` outlives the plugin inside
+    // the pending timeout so a poll after unload does nothing.
+    void pollJobs(std::shared_ptr<bool> alive);
+    void runJob(const std::string &text);
+    std::filesystem::path jobDir() const;
+
     // Builds and appends one capture-file line from the current server/ball
     // state. Does nothing if `capturing_` is false or either wrapper is null.
     void writeFrame(ServerWrapper server, BallWrapper ball);
@@ -52,4 +64,5 @@ private:
     // Ticks left to log the input argument against `GetInput()` after a
     // `rb_capture_start`, for diagnosis.
     int debugTicksLeft_ = 0;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };

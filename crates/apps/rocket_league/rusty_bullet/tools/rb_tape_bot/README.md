@@ -13,7 +13,8 @@ lives in the workspace crate `crates/rb_scenario`, which this package and
 Status: **run against the game on 2026-10-06** (RLBot core v5.0.0-rc17,
 Epic Rocket League, BakkesMod injector 32): all eleven scenarios captured
 and scored, results below and in `docs/research/BOT-RUN-SHEET.md`
-(session 1). Setup decisions: ADR-0059.
+(session 1). Since session 2 the whole set runs unattended with one
+command (`run_batch.ps1`, ADR-0064). Setup decisions: ADR-0059.
 
 ## Scenario files (`scenarios/*.json`)
 
@@ -50,10 +51,10 @@ capture is the test of that prediction.
 | `half_flip` | car facing -y moving +y, jump, back flip, cancel, air roll | keeps spinning (pitch spin about -5 rad/s) for the flip window | flip cancel rule, air roll |
 | `pogo` | drop nose-first from 260 uu, jump on contact, rotate nose down | the contact jump pushes the car along its own up axis (about +270 uu/s forward) and it lands again | hard nose landings, jump on contact |
 | `hard_landing_nose_first` | the `test2.jsonl` 18.308 s state, no input | the recorded landing (rebounds, then rests) | the 18.35 s residual, with exact inputs |
-| `corner_slide` | the `test2.jsonl` 8.95 s state and inputs | hits the corner and slides | the 8.958 s and 9.125 s residuals |
+| `corner_slide` | the `test2.jsonl` 8.95 s state and inputs, started 0.5 s earlier on its ballistic path | hits the corner and slides; the port peaks about 25 uu above the game's 272.9 uu | the 8.958 s and 9.125 s residuals. The original start (3 ticks from the wall) is kept as `experiments/corner_slide_original.json`: it is not repeatable (RB-RESEARCH-O011) |
 | `car_over_ball` | the `hitjump.jsonl` 77.642 s state, ball resting | wheels over the ball | the 77.667 s ball residual |
 
-The last three start from states read out of the owner's captures, so the new
+The last three start from states read out of the owner's captures (corner_slide moved 0.5 s back, see its row), so the new
 capture can be compared directly with the old one. Rotations were converted
 from the capture's quaternions to RLBot's pitch/yaw/roll and checked by
 converting back (the 18.308 s quaternion round-trips to four decimals); the
@@ -83,7 +84,52 @@ difference is noted.
 3. `cargo build --release` in this directory (builds `rb_tape_bot.exe`
    and the `rb_probe.exe` diagnostic).
 
-### Run one scenario
+### Run everything unattended (one command)
+
+From the repository root, with **BakkesMod running** (nothing else needed;
+no RLBot GUI, no launcher, no clicking in the game):
+
+```
+powershell -File tools\rb_tape_bot\run_batch.ps1            # every scenario, twice
+powershell -File tools\rb_tape_bot\run_batch.ps1 -Repeat 1 -Scenarios pogo,half_flip
+powershell -File tools\rb_tape_bot\run_batch.ps1 -ScoreOnly replays\batch_<stamp>
+```
+
+It builds the bot, runs `rb_run_tapes`, then scores each capture with
+`rb-verify` and writes `replays\batch_<stamp>\results.md` (one row per
+scenario: lag, position error mean/max per run, first tick over 10/100 uu,
+frames, largest gap, start-frame error, repeatable). Captures are
+`<scenario>_run<k>.jsonl` next to it; core's log is `core.log` there if the
+runner had to start core. About five minutes for all eleven twice.
+
+What `rb_run_tapes` does for each scenario: starts `RLBotServer.exe` if core
+is not listening; if the capture plugin's heartbeat is missing, starts a
+warm-up freeplay match so core launches Rocket League (Epic) and the plugin
+loads; writes `{"start": ...}` to the plugin's job file; sends core a
+freeplay `MatchConfiguration` (Soccar on `Stadium_P`, state setting on, one
+bot on Blue whose `run_command`, `root_dir` and `RB_TAPE` are in the message,
+so the `bots/*.bot.toml` files are not used); finds the bot's state set by
+the car reaching the scenario's start location within the match's first 300
+frames; records until `total_ticks` plus 180 physics frames after that, so
+focus and wall-clock time do not matter; writes `{"stop": true}` and stops
+the match. It exits non-zero at the first failure, after stopping the
+capture and match it started.
+
+One-time setup for this path (outside the repository, done on 2026-10-06):
+build the plugin (`bakkesmod-plugin/rusty_bullet_capture/README.md`), copy
+`rusty_bullet_capture.dll` (1.4 or later) into
+`%APPDATA%\bakkesmod\bakkesmod\plugins\`, and add the line
+`plugin load rusty_bullet_capture` to
+`%APPDATA%\bakkesmod\bakkesmod\cfg\plugins.cfg` so it loads at game start.
+Start `BakkesMod.exe` before running.
+
+`-Scenarios` takes shipped names or files in `experiments/` (variants kept out
+of the default set).
+
+Window focus is not needed: the game was minimised during four manual tapes
+and during the batches (`docs/research/BOT-RUN-SHEET.md`, session 2).
+
+### Run one scenario by hand (fallback, the GUI path)
 
 1. Start **BakkesMod first** and leave it waiting. Core kills any running
    Rocket League and relaunches it itself with

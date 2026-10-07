@@ -17,7 +17,7 @@ hivemind = false
 RB_TAPE = "scenarios/corner_slide.json"
 
 [details]
-description = "reproduces test2.jsonl 8.95 s: a car at 2090 uu/s hitting the (3800, 4150) corner wall, steer, pitch and yaw held (the 8.958 s and 9.125 s residuals)"
+description = "corner_slide: test2.jsonl 8.95 s state and inputs, started 0.5 s earlier on its ballistic path so the corner contact is not the first thing after the state set (repeatable; the original start is not, O011)"
 developer = "rusty_bullet"
 language = "rust"
 tags = []

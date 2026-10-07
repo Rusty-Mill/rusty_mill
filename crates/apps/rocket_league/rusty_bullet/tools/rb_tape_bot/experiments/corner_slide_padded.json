@@ -1,11 +1,11 @@
 {
-  "name": "corner_slide: test2.jsonl 8.95 s state and inputs, started 0.5 s earlier on its ballistic path so the corner contact is not the first thing after the state set (repeatable; the original start is not, O011)",
-  "settle_ticks": 60,
+  "name": "corner_slide_padded: corner_slide with 24 neutral ticks before the first input (O011 experiment)",
+  "settle_ticks": 24,
   "car": {
     "location": [
-      2736.865,
-      4302.695,
-      121.08499999999998
+      3782.43,
+      4154.49,
+      184.6
     ],
     "rotation": [
       0.4624,
@@ -15,12 +15,12 @@
     "velocity": [
       2091.13,
       -296.41,
-      289.53
+      -35.47
     ],
     "angular_velocity": [
-      0,
-      0,
-      0
+      4.05,
+      -1.4,
+      1.92
     ],
     "boost": 100
   },

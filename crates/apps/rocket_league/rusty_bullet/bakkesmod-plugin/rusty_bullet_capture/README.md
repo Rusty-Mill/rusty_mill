@@ -81,6 +81,28 @@ cl /LD /std:c++17 -I <sdk>\include RustyBulletCapturePlugin.cpp <sdk>\lib\plugin
    directory unless you pass an absolute path to `rb_capture_start`. Feed
    it to `rb_verify_cli` the same way as the vendored replay fixture.
 
+## Job-file trigger (1.4)
+
+BakkesMod console commands cannot be driven from outside the game, so the
+plugin also polls a job file, at most once a second, in
+`%APPDATA%\bakkesmod\bakkesmod\data\rusty_bullet_capture\`:
+
+- `job.json` holds one JSON object, either `{"start": "<absolute path>.jsonl"}`
+  (same as `rb_capture_start <path>`; backslashes in the path are escaped as
+  `\\`) or `{"stop": true}` (same as `rb_capture_stop`). The plugin runs it
+  through the same `startCapture`/`stopCapture` code as the console commands,
+  then deletes the file; the delete is the acknowledgement. Write the job to
+  a temporary name and rename it so the plugin never reads half a file.
+- `heartbeat.txt` is rewritten every poll with `version=1.4` and
+  `capturing=0|1`. A file younger than a few seconds means the plugin is
+  loaded and polling; `capturing=1` after a start job confirms the capture
+  file opened.
+
+The console commands keep working. To have the plugin loaded whenever the
+game starts, add `plugin load rusty_bullet_capture` to
+`%APPDATA%\bakkesmod\bakkesmod\cfg\plugins.cfg`. `tools/rb_tape_bot`'s
+`rb_run_tapes` is the only writer of job files so far.
+
 ## Known limitations (by design, not bugs)
 
 - Not usable for online-match ground truth (Easy Anti-Cheat blocks
@@ -111,7 +133,7 @@ call stack inside this DLL). The plugin now reads only live actors
 skips a tick with none, and keeps timestamps increasing across a respawn.
 It also reads boost fuel only when the car has a boost component, and
 removes its per-tick hook on unload. BakkesMod's console prints the loaded
-plugin's version on `plugin load`; it should say 1.3.
+plugin's version on `plugin load`; it should say 1.4.
 
 1.3 (RB-RESEARCH-O008): the recorded `input` is the argument of the
 `SetVehicleInput` hook (the input the game applies to that car that tick),

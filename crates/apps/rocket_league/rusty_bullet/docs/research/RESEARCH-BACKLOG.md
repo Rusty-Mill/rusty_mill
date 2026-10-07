@@ -435,7 +435,80 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   pinned against the floor, versus the port's single impulse.
 - **Status**: Open. **Owner**: baileyrd.
 
+### RB-RESEARCH-O011 — corner_slide is not repeatable run to run
+
+- **Evidence (2026-10-06)**: the same `corner_slide` tape, start state and
+  inputs captured five times: position error against the port 100.3 / 177.6
+  (session 1), 19.5 / 33.1 and 100.5 / 177.6, 27.7 / 45.0 and 79.7 / 146.3
+  uu (mean / max; two unattended batches, `BOT-RUN-SHEET.md` session 2). The
+  cars' speeds differ from tick 12 (1160 vs 1233 uu/s) at the first corner
+  contact. Every other scenario repeats to under 4 uu mean.
+- **Effect**: the 100 uu "corner climb miss" of session 1 is one draw of a
+  distribution the game itself spans (19 to 100 uu mean); the port cannot be
+  judged to 100 uu on one capture, and a fit to it could chase noise.
+- **Ten more runs (2026-10-06, `replays/batch_20261006-200506`)**: mean
+  error against the port 16.6, 19.4, 19.4, 79.7, 80.0, 100.1, 101.0, 106.0,
+  106.5 uu, a spread of 89.9 mean / 166.5 max; run against run, the largest
+  pairwise distance within the first 200 ticks is 139.5 uu (median 44.6).
+  The outcomes cluster: peak height at the corner 288 to 289 uu (three runs,
+  two bit-identical), 312 uu (three, bit-identical at tick 120) and 326 to
+  331 uu (four), so the game is deterministic for some discrete input, not
+  noisy. The delay between the state-set frame and the first recorded
+  steer input is 1 to 4 ticks (0.008 to 0.033 s) and varies run to run,
+  which fits (the car is at 2112 uu/s and meets the wall within a second)
+  but does not explain it alone: runs with the same delay still split (two
+  at 0.0167 s gave 288.7 and 326.5 uu).
+- **Two experiments (2026-10-06, `batch_20261006-201038`, six runs each,
+  scenarios in `tools/rb_tape_bot/experiments/`)**:
+  `corner_slide_far` (the car started 0.5 s earlier on its ballistic path,
+  60 neutral ticks, then the same steps) is **bit-identical in all six runs**
+  (pairwise distance 0.0 uu, peak 272.9 uu, port error 23.0 mean / 41.3 max
+  every time). `corner_slide_padded` (original start, 24 neutral ticks before
+  the first input) still splits into three outcomes (peak 317, 340 uu;
+  pairwise up to 93 uu). So the game is repeatable once the car is not set
+  next to the wall, and padding the first input does not help: the
+  variation comes from the state set itself (the car is placed about three
+  ticks from the wall at 2112 uu/s, and whatever differs between runs in the
+  first ticks after a set, such as that tick's step size or sub-tick phase,
+  decides the contact), not from input timing. The input-delay hypothesis
+  above is rejected.
+- **Consequence**: `corner_slide` as shipped is a poor ground truth. Cut the
+  corner target from a start with a clear approach (`corner_slide_far` is a
+  candidate replacement, repeatable, port 23.0 / 41.3 uu; from this start the
+  port peaks at 297.8 uu against the game's 272.9, about 25 uu high, the
+  opposite sign to session 1's "port climbs only to 276 against 326", which
+  was one draw of the unrepeatable original). Any
+  scenario that starts within a few ticks of a contact (car_over_ball and
+  the hard landings start in contact or a few ticks from it) deserves the
+  same check.
+- **Promoted and checked on the others (2026-10-06,
+  `batch_20261006-201506`, six runs each)**: `corner_slide_far` is now the
+  shipped `corner_slide` (the original is `experiments/corner_slide_original.json`).
+  `hard_landing_nose_first` as shipped has the same fault: three outcomes
+  (mean error 7.3, 9.9, 11.4 uu; cars up to 54.8 uu apart), while
+  `experiments/hard_landing_far.json` (started 0.3 s earlier, spin zeroed,
+  fitted so the port reaches the original start state at the original
+  tick) is bit-identical in all six runs (port error 4.9 / 11.2 uu).
+  `car_over_ball` as shipped is repeatable (cars at most 4.7 uu apart, ball
+  0.8 uu), but its far variant (`experiments/car_over_ball_far.json`, 0.25 s
+  earlier, fitted the same way) is **not** (two outcomes, 113.5 and 146.7 uu
+  mean, cars up to 81 uu apart): its variation is not the state set beside
+  a contact, so something else varies in a ball hit during free flight
+  that the original start does not exercise. Not investigated.
+- **Next (superseded)**: find the discrete variable. Candidates: the bot's state set
+  and first input landing 1 to 4 ticks apart (move the first tape input,
+  or pre-roll the car further from the wall so the contact is not the first
+  thing that happens); the physics sub-tick phase at the set. Compare run
+  against run, not against the port. `run_batch.ps1` now reports the spread
+  over all runs (its first version compared only runs 1 and 2 and called
+  this scenario repeatable in a ten-run batch).
+- **Status**: Open. **Owner**: baileyrd.
+
 ## Change history
+
+- 2026-10-06: Added RB-RESEARCH-O011 (corner_slide not repeatable);
+  RB-RESEARCH-O008 fixed (plugin 1.3, verified). Largest capture hole in the
+  22-capture batch 0.075 s (O009 unchanged).
 
 - 2026-10-05: Added RB-RESEARCH-O007 (long term, RLBot in Rust over this
   engine) from the owner's note; reading B recommended, nothing scheduled.
