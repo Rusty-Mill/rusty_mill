@@ -20,8 +20,10 @@ pub fn simulate_scenario(scenario: &Scenario) -> Vec<PhysicsFrame> {
     let mut frames = vec![start.clone()];
     env.reset(&start);
     for tick in 0..=scenario.total_ticks() {
-        let input = scenario.input_at(tick).to_controller_input();
-        let mut frame = env.step(&[input]);
+        let inputs: Vec<ControllerInput> = (0..scenario.car_count())
+            .map(|car| scenario.input_at_car(car, tick).to_controller_input())
+            .collect();
+        let mut frame = env.step(&inputs);
         frame.timestamp_secs = (tick + 1) as f32 * SCENARIO_TICK_SECS;
         frames.push(frame);
     }
@@ -91,6 +93,10 @@ pub struct ScenarioComparison {
     /// the first (state-setting) tick: nonzero means the bot did not play
     /// the tape as written.
     pub input_mismatches: usize,
+    /// Rows of every car after the first, one list per car (a bump or
+    /// demolition scenario, `RB-VERIFY-003-FR-018`): the tick and the
+    /// recorded and predicted state.
+    pub other_rows: Vec<Vec<(usize, CarState, CarState)>>,
     /// For a recorded-input replay (`compare_scenario_recorded`): which
     /// recorded input fed each step, 0 for the previous tick's, 1 for the
     /// same tick's. `None` for a tape replay.
@@ -136,6 +142,29 @@ impl ScenarioComparison {
             return 0.0;
         }
         self.rows.iter().map(ScenarioRow::ball_error).sum::<f32>() / self.rows.len() as f32
+    }
+
+    /// Position error (uu) of every row of car `index` after the first
+    /// (`index` 0 is the second car).
+    fn other_errors(&self, index: usize) -> impl Iterator<Item = f32> + '_ {
+        self.other_rows
+            .get(index)
+            .into_iter()
+            .flatten()
+            .map(|(_, recorded, predicted)| recorded.position.distance(&predicted.position))
+    }
+
+    /// Mean position error (uu) of the car after the first at `index`.
+    pub fn mean_other_error(&self, index: usize) -> f32 {
+        let (sum, count) = self
+            .other_errors(index)
+            .fold((0.0, 0usize), |(sum, count), e| (sum + e, count + 1));
+        sum / count.max(1) as f32
+    }
+
+    /// Largest position error (uu) of the car after the first at `index`.
+    pub fn max_other_error(&self, index: usize) -> f32 {
+        self.other_errors(index).fold(0.0, f32::max)
     }
 
     /// Mean position error (uu) over the run.
@@ -237,9 +266,18 @@ pub fn compare_scenario(
                 let p = frame.cars.first()?;
                 // Car and ball both: a scenario whose car stands still (a
                 // ball-only probe) would otherwise pick its lag at random.
+                // Every other car too (a bump scenario).
+                let others: f32 = frame
+                    .cars
+                    .iter()
+                    .zip(r.cars.iter())
+                    .skip(1)
+                    .map(|(p, r)| p.position.distance(&r.position))
+                    .sum();
                 Some(
                     p.position.distance(&r.cars.first()?.position)
-                        + frame.ball.position.distance(&r.ball.position),
+                        + frame.ball.position.distance(&r.ball.position)
+                        + others,
                 )
             })
             .collect();
@@ -253,6 +291,8 @@ pub fn compare_scenario(
         .unwrap_or(0);
 
     let mut rows = Vec::new();
+    let mut other_rows: Vec<Vec<(usize, CarState, CarState)>> =
+        vec![Vec::new(); scenario.car_count().saturating_sub(1)];
     let mut input_mismatches = 0;
     for (recorded_tick, r) in recorded_ticks {
         let Some(tick) = recorded_tick.checked_sub(lag_ticks) else {
@@ -265,6 +305,12 @@ pub fn compare_scenario(
             continue;
         };
         let (recorded_ball, predicted_ball) = (r.ball.position, predicted_frame.ball.position);
+        for (index, rows) in other_rows.iter_mut().enumerate() {
+            if let (Some(p), Some(r)) = (predicted_frame.cars.get(index + 1), r.cars.get(index + 1))
+            {
+                rows.push((tick, *r, *p));
+            }
+        }
         let r = car;
         // The capture's input may belong to this tick or the previous one;
         // either counts as playing the tape.
@@ -286,6 +332,7 @@ pub fn compare_scenario(
         start_index,
         lag_ticks,
         rows,
+        other_rows,
         input_mismatches,
         input_offset: None,
     })
@@ -293,12 +340,15 @@ pub fn compare_scenario(
 
 /// What the port does from `start` when fed `inputs`, one per tick: the
 /// start frame, then one frame after each input.
-fn simulate_with_inputs(start: &PhysicsFrame, inputs: &[ControllerInput]) -> Vec<PhysicsFrame> {
+fn simulate_with_inputs(
+    start: &PhysicsFrame,
+    inputs: &[Vec<ControllerInput>],
+) -> Vec<PhysicsFrame> {
     let mut env = Env::new();
     let mut frames = vec![start.clone()];
     env.reset(start);
     for (tick, input) in inputs.iter().enumerate() {
-        let mut frame = env.step(&[*input]);
+        let mut frame = env.step(input);
         frame.timestamp_secs = (tick + 1) as f32 * SCENARIO_TICK_SECS;
         frames.push(frame);
     }
@@ -344,32 +394,46 @@ pub fn compare_scenario_recorded(
         .take_while(|(tick, _)| *tick <= limit)
         .collect();
 
-    // The recorded input of each tick, holes filled with the last one seen.
-    let mut by_tick: Vec<Option<ControllerInput>> = vec![None; limit + 1];
-    for (tick, frame) in &recorded_ticks {
-        if let Some(input) = frame.cars.first().and_then(|car| car.input) {
-            by_tick[*tick] = Some(input);
-        }
-    }
-    let mut last = ControllerInput::default();
-    let filled: Vec<ControllerInput> = by_tick
-        .iter()
-        .map(|input| {
-            last = input.unwrap_or(last);
-            last
+    // Every car's recorded input of each tick, holes filled with the last one
+    // seen.
+    let cars = scenario.car_count();
+    let filled: Vec<Vec<ControllerInput>> = (0..cars)
+        .map(|car| {
+            let mut by_tick: Vec<Option<ControllerInput>> = vec![None; limit + 1];
+            for (tick, frame) in &recorded_ticks {
+                if let Some(input) = frame.cars.get(car).and_then(|c| c.input) {
+                    by_tick[*tick] = Some(input);
+                }
+            }
+            let mut last = ControllerInput::default();
+            by_tick
+                .iter()
+                .map(|input| {
+                    last = input.unwrap_or(last);
+                    last
+                })
+                .collect()
         })
         .collect();
 
     let start = scenario.initial_frame();
+    type Rows = (Vec<ScenarioRow>, Vec<Vec<(usize, CarState, CarState)>>);
     // `lag`: recorded tick t is the port's tick t - lag (the state set can
     // land a tick or two after the frame the recording first shows it);
     // `offset`: which recorded input fed the step; `ticks` bounds the run.
-    let run = |lag: usize, offset: usize, ticks: usize| -> (Vec<ScenarioRow>, f32) {
-        let inputs: Vec<ControllerInput> = (0..ticks.min(limit))
-            .map(|tick| filled[(tick + lag + offset).min(limit)])
+    let run = |lag: usize, offset: usize, ticks: usize| -> (Rows, f32) {
+        let inputs: Vec<Vec<ControllerInput>> = (0..ticks.min(limit))
+            .map(|tick| {
+                filled
+                    .iter()
+                    .map(|car| car[(tick + lag + offset).min(limit)])
+                    .collect()
+            })
             .collect();
         let predicted = simulate_with_inputs(&start, &inputs);
         let mut rows = Vec::new();
+        let mut other_rows: Vec<Vec<(usize, CarState, CarState)>> =
+            vec![Vec::new(); cars.saturating_sub(1)];
         let mut total = 0.0;
         for (recorded_tick, r) in &recorded_ticks {
             let Some(tick) = recorded_tick.checked_sub(lag) else {
@@ -383,6 +447,12 @@ pub fn compare_scenario_recorded(
             };
             total +=
                 pc.position.distance(&car.position) + p.ball.position.distance(&r.ball.position);
+            for (index, rows) in other_rows.iter_mut().enumerate() {
+                if let (Some(pc), Some(rc)) = (p.cars.get(index + 1), r.cars.get(index + 1)) {
+                    total += pc.position.distance(&rc.position);
+                    rows.push((tick, *rc, *pc));
+                }
+            }
             rows.push(ScenarioRow {
                 tick,
                 recorded: *car,
@@ -392,7 +462,7 @@ pub fn compare_scenario_recorded(
             });
         }
         let mean = total / rows.len().max(1) as f32;
-        (rows, mean)
+        ((rows, other_rows), mean)
     };
     // Lag first (offset 0), then offset at that lag, each on the whole run:
     // the early trajectory alone mis-picks a falling start (`pogo`).
@@ -408,11 +478,12 @@ pub fn compare_scenario_recorded(
     if shifted.1 < (best.0).1 {
         best = (shifted, lag_ticks, 1);
     }
-    let ((rows, _), _, input_offset) = best;
+    let (((rows, other_rows), _), _, input_offset) = best;
     Ok(ScenarioComparison {
         start_index,
         lag_ticks,
         rows,
+        other_rows,
         input_mismatches: 0,
         input_offset: Some(input_offset),
     })
@@ -487,6 +558,7 @@ pub fn scenario_from_capture(
             angular_velocity: Some(array(&first.ball.angular_velocity)),
         }),
         steps,
+        others: Vec::new(),
     })
 }
 
@@ -677,6 +749,46 @@ mod tests {
         assert_eq!(comparison.input_mismatches, 0);
         assert_eq!(comparison.first_position_error_over(1.0), None);
         assert_eq!(comparison.rows.len() as u64, sc.total_ticks() + 2);
+    }
+
+    const TWO_CAR_SCENARIO: &str = r#"{
+        "name": "head-on",
+        "settle_ticks": 0,
+        "car": { "location": [0, -600, 17], "rotation": [0, 1.5708, 0],
+                 "velocity": [0, 1000, 0], "boost": 0 },
+        "steps": [ { "ticks": 90, "throttle": 1 } ],
+        "others": [ { "car": { "location": [0, 600, 17], "rotation": [0, -1.5708, 0],
+                               "velocity": [0, -1000, 0], "boost": 0 },
+                      "steps": [ { "ticks": 90, "throttle": 1 } ] } ]
+    }"#;
+
+    /// `RB-VERIFY-003-FR-018`: every car is simulated and scored. Two cars
+    /// meeting head-on bounce off each other; a recording of that matches its
+    /// own prediction on both cars, and one whose second car is 40 uu off
+    /// shows it on the second car and not on the first.
+    #[test]
+    fn a_second_car_is_simulated_and_scored_beside_the_first() {
+        let sc = Scenario::from_json(TWO_CAR_SCENARIO).unwrap();
+        let frames = simulate_scenario(&sc);
+        assert_eq!(frames[0].cars.len(), 2);
+        assert!(
+            frames.last().unwrap().cars[1].velocity.y > -500.0,
+            "the second car was slowed by the collision"
+        );
+        let capture = fake_capture(&sc, 3, 0);
+        let comparison = compare_scenario(&sc, &capture).unwrap();
+        assert_eq!(comparison.other_rows.len(), 1);
+        assert_eq!(comparison.max_other_error(0), 0.0);
+        let mut off = capture.clone();
+        for frame in off.iter_mut().skip(10) {
+            frame.cars[1].position.x += 40.0;
+        }
+        let comparison = compare_scenario(&sc, &off).unwrap();
+        assert!((comparison.max_other_error(0) - 40.0).abs() < 1e-3);
+        assert_eq!(comparison.max_position_error(), 0.0);
+        // The recorded-input replay reads each car's own input.
+        let replay = compare_scenario_recorded(&sc, &capture).unwrap();
+        assert_eq!(replay.max_other_error(0), 0.0);
     }
 
     /// `RB-VERIFY-003-FR-015`: a ball-only scenario (the car stands still) is

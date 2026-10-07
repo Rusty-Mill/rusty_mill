@@ -4,6 +4,12 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- ADR-0067 (`RB-VERIFY-003-FR-018`, spec 0.29.0): scenarios with several cars
+  (`others`), a hivemind bot `rb_tape_hive` that drives them all on one clock,
+  and `rb-verify` scoring every car. First car-vs-car ground truth: a 500 uu/s
+  push sends a stopped car to 1293 uu/s and up into the air, which the port
+  (no bump model) gives 496 uu/s (RB-RESEARCH-O018).
 ### Changed
 - `rb-verify --recorded-inputs` finds the start lag (spec 0.28.0); the golden
   gate holds 30 recordings and runs its cases in parallel (3 s). Round 3 of the

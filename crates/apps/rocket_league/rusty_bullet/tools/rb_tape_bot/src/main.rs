@@ -7,14 +7,11 @@
 
 use std::sync::Arc;
 
-use rb_scenario::{BallStart, CarStart, Input, Scenario};
+use rb_scenario::{Input, Scenario};
+use rb_tape_bot::{controller, start_state};
 use rlbot::{
     agents::{run_bot_agents, BotAgent},
-    flat::{
-        ControllableInfo, ControllerState, DesiredBallState, DesiredCarState, DesiredGameState,
-        DesiredPhysics, FieldInfo, Float, GamePacket, MatchConfiguration, MatchPhase, PlayerInput,
-        RotatorPartial, Vector3Partial,
-    },
+    flat::{ControllableInfo, FieldInfo, GamePacket, MatchConfiguration, MatchPhase, PlayerInput},
     util::{AgentEnvironment, PacketQueue},
     RLBotConnection,
 };
@@ -27,63 +24,6 @@ struct TapeBot {
     last_frame: Option<u32>,
     /// Physics frame of the first live packet, where the state was set.
     start_frame: Option<u32>,
-}
-
-fn float(val: f32) -> Option<Float> {
-    Some(Float { val })
-}
-
-fn vector(v: [f32; 3]) -> Option<Box<Vector3Partial>> {
-    Some(Box::new(Vector3Partial {
-        x: float(v[0]),
-        y: float(v[1]),
-        z: float(v[2]),
-    }))
-}
-
-fn rotator(r: [f32; 3]) -> Option<Box<RotatorPartial>> {
-    Some(Box::new(RotatorPartial {
-        pitch: float(r[0]),
-        yaw: float(r[1]),
-        roll: float(r[2]),
-    }))
-}
-
-fn car_state(car: &CarStart) -> DesiredCarState {
-    DesiredCarState {
-        physics: Some(Box::new(DesiredPhysics {
-            location: car.location.and_then(vector),
-            rotation: car.rotation.and_then(rotator),
-            velocity: car.velocity.and_then(vector),
-            angular_velocity: car.angular_velocity.and_then(vector),
-        })),
-        boost_amount: car.boost.and_then(float),
-    }
-}
-
-fn ball_state(ball: &BallStart) -> DesiredBallState {
-    DesiredBallState {
-        physics: Box::new(DesiredPhysics {
-            location: ball.location.and_then(vector),
-            rotation: None,
-            velocity: ball.velocity.and_then(vector),
-            angular_velocity: ball.angular_velocity.and_then(vector),
-        }),
-    }
-}
-
-fn controller(input: Input) -> ControllerState {
-    ControllerState {
-        throttle: input.throttle,
-        steer: input.steer,
-        pitch: input.pitch,
-        yaw: input.yaw,
-        roll: input.roll,
-        jump: input.jump,
-        boost: input.boost,
-        handbrake: input.handbrake,
-        ..Default::default()
-    }
 }
 
 impl BotAgent for TapeBot {
@@ -142,11 +82,7 @@ impl BotAgent for TapeBot {
                     info.match_phase
                 );
                 self.start_frame = Some(frame);
-                packet_queue.push(DesiredGameState {
-                    ball_states: self.scenario.ball.iter().map(ball_state).collect(),
-                    car_states: vec![car_state(&self.scenario.car)],
-                    ..Default::default()
-                });
+                packet_queue.push(start_state(&self.scenario));
                 frame
             }
         };

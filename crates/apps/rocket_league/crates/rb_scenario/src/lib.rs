@@ -62,7 +62,19 @@ pub struct BallStart {
     pub angular_velocity: Option<[f32; 3]>,
 }
 
+/// A further car in a scenario (a bump or demolition test): where it starts
+/// and what it presses, on the same clock as the first car's tape (the first
+/// car's `settle_ticks` apply to it too). No steps leaves it neutral.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct OtherCar {
+    pub car: CarStart,
+    pub steps: Vec<Step>,
+}
+
 /// A scenario: where the car (and ball) start and what the car presses.
+/// More cars are listed under `others`; the tape bot drives them all from one
+/// hivemind process so their tapes share a clock.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Scenario {
     pub name: String,
@@ -76,6 +88,9 @@ pub struct Scenario {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ball: Option<BallStart>,
     pub steps: Vec<Step>,
+    /// Cars after the first, in car-index order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<OtherCar>,
 }
 
 /// Why a scenario could not be read.
@@ -118,18 +133,45 @@ impl Scenario {
         serde_json::to_string_pretty(self).map_err(ScenarioError::Write)
     }
 
-    /// Packets of input the scenario plays, settling included.
-    pub fn total_ticks(&self) -> u64 {
-        self.settle_ticks + self.steps.iter().map(|step| step.ticks).sum::<u64>()
+    /// Cars in the scenario: the first and every other.
+    pub fn car_count(&self) -> usize {
+        1 + self.others.len()
     }
 
-    /// The input for packet `tick`, counted from the packet after the start
-    /// state was set: neutral while settling and after the last step.
+    /// Packets of input the scenario plays, settling included: until the
+    /// longest car's last step.
+    pub fn total_ticks(&self) -> u64 {
+        let longest = self
+            .others
+            .iter()
+            .map(|other| ticks_of(&other.steps))
+            .chain(std::iter::once(ticks_of(&self.steps)))
+            .max()
+            .unwrap_or(0);
+        self.settle_ticks + longest
+    }
+
+    /// The first car's input for packet `tick`, counted from the packet after
+    /// the start state was set: neutral while settling and after the last
+    /// step.
     pub fn input_at(&self, tick: u64) -> Input {
+        self.input_at_car(0, tick)
+    }
+
+    /// Car `car`'s input for packet `tick` (see [`Scenario::input_at`]);
+    /// neutral for a car the scenario does not have.
+    pub fn input_at_car(&self, car: usize, tick: u64) -> Input {
+        let steps = match car {
+            0 => &self.steps,
+            n => match self.others.get(n - 1) {
+                Some(other) => &other.steps,
+                None => return Input::default(),
+            },
+        };
         let Some(mut remaining) = tick.checked_sub(self.settle_ticks) else {
             return Input::default();
         };
-        for step in &self.steps {
+        for step in steps {
             if remaining < step.ticks {
                 return step.input;
             }
@@ -137,6 +179,10 @@ impl Scenario {
         }
         Input::default()
     }
+}
+
+fn ticks_of(steps: &[Step]) -> u64 {
+    steps.iter().map(|step| step.ticks).sum()
 }
 
 impl Input {
@@ -244,18 +290,26 @@ pub fn quat_to_rotator(q: Quat) -> [f32; 3] {
 }
 
 impl Scenario {
-    /// The scenario's start as a physics frame (one car, player 0, and the
-    /// ball), with the car's input unset.
+    /// The scenario's start as a physics frame (every car, player ids in car
+    /// order, and the ball), with the cars' inputs unset.
     pub fn initial_frame(&self) -> PhysicsFrame {
-        let car = CarState {
-            player_id: 0,
-            position: vec3(self.car.location.unwrap_or(DEFAULT_CAR_LOCATION)),
-            rotation: rotator_to_quat(self.car.rotation.unwrap_or([0.0; 3])),
-            velocity: vec3(self.car.velocity.unwrap_or([0.0; 3])),
-            angular_velocity: vec3(self.car.angular_velocity.unwrap_or([0.0; 3])),
-            boost_amount: self.car.boost.unwrap_or(100.0),
+        let car_state = |index: usize, start: &CarStart| CarState {
+            player_id: index as u32,
+            position: vec3(start.location.unwrap_or(DEFAULT_CAR_LOCATION)),
+            rotation: rotator_to_quat(start.rotation.unwrap_or([0.0; 3])),
+            velocity: vec3(start.velocity.unwrap_or([0.0; 3])),
+            angular_velocity: vec3(start.angular_velocity.unwrap_or([0.0; 3])),
+            boost_amount: start.boost.unwrap_or(100.0),
             input: None,
         };
+        let cars: Vec<CarState> = std::iter::once(car_state(0, &self.car))
+            .chain(
+                self.others
+                    .iter()
+                    .enumerate()
+                    .map(|(i, other)| car_state(i + 1, &other.car)),
+            )
+            .collect();
         let ball = self.ball.unwrap_or_default();
         PhysicsFrame {
             timestamp_secs: 0.0,
@@ -270,7 +324,7 @@ impl Scenario {
                 velocity: vec3(ball.velocity.unwrap_or([0.0; 3])),
                 angular_velocity: vec3(ball.angular_velocity.unwrap_or([0.0; 3])),
             },
-            cars: vec![car],
+            cars,
         }
     }
 }
@@ -300,6 +354,59 @@ mod tests {
         assert_eq!(scenario.car.velocity, None);
         assert_eq!(scenario.ball, None);
         assert_eq!(scenario.total_ticks(), 8);
+    }
+
+    const TWO_CARS: &str = r#"{
+        "name": "bump",
+        "settle_ticks": 2,
+        "car": { "location": [0, -500, 17], "rotation": [0, 1.5708, 0] },
+        "steps": [ { "ticks": 4, "throttle": 1 } ],
+        "others": [
+            { "car": { "location": [0, 500, 17], "rotation": [0, -1.5708, 0] },
+              "steps": [ { "ticks": 2 }, { "ticks": 6, "boost": true } ] }
+        ]
+    }"#;
+
+    #[test]
+    fn a_scenario_without_others_is_one_car_as_before() {
+        let scenario = Scenario::from_json(JUMP_THEN_DODGE).expect("valid");
+        assert_eq!(scenario.car_count(), 1);
+        assert!(scenario.others.is_empty());
+        assert_eq!(scenario.initial_frame().cars.len(), 1);
+        // And an unset `others` is not written back.
+        assert!(!scenario.to_json().expect("writes").contains("others"));
+    }
+
+    #[test]
+    fn other_cars_have_their_own_start_and_tape_on_one_clock() {
+        let scenario = Scenario::from_json(TWO_CARS).expect("valid");
+        assert_eq!(scenario.car_count(), 2);
+        let frame = scenario.initial_frame();
+        assert_eq!(frame.cars.len(), 2);
+        assert_eq!(frame.cars[0].player_id, 0);
+        assert_eq!(frame.cars[1].player_id, 1);
+        assert_eq!(frame.cars[1].position, Vec3::new(0.0, 500.0, 17.0));
+        // Settling applies to every car; then each car follows its own steps.
+        assert!(!scenario.input_at_car(0, 1).boost && !scenario.input_at_car(1, 1).boost);
+        assert_eq!(scenario.input_at_car(0, 2).throttle, 1.0);
+        assert!(
+            !scenario.input_at_car(1, 3).boost,
+            "its two neutral ticks first"
+        );
+        assert!(scenario.input_at_car(1, 4).boost);
+        // Neutral past its own tape and for a car the scenario lacks.
+        assert_eq!(scenario.input_at_car(0, 6), Input::default());
+        assert!(scenario.input_at_car(1, 9).boost);
+        assert_eq!(scenario.input_at_car(5, 4), Input::default());
+        // The tape runs until the longest car's last step: 2 + 8.
+        assert_eq!(scenario.total_ticks(), 10);
+    }
+
+    #[test]
+    fn a_two_car_scenario_round_trips_through_json() {
+        let scenario = Scenario::from_json(TWO_CARS).expect("valid");
+        let again = Scenario::from_json(&scenario.to_json().expect("writes")).expect("reads");
+        assert_eq!(scenario, again);
     }
 
     #[test]
