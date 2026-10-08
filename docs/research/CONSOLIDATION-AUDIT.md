@@ -1,18 +1,26 @@
 # Consolidation audit: duplicated capabilities across rusty_mill
 
-Date: 2026-10-07 · Status: report only (no code, issues or PRs) · Base: `main` @ 4506e96
+Date: 2026-10-07 (status updated 2026-10-08) · Status: report plus the consolidation work in the Status section · Base: `main` @ 4506e96
 
-## Status (2026-10-07)
+## Status (2026-10-08)
 
-- Nexus **frozen** (Q1 answered "freeze first"): excluded from the workspace, not deleted; `crates/apps/nexus/FROZEN.md`. Deletion still needs separate approval.
-- Priority step 1 **done** for rows 1 and 2 (non-Nexus sites): `rusty_crypto_key::constant_time_eq`, `rusty_oauth::bearer::token_from_authorization`. Left: the two Nexus `ct_eq` copies and `nexus-memory-hub`'s Bearer parse (frozen), `rusty_acp/examples/authenticated_server.rs` (example kept standalone).
-- Priority step 2: row 3 **done** (`Emitter::{text_delta, end_text, tool_call, tool_result}` in `rusty_agui`; `adk-agui`, `rk-agui`, `rusty_tick`, `echo_agent` use them). Row 4 (`strip_ansi`) **done**: `rusty_ansi`'s parser gained an `Escape` token (two-byte sequences, charset designations, DCS/SOS/PM/APC strings up to ST) so its `strip_ansi` matches the stricter test helper; `rp-router`'s `rtk.rs` and `rusty_lines/tests/pty.rs` now call it (all 43 PTY tests pass). Side effect for `rtk.rs`: OSC and two-byte sequences are stripped too, and other C0 controls (bell, backspace) are dropped. The Nexus copies (`nexus-cli`, `nexus-terminal`) are frozen and untouched.
-- Priority step 3 **done** for rows 5, 6, 7: `rusty_base64::decode_standard_lenient` (6 base64 copies), new `rusty_hex` (8 crates), new `rusty_percent` (11 crates; `rusty_url` rejected as the home because it pulls `idna`). Left: `platform-bsd` (BSD-only, not built here), Nexus copies (frozen), `rusty_url`'s internal decoder, the eight external `percent-encoding` users, row 21 (`Url` ×2).
-- Priority step 4 **done** (row 8): `rusty_retry` now owns `Retry-After` incl. HTTP-date (no `rusty_time` needed; it stays zero-dependency) and `Backoff` replaces the three hand-rolled doublings (`rusty_a2a` push, `rp-mcp` gateway, `rusty-croc`). Left: Nexus copies (frozen).
-- Priority step 5 **partly done**: `remind_me_remote` on the workspace `rmcp` (row 12); `rsi-runtime` blob writes on `rusty_atomic_file` (row 13). Not moved, with reasons: `rusty_fair_play` (its tests inject failure through the fixed `.tmp` name) and `rusty_lines` (preserves existing permissions). Both would need `rusty_atomic_file` or the tests to change first. `rusty_atomic_file` does fsync the parent directory, which settles the earlier open question.
-- Priority step 6: row 14 **done in the narrow form** (Q6 answered: option 1): new `rusty_dirs::{config_root, config_dir}` used by `rusty_term` and `rusty-croc`. The audit overstated the duplication: the other sites resolve state/data dirs or `~`, with their own overrides, and `rusty_yirp`'s two copies are deliberate. Row 17 (Nexus retirement): **decided, keep frozen; do not delete** (owner, 2026-10-07). Unfreeze by reverting the freeze commit.
-- Priority step 7 **started**: `rk-app` (single-tool stdio server) now runs on `rusty_mcp::serve`. Remaining, in order: `rk-mcp` client, `adk-mcp` (needs stateless HTTP + `line_cap` ported into `rusty-mcp` first), `remind_me_remote` (wire-behaviour tests), `remind_me_mcp` last (Q2).
-- Priority step 7 **in progress**: `rk-app` (server) and `rk-mcp` (client; stdio verified against a real server) are on `rusty-mcp`. Remaining, in order: `adk-mcp` (needs stateless HTTP + `line_cap` ported into `rusty-mcp` first), `remind_me_remote` (wire-behaviour tests), `remind_me_mcp` last (Q2).
+Priorities 1 to 6 of the table in section 5 are done (rows 17 and parts of 5, 13 and 14 excepted, below); 7 is in progress and now split into two tracks. Verified at each step by clippy `-D warnings`, the affected crates' tests and the workspace policy scripts; CI has not been run on this branch.
+
+| Priority | Rows | State | What landed |
+|---|---|---|---|
+| 1 | 1, 2 | done | `rusty_crypto_key::constant_time_eq`; `rusty_oauth::bearer::token_from_authorization` |
+| 2 | 3, 4 | done | `rusty_agui` `Emitter::{text_delta, end_text, tool_call, tool_result}` (used by `adk-agui`, `rk-agui`, `rusty_tick`); `rusty_ansi` `AnsiToken::Escape` and the one `strip_ansi` (`rp-router`, `rusty_lines`) |
+| 3 | 5, 6, 7 | done | `rusty_base64::decode_standard_lenient`; new `rusty_hex` (8 crates); new `rusty_percent` (11 crates; not `rusty_url`, which pulls `idna`) |
+| 4 | 8 | done | `rusty_retry::{retry_after, parse_http_date}` and `Backoff` in `rusty_request`, `rusty-acp`, `rusty_a2a`, `rp-mcp`, `rusty-croc` |
+| 5 | 12 (pin), 13 | partly | `remind_me_remote` on the workspace `rmcp`; `rsi-runtime` blobs via `rusty_atomic_file`. Not moved: `rusty_fair_play` (tests inject failure through the fixed `.tmp` name), `rusty_lines` (preserves permissions) |
+| 6 | 14, 17 | done / decided | new `rusty_dirs` (`rusty_term`, `rusty-croc`); the other home-dir sites are not duplicates. Nexus **frozen, not deleted** (owner, 2026-10-07); unfreeze by reverting the freeze commit |
+| 7 | 11, 12 | in progress | `rk-app` server on `rusty_mcp::serve`; `rk-mcp` client on the new `rusty-mcp-client` (split out of `rusty-mcp`; rustls, not OpenSSL; stdio verified against a real server). Remaining `adk-mcp`, `remind_me_remote`, `remind_me_mcp` are superseded by the MCP track below |
+
+**Direction change (owner, 2026-10-08):** replace `rmcp` and its stack with first-party crates, and make `rusty_tls`'s native engine a valid replacement for `rustls`. This supersedes the "converge onto `rusty-mcp`" plan for `adk-mcp`/`remind_me_remote`/`remind_me_mcp` and amends workspace ADR-0002 (MCP crates Tier A to Tier T), pending sign-off. Plan, open decisions and the two independent session prompts: `docs/research/MCP-NATIVE-PLAN.md`, `docs/research/prompts/mcp-track.md`, `docs/research/prompts/tls-track.md`.
+
+**Not started** (need owner answers): priorities 8 and 9 (HTTP/`Url` convergence, LLM wire types; Q2, Q3, Q10).
+
+**Known unverified:** `platform-bsd` and `rusty_term`'s `gui` feature were not built; Streamable HTTP in `rusty-mcp-client` and `rusty-keys --mcp` end to end were not exercised against a live peer; `rusty_term` clippy fails without `gui` on unused `Grid` methods, also on the baseline.
 
 ## 0. Scope, method, limits
 
