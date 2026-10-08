@@ -187,7 +187,7 @@ Units: uu = Unreal units. Ticks are physics ticks at 120 Hz (8.33 ms).
 
 ## 7. Gaps
 
-- Still not transcribed: Hitbox Visualizations (99j1mTN1_Vs, mostly visual), Curvedashing (PuB6yLVSs5s), the rest of the 68 videos (input lag, controller tests, BakkesMod, esports, TAS). Full list: /tmp/rocket-science-channel-videos.md.
+- Still not transcribed: Hitbox Visualizations (99j1mTN1_Vs, mostly visual), Curvedashing (PuB6yLVSs5s), the rest of the 68 videos (input lag, controller tests, BakkesMod, esports, TAS). Full list: ./rocket-science-channel-videos.md.
 - YouTube auto-captions: digits can be wrong; flagged above. RS-KB pages are more reliable where they exist; only 4 episodes have them.
 - GDC slides are text only; diagram slides and talk audio are missing.
 - 3P (smish.dev): car-ball hit formula J = m_ball*|dv|*s(|dv|)*n with n = ball.pos - car.pos; n.z *= 0.35; n = normalize(n - 0.35*dot(n,car.forward)*car.forward), ball only; this is consistent with RS-CC #6's description (shortening adjustment plus vertical damping) but the 0.35 constants and the s() curve are not stated by Rocket Science. Applied #2 also points to smish.dev for rotation damping math.
@@ -225,7 +225,7 @@ Channel: https://www.youtube.com/@RocketScience (ID UCfKidiMlHTBRNkQZlLzUesw)
 - The Merc preset explained: https://youtu.be/NmyDRWvFbZ0
 - NoFlip/Airdash: https://youtu.be/YLUMcvxLXyg
 - Landing wavedash: https://youtu.be/baNsqFEfRMY
-- Channel listing (68 videos): /tmp/rocket-science-channel-videos.md
+- Channel listing (68 videos): ./rocket-science-channel-videos.md
 
 ### Psyonix GDC 2018 (Jared Cone)
 - Slide deck PDF: https://media.gdcvault.com/gdc2018/presentations/Cone_Jared_It_Is_Rocket.pdf

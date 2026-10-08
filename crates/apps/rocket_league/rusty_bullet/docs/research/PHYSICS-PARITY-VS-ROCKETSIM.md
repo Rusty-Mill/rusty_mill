@@ -56,7 +56,7 @@
 | Engine ÷4 when <3 wheels touch | yes | yes (`ground.rs` `partial_contact` 0.25) | ✅ | - | - |
 | Brake | torque `180·(14.25+1/3)` | 3500 uu/s² (derived) | ≈ | - | - |
 | Coast brake / full-stop speed | 0.15 / 25 | 0.15 / 25 | ✅ | - | - |
-| Throttle deadzone | 0.001 | 0.001 | ✅ | ≈58 km/h/s (≈1611 uu/s², my conversion) at standstill (CC wavedash) | force/accel curve instead of transmission; no longitudinal friction |
+| Throttle deadzone | 0.001 | 0.001 | ✅ | - | - |
 | Steer angle curve | (0,.53356) (500,.31930) (1000,.18203) (1500,.10570) (1750,.08507) (3000,.03454) | identical | ✅ | turn comparisons only: presets within ≈3% at max turn; break-even angle vs Octane: Dominus 25°, Breakout/Hybrid 78°, Batmobile 107° (#18); no curve constants | 'limit steer angles' / stay-upright constraint as workarounds (qualitative) |
 | Powerslide steer curve | (0,.39235) (2500,.12610) | identical | ✅ | - | - |
 | Lateral friction curve | (0,1) (1,.2) | identical | ✅ | - | Ratio=Side/(Side+Fwd); SlideFriction=Curve(Ratio); GroundFriction=Curve(Normal.Z); Friction=Slide×Ground; Impulse=Constraint×Friction (curve values not in text) |
