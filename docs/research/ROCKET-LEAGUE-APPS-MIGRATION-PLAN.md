@@ -130,11 +130,29 @@ Because sources are never touched, rollback is cheap:
 - **If a replay blob leaks in anyway:** do not fix forward; revert the merge before others branch from it, redo the filter, re-merge. A post-hoc history rewrite on rusty_mill is the expensive case, which is why the size gate runs before the merge.
 - The source repos stay un-archived and un-deleted until at least one release cycle after phase 4, then archiving (not deleting) is a separate decision for you.
 
-## 9. Open questions (answers change the plan)
+## 9. Decisions (2026-10-08) and what they change
 
-1. Is `rusty_mill` private? RLEvalSystem is. If rusty_mill is public, do not import RLEval history as-is.
-2. Keep small tracked fixtures (<1 MB: rusty_bullet's 860 KB sample, a trimmed `assets/replays/42f2.replay` for the viewer smoke), or enforce zero `.replay` in git and generate fixtures at CI time? Default above: keep the small ones.
-3. `canonical-match.json` (12.8 MB, a sample output cited from one doc) and the stray `replay-analyzer-main.rs` / `replay-analyzer-Cargo.toml` (older copies of `src/main.rs` / root manifest) at the RLEval root: drop from history as planned, or keep?
-4. Is the Docker/Celery `service/` stack in scope for CI now, or move-only?
-5. Keep package names, or take the one-time rename to `rl_*` at import (cheaper to do once, noisier diff)? Default: keep.
-6. Is your intent for RLEval to depend on `rb_env` (sim-based input recovery)? It is allowed by the single-family layout; stated so the ADR records the edge.
+1. **rusty_mill is public.** RLEvalSystem is private, so everything imported becomes public. Section 10 applies.
+2. **Small fixtures stay in git (<1 MB each); the corpus goes to a separate private repo** (section 10). `RL_REPLAY_DIR` can point at a checkout of it.
+3. `canonical-match.json` and the stray root copies are dropped from history.
+4. Docker/Celery `service/` is **move-only**: no CI job, no image build in CI.
+5. Package names unchanged at import.
+6. RLEval may depend on `rb_env`; ADR-0008 records the edge.
+
+## 10. Public-repo consequences (new, from a read-only scan of RLEval history)
+
+No credentials found (no tokens/keys in any revision; `client_secret` hits in `app/src/oidc.rs` are identifiers). But the following become public on import and need your call before any push:
+
+| Path | Content | Proposed |
+| --- | --- | --- |
+| `assets/myReplays`, `assets/corpus/*.replay`, `assets/modes`, `assets/case-studies/*/*.replay` | your matches and other players' replays | strip; private repo |
+| `data/local/*.json` (75 files) | saved sessions with real player names/gamertags and per-player scores | strip; private repo |
+| `assets/case-studies/*/manifest.json` | named third-party players (`3am-4usion`, `marthy-mcgray`) | private repo |
+| `spire_capture/`, `docs/competitor/spire/` | kit and notes for capturing and reverse engineering a commercial service's premium trial (mitm of its traffic) | private repo (ToS/legal exposure if public) |
+| `docs/ballchasing-*teardown*`, `bc-clone` | reverse-engineered clone of ballchasing's analyzer, validated against its API | your call: keep code, review the teardown docs for ToS-sensitive content |
+| commit author | `David Bailey <baileyrd@gmail.com>` (already the rusty_mill author) | no action |
+| licence | RLEvalSystem has no LICENSE file; rusty_bullet is MIT OR Apache-2.0 | add family licence before import |
+
+Private repo (name to choose, e.g. `rocket_league_private`): created by you or with your approval. It receives the stripped paths **with history preserved** via a second filter-repo pass (`--path` selecting just those paths), so nothing is lost by keeping them out of rusty_mill. rusty_mill refers to it only through `RL_REPLAY_DIR` and a README pointer.
+
+Revised order: phase 0 (ADR + licence + private repo exists) -> dry run -> rusty_bullet import -> RLEval import (only after you review the section 10 table).
