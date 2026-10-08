@@ -39,6 +39,12 @@ const START_MATCH_RADIUS: f32 = 5.0;
 /// tick or two to appear in the capture).
 const MAX_LAG_TICKS: usize = 3;
 
+/// Start speed (uu/s) above which the recording is not lagged against the port.
+const FAST_START_SPEED: f32 = 300.0;
+
+/// A car that moved less than this (uu) between two frames has not moved.
+const STILL_FRAME_UU: f32 = 0.5;
+
 /// Ticks used to choose the lag: the early trajectory, before chaos.
 const LAG_WINDOW_TICKS: usize = 60;
 
@@ -383,6 +389,20 @@ fn simulate_with_inputs(
     frames
 }
 
+/// How many frames at the start of `frames` show the first car where the frame before did:
+/// a state set the recording shows repeated, which a lag can absorb.
+fn leading_still_frames(frames: &[(usize, &PhysicsFrame)]) -> usize {
+    frames
+        .windows(2)
+        .take_while(
+            |pair| match (pair[0].1.cars.first(), pair[1].1.cars.first()) {
+                (Some(a), Some(b)) => a.position.distance(&b.position) < STILL_FRAME_UU,
+                _ => false,
+            },
+        )
+        .count()
+}
+
 /// The spawn point each car came back at in `frames`, if it was demolished: the point
 /// nearest to where it reappears after being out of the capture. The game's pick is
 /// random, so a replay is given the recording's (`PhysicsWorld::set_respawn_point`).
@@ -529,7 +549,21 @@ pub fn compare_scenario_recorded(
     // Lag first (offset 0), then offset at that lag, each on the whole run:
     // the early trajectory alone mis-picks a falling start (`pogo`).
     let mut best = (run(0, 0, limit), 0, 0);
-    for lag in 1..=MAX_LAG_TICKS {
+    // A car already moving at the start sits at the state-set frame in the recording's
+    // first matching frame and moves on every frame after it, so a lag would only add its
+    // speed times the lag as a constant offset (19 uu per tick at 2300 uu/s). A fast start
+    // is lagged only by the leading frames in which the recorded car has not moved (a
+    // state set that shows up repeated).
+    let start_speed = scenario
+        .car
+        .velocity
+        .map_or(0.0, |v| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt());
+    let max_lag = if start_speed > FAST_START_SPEED {
+        leading_still_frames(&recorded_ticks).min(MAX_LAG_TICKS)
+    } else {
+        MAX_LAG_TICKS
+    };
+    for lag in 1..=max_lag {
         let trial = run(lag, 0, limit);
         if trial.1 < (best.0).1 {
             best = (trial, lag, 0);
@@ -903,6 +937,35 @@ mod tests {
             }
         }
         assert_eq!(compare_scenario(&sc, &capture).unwrap().input_mismatches, 0);
+    }
+
+    /// A car already moving at the start moves on every recorded frame, so the recorded-input
+    /// replay does not lag it: each lag tick would be a constant offset of its speed over 120
+    /// (19 uu a tick at 2300 uu/s) in every row. A start the recording shows repeated is
+    /// still lagged (`a_recorded_input_replay_finds_the_start_lag`).
+    #[test]
+    fn only_a_start_shown_repeated_has_leading_still_frames() {
+        let path = format!(
+            "{}/../../tools/rb_tape_bot/experiments/bumpf_flip.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let fast = Scenario::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let ticks = |frames: &[PhysicsFrame]| -> usize {
+            let numbered: Vec<(usize, &PhysicsFrame)> = frames.iter().enumerate().collect();
+            leading_still_frames(&numbered)
+        };
+        // The fast car moves on from the first frame it is shown.
+        assert_eq!(ticks(&fake_capture(&fast, 0, 0)), 0);
+        // A start shown twice more before the car moves is two still frames.
+        assert_eq!(ticks(&fake_capture(&fast, 0, 2)), 2);
+        // And the replay of the repeated start still finds its lag.
+        let capture = fake_capture(&fast, 5, 2);
+        assert_eq!(
+            compare_scenario_recorded(&fast, &capture)
+                .unwrap()
+                .lag_ticks,
+            2
+        );
     }
 
     #[test]

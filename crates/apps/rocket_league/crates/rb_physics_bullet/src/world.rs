@@ -118,6 +118,11 @@ const CAR_CAR_MATERIAL: solver::PairMaterial = solver::PairMaterial {
 /// `BUMP_MIN_FORWARD_DIST` (uu): a car bumps another only when the contact
 /// point on it is at least this far ahead of its origin, i.e. with its nose.
 const BUMP_MIN_FORWARD_DIST: f32 = 64.5;
+/// Largest `|forward.z|` of a bumping car's nose: sin 45 degrees. A nose pitched past it
+/// gives no bump (`RB-PHYSICS-001-FR-152`): the flipping car of `bumpf_flip` hit with its
+/// nose straight down (-85 to -77 degrees), while a car thrown up by a bump and hitting a
+/// third is level (-2 to -7); the threshold between them is an assumption.
+const BUMP_MAX_FORWARD_Z: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// `BUMP_COOLDOWN_TIME`, 0.25 s in 120 Hz ticks: one bump per pair of cars.
 const BUMP_COOLDOWN_TICKS: u64 = 30;
 /// `BUMP_VEL_AMOUNT_GROUND_CURVE`: (bumper speed, extra speed given to the
@@ -1373,7 +1378,12 @@ impl PhysicsWorld {
                         / contacts.len() as f32;
                     let front = mean_forward > BUMP_MIN_FORWARD_DIST;
                     let last = &mut self.bump_ticks[bumper][victim];
+                    // A nose pitched far off the horizontal (a front flip's, straight down
+                    // at the hit) bumps nobody (`RB-PHYSICS-001-FR-152`): the two push on in
+                    // the ordinary collision.
+                    let level = forward.z.abs() <= BUMP_MAX_FORWARD_Z;
                     if front
+                        && level
                         && last.is_none_or(|tick| self.tick_count >= tick + BUMP_COOLDOWN_TICKS)
                     {
                         *last = Some(self.tick_count);
@@ -3039,6 +3049,38 @@ mod tests {
             "a ground bump gives about 1330: {victim:?}"
         );
         assert!(victim.z < -100.0, "thrown down, not up: {victim:?}");
+    }
+
+    /// `RB-PHYSICS-001-FR-152`, measured on the game (`bumpf_flip`): a car whose nose points
+    /// straight down at the hit (a front flip's) gives no bump; the two push on together and
+    /// settle at half the attacker's speed (equal masses, inelastic: 1540 -> 770 uu/s both).
+    #[test]
+    fn a_nose_pitched_far_off_the_horizontal_bumps_nobody() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 40.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 1000.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        // Pitch the attacker 60 degrees nose down about its own right (local y) axis.
+        let half = 30.0_f32.to_radians();
+        let pitch = Quat::new(0.0, half.sin(), 0.0, half.cos());
+        let heading = world.cars[0].orientation;
+        world.cars[0].orientation = heading.mul(&pitch).normalize();
+        assert!(
+            drive::forward_axis(&world.cars[0]).z < -0.8,
+            "nose well down"
+        );
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        let victim = world.cars[1].linear_velocity;
+        assert!(
+            victim.y > 50.0 && victim.y < 800.0,
+            "a plain collision gives the victim about half, a bump about 1300: {victim:?}"
+        );
     }
 
     /// A car reversing into another with its tail does not bump it.
