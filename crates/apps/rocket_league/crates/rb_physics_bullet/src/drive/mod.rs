@@ -578,11 +578,14 @@ pub fn apply_driven_forces(
         // `numWheelsInContact == 0` false); flip torque still acts.
         let touching = wheels.iter().any(Option::is_some);
         if touching {
+            // With fewer than three wheels down a held boost does not force the wheels'
+            // throttle to 1 (`RB-PHYSICS-001-FR-154`): the car lands on its front wheels
+            // coasting at half the brake, not driven.
             ground::apply_ground_control(
                 car,
                 wheels,
                 input,
-                throttle,
+                input.throttle.clamp(-1.0, 1.0),
                 forward,
                 state.handbrake_amount,
                 dt,

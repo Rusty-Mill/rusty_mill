@@ -3352,6 +3352,42 @@ fn two_touching_wheels_brake_at_half_strength_without_air_control() {
 }
 
 #[test]
+fn two_touching_wheels_coast_even_with_boost_held_and_no_throttle() {
+    // RB-PHYSICS-001-FR-154: `fuzz_513` lands nose first on its front wheels, boosting with
+    // the throttle at 0: the game brakes it at half the coasting brake (as the same landing
+    // without boost, FR-099), where the port let the held boost force the wheels' throttle to 1
+    // and drove it (a steady 4.2 uu/s per tick of error for 14 ticks).
+    let mut c = car();
+    c.linear_velocity = Vec3::new(400.0, 0.0, 0.0);
+    let mut wheels = resting_contacts(&c);
+    for (contact, &(_, _, front)) in wheels.iter_mut().zip(super::wheels::WHEELS.iter()) {
+        if !front {
+            *contact = None;
+        }
+    }
+    let run = |boost: bool| {
+        let mut car = c;
+        let mut state = DriveState::new();
+        let input = ControllerInput {
+            boost,
+            ..Default::default()
+        };
+        apply_driven_forces(&mut car, &input, &wheels, None, &mut state, TICK);
+        car.linear_velocity.x
+    };
+    let coasting = COASTING_BRAKE_FACTOR * BRAKE_DECELERATION * TICK;
+    assert_close(run(false), 400.0 - coasting / 2.0, "coasting on two wheels");
+    // The boost's own push is applied elsewhere; the ground control must not change with the
+    // button (before FR-154 the held boost forced throttle 1: engine drive instead of the
+    // coasting brake, 4.6 uu/s more in one tick).
+    let difference = run(true) - run(false);
+    assert!(
+        difference.abs() < 0.01,
+        "ground control differs by {difference}"
+    );
+}
+
+#[test]
 fn a_ground_jump_pushes_along_the_cars_up_axis() {
     // RB-PHYSICS-001-FR-101: RocketSim's `_UpdateJump` pushes along
     // `GetUpDir()`; a car pitched on its suspension jumps slightly forward.

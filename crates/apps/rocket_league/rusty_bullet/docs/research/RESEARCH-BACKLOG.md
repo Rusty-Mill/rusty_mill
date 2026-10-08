@@ -730,6 +730,15 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   about 25 uu above the game's.
 - **Status**: Open (low priority). **Owner**: baileyrd.
 
+- **Two-wheel landing with boost (2026-10-08, FR-154)**: the only anomalous bucket of
+  `kstep_regimes.py 30` on the 24 holdout tapes (coasting, half steer, boost held, under 1000 uu/s:
+  61 uu/s over 40 windows) was one event, `fuzz_513` t = 5.34 to 5.45 s, a nose-first landing on
+  the two front wheels with the boost held and the throttle at 0. The game coast-braked at half
+  strength (as FR-099 found without boost); the port let the held boost force the wheels'
+  throttle to 1 and drove the car: 4.2 uu/s per tick of error for 14 ticks. With fewer than three
+  wheels down the raw throttle is used: 0.6 to 0.7 uu/s per tick. The tape's free-run mean is
+  unchanged (116.8 uu): its divergence is elsewhere.
+
 ### RB-RESEARCH-O016 — A ball set at rest in the air hovers in the game
 
 - **Evidence (2026-10-07)**: `probe_ball_drop` (ball set at (0, 0, 1500),
