@@ -75,7 +75,7 @@ impulses is worse everywhere.
    (port) and compare to the car's per-tick force in the game. A per-tick
    force diff at each facet crossing says whether it is the contact normal, the
    suspension length jump, or the pushback.
-2. A clean wheels-on-ramp probe set that does not start with a state-set on
+2. (Mirror set done 2026-10-08: `wallgm_*`, the game is near-symmetric, the port is not; O012.) A clean wheels-on-ramp probe set that does not start with a state-set on
    the wall (the start transient pollutes `wallfuzz`): approach from the floor
    at 10, 20, 30, 45, 60 degrees and 3 speeds (the existing `wallg_*`), plus a
    slow drop onto a wall and a ceiling.
