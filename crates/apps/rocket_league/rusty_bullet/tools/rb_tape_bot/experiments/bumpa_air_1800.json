@@ -1,0 +1,77 @@
+{
+  "name": "bumpa_air_1800: both airborne at z=700, attacker 1800 uu/s into the other",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -658.0,
+      700
+    ],
+    "rotation": [
+      0.0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      1800,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 110
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          0,
+          700
+        ],
+        "rotation": [
+          0.0,
+          1.5708,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 110
+        }
+      ],
+      "team": 0
+    }
+  ]
+}

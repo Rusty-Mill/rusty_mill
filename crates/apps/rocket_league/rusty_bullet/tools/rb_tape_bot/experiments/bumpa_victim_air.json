@@ -1,0 +1,85 @@
+{
+  "name": "bumpa_victim_air: victim airborne at z=400, attacker boosts up into it",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -250,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      600,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 10,
+      "jump": true,
+      "throttle": 1
+    },
+    {
+      "ticks": 140,
+      "throttle": 1,
+      "boost": true,
+      "pitch": -1
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          0,
+          400
+        ],
+        "rotation": [
+          0.0,
+          1.5708,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 150
+        }
+      ],
+      "team": 0
+    }
+  ]
+}

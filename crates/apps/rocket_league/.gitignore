@@ -1,0 +1,10 @@
+# Replays, captures and corpora are never committed (large, and some are other
+# players' matches). Small test fixtures are the exception.
+*.replay
+!**/fixtures/**
+!rleval/assets/replays/*.replay
+/rusty_bullet/captures/
+/rusty_bullet/replays/
+/rusty_bullet/bakkesmod-plugin/rusty_bullet_capture/build/
+/rusty_bullet/tools/rb_tape_bot/target/
+.env
