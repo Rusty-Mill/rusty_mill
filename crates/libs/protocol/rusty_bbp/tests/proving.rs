@@ -61,6 +61,7 @@ fn stage_one_end_to_end() {
             failed: 0,
         }],
         tree: Some(Sha256([2; 32])),
+        sandbox: "test".into(),
         log,
     };
     let payload = ArtifactPayload::TestReport(rep);

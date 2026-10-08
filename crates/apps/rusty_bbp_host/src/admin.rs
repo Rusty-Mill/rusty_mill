@@ -1,5 +1,6 @@
 //! Open a task and assign roles: moderator operations a host runs once.
 
+use crate::profiles::{self, ProfileSet};
 use crate::{now, open_driver};
 use rusty_bbp::*;
 use std::path::Path;
@@ -23,14 +24,17 @@ pub fn role_name(r: Role) -> &'static str {
     }
 }
 
-/// Open `task` in the store at `dir` with `brief` as its brief.
+/// Open `task` in the store at `dir` with `brief` as its brief. The profile
+/// set is frozen first; its digest is the task's `profile_digest`.
 pub fn open_task(
     dir: &Path,
     task: &TaskId,
     repo: &str,
     brief: &[u8],
     human: &PrincipalId,
+    set: &ProfileSet,
 ) -> Result<Response, String> {
+    let profile_digest = profiles::freeze(dir, task, set)?;
     let mut store = FsStore::open(dir).map_err(|e| e.to_string())?;
     let blob = store.blob_put(brief);
     let mut d = Driver::new(store, task.clone());
@@ -38,7 +42,7 @@ pub fn open_task(
     let cmd = Command::Open(OpenTask {
         task: task.clone(),
         repo: repo.to_owned(),
-        profile_digest: Sha256::of(b"default"),
+        profile_digest,
         budget: Budget {
             messages: 40,
             bytes: 5_000_000,

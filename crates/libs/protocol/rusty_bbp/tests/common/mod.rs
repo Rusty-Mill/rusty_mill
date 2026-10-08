@@ -205,6 +205,7 @@ impl<S: Store> Fx<S> {
                 failed,
             }],
             tree: Some(Sha256([9; 32])),
+            sandbox: "test".into(),
             log,
         };
         let payload = ArtifactPayload::TestReport(rep);

@@ -106,6 +106,7 @@ fn setup(dir: &Path) -> TaskId {
         "github.com/example/repo",
         b"Add retry with backoff.",
         &PrincipalId("human".into()),
+        &rusty_bbp_host::profiles::ProfileSet::shell("test", "true"),
     )
     .expect("open");
     for (role, vendor) in [

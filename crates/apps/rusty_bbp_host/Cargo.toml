@@ -17,6 +17,10 @@ rusty_bbp = { workspace = true }
 rusty_serde = { workspace = true }
 # Operation ids for reads the agent did not name.
 rusty_rand = { workspace = true }
+# Frozen profile sets are written whole or not at all.
+rusty_atomic_file = { workspace = true }
+# The runner's workload sandbox: Landlock, seccomp, rlimits, process group.
+rusty_sandbox = { workspace = true }
 
 [[bin]]
 name = "bbp"
