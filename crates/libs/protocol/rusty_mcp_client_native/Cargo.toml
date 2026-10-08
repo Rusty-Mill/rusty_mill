@@ -1,0 +1,30 @@
+[package]
+name = "rusty_mcp_client_native"
+version = "0.1.0"
+edition = "2021"
+description = "Sovereign MCP client core on rusty_mcp_proto: a sans-IO session for the classic and stateless handshakes, a server-sent-events parser, and a blocking client over a child-process transport"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["mcp", "client", "json-rpc"]
+categories = ["network-programming"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+# First-party only (ADR-0002 Tier S).
+rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
+rusty_mcp_proto = { workspace = true }
+
+[dev-dependencies]
+# The server this client is tested against, in process and as a child process.
+rusty_mcp_server = { workspace = true, features = ["request-state"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"

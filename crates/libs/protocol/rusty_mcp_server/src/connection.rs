@@ -509,6 +509,19 @@ impl Connection {
     }
 
     fn discover(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
+        // A server with no stateless revision has no `server/discover`: the
+        // client's cue to fall back to `initialize`.
+        if !self
+            .server
+            .versions
+            .iter()
+            .any(ProtocolVersion::is_stateless)
+        {
+            return Err(ErrorData::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                "this server has no server/discover; use initialize",
+            ));
+        }
         let _: DiscoverParams = decode_params(params).map_err(invalid_params)?;
         let mut result = DiscoverResult::new(self.server.versions.clone(), self.capabilities())
             .with_server_info(&self.server.info);

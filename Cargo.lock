@@ -12526,6 +12526,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mcp_client_native"
+version = "0.1.0"
+dependencies = [
+ "rusty_json",
+ "rusty_mcp_proto",
+ "rusty_mcp_server",
+]
+
+[[package]]
 name = "rusty_mcp_proto"
 version = "0.1.0"
 dependencies = [

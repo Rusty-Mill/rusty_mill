@@ -692,3 +692,21 @@ fn a_finished_request_frees_its_id_for_reuse() {
         "no duplicate-id error: {out:?}"
     );
 }
+
+#[test]
+fn a_classic_only_server_has_no_discover() {
+    let server = Arc::new(
+        Server::builder("classic", "1")
+            .versions(vec![ProtocolVersion::new("2025-06-18")])
+            .tool(Tool::new("t", schema()), |_c, _p| {
+                Ok(CallToolResult::default())
+            })
+            .build()
+            .unwrap(),
+    );
+    let out = run_with(
+        server,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\"}\n",
+    );
+    assert_eq!(code(reply(&out, 1)), -32601);
+}

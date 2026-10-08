@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_client_native, first slice (pending review)
+
+- **Added:** the client core: SSE parser, sans-IO session, blocking client over a child process (35 tests against `rusty_mcp_server`). New workspace crate; no consumer uses it yet.
+- **Fixed in `rusty_mcp_server`:** a classic-only server now answers `server/discover` with method-not-found.
+- **Not verified:** any server other than `rusty_mcp_server`; HTTP is not built, so nothing here can replace `rmcp`'s client yet.
+
+---
+
 ## 2026-10-08 - rusty_mcp_server push streams (pending review)
 
 - **Added:** the `GET` push stream for classic HTTP sessions, with event ids and `Last-Event-ID` resumption, and classic `resources/subscribe`. Verified against raw sockets and the `rmcp` classic HTTP client.

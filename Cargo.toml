@@ -39,6 +39,7 @@ members = [
     "crates/libs/protocol/rusty_agui",
     "crates/libs/protocol/rusty_mcp_proto",
     "crates/libs/protocol/rusty_mcp_server",
+    "crates/libs/protocol/rusty_mcp_client_native",
     "crates/libs/protocol/rusty_a2a",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client",
@@ -445,6 +446,7 @@ rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }
 rusty_agui = { path = "crates/libs/protocol/rusty_agui" }
 rusty_mcp_proto = { path = "crates/libs/protocol/rusty_mcp_proto" }
 rusty_mcp_server = { path = "crates/libs/protocol/rusty_mcp_server" }
+rusty_mcp_client_native = { path = "crates/libs/protocol/rusty_mcp_client_native" }
 rusty_channel = { path = "crates/libs/protocol/rusty_channel" }
 rusty_routine = { path = "crates/libs/protocol/rusty_routine" }
 rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
