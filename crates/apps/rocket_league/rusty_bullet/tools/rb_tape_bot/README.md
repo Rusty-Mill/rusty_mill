@@ -334,6 +334,41 @@ frames), which pinned `probe_wall_land` to a different facet's normal
 error column. `rb-verify --scenario ... --recorded-inputs` with `RB_STATES=1` prints the first
 car's velocity, spin and orientation, recorded against predicted, per tick.
 
+### Finding rules by regime (2026-10-08)
+
+Free-run error mixes everything that went wrong earlier in a tape, so rules are found on the
+one-step error (the port stepped once from each recorded frame, `rb-verify --wheel-trace`),
+grouped by what the car was doing and expressed in the car's frame:
+
+- `regime_bias.py <batches> [clip]` groups every tick by wheels touching, throttle sign,
+  boost, handbrake and steer size (`SURFACE=1` adds floor, ramp, wall, ceiling; `SPIN=1` ranks the
+  angular error; `TOP=n` lists more) and prints the mean error per tick and a bias score
+  (ticks x |mean|). A steady value near a known constant is a rule: 0.556 uu/s per tick is the
+  air throttle's 200/3 uu/s^2 (FR-156), 0.55 to 0.7 the gap between the two boost
+  accelerations (FR-157).
+- `two_wheel_errors.py` does the same per wheel set (`N_WHEELS=1..3`, `TWO_WHEEL_DETAIL=FR+FL`
+  names the tapes); `touchdown_errors.py` sums the first ticks after each touchdown.
+- `gen_duel_fuzz.py` (two cars at each other, then seeded random tapes) and `duel_report.py`
+  (errors around the first car-car contact) test the bump rules; same-team cars both play their
+  tapes (hivemind), an enemy second car stands still.
+- `gen_air_combo.py` (held pitch/yaw/roll combinations, jumped, late or moving starts) and
+  `gen_ceiling.py`.
+
+Score a candidate rule on every related tape (all `bump*`, `tri_*`, `demo_*`, `duel_*` for a bump
+rule) against a baseline built from the same scorer before adopting it, and check a held-out set.
+
+Rig artifacts to keep out of the physics:
+
+1. Pitch input is silent for the first ~25 ticks after the state set while roll and yaw work: put
+   pitch no earlier than 0.25 s into a tape (FR-155 mistook this for "roll drops pitch").
+2. In a hivemind scenario the second car's recorded input leads the first's by a tick
+   (`HIVE_INPUT_LEAD` in the scorer).
+3. The state set carries the car over the boost pads between its old and new place; the game
+   credits them on the next frame and the scorer adds a tank jump of more than 5 there.
+4. The scorer's whole-run alignment can pick input offset 1 on a chaotic tape;
+   `RB_FORCE_ALIGN=lag,offset` forces one (`0,0` is the honest one where a throttle onset
+   shows the timing).
+
 ## Scoring
 
 `rb-verify --scenario scenarios/<name>.json --against <capture> [every]`
