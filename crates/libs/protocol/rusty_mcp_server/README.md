@@ -181,21 +181,15 @@ a task; the handler runs on a thread of its own and the client polls
 - Status changes are polled; `notifications/tasks` is not sent. Tasks are not
   advertised per tool (no `execution` metadata).
 
-## Acceptance: the `rusty-mcp-demo` suite
+## Acceptance: `rusty-mcp-demo`
 
-`tests/demo/` rebuilds `rusty-mcp-demo` (seven tools, two prompts, two
-resources, a template, completions) on this crate, and
-`tests/demo_acceptance.rs` is the demo's own test suite (tools, tasks, MRTR,
-resources and prompts, subscriptions: 43 tests) run against it with the `rmcp`
-client over real Streamable HTTP. The assertions are the originals'; the
-transport changed (they used an in-memory pipe to the `rmcp` server). Run it with
-`cargo test -p rusty_mcp_server --features http,request-state --test demo_acceptance`.
-The demo crate itself is untouched.
-
-Two deviations from the originals, both on purpose: the MRTR tests' client
-declares the `elicitation` capability (the old scaffold asked clients that had
-not; this server does not), and `Pinned` builds capabilities from JSON because
-the capability builder is behind a feature this crate does not enable.
+`crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo` is built on this crate
+(seven tools, two prompts, two resources, a template, completions), and its
+`tests/acceptance.rs` (43 tests: tools, tasks, MRTR, resources and prompts,
+subscriptions) drives it with the `rmcp` client over real Streamable HTTP. The
+assertions are the demo's original ones, which used an in-memory pipe to the
+`rmcp` server. One deviation: the MRTR client declares the `elicitation`
+capability, which the old scaffold did not require and this server does.
 
 ## Streamable HTTP
 

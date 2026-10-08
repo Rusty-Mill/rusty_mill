@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty-mcp-demo moved onto rusty_mcp_server (pending review)
+
+- **Changed:** the demo crate now runs on `rusty_mcp_server`; its old `rusty-mcp`/`rmcp`-macro code and tests are removed, its acceptance suite (43 tests) now lives in the demo and passes over real HTTP.
+- **Breaking for demo users:** the command line shrank to `--transport`, `--bind`, `--path`, `--allowed-host`, `--allowed-origin`, `--max-body-bytes`; no logging flags, auth, limits, telemetry or graceful shutdown. The `rusty-mcp` scaffold no longer has a reference example (its README says so).
+- **Not verified:** other MCP clients, or the binary under a real IDE.
+
+---
+
 ## 2026-10-08 - rusty-mcp-demo acceptance port (pending review)
 
 - **Added:** the demo's five test files, ported to run against a copy of the demo built on `rusty_mcp_server`; 43 of 43 pass over real HTTP with the `rmcp` client. Three server fixes came out of the first run (30 of 43): `initialize` at 2026-07-28, client capabilities kept in the HTTP session, cache hints on resource reads.

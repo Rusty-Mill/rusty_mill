@@ -1,22 +1,21 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! `rusty-mcp-demo`'s acceptance suite (ported from its `tests/*.rs`) run
-//! against the demo rebuilt on `rusty_mcp_server`. The assertions are the
-//! demo's own; what changed is the transport: the originals talk to the
-//! `rmcp` server over an in-memory pipe, these talk to ours over real
-//! Streamable HTTP with the same `rmcp` client.
+//! The demo's acceptance suite: the `rmcp` client against the demo over real
+//! Streamable HTTP. Ported from the demo's earlier tests, whose assertions
+//! these are; they used an in-memory pipe to the `rmcp` server.
 
+#[path = "../src/demo.rs"]
 mod demo;
 
 use rmcp::{
+    ClientHandler, ClientServiceExt, ServiceExt,
     model::{
         CallToolRequestParams, CallToolResponse, ClientCapabilities, ClientInfo, ProtocolVersion,
     },
     service::RunningService,
-    transport::streamable_http_client::StreamableHttpClientTransportConfig,
     transport::StreamableHttpClientTransport,
-    ClientHandler, ClientServiceExt, ServiceExt,
+    transport::streamable_http_client::StreamableHttpClientTransportConfig,
 };
-use rusty_mcp_server::{bind_http, HttpConfig};
+use rusty_mcp_server::{HttpConfig, bind_http};
 use rusty_serve::{Limits, ShutdownHandle};
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,7 +63,7 @@ impl Drop for Demo {
 
 fn start() -> Demo {
     let http = bind_http(
-        Arc::new(demo::demo_server()),
+        Arc::new(demo::demo_server().unwrap()),
         "127.0.0.1:0".parse().unwrap(),
         HttpConfig::default(),
         Limits::default(),
@@ -417,10 +416,12 @@ mod tasks {
     async fn an_unknown_task_id_is_an_error() {
         let demo = start();
         let client = connect_with(&demo, ProtocolVersion::V_2026_07_28, true).await;
-        assert!(client
-            .get_task(GetTaskParams::new("no-such-task"))
-            .await
-            .is_err());
+        assert!(
+            client
+                .get_task(GetTaskParams::new("no-such-task"))
+                .await
+                .is_err()
+        );
         client.cancel().await.unwrap();
     }
 
@@ -730,10 +731,12 @@ mod resources_and_prompts {
     async fn an_unknown_resource_is_an_error() {
         let demo = start();
         let client = connect(&demo).await;
-        assert!(client
-            .read_resource(ReadResourceRequestParams::new("config://nope"))
-            .await
-            .is_err());
+        assert!(
+            client
+                .read_resource(ReadResourceRequestParams::new("config://nope"))
+                .await
+                .is_err()
+        );
         client.cancel().await.unwrap();
     }
 
@@ -741,12 +744,14 @@ mod resources_and_prompts {
     async fn a_template_variable_cannot_traverse_out_of_its_namespace() {
         let demo = start();
         let client = connect(&demo).await;
-        assert!(client
-            .read_resource(ReadResourceRequestParams::new(
-                "db://tables/../../etc/passwd"
-            ))
-            .await
-            .is_err());
+        assert!(
+            client
+                .read_resource(ReadResourceRequestParams::new(
+                    "db://tables/../../etc/passwd"
+                ))
+                .await
+                .is_err()
+        );
         client.cancel().await.unwrap();
     }
 

@@ -1,21 +1,19 @@
-#![allow(clippy::unwrap_used)]
-//! `rusty-mcp-demo` rebuilt on `rusty_mcp_server`: the same seven tools, two
-//! prompts, resources, template and completions, so its acceptance suite
-//! (`tests/demo_acceptance.rs`, ported from the demo's own tests) can run
-//! against the new server. Behaviour follows `rusty-mcp-demo/src`.
+//! The demo server: seven tools, two prompts, two resources, a template and
+//! completions, built on `rusty_mcp_server`. `tests/acceptance.rs` is its
+//! acceptance suite.
 
-use rusty_json::Value;
-use rusty_mcp_proto::{
+use rusty_mcp_server::json::Value;
+use rusty_mcp_server::proto::{
     CallToolParams, CallToolResult, CompletionInfo, ContentBlock, ElicitAction, ElicitParams,
     ErrorCode, ErrorData, GetPromptResult, Prompt, PromptArgument, PromptMessage,
     ReadResourceResult, Reference, Resource, ResourceContents, ResourceTemplate, Role, Tool,
 };
 use rusty_mcp_server::{
-    answer, Ask, CallContext, ChangeBroadcaster, ChangeKinds, Server, TaskContext, ToolOutcome,
-    Turn,
+    Ask, BuildError, CallContext, ChangeBroadcaster, ChangeKinds, Server, TaskContext, ToolOutcome,
+    Turn, answer,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const TABLES: &[(&str, &[&str])] = &[
@@ -206,7 +204,10 @@ fn uptime() -> Duration {
 }
 
 /// The demo server, with a fresh call counter and change broadcaster.
-pub fn demo_server() -> Server {
+///
+/// # Errors
+/// A registration mistake, which is a bug in this file.
+pub fn demo_server() -> Result<Server, BuildError> {
     let calls = Arc::new(AtomicU64::new(0));
     let changes = ChangeBroadcaster::new();
     let touched = changes.clone();
@@ -438,5 +439,20 @@ pub fn demo_server() -> Server {
             })
         })
         .build()
-        .unwrap()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::slugify;
+
+    #[test]
+    fn slugifies() {
+        assert_eq!(slugify("Hello, World!"), "hello-world");
+        assert_eq!(slugify("  leading and trailing  "), "leading-and-trailing");
+        assert_eq!(slugify("multiple---separators"), "multiple-separators");
+        assert_eq!(slugify("Ünïcödé Tëxt"), "ünïcödé-tëxt");
+        assert_eq!(slugify("!!!"), "");
+        assert_eq!(slugify(""), "");
+    }
 }
