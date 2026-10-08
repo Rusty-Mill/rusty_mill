@@ -92,3 +92,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 0
+
+  # Workflow actions are pinned by commit SHA (ADR-0008); Dependabot rewrites
+  # the SHA and its trailing `# vN` comment. One grouped PR per week.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

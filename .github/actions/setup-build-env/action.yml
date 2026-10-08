@@ -16,7 +16,7 @@ runs:
   using: composite
   steps:
     # The calling workflow's pinned toolchain (`RUST_TOOLCHAIN`, ci.yml).
-    - uses: dtolnay/rust-toolchain@master
+    - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
       with:
         toolchain: ${{ env.RUST_TOOLCHAIN }}
         components: ${{ inputs.components }}
@@ -78,6 +78,6 @@ runs:
       shell: bash
       run: choco install protoc -y
 
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
         shared-key: ${{ inputs.cache-shared-key }}

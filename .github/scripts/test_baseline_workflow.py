@@ -42,7 +42,7 @@ class BaselineWorkflowTests(unittest.TestCase):
 
     def test_report_artifact_is_uploaded_after_measurement_failure(self) -> None:
         source = WORKFLOW.read_text(encoding="utf-8")
-        upload = source.split("      - uses: actions/upload-artifact@v4\n", 1)[1]
+        upload = source.split("      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n", 1)[1]
         self.assertRegex(upload, re.compile(r"^        if: always\(\)$", re.MULTILINE))
         self.assertIn("path: baseline-${{ matrix.os }}.md", upload)
 

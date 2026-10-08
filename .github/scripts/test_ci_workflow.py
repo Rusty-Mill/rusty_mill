@@ -343,7 +343,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         jobs = re.split(r"^  ([a-z][a-z0-9-]+):\n", self.workflow.split("\njobs:\n", 1)[1], flags=re.M)
         groups = []
         for job, body in zip(jobs[1::2], jobs[2::2]):
-            if job in {"fmt", "plan-tests", "workflow-lint", "dependency-policy", "plan", "required-gate"}:
+            if job in {"fmt", "plan-tests", "workflow-lint", "dependency-policy", "cargo-deny", "plan", "required-gate"}:
                 self.assertNotIn("    concurrency:", body)
                 continue  # These start for every SHA, without a coalescing lock.
             with self.subTest(job=job):
@@ -381,6 +381,27 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 pin = re.search(r'(?m)^  RUST_TOOLCHAIN: "([^"]+)"', path.read_text(encoding="utf-8"))
                 self.assertEqual(pin and pin.group(1), channel)
+
+    def test_every_action_is_pinned_to_a_commit_sha(self) -> None:
+        for path in sorted(REPO.glob(".github/workflows/*.yml")) + sorted(REPO.glob(".github/actions/*/action.yml")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                match = re.match(r"\s*-?\s*uses: (\S+)", line)
+                if not match or match[1].startswith("./"):
+                    continue
+                with self.subTest(file=path.name, line=number):
+                    self.assertRegex(match[1], r"@[0-9a-f]{40}$")
+
+    def test_cargo_deny_runs_every_event_and_is_non_blocking(self) -> None:
+        deny = self.workflow.split("  cargo-deny:\n")[1].split("  plan:\n")[0]
+        self.assertNotIn("    if:", deny)
+        self.assertNotIn("    concurrency:", deny)
+        self.assertIn("continue-on-error: true", deny)
+        self.assertIn("cargo deny --workspace check", deny)
+        self.assertTrue((REPO / "deny.toml").is_file())
+
+    def test_dependabot_tracks_github_actions(self) -> None:
+        text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+        self.assertIn("package-ecosystem: github-actions", text)
 
     def test_generic_matrix_uses_component_scope_and_unique_artifacts(self) -> None:
         for job, end in (("clippy", "ci-smoke"), ("test", "data-mesh-monitor")):

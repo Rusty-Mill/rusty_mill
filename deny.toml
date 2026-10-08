@@ -1,0 +1,39 @@
+# cargo-deny policy (ADR-0008, ADR-0002). Introduced warn-only: the CI job
+# is non-blocking until the first run's findings are triaged, then drop
+# `continue-on-error` in ci.yml. Run locally: `cargo deny check`.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "warn"
+
+[licenses]
+version = 2
+# Seeded permissively from the first run; tighten, don't widen blindly.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0", # file-level copyleft; fine as an unmodified dependency
+    "Unlicense",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow" # many pre-merge duplicates; revisit after triage
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

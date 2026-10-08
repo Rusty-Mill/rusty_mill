@@ -127,8 +127,10 @@ Verified against `main` at `a402fff`.
 1. **Hygiene (all S):** 1, 2, 3, 4, 7 — done together in the PR that
    introduced `required-gate`, `permissions:`, `rust-toolchain.toml`,
    `CODEOWNERS` and the weekly `schedule:` sweep.
-2. **Supply chain:** 5, then 6. Both start warn-only for one cycle, then
-   enforce.
+2. **Supply chain:** 6 (done: every action SHA-pinned, Dependabot
+   `github-actions` group, test enforces it) and 5 (done warn-only: `deny.toml`
+   plus a non-blocking `cargo-deny` job). Drop `continue-on-error` once the
+   first findings are triaged.
 3. **On trigger only:** the deferred table above.
 
 Branch-protection changes (making `required-gate` the sole required check)

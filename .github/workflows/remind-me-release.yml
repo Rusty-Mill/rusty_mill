@@ -51,7 +51,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       is_new: ${{ steps.version.outputs.is_new }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Every tag, not just this branch's history -- the existing-tag
           # check below needs every release ever published.
@@ -93,14 +93,14 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: remind-me-release-${{ matrix.target }}
 
@@ -141,7 +141,7 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
           echo "ASSET_PATH=$stage.zip" >> $env:GITHUB_ENV
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-asset-${{ matrix.target }}
           path: ${{ env.ASSET_PATH }}
@@ -155,7 +155,7 @@ jobs:
     if: needs.detect-version.outputs.is_new == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # remind-me-checks.yml should already have blocked a drifted PR, but a
       # release must never ship a plugin archive claiming the wrong version.
@@ -172,7 +172,7 @@ jobs:
           zip -rq "${stage}.zip" "$stage"
           echo "ASSET_PATH=${stage}.zip" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-asset-plugin
           path: ${{ env.ASSET_PATH }}
@@ -184,7 +184,7 @@ jobs:
     if: needs.detect-version.outputs.is_new == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           pattern: release-asset-*
@@ -198,7 +198,7 @@ jobs:
       # list every monorepo PR merged since the previous release of *any*
       # product.
       - name: Create the release and attach all archives
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ env.TAG_PREFIX }}${{ needs.detect-version.outputs.version }}
           name: rusty_remind_me v${{ needs.detect-version.outputs.version }}
