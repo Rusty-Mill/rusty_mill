@@ -521,6 +521,39 @@ const CASES: &[Case] = &[
         ball: None,
         other: Some((2.8, 5.7)),
     },
+    // The first 130 ticks of hivemind duels (`gen_duel_fuzz.py`, both cars play a tape).
+    // 865: two cars at 1000 uu/s each, 70 uu off line, both bumped (FR-158); 910: an
+    // airborne car bumps a grounded one and pushes it up by its climb (FR-159); 904: a
+    // clean head-on; 911: a tank that grew on the first frame (a pad swept by the state
+    // set, counted into the starting tank).
+    Case {
+        scenario: "experiments/duelg_865.json",
+        fixture: "duelg_865.jsonl",
+        car: (6.4, 20.0),
+        ball: None,
+        other: Some((6.9, 21.0)),
+    },
+    Case {
+        scenario: "experiments/duelg_910.json",
+        fixture: "duelg_910.jsonl",
+        car: (2.8, 9.0),
+        ball: None,
+        other: Some((3.0, 10.9)),
+    },
+    Case {
+        scenario: "experiments/duelg_904.json",
+        fixture: "duelg_904.jsonl",
+        car: (0.2, 0.4),
+        ball: None,
+        other: Some((0.3, 0.9)),
+    },
+    Case {
+        scenario: "experiments/duelg_911.json",
+        fixture: "duelg_911.jsonl",
+        car: (0.2, 0.5),
+        ball: None,
+        other: Some((0.2, 0.2)),
+    },
 ];
 
 fn bot_dir() -> PathBuf {
