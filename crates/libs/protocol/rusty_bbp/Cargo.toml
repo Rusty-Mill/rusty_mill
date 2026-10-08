@@ -19,6 +19,8 @@ layer = "libs"
 rusty_serde = { workspace = true }
 # Blob content addressing and op payload hashing (SHA-256).
 rusty_rsa = { workspace = true }
+# Crash-atomic blob files: temp, fsync, rename, directory fsync.
+rusty_atomic_file = { workspace = true }
 
 [dev-dependencies]
 # Independent test oracle for the model tests (dev-only, allowed in Tier S).

@@ -24,11 +24,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-08 - RLEvalSystem imported into crates/apps/rocket_league (pending review)
 
 - **Added:** `replay-analyzer`, `replay-scoring`, `replay-skills`, `replay-value`, `replay-viewer`, `replay-pacifist`, `bc-clone`, `recon-check`, `rleval-app` and the `rleval/` product dir (docs, Python `service/`, scripts). History preserved via `git filter-repo` (201 of 222 commits; the rest only touched private material). Stacked on the rusty_bullet import.
-- **Changed:** replays, corpus, player sessions and the Spire capture kit are excluded and live in the private repo `baileyrd/rocket_league_private`. `rleval-app`'s git-pinned rusty_mill dependencies became workspace dependencies. `replay-analyzer`'s golden records `boxcars-0.11.5` (was 0.11.3; no other change). `rleval-app`'s SHA-256 uses `as_chunks`, `rp-core`'s `refills_over_time` test uses a 600/min bucket (it failed 43 of 96 runs under CPU contention before, 0 of 96 after; it started failing in CI once this import changed the test sharding), and its upload-signing key comes from `rusty_rand` (the old `/dev/urandom` read made signed uploads return 501 on Windows, which the old Ubuntu-only CI never ran). `history_flow` skips without the corpus.
+- **Changed:** replays, corpus, player sessions and the Spire capture kit are excluded and live in the private repo `baileyrd/rocket_league_private`. `rleval-app`'s git-pinned rusty_mill dependencies became workspace dependencies. `replay-analyzer`'s golden records `boxcars-0.11.5` (was 0.11.3; no other change). `rleval-app`'s SHA-256 uses `as_chunks`, its upload-signing key comes from `rusty_rand` (the old `/dev/urandom` read made signed uploads return 501 on Windows, which the old Ubuntu-only CI never ran). `history_flow` skips without the corpus.
 - **Known limitation:** the Python service and Docker files are moved, not built or tested in CI; the viewer headless-GL smoke test and the `mmdb,oidc` feature job of the old CI are not ported yet.
 
 ---
 
+## 2026-10-08 - rusty_bbp stage 2: durable store (pending review)
+
+- **Added:** `rusty_bbp::FsStore`, a file-backed store with one `fsync`ed JSON line per committed batch, crash truncation on open, revision-checked append and digest-verified blobs via `rusty_atomic_file`. Stage-2 exit criteria from the implementation plan are tests: reopen, crash mid-batch, conflict, blob consistency.
+- **Changed:** `Store::blob_get` returns `Vec<u8>`; `StoreError::Backend` added.
+- **Known limitation:** no directory lock; one writer per data directory is the host's job. Blob garbage collection and retention are not implemented.
 ## 2026-10-08 - rusty_bullet imported as crates/apps/rocket_league (pending review)
 
 - **Added:** `crates/apps/rocket_league/` (ADR-0008) with `rb_domain`, `rb_env`, `rb_physics_bullet`, `rb_replay_ingest`, `rb_capture_ingest`, `rb_scenario`, `rb_verify_cli` and the product's docs, BakkesMod plugin and tape-bot tooling. Full history preserved via `git filter-repo` + merge (SHAs differ from `baileyrd/rusty_bullet`; map in the PR).
