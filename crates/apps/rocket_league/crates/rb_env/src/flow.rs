@@ -10,7 +10,7 @@
 //! With a clock (`Flow::with_clock`) the match also ends: the clock runs only in `Active` (a
 //! 300 s match is 36000 ticks of it), and at zero play goes on until the ball is low; then a tie
 //! starts overtime (a countdown with no replay, the clock counting up, the next goal wins) and a
-//! lead ends the match. The very first countdown of a match is 826 ticks (an intro).
+//! lead ends the match. The very first countdown of a match is 850 ticks from the start of the match (an intro).
 //!
 //! This is pure bookkeeping: it looks at the ball and says when the phase changes. What a phase
 //! does to the world (a frozen replay, a reset at the countdown, a held ball) is `Env`'s job.
@@ -23,8 +23,9 @@ pub const GOAL_SCORED_TICKS: u32 = 360;
 pub const REPLAY_TICKS: u32 = 1080;
 /// Ticks of the kickoff countdown, cars and ball placed and inputs ignored (4.0 s).
 pub const COUNTDOWN_TICKS: u32 = 480;
-/// Ticks of the first countdown of a match (6.9 s, with its intro).
-pub const FIRST_COUNTDOWN_TICKS: u32 = 826;
+/// Ticks from the start of a match to its first kickoff (7.1 s, countdown and intro): the five logs
+/// ended it at frames 846 to 853.
+pub const FIRST_COUNTDOWN_TICKS: u32 = 850;
 /// Ticks of a five-minute match's clock.
 pub const FIVE_MINUTES: i64 = 36_000;
 /// With the clock at zero, play ends when the ball's centre is this low (uu): it has met the
@@ -33,6 +34,9 @@ pub const MATCH_END_BALL_HEIGHT: f32 = 97.5;
 /// The ball scores when its centre is past this |y|: the goal line (5120) and the ball's reach.
 /// The game scored at 5215.55 and not at 5214.02 (`log2.jsonl`, 16 goals).
 pub const GOAL_LINE_Y: f32 = 5215.0;
+/// A kickoff nobody touches goes live anyway after this many ticks (5.0 s): three of 48 kickoffs of
+/// the logs ended at 600 or 601 frames with the ball still on the spot.
+pub const KICKOFF_TIMEOUT_TICKS: u32 = 600;
 /// A ball further than this (uu) from the centre spot in the plane has been touched.
 pub const TOUCH_DISTANCE: f32 = 0.05;
 /// A ball faster than this (uu/s) in the plane has been touched.
@@ -102,6 +106,7 @@ pub enum Transition {
 pub struct Flow {
     state: MatchState,
     countdown_ticks: u32,
+    replay_ticks: u32,
 }
 
 impl Flow {
@@ -116,12 +121,20 @@ impl Flow {
                 overtime: false,
             },
             countdown_ticks: COUNTDOWN_TICKS,
+            replay_ticks: REPLAY_TICKS,
         }
     }
 
     /// The same machine with a match clock of `ticks` of play.
     pub fn with_clock(mut self, ticks: i64) -> Flow {
         self.state.clock_ticks = Some(ticks);
+        self
+    }
+
+    /// The same machine with replays `ticks` long. The game's were 1076 to 1084 in 31 of 41 goals
+    /// and 1103 to 1560 (up to 13 s) in the rest, for reasons the packets do not show.
+    pub fn with_replay(mut self, ticks: u32) -> Flow {
+        self.replay_ticks = ticks;
         self
     }
 
@@ -141,6 +154,7 @@ impl Flow {
                 ..self.state
             },
             countdown_ticks: self.countdown_ticks,
+            replay_ticks: self.replay_ticks,
         }
     }
 
@@ -186,7 +200,7 @@ impl Flow {
                 self.enter(Phase::Replay);
                 return Transition::ReplayStarted;
             }
-            Phase::Replay if self.state.ticks_in_phase >= REPLAY_TICKS => {
+            Phase::Replay if self.state.ticks_in_phase >= self.replay_ticks => {
                 // A goal in overtime ends the match; one after the clock ran out ends it or, if it
                 // levelled the score, starts overtime.
                 let expired = self.state.clock_ticks.is_some_and(|c| c <= 0);
@@ -210,7 +224,7 @@ impl Flow {
             Phase::Kickoff => {
                 let moved = ball.x.hypot(ball.y) > TOUCH_DISTANCE
                     || ball_velocity.x.hypot(ball_velocity.y) > TOUCH_SPEED;
-                if moved {
+                if moved || self.state.ticks_in_phase >= KICKOFF_TIMEOUT_TICKS {
                     self.enter(Phase::Active);
                     return Transition::PlayStarted;
                 }
@@ -272,8 +286,8 @@ mod tests {
         assert_eq!(run(&mut flow, COUNTDOWN_TICKS - 1, centre), vec![]);
         assert_eq!(flow.state().phase, Phase::Countdown);
         assert_eq!(run(&mut flow, 1, centre), vec![Transition::KickoffStarted]);
-        // The kickoff waits for a touch, however long.
-        assert_eq!(run(&mut flow, 5_000, centre), vec![]);
+        // The kickoff waits for a touch, but only so long.
+        assert_eq!(run(&mut flow, KICKOFF_TIMEOUT_TICKS - 1, centre), vec![]);
         assert_eq!(flow.state().phase, Phase::Kickoff);
         let touched = flow.after_step(
             Vec3::new(-0.69, -7.45, 95.36),
@@ -372,5 +386,13 @@ mod tests {
             run(&mut next, COUNTDOWN_TICKS, centre),
             vec![Transition::KickoffStarted]
         );
+    }
+
+    #[test]
+    fn an_untouched_kickoff_goes_live_after_five_seconds() {
+        let mut flow = Flow::new(Phase::Kickoff);
+        let centre = Vec3::new(0.0, 0.0, 92.75);
+        assert_eq!(run(&mut flow, KICKOFF_TIMEOUT_TICKS - 1, centre), vec![]);
+        assert_eq!(run(&mut flow, 1, centre), vec![Transition::PlayStarted]);
     }
 }
