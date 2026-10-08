@@ -17,6 +17,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 - **Changed (docs):** `CRYPTO-REPLACEMENT-PLAN.md` no longer says "Done" or "exactly what ring accepts": stages are "implemented; independent review pending", ring parity is "on the recorded corpus", the Ed25519 leniency is a documented compatibility exception, provisional implementer choices are separated from owner decisions, scope limits (no AES-GCM, no P-256/P-384 key exchange, no signing, no randomness) and a call-site coverage table are stated. Added `docs/research/crypto-evidence/` (script and record).
 - **Added (tests):** adversarial boundary tests for the shared Montgomery core. No defect found.
+- **Found (test method, not a primitive):** repeated timing runs exposed two harness artifacts (|t| = 7.9 and 25 on code with no leak). Fixed by timing only the operation on a shared buffer; added A/A baselines (2 of 120 no-leak runs exceed 4.5) and a 40-repetition evidence record (`docs/research/crypto-evidence/`, produced at commit `c4bbb66`).
 - **Not changed:** any primitive's behaviour, `rusty_tls`, consumers, gates. Stages 0 to 4 are frozen.
 
 ## 2026-10-08 - Crypto stage 4: X25519 (pending review)

@@ -42,7 +42,7 @@ made for any stage. No stage is approved for TLS use.
 | Stage | State (implementation only; none is approved for TLS use) | Evidence so far (preliminary; see `docs/research/crypto-evidence/`) |
 | --- | --- | --- |
 | 0 Harness | Implemented; review pending (`rusty_ct_check`) | Taint tool, timing t-test and disassembly audit each catch a planted leak and pass a clean probe; Wycheproof loader. |
-| 1 SHA-2, HMAC, HKDF | Implemented; review pending (`rusty_sha2`) | 18 tests plus doctest: FIPS 180 examples, RFC 4231 case 1, six Wycheproof files (HMAC and HKDF, SHA-256/384/512), differential vs `ring` over lengths 0 to 300 and block boundaries, long inputs, HMAC key lengths 0 to 1000, 600 random HKDF calls; 9 hand-made mutants all caught; valgrind taint run clean with a leaky control that is caught; disassembly budget pinned; timing test `|t|` 1.75 (HMAC-SHA256) and 0.56 (HMAC-SHA512), one run. |
+| 1 SHA-2, HMAC, HKDF | Implemented; review pending (`rusty_sha2`) | 18 tests plus doctest: FIPS 180 examples, RFC 4231 case 1, six Wycheproof files (HMAC and HKDF, SHA-256/384/512), differential vs `ring` over lengths 0 to 300 and block boundaries, long inputs, HMAC key lengths 0 to 1000, 600 random HKDF calls; 9 hand-made mutants all caught; valgrind taint run clean with a leaky control that is caught; disassembly budget pinned; timing: 40 repetitions per test against an A/A baseline, no gap above the baseline (see section 4.5 and the evidence record). |
 | 2 Signature verify | Implemented; review pending (`rusty_pk`: `rsa`, `ecdsa`, `ed25519`) | See "Stage 2 results" below. |
 | 3 ChaCha20-Poly1305 | Implemented; review pending (`rusty_aead`) | See "Stage 3 results" below. |
 | 4 X25519 | Implemented; review pending (`rusty_pk::x25519`) | See "Stage 4 results" below. **Work stops here by owner decision. Independent review is required before any use in `rusty_tls`.** |
@@ -140,8 +140,10 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
     library, so the script requires exactly one report located there; a second one fails.
   - disassembly: `ChaCha20::block` has 1 conditional jump (the round-loop back-edge) and the
     Poly1305 block function has 0; both pinned.
-  - timing (scheduled job, two runs): fixed vs other key `|t|` 1.6 and 1.8; all-zero vs
-    all-ones plaintext 0.6 and 0.5; tag mismatch in first vs last byte 2.6 and 1.5 (threshold 4.5).
+  - timing, 40 repetitions per test with an A/A baseline (evidence record): medians of `|t|`
+    0.62 (fixed vs other key), 1.02 (all-zero vs all-ones plaintext) and 0.75 (tag mismatch
+    first vs last byte) against a baseline median of 0.85; maxima 3.42, 3.53, 2.96 against a
+    baseline maximum of 4.02; none above 4.5. No difference from noise was detected.
   - Limits: x86-64 only; Poly1305 `update`/`finalize` and the tag assembly branch on public
     lengths and are covered by taint but not by the disassembly budget.
 - **Speed (once, VM, release; `tests/perf.rs`):** 305 MB/s at 1 KiB, 341 MB/s at 16 KiB, 330 MB/s at
@@ -173,8 +175,10 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   `black_box` is best effort, not a guarantee; this is the compiler-drift risk (section 8
   item 2) showing up on first contact, and the pinned counts must be re-reviewed on every
   toolchain change.
-- **Timing (scheduled job, two runs):** sparse vs dense scalar `|t|` 1.1 and 1.6; fixed vs other
-  scalar 1.6 and 2.2 (threshold 4.5).
+- **Timing, 40 repetitions per test with an A/A baseline (evidence record):** medians of `|t|`
+  0.84 (sparse vs dense scalar) and 0.96 (fixed vs other scalar) against a baseline median of
+  1.17; maxima 2.91 and 3.15; the baseline itself reached 5.25 once. No difference from noise
+  was detected.
 - **Speed (once, VM, release):** key generation plus agreement, 525 us against `ring`'s 68 us:
   about 7.7x slower, worse than the section 5 estimate (2 to 4x). A change that shrank the
   scratch arrays gained only 10% and was reverted because it made the disassembly counts less
@@ -378,9 +382,22 @@ detection (dudect is a detector, not a verifier); a taint run covers the paths i
 pinned jump count detects change, not independence from secrets. Each result must be read
 with its recorded conditions: sample counts, input classes, CPU, compiler, flags and
 repetitions, which `docs/research/crypto-evidence/EVIDENCE-2026-10-08.txt` records, with the raw
-numbers. Effort is aimed at the code that touches secrets (HMAC and HKDF keys, AEAD keys,
+numbers (40 repetitions per test, with no-leak baselines). Effort is aimed at the code that touches secrets (HMAC and HKDF keys, AEAD keys,
 X25519 scalars); signature verification handles public inputs and gets correctness evidence,
 not constant-time evidence.
+
+**Harness history and calibration (read before trusting any timing number).** A first
+version of these tests set up the two classes inside the timed region and read the two
+keys from different stack buffers. Repeated runs then reported `|t|` = 7.9 on HMAC-SHA512 and,
+after a first attempted repair, up to 25 on HMAC-SHA256, on code with no secret-dependent
+behaviour. Both were measurement artifacts (class-dependent setup in the clock, different
+addresses, a compile-time-constant class), found only because the runs were repeated. The
+tests now time only the operation, on one buffer shared by both classes (`leak_statistic_split`).
+Even so, the identical-work A/A baselines exceed the 4.5 threshold in 2 of 120 runs
+(4.95 for HMAC-SHA512, 5.25 for X25519), so a single run above 4.5 is not by itself a leak
+on this machine, and a single run below it is not evidence of safety. The criterion used
+in the evidence record is: a leak test must stay inside the A/A spread over 40 repetitions.
+None of that makes the primitives constant time; it bounds what this method could have seen.
 
 ## 5. Performance estimate against `ring`
 
@@ -569,7 +586,7 @@ the honest current position.
 Added after review (current as of the evidence record):
 - No human has reviewed any of the new code; every statement above is the implementer's.
 - `ring` parity was established against 0.17.14 only, on the recorded corpus.
-- Constant-time results are single-machine, x86-64, rustc 1.99.0, and preliminary; aarch64 was
+- Constant-time results are single-machine, x86-64, rustc 1.99.0, in a container VM with unknown neighbours, and preliminary; aarch64 was
   never run, and the taint tool is a no-op there (`rusty_ct_check::taint::SUPPORTED`).
 - The Ed25519 leniency and its effect on key identity were not reviewed by anyone else.
 - Nothing about randomness (`ring::rand` replacement) was evaluated.
