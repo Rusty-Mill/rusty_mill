@@ -11,7 +11,7 @@ if a given replay never exercises it), enumerated in full as the data dictionary
 in [`replay-file-format.md` Appendix A](replay-file-format.md#appendix-a--complete-attribute-reference),
 plus the header. Layers B–F are what this workspace (and ballchasing/carball)
 compute on top. See [`replay-file-format.md`](replay-file-format.md) for the
-container and [`ballchasing-analyzer-teardown.md`](ballchasing-analyzer-teardown.md)
+container and [`ballchasing-analyzer-teardown.md`] *(private repo)*
 for the stat math.
 
 Trust tags: **[A]** authoritative (read straight from the bytes — no inference),

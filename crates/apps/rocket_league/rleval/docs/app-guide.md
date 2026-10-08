@@ -406,7 +406,7 @@ cargo build --release -p replay-pacifist --features corpus-validate --bin case_s
 prints, per match in date order, that player's scoring composite and
 Pacifist score side by side, plus a per-bucket mean summary — the direct
 "did either number move with this player's real rank change" check. See
-[`docs/case-study-player-progression.md`](case-study-player-progression.md)
+[`docs/case-study-player-progression.md`] *(private repo)*
 for what this found (short version: not yet, and it's an open question why).
 
 ## 4. One-off CLI usage (no server)

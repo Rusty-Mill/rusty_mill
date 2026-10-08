@@ -58,7 +58,7 @@ engine.
   `core`/`boost`/`movement`/`positioning`/`demo`) from a replay, plus a
   `bc-validate` binary that diffs that document field-by-field against the real
   ballchasing API as a regression oracle. See
-  [`docs/ballchasing-analyzer-teardown.md`](docs/ballchasing-analyzer-teardown.md)
+  [`docs/ballchasing-analyzer-teardown.md`] *(private repo)*
   for the mechanical spec it implements.
 - **`viewer`** — a self-contained **3D replay viewer**: animates the
   reconstructed match (ball + cars, boost, name labels) in the browser with a
@@ -88,7 +88,7 @@ including [`docs/replay-file-format.md`](docs/replay-file-format.md) (the binary
 `.replay` container/network-stream specification),
 [`docs/detection-catalog.md`](docs/detection-catalog.md), a full reference of
 everything detectable in a replay across all crates, and
-[`docs/ballchasing-analyzer-teardown.md`](docs/ballchasing-analyzer-teardown.md)
+[`docs/ballchasing-analyzer-teardown.md`] *(private repo)*
 (how ballchasing computes each stat).
 Scores and skill detections are **heuristic** inferences from kinematics
 (replays carry motion, not inputs); thresholds are versioned and want corpus

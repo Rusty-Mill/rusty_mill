@@ -42,12 +42,12 @@ This reuses the workspace analyzer (`replay-analyzer`: decode → reconstruct �
 stat semantics**, reproduced field-for-field, not a from-scratch second
 reconstruction (that independent check already exists as the `recon-check`
 crate). The mechanical spec it implements is
-[`docs/ballchasing-analyzer-teardown.md`](../docs/ballchasing-analyzer-teardown.md).
+[`docs/ballchasing-analyzer-teardown.md`] *(private repo)*.
 
 ## Not yet computed
 
 Three ballchasing fields are emitted as `0.0` (and excluded from the validator):
 `amount_used_while_supersonic`, `time/percent_closest_to_ball`,
 `time/percent_farthest_from_ball`. They're tracked in
-[`docs/ballchasing-parity.md`](../docs/ballchasing-parity.md). Everything else —
+[`docs/ballchasing-parity.md`] *(private repo)*. Everything else —
 including the authoritative boost-pad pickups and powerslide — is real.

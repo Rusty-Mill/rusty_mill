@@ -2,9 +2,9 @@
 
 Status as of 2026-06-20. A formal reference for the binary `.replay` container
 this workspace decodes, and the obligations a conformant decoder must meet to
-produce our [canonical match model](../src/model.rs). It is the format-layer
-companion to [`docs/ballchasing-analyzer-teardown.md`](ballchasing-analyzer-teardown.md)
-(which is about *stats*) and the contract behind the [decode port](../src/decode/mod.rs).
+produce our [canonical match model](../../crates/replay-analyzer/src/model.rs). It is the format-layer
+companion to [`docs/ballchasing-analyzer-teardown.md`] *(private repo)*
+(which is about *stats*) and the contract behind the [decode port](../../crates/replay-analyzer/src/decode/mod.rs).
 
 > **Provenance & confidence.** Psyonix publishes no official format. This spec is
 > the community-reverse-engineered structure as implemented by the
@@ -372,9 +372,9 @@ Commonly assumed to be in a replay, but **not reliably present**:
   <https://github.com/tfausak/rattletrap>
 - **jjbott/RocketLeagueReplayParser** — the original C# reverse-engineering, with
   the most prose on the bit layout.
-- This workspace: [`src/decode/`](../src/decode) (the port + boxcars adapter),
-  [`src/analyze/reconstruct.rs`](../src/analyze/reconstruct.rs) (the obligations of
-  §5), [`docs/ballchasing-analyzer-teardown.md`](ballchasing-analyzer-teardown.md)
+- This workspace: [`src/decode/`](../../crates/replay-analyzer/src/decode) (the port + boxcars adapter),
+  [`src/analyze/reconstruct.rs`](../../crates/replay-analyzer/src/analyze/reconstruct.rs) (the obligations of
+  §5), [`docs/ballchasing-analyzer-teardown.md`] *(private repo)*
   (the stats layer on top).
 
 ---
