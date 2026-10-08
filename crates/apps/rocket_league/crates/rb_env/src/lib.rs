@@ -7,8 +7,14 @@
 //! collision meshes cost far more to build than to copy, and a sweep or a
 //! policy resets thousands of times.
 
+pub mod flow;
+
+use flow::{Flow, MatchState, Phase, Transition};
 use rb_domain::{ControllerInput, PhysicsFrame, Vec3};
 use rb_physics_bullet::{CarBallTuning, PhysicsWorld, RigidBody};
+
+/// Height of the ball's centre where it touches the floor (uu).
+const BALL_FLOOR_CONTACT_HEIGHT: f32 = 93.2;
 
 /// Seconds per tick: the game's 120 Hz physics rate.
 pub const TICK_SECS: f32 = 1.0 / 120.0;
@@ -21,6 +27,12 @@ pub struct Env {
     teams: Vec<u32>,
     dodge_forward_from_throttle: bool,
     boost_pads: bool,
+    /// The match phase machine, when match flow is on.
+    flow: Option<Flow>,
+    /// The spawn slots (0 to 4) of the next kickoff, car by car, if given.
+    kickoff_slots: Option<Vec<usize>>,
+    /// Kickoffs started so far, which rotates the default slots.
+    kickoffs: usize,
 }
 
 impl Env {
@@ -36,6 +48,9 @@ impl Env {
             teams: Vec::new(),
             dodge_forward_from_throttle: false,
             boost_pads: true,
+            flow: None,
+            kickoff_slots: None,
+            kickoffs: 0,
         }
     }
 
@@ -82,7 +97,87 @@ impl Env {
         for (index, team) in self.teams.iter().enumerate() {
             self.world.set_car_team(index, *team);
         }
+        if self.flow.is_some() {
+            self.flow = Some(Flow::new(Phase::Active));
+        }
         self.world.frame()
+    }
+
+    /// Turns match flow on or off for the current and later simulations (`RB-PHYSICS-001-FR-160`,
+    /// ADR-0082). Off by default. On, a reset starts in `Phase::Active`; a ball past a goal line
+    /// scores, the world carries on for three seconds, freezes for the nine of the replay,
+    /// then `kickoff`s: cars at their spawn slots with inputs ignored for four seconds, the ball
+    /// held on the centre spot until the first touch.
+    pub fn enable_match_flow(&mut self, on: bool) {
+        self.flow = on.then(|| Flow::new(Phase::Active));
+    }
+
+    /// The match phase, ticks in it and the score, if match flow is on.
+    pub fn match_state(&self) -> Option<MatchState> {
+        self.flow.map(|flow| flow.state())
+    }
+
+    /// Chooses the spawn slots (0 to 4, car by car) of the next kickoff; later ones rotate
+    /// from the default again. The game picks at random.
+    pub fn set_kickoff_slots(&mut self, slots: Option<Vec<usize>>) {
+        self.kickoff_slots = slots;
+    }
+
+    /// Starts a kickoff now (match flow on): places the cars and the ball and begins the
+    /// countdown. Returns the first observation.
+    pub fn start_kickoff(&mut self) -> PhysicsFrame {
+        let slots = self
+            .kickoff_slots
+            .take()
+            .unwrap_or_else(|| self.default_slots());
+        self.kickoffs += 1;
+        self.world.kickoff(&slots);
+        self.flow = Some(match self.flow {
+            Some(flow) => flow.restarted(Phase::Countdown),
+            None => Flow::new(Phase::Countdown),
+        });
+        self.world.frame()
+    }
+
+    /// Default slots: teammates take consecutive slots, starting one further along at each
+    /// kickoff.
+    fn default_slots(&self) -> Vec<usize> {
+        let cars = self.world.frame().cars.len();
+        let mut seen = [0usize; 2];
+        (0..cars)
+            .map(|index| {
+                let team = usize::from(self.teams.get(index).copied().unwrap_or(0) != 0);
+                let slot = (self.kickoffs + seen[team]) % 5;
+                seen[team] += 1;
+                slot
+            })
+            .collect()
+    }
+
+    /// Runs the phase machine after a tick and does what the new phase asks of the world.
+    fn advance_flow(&mut self) {
+        let Some(mut flow) = self.flow else {
+            return;
+        };
+        let frame = self.world.frame();
+        let transition = flow.after_step(frame.ball.position, frame.ball.velocity);
+        self.flow = Some(flow);
+        if transition == Transition::CountdownStarted {
+            self.start_kickoff();
+            return;
+        }
+        if flow.state().phase == Phase::Countdown {
+            self.world.hold_cars_on_their_spots();
+        }
+        let held = match flow.state().phase {
+            // The falling ball is caught where it would meet the floor (its radius, 93.15).
+            Phase::Countdown => frame.ball.position.z <= BALL_FLOOR_CONTACT_HEIGHT,
+            Phase::Kickoff => true,
+            _ => false,
+        };
+        if held {
+            self.world.pin_ball_to_centre_spot();
+        }
     }
 
     /// Chooses the spawn point (an index into `rb_physics_bullet::respawn::SPAWN_POINTS`)
@@ -121,10 +216,23 @@ impl Env {
     /// the observation. Each returned car carries the input that produced
     /// the frame.
     pub fn step(&mut self, inputs: &[ControllerInput]) -> PhysicsFrame {
+        let phase = self.flow.map(|flow| flow.state().phase);
+        if phase == Some(Phase::Replay) {
+            // The replay shows the goal again: the clock runs, the world does not.
+            self.advance_flow();
+            return self.world.frame();
+        }
+        let countdown = phase == Some(Phase::Countdown);
         for (index, input) in inputs.iter().enumerate() {
-            self.world.set_car_input(index, *input);
+            let input = if countdown {
+                ControllerInput::default()
+            } else {
+                *input
+            };
+            self.world.set_car_input(index, input);
         }
         self.world.step(TICK_SECS);
+        self.advance_flow();
         self.world.frame()
     }
 }
@@ -136,6 +244,7 @@ impl Default for Env {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use rb_domain::{BallState, CarState, Quat};
@@ -314,5 +423,133 @@ mod tests {
         assert_eq!(seen.cars.len(), 2);
         assert_eq!(seen.cars[0].input, Some(throttle()));
         assert_eq!(seen.cars[1].input, Some(ControllerInput::default()));
+    }
+
+    /// A car at rest by the touchline and the ball launched into the orange goal.
+    fn goal_shot() -> PhysicsFrame {
+        let mut frame = start();
+        frame.cars[0].position = Vec3::new(-3000.0, -3000.0, 17.0);
+        frame.cars[0].velocity = Vec3::ZERO;
+        frame.ball.position = Vec3::new(0.0, 4800.0, 400.0);
+        frame.ball.velocity = Vec3::new(0.0, 2500.0, 0.0);
+        frame
+    }
+
+    fn idle() -> [ControllerInput; 1] {
+        [ControllerInput::default()]
+    }
+
+    #[test]
+    fn match_flow_is_off_unless_asked_for() {
+        let mut env = Env::new();
+        env.reset(&goal_shot());
+        for _ in 0..60 {
+            env.step(&idle());
+        }
+        assert_eq!(env.match_state(), None);
+    }
+
+    /// The measured sequence (`log2.jsonl`): a goal, 3.0 s of play, a 9.0 s frozen replay, a
+    /// 4.0 s countdown with the field reset, then the kickoff waits for a touch.
+    #[test]
+    fn a_goal_leads_to_a_replay_a_countdown_and_a_kickoff() {
+        let mut env = Env::new();
+        env.enable_match_flow(true);
+        // The centre slot faces the ball squarely; the others pass it by.
+        env.set_kickoff_slots(Some(vec![4]));
+        env.reset(&goal_shot());
+        assert_eq!(env.match_state().map(|m| m.phase), Some(Phase::Active));
+        let mut ticks = 0;
+        while env.match_state().map(|m| m.phase) == Some(Phase::Active) {
+            env.step(&idle());
+            ticks += 1;
+            assert!(ticks < 100, "the shot never scored");
+        }
+        let state = env.match_state().unwrap();
+        assert_eq!((state.phase, state.score), (Phase::GoalScored, [1, 0]));
+        // About (5215 - 4800) / 20.8 uu per tick.
+        assert!((18..=22).contains(&ticks), "scored after {ticks} ticks");
+
+        for _ in 0..flow::GOAL_SCORED_TICKS {
+            env.step(&idle());
+        }
+        assert_eq!(env.match_state().map(|m| m.phase), Some(Phase::Replay));
+        // The replay freezes the world.
+        let frozen = env.step(&idle());
+        let later = env.step(&idle());
+        assert_eq!(frozen, later);
+        for _ in 2..flow::REPLAY_TICKS {
+            env.step(&idle());
+        }
+        let first = env.match_state().unwrap();
+        assert_eq!(first.phase, Phase::Countdown);
+
+        // The field is reset: ball at the centre, the car at a blue spawn slot (slot 4), a third of a tank once it has dropped.
+        let frame = env.step(&idle());
+        assert_eq!((frame.ball.position.x, frame.ball.position.y), (0.0, 0.0));
+        let spawn = rb_physics_bullet::respawn::SPAWN_POINTS[4];
+        assert_eq!(
+            (frame.cars[0].position.x, frame.cars[0].position.y),
+            (spawn.x, spawn.y)
+        );
+        for _ in 0..flow::COUNTDOWN_TICKS - 1 {
+            let throttled = env.step(&[throttle()]);
+            // Inputs are ignored through the countdown.
+            let v = throttled.cars[0].velocity;
+            assert!(v.x.hypot(v.y) < 1.0, "{v:?}");
+        }
+        assert_eq!(env.match_state().map(|m| m.phase), Some(Phase::Kickoff));
+        let held = env.step(&idle());
+        assert_eq!(
+            held.ball.position.z,
+            rb_physics_bullet::respawn::KICKOFF_BALL_REST_HEIGHT
+        );
+        assert_eq!(env.match_state().map(|m| m.score), Some([1, 0]));
+
+        // Driving at the ball starts play.
+        let mut touched = false;
+        for _ in 0..600 {
+            env.step(&[throttle()]);
+            if env.match_state().map(|m| m.phase) == Some(Phase::Active) {
+                touched = true;
+                break;
+            }
+        }
+        assert!(touched, "a car driving at the ball never touched it");
+    }
+
+    /// The ball of a countdown falls from 100.49 as the game's does (`log2.jsonl`, countdown of
+    /// the second goal, tick k after the first frame) and is then held at 92.75.
+    #[test]
+    fn the_countdown_ball_falls_as_recorded_and_is_held_at_the_rest_height() {
+        let mut env = Env::new();
+        env.enable_match_flow(true);
+        env.reset(&start());
+        let first = env.start_kickoff();
+        assert_eq!(first.ball.position.z, 100.49);
+        let recorded = [
+            (0, 100.440),
+            (1, 100.350),
+            (2, 100.210),
+            (3, 100.030),
+            (4, 99.800),
+            (5, 99.530),
+            (6, 99.210),
+            (8, 98.440),
+            (10, 97.490),
+            (15, 94.330),
+        ];
+        let frames: Vec<PhysicsFrame> = (0..40).map(|_| env.step(&idle())).collect();
+        // The game's falling ball shows no drag; the port's 3 percent per second adds up to a tenth of
+        // a unit by tick 15.
+        for (k, z) in recorded {
+            let port = frames[k].ball.position.z;
+            assert!((port - z).abs() < 0.1, "tick {k}: port {port}, game {z}");
+        }
+        assert_eq!(
+            frames[39].ball.position.z,
+            rb_physics_bullet::respawn::KICKOFF_BALL_REST_HEIGHT
+        );
+        assert_eq!(frames[39].ball.velocity, Vec3::ZERO);
     }
 }

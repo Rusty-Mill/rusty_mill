@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.160.0
+- Version: 0.161.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -8255,6 +8255,28 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     bump / tri / demolition / duel tapes: 17 improved, 4 worse by over 1 uu (`duel_868` 3251 -> 4604, the rest within 30; the air-air `bumpa_air_*` unchanged); non-duel total 1735 -> 1292 uu, duel total 51847 -> 45321;
     golden gate unchanged (`bumpag_*` bounds can tighten).
 
+- `RB-PHYSICS-001-FR-160` (match flow around a goal; implemented in `rb_env` and verified against a
+  game log of 16 goals; new, ADR-0082, `RB-RESEARCH-O024`): `Env::enable_match_flow` adds the phases a
+  Soccar match moves through: a ball whose centre passes |y| = 5215 scores (blue in +y, orange in -y);
+  **GoalScored** 360 ticks (play carries on), **Replay** 1080 ticks (the world, its pads and its clock of
+  pickups frozen), **Countdown** 480 ticks (`PhysicsWorld::kickoff`: every car at its team's spawn slot with
+  a third of a tank, held in place and ignoring input while it drops and settles; the ball at the centre,
+  100.49 up, falling and caught at 92.75; all 34 pads active), **Kickoff** (ball held on the spot, inputs
+  live) until the ball is touched, then **Active**.
+  - Why: `rb_match_log` started a real (not freeplay) match with a Psyonix bot per team and logged every
+    packet, 16 forced and natural goals. The goal registered on the first frame the ball was beyond 5215.55
+    and not at 5214.02 (the previous frame of four natural goals); phase lengths 360, 1078 to 1083 and 480
+    frames; cars and ball stand still through the countdown while the ball falls from 100.49 (the first
+    frame of every capture is such a kickoff frame) and rests at 92.75, not the 93.15 of free rolling;
+    boost resets to 33.33; pads 33 of 34 active before, 34 after; the five blue slots pair with the orange
+    ones point-reflected, and the pair is random at each kickoff.
+  - Not modelled: the match clock and overtime, the first kickoff of a match (an intro makes its countdown
+    6.9 s), the game's random slot choice (the caller may pass `set_kickoff_slots`; the default rotates),
+    the spawn-height stagger between the two teams' cars (blue 35.0 against orange 39.5 on the first
+    packets), the ball's missing drag while it falls (a tenth of a unit by tick 15).
+  - **Verification**: `flow` tests (goal line, both goals, the phase lengths), `Env` tests (a goal shot
+    through all phases, the ball's fall against the recorded heights); 18 tests in `rb_env`.
+
 - `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
   verified on `bumpag_*` and `tri_chain`; refines FR-143): an airborne bumper on a grounded
   victim bumps like a ground bumper (victim 1.25 times the speed, up).
@@ -8427,6 +8449,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.161.0 (2026-10-08): `RB-PHYSICS-001-FR-160` (match flow around a goal, in `rb_env`).
 - 0.160.0 (2026-10-08): `RB-PHYSICS-001-FR-159` (the ground bump follows the bumper's climb). 508 tests in
   `rb_physics_bullet`.
 - 0.159.0 (2026-10-08): `RB-PHYSICS-001-FR-158` (the bump's nose test uses the other car's origin). 507 tests in

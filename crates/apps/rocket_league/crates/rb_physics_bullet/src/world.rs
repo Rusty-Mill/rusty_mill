@@ -409,6 +409,9 @@ pub struct PhysicsWorld {
     /// Car `i` came back last tick and is still at the spawn's raw state: the next
     /// tick starts it at its respawn height with its boost.
     respawn_settling: Vec<bool>,
+    /// Where each car was put by the last `kickoff` (x, y, heading degrees), for
+    /// `hold_cars_on_their_spots`.
+    kickoff_spots: Vec<Option<(f32, f32, f32)>>,
     /// Each car's supersonic state.
     supersonic: Vec<bool>,
     /// The boost pads, if the scene has them (`RB-PHYSICS-001-FR-149`): none
@@ -601,6 +604,7 @@ impl PhysicsWorld {
             respawn_in: Vec::new(),
             respawn_pick: Vec::new(),
             respawn_settling: Vec::new(),
+            kickoff_spots: Vec::new(),
             supersonic: Vec::new(),
             boost_pads: None,
             car_ball: CarBallTuning::default(),
@@ -841,6 +845,59 @@ impl PhysicsWorld {
         if let Some(slot) = self.respawn_pick.get_mut(index) {
             *slot = point;
         }
+    }
+
+    /// Sets up a kickoff (`RB-PHYSICS-001-FR-160`): every car takes its team's spawn slot
+    /// (`slots[i] % 5`, blue slots are `SPAWN_POINTS[0..5]`, orange `[5..10]`) as after a
+    /// respawn, with a third of a tank; the ball goes to the centre at rest, 100.49 uu up
+    /// (it falls and is held at 92.75 by the caller); every boost pad is active again.
+    /// Cars and ball keep falling from here, so a countdown settles them.
+    pub fn kickoff(&mut self, slots: &[usize]) {
+        for index in 0..self.cars.len() {
+            let slot = slots.get(index).copied().unwrap_or(0) % 5;
+            let pick = if self.car_teams[index] == 0 {
+                slot
+            } else {
+                5 + slot
+            };
+            self.respawn_pick[index] = Some(pick);
+            self.respawn_car(index);
+            let spot = respawn::SPAWN_POINTS[pick];
+            self.kickoff_spots.resize(self.cars.len(), None);
+            self.kickoff_spots[index] = Some((spot.x, spot.y, spot.yaw_degrees));
+        }
+        self.ball.position = Vec3::new(0.0, 0.0, respawn::KICKOFF_BALL_HEIGHT);
+        self.ball.linear_velocity = Vec3::ZERO;
+        self.ball.angular_velocity = Vec3::ZERO;
+        self.ball.wake();
+        if self.boost_pads.is_some() {
+            self.boost_pads = Some(BoostPads::standard());
+        }
+    }
+
+    /// Holds every car on its kickoff spot in the plane and not turning: the game keeps them
+    /// there through the countdown, letting them only fall and settle on their suspension.
+    pub fn hold_cars_on_their_spots(&mut self) {
+        for (car, anchor) in self.cars.iter_mut().zip(&self.kickoff_spots) {
+            let Some((x, y, yaw)) = *anchor else {
+                continue;
+            };
+            car.position.x = x;
+            car.position.y = y;
+            car.linear_velocity.x = 0.0;
+            car.linear_velocity.y = 0.0;
+            car.angular_velocity = Vec3::ZERO;
+            let half = yaw.to_radians() * 0.5;
+            car.orientation = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        }
+    }
+
+    /// Holds the ball still at the centre spot, `respawn::KICKOFF_BALL_REST_HEIGHT` up: the
+    /// game keeps it there through the countdown and until the first touch.
+    pub fn pin_ball_to_centre_spot(&mut self) {
+        self.ball.position = Vec3::new(0.0, 0.0, respawn::KICKOFF_BALL_REST_HEIGHT);
+        self.ball.linear_velocity = Vec3::ZERO;
+        self.ball.angular_velocity = Vec3::ZERO;
     }
 
     /// Whether car `index` is out of the match after a demolition.

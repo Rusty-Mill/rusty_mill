@@ -23,6 +23,12 @@ pub const RESPAWN_HEIGHT: f32 = 36.0;
 /// Boost of a respawned car from the next frame on (a third of a tank).
 pub const RESPAWN_BOOST: f32 = 100.0 / 3.0;
 
+/// Height of the ball when a kickoff countdown starts (uu); it falls from rest.
+pub const KICKOFF_BALL_HEIGHT: f32 = 100.49;
+/// Height the ball is held at on the centre spot until the first touch (uu), as the game's
+/// packets show through the countdown and the kickoff.
+pub const KICKOFF_BALL_REST_HEIGHT: f32 = 92.75;
+
 /// A kickoff spawn point: a place on the field and the heading a car has there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpawnPoint {

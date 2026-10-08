@@ -856,6 +856,22 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   position, as expected from rules that move the one-step forward error by 0.2 to 0.4 uu/s per tick on a small share of
   ticks; they were adopted on the one-step evidence (`regime_bias.py`), not on these means.
 
+### RB-RESEARCH-O024 — Match flow: goal, replay, countdown, kickoff (workstream E)
+
+- **Measured (2026-10-08, `rb_match_log`, `log1..3.jsonl`, not committed)**: a real match (not freeplay), one Psyonix bot
+  per team, every packet logged with the match phase, the score, the ball, the cars and the pad count; goals forced
+  with a state set (alternating goals) and natural ones. Goal: the first frame the ball's centre is past |y| about 5215
+  (5214.02 did not score, 5215.55 did), blue scores in +y. Phases at 120 frames/s: GoalScored 360, Replay 1078-1083
+  (the world and the pads frozen), Countdown 480 (cars held, ball falling from 100.49 and held at 92.75, boost
+  33.33, all pads active), Kickoff until the first touch (3 to 5 s with two bots), Active. The very first countdown of a
+  match runs 6.9 s (an intro). The first frame of every tape-bot capture is such a countdown frame: ball 100.49,
+  cars at z 83 falling to 36.
+- **Modelled**: FR-160 (`rb_env::flow`).
+- **Open**: the clock and overtime; the random spawn slot (five, point-reflected for the other team) and the two
+  teams' different drop heights on the first packets; goal-line geometry for a ball that crosses between the posts
+  only (the test is the line alone); demolitions and bumps during the countdown; the ball's missing drag.
+- **Status**: Modelled in `Env`; owner: baileyrd.
+
 ### RB-RESEARCH-O018 — Car bumps and demolitions
 
 - **Evidence (2026-10-07)**: 18 two-car recordings (hivemind bot, teammates).
