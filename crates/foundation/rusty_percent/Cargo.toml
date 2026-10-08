@@ -1,0 +1,14 @@
+[package]
+name = "rusty_percent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space)."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[dependencies]
+
+[dev-dependencies]

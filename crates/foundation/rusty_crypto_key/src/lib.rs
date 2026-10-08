@@ -13,6 +13,24 @@ use alloc::vec::Vec;
 
 use core::fmt;
 
+/// Compares two byte strings without exiting early on the first difference.
+///
+/// Use it for secrets and MACs (bearer tokens, signatures, PKCE verifiers):
+/// `==` short-circuits, so response latency would reveal how many leading
+/// bytes a guess got right. The length is folded into the same accumulator and
+/// the shorter input is zero-padded, so a wrong-length guess costs the same as
+/// a wrong-value one. `black_box` stops the optimiser from reintroducing an
+/// early exit it could prove equivalent for a boolean result.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= usize::from(x ^ y);
+    }
+    core::hint::black_box(diff) == 0
+}
+
 /// Zero-on-drop secret byte vector wrapper.
 pub struct SecretBytes {
     buf: Vec<u8>,
@@ -59,15 +77,7 @@ impl fmt::Debug for SecretBytes {
 
 impl PartialEq for SecretBytes {
     fn eq(&self, other: &Self) -> bool {
-        // Constant-time byte comparison to prevent timing side-channels
-        if self.buf.len() != other.buf.len() {
-            return false;
-        }
-        let mut diff = 0u8;
-        for (a, b) in self.buf.iter().zip(other.buf.iter()) {
-            diff |= a ^ b;
-        }
-        diff == 0
+        constant_time_eq(&self.buf, &other.buf)
     }
 }
 
@@ -133,7 +143,24 @@ mod tests {
     }
 
     #[test]
-    fn constant_time_eq() {
+    fn constant_time_eq_matches_equality() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(!constant_time_eq(b"ab", b"abc"));
+        assert!(!constant_time_eq(b"", b"a"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_zero_padded_prefix() {
+        // The padded tail must not make a shorter input equal a longer one.
+        assert!(!constant_time_eq(&[1], &[1, 0]));
+        assert!(!constant_time_eq(&[1, 0, 0], &[1]));
+    }
+
+    #[test]
+    fn secret_bytes_equality_is_byte_equality() {
         let s1 = SecretBytes::new(vec![0xAA, 0xBB, 0xCC]);
         let s2 = SecretBytes::new(vec![0xAA, 0xBB, 0xCC]);
         let s3 = SecretBytes::new(vec![0xAA, 0xBB, 0xDD]);

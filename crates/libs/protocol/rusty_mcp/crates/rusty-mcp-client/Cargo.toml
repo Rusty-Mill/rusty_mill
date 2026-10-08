@@ -1,0 +1,44 @@
+[package]
+name = "rusty-mcp-client"
+version = "0.1.0"
+description = "Protocol-only MCP client: stdio child process and Streamable HTTP, with API-key, bearer and OAuth client-credentials auth"
+keywords = ["mcp", "model-context-protocol", "ai", "llm"]
+categories = ["network-programming", "development-tools"]
+publish = false
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_mcp"
+authors = ["rusty_mcp contributors"]
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "warn"
+unwrap_used = "warn"
+
+[dependencies]
+# TLS is whatever `reqwest` brings (rustls, not OpenSSL) until the native client
+# on `rusty_request`/`rusty_tls` replaces `rmcp`; see docs/research/MCP-NATIVE-PLAN.md.
+rmcp = { version = "3.1", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+    "reqwest",
+] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", default-features = false, features = ["process", "time", "io-util"] }
+
+[dev-dependencies]
+toml = "1.1"
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net"] }

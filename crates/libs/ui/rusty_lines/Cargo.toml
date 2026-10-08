@@ -55,5 +55,9 @@ rusty_win32 = { workspace = true, features = ["std"] }
 
 # The pty end-to-end tests (tests/pty.rs) drive examples/demo under a
 # pseudo-terminal.
+[dev-dependencies]
+# The PTY tests read the demo's raw output through the shared ANSI stripper.
+rusty_ansi = { workspace = true }
+
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

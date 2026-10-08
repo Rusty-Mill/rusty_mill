@@ -23,7 +23,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(rusty_oauth::bearer::token_from_authorization)
 }
 
 /// Accepts either the legacy shared `server.api_key_env` token or any

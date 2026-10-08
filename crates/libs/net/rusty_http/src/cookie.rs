@@ -213,67 +213,7 @@ impl CookieJar {
     }
 }
 
-/// Parses an RFC 7231 IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`), the
-/// format every real server sends `Expires`, `Retry-After`, and similar
-/// date-valued headers in today. Older `Set-Cookie`-specific date formats
-/// (RFC 850, asctime) aren't handled -- `Max-Age` already takes
-/// precedence over `Expires` when both are present, so this is purely a
-/// fallback for servers that only send the date form; likewise a caller
-/// parsing `Retry-After` should try a delta-seconds integer first. `pub`
-/// (not just used internally by this module) since IMF-fixdate parsing
-/// is a general HTTP concern, not a cookie-specific one -- consumers with
-/// their own date-valued headers to parse can reuse this rather than
-/// hand-rolling a second copy.
-pub fn parse_http_date(s: &str) -> Option<SystemTime> {
-    let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() != 6 {
-        return None;
-    }
-    let day: i64 = parts[1].parse().ok()?;
-    let month = month_number(parts[2])?;
-    let year: i64 = parts[3].parse().ok()?;
-    let mut time_parts = parts[4].split(':');
-    let hour: u64 = time_parts.next()?.parse().ok()?;
-    let minute: u64 = time_parts.next()?.parse().ok()?;
-    let second: u64 = time_parts.next()?.parse().ok()?;
-
-    let days = days_from_civil(year, month, day);
-    if days < 0 {
-        // A date before the epoch (e.g. the classic "delete this
-        // cookie" trick using 1969 or earlier) is simply already
-        // expired -- clamp rather than under/overflow the cast below.
-        return Some(SystemTime::UNIX_EPOCH);
-    }
-    let total_seconds = (days as u64) * 86_400 + hour * 3600 + minute * 60 + second;
-    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(total_seconds))
-}
-
-fn month_number(name: &str) -> Option<i64> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    MONTHS
-        .iter()
-        .position(|m| m.eq_ignore_ascii_case(name))
-        .map(|i| i as i64 + 1)
-}
-
-/// Howard Hinnant's `days_from_civil`: days since the Unix epoch
-/// (1970-01-01) for a proleptic-Gregorian calendar date. A well-known,
-/// already-verified-correct public-domain algorithm
-/// (<http://howardhinnant.github.io/date_algorithms.html>) -- chosen
-/// over hand-rolling a cumulative-days-per-month table because it
-/// already *is* that table, done right (including century/400-year
-/// leap-year rules a naive table easily gets wrong).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400; // [0, 399]
-    let mp = (m + 9) % 12; // [0, 11]
-    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    era * 146097 + doe - 719468
-}
+pub use rusty_retry::parse_http_date;
 
 #[cfg(test)]
 mod tests {
@@ -458,12 +398,5 @@ mod tests {
             ["no equals sign here"].into_iter(),
         );
         assert_eq!(jar.cookie_header_for(&url("http://example.com/")), None);
-    }
-
-    #[test]
-    fn days_from_civil_matches_hand_verified_epoch_offsets() {
-        assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(days_from_civil(1970, 1, 2), 1);
-        assert_eq!(days_from_civil(1969, 12, 31), -1);
     }
 }

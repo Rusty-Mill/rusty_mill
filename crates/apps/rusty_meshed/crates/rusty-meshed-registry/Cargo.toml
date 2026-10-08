@@ -11,6 +11,7 @@ publish = false
 layer = "apps"
 
 [dependencies]
+rusty_percent = { workspace = true }
 rusty_err = { workspace = true }
 rusty_http = { workspace = true, features = ["rusty-tokio"] }
 rusty_tokio = { workspace = true }

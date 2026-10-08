@@ -260,16 +260,7 @@ fn parse_authority(authority: &str, default_port: u16, original: &str) -> Result
 /// safe in this component" characters like `!*'()`), which is fine for
 /// query params built from arbitrary caller strings.
 pub fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
+    rusty_percent::encode(input)
 }
 
 #[cfg(test)]

@@ -39,6 +39,7 @@ members = [
     "crates/libs/protocol/rusty_agui",
     "crates/libs/protocol/rusty_a2a",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
+    "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo",
     "crates/libs/async/rusty_stream",
     "crates/foundation/rusty_url",
@@ -88,6 +89,9 @@ members = [
     "crates/foundation/rusty_err/derive",
     "crates/libs/net/rusty_request",
     "crates/foundation/rusty_base64",
+    "crates/foundation/rusty_dirs",
+    "crates/foundation/rusty_hex",
+    "crates/foundation/rusty_percent",
     "crates/foundation/rusty_rand",
     "crates/foundation/rusty_atomic_file",
     "crates/foundation/rusty_confined_fs",
@@ -234,6 +238,35 @@ members = [
     "crates/apps/rusty_agent_gateway/crates/agentgateway-tls",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-core",
     "crates/apps/rusty_agent_gateway/crates/agentgateway",
+]
+# cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
+# it was excluded from rusty_term's own workspace before the merge.
+# crates/libs/ui/rusty_lines/bench is a standalone on-demand benchmark harness
+# (rusty_lines vs rustyline vs reedline) with no `[workspace]` table of its
+# own, run only via `cd crates/libs/ui/rusty_lines/bench && cargo run --release` —
+# excluded so it doesn't try to join this workspace.
+# crates/foundation/rusty_libc/bench is the same shape: its own standalone `[workspace]`
+# comparing rusty_libc against the `libc` crate, deliberately outside the
+# library's own zero-dependency build.
+exclude = [
+    "crates/libs/ui/rusty_term/fuzz",
+    "crates/apps/rush/fuzz",
+    "crates/libs/ui/rusty_lines/bench",
+    "crates/foundation/rusty_libc/bench",
+    "crates/libs/net/rusty_tls/fuzz",
+    "crates/libs/protocol/rusty_lsp/fuzz",
+    "crates/platform/rustils/fuzz",
+    "crates/apps/rusty_croc/fuzz",
+    "crates/apps/rusty_key/desktop/src-tauri",
+    # nexus's Tauri desktop shell (`shell/src-tauri`, crate `nexus-shell`)
+    # was excluded from nexus's own workspace too: it is built by `tauri
+    # build` from the pnpm side, carries its own dependency graph (tauri
+    # plugins, WebKitGTK), and is not a `cargo test` target.
+    "crates/apps/nexus/shell",
+    # Nexus is FROZEN (2026-10-07): not in use, kept as a source to extract
+    # from or retire, not a target. Its 42 crates are excluded rather than
+    # deleted so nothing is lost and `git revert` of the freeze commit
+    # restores them as members. See crates/apps/nexus/FROZEN.md.
     "crates/apps/nexus/crates/nexus-types",
     "crates/apps/nexus/crates/nexus-plugin-api",
     "crates/apps/nexus/crates/nexus-hashline",
@@ -276,31 +309,6 @@ members = [
     "crates/apps/nexus/crates/nexus-context",
     "crates/apps/nexus/crates/nexus-protocol",
 ]
-# cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
-# it was excluded from rusty_term's own workspace before the merge.
-# crates/libs/ui/rusty_lines/bench is a standalone on-demand benchmark harness
-# (rusty_lines vs rustyline vs reedline) with no `[workspace]` table of its
-# own, run only via `cd crates/libs/ui/rusty_lines/bench && cargo run --release` —
-# excluded so it doesn't try to join this workspace.
-# crates/foundation/rusty_libc/bench is the same shape: its own standalone `[workspace]`
-# comparing rusty_libc against the `libc` crate, deliberately outside the
-# library's own zero-dependency build.
-exclude = [
-    "crates/libs/ui/rusty_term/fuzz",
-    "crates/apps/rush/fuzz",
-    "crates/libs/ui/rusty_lines/bench",
-    "crates/foundation/rusty_libc/bench",
-    "crates/libs/net/rusty_tls/fuzz",
-    "crates/libs/protocol/rusty_lsp/fuzz",
-    "crates/platform/rustils/fuzz",
-    "crates/apps/rusty_croc/fuzz",
-    "crates/apps/rusty_key/desktop/src-tauri",
-    # nexus's Tauri desktop shell (`shell/src-tauri`, crate `nexus-shell`)
-    # was excluded from nexus's own workspace too: it is built by `tauri
-    # build` from the pnpm side, carries its own dependency graph (tauri
-    # plugins, WebKitGTK), and is not a `cargo test` target.
-    "crates/apps/nexus/shell",
-]
 
 # Hoisted from rusty_search's own former `[workspace.package]`/
 # `[workspace.dependencies]` tables (it was its own nested Cargo workspace
@@ -340,6 +348,9 @@ rusty-db = { path = "crates/libs/storage/rusty_db/rusty_db" }
 rusty-whisper = { path = "crates/libs/ai/rusty_whisper" }
 rusty_audio = { path = "crates/libs/ui/rusty_audio" }
 rusty_base64 = { path = "crates/foundation/rusty_base64" }
+rusty_dirs = { path = "crates/foundation/rusty_dirs" }
+rusty_hex = { path = "crates/foundation/rusty_hex" }
+rusty_percent = { path = "crates/foundation/rusty_percent" }
 rusty_codec = { path = "crates/foundation/rusty_codec" }
 rusty_compress = { path = "crates/foundation/rusty_compress" }
 rusty_diff = { path = "crates/foundation/rusty_diff" }
@@ -610,6 +621,7 @@ ts-net = { path = "crates/apps/rusty_tailscale/crates/ts-net" }
 rusty_http = { path = "crates/libs/net/rusty_http" }
 rusty_serve = { path = "crates/libs/net/rusty_serve" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
+rusty_ansi = { path = "crates/libs/ui/rusty_ansi" }
 hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false }
 http-body-util = "0.1"
@@ -673,6 +685,7 @@ rp-router = { path = "crates/apps/rusty_provider/crates/router" }
 # A no-op for rusty_provider, which inherits this entry as-is: rusty-mcp's
 # own `default` feature is empty.
 rusty-mcp = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp", default-features = false }
+rusty-mcp-client = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client" }
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"

@@ -28,6 +28,10 @@ Tauri desktop shell, `shell/src-tauri`) is `exclude`d the same way as
 `rusty_key`'s `desktop/src-tauri` — it's a separate pnpm-driven Tauri
 workspace, not a `cargo test` target.
 
+**Nexus is frozen** (2026-10-07): its crates are `exclude`d from the
+workspace and CI, not deleted. See
+[`crates/apps/nexus/FROZEN.md`](crates/apps/nexus/FROZEN.md).
+
 A sixth merge, also outside the wave numbering, brought in
 `baileyrd/rusty_multimodal_db` — a single-crate benchmark harness for
 record-store backend design — under `crates/rusty_multimodal_db/`, the
@@ -316,6 +320,9 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`remind_me_hub`](crates/apps/rusty_remind_me/crates/remind_me_hub) | `crates/apps/rusty_remind_me/crates/remind_me_hub` | rusty_remind_me: multi-node sync hub (`rusty-remind-me-hub`), SQLite or Postgres storage |
 | [`rusty-remind-me`](crates/apps/rusty_remind_me/crates/remind_me_cli) | `crates/apps/rusty_remind_me/crates/remind_me_cli` | rusty_remind_me: the `rusty-remind-me` CLI/server binary; also a Claude Code plugin (root `.claude-plugin/marketplace.json`) |
 | [`rusty_sha1`](crates/foundation/rusty_sha1) | `crates/foundation/rusty_sha1` | Zero-dependency SHA-1 (FIPS 180-1) implementation, shared by `rusty_git`'s object hashing and `rusty_term`'s WebSocket handshake |
+| [`rusty_dirs`](crates/foundation/rusty_dirs) | `crates/foundation/rusty_dirs` | Dependency-free per-user config directory lookup (`%APPDATA%`, `$XDG_CONFIG_HOME`, `~/.config`); used by `rusty_term` and `rusty-croc` |
+| [`rusty_percent`](crates/foundation/rusty_percent) | `crates/foundation/rusty_percent` | Hand-rolled, dependency-free percent-encoding for URL components and query strings (RFC 3986 unreserved encode; lenient, form and UTF-8-checked decode); the one copy behind the HTTP servers, gateways and MCP/LSP URI handling |
+| [`rusty_hex`](crates/foundation/rusty_hex) | `crates/foundation/rusty_hex` | Hand-rolled, dependency-free hex codec (lowercase out, either case in, fixed-size arrays for keys and digests); the one copy behind `ts-types`, `ts-key`, `rsi-core`, `rusty_term` and others |
 | [`rusty_base64`](crates/foundation/rusty_base64) | `crates/foundation/rusty_base64` | Hand-rolled, dependency-free Base64 (RFC 4648) codec (standard and URL-safe alphabets, encode/decode), extracted from `rusty_oauth` and now shared by `rusty_acp`/`rusty-mcp`/`rusty_a2a` |
 | [`rusty_rand`](crates/foundation/rusty_rand) | `crates/foundation/rusty_rand` | OS-backed cryptographically secure random bytes (`/dev/urandom`/`BCryptGenRandom`), the CSPRNG shared by `rusty_oauth`, `rusty_uuid`, and `sessionmgr-proc` |
 | [`rusty_retry`](crates/foundation/rusty_retry) | `crates/foundation/rusty_retry` | Exponential backoff with jitter and `Retry-After` delta-seconds parsing, the retry mechanism shared by `rusty_request` and `rusty_acp` |

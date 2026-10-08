@@ -14,7 +14,7 @@ use rmcp::model::{
     PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
-use rmcp::{ErrorData, ServerHandler, ServiceExt};
+use rmcp::{ErrorData, ServerHandler};
 use serde_json::json;
 
 use crate::Session;
@@ -29,16 +29,18 @@ where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
 {
     fn get_info(&self) -> ServerInfo {
-        // rmcp 3.1.4: `ServerInfo` is non-exhaustive, so it is built through
-        // its constructor.
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Rusty Keys harness exposed over MCP. Call `chat` to run a turn.")
+        rusty_mcp::server_info(
+            "rusty-keys",
+            env!("CARGO_PKG_VERSION"),
+            ServerCapabilities::builder().enable_tools().build(),
+        )
+        .with_instructions("Rusty Keys harness exposed over MCP. Call `chat` to run a turn.")
     }
 
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, ErrorData>> + Send + '_ {
         let schema = json!({
             "type": "object",
@@ -54,10 +56,12 @@ where
             "Send a message to Rusty Keys and receive a reply.",
             Arc::new(map),
         );
-        std::future::ready(Ok(ListToolsResult {
+        let mut result = ListToolsResult {
             tools: vec![tool],
             ..Default::default()
-        }))
+        };
+        rusty_mcp::apply_cache_hints(&ctx, &mut result.ttl_ms, &mut result.cache_scope);
+        std::future::ready(Ok(result))
     }
 
     fn call_tool(
@@ -96,13 +100,15 @@ pub async fn serve<M>(session: Session<M>) -> anyhow::Result<()>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
 {
-    let handler = ChatServer {
-        session: Arc::new(session),
-    };
-    let running = handler
-        .serve(rmcp::transport::stdio())
-        .await
-        .context("starting MCP server")?;
-    running.waiting().await.context("MCP server")?;
-    Ok(())
+    let session = Arc::new(session);
+    rusty_mcp::serve(
+        move || {
+            Ok(ChatServer {
+                session: session.clone(),
+            })
+        },
+        rusty_mcp::ServerConfig::stdio(),
+    )
+    .await
+    .context("MCP server")
 }

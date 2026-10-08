@@ -12,6 +12,7 @@ categories = ["network-programming", "asynchronous"]
 layer = "libs"
 
 [dependencies]
+rusty_retry = { workspace = true }
 rusty_ip = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -161,17 +161,7 @@ async fn protected_resource_metadata(State(state): State<OAuthAppState>) -> Resp
 /// style (space → `+`) — matching `urllib.parse.urlencode`'s own encoding,
 /// which is what the reference's `construct_redirect_uri` uses.
 fn urlencode_component(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    rusty_percent::encode(s).replace("%20", "+")
 }
 
 /// Append `params` to `base`'s query string, preserving whatever query it
@@ -907,7 +897,7 @@ pub async fn require_bearer(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let Some(token) = header_value.strip_prefix("Bearer ") else {
+    let Some(token) = rusty_oauth::bearer::token_from_authorization(header_value) else {
         return unauthorized_bearer(&state);
     };
 

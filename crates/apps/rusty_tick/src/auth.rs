@@ -10,8 +10,8 @@
 //! A refusal never says why. It carries the user key the caller *claimed*, if
 //! the token parsed, so the server can log it; the secret is never kept.
 
-use crate::api::constant_time_eq;
 use crate::users::{RegistryFile, Token, UserKey};
+use rusty_crypto_key::constant_time_eq;
 
 /// Shortest accepted single-user token: a guessable token defeats the check.
 pub const MIN_TOKEN_LEN: usize = 16;
@@ -70,7 +70,7 @@ impl Authenticator {
     /// [`Denied`], for a missing header, a scheme other than `Bearer`, and a
     /// token that is unknown, revoked, disabled or wrong alike.
     pub fn authenticate(&mut self, header: Option<&str>) -> Result<UserKey, Denied> {
-        let presented = header.and_then(|h| h.strip_prefix("Bearer "));
+        let presented = header.and_then(rusty_oauth::bearer::token_from_authorization);
         match self {
             Self::Single { token, user } => {
                 let ok =

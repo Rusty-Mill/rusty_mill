@@ -25,6 +25,7 @@ todo = "warn"
 unwrap_used = "warn"
 
 [dependencies]
+rusty_percent = { workspace = true }
 agentgateway-config = { workspace = true }
 http = { workspace = true }
 regex = { workspace = true }

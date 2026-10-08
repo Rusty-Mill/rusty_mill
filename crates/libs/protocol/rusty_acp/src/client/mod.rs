@@ -239,11 +239,7 @@ fn retryable_transport(error: &reqwest::Error) -> bool {
 /// own backoff rather than retrying instantly.
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    if let Some(delay) = rusty_retry::retry_after_seconds(value) {
-        return Some(delay);
-    }
-    let when = chrono::DateTime::parse_from_rfc2822(value.trim()).ok()?;
-    (when.with_timezone(&chrono::Utc) - chrono::Utc::now()).to_std().ok()
+    rusty_retry::retry_after(value, std::time::SystemTime::now())
 }
 
 /// How long to keep polling a run, and how often.

@@ -13,6 +13,104 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty-mcp-client split (pending review)
+
+- **Added:** `rusty-mcp-client`; **Changed:** `rusty-mcp` loses its `client` feature; `rk-mcp` depends on the new crate. Stdio verified again against a real `rusty-mcp-demo` after the move. No OpenSSL in the MCP client path (the `native-tls` still in `rk-mcp`'s tree comes from `aisdk`/`rk-feed`, the LLM client).
+- **Known limitation:** Nexus is frozen and still references `rusty_mcp::client`. The Streamable HTTP path is still not exercised against a live server.
+
+---
+
+## 2026-10-08 - rk-mcp client on rusty-mcp (pending review)
+
+- **Changed:** `rk-mcp`'s stdio and HTTP adapters collapse into `RemoteMcpClient` over `rusty-mcp`'s client. Verified end to end for stdio: the ignored smoke test connected to a real `rusty-mcp-demo`, listed tools, reconnected and listed again.
+- **Known limitation:** the Streamable HTTP path was not exercised (no server to point at here), and its TLS backend changes to `native-tls`. A server with more than one page of tools now returns all of them, so a registry that relied on the truncated list will see more tools.
+
+---
+
+## 2026-10-07 - rk-app MCP server on rusty-mcp (pending review)
+
+- **Changed:** `rusty-keys --mcp` uses `rusty_mcp::serve`; compiles clean under clippy `-D warnings` with `--features mcp-server`, and the crate's tests pass.
+- **Known limitation:** the MCP path is still not exercised end to end (needs a live model; the file header already says so), so the protocol-version change and shutdown behaviour are compile-checked only. Try `rusty-keys --mcp` from an MCP client before relying on it.
+
+---
+
+## 2026-10-07 - rusty_dirs (pending review)
+
+- **Added:** `rusty_dirs`; `rusty_term` and `rusty-croc` use it.
+- **Known limitation:** only config directories are shared. The other ~6 sites in the audit (`rusty_yirp` state dirs, `rusty_inventory`, `rusty_key` guide, `rusty_provider` `~` expansion, `rush`, `sessionmgr-agents`) resolve different things (state/data dirs, `~` expansion, override variables) and were left alone; `rusty_yirp`'s two path files are duplicated on purpose. Nexus untouched (frozen, deletion not approved).
+
+---
+
+## 2026-10-07 - rmcp pin and rsi blob writes (pending review)
+
+- **Changed:** `remind_me_remote` uses the workspace `rmcp`; `rsi-runtime` blob writes are now fsynced (slightly slower, durable).
+- **Known limitation:** `rusty_fair_play`'s `write_by_rename` and `rusty_lines`' history writer were not moved to `rusty_atomic_file`. Fair Play's tests make a directory at the fixed `<file>.tmp` name to force a write failure, which `rusty_atomic_file`'s unique temp names defeat; `rusty_lines` preserves an existing file's permissions, which `rusty_atomic_file` does not.
+
+---
+
+## 2026-10-07 - Retry-After and backoff consolidated (pending review)
+
+- **Changed:** five crates use `rusty_retry` for backoff or `Retry-After`; `rusty_http` gains a `rusty_retry` dependency (it re-exports the date parser).
+- **Known limitation:** the gateway's `initial_backoff` larger than `max_backoff` now sleeps `max_backoff` from the first attempt (it slept the initial value once before). Nexus's four retry copies are untouched (frozen).
+
+---
+
+## 2026-10-07 - rusty_percent (pending review)
+
+- **Added:** `rusty_percent` foundation crate; **Changed:** eleven crates drop their private percent-encode/decode helpers for it. Fixes trailing-escape decoding in `remind_me_core`, `remind_me_hub`, `remind_me_api` and `rusty_fedora_agent`.
+- **Known limitation:** `rusty_url` keeps its own spec-driven `percent_decode`; `remind_me_hub`'s test helper `urlencode` and eight crates that use the external `percent-encoding` crate (`rusty-mcp` trace, `rp-providers`, `rusty-search-*`, meshed) are untouched. Follow-up, not part of this change.
+
+---
+
+## 2026-10-07 - rusty_hex (pending review)
+
+- **Added:** `rusty_hex` foundation crate; **Changed:** eight crates drop their private hex codecs for it. `ts-key` and `ts-types` no longer each carry a copy.
+- **Known limitation:** `rusty_term`'s `gui` feature and `platform-bsd` were not built here. `rusty_term` clippy fails without gui on unused `Grid` methods, also on the untouched baseline.
+
+---
+
+## 2026-10-07 - base64 copies replaced (pending review)
+
+- **Changed:** six hand-written base64 encoders/decoders now call `rusty_base64`; new `decode_standard_lenient` (+2 tests) covers PEM and terminal payloads.
+- **Known limitation:** `platform-bsd`'s edit compiles only on BSD targets and was not built here; it is the same one-line wrapper as `platform-linux`'s. `rusty_term`'s `gui` feature (encode alias) was not built. Pre-existing: `rusty_term` clippy `-D warnings` fails on unused `Grid::running_command`/`abs_line_text`/`row_text` without the gui feature, also on the untouched baseline.
+
+---
+
+## 2026-10-07 - One strip_ansi (pending review)
+
+- **Changed:** `rusty_ansi` parses two-byte escapes and string sequences (new `AnsiToken::Escape`); `rp-router` and `rusty_lines`' PTY tests use `rusty_ansi::strip_ansi` instead of private copies. Five new `rusty_ansi` tests; all 43 `rusty_lines` PTY tests pass.
+- **Known limitation:** an unterminated string sequence (`ESC _ ...` with no `ST`) still leaks its text; only the `ESC` is dropped. The Nexus copies are untouched (frozen).
+
+---
+
+## 2026-10-07 - Emitter helpers for AG-UI adapters (pending review)
+
+- **Added:** `Emitter::{text_delta, end_text, tool_call, tool_result}` in `rusty_agui`; **Changed:** `adk-agui`, `rk-agui`, `rusty_tick` and the `echo_agent` example use them instead of private copies.
+- **Known limitation:** an adapter must still call `end_text` before a non-text event (the verifier rejects a tool call inside an open message). The helpers do not close it for you.
+
+---
+
+## 2026-10-07 - One Bearer parser (pending review)
+
+- **Changed:** `rusty_oauth::bearer::token_from_authorization` replaces nine call-site copies. Behaviour change: scheme matched case-insensitively and an empty token is rejected up front. New `rusty_oauth` edges: `remind_me_core`, `remind_me_api`, `remind_me_remote`, `rp-server`, `rk-app`, `rusty_fair_play`, `rusty_tick`.
+- **Known limitation:** `remind_me_api`'s and `remind_me_remote`'s flat-key check still compares the whole header to `"Bearer <secret>"` in constant time (exact case); only the scoped-key and OAuth paths use the parser.
+
+---
+
+## 2026-10-07 - One constant_time_eq (pending review)
+
+- **Changed:** `rusty_crypto_key::constant_time_eq` replaces seven hand-written copies and the one inside `SecretBytes::eq`; the length is folded into the accumulator and the shorter side zero-padded, so a wrong-length token no longer returns early. New edges: `rusty_oauth`, `remind_me_core`, `remind_me_hub`, `rk-app`, `rusty_fair_play`, `rusty_tick` depend on `rusty_crypto_key`.
+- **Known limitation:** the two Nexus copies (`nexus-collab`, `nexus-memory-hub`) are untouched because Nexus is frozen. `rk-app`'s old `&str` unit test moved to `rusty_crypto_key`.
+
+---
+
+## 2026-10-07 - Nexus frozen (pending review)
+
+- **Changed:** the 41 `nexus-*` crates are excluded from the workspace (`exclude` in the root `Cargo.toml`), so CI, `--workspace` runs, the workspace map and `Cargo.lock` no longer cover them. `Cargo.lock` only loses packages (162 removed, 41 Nexus); none added or upgraded.
+- **Known limitation:** frozen crates do not build until unfrozen (`crates/apps/nexus/FROZEN.md`). `NEXUS_NO_KEYRING` and the D-Bus setup in CI are left in place, now unused. Dependabot's config never listed Nexus. `docs/WORKSPACE-ATLAS.html` was not regenerated.
+
+---
+
 ## 2026-10-07 - Term and Tick Tailwind 4 CI repair (pending review)
 
 - **Fixed:** both web builds use `@tailwindcss/vite` 4.3.3, import Tailwind's v4 CSS, and explicitly load their existing theme configurations. Existing dependency versions, React integration, aliases, chunking, proxies, and CI gates are unchanged.

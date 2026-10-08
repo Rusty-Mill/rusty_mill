@@ -9,6 +9,9 @@ license = "MIT"
 layer = "apps"
 
 [dependencies]
+rusty_dirs = { workspace = true }
+rusty_retry = { workspace = true }
+rusty_hex = { workspace = true }
 aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
 pbkdf2 = { version = "0.12", features = ["simple"] }

@@ -228,23 +228,10 @@ fn encode_path_char(out: &mut String, ch: char) {
     }
 }
 
-/// Percent-decode `s`, returning `None` on malformed escapes or invalid UTF-8.
+/// Percent-decode `s`, returning `None` on invalid UTF-8. An escape that is not
+/// `%` plus two hex digits is kept as written.
 fn percent_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hi = char::from(*bytes.get(i + 1)?).to_digit(16)?;
-            let lo = char::from(*bytes.get(i + 2)?).to_digit(16)?;
-            out.push((hi as u8) << 4 | lo as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
+    rusty_percent::decode_utf8(s)
 }
 
 impl<'de> Deserialize<'de> for Uri {

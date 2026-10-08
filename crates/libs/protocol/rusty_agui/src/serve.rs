@@ -37,6 +37,8 @@ pub struct Emitter<'a> {
     verifier: &'a mut Verifier,
     sink: &'a mut dyn FnMut(Event) -> Result<()>,
     next_id: u64,
+    /// The message [`Emitter::text_delta`] is streaming into, if one is open.
+    streaming: Option<String>,
 }
 
 impl Emitter<'_> {
@@ -72,6 +74,75 @@ impl Emitter<'_> {
             message_id: message_id.clone(),
         })?;
         Ok(message_id)
+    }
+
+    /// Appends to the assistant message being streamed, opening it on the
+    /// first non-empty delta. Close it with [`Emitter::end_text`] before
+    /// emitting anything else that is not text.
+    pub fn text_delta(&mut self, delta: &str) -> Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        let message_id = match &self.streaming {
+            Some(id) => id.clone(),
+            None => {
+                let id = self.next_id();
+                self.emit(EventKind::TextMessageStart {
+                    message_id: id.clone(),
+                    role: Role::Assistant,
+                })?;
+                self.streaming = Some(id.clone());
+                id
+            }
+        };
+        self.emit(EventKind::TextMessageContent {
+            message_id,
+            delta: delta.into(),
+        })
+    }
+
+    /// Closes the message [`Emitter::text_delta`] opened; says whether one
+    /// was open.
+    pub fn end_text(&mut self) -> Result<bool> {
+        let Some(message_id) = self.streaming.take() else {
+            return Ok(false);
+        };
+        self.emit(EventKind::TextMessageEnd { message_id })?;
+        Ok(true)
+    }
+
+    /// Emits a whole tool call: start, the arguments as one JSON string,
+    /// end. `parent_message_id` is the assistant message that made the call.
+    pub fn tool_call(
+        &mut self,
+        tool_call_id: &str,
+        name: &str,
+        args: &str,
+        parent_message_id: Option<String>,
+    ) -> Result<()> {
+        self.emit(EventKind::ToolCallStart {
+            tool_call_id: tool_call_id.into(),
+            tool_call_name: name.into(),
+            parent_message_id,
+        })?;
+        self.emit(EventKind::ToolCallArgs {
+            tool_call_id: tool_call_id.into(),
+            delta: args.into(),
+        })?;
+        self.emit(EventKind::ToolCallEnd {
+            tool_call_id: tool_call_id.into(),
+        })
+    }
+
+    /// Emits a tool call's result as a tool message with a fresh id.
+    pub fn tool_result(&mut self, tool_call_id: &str, content: String) -> Result<()> {
+        let message_id = self.next_id();
+        self.emit(EventKind::ToolCallResult {
+            message_id,
+            tool_call_id: tool_call_id.into(),
+            content,
+            role: Some(Role::Tool),
+        })
     }
 
     /// Emits a state snapshot.
@@ -181,6 +252,7 @@ fn run_framed<A: Agent>(agent: Arc<Mutex<A>>, input: RunAgentInput, tx: SyncSend
             verifier: &mut verifier,
             sink: &mut sink,
             next_id: 0,
+            streaming: None,
         };
         agent.run(&input, &mut emitter)
     };
@@ -235,6 +307,108 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
+
+    /// Runs `f` against an emitter over a started run and returns what the
+    /// run put on the wire.
+    fn emitted(f: impl FnOnce(&mut Emitter<'_>) -> Result<()>) -> Result<Vec<EventKind>> {
+        let mut verifier = Verifier::new();
+        let mut wire = Vec::new();
+        let mut sink = |event: Event| {
+            wire.push(event.kind);
+            Ok(())
+        };
+        let mut out = Emitter {
+            verifier: &mut verifier,
+            sink: &mut sink,
+            next_id: 0,
+            streaming: None,
+        };
+        out.emit(EventKind::RunStarted {
+            thread_id: "t".into(),
+            run_id: "r".into(),
+            parent_run_id: None,
+            input: None,
+        })?;
+        f(&mut out)?;
+        Ok(wire)
+    }
+
+    #[test]
+    fn text_deltas_share_one_message_until_it_is_ended() {
+        let wire = emitted(|out| {
+            out.text_delta("")?;
+            out.text_delta("he")?;
+            out.text_delta("llo")?;
+            assert!(out.end_text()?);
+            assert!(!out.end_text()?);
+            Ok(())
+        })
+        .unwrap();
+        let kinds: Vec<_> = wire.iter().map(EventKind::type_name).collect();
+        assert_eq!(
+            kinds,
+            [
+                "RUN_STARTED",
+                "TEXT_MESSAGE_START",
+                "TEXT_MESSAGE_CONTENT",
+                "TEXT_MESSAGE_CONTENT",
+                "TEXT_MESSAGE_END"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_second_stream_gets_a_fresh_message_id() {
+        let wire = emitted(|out| {
+            out.text_delta("a")?;
+            out.end_text()?;
+            out.text_delta("b")?;
+            out.end_text().map(|_| ())
+        })
+        .unwrap();
+        let ids: Vec<_> = wire
+            .iter()
+            .filter_map(|kind| match kind {
+                EventKind::TextMessageStart { message_id, .. } => Some(message_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn a_tool_call_is_start_args_end_and_its_result_is_a_tool_message() {
+        let wire = emitted(|out| {
+            out.tool_call("c1", "lookup", "{\"q\":1}", Some("m1".into()))?;
+            out.tool_result("c1", "ok".into())
+        })
+        .unwrap();
+        assert!(matches!(
+            &wire[1],
+            EventKind::ToolCallStart { tool_call_id, tool_call_name, parent_message_id }
+                if tool_call_id == "c1" && tool_call_name == "lookup"
+                    && parent_message_id.as_deref() == Some("m1")
+        ));
+        assert!(matches!(&wire[2], EventKind::ToolCallArgs { delta, .. } if delta == "{\"q\":1}"));
+        assert!(
+            matches!(&wire[3], EventKind::ToolCallEnd { tool_call_id } if tool_call_id == "c1")
+        );
+        assert!(matches!(
+            &wire[4],
+            EventKind::ToolCallResult { tool_call_id, content, role: Some(Role::Tool), .. }
+                if tool_call_id == "c1" && content == "ok"
+        ));
+    }
+
+    #[test]
+    fn a_tool_call_while_a_message_is_open_is_a_sequence_error() {
+        let result = emitted(|out| {
+            out.text_delta("x")?;
+            out.tool_call("c1", "t", "{}", None)
+        });
+        assert!(matches!(result, Err(Error::Sequence(_))));
+    }
 
     /// Echoes the last user message, streams a state delta, and fails on
     /// the word "fail".

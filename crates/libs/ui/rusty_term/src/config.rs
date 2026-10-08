@@ -247,7 +247,11 @@ impl Config {
         if let (Some((p, _)), _) = resolve_path(args) {
             return Some(p);
         }
-        Some(default_config_dir()?.join("rusty_term").join("config.toml"))
+        Some(
+            rusty_dirs::config_root()?
+                .join("rusty_term")
+                .join("config.toml"),
+        )
     }
 
     /// A commented starter config, written when the open-config shortcut
@@ -340,29 +344,11 @@ fn resolve_path(args: &[String]) -> (Option<(PathBuf, bool)>, Vec<String>) {
     if let Some(p) = std::env::var_os("RUSTY_TERM_CONFIG") {
         return (Some((PathBuf::from(p), true)), warnings);
     }
-    let Some(base) = default_config_dir() else {
+    let Some(base) = rusty_dirs::config_root() else {
         return (None, warnings);
     };
     let p = base.join("rusty_term").join("config.toml");
     (p.exists().then_some((p, false)), warnings)
-}
-
-/// Platform config root: `%APPDATA%` on Windows, `$XDG_CONFIG_HOME` (default
-/// `~/.config`) elsewhere.
-fn default_config_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        if let Some(x) = std::env::var_os("XDG_CONFIG_HOME")
-            && !x.is_empty()
-        {
-            return Some(PathBuf::from(x));
-        }
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))
-    }
 }
 
 /// Open the config file in the user's editor (the `Ctrl+Shift+,` shortcut),

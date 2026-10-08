@@ -85,10 +85,7 @@ impl Teams {
     fn verify(&self, headers: &dyn Headers, now: u64) -> Result<Value, Error> {
         let token = headers
             .get("authorization")
-            .and_then(|v| {
-                v.strip_prefix("Bearer ")
-                    .or_else(|| v.strip_prefix("bearer "))
-            })
+            .and_then(rusty_oauth::bearer::token_from_authorization)
             .ok_or_else(|| Error::Signature("no bearer token".into()))?;
         let kid = jwt::decode_unverified(token)
             .ok()

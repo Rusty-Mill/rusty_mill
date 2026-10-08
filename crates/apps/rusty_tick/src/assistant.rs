@@ -9,7 +9,7 @@
 //! keeps this agent sans-IO and testable as a pure function, and lets an
 //! LLM-backed agent replace it behind the same trait later.
 
-use rusty_agui::{Agent, Emitter, EventKind, Message, RunAgentInput};
+use rusty_agui::{Agent, Emitter, Message, RunAgentInput};
 use rusty_json::{json, Value};
 
 /// The tool the web UI offers for adding a task.
@@ -123,16 +123,12 @@ impl Agent for Assistant {
             Reply::CreateTask { title } => {
                 let message_id = out.text(&format!("Adding “{title}”…"))?;
                 let tool_call_id = out.next_id();
-                out.emit(EventKind::ToolCallStart {
-                    tool_call_id: tool_call_id.clone(),
-                    tool_call_name: CREATE_TASK.into(),
-                    parent_message_id: Some(message_id),
-                })?;
-                out.emit(EventKind::ToolCallArgs {
-                    tool_call_id: tool_call_id.clone(),
-                    delta: json!({ "title": title.as_str() }).to_json_string(),
-                })?;
-                out.emit(EventKind::ToolCallEnd { tool_call_id })?;
+                out.tool_call(
+                    &tool_call_id,
+                    CREATE_TASK,
+                    &json!({ "title": title.as_str() }).to_json_string(),
+                    Some(message_id),
+                )?;
                 Ok(None)
             }
         }

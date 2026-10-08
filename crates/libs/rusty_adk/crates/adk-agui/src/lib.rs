@@ -76,7 +76,7 @@ use adk_graph::{PendingInterrupt, ResumeRequest, PENDING_STATE_KEY};
 use adk_runner::Runner;
 use futures::StreamExt;
 use rusty_agui::serve::{Agent, Emitter};
-use rusty_agui::{Error, EventKind, Message, Role, RunAgentInput};
+use rusty_agui::{Error, Message, RunAgentInput};
 use rusty_json::Value;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -279,8 +279,6 @@ impl Turn {
 /// Turns ADK events into AG-UI events as they arrive.
 struct Relay<'e, 'a> {
     out: &'e mut Emitter<'a>,
-    /// The message partial chunks are streaming into, if one is open.
-    open: Option<String>,
     /// The output of the last final response.
     result: Option<Value>,
     state_changed: bool,
@@ -290,7 +288,6 @@ impl<'e, 'a> Relay<'e, 'a> {
     fn new(out: &'e mut Emitter<'a>) -> Self {
         Self {
             out,
-            open: None,
             result: None,
             state_changed: false,
         }
@@ -308,7 +305,7 @@ impl<'e, 'a> Relay<'e, 'a> {
             return self.chunk(event);
         }
         // A complete event after streamed chunks repeats their text.
-        let streamed = self.close_open()?;
+        let streamed = self.out.end_text()?;
         let text = event
             .content
             .as_ref()
@@ -320,27 +317,14 @@ impl<'e, 'a> Relay<'e, 'a> {
         };
         for call in event.function_calls() {
             let id = call.id.clone().unwrap_or_else(|| self.out.next_id());
-            self.out.emit(EventKind::ToolCallStart {
-                tool_call_id: id.clone(),
-                tool_call_name: call.name.clone(),
-                parent_message_id: message_id.clone(),
-            })?;
             let args = serde_json::Value::Object(call.args.clone()).to_string();
-            self.out.emit(EventKind::ToolCallArgs {
-                tool_call_id: id.clone(),
-                delta: args,
-            })?;
-            self.out.emit(EventKind::ToolCallEnd { tool_call_id: id })?;
+            self.out
+                .tool_call(&id, &call.name, &args, message_id.clone())?;
         }
         for response in event.function_responses() {
             let tool_call_id = response.id.clone().unwrap_or_else(|| self.out.next_id());
-            let message_id = self.out.next_id();
-            self.out.emit(EventKind::ToolCallResult {
-                message_id,
-                tool_call_id,
-                content: response.response.to_string(),
-                role: Some(Role::Tool),
-            })?;
+            self.out
+                .tool_result(&tool_call_id, response.response.to_string())?;
         }
         if let Some(request) = &event.request_input {
             let mut args = serde_json::Map::new();
@@ -352,16 +336,12 @@ impl<'e, 'a> Relay<'e, 'a> {
                 args.insert("payload".into(), payload.clone());
             }
             let id = request.interrupt_id.clone();
-            self.out.emit(EventKind::ToolCallStart {
-                tool_call_id: id.clone(),
-                tool_call_name: INPUT_TOOL.into(),
-                parent_message_id: None,
-            })?;
-            self.out.emit(EventKind::ToolCallArgs {
-                tool_call_id: id.clone(),
-                delta: serde_json::Value::Object(args).to_string(),
-            })?;
-            self.out.emit(EventKind::ToolCallEnd { tool_call_id: id })?;
+            self.out.tool_call(
+                &id,
+                INPUT_TOOL,
+                &serde_json::Value::Object(args).to_string(),
+                None,
+            )?;
         }
         if event
             .actions
@@ -389,34 +369,10 @@ impl<'e, 'a> Relay<'e, 'a> {
         if text.is_empty() {
             return Ok(());
         }
-        let message_id = match &self.open {
-            Some(id) => id.clone(),
-            None => {
-                let id = self.out.next_id();
-                self.out.emit(EventKind::TextMessageStart {
-                    message_id: id.clone(),
-                    role: Role::Assistant,
-                })?;
-                self.open = Some(id.clone());
-                id
-            }
-        };
-        self.out.emit(EventKind::TextMessageContent {
-            message_id,
-            delta: text,
-        })
-    }
-
-    /// Closes the streamed message, if one is open; says whether one was.
-    fn close_open(&mut self) -> Result<bool, Error> {
-        let Some(message_id) = self.open.take() else {
-            return Ok(false);
-        };
-        self.out.emit(EventKind::TextMessageEnd { message_id })?;
-        Ok(true)
+        self.out.text_delta(&text)
     }
 
     fn finish(&mut self) -> Result<(), Error> {
-        self.close_open().map(|_| ())
+        self.out.end_text().map(|_| ())
     }
 }

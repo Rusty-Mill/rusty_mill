@@ -222,6 +222,23 @@ pub fn decode_standard(data: &str) -> Result<Vec<u8>, DecodeError> {
 
 /// Encodes `data` using the URL-safe Base64 alphabet, without padding
 /// (`base64url` as used by PKCE, RFC 7636 §4.2, and JOSE, RFC 7515 App. C).
+/// Decodes standard-alphabet base64 the way PEM bodies and terminal escape
+/// payloads arrive: ASCII whitespace (line wrapping) is skipped anywhere, and
+/// the first `=` ends the data. Everything else is as strict as
+/// [`decode_standard`], including rejecting a character outside the alphabet.
+pub fn decode_standard_lenient(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    let mut payload = String::with_capacity(data.len());
+    for (index, &byte) in data.iter().enumerate() {
+        match byte {
+            b'=' => break,
+            b if b.is_ascii_whitespace() => {}
+            b if b.is_ascii() => payload.push(char::from(b)),
+            byte => return Err(DecodeError::InvalidCharacter { byte, index }),
+        }
+    }
+    decode_standard(&payload)
+}
+
 pub fn encode_url_safe_no_pad(data: &[u8]) -> String {
     encode_with(data, URL_SAFE_ALPHABET, Padding::Omit)
 }
@@ -238,6 +255,26 @@ pub fn decode_url_safe(data: &str) -> Result<Vec<u8>, DecodeError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lenient_decode_skips_whitespace_and_stops_at_padding() {
+        use super::decode_standard_lenient as lenient;
+        assert_eq!(lenient(b"TWFu").unwrap(), b"Man");
+        assert_eq!(lenient(b"TWE=").unwrap(), b"Ma");
+        assert_eq!(lenient(b"TQ==").unwrap(), b"M");
+        assert_eq!(lenient(b"TW\nFu ").unwrap(), b"Man");
+        assert_eq!(lenient(b"SGVs\r\nbG8=").unwrap(), b"Hello");
+        assert_eq!(lenient(b"SGVsbG8=trailing").unwrap(), b"Hello");
+        assert_eq!(lenient(b"").unwrap(), b"");
+    }
+
+    #[test]
+    fn lenient_decode_rejects_bytes_outside_the_alphabet() {
+        use super::decode_standard_lenient as lenient;
+        assert!(lenient(b"TW*u").is_err());
+        assert!(lenient(b"TW\xC3\xA9u").is_err());
+        assert!(lenient(b"@@@@").is_err());
+    }
+
     use super::*;
 
     #[test]
