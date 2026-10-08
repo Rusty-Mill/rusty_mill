@@ -794,6 +794,22 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   in play) leaves the same picture (45 degrees: 2.6 against 40.7 uu). (d) The rest
   roll is not the port's sleeping (the thresholds do not move it). So the order 0123
   is probably the game's, and something else makes the game's rest pose level.
+- **Symmetric orders tried (2026-10-08, scratch code, not kept)**: with the mirror
+  set (`wallgm_*`, O012) the damper order can be scored on both walls. Free-run
+  position error against the game, mean over 15 tapes per wall (`--scenario ...
+  --against ... --recorded-inputs`): the current order 0123 (read and applied in turn)
+  **17.2 uu on the right wall (the one it was tuned on) and 28.0 on the left**; Bullet's
+  order (every wheel reads before any impulse) 21.8 / 21.3; the average of the impulses
+  of order 0123 and its mirror 1032, symmetric by construction, 20.1 / 19.3. Over
+  both walls: 22.6, 21.5 and 19.7. But both symmetric forms break the golden gate:
+  Bullet's order fails 6 captures (`probe_wall_ride_45` 9.6 uu against a 0.7 bound,
+  `probe_boost_air_pitchup` 5.5 / 158 against 3.0 / 6.9, `jumpgap_H3_R4`,
+  `probe_air_roll`, `bumpo_900` (both cars) and `bumpv_moving_side`), the mirror average at least 8 (`probe_wall_ride_45`
+  4.1, `half_flip` 2.8 / 14.8, `bumpv_moving_side`, `bumps_1800`, `bumpd_side_2300`,
+  `probe_air_roll`, `jumpgap_H3_R4`, `probe_boost_air_pitchup` improves to 1.39 / 7.17
+  but is still over its max bound 6.9). So the sequential order carries a real one-sided
+  fit (all the golden wall and air captures are right-handed) that a symmetric form does
+  not yet reproduce, and the left wall shows the price: 28.0 against 17.2 uu.
 - **Next**: find what the sequential order stands in for (the damper
   reading after the drive impulses, FR-091; the first tick after a state
   set; the wall's normal on the wheels) and then read in Bullet's order.
