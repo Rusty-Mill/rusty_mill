@@ -7,6 +7,13 @@ all-features = true
 [advisories]
 version = 2
 yanked = "warn"
+# Unmaintained: only crates a workspace member depends on directly. Transitive
+# ones are visible in `cargo deny check` output but do not fail the gate.
+unmaintained = "workspace"
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing attack, no patched release exists (patched = []). Reached via jsonwebtoken for JWT RS* verification; re-check on every rsa release." },
+    { id = "RUSTSEC-2023-0018", reason = "remove_dir_all 0.5 via tempdir <- mmap <- perfcnt <- criterion-perf-events: optional Linux-only `perf-events` benchmark feature of rusty_multimodal_db, never in a shipped binary." },
+]
 
 [licenses]
 version = 2
