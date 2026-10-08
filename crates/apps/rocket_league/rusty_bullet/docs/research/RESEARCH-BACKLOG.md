@@ -828,6 +828,17 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   (`RB_FORCE_ALIGN=0,0`): the scorer's whole-run pick of input offset 1 (mean 25.4 against 29.7) is a tick early
   for the throttle onset, so alignment choice by whole-run error is itself a little noisy on tapes with a late event.
 
+- **Low-speed slides on walls and ramps (2026-10-08, `regime_bias.py` with `SURFACE=1`, 120 fuzz and wall
+  tapes)**: split by surface, the one-step bias is the resting 0.2 uu/s per tick on every wall and ramp row, plus
+  one real regime: a car under 25 uu/s forward with the throttle released on a wall or a steep ramp (normal z
+  under 0.6; 284 wall ticks, 160 ramp ticks, mostly `fuzz_501` t 7.0 to 7.8 and `fuzz_712`). The game slides down
+  faster than the port holds it: -1.6 uu/s per tick forward error with the nose up the wall, -2.1 on a steep
+  ramp, but +0.35 nose down. The stopping brake (full `BRAKE_DECELERATION` under `STOPPING_FORWARD_SPEED`)
+  scales with the non-sticky grip curve; raising that curve's exponent to 2 fixes the nose-up wall (+0.55) and
+  breaks the nose-down one (-2.1), so it is not one grip curve. Unexplained, rare (cars at rest on a wall), not
+  changed. Elsewhere: touchdowns (195 landings) median one-step error 0.2 to 0.7 uu/s over four ticks, spin bias
+  under 0.02 rad/s per tick in every regime.
+
 ### RB-RESEARCH-O018 — Car bumps and demolitions
 
 - **Evidence (2026-10-07)**: 18 two-car recordings (hivemind bot, teammates).

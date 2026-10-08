@@ -10,7 +10,8 @@ boost, handbrake, steer size. For each group it prints the tick count and the me
 tick on each axis (forward, left, up) and a bias score, ticks x |mean|, which is the velocity
 the port drifts by over the batch in that regime: a large score with a steady direction is a
 missing or wrong force, a small mean with a big spread is noise. `SPIN=1` ranks and prints the
-angular velocity error (rad/s per tick) instead; `TOP=n` lists n regimes.
+angular velocity error (rad/s per tick) instead; `TOP=n` lists n regimes; `SURFACE=1` splits
+them by the first touching wheel's surface (floor, ramp, wall, ceiling).
 """
 import collections
 import json
@@ -44,8 +45,21 @@ def rotate_inverse(q: dict, v: tuple) -> tuple:
     )
 
 
-def regime(throttle: float, steer: float, flags: str, touching: int) -> tuple:
+NORMAL = re.compile(r"n\((-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\)")
+
+
+def surface(line: str) -> str:
+    """The class of the first touching wheel's surface: floor, ramp, wall, ceiling."""
+    m = NORMAL.search(line)
+    if not m:
+        return "air"
+    z = float(m.group(3))
+    return "floor" if z > 0.9 else "ramp" if z > 0.3 else "wall" if z > -0.3 else "ceiling"
+
+
+def regime(throttle: float, steer: float, flags: str, touching: int, where: str) -> tuple:
     return (
+        where if os.environ.get("SURFACE") else "",
         f"{touching}w",
         "thr" + ("+" if throttle > 0.3 else "-" if throttle < -0.3 else "0"),
         "boost" if "B" in flags else "-",
@@ -79,7 +93,7 @@ def main() -> int:
                 touching = sum(1 for _, kind in WHEELS.findall(line) if kind == "n(")
                 err = rotate_inverse(q, (float(m.group(8)), float(m.group(9)), float(m.group(10))))
                 spin = rotate_inverse(q, (float(m.group(12)), float(m.group(13)), float(m.group(14))))
-                groups[regime(float(m.group(2)), float(m.group(3)), m.group(7), touching)].append(err + spin)
+                groups[regime(float(m.group(2)), float(m.group(3)), m.group(7), touching, surface(line))].append(err + spin)
     rows = []
     for key, errs in groups.items():
         n = len(errs)
