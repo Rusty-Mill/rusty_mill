@@ -85,9 +85,9 @@ section "constant-time checks (taint, disassembly budget, planted-leak controls)
 # checks run on every toolchain named here; the default includes the version CI builds with
 # (RUST_TOOLCHAIN in .github/workflows/ci.yml) as well as the local default.
 CI_TC=$(sed -n 's/^  RUST_TOOLCHAIN: "\(.*\)"/\1/p' .github/workflows/ci.yml | head -1)
-CT_TOOLCHAINS=${CT_TOOLCHAINS:-"$CI_TC $(rustc -V | cut -d' ' -f2)"}
+CT_TOOLCHAINS=${CT_TOOLCHAINS:-"$CI_TC stable"}
 for tc in $(echo $CT_TOOLCHAINS | tr ' ' '\n' | sort -u); do
-  if ! rustup toolchain list | grep -q "^$tc"; then echo "toolchain $tc: NOT INSTALLED"; fail "toolchain $tc missing"; continue; fi
+  if ! RUSTUP_TOOLCHAIN=$tc rustc -V >/dev/null 2>&1; then echo "toolchain $tc: NOT INSTALLED"; fail "toolchain $tc missing"; continue; fi
   echo "-- toolchain $tc ($(RUSTUP_TOOLCHAIN=$tc rustc -V))"
   for c in rusty_ct_check rusty_sha2 rusty_aead rusty_pk; do
     sc=crates/foundation/$c/scripts/valgrind_selftest.sh; [ "$c" = rusty_ct_check ] || sc=crates/foundation/$c/scripts/ct_check.sh
