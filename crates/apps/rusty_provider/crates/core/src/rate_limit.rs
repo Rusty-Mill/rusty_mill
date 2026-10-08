@@ -195,15 +195,17 @@ mod tests {
     #[test]
     fn refills_over_time() {
         let limiter = RateLimiter::new();
-        // 6000 requests/minute = 100 tokens/sec, so a short sleep refills
-        // meaningfully without slowing the test suite down.
-        for _ in 0..6000 {
-            limiter.check("fast", 6000).unwrap();
+        // 600 requests/minute = 10 tokens/sec. Draining the bucket takes a few
+        // ms, which refills a small fraction of a token even on a loaded CI
+        // shard (a 6000/min bucket refilled a whole token mid-drain there and
+        // made the `is_err` below flaky), while the 150 ms sleep refills 1.5.
+        for _ in 0..600 {
+            limiter.check("fast", 600).unwrap();
         }
-        assert!(limiter.check("fast", 6000).is_err());
+        assert!(limiter.check("fast", 600).is_err());
 
-        sleep(Duration::from_millis(50));
-        assert!(limiter.check("fast", 6000).is_ok());
+        sleep(Duration::from_millis(150));
+        assert!(limiter.check("fast", 600).is_ok());
     }
 
     #[test]
