@@ -147,8 +147,9 @@ plugin already sees the game state. Do after A to C, since they matter less
 to a bot environment than to a full match.
 
 **Started 2026-10-08** (FR-160, ADR-0082, O024): goal line, GoalScored/Replay/Countdown/Kickoff phases,
-kickoff reset and held ball, measured with `rb_match_log` on a real match. Open: clock and overtime, the
-first kickoff's intro, random slot choice, the net after a goal.
+kickoff reset and held ball, measured with `rb_match_log` on a real match. Clock, overtime, match end and the
+first-kickoff intro followed the same day. Open: the random slot choice; the net after a goal cannot be
+observed (the packets drop the ball).
 
 ### F. Measure the game's own spread (done 2026-10-07)
 

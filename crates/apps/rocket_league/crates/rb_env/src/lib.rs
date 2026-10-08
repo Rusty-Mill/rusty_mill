@@ -31,6 +31,8 @@ pub struct Env {
     flow: Option<Flow>,
     /// The spawn slots (0 to 4) of the next kickoff, car by car, if given.
     kickoff_slots: Option<Vec<usize>>,
+    /// Ticks of play in a match, if it has a clock.
+    match_ticks: Option<i64>,
     /// Kickoffs started so far, which rotates the default slots.
     kickoffs: usize,
 }
@@ -50,6 +52,7 @@ impl Env {
             boost_pads: true,
             flow: None,
             kickoff_slots: None,
+            match_ticks: None,
             kickoffs: 0,
         }
     }
@@ -98,7 +101,7 @@ impl Env {
             self.world.set_car_team(index, *team);
         }
         if self.flow.is_some() {
-            self.flow = Some(Flow::new(Phase::Active));
+            self.flow = Some(self.new_flow(Phase::Active));
         }
         self.world.frame()
     }
@@ -109,7 +112,34 @@ impl Env {
     /// then `kickoff`s: cars at their spawn slots with inputs ignored for four seconds, the ball
     /// held on the centre spot until the first touch.
     pub fn enable_match_flow(&mut self, on: bool) {
-        self.flow = on.then(|| Flow::new(Phase::Active));
+        self.flow = on.then(|| self.new_flow(Phase::Active));
+    }
+
+    fn new_flow(&self, phase: Phase) -> Flow {
+        let flow = Flow::new(phase);
+        match self.match_ticks {
+            Some(ticks) => flow.with_clock(ticks),
+            None => flow,
+        }
+    }
+
+    /// Gives matches a clock of `ticks` of play (`flow::FIVE_MINUTES` for the standard five
+    /// minutes), counted down while the ball is in play, for every later `reset` or
+    /// `enable_match_flow`; `None` (the default) is an unlimited match. At zero play goes on until
+    /// the ball is low, then a lead ends the match and a tie starts overtime.
+    pub fn set_match_length(&mut self, ticks: Option<i64>) {
+        self.match_ticks = ticks;
+    }
+
+    /// Starts a match from its first kickoff: like `start_kickoff`, but with the intro that makes
+    /// the first countdown 826 ticks.
+    pub fn start_match(&mut self) -> PhysicsFrame {
+        self.flow = Some(
+            self.new_flow(Phase::Countdown)
+                .with_countdown(flow::FIRST_COUNTDOWN_TICKS),
+        );
+        self.kickoffs = 0;
+        self.place_kickoff()
     }
 
     /// The match phase, ticks in it and the score, if match flow is on.
@@ -126,16 +156,20 @@ impl Env {
     /// Starts a kickoff now (match flow on): places the cars and the ball and begins the
     /// countdown. Returns the first observation.
     pub fn start_kickoff(&mut self) -> PhysicsFrame {
+        self.flow = Some(match self.flow {
+            Some(flow) => flow.restarted(Phase::Countdown),
+            None => self.new_flow(Phase::Countdown),
+        });
+        self.place_kickoff()
+    }
+
+    fn place_kickoff(&mut self) -> PhysicsFrame {
         let slots = self
             .kickoff_slots
             .take()
             .unwrap_or_else(|| self.default_slots());
         self.kickoffs += 1;
         self.world.kickoff(&slots);
-        self.flow = Some(match self.flow {
-            Some(flow) => flow.restarted(Phase::Countdown),
-            None => Flow::new(Phase::Countdown),
-        });
         self.world.frame()
     }
 
@@ -162,7 +196,10 @@ impl Env {
         let frame = self.world.frame();
         let transition = flow.after_step(frame.ball.position, frame.ball.velocity);
         self.flow = Some(flow);
-        if transition == Transition::CountdownStarted {
+        if matches!(
+            transition,
+            Transition::CountdownStarted | Transition::OvertimeStarted
+        ) {
             self.start_kickoff();
             return;
         }
@@ -217,7 +254,7 @@ impl Env {
     /// the frame.
     pub fn step(&mut self, inputs: &[ControllerInput]) -> PhysicsFrame {
         let phase = self.flow.map(|flow| flow.state().phase);
-        if phase == Some(Phase::Replay) {
+        if matches!(phase, Some(Phase::Replay | Phase::Ended)) {
             // The replay shows the goal again: the clock runs, the world does not.
             self.advance_flow();
             return self.world.frame();
@@ -551,5 +588,37 @@ mod tests {
             rb_physics_bullet::respawn::KICKOFF_BALL_REST_HEIGHT
         );
         assert_eq!(frames[39].ball.velocity, Vec3::ZERO);
+    }
+
+    /// A match from its first kickoff has the 826-tick intro countdown and a clock that starts
+    /// when the ball is first touched.
+    #[test]
+    fn a_match_starts_with_the_long_countdown_and_a_clock_that_waits_for_play() {
+        let mut env = Env::new();
+        env.enable_match_flow(true);
+        env.set_match_length(Some(flow::FIVE_MINUTES));
+        env.reset(&start());
+        env.set_kickoff_slots(Some(vec![4]));
+        env.start_match();
+        for _ in 0..flow::FIRST_COUNTDOWN_TICKS - 1 {
+            env.step(&idle());
+        }
+        assert_eq!(env.match_state().map(|m| m.phase), Some(Phase::Countdown));
+        env.step(&idle());
+        let state = env.match_state().unwrap();
+        assert_eq!(state.phase, Phase::Kickoff);
+        assert_eq!(state.seconds_remaining(), Some(300.0));
+        // Play starts the clock.
+        for _ in 0..600 {
+            env.step(&[throttle()]);
+            if env.match_state().map(|m| m.phase) == Some(Phase::Active) {
+                break;
+            }
+        }
+        env.step(&[throttle()]);
+        assert!(env
+            .match_state()
+            .and_then(|m| m.seconds_remaining())
+            .is_some_and(|s| s < 300.0));
     }
 }

@@ -25,5 +25,8 @@ bot per team and logged every packet (phase, score, clock, ball, cars, pad count
 ## Consequences
 
 - A policy or a script can play whole points: score, replay, countdown, restart.
-- Not covered: the match clock and overtime, the first kickoff's intro, the teams' drop-height stagger.
+- The clock, overtime, the match end and the first kickoff's 826-tick intro are in `Flow` too (a clock
+  is opt-in: `Env::set_match_length`).
+- Not covered: the teams' drop-height stagger, the end test on the curve (a ball height of 97.5 stands for
+  "on the ground"), a goal in the same tick as the clock reaching zero.
 - The probe needs the game up as the tape runner does; its logs are not committed.
