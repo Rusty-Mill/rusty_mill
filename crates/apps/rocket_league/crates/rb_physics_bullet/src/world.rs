@@ -122,7 +122,7 @@ const BUMP_MIN_FORWARD_DIST: f32 = 64.5;
 /// gives no bump (`RB-PHYSICS-001-FR-152`): the flipping car of `bumpf_flip` hit with its
 /// nose straight down (-85 to -77 degrees), while a car thrown up by a bump and hitting a
 /// third is level (-2 to -7); the threshold between them is an assumption.
-const BUMP_MAX_FORWARD_Z: f32 = 0.707_106_8;
+const BUMP_MAX_FORWARD_Z: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// `BUMP_COOLDOWN_TIME`, 0.25 s in 120 Hz ticks: one bump per pair of cars.
 const BUMP_COOLDOWN_TICKS: u64 = 30;
 /// `BUMP_VEL_AMOUNT_GROUND_CURVE`: (bumper speed, extra speed given to the
