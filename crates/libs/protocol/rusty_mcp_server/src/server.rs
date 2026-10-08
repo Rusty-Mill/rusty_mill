@@ -3,8 +3,11 @@
 //! [`Server::builder`], share it between connections with an `Arc`.
 
 use crate::connection::CallContext;
+use crate::uri_template::{TemplateError, UriTemplate, UriVars};
 use rusty_mcp_proto::{
-    CallToolParams, CallToolResult, ErrorData, Implementation, ProtocolVersion, Tool,
+    CallToolParams, CallToolResult, CompleteParams, CompletionInfo, ErrorData, GetPromptParams,
+    GetPromptResult, Implementation, Prompt, ProtocolVersion, ReadResourceParams,
+    ReadResourceResult, Resource, ResourceTemplate, Tool,
 };
 use std::fmt;
 
@@ -16,7 +19,31 @@ use std::fmt;
 pub type ToolHandler =
     dyn Fn(&CallContext, CallToolParams) -> Result<CallToolResult, ErrorData> + Send + Sync;
 
-/// Entries per `tools/list` page unless [`ServerBuilder::page_size`] says
+/// A prompt's implementation: the arguments are already checked against the
+/// prompt's declared required ones.
+pub type PromptHandler =
+    dyn Fn(&CallContext, GetPromptParams) -> Result<GetPromptResult, ErrorData> + Send + Sync;
+
+/// A resource's implementation, called for exactly its URI.
+pub type ResourceHandler =
+    dyn Fn(&CallContext, ReadResourceParams) -> Result<ReadResourceResult, ErrorData> + Send + Sync;
+
+/// A resource template's implementation, called for any URI the template
+/// matches, with the variables it matched.
+pub type TemplateHandler = dyn Fn(&CallContext, &UriVars, ReadResourceParams) -> Result<ReadResourceResult, ErrorData>
+    + Send
+    + Sync;
+
+/// Argument completion for every prompt and resource template. The reference
+/// is already checked to name a registered prompt (and one of its arguments)
+/// or a registered template; at most 100 values are sent.
+pub type CompletionHandler =
+    dyn Fn(&CallContext, CompleteParams) -> Result<CompletionInfo, ErrorData> + Send + Sync;
+
+/// The most completion values a response carries, per the spec.
+pub(crate) const MAX_COMPLETION_VALUES: usize = 100;
+
+/// Entries per list page unless [`ServerBuilder::page_size`] says
 /// otherwise.
 pub const DEFAULT_PAGE_SIZE: usize = 100;
 
@@ -39,11 +66,35 @@ pub(crate) struct RegisteredTool {
     pub(crate) handler: Box<ToolHandler>,
 }
 
+pub(crate) struct RegisteredPrompt {
+    pub(crate) prompt: Prompt,
+    pub(crate) handler: Box<PromptHandler>,
+}
+
+pub(crate) struct RegisteredResource {
+    pub(crate) resource: Resource,
+    pub(crate) handler: Box<ResourceHandler>,
+}
+
+pub(crate) struct RegisteredTemplate {
+    pub(crate) template: ResourceTemplate,
+    pub(crate) matcher: UriTemplate,
+    pub(crate) handler: Box<TemplateHandler>,
+}
+
 /// Why [`ServerBuilder::build`] refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuildError {
     /// Two tools share a name.
     DuplicateTool(String),
+    /// Two prompts share a name.
+    DuplicatePrompt(String),
+    /// Two resources share a URI.
+    DuplicateResource(String),
+    /// Two resource templates share a URI template.
+    DuplicateTemplate(String),
+    /// A resource template this crate cannot match.
+    BadTemplate(TemplateError),
     /// A page size or in-flight limit of zero would serve nothing.
     ZeroLimit(&'static str),
     /// No protocol revision to speak.
@@ -54,6 +105,10 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BuildError::DuplicateTool(name) => write!(f, "tool {name:?} is registered twice"),
+            BuildError::DuplicatePrompt(name) => write!(f, "prompt {name:?} is registered twice"),
+            BuildError::DuplicateResource(uri) => write!(f, "resource {uri:?} is registered twice"),
+            BuildError::DuplicateTemplate(t) => write!(f, "template {t:?} is registered twice"),
+            BuildError::BadTemplate(e) => write!(f, "{e}"),
             BuildError::ZeroLimit(what) => write!(f, "{what} must be at least 1"),
             BuildError::NoVersions => f.write_str("a server needs at least one protocol version"),
         }
@@ -68,6 +123,10 @@ pub struct Server {
     pub(crate) instructions: Option<String>,
     pub(crate) versions: Vec<ProtocolVersion>,
     pub(crate) tools: Vec<RegisteredTool>,
+    pub(crate) prompts: Vec<RegisteredPrompt>,
+    pub(crate) resources: Vec<RegisteredResource>,
+    pub(crate) templates: Vec<RegisteredTemplate>,
+    pub(crate) completer: Option<Box<CompletionHandler>>,
     pub(crate) page_size: usize,
     pub(crate) max_in_flight: usize,
 }
@@ -83,6 +142,11 @@ impl Server {
                 .map(|v| ProtocolVersion::new(*v))
                 .collect(),
             tools: Vec::new(),
+            prompts: Vec::new(),
+            resources: Vec::new(),
+            templates: Vec::new(),
+            completer: None,
+            deferred: Vec::new(),
             page_size: DEFAULT_PAGE_SIZE,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
         }
@@ -109,6 +173,12 @@ pub struct ServerBuilder {
     instructions: Option<String>,
     versions: Vec<ProtocolVersion>,
     tools: Vec<RegisteredTool>,
+    prompts: Vec<RegisteredPrompt>,
+    resources: Vec<RegisteredResource>,
+    templates: Vec<RegisteredTemplate>,
+    completer: Option<Box<CompletionHandler>>,
+    /// Registration mistakes, reported by [`ServerBuilder::build`].
+    deferred: Vec<BuildError>,
     page_size: usize,
     max_in_flight: usize,
 }
@@ -162,11 +232,88 @@ impl ServerBuilder {
         self
     }
 
+    /// Offer `prompt`, answered by `handler`. A call missing an argument the
+    /// prompt declares `required` is refused before the handler runs.
+    #[must_use]
+    pub fn prompt(
+        mut self,
+        prompt: Prompt,
+        handler: impl Fn(&CallContext, GetPromptParams) -> Result<GetPromptResult, ErrorData>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.prompts.push(RegisteredPrompt {
+            prompt,
+            handler: Box::new(handler),
+        });
+        self
+    }
+
+    /// Offer `resource` at its URI, read by `handler`.
+    #[must_use]
+    pub fn resource(
+        mut self,
+        resource: Resource,
+        handler: impl Fn(&CallContext, ReadResourceParams) -> Result<ReadResourceResult, ErrorData>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.resources.push(RegisteredResource {
+            resource,
+            handler: Box::new(handler),
+        });
+        self
+    }
+
+    /// Offer resources by URI template (`{name}` for a path segment,
+    /// `{+name}` for anything), read by `handler` with the variables the URI
+    /// matched. A URI that is also a registered [`resource`](Self::resource)
+    /// goes to that resource; among templates, the first registered wins.
+    #[must_use]
+    pub fn resource_template(
+        mut self,
+        template: ResourceTemplate,
+        handler: impl Fn(&CallContext, &UriVars, ReadResourceParams) -> Result<ReadResourceResult, ErrorData>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        match UriTemplate::compile(&template.uri_template) {
+            Ok(matcher) => self.templates.push(RegisteredTemplate {
+                template,
+                matcher,
+                handler: Box::new(handler),
+            }),
+            Err(e) => self.deferred.push(BuildError::BadTemplate(e)),
+        }
+        self
+    }
+
+    /// Complete the arguments of prompts and the variables of templates. The
+    /// server advertises the `completions` capability only when this is set.
+    #[must_use]
+    pub fn completer(
+        mut self,
+        handler: impl Fn(&CallContext, CompleteParams) -> Result<CompletionInfo, ErrorData>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.completer = Some(Box::new(handler));
+        self
+    }
+
     /// Finish.
     ///
     /// # Errors
-    /// [`BuildError`] for a duplicate tool name, a zero limit or no versions.
+    /// [`BuildError`] for a duplicate name, URI or template, a template that
+    /// cannot be matched, a zero limit or no versions.
     pub fn build(self) -> Result<Server, BuildError> {
+        if let Some(e) = self.deferred.into_iter().next() {
+            return Err(e);
+        }
         if self.versions.is_empty() {
             return Err(BuildError::NoVersions);
         }
@@ -181,13 +328,42 @@ impl ServerBuilder {
                 return Err(BuildError::DuplicateTool(t.tool.name.clone()));
             }
         }
+        if let Some(d) = first_duplicate(self.prompts.iter().map(|p| p.prompt.name.as_str())) {
+            return Err(BuildError::DuplicatePrompt(d.to_owned()));
+        }
+        if let Some(d) = first_duplicate(self.resources.iter().map(|r| r.resource.uri.as_str())) {
+            return Err(BuildError::DuplicateResource(d.to_owned()));
+        }
+        if let Some(d) = first_duplicate(
+            self.templates
+                .iter()
+                .map(|t| t.template.uri_template.as_str()),
+        ) {
+            return Err(BuildError::DuplicateTemplate(d.to_owned()));
+        }
         Ok(Server {
             info: self.info,
             instructions: self.instructions,
             versions: self.versions,
             tools: self.tools,
+            prompts: self.prompts,
+            resources: self.resources,
+            templates: self.templates,
+            completer: self.completer,
             page_size: self.page_size,
             max_in_flight: self.max_in_flight,
         })
     }
+}
+
+/// The first item that appears twice.
+fn first_duplicate<'a>(items: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut seen: Vec<&str> = Vec::new();
+    for item in items {
+        if seen.contains(&item) {
+            return Some(item);
+        }
+        seen.push(item);
+    }
+    None
 }

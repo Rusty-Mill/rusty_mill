@@ -9,12 +9,18 @@ use rusty_base64::{decode_url_safe, encode_url_safe_no_pad};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Tools,
+    Prompts,
+    Resources,
+    Templates,
 }
 
 impl Kind {
     fn tag(self) -> &'static str {
         match self {
             Kind::Tools => "tools",
+            Kind::Prompts => "prompts",
+            Kind::Resources => "resources",
+            Kind::Templates => "templates",
         }
     }
 }
@@ -36,7 +42,25 @@ pub(crate) fn decode(kind: Kind, cursor: &str, len: usize) -> Option<usize> {
     (offset <= len).then_some(offset)
 }
 
+/// The slice of a list of `len` entries a request asks for: `start..end`
+/// and the cursor for the entry after it, or `None` for a cursor that is not
+/// one of ours for `kind`.
+pub(crate) fn window(
+    kind: Kind,
+    cursor: Option<&str>,
+    len: usize,
+    size: usize,
+) -> Option<(usize, usize, Option<String>)> {
+    let start = match cursor {
+        None => 0,
+        Some(c) => decode(kind, c, len)?,
+    };
+    let end = (start + size).min(len);
+    Some((start, end, (end < len).then(|| encode(kind, end))))
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -46,6 +70,27 @@ mod tests {
             let c = encode(Kind::Tools, offset);
             assert_eq!(decode(Kind::Tools, &c, 20000), Some(offset));
         }
+    }
+
+    #[test]
+    fn a_window_walks_a_list_in_pages() {
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let (start, end, next) = window(Kind::Prompts, cursor.as_deref(), 5, 2).unwrap();
+            seen.push(start..end);
+            match next {
+                Some(n) => cursor = Some(n),
+                None => break,
+            }
+        }
+        assert_eq!(seen, [0..2, 2..4, 4..5]);
+        assert_eq!(
+            window(Kind::Prompts, None, 0, 2),
+            Some((0, 0, None)),
+            "an empty list"
+        );
+        assert!(window(Kind::Resources, Some(&encode(Kind::Prompts, 1)), 5, 2).is_none());
     }
 
     #[test]

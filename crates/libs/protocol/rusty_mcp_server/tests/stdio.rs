@@ -4,36 +4,15 @@
 
 use rusty_json::Value;
 use rusty_mcp_proto::{CallToolResult, ContentBlock, ErrorCode, ErrorData, ProtocolVersion, Tool};
+mod support;
+
 use rusty_mcp_server::{serve_lines, BuildError, Server, StdioConfig};
 use std::io::{self, BufReader, Cursor, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-#[derive(Clone, Default)]
-struct Out(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Out {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Out {
-    fn messages(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap().clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|l| Value::from_json_str(l).unwrap_or_else(|e| panic!("{l}: {e}")))
-            .collect()
-    }
-}
+use support::{code, reply, result, run_with, Out};
 
 /// A reader fed from a channel, so a test can send a line after the server
 /// has started working on an earlier one.
@@ -120,40 +99,8 @@ fn server(flags: &Flags) -> Arc<Server> {
     )
 }
 
-fn run_with(server: Arc<Server>, input: &str) -> Vec<Value> {
-    let out = Out::default();
-    serve_lines(
-        server,
-        Cursor::new(input.as_bytes().to_vec()),
-        out.clone(),
-        StdioConfig::default(),
-    )
-    .unwrap();
-    out.messages()
-}
-
 fn run(input: &str) -> Vec<Value> {
     run_with(server(&Flags::default()), input)
-}
-
-fn reply(out: &[Value], id: i64) -> &Value {
-    out.iter()
-        .find(|m| m.get("id").and_then(Value::as_i64) == Some(id))
-        .unwrap_or_else(|| panic!("no reply to {id} in {out:?}"))
-}
-
-fn code(m: &Value) -> i32 {
-    let c = m
-        .get("error")
-        .and_then(|e| e.get("code"))
-        .and_then(Value::as_i64)
-        .expect("an error");
-    i32::try_from(c).expect("a 32-bit code")
-}
-
-fn result(m: &Value) -> &Value {
-    m.get("result")
-        .unwrap_or_else(|| panic!("not a result: {m:?}"))
 }
 
 fn first_text(m: &Value) -> &str {

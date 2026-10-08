@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_server prompts, resources, completion (pending review)
+
+- **Added:** prompts, resources (exact and templated) and completion on `rusty_mcp_server`, verified against the `rmcp` client over stdio and HTTP in both handshake modes. 49 tests with the `http` feature.
+- **Known limitations:** no resource subscriptions (`resources/subscribe`, `subscriptions/listen`), no tasks, no multi-round-trip input; resource templates support only `{name}` and `{+name}`; template variables are not percent-decoded; the 100-value completion cap and the page size are the only limits on those lists. `rusty-mcp-demo`, `agentgateway` and `remind_me_remote` still use `rmcp` and were not run against this server.
+
+---
+
 ## 2026-10-08 - rk-app MCP server on rusty_mcp_server (pending review)
 
 - **Changed:** `rusty-keys --mcp` (feature `mcp-server`) now serves through `rusty_mcp_server` instead of `rmcp` and `rusty-mcp`. Verified offline with a scripted fake model: a `chat` call runs a full turn through the real registry, policy, verifier and evidence journal; all 17 unit and the other `rk-app` test suites still pass, clippy is clean with and without the feature.

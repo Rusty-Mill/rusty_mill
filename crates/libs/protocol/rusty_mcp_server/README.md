@@ -23,7 +23,7 @@ serve_stdio(Arc::new(server))?;
 
 | Piece | What it does |
 |---|---|
-| `Server` / `ServerBuilder` | Immutable description: identity, instructions, protocol revisions, tools, page size, in-flight limit. Duplicate tool names and zero limits are refused at `build`. |
+| `Server` / `ServerBuilder` | Immutable description: identity, instructions, protocol revisions, page size, in-flight limit, and what it offers: `.tool(..)`, `.prompt(..)`, `.resource(..)`, `.resource_template(..)`, `.completer(..)`. Duplicate names, URIs or templates, a template that cannot be matched, and zero limits are refused at `build`. |
 | `Connection` | One client's conversation, no I/O. `start(message)` answers `initialize`, `server/discover` and `ping` at once, handles `notifications/cancelled`, and hands any other request back as a `Job` to `run` on any thread. |
 | `CallContext` | What a tool sees: request id, protocol revision, client info and capabilities, `_meta` (trace context in `meta().extra`), `is_cancelled()`, `progress(..)`. |
 | `serve_stdio` / `serve_lines` | Newline-delimited JSON; each request runs on its own thread so a cancellation can reach a running tool; an over-long line is refused and skipped. At end of input running requests get `StdioConfig::drain_timeout` (10 s) to finish, then are cancelled, and a tool that still ignores the flag is abandoned after half a second, so the server can always exit. |
@@ -34,6 +34,22 @@ Both protocol generations are served from the same handlers: a classic client
 sends `initialize` and its revision is remembered per connection; a stateless
 client names its revision in every request's `_meta` and needs no handshake.
 Stateless `tools/list` answers carry `ttlMs` and `cacheScope`.
+
+Prompts, resources and completion work the same way as tools, and the server
+does the generic part for you:
+
+- Lists page with opaque, list-tagged cursors (a prompts cursor is refused by
+  `resources/list`) and carry `ttlMs`/`cacheScope` on 2026-07-28.
+- `prompts/get` refuses a call missing an argument the prompt declares required.
+- `resources/read` tries the exact URI first, then templates in registration
+  order, and answers `-32002` with the URI in `data` when nothing matches.
+  Templates support `{name}` (one path segment) and `{+name}` (anything, with
+  slashes); the handler receives the matched variables, still percent-encoded.
+  Any other operator is refused at `build` rather than half-supported.
+- `completion/complete` checks the reference names a registered prompt argument
+  or template, and sends at most 100 values (`total` and `hasMore` say so).
+- A method for a feature the server does not register is `-32601`, and its
+  capability is not advertised.
 
 Behaviour worth knowing:
 
@@ -48,8 +64,9 @@ Behaviour worth knowing:
 
 Tested against an independent client: `tests/interop.rs` spawns the example
 server as a child process and drives it with the `rmcp` client over real stdio,
-in both handshake modes (list with pagination and cache hints, calls, tool
-failures, malformed calls, progress, cancellation). `rmcp` is a dev-dependency
+in both handshake modes (tools, prompts, resources and templates with
+pagination, completion, errors, progress, cancellation; both transports share
+one fixture and one scenario). `rmcp` is a dev-dependency
 only.
 
 ## Streamable HTTP
@@ -84,7 +101,7 @@ header works without sessions.
 Tested with raw sockets (`tests/http.rs`) and against the `rmcp` HTTP client in
 both handshake modes (`tests/http_interop.rs`).
 
-Not here yet: prompts, resources, completion, subscriptions, tasks and
-multi-round-trip input on the server side, authentication (the existing
+Not here yet: subscriptions, tasks and multi-round-trip input on the server
+side (and so `resultType: input_required`), authentication (the existing
 `rusty-mcp` has OAuth, limits and telemetry that are not ported), and
 sessions or stream resumption.

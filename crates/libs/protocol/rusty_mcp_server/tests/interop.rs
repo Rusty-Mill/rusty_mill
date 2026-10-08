@@ -14,30 +14,30 @@ use rmcp::{ClientServiceExt, ServiceExt};
 use std::path::PathBuf;
 use tokio::process::Command;
 
-/// The example server, built on demand: `cargo test --test interop` alone
-/// does not build examples, a plain `cargo test` does.
+/// The example server, rebuilt if it is stale: a binary left over from an
+/// older source would test the wrong server. `cargo build` is a no-op when
+/// the example is current, and `cargo test --test interop` alone does not
+/// build examples at all.
 fn server_binary() -> PathBuf {
     // target/<profile>/deps/interop-<hash> -> target/<profile>/examples/interop_server
     let exe = std::env::current_exe().unwrap();
     let profile_dir = exe.parent().unwrap().parent().unwrap();
+    let mut build = std::process::Command::new(env!("CARGO"));
+    build.args([
+        "build",
+        "--example",
+        "interop_server",
+        "-p",
+        "rusty_mcp_server",
+    ]);
+    if profile_dir.file_name().is_some_and(|n| n == "release") {
+        build.arg("--release");
+    }
+    let status = build.status().unwrap();
+    assert!(status.success(), "building the example server failed");
     let bin = profile_dir
         .join("examples")
         .join(format!("interop_server{}", std::env::consts::EXE_SUFFIX));
-    if !bin.exists() {
-        let mut build = std::process::Command::new(env!("CARGO"));
-        build.args([
-            "build",
-            "--example",
-            "interop_server",
-            "-p",
-            "rusty_mcp_server",
-        ]);
-        if profile_dir.file_name().is_some_and(|n| n == "release") {
-            build.arg("--release");
-        }
-        let status = build.status().unwrap();
-        assert!(status.success(), "building the example server failed");
-    }
     assert!(bin.exists(), "{} missing after the build", bin.display());
     bin
 }

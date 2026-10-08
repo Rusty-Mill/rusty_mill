@@ -42,9 +42,11 @@
 pub mod connection;
 #[cfg(feature = "http")]
 pub mod http;
+mod methods;
 mod page;
 pub mod server;
 pub mod stdio;
+mod uri_template;
 
 /// The JSON value type the protocol types are built on, re-exported so a
 /// consumer of this crate needs no dependency of its own for it.
@@ -56,7 +58,11 @@ pub use rusty_mcp_proto as proto;
 pub use connection::{CallContext, CancelToken, Connection, Job, Notifier, Started};
 #[cfg(feature = "http")]
 pub use http::{bind_http, HttpConfig, HttpHandler};
-pub use server::{BuildError, Server, ServerBuilder, ToolHandler};
+pub use server::{
+    BuildError, CompletionHandler, PromptHandler, ResourceHandler, Server, ServerBuilder,
+    TemplateHandler, ToolHandler,
+};
 pub use stdio::{
     serve_lines, serve_stdio, StdioConfig, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_LINE_BYTES,
 };
+pub use uri_template::{TemplateError, UriVars};

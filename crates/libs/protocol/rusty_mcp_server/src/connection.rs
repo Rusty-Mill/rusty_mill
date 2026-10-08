@@ -9,17 +9,16 @@
 //! connection; a stateless client (`server/discover`, or no handshake at
 //! all) names its revision in every request's `_meta`.
 
-use crate::page::{self, Kind};
 use crate::server::Server;
 use rusty_json::Value;
 use rusty_mcp_proto::lifecycle::{self, DiscoverParams, InitializeParams, InitializeResult};
 use rusty_mcp_proto::notify::{self, CancelledParams, ProgressParams};
 use rusty_mcp_proto::rpc::params as decode_params;
-use rusty_mcp_proto::tool;
+use rusty_mcp_proto::{completion, prompt, resource, tool};
 use rusty_mcp_proto::{
-    CacheScope, CallToolParams, ClientCapabilities, DiscoverResult, ErrorCode, ErrorData,
-    Implementation, ListToolsResult, Message, PaginatedParams, Paging, ProtocolVersion, RequestId,
-    RequestMeta, ResultType, ServerCapabilities, ToolsCapability, Wire,
+    ClientCapabilities, DiscoverResult, ErrorCode, ErrorData, Implementation, Message,
+    PromptsCapability, ProtocolVersion, RequestId, RequestMeta, ResourcesCapability,
+    ServerCapabilities, ToolsCapability, Wire,
 };
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -178,6 +177,11 @@ fn invalid_params(e: impl std::fmt::Display) -> ErrorData {
 }
 
 impl Connection {
+    /// The server this connection talks to.
+    pub(crate) fn server(&self) -> &Server {
+        &self.server
+    }
+
     /// A connection to `server` whose own notifications go to `notifier`.
     pub fn new(server: Arc<Server>, notifier: Arc<dyn Notifier>) -> Self {
         Self {
@@ -295,10 +299,45 @@ impl Connection {
         }
     }
 
-    fn capabilities(&self) -> ServerCapabilities {
+    pub(crate) fn capabilities(&self) -> ServerCapabilities {
+        let s = &self.server;
         ServerCapabilities {
-            tools: (!self.server.tools.is_empty()).then(ToolsCapability::default),
+            tools: (!s.tools.is_empty()).then(ToolsCapability::default),
+            prompts: (!s.prompts.is_empty()).then(PromptsCapability::default),
+            resources: (!s.resources.is_empty() || !s.templates.is_empty())
+                .then(ResourcesCapability::default),
+            completions: s.completer.is_some().then(Value::object),
             ..ServerCapabilities::default()
+        }
+    }
+
+    /// The context a handler is given for request `id`.
+    pub(crate) fn call_context(
+        &self,
+        id: &RequestId,
+        version: ProtocolVersion,
+        meta: RequestMeta,
+        token: &CancelToken,
+    ) -> CallContext {
+        let (client_info, client_capabilities) = {
+            let state = lock(&self.state);
+            (
+                meta.client_info
+                    .clone()
+                    .or_else(|| state.client_info.clone()),
+                meta.client_capabilities
+                    .clone()
+                    .or_else(|| state.client_capabilities.clone()),
+            )
+        };
+        CallContext {
+            request_id: id.clone(),
+            version,
+            client_info,
+            client_capabilities,
+            meta,
+            cancel: token.clone(),
+            notifier: Arc::clone(&self.notifier),
         }
     }
 
@@ -315,6 +354,12 @@ impl Connection {
             lifecycle::method::PING => Ok(Value::object()),
             tool::method::LIST => self.tools_list(params),
             tool::method::CALL => self.tools_call(id, params, token),
+            prompt::method::LIST => self.prompts_list(params),
+            prompt::method::GET => self.prompts_get(id, params, token),
+            resource::method::LIST => self.resources_list(params),
+            resource::method::TEMPLATES_LIST => self.templates_list(params),
+            resource::method::READ => self.resources_read(id, params, token),
+            completion::method::COMPLETE => self.complete(id, params, token),
             other => Err(ErrorData::new(
                 ErrorCode::METHOD_NOT_FOUND,
                 format!("unknown method {other:?}"),
@@ -356,7 +401,7 @@ impl Connection {
 
     /// The revision in force for a request and its parsed `_meta`: the one
     /// the request names, else the one `initialize` settled on.
-    fn version_for(
+    pub(crate) fn version_for(
         &self,
         params: &Option<Value>,
     ) -> Result<(ProtocolVersion, RequestMeta), ErrorData> {
@@ -396,78 +441,6 @@ impl Connection {
                 "no protocol version: send initialize first, or name one in _meta",
             )),
         }
-    }
-
-    fn tools_list(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
-        let tools = &self.server.tools;
-        if tools.is_empty() {
-            return Err(ErrorData::new(
-                ErrorCode::METHOD_NOT_FOUND,
-                "this server has no tools",
-            ));
-        }
-        let (version, _) = self.version_for(params)?;
-        let p: PaginatedParams = decode_params(params).map_err(invalid_params)?;
-        let start = match &p.cursor {
-            None => 0,
-            Some(c) => page::decode(Kind::Tools, c, tools.len())
-                .ok_or_else(|| invalid_params("invalid cursor"))?,
-        };
-        let end = (start + self.server.page_size).min(tools.len());
-        let mut paging = Paging {
-            next_cursor: (end < tools.len()).then(|| page::encode(Kind::Tools, end)),
-            ..Paging::default()
-        };
-        if version.is_stateless() {
-            paging.ttl_ms = Some(0);
-            paging.cache_scope = Some(CacheScope::Public);
-        }
-        Ok(ListToolsResult {
-            tools: tools[start..end].iter().map(|t| t.tool.clone()).collect(),
-            paging,
-        }
-        .to_value())
-    }
-
-    fn tools_call(
-        &self,
-        id: &RequestId,
-        params: &Option<Value>,
-        token: &CancelToken,
-    ) -> Result<Value, ErrorData> {
-        let (version, meta) = self.version_for(params)?;
-        let call: CallToolParams = decode_params(params).map_err(invalid_params)?;
-        let entry = self
-            .server
-            .tools
-            .iter()
-            .find(|t| t.tool.name == call.name)
-            .ok_or_else(|| invalid_params(format!("unknown tool {:?}", call.name)))?;
-        let (client_info, client_capabilities) = {
-            let state = lock(&self.state);
-            (
-                meta.client_info
-                    .clone()
-                    .or_else(|| state.client_info.clone()),
-                meta.client_capabilities
-                    .clone()
-                    .or_else(|| state.client_capabilities.clone()),
-            )
-        };
-        let ctx = CallContext {
-            request_id: id.clone(),
-            version: version.clone(),
-            client_info,
-            client_capabilities,
-            meta,
-            cancel: token.clone(),
-            notifier: Arc::clone(&self.notifier),
-        };
-        let mut result = (entry.handler)(&ctx, call)?;
-        if version.is_stateless() && result.result_type.is_none() {
-            result.result_type = Some(ResultType(ResultType::COMPLETE.to_owned()));
-        }
-        Ok(result.to_value())
     }
 }
 
