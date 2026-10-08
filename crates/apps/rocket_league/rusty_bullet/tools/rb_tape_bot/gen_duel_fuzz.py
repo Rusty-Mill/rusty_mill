@@ -18,7 +18,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from gen_fuzz import TICKS, random_tape, step  # noqa: E402
 
 OUT = pathlib.Path(__file__).resolve().parent / "experiments"
-RUN_TICKS_MIN, RUN_TICKS_MAX = 40, 80  # about when two boosting cars 450 to 800 uu apart meet
+RUN_TICKS_BOTH = (40, 75)  # about when two boosting cars 450 to 800 uu apart meet
+RUN_TICKS_ALONE = (80, 130)  # one boosting car covering the whole distance
 
 
 def car_state(x: float, y: float, yaw: float, boost: int) -> dict:
@@ -44,12 +45,15 @@ def scenario(seed: int) -> dict:
     # A sideways offset of the second car, so the hits are off centre.
     side = rng.uniform(-110, 110)
     ox, oy = -math.sin(angle) * side, math.cos(angle) * side
-    run_ticks = rng.randint(RUN_TICKS_MIN, RUN_TICKS_MAX)
+    team = rng.choice([0, 1])
+    # Same team: the hivemind plays both tapes and the cars meet in the middle. Enemy team: the
+    # second car stands still, so the first has to cover the whole distance.
+    run_ticks = rng.randint(*(RUN_TICKS_BOTH if team == 0 else RUN_TICKS_ALONE))
     run_a = [step(run_ticks, throttle=1, boost=True)]
-    run_b = [step(run_ticks, throttle=1, boost=True)]
+    run_b = [step(run_ticks, throttle=1, boost=True)] if team == 0 else [step(run_ticks)]
     rest = TICKS - run_ticks
     tail_a = [s for s in random_tape(rng) if s]
-    tail_b = [s for s in random_tape(rng) if s]
+    tail_b = [s for s in random_tape(rng) if s] if team == 0 else [step(TICKS)]
     return {
         "name": f"duel_{seed}: two cars run at each other, then seeded random tapes",
         "settle_ticks": 0,
@@ -60,7 +64,7 @@ def scenario(seed: int) -> dict:
             {
                 "car": car_state(cx - dx + ox, cy - dy + oy, face_b, boost),
                 "steps": run_b + trim(tail_b, rest),
-                "team": rng.choice([0, 1]),
+                "team": team,
             }
         ],
     }

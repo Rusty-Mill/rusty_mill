@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.159.0
+- Version: 0.160.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -8242,6 +8242,19 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   - **Verification**: `world` test `an_off_centre_head_on_bumps_both_cars` (fails on the old rule); golden gate
     unchanged; `duel_848` 524 -> 447, `duel_875` 1748 -> 1522 uu.
 
+- `RB-PHYSICS-001-FR-159` (a rising or falling bumper pushes its victim up or down along its heading; implemented
+  and verified on `bumpag_*`, `tri_*` and `duel_*`; refines FR-140 and FR-153): the ground bump's direction is the
+  bumper's nose, horizontally, tilted by the bumper's vertical speed over its speed along the nose, instead of
+  the flat nose direction. Two airborne cars keep the horizontal heading and the fixed kick down (FR-143).
+  - Why: `duel_910`: an airborne car (vz 303) bumped a grounded one; the game sent the victim up at 445 uu/s,
+    the port at 205. The bumper's velocity direction as the heading fixed it and every airborne-bumper tape
+    (`bumpag_1000_38` 40 -> 8.0, `bumpag_1400_45` 110 -> 8.5, `bumpag_1400_52` 94 -> 19, `tri_pinch` 148 -> 41,
+    `tri_chain_enemy` 111 -> 60); the bumper's velocity direction alone made `bumpo_900`'s second clip worse
+    (the clipped bumper moves sideways of its nose), so the horizontal part stays the nose.
+  - **Verification**: `world` test `a_rising_bumper_pushes_the_victim_up_along_its_velocity`; the 151
+    bump / tri / demolition / duel tapes: 37 improved, 6 worse by over 1 uu (the air-air `bumpa_air_*` unchanged);
+    golden gate unchanged (`bumpag_*` bounds can tighten).
+
 - `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
   verified on `bumpag_*` and `tri_chain`; refines FR-143): an airborne bumper on a grounded
   victim bumps like a ground bumper (victim 1.25 times the speed, up).
@@ -8414,6 +8427,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.160.0 (2026-10-08): `RB-PHYSICS-001-FR-159` (the ground bump follows the bumper's climb). 508 tests in
+  `rb_physics_bullet`.
 - 0.159.0 (2026-10-08): `RB-PHYSICS-001-FR-158` (the bump's nose test uses the other car's origin). 507 tests in
   `rb_physics_bullet`.
 - 0.158.0 (2026-10-08): `RB-PHYSICS-001-FR-157` (any wheel down gives the ground boost acceleration). 506 tests in

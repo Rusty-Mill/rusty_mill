@@ -39,6 +39,10 @@ const START_MATCH_RADIUS: f32 = 5.0;
 /// tick or two to appear in the capture).
 const MAX_LAG_TICKS: usize = 3;
 
+/// The smallest tank gain on the first frame after the state set that counts as a swept boost
+/// pad (a small pad gives 12; burning boost only ever lowers the tank).
+const SWEPT_PAD_MIN_GAIN: f32 = 5.0;
+
 /// The cars after the first of a hivemind scenario (`rb_tape_hive`, one process playing every
 /// car's tape) get their input in the game one tick before the first car's: with the second
 /// car's recorded input read one tick later the port matches a boosted straight run to 0.3 uu
@@ -505,8 +509,23 @@ pub fn compare_scenario_recorded(
     // state set can leave pads taken on its way (`padp_*`), and a recorded-input
     // replay scores the tank (`boost error`) from the recording's own start.
     let mut start = scenario.initial_frame();
-    for (car, seen) in start.cars.iter_mut().zip(&recorded[start_index].cars) {
+    for (index, (car, seen)) in start
+        .cars
+        .iter_mut()
+        .zip(&recorded[start_index].cars)
+        .enumerate()
+    {
         car.boost_amount = seen.boost_amount;
+        // The state set carries the car over the pads between its old and new place and the
+        // game credits them on the next frame (`duel_911`: 33 -> 45 at tick 1, a pad swept on
+        // the way): count a jump there into the starting tank.
+        let next = recorded
+            .get(start_index + 1)
+            .and_then(|frame| frame.cars.get(index))
+            .map_or(seen.boost_amount, |next| next.boost_amount);
+        if next - seen.boost_amount > SWEPT_PAD_MIN_GAIN {
+            car.boost_amount = next;
+        }
     }
     let respawn_points = recorded_respawn_points(&recorded_ticks, cars);
     let teams = scenario.teams();
