@@ -13,7 +13,7 @@ MCP crates depend on `rusty_request` / `rusty_serve` and **`rusty_tls`**, never 
 | A0 | Amend workspace ADR-0002: MCP crates move from Tier A (`rmcp`, permanent) to Tier T (transitional) with this plan as the milestone list | **needs owner sign-off** |
 | A1 | Split the client out of `rusty-mcp` into `rusty-mcp-client`; client on rustls, not OpenSSL | done |
 | A2 | `rusty_mcp_proto` (Tier S): JSON-RPC 2.0 + MCP types on `rusty_json`; `rmcp` as a **dev-only** wire-format oracle | in progress: type list complete in four slices (see `rusty_mcp_proto` README); scope in `MCP-PROTO-SCOPE.md` |
-| A3 | Server on `rusty_serve` (stdio + stateless Streamable HTTP); accept on `rk-app` and `rusty-mcp-demo` | in progress: `rusty_serve` gained headers, `Limits` and `SharedHandler` (owner approved, additive); `rusty_mcp_server` has the core, stdio and stateless HTTP (tools only; verified against the `rmcp` client); prompts, resources, completion, subscriptions, tasks and the two acceptance moves remain |
+| A3 | Server on `rusty_serve` (stdio + stateless Streamable HTTP); accept on `rk-app` and `rusty-mcp-demo` | in progress: `rusty_serve` gained headers, `Limits` and `SharedHandler` (owner approved, additive); `rusty_mcp_server` has the core, stdio and stateless HTTP (tools only; verified against the `rmcp` client); **`rk-app` moved** (first consumer); prompts, resources, completion, subscriptions, tasks and the `rusty-mcp-demo` acceptance remain |
 | A4 | Client on `rusty_request` + `rusty_tls`; needs an SSE reader | open |
 | A5 | Move consumers one at a time: `rk-app`, `rk-mcp`, `rusty_homelab_mcp`, `rp-mcp`, ..., `agentgateway` last | open |
 | A6 | Drop `rmcp`, then `axum`/`clap`/`tracing-subscriber`/`jsonwebtoken` from the MCP crates | open |

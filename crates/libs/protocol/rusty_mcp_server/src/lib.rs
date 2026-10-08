@@ -46,6 +46,13 @@ mod page;
 pub mod server;
 pub mod stdio;
 
+/// The JSON value type the protocol types are built on, re-exported so a
+/// consumer of this crate needs no dependency of its own for it.
+pub use rusty_json as json;
+/// The wire types (`Tool`, `CallToolResult`, `ContentBlock`, ...), re-exported
+/// for the same reason.
+pub use rusty_mcp_proto as proto;
+
 pub use connection::{CallContext, CancelToken, Connection, Job, Notifier, Started};
 #[cfg(feature = "http")]
 pub use http::{bind_http, HttpConfig, HttpHandler};

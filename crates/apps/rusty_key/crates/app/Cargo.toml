@@ -27,12 +27,10 @@ async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std"] }
-# `rmcp` follows the workspace root ("3.1") since dependabot #473. `axum`
-# "0.7" is still a deliberate split against the root's "0.8" -- see the
+# `axum` "0.7" is still a deliberate split against the root's "0.8" -- see the
 # "Hoisted from rusty_key"/"Hoisted from rusty_adk" comment blocks in the
 # root Cargo.toml for why it is tracked as a migration, not drift.
-rmcp = { version = "3.1", features = ["server", "transport-io"], optional = true }
-rusty-mcp = { workspace = true, optional = true }
+rusty_mcp_server = { workspace = true, optional = true }
 axum = { version = "0.7", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
@@ -40,8 +38,10 @@ futures = { version = "0.3", optional = true }
 
 [features]
 # MCP server mode (`rusty-keys --mcp`): expose Session::send() over JSON-RPC
-# (ADR-0029). Off by default (pulls rmcp); enable for IDE integration.
-mcp-server = ["dep:rmcp", "dep:rusty-mcp", "rk-mcp/rmcp"]
+# (ADR-0029) on `rusty_mcp_server`'s stdio transport. Off by default; enable
+# for IDE integration. `rk-mcp/rmcp` is the client side, for connecting the
+# servers declared in the config.
+mcp-server = ["dep:rusty_mcp_server", "rk-mcp/rmcp"]
 # Web gateway (`rusty-keys --gateway`): axum HTTP/SSE over Session::send()
 # (PRD 06). Off by default (pulls axum); enable for web/desktop clients.
 gateway = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures", "tokio/net"]

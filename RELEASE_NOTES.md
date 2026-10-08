@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rk-app MCP server on rusty_mcp_server (pending review)
+
+- **Changed:** `rusty-keys --mcp` (feature `mcp-server`) now serves through `rusty_mcp_server` instead of `rmcp` and `rusty-mcp`. Verified offline with a scripted fake model: a `chat` call runs a full turn through the real registry, policy, verifier and evidence journal; all 17 unit and the other `rk-app` test suites still pass, clippy is clean with and without the feature.
+- **Behaviour differences:** unknown tool is `-32602` (was `-32601`); shutdown signals return from `serve` without awaiting an in-flight turn; new bounds (32 in flight, 4 MiB lines).
+- **Known limitations:** not run against a real IDE or a real model (the `chat` tool needs one), only against the scripted fake and in-memory pipes; the generic server is checked against the `rmcp` client in its own crate, not through `rk-app`'s binary. The binary itself (`rusty-keys --mcp`) was not launched.
+
+---
+
 ## 2026-10-08 - rusty_mcp_server over Streamable HTTP (pending review)
 
 - **Added:** feature `http` on `rusty_mcp_server`: a stateless Streamable HTTP transport, verified over real sockets and against the `rmcp` HTTP client in both handshake modes.
