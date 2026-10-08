@@ -1822,11 +1822,6 @@ impl Scripted {
             .expect("seal")
     }
 
-    fn honest_finished(&mut self) -> Vec<u8> {
-        let data = self.verify_data(Side::Client, &self.transcript.clone());
-        self.finished_record(&data, &[])
-    }
-
     /// Read the server's `ChangeCipherSpec` and `Finished`, and check the
     /// latter is what the server owed: a MAC over everything, with this
     /// client's own Finished included.

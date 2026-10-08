@@ -1079,11 +1079,11 @@ jobs:
         run: |
           set -euo pipefail
           openssl version
-          # Three suites: the TLS 1.3 server (OpenSSL as the client), the
-          # TLS 1.2 client (OpenSSL as the server) and the TLS 1.2 server
-          # (OpenSSL as the client).
+          # Four suites: the TLS 1.3 server (OpenSSL as the client), the
+          # TLS 1.2 client and server (OpenSSL as the other end), and version
+          # negotiation with the downgrade sentinel (both directions).
           for suite in handrolled_socket_interop handrolled_client12_socket_interop \
-            handrolled_server12_socket_interop; do
+            handrolled_server12_socket_interop handrolled_negotiate_socket_interop; do
             out=$(cargo test -p rusty_tls --features handrolled-engine \
               --test "$suite" -- --ignored --nocapture --color never)
             echo "$out"

@@ -52,11 +52,13 @@
 //! raw handshake messages so far — the scheme hashes them — and is checked
 //! with [`verify_tls12_signature`].
 //!
-//! # No downgrade protection yet
+//! # Downgrade protection
 //!
-//! This server speaks TLS 1.2 and nothing else, so it has nothing to be
-//! downgraded *from* and writes no `DOWNGRD` sentinel. The server that speaks
-//! both must; that is stage 4b-v.
+//! Standing alone, this server speaks TLS 1.2 and nothing else, so it has nothing
+//! to be downgraded *from* and writes no `DOWNGRD` sentinel: a TLS 1.2 client of
+//! a server that might also have spoken 1.3 would otherwise be told, falsely,
+//! that it was attacked. Inside [`super::negotiate`] the same server is the
+//! 1.2 half of one that speaks both, and writes it.
 
 use super::client::Alert;
 use super::client12::{CipherSuite12, Connection12, Role};
@@ -169,7 +171,14 @@ pub struct ServerHandshake12<'a> {
     /// Handshake bytes reassembled across records.
     buffer: Vec<u8>,
     connection: Option<Connection12>,
+    /// True when this server also speaks TLS 1.3 and is answering in 1.2
+    /// anyway, which RFC 8446 §4.1.3 requires it to say in `random`.
+    signals_tls13: bool,
 }
+
+/// The last eight octets of a `ServerHello.random` from a TLS 1.3-capable
+/// server that negotiates TLS 1.2 (RFC 8446 §4.1.3): `"DOWNGRD"` and `0x01`.
+pub const DOWNGRADE_SENTINEL: [u8; 8] = [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01];
 
 /// How a signing key authenticates the server in a suite's terms.
 fn key_authentication(key: &SigningKey) -> Authentication {
@@ -202,19 +211,6 @@ fn u16_list(data: &[u8]) -> core::result::Result<Vec<u16>, HandshakeError> {
         out.push(list.u16()?);
     }
     Ok(out)
-}
-
-/// Whether a `supported_versions` extension from a client lists TLS 1.2.
-fn offers_tls12(data: &[u8]) -> core::result::Result<bool, HandshakeError> {
-    let mut reader = Reader::new(data);
-    let list = reader.vector_u8()?;
-    reader.finish()?;
-    if list.is_empty() || list.len() % 2 != 0 {
-        return Err(HandshakeError::Malformed(
-            "supported_versions is not a list",
-        ));
-    }
-    Ok(list.chunks(2).any(|v| v == TLS12.to_be_bytes()))
 }
 
 /// Split handshake bytes into records of at most 2^14.
@@ -263,6 +259,19 @@ impl<'a> ServerHandshake12<'a> {
             },
             buffer: Vec::new(),
             connection: None,
+            signals_tls13: false,
+        })
+    }
+
+    /// As [`Self::new`], for a server that also speaks TLS 1.3 and has been
+    /// handed a client that will not: the `ServerHello` then carries the
+    /// `DOWNGRD` sentinel, which is how a client that *did* offer 1.3 learns
+    /// its hello was tampered with on the way. A server that speaks only 1.2
+    /// must not send it, so this is a different constructor and not a default.
+    pub(super) fn downgraded(config: &'a ServerConfig12<'a>) -> Result<Self> {
+        Ok(Self {
+            signals_tls13: true,
+            ..Self::new(config)?
         })
     }
 
@@ -436,8 +445,8 @@ impl<'a> ServerHandshake12<'a> {
         if hello.version < TLS12 {
             return Err(ServerError::NotTls12(hello.version));
         }
-        if let Some(data) = find(&hello.extensions, extension::SUPPORTED_VERSIONS) {
-            if !offers_tls12(data)? {
+        if let Some(versions) = hello.supported_versions()? {
+            if !versions.contains(&TLS12) {
                 return Err(ServerError::NotTls12(hello.version));
             }
         }
@@ -508,7 +517,10 @@ impl<'a> ServerHandshake12<'a> {
             .ok_or(ServerError::NoSharedGroup)?;
 
         // 4. The flight.
-        let random = random_bytes(RANDOM_LEN)?;
+        let mut random = random_bytes(RANDOM_LEN)?;
+        if self.signals_tls13 {
+            random[RANDOM_LEN - 8..].copy_from_slice(&DOWNGRADE_SENTINEL);
+        }
         self.hs.client_random.copy_from_slice(hello.random);
         self.hs.server_random.copy_from_slice(&random);
         self.hs.suite = suite;

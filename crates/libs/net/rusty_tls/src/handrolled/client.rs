@@ -103,6 +103,7 @@
 
 use ring::rand::{SecureRandom, SystemRandom};
 
+use super::client12::CipherSuite12;
 use super::handshake::{
     certificate_verify_content, complete_prefix, extension, find, messages,
     parse_encrypted_extensions, parse_finished, pre_shared_key_placeholder, BinderHello,
@@ -744,7 +745,7 @@ const DOWNGRADE_SENTINEL_TLS12: [u8; 8] = [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0
 const DOWNGRADE_SENTINEL_OLDER: [u8; 8] = [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00];
 
 /// True if a `ServerHello.random` carries either downgrade sentinel.
-fn is_downgrade_sentinel(random: &[u8]) -> bool {
+pub(super) fn is_downgrade_sentinel(random: &[u8]) -> bool {
     match random.len().checked_sub(8).map(|at| &random[at..]) {
         Some(tail) => tail == DOWNGRADE_SENTINEL_TLS12 || tail == DOWNGRADE_SENTINEL_OLDER,
         None => false,
@@ -849,11 +850,32 @@ pub struct ClientHandshake<'a> {
     /// Handshake bytes reassembled across records. Messages may span records
     /// and several may share one, so neither boundary lines up with the other.
     buffer: Vec<u8>,
+    /// The TLS 1.2 suites also offered in the hello, if this client is the
+    /// first half of a [`super::negotiate`] handshake. Kept so a second hello
+    /// after a HelloRetryRequest offers exactly what the first did.
+    tls12: Option<&'a [CipherSuite12]>,
 }
 
 impl<'a> ClientHandshake<'a> {
     /// Start a handshake, returning it and the ClientHello record to send.
     pub fn start(config: &'a ClientConfig<'a>) -> Result<(Self, Vec<u8>)> {
+        Self::start_inner(config, None)
+    }
+
+    /// As [`Self::start`], with a hello that also offers TLS 1.2 and these
+    /// suites. The caller must be ready to continue the handshake in either
+    /// version from the reply; see [`super::negotiate`].
+    pub(super) fn start_offering_tls12(
+        config: &'a ClientConfig<'a>,
+        suites: &'a [CipherSuite12],
+    ) -> Result<(Self, Vec<u8>)> {
+        Self::start_inner(config, Some(suites))
+    }
+
+    fn start_inner(
+        config: &'a ClientConfig<'a>,
+        tls12: Option<&'a [CipherSuite12]>,
+    ) -> Result<(Self, Vec<u8>)> {
         let group = *config.groups.first().ok_or(ClientError::BadKeyShare)?;
         // A session offered under a suite this configuration will not offer is
         // refused here rather than sent: the server could never select the
@@ -867,7 +889,7 @@ impl<'a> ClientHandshake<'a> {
             session_hash(resumption.session)?;
         }
         let kx = KeyExchange::generate(group)?;
-        let (hello, random, session_id) = build_client_hello(config, &kx, None, &[])?;
+        let (hello, random, session_id) = build_client_hello(config, &kx, None, &[], tls12)?;
 
         let record = plaintext_record(ContentType::Handshake, 0x0301, &hello)?;
         Ok((
@@ -881,9 +903,25 @@ impl<'a> ClientHandshake<'a> {
                     session_id,
                 },
                 buffer: Vec::new(),
+                tls12,
             },
             record,
         ))
+    }
+
+    /// Give up the TLS 1.3 handshake and hand back what a TLS 1.2 one needs to
+    /// carry on from the same ClientHello: the message as sent, and its random.
+    /// Only possible before any ServerHello has been accepted.
+    pub(super) fn into_tls12_hello(self) -> Result<(Vec<u8>, Vec<u8>)> {
+        match self.state {
+            State::AwaitServerHello {
+                client_hello,
+                random,
+                retried: false,
+                ..
+            } => Ok((client_hello, random)),
+            _ => Err(ClientError::Failed),
+        }
     }
 
     /// True once the handshake has completed and [`Self::into_connection`]
@@ -1053,6 +1091,7 @@ fn build_client_hello(
     kx: &KeyExchange,
     identity: Option<(&[u8], &[u8])>,
     transcript_prefix: &[u8],
+    tls12: Option<&[CipherSuite12]>,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let (random, session_id) = match identity {
         Some((random, session_id)) => (random.to_vec(), session_id.to_vec()),
@@ -1070,8 +1109,15 @@ fn build_client_hello(
         });
     }
 
+    // With a TLS 1.2 fallback the hello offers both, 1.3 first; the server
+    // picks, and `negotiate` continues the handshake from this same message.
     let mut versions = Writer::new();
-    versions.vector_u8(|w| w.u16(0x0304));
+    versions.vector_u8(|w| {
+        w.u16(0x0304);
+        if tls12.is_some() {
+            w.u16(0x0303);
+        }
+    });
 
     let mut groups = Writer::new();
     groups.vector_u16(|w| {
@@ -1084,6 +1130,14 @@ fn build_client_hello(
     schemes.vector_u16(|w| {
         for scheme in SignatureScheme::TLS13_SUPPORTED {
             w.u16(scheme.0);
+        }
+        // TLS 1.2 adds the PKCS#1 v1.5 schemes and nothing else new.
+        if tls12.is_some() {
+            for scheme in SignatureScheme::TLS12_SUPPORTED {
+                if !SignatureScheme::TLS13_SUPPORTED.contains(scheme) {
+                    w.u16(scheme.0);
+                }
+            }
         }
     });
 
@@ -1139,6 +1193,23 @@ fn build_client_hello(
         data: &psk_modes,
     });
 
+    // What a TLS 1.2 server needs to see in order to answer: uncompressed
+    // points, the extended master secret, and secure renegotiation.
+    if tls12.is_some() {
+        extensions.push(Extension {
+            typ: extension::EC_POINT_FORMATS,
+            data: &[1, 0],
+        });
+        extensions.push(Extension {
+            typ: extension::EXTENDED_MASTER_SECRET,
+            data: &[],
+        });
+        extensions.push(Extension {
+            typ: extension::RENEGOTIATION_INFO,
+            data: &[0],
+        });
+    }
+
     // `pre_shared_key` goes last, always, and nothing may be appended after
     // it. §4.2.11: the binder covers the hello truncated to just before the
     // binders, so an extension after the offer would sit outside what the
@@ -1166,10 +1237,12 @@ fn build_client_hello(
         });
     }
 
+    let mut cipher_suites: Vec<u16> = config.cipher_suites.iter().map(|s| s.0).collect();
+    cipher_suites.extend(tls12.unwrap_or_default().iter().map(|s| s.0));
     let hello = ClientHello {
         random: &random,
         session_id: &session_id,
-        cipher_suites: config.cipher_suites.iter().map(|s| s.0).collect(),
+        cipher_suites,
         extensions,
     };
 
@@ -1433,8 +1506,13 @@ impl ClientHandshake<'_> {
         // rather than carried across from the first hello.
         let mut replayed = synthetic;
         replayed.extend_from_slice(message.encoded);
-        let (second, random, session_id) =
-            build_client_hello(self.config, &kx, Some((random, session_id)), &replayed)?;
+        let (second, random, session_id) = build_client_hello(
+            self.config,
+            &kx,
+            Some((random, session_id)),
+            &replayed,
+            self.tls12,
+        )?;
         replayed.extend_from_slice(&second);
 
         self.state = State::AwaitServerHello {
@@ -1970,6 +2048,18 @@ impl Connection {
     /// Protect application data as one record.
     pub fn write(&mut self, data: &[u8]) -> Result<Vec<u8>> {
         Ok(self.sealer.seal(ContentType::ApplicationData, data, 0)?)
+    }
+
+    /// Send `close_notify`, the orderly end of the sending half (RFC 8446
+    /// §6.1). The caller stops writing; the peer's own `close_notify` is still
+    /// read. Without it a peer cannot tell the end of the data from a
+    /// truncation.
+    pub fn close(&mut self) -> Result<Vec<u8>> {
+        Ok(self.sealer.seal(
+            ContentType::Alert,
+            &[1, AlertDescription::CLOSE_NOTIFY.0],
+            0,
+        )?)
     }
 
     /// Unprotect one whole record.

@@ -55,15 +55,18 @@
 //! keys that were never agreed. TLS 1.3 made the record meaningless; in TLS 1.2
 //! it is a state transition, so it is treated as one.
 //!
-//! # No downgrade protection yet
+//! # Downgrade protection lives one level up
 //!
-//! This client offers TLS 1.2 and nothing else, so there is nothing to
-//! downgrade *from* and the `DOWNGRD` sentinel in `ServerHello.random` is not
-//! checked. A client that offers both versions must check it, and will: that is
-//! stage 4b-v, where version negotiation joins the TLS 1.3 client.
+//! Standing alone, this client offers TLS 1.2 and nothing else, so there is
+//! nothing to downgrade *from* and the `DOWNGRD` sentinel in
+//! `ServerHello.random` is deliberately not checked: a 1.2-only client of a
+//! 1.3-capable server is told the truth, not attacked. [`super::negotiate`]
+//! builds the client that offers both, continues this handshake from its hello
+//! when the server answers in 1.2, and refuses the sentinel there.
 
 use super::client::{
-    plaintext_record, random_bytes, Alert, AlertDescription, AlertLevel, ClientError,
+    is_downgrade_sentinel, plaintext_record, random_bytes, Alert, AlertDescription, AlertLevel,
+    ClientError,
 };
 use super::handshake::{
     complete_prefix, extension, find, messages, ClientHello, Extension, HandshakeError,
@@ -246,6 +249,9 @@ pub struct ClientHandshake12<'a> {
     /// Handshake bytes reassembled across records.
     buffer: Vec<u8>,
     connection: Option<Connection12>,
+    /// True when the ClientHello also offered TLS 1.3, so a ServerHello that
+    /// answers in 1.2 must not carry the `DOWNGRD` sentinel.
+    offered_tls13: bool,
 }
 
 fn encode_client_hello(config: &ClientConfig12<'_>, random: &[u8]) -> Result<Vec<u8>> {
@@ -347,9 +353,30 @@ impl<'a> ClientHandshake12<'a> {
                 },
                 buffer: Vec::new(),
                 connection: None,
+                offered_tls13: false,
             },
             record,
         ))
+    }
+
+    /// Continue from a ClientHello that was already sent and also offered
+    /// TLS 1.3, and that the server answered in 1.2. `hello` is the message as
+    /// sent, which is the start of the transcript, and `random` its random.
+    ///
+    /// The caller must have built the hello from this configuration's suites
+    /// and groups; the handshake judges the server's choices against them.
+    pub(super) fn continue_from(
+        config: &'a ClientConfig12<'a>,
+        hello: Vec<u8>,
+        random: &[u8],
+    ) -> Result<Self> {
+        let (mut handshake, _) = Self::start(config)?;
+        let mut client_random = [0u8; RANDOM_LEN];
+        client_random.copy_from_slice(random);
+        handshake.hs.client_random = client_random;
+        handshake.hs.transcript = hello;
+        handshake.offered_tls13 = true;
+        Ok(handshake)
     }
 
     /// True once the handshake has completed and [`Self::into_connection`]
@@ -533,6 +560,12 @@ impl<'a> ClientHandshake12<'a> {
         let hello = ServerHello12::parse(body)?;
         if hello.version != TLS12 {
             return Err(ClientError::NotTls12(hello.version));
+        }
+        // RFC 8446 §4.1.3: a client that offered 1.3 and is answered in 1.2 by
+        // a server that *also* speaks 1.3 is being told so in `random`. The
+        // only way that happens is a hello that was altered on the way.
+        if self.offered_tls13 && is_downgrade_sentinel(hello.random) {
+            return Err(ClientError::DowngradeDetected);
         }
         let suite = CipherSuite12(hello.cipher_suite);
         if !self.config.cipher_suites.contains(&suite) {

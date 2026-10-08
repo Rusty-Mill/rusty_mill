@@ -37,6 +37,9 @@
 //! - [`server12`] — the TLS 1.2 server handshake (stage 4b-iv): the same
 //!   refusals as the client, an optional client certificate that must prove
 //!   its key, and a shared [`client12::Connection12`] once established.
+//! - [`negotiate`] — one endpoint that speaks both (stage 4b-v): chooses the
+//!   version from the first message, writes and checks the `DOWNGRD` sentinel,
+//!   and refuses a `TLS_FALLBACK_SCSV` retry.
 //! - [`der`] — a strict DER reader (stage 2a), the foundation everything
 //!   certificate-shaped sits on.
 //! - [`x509`] — certificate parsing (stage 2a). **Parsing only**: it reports
@@ -102,6 +105,7 @@ pub mod handshake;
 pub mod handshake12;
 pub mod kx;
 pub mod name;
+pub mod negotiate;
 pub mod path;
 pub mod record;
 pub mod record12;

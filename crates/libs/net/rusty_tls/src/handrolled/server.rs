@@ -278,6 +278,11 @@ pub enum ServerError {
     HandshakeTooLarge,
     /// The TLS 1.2 key derivation was refused.
     Schedule(ScheduleError),
+    /// The client signalled `TLS_FALLBACK_SCSV` (RFC 7507) while offering
+    /// less than this server's best version: it is retrying after a failure
+    /// that an attacker may have caused, and answering would complete the
+    /// downgrade.
+    InappropriateFallback,
 }
 
 impl core::fmt::Display for ServerError {
@@ -343,6 +348,9 @@ impl core::fmt::Display for ServerError {
             Self::UnexpectedChangeCipherSpec => f.write_str("unexpected ChangeCipherSpec"),
             Self::HandshakeTooLarge => f.write_str("the client's handshake message is too large"),
             Self::Schedule(err) => write!(f, "key derivation: {err}"),
+            Self::InappropriateFallback => {
+                f.write_str("the client is falling back to a lower version than this server speaks")
+            }
         }
     }
 }
@@ -412,6 +420,7 @@ impl ServerError {
             | Self::UnacceptableOffer(_)
             | Self::Schedule(_) => AlertDescription::HANDSHAKE_FAILURE,
             Self::UnexpectedChangeCipherSpec => AlertDescription::UNEXPECTED_MESSAGE,
+            Self::InappropriateFallback => AlertDescription::INAPPROPRIATE_FALLBACK,
             Self::HandshakeTooLarge => AlertDescription::ILLEGAL_PARAMETER,
             // The peer already knows; telling it again is noise.
             Self::PeerAlert(_) | Self::Failed => return None,

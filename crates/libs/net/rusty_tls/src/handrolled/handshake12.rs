@@ -182,6 +182,33 @@ impl<'a> ClientHello12<'a> {
         })
     }
 
+    /// The versions in a `supported_versions` extension, or `None` if the hello
+    /// has none. A present-but-malformed list is an error, not "none": a hello
+    /// whose version list cannot be read must not be negotiated from.
+    pub fn supported_versions(&self) -> Result<Option<Vec<u16>>> {
+        let Some(data) = self
+            .extensions
+            .iter()
+            .find(|e| e.typ == super::handshake::extension::SUPPORTED_VERSIONS)
+            .map(|e| e.data)
+        else {
+            return Ok(None);
+        };
+        let mut reader = Reader::new(data);
+        let mut list = reader.sub_u8()?;
+        reader.finish()?;
+        if list.is_empty() || list.remaining() % 2 != 0 {
+            return Err(HandshakeError::Malformed(
+                "supported_versions is not a list",
+            ));
+        }
+        let mut versions = Vec::new();
+        while !list.is_empty() {
+            versions.push(list.u16()?);
+        }
+        Ok(Some(versions))
+    }
+
     /// Encode the body; the extensions block is omitted when there are none.
     pub fn encode(&self) -> Vec<u8> {
         let mut writer = Writer::new();

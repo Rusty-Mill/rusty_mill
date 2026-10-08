@@ -40,7 +40,7 @@ Each stage is independently reviewable and abandonable, as in ADR-0002.
 | 4b-ii | PRF, master secret, extended master secret, key block, Finished. **Done**, see below. | OpenSSL's own PRF; captured real OpenSSL handshakes; differential against rustls. | 3 to 4 (took well under one) |
 | 4b-iii | Client handshake: ServerHello, Certificate, ServerKeyExchange (signature over randoms and params), Finished, tickets. Reuses `path`/`name`. | Handshakes against rustls (restricted to TLS 1.2), OpenSSL, plus a hostile test server for refusals. | 7 to 9 |
 | 4b-iv | Server handshake: mirror, plus client auth. **Done**, see below. | rustls and OpenSSL clients. | 7 to 9 (took well under one) |
-| 4b-v | Version negotiation and downgrade protection in existing client and server; alerts. | rustls both directions; sentinel tests. | 3 to 4 |
+| 4b-v | Version negotiation and downgrade protection in existing client and server; alerts. **Done**, see below. | rustls both directions; sentinel tests. | 3 to 4 (took well under one) |
 | 4b-vi | Fuzz targets and BoGo/tlsfuzzer cases for the 1.2 paths; resource limits. | libFuzzer; BoGo. | 4 to 5 |
 
 Total 27 to 35 days, matching the earlier estimate. Gate for each stage is the ADR-0002
@@ -232,10 +232,85 @@ Limits of this evidence: the scripted client shares this crate's primitives, so 
 the server rejects of *its* mistakes; the live tests are what show the server is a faithful TLS server.
 The fuzz, mutation and bit-flip figures are single runs. Interop is with two implementations on loopback.
 
+## Stage 4b-v: done
+
+`handrolled::negotiate`: `ClientConfigBoth` / `ClientHandshakeBoth`, `ServerConfigBoth` /
+`ServerHandshakeBoth`, and `Established` (a 1.3 or 1.2 connection). One endpoint that speaks both
+versions, built by choosing and then stepping aside: each side buffers records until the first
+handshake message is whole, decides, and replays the buffered records into the existing 1.3 or 1.2
+machine. Nothing in those machines changed behaviour for a caller that does not use this module.
+
+What it adds, which is the property the track gave up by learning to speak something older:
+
+- **A combined ClientHello.** `ClientHandshake::start_offering_tls12` builds one hello that offers
+  1.3 and 1.2 (versions, both suite lists, the PKCS#1 schemes, extended master secret, secure
+  renegotiation, point formats) *before* any PSK binder is computed, so resumption still binds the
+  whole message, and a HelloRetryRequest's second hello offers exactly the same.
+- **The sentinel, written.** A two-version server answering in 1.2 puts `DOWNGRD\x01` in
+  `ServerHello.random` (`ServerHandshake12::downgraded`, used by this module only).
+- **The sentinel, checked.** A client that offered both and is answered in 1.2 refuses a hello that
+  carries it (`ClientError::DowngradeDetected`). A client that offered only 1.2 does not: it is a
+  1.2-only client of a 1.3-capable server, told the truth, and checking would break it.
+- **`TLS_FALLBACK_SCSV`** (RFC 7507): a hello whose best is 1.2 and that signals a fallback is
+  refused with `inappropriate_fallback`.
+
+| Gate | Result |
+| --- | --- |
+| Live rustls, both ends | Every pairing of both / 1.2-only / 1.3-only against our server and against our client picks the version rustls does, with data both ways. |
+| Active attacker, rustls as the honest end | TLS 1.3 stripped from a hello in flight: our server answers in 1.2 **with the sentinel** and a real rustls client aborts naming the downgrade; our client, given a 1.2 reply carrying rustls's sentinel, returns `DowngradeDetected`. Controls complete in 1.3. Against a 1.2-only server (which cannot write one) the same attack is caught by the transcript at the `Finished`, and the test says so. |
+| Live OpenSSL over a socket | Four tests, run by CI: OpenSSL as client at default, `-tls1_3` and `-tls1_2`; our client against `s_server` at the same three settings; a **real `-fallback_scsv`** hello, refused with the alert OpenSSL names; and a TCP proxy that strips 1.3 from our client's hello so the **sentinel OpenSSL writes** is what our client catches. Five consecutive runs clean. |
+| Framing | A hello and a ServerHello delivered in 1, 2, 3, 7, 33 and 40-octet records, and a record that ends inside the *next* message, choose the right version every time. |
+| Refusals | Neither version offered, client_version below 1.2, malformed version lists, a non-handshake or wrong first message, a first message that never ends (cut off at 128 KiB on both sides), an alert before the ServerHello (reported by name). |
+| Hello content | The combined hello is parsed and checked field by field, and so is the plain 1.3 hello, which must say nothing about 1.2. |
+| Mutation | 31 deliberate bugs (sentinel absent, at the front, wrong octet, written by the standalone server; checked too widely or not at all; each dispatch rule inverted; fallback ignored or too broad; framing and caps; hello contents; the retry forgetting the 1.2 offer). First round: 28 caught, 2 were redundant code (removed, the 1.2 server already refuses a hello with no usable version), and 1 was a real gap (the framing test did not assert *which* version was chosen). All genuine mutants now caught. |
+| Fuzz | Two new libFuzzer targets, `negotiate_server` and `negotiate_client`, which also reach the TLS 1.3 server and client for the first time: 631k and 622k executions in 60 seconds each, no findings; each asserts nothing completes a handshake. |
+
+**Found by the tests before this was committed.**
+
+- *A bug in the first version of the choice.* It judged the version of a ServerHello with
+  `messages()`, which errors on a partial trailing message; when a record boundary fell inside the next
+  message the choice silently defaulted to 1.3, and a 1.2 server was refused with a confusing error.
+  The framing test found it; the fix is to read only the complete prefix. A second, identical slip on
+  the server side was hidden by a patch that did not apply and was found by the next test.
+- *A missing API.* The TLS 1.3 `Connection` had no `close()` (the 1.2 one has), so an endpoint could
+  not end a 1.3 conversation with `close_notify`. Added: one record, symmetric with 1.2, exercised by
+  the OpenSSL tests (which report an unclean EOF without it).
+
+**A correction to stage 4b-iv.** The clippy check I reported for that commit used a pattern that never
+matched coloured output, so it could not fail. The pushed commit had one dead-code error in a test
+(`Scripted::honest_finished`) that `-D warnings` rejects. It is fixed here; the checks in this stage
+were run with a pattern shown to catch an error first.
+
+Decisions made in this stage:
+
+- **The version is chosen on the first whole message, once.** A client that lists 1.3 and has nothing
+  else in common with this server fails; it is not retried in 1.2, because the 1.3 machine has
+  already consumed the hello. rustls would fall back; here that would need the dispatcher to keep a
+  second copy of the hello state, which is the complexity this design avoids.
+- **Resumption is 1.3 only.** The PSK rides in the combined hello and a 1.2 reply ignores it.
+- **`Established` is an enum, not a trait object.** The two connections differ in their incoming
+  types, and flattening them would hide exactly the distinction a caller has to make (tickets exist in
+  one and not the other).
+- **No redundant version check in the dispatcher.** Whether a hello offers any usable version is the
+  1.2 server's rule, stated once.
+
+Not done in this stage, deliberately:
+
+- **No ALPN, no SNI-based certificate selection, no 1.2 resumption.**
+- **Not wired to any seam type** or the default build.
+- **`Connection12` still reports `ClientError`**, and `Established` therefore exposes two error types.
+  Unifying them is a breaking rename and belongs with a decision about the seam.
+- Secrets are not zeroized on drop, as elsewhere in the engine.
+
+Limits of this evidence: the MITM tests rewrite one message and show the sentinel and the transcript
+catch it; they do not show a defence against an attacker who can also break a signature. The mutation,
+fuzz and framing figures are single runs. Interop is with two implementations on loopback.
+
 ## Next action
 
-Stage 4b-v, version negotiation and downgrade protection. The client and server in `client.rs` and
-`server.rs` speak 1.3 only and `client12`/`server12` speak 1.2 only; the next stage joins them, so a
-single endpoint offers both and the `DOWNGRD` sentinel (RFC 8446 §4.1.3) is written by the server and
-checked by the client. That is the property this track gave up when it started speaking something older.
-Its first oracle is rustls on both sides, with the sentinel tests written before the code.
+Stage 4b-vi, the remainder: BoGo and tlsfuzzer cases for the 1.2 and negotiation paths, and the
+resource limits that are still implicit (the number of handshakes a server holds open, the cost of a
+hostile `Certificate`). BoGo is the first independent suite with cases written by someone who has tried
+to break TLS stacks, so its failures are findings rather than test bugs until shown otherwise. The
+first question is whether BoGo can run in this environment (it needs a Go toolchain and the BoringSSL
+test runner); if not, the stage is the tlsfuzzer subset that can.

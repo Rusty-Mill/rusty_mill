@@ -65,6 +65,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "negotiate_server"
+path = "fuzz_targets/negotiate_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "negotiate_client"
+path = "fuzz_targets/negotiate_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "server12"
 path = "fuzz_targets/server12.rs"
 test = false
