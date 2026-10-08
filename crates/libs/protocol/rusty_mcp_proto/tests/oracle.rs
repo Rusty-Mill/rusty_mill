@@ -4,12 +4,15 @@
 
 use rmcp::model as rm;
 use rusty_mcp_proto::{
-    CallToolParams, CallToolResult, CancelledParams, ClientCapabilities, CompleteParams,
-    CompleteResult, ContentBlock, DiscoverResult, ErrorData, GetPromptParams, GetPromptResult,
-    Implementation, InitializeParams, InitializeResult, ListPromptsResult,
-    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedParams,
-    ProgressParams, Prompt, ReadResourceParams, ReadResourceResult, RequestMeta, Resource,
-    ResourceContents, ResourceTemplate, ServerCapabilities, Tool, Wire,
+    AcknowledgedParams, CallToolParams, CallToolResponse, CallToolResult, CancelledParams,
+    ClientCapabilities, CompleteParams, CompleteResult, ContentBlock, CreateTaskResult,
+    DiscoverResult, ElicitParams, ElicitResult, ErrorData, GetPromptParams, GetPromptResult,
+    GetTaskResult, Implementation, InitializeParams, InitializeResult, InputRequiredResult,
+    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
+    ListenParams, ListenResult, Outcome, PaginatedParams, ProgressParams, Prompt,
+    ReadResourceParams, ReadResourceResult, RequestMeta, Resource, ResourceContents,
+    ResourceTemplate, ResourceUpdatedParams, ServerCapabilities, SubscribeParams, TaskAckResult,
+    TaskIdParams, TaskStatusParams, Tool, UpdateTaskParams, Wire,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -380,4 +383,205 @@ fn request_meta_matches_rmcp_accessors() {
         ours.extra.get("traceparent").and_then(|v| v.as_str()),
         Some("00-abc-def-01")
     );
+}
+
+const ELICIT_SCHEMA: &str =
+    r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#;
+
+#[test]
+fn subscriptions() {
+    agree::<rusty_mcp_proto::SubscriptionFilter, rm::SubscriptionFilter>(r#"{}"#);
+    agree::<rusty_mcp_proto::SubscriptionFilter, rm::SubscriptionFilter>(
+        r#"{"toolsListChanged":true,"promptsListChanged":false,"resourcesListChanged":true,
+        "resourceSubscriptions":["file:///a","file:///b"]}"#,
+    );
+    both_refuse::<rusty_mcp_proto::SubscriptionFilter, rm::SubscriptionFilter>(
+        r#"{"resourceSubscriptions":"file:///a"}"#,
+    );
+    agree::<ListenParams, rm::SubscriptionsListenRequestParams>(
+        r#"{"notifications":{"toolsListChanged":true}}"#,
+    );
+    agree::<ListenParams, rm::SubscriptionsListenRequestParams>(
+        r#"{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"},"notifications":{}}"#,
+    );
+    both_refuse::<ListenParams, rm::SubscriptionsListenRequestParams>(r#"{"_meta":{}}"#);
+    agree::<AcknowledgedParams, rm::SubscriptionsAcknowledgedNotificationParams>(
+        r#"{"_meta":{"k":1},"notifications":{"toolsListChanged":true}}"#,
+    );
+    agree::<ListenResult, rm::SubscriptionsListenResult>(
+        r#"{"resultType":"complete","_meta":{"io.modelcontextprotocol/subscriptionId":7}}"#,
+    );
+    agree::<ListenResult, rm::SubscriptionsListenResult>(
+        r#"{"resultType":"complete","_meta":{"io.modelcontextprotocol/subscriptionId":"s-1",
+        "io.modelcontextprotocol/serverInfo":{"name":"s","version":"1"}}}"#,
+    );
+    both_refuse::<ListenResult, rm::SubscriptionsListenResult>(
+        r#"{"resultType":"complete","_meta":{}}"#,
+    );
+    both_refuse::<ListenResult, rm::SubscriptionsListenResult>(r#"{"resultType":"complete"}"#);
+    agree::<ResourceUpdatedParams, rm::ResourceUpdatedNotificationParam>(r#"{"uri":"file:///a"}"#);
+    agree::<ResourceUpdatedParams, rm::ResourceUpdatedNotificationParam>(
+        r#"{"uri":"file:///a","_meta":{"k":1}}"#,
+    );
+    both_refuse::<ResourceUpdatedParams, rm::ResourceUpdatedNotificationParam>(r#"{}"#);
+    agree::<SubscribeParams, rm::SubscribeRequestParams>(r#"{"uri":"file:///a","_meta":{"k":1}}"#);
+    both_refuse::<SubscribeParams, rm::SubscribeRequestParams>(r#"{}"#);
+}
+
+const TASK: &str =
+    r#""taskId":"t1","createdAt":"2026-07-28T10:00:00Z","lastUpdatedAt":"2026-07-28T10:00:01Z""#;
+
+#[test]
+fn tasks() {
+    agree::<CreateTaskResult, rm::CreateTaskResult>(&format!(
+        r#"{{"resultType":"task",{TASK},"status":"working","ttlMs":null}}"#
+    ));
+    agree::<CreateTaskResult, rm::CreateTaskResult>(&format!(
+        r#"{{"resultType":"task",{TASK},"status":"working","statusMessage":"go","ttlMs":60000,
+        "pollIntervalMs":500,"_meta":{{"k":1}}}}"#
+    ));
+    both_refuse::<CreateTaskResult, rm::CreateTaskResult>(&format!(
+        r#"{{"resultType":"complete",{TASK},"status":"working","ttlMs":null}}"#
+    ));
+    both_refuse::<CreateTaskResult, rm::CreateTaskResult>(&format!(
+        r#"{{"resultType":"task",{TASK},"status":"paused","ttlMs":null}}"#
+    ));
+
+    for (status, extra) in [
+        ("working", ""),
+        ("cancelled", ""),
+        (
+            "completed",
+            r#","result":{"content":[{"type":"text","text":"ok"}]}"#,
+        ),
+        ("failed", r#","error":{"code":-32603,"message":"boom"}"#),
+        (
+            "input_required",
+            r#","inputRequests":{"q":{"method":"elicitation/create","params":{"mode":"form","message":"?","requestedSchema":{"type":"object","properties":{}}}}}"#,
+        ),
+    ] {
+        let text = format!(
+            r#"{{"resultType":"complete",{TASK},"status":"{status}","ttlMs":null{extra}}}"#
+        );
+        agree::<GetTaskResult, rm::GetTaskResult>(&text);
+        // The same state as a notification (no resultType).
+        let note =
+            format!(r#"{{{TASK},"status":"{status}","ttlMs":null{extra},"_meta":{{"k":1}}}}"#);
+        agree::<TaskStatusParams, rm::TaskStatusNotificationParams>(&note);
+    }
+    // A status without its payload member is refused by both.
+    for status in ["completed", "failed", "input_required"] {
+        both_refuse::<GetTaskResult, rm::GetTaskResult>(&format!(
+            r#"{{"resultType":"complete",{TASK},"status":"{status}","ttlMs":null}}"#
+        ));
+    }
+
+    agree::<TaskIdParams, rm::GetTaskParams>(r#"{"taskId":"t1"}"#);
+    agree::<TaskIdParams, rm::CancelTaskParams>(r#"{"taskId":"t1","_meta":{"k":1}}"#);
+    both_refuse::<TaskIdParams, rm::GetTaskParams>(r#"{}"#);
+    agree::<UpdateTaskParams, rm::UpdateTaskParams>(
+        r#"{"taskId":"t1","inputResponses":{"q":{"action":"accept","content":{"name":"x"}}}}"#,
+    );
+    both_refuse::<UpdateTaskParams, rm::UpdateTaskParams>(r#"{"taskId":"t1"}"#);
+    agree::<TaskAckResult, rm::TaskAckResult>(r#"{"resultType":"complete"}"#);
+    agree::<TaskAckResult, rm::TaskAckResult>(r#"{"resultType":"complete","_meta":{"k":1}}"#);
+    both_refuse::<TaskAckResult, rm::TaskAckResult>(r#"{"resultType":"complete","extra":1}"#);
+    both_refuse::<TaskAckResult, rm::TaskAckResult>(r#"{"resultType":"task"}"#);
+}
+
+#[test]
+fn multi_round_trip_input() {
+    let request = format!(
+        r#"{{"method":"elicitation/create","params":{{"mode":"form","message":"Name?","requestedSchema":{ELICIT_SCHEMA}}}}}"#
+    );
+    agree::<InputRequiredResult, rm::InputRequiredResult>(&format!(
+        r#"{{"resultType":"input_required","inputRequests":{{"who":{request}}},"requestState":"opaque","_meta":{{"k":1}}}}"#
+    ));
+    agree::<InputRequiredResult, rm::InputRequiredResult>(
+        r#"{"resultType":"input_required","requestState":"only-state"}"#,
+    );
+    agree::<InputRequiredResult, rm::InputRequiredResult>(
+        r#"{"resultType":"input_required","inputRequests":{"roots":{"method":"roots/list"}}}"#,
+    );
+    // Needs one of inputRequests or requestState; wrong resultType; unknown method.
+    both_refuse::<InputRequiredResult, rm::InputRequiredResult>(
+        r#"{"resultType":"input_required"}"#,
+    );
+    both_refuse::<InputRequiredResult, rm::InputRequiredResult>(
+        r#"{"resultType":"complete","requestState":"s"}"#,
+    );
+    both_refuse::<InputRequiredResult, rm::InputRequiredResult>(
+        r#"{"resultType":"input_required","inputRequests":{"x":{"method":"tools/call","params":{}}}}"#,
+    );
+
+    agree::<ElicitParams, rm::ElicitRequestParams>(&format!(
+        r#"{{"mode":"form","message":"Name?","requestedSchema":{ELICIT_SCHEMA},"_meta":{{"k":1}}}}"#
+    ));
+    agree::<ElicitParams, rm::ElicitRequestParams>(
+        r#"{"mode":"url","message":"Sign in","url":"https://x/auth","elicitationId":"e1"}"#,
+    );
+    both_refuse::<ElicitParams, rm::ElicitRequestParams>(r#"{"mode":"form","message":"x"}"#);
+    both_refuse::<ElicitParams, rm::ElicitRequestParams>(r#"{"mode":"other","message":"x"}"#);
+    agree::<ElicitResult, rm::ElicitResult>(r#"{"action":"accept","content":{"name":"x"}}"#);
+    agree::<ElicitResult, rm::ElicitResult>(r#"{"action":"decline","_meta":{"k":1}}"#);
+    both_refuse::<ElicitResult, rm::ElicitResult>(r#"{"action":"maybe"}"#);
+}
+
+/// A form without `mode` is how older peers send it; both sides read it as a form.
+#[test]
+fn elicit_without_mode_is_a_form() {
+    let text = format!(r#"{{"message":"Name?","requestedSchema":{ELICIT_SCHEMA}}}"#);
+    assert!(matches!(
+        ElicitParams::from_json(&text).expect("decodes"),
+        ElicitParams::Form { .. }
+    ));
+    assert!(serde_json::from_str::<rm::ElicitRequestParams>(&text).is_ok());
+}
+
+/// The outcome enums pick their variant from `resultType`, as `rmcp`'s do.
+#[test]
+fn responses_dispatch_on_result_type() {
+    let complete = r#"{"content":[{"type":"text","text":"ok"}]}"#;
+    let input = r#"{"resultType":"input_required","requestState":"s"}"#;
+    let task = format!(r#"{{"resultType":"task",{TASK},"status":"working","ttlMs":null}}"#);
+
+    assert!(matches!(
+        CallToolResponse::from_json(complete),
+        Ok(CallToolResponse::Complete(_))
+    ));
+    assert!(matches!(
+        CallToolResponse::from_json(input),
+        Ok(CallToolResponse::InputRequired(_))
+    ));
+    assert!(matches!(
+        CallToolResponse::from_json(&task),
+        Ok(CallToolResponse::Task(_))
+    ));
+    for text in [complete, input, &task] {
+        // Each form re-encodes to itself.
+        let ours = CallToolResponse::from_json(text).expect("decodes");
+        assert_eq!(json(&ours.to_json()), json(text));
+    }
+
+    type Prompt = Outcome<GetPromptResult>;
+    type Read = Outcome<ReadResourceResult>;
+    let prompt = r#"{"messages":[{"role":"user","content":{"type":"text","text":"hi"}}]}"#;
+    assert!(matches!(
+        Prompt::from_json(prompt),
+        Ok(Outcome::Complete(_))
+    ));
+    assert!(matches!(
+        Prompt::from_json(input),
+        Ok(Outcome::InputRequired(_))
+    ));
+    assert!(matches!(
+        Read::from_json(r#"{"contents":[]}"#),
+        Ok(Outcome::Complete(_))
+    ));
+    assert!(matches!(
+        Read::from_json(input),
+        Ok(Outcome::InputRequired(_))
+    ));
+    // A task is not a valid answer to prompts/get: it is read as a (bad) prompt result.
+    assert!(Prompt::from_json(&task).is_err());
 }

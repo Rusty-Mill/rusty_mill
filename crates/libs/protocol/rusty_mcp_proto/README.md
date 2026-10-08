@@ -19,6 +19,9 @@ A2 of `docs/research/MCP-NATIVE-PLAN.md`, in slices. So far:
 | `capabilities` | `ServerCapabilities`, `ClientCapabilities` and the typed `prompts`/`resources`/`tools` sub-capabilities |
 | `lifecycle` | `InitializeParams/Result` (classic), `DiscoverParams/Result` (stateless), `negotiate_classic`, `pick_common`, `falls_back_to_initialize` |
 | `meta` | `RequestMeta`: typed view of a request `_meta` (progress token, protocol version, client info and capabilities, log level), other keys kept |
+| `subscribe` | `SubscriptionFilter`, `ListenParams/Result`, `AcknowledgedParams`, `ResourceUpdatedParams`, classic `SubscribeParams` |
+| `task` | `Task`, `DetailedTask` (status and payload cannot disagree), `CreateTaskResult`, `GetTaskResult`, `UpdateTaskParams`, `TaskAckResult` |
+| `input` | multi-round-trip: `InputRequiredResult`, `InputRequest`, `CallToolResponse`, `Outcome<T>` (prompt/resource answers), `ElicitParams`, `ElicitResult` |
 | `notify` | `CancelledParams`, `ProgressParams`, `ProgressToken` |
 
 Each module has a `method` submodule with the method-name constants.
@@ -39,7 +42,6 @@ known types are dropped on decode.
 (dev-dependency only): the fixture, this crate's re-encoding and `rmcp`'s
 re-encoding must agree, and malformed input must be refused by both.
 
-Not yet covered: subscriptions (`subscriptions/listen`, list-changed and
-updated notifications), tasks, and multi-round-trip input (`InputRequired`
-results, elicitation).
-Scope: `docs/research/MCP-PROTO-SCOPE.md`.
+The A2 type list in `docs/research/MCP-PROTO-SCOPE.md` is complete. Still to come
+are the pieces around it: a session/dispatch layer, SSE framing and the
+transports (A3/A4). Elicitation schemas stay opaque JSON by decision.
