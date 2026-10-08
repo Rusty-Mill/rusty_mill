@@ -642,6 +642,18 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   `wheel_kstep.py`, the rest pose (roll 0), and the port's original-versus-mirror
   distance on these 30 tapes.
 
+- **Coasting climbs (2026-10-08, `gen_wall_coast.py`, `wallgc_*` and mirrors `wallgcm_*`,
+  `batch_20261008-081407`)**: four wall approaches (30 and 60 degrees, 1200 and 1800 uu/s) with
+  the throttle released, on the right and the left wall, one game run each. Free-run mean error
+  (right / left wall, uu): `30_1800` 10.1 / 19.5, `30_1200` 6.3 / 6.1, `60_1800` 13.7 / 13.3,
+  `60_1200` 30.6 / 30.4 (max 153). The **game** is mirror-symmetric to 0.3 to 1.2 uu at 1 to 2 s
+  and 1.2 to 5.3 uu at 3 s; the **port** is nearly symmetric too when coasting, so the left-right
+  gap of the powered climbs (17 against 28 uu) comes from the engine and steering acting on the
+  wall, not from the surface transition. The 60 degree 1200 uu/s tape climbs to z = 309, stalls
+  and slides back down: its error (up to 184 uu) starts at the apex where the car peels off the
+  wall, a chaotic moment. A pure coasting wall ride is modelled to 6 to 14 uu.
+  Next for the wall: the engine and the steered wheels on a wall (powered minus coasting).
+
 ### RB-RESEARCH-O013 — Powerslide: a long reverse slide loses speed too fast
 
 - **Evidence (2026-10-07)**: `probe_powerslide` (1400 uu/s, handbrake, full
