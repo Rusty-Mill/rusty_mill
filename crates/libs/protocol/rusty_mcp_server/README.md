@@ -210,7 +210,6 @@ its `_meta` (2026-07-28), else the `MCP-Protocol-Version` header, else
 Tested with raw sockets (`tests/http.rs`) and against the `rmcp` HTTP client in
 both handshake modes (`tests/http_interop.rs`).
 
-Not here yet: classic `resources/subscribe`, `notifications/tasks`, and multi-round-trip input
-on the server side (and so `resultType: input_required`), authentication (the existing
-`rusty-mcp` has OAuth, limits and telemetry that are not ported), and
-sessions or stream resumption.
+Not here yet: classic `resources/subscribe`, `notifications/tasks`, multi-round-trip
+input for prompts and resources, authentication (the existing `rusty-mcp` has
+OAuth, limits and telemetry that are not ported), TLS, and stream resumption.
