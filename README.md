@@ -483,3 +483,7 @@ A fifth merge, separate from that `baileyrd/rusty_*` wave numbering,
 brought in [`baileyrd/nexus`](https://github.com/baileyrd/nexus) — a
 42-crate microkernel note-taking/AI-agent workspace — under
 `crates/nexus/`, same `git subtree` process, full history preserved.
+
+## License
+
+MIT OR Apache-2.0, at your option: [LICENSE-MIT](./LICENSE-MIT), [LICENSE-APACHE](./LICENSE-APACHE). Crates that carry their own `LICENSE` file are governed by it.
