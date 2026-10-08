@@ -39,7 +39,7 @@ def main() -> None:
     batch = pathlib.Path(sys.argv[1])
     threshold = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
     means, clean = [], 0
-    for capture in sorted(batch.glob("fuzz_*_run1.jsonl"), key=lambda p: int(p.name.split("_")[1])):
+    for capture in sorted(batch.glob("*fuzz_*_run1.jsonl"), key=lambda p: int(p.name.split("_")[1])):
         name = capture.name[: -len("_run1.jsonl")]
         scenario = EXP / f"{name}.json"
         out, rows = rows_of(scenario, capture)
