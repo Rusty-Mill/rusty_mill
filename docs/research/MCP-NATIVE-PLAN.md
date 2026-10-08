@@ -14,7 +14,7 @@ MCP crates depend on `rusty_request` / `rusty_serve` and **`rusty_tls`**, never 
 | A1 | Split the client out of `rusty-mcp` into `rusty-mcp-client`; client on rustls, not OpenSSL | done |
 | A2 | `rusty_mcp_proto` (Tier S): JSON-RPC 2.0 + MCP types on `rusty_json`; `rmcp` as a **dev-only** wire-format oracle | in progress: type list complete in four slices (see `rusty_mcp_proto` README); scope in `MCP-PROTO-SCOPE.md` |
 | A3 | Server on `rusty_serve` (stdio + stateless Streamable HTTP); accept on `rk-app` and `rusty-mcp-demo` | in progress: `rusty_serve` gained headers, `Limits` and `SharedHandler` (owner approved, additive); `rusty_mcp_server` has the core, stdio and stateless HTTP (tools, prompts, resources, completion, `subscriptions/listen`; verified against the `rmcp` client); **`rk-app` moved** (first consumer); tasks, multi-round-trip input (tools) and classic-HTTP sessions are in; **`rusty-mcp-demo` moved** (owner-approved swap, 43 acceptance tests over HTTP). Remaining in A3: `notifications/tasks`, MRTR for prompts and resources, classic `resources/subscribe`, auth/limits/telemetry from `rusty-mcp` |
-| A4 | Client on `rusty_request` + `rusty_tls`; needs an SSE reader | open |
+| A4 | Client on `rusty_request` + `rusty_tls`; needs an SSE reader | scoped in `MCP-CLIENT-SCOPE.md` (`rusty_request` already streams bodies, so the SSE reader is a pure parser); five owner decisions open |
 | A5 | Move consumers one at a time: `rk-app`, `rk-mcp`, `rusty_homelab_mcp`, `rp-mcp`, ..., `agentgateway` last | open |
 | A6 | Drop `rmcp`, then `axum`/`clap`/`tracing-subscriber`/`jsonwebtoken` from the MCP crates | open |
 
