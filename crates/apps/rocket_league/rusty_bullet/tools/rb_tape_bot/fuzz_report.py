@@ -12,11 +12,13 @@ the threshold for the whole tape.
 import json
 import pathlib
 import re
+import statistics
 import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+TAPE_TICKS = 720  # a 6 s tape
 EXP = ROOT / "tools" / "rb_tape_bot" / "experiments"
 
 
@@ -38,7 +40,7 @@ def rows_of(scenario: pathlib.Path, capture: pathlib.Path) -> tuple[str, dict]:
 def main() -> None:
     batch = pathlib.Path(sys.argv[1])
     threshold = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
-    means, clean = [], 0
+    means, clean, first_ticks, hundred_ticks = [], 0, [], []
     for capture in sorted(batch.glob("*fuzz_*_run1.jsonl"), key=lambda p: int(p.name.split("_")[1])):
         name = capture.name[: -len("_run1.jsonl")]
         scenario = EXP / f"{name}.json"
@@ -50,6 +52,9 @@ def main() -> None:
         mean, mx = float(m.group(1)), float(m.group(2))
         means.append(mean)
         first = next((t for t in sorted(rows) if rows[t][0] > threshold), None)
+        first_ticks.append(first if first is not None else TAPE_TICKS)
+        hundred = next((t for t in sorted(rows) if rows[t][0] > 100.0), None)
+        hundred_ticks.append(hundred if hundred is not None else TAPE_TICKS)
         if first is None:
             clean += 1
             print(f"{name:<9} mean {mean:6.1f} max {mx:6.1f}  stays under {threshold:g} uu")
@@ -67,6 +72,11 @@ def main() -> None:
         print(f"{name:<9} mean {mean:6.1f} max {mx:6.1f}  first over {threshold:g} at tick {tick}: z {z:.0f}, tape {pressed}")
     if means:
         print(f"\n{len(means)} tapes, mean of means {sum(means) / len(means):.1f} uu, {clean} under {threshold:g} uu throughout")
+        print(
+            f"median time until {threshold:g} uu off {statistics.median(first_ticks) / 120:.1f} s, until 100 uu off "
+            f"{statistics.median(hundred_ticks) / 120:.1f} s ({sum(t >= TAPE_TICKS for t in hundred_ticks)} tapes never 100 uu off); "
+            "set RB_FORCE_ALIGN=0,0 for the honest alignment"
+        )
 
 
 if __name__ == "__main__":
