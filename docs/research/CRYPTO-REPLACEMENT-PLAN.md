@@ -575,11 +575,27 @@ the honest current position.
 | Requirement | State |
 | --- | --- |
 | Arithmetic review of the shared Montgomery core: carry bounds, reduction invariants, limb conversions, adversarial boundaries. Sharing the code concentrates the impact of a defect. | Boundary tests added (`mont::tests::adversarial_boundaries_match_biguint`, moduli of 1 to 128 limbs built from all-ones, near-2^(64k), sparse and top-bit patterns; operands 0, 1, n-1, n-2, R; mul, add, sub, enter/leave against an independent bignum): no defect found. `add`/`sub` assume inputs below `n` and `mul` assumes `a*b < n*R`; documented in code, enforced by callers. **A human review of the invariants has not happened.** |
-| AEAD failure tests: corrupted tag, AAD and ciphertext; no unauthenticated plaintext exposed; full-length tag comparison; counter limit; explicit nonce contract. | Corrupted tag/AAD/ciphertext/nonce: tested (differential and unit). Failed open leaves the buffer undecrypted: tested. Wrong-length and empty tags rejected: tested. Counter limit: only the value of `MAX_LEN` is pinned, the 256 GiB boundary is not exercised. Nonce contract: stated in the type's docs (never reuse under one key), not enforced by the API, and the caller owns uniqueness. |
+| AEAD failure tests: corrupted tag, AAD and ciphertext; no unauthenticated plaintext exposed; full-length tag comparison; counter limit; explicit nonce contract. | Corrupted tag/AAD/ciphertext/nonce: tested (differential and unit). Failed open leaves the buffer undecrypted: tested. Wrong-length and empty tags rejected: tested. Counter limit: `MAX_LEN` is now `u32::MAX * 64` (274,877,906,880 bytes, RFC 8439 section 2.8; it was one block short, found by Codex round 1) and its value and boundary arithmetic are pinned by a unit test, but a message of that size is never actually sealed. Nonce contract: stated in the type's docs (never reuse under one key), not enforced by the API, and the caller owns uniqueness. |
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
 | Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-08.txt`. **Review findings: none exist yet.** |
 | `ring` usage inventory including randomness and helper APIs. | Section 2.3. |
 | Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Not done. Required.** |
+
+## 11a. Independent review, round 1 (Codex, PR #540, reviewed commit `25fcc18`)
+
+Codex returned three findings and stated no others. This is one automated pass, not the
+human review the plan requires.
+
+| Finding | Verified? | Disposition |
+| --- | --- | --- |
+| P1: constant-time budgets were checked only on rustc 1.99.0, but CI builds with 1.98.1, no workflow runs `ct_check.sh`, and the crates declare 1.75. The shipped artifact had never passed the taint/disassembly checks. **Blocking for any backend seam.** | **Yes.** | The checks now run on 1.98.1 as well (identical results and jump counts; `collect.sh` runs every toolchain it names, defaulting to CI's and the local one). Still open: no CI job runs the checks, and `rust-version = 1.75` has never been built or checked; only 1.98.1 and 1.99.0 are evidenced. Adding a CI job is a workflow change left for the owner's decision. |
+| P2: `collect.sh` ignored the exit status of timing and constant-time runs, so a detector firing could still yield a completed record. | **Yes** (and the `exit=` it printed for the constant-time checks was the status of a `sed`, not the check). | Fixed: statuses are captured; the script exits non-zero on any failed test, lint, constant-time check, missing toolchain or unparsed timing run, and fails a leak series that alarms more than `2 x baseline + 1` times. The failure path was exercised once (it caught its own toolchain-lookup bug); a timing alarm path was not triggered. |
+| P3: `MAX_LEN` rejected the final legal ChaCha20 block (off by one block against RFC 8439 section 2.8). | **Yes**: data uses counters 1 to 2^32-1, so the limit is `u32::MAX * 64`, as `ring` documents. | Fixed and pinned by a test. Conservative direction (rejected a valid input), not a forgery risk. |
+
+Observation for the human reviewer: in every timing series so far, the HMAC-SHA512 key-class test
+has had the highest tail (4.33, 4.80 at the latest record; no-leak baselines 3.0 to 4.95). That is
+inside the allowance and inside the noise seen, but it is the series I would repeat on quiet
+hardware first.
 
 ## 12. What I did not verify
 

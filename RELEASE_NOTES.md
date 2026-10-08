@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - Codex review round 1 on #540: three findings fixed
+
+- **Fixed (rusty_aead):** `MAX_LEN` was one 64-byte block short of RFC 8439 section 2.8; now `u32::MAX * 64`, pinned by a test. Behaviour change only for a message of exactly 2^38 - 64 bytes.
+- **Fixed (evidence script):** failures in tests, lint, constant-time checks and timing now fail the run; constant-time checks run on every named compiler, including CI's 1.98.1 (identical results).
+- **Open:** no CI job runs the constant-time checks; `rust-version = 1.75` is unverified.
+
 ## 2026-10-08 - Crypto claims corrected, evidence record, boundary tests (docs and tests only)
 
 - **Changed (docs):** `CRYPTO-REPLACEMENT-PLAN.md` no longer says "Done" or "exactly what ring accepts": stages are "implemented; independent review pending", ring parity is "on the recorded corpus", the Ed25519 leniency is a documented compatibility exception, provisional implementer choices are separated from owner decisions, scope limits (no AES-GCM, no P-256/P-384 key exchange, no signing, no randomness) and a call-site coverage table are stated. Added `docs/research/crypto-evidence/` (script and record).
