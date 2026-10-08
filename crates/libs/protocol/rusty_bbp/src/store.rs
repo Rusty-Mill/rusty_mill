@@ -16,6 +16,8 @@ pub enum StoreError {
     },
     UnknownTask,
     UnknownBlob,
+    /// The backing medium failed or is corrupt.
+    Backend(String),
 }
 
 /// Single-writer, transactional, append-only log plus content-addressed blobs.
@@ -29,7 +31,7 @@ pub trait Store {
     fn events(&self, task: &TaskId, after: usize) -> Result<Vec<Event>, StoreError>;
     /// The store computes the digest; callers never supply it.
     fn blob_put(&mut self, bytes: &[u8]) -> BlobRef;
-    fn blob_get(&self, sha: &Sha256) -> Result<&[u8], StoreError>;
+    fn blob_get(&self, sha: &Sha256) -> Result<Vec<u8>, StoreError>;
 }
 
 #[derive(Default)]
@@ -74,11 +76,8 @@ impl Store for MemStore {
             len: bytes.len() as u64,
         }
     }
-    fn blob_get(&self, sha: &Sha256) -> Result<&[u8], StoreError> {
-        self.blobs
-            .get(sha)
-            .map(|v| v.as_slice())
-            .ok_or(StoreError::UnknownBlob)
+    fn blob_get(&self, sha: &Sha256) -> Result<Vec<u8>, StoreError> {
+        self.blobs.get(sha).cloned().ok_or(StoreError::UnknownBlob)
     }
 }
 
