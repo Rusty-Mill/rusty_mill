@@ -3,7 +3,7 @@
 //! crash mid-batch, a revision conflict between two handles, blob consistency.
 mod common;
 use common::*;
-use rusty_bbp::fs_store::truncate_log_for_test;
+use rusty_bbp::fs_store::{lock_for_test, truncate_log_for_test};
 use rusty_bbp::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -182,5 +182,91 @@ fn every_referenced_blob_exists_after_reopen() {
             .expect("referenced blob present");
         assert_eq!(bytes.len() as u64, art.blob.len);
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A process mid-operation holds the directory lock; another process's open
+/// (with its tail repair) waits for it instead of racing it.
+#[test]
+fn open_waits_for_a_process_that_holds_the_lock() {
+    let dir = tempdir();
+    let task = TaskId("T1".into());
+    let mut fx = Fx::with_store(open(&dir));
+    fx.reach_build();
+    let before = fx.st().rev;
+    // The "other process" is mid-write: it holds the lock while its batch is
+    // not yet complete on disk.
+    let held = lock_for_test(&dir).expect("lock");
+    let size = std::fs::metadata(dir.join("tasks").join("T1.log"))
+        .expect("meta")
+        .len();
+    truncate_log_for_test(&dir, &task, size - 5).expect("truncate");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir2 = dir.clone();
+    let opener = std::thread::spawn(move || {
+        let store = open(&dir2);
+        tx.send(store.rev(&TaskId("T1".into()))).expect("send");
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "open must block while another process holds the lock"
+    );
+    drop(held);
+    let seen = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("open completes once the lock is released");
+    opener.join().expect("join");
+    // Repair ran after the lock was released and dropped exactly the cut batch.
+    assert!(
+        seen < before,
+        "the cut batch is gone: {seen:?} < {before:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two writers racing on one directory: per round exactly one append lands and
+/// the other conflicts, and every acknowledged batch survives reopen.
+#[test]
+fn racing_writers_never_both_pass_the_revision_check() {
+    let dir = tempdir();
+    let task = TaskId("T1".into());
+    let fx = Fx::with_store(open(&dir));
+    let base = fx.st().rev;
+    let payload = fx.d.store.events(&task, 0).expect("events")[0].clone();
+    let rounds = 25;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writer = |dir: PathBuf, barrier: std::sync::Arc<std::sync::Barrier>, ev: Event| {
+        std::thread::spawn(move || {
+            let task = TaskId("T1".into());
+            let mut store = open(&dir);
+            let mut wins = 0u64;
+            for _ in 0..rounds {
+                store.refresh(&task).expect("refresh");
+                let rev = store.rev(&task);
+                barrier.wait();
+                match store.append(&task, rev, std::slice::from_ref(&ev)) {
+                    Ok(()) => wins += 1,
+                    Err(StoreError::Conflict { .. }) => {}
+                    Err(e) => panic!("unexpected {e:?}"),
+                }
+                barrier.wait();
+            }
+            wins
+        })
+    };
+    let a = writer(dir.clone(), barrier.clone(), payload.clone());
+    let b = writer(dir.clone(), barrier, payload);
+    let wins = a.join().expect("a") + b.join().expect("b");
+    assert!(
+        wins >= rounds,
+        "at least one writer lands per round: {wins}"
+    );
+    let reopened = open(&dir);
+    assert_eq!(
+        reopened.rev(&task).0,
+        base.0 + wins,
+        "every acknowledged batch is on disk and nothing else is"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
