@@ -867,7 +867,13 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   match runs 6.9 s (an intro). The first frame of every tape-bot capture is such a countdown frame: ball 100.49,
   cars at z 83 falling to 36.
 - **Modelled**: FR-160 (`rb_env::flow`).
-- **Open**: the clock and overtime; the random spawn slot (five, point-reflected for the other team) and the two
+- **Clock, overtime, end (2026-10-08, `log4..6`)**: a five-minute match, game_time_remaining 300.0 down 1 s per
+  second of `Active` only; at zero play goes on (the clock negative) until the ball is low (match ended at ball z
+  92.2 and 97.3), then a lead gives `Ended` (after 0.26 to 0.49 s below zero) and a tie gives overtime: a 4 s
+  countdown with no replay, the clock counting on from the negative value, `is_overtime`; the golden goal is
+  followed by the usual 3 s and 9 s and then `Ended`. The first countdown of a match is 826 frames. After a goal
+  the packets carry no ball, so the net cannot be observed. Modelled in FR-160.
+- **Open**: the random spawn slot (five, point-reflected for the other team) and the two
   teams' different drop heights on the first packets; goal-line geometry for a ball that crosses between the posts
   only (the test is the line alone); demolitions and bumps during the countdown; the ball's missing drag.
 - **Status**: Modelled in `Env`; owner: baileyrd.

@@ -8270,8 +8270,15 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     frame of every capture is such a kickoff frame) and rests at 92.75, not the 93.15 of free rolling;
     boost resets to 33.33; pads 33 of 34 active before, 34 after; the five blue slots pair with the orange
     ones point-reflected, and the pair is random at each kickoff.
-  - Not modelled: the match clock and overtime, the first kickoff of a match (an intro makes its countdown
-    6.9 s), the game's random slot choice (the caller may pass `set_kickoff_slots`; the default rotates),
+  - Clock, overtime, end and intro (added the same day, `log4..6.jsonl`: a five-minute match, goals forced
+    so that it ended level): the clock (`Env::set_match_length`, 36000 ticks for five minutes) runs in
+    `Active` only, so it stands through goal, replay, countdown and kickoff; at zero play goes on, the clock
+    below zero, until the ball is low (it ended at ball z 92.2 and 97.3); a lead then ends the match (`Ended`),
+    a tie starts overtime: a countdown with no replay, the clock still counting away from zero, and the next
+    goal's replay is followed by `Ended`. `Env::start_match` gives the first kickoff its 826-tick intro.
+    After a goal the game's packets stop reporting the ball, so the net's behaviour is not observable beyond
+    the line; the port keeps simulating it (FR-033).
+  - Not modelled: the game's random slot choice (the caller may pass `set_kickoff_slots`; the default rotates),
     the spawn-height stagger between the two teams' cars (blue 35.0 against orange 39.5 on the first
     packets), the ball's missing drag while it falls (a tenth of a unit by tick 15).
   - **Verification**: `flow` tests (goal line, both goals, the phase lengths), `Env` tests (a goal shot
@@ -8449,7 +8456,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
-- 0.161.0 (2026-10-08): `RB-PHYSICS-001-FR-160` (match flow around a goal, in `rb_env`).
+- 0.161.0 (2026-10-08): `RB-PHYSICS-001-FR-160` (match flow around a goal, with clock, overtime and the first-kickoff intro, in `rb_env`).
 - 0.160.0 (2026-10-08): `RB-PHYSICS-001-FR-159` (the ground bump follows the bumper's climb). 508 tests in
   `rb_physics_bullet`.
 - 0.159.0 (2026-10-08): `RB-PHYSICS-001-FR-158` (the bump's nose test uses the other car's origin). 507 tests in
