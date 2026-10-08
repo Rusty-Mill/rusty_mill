@@ -60,6 +60,9 @@ async fn run(mode: Mode) {
             .unwrap(),
     };
     let observed = move || saw_cancel.load(Ordering::SeqCst);
+    if matches!(mode, Mode::Classic) {
+        common::classic_subscribe(&client, &recorder).await;
+    }
     exercise(mode, client, recorder, &observed).await;
     stop.shutdown();
 }

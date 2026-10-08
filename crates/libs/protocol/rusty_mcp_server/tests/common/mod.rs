@@ -4,7 +4,8 @@
 
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, ClientInfo, ClientRequest, GetPromptRequestParams,
-    ProgressNotificationParam, ReadResourceRequestParams, ServerNotification, SubscriptionFilter,
+    ProgressNotificationParam, ReadResourceRequestParams, ResourceUpdatedNotificationParam,
+    ServerNotification, SubscribeRequestParams, SubscriptionFilter, UnsubscribeRequestParams,
 };
 use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService};
 use rmcp::{ClientHandler, RoleClient, ServiceError};
@@ -15,6 +16,10 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Default)]
 pub struct Recorder {
     pub progress: Arc<Mutex<Vec<f64>>>,
+    /// URIs of `notifications/resources/updated` received.
+    pub updated: Arc<Mutex<Vec<String>>>,
+    /// Count of `notifications/resources/list_changed` received.
+    pub list_changed: Arc<Mutex<usize>>,
 }
 
 impl ClientHandler for Recorder {
@@ -28,6 +33,18 @@ impl ClientHandler for Recorder {
         _context: NotificationContext<RoleClient>,
     ) {
         self.progress.lock().unwrap().push(params.progress);
+    }
+
+    async fn on_resource_updated(
+        &self,
+        params: ResourceUpdatedNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        self.updated.lock().unwrap().push(params.uri);
+    }
+
+    async fn on_resource_list_changed(&self, _context: NotificationContext<RoleClient>) {
+        *self.list_changed.lock().unwrap() += 1;
     }
 }
 
@@ -279,4 +296,38 @@ async fn exercise_listen(client: &RunningService<RoleClient, Recorder>) {
         ),
         "unexpected second notification: {second:?}"
     );
+}
+
+/// Classic `resources/subscribe` over a session: the server pushes what the
+/// session follows on the standalone `GET` stream, which the client opens by
+/// itself. `touch` publishes an update to `mem://a` and a list change.
+#[allow(deprecated)] // rmcp marks resources/subscribe legacy-only: that is the point
+pub async fn classic_subscribe(client: &RunningService<RoleClient, Recorder>, recorder: &Recorder) {
+    client
+        .subscribe(SubscribeRequestParams::new("mem://a"))
+        .await
+        .expect("resources/subscribe");
+    // The client opens its stream a moment after the handshake; events
+    // published before it connects are kept for it, so no sleep is needed.
+    client
+        .call_tool(CallToolRequestParams::new("touch"))
+        .await
+        .unwrap();
+    assert!(
+        eventually(|| recorder
+            .updated
+            .lock()
+            .unwrap()
+            .contains(&"mem://a".to_owned()))
+        .await,
+        "no resources/updated for the followed resource"
+    );
+    assert!(
+        eventually(|| *recorder.list_changed.lock().unwrap() >= 1).await,
+        "no resources/list_changed"
+    );
+    client
+        .unsubscribe(UnsubscribeRequestParams::new("mem://a"))
+        .await
+        .expect("resources/unsubscribe");
 }

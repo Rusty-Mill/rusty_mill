@@ -25,9 +25,16 @@
 //! 2026-07-28 requests are stateless and never get or use a session.
 //! [`HttpConfig::max_sessions`] of `0` turns sessions off.
 //!
-//! `GET` (a server-push stream) is answered `405`: there is nothing to push.
+//! **Push.** A classic session can open the standalone server-to-client stream
+//! with `GET` (`Accept: text/event-stream`, `Mcp-Session-Id`): list changes and
+//! updates to resources followed with `resources/subscribe` arrive on it, with
+//! event ids and `Last-Event-ID` resumption (details in `push.rs`). `GET` is
+//! `405` where there is nothing to push: sessions off, or a server that
+//! announces no changes.
 
+use crate::changes::ChangeKinds;
 use crate::connection::{CancelToken, Connection, Notifier, Started};
+use crate::push::Push;
 use crate::server::Server;
 use rusty_base64::decode_standard;
 use rusty_http::{Method, StatusCode};
@@ -264,6 +271,7 @@ struct Session {
     version: ProtocolVersion,
     client_info: Option<Implementation>,
     client_capabilities: Option<ClientCapabilities>,
+    push: Arc<Push>,
     inflight: Mutex<HashMap<RequestId, CancelToken>>,
     last_used: Mutex<Instant>,
 }
@@ -328,6 +336,7 @@ impl Sessions {
         &self,
         version: ProtocolVersion,
         client: Option<InitializeParams>,
+        push: Arc<Push>,
         max: usize,
         idle: Duration,
     ) -> Result<(String, Arc<Session>), OpenError> {
@@ -349,6 +358,7 @@ impl Sessions {
             version,
             client_info,
             client_capabilities,
+            push,
             inflight: Mutex::new(HashMap::new()),
             last_used: Mutex::new(Instant::now()),
         });
@@ -438,13 +448,17 @@ impl HttpHandler {
             self.check_origin(request.headers)?;
             return self.end_session(request.headers);
         }
+        if request.method == &Method::Get {
+            self.check_origin(request.headers)?;
+            return self.open_push_stream(request.headers);
+        }
         if request.method != &Method::Post {
             let mut refusal = reject(
                 StatusCode::METHOD_NOT_ALLOWED,
                 ErrorCode::INVALID_REQUEST,
-                "this server accepts POST and DELETE only",
+                "this server accepts GET, POST and DELETE only",
             );
-            let _ = refusal.headers.insert("Allow", "POST, DELETE");
+            let _ = refusal.headers.insert("Allow", "GET, POST, DELETE");
             return Err(refusal);
         }
         self.check_origin(request.headers)?;
@@ -496,6 +510,99 @@ impl HttpHandler {
             })
     }
 
+    /// `GET`: the standalone stream of the session's own notifications.
+    /// `405` where there is nothing to push (no sessions, or a server that
+    /// announces no changes), as the spec allows.
+    fn open_push_stream(&self, headers: &HeaderMap) -> Result<Response, Response> {
+        let not_offered = || {
+            let mut r = reject(
+                StatusCode::METHOD_NOT_ALLOWED,
+                ErrorCode::INVALID_REQUEST,
+                "this server has no standalone stream",
+            );
+            let _ = r.headers.insert("Allow", "POST, DELETE");
+            r
+        };
+        if self.config.max_sessions == 0 || self.server.changes.is_none() {
+            return Err(not_offered());
+        }
+        if !headers
+            .get("accept")
+            .is_some_and(|a| a.contains("text/event-stream"))
+        {
+            return Err(reject(
+                StatusCode::NOT_ACCEPTABLE,
+                ErrorCode::INVALID_REQUEST,
+                "the client must accept text/event-stream",
+            ));
+        }
+        if headers.get("mcp-session-id").is_none() {
+            return Err(reject(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                "the stream needs an Mcp-Session-Id header",
+            ));
+        }
+        let Some(session) = self.session_of(headers)? else {
+            return Err(not_offered());
+        };
+        let last = headers
+            .get("last-event-id")
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let touched = Arc::clone(&session);
+        let stream = session.push.attach(
+            last,
+            self.config.keep_alive,
+            Box::new(move || touched.touch()),
+        );
+        Ok(Response::stream("text/event-stream", stream))
+    }
+
+    /// `resources/subscribe` and `resources/unsubscribe` of a classic
+    /// session: remember the URI, so the session's stream carries its updates.
+    fn session_subscription(
+        &self,
+        session: &Session,
+        id: &RequestId,
+        method: &str,
+        params: &Option<Value>,
+    ) -> Message {
+        let fail = |code: ErrorCode, why: String| {
+            Message::error(Some(id.clone()), ErrorData::new(code, why))
+        };
+        let announced = self
+            .server
+            .changes
+            .as_ref()
+            .is_some_and(|(_, k)| k.resource_updates);
+        if !announced {
+            return fail(
+                ErrorCode::METHOD_NOT_FOUND,
+                "this server announces no resource updates".to_owned(),
+            );
+        }
+        let parsed: rusty_mcp_proto::subscribe::SubscribeParams =
+            match rusty_mcp_proto::rpc::params(params) {
+                Ok(p) => p,
+                Err(e) => return fail(ErrorCode::INVALID_PARAMS, e.to_string()),
+            };
+        if method == "resources/subscribe" {
+            if !self.server.can_read(&parsed.uri) {
+                return fail(
+                    ErrorCode::RESOURCE_NOT_FOUND,
+                    format!("resource not found: {}", parsed.uri),
+                );
+            }
+            session.push.subscribe(&parsed.uri);
+        } else {
+            session.push.unsubscribe(&parsed.uri);
+        }
+        Message::Response {
+            id: id.clone(),
+            result: Value::object(),
+        }
+    }
+
     /// `DELETE`: the client ends its session; whatever it still had running
     /// is cancelled.
     fn end_session(&self, headers: &HeaderMap) -> Result<Response, Response> {
@@ -514,6 +621,7 @@ impl HttpHandler {
             ));
         };
         session.cancel_all();
+        session.push.close();
         Ok(Response::json(StatusCode::OK, Vec::new()))
     }
 
@@ -534,9 +642,15 @@ impl HttpHandler {
         if self.config.max_sessions == 0 {
             return Ok(None);
         }
+        // Collect the server's change events for this session from now on.
+        let push = match &self.server.changes {
+            Some((changes, kinds)) => Push::new(Some(changes.subscribe()), *kinds),
+            None => Push::new(None, ChangeKinds::default()),
+        };
         let opened = self.sessions.open(
             ProtocolVersion::new(version),
             client,
+            push,
             self.config.max_sessions,
             self.config.session_idle,
         );
@@ -714,6 +828,12 @@ impl HttpHandler {
                 if let Some(id) = id {
                     session.cancel(&id);
                 }
+            }
+        }
+        if let (Some(session), Message::Request { id, method, params }) = (&session, &message) {
+            if method == "resources/subscribe" || method == "resources/unsubscribe" {
+                let reply = self.session_subscription(session, id, method, params);
+                return Ok(json_reply(StatusCode::OK, &reply));
             }
         }
         let (tx, events) = channel();

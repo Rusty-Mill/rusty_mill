@@ -45,6 +45,8 @@ pub mod connection;
 pub mod http;
 mod methods;
 mod page;
+#[cfg(feature = "http")]
+mod push;
 pub mod server;
 #[cfg(feature = "request-state")]
 mod state;

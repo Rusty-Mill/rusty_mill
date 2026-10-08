@@ -945,3 +945,357 @@ fn a_session_opened_at_the_stateless_revision_needs_no_meta_afterwards() {
     let alone = post(f.addr, &[("MCP-Protocol-Version", "2026-07-28")], LIST);
     assert_eq!(alone.status, 400);
 }
+
+// ---- sessions' standalone stream (GET) and classic resources/subscribe ----
+
+use rusty_mcp_proto::{ReadResourceResult, Resource};
+use rusty_mcp_server::{ChangeBroadcaster, ChangeKinds};
+
+/// A server with changes announced and two readable resources.
+fn start_push(config: HttpConfig, kinds: ChangeKinds) -> (Fixture, ChangeBroadcaster) {
+    let changes = ChangeBroadcaster::new();
+    let server = Arc::new(
+        Server::builder("push-fixture", "1")
+            .tool(Tool::new("noop", schema()), |_c, _p| Ok(text("ok")))
+            .prompt(rusty_mcp_proto::Prompt::new("p"), |_c, _g| {
+                Ok(Default::default())
+            })
+            .resource(Resource::new("mem://a", "a"), |_c, _r| {
+                Ok(ReadResourceResult::default())
+            })
+            .resource(Resource::new("mem://b", "b"), |_c, _r| {
+                Ok(ReadResourceResult::default())
+            })
+            .notify_changes(&changes, kinds)
+            .build()
+            .unwrap(),
+    );
+    let http = bind_http(
+        server,
+        "127.0.0.1:0".parse().unwrap(),
+        config,
+        Limits::default(),
+    )
+    .unwrap();
+    let addr = http.local_addr().unwrap();
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    (
+        Fixture {
+            addr,
+            stop,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        },
+        changes,
+    )
+}
+
+/// An open `GET` stream, read incrementally.
+struct Stream {
+    sock: TcpStream,
+    seen: String,
+    status: u16,
+    done: usize,
+}
+
+fn open_stream(addr: SocketAddr, session: &str, extra: &[(&str, &str)]) -> Stream {
+    let mut sock = TcpStream::connect(addr).unwrap();
+    sock.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut raw = format!(
+        "GET /mcp HTTP/1.1\r\nHost: {addr}\r\nAccept: text/event-stream\r\nMcp-Session-Id: {session}\r\nMCP-Protocol-Version: 2025-06-18\r\n"
+    );
+    for (k, v) in extra {
+        raw.push_str(&format!("{k}: {v}\r\n"));
+    }
+    raw.push_str("\r\n");
+    sock.write_all(raw.as_bytes()).unwrap();
+    let mut s = Stream {
+        sock,
+        seen: String::new(),
+        status: 0,
+        done: 0,
+    };
+    s.pump(Duration::from_secs(5), |s| s.seen.contains("\r\n\r\n"));
+    s.status = s
+        .seen
+        .split(' ')
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    s
+}
+
+impl Stream {
+    /// Read until `until` holds or `limit` passes. Returns whether it held;
+    /// notes when the server closed the stream.
+    fn pump(&mut self, limit: Duration, until: impl Fn(&Stream) -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        let mut buf = [0u8; 4096];
+        while Instant::now() < deadline {
+            if until(self) {
+                return true;
+            }
+            match self.sock.read(&mut buf) {
+                Ok(0) => return until(self),
+                Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return until(self),
+            }
+        }
+        until(self)
+    }
+
+    /// Every `(id, message)` read so far.
+    fn all(&self) -> Vec<(u64, Value)> {
+        let mut out = Vec::new();
+        let mut id = 0;
+        for line in self.seen.split('\n') {
+            let line = line.trim_end_matches('\r');
+            if let Some(n) = line.strip_prefix("id: ") {
+                id = n.parse().unwrap();
+            } else if let Some(d) = line.strip_prefix("data: ") {
+                if let Ok(v) = Value::from_json_str(d) {
+                    out.push((id, v));
+                }
+            }
+        }
+        out
+    }
+
+    /// The next `n` events, waiting for them.
+    fn events(&mut self, n: usize) -> Vec<(u64, Value)> {
+        let want = self.done + n;
+        assert!(
+            self.pump(Duration::from_secs(5), |s| s.all().len() >= want),
+            "only {} of {want} events: {:?}",
+            self.all().len(),
+            self.seen
+        );
+        let got = self.all()[self.done..want].to_vec();
+        self.done = want;
+        got
+    }
+
+    fn method(m: &(u64, Value)) -> &str {
+        m.1["method"].as_str().unwrap()
+    }
+}
+
+const SUB_A: &str =
+    r#"{"jsonrpc":"2.0","id":5,"method":"resources/subscribe","params":{"uri":"mem://a"}}"#;
+
+fn sub_headers(id: &str) -> [(&str, &str); 2] {
+    [CLASSIC, ("Mcp-Session-Id", id)]
+}
+
+fn session_on(f: &Fixture) -> String {
+    open_session(f)
+}
+
+#[test]
+fn the_stream_carries_list_changes_and_updates_to_followed_resources_only() {
+    let (f, changes) = start_push(fast(), ChangeKinds::all());
+    let id = session_on(&f);
+    let sub = post(f.addr, &sub_headers(&id), SUB_A);
+    assert_eq!(sub.status, 200);
+    assert!(sub.json()["result"].is_object());
+
+    let mut stream = open_stream(f.addr, &id, &[]);
+    assert_eq!(stream.status, 200);
+    changes.resource_updated("mem://b");
+    changes.resource_updated("mem://a");
+    changes.tools_changed();
+    let got = stream.events(2);
+    assert_eq!(Stream::method(&got[0]), "notifications/resources/updated");
+    assert_eq!(got[0].1["params"]["uri"], "mem://a");
+    assert_eq!(Stream::method(&got[1]), "notifications/tools/list_changed");
+    assert!(got[0].0 < got[1].0, "event ids increase");
+    assert!(
+        got[1].1["params"].is_null(),
+        "a classic session has no _meta tag"
+    );
+}
+
+#[test]
+fn events_before_the_stream_opens_are_kept_for_it() {
+    let (f, changes) = start_push(fast(), ChangeKinds::all());
+    let id = session_on(&f);
+    changes.resources_changed();
+    changes.prompts_changed();
+    let mut stream = open_stream(f.addr, &id, &[]);
+    let got = stream.events(2);
+    assert_eq!(
+        Stream::method(&got[0]),
+        "notifications/resources/list_changed"
+    );
+    assert_eq!(
+        Stream::method(&got[1]),
+        "notifications/prompts/list_changed"
+    );
+}
+
+#[test]
+fn unsubscribing_stops_the_updates_and_bad_subscriptions_are_refused() {
+    let (f, changes) = start_push(fast(), ChangeKinds::all());
+    let id = session_on(&f);
+    post(f.addr, &sub_headers(&id), SUB_A);
+    let unsub = SUB_A.replace("subscribe", "unsubscribe");
+    assert_eq!(post(f.addr, &sub_headers(&id), &unsub).status, 200);
+    let mut stream = open_stream(f.addr, &id, &[]);
+    changes.resource_updated("mem://a");
+    changes.tools_changed();
+    let got = stream.events(1);
+    assert_eq!(Stream::method(&got[0]), "notifications/tools/list_changed");
+
+    let unknown = SUB_A.replace("mem://a", "mem://nope");
+    let r = post(f.addr, &sub_headers(&id), &unknown);
+    assert_eq!(code(&r), -32002);
+    let bad = r#"{"jsonrpc":"2.0","id":6,"method":"resources/subscribe","params":{}}"#;
+    assert_eq!(code(&post(f.addr, &sub_headers(&id), bad)), -32602);
+    // Without a session the method does not exist.
+    assert_eq!(code(&post(f.addr, &[CLASSIC], SUB_A)), -32601);
+}
+
+#[test]
+fn a_server_that_does_not_announce_updates_refuses_subscriptions() {
+    let kinds = ChangeKinds {
+        tools_list: true,
+        ..ChangeKinds::default()
+    };
+    let (f, _changes) = start_push(fast(), kinds);
+    let id = session_on(&f);
+    assert_eq!(code(&post(f.addr, &sub_headers(&id), SUB_A)), -32601);
+}
+
+#[test]
+fn a_new_stream_takes_over_from_the_old_one() {
+    let (f, changes) = start_push(fast(), ChangeKinds::all());
+    let id = session_on(&f);
+    let mut old = open_stream(f.addr, &id, &[]);
+    // A reconnect must work at once, even though the old connection still looks alive.
+    let mut new = open_stream(f.addr, &id, &[]);
+    assert_eq!(new.status, 200);
+    assert!(
+        old.pump(Duration::from_secs(5), |s| s.seen.contains("0\r\n\r\n")),
+        "the old stream should have ended"
+    );
+    changes.tools_changed();
+    let got = new.events(1);
+    assert_eq!(Stream::method(&got[0]), "notifications/tools/list_changed");
+}
+
+#[test]
+fn last_event_id_replays_what_was_missed() {
+    let (f, changes) = start_push(fast(), ChangeKinds::all());
+    let id = session_on(&f);
+    let mut first = open_stream(f.addr, &id, &[]);
+    changes.tools_changed();
+    changes.prompts_changed();
+    changes.resources_changed();
+    let got = first.events(3);
+    let seen_upto = got[0].0;
+    drop(first);
+    // The client only processed the first frame.
+    let again_id = seen_upto.to_string();
+    let mut again = open_stream(f.addr, &id, &[("Last-Event-ID", again_id.as_str())]);
+    let replay = again.events(2);
+    assert_eq!(replay[0].0, got[1].0);
+    assert_eq!(replay[1].0, got[2].0);
+    assert_eq!(
+        Stream::method(&replay[0]),
+        "notifications/prompts/list_changed"
+    );
+}
+
+#[test]
+fn a_client_that_fell_behind_is_told_to_recheck_everything() {
+    let (f, changes) = start_push(fast(), ChangeKinds::all());
+    let id = session_on(&f);
+    post(f.addr, &sub_headers(&id), SUB_A);
+    // Far more than the buffer holds, none of it of interest to this session.
+    for _ in 0..500 {
+        changes.resource_updated("mem://b");
+    }
+    let mut stream = open_stream(f.addr, &id, &[]);
+    let got = stream.events(4);
+    let methods: Vec<&str> = got.iter().map(Stream::method).collect();
+    for expected in [
+        "notifications/tools/list_changed",
+        "notifications/prompts/list_changed",
+        "notifications/resources/list_changed",
+        "notifications/resources/updated",
+    ] {
+        assert!(
+            methods.contains(&expected),
+            "{expected} missing: {methods:?}"
+        );
+    }
+}
+
+#[test]
+fn an_idle_stream_sends_keep_alive_comments() {
+    let (f, _changes) = start_push(fast(), ChangeKinds::all());
+    let id = session_on(&f);
+    let mut stream = open_stream(f.addr, &id, &[]);
+    assert!(stream.pump(Duration::from_secs(5), |s| s.seen.contains(": ping")));
+}
+
+#[test]
+fn deleting_the_session_ends_its_stream() {
+    let (f, _changes) = start_push(fast(), ChangeKinds::all());
+    let id = session_on(&f);
+    let mut stream = open_stream(f.addr, &id, &[]);
+    assert_eq!(
+        request(f.addr, "DELETE", "/mcp", &[("Mcp-Session-Id", &id)], "").status,
+        200
+    );
+    assert!(
+        stream.pump(Duration::from_secs(5), |s| s.seen.contains("0\r\n\r\n")),
+        "the stream never ended: {:?}",
+        stream.seen
+    );
+}
+
+#[test]
+fn the_stream_is_refused_without_what_it_needs() {
+    let (f, _changes) = start_push(fast(), ChangeKinds::all());
+    let id = session_on(&f);
+    let get = |headers: &[(&str, &str)]| request(f.addr, "GET", "/mcp", headers, "");
+    let sse = ("Accept", "text/event-stream");
+    assert_eq!(get(&[sse]).status, 400, "no session id");
+    assert_eq!(get(&[sse, ("Mcp-Session-Id", "nope")]).status, 404);
+    assert_eq!(get(&[("Mcp-Session-Id", &id)]).status, 406, "no Accept");
+    assert_eq!(
+        get(&[
+            sse,
+            ("Mcp-Session-Id", &id),
+            ("Origin", "https://evil.example")
+        ])
+        .status,
+        403
+    );
+    // Servers with nothing to push, or with sessions off, offer no stream.
+    let plain = start(fast());
+    let plain_id = open_session(&plain);
+    let r = request(
+        plain.addr,
+        "GET",
+        "/mcp",
+        &[sse, ("Mcp-Session-Id", &plain_id)],
+        "",
+    );
+    assert_eq!((r.status, r.header("Allow")), (405, Some("POST, DELETE")));
+    let (off, _c) = start_push(
+        HttpConfig {
+            max_sessions: 0,
+            ..fast()
+        },
+        ChangeKinds::all(),
+    );
+    assert_eq!(request(off.addr, "GET", "/mcp", &[sse], "").status, 405);
+}

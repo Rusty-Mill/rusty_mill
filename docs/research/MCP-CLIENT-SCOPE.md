@@ -83,7 +83,7 @@ transports:
    so a server-only binary pulls no client and `rusty_request`.
 3. **`rusty-mcp-client`'s public API** stays as is (a re-implementation, not a
    change). Confirm, because it is shared by `rk-mcp` and others.
-4. **Server gaps the clients' peers need.** `remind_me_remote` needs
+4. **Server gaps the clients' peers need. (Built 2026-10-08 at the owner's request: the sessions' `GET` push stream with resumption, and classic `resources/subscribe`. The gateway's raw-stream passthrough is not built.)** `remind_me_remote` needs
    server-side sessions with a `GET` push stream and resumption, which the A3
    HTTP transport answers `405`; `agentgateway` proxies streams. Decide
    whether those stay on `rmcp` until the end (A6 cannot finish without them)

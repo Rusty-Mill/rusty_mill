@@ -223,7 +223,21 @@ its `_meta` (2026-07-28), else the `MCP-Protocol-Version` header, else
   the header alone, with no `_meta`, and are served with the capabilities it
   declared at `initialize`.
 - A client that hangs up on a streaming reply also cancels the call.
-- `GET` is `405`: there is nothing to push.
+- **Push stream (classic sessions).** `GET` with `Accept: text/event-stream` and
+  the `Mcp-Session-Id` opens a stream of the session's own notifications:
+  `list_changed` for what the server announced with `notify_changes`, and
+  `notifications/resources/updated` for the URIs the session followed with
+  `resources/subscribe` (`resources/unsubscribe` stops it; an unreadable URI is
+  `-32002`). Frames carry ids; a reconnect with `Last-Event-ID` is replayed from
+  the last 64 frames. Events published before the stream opens, or while it is
+  down, wait in a bounded buffer (64); if it overflows, or the id is older than
+  the ring, the client gets `list_changed` for everything and an `updated` for
+  every followed URI instead of a gap. One stream per session: a new `GET`
+  **takes over** (the old one ends), so a client reconnecting after a network drop
+  is never refused. Delivery is at most once unless the client resumes with
+  `Last-Event-ID`. A stream holds a connection thread for its life, and keeps the
+  session from going idle. `GET` is `405` when sessions are off or the server
+  announces no changes. 2026-07-28 clients use `subscriptions/listen` instead.
 - Each running call or open stream holds a connection thread of `rusty_serve`;
   size `Limits::max_connections` for the concurrency wanted. No TLS: front it
   with a proxy beyond loopback.
@@ -231,6 +245,6 @@ its `_meta` (2026-07-28), else the `MCP-Protocol-Version` header, else
 Tested with raw sockets (`tests/http.rs`) and against the `rmcp` HTTP client in
 both handshake modes (`tests/http_interop.rs`).
 
-Not here yet: classic `resources/subscribe`, `notifications/tasks`, multi-round-trip
+Not here yet: `notifications/tasks`, server-to-client requests (sampling, roots), multi-round-trip
 input for prompts and resources, authentication (the existing `rusty-mcp` has
 OAuth, limits and telemetry that are not ported), TLS, and stream resumption.

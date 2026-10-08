@@ -491,20 +491,40 @@ fn accept_filter(
     }
 }
 
+/// What a classic session follows: the list changes the server announces,
+/// and the resources it subscribed to.
+#[cfg(feature = "http")]
+pub(crate) fn session_filter(
+    kinds: &ChangeKinds,
+    subscribed: &std::collections::BTreeSet<String>,
+) -> SubscriptionFilter {
+    let on = |announced: bool| announced.then_some(true);
+    SubscriptionFilter {
+        tools_list_changed: on(kinds.tools_list),
+        prompts_list_changed: on(kinds.prompts_list),
+        resources_list_changed: on(kinds.resources_list),
+        resource_subscriptions: (kinds.resource_updates && !subscribed.is_empty())
+            .then(|| subscribed.iter().cloned().collect()),
+    }
+}
+
 /// The notification for `event`, if `accepted` includes it, tagged with the
-/// subscription it belongs to.
-fn notification_for(
+/// subscription it belongs to (`meta`; a classic session has none).
+pub(crate) fn notification_for(
     event: &ChangeEvent,
     accepted: &SubscriptionFilter,
-    meta: &Value,
+    meta: Option<&Value>,
 ) -> Option<Message> {
     let list_changed = |on: Option<bool>, method: &str| {
         (on == Some(true)).then(|| {
-            let mut params = Value::object();
-            params.insert("_meta", meta.clone());
+            let params = meta.map(|m| {
+                let mut p = Value::object();
+                p.insert("_meta", m.clone());
+                p
+            });
             Message::Notification {
                 method: method.to_owned(),
-                params: Some(params),
+                params,
             }
         })
     };
@@ -530,7 +550,7 @@ fn notification_for(
                     subscribe::method::RESOURCE_UPDATED,
                     &ResourceUpdatedParams {
                         uri: uri.clone(),
-                        meta: Some(meta.clone()),
+                        meta: meta.cloned(),
                     },
                 )
             }),
@@ -578,7 +598,7 @@ impl Connection {
             }
             match subscription.events.recv_timeout(LISTEN_POLL) {
                 Ok(event) => {
-                    if let Some(message) = notification_for(&event, &accepted, &meta) {
+                    if let Some(message) = notification_for(&event, &accepted, Some(&meta)) {
                         self.notify(message);
                     }
                 }
@@ -587,7 +607,8 @@ impl Connection {
                     // everything it follows may have changed.
                     if subscription.lagged.swap(false, Ordering::SeqCst) {
                         for event in resync_events(&accepted) {
-                            if let Some(message) = notification_for(&event, &accepted, &meta) {
+                            if let Some(message) = notification_for(&event, &accepted, Some(&meta))
+                            {
                                 self.notify(message);
                             }
                         }
@@ -603,7 +624,7 @@ impl Connection {
 }
 
 /// Everything a listener with `accepted` follows, as events.
-fn resync_events(accepted: &SubscriptionFilter) -> Vec<ChangeEvent> {
+pub(crate) fn resync_events(accepted: &SubscriptionFilter) -> Vec<ChangeEvent> {
     let mut events = vec![
         ChangeEvent::ToolsListChanged,
         ChangeEvent::PromptsListChanged,
@@ -679,22 +700,27 @@ mod tests {
         let accepted = filter(true, &["a://1"]);
         let mut meta = Value::object();
         meta.insert(SUBSCRIPTION_ID, 9);
-        let tools = notification_for(&ChangeEvent::ToolsListChanged, &accepted, &meta).unwrap();
+        let tools =
+            notification_for(&ChangeEvent::ToolsListChanged, &accepted, Some(&meta)).unwrap();
         let Message::Notification { method, params } = tools else {
             panic!("not a notification")
         };
         assert_eq!(method, subscribe::method::TOOLS_LIST_CHANGED);
         assert_eq!(params.unwrap().get("_meta"), Some(&meta));
-        assert!(notification_for(&ChangeEvent::PromptsListChanged, &accepted, &meta).is_none());
-        assert!(notification_for(&ChangeEvent::ResourcesListChanged, &accepted, &meta).is_none());
+        assert!(
+            notification_for(&ChangeEvent::PromptsListChanged, &accepted, Some(&meta)).is_none()
+        );
+        assert!(
+            notification_for(&ChangeEvent::ResourcesListChanged, &accepted, Some(&meta)).is_none()
+        );
         let updated = ChangeEvent::ResourceUpdated {
             uri: "a://1".into(),
         };
-        assert!(notification_for(&updated, &accepted, &meta).is_some());
+        assert!(notification_for(&updated, &accepted, Some(&meta)).is_some());
         let other = ChangeEvent::ResourceUpdated {
             uri: "a://2".into(),
         };
-        assert!(notification_for(&other, &accepted, &meta).is_none());
+        assert!(notification_for(&other, &accepted, Some(&meta)).is_none());
     }
 
     #[test]
@@ -704,7 +730,7 @@ mod tests {
         meta.insert(SUBSCRIPTION_ID, 1);
         let sent: Vec<Message> = resync_events(&accepted)
             .iter()
-            .filter_map(|e| notification_for(e, &accepted, &meta))
+            .filter_map(|e| notification_for(e, &accepted, Some(&meta)))
             .collect();
         // One tools signal and one update per followed resource; nothing else.
         assert_eq!(sent.len(), 3);

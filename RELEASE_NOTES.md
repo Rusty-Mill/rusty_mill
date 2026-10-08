@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_server push streams (pending review)
+
+- **Added:** the `GET` push stream for classic HTTP sessions, with event ids and `Last-Event-ID` resumption, and classic `resources/subscribe`. Verified against raw sockets and the `rmcp` classic HTTP client.
+- **Not verified:** `remind_me_remote` (the consumer this is for) was not moved or run against it; no client other than `rmcp`. Sessions are in memory (not shared between instances), delivery is at most once without resumption, and the server cannot send requests to the client over the stream.
+
+---
+
 ## 2026-10-08 - rusty-mcp-demo moved onto rusty_mcp_server (pending review)
 
 - **Changed:** the demo crate now runs on `rusty_mcp_server`; its old `rusty-mcp`/`rmcp`-macro code and tests are removed, its acceptance suite (43 tests) now lives in the demo and passes over real HTTP.
