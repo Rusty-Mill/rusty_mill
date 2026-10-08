@@ -11121,6 +11121,7 @@ dependencies = [
  "rusty_http",
  "rusty_multimodal_db_engine",
  "rusty_oauth",
+ "rusty_rand",
  "rusty_tls",
  "serde",
  "serde_json",

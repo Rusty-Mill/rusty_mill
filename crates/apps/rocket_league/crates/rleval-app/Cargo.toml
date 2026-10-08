@@ -23,6 +23,8 @@ mmdb = ["dep:rusty_multimodal_db_engine", "dep:uuid"]
 oidc = ["dep:rusty_oauth", "dep:rusty_http", "dep:rusty_tls"]
 
 [dependencies]
+# OS CSPRNG for upload-URL signing keys: /dev/urandom on Unix, BCryptGenRandom on Windows.
+rusty_rand = { workspace = true }
 replay-analyzer = { path = "../replay-analyzer" }
 replay-pacifist = { path = "../replay-pacifist" }
 replay-scoring = { path = "../replay-scoring" }

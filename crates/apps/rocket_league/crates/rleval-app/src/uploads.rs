@@ -68,9 +68,8 @@ pub struct Signer {
 impl Signer {
     /// A signer with a fresh random key from the OS. URLs die with the process.
     pub fn new() -> std::io::Result<Self> {
-        use std::io::Read;
         let mut key = [0u8; 32];
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut key)?;
+        rusty_rand::fill(&mut key)?;
         Ok(Self::with_key(key))
     }
 
