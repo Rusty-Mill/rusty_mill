@@ -10,12 +10,18 @@
 //! - [`Client`]: a blocking client on top, with typed calls, multi-round-trip
 //!   input and tasks driven to a result.
 //!
-//! The Streamable HTTP transport and an async facade are the next slice.
+//! - `HttpTransport` (feature `http`): Streamable HTTP on `rusty_request`, with
+//!   JSON and event-stream replies, sessions, the standalone push stream with
+//!   resumption, and hang-up cancellation.
+//!
+//! The async facade is the next slice.
 
 #![forbid(unsafe_code)]
 
 pub mod client;
 pub mod error;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod session;
 pub mod sse;
 pub mod stdio;
@@ -23,6 +29,8 @@ pub mod transport;
 
 pub use client::{Client, Handler, NoHandler};
 pub use error::ClientError;
+#[cfg(feature = "http")]
+pub use http::{HttpConfig, HttpTransport};
 /// The JSON value type the wire types are built on.
 pub use rusty_json as json;
 /// The wire types, re-exported so a consumer needs no dependency of its own.

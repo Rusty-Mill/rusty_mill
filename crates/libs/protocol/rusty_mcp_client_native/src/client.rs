@@ -99,6 +99,7 @@ impl<T: Transport, H: Handler> Client<T, H> {
             match self.exchange(id, &message) {
                 Ok(result) => {
                     if self.session.on_discover(&result)? {
+                        self.announce_version();
                         return Ok(());
                     }
                 }
@@ -109,9 +110,46 @@ impl<T: Transport, H: Handler> Client<T, H> {
         let (id, message) = self.session.initialize_request()?;
         let result = self.exchange(id, &message)?;
         self.session.on_initialize(&result)?;
+        self.announce_version();
         let initialized = self.session.initialized_notification();
         self.transport.send(&initialized)?;
         Ok(())
+    }
+
+    fn announce_version(&mut self) {
+        if let Some(version) = self.session.negotiated().cloned() {
+            self.transport.set_protocol_version(&version);
+        }
+    }
+
+    /// Wait up to `wait` for something from the server and handle it
+    /// (notifications go to the handler, server requests are answered).
+    /// Returns whether anything arrived. Use it to receive notifications
+    /// between calls, for example resource updates on a classic HTTP session.
+    ///
+    /// # Errors
+    /// Transport failure, or the server closed the connection.
+    pub fn pump(&mut self, wait: Duration) -> Result<bool, ClientError> {
+        match self.transport.recv(wait)? {
+            Recv::Timeout => Ok(false),
+            Recv::Closed => Err(ClientError::Closed),
+            Recv::Message(m) => {
+                match self.session.accept(m) {
+                    Incoming::Notification { method, params } => {
+                        self.handler.notification(&method, params.as_ref());
+                    }
+                    Incoming::Request { id, method, params } => {
+                        let answer = match self.handler.request(&method, params.as_ref()) {
+                            Ok(result) => Message::Response { id, result },
+                            Err(error) => Message::error(Some(id), error),
+                        };
+                        self.transport.send(&answer)?;
+                    }
+                    Incoming::Response { .. } | Incoming::Stray(_) => {}
+                }
+                Ok(true)
+            }
+        }
     }
 
     /// The protocol state: negotiated revision, what the server said about

@@ -2,155 +2,18 @@
 //! The client against `rusty_mcp_server`, in one process: the two ends talk
 //! over pipes, so every call crosses the real newline-delimited JSON framing.
 
+mod common;
+
+use common::{builder, eliciting, first_text, with_tasks, Asker, SECS};
 use rusty_mcp_client_native::json::Value;
-use rusty_mcp_client_native::proto::{
-    CallToolResult, ContentBlock, ElicitAction, ElicitParams, ElicitResult, ErrorData, Prompt,
-    PromptMessage, ProtocolVersion, ReadResourceResult, Resource, ResourceContents,
-    ResourceTemplate, Role, Tool,
-};
+use rusty_mcp_client_native::proto::{ProtocolVersion, ResourceContents};
 use rusty_mcp_client_native::{
     Client, ClientConfig, ClientError, Handler, NoHandler, StdioTransport,
 };
-use rusty_mcp_server::{
-    answer, serve_lines, Ask, Server, ServerBuilder, StdioConfig, ToolOutcome, Turn,
-};
+use rusty_mcp_server::{serve_lines, Server, StdioConfig};
 use std::io::BufReader;
 use std::sync::Arc;
 use std::time::Duration;
-
-const SECS: Duration = Duration::from_secs(5);
-
-fn schema() -> Value {
-    let mut s = Value::object();
-    s.insert("type", "object");
-    s
-}
-
-fn text(s: &str) -> CallToolResult {
-    CallToolResult {
-        content: vec![ContentBlock::text(s)],
-        ..CallToolResult::default()
-    }
-}
-
-fn form(message: &str) -> ElicitParams {
-    ElicitParams::Form {
-        message: message.to_owned(),
-        requested_schema: schema(),
-        meta: None,
-    }
-}
-
-fn first_text(r: &CallToolResult) -> String {
-    match &r.content[0] {
-        ContentBlock::Text { text, .. } => text.clone(),
-        other => panic!("not text: {other:?}"),
-    }
-}
-
-fn builder() -> ServerBuilder {
-    Server::builder("fixture", "1.0")
-        .page_size(2)
-        .tool(Tool::new("add", schema()), |_c, call| {
-            let n = |k: &str| {
-                call.arguments
-                    .as_ref()
-                    .and_then(|a| a.get(k))
-                    .and_then(Value::as_i64)
-            };
-            match (n("a"), n("b")) {
-                (Some(a), Some(b)) => Ok(text(&(a + b).to_string())),
-                _ => Err(ErrorData::new(
-                    rusty_mcp_client_native::proto::ErrorCode::INVALID_PARAMS,
-                    "a and b are required",
-                )),
-            }
-        })
-        .tool(Tool::new("slow", schema()), |_c, _p| {
-            std::thread::sleep(Duration::from_millis(400));
-            Ok(text("late"))
-        })
-        .tool(Tool::new("progress", schema()), |ctx, _p| {
-            for i in 1..=3 {
-                ctx.progress(f64::from(i), Some(3.0), None);
-            }
-            Ok(text("done"))
-        })
-        .interactive_tool(Tool::new("confirm", schema()), |ctx, call| {
-            match ctx.turn(&call)? {
-                Turn::Fresh => Ok(ToolOutcome::Ask(
-                    Ask::new()
-                        .elicit("ok", &form("Proceed?"))
-                        .with_state("pending"),
-                )),
-                Turn::Resumed { state } => {
-                    let yes =
-                        answer(&call, "ok")?.is_some_and(|r| r.action == ElicitAction::Accept);
-                    Ok(ToolOutcome::Done(text(&format!(
-                        "{} {}",
-                        String::from_utf8_lossy(state),
-                        if yes { "accepted" } else { "declined" }
-                    ))))
-                }
-            }
-        })
-        .interactive_tool(Tool::new("nag", schema()), |_ctx, _call| {
-            Ok(ToolOutcome::Ask(
-                Ask::new().elicit("ok", &form("Again?")).with_state("x"),
-            ))
-        })
-        .task_tool(Tool::new("job", schema()), |_ctx, _p| Ok(text("job done")))
-        .task_tool(Tool::new("ask_job", schema()), |ctx, _p| {
-            let reply = ctx.elicit("name", &form("Name?")).map_err(|_| {
-                ErrorData::new(
-                    rusty_mcp_client_native::proto::ErrorCode::INTERNAL_ERROR,
-                    "no",
-                )
-            })?;
-            let who = reply
-                .content
-                .as_ref()
-                .and_then(|c| c.get("n"))
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_owned();
-            Ok(text(&format!("hello {who}")))
-        })
-        .prompt(Prompt::new("hi"), |_c, _g| {
-            Ok(rusty_mcp_client_native::proto::GetPromptResult {
-                messages: vec![PromptMessage {
-                    role: Role::User,
-                    content: ContentBlock::text("hi there"),
-                }],
-                ..Default::default()
-            })
-        })
-        .resource(Resource::new("mem://a", "a"), |_c, read| {
-            Ok(ReadResourceResult {
-                contents: vec![ResourceContents::Text {
-                    uri: read.uri,
-                    mime_type: None,
-                    text: "contents of a".to_owned(),
-                    meta: None,
-                }],
-                ..ReadResourceResult::default()
-            })
-        })
-        .resource_template(
-            ResourceTemplate::new("mem://t/{x}", "t"),
-            |_c, vars, read| {
-                Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::Text {
-                        uri: read.uri,
-                        mime_type: None,
-                        text: format!("x={}", vars.get("x").unwrap_or_default()),
-                        meta: None,
-                    }],
-                    ..ReadResourceResult::default()
-                })
-            },
-        )
-}
 
 /// Connect a client to `server` over pipes.
 fn transport(server: Server) -> StdioTransport {
@@ -169,30 +32,6 @@ fn transport(server: Server) -> StdioTransport {
 
 fn config() -> ClientConfig {
     ClientConfig::new("test-client", "0.1")
-}
-
-fn with_tasks(mut c: ClientConfig) -> ClientConfig {
-    let mut caps = c.capabilities.to_value_for_test();
-    let mut ext = Value::object();
-    ext.insert("io.modelcontextprotocol/tasks", Value::object());
-    caps.insert("extensions", ext);
-    c.capabilities = rusty_mcp_client_native::proto::ClientCapabilities::from_value_for_test(&caps);
-    c
-}
-
-trait CapsJson {
-    fn to_value_for_test(&self) -> Value;
-    fn from_value_for_test(v: &Value) -> Self;
-}
-impl CapsJson for rusty_mcp_client_native::proto::ClientCapabilities {
-    fn to_value_for_test(&self) -> Value {
-        use rusty_mcp_client_native::proto::Wire;
-        self.to_value()
-    }
-    fn from_value_for_test(v: &Value) -> Self {
-        use rusty_mcp_client_native::proto::Wire;
-        Self::from_value(v).unwrap()
-    }
 }
 
 fn connect<H: Handler>(
@@ -352,40 +191,6 @@ fn a_timeout_is_reported_and_a_late_answer_does_not_confuse_the_next_call() {
     assert_eq!(first_text(&c.call_tool("add", args(3, 4)).unwrap()), "7");
 }
 
-struct Asker {
-    accept: bool,
-    asked: Vec<String>,
-}
-
-impl Handler for Asker {
-    fn elicit(&mut self, params: &ElicitParams) -> ElicitResult {
-        if let ElicitParams::Form { message, .. } = params {
-            self.asked.push(message.clone());
-        }
-        let mut content = Value::object();
-        content.insert("n", "Ann");
-        ElicitResult {
-            action: if self.accept {
-                ElicitAction::Accept
-            } else {
-                ElicitAction::Decline
-            },
-            content: self.accept.then_some(content),
-            meta: None,
-        }
-    }
-}
-
-fn eliciting() -> ClientConfig {
-    let mut c = config();
-    let mut caps = Value::object();
-    let mut e = Value::object();
-    e.insert("form", Value::object());
-    caps.insert("elicitation", e);
-    c.capabilities = rusty_mcp_client_native::proto::ClientCapabilities::from_value_for_test(&caps);
-    c
-}
-
 #[test]
 fn input_required_is_driven_to_an_answer() {
     let mut c = connect(
@@ -433,7 +238,7 @@ fn a_server_that_never_stops_asking_is_cut_off() {
 
 #[test]
 fn a_task_is_polled_to_its_result_and_can_ask_questions() {
-    let cfg = with_tasks(eliciting());
+    let cfg = with_tasks();
     let mut c = connect(
         builder().build().unwrap(),
         cfg,

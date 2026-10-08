@@ -2,7 +2,7 @@
 //! next one. The child-process transport is [`crate::stdio`]; the Streamable
 //! HTTP one is the next slice.
 
-use rusty_mcp_proto::Message;
+use rusty_mcp_proto::{Message, ProtocolVersion};
 use std::io;
 use std::time::Duration;
 
@@ -30,4 +30,9 @@ pub trait Transport {
     /// # Errors
     /// The underlying read failed.
     fn recv(&mut self, timeout: Duration) -> io::Result<Recv>;
+
+    /// The handshake settled on `version`. Transports that name the revision
+    /// in every request (HTTP's `MCP-Protocol-Version`) start doing so;
+    /// the others ignore it.
+    fn set_protocol_version(&mut self, _version: &ProtocolVersion) {}
 }

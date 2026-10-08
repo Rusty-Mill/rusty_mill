@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_client_native, Streamable HTTP (pending review)
+
+- **Added:** the HTTP transport (feature `http`) on `rusty_request`, verified against `rusty_mcp_server` and against `rmcp`'s own HTTP server (with and without sessions).
+- **Not verified:** HTTPS and authenticated servers; servers other than those two; resuming an interrupted reply stream. The async facade and the gateway passthrough are not built, and no consumer has moved off `rmcp`'s client.
+
+---
+
 ## 2026-10-08 - rusty_mcp_client_native, first slice (pending review)
 
 - **Added:** the client core: SSE parser, sans-IO session, blocking client over a child process (35 tests against `rusty_mcp_server`). New workspace crate; no consumer uses it yet.

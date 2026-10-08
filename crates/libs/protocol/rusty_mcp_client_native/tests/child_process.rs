@@ -12,6 +12,11 @@ use std::time::{Duration, Instant};
 /// The example server, rebuilt if stale (`cargo test` alone does not build
 /// examples, and a leftover binary would test the wrong server).
 fn server_binary() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT.get_or_init(build_server).clone()
+}
+
+fn build_server() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let profile_dir = exe.parent().unwrap().parent().unwrap();
     let mut build = Command::new(env!("CARGO"));
@@ -70,6 +75,7 @@ fn both_handshakes_work_against_a_child_process() {
 
 #[test]
 fn dropping_the_client_ends_the_child_promptly() {
+    server_binary(); // build outside the timed part
     let started = Instant::now();
     let client = connect(ClientConfig::new("c", "1"));
     drop(client);
