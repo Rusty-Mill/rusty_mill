@@ -1,0 +1,56 @@
+{
+  "name": "jumpgap H1 R1: jump held 1 ticks, released 1, then a one-tick forward dodge press (second-jump acceptance sweep)",
+  "settle_ticks": 120,
+  "car": {
+    "location": [
+      0,
+      -2000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3000,
+      3000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 1,
+      "jump": true
+    },
+    {
+      "ticks": 1
+    },
+    {
+      "ticks": 1,
+      "jump": true,
+      "pitch": -1
+    },
+    {
+      "ticks": 90
+    }
+  ]
+}

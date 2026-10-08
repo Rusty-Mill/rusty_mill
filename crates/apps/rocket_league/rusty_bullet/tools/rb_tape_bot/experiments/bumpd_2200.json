@@ -1,0 +1,79 @@
+{
+  "name": "bumpd_2200: attacker at 2200 uu/s boosting hits a stopped enemy's rear",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -778.0,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      2200,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 150,
+      "throttle": 1,
+      "boost": true
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          0,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          1.5708,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 150
+        }
+      ],
+      "team": 1
+    }
+  ]
+}

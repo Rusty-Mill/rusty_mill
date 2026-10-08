@@ -1,0 +1,50 @@
+{
+ "settle_ticks": 60,
+ "car": {
+  "location": [
+   917,
+   136,
+   17
+  ],
+  "rotation": [
+   -0.0096,
+   2.1339423440385645,
+   0
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ],
+  "angular_velocity": [
+   0,
+   0,
+   0
+  ],
+  "boost": 100
+ },
+ "ball": {
+  "location": [
+   3500,
+   3500,
+   93.15
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ]
+ },
+ "name": "js_jtb_yaw: standing start jump+throttle+boost at yaw 2.13",
+ "steps": [
+  {
+   "ticks": 6,
+   "jump": true,
+   "throttle": 1,
+   "boost": true
+  },
+  {
+   "ticks": 90
+  }
+ ]
+}

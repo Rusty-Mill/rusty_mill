@@ -1,0 +1,57 @@
+{
+ "settle_ticks": 60,
+ "car": {
+  "location": [
+   0,
+   -3500,
+   17
+  ],
+  "rotation": [
+   -0.0096,
+   1.5707963,
+   0
+  ],
+  "velocity": [
+   0,
+   400,
+   0
+  ],
+  "angular_velocity": [
+   0,
+   0,
+   0
+  ],
+  "boost": 100
+ },
+ "ball": {
+  "location": [
+   3500,
+   3500,
+   93.15
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ]
+ },
+ "name": "bt_rev_ground: a boost tap on the ground, then reverse throttle",
+ "steps": [
+  {
+   "ticks": 10,
+   "throttle": 1
+  },
+  {
+   "ticks": 3,
+   "throttle": 1,
+   "boost": true
+  },
+  {
+   "ticks": 40,
+   "throttle": -1
+  },
+  {
+   "ticks": 60
+  }
+ ]
+}

@@ -1,0 +1,108 @@
+{
+  "name": "duelg_865: first 130 ticks of duel_865 (golden gate)",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      261,
+      96,
+      17
+    ],
+    "rotation": [
+      0,
+      5.5949,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 33
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 76,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 20,
+      "throttle": 1,
+      "steer": 1
+    },
+    {
+      "ticks": 27,
+      "throttle": 0
+    },
+    {
+      "ticks": 7,
+      "throttle": 1,
+      "steer": -0.5,
+      "handbrake": true
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          732,
+          -353,
+          17
+        ],
+        "rotation": [
+          0,
+          2.5839,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 33
+      },
+      "steps": [
+        {
+          "ticks": 76,
+          "throttle": 1,
+          "boost": true
+        },
+        {
+          "ticks": 46,
+          "throttle": -1,
+          "steer": -0.5,
+          "boost": true,
+          "handbrake": true
+        },
+        {
+          "ticks": 8,
+          "throttle": -1,
+          "steer": 0
+        }
+      ],
+      "team": 0
+    }
+  ]
+}
