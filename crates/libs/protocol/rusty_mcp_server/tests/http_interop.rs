@@ -59,15 +59,8 @@ async fn run(mode: Mode) {
             .await
             .unwrap(),
     };
-    // The classic handshake cancels with a `notifications/cancelled` POST,
-    // which a sessionless server cannot match to a request running on another
-    // connection; only the stateless mode, which hangs up, is observable.
     let observed = move || saw_cancel.load(Ordering::SeqCst);
-    let cancel_check: Option<&dyn Fn() -> bool> = match mode {
-        Mode::Classic => None,
-        Mode::Stateless => Some(&observed),
-    };
-    exercise(mode, client, recorder, cancel_check).await;
+    exercise(mode, client, recorder, &observed).await;
     stop.shutdown();
 }
 

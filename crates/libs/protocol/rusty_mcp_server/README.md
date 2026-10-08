@@ -28,7 +28,7 @@ serve_stdio(Arc::new(server))?;
 | `CallContext` | What a tool sees: request id, protocol revision, client info and capabilities, `_meta` (trace context in `meta().extra`), `is_cancelled()`, `progress(..)`. |
 | `serve_stdio` / `serve_lines` | Newline-delimited JSON; each request runs on its own thread so a cancellation can reach a running tool; an over-long line is refused and skipped. At end of input running requests get `StdioConfig::drain_timeout` (10 s) to finish, then are cancelled, and a tool that still ignores the flag is abandoned after half a second, so the server can always exit. |
 
-| `http` (feature `http`) | Streamable HTTP on `rusty_serve`: `bind_http(server, addr, HttpConfig, Limits)` or mount `HttpHandler` in your own `rusty_serve` server. Stateless: one `POST` per message, a connection of its own, no session ids. |
+| `http` (feature `http`) | Streamable HTTP on `rusty_serve`: `bind_http(server, addr, HttpConfig, Limits)` or mount `HttpHandler` in your own `rusty_serve` server. One `POST` per message, a connection of its own; classic `initialize` opens a lightweight session for cancellation, 2026-07-28 is stateless. |
 
 Both protocol generations are served from the same handlers: a classic client
 sends `initialize` and its revision is remembered per connection; a stateless
@@ -107,8 +107,7 @@ only.
 
 Enable with `features = ["http"]`. Which revision a request speaks comes from
 its `_meta` (2026-07-28), else the `MCP-Protocol-Version` header, else
-`2025-03-26`, so a classic client that `initialize`s once and then sends the
-header works without sessions.
+`2025-03-26`. A classic client that never echoes a session id still works.
 
 - A reply is plain JSON when the tool answers within `sse_after` (250 ms) and
   reports no progress; otherwise it is `text/event-stream` with the progress
@@ -121,13 +120,19 @@ header works without sessions.
 - `Host` must be loopback unless `allowed_hosts` says otherwise; a request with
   an `Origin` not in `allowed_origins` (default none) is refused `403`, which
   keeps web pages away from a local server. Non-browser clients send no `Origin`.
-- `GET` and `DELETE` are `405`; there are no sessions and nothing to push.
-- **Cancellation is by hanging up.** A client that closes a streaming reply
-  cancels the call. A `notifications/cancelled` POST is acknowledged and
-  ignored, because without sessions it cannot be matched to a request running
-  on another connection (ids from different clients collide). The `rmcp` client
-  cancels by closing the stream in stateless mode, so it works; in classic mode
-  it only sends the notification, so the call runs to completion.
+- **Sessions (classic `initialize` only).** The `initialize` reply carries
+  `Mcp-Session-Id`. A client that echoes it can cancel with a
+  `notifications/cancelled` POST (matched to the request running under that
+  session; ids of other sessions never collide) and end the session with
+  `DELETE`, which also cancels what it had running. An unknown, ended or idle
+  session is `404`. A session keeps only the negotiated revision and the
+  cancel flags of running requests, so any POST may still be served by a
+  fresh connection; it does not carry the client's `clientInfo` or
+  capabilities between POSTs. `max_sessions` (1024; `0` turns sessions off,
+  full answers `503`) and `session_idle` (1 h) bound it. 2026-07-28 is
+  stateless and has none.
+- A client that hangs up on a streaming reply also cancels the call.
+- `GET` is `405`: there is nothing to push.
 - Each running call or open stream holds a connection thread of `rusty_serve`;
   size `Limits::max_connections` for the concurrency wanted. No TLS: front it
   with a proxy beyond loopback.

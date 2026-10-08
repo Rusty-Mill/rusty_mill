@@ -56,16 +56,12 @@ pub async fn eventually(cond: impl Fn() -> bool) -> bool {
 
 /// The server under test offers `add`, `fail`, `progress` and `wait`, three
 /// tools to a page. `saw_cancel` says whether `wait` has seen its
-/// cancellation; pass `None` for a transport and mode where a client's
-/// `notifications/cancelled` cannot reach the running call (Streamable HTTP
-/// with the classic handshake: each POST is its own connection, so the
-/// notification cannot be matched to the request). The cancel is then only
-/// checked to be accepted.
+/// cancellation.
 pub async fn exercise(
     mode: Mode,
     client: RunningService<RoleClient, Recorder>,
     recorder: Recorder,
-    saw_cancel: Option<&dyn Fn() -> bool>,
+    saw_cancel: &dyn Fn() -> bool,
 ) {
     // Handshake: the client learned who it is talking to.
     let info = client.peer_info().expect("handshake completed");
@@ -143,12 +139,10 @@ pub async fn exercise(
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     handle.cancel(Some("test".into())).await.unwrap();
-    if let Some(saw_cancel) = saw_cancel {
-        assert!(
-            eventually(saw_cancel).await,
-            "{mode:?}: the tool never saw the cancellation"
-        );
-    }
+    assert!(
+        eventually(saw_cancel).await,
+        "{mode:?}: the tool never saw the cancellation"
+    );
 
     // And the connection still works afterwards.
     let again = client

@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_server HTTP sessions (pending review)
+
+- **Added:** `Mcp-Session-Id` for the classic handshake over Streamable HTTP, so `notifications/cancelled` and `DELETE` work as the spec describes. Verified with the `rmcp` classic HTTP client (mid-call cancel) and socket tests.
+- **Not verified:** only the `rmcp` client; no other MCP HTTP client. Sessions are in memory, so they do not survive a restart or span several server instances behind a load balancer (clients get `404` and re-initialize, per spec). `clientInfo` is not kept between POSTs.
+
+---
+
 ## 2026-10-08 - rusty_mcp_server subscriptions (pending review)
 
 - **Added:** `subscriptions/listen` with a `ChangeBroadcaster`, verified against the `rmcp` client's `listen` over stdio and HTTP.

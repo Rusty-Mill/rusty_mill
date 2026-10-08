@@ -12547,6 +12547,7 @@ dependencies = [
  "rusty_http",
  "rusty_json",
  "rusty_mcp_proto",
+ "rusty_rand",
  "rusty_serve",
  "serde",
  "serde_json",

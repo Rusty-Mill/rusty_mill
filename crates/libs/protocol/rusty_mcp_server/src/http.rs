@@ -12,26 +12,36 @@
 //! [`HttpConfig::sse_after`] and sent no progress; otherwise it is a
 //! `text/event-stream` carrying the progress notifications and the final
 //! response, with a keep-alive comment every [`HttpConfig::keep_alive`]. A
-//! client that hangs up mid-stream cancels the request, which is the only
-//! cancellation available: without sessions a later `notifications/cancelled`
-//! POST cannot be matched to a request, and is acknowledged and ignored.
+//! client that hangs up mid-stream cancels the request.
 //!
-//! `GET` (a server-push stream) and `DELETE` (session end) are answered
-//! `405`: there are no sessions and nothing to push.
+//! **Sessions** (classic `initialize` only). The reply to `initialize`
+//! carries an `Mcp-Session-Id`; a client that echoes it can cancel with a
+//! `notifications/cancelled` POST, which is matched to the request running
+//! under that session, and can end the session with `DELETE`. An unknown or
+//! ended id is answered `404`, as the spec requires. A session holds only the
+//! negotiated revision and the cancel flags of its running requests, so
+//! nothing else is kept between POSTs, and a client that never sends the id
+//! is served exactly as before (it just cannot cancel by notification).
+//! 2026-07-28 requests are stateless and never get or use a session.
+//! [`HttpConfig::max_sessions`] of `0` turns sessions off.
+//!
+//! `GET` (a server-push stream) is answered `405`: there is nothing to push.
 
 use crate::connection::{CancelToken, Connection, Notifier, Started};
 use crate::server::Server;
 use rusty_base64::decode_standard;
 use rusty_http::{Method, StatusCode};
 use rusty_json::Value;
-use rusty_mcp_proto::{ErrorCode, ErrorData, Message, ProtocolVersion, RequestMeta, Wire};
+use rusty_mcp_proto::{
+    CancelledParams, ErrorCode, ErrorData, Message, ProtocolVersion, RequestId, RequestMeta, Wire,
+};
 use rusty_serve::{HeaderMap, Limits, Request, Response, SharedHandler};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 /// The revision assumed when a request names none, per the 2025-06-18 spec.
 const FALLBACK_VERSION: &str = ProtocolVersion::V_2025_03_26;
@@ -59,6 +69,12 @@ pub struct HttpConfig {
     /// Interval of the keep-alive comment on an event stream, which is also
     /// how a vanished client is noticed. Default 15 s.
     pub keep_alive: Duration,
+    /// Most classic sessions open at once; `0` issues no session ids. When
+    /// full, `initialize` is refused with `503` until one ends or goes idle.
+    /// Default 1024.
+    pub max_sessions: usize,
+    /// A session unused for this long is forgotten. Default one hour.
+    pub session_idle: Duration,
 }
 
 impl Default for HttpConfig {
@@ -69,6 +85,8 @@ impl Default for HttpConfig {
             allowed_origins: Vec::new(),
             sse_after: Duration::from_millis(250),
             keep_alive: Duration::from_secs(15),
+            max_sessions: 1024,
+            session_idle: Duration::from_secs(3600),
         }
     }
 }
@@ -99,12 +117,17 @@ pub fn bind_http(
 pub struct HttpHandler {
     server: Arc<Server>,
     config: HttpConfig,
+    sessions: Sessions,
 }
 
 impl HttpHandler {
     /// Serve `server` per `config`.
     pub fn new(server: Arc<Server>, config: HttpConfig) -> Self {
-        Self { server, config }
+        Self {
+            server,
+            config,
+            sessions: Sessions::default(),
+        }
     }
 }
 
@@ -225,6 +248,108 @@ fn status_of(modern: bool, reply: &Message) -> StatusCode {
     }
 }
 
+/// The `Mcp-Session-Id` header.
+const SESSION_HEADER: &str = "Mcp-Session-Id";
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    // The guarded maps stay valid if a holder panicked.
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What a classic session remembers: its revision and the cancel flags of
+/// the requests running under it.
+struct Session {
+    version: ProtocolVersion,
+    inflight: Mutex<HashMap<RequestId, CancelToken>>,
+    last_used: Mutex<Instant>,
+}
+
+impl Session {
+    fn touch(&self) {
+        *lock(&self.last_used) = Instant::now();
+    }
+
+    fn idle_for(&self) -> Duration {
+        lock(&self.last_used).elapsed()
+    }
+
+    fn cancel(&self, id: &RequestId) {
+        if let Some(token) = lock(&self.inflight).get(id) {
+            token.cancel();
+        }
+    }
+
+    fn cancel_all(&self) {
+        for token in lock(&self.inflight).values() {
+            token.cancel();
+        }
+    }
+}
+
+/// Removes a request from its session when the request ends, however it ends.
+struct Registered {
+    session: Arc<Session>,
+    id: RequestId,
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        lock(&self.session.inflight).remove(&self.id);
+    }
+}
+
+#[derive(Default)]
+struct Sessions(Mutex<HashMap<String, Arc<Session>>>);
+
+/// Why a session could not be opened.
+enum OpenError {
+    Full,
+    NoRandom,
+}
+
+impl Sessions {
+    /// The live session `id`, refreshed; `None` if unknown or idle too long.
+    fn get(&self, id: &str, idle: Duration) -> Option<Arc<Session>> {
+        let mut map = lock(&self.0);
+        let session = map.get(id)?;
+        if session.idle_for() > idle {
+            map.remove(id);
+            return None;
+        }
+        session.touch();
+        Some(Arc::clone(session))
+    }
+
+    fn open(
+        &self,
+        version: ProtocolVersion,
+        max: usize,
+        idle: Duration,
+    ) -> Result<(String, Arc<Session>), OpenError> {
+        let mut map = lock(&self.0);
+        if map.len() >= max {
+            map.retain(|_, s| s.idle_for() <= idle);
+        }
+        if map.len() >= max {
+            return Err(OpenError::Full);
+        }
+        let mut raw = [0u8; 16];
+        rusty_rand::fill(&mut raw).map_err(|_| OpenError::NoRandom)?;
+        let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let session = Arc::new(Session {
+            version,
+            inflight: Mutex::new(HashMap::new()),
+            last_used: Mutex::new(Instant::now()),
+        });
+        map.insert(id.clone(), Arc::clone(&session));
+        Ok((id, session))
+    }
+
+    fn end(&self, id: &str) -> Option<Arc<Session>> {
+        lock(&self.0).remove(id)
+    }
+}
+
 /// What the worker thread reports back to the thread holding the socket.
 enum Event {
     Note(Message),
@@ -298,13 +423,17 @@ impl HttpHandler {
                 "not found",
             ));
         }
+        if request.method == &Method::Delete {
+            self.check_origin(request.headers)?;
+            return self.end_session(request.headers);
+        }
         if request.method != &Method::Post {
             let mut refusal = reject(
                 StatusCode::METHOD_NOT_ALLOWED,
                 ErrorCode::INVALID_REQUEST,
-                "this server accepts POST only",
+                "this server accepts POST and DELETE only",
             );
-            let _ = refusal.headers.insert("Allow", "POST");
+            let _ = refusal.headers.insert("Allow", "POST, DELETE");
             return Err(refusal);
         }
         self.check_origin(request.headers)?;
@@ -330,7 +459,85 @@ impl HttpHandler {
         let header_version = self.header_version(headers)?;
         let message = parse_body(request.body)?;
         let modern = self.check_version_rules(headers, header_version.as_ref(), &message)?;
-        Ok(self.dispatch(message, header_version, modern))
+        // 2026-07-28 is stateless: any session id it sends is ignored.
+        let session = if modern {
+            None
+        } else {
+            self.session_of(headers)?
+        };
+        self.dispatch(message, header_version, modern, session)
+    }
+
+    /// The session a request names, refused with `404` when it is unknown or
+    /// ended (the spec's cue for a client to start over).
+    fn session_of(&self, headers: &HeaderMap) -> Result<Option<Arc<Session>>, Response> {
+        let Some(id) = headers.get("mcp-session-id") else {
+            return Ok(None);
+        };
+        self.sessions
+            .get(id, self.config.session_idle)
+            .map(Some)
+            .ok_or_else(|| {
+                reject(
+                    StatusCode::NOT_FOUND,
+                    ErrorCode::INVALID_REQUEST,
+                    "unknown or ended session",
+                )
+            })
+    }
+
+    /// `DELETE`: the client ends its session; whatever it still had running
+    /// is cancelled.
+    fn end_session(&self, headers: &HeaderMap) -> Result<Response, Response> {
+        let Some(id) = headers.get("mcp-session-id") else {
+            return Err(reject(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                "DELETE needs an Mcp-Session-Id header",
+            ));
+        };
+        let Some(session) = self.sessions.end(id) else {
+            return Err(reject(
+                StatusCode::NOT_FOUND,
+                ErrorCode::INVALID_REQUEST,
+                "unknown or ended session",
+            ));
+        };
+        session.cancel_all();
+        Ok(Response::json(StatusCode::OK, Vec::new()))
+    }
+
+    /// Start a session for a successful classic `initialize` reply and name
+    /// it in the response. Without room or randomness, the client is told
+    /// plainly rather than handed a session that cannot work.
+    fn open_session(&self, reply: &Message) -> Result<Option<String>, Response> {
+        let Message::Response { result, .. } = reply else {
+            return Ok(None);
+        };
+        let Some(version) = result.get("protocolVersion").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        if self.config.max_sessions == 0 {
+            return Ok(None);
+        }
+        let opened = self.sessions.open(
+            ProtocolVersion::new(version),
+            self.config.max_sessions,
+            self.config.session_idle,
+        );
+        match opened {
+            Ok((id, _)) => Ok(Some(id)),
+            Err(OpenError::Full) => Err(reject(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::INTERNAL_ERROR,
+                "too many open sessions",
+            )),
+            Err(OpenError::NoRandom) => Err(reject(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::INTERNAL_ERROR,
+                "could not make a session id",
+            )),
+        }
     }
 
     fn check_origin(&self, headers: &HeaderMap) -> Result<(), Response> {
@@ -466,13 +673,29 @@ impl HttpHandler {
         message: Message,
         header_version: Option<ProtocolVersion>,
         modern: bool,
-    ) -> Response {
+        session: Option<Arc<Session>>,
+    ) -> Result<Response, Response> {
         // What a request without `_meta` is taken to speak: its header, else
-        // the oldest revision that has no header.
-        let assumed = header_version.or_else(|| {
-            let fallback = ProtocolVersion::new(FALLBACK_VERSION);
-            self.server.supports(&fallback).then_some(fallback)
-        });
+        // its session's revision, else the oldest revision that has no header.
+        let assumed = header_version
+            .or_else(|| session.as_ref().map(|s| s.version.clone()))
+            .or_else(|| {
+                let fallback = ProtocolVersion::new(FALLBACK_VERSION);
+                self.server.supports(&fallback).then_some(fallback)
+            });
+        let is_initialize =
+            matches!(&message, Message::Request { method, .. } if method == "initialize");
+        if let (Some(session), Message::Notification { method, params }) = (&session, &message) {
+            if method == "notifications/cancelled" {
+                let id = params
+                    .as_ref()
+                    .and_then(|p| CancelledParams::from_value(p).ok())
+                    .and_then(|c| c.request_id);
+                if let Some(id) = id {
+                    session.cancel(&id);
+                }
+            }
+        }
         let (tx, events) = channel();
         let conn = Arc::new(Connection::with_protocol_version(
             Arc::clone(&self.server),
@@ -480,22 +703,44 @@ impl HttpHandler {
             assumed,
         ));
         match conn.start(message) {
-            Started::Done(None) => Response::json(StatusCode::ACCEPTED, Vec::new()),
-            Started::Done(Some(reply)) => json_reply(status_of(modern, &reply), &reply),
+            Started::Done(None) => Ok(Response::json(StatusCode::ACCEPTED, Vec::new())),
+            Started::Done(Some(reply)) => {
+                let mut response = json_reply(status_of(modern, &reply), &reply);
+                if is_initialize && !modern {
+                    if let Some(id) = self.open_session(&reply)? {
+                        response = response.with_header(SESSION_HEADER, &id).map_err(|_| {
+                            reject(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                ErrorCode::INTERNAL_ERROR,
+                                "could not name the session",
+                            )
+                        })?;
+                    }
+                }
+                Ok(response)
+            }
             Started::Run(job) => {
                 let cancel = job.cancel_token();
+                let registered = session.map(|session| {
+                    lock(&session.inflight).insert(job.id().clone(), cancel.clone());
+                    Registered {
+                        session,
+                        id: job.id().clone(),
+                    }
+                });
                 let worker = std::thread::Builder::new().spawn(move || {
                     // A send fails only when the client is gone.
                     let _ = tx.send(Event::Done(job.run()));
+                    drop(registered);
                 });
                 if worker.is_err() {
-                    return reject(
+                    return Err(reject(
                         StatusCode::SERVICE_UNAVAILABLE,
                         ErrorCode::INTERNAL_ERROR,
                         "could not start a worker thread",
-                    );
+                    ));
                 }
-                self.await_reply(events, cancel, modern)
+                Ok(self.await_reply(events, cancel, modern))
             }
         }
     }

@@ -70,7 +70,7 @@ async fn run(mode: Mode) {
             .unwrap(),
     };
     let seen = cancel_file.clone();
-    exercise(mode, client, recorder, Some(&move || seen.exists())).await;
+    exercise(mode, client, recorder, &move || seen.exists()).await;
     let _ = std::fs::remove_file(&cancel_file);
 }
 

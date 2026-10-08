@@ -231,11 +231,11 @@ fn modern_headers<'a>(method: &'a str, name: &'a str) -> Vec<(&'a str, &'a str)>
 }
 
 #[test]
-fn a_classic_client_works_without_sessions() {
+fn a_classic_client_works_with_or_without_echoing_its_session() {
     let f = start(fast());
     let init = post(f.addr, &[], INIT);
     assert_eq!(init.status, 200);
-    assert!(init.header("Mcp-Session-Id").is_none(), "no sessions");
+    assert_eq!(init.header("Mcp-Session-Id").map(str::len), Some(32));
     assert!(init
         .header("content-type")
         .unwrap()
@@ -419,8 +419,12 @@ fn http_level_requests_are_refused_with_the_right_status() {
         "",
     );
     assert_eq!(get.status, 405);
-    assert_eq!(get.header("Allow"), Some("POST"));
-    assert_eq!(request(f.addr, "DELETE", "/mcp", &[], "").status, 405);
+    assert_eq!(get.header("Allow"), Some("POST, DELETE"));
+    assert_eq!(
+        request(f.addr, "DELETE", "/mcp", &[], "").status,
+        400,
+        "DELETE without a session id"
+    );
     assert_eq!(
         request(
             f.addr,
@@ -760,4 +764,120 @@ fn a_listener_that_hangs_up_deregisters_and_one_that_stays_hears_changes() {
         "the one that stayed hears the change: {heard}"
     );
     stop.shutdown();
+}
+
+const CLASSIC: (&str, &str) = ("MCP-Protocol-Version", "2025-06-18");
+
+fn open_session(f: &Fixture) -> String {
+    post(f.addr, &[], INIT)
+        .header("Mcp-Session-Id")
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn a_session_id_is_issued_only_for_a_classic_initialize_and_only_when_enabled() {
+    let f = start(fast());
+    assert_ne!(open_session(&f), open_session(&f), "ids are unique");
+    let discover = post(
+        f.addr,
+        &modern_headers("server/discover", ""),
+        &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{{{META}}}}}"#),
+    );
+    assert!(discover.header("Mcp-Session-Id").is_none(), "stateless");
+    let off = start(HttpConfig {
+        max_sessions: 0,
+        ..fast()
+    });
+    let init = post(off.addr, &[], INIT);
+    assert_eq!(init.status, 200);
+    assert!(init.header("Mcp-Session-Id").is_none());
+}
+
+#[test]
+fn an_unknown_or_ended_session_is_404_and_delete_ends_it() {
+    let f = start(fast());
+    let bogus = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", "nope")], LIST);
+    assert_eq!((bogus.status, code(&bogus)), (404, -32600));
+
+    let id = open_session(&f);
+    let ok = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &id)], LIST);
+    assert_eq!(ok.status, 200);
+    let end = request(f.addr, "DELETE", "/mcp", &[("Mcp-Session-Id", &id)], "");
+    assert_eq!(end.status, 200);
+    let after = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &id)], LIST);
+    assert_eq!(after.status, 404, "ended");
+    let again = request(f.addr, "DELETE", "/mcp", &[("Mcp-Session-Id", &id)], "");
+    assert_eq!(again.status, 404);
+}
+
+#[test]
+fn a_cancelled_notification_on_the_session_stops_the_running_call() {
+    let f = start(fast());
+    let id = open_session(&f);
+    let addr = f.addr;
+    let session = id.clone();
+    let call = std::thread::spawn(move || {
+        let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"wait"}}"#;
+        post(addr, &[CLASSIC, ("Mcp-Session-Id", &session)], body)
+    });
+    // Let the call get going, then cancel it from another connection.
+    std::thread::sleep(Duration::from_millis(300));
+    let note = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#;
+    let ack = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &id)], note);
+    assert_eq!(ack.status, 202);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !f.cancelled.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(f.cancelled.load(Ordering::SeqCst), "never cancelled");
+    let reply = call.join().unwrap();
+    assert!(
+        !reply.body.contains("stopped"),
+        "a cancelled call gets no answer: {:?}",
+        reply.body
+    );
+}
+
+#[test]
+fn a_cancel_cannot_reach_another_sessions_call() {
+    let f = start(fast());
+    let (mine, theirs) = (open_session(&f), open_session(&f));
+    let addr = f.addr;
+    let session = theirs.clone();
+    let call = std::thread::spawn(move || {
+        let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"wait"}}"#;
+        post(addr, &[CLASSIC, ("Mcp-Session-Id", &session)], body)
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let note = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#;
+    assert_eq!(
+        post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &mine)], note).status,
+        202
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !f.cancelled.load(Ordering::SeqCst),
+        "wrong session cancelled it"
+    );
+    // Ending the owner's session does cancel it.
+    request(f.addr, "DELETE", "/mcp", &[("Mcp-Session-Id", &theirs)], "");
+    call.join().unwrap();
+    assert!(f.cancelled.load(Ordering::SeqCst));
+}
+
+#[test]
+fn sessions_are_capped_and_idle_ones_expire() {
+    let f = start(HttpConfig {
+        max_sessions: 1,
+        session_idle: Duration::from_millis(200),
+        ..fast()
+    });
+    let first = open_session(&f);
+    let full = post(f.addr, &[], INIT);
+    assert_eq!((full.status, code(&full)), (503, -32603));
+    std::thread::sleep(Duration::from_millis(300));
+    let gone = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &first)], LIST);
+    assert_eq!(gone.status, 404, "idle too long");
+    assert_eq!(post(f.addr, &[], INIT).status, 200, "room again");
 }
