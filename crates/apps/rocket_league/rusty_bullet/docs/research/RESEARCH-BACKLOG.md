@@ -585,6 +585,28 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   constant fitted to the 15; the bias being the same at three speeds argues for a
   term that does not scale with speed.
 
+- **The constant normal bias (2026-10-07, wheel trace on `batch_20261006-221954`)**:
+  while the car is on the flat wall (x = 4079) the one-step error along x is exactly
+  -0.200 uu/s every tick, in every run (the car is pinned: x constant, the game's
+  normal velocity constant at -0.27, acceleration 0.000; the port, from the same
+  state, pushes 0.2 uu/s per tick away from the wall). The same +0.2 shows for a car
+  parked on the floor (padp tapes: error +0.2 in z, suspension lengths 24.76 / 24.76
+  / 23.08 / 23.08 as on the wall), so it is **not a wall effect: it is the port's
+  rest-pose offset (O019)**, 24 uu/s^2 along the surface normal. A constant 0.2 uu/s
+  per tick along the mean wheel normal explains most of the summed one-step error
+  everywhere: on the wall x -58 / -99 / -59 / -42 / -35 predicted against -68 / -106 /
+  -64 / -47 / -46 observed (10, 20, 30, 45, 60 degrees); on the 10 degree ramp z 43.4
+  against 45.8; what is left after removing it is up to 12 uu/s per phase and not
+  steady (tangential errors on the flat wall sum to a few uu/s over the whole
+  climb). The summed one-step error is not the free-run error: the stiff
+  suspension absorbs a steady 24 uu/s^2 in a hundredth of a uu of compression, so the
+  one-step view cannot say what makes the climb's heading differ by a degree.
+- **Next**: k-step errors (`--self-kstep`, k = 30) bucketed by the facet each
+  wheel stood on, where the equilibrium offset is absorbed and a real force
+  difference at a crossing would stay; and, separately, the rest-pose offset itself
+  (O019), whose 0.2 uu/s per tick is the largest single one-step error on any
+  surface.
+
 ### RB-RESEARCH-O013 — Powerslide: a long reverse slide loses speed too fast
 
 - **Evidence (2026-10-07)**: `probe_powerslide` (1400 uu/s, handbrake, full
