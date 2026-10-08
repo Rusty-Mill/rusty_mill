@@ -64,10 +64,6 @@ impl Modulus {
         Some(m)
     }
 
-    pub(crate) fn limbs(&self) -> usize {
-        self.n.len()
-    }
-
     pub(crate) fn modulus(&self) -> &[u64] {
         &self.n
     }

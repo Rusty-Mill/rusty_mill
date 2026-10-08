@@ -18,7 +18,10 @@
 extern crate alloc;
 
 mod der;
+mod field;
 mod mont;
+mod params;
+mod weierstrass;
 
 pub mod ecdsa;
 pub mod ed25519;

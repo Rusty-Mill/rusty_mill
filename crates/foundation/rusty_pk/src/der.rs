@@ -11,7 +11,10 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let (head, tail) = self.0.split_at_checked(n)?;
+        if self.0.len() < n {
+            return None;
+        }
+        let (head, tail) = self.0.split_at(n);
         self.0 = tail;
         Some(head)
     }
@@ -67,6 +70,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn reads_sequence_of_integers() {
@@ -86,6 +90,18 @@ mod tests {
         assert!(Reader::new(&[2, 1, 0x80]).positive_integer().is_none());
         assert!(Reader::new(&[2, 0]).positive_integer().is_none());
         assert!(Reader::new(&[2, 1, 0]).positive_integer().is_none());
+    }
+
+    #[test]
+    fn rejects_non_minimal_two_byte_length_even_with_a_full_body() {
+        // 0x82 0x00 0x90 encodes 144, which fits the one-byte form 0x81 0x90.
+        let mut der = vec![0x30, 0x82, 0x00, 0x90];
+        der.extend(vec![0u8; 0x90]);
+        assert!(Reader::new(&der).tlv(0x30).is_none());
+        // The minimal spelling of the same length is accepted.
+        let mut ok = vec![0x30, 0x81, 0x90];
+        ok.extend(vec![0u8; 0x90]);
+        assert_eq!(Reader::new(&ok).tlv(0x30).unwrap().len(), 0x90);
     }
 
     #[test]

@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - Crypto stage 2: rusty_pk signature verification (pending review)
+
+- **Added:** `rusty_pk` (RSA, ECDSA P-256/P-384, Ed25519 verify). `ring` is a dev-dependency oracle only. **Not changed:** `rusty_tls`, consumers, gates.
+- **Verified:** tests, clippy `-D warnings`, differential against `ring` on every Wycheproof case in 19 files and several thousand mutated or `ring`-signed inputs, more than 20 hand-made mutants (all caught after fixing two test gaps), workspace policy scripts.
+- **Known limitations:** deliberately as lenient as `ring` where `ring` is looser than RFC 8032 (non-canonical Ed25519 `y`, `x = 0` with sign bit); mutation fuzzing is deterministic, not coverage-guided; speed is 1.7x to 9x slower than `ring`; nothing is independently reviewed.
+
 ## 2026-10-08 - Crypto stages 0 and 1: rusty_ct_check, rusty_sha2 (pending review)
 
 - **Added:** `rusty_ct_check` (harness), `rusty_sha2` (SHA-2, HMAC, HKDF), `rusty_crypto_key::wipe`. `ring` is a dev-dependency oracle only. **Not changed:** `rusty_tls`, any consumer, any gate.

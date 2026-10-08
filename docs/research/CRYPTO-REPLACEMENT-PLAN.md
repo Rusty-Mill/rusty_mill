@@ -18,9 +18,57 @@ non-heap secrets; fiat-crypto not yet evaluated (stage 4).
 | --- | --- | --- |
 | 0 Harness | **Done** (`rusty_ct_check`) | Taint tool, timing t-test and disassembly audit each catch a planted leak and pass a clean probe; Wycheproof loader. |
 | 1 SHA-2, HMAC, HKDF | **Done** (`rusty_sha2`) | 18 tests plus doctest: FIPS 180 examples, RFC 4231 case 1, six Wycheproof files (HMAC and HKDF, SHA-256/384/512), differential vs `ring` over lengths 0 to 300 and block boundaries, long inputs, HMAC key lengths 0 to 1000, 600 random HKDF calls; 9 hand-made mutants all caught; valgrind taint run clean with a leaky control that is caught; disassembly budget pinned; timing test `|t|` 1.75 (HMAC-SHA256) and 0.56 (HMAC-SHA512), one run. |
-| 2 Signature verify | not started | |
+| 2 Signature verify | **Done** (`rusty_pk`: `rsa`, `ecdsa`, `ed25519`) | See "Stage 2 results" below. |
 | 3 ChaCha20-Poly1305 | not started | |
 | 4 X25519 | not started | |
+
+### Stage 2 results (`rusty_pk`, 2026-10-08)
+
+Layout taken: one crate, `rusty_pk`, with a shared Montgomery core (`mont`, branch-free
+`mul/add/sub`), `field`, and modules `rsa`, `ecdsa`, `ed25519` (X25519 joins it at stage 4).
+Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
+
+- **Accepts exactly what `ring` accepts**, including its quirks, read from `ring` 0.17.14
+  source and then checked by differential test: RSA modulus length is rounded up to bytes
+  before the 2048 floor, max 8192 bits, `e` odd in 3..2^33-1, signature length equals modulus
+  length; PSS salt = hash length; ECDSA strict DER; Ed25519 accepts a non-canonical `y`
+  and an `x = 0` key with the sign bit set (RFC 8032 rejects both) and requires canonical `S`.
+  These choices are **looser than the RFC** by design, to match `ring`; changing them is a
+  policy decision, not a bug fix.
+- **Evidence:** 42 tests (plus one ignored speed test). Every case in 19 vendored Wycheproof files (RSA PKCS#1 2048/3072/4096
+  x SHA-256/384/512, RSA-PSS incl. the parameter zoo, ECDSA P-256/SHA-256, P-384/SHA-384,
+  P-384/SHA-256, Ed25519) gets the same verdict from `ring` and from us, and the
+  vector's stated verdict. P-256/SHA-384 (no Wycheproof file; `ring` cannot sign it) uses 72
+  cases from an independent Python signer. 18 RSA padding forgeries (block type, pad byte,
+  separator, trailing bytes, PSS trailer, top bit, salt length) from a throwaway key and an
+  independent signer. 3,000 `ring`-signed-then-mutated cases and several thousand mutated Wycheproof
+  vectors give the same verdict as `ring`; 2000 garbage inputs never panic. Deterministic
+  mutation fuzzing only: **no coverage-guided fuzzer was run** (none installed).
+- **Mutation check by hand, more than 20 mutants:** all caught after two rounds of repair. The first
+  round exposed two real test gaps (padding checks were not individually exercised; a
+  non-minimal DER length was caught only by accident), both fixed. One mutant is equivalent
+  and stays alive: removing the `signature == 0` check changes nothing, because a zero
+  signature decodes to a zero encoded message that fails padding.
+- **A wrong test assumption, not a code bug:** Wycheproof's salt-0 PSS file contains a vector
+  (tcId 69, "s_len changed to 32", result invalid) that is a genuine salt-32 signature, so it
+  verifies under the shared salt-equals-hash profile in both `ring` and ours.
+- **Speed, measured once on this VM, release (`tests/perf.rs`, ignored):**
+
+  | | ours | `ring` | ratio |
+  | --- | --- | --- | --- |
+  | RSA-2048 PKCS#1 | 76 us | 29 us | 2.7x |
+  | RSA-3072 | 210 us | 56 us | 3.8x |
+  | RSA-4096 | 298 us | 101 us | 2.9x |
+  | ECDSA P-256 | 542 us | 73 us | 7.5x |
+  | ECDSA P-384 | 1172 us | 709 us | 1.7x |
+  | Ed25519 | 435 us | 48 us | 9.0x |
+
+  RSA matches the section 5 estimate; P-256 and Ed25519 are slower than estimated (no
+  windowing or precomputation yet). All are under 1.2 ms, so a handshake with three
+  signatures adds about 1 to 2 ms. Optimisation is possible and not done.
+- **Constant time:** not applicable to verification (public data); the `_vartime` routines are
+  named and documented. The `mont` primitives that stage 4 will use on secrets are not yet
+  tainted-tested.
 
 ## 1. Answer first
 

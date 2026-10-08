@@ -256,6 +256,9 @@ mod tests {
         assert!(verify(Scheme::Pkcs1Sha256, &der(&[0x7f; 3], &[3]), b"", &[0; 3]).is_err());
         assert!(parse_public_key(&der(&[0x7f, 0x7e], &[3])).is_none());
         assert!(parse_public_key(&der(&[0x7f, 0x7f], &[2])).is_none());
+        // even and large enough: 65538 must still be refused
+        assert!(parse_public_key(&der(&[0x7f, 0x7f], &[1, 0, 2])).is_none());
+        assert!(parse_public_key(&der(&[0x7f, 0x7f], &[1, 0, 1])).is_some());
         assert!(parse_public_key(&der(&[0x7f, 0x7f], &[1])).is_none());
         assert!(parse_public_key(&der(&[0x7f, 0x7f], &[1, 0, 0, 0, 0, 1])).is_none());
         assert!(parse_public_key(&der(&[0x7f, 0x7f], &[3])).is_some());

@@ -175,3 +175,33 @@ fn pss_misc_parameters_follow_the_native_profile() {
         });
     }
 }
+
+/// Deliberately malformed encoded messages signed with a throwaway key
+/// (`scripts/gen_rsa_forgeries.py`): each padding check must be enforced
+/// individually. Ours must agree with ring and with the stated verdict.
+#[test]
+fn padding_forgeries_are_rejected() {
+    let mut valid = 0;
+    for line in include_str!("vectors/rsa_forgeries.txt").lines() {
+        let f: Vec<&str> = line.split(' ').collect();
+        let (name, verdict, scheme) = (f[0], f[1], f[2]);
+        let (key, msg, sig) = (
+            rusty_hex::decode(f[3]).unwrap(),
+            rusty_hex::decode(f[4]).unwrap(),
+            rusty_hex::decode(f[5]).unwrap(),
+        );
+        let scheme = match scheme {
+            "pkcs1-sha256" => Scheme::Pkcs1Sha256,
+            "pss-sha256" => Scheme::PssSha256,
+            other => panic!("unknown scheme {other}"),
+        };
+        let ours = verify(scheme, &key, &msg, &sig).is_ok();
+        let ring = UnparsedPublicKey::new(ring_alg(scheme), &key)
+            .verify(&msg, &sig)
+            .is_ok();
+        assert_eq!(ours, ring, "{name}: differs from ring");
+        assert_eq!(ours, verdict == "valid", "{name}");
+        valid += ours as usize;
+    }
+    assert_eq!(valid, 2, "exactly the two well-formed signatures verify");
+}
