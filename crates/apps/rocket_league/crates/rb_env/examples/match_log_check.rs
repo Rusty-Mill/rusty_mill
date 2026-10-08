@@ -93,18 +93,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ball = vec3(p);
                 velocity = vec3(v);
             } else {
-                ball = ball + velocity * (1.0 / 120.0);
+                ball += velocity * (1.0 / 120.0);
             }
         } else {
-            ball = ball + velocity * (1.0 / 120.0);
+            ball += velocity * (1.0 / 120.0);
         }
-        if frame > frame0 {
-            if flow.after_step(ball, velocity) == Transition::ReplayStarted {
-                if let Some(&ticks) = replay_lengths.get(replays_seen) {
-                    flow = flow.with_replay(ticks);
-                }
-                replays_seen += 1;
+        if frame > frame0 && flow.after_step(ball, velocity) == Transition::ReplayStarted {
+            if let Some(&ticks) = replay_lengths.get(replays_seen) {
+                flow = flow.with_replay(ticks);
             }
+            replays_seen += 1;
         }
         let state = flow.state();
         if state.phase != previous {
