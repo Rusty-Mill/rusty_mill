@@ -709,6 +709,18 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   ball's sleep (the port zeroes a body under 20 uu/s for 0.5 s) changes nothing.
 - **Status**: Open. **Owner**: baileyrd.
 
+- **Plain hits are good, the odd ones are known (2026-10-08, `ball_events.py`, `RB_BALL=1`)**:
+  24 hit tapes re-recorded (`hitfuzz_301` to `324`, `batch_20261008-072649`; 11 have a hit). On
+  the five clean first touches of a resting ball the port's post-hit speed is 0.14 to 0.96 percent
+  fast (307, 308, 312, 317, 320: ratios 1.0034, 1.0052, 1.0014, 1.0081, 1.0096), so the car-ball hit
+  itself is within 1 percent. The three that dip on the second tick (304: 1355 -> 1134 -> 1256;
+  306: 1552 -> 1305 -> 1550; 315: 1152 -> 1039) are the floor-contact knife-edge of O020: repeated
+  five times each, the game splits into two groups by one tick of contact time (306 gave either
+  1605 -> 1516 or 1552 -> 1305), deterministic but sensitive to sub-tick geometry. `hitfuzz_322`
+  shows a second kick two ticks after the first (504 -> 502 -> 638) in all five runs; the free run
+  reproduces it (644 against 638 uu/s), so the one-step view's 137 uu/s there is an artifact of
+  resetting the pending hit each tick: score ball events in the free run, not one-step.
+
 ### RB-RESEARCH-O015 — Smaller residuals
 
 - `wavedash_early` 7.3 / 17.4 uu (recorded input): the flip that hops back
@@ -989,6 +1001,9 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   implemented (`pads.rs`), on in `Env`, off in `PhysicsWorld::new`. Probe tapes: 32 of
   34 pickup decisions match the game (16 of 21 pickups on the same tick, 5 one tick
   late, same gain). Open: the 1-tick lag, the cap, pads in the air, two cars on one pad.
+- **Timing re-fit (2026-10-08)**: the in-port grid (test point x both radii, 34 probes) keeps the
+  radii 176 / 208 and puts the test point at 0.6 of the tick: 20 of 21 pickups on the game's tick,
+  1 late (0.25 left 5 late); no pickup / no-pickup mismatch. See ADR-0072.
 - **Next** (first part done): dump `FieldInfo` (the pad list and kinds) from the tape bot's `new`;
   record the pad `is_active`/`timer` per tick (the game packet has them), which
   says exactly when a pad is taken, and drive over one pad at many offsets from a

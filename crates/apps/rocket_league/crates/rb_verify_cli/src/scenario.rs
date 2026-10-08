@@ -59,6 +59,9 @@ pub struct ScenarioRow {
     /// (`RB-VERIFY-003-FR-015`).
     pub recorded_ball: Vec3,
     pub predicted_ball: Vec3,
+    /// The same ball's recorded and predicted velocities (uu/s).
+    pub recorded_ball_velocity: Vec3,
+    pub predicted_ball_velocity: Vec3,
 }
 
 impl ScenarioRow {
@@ -354,6 +357,8 @@ pub fn compare_scenario(
             predicted: *p,
             recorded_ball,
             predicted_ball,
+            recorded_ball_velocity: Vec3::ZERO,
+            predicted_ball_velocity: Vec3::ZERO,
         });
     }
     Ok(ScenarioComparison {
@@ -541,6 +546,8 @@ pub fn compare_scenario_recorded(
                 predicted: *pc,
                 recorded_ball: r.ball.position,
                 predicted_ball: p.ball.position,
+                recorded_ball_velocity: r.ball.velocity,
+                predicted_ball_velocity: p.ball.velocity,
             });
         }
         let mean = total / rows.len().max(1) as f32;
