@@ -5,6 +5,23 @@ Status: **assessment and plan only. No primitive was written, no crate created, 
 consumer touched.** Everything marked "decision" is the owner's. Section 10 is a draft ADR
 and is **not accepted**.
 
+## 0. Progress and owner decisions (updated as stages land)
+
+Owner decision 2026-10-08: **`unsafe` intrinsics approved; stop after stage 4.** Stage 5
+(AES-GCM) and later are therefore out of scope unless the owner reopens them; the AES-NI
+approval is recorded but unused until then. Section 9 items 3 to 5 were not answered; I
+took the recommended defaults and say so here: new crates, not extensions of `rusty_rsa`
+(revisit at stage 2); one additive function, `rusty_crypto_key::wipe`, for zeroizing
+non-heap secrets; fiat-crypto not yet evaluated (stage 4).
+
+| Stage | State | Evidence so far |
+| --- | --- | --- |
+| 0 Harness | **Done** (`rusty_ct_check`) | Taint tool, timing t-test and disassembly audit each catch a planted leak and pass a clean probe; Wycheproof loader. |
+| 1 SHA-2, HMAC, HKDF | **Done** (`rusty_sha2`) | 18 tests plus doctest: FIPS 180 examples, RFC 4231 case 1, six Wycheproof files (HMAC and HKDF, SHA-256/384/512), differential vs `ring` over lengths 0 to 300 and block boundaries, long inputs, HMAC key lengths 0 to 1000, 600 random HKDF calls; 9 hand-made mutants all caught; valgrind taint run clean with a leaky control that is caught; disassembly budget pinned; timing test `|t|` 1.75 (HMAC-SHA256) and 0.56 (HMAC-SHA512), one run. |
+| 2 Signature verify | not started | |
+| 3 ChaCha20-Poly1305 | not started | |
+| 4 X25519 | not started | |
+
 ## 1. Answer first
 
 - **Stages 1 and 2 (hashes, HMAC, HKDF, signature verification) are worth doing.** They touch

@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - Crypto stages 0 and 1: rusty_ct_check, rusty_sha2 (pending review)
+
+- **Added:** `rusty_ct_check` (harness), `rusty_sha2` (SHA-2, HMAC, HKDF), `rusty_crypto_key::wipe`. `ring` is a dev-dependency oracle only. **Not changed:** `rusty_tls`, any consumer, any gate.
+- **Decision recorded:** `unsafe` intrinsics approved, work stops after stage 4 (`docs/research/CRYPTO-REPLACEMENT-PLAN.md` section 0).
+- **Verified:** tests, clippy `-D warnings`, differential against `ring`, mutation by hand (9 of 9 caught), valgrind taint and disassembly gates on the planted-leak controls, workspace policy scripts.
+- **Known limitations:** constant-time evidence covers x86-64 and rustc 1.97 only; the timing results are single runs on a noisy VM; nothing here is independently reviewed; the HMAC/HKDF functions other than `compress` are inlined, so the disassembly audit covers only the compression functions.
+
 ## 2026-10-08 - Crypto replacement plan (docs only)
 
 - **Added:** `docs/research/CRYPTO-REPLACEMENT-PLAN.md`. **Not changed:** any crate, dependency, `rusty_tls`, or gate. No primitive was written.

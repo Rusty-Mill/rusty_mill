@@ -12279,6 +12279,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_ct_check"
+version = "0.1.0"
+dependencies = [
+ "rusty_hex",
+ "rusty_json",
+]
+
+[[package]]
 name = "rusty_diff"
 version = "0.1.0"
 
@@ -12725,6 +12733,16 @@ dependencies = [
 [[package]]
 name = "rusty_sha1"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_sha2"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "rusty_crypto_key",
+ "rusty_ct_check",
+ "rusty_hex",
+]
 
 [[package]]
 name = "rusty_simd"

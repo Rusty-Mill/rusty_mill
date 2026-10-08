@@ -1,0 +1,16 @@
+[package]
+name = "rusty_ct_check"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Test-support harness for constant-time evidence: valgrind secret tainting, a dudect-style timing t-test and a disassembly audit script. Detects planted leaks; proves nothing about their absence. Not for production dependencies."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[dependencies]
+rusty_json = { workspace = true }
+rusty_hex = { workspace = true }
+
+[dev-dependencies]
