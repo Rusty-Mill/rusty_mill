@@ -1,0 +1,82 @@
+# Stand up the broker-backed service:  docker compose up --build
+#
+# Postgres (DB) + Redis (broker) + a one-shot migrate + the API + a Celery worker.
+# `migrate` runs `alembic upgrade head` before the app starts (the app has
+# RLS_DB_AUTO_CREATE=0, so it relies on migrations). Blobs still share a volume
+# here; for full multi-node set RLS_BLOB_BACKEND=s3 and add a MinIO service.
+
+x-db-env: &db-env
+  RLS_DATABASE_URL: postgresql+psycopg2://rls:rls@postgres:5432/rls
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rls
+      POSTGRES_PASSWORD: rls
+      POSTGRES_DB: rls
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rls -d rls"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment: *db-env
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment:
+      <<: *db-env
+      RLS_DB_AUTO_CREATE: "0"
+      RLS_QUEUE_BACKEND: celery
+      RLS_CELERY_BROKER_URL: redis://redis:6379/0
+      RLS_BLOB_DIR: /data/blobs
+    volumes: ["rls-data:/data"]
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    command:
+      ["celery", "-A", "app.celery_app:celery_app", "worker",
+       "-Q", "scoring", "--concurrency=2", "--loglevel=info"]
+    environment:
+      <<: *db-env
+      RLS_DB_AUTO_CREATE: "0"
+      RLS_CELERY_BROKER_URL: redis://redis:6379/0
+      RLS_BLOB_DIR: /data/blobs
+    volumes: ["rls-data:/data"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  rls-data:
+  pg-data:
