@@ -1,0 +1,22 @@
+[package]
+name = "bc-clone"
+version = "0.1.0"
+edition = "2021"
+description = "Reverse-engineered clone of ballchasing.com's replay analyzer: .replay -> a ballchasing-shaped stats document, plus a field-by-field validator against the real API."
+
+[lib]
+name = "bc_clone"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bc-clone"
+path = "src/main.rs"
+
+[[bin]]
+name = "bc-validate"
+path = "src/bin/validate.rs"
+
+[dependencies]
+replay-analyzer = { path = ".." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
