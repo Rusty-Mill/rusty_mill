@@ -1,5 +1,8 @@
 # Contributing
 
+How the repo is organised, validated and released:
+[ADR-0008](./docs/adr/0008-monorepo-operating-model.md).
+
 ## Before you start
 - Match surrounding conventions when editing existing code.
 - Keep diffs focused — one logical change per PR.
