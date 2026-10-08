@@ -43,6 +43,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "record12_open"
+path = "fuzz_targets/record12_open.rs"
+test = false
+doc = false
+bench = false
+
 # Standalone: this is not a member of the parent, which is a single crate with
 # no workspace of its own.
 [workspace]

@@ -28,6 +28,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   its three tests failed before the fix.
 
 ### Added
+- **TLS 1.2 record layer (stage 4b-i)**: `handrolled::record12` with `Sealer` and `Opener` for AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 (RFC 5246 6.2.3.3, 5288, 7905). Protection only; no handshake yet, and nothing in the default build or any consumer uses it. Verified by a rustls differential (1,568 sealing cases, byte-identical, both directions), 14 independent vectors from OpenSSL including AES-128-GCM, a 23-test rejection suite that flips every bit of a valid record, and 17 mutants all caught. A new libFuzzer target `record12_open` ran 5.2 million executions clean. `RecordError` gains `FixedIvLength` and `UnexpectedVersion` (the enum is non-exhaustive). Plan and decisions: `docs/research/TLS12-DESIGN.md`.
 - **`TlsServerStream::peer_certificate_der`**, the server-side mirror of
   `TlsStream::peer_certificate_der`: the DER-encoded end-entity certificate
   the client presented during the handshake, `None` before

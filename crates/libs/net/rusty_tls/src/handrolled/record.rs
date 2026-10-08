@@ -236,6 +236,22 @@ pub enum RecordError {
     /// The sequence number reached `u64::MAX` and this key may not be used
     /// again (§5.3 forbids wrapping).
     SequenceExhausted,
+    /// The fixed part of the nonce was the wrong length for the algorithm.
+    ///
+    /// Only the TLS 1.2 record layer ([`super::record12`]) reports this: it
+    /// takes a 4-byte implicit salt for AES-GCM and a 12-byte IV for
+    /// ChaCha20-Poly1305, where TLS 1.3 always takes 12.
+    FixedIvLength {
+        /// What the algorithm requires.
+        expected: usize,
+        /// What was supplied.
+        actual: usize,
+    },
+    /// A protected TLS 1.2 record carried a version other than `0x0303`.
+    ///
+    /// Reported by [`super::record12`] only. TLS 1.2 authenticates the version
+    /// bytes, so unlike TLS 1.3 they are not "ignored for all purposes".
+    UnexpectedVersion([u8; 2]),
 }
 
 impl fmt::Display for RecordError {
@@ -275,6 +291,12 @@ impl fmt::Display for RecordError {
             }
             Self::SequenceExhausted => {
                 f.write_str("record sequence number exhausted; this key may not be used again")
+            }
+            Self::FixedIvLength { expected, actual } => {
+                write!(f, "fixed iv is {actual} bytes, algorithm needs {expected}")
+            }
+            Self::UnexpectedVersion([major, minor]) => {
+                write!(f, "record version {major}.{minor} is not TLS 1.2 (3.3)")
             }
         }
     }
@@ -353,18 +375,18 @@ fn additional_data(encrypted_len: usize) -> [u8; HEADER_LEN] {
 /// `None` means exhausted. The counter only advances after an operation
 /// succeeds, so a rejected record does not consume a sequence number.
 #[derive(Debug)]
-struct Sequence(Option<u64>);
+pub(super) struct Sequence(pub(super) Option<u64>);
 
 impl Sequence {
-    const fn starting_at(seq: u64) -> Self {
+    pub(super) const fn starting_at(seq: u64) -> Self {
         Self(Some(seq))
     }
 
-    fn peek(&self) -> Result<u64, RecordError> {
+    pub(super) fn peek(&self) -> Result<u64, RecordError> {
         self.0.ok_or(RecordError::SequenceExhausted)
     }
 
-    fn advance(&mut self, used: u64) {
+    pub(super) fn advance(&mut self, used: u64) {
         self.0 = used.checked_add(1);
     }
 }
