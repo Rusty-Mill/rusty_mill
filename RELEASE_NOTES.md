@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - Operating model (ADR-0008) and rusty-ttf-parser (pending review)
+
+- **Added:** ADR-0008, `required-gate`, scheduled sweep, toolchain pin, CODEOWNERS, SHA-pinned actions, warn-only `cargo-deny`, root licence files; `rusty-ttf-parser`. **Changed:** `rusty_term` uses it instead of `ttf-parser`; `remind_me_core`'s S3 client moves to the SDK's current HTTP stack. **Fixed:** four advisories via the AWS change.
+- **Known limitations:** `cargo-deny` is non-blocking until `bincode` and `rustls-pemfile` are resolved. Set `required-gate` as the only required check in branch protection after merge. `rusty-ttf-parser` decodes GSUB types 1/4/5/6 only; context format 1 and `sbix` are covered by hand-built fonts, not by the real-font comparison.
+
+---
+
 ## 2026-10-08 - rusty-mcp-client split (pending review)
 
 - **Added:** `rusty-mcp-client`; **Changed:** `rusty-mcp` loses its `client` feature; `rk-mcp` depends on the new crate. Stdio verified again against a real `rusty-mcp-demo` after the move. No OpenSSL in the MCP client path (the `native-tls` still in `rk-mcp`'s tree comes from `aisdk`/`rk-feed`, the LLM client).

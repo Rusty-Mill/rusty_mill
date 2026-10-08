@@ -110,7 +110,7 @@ pub(crate) struct FontCache {
     /// face has no `liga`/`calt` lookups or ligatures are disabled.
     shapers: [Option<Shaper>; 4],
     /// A color-emoji font's raw bytes, parsed on demand for bitmap strikes
-    /// (`ttf-parser` borrows, so the bytes are kept, not a `Face`).
+    /// (`rusty-ttf-parser` borrows, so the bytes are kept, not a `Face`).
     emoji: Option<Vec<u8>>,
     /// Fonts tried in order when the chosen face lacks a glyph (CJK, symbols, …).
     fallback: Vec<Font>,
@@ -200,11 +200,11 @@ impl FontCache {
             return None;
         }
         let data = self.emoji.as_deref()?;
-        let face = ttf_parser::Face::parse(data, 0).ok()?;
+        let face = rusty_ttf_parser::Face::parse(data, 0).ok()?;
         let gid = face.glyph_index(ch)?;
         let (cw, chh) = self.cell_size();
         let img = face.glyph_raster_image(gid, chh as u16)?;
-        if img.format != ttf_parser::RasterImageFormat::PNG {
+        if img.format != rusty_ttf_parser::RasterImageFormat::PNG {
             return None;
         }
         let decoded = crate::core::png_decode(img.data)?;

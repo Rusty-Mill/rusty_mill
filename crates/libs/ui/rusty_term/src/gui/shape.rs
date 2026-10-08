@@ -4,9 +4,9 @@
 //! `!=`, `fi`, ...) never form on their own. This applies the font's `liga`
 //! and `calt` GSUB features to a run of glyph ids, returning each output
 //! glyph with the number of input glyphs (terminal cells) it spans. The font
-//! tables are read with `ttf-parser` (a separate, direct dependency — see
-//! `rusty_font`'s scope in `font.rs`, which covers outline rasterization but
-//! not OpenType layout); the substitution *application* is hand-rolled here.
+//! tables are decoded by `rusty-ttf-parser` (see `rusty_font`'s scope in
+//! `font.rs`, which covers outline rasterization but not OpenType layout); the
+//! substitution *application* is hand-rolled here.
 //!
 //! Supported lookup types: 1 (single), 4 (ligature), 5 (context), 6 (chained
 //! context) in all three formats, with nested lookup records applied
@@ -17,11 +17,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use ttf_parser::gsub::{LigatureSubstitution, SingleSubstitution, SubstitutionSubtable};
-use ttf_parser::opentype_layout::{
-    ChainedContextLookup, ContextLookup, LayoutTable, SequenceLookupRecord,
+use rusty_ttf_parser::gsub::{
+    LigatureSubstitution, SingleSubstitution, SubstitutionSubtable, Table as LayoutTable,
 };
-use ttf_parser::{Face, GlyphId, Tag};
+use rusty_ttf_parser::opentype_layout::{
+    ChainedContextLookup, ClassDefinition, ContextLookup, SequenceLookupRecord,
+};
+use rusty_ttf_parser::{Face, GlyphId, LazyArray16, Tag};
 
 /// Recursion cap for nested contextual lookups (real fonts are shallow).
 const MAX_DEPTH: u8 = 8;
@@ -41,7 +43,7 @@ type ShapedRun = Vec<(u16, u8)>;
 type ShapeCache = RefCell<HashMap<Vec<u16>, ShapedRun>>;
 
 /// One face's ligature shaper: the font bytes (re-parsed per call, since
-/// `ttf-parser` borrows the data and a self-referential `Face` can't be
+/// `rusty-ttf-parser` borrows the data and a self-referential `Face` can't be
 /// stored without unsafe code) plus the GSUB lookup indices enabled by the
 /// `liga` and `calt` features, in application order.
 pub(crate) struct Shaper {
@@ -137,7 +139,7 @@ fn apply_lookup_scan(gsub: &LayoutTable, li: u16, buf: &mut Vec<(u16, u8)>) {
     let Some(lookup) = gsub.lookups.get(li) else {
         return;
     };
-    let subtables: Vec<SubstitutionSubtable> = lookup.subtables.into_iter().collect();
+    let subtables: Vec<SubstitutionSubtable> = lookup.subtables().collect();
     let mut i = 0;
     while i < buf.len() {
         let mut advance = 1;
@@ -164,7 +166,7 @@ fn apply_lookup_at(
         return None;
     }
     let lookup = gsub.lookups.get(li)?;
-    for st in lookup.subtables.into_iter::<SubstitutionSubtable>() {
+    for st in lookup.subtables() {
         if let Some(consumed) = apply_subtable_at(gsub, &st, buf, pos, depth) {
             return Some(consumed);
         }
@@ -373,7 +375,7 @@ fn apply_chain(
 /// the input region's new length, for the caller's scan to advance past.
 fn apply_records(
     gsub: &LayoutTable,
-    records: ttf_parser::LazyArray16<SequenceLookupRecord>,
+    records: LazyArray16<SequenceLookupRecord>,
     buf: &mut Vec<(u16, u8)>,
     start: usize,
     input_len: usize,
@@ -396,7 +398,7 @@ fn apply_records(
     (input_len as isize + delta).max(1) as usize
 }
 
-type U16Array<'a> = ttf_parser::LazyArray16<'a, u16>;
+type U16Array<'a> = LazyArray16<'a, u16>;
 
 /// Input glyphs 1.. (index 0 is implied by the subtable coverage) match `seq`.
 fn seq_matches_gids(seq: &U16Array, buf: &[(u16, u8)], pos: usize) -> bool {
@@ -431,7 +433,7 @@ fn seq_matches_classes(
     seq: &U16Array,
     buf: &[(u16, u8)],
     pos: usize,
-    cd: &ttf_parser::opentype_layout::ClassDefinition,
+    cd: &ClassDefinition,
 ) -> bool {
     (0..seq.len()).all(|k| match buf.get(pos + 1 + k as usize) {
         Some(e) => seq.get(k) == Some(cd.get(GlyphId(e.0))),
@@ -443,7 +445,7 @@ fn backtrack_classes_match(
     seq: &U16Array,
     buf: &[(u16, u8)],
     pos: usize,
-    cd: &ttf_parser::opentype_layout::ClassDefinition,
+    cd: &ClassDefinition,
 ) -> bool {
     (0..seq.len()).all(|k| match pos.checked_sub(1 + k as usize) {
         Some(idx) => seq.get(k) == Some(cd.get(GlyphId(buf[idx].0))),
@@ -455,7 +457,7 @@ fn lookahead_classes_match(
     seq: &U16Array,
     buf: &[(u16, u8)],
     from: usize,
-    cd: &ttf_parser::opentype_layout::ClassDefinition,
+    cd: &ClassDefinition,
 ) -> bool {
     (0..seq.len()).all(|k| match buf.get(from + k as usize) {
         Some(e) => seq.get(k) == Some(cd.get(GlyphId(e.0))),
