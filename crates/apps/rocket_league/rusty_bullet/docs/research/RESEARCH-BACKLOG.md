@@ -627,6 +627,21 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   hypothesis that does not lower the slope is out. The front/rear asymmetry points
   at the wheel order (O019).
 
+- **Mirror test (2026-10-08, `gen_wall_mirror.py`, `wallgm_*`, `batch_20261008-041030`)**:
+  the 15 `wallg_*` approaches mirrored onto the x = -4096 wall (x -> -x, yaw -> pi - yaw),
+  one game run each. Distance between the original and the mirror-corrected
+  recording, 3.4 s into the climb: the **game** is nearly symmetric (0.9, 1.0, 1.0,
+  4.5, 5.2 uu for five pairs; median 11.7, but 15 to 26 for six and 164 for
+  `60_1800`, which the game's own start sensitivity (O011) may explain), the **port** is not (13 to 91 uu,
+  median 45.7; `60_1200` 84.5 against the game's 0.9). The port's asymmetry is its
+  fixed wheel order (front right, front left, back right, back left; O019): the same 20
+  degree approach ends 894.7 high on one wall and 869.9 on the other. So the order
+  that makes the 45 degree climbs fit is a stand-in: the game's mechanism is
+  (almost) mirror-symmetric, which the real fix must be too. Any candidate for O019
+  can now be scored on three things together: the pooled k-step slope of
+  `wheel_kstep.py`, the rest pose (roll 0), and the port's original-versus-mirror
+  distance on these 30 tapes.
+
 ### RB-RESEARCH-O013 — Powerslide: a long reverse slide loses speed too fast
 
 - **Evidence (2026-10-07)**: `probe_powerslide` (1400 uu/s, handbrake, full
