@@ -6,7 +6,7 @@ use rusty_bbp::*;
 use rusty_bbp_host::{admin, human, open_driver};
 use rusty_serde::Value;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Proc, Stdio};
 
 fn tempdir(tag: &str) -> PathBuf {
@@ -22,7 +22,7 @@ struct Mcp {
 }
 
 impl Mcp {
-    fn spawn(dir: &PathBuf, task: &str, principal: &str, turn: u64) -> Mcp {
+    fn spawn(dir: &Path, task: &str, principal: &str, turn: u64) -> Mcp {
         let child = Proc::new(env!("CARGO_BIN_EXE_bbp"))
             .arg("mcp")
             .env("BBP_DIR", dir)
@@ -98,7 +98,7 @@ impl Drop for Mcp {
     }
 }
 
-fn setup(dir: &PathBuf) -> TaskId {
+fn setup(dir: &Path) -> TaskId {
     let task = TaskId("T1".into());
     admin::open_task(
         dir,

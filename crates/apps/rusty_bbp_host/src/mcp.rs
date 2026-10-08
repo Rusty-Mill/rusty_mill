@@ -256,14 +256,27 @@ fn op_of(a: &Value) -> OpId {
         .unwrap_or_else(fresh_op)
 }
 
+/// A tool call translated into an agent action, plus the artifact bytes to
+/// store first when the call is `put_artifact`.
+pub struct Translated {
+    pub op: OpId,
+    pub action: AgentAction,
+    pub bytes: Option<(ArtifactPayload, Vec<u8>)>,
+}
+
+fn translated(
+    op: OpId,
+    action: AgentAction,
+    bytes: Option<(ArtifactPayload, Vec<u8>)>,
+) -> Translated {
+    Translated { op, action, bytes }
+}
+
 /// Translate a tool call into an agent action.
-pub fn action(
-    name: &str,
-    a: &Value,
-) -> Result<(OpId, AgentAction, Option<(ArtifactPayload, Vec<u8>)>), String> {
+pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
     match name {
-        "task_card" => Ok((fresh_op(), AgentAction::TaskCard, None)),
-        "read" => Ok((
+        "task_card" => Ok(translated(fresh_op(), AgentAction::TaskCard, None)),
+        "read" => Ok(translated(
             op_of(a),
             AgentAction::Read {
                 after: a.get("after").and_then(Value::as_u64).map(MsgId),
@@ -271,7 +284,7 @@ pub fn action(
             },
             None,
         )),
-        "get_artifact" => Ok((
+        "get_artifact" => Ok(translated(
             op_of(a),
             AgentAction::GetArtifact {
                 id: ArtId(u64_of(a.get("id"), "id")?),
@@ -308,7 +321,7 @@ pub fn action(
                     .transpose()?,
                 gate: a.get("gate").and_then(Value::as_bool).unwrap_or(false),
             };
-            Ok((op_of(a), AgentAction::Post(draft), None))
+            Ok(translated(op_of(a), AgentAction::Post(draft), None))
         }
         "put_artifact" => {
             let body = a
@@ -354,7 +367,7 @@ pub fn action(
                 sha: Sha256([0; 32]),
                 len: 0,
             };
-            Ok((
+            Ok(translated(
                 op_of(a),
                 AgentAction::PutArtifact {
                     blob: placeholder,
@@ -387,7 +400,11 @@ impl Server {
     /// Run one tool call end to end.
     pub fn call(&mut self, name: &str, args: &Value) -> Result<Response, String> {
         self.driver.sync().map_err(|e| format!("{e:?}"))?;
-        let (op, mut act, bytes) = action(name, args)?;
+        let Translated {
+            op,
+            action: mut act,
+            bytes,
+        } = action(name, args)?;
         if !matches!(act, AgentAction::TaskCard) && !self.turn_live() {
             return Err(format!(
                 "turn {} has ended; this server speaks for no later turn",
