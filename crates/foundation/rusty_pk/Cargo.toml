@@ -2,7 +2,7 @@
 name = "rusty_pk"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.98.1"
 description = "Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, X25519. Portable, no unsafe. Stages 2 and 4 of the native ring replacement plan."
 license = "MIT OR Apache-2.0"
 

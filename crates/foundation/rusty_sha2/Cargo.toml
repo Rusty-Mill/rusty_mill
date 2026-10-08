@@ -2,7 +2,7 @@
 name = "rusty_sha2"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.98.1"
 description = "Dependency-free SHA-256, SHA-384, SHA-512, HMAC and HKDF (RFC 5869) with zeroized state. Portable, no allocation, no unsafe. Stage 1 of the native ring replacement plan."
 license = "MIT OR Apache-2.0"
 

@@ -2,7 +2,7 @@
 name = "rusty_aead"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.98.1"
 description = "Dependency-free ChaCha20-Poly1305 (RFC 8439) AEAD. Portable, no unsafe, no allocation. Stage 3 of the native ring replacement plan."
 license = "MIT OR Apache-2.0"
 
