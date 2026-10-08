@@ -39,6 +39,7 @@ members = [
     "crates/libs/protocol/rusty_agui",
     "crates/libs/protocol/rusty_a2a",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
+    "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo",
     "crates/libs/async/rusty_stream",
     "crates/foundation/rusty_url",
@@ -684,6 +685,7 @@ rp-router = { path = "crates/apps/rusty_provider/crates/router" }
 # A no-op for rusty_provider, which inherits this entry as-is: rusty-mcp's
 # own `default` feature is empty.
 rusty-mcp = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp", default-features = false }
+rusty-mcp-client = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client" }
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"

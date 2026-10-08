@@ -80,16 +80,6 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 
 [features]
 default = []
-# Protocol-only MCP client: stdio child + Streamable HTTP and client-credentials auth.
-client = [
-    "dep:reqwest",
-    "rmcp/client",
-    "rmcp/transport-child-process",
-    "rmcp/transport-streamable-http-client",
-    "rmcp/transport-streamable-http-client-reqwest",
-    "rmcp/reqwest-native-tls",
-    "tokio/io-util",
-]
 # A JWKS-backed JWT validator for the authorization layer.
 jwt = ["dep:jsonwebtoken", "dep:reqwest", "tokio/sync"]
 # Export spans to an OpenTelemetry collector over OTLP.

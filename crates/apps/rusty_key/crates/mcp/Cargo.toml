@@ -20,7 +20,7 @@ serde_json.workspace = true
 thiserror = "2"
 toml.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "process"] }
-rusty-mcp = { workspace = true, features = ["client"], optional = true }
+rusty-mcp-client = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
@@ -28,10 +28,10 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [features]
 # Expose the in-process FakeMcpClient for downstream offline tests.
 fake = []
-# The MCP transport adapter (ADR-0029), now over `rusty-mcp`'s client (which
+# The MCP transport adapter (ADR-0029), now over `rusty-mcp-client` (which
 # wraps rmcp). Off by default so the offline core builds without the SDK;
 # CI/release builds enable it. The feature keeps its `rmcp` name.
-rmcp = ["dep:rusty-mcp"]
+rmcp = ["dep:rusty-mcp-client"]
 
 # De-inherited from rusty_key's own former `[workspace.lints]`: this
 # workspace root's `[workspace.lints]` is rustils' (`unsafe_code = "warn"`),

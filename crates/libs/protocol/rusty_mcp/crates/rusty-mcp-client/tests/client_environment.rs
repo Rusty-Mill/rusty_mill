@@ -1,8 +1,7 @@
 //! Environment-backed client credentials, isolated from parallel test processes.
-#![cfg(feature = "client")]
 
-use rusty_mcp::client::{McpClient, McpClientError, McpServerSpec, McpTransport};
-use rusty_mcp::client_auth::{AuthError, McpAuth, McpAuthSecret, resolve};
+use rusty_mcp_client::client::{McpClient, McpClientError, McpServerSpec, McpTransport};
+use rusty_mcp_client::client_auth::{AuthError, McpAuth, McpAuthSecret, resolve};
 
 const CHILD_CASE: &str = "RUSTY_MCP_ENV_TEST_CASE";
 const SECRET: &str = "RUSTY_MCP_ENV_TEST_SECRET";

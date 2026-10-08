@@ -1,5 +1,5 @@
 //! The MCP transport adapter (ADR-0029), behind the `rmcp` feature.
-//! `rusty-mcp`'s client owns connection setup (stdio spawn, Streamable HTTP,
+//! `rusty-mcp-client` owns connection setup (stdio spawn, Streamable HTTP,
 //! auth headers, handshake timeout) and pagination; this module is a thin
 //! [`McpClient`] adapter -- Rusty Keys keeps namespacing, policy, approval, and
 //! return-inspection *above* it, plus the endpoint hardening in
@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusty_mcp::client::{McpClient as Connection, McpServerSpec, McpTransport};
+use rusty_mcp_client::{McpClient as Connection, McpServerSpec, McpTransport};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -56,7 +56,7 @@ pub async fn client_from_spec(spec: &ServerSpec) -> Result<Arc<dyn McpClient>, M
     ))
 }
 
-/// One external MCP server over `rusty-mcp`'s client. Keeps its spec so
+/// One external MCP server over `rusty-mcp-client`. Keeps its spec so
 /// [`McpClient::reconnect`] can rebuild the connection after a hard failure.
 pub struct RemoteMcpClient {
     name: String,

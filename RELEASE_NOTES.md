@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty-mcp-client split (pending review)
+
+- **Added:** `rusty-mcp-client`; **Changed:** `rusty-mcp` loses its `client` feature; `rk-mcp` depends on the new crate. Stdio verified again against a real `rusty-mcp-demo` after the move. No OpenSSL in the MCP client path (the `native-tls` still in `rk-mcp`'s tree comes from `aisdk`/`rk-feed`, the LLM client).
+- **Known limitation:** Nexus is frozen and still references `rusty_mcp::client`. The Streamable HTTP path is still not exercised against a live server.
+
+---
+
 ## 2026-10-08 - rk-mcp client on rusty-mcp (pending review)
 
 - **Changed:** `rk-mcp`'s stdio and HTTP adapters collapse into `RemoteMcpClient` over `rusty-mcp`'s client. Verified end to end for stdio: the ignored smoke test connected to a real `rusty-mcp-demo`, listed tools, reconnected and listed again.
