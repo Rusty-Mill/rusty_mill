@@ -385,6 +385,27 @@ fn run_scenario_against(
             }
         }
     }
+    // `RB_BALL=1` lists the recorded and predicted ball velocity (and speed) on every row
+    // where either changes by more than 1 uu/s, to see when each side's ball is hit.
+    if std::env::var_os("RB_BALL").is_some() {
+        let mut last: Option<(Vec3, Vec3)> = None;
+        for row in &comparison.rows {
+            let now = (row.recorded_ball_velocity, row.predicted_ball_velocity);
+            let moved =
+                last.is_none_or(|(r, p)| now.0.distance(&r) > 1.0 || now.1.distance(&p) > 1.0);
+            if moved {
+                println!(
+                    "ball tick {:>4}: rec vel {} ({:.0}) | pred vel {} ({:.0})",
+                    row.tick,
+                    fmt_vec(&now.0),
+                    now.0.length(),
+                    fmt_vec(&now.1),
+                    now.1.length()
+                );
+                last = Some(now);
+            }
+        }
+    }
     if std::env::var_os("RB_OTHERS").is_some() {
         for (index, rows) in comparison.other_rows.iter().enumerate() {
             for (tick, recorded, predicted) in rows {

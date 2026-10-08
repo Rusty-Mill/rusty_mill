@@ -8,9 +8,11 @@
 //! - a pad is taken when the car's *origin* (not its hitbox centre) is within
 //!   [`SMALL_PAD_RADIUS`] / [`BIG_PAD_RADIUS`] of the pad's centre in the plane
 //!   and no more than [`PAD_HEIGHT`] above the pad;
-//! - the position tested is a quarter of the way from where the car was at the
-//!   start of the tick to where it ends it ([`PAD_TEST_FRACTION`]): the logged
-//!   pickups fit a position 0.75 of a tick before the one the packet shows;
+//! - the position tested is 0.6 of the way from where the car was at the start of
+//!   the tick to where it ends it ([`PAD_TEST_FRACTION`]): a joint fit of the test
+//!   point and both radii on the 34 probe recordings puts 20 of 21 pickups on the
+//!   game's tick (0.25, the first fit from the logs, left 5 late); the radii kept
+//!   their values;
 //! - a small pad gives 12 boost and a big pad fills the tank; a car with a full
 //!   tank does not use the pad up;
 //! - a taken pad is back after 4 s (small) or 10 s (big), counted in ticks.
@@ -31,8 +33,9 @@ pub const BIG_PAD_RADIUS: f32 = 208.0;
 /// the same for both sizes).
 pub const PAD_HEIGHT: f32 = 160.0;
 /// Where along the tick the pad test reads the car: this fraction of the way
-/// from its start-of-tick position to its end-of-tick position.
-pub const PAD_TEST_FRACTION: f32 = 0.25;
+/// from its start-of-tick position to its end-of-tick position (0.6: about 3.6 uu
+/// short of the end position at a probe's 9 uu per tick).
+pub const PAD_TEST_FRACTION: f32 = 0.6;
 /// Boost a small pad gives.
 pub const SMALL_PAD_BOOST: f32 = 12.0;
 /// Seconds before a taken small pad is back.
@@ -316,16 +319,16 @@ mod tests {
     }
 
     #[test]
-    fn the_test_reads_a_quarter_of_the_way_through_the_tick() {
-        // Starts out of reach (200 uu), ends in (150 uu): a quarter along is 187.5,
-        // out of reach; from 200 to 100 a quarter along is 175, in reach.
+    fn the_test_reads_three_fifths_of_the_way_through_the_tick() {
+        // Starts out of reach (200 uu), ends at 150: 0.6 along is 170, in reach; from
+        // 200 to 190 it is 194, out of reach.
         let mut pads = small_pad_world();
         assert_eq!(
-            pads.collect(at(200.0, -1024.0, 17.0), at(150.0, -1024.0, 17.0), 0.0),
+            pads.collect(at(200.0, -1024.0, 17.0), at(190.0, -1024.0, 17.0), 0.0),
             0.0
         );
         assert_eq!(
-            pads.collect(at(200.0, -1024.0, 17.0), at(100.0, -1024.0, 17.0), 0.0),
+            pads.collect(at(200.0, -1024.0, 17.0), at(150.0, -1024.0, 17.0), 0.0),
             12.0
         );
     }

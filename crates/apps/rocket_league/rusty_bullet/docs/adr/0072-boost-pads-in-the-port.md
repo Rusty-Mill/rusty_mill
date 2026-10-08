@@ -43,6 +43,13 @@ rule; `PhysicsWorld::set_boost_pads(bool)` and `boost_pads()` expose them;
 `PhysicsFrame` is unchanged: pad state is read through `boost_pads()`, and a
 pickup shows in the car's `boost_amount`.
 
+Addendum (2026-10-08): a joint fit of the test point and both radii in the port itself, on the
+34 probe recordings (a grid over fraction 0.5 to 0.7, small radius 174 to 178, big 206 to 210,
+scoring the tick of every pickup and every pickup / no-pickup decision), keeps 176 and 208 and
+moves the test point from 0.25 to 0.6 of the tick: 20 of 21 pickups on the game's tick, 1 late
+(was 16 exact, 5 late), no decision mismatch. The log fit of O021 had the time reference wrong
+by a fraction of a tick because it matched events to rows of the capture.
+
 ## Consequences
 
 ### Positive

@@ -8247,8 +8247,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   recordings): Soccar's 34 pads (`pads::BoostPads::standard`, the game's order),
   off by default in `PhysicsWorld` (`set_boost_pads`), on in `rb_env::Env`
   (ADR-0072). A pad is taken when the car's origin is within 176 uu (small) or
-  208 uu (big) of it in the plane and no more than 160 uu above it, tested a
-  quarter of the way from the tick's start position to its end position; a small
+  208 uu (big) of it in the plane and no more than 160 uu above it, tested 0.6 of
+  the way from the tick's start position to its end position (0.25 until 2026-10-08); a small
   pad adds 12 (cap 100), a big pad fills the tank, a full tank leaves the pad
   alone; a taken pad is back after 480 (small) or 1200 (big) ticks.
   - Why: `RB-RESEARCH-O021`: 190 pickups in the recordings, none in the port.
