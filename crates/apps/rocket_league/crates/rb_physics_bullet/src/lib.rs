@@ -124,4 +124,4 @@ pub use collision::Contact;
 pub use mat3::Mat3;
 pub use net::NetMesh;
 pub use pads::{BoostPad, BoostPads};
-pub use world::{simulate, CarBallTuning, PhysicsWorld};
+pub use world::{simulate, wheel_contacts_along, CarBallTuning, PhysicsWorld};

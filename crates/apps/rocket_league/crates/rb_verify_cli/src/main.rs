@@ -62,8 +62,9 @@ use rb_verify_cli::{
     car_frame_spin, compare_scenario, compare_scenario_recorded, default_grid, k_step_capture,
     k_step_score, one_step_capture, rotation_rate, scenario_from_capture,
     score_capture_against_candidate, score_capture_growth, score_replay_against_capture,
-    simulate_scenario, sweep, trace_capture, Candidate, SeedFrame, TraceRow, Window,
-    DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    simulate_scenario, sweep, trace_capture, wheel_trace_capture, Candidate, SeedFrame, TraceRow,
+    WheelTraceRow, Window, DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP,
+    DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::path::Path;
@@ -137,6 +138,52 @@ fn fmt_input(input: Option<ControllerInput>) -> String {
 /// implied by the change in recorded and simulated orientation
 /// (`rotation_rate`): matching `spin` means a stream's orientations agree
 /// with its own angular velocity.
+/// `--wheel-trace`: one line per tick with the one-step velocity error and what each
+/// wheel ray hit (normal, suspension length); `FACET` marks a tick whose hits differ
+/// from the tick before's (a wheel crossed onto another triangle or lost the surface).
+fn print_wheel_trace(rows: &[WheelTraceRow]) {
+    let names = ["FR", "FL", "BR", "BL"];
+    let mut previous: Option<&WheelTraceRow> = None;
+    for row in rows {
+        let changed = previous.is_some_and(|p| {
+            row.wheels
+                .iter()
+                .zip(&p.wheels)
+                .any(|(now, before)| match (now, before) {
+                    (Some(a), Some(b)) => a.normal.distance(&b.normal) > 1e-3,
+                    (None, None) => false,
+                    _ => true,
+                })
+        });
+        let wheels: Vec<String> = row
+            .wheels
+            .iter()
+            .zip(names)
+            .map(|(hit, name)| match hit {
+                Some(h) => format!(
+                    "{name} n({:.3},{:.3},{:.3}) s{:.2}",
+                    h.normal.x,
+                    h.normal.y,
+                    h.normal.z,
+                    h.suspension_length()
+                ),
+                None => format!("{name} -"),
+            })
+            .collect();
+        println!(
+            "t={:>7.3}s | {} | dv err {} |{:>6.1}| spin err {} | {} {}",
+            row.t_secs,
+            fmt_input(row.input),
+            fmt_vec(&row.velocity_error),
+            row.velocity_error.length(),
+            fmt_vec(&row.spin_error),
+            wheels.join(" "),
+            if changed { "FACET" } else { "" },
+        );
+        previous = Some(row);
+    }
+}
+
 fn print_trace(rows: &[TraceRow]) {
     let mut previous: Vec<&TraceRow> = Vec::new();
     for row in rows {
@@ -597,6 +644,36 @@ fn main() -> ExitCode {
             }
             Ok(rows) => {
                 print_trace(&rows);
+                ExitCode::SUCCESS
+            }
+        };
+    }
+
+    if first == "--wheel-trace" {
+        let Some(capture_path) = args.next() else {
+            eprintln!("{}", usage());
+            return ExitCode::FAILURE;
+        };
+        let window = parse_secs("from-secs", args.next())
+            .and_then(|from| parse_secs("to-secs", args.next()).map(|to| (from, to)));
+        let (from_secs, to_secs) = match window {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "{e}
+{}",
+                    usage()
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        return match wheel_trace_capture(capture_path, from_secs, to_secs) {
+            Err(e) => {
+                eprintln!("ingestion failed: {e}");
+                ExitCode::FAILURE
+            }
+            Ok(rows) => {
+                print_wheel_trace(&rows);
                 ExitCode::SUCCESS
             }
         };

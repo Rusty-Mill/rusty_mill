@@ -8,8 +8,9 @@ use rb_domain::{
     BallState, CarState, ControllerInput, IngestError, PhysicsFrame, PhysicsStateSource, Quat, Vec3,
 };
 use rb_physics_bullet::body::CAR_HALF_EXTENTS;
+use rb_physics_bullet::drive::WheelContacts;
 use rb_physics_bullet::world::{
-    simulate_recorded, simulate_recorded_k_step, simulate_recorded_one_step,
+    simulate_recorded, simulate_recorded_k_step, simulate_recorded_one_step, wheel_contacts_along,
 };
 use rb_physics_bullet::PhysicsWorld;
 use rb_replay_ingest::ReplayFileSource;
@@ -296,6 +297,60 @@ pub fn one_step_capture(
     let (recorded, world) = seed(capture_path, seed_frame)?;
     let candidate = simulate_recorded_one_step(world, &recorded);
     Ok(trace_rows(&recorded, &candidate, 0.0, f32::INFINITY))
+}
+
+/// One tick of a wall-and-ramp instrument row (`rb-verify --wheel-trace`, PARITY-PLAN
+/// workstream A): the one-step velocity error into this tick and what the four
+/// wheel rays hit in the state the step started from.
+#[derive(Debug, Clone, Copy)]
+pub struct WheelTraceRow {
+    /// Time of the tick's end (the frame whose velocity is predicted).
+    pub t_secs: f32,
+    /// The input applied over the tick.
+    pub input: Option<ControllerInput>,
+    /// Recorded minus predicted velocity at the tick's end (uu/s).
+    pub velocity_error: Vec3,
+    /// Recorded minus predicted spin at the tick's end (rad/s).
+    pub spin_error: Vec3,
+    /// The first car's wheel hits at the start of the tick, in wheel order.
+    pub wheels: WheelContacts,
+}
+
+/// The first car's one-step error at each tick of a capture (frames from the first on,
+/// the tape bot's captures start at the state set) beside its wheel-ray hits, for
+/// lining a velocity error up with the facet a wheel crossed.
+pub fn wheel_trace_capture(
+    capture_path: impl AsRef<Path>,
+    from_secs: f32,
+    to_secs: f32,
+) -> Result<Vec<WheelTraceRow>, IngestError> {
+    let recorded = CaptureFileSource::new(capture_path.as_ref()).frames()?;
+    if recorded.first().is_none_or(|frame| frame.cars.is_empty()) {
+        return Err(IngestError::Malformed(
+            "the capture's first frame has no car to trace".to_string(),
+        ));
+    }
+    let world = PhysicsWorld::from_frame(&recorded[0]);
+    let candidate = simulate_recorded_one_step(world.clone(), &recorded);
+    let hits = wheel_contacts_along(world, &recorded);
+    let mut rows = Vec::new();
+    for (index, wheels) in hits.iter().enumerate() {
+        let (prev, next) = (&recorded[index], &recorded[index + 1]);
+        let (Some(rec), Some(pred)) = (next.cars.first(), candidate[index + 1].cars.first()) else {
+            continue;
+        };
+        if next.timestamp_secs < from_secs || next.timestamp_secs > to_secs {
+            continue;
+        }
+        rows.push(WheelTraceRow {
+            t_secs: next.timestamp_secs,
+            input: prev.cars.first().and_then(|car| car.input),
+            velocity_error: rec.velocity - pred.velocity,
+            spin_error: rec.angular_velocity - pred.angular_velocity,
+            wheels: *wheels,
+        });
+    }
+    Ok(rows)
 }
 
 /// Default horizon (ticks) for `rb-verify --self-kstep`: a quarter second

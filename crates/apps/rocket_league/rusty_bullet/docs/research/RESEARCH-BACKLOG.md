@@ -561,6 +561,30 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   (a 3 to 4 tick pattern), so look at the ray cast against the ramp mesh.
 - **Status**: Open. **Owner**: baileyrd.
 
+- **Wheel trace (2026-10-07, ADR-0073)**: `rb-verify --wheel-trace <capture> <from> <to>`
+  prints each tick's one-step velocity error beside the four wheel hits (normal,
+  suspension length; `FACET` where a wheel's normal changed). On the 15 `wallg_*`
+  recordings (`batch_20261006-221954`):
+  - with all four wheels touching, the one-step error is small: mean 0.25 uu/s, max
+    1.8 (the huge numbers are the state-set frame at the start, up to 1800 uu/s,
+    and the first ticks in the air);
+  - it is **one-sided**: summed over the steady climb (after 1.5 s) it is 17 to 108
+    uu/s per run, **entirely along the wall's normal** (world x for these tapes, whose
+    wall is x = 4096: the game's car gains 0.21 uu/s per tick more toward the arena
+    than the port at 10 and 20 degrees, 0.09 to 0.10 at 30 and 45, 0.13 to 0.14 at
+    60), and it does **not depend on speed** (700, 1200 and 1800 uu/s give the same
+    per-tick bias);
+  - in the floor-to-wall transition (0.5 to 1.5 s) the summed error is 13 to 60
+    uu/s (summed vector magnitudes), and the ticks where a wheel changed facet carry
+    about 10 percent of it at 10 degrees, 25 to 45 percent at 20 and 55 to 70
+    percent at 30, 45 and 60.
+  So a facet crossing is a big part of the transition error from about 30 degrees up; for
+  shallow ones a small constant normal-axis force difference accumulates over a
+  long steady climb. The next test is a force on the normal axis (sticky force,
+  suspension at equilibrium, pushback) read tick by tick against the game, not a
+  constant fitted to the 15; the bias being the same at three speeds argues for a
+  term that does not scale with speed.
+
 ### RB-RESEARCH-O013 — Powerslide: a long reverse slide loses speed too fast
 
 - **Evidence (2026-10-07)**: `probe_powerslide` (1400 uu/s, handbrake, full
