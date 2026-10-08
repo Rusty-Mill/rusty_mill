@@ -171,7 +171,7 @@ fn print_wheel_trace(rows: &[WheelTraceRow]) {
             })
             .collect();
         println!(
-            "t={:>7.3}s | {} | dv err {} |{:>6.1}| spin err {} | ball dv err {} |{:>6.1}| | {} {}",
+            "t={:>7.3}s | {} | dv err {} |{:>6.1}| spin err {} | ball dv err {} |{:>6.1}| | box-ball pen {} | {} {}",
             row.t_secs,
             fmt_input(row.input),
             fmt_vec(&row.velocity_error),
@@ -179,6 +179,8 @@ fn print_wheel_trace(rows: &[WheelTraceRow]) {
             fmt_vec(&row.spin_error),
             fmt_vec(&row.ball_velocity_error),
             row.ball_velocity_error.length(),
+            row.ball_penetration
+                .map_or_else(|| "-".to_string(), |depth| format!("{depth:.2}")),
             wheels.join(" "),
             if changed { "FACET" } else { "" },
         );

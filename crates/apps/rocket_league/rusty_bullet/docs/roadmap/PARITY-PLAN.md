@@ -94,7 +94,7 @@ rest roll 0 without breaking any gated fixture, wall-start tape median under
 
 1. Collect the clean single-event data the fuzz found (`hitfuzz`, `bsl_*`)
    and score only one-step predictions (`--self-onestep`), which are exact.
-2. (Drops recorded and the pushback fixed 2026-10-08, FR-150; off-centre drops still open.)
+2. (Drops recorded and the pushback fixed 2026-10-08, FR-150; off-centre drops still open: a one-sided reaction on the ball trades car for ball, see O014.)
    Wheels on the ball (O014): the wheel-on-ball interaction needs a recording
    that isolates it (a car dropped wheels-first onto a ball at rest, a few
    speeds); the earlier "reaction on the ball" hypothesis made it worse.

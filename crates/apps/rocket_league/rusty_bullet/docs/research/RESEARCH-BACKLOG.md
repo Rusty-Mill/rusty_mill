@@ -689,6 +689,24 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   `car_over_ball` 33.6 -> 62.5), the ball's inverse mass in the denominator (car 28.9),
   the opposite impulse on the ball (car 59.7, ball 82.5). Off-centre drops stay 14 to
   45 uu off (car) and 18 to 191 (ball): the ball's side of the contact is unexplained.
+- **Off-centre drops (2026-10-08, `wob_50_*`, `wob_100_*`, held-out `wobh_*`)**: in the
+  steady phase the rear wheels hold the car on the ball (the box does not touch the
+  ball by the port's measure: `--wheel-trace` now prints `box-ball pen`, `-` here), and
+  the game's car and ball both differ from the port every tick: car +4.7 / 0 / +2.8
+  uu/s, ball -2.8 / 0 / -1.5 uu/s (opposite, similar size, so not a momentum exchange of
+  a 180 and a 30 mass). Reaction of the wheels' whole impulse (spring, damper, pushback)
+  on the ball, scaled (scratch, not kept): the nine training drops, car / ball mean
+  uu: scale 0 21.8 / 69.3; 0.02 18.6 / 36.1; 0.05 25.4 / 33.0; 0.1 33.0 / 30.2; 0.1667
+  (the mass ratio) 36.6 / 34.7; 0.25 37.5 / 65.3; 1 81.2 / 210.2. A negligible 1e-4
+  scale already gave 17.3 / 49.5 on those nine and 1e-9 nothing, but the eight held-out
+  drops (other offsets and speeds, a side offset) show 26.1 / 68.1 at 1e-4 (baseline
+  25.9 / 67.8): that gain was chaos, not mechanism (as O020). Held-out at 0.02: car 29.4,
+  ball 40.9; 0.05: 36.0 / 40.8; 0.1: 45.9 / 37.1. And `car_over_ball` at 0.02: car 33.6 ->
+  71.2, ball 61.5 -> 36.7, and a golden bound breaks. So a one-sided reaction trades the
+  car for the ball everywhere; it is not adopted. The game probably supports the car
+  harder AND pushes the ball in one solved contact (the car error is +300 uu/s^2 short
+  by itself); a pair solver, not a reaction term, is the thing to try. Disabling the
+  ball's sleep (the port zeroes a body under 20 uu/s for 0.5 s) changes nothing.
 - **Status**: Open. **Owner**: baileyrd.
 
 ### RB-RESEARCH-O015 — Smaller residuals

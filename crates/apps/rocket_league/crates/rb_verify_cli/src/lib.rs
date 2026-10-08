@@ -10,7 +10,8 @@ use rb_domain::{
 use rb_physics_bullet::body::CAR_HALF_EXTENTS;
 use rb_physics_bullet::drive::WheelContacts;
 use rb_physics_bullet::world::{
-    simulate_recorded, simulate_recorded_k_step, simulate_recorded_one_step, wheel_contacts_along,
+    car_ball_penetration_along, simulate_recorded, simulate_recorded_k_step,
+    simulate_recorded_one_step, wheel_contacts_along,
 };
 use rb_physics_bullet::PhysicsWorld;
 use rb_replay_ingest::ReplayFileSource;
@@ -314,6 +315,9 @@ pub struct WheelTraceRow {
     pub spin_error: Vec3,
     /// Recorded minus predicted ball velocity at the tick's end (uu/s).
     pub ball_velocity_error: Vec3,
+    /// Deepest car-box-to-ball penetration (uu) in the state the step started from,
+    /// `None` when the box and the ball do not touch.
+    pub ball_penetration: Option<f32>,
     /// The first car's wheel hits at the start of the tick, in wheel order.
     pub wheels: WheelContacts,
 }
@@ -334,6 +338,7 @@ pub fn wheel_trace_capture(
     }
     let world = PhysicsWorld::from_frame(&recorded[0]);
     let candidate = simulate_recorded_one_step(world.clone(), &recorded);
+    let depths = car_ball_penetration_along(world.clone(), &recorded);
     let hits = wheel_contacts_along(world, &recorded);
     let mut rows = Vec::new();
     for (index, wheels) in hits.iter().enumerate() {
@@ -350,6 +355,7 @@ pub fn wheel_trace_capture(
             velocity_error: rec.velocity - pred.velocity,
             spin_error: rec.angular_velocity - pred.angular_velocity,
             ball_velocity_error: next.ball.velocity - candidate[index + 1].ball.velocity,
+            ball_penetration: depths[index],
             wheels: *wheels,
         });
     }
