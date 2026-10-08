@@ -28,6 +28,12 @@
 //! - [`schedule12`] — the TLS 1.2 key derivation (stage 4b-ii): the PRF, the
 //!   extended master secret, the key block and `Finished`. Extended master
 //!   secret only; the original RFC 5246 derivation is deliberately absent.
+//! - [`handshake12`] — the TLS 1.2 handshake messages (stage 4b-iii) that TLS 1.3
+//!   does not share: `ServerKeyExchange`, `ClientKeyExchange`, the bare
+//!   `Certificate`, `ServerHelloDone`.
+//! - [`client12`] — the TLS 1.2 client handshake (stage 4b-iii): ECDHE with an
+//!   AEAD, extended master secret required, no resumption, no client
+//!   certificate. The first TLS 1.2 code here that talks to a peer.
 //! - [`der`] — a strict DER reader (stage 2a), the foundation everything
 //!   certificate-shaped sits on.
 //! - [`x509`] — certificate parsing (stage 2a). **Parsing only**: it reports
@@ -87,8 +93,10 @@
 //! module's testing strategy can see.
 
 pub mod client;
+pub mod client12;
 pub mod der;
 pub mod handshake;
+pub mod handshake12;
 pub mod kx;
 pub mod name;
 pub mod path;

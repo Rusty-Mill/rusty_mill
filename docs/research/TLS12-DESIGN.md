@@ -1,7 +1,7 @@
 # TLS 1.2 for the native engine: scope and stages
 
 Date: 2026-10-08. Status: in progress. Owner approved implementing TLS 1.2 (decision D1 in
-`TLS-ENGINE-ASSESSMENT.md`). Stages 4b-i (record layer) and 4b-ii (key derivation) are built; the rest is not. Supersedes ADR-0002 stage 4b
+`TLS-ENGINE-ASSESSMENT.md`). Stages 4b-i (record layer), 4b-ii (key derivation) and 4b-iii (client handshake) are built; the server, version negotiation and hardening are not. Supersedes ADR-0002 stage 4b
 ("declined") once the first stage lands and the crate ADR is amended (decision D3, still open).
 
 ## Principle
@@ -120,11 +120,73 @@ shared secret is not in a capture), only everything after it; the master-secret 
 covered for ECDHE only by being identical code to the RSA case. Secrets are not zeroized on drop,
 as in the TLS 1.3 schedule. The mutation and fuzz figures are single runs.
 
+## Stage 4b-iii: done
+
+`handrolled::client12` (state machine and connection), `handrolled::handshake12` (the TLS 1.2
+messages), and `verify_tls12_signature` in `handrolled::verify`. A sans-IO ECDHE client for the six
+AEAD suites, offering TLS 1.2 and nothing else.
+
+| Gate | Result |
+| --- | --- |
+| Live rustls (TLS 1.2 only) | Full handshakes plus data both ways for **30 combinations** of suite, curve and key type (ECDSA P-256, P-384, Ed25519 and RSA leaves), a 70 KB transfer each way, `close_notify` both ways, a TLS 1.3-only server (refused with its `protocol_version` alert surfaced), and a client-certificate request. |
+| Live OpenSSL over a real socket | Nine tests against `openssl s_server`: all six suites (with OpenSSL reporting the one negotiated), all three curves, **all six RSA signature schemes** (PKCS#1 v1.5 and PSS at SHA-256/384/512, which rustls cannot be made to produce), ECDSA and Ed25519 certificates, an optional and a required client certificate, a TLS 1.3-only server, and a certificate for another name. Run by CI. |
+| Independent signature vectors | 11 handshake signatures made by Python `cryptography` (OpenSSL): every scheme, plus the cross-curve ECDSA cases below. |
+| Message codec | 14 tests. Each message parses and encodes as inverses; **every strict prefix and every trailing octet** of each is refused. |
+| Refusals | A scripted server, built from this crate's own primitives and used only to make the client refuse, with a control test proving its correct flight completes under every framing (one message per record, all in one record, one octet per record, and a Finished split across records). 58 refusal and connection tests, each asserting the *specific* error: version, suite, compression, extended master secret, secure renegotiation, unsolicited extensions, point formats, certificate (empty, malformed, untrusted, wrong name, expired, wrong key type for the suite), key-exchange signature (tampered, wrong client random, wrong server random, wrong curve label, wrong key, unoffered curve or scheme, wrong key type, empty, invalid or low-order public key), message order, `ChangeCipherSpec` timing and body, `Finished` (wrong data, reflected, wrong key, plaintext, short, trailing message, no CCS), alerts, record framing and limits, and the established connection (renegotiation request, forged, replayed and reordered records, alerts, close). |
+| Every byte | One bit flipped in **every byte** of a valid server transmission (more than 400 handshakes; the test fails if it runs fewer). The only flips that still complete are the minor-version byte of each unprotected record header, which RFC 5246 appendix E says is ignored. Stable across six runs. |
+| Mutation | 34 deliberate bugs across the client, the message module and the verifier (skipping the chain check, the signature check, either random in the signed data, the CCS rules, the Finished check, a transcript message, the extension allowlist and more). All 34 caught. |
+| Fuzz | New libFuzzer target `client12`: arbitrary record sequences into the handshake, which reaches the X.509 parser and path validator through `Certificate`. 1.95 million executions in 90 seconds, no findings; and it asserts nothing completes a handshake. |
+
+**A real bug, found by a real peer, that rustls could not have found.** The first version of the TLS 1.2
+verifier copied TLS 1.3's rule that an ECDSA scheme names a curve. OpenSSL 3.0 signs a **P-384** key
+with the **SHA-256** scheme whenever the client lists it first, because in TLS 1.2 the scheme names only
+the hash. The client refused a correct server. rustls never shows this, because its client lists the
+P-384 scheme first. The fix reads the curve from the key; the vectors above pin it, and the doc comment
+that wrongly said other stacks enforce the binding was corrected.
+
+Two smaller things the live peers taught:
+
+- For an ECDSA certificate, RFC 8422 §5.1 makes the **certificate's curve** part of what the client's
+  `supported_groups` must cover, and OpenSSL enforces it. A client that offers only X25519 cannot talk
+  to a P-256 ECDSA server. That is correct behaviour, and the interop tests now offer the right set.
+- rcgen serialises Ed25519 keys as PKCS#8 v2, which OpenSSL 3.0's key reader refuses; that one test pair
+  is generated by OpenSSL instead.
+
+Decisions made, inherited by later stages:
+
+- **Refuse, don't accommodate.** No extended master secret, no secure renegotiation, an unsolicited
+  extension, or a `HelloRequest` mid-handshake (RFC 5246 would let a client ignore it) are all refused.
+- **A `ChangeCipherSpec` is accepted at exactly one moment**, as one octet `0x01`, because accepting one
+  early is CVE-2014-0224. (One further guard, that no handshake bytes are half-read at that moment, is
+  unreachable because the state machine already refuses handshake records there; it stays as defence.)
+- **The handshake buffer is capped at 128 KiB** so a server cannot make the client hold 16 MiB before it
+  has authenticated anything.
+- **Warning alerts other than `close_notify` are advisory** and ignored, as RFC 5246 allows; during the
+  handshake `close_notify` is an error.
+- **A renegotiation request after the handshake** is answered with a `no_renegotiation` warning and the
+  connection carries on.
+
+Not done in this stage, deliberately:
+
+- **No downgrade protection.** This client offers only TLS 1.2, so there is nothing to downgrade from;
+  the `DOWNGRD` sentinel is not checked. A client offering both versions must, and will (stage 4b-v).
+- **No resumption** (neither session ids nor tickets), **no client certificate** (an empty one is sent
+  when asked), **no ALPN**, **no OCSP stapling**. Each is a later stage or a seam concern.
+- **Not wired to any seam type.** Nothing in `TlsStream`, `AsyncTlsStream` or the default build uses it.
+- **The ECDSA scheme/curve leniency is TLS 1.2's, and applies only to TLS 1.2.** It must never be reached
+  from a TLS 1.3 connection.
+- **Leaf `keyUsage` (digitalSignature) is not checked**, as in the TLS 1.3 path.
+- Secrets are not zeroized on drop, as elsewhere in the engine.
+
+Limits of this evidence: the scripted server and the client share this crate's primitives, so the refusal
+tests show the client rejects what the *script* got wrong, not that the script is a faithful TLS server
+(the live rustls and OpenSSL tests are what show that). The fuzz, mutation and bit-flip figures are single
+runs. Interop is with two implementations, both tested on loopback.
+
 ## Next action
 
-Stage 4b-iii, the client handshake: ClientHello with the extended-master-secret and renegotiation
-extensions, ServerHello, Certificate, ServerKeyExchange (signature over the randoms and curve
-parameters), ClientKeyExchange, `ChangeCipherSpec`, `Finished`. It reuses `path`, `name`, `verify`,
-`kx`, `record12` and `schedule12`, and its first oracle is a live rustls (restricted to TLS 1.2)
-and OpenSSL server. This is the largest stage; estimate 7 to 9 days, and I would expect the
-record and derivation work to have removed some of its risk but not much of its volume.
+Stage 4b-iv, the server handshake. The scripted server in `tests/handrolled_client12.rs` is already most
+of its skeleton, and the messages it needs (`ServerHello12`, `Certificate12`, `ServerKeyExchange`,
+`parse_client_key_exchange`, `CertificateRequest12`) have encoders and parsers. What is new is the state
+machine that receives hostile input, which is the larger attack surface, and client authentication. Its
+first oracle is a live rustls client and `openssl s_client`.

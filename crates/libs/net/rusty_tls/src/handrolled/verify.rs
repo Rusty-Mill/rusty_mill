@@ -555,6 +555,81 @@ impl SignatureScheme {
         Self::RSA_PSS_RSAE_SHA512,
     ];
 
+    /// The schemes this module will verify a TLS 1.2 `ServerKeyExchange`
+    /// signature with, in the order a client should offer them.
+    ///
+    /// The TLS 1.3 set plus `rsa_pkcs1_*`. TLS 1.2 signs the key exchange with
+    /// whichever RSA padding the server's library prefers, and PKCS#1 v1.5 is
+    /// still what many servers use; RFC 8446 §4.4.3 forbids it only for TLS 1.3
+    /// handshake signatures. SHA-1 stays refused.
+    pub const TLS12_SUPPORTED: &'static [Self] = &[
+        Self::ECDSA_SECP256R1_SHA256,
+        Self::ECDSA_SECP384R1_SHA384,
+        Self::ED25519,
+        Self::RSA_PSS_RSAE_SHA256,
+        Self::RSA_PSS_RSAE_SHA384,
+        Self::RSA_PSS_RSAE_SHA512,
+        Self::RSA_PKCS1_SHA256,
+        Self::RSA_PKCS1_SHA384,
+        Self::RSA_PKCS1_SHA512,
+    ];
+
+    /// Resolve this scheme for use in a TLS 1.2 handshake signature.
+    ///
+    /// Differs from [`Self::tls13_algorithm`] in two rules, and both are the
+    /// RFC 5246 reading rather than a relaxation:
+    ///
+    /// - `rsa_pkcs1_*` is a handshake signature scheme in TLS 1.2.
+    /// - An ECDSA scheme names only the **hash**. TLS 1.3 redefined those code
+    ///   points to also name a curve (RFC 8446 §4.2.3); before that,
+    ///   `ecdsa_secp256r1_sha256` meant "ECDSA with SHA-256" and the curve was
+    ///   whatever the certificate's key was on. This is not a theoretical
+    ///   distinction. OpenSSL 3.0 signs a P-384 key with the SHA-256 scheme when
+    ///   the client lists it first, and a verifier that enforced TLS 1.3's rule
+    ///   here refuses that server. rustls' verifier does enforce it, and escapes
+    ///   the problem only because it lists the P-384 scheme first.
+    ///
+    /// So the curve is read from the key (as the X.509 side does) and combined
+    /// with the hash the scheme names. Ed25519 and RSA-PSS are unchanged.
+    fn tls12_algorithm(
+        self,
+        key: &SubjectPublicKeyInfo<'_>,
+    ) -> Result<&'static dyn signature::VerificationAlgorithm, VerifyError> {
+        let key_mismatch = |key: &SubjectPublicKeyInfo<'_>| match key.algorithm.oid {
+            oid::RSA_ENCRYPTION | oid::EC_PUBLIC_KEY | oid::ED25519 => {
+                VerifyError::KeyAlgorithmMismatch
+            }
+            _ => VerifyError::UnsupportedKeyAlgorithm,
+        };
+
+        match self {
+            Self::RSA_PKCS1_SHA256 | Self::RSA_PKCS1_SHA384 | Self::RSA_PKCS1_SHA512 => {
+                if key.algorithm.oid != oid::RSA_ENCRYPTION {
+                    return Err(key_mismatch(key));
+                }
+                require_null_or_absent_parameters(&key.algorithm)?;
+                Ok(match self {
+                    Self::RSA_PKCS1_SHA384 => &signature::RSA_PKCS1_2048_8192_SHA384,
+                    Self::RSA_PKCS1_SHA512 => &signature::RSA_PKCS1_2048_8192_SHA512,
+                    _ => &signature::RSA_PKCS1_2048_8192_SHA256,
+                })
+            }
+            Self::ECDSA_SECP256R1_SHA256 | Self::ECDSA_SECP384R1_SHA384 => {
+                if key.algorithm.oid != oid::EC_PUBLIC_KEY {
+                    return Err(key_mismatch(key));
+                }
+                let sha384 = self == Self::ECDSA_SECP384R1_SHA384;
+                Ok(match (named_curve(key)?, sha384) {
+                    (Curve::P256, false) => &signature::ECDSA_P256_SHA256_ASN1,
+                    (Curve::P256, true) => &signature::ECDSA_P256_SHA384_ASN1,
+                    (Curve::P384, false) => &signature::ECDSA_P384_SHA256_ASN1,
+                    (Curve::P384, true) => &signature::ECDSA_P384_SHA384_ASN1,
+                })
+            }
+            other => other.tls13_algorithm(key),
+        }
+    }
+
     /// Resolve this scheme for use in a TLS 1.3 handshake signature, given
     /// the key it will be checked against.
     ///
@@ -678,6 +753,31 @@ pub fn verify_tls13_signature(
     signature: &[u8],
 ) -> Result<(), VerifyError> {
     let algorithm = scheme.tls13_algorithm(key)?;
+    signature::UnparsedPublicKey::new(algorithm, key.key)
+        .verify(message, signature)
+        .map_err(|_| VerifyError::BadSignature)
+}
+
+/// Verify a TLS 1.2 handshake signature — a `ServerKeyExchange`.
+///
+/// `message` is what RFC 5246 §7.4.3 defines: `client_random + server_random +
+/// ServerECDHParams`, which the caller builds. As with
+/// [`verify_tls13_signature`] this proves authorship and nothing else: the
+/// certificate still has to chain to an anchor and name the server.
+///
+/// The difference from the TLS 1.3 verifier is two rules (see
+/// [`SignatureScheme::TLS12_SUPPORTED`]), and one is the dangerous direction:
+/// `rsa_pkcs1_*` is accepted here and refused there, and an ECDSA scheme here
+/// names only a hash. It must therefore only ever be called for a connection
+/// that negotiated TLS 1.2, never as a fallback after a TLS 1.3 verification
+/// failed.
+pub fn verify_tls12_signature(
+    scheme: SignatureScheme,
+    key: &SubjectPublicKeyInfo<'_>,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), VerifyError> {
+    let algorithm = scheme.tls12_algorithm(key)?;
     signature::UnparsedPublicKey::new(algorithm, key.key)
         .verify(message, signature)
         .map_err(|_| VerifyError::BadSignature)

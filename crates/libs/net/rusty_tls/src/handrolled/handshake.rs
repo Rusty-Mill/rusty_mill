@@ -86,6 +86,17 @@ pub enum HandshakeError {
     /// while sitting somewhere else is exactly the case a binder would fail to
     /// cover.
     PskOffer(&'static str),
+    /// A TLS 1.2 `ServerKeyExchange` named a curve type other than
+    /// `named_curve(3)`.
+    ///
+    /// The other two (`explicit_prime`, `explicit_char2`) let a server supply
+    /// its own curve parameters, which is a documented attack surface and has
+    /// no use on the modern internet.
+    UnexpectedCurveType(u8),
+    /// A field was present and well-formed on the wire but violated a rule of
+    /// its message, described by the string (a session id over 32 octets, an
+    /// empty certificate in a chain, a `Finished` of the wrong length).
+    Malformed(&'static str),
 }
 
 impl From<WireError> for HandshakeError {
@@ -118,6 +129,13 @@ impl core::fmt::Display for HandshakeError {
             Self::DuplicateExtension(id) => write!(f, "extension {id} appears more than once"),
             Self::Empty(what) => write!(f, "{what} is empty"),
             Self::PskOffer(why) => write!(f, "malformed pre_shared_key offer: {why}"),
+            Self::UnexpectedCurveType(typ) => {
+                write!(
+                    f,
+                    "ServerKeyExchange curve type {typ} is not named_curve(3)"
+                )
+            }
+            Self::Malformed(why) => write!(f, "malformed message: {why}"),
         }
     }
 }
@@ -140,6 +158,8 @@ pub const LEGACY_VERSION: u16 = 0x0303;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HandshakeType {
+    /// `hello_request(0)`. TLS 1.2 only; a request to renegotiate.
+    HelloRequest,
     /// `client_hello(1)`.
     ClientHello,
     /// `server_hello(2)`, which also carries HelloRetryRequest.
@@ -150,10 +170,16 @@ pub enum HandshakeType {
     EncryptedExtensions,
     /// `certificate(11)`.
     Certificate,
+    /// `server_key_exchange(12)`. TLS 1.2 only.
+    ServerKeyExchange,
     /// `certificate_request(13)`.
     CertificateRequest,
+    /// `server_hello_done(14)`. TLS 1.2 only.
+    ServerHelloDone,
     /// `certificate_verify(15)`.
     CertificateVerify,
+    /// `client_key_exchange(16)`. TLS 1.2 only.
+    ClientKeyExchange,
     /// `finished(20)`.
     Finished,
     /// `key_update(24)`.
@@ -166,13 +192,17 @@ impl HandshakeType {
     /// The wire encoding.
     pub const fn as_u8(self) -> u8 {
         match self {
+            Self::HelloRequest => 0,
             Self::ClientHello => 1,
             Self::ServerHello => 2,
             Self::NewSessionTicket => 4,
             Self::EncryptedExtensions => 8,
             Self::Certificate => 11,
+            Self::ServerKeyExchange => 12,
             Self::CertificateRequest => 13,
+            Self::ServerHelloDone => 14,
             Self::CertificateVerify => 15,
+            Self::ClientKeyExchange => 16,
             Self::Finished => 20,
             Self::KeyUpdate => 24,
             Self::Unknown(other) => other,
@@ -183,13 +213,17 @@ impl HandshakeType {
     /// the state machine's decision, not this module's.
     pub const fn from_u8(value: u8) -> Self {
         match value {
+            0 => Self::HelloRequest,
             1 => Self::ClientHello,
             2 => Self::ServerHello,
             4 => Self::NewSessionTicket,
             8 => Self::EncryptedExtensions,
             11 => Self::Certificate,
+            12 => Self::ServerKeyExchange,
             13 => Self::CertificateRequest,
+            14 => Self::ServerHelloDone,
             15 => Self::CertificateVerify,
+            16 => Self::ClientKeyExchange,
             20 => Self::Finished,
             24 => Self::KeyUpdate,
             other => Self::Unknown(other),
@@ -319,10 +353,16 @@ pub mod extension {
     pub const SERVER_NAME: u16 = 0;
     /// `supported_groups(10)`.
     pub const SUPPORTED_GROUPS: u16 = 10;
+    /// `ec_point_formats(11)`, RFC 8422. TLS 1.2 only.
+    pub const EC_POINT_FORMATS: u16 = 11;
     /// `signature_algorithms(13)`.
     pub const SIGNATURE_ALGORITHMS: u16 = 13;
     /// `application_layer_protocol_negotiation(16)` — ALPN.
     pub const ALPN: u16 = 16;
+    /// `extended_master_secret(23)`, RFC 7627. TLS 1.2 only.
+    pub const EXTENDED_MASTER_SECRET: u16 = 23;
+    /// `renegotiation_info(65281)`, RFC 5746. TLS 1.2 only.
+    pub const RENEGOTIATION_INFO: u16 = 0xff01;
     /// `pre_shared_key(41)`.
     ///
     /// Must be the **last** extension in a ClientHello: its binders are
@@ -348,7 +388,7 @@ pub mod extension {
 /// in a given extension block." A parser that takes the first, or the last,
 /// lets a peer say two things and lets two implementations disagree about
 /// which one it said.
-fn parse_extensions<'a>(reader: &mut Reader<'a>) -> Result<Vec<Extension<'a>>> {
+pub(super) fn parse_extensions<'a>(reader: &mut Reader<'a>) -> Result<Vec<Extension<'a>>> {
     let mut block = reader.sub_u16()?;
     let mut extensions: Vec<Extension<'_>> = Vec::new();
 
@@ -364,7 +404,7 @@ fn parse_extensions<'a>(reader: &mut Reader<'a>) -> Result<Vec<Extension<'a>>> {
     Ok(extensions)
 }
 
-fn write_extensions(writer: &mut Writer, extensions: &[Extension<'_>]) {
+pub(super) fn write_extensions(writer: &mut Writer, extensions: &[Extension<'_>]) {
     writer.vector_u16(|w| {
         for extension in extensions {
             w.u16(extension.typ);

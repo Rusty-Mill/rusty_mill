@@ -248,7 +248,7 @@ pub struct Alert {
 
 impl Alert {
     /// Parse an alert body, which RFC 8446 §6 fixes at two octets.
-    fn parse(body: &[u8]) -> Option<Self> {
+    pub(super) fn parse(body: &[u8]) -> Option<Self> {
         match body {
             [level, description] => Some(Self {
                 level: AlertLevel::from_u8(*level),
@@ -390,6 +390,50 @@ pub enum ClientError {
     /// scope, and quietly tolerating the extension is how a feature nobody
     /// decided to build gets half-built.
     UnexpectedEarlyData,
+    /// The server selected a protocol version other than TLS 1.2.
+    ///
+    /// Reported by [`super::client12`], which offers TLS 1.2 and nothing else.
+    /// Carries the version the server named so a caller can tell "too old"
+    /// (`0x0301`) from "something else".
+    NotTls12(u16),
+    /// The server did not echo the `extended_master_secret` extension.
+    ///
+    /// RFC 7627 exists because without it two handshakes can share a master
+    /// secret (the triple handshake attack). This client does not implement
+    /// the original derivation at all, so a server that cannot do the extension
+    /// cannot be talked to.
+    MissingExtendedMasterSecret,
+    /// The `renegotiation_info` extension was missing or non-empty.
+    ///
+    /// RFC 5746: on an initial handshake the server must echo it with an empty
+    /// body. A server that does not is vulnerable to the renegotiation
+    /// injection attack, and cannot be told apart from one an attacker is
+    /// speaking for.
+    BadRenegotiationInfo,
+    /// The server sent an extension this client did not offer (RFC 5246
+    /// §7.4.1.4: it must not).
+    UnofferedExtension(u16),
+    /// The server's `ec_point_formats` did not include `uncompressed`.
+    UnsupportedPointFormat,
+    /// The server's `ServerKeyExchange` was signed with a scheme the client did
+    /// not offer.
+    UnofferedSignatureScheme(u16),
+    /// The certificate's key type does not match the negotiated suite.
+    ///
+    /// `ECDHE_ECDSA` suites need an EC or Ed25519 key and `ECDHE_RSA` suites an
+    /// RSA key; a server presenting the other is either misconfigured or trying
+    /// to be verified under rules it did not negotiate.
+    KeyTypeMismatch,
+    /// A `ChangeCipherSpec` arrived when none was expected, or was not exactly
+    /// the single octet `0x01`.
+    ///
+    /// Accepting one early is CVE-2014-0224, in which an attacker forces the
+    /// peers to start encrypting under keys that were never agreed.
+    UnexpectedChangeCipherSpec,
+    /// A handshake message was larger than this client will buffer.
+    HandshakeTooLarge,
+    /// A TLS 1.2 key derivation refused its inputs.
+    Schedule(super::schedule12::ScheduleError),
 }
 
 impl core::fmt::Display for ClientError {
@@ -450,11 +494,44 @@ impl core::fmt::Display for ClientError {
             Self::UnexpectedEarlyData => {
                 f.write_str("the peer sent an early_data extension, which this client never offers")
             }
+            Self::NotTls12(version) => {
+                write!(f, "the server selected 0x{version:04x}, not TLS 1.2")
+            }
+            Self::MissingExtendedMasterSecret => {
+                f.write_str("the server did not negotiate the extended master secret (RFC 7627)")
+            }
+            Self::BadRenegotiationInfo => {
+                f.write_str("the server's renegotiation_info is missing or not empty (RFC 5746)")
+            }
+            Self::UnofferedExtension(typ) => {
+                write!(f, "the server sent extension {typ}, which was not offered")
+            }
+            Self::UnsupportedPointFormat => {
+                f.write_str("the server does not support uncompressed EC points")
+            }
+            Self::UnofferedSignatureScheme(scheme) => write!(
+                f,
+                "the ServerKeyExchange is signed with unoffered scheme 0x{scheme:04x}"
+            ),
+            Self::KeyTypeMismatch => {
+                f.write_str("the certificate's key type does not match the negotiated suite")
+            }
+            Self::UnexpectedChangeCipherSpec => {
+                f.write_str("an unexpected or malformed ChangeCipherSpec")
+            }
+            Self::HandshakeTooLarge => f.write_str("a handshake message exceeds the buffer limit"),
+            Self::Schedule(err) => write!(f, "key derivation: {err}"),
         }
     }
 }
 
 impl std::error::Error for ClientError {}
+
+impl From<super::schedule12::ScheduleError> for ClientError {
+    fn from(err: super::schedule12::ScheduleError) -> Self {
+        Self::Schedule(err)
+    }
+}
 
 impl From<HandshakeError> for ClientError {
     fn from(err: HandshakeError) -> Self {
@@ -632,7 +709,7 @@ pub fn record_length(input: &[u8]) -> Option<usize> {
 /// Only the first flight is unprotected, so `version` is 0x0301 there and
 /// 0x0303 afterwards. RFC 8446 §5.1 says the field MUST be ignored on receipt,
 /// so this matches convention rather than a requirement.
-fn plaintext_record(typ: ContentType, version: u16, fragment: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn plaintext_record(typ: ContentType, version: u16, fragment: &[u8]) -> Result<Vec<u8>> {
     if fragment.len() > usize::from(u16::MAX) {
         return Err(RecordError::FragmentTooLong {
             len: fragment.len(),
@@ -941,7 +1018,7 @@ impl<'a> ClientHandshake<'a> {
 // ClientHello
 // ---------------------------------------------------------------------------
 
-fn random_bytes(len: usize) -> Result<Vec<u8>> {
+pub(super) fn random_bytes(len: usize) -> Result<Vec<u8>> {
     let mut out = vec![0u8; len];
     SystemRandom::new()
         .fill(&mut out)
