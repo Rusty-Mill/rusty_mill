@@ -134,8 +134,44 @@ with `interactive_tool` and return `ToolOutcome::Ask`:
   from another process is refused and the client starts over.
 - Not bound to a client identity: if requests are authenticated, check the
   caller again on the retry.
-- Tools only for now; prompts and resources take no input yet. Task-based
-  input (`tasks/update`) is not here.
+- Tools only for now; prompts and resources take no input yet. A task asks
+  its own questions (below).
+
+## Tasks
+
+Register a long-running tool with `task_tool`. A call from a client that
+declared the `io.modelcontextprotocol/tasks` extension is answered at once with
+a task; the handler runs on a thread of its own and the client polls
+`tasks/get`, answers its questions with `tasks/update` and may `tasks/cancel`.
+
+```rust,ignore
+.task_tool(tool, |task, call| {
+    task.set_message("crunching");
+    let reply = task.elicit("ok", &form).map_err(|_| cancelled_error())?;
+    // poll task.is_cancelled() in long loops
+    Ok(result)
+})
+```
+
+- The server advertises the extension once it has a task tool. A client
+  that did not declare it gets `-32021`; classic revisions have no tasks
+  (`-32600`). Task tools are task-only: there is no synchronous fallback.
+- `TaskContext::elicit` shows the task as `input_required` with the question
+  and blocks until `tasks/update` answers it (a malformed or unrelated answer
+  is `-32602` and the task keeps waiting), or the task is cancelled.
+- A failing or panicking handler fails its task; a handler that returns
+  after `tasks/cancel` does not bring the task back. Unknown ids and ending a
+  finished task are `-32602`.
+- **The store is in memory**, shared by all connections of a `Server`, so
+  stateless HTTP clients poll from any POST. It does not survive a restart or
+  span instances. `max_tasks` (1000; more is `-32603 too many tasks`) and
+  `task_ttl` (1 h from creation, whole seconds) bound it; an expired task is
+  cancelled and forgotten.
+- A task id is 128 random bits and is the only credential: anyone holding it
+  can read, answer and cancel the task. Put authentication in front of the
+  transport if ids could leak.
+- Status changes are polled; `notifications/tasks` is not sent. Tasks are not
+  advertised per tool (no `execution` metadata).
 
 ## Streamable HTTP
 
@@ -174,7 +210,7 @@ its `_meta` (2026-07-28), else the `MCP-Protocol-Version` header, else
 Tested with raw sockets (`tests/http.rs`) and against the `rmcp` HTTP client in
 both handshake modes (`tests/http_interop.rs`).
 
-Not here yet: classic `resources/subscribe`, tasks and multi-round-trip input
+Not here yet: classic `resources/subscribe`, `notifications/tasks`, and multi-round-trip input
 on the server side (and so `resultType: input_required`), authentication (the existing
 `rusty-mcp` has OAuth, limits and telemetry that are not ported), and
 sessions or stream resumption.

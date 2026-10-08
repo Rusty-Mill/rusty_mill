@@ -14,7 +14,7 @@ use rusty_json::Value;
 use rusty_mcp_proto::lifecycle::{self, DiscoverParams, InitializeParams, InitializeResult};
 use rusty_mcp_proto::notify::{self, CancelledParams, ProgressParams};
 use rusty_mcp_proto::rpc::params as decode_params;
-use rusty_mcp_proto::{completion, prompt, resource, subscribe, tool};
+use rusty_mcp_proto::{completion, prompt, resource, subscribe, task, tool};
 use rusty_mcp_proto::{
     ClientCapabilities, DiscoverResult, ErrorCode, ErrorData, Implementation, Message,
     PromptsCapability, ProtocolVersion, RequestId, RequestMeta, ResourcesCapability,
@@ -194,6 +194,10 @@ impl Connection {
         &self.server
     }
 
+    pub(crate) fn server_arc(&self) -> Arc<Server> {
+        Arc::clone(&self.server)
+    }
+
     /// A connection to `server` whose own notifications go to `notifier`.
     pub fn new(server: Arc<Server>, notifier: Arc<dyn Notifier>) -> Self {
         Self {
@@ -346,6 +350,11 @@ impl Connection {
                 }
             }),
             completions: s.completer.is_some().then(Value::object),
+            extensions: s.has_task_tools().then(|| {
+                let mut e = Value::object();
+                e.insert(task::EXTENSION_ID, Value::object());
+                e
+            }),
             ..ServerCapabilities::default()
         }
     }
@@ -402,6 +411,9 @@ impl Connection {
             resource::method::READ => self.resources_read(id, params, token),
             completion::method::COMPLETE => self.complete(id, params, token),
             subscribe::method::LISTEN => self.listen(id, params, token),
+            task::method::GET => self.tasks_get(params),
+            task::method::UPDATE => self.tasks_update(params),
+            task::method::CANCEL => self.tasks_cancel(params),
             other => Err(ErrorData::new(
                 ErrorCode::METHOD_NOT_FOUND,
                 format!("unknown method {other:?}"),

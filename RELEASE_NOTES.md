@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_server tasks (pending review)
+
+- **Added:** `task_tool` and the task methods (`tasks/get`, `tasks/update`, `tasks/cancel`) of the 2026-07-28 tasks extension, with an in-memory store.
+- **Not verified:** no real MCP client has run a task (tests drive the server directly and over raw HTTP); `rusty-mcp-demo` was not run. The store is lost on restart and not shared between instances; ids are the only credential; no `notifications/tasks`.
+
+---
+
 ## 2026-10-08 - rusty_mcp_server multi-round-trip input (pending review)
 
 - **Added:** tools can ask the user mid-call (2026-07-28) with `interactive_tool`; `requestState` is HMAC-sealed under the new `request-state` feature.

@@ -60,6 +60,7 @@ fn start(config: HttpConfig) -> Fixture {
                 }
                 Ok(text("finished"))
             })
+            .task_tool(Tool::new("job", schema()), |_c, _p| Ok(text("job done")))
             .tool(Tool::new("slow", schema()), |_c, _p| {
                 std::thread::sleep(Duration::from_millis(400));
                 Ok(text("slow done"))
@@ -262,7 +263,7 @@ fn a_classic_client_works_with_or_without_echoing_its_session() {
             .as_array()
             .unwrap()
             .len(),
-        4
+        5
     );
     assert!(
         listed.json().get("result").unwrap().get("ttlMs").is_none(),
@@ -880,4 +881,41 @@ fn sessions_are_capped_and_idle_ones_expire() {
     let gone = post(f.addr, &[CLASSIC, ("Mcp-Session-Id", &first)], LIST);
     assert_eq!(gone.status, 404, "idle too long");
     assert_eq!(post(f.addr, &[], INIT).status, 200, "room again");
+}
+
+#[test]
+fn a_task_started_in_one_post_is_polled_from_others() {
+    let f = start(fast());
+    let caps = r#""io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}"#;
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"job","_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28",{caps}}}}}}}"#
+    );
+    let created = post(f.addr, &modern_headers("tools/call", "job"), &body);
+    assert_eq!(created.status, 200);
+    let id = created.json()["result"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let get = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tasks/get","params":{{"taskId":"{id}","_meta":{{{META_ONLY}}}}}}}"#,
+        META_ONLY = r#""io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}"#
+    );
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let r = post(f.addr, &modern_headers("tasks/get", &id), &get);
+        assert_eq!(r.status, 200);
+        if r.json()["result"]["status"].as_str() == Some("completed") {
+            assert_eq!(
+                r.json()["result"]["result"]["content"][0]["text"],
+                "job done"
+            );
+            break;
+        }
+        assert!(Instant::now() < until, "never completed: {}", r.body);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The routing header must carry the task id, like any other name.
+    let wrong = post(f.addr, &modern_headers("tasks/get", "other"), &get);
+    assert_eq!(wrong.status, 400);
 }

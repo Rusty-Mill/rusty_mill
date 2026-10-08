@@ -7,6 +7,7 @@ use crate::changes::{ChangeBroadcaster, ChangeKinds};
 use crate::connection::CallContext;
 #[cfg(feature = "request-state")]
 use crate::state::StateCodec;
+use crate::tasks::{TaskContext, TaskHandler, TaskStore, DEFAULT_MAX_TASKS, DEFAULT_TASK_TTL};
 use crate::uri_template::{TemplateError, UriTemplate, UriVars};
 use rusty_mcp_proto::{
     CallToolParams, CallToolResult, CompleteParams, CompletionInfo, ErrorData, GetPromptParams,
@@ -14,7 +15,6 @@ use rusty_mcp_proto::{
     ReadResourceResult, Resource, ResourceTemplate, Tool,
 };
 use std::fmt;
-#[cfg(feature = "request-state")]
 use std::time::Duration;
 
 /// A tool's implementation. It gets the call's context (cancellation,
@@ -72,9 +72,15 @@ pub const DEFAULT_VERSIONS: [&str; 5] = [
     ProtocolVersion::V_2026_07_28,
 ];
 
+/// How a tool runs: inside the request, or as a task on its own thread.
+pub(crate) enum ToolKind {
+    Inline(Box<ToolHandler>),
+    Task(Box<TaskHandler>),
+}
+
 pub(crate) struct RegisteredTool {
     pub(crate) tool: Tool,
-    pub(crate) handler: Box<ToolHandler>,
+    pub(crate) kind: ToolKind,
 }
 
 pub(crate) struct RegisteredPrompt {
@@ -160,6 +166,7 @@ pub struct Server {
     pub(crate) changes: Option<(ChangeBroadcaster, ChangeKinds)>,
     pub(crate) page_size: usize,
     pub(crate) max_in_flight: usize,
+    pub(crate) tasks: TaskStore,
     #[cfg(feature = "request-state")]
     pub(crate) state: StateCodec,
 }
@@ -183,11 +190,20 @@ impl Server {
             deferred: Vec::new(),
             page_size: DEFAULT_PAGE_SIZE,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            max_tasks: DEFAULT_MAX_TASKS,
+            task_ttl: DEFAULT_TASK_TTL,
             #[cfg(feature = "request-state")]
             state_key: None,
             #[cfg(feature = "request-state")]
             state_ttl: DEFAULT_STATE_TTL,
         }
+    }
+
+    /// Whether any tool runs as a task, which is what turns the extension on.
+    pub(crate) fn has_task_tools(&self) -> bool {
+        self.tools
+            .iter()
+            .any(|t| matches!(t.kind, ToolKind::Task(_)))
     }
 
     /// Whether this server speaks `version`.
@@ -220,6 +236,8 @@ pub struct ServerBuilder {
     deferred: Vec<BuildError>,
     page_size: usize,
     max_in_flight: usize,
+    max_tasks: usize,
+    task_ttl: Duration,
     #[cfg(feature = "request-state")]
     state_key: Option<Vec<u8>>,
     #[cfg(feature = "request-state")]
@@ -287,8 +305,46 @@ impl ServerBuilder {
     ) -> Self {
         self.tools.push(RegisteredTool {
             tool,
-            handler: Box::new(handler),
+            kind: ToolKind::Inline(Box::new(handler)),
         });
+        self
+    }
+
+    /// Offer a tool that runs as a task (extension
+    /// `io.modelcontextprotocol/tasks`, 2026-07-28): a call is answered at
+    /// once with a task and `handler` runs on a thread of its own while the
+    /// client polls `tasks/get`. Only clients that declare the extension can
+    /// call it (others get `-32021`). See the [`tasks`](crate::tasks) module
+    /// for what the store keeps and for how long.
+    #[must_use]
+    pub fn task_tool(
+        mut self,
+        tool: Tool,
+        handler: impl Fn(&TaskContext, CallToolParams) -> Result<CallToolResult, ErrorData>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.tools.push(RegisteredTool {
+            tool,
+            kind: ToolKind::Task(Box::new(handler)),
+        });
+        self
+    }
+
+    /// Most tasks alive at once (default 1000); a call that would exceed it
+    /// is refused.
+    #[must_use]
+    pub fn max_tasks(mut self, max: usize) -> Self {
+        self.max_tasks = max;
+        self
+    }
+
+    /// How long a task is kept from its creation, running or finished
+    /// (default one hour, whole seconds, at least one).
+    #[must_use]
+    pub fn task_ttl(mut self, ttl: Duration) -> Self {
+        self.task_ttl = ttl;
         self
     }
 
@@ -430,6 +486,12 @@ impl ServerBuilder {
         if self.max_in_flight == 0 {
             return Err(BuildError::ZeroLimit("in-flight limit"));
         }
+        if self.max_tasks == 0 {
+            return Err(BuildError::ZeroLimit("task limit"));
+        }
+        if self.task_ttl.as_secs() == 0 {
+            return Err(BuildError::ZeroLimit("task lifetime (seconds)"));
+        }
         for (i, t) in self.tools.iter().enumerate() {
             if self.tools[..i].iter().any(|u| u.tool.name == t.tool.name) {
                 return Err(BuildError::DuplicateTool(t.tool.name.clone()));
@@ -475,6 +537,7 @@ impl ServerBuilder {
             changes: self.changes,
             page_size: self.page_size,
             max_in_flight: self.max_in_flight,
+            tasks: TaskStore::new(self.max_tasks, self.task_ttl),
             #[cfg(feature = "request-state")]
             state,
         })

@@ -7,23 +7,28 @@ use crate::ask::{Ask, ToolOutcome};
 use crate::changes::{ChangeEvent, ChangeKinds};
 use crate::connection::{CallContext, CancelToken, Connection};
 use crate::page::{self, Kind};
-use crate::server::MAX_COMPLETION_VALUES;
+use crate::server::{ToolKind, MAX_COMPLETION_VALUES};
 #[cfg(feature = "request-state")]
 use crate::state::StateError;
+use crate::tasks::{CreateError, Entry, TaskContext};
 use rusty_json::Value;
 use rusty_mcp_proto::rpc::params as decode_params;
 use rusty_mcp_proto::subscribe::{
     self, AcknowledgedParams, ListenParams, ListenResult, ResourceUpdatedParams,
 };
+use rusty_mcp_proto::task::{self, GetTaskResult, TaskAckResult, TaskIdParams, UpdateTaskParams};
 use rusty_mcp_proto::{
-    CacheScope, CallToolParams, CompleteParams, CompleteResult, ErrorCode, ErrorData,
-    GetPromptParams, InputRequiredResult, ListPromptsResult, ListResourceTemplatesResult,
-    ListResourcesResult, ListToolsResult, Message, PaginatedParams, Paging, ProtocolVersion,
-    ReadResourceParams, Reference, RequestId, ResultType, SubscriptionFilter, Wire,
+    CacheScope, CallToolParams, CompleteParams, CompleteResult, CreateTaskResult, ErrorCode,
+    ErrorData, GetPromptParams, InputRequiredResult, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, Message, PaginatedParams,
+    Paging, ProtocolVersion, ReadResourceParams, Reference, RequestId, ResultType,
+    SubscriptionFilter, Wire,
 };
 use std::ops::Range;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How often an open listener looks up from waiting for events to check
@@ -97,11 +102,11 @@ impl Connection {
     ) -> Result<Value, ErrorData> {
         let (version, meta) = self.version_for(params)?;
         let call: CallToolParams = decode_params(params).map_err(invalid_params)?;
-        let entry = self
+        let index = self
             .server()
             .tools
             .iter()
-            .find(|t| t.tool.name == call.name)
+            .position(|t| t.tool.name == call.name)
             .ok_or_else(|| invalid_params(format!("unknown tool {:?}", call.name)))?;
         #[allow(unused_mut)]
         let mut ctx = self.call_context(id, version.clone(), meta, token);
@@ -123,13 +128,124 @@ impl Connection {
                 None => None,
             };
         }
-        match (entry.handler)(&ctx, call)? {
+        let ToolKind::Inline(handler) = &self.server().tools[index].kind else {
+            return self.start_task(&ctx, index, call);
+        };
+        match handler(&ctx, call)? {
             ToolOutcome::Done(mut result) => {
                 complete_type(&version, &mut result.result_type);
                 Ok(result.to_value())
             }
             ToolOutcome::Ask(ask) => self.input_required(&ctx, &name, ask),
         }
+    }
+
+    /// Answer a call to a task tool: create the task, start its handler on a
+    /// thread of its own and announce the task.
+    fn start_task(
+        &self,
+        ctx: &CallContext,
+        index: usize,
+        call: CallToolParams,
+    ) -> Result<Value, ErrorData> {
+        if !ctx.protocol_version().is_stateless() {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_REQUEST,
+                "tasks need protocol revision 2026-07-28",
+            ));
+        }
+        let declared = ctx
+            .client_capabilities()
+            .and_then(|c| c.extensions.as_ref())
+            .is_some_and(|e| e.get(task::EXTENSION_ID).is_some());
+        if !declared {
+            return Err(ErrorData::new(
+                ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY,
+                format!(
+                    "this tool runs as a task; the client must declare the {} extension",
+                    task::EXTENSION_ID
+                ),
+            ));
+        }
+        let entry = self.server().tasks.create().map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                match e {
+                    CreateError::Full => "too many tasks",
+                    CreateError::NoRandom => "could not make a task id",
+                },
+            )
+        })?;
+        let announcement = entry.announcement();
+        let server = self.server_arc();
+        let worker = Arc::clone(&entry);
+        let spawned = std::thread::Builder::new().spawn(move || {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let ToolKind::Task(handler) = &server.tools[index].kind else {
+                    return Err(ErrorData::new(ErrorCode::INTERNAL_ERROR, "not a task tool"));
+                };
+                handler(&TaskContext::new(Arc::clone(&worker)), call)
+            }))
+            .unwrap_or_else(|_| Err(ErrorData::new(ErrorCode::INTERNAL_ERROR, "internal error")));
+            worker.finish(outcome);
+        });
+        if spawned.is_err() {
+            entry.cancel();
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "could not start the task",
+            ));
+        }
+        Ok(CreateTaskResult {
+            task: announcement,
+            meta: None,
+        }
+        .to_value())
+    }
+
+    /// The task `id` names, for a client that may use tasks at all.
+    fn task_named(&self, params: &Option<Value>, id: &str) -> Result<Arc<Entry>, ErrorData> {
+        if !self.server().has_task_tools() {
+            return Err(not_offered("tasks"));
+        }
+        let (version, _) = self.version_for(params)?;
+        if !version.is_stateless() {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_REQUEST,
+                "tasks need protocol revision 2026-07-28",
+            ));
+        }
+        self.server()
+            .tasks
+            .get(id)
+            .ok_or_else(|| invalid_params("unknown task"))
+    }
+
+    pub(crate) fn tasks_get(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
+        let p: TaskIdParams = decode_params(params).map_err(invalid_params)?;
+        let entry = self.task_named(params, &p.task_id)?;
+        Ok(GetTaskResult {
+            task: entry.snapshot(),
+            meta: None,
+        }
+        .to_value())
+    }
+
+    pub(crate) fn tasks_update(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
+        let p: UpdateTaskParams = decode_params(params).map_err(invalid_params)?;
+        let entry = self.task_named(params, &p.task_id)?;
+        entry.answer(&p.input_responses).map_err(invalid_params)?;
+        Ok(TaskAckResult::default().to_value())
+    }
+
+    pub(crate) fn tasks_cancel(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
+        let p: TaskIdParams = decode_params(params).map_err(invalid_params)?;
+        let entry = self.task_named(params, &p.task_id)?;
+        if entry.status().is_terminal() {
+            return Err(invalid_params("the task has already ended"));
+        }
+        entry.cancel();
+        Ok(TaskAckResult::default().to_value())
     }
 
     /// The reply for a handler that wants input: checks the client can be

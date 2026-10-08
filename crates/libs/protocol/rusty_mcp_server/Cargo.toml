@@ -17,19 +17,20 @@ layer = "libs"
 default = []
 # `http`: the Streamable HTTP transport on `rusty_serve`. Off by default so a
 # stdio-only server pulls in no HTTP stack.
-http = ["dep:rusty_serve", "dep:rusty_http", "dep:rusty_rand"]
+http = ["dep:rusty_serve", "dep:rusty_http"]
 # `request-state`: seal the `requestState` of multi-round-trip input with an
 # HMAC, so a client cannot forge or alter what it echoes back.
-request-state = ["dep:rusty_oauth", "dep:rusty_crypto_key", "dep:rusty_rand"]
+request-state = ["dep:rusty_oauth", "dep:rusty_crypto_key"]
 
 [dependencies]
 # First-party only (ADR-0002 Tier S).
 rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
 rusty_mcp_proto = { workspace = true }
 rusty_base64 = { workspace = true }
+rusty_rand = { workspace = true }
+rusty_time = { workspace = true }
 rusty_serve = { workspace = true, optional = true }
 rusty_http = { workspace = true, optional = true }
-rusty_rand = { workspace = true, optional = true }
 rusty_oauth = { workspace = true, optional = true }
 rusty_crypto_key = { workspace = true, optional = true }
 
