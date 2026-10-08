@@ -1,0 +1,14 @@
+# Review routing, not team structure (ADR-0008). With one maintainer this
+# marks high-impact paths that should wait for an independent reviewer when
+# one is available (CONTRIBUTING). Last matching pattern wins.
+*                              @baileyrd
+
+# High-impact paths
+/Cargo.toml                    @baileyrd
+/Cargo.lock                    @baileyrd
+/rust-toolchain.toml           @baileyrd
+/.cargo/                       @baileyrd
+/deny.toml                     @baileyrd
+/.github/                      @baileyrd
+/docs/adr/                     @baileyrd
+/crates/foundation/            @baileyrd

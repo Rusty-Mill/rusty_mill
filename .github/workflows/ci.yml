@@ -33,6 +33,14 @@ on:
   # It is useful for re-running the whole workspace after runner or cache
   # incidents without creating a no-op commit.
   workflow_dispatch:
+  # Weekly full-workspace sweep: catches drift that scoped PR runs cannot see
+  # (ADR-0008). `ci_plan.py` treats any event other than push/PR as full.
+  schedule:
+    - cron: "17 3 * * 1"
+
+# Least privilege (ADR-0008): no job here writes to the repository.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -994,6 +1002,9 @@ jobs:
     needs: plan
     if: needs.plan.outputs.multimodal_db == 'true'
     runs-on: ubuntu-latest
+    env:
+      # rust-toolchain.toml would otherwise win over the action's default.
+      RUSTUP_TOOLCHAIN: "1.89.0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
@@ -1237,3 +1248,47 @@ jobs:
         run: cargo test --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
       - name: cargo clippy
         run: cargo clippy --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub --all-targets -- -D warnings
+
+  required-gate:
+    # The one check branch protection requires (ADR-0008). Planned-out jobs
+    # are `skipped`, which passes; a failed or cancelled job fails the gate.
+    # `test_ci_workflow` fails if a job is missing from `needs`.
+    name: required-gate
+    if: always()
+    needs:
+      - fmt
+      - plan-tests
+      - workflow-lint
+      - dependency-policy
+      - plan
+      - clippy
+      - ci-smoke
+      - test
+      - data-mesh-monitor
+      - rusty-term-web
+      - rusty-tick-web
+      - rusty-tick-e2e
+      - rusty-agui-conformance
+      - rusty-fair-play-web
+      - rusty-fair-play-e2e
+      - rusty-key-desktop
+      - win32-cross-compile-check
+      - multimodal-db-feature-sets
+      - multimodal-db-msrv
+      - rusty-config-no-std-check
+      - remind-me
+      - remind-me-features
+      - remind-me-combined-features
+      - remind-me-hub
+      - remind-me-legacy-import
+      - remind-me-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed or was cancelled
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          case " $RESULTS " in
+            *" failure "*|*" cancelled "*) exit 1 ;;
+          esac

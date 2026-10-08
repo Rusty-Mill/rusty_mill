@@ -14,6 +14,7 @@ from ci_plan import changed_paths_from_git, is_workspace_wide_change, specialize
 
 WORKFLOW = Path(__file__).parents[1] / "workflows" / "ci.yml"
 BASELINE_WORKFLOW = Path(__file__).parents[1] / "workflows" / "baseline.yml"
+REPO = Path(__file__).parents[2]
 NEXTEST_CONFIG = Path(__file__).parents[2] / ".config" / "nextest.toml"
 PLANNER = Path(__file__).with_name("ci_plan.py")
 
@@ -342,7 +343,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         jobs = re.split(r"^  ([a-z][a-z0-9-]+):\n", self.workflow.split("\njobs:\n", 1)[1], flags=re.M)
         groups = []
         for job, body in zip(jobs[1::2], jobs[2::2]):
-            if job in {"fmt", "plan-tests", "workflow-lint", "dependency-policy", "plan"}:
+            if job in {"fmt", "plan-tests", "workflow-lint", "dependency-policy", "plan", "required-gate"}:
                 self.assertNotIn("    concurrency:", body)
                 continue  # These start for every SHA, without a coalescing lock.
             with self.subTest(job=job):
@@ -353,6 +354,33 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 self.assertIn(f"-{job}", group)
                 groups.append(group)
         self.assertEqual(len(groups), len(set(groups)))
+
+    def test_required_gate_needs_every_other_job(self) -> None:
+        body = self.workflow.split("\njobs:\n", 1)[1]
+        jobs = re.findall(r"^  ([a-z][a-z0-9-]+):\n", body, flags=re.M)
+        gate = body.split("  required-gate:\n", 1)[1]
+        needs = set(re.findall(r"^      - ([a-z][a-z0-9-]+)$", gate.split("runs-on:")[0], flags=re.M))
+        self.assertEqual(needs, set(jobs) - {"required-gate"})
+        self.assertIn("if: always()", gate)
+        self.assertIn("*\" failure \"*|*\" cancelled \"*) exit 1", gate)
+
+    def test_workflows_default_to_read_only_token(self) -> None:
+        for path in (WORKFLOW, BASELINE_WORKFLOW):
+            with self.subTest(workflow=path.name):
+                self.assertRegex(path.read_text(encoding="utf-8"), r"(?m)^permissions:\n  contents: read$")
+
+    def test_scheduled_sweep_is_full_and_msrv_ignores_toolchain_file(self) -> None:
+        self.assertRegex(self.workflow, r"(?m)^  schedule:\n    - cron: ")
+        self.assertEqual(self._planner_map("--event", "schedule")["mode"], "full")
+        msrv = self.workflow.split("  multimodal-db-msrv:\n")[1].split("  rusty-config-no-std-check:\n")[0]
+        self.assertIn('RUSTUP_TOOLCHAIN: "1.89.0"', msrv)
+
+    def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:
+        channel = tomllib.loads((REPO / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+        for path in (WORKFLOW, BASELINE_WORKFLOW, WORKFLOW.with_name("remind-me-release.yml")):
+            with self.subTest(workflow=path.name):
+                pin = re.search(r'(?m)^  RUST_TOOLCHAIN: "([^"]+)"', path.read_text(encoding="utf-8"))
+                self.assertEqual(pin and pin.group(1), channel)
 
     def test_generic_matrix_uses_component_scope_and_unique_artifacts(self) -> None:
         for job, end in (("clippy", "ci-smoke"), ("test", "data-mesh-monitor")):

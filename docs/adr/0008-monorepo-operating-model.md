@@ -124,7 +124,9 @@ Verified against `main` at `a402fff`.
 
 ## Adoption order
 
-1. **Hygiene (one PR each, all S):** 1, 2, 3, 4, 7.
+1. **Hygiene (all S):** 1, 2, 3, 4, 7 — done together in the PR that
+   introduced `required-gate`, `permissions:`, `rust-toolchain.toml`,
+   `CODEOWNERS` and the weekly `schedule:` sweep.
 2. **Supply chain:** 5, then 6. Both start warn-only for one cycle, then
    enforce.
 3. **On trigger only:** the deferred table above.
