@@ -24,16 +24,18 @@ use std::net::TcpStream;
 use std::process::exit;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusty_tls::handrolled::client::{CipherSuite, ClientConfig, ClientError, Incoming};
-use rusty_tls::handrolled::client12::{CipherSuite12, Incoming12};
+use rusty_tls::handrolled::client::{
+    CipherSuite, ClientConfig, ClientError, ClientHandshake, Incoming,
+};
+use rusty_tls::handrolled::client12::{CipherSuite12, ClientConfig12, ClientHandshake12, Incoming12};
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
 use rusty_tls::handrolled::negotiate::{
     ClientConfigBoth, ClientHandshakeBoth, Established, ServerConfigBoth, ServerHandshakeBoth,
 };
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
-use rusty_tls::handrolled::server::ServerConfig;
-use rusty_tls::handrolled::server12::ServerConfig12;
+use rusty_tls::handrolled::server::{ServerConfig, ServerHandshake};
+use rusty_tls::handrolled::server12::{ServerConfig12, ServerHandshake12};
 use rusty_tls::handrolled::sign::SigningKey;
 use rusty_tls::handrolled::x509::Certificate;
 
@@ -45,6 +47,15 @@ const GROUPS: &[NamedGroup] = &[
     NamedGroup::SecP256R1,
     NamedGroup::SecP384R1,
 ];
+
+/// The groups to offer or accept: the scenario's `-curves`, else all three.
+fn groups(config: &Config) -> &[NamedGroup] {
+    if config.curves.is_empty() {
+        GROUPS
+    } else {
+        &config.curves
+    }
+}
 
 fn unimplemented(why: &str) -> ! {
     eprintln!("unimplemented: {why}");
@@ -81,6 +92,9 @@ struct Config {
     max_version: u16,
     expect_version: Option<u16>,
     no_tls: [bool; 4], // 1.0, 1.1, 1.2, 1.3
+    /// `-curves`, in order; empty means the default list.
+    curves: Vec<NamedGroup>,
+    check_close_notify: bool,
 }
 
 const TLS12: u16 = 0x0303;
@@ -119,6 +133,21 @@ fn parse_args() -> Config {
             "-no-tls11" => config.no_tls[1] = true,
             "-no-tls12" => config.no_tls[2] = true,
             "-no-tls13" => config.no_tls[3] = true,
+            // The runner's asynchronous-callback modes change *how* a stack
+            // gets its answers, not what it must conclude; this shim has no
+            // callbacks, so there is nothing to defer and the outcome is the
+            // one the runner checks.
+            "-async" => {}
+            "-check-close-notify" => config.check_close_notify = true,
+            "-curves" => {
+                let id = value("-curves").parse().unwrap_or(0);
+                // A group the engine lacks (P-521, the hybrids) must not be
+                // dropped quietly: the test would then be about a different
+                // negotiation than the one it names.
+                let group = NamedGroup::from_u16(id)
+                    .unwrap_or_else(|| unimplemented(&format!("curve {id}")));
+                config.curves.push(group);
+            }
             other => unimplemented(&format!("flag {other}")),
         }
     }
@@ -287,38 +316,36 @@ trait Handshake {
     fn into_connection(self: Box<Self>) -> Result<Established, String>;
 }
 
-struct ServerSide<'a>(ServerHandshakeBoth<'a>);
-struct ClientSide<'a>(ClientHandshakeBoth<'a>);
-
-impl Handshake for ServerSide<'_> {
-    fn read_record(&mut self, record: &[u8]) -> Result<Vec<u8>, (String, Option<Vec<u8>>)> {
-        self.0.read_record(record).map_err(|error| {
-            let alert = self.0.alert_record(&error);
-            (format!("{error:?}: {error}"), alert)
-        })
-    }
-    fn is_finished(&self) -> bool {
-        self.0.is_finished()
-    }
-    fn into_connection(self: Box<Self>) -> Result<Established, String> {
-        self.0.into_connection().map_err(|e| e.to_string())
-    }
+/// Erase one handshake machine behind [`Handshake`]. The six machines differ
+/// only in type, in how a finished one becomes an [`Established`], and in
+/// whether its alert encoder needs `&mut self`.
+macro_rules! machine {
+    ($wrapper:ident, $inner:ident, |$m:ident| $into:expr) => {
+        struct $wrapper<'a>($inner<'a>);
+        impl Handshake for $wrapper<'_> {
+            fn read_record(&mut self, record: &[u8]) -> Result<Vec<u8>, (String, Option<Vec<u8>>)> {
+                self.0.read_record(record).map_err(|error| {
+                    let alert = self.0.alert_record(&error);
+                    (format!("{error:?}: {error}"), alert)
+                })
+            }
+            fn is_finished(&self) -> bool {
+                self.0.is_finished()
+            }
+            fn into_connection(self: Box<Self>) -> Result<Established, String> {
+                let $m = self.0;
+                $into
+            }
+        }
+    };
 }
 
-impl Handshake for ClientSide<'_> {
-    fn read_record(&mut self, record: &[u8]) -> Result<Vec<u8>, (String, Option<Vec<u8>>)> {
-        self.0.read_record(record).map_err(|error| {
-            let alert = self.0.alert_record(&error);
-            (format!("{error:?}: {error}"), alert)
-        })
-    }
-    fn is_finished(&self) -> bool {
-        self.0.is_finished()
-    }
-    fn into_connection(self: Box<Self>) -> Result<Established, String> {
-        self.0.into_connection().map_err(|e| e.to_string())
-    }
-}
+machine!(ServerSide, ServerHandshakeBoth, |m| m.into_connection().map_err(|e| e.to_string()));
+machine!(ClientSide, ClientHandshakeBoth, |m| m.into_connection().map_err(|e| e.to_string()));
+machine!(Server13, ServerHandshake, |m| m.into_connection().map(Established::Tls13).map_err(|e| e.to_string()));
+machine!(Server12, ServerHandshake12, |m| m.into_connection().map(Established::Tls12).map_err(|e| e.to_string()));
+machine!(Client13, ClientHandshake, |m| m.into_connection().map(Established::Tls13).map_err(|e| e.to_string()));
+machine!(Client12, ClientHandshake12, |m| m.into_connection().map(Established::Tls12).map_err(|e| e.to_string()));
 
 fn run_handshake(stream: &mut TcpStream, mut handshake: Box<dyn Handshake + '_>) -> Established {
     while !handshake.is_finished() {
@@ -383,7 +410,8 @@ fn close(connection: &mut Established) -> Result<Vec<u8>, String> {
     }
 }
 
-fn exchange(stream: &mut TcpStream, mut connection: Established) {
+fn exchange(config: &Config, stream: &mut TcpStream, mut connection: Established) {
+    let mut closed = false;
     while let Some(record) = read_record(stream) {
         match read_app(&mut connection, &record) {
             Ok(Got::Data(mut data)) => {
@@ -394,7 +422,10 @@ fn exchange(stream: &mut TcpStream, mut connection: Established) {
                 }
             }
             Ok(Got::Reply(bytes)) => send(stream, &bytes),
-            Ok(Got::Closed) => break,
+            Ok(Got::Closed) => {
+                closed = true;
+                break;
+            }
             Ok(Got::Nothing) => {}
             Err(error) => {
                 if let Some(alert) = connection.alert_record(&error) {
@@ -403,6 +434,9 @@ fn exchange(stream: &mut TcpStream, mut connection: Established) {
                 fail_on(stream, format!("{error:?}: {error}"))
             }
         }
+    }
+    if config.check_close_notify && !closed {
+        fail("the peer ended the connection without a close_notify");
     }
     if let Ok(bytes) = close(&mut connection) {
         send(stream, &bytes);
@@ -450,7 +484,7 @@ fn serve(config: &Config, tls12: bool, tls13: bool) {
         certificates: &chain,
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
-        groups: GROUPS,
+        groups: groups(config),
         client_auth: None,
         tickets: None,
     };
@@ -458,7 +492,7 @@ fn serve(config: &Config, tls12: bool, tls13: bool) {
         certificates: &chain,
         key: &key,
         cipher_suites: CipherSuite12::SUPPORTED,
-        groups: GROUPS,
+        groups: groups(config),
         client_auth: None,
     };
     let both = ServerConfigBoth {
@@ -471,11 +505,14 @@ fn serve(config: &Config, tls12: bool, tls13: bool) {
     // reaching the other would mean claiming an ability the scenario denied it.
     let handshake: Box<dyn Handshake + '_> = match (tls12, tls13) {
         (true, true) => Box::new(ServerSide(ServerHandshakeBoth::new(&both))),
-        _ => unimplemented("a single-version server scenario"),
+        (false, true) => Box::new(Server13(ServerHandshake::new(&server_13))),
+        _ => Box::new(Server12(
+            ServerHandshake12::new(&server_12).unwrap_or_else(|e| fail(e)),
+        )),
     };
     let connection = run_handshake(&mut stream, handshake);
     expect_version(config, &connection);
-    exchange(&mut stream, connection);
+    exchange(config, &mut stream, connection);
 }
 
 fn connect_client(config: &Config, tls12: bool, tls13: bool) {
@@ -494,23 +531,41 @@ fn connect_client(config: &Config, tls12: bool, tls13: bool) {
     let anchors: Vec<TrustAnchor<'_>> = parsed.iter().map(TrustAnchor::from_certificate).collect();
     let name = config.host_name.as_deref().unwrap_or("test");
 
-    let tls13_config = ClientConfig {
+    let tls13_config = || ClientConfig {
         server_name: ServerName::Dns(name),
         anchors: &anchors,
         path: path_options(),
-        groups: GROUPS,
+        groups: groups(config),
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
     };
-    if !(tls12 && tls13) {
-        unimplemented("a single-version client scenario");
-    }
-    let both = ClientConfigBoth::new(tls13_config, CipherSuite12::SUPPORTED);
+    let tls12_config = ClientConfig12 {
+        server_name: ServerName::Dns(name),
+        anchors: &anchors,
+        path: path_options(),
+        groups: groups(config),
+        cipher_suites: CipherSuite12::SUPPORTED,
+    };
+    let tls13_single = tls13_config();
+    let both = ClientConfigBoth::new(tls13_config(), CipherSuite12::SUPPORTED);
     let mut stream = connect(config);
-    let (handshake, hello) = ClientHandshakeBoth::start(&both).unwrap_or_else(|e| fail(e));
+    let (handshake, hello): (Box<dyn Handshake + '_>, Vec<u8>) = match (tls12, tls13) {
+        (true, true) => {
+            let (m, hello) = ClientHandshakeBoth::start(&both).unwrap_or_else(|e| fail(e));
+            (Box::new(ClientSide(m)), hello)
+        }
+        (false, true) => {
+            let (m, hello) = ClientHandshake::start(&tls13_single).unwrap_or_else(|e| fail(e));
+            (Box::new(Client13(m)), hello)
+        }
+        _ => {
+            let (m, hello) = ClientHandshake12::start(&tls12_config).unwrap_or_else(|e| fail(e));
+            (Box::new(Client12(m)), hello)
+        }
+    };
     send(&mut stream, &hello);
-    let connection = run_handshake(&mut stream, Box::new(ClientSide(handshake)));
+    let connection = run_handshake(&mut stream, handshake);
     expect_version(config, &connection);
-    exchange(&mut stream, connection);
+    exchange(config, &mut stream, connection);
 }

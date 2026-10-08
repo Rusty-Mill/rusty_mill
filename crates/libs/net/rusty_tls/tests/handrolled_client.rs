@@ -1208,6 +1208,17 @@ fn a_server_that_does_not_select_tls13_is_refused() {
     record.extend_from_slice(&encoded);
 
     assert_eq!(client.read_record(&record), Err(ClientError::NotTls13));
+
+    // A TLS 1.2 server names suites this client never offered (BoGo
+    // MinimumVersion-Client-TLS13-TLS12). Its fault is its version, and that
+    // is what the alert must say, not `illegal_parameter` for the suite.
+    rewritten.cipher_suite = 0x009c; // TLS_RSA_WITH_AES_128_GCM_SHA256
+    let encoded = Message::encode(HandshakeType::ServerHello, &rewritten.encode());
+    let mut record = vec![22u8, 0x03, 0x03];
+    record.extend_from_slice(&(encoded.len() as u16).to_be_bytes());
+    record.extend_from_slice(&encoded);
+    let (mut client, _) = ClientHandshake::start(&config).expect("start");
+    assert_eq!(client.read_record(&record), Err(ClientError::NotTls13));
 }
 
 /// A record arriving before the ServerHello that claims to be application data

@@ -356,11 +356,39 @@ Not done: tlsfuzzer (BoGo covered the same ground and was runnable); a cap on co
 tests were never run against this engine because the shim cannot express them, so "0 failed" means "of
 the 490 it could run".
 
+## Stage 7: BoGo shim flags (first tranche)
+
+Not part of the original six stages; added because stage 6 left most of BoGo unrun. Ranked by
+`BOGO_UNIMPLEMENTED_LOG` (the shim records which flag stopped each test), the first tranche was the
+cheap flags: single-version client and server scenarios (the shim now drives the standalone 1.3 and 1.2
+machines, not only the dispatchers), `-curves` (a group the engine lacks is "unimplemented", never
+dropped), `-async` (no callbacks exist to defer, so the outcome the runner checks is the same) and
+`-check-close-notify`. Result: **590 passed, 0 failed** (was 490), 217 disabled by name.
+
+BoGo found two engine bugs in the newly reachable tests, both fixed with a test that fails without the fix:
+
+- **A server sent `handshake_failure` for an invalid key share** (point not on the curve, truncated,
+  padded, compressed, a low-order X25519 point). RFC 8446 §4.2.8.2 says `illegal_parameter`; the client
+  already did. `ServerError::Kx(BadPeerKey)` now maps to it; other key-exchange errors stay
+  `handshake_failure`.
+- **A client checked the cipher suite before the version.** A TLS 1.2 server names suites a 1.3 client
+  never offered, so the client reported `illegal_parameter` for the suite instead of `protocol_version`
+  for the version. The suite check now follows the version check, as the session-id check already did.
+
+78 newly runnable tests fail by design and are disabled by exact name with a reason: TLS 1.0/1.1
+scenarios, static-RSA suites, SHA-1 signatures, BoringSSL's leaf-curve policy (`CheckLeafCurve`), and its
+choice of `0x0301` as the first record version (RFC 8446 §5.1 allows `0x0301` or `0x0303`).
+
+What is left, from the log: credentials (`-expect-selected-credential`, `-new-x509-credential`), verify
+callbacks (`-verify-fail`, `-expect-verify-result`), resumption (`-resume-count`, `-psk`), OCSP, ALPN
+and client authentication. Resumption is the next best: the engine already issues and accepts 1.3
+tickets, and `-resume-count` alone gates about 265 tests; the shim would need to repeat the connection
+in one process.
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could
 produce (rustls and OpenSSL both directions, BoGo, mutation, fuzz, CI). Whether that meets the bar for
 the seam is theirs to set. If it does, stage 5 of the track is wiring (ALPN, SNI certificate selection,
 1.2 resumption are the known gaps) and an ADR superseding ADR-0002. If the bar includes more of BoGo,
-the next increment is shim flags: client certificates, resumption and ALPN unlock most of the 4718
-skipped tests.
+the next increment is shim resumption (`-resume-count`), then credentials and client certificates.

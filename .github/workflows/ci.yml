@@ -1139,8 +1139,8 @@ jobs:
           set -euo pipefail
           crates/libs/net/rusty_tls/bogo/run.sh | tee bogo.out
           passed=$(sed -nE 's/^BoGo: ([0-9]+) passed.*/\1/p' bogo.out)
-          if [ "${passed:-0}" -lt 400 ]; then
-            echo "::error::BoGo passed only ${passed:-0} tests (expected 400+) -- is the shim skipping everything?"
+          if [ "${passed:-0}" -lt 550 ]; then
+            echo "::error::BoGo passed only ${passed:-0} tests (expected 550+) -- is the shim skipping everything?"
             exit 1
           fi
 

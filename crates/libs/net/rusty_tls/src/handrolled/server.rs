@@ -426,6 +426,12 @@ impl ServerError {
                 AlertDescription::DECRYPT_ERROR
             }
             Self::ClientCertificateRequired => AlertDescription::CERTIFICATE_REQUIRED,
+            // RFC 8446 §4.2.8.2: a key share that is not a valid point is an
+            // illegal parameter, not a failure to agree. The same value in a
+            // TLS 1.2 ClientKeyExchange is the same mistake. Anything else the
+            // key exchange can fail at (the system RNG) stays a handshake failure.
+            Self::Kx(KxError::BadPeerKey) => AlertDescription::ILLEGAL_PARAMETER,
+            Self::Kx(_) => AlertDescription::HANDSHAKE_FAILURE,
             Self::MissingExtension(_) => AlertDescription::MISSING_EXTENSION,
             Self::ClientCertificate(_) | Self::MalformedClientCertificate(_) => {
                 AlertDescription::BAD_CERTIFICATE
@@ -433,7 +439,6 @@ impl ServerError {
             Self::NoSharedCipherSuite
             | Self::NoSharedGroup
             | Self::RetriedHelloStillHasNoShare(_)
-            | Self::Kx(_)
             | Self::NoSharedSignatureScheme
             | Self::MissingExtendedMasterSecret
             | Self::BadRenegotiationInfo

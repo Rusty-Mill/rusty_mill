@@ -10,6 +10,7 @@
 
 use rusty_tls::handrolled::client::{Alert, AlertDescription, AlertLevel, ClientError};
 use rusty_tls::handrolled::handshake::{HandshakeError, HandshakeType};
+use rusty_tls::handrolled::kx::KxError;
 use rusty_tls::handrolled::limits::Flood;
 use rusty_tls::handrolled::path::PathError;
 use rusty_tls::handrolled::record::{ContentType, RecordError};
@@ -168,6 +169,14 @@ fn what_a_server_tells_a_client() {
         (
             ServerError::Handshake(HandshakeError::DuplicateKeyShare(0x001d)),
             Some(A::ILLEGAL_PARAMETER),
+        ),
+        (
+            ServerError::Kx(KxError::BadPeerKey),
+            Some(A::ILLEGAL_PARAMETER),
+        ),
+        (
+            ServerError::Kx(KxError::Generation),
+            Some(A::HANDSHAKE_FAILURE),
         ),
         (
             ServerError::Record(RecordError::FragmentTooLong { len: 1, max: 0 }),

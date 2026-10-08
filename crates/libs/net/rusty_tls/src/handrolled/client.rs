@@ -1560,17 +1560,6 @@ impl ClientHandshake<'_> {
             }
         })?;
 
-        // The selected suite must be one that was offered, and one this code
-        // can actually use. A server naming something else is either confused
-        // or steering.
-        let suite = CipherSuite(hello.cipher_suite);
-        if !self.config.cipher_suites.contains(&suite) {
-            return Err(ClientError::UnofferedCipherSuite(hello.cipher_suite));
-        }
-        let (aead, hash) = suite
-            .parts()
-            .ok_or(ClientError::UnofferedCipherSuite(hello.cipher_suite))?;
-
         // TLS 1.3 is negotiated here and nowhere else. `legacy_version` is
         // pinned at 0x0303 for every version, so a server that omits
         // `supported_versions` is offering TLS 1.2.
@@ -1584,6 +1573,21 @@ impl ClientHandshake<'_> {
             _ if is_downgrade_sentinel(hello.random) => return Err(ClientError::DowngradeDetected),
             _ => return Err(ClientError::NotTls13),
         }
+
+        // The suite comes after the version, like the session id below: a
+        // TLS 1.2 server names suites this code never offered, and its fault
+        // is its version, which is what the alert has to say.
+        //
+        // The selected suite must be one that was offered, and one this code
+        // can actually use. A server naming something else is either confused
+        // or steering.
+        let suite = CipherSuite(hello.cipher_suite);
+        if !self.config.cipher_suites.contains(&suite) {
+            return Err(ClientError::UnofferedCipherSuite(hello.cipher_suite));
+        }
+        let (aead, hash) = suite
+            .parts()
+            .ok_or(ClientError::UnofferedCipherSuite(hello.cipher_suite))?;
 
         // Only now, because the field means something else below TLS 1.3: in a
         // TLS 1.2 ServerHello it is a resumption identifier, not an echo, so a
