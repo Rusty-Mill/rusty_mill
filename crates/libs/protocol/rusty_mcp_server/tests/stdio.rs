@@ -4,7 +4,7 @@
 
 use rusty_json::Value;
 use rusty_mcp_proto::{CallToolResult, ContentBlock, ErrorCode, ErrorData, ProtocolVersion, Tool};
-use rusty_mcp_server::{serve_lines, BuildError, Server};
+use rusty_mcp_server::{serve_lines, BuildError, Server, StdioConfig};
 use std::io::{self, BufReader, Cursor, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
@@ -126,7 +126,7 @@ fn run_with(server: Arc<Server>, input: &str) -> Vec<Value> {
         server,
         Cursor::new(input.as_bytes().to_vec()),
         out.clone(),
-        1 << 20,
+        StdioConfig::default(),
     )
     .unwrap();
     out.messages()
@@ -375,7 +375,10 @@ fn an_oversized_line_is_refused_and_skipped() {
         server(&Flags::default()),
         Cursor::new(input.into_bytes()),
         out.clone(),
-        200,
+        StdioConfig {
+            max_line_bytes: 200,
+            ..StdioConfig::default()
+        },
     )
     .unwrap();
     let out = out.messages();
@@ -475,7 +478,13 @@ fn a_cancelled_request_stops_and_gets_no_answer() {
     let srv = server(&flags);
     let sink = out.clone();
     let serving = std::thread::spawn(move || {
-        serve_lines(srv, BufReader::new(Feed(rx, Vec::new())), sink, 1 << 20).unwrap();
+        serve_lines(
+            srv,
+            BufReader::new(Feed(rx, Vec::new())),
+            sink,
+            StdioConfig::default(),
+        )
+        .unwrap();
     });
     let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
     tx.send(format!(r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"wait",{meta}}}}}{}"#, "\n").into_bytes()).unwrap();
@@ -646,8 +655,110 @@ fn a_dead_output_ends_the_session_with_an_error() {
         server(&Flags::default()),
         Cursor::new(input.into_bytes()),
         Dead,
-        1 << 20,
+        StdioConfig::default(),
     )
     .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+}
+
+/// A tool that ignores cancellation must not keep the server from exiting.
+#[test]
+fn end_of_input_cancels_cooperative_tools_and_abandons_stuck_ones() {
+    let flags = Flags::default();
+    let stuck = Arc::new(AtomicBool::new(false));
+    let stuck_flag = stuck.clone();
+    let saw_cancel = flags.saw_cancel.clone();
+    let srv = Arc::new(
+        Server::builder("d", "1")
+            .tool(Tool::new("wait", schema()), move |ctx, _p| {
+                while !ctx.is_cancelled() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                saw_cancel.store(true, Ordering::SeqCst);
+                Ok(text("stopped"))
+            })
+            .tool(Tool::new("stuck", schema()), move |_c, _p| {
+                // Ignores the cancellation flag entirely.
+                std::thread::sleep(Duration::from_secs(4));
+                stuck_flag.store(true, Ordering::SeqCst);
+                Ok(text("late"))
+            })
+            .build()
+            .unwrap(),
+    );
+    let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
+    let input = [
+        format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"wait",{meta}}}}}"#
+        ),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"stuck",{meta}}}}}"#
+        ),
+    ]
+    .join("\n");
+    let out = Out::default();
+    let started = Instant::now();
+    serve_lines(
+        srv,
+        Cursor::new(input.into_bytes()),
+        out.clone(),
+        StdioConfig {
+            drain_timeout: Duration::from_millis(300),
+            ..StdioConfig::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "returned after {:?}, not after the stuck tool",
+        started.elapsed()
+    );
+    assert!(
+        flags.saw_cancel.load(Ordering::SeqCst),
+        "the cooperative tool was told to stop"
+    );
+    assert!(
+        !stuck.load(Ordering::SeqCst),
+        "the stuck tool was abandoned, not awaited"
+    );
+    assert!(
+        out.messages().is_empty(),
+        "cancelled requests get no answer"
+    );
+}
+
+#[test]
+fn a_finished_request_frees_its_id_for_reuse() {
+    let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
+    let ping = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"add","arguments":{{"a":1,"b":1}},{meta}}}}}"#
+    );
+    // The second use of id 1 arrives after the first answer: sequential, same connection.
+    let (tx, rx) = channel();
+    let out = Out::default();
+    let sink = out.clone();
+    let srv = server(&Flags::default());
+    let serving = std::thread::spawn(move || {
+        serve_lines(
+            srv,
+            BufReader::new(Feed(rx, Vec::new())),
+            sink,
+            StdioConfig::default(),
+        )
+        .unwrap();
+    });
+    tx.send(format!("{ping}\n").into_bytes()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while out.messages().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    tx.send(format!("{ping}\n").into_bytes()).unwrap();
+    drop(tx);
+    serving.join().unwrap();
+    let out = out.messages();
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(
+        out.iter().all(|m| m.get("result").is_some()),
+        "no duplicate-id error: {out:?}"
+    );
 }

@@ -31,7 +31,7 @@
 //!   and cursor pagination. Transports are thin loops over
 //!   [`Connection::start`].
 //! - [`stdio`]: newline-delimited JSON on stdin/stdout, requests running
-//!   concurrently.
+//!   concurrently; end of input drains them for a bounded time, then cancels.
 //!
 //! Not here yet: prompts, resources, completion, subscriptions, tasks and
 //! multi-round-trip input on the server side, and the Streamable HTTP
@@ -46,4 +46,6 @@ pub mod stdio;
 
 pub use connection::{CallContext, CancelToken, Connection, Job, Notifier, Started};
 pub use server::{BuildError, Server, ServerBuilder, ToolHandler};
-pub use stdio::{serve_lines, serve_stdio, DEFAULT_MAX_LINE_BYTES};
+pub use stdio::{
+    serve_lines, serve_stdio, StdioConfig, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_LINE_BYTES,
+};

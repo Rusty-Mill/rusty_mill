@@ -12543,9 +12543,13 @@ dependencies = [
 name = "rusty_mcp_server"
 version = "0.1.0"
 dependencies = [
+ "rmcp",
  "rusty_base64",
  "rusty_json",
  "rusty_mcp_proto",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

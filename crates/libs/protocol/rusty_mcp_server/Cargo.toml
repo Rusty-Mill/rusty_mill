@@ -19,6 +19,14 @@ rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", defau
 rusty_mcp_proto = { workspace = true }
 rusty_base64 = { workspace = true }
 
+[dev-dependencies]
+# Interop oracle only (never shipped): the `rmcp` client, which the MCP crates
+# use today, drives this server over real stdio in `tests/interop.rs`.
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "process", "time"] }
+serde = "1"
+serde_json = "1"
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

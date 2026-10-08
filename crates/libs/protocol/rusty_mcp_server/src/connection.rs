@@ -145,13 +145,26 @@ pub enum Started {
     Run(Job),
 }
 
-/// An admitted request, ready to run on any thread.
+/// An admitted request, ready to run on any thread. Dropping it unrun frees
+/// its slot.
 pub struct Job {
-    conn: Arc<Connection>,
-    id: RequestId,
+    guard: InflightGuard,
     method: String,
     params: Option<Value>,
     token: CancelToken,
+}
+
+/// Holds a request's place in the in-flight table; gives it back on drop,
+/// however the job ends (answered, cancelled, panicked, never started).
+struct InflightGuard {
+    conn: Arc<Connection>,
+    id: RequestId,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        lock(&self.conn.inflight).remove(&self.id);
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -217,8 +230,10 @@ impl Connection {
                 let token = CancelToken::default();
                 inflight.insert(id.clone(), token.clone());
                 Started::Run(Job {
-                    conn: Arc::clone(self),
-                    id,
+                    guard: InflightGuard {
+                        conn: Arc::clone(self),
+                        id,
+                    },
                     method,
                     params,
                     token,
@@ -241,6 +256,14 @@ impl Connection {
         match self.start(message) {
             Started::Done(reply) => reply,
             Started::Run(job) => job.run(),
+        }
+    }
+
+    /// Raise the cancellation flag of every request in flight. Tools that
+    /// poll it stop early; their answers are dropped.
+    pub fn cancel_all(&self) {
+        for token in lock(&self.inflight).values() {
+            token.cancel();
         }
     }
 
@@ -434,27 +457,28 @@ impl Connection {
 }
 
 impl Job {
+    /// The id of the request this job answers.
+    pub fn id(&self) -> &RequestId {
+        &self.guard.id
+    }
+
     /// Run the request to completion and return the reply to send, or `None`
     /// when the client cancelled it meanwhile (a cancelled request gets no
     /// answer). A panicking tool becomes an internal error rather than a
     /// request that never answers.
     pub fn run(self) -> Option<Message> {
-        let Job {
-            conn,
-            id,
-            method,
-            params,
-            token,
-        } = self;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            conn.dispatch(&id, &method, &params, &token)
+            self.guard
+                .conn
+                .dispatch(&self.guard.id, &self.method, &self.params, &self.token)
         }))
         .unwrap_or_else(|_| Err(ErrorData::new(ErrorCode::INTERNAL_ERROR, "internal error")));
-        lock(&conn.inflight).remove(&id);
-        if token.is_cancelled() {
-            return None;
-        }
-        Some(reply(id, outcome))
+        let cancelled = self.token.is_cancelled();
+        let id = self.guard.id.clone();
+        // Free the slot before the reply is sent, so the client may reuse
+        // the id as soon as it has the answer.
+        drop(self);
+        (!cancelled).then(|| reply(id, outcome))
     }
 }
 

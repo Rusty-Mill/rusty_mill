@@ -16,7 +16,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-08 - rusty_mcp_server first slice (pending review)
 
 - **Added:** `rusty_mcp_server`, a tools-only MCP server core with a stdio transport, serving both protocol generations. Nothing consumes it yet.
-- **Known limitations:** verified through in-memory pipes only: it has not been run against a real MCP client or the `rusty-mcp-demo` acceptance suite, and the HTTP transport does not exist. Tool input schemas are not validated. There is no authentication layer (the existing `rusty-mcp` has OAuth, limits and telemetry that are not ported). The decision on how tool schemas are produced (builder or derive) is still open: callers pass a schema as raw JSON.
+- **Verified:** against the `rmcp` 3.1 client over a real child process and stdio, in both handshake modes, as well as through in-memory pipes.
+- **Known limitations:** it has not been run against the `rusty-mcp-demo` acceptance suite or any other client, and the HTTP transport does not exist. Tool input schemas are not validated. There is no authentication layer (the existing `rusty-mcp` has OAuth, limits and telemetry that are not ported). The decision on how tool schemas are produced (builder or derive) is still open: callers pass a schema as raw JSON.
 
 ---
 
