@@ -1,6 +1,6 @@
 # Fidelity scoreboard: the port against real Rocket League
 
-State on 2026-10-07 (spec `RB-PHYSICS-001` 0.150.0). Every number is the mean
+State on 2026-10-08 (spec `RB-PHYSICS-001` 0.155.0; the rows added since 2026-10-07 are marked). Every number is the mean
 position error in uu between the port, fed the input the game recorded
 (`rb-verify --scenario S --against C --recorded-inputs`), and a tape-bot
 recording of real Rocket League: the car, and where it matters the ball and a
@@ -27,6 +27,11 @@ the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
 | Powerslide: straight, half-left, release, long reverse slides; reverse + handbrake | `ps_straight` 0.3, `ps_half_left` 1.1 to 4.3, `ps_release` 2.8 to 5.1, `powerslide` 4.8, `ps_boost` 4.9, `hb_rev_*` 0.2 | under 8 |
 | **Car-car bumps**: rear (300 to 2100 uu/s), side, head-on, off-centre, moving, crossing, in the air | 36 `bump*` scenarios | 0.1 to 11 per car |
 | **Demolition** (supersonic nose on an enemy; teammates only bumped) | `bumpd_*` | enemy 0.0 until removed, attacker about 1 |
+| **Respawn after a demolition** (new 2026-10-08): out exactly 3.000 s, back at a kickoff spawn point (random; the recording's pick is replayed) | `demo_0` to `demo_11` | victim 0.1 to 0.3 over 700 ticks |
+| **Boost pads** (new 2026-10-08): pickups, amounts, respawn | `padp_*` (34 probes), fuzz tapes | 32 of 34 pickup decisions match, 20 of 21 on the game's tick |
+| **Airborne bumper on a grounded car** (new 2026-10-08) | `bumpag_*` | victim 14 to 18 uu at 700 to 1400 uu/s (was 50 to 70) |
+| **Three cars**: demolish two in a row, a bumped teammate into an enemy | `tri_double_demo`, `tri_mate_into_enemy` | 1.2 to 1.8 attacker, 0.0 to 0.1 and 9 to 29 for the others |
+| **Plain car-ball hit on a resting ball** (new 2026-10-08) | `hitfuzz_307/308/312/317/320` | post-hit speed 0.1 to 1 percent fast |
 
 ## Does not agree yet
 
@@ -34,10 +39,11 @@ the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
 |---|---|---|
 | Climbing a wall or ramp | `wall_ride` 9, `wall_ride_slow` 16, `wall_ride_boost` 12 to 19, `corner_slide` 22 | The port climbs about 10% slowly; a family of suspension and pushback constants trades errors (O012) |
 | A car hitting the ceiling | `ceiling` 31 | A nose landing on the ceiling plane; not yet traced (O017) |
-| A resting ball hit from above by a car | `hitfuzz_304/306` ball 4 to 260 uu/s of velocity | The game's solver order is random: the floor's push back on the hit tick is there in half the cases (O020) |
-| Wheels on the ball | `car_over_ball` 27 car / 44 ball | Ordinary hits agree; the wheel-on-ball contact does not (O014) |
-| A flip into a car | `bumpf_flip` 39 / 65 | The dodge's own impulse is in play |
-| Respawn after a demolition | not modelled | The game brings the car back after exactly 3 s at a spawn point it picks (O018) |
+| A resting ball hit from above by a car | `hitfuzz_304/306/315` ball 42 to 391 uu | Deterministic but split by one tick of contact time in the game (five repeats each): the floor's push back on the hit tick (O020) |
+| Wheels on the ball | `car_over_ball` 34 / 62; `wob_*` drops car 22 / ball 69 mean | Pushback reads the ball's velocity (FR-150, car 28 -> 22); a one-sided reaction on the ball trades car for ball (O014) |
+| A flip into a car | `bumpf_flip` 20.6 / 43.8 (was 202 / 341 at the honest alignment) | No bump when the nose points down (FR-152); the contact is a tick early |
+| Two cars into one, or a pinch | `tri_two_on_one` 244 / 292, `tri_pinch` 17 / 122 | Secondary collisions between cars already moving (O018) |
+| The game's own repeatability (new 2026-10-08) | 23 of 24 random tapes repeat to 0.0 uu | The port's 104 uu median is all port error |
 | A ball set at rest in the air | the game's ball hovers | State-setting artefact (O016) |
 
 Smaller: `wavedash_early` 7 (a chaotic hop), `half_flip` 2.4 / 11.8 max,

@@ -43,6 +43,19 @@ version: `a245d35`).
 
 ## Recently completed
 
+- 2026-10-08 (parity plan, PRs #275 to #291; evidence in
+  [FIDELITY-SCOREBOARD.md](./research/FIDELITY-SCOREBOARD.md)): `RB-PHYSICS-001-FR-149`
+  (boost pads, fitted rule, ADR-0072; test point re-fitted to 0.6 of the tick),
+  `FR-150` (a wheel's pushback against the ball reads its velocity, ADR-0074), `FR-151`
+  (demolition respawn, ADR-0075), `FR-152` (a bump needs a level nose, ADR-0076), `FR-153`
+  (the air bump is for two airborne cars). Tools: `--wheel-trace`, `--wheel-kstep`,
+  `spread_report.py`, `pad_fit.py`, `ball_events.py`, `respawn_report.py`, probe
+  generators for pads, wheels on the ball, demolitions, three cars and mixed bumps.
+  Findings that change the plan: the wall's one-step error is the rest-pose offset
+  (O012/O019), the port is not mirror-symmetric but the game is (right wall 17.2 uu, left
+  28.0), symmetric damper orders break golden captures; a one-sided wheel reaction on the
+  ball trades car for ball (O014). The scorer no longer lags fast starts (ADR-0076).
+
 - 2026-10-07 (parity plan, PRs #273 to #274): `docs/roadmap/PARITY-PLAN.md`;
   pad sidecar log in `rb_run_tapes` and `spread_report.py` (ADR-0071). Game
   spread measured on seeds 501-524 x 5 runs: 0.0 uu mean on 23 of 24 tapes, so
