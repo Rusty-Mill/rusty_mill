@@ -209,19 +209,38 @@ fn extra_ball_hit_velocity(ball: &RigidBody, car: &RigidBody, tuning: &CarBallTu
 }
 
 /// The extra velocity a bump gives the car bumped by `bumper`
-/// (`RB-PHYSICS-001-FR-140`): along the bumper's horizontal heading, by the
-/// bumper's speed along it, plus a share of that speed upward. Not the line
-/// between the two cars (an off-centre clip pushes straight ahead).
+/// (`RB-PHYSICS-001-FR-140`, `FR-159`). Two airborne cars: along the bumper's
+/// horizontal heading, 0.99 of its speed along it, and a fixed kick down.
+/// Otherwise along the bumper's heading (its nose, horizontally, tilted up or
+/// down by its own vertical speed over its speed along the nose, so a rising
+/// bumper pushes up), by the curve of its speed, plus a share of that speed
+/// upward. Not the line between the two cars (an off-centre clip pushes
+/// straight ahead).
 fn bump_velocity_of(bumper: &RigidBody, bumper_airborne: bool) -> Vec3 {
     let forward = drive::forward_axis(bumper);
-    let Some(heading) = Vec3::new(forward.x, forward.y, 0.0).normalize() else {
-        return Vec3::ZERO;
-    };
-    let speed = bumper.linear_velocity.dot(&heading).max(0.0);
+    let flat = Vec3::new(forward.x, forward.y, 0.0).normalize();
     if bumper_airborne {
+        let Some(heading) = flat else {
+            return Vec3::ZERO;
+        };
+        let speed = bumper.linear_velocity.dot(&heading).max(0.0);
         return heading * piecewise_linear(&BUMP_AIR_VELOCITY_CURVE, speed)
             - Vec3::new(0.0, 0.0, BUMP_AIR_DOWNWARD_SPEED);
     }
+    let Some(flat) = flat else {
+        return Vec3::ZERO;
+    };
+    // The horizontal heading is the car's nose; it climbs or dives with the car's own vertical
+    // speed over its speed along the nose.
+    let along = bumper.linear_velocity.dot(&flat).max(0.0);
+    let heading = if along > 1.0 {
+        (flat + Vec3::new(0.0, 0.0, bumper.linear_velocity.z / along))
+            .normalize()
+            .unwrap_or(flat)
+    } else {
+        flat
+    };
+    let speed = bumper.linear_velocity.dot(&heading).max(0.0);
     heading * piecewise_linear(&BUMP_VELOCITY_CURVE, speed)
         + Vec3::new(0.0, 0.0, speed * BUMP_UPWARD_SCALE)
 }
@@ -2830,6 +2849,25 @@ mod tests {
         );
         assert!(world.cars[0].linear_velocity.y < 0.0);
         assert!(world.cars[1].linear_velocity.y > 0.0);
+    }
+
+    /// `RB-PHYSICS-001-FR-159`, `duel_910` and `bumpag_*`: a bumper that is rising
+    /// when it hits a grounded car pushes it up by its share of the heading too (the
+    /// game gave 445 uu/s up where the horizontal-only rule gave 205).
+    #[test]
+    fn a_rising_bumper_pushes_the_victim_up_along_its_velocity() {
+        let mut level = RigidBody::standard_car(Vec3::new(0.0, 0.0, 300.0));
+        level.linear_velocity = Vec3::new(900.0, 0.0, 0.0);
+        let mut rising = level;
+        rising.linear_velocity = Vec3::new(900.0, 0.0, 300.0);
+        let flat = bump_velocity_of(&level, false);
+        let up = bump_velocity_of(&rising, false);
+        assert!(up.z > flat.z + 150.0, "{flat:?} {up:?}");
+        // Two airborne cars keep the horizontal heading and the fixed downward kick.
+        assert_eq!(
+            bump_velocity_of(&rising, true).z,
+            bump_velocity_of(&level, true).z
+        );
     }
 
     /// `RB-PHYSICS-001-FR-158`, `duel_865`: two cars at 1000 uu/s driving at each
