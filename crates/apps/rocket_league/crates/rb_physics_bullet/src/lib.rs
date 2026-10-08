@@ -113,6 +113,7 @@ pub mod mat3;
 pub mod mesh;
 pub mod net;
 pub mod pads;
+pub mod respawn;
 pub mod solver;
 pub mod world;
 

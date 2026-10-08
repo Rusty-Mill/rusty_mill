@@ -11,6 +11,7 @@ use crate::collision;
 use crate::mesh::{self, StaticMesh};
 use crate::net::NetMesh;
 use crate::pads::BoostPads;
+use crate::respawn;
 use crate::solver::ContactCache;
 use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
@@ -373,9 +374,16 @@ pub struct PhysicsWorld {
     car_teams: Vec<u32>,
     /// Cars demolished and out of the simulation: not driven, not in contact,
     /// not in `frame()` (the game's capture drops them too). They respawn
-    /// after three seconds at a spawn point the game picks, which this port
-    /// does not model.
+    /// after three seconds (`respawn`, `RB-PHYSICS-001-FR-151`).
     demolished: Vec<bool>,
+    /// Seconds before demolished car `i` is back, `None` when it is in play.
+    respawn_in: Vec<Option<f32>>,
+    /// The spawn point car `i` takes at its next respawn (`set_respawn_point`);
+    /// `None` takes `respawn::default_pick`.
+    respawn_pick: Vec<Option<usize>>,
+    /// Car `i` came back last tick and is still at the spawn's raw state: the next
+    /// tick starts it at its respawn height with its boost.
+    respawn_settling: Vec<bool>,
     /// Each car's supersonic state.
     supersonic: Vec<bool>,
     /// The boost pads, if the scene has them (`RB-PHYSICS-001-FR-149`): none
@@ -565,6 +573,9 @@ impl PhysicsWorld {
             bump_ticks: Vec::new(),
             car_teams: Vec::new(),
             demolished: Vec::new(),
+            respawn_in: Vec::new(),
+            respawn_pick: Vec::new(),
+            respawn_settling: Vec::new(),
             supersonic: Vec::new(),
             boost_pads: None,
             car_ball: CarBallTuning::default(),
@@ -782,6 +793,9 @@ impl PhysicsWorld {
         self.car_inputs.push(ControllerInput::default());
         self.car_teams.push(0);
         self.demolished.push(false);
+        self.respawn_in.push(None);
+        self.respawn_pick.push(None);
+        self.respawn_settling.push(false);
         self.supersonic.push(false);
         self
     }
@@ -792,6 +806,21 @@ impl PhysicsWorld {
         if let Some(slot) = self.car_teams.get_mut(index) {
             *slot = team;
         }
+    }
+
+    /// Chooses the spawn point (an index into `respawn::SPAWN_POINTS`) car `index` takes
+    /// the next time it respawns after a demolition; `None` takes
+    /// `respawn::default_pick`. The game's pick is random, so a replay of a recording
+    /// passes the one it shows (`respawn::nearest_spawn_point`).
+    pub fn set_respawn_point(&mut self, index: usize, point: Option<usize>) {
+        if let Some(slot) = self.respawn_pick.get_mut(index) {
+            *slot = point;
+        }
+    }
+
+    /// Whether car `index` is out of the match after a demolition.
+    pub fn is_demolished(&self, index: usize) -> bool {
+        self.demolished.get(index).copied().unwrap_or(false)
     }
 
     /// Sets car `index`'s current controller input, which persists across
@@ -1096,6 +1125,13 @@ impl PhysicsWorld {
     /// resolution, before sleep evaluation and transform integration —
     /// matching real RocketSim's own placement for this same clamp.
     pub fn step(&mut self, dt: f32) {
+        // A car that came back last tick drops to its respawn height with its boost.
+        for index in 0..self.cars.len() {
+            if std::mem::take(&mut self.respawn_settling[index]) {
+                self.cars[index].position.z = respawn::RESPAWN_HEIGHT;
+                self.car_drive[index].boost_amount = respawn::RESPAWN_BOOST;
+            }
+        }
         // Where each car starts the tick, for the boost pad test at its end.
         let pad_starts: Vec<Vec3> = if self.boost_pads.is_some() {
             self.cars.iter().map(|car| car.position).collect()
@@ -1444,14 +1480,55 @@ impl PhysicsWorld {
             }
         }
 
+        // Cars out since an earlier tick count down; the tick a car is demolished on is
+        // not one of its 360.
+        for index in 0..self.cars.len() {
+            let Some(left) = self.respawn_in[index] else {
+                continue;
+            };
+            let left = left - dt;
+            if left <= 1.0e-3 {
+                self.respawn_car(index);
+            } else {
+                self.respawn_in[index] = Some(left);
+            }
+        }
         for victim in newly_demolished {
             self.demolished[victim] = true;
+            self.respawn_in[victim] = Some(respawn::RESPAWN_DELAY_SECS);
             self.cars[victim].linear_velocity = Vec3::ZERO;
             self.cars[victim].angular_velocity = Vec3::ZERO;
         }
 
         self.elapsed_secs += dt;
         self.tick_count += 1;
+    }
+
+    /// Brings demolished car `index` back at a spawn point, at rest, as the game's first
+    /// frame back shows it (`respawn`): a fresh drive state with no boost, a level body
+    /// turned to the point's heading. The next tick lowers it to its respawn height
+    /// and gives it its boost.
+    fn respawn_car(&mut self, index: usize) {
+        let pick = self.respawn_pick[index]
+            .take()
+            .unwrap_or_else(|| respawn::default_pick(self.tick_count, index));
+        let point = respawn::SPAWN_POINTS[pick % respawn::SPAWN_POINTS.len()];
+        let car = &mut self.cars[index];
+        car.position = point.position(respawn::SPAWN_RAW_HEIGHT);
+        car.orientation = point.rotation();
+        car.linear_velocity = Vec3::ZERO;
+        car.angular_velocity = Vec3::ZERO;
+        car.wake();
+        self.car_drive[index] = drive::DriveState {
+            boost_amount: 0.0,
+            boost_used_per_second: self.boost_used_per_second,
+            dodge_forward_from_throttle: self.dodge_forward_from_throttle,
+            ..drive::DriveState::new()
+        };
+        self.supersonic[index] = false;
+        self.demolished[index] = false;
+        self.respawn_in[index] = None;
+        self.respawn_settling[index] = true;
     }
 
     /// Sets the ball's and every car's position, orientation, velocities
@@ -2809,6 +2886,110 @@ mod tests {
             world.step(1.0 / 120.0);
         }
         assert!(world.frame().cars[0].position.y > 100.0);
+    }
+
+    /// A world where car 0 demolishes car 1 on the first step, and the number of steps
+    /// until the victim is out of `frame()`.
+    fn demolition_world() -> PhysicsWorld {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 500.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 2300.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        world.set_car_team(1, 1);
+        world
+    }
+
+    fn steps_until_the_victim_is_out(world: &mut PhysicsWorld) -> u32 {
+        for step in 1..=20 {
+            world.step(1.0 / 120.0);
+            if world.frame().cars.len() == 1 {
+                return step;
+            }
+        }
+        unreachable!("the enemy was never demolished");
+    }
+
+    /// `RB-PHYSICS-001-FR-151`: a demolished car is out for exactly 360 ticks, then
+    /// back at the chosen spawn point, at rest and level, in the raw spawn state.
+    #[test]
+    fn a_demolished_car_is_back_after_exactly_three_seconds_at_the_chosen_spawn_point() {
+        let mut world = demolition_world();
+        world.set_respawn_point(1, Some(3));
+        steps_until_the_victim_is_out(&mut world);
+        assert!(world.is_demolished(1));
+        for tick in 1..360 {
+            world.step(1.0 / 120.0);
+            assert_eq!(world.frame().cars.len(), 1, "still out at tick {tick}");
+        }
+        world.step(1.0 / 120.0);
+        let frame = world.frame();
+        assert_eq!(frame.cars.len(), 2, "back on the 360th tick");
+        let car = frame.cars.iter().find(|c| c.player_id == 1).expect("car 1");
+        let spawn = crate::respawn::SPAWN_POINTS[3];
+        assert_eq!(
+            car.position,
+            Vec3::new(spawn.x, spawn.y, crate::respawn::SPAWN_RAW_HEIGHT)
+        );
+        assert_eq!(car.velocity, Vec3::ZERO);
+        assert_eq!(car.boost_amount, 0.0, "the raw spawn has no boost");
+        let nose = car.rotation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+        assert!(nose.y > 0.999, "faces +y like the point: {nose:?}");
+        assert!(!world.is_demolished(1));
+    }
+
+    #[test]
+    fn a_respawned_car_drops_to_its_respawn_height_with_a_third_of_a_tank_next_tick() {
+        let mut world = demolition_world();
+        // The bump world has no gravity; the respawned car falls from rest.
+        world.gravity = Vec3::new(0.0, 0.0, -650.0);
+        world.set_respawn_point(1, Some(0));
+        steps_until_the_victim_is_out(&mut world);
+        for _ in 0..360 {
+            world.step(1.0 / 120.0);
+        }
+        world.step(1.0 / 120.0);
+        let car = world
+            .frame()
+            .cars
+            .into_iter()
+            .find(|c| c.player_id == 1)
+            .expect("car 1");
+        assert!(
+            (car.position.z - crate::respawn::RESPAWN_HEIGHT).abs() < 0.5,
+            "{:?}",
+            car.position
+        );
+        assert!((car.boost_amount - crate::respawn::RESPAWN_BOOST).abs() < 0.01);
+        // It falls from rest: one tick of gravity (5.4 uu/s).
+        assert!((car.velocity.z + 5.4).abs() < 0.5, "{:?}", car.velocity);
+    }
+
+    #[test]
+    fn without_a_chosen_point_the_respawn_is_deterministic_and_on_a_spawn_point() {
+        let place = |world: &mut PhysicsWorld| {
+            steps_until_the_victim_is_out(world);
+            for _ in 0..360 {
+                world.step(1.0 / 120.0);
+            }
+            let frame = world.frame();
+            let car = frame
+                .cars
+                .iter()
+                .find(|c| c.player_id == 1)
+                .expect("car 1")
+                .position;
+            (car.x, car.y)
+        };
+        let first = place(&mut demolition_world());
+        let second = place(&mut demolition_world());
+        assert_eq!(first, second);
+        assert!(crate::respawn::SPAWN_POINTS
+            .iter()
+            .any(|p| (p.x, p.y) == first));
     }
 
     /// The same hit on a teammate, or below supersonic on an enemy, is only a

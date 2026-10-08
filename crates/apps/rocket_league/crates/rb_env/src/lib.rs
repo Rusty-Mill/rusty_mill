@@ -85,6 +85,13 @@ impl Env {
         self.world.frame()
     }
 
+    /// Chooses the spawn point (an index into `rb_physics_bullet::respawn::SPAWN_POINTS`)
+    /// car `index` respawns at after its next demolition in the current simulation;
+    /// `None` takes the default stand-in for the game's random pick.
+    pub fn set_respawn_point(&mut self, index: usize, point: Option<usize>) {
+        self.world.set_respawn_point(index, point);
+    }
+
     /// Snaps the ball and every car to `frame`'s state (position, rotation,
     /// velocity, spin, boost) while the simulation's own memory carries on:
     /// solver warm-starts, suspension and ground contact, jump and flip

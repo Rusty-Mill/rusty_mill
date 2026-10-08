@@ -1,0 +1,82 @@
+{
+  "name": "demo_10: boosting attacker demolishes a stopped enemy at (1200, -1000) facing 180 degrees",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      1200,
+      -1808,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.5707963267948966,
+      0
+    ],
+    "velocity": [
+      0,
+      2300,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 150,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 550
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          1200,
+          -1000,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          3.141592653589793,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 700
+        }
+      ],
+      "team": 1
+    }
+  ]
+}

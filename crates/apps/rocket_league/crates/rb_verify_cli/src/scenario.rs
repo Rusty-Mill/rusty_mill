@@ -366,17 +366,47 @@ fn simulate_with_inputs(
     start: &PhysicsFrame,
     teams: &[u32],
     inputs: &[Vec<ControllerInput>],
+    respawn_points: &[Option<usize>],
 ) -> Vec<PhysicsFrame> {
     let mut env = Env::new();
     env.set_teams(teams);
     let mut frames = vec![start.clone()];
     env.reset(start);
+    for (car, point) in respawn_points.iter().enumerate() {
+        env.set_respawn_point(car, *point);
+    }
     for (tick, input) in inputs.iter().enumerate() {
         let mut frame = env.step(input);
         frame.timestamp_secs = (tick + 1) as f32 * SCENARIO_TICK_SECS;
         frames.push(frame);
     }
     frames
+}
+
+/// The spawn point each car came back at in `frames`, if it was demolished: the point
+/// nearest to where it reappears after being out of the capture. The game's pick is
+/// random, so a replay is given the recording's (`PhysicsWorld::set_respawn_point`).
+fn recorded_respawn_points(frames: &[(usize, &PhysicsFrame)], cars: usize) -> Vec<Option<usize>> {
+    (0..cars)
+        .map(|car| {
+            let mut seen = false;
+            let mut gone = false;
+            for (_, frame) in frames {
+                match frame.cars.iter().find(|c| c.player_id as usize == car) {
+                    Some(state) if gone => {
+                        return Some(rb_physics_bullet::respawn::nearest_spawn_point(
+                            state.position.x,
+                            state.position.y,
+                        ));
+                    }
+                    Some(_) => seen = true,
+                    None if seen => gone = true,
+                    None => {}
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 /// `compare_scenario`, but the port is fed the input the recording shows
@@ -447,6 +477,7 @@ pub fn compare_scenario_recorded(
     for (car, seen) in start.cars.iter_mut().zip(&recorded[start_index].cars) {
         car.boost_amount = seen.boost_amount;
     }
+    let respawn_points = recorded_respawn_points(&recorded_ticks, cars);
     let teams = scenario.teams();
     type Rows = (Vec<ScenarioRow>, Vec<Vec<(usize, CarState, CarState)>>);
     // `lag`: recorded tick t is the port's tick t - lag (the state set can
@@ -461,7 +492,7 @@ pub fn compare_scenario_recorded(
                     .collect()
             })
             .collect();
-        let predicted = simulate_with_inputs(&start, &teams, &inputs);
+        let predicted = simulate_with_inputs(&start, &teams, &inputs, &respawn_points);
         let mut rows = Vec::new();
         let mut other_rows: Vec<Vec<(usize, CarState, CarState)>> =
             vec![Vec::new(); cars.saturating_sub(1)];

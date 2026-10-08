@@ -31,6 +31,22 @@ struct Case {
 }
 
 const CASES: &[Case] = &[
+    // A boosting attacker demolishes a stopped enemy; the victim is back 3.000 s later at
+    // the spawn point the recording shows (FR-151). `other` is the victim.
+    Case {
+        scenario: "experiments/demo_4.json",
+        fixture: "demo_4.jsonl",
+        car: (3.8, 8.9),
+        ball: None,
+        other: Some((0.3, 0.3)),
+    },
+    Case {
+        scenario: "experiments/demo_9.json",
+        fixture: "demo_9.jsonl",
+        car: (3.0, 5.8),
+        ball: None,
+        other: Some((0.3, 0.3)),
+    },
     // A level car dropped on a ball at rest (RB-RESEARCH-O014, FR-150): the wheels
     // hold the car up on the ball. The bounds are today's errors, not parity: the
     // off-centre drops are far from the game (ball 92 uu mean at 100 uu off centre).
