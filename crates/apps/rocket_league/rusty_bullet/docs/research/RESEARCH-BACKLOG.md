@@ -871,9 +871,13 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   second of `Active` only; at zero play goes on (the clock negative) until the ball is low (match ended at ball z
   92.2 and 97.3), then a lead gives `Ended` (after 0.26 to 0.49 s below zero) and a tie gives overtime: a 4 s
   countdown with no replay, the clock counting on from the negative value, `is_overtime`; the golden goal is
-  followed by the usual 3 s and 9 s and then `Ended`. The first countdown of a match is 826 frames. After a goal
+  followed by the usual 3 s and 9 s and then `Ended`. The first countdown of a match is 850 frames. After a goal
   the packets carry no ball, so the net cannot be observed. Modelled in FR-160.
-- **Open**: the random spawn slot (five, point-reflected for the other team) and the two
+- **Whole matches (2026-10-08, `match_log_check`)**: replaying four logs through `Flow`: phases agree on all but
+  10 to 26 frames per match, scores and overtime as the game's, clock within 0.15 s (0.5 s in overtime). Found: an
+  untouched kickoff goes live at 600 ticks; the intro ends at match frame 850; replays vary (1076-1084 in 31 of
+  41 goals, up to 1560 in 8), cause unknown.
+- **Open**: why some replays run long; the random spawn slot (five, point-reflected for the other team) and the two
   teams' different drop heights on the first packets; goal-line geometry for a ball that crosses between the posts
   only (the test is the line alone); demolitions and bumps during the countdown; the ball's missing drag.
 - **Status**: Modelled in `Env`; owner: baileyrd.

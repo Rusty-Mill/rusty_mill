@@ -31,6 +31,8 @@ pub struct Env {
     flow: Option<Flow>,
     /// The spawn slots (0 to 4) of the next kickoff, car by car, if given.
     kickoff_slots: Option<Vec<usize>>,
+    /// Ticks of a goal replay (the game's vary), if not the usual.
+    replay_ticks: Option<u32>,
     /// Ticks of play in a match, if it has a clock.
     match_ticks: Option<i64>,
     /// Kickoffs started so far, which rotates the default slots.
@@ -52,6 +54,7 @@ impl Env {
             boost_pads: true,
             flow: None,
             kickoff_slots: None,
+            replay_ticks: None,
             match_ticks: None,
             kickoffs: 0,
         }
@@ -116,11 +119,17 @@ impl Env {
     }
 
     fn new_flow(&self, phase: Phase) -> Flow {
-        let flow = Flow::new(phase);
+        let flow = Flow::new(phase).with_replay(self.replay_ticks.unwrap_or(flow::REPLAY_TICKS));
         match self.match_ticks {
             Some(ticks) => flow.with_clock(ticks),
             None => flow,
         }
+    }
+
+    /// Sets the length of goal replays for later flows (the world is frozen throughout); the
+    /// default is the usual 1080 ticks.
+    pub fn set_replay_ticks(&mut self, ticks: Option<u32>) {
+        self.replay_ticks = ticks;
     }
 
     /// Gives matches a clock of `ticks` of play (`flow::FIVE_MINUTES` for the standard five
@@ -132,7 +141,7 @@ impl Env {
     }
 
     /// Starts a match from its first kickoff: like `start_kickoff`, but with the intro that makes
-    /// the first countdown 826 ticks.
+    /// the first countdown 850 ticks.
     pub fn start_match(&mut self) -> PhysicsFrame {
         self.flow = Some(
             self.new_flow(Phase::Countdown)
@@ -590,7 +599,7 @@ mod tests {
         assert_eq!(frames[39].ball.velocity, Vec3::ZERO);
     }
 
-    /// A match from its first kickoff has the 826-tick intro countdown and a clock that starts
+    /// A match from its first kickoff has the 850-tick intro countdown and a clock that starts
     /// when the ball is first touched.
     #[test]
     fn a_match_starts_with_the_long_countdown_and_a_clock_that_waits_for_play() {

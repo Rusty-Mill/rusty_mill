@@ -8275,9 +8275,18 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     `Active` only, so it stands through goal, replay, countdown and kickoff; at zero play goes on, the clock
     below zero, until the ball is low (it ended at ball z 92.2 and 97.3); a lead then ends the match (`Ended`),
     a tie starts overtime: a countdown with no replay, the clock still counting away from zero, and the next
-    goal's replay is followed by `Ended`. `Env::start_match` gives the first kickoff its 826-tick intro.
+    goal's replay is followed by `Ended`. `Env::start_match` gives the first kickoff its 850-tick intro.
     After a goal the game's packets stop reporting the ball, so the net's behaviour is not observable beyond
     the line; the port keeps simulating it (FR-033).
+  - Whole matches (`cargo run -p rb_env --example match_log_check -- LOG [five]`): the game's logs of
+    four whole matches (59k, 69k, 53k and 65k frames; two with a five-minute clock, one ending in overtime)
+    replayed through `Flow` with the log's ball and each goal's own replay length: the phase differs on 10 to 26
+    frames per match except 307 in the unlimited one (transitions off by a few frames), the final scores
+    and the overtime come out as the game's, and the clock stays within 0.15 s of the game's (0.5 s in
+    overtime). Two things came out of it: a kickoff nobody touches goes live after 600 ticks, and the
+    first kickoff of a match ends at frame 850 of the match (846 to 853 in five logs, not 826 from the
+    first packet). Goal replays are not constant: 1076 to 1084 ticks in 31 of 41, 1103 to 1560 in the
+    rest, for reasons the packets do not show (`Env::set_replay_ticks`).
   - Not modelled: the game's random slot choice (the caller may pass `set_kickoff_slots`; the default rotates),
     the spawn-height stagger between the two teams' cars (blue 35.0 against orange 39.5 on the first
     packets), the ball's missing drag while it falls (a tenth of a unit by tick 15).
