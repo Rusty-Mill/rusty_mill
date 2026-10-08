@@ -10861,7 +10861,7 @@ dependencies = [
  "rk-constrain",
  "rk-feed",
  "rk-observe",
- "rmcp",
+ "rusty-mcp",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

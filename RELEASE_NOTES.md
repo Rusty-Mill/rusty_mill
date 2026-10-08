@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rk-mcp client on rusty-mcp (pending review)
+
+- **Changed:** `rk-mcp`'s stdio and HTTP adapters collapse into `RemoteMcpClient` over `rusty-mcp`'s client. Verified end to end for stdio: the ignored smoke test connected to a real `rusty-mcp-demo`, listed tools, reconnected and listed again.
+- **Known limitation:** the Streamable HTTP path was not exercised (no server to point at here), and its TLS backend changes to `native-tls`. A server with more than one page of tools now returns all of them, so a registry that relied on the truncated list will see more tools.
+
+---
+
 ## 2026-10-07 - rk-app MCP server on rusty-mcp (pending review)
 
 - **Changed:** `rusty-keys --mcp` uses `rusty_mcp::serve`; compiles clean under clippy `-D warnings` with `--features mcp-server`, and the crate's tests pass.
