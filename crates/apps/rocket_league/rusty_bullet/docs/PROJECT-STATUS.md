@@ -43,6 +43,17 @@ version: `a245d35`).
 
 ## Recently completed
 
+- 2026-10-08 (autonomous run, PRs #292 to #306): `RB-PHYSICS-001-FR-154` (raw throttle with fewer
+  than three wheels down), `FR-156` (no air throttle while a wheel touches, ADR-0078), `FR-157` (ground
+  boost acceleration while any wheel touches, ADR-0079), `FR-158` (the bump nose test by the other car's
+  origin, ADR-0080), `FR-159` (the ground bump follows the bumper's climb, ADR-0081). `FR-155` ("roll
+  drops pitch", ADR-0077) was drafted and withdrawn the same day: pitch is silent only for the first
+  ~25 ticks after the state set. Scorer: the second hive car's input leads a tick, pads swept by the
+  state set count into the starting tank, `RB_FORCE_ALIGN`. Tools: `regime_bias.py`,
+  `two_wheel_errors.py`, `touchdown_errors.py`, `duel_report.py`, `gen_duel_fuzz.py`,
+  `gen_air_combo.py`, `gen_ceiling.py`. Random drives 105 to 121 uu mean (median 25 to 58 uu);
+  duels held out: total 15514 -> 11900 uu with the new bump rules.
+
 - 2026-10-08 (parity plan, PRs #275 to #291; evidence in
   [FIDELITY-SCOREBOARD.md](./research/FIDELITY-SCOREBOARD.md)): `RB-PHYSICS-001-FR-149`
   (boost pads, fitted rule, ADR-0072; test point re-fitted to 0.6 of the tick),
