@@ -369,6 +369,14 @@ Rig artifacts to keep out of the physics:
    `RB_FORCE_ALIGN=lag,offset` forces one (`0,0` is the honest one where a throttle onset
    shows the timing).
 
+### Match flow probe
+
+`target/release/rb_match_log.exe [--out FILE] [--seconds N] [--goal-after S] [--goals N]` starts a real
+(not freeplay) match with a Psyonix bot per team and writes one JSON line per game packet: frame, match
+phase, score, clock, pads active, ball and cars. With `--goals N` it sets the ball into alternating goals
+S seconds after each kickoff is live, so a few minutes record N goals, replays and kickoffs. The game must be
+up as for `rb_run_tapes`. Findings: FR-160 and RB-RESEARCH-O024.
+
 ## Scoring
 
 `rb-verify --scenario scenarios/<name>.json --against <capture> [every]`

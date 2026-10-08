@@ -146,6 +146,10 @@ the net's behaviour on a goal. Each needs its own recording; the capture
 plugin already sees the game state. Do after A to C, since they matter less
 to a bot environment than to a full match.
 
+**Started 2026-10-08** (FR-160, ADR-0082, O024): goal line, GoalScored/Replay/Countdown/Kickoff phases,
+kickoff reset and held ball, measured with `rb_match_log` on a real match. Open: clock and overtime, the
+first kickoff's intro, random slot choice, the net after a goal.
+
 ### F. Measure the game's own spread (done 2026-10-07)
 
 Result: spread 0.0 uu mean on 23 of 24 tapes (see section 1); tool

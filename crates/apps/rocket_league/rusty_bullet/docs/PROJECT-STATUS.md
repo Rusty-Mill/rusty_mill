@@ -43,6 +43,10 @@ version: `a245d35`).
 
 ## Recently completed
 
+- 2026-10-08 (match flow, workstream E): `RB-PHYSICS-001-FR-160` (ADR-0082): `Env::enable_match_flow` with goal
+  detection, a 3 s GoalScored, 9 s frozen Replay, 4 s Countdown with the field reset and a held ball, and a
+  Kickoff until the first touch, all measured on a real match with the new `rb_match_log` probe (O024).
+
 - 2026-10-08 (autonomous run, PRs #292 to #306): `RB-PHYSICS-001-FR-154` (raw throttle with fewer
   than three wheels down), `FR-156` (no air throttle while a wheel touches, ADR-0078), `FR-157` (ground
   boost acceleration while any wheel touches, ADR-0079), `FR-158` (the bump nose test by the other car's
