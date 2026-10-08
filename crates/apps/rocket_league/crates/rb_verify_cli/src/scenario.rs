@@ -39,6 +39,12 @@ const START_MATCH_RADIUS: f32 = 5.0;
 /// tick or two to appear in the capture).
 const MAX_LAG_TICKS: usize = 3;
 
+/// The cars after the first of a hivemind scenario (`rb_tape_hive`, one process playing every
+/// car's tape) get their input in the game one tick before the first car's: with the second
+/// car's recorded input read one tick later the port matches a boosted straight run to 0.3 uu
+/// (`duel_870`: 54.3 against 54.0, where the same input a tick earlier led by 6.6 uu).
+const HIVE_INPUT_LEAD: usize = 1;
+
 /// Start speed (uu/s) above which the recording is not lagged against the port.
 const FAST_START_SPEED: f32 = 300.0;
 
@@ -513,7 +519,11 @@ pub fn compare_scenario_recorded(
             .map(|tick| {
                 filled
                     .iter()
-                    .map(|car| car[(tick + lag + offset).min(limit)])
+                    .enumerate()
+                    .map(|(index, car)| {
+                        let lead = if index > 0 { HIVE_INPUT_LEAD } else { 0 };
+                        car[(tick + lag + offset + lead).min(limit)]
+                    })
                     .collect()
             })
             .collect();
@@ -897,9 +907,15 @@ mod tests {
         let comparison = compare_scenario(&sc, &off).unwrap();
         assert!((comparison.max_other_error(0) - 40.0).abs() < 1e-3);
         assert_eq!(comparison.max_position_error(), 0.0);
-        // The recorded-input replay reads each car's own input.
+        // The recorded-input replay reads each car's own input; the second car's is read a
+        // tick later (`HIVE_INPUT_LEAD`), which a fake capture built without the lead sees
+        // as a small difference.
         let replay = compare_scenario_recorded(&sc, &capture).unwrap();
-        assert_eq!(replay.max_other_error(0), 0.0);
+        assert!(
+            replay.max_other_error(0) < 2.0,
+            "{}",
+            replay.max_other_error(0)
+        );
     }
 
     /// `RB-VERIFY-003-FR-015`: a ball-only scenario (the car stands still) is
