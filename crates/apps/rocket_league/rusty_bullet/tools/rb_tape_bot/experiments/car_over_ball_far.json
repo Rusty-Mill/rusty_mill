@@ -1,0 +1,45 @@
+{
+  "name": "car_over_ball_far: car_over_ball started 0.25 s earlier on its ballistic path (O011 check)",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      414.96750000000003,
+      565.0050000000001,
+      54.719999999999956
+    ],
+    "rotation": [
+      -0.0095,
+      -2.2569,
+      0.0
+    ],
+    "velocity": [
+      -1348.0900000000004,
+      -1646.4400000000003,
+      483.09000000000003
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      0,
+      93.14
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 270,
+      "throttle": 1
+    }
+  ]
+}

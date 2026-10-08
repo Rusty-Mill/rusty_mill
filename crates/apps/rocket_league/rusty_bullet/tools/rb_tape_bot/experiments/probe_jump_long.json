@@ -1,0 +1,48 @@
+{
+  "name": "probe_jump_long: jump held 60 ticks (past the 0.2 s hold limit)",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      0,
+      -2000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 60,
+      "jump": true
+    },
+    {
+      "ticks": 100
+    }
+  ]
+}

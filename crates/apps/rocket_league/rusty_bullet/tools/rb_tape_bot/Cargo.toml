@@ -1,0 +1,18 @@
+# Standalone package, deliberately outside the root workspace: the `rlbot`
+# dependency (and its transitive crates) must not enter the workspace
+# build, CI or `rb_domain`. See docs/research/BOT-CAPTURE-PLAN.md.
+[package]
+name = "rb_tape_bot"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+# Scenario files, shared with `rb-verify --scenario` (workspace crate).
+rb_scenario = { path = "../../crates/rb_scenario" }
+# The only maintained Rust client for the RLBot v5 socket API (MIT);
+# hand-rolling a FlatBuffers client is worse.
+rlbot = "0.6.0"

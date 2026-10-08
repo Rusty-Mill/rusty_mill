@@ -1,0 +1,44 @@
+{
+  "name": "probe_ball_roll: ball rolling on the floor at 1500 uu/s",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      -3500,
+      -4000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      0,
+      93.15
+    ],
+    "velocity": [
+      1500,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 420
+    }
+  ]
+}

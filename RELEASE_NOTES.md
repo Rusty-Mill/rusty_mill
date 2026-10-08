@@ -18,6 +18,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `rusty_bbp::FsStore`, a file-backed store with one `fsync`ed JSON line per committed batch, crash truncation on open, revision-checked append and digest-verified blobs via `rusty_atomic_file`. Stage-2 exit criteria from the implementation plan are tests: reopen, crash mid-batch, conflict, blob consistency.
 - **Changed:** `Store::blob_get` returns `Vec<u8>`; `StoreError::Backend` added.
 - **Known limitation:** no directory lock; one writer per data directory is the host's job. Blob garbage collection and retention are not implemented.
+## 2026-10-08 - rusty_bullet imported as crates/apps/rocket_league (pending review)
+
+- **Added:** `crates/apps/rocket_league/` (ADR-0008) with `rb_domain`, `rb_env`, `rb_physics_bullet`, `rb_replay_ingest`, `rb_capture_ingest`, `rb_scenario`, `rb_verify_cli` and the product's docs, BakkesMod plugin and tape-bot tooling. Full history preserved via `git filter-repo` + merge (SHAs differ from `baileyrd/rusty_bullet`; map in the PR).
+- **Changed:** `Cargo.lock` gains 20 packages, no existing entry changes. `boxcars` is held on one 0.11.x so `subtr-actor ~1.2` and `rb_replay_ingest` share a `Replay` type.
+- **Known limitation:** `tools/rb_tape_bot` is excluded from the workspace (own lockfile, external `rlbot` client). RLEvalSystem is a separate follow-up import; replays and corpora stay out of git.
 
 ---
 
