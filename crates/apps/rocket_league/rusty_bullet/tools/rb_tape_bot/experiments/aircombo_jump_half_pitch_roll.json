@@ -1,0 +1,51 @@
+{
+  "name": "aircombo_jump_half_pitch_roll: level at z = 1000, pitch -0.5 yaw 0 roll -0.5",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      0,
+      17
+    ],
+    "rotation": [
+      0,
+      0,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 3,
+      "jump": true
+    },
+    {
+      "ticks": 120,
+      "pitch": -0.5,
+      "yaw": 0,
+      "roll": -0.5
+    }
+  ]
+}

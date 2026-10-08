@@ -1,0 +1,44 @@
+{
+  "name": "ceil_60: nose 60 degrees up, 700 uu/s along +y and 1200 up, no input",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -1500,
+      1300
+    ],
+    "rotation": [
+      1.0471975511965976,
+      1.5707963267948966,
+      0
+    ],
+    "velocity": [
+      0,
+      700,
+      1200
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 300
+    }
+  ]
+}

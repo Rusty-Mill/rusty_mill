@@ -1,0 +1,44 @@
+{
+  "name": "probe_ball_ceiling: ball up into the ceiling",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      -3500,
+      -4000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      0,
+      1500
+    ],
+    "velocity": [
+      0,
+      0,
+      3000
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 360
+    }
+  ]
+}

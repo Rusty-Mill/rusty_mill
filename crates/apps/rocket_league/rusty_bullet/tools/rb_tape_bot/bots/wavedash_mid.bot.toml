@@ -1,0 +1,23 @@
+#:schema https://rlbot.org/schemas/agent.json
+# Generated: one bot entry per scenario, so the RLBot GUI can pick the tape
+# without editing bot.toml between runs. Same binary, same agent id; only
+# the environment differs. Regenerate with the snippet in README "Running".
+# run_command is a TOML literal string: cmd.exe needs backslashes and a
+# basic string would treat them as escapes.
+
+[settings]
+name = "RB Tape: wavedash_mid"
+agent_id = "rusty_bullet/tape_bot"
+root_dir = ".."
+run_command = 'target\release\rb_tape_bot.exe'
+run_command_linux = "target/release/rb_tape_bot"
+hivemind = false
+
+[settings.environment]
+RB_TAPE = "scenarios/wavedash_mid.json"
+
+[details]
+description = "wavedash (mid): nose-up car falling at 900 uu/s forward, forward flip 19 ticks in (0.16 s), as the wheels reach the floor; a late enough flip lands with its speed (the port predicts about 1350 uu/s), an early one hops"
+developer = "rusty_bullet"
+language = "rust"
+tags = []

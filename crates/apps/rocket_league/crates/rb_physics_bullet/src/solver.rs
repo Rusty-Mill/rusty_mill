@@ -1,0 +1,2732 @@
+//! Sequential-impulse contact solver, ported from
+//! `bullet3/src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp`
+//! (zlib license — see `THIRD_PARTY_NOTICES.md`). Two paths:
+//! - `resolve_contacts`: one dynamic body (sphere or box, via `RigidBody`'s
+//!   general 3x3 inverse inertia tensor — see `body.rs`) against one static
+//!   body's contact manifold (1 to 4 points depending on shape/orientation)
+//!   — the static body is identified only by its restitution/friction, so
+//!   this same path serves a `StaticPlane` and, since
+//!   `RB-PHYSICS-001-FR-020`, a `StaticQuarterPipe` fillet equally.
+//! - `resolve_contacts_between`: two dynamic bodies against each other's
+//!   contact manifold (1 point for sphere-vs-box or an edge-edge box
+//!   contact, up to 4 for a box-vs-box face contact — see `collision`).
+//!   This is the generic two-body path Bullet's real solver always runs
+//!   (every constraint row carries both bodies' mass/inertia
+//!   contributions); `resolve_contacts` only got away with a one-body-only
+//!   version because a static plane's side of that math is always zero.
+//! - `resolve_dynamic_manifolds` (`RB-PHYSICS-001-FR-030`): every
+//!   dynamic-vs-dynamic manifold in the scene at once, sharing one
+//!   `DeltaVelocity` accumulator per body index across every manifold that
+//!   body takes part in — the combined multi-body solve
+//!   `resolve_contacts_between` alone can't give a body touching two others
+//!   in the same step (see its own doc comment).
+//!
+//! Since `RB-PHYSICS-001-FR-034`, every contact's normal row also runs
+//! **split impulse** (Bullet's default, `m_splitImpulse = true`): a second,
+//! entirely separate "push" pseudo-velocity accumulator
+//! (`resolve_push_row`/`resolve_two_body_push_row`) is solved alongside the
+//! real one, fed only by the contact's own positional (penetration/ERP)
+//! error — never its velocity/restitution error, which stays on the real
+//! channel alone. After a manifold's `SOLVER_ITERATIONS` finish, the real
+//! delta is applied to the body's velocity exactly as before, and the push
+//! delta is applied directly to the body's position/orientation via
+//! `integrate::integrate_transform` (mirroring Bullet's own
+//! `btSolverBody::writebackVelocity`, which does the identical thing) —
+//! deep-penetration correction no longer adds spurious kinetic energy to
+//! the velocity restitution/friction actually see. See each function's own
+//! doc comment for exactly where this happens.
+//!
+//! Since `RB-PHYSICS-001-FR-035`, `resolve_dynamic_manifolds` also
+//! **warm-starts** each manifold's rows from a `ContactCache` the caller
+//! owns and passes back in every call: each contact's converged real-channel
+//! impulse is matched to this call's nearest same-position contact and
+//! pre-applied to that manifold's `DeltaVelocity` before iterating —
+//! mirroring Bullet's own `SOLVER_USE_WARMSTARTING` — so a manifold
+//! under-converged at this port's fixed `SOLVER_ITERATIONS` budget (see
+//! `RB-PHYSICS-001-FR-030`'s own extreme-mass-ratio example) gets
+//! measurably closer to the true answer call over call, instead of
+//! restarting from zero every time. `resolve_contacts`/
+//! `resolve_contacts_between` don't take a `ContactCache` yet — see
+//! `resolve_dynamic_manifolds`'s own doc comment and `RB-PHYSICS-001-FR-035`'s
+//! Non-goals for why.
+//!
+//! Deliberate, documented deviations from Bullet's actual solver (tracked
+//! as open follow-up work in `RB-PHYSICS-001`, not silently assumed away):
+//! - **No SIMD.** Scalar translation of the SSE2/SSE4/FMA3 code paths —
+//!   this is a from-scratch Rust port, not a binding (see ADR-0004), and
+//!   correctness came before micro-optimization for v0.
+//! - **No warm-starting for `resolve_contacts`/`resolve_contacts_between`.**
+//!   `resolve_dynamic_manifolds` gained warm-starting in
+//!   `RB-PHYSICS-001-FR-035` (see above); the other two paths still
+//!   re-derive every contact's impulses from zero each call — a difference
+//!   in *convergence speed*, not in what they converge to (projected
+//!   Gauss-Seidel reaches the same fixed point regardless of starting
+//!   impulse, given enough iterations, and this port's fixed
+//!   `SOLVER_ITERATIONS` already fully converges every one-body/two-body
+//!   scenario this crate tests — see `RB-PHYSICS-001-FR-035`'s own
+//!   Non-goals).
+//! - **Sleeping is now implemented** (`RB-PHYSICS-001-FR-037`,
+//!   `body::RigidBody::update_sleep_state`/`wake`), fixing the different
+//!   symptom warm-starting alone couldn't: a *bouncy* resting contact
+//!   (restitution > 0) used to never actually settle, since each frame's
+//!   fresh gravity-induced closing velocity was solved as a new "impact"
+//!   and restitution bounced it back up indefinitely — warm-starting only
+//!   converged that same wrong-looking bounce faster, it never stopped it
+//!   from recurring, since nothing about where the solver's iteration
+//!   starts changes what triggers it each frame. Sleeping fixes it by a
+//!   different mechanism entirely, outside the solver's own iteration:
+//!   once a body's velocity has stayed below both sleep thresholds for
+//!   long enough, its velocity is forcibly zeroed every subsequent step
+//!   instead of being left to a fresh solve, freezing its position for
+//!   real. An inelastic resting contact (restitution 0) already settled
+//!   fine even before this (see `world::tests::resting_ball_stays_at_rest`)
+//!   — sleeping's own value is specifically the bouncy case.
+//! - **`resolve_dynamic_manifolds`'s own extreme-mass-ratio "sandwiched"
+//!   case (`RB-PHYSICS-001-FR-030`) still doesn't fully converge within one
+//!   call's fixed `SOLVER_ITERATIONS`**, even after `RB-PHYSICS-001-FR-041`'s
+//!   own per-body `1 / k` impulse-scale fix (see that function's doc
+//!   comment) narrowed the gap considerably (measured directly by its own
+//!   tests) — `RB-PHYSICS-001-FR-041` investigated raising
+//!   `SOLVER_ITERATIONS` itself and a naive global over-relaxation factor as
+//!   alternatives and found neither adoptable without real recorded data
+//!   (the former is a real added per-step cost with no data yet to justify
+//!   it; the latter provably diverges for this exact case). Full
+//!   convergence remains an open item, tracked in `RB-PHYSICS-001`.
+//! - **Restitution/friction combine mode**: average of the two surfaces'
+//!   coefficients (`(a + b) * 0.5`). `RB-PHYSICS-001-FR-043` fetched and read
+//!   Bullet's actual `btManifoldResult::calculateCombinedRestitution`/
+//!   `calculateCombinedFriction` reference source directly and found this
+//!   spec's own prior claim about Bullet's default (`btMax`) was wrong: the
+//!   real default for both is an unclamped **product** (`a * b`; friction's
+//!   own version then clamps the result to `[-10, 10]`), with no `max` mode
+//!   anywhere in the reference and no per-pair combine-mode override short
+//!   of a custom `gContactAddedCallback`. This port keeps average rather
+//!   than switching to match the now-correctly-identified reference,
+//!   because product has a real, documented drawback average doesn't:
+//!   two surfaces sharing the same coefficient no longer combine back to
+//!   that same coefficient (e.g. `0.5 * 0.5 == 0.25`, not `0.5`), which
+//!   matters for this port specifically since most bodies currently share
+//!   the same uncalibrated placeholder coefficient (see `body.rs`'s
+//!   `Default` impls) — average preserves that identity, product doesn't.
+//!   Which formula (if either) actually matches real Rocket League still
+//!   needs real recorded ball/ground behavior to calibrate
+//!   (`RB-VERIFY-001`/`RB-VERIFY-002` data) — this remains an open item in
+//!   `RB-PHYSICS-001`, not asserted as settled; only the reference-fact
+//!   claim and this port's own justification for diverging from it changed.
+//! - **Friction-direction selection is now velocity-aligned**
+//!   (`RB-PHYSICS-001-FR-049`, closing the divergence
+//!   `RB-PHYSICS-001-FR-048` found and left open). `RB-PHYSICS-001-FR-048`
+//!   fetched and read Bullet's real
+//!   `btSequentialImpulseConstraintSolver::convertContact` directly and
+//!   found this crate's own `setup_rows` always derived both friction
+//!   directions from `plane_space(&contact.normal)` — a fixed,
+//!   velocity-independent orthonormal basis of the contact normal's
+//!   tangent plane — while real Bullet's actual default derives friction
+//!   direction 1 from the tangential component of the *current relative
+//!   sliding velocity itself* (`cp.m_lateralFrictionDir1 = vel - normal *
+//!   rel_vel`, normalized), falling back to `btPlaneSpace1`'s own fixed
+//!   basis only when that tangential velocity is negligible
+//!   (`lat_rel_vel <= SIMD_EPSILON`). This mattered physically, not just
+//!   cosmetically: each friction row is independently clamped to
+//!   `[-mu * N, +mu * N]`, so two *fixed* orthogonal rows approximate the
+//!   true circular friction cone with a square in tangent space — for a
+//!   body sliding along neither fixed axis, up to `sqrt(2)` times the
+//!   correct friction magnitude was achievable at the square's diagonal.
+//!   `RB-PHYSICS-001-FR-049` implements `friction_directions` (see its own
+//!   doc comment) to reproduce Bullet's real velocity-aligned selection —
+//!   direction 1 now aligns with the actual slide direction, keeping
+//!   direction 2 orthogonal to it (so it naturally solves near zero) and
+//!   letting direction 1 alone reproduce the textbook
+//!   single-direction-sliding friction result exactly, with the same
+//!   degenerate-velocity fallback to `plane_space` real Bullet itself uses
+//!   (plus one additional, empirically-found fallback case — a
+//!   catastrophic-cancellation edge case in the near-head-on-collision
+//!   direction computation that real Bullet's own unguarded `normalize()`
+//!   doesn't need to handle but this crate's own panic-free
+//!   `Vec3::normalize()` does — see `friction_direction`'s own doc
+//!   comment). Confirmed the fix makes friction deceleration isotropic
+//!   (independent of which way a body happens to be sliding in world
+//!   space) via a dedicated regression test that fails under the old
+//!   fixed-basis behavior. Since `RB-PHYSICS-001-FR-110` there is only
+//!   direction 1 (`friction_direction`): Bullet adds direction 2 only
+//!   under `SOLVER_USE_2_FRICTION_DIRECTIONS`, which its default mode, and
+//!   RocketSim, leave off.
+
+use crate::body::RigidBody;
+use crate::collision::Contact;
+use crate::integrate;
+use rb_domain::Vec3;
+use std::collections::HashMap;
+
+/// `btContactSolverInfo`'s defaults this port fixes rather than exposes as
+/// config yet (bullet3/src/BulletDynamics/ConstraintSolver/btContactSolverInfo.h).
+/// Confirmed byte-for-byte against real `btContactSolverInfoData`'s own
+/// constructor (`RB-PHYSICS-001-FR-048`): `m_erp2 = 0.2`, `m_globalCfm = 0.`,
+/// `m_linearSlop = 0.`, `m_restitutionVelocityThreshold = 0.2f` (Bullet
+/// units; scaled to uu below),
+/// `m_sor = 1.`, `m_numIterations = 10` all match exactly.
+const ERP2: f32 = 0.2;
+const GLOBAL_CFM: f32 = 0.0;
+const LINEAR_SLOP: f32 = 0.0;
+/// Bullet's `m_restitutionVelocityThreshold` is 0.2 in Bullet's own units
+/// (m/s). This port works in Unreal units, and RocketSim runs Bullet at
+/// `BT_TO_UU = 50` uu per Bullet unit (`src/BulletLink.h`), so the same
+/// threshold here is 0.2 * 50 = 10 uu/s. `RB-PHYSICS-001-FR-079`: copying
+/// 0.2 verbatim made every gravity touchdown (~5-11 uu/s per tick) bounce
+/// at full restitution, so a driving car hopped off the floor and counted
+/// as grounded only one tick in three.
+const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.2 * BULLET_TO_UU;
+/// Unreal units per Bullet length unit, matching RocketSim's `BT_TO_UU`.
+/// Any Bullet default that carries a length unit must be scaled by this.
+const BULLET_TO_UU: f32 = 50.0;
+const RELAXATION: f32 = 1.0;
+const SOLVER_ITERATIONS: u32 = 10;
+const UPPER_LIMIT: f32 = 1e10;
+
+/// This port's own combine mode (average) rather than Bullet's real default
+/// (an unclamped product) — see the module doc comment's
+/// "Restitution/friction combine mode" bullet (`RB-PHYSICS-001-FR-043`) for
+/// why. Preserves the identity `combine(a, a) == a`, which the reference's
+/// own product does not.
+///
+/// `RB-PHYSICS-001-FR-063` found this whole per-body-combine *model* — not
+/// just which formula it uses — doesn't match real Rocket League's own
+/// gameplay layer at all: RocketSim's own `RLConst.h` hardcodes distinct
+/// restitution constants per *contact-pair type*, overriding whatever a
+/// generic combine of the two bodies' own properties would produce —
+/// `CARWORLD_COLLISION_RESTITUTION = 0.3f` (car vs. any static geometry),
+/// `CARCAR_COLLISION_RESTITUTION = 0.1f`, and, most strikingly,
+/// `CARBALL_COLLISION_RESTITUTION = 0.0f` — a car hitting the ball has
+/// *zero* restitution-driven bounce in real Rocket League, regardless of
+/// either body's own material, a sharp contrast with this port's own
+/// `combine_restitution(ball.restitution, car.restitution)` (currently
+/// averaging `RB-PHYSICS-001-FR-062`'s confirmed real `0.6` against the
+/// car's still-generic `0.5`, a real `~0.55` bounce this specific pairing
+/// shouldn't have at all per the reference). Not adopted here — see that
+/// requirement's own Non-goals for why a per-pair override doesn't fit
+/// this function's own per-body-argument signature.
+fn combine_restitution(a: f32, b: f32) -> f32 {
+    (a + b) * 0.5
+}
+
+/// See `combine_restitution`'s own doc comment — same rationale, same
+/// identity-preservation property, same `RB-PHYSICS-001-FR-043` finding.
+/// Since `RB-PHYSICS-001-FR-053`, also clamps the result to `[-10.0, 10.0]`
+/// — real Bullet's own `calculateCombinedFriction` applies this exact bound
+/// to its own product result (confirmed against real fetched
+/// `btManifoldResult.cpp`), and `RB-PHYSICS-001-FR-043` corrected which
+/// formula the reference uses but never examined this separate clamp.
+/// Inert for every material-property value this crate itself currently
+/// ever sets (all positive placeholders in `0.1..=0.9`, nowhere near
+/// either bound) — but every `RigidBody`/`StaticPlane`/`StaticQuarterPipe`/
+/// `StaticCornerFillet`/`StaticGoalWall`/`StaticBoundedWall`'s own
+/// `friction` field is a public, unvalidated `f32`, so adopting the
+/// reference's own defensive bound costs nothing and closes a genuinely
+/// uninvestigated gap rather than leaving this port silently more
+/// permissive than the reference it's ported from.
+///
+/// `RB-PHYSICS-001-FR-063` found the same per-pair-type override pattern
+/// `combine_restitution`'s own doc comment describes also applies to
+/// friction, and more starkly: `CARWORLD_COLLISION_FRICTION = 0.3f`,
+/// `CARCAR_COLLISION_FRICTION = 0.09f`, and
+/// `CARBALL_COLLISION_FRICTION = 2.0f` — a car-vs-ball friction coefficient
+/// *above* `1.0`, something no combine of two bodies' own per-material
+/// friction values bounded to a sane range could ever produce. The
+/// car-vs-world pair is adopted through `StaticMaterial::Pair`
+/// (`RB-PHYSICS-001-FR-100`); the dynamic pairs are not yet.
+fn combine_friction(a: f32, b: f32) -> f32 {
+    ((a + b) * 0.5).clamp(-10.0, 10.0)
+}
+
+/// Port of `btSequentialImpulseConstraintSolver::restitutionCurve`, with its
+/// own call site's clamp folded in. Confirmed against real source
+/// (`RB-PHYSICS-001-FR-048`): the reference's own `restitutionCurve` returns
+/// the raw `restitution * -rel_vel` unclamped (it *can* be negative, e.g. a
+/// contact still registered while already separating faster than
+/// `velocity_threshold`) — but its one caller, `setupContactConstraint`,
+/// immediately clamps a non-positive result to exactly `0.` before using it
+/// (`if (restitution <= 0.) restitution = 0.f;`) before it ever reaches
+/// `velocityError`. This function's own `.max(0.0)` reproduces that
+/// call-site clamp inline rather than as a separate step — the *value* this
+/// crate's own `setup_rows` ultimately uses is identical either way, so this
+/// is a confirmed-equivalent restructuring, not a divergence.
+fn restitution_curve(rel_vel: f32, restitution: f32, velocity_threshold: f32) -> f32 {
+    if rel_vel.abs() < velocity_threshold {
+        0.0
+    } else {
+        (restitution * -rel_vel).max(0.0)
+    }
+}
+
+/// Port of `btPlaneSpace1`: builds two vectors orthogonal to `n` (and to
+/// each other), used as the two friction directions in the tangent plane.
+/// Confirmed byte-for-byte accurate against real `btPlaneSpace1`
+/// (`RB-PHYSICS-001-FR-048`), including its `|n.z| > 1/sqrt(2)` branch
+/// threshold. Real Bullet only calls this as its own *fallback*, when a
+/// contact's tangential relative velocity is too small to derive a
+/// direction from (or `SOLVER_DISABLE_VELOCITY_DEPENDENT_FRICTION_DIRECTION`
+/// is set) — `friction_directions` (below) now reproduces that same
+/// fallback structure, since `RB-PHYSICS-001-FR-049` (previously this
+/// crate's own `setup_rows` used this function unconditionally, the
+/// deliberately-not-adopted divergence `RB-PHYSICS-001-FR-048` found and
+/// flagged for a dedicated follow-up).
+fn plane_space(n: &Vec3) -> (Vec3, Vec3) {
+    if n.z.abs() > std::f32::consts::FRAC_1_SQRT_2 {
+        let a = n.y * n.y + n.z * n.z;
+        let k = 1.0 / a.sqrt();
+        let p = Vec3::new(0.0, -n.z * k, n.y * k);
+        let q = Vec3::new(a * k, -n.x * p.z, n.x * p.y);
+        (p, q)
+    } else {
+        let a = n.x * n.x + n.y * n.y;
+        let k = 1.0 / a.sqrt();
+        let p = Vec3::new(-n.y * k, n.x * k, 0.0);
+        let q = Vec3::new(-n.z * p.y, n.z * p.x, a * k);
+        (p, q)
+    }
+}
+
+/// The one friction direction for a contact, as real Bullet picks it by
+/// default (`RB-PHYSICS-001-FR-049`, one row since `RB-PHYSICS-001-FR-110`):
+/// the tangential part of the relative sliding velocity
+/// (`relative_velocity` minus its component along `normal`), so the
+/// friction row's `[-mu * N, +mu * N]` clamp acts along the actual slide.
+/// Bullet only adds a second row, `dir1 x normal`, under
+/// `SOLVER_USE_2_FRICTION_DIRECTIONS`, which RocketSim leaves off.
+///
+/// Falls back to `plane_space`'s first axis whenever that direction can't
+/// be trusted: its squared length is at or below `f32::EPSILON` (Bullet's
+/// `SIMD_EPSILON`: no sliding to align with), or — found empirically, not
+/// something Bullet's unguarded `normalize()` handles — the near-head-on
+/// case where `relative_velocity` is almost entirely along `normal`, whose
+/// tiny residual can pass the length check while its direction is
+/// rounding error close enough to `normal` that it is no tangent at all.
+/// `plane_space` never subtracts two comparable vectors, so it's well
+/// defined for any nonzero `normal` once normalized.
+fn friction_direction(normal: &Vec3, relative_velocity: &Vec3) -> Vec3 {
+    let rel_vel = normal.dot(relative_velocity);
+    let tangential = *relative_velocity - *normal * rel_vel;
+    if tangential.length_squared() > f32::EPSILON {
+        if let Some(dir) = tangential.normalize() {
+            if dir.cross(normal).normalize().is_some() {
+                return dir;
+            }
+        }
+    }
+    // `plane_space` needs a unit normal; a caller's may not be one (a
+    // combined ball-world normal was an average until FR-119).
+    match normal.normalize() {
+        Some(unit) => plane_space(&unit).0,
+        None => Vec3::new(1.0, 0.0, 0.0),
+    }
+}
+
+/// One constraint row: a contact normal or a friction direction, solved
+/// with the projected-Gauss-Seidel iteration below. Mirrors the fields of
+/// `btSolverConstraint` this port actually needs.
+struct ConstraintRow {
+    /// World-space direction the impulse acts along (contact normal, or a
+    /// friction tangent).
+    direction: Vec3,
+    /// `direction × rel_pos`, i.e. `m_relpos1CrossNormal` — dotted with
+    /// angular *velocity* to get a point's velocity contribution along
+    /// `direction`.
+    torque_axis: Vec3,
+    /// `inv_inertia * torque_axis`, i.e. `m_angularComponentA` — how much
+    /// angular velocity a unit impulse along `direction` produces.
+    angular_component: Vec3,
+    jac_diag_ab_inv: f32,
+    rhs: f32,
+    /// `RB-PHYSICS-001-FR-034`'s split-impulse penetration term, solved
+    /// entirely separately from `rhs` (see `resolve_push_row`) — zero for a
+    /// friction row (Bullet's own split-impulse penetration resolve only
+    /// ever runs against a contact's normal row).
+    rhs_penetration: f32,
+    cfm: f32,
+    lower_limit: f32,
+    upper_limit: f32,
+    applied_impulse: f32,
+    /// Split impulse's own accumulated push impulse — entirely separate
+    /// scratch state from `applied_impulse`, the same way `rhs_penetration`
+    /// is separate from `rhs`.
+    applied_push_impulse: f32,
+}
+
+fn effective_mass_denom(body: &RigidBody, rel_pos: &Vec3, direction: &Vec3) -> (Vec3, Vec3, f32) {
+    let torque_axis = rel_pos.cross(direction);
+    let angular_component = body.inv_inertia_world().mul_vec3(&torque_axis);
+    let denom = body.inv_mass() + direction.dot(&angular_component.cross(rel_pos));
+    (torque_axis, angular_component, denom)
+}
+
+/// Accumulates velocity change across solver iterations before it's
+/// applied to the body once — matches Bullet's `btSolverBody` separating
+/// "delta" velocity from the pre-solve velocity used to compute `rhs`, so
+/// resolving the normal row before the friction rows within one iteration
+/// doesn't corrupt the `rhs` baseline computed at setup time.
+struct DeltaVelocity {
+    linear: Vec3,
+    angular: Vec3,
+}
+
+impl DeltaVelocity {
+    fn zero() -> DeltaVelocity {
+        DeltaVelocity {
+            linear: Vec3::ZERO,
+            angular: Vec3::ZERO,
+        }
+    }
+}
+
+/// Sets up the normal + two friction constraint rows for one contact,
+/// porting `setupContactConstraint` + `setupFrictionConstraint` (reached via
+/// `addFrictionConstraint`'s own default `desiredVelocity = 0`,
+/// `cfmSlip = 0` arguments — not `setFrictionConstraintImpulse`, a
+/// differently-named, unrelated function that only resets a cached impulse
+/// to zero) against a static body B (the plane), which is why every
+/// `rb1`-branch in the original is simply the zero case here.
+///
+/// Confirmed byte-for-byte accurate against both real functions directly
+/// (`RB-PHYSICS-001-FR-048`, matching `RB-PHYSICS-001-FR-036`/`FR-042`/
+/// `FR-043`/`FR-045`/`FR-046`/`FR-047`'s own method): the normal row's
+/// `velocity_error`/`positional_error` split on `gap_with_slop > 0.0` here
+/// matches (since `RB-PHYSICS-001-FR-108`, RocketSim's modified)
+/// `setupContactConstraint`'s own identical split on
+/// `penetration > 0` exactly (`penetration = cp.getDistance() +
+/// m_linearSlop` is exactly this crate's own `gap_with_slop`, given
+/// `Contact::penetration_depth = -getDistance()` — see `Contact`'s own doc
+/// comment), and the friction row's `rhs: -rel_vel * jac_diag_ab_inv`
+/// matches `setupFrictionConstraint`'s own `rhs = (desiredVelocity -
+/// rel_vel) * jacDiagABInv` exactly at the real default `desiredVelocity =
+/// 0` (this crate has no conveyor-belt/friction-anchor feature, so this is
+/// its only reachable case).
+fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 2] {
+    setup_rows_with_erp(body, contact, dt, ERP2)
+}
+
+/// `setup_rows` with the contact's error reduction parameter (`m_erp2`,
+/// or a point's own `m_contactERP`) given: RocketSim's ball-world push
+/// rows use its arena-wide 0.8 (`RB-PHYSICS-001-FR-118`).
+fn setup_rows_with_erp(
+    body: &RigidBody,
+    contact: &Contact,
+    dt: f32,
+    erp: f32,
+) -> [ConstraintRow; 2] {
+    let rel_pos = contact.point_on_a() - body.position;
+    let inv_dt = 1.0 / dt;
+
+    let (normal_torque_axis, normal_angular_component, denom) =
+        effective_mass_denom(body, &rel_pos, &contact.normal);
+    let jac_diag_ab_inv = RELAXATION / (denom + GLOBAL_CFM);
+
+    let relative_velocity = body.velocity_at_point(&rel_pos);
+    let rel_vel = contact.normal.dot(&relative_velocity);
+    let restitution = restitution_curve(rel_vel, body.restitution, RESTITUTION_VELOCITY_THRESHOLD);
+
+    let gap_with_slop = -contact.penetration_depth + LINEAR_SLOP;
+    // RocketSim's Bullet drops vanilla Bullet's speculative
+    // `velocityError -= penetration * invTimeStep` for a contact still
+    // clear of its surface ("it ruins ball bounces at low velocities"), so
+    // such a contact acts as if touching (`RB-PHYSICS-001-FR-108`).
+    let (positional_error, velocity_error) = if gap_with_slop > 0.0 {
+        (0.0, restitution - rel_vel)
+    } else {
+        (-gap_with_slop * erp * inv_dt, restitution - rel_vel)
+    };
+
+    let normal_row = ConstraintRow {
+        direction: contact.normal,
+        torque_axis: normal_torque_axis,
+        angular_component: normal_angular_component,
+        jac_diag_ab_inv,
+        rhs: velocity_error * jac_diag_ab_inv,
+        rhs_penetration: positional_error * jac_diag_ab_inv,
+        cfm: GLOBAL_CFM * jac_diag_ab_inv,
+        lower_limit: 0.0,
+        upper_limit: UPPER_LIMIT,
+        applied_impulse: 0.0,
+        applied_push_impulse: 0.0,
+    };
+
+    let tangent = friction_direction(&contact.normal, &relative_velocity);
+    // Port of `setupFrictionConstraint`: target zero relative velocity
+    // along the tangent direction (Bullet's `desiredVelocity` parameter is
+    // 0 in the default no-conveyor-belt case) — a friction row needs a
+    // nonzero `rhs` to ever apply an impulse; it isn't "no correction".
+    let friction_row = |dir: Vec3| -> ConstraintRow {
+        let (torque_axis, angular_component, denom) = effective_mass_denom(body, &rel_pos, &dir);
+        let jac_diag_ab_inv = RELAXATION / (denom + GLOBAL_CFM);
+        let rel_vel = dir.dot(&body.velocity_at_point(&rel_pos));
+        ConstraintRow {
+            direction: dir,
+            torque_axis,
+            angular_component,
+            jac_diag_ab_inv,
+            rhs: -rel_vel * jac_diag_ab_inv,
+            rhs_penetration: 0.0,
+            cfm: 0.0,
+            lower_limit: 0.0, // recomputed from the normal row's impulse each iteration
+            upper_limit: 0.0,
+            applied_impulse: 0.0,
+            applied_push_impulse: 0.0,
+        }
+    };
+
+    [normal_row, friction_row(tangent)]
+}
+
+/// Port of `resolveSingleConstraintRowGeneric`/`...LowerLimit`: one
+/// projected-Gauss-Seidel update of a single constraint row against the
+/// body's currently-accumulated delta velocity.
+///
+/// Confirmed against real source (`RB-PHYSICS-001-FR-048`): this crate uses
+/// one unified function (checking both `lower_limit` and `upper_limit`) for
+/// every row, where real Bullet actually dispatches to two different
+/// functions — `resolveSingleConstraintRowLowerLimit` (checks only
+/// `m_lowerLimit`, no upper check at all) for the contact/normal row, and
+/// `resolveSingleConstraintRowGeneric` (checks both) for friction rows.
+/// Confirmed this unification changes nothing: the normal row's own
+/// `upper_limit` is `UPPER_LIMIT` (`1e10`, matching real Bullet's own
+/// `m_upperLimit = 1e10f` for that row exactly), astronomically larger than
+/// any impulse a real contact ever produces, so the Generic formula's extra
+/// upper check is unreachable there — the two real functions are otherwise
+/// byte-for-byte identical (both compute `deltaImpulse = rhs -
+/// appliedImpulse * cfm - deltaVelDotN * jacDiagABInv`, then clamp
+/// `appliedImpulse` to the same lower bound the same way), so this is a
+/// confirmed-equivalent unification, not a divergence.
+fn resolve_row(row: &mut ConstraintRow, inv_mass: f32, delta: &mut DeltaVelocity) {
+    let delta_vel_dot_n = row.direction.dot(&delta.linear) + row.torque_axis.dot(&delta.angular);
+
+    let mut delta_impulse = row.rhs - row.applied_impulse * row.cfm;
+    delta_impulse -= delta_vel_dot_n * row.jac_diag_ab_inv;
+
+    let sum = row.applied_impulse + delta_impulse;
+    if sum < row.lower_limit {
+        delta_impulse = row.lower_limit - row.applied_impulse;
+        row.applied_impulse = row.lower_limit;
+    } else if sum > row.upper_limit {
+        delta_impulse = row.upper_limit - row.applied_impulse;
+        row.applied_impulse = row.upper_limit;
+    } else {
+        row.applied_impulse = sum;
+    }
+
+    delta.linear += row.direction * (inv_mass * delta_impulse);
+    delta.angular += row.angular_component * delta_impulse;
+}
+
+/// Split impulse's own push-velocity resolve (`RB-PHYSICS-001-FR-034`) —
+/// structurally identical to `resolve_row`, but reading/writing
+/// `rhs_penetration`/`applied_push_impulse` against a separate `push_delta`
+/// accumulator instead of `rhs`/`applied_impulse`/`delta`, and always
+/// clamped to `[0, UPPER_LIMIT]` regardless of `row.lower_limit`/
+/// `upper_limit` (those two are only ever narrowed for a friction row's
+/// *real* impulse, per-iteration, from that same contact's normal `applied_impulse`
+/// — a friction row's `rhs_penetration` is always `0.0`, so its push
+/// impulse converges to and stays at exactly `0.0` regardless of which
+/// limits this function would use, making the distinction moot in
+/// practice; hardcoding here is simply the clearest way to say that only a
+/// contact's own normal direction ever receives positional correction, the
+/// same restriction Bullet's own split-impulse resolve enforces).
+fn resolve_push_row(row: &mut ConstraintRow, inv_mass: f32, push_delta: &mut DeltaVelocity) {
+    let delta_vel_dot_n =
+        row.direction.dot(&push_delta.linear) + row.torque_axis.dot(&push_delta.angular);
+
+    let mut delta_impulse = row.rhs_penetration - row.applied_push_impulse * row.cfm;
+    delta_impulse -= delta_vel_dot_n * row.jac_diag_ab_inv;
+
+    let sum = row.applied_push_impulse + delta_impulse;
+    if sum < 0.0 {
+        delta_impulse = -row.applied_push_impulse;
+        row.applied_push_impulse = 0.0;
+    } else if sum > UPPER_LIMIT {
+        delta_impulse = UPPER_LIMIT - row.applied_push_impulse;
+        row.applied_push_impulse = UPPER_LIMIT;
+    } else {
+        row.applied_push_impulse = sum;
+    }
+
+    push_delta.linear += row.direction * (inv_mass * delta_impulse);
+    push_delta.angular += row.angular_component * delta_impulse;
+}
+
+/// Applies a split-impulse push delta directly to `body`'s position/
+/// orientation via `integrate::integrate_transform` — mirroring Bullet's
+/// own `btSolverBody::writebackVelocity`, which does the identical thing
+/// (a *second*, independent `integrateTransform` call using the push
+/// velocity instead of the real one) immediately after writing the real
+/// velocity delta back. A zero push delta (the overwhelmingly common case
+/// — every non-penetrating contact contributes nothing to it) is a correct
+/// no-op here, not a special case: `integrate_transform` with zero
+/// linear/angular velocity already returns `position`/`orientation`
+/// unchanged (see `integrate::tests::integrate_transform_with_zero_angular_velocity_keeps_orientation`).
+fn apply_push_delta(body: &mut RigidBody, push_delta: &DeltaVelocity, dt: f32) {
+    let (position, orientation) = integrate::integrate_transform(
+        body.position,
+        body.orientation,
+        push_delta.linear,
+        push_delta.angular,
+        dt,
+    );
+    body.position = position;
+    body.orientation = orientation;
+    body.update_inertia_tensor();
+}
+
+/// Resolves an entire contact manifold (1 to 4 points — a box resting flat
+/// generates up to 4, matching `RB-PHYSICS-001-FR-004`'s multi-contact
+/// requirement; a sphere always generates exactly 1) against one static
+/// body, identified only by its `restitution`/`friction` (its actual shape
+/// — a `StaticPlane` or, since `RB-PHYSICS-001-FR-020`, a
+/// `StaticQuarterPipe` — is irrelevant here: every `Contact`'s normal/point/
+/// depth is already fully resolved by the caller's own narrow-phase test,
+/// so this function never needs the static shape itself, only the two
+/// material properties it combines with `body`'s own). Runs
+/// `SOLVER_ITERATIONS` passes of the sequential impulse solver, each pass
+/// resolving every contact's normal row and then every contact's friction
+/// rows (limits re-derived from that same contact's current normal impulse
+/// — matching Bullet's per-iteration friction reclamping), sharing one
+/// accumulated `DeltaVelocity` across the whole manifold so an earlier
+/// contact's resolution already influences a later contact's `rhs`
+/// baseline within the same iteration — then applies the accumulated
+/// velocity change to `body` once.
+pub fn resolve_contacts(
+    body: &mut RigidBody,
+    static_restitution: f32,
+    static_friction: f32,
+    contacts: &[Contact],
+    dt: f32,
+) {
+    if contacts.is_empty() {
+        return;
+    }
+
+    let combined_restitution = combine_restitution(body.restitution, static_restitution);
+    let combined_friction = combine_friction(body.friction, static_friction);
+
+    let mut effective_body = *body;
+    effective_body.restitution = combined_restitution;
+
+    let mut manifold: Vec<[ConstraintRow; 2]> = contacts
+        .iter()
+        .map(|c| setup_rows(&effective_body, c, dt))
+        .collect();
+    let mut delta = DeltaVelocity::zero();
+    let mut push_delta = DeltaVelocity::zero();
+    let inv_mass = body.inv_mass();
+
+    for _ in 0..SOLVER_ITERATIONS {
+        for rows in &mut manifold {
+            resolve_row(&mut rows[0], inv_mass, &mut delta);
+            resolve_push_row(&mut rows[0], inv_mass, &mut push_delta);
+
+            let friction_limit = combined_friction * rows[0].applied_impulse;
+            rows[1].lower_limit = -friction_limit;
+            rows[1].upper_limit = friction_limit;
+
+            resolve_row(&mut rows[1], inv_mass, &mut delta);
+        }
+    }
+
+    body.linear_velocity += delta.linear;
+    body.angular_velocity += delta.angular;
+    apply_push_delta(body, &push_delta, dt);
+}
+
+/// Resolves every one of `body`'s contact manifolds against *every* static
+/// surface it touches this step together, as one combined solve
+/// (`RB-PHYSICS-001-FR-051`), instead of the old `PhysicsWorld::step`
+/// pattern of one independent `resolve_contacts` call per static shape
+/// (ground, each wall, each curve, each corner fillet, each goal wall, each
+/// bounded wall) — fully resolved and applied before the next shape's setup
+/// even reads `body`'s velocity. `manifolds` is `(static_restitution,
+/// static_friction, contacts)` triples, one per static shape `body`
+/// currently touches; omit a shape from `manifolds` entirely rather than
+/// passing it with an empty `contacts` (an empty manifold would still
+/// allocate a `DeltaVelocity`-touching no-op, the same convention
+/// `resolve_dynamic_manifolds`'s own doc comment already establishes).
+///
+/// Mirrors `resolve_contacts`'s own per-manifold combined-restitution setup
+/// (each manifold group computes its own `combine_restitution`/
+/// `combine_friction` against `body`'s single restitution/friction, since
+/// different static shapes can have different material properties), but
+/// shares one `DeltaVelocity`/push-delta accumulator across every group for
+/// the whole `SOLVER_ITERATIONS` loop — the same "one shared accumulator
+/// instead of independent sequential passes" fix
+/// `resolve_dynamic_manifolds` (`RB-PHYSICS-001-FR-030`) and
+/// `net::NetMesh::step` (`RB-PHYSICS-001-FR-050`) already made for their own
+/// independent-pairwise gaps. See
+/// `tests::resolving_a_two_wall_corner_together_avoids_the_order_dependent_bias_sequential_resolution_has`
+/// for the exact mechanism this closes: a ball wedged into a symmetric
+/// two-wall corner, resolved wall-by-wall sequentially, ends up biased
+/// toward whichever wall was resolved last (a purely arbitrary artifact of
+/// iteration order with no physical basis), where this function lands close
+/// to the true symmetric answer instead.
+pub fn resolve_static_manifolds(
+    body: &mut RigidBody,
+    manifolds: &[(f32, f32, Vec<Contact>)],
+    dt: f32,
+) {
+    if manifolds.is_empty() {
+        return;
+    }
+
+    struct Manifold {
+        combined_friction: f32,
+        rows: Vec<[ConstraintRow; 2]>,
+    }
+
+    let mut solved: Vec<Manifold> = manifolds
+        .iter()
+        .map(|(static_restitution, static_friction, contacts)| {
+            let combined_restitution = combine_restitution(body.restitution, *static_restitution);
+            let combined_friction = combine_friction(body.friction, *static_friction);
+            let mut effective_body = *body;
+            effective_body.restitution = combined_restitution;
+            let rows = contacts
+                .iter()
+                .map(|c| setup_rows(&effective_body, c, dt))
+                .collect();
+            Manifold {
+                combined_friction,
+                rows,
+            }
+        })
+        .collect();
+
+    let mut delta = DeltaVelocity::zero();
+    let mut push_delta = DeltaVelocity::zero();
+    let inv_mass = body.inv_mass();
+
+    for _ in 0..SOLVER_ITERATIONS {
+        for m in &mut solved {
+            for rows in &mut m.rows {
+                resolve_row(&mut rows[0], inv_mass, &mut delta);
+                resolve_push_row(&mut rows[0], inv_mass, &mut push_delta);
+
+                let friction_limit = m.combined_friction * rows[0].applied_impulse;
+                rows[1].lower_limit = -friction_limit;
+                rows[1].upper_limit = friction_limit;
+
+                resolve_row(&mut rows[1], inv_mass, &mut delta);
+            }
+        }
+    }
+
+    body.linear_velocity += delta.linear;
+    body.angular_velocity += delta.angular;
+    apply_push_delta(body, &push_delta, dt);
+}
+
+/// Like `ConstraintRow`, but carrying both bodies' torque axis/angular
+/// component (`_a`/`_b`) instead of assuming one side is static.
+struct TwoBodyRow {
+    direction: Vec3,
+    torque_axis_a: Vec3,
+    angular_component_a: Vec3,
+    torque_axis_b: Vec3,
+    angular_component_b: Vec3,
+    jac_diag_ab_inv: f32,
+    rhs: f32,
+    /// `RB-PHYSICS-001-FR-034`'s split-impulse penetration term — see
+    /// `ConstraintRow::rhs_penetration`, whose reasoning applies unchanged
+    /// here (zero for a friction row).
+    rhs_penetration: f32,
+    cfm: f32,
+    lower_limit: f32,
+    upper_limit: f32,
+    applied_impulse: f32,
+    /// See `ConstraintRow::applied_push_impulse`.
+    applied_push_impulse: f32,
+}
+
+/// Two-body version of `effective_mass_denom`: each body contributes its
+/// own `inv_mass + direction · (angular_component × rel_pos)` term to the
+/// shared denominator, matching Bullet's generic (both-sides-dynamic)
+/// constraint setup.
+#[allow(clippy::type_complexity)]
+fn effective_mass_denom_two_body(
+    a: &RigidBody,
+    b: &RigidBody,
+    rel_pos_a: &Vec3,
+    rel_pos_b: &Vec3,
+    direction: &Vec3,
+) -> (Vec3, Vec3, Vec3, Vec3, f32) {
+    let torque_axis_a = rel_pos_a.cross(direction);
+    let angular_component_a = a.inv_inertia_world().mul_vec3(&torque_axis_a);
+    let torque_axis_b = rel_pos_b.cross(direction);
+    let angular_component_b = b.inv_inertia_world().mul_vec3(&torque_axis_b);
+    let denom = a.inv_mass()
+        + b.inv_mass()
+        + direction.dot(&angular_component_a.cross(rel_pos_a))
+        + direction.dot(&angular_component_b.cross(rel_pos_b));
+    (
+        torque_axis_a,
+        angular_component_a,
+        torque_axis_b,
+        angular_component_b,
+        denom,
+    )
+}
+
+/// Two-body version of `setup_rows`. `combined_restitution` is passed in
+/// explicitly (rather than stashed on a copied body, as `resolve_contacts`
+/// does) since here there's no single "the body" to stash it on.
+fn setup_two_body_rows(
+    a: &RigidBody,
+    b: &RigidBody,
+    contact: &Contact,
+    combined_restitution: f32,
+    dt: f32,
+) -> [TwoBodyRow; 2] {
+    // Bullet's `rel_pos1`/`rel_pos2` run to each body's own contact point,
+    // A's on A's surface (`RB-PHYSICS-001-FR-130`).
+    let rel_pos_a = contact.point_on_a() - a.position;
+    let rel_pos_b = contact.point - b.position;
+    let inv_dt = 1.0 / dt;
+
+    let relative_velocity = a.velocity_at_point(&rel_pos_a) - b.velocity_at_point(&rel_pos_b);
+    let relative_velocity_along = |dir: &Vec3| -> f32 { dir.dot(&relative_velocity) };
+
+    let (
+        normal_torque_axis_a,
+        normal_angular_component_a,
+        normal_torque_axis_b,
+        normal_angular_component_b,
+        denom,
+    ) = effective_mass_denom_two_body(a, b, &rel_pos_a, &rel_pos_b, &contact.normal);
+    let jac_diag_ab_inv = RELAXATION / (denom + GLOBAL_CFM);
+
+    let rel_vel = relative_velocity_along(&contact.normal);
+    let restitution = restitution_curve(
+        rel_vel,
+        combined_restitution,
+        RESTITUTION_VELOCITY_THRESHOLD,
+    );
+
+    let gap_with_slop = -contact.penetration_depth + LINEAR_SLOP;
+    // RocketSim's Bullet drops vanilla Bullet's speculative
+    // `velocityError -= penetration * invTimeStep` for a contact still
+    // clear of its surface ("it ruins ball bounces at low velocities"), so
+    // such a contact acts as if touching (`RB-PHYSICS-001-FR-108`).
+    let (positional_error, velocity_error) = if gap_with_slop > 0.0 {
+        (0.0, restitution - rel_vel)
+    } else {
+        (-gap_with_slop * ERP2 * inv_dt, restitution - rel_vel)
+    };
+
+    let normal_row = TwoBodyRow {
+        direction: contact.normal,
+        torque_axis_a: normal_torque_axis_a,
+        angular_component_a: normal_angular_component_a,
+        torque_axis_b: normal_torque_axis_b,
+        angular_component_b: normal_angular_component_b,
+        jac_diag_ab_inv,
+        rhs: velocity_error * jac_diag_ab_inv,
+        rhs_penetration: positional_error * jac_diag_ab_inv,
+        cfm: GLOBAL_CFM * jac_diag_ab_inv,
+        lower_limit: 0.0,
+        upper_limit: UPPER_LIMIT,
+        applied_impulse: 0.0,
+        applied_push_impulse: 0.0,
+    };
+
+    let tangent = friction_direction(&contact.normal, &relative_velocity);
+    let friction_row = |dir: Vec3| -> TwoBodyRow {
+        let (torque_axis_a, angular_component_a, torque_axis_b, angular_component_b, denom) =
+            effective_mass_denom_two_body(a, b, &rel_pos_a, &rel_pos_b, &dir);
+        let jac_diag_ab_inv = RELAXATION / (denom + GLOBAL_CFM);
+        let rel_vel = relative_velocity_along(&dir);
+        TwoBodyRow {
+            direction: dir,
+            torque_axis_a,
+            angular_component_a,
+            torque_axis_b,
+            angular_component_b,
+            jac_diag_ab_inv,
+            rhs: -rel_vel * jac_diag_ab_inv,
+            rhs_penetration: 0.0,
+            cfm: 0.0,
+            lower_limit: 0.0,
+            upper_limit: 0.0,
+            applied_impulse: 0.0,
+            applied_push_impulse: 0.0,
+        }
+    };
+
+    [normal_row, friction_row(tangent)]
+}
+
+/// Two-body version of `resolve_row`: the relative-velocity term along a
+/// row's direction is body A's contribution minus body B's, and a solved
+/// impulse pushes A along `+direction` and B along `-direction` (Newton's
+/// third law) — matching `contacts_between`'s normal convention (points
+/// from B toward A). Takes each body's `DeltaVelocity` accumulator
+/// separately (rather than one combined struct) so `resolve_dynamic_manifolds`
+/// can share a single accumulator per body index across every manifold that
+/// body takes part in, not just the one pair currently being resolved.
+fn resolve_two_body_row(
+    row: &mut TwoBodyRow,
+    inv_mass_a: f32,
+    inv_mass_b: f32,
+    delta_a: &mut DeltaVelocity,
+    delta_b: &mut DeltaVelocity,
+) {
+    resolve_two_body_row_relaxed(row, inv_mass_a, inv_mass_b, delta_a, delta_b, 1.0)
+}
+
+/// Like `resolve_two_body_row`, but scales the computed impulse delta by
+/// `impulse_scale` before clamping (`RB-PHYSICS-001-FR-041`) — `1.0` (via
+/// `resolve_two_body_row`) is a no-op, reproducing the original behavior
+/// exactly; a manifold whose body is shared with `k >= 2` other manifolds
+/// this step uses `1 / k` instead, so each manifold contributes only its
+/// own fair share of that shared body's per-iteration correction (see
+/// `resolve_dynamic_manifolds`'s own `impulse_scale` field for why).
+fn resolve_two_body_row_relaxed(
+    row: &mut TwoBodyRow,
+    inv_mass_a: f32,
+    inv_mass_b: f32,
+    delta_a: &mut DeltaVelocity,
+    delta_b: &mut DeltaVelocity,
+    impulse_scale: f32,
+) {
+    let delta_vel_dot_n = row.direction.dot(&delta_a.linear)
+        + row.torque_axis_a.dot(&delta_a.angular)
+        - row.direction.dot(&delta_b.linear)
+        - row.torque_axis_b.dot(&delta_b.angular);
+
+    let mut delta_impulse = row.rhs - row.applied_impulse * row.cfm;
+    delta_impulse -= delta_vel_dot_n * row.jac_diag_ab_inv;
+    delta_impulse *= impulse_scale;
+
+    let sum = row.applied_impulse + delta_impulse;
+    if sum < row.lower_limit {
+        delta_impulse = row.lower_limit - row.applied_impulse;
+        row.applied_impulse = row.lower_limit;
+    } else if sum > row.upper_limit {
+        delta_impulse = row.upper_limit - row.applied_impulse;
+        row.applied_impulse = row.upper_limit;
+    } else {
+        row.applied_impulse = sum;
+    }
+
+    delta_a.linear += row.direction * (inv_mass_a * delta_impulse);
+    delta_a.angular += row.angular_component_a * delta_impulse;
+    delta_b.linear -= row.direction * (inv_mass_b * delta_impulse);
+    delta_b.angular -= row.angular_component_b * delta_impulse;
+}
+
+/// Two-body version of `resolve_push_row` — see that function's doc comment
+/// for why it's always clamped to `[0, UPPER_LIMIT]` regardless of
+/// `row.lower_limit`/`upper_limit`, and `resolve_two_body_row` for the
+/// A-gets-plus/B-gets-minus convention this mirrors for the push channel.
+fn resolve_two_body_push_row(
+    row: &mut TwoBodyRow,
+    inv_mass_a: f32,
+    inv_mass_b: f32,
+    push_delta_a: &mut DeltaVelocity,
+    push_delta_b: &mut DeltaVelocity,
+) {
+    let delta_vel_dot_n = row.direction.dot(&push_delta_a.linear)
+        + row.torque_axis_a.dot(&push_delta_a.angular)
+        - row.direction.dot(&push_delta_b.linear)
+        - row.torque_axis_b.dot(&push_delta_b.angular);
+
+    let mut delta_impulse = row.rhs_penetration - row.applied_push_impulse * row.cfm;
+    delta_impulse -= delta_vel_dot_n * row.jac_diag_ab_inv;
+
+    let sum = row.applied_push_impulse + delta_impulse;
+    if sum < 0.0 {
+        delta_impulse = -row.applied_push_impulse;
+        row.applied_push_impulse = 0.0;
+    } else if sum > UPPER_LIMIT {
+        delta_impulse = UPPER_LIMIT - row.applied_push_impulse;
+        row.applied_push_impulse = UPPER_LIMIT;
+    } else {
+        row.applied_push_impulse = sum;
+    }
+
+    push_delta_a.linear += row.direction * (inv_mass_a * delta_impulse);
+    push_delta_a.angular += row.angular_component_a * delta_impulse;
+    push_delta_b.linear -= row.direction * (inv_mass_b * delta_impulse);
+    push_delta_b.angular -= row.angular_component_b * delta_impulse;
+}
+
+/// Resolves an entire contact manifold (1 to 4 points — a box-vs-box face
+/// contact can produce up to 4, an edge-edge or sphere-vs-box contact
+/// exactly 1) between two dynamic bodies (`a`, `b`) — every `Contact` must
+/// have come from `collision::contacts_between(a, b)` (its `normal`
+/// convention and `rel_pos` derivation both assume that argument order).
+/// Mirrors `resolve_contacts`' shared-delta multi-iteration structure
+/// (see its doc comment), generalized to two dynamic bodies instead of one
+/// dynamic body against a static plane.
+pub fn resolve_contacts_between(
+    a: &mut RigidBody,
+    b: &mut RigidBody,
+    contacts: &[Contact],
+    dt: f32,
+) {
+    if contacts.is_empty() {
+        return;
+    }
+
+    let combined_restitution = combine_restitution(a.restitution, b.restitution);
+    let combined_friction = combine_friction(a.friction, b.friction);
+
+    let mut manifold: Vec<[TwoBodyRow; 2]> = contacts
+        .iter()
+        .map(|c| setup_two_body_rows(a, b, c, combined_restitution, dt))
+        .collect();
+    let mut delta_a = DeltaVelocity::zero();
+    let mut delta_b = DeltaVelocity::zero();
+    let mut push_delta_a = DeltaVelocity::zero();
+    let mut push_delta_b = DeltaVelocity::zero();
+    let inv_mass_a = a.inv_mass();
+    let inv_mass_b = b.inv_mass();
+
+    for _ in 0..SOLVER_ITERATIONS {
+        for rows in &mut manifold {
+            resolve_two_body_row(
+                &mut rows[0],
+                inv_mass_a,
+                inv_mass_b,
+                &mut delta_a,
+                &mut delta_b,
+            );
+            resolve_two_body_push_row(
+                &mut rows[0],
+                inv_mass_a,
+                inv_mass_b,
+                &mut push_delta_a,
+                &mut push_delta_b,
+            );
+
+            let friction_limit = combined_friction * rows[0].applied_impulse;
+            rows[1].lower_limit = -friction_limit;
+            rows[1].upper_limit = friction_limit;
+
+            resolve_two_body_row(
+                &mut rows[1],
+                inv_mass_a,
+                inv_mass_b,
+                &mut delta_a,
+                &mut delta_b,
+            );
+        }
+    }
+
+    a.linear_velocity += delta_a.linear;
+    a.angular_velocity += delta_a.angular;
+    b.linear_velocity += delta_b.linear;
+    b.angular_velocity += delta_b.angular;
+    apply_push_delta(a, &push_delta_a, dt);
+    apply_push_delta(b, &push_delta_b, dt);
+}
+
+/// Index of each body taking part in a `resolve_dynamic_manifolds` pair,
+/// paired with mutable access to its own `DeltaVelocity` accumulator without
+/// a duplicate-borrow error — the general (arbitrary `a`/`b`, not just
+/// `b == a + 1`) version of the `Vec::split_at_mut` trick
+/// `PhysicsWorld::step` already uses for its car-vs-car loop.
+fn delta_pair_mut(
+    deltas: &mut [DeltaVelocity],
+    a: usize,
+    b: usize,
+) -> (&mut DeltaVelocity, &mut DeltaVelocity) {
+    assert_ne!(a, b, "a body cannot form a contact manifold with itself");
+    if a < b {
+        let (left, right) = deltas.split_at_mut(b);
+        (&mut left[a], &mut right[0])
+    } else {
+        let (left, right) = deltas.split_at_mut(a);
+        (&mut right[0], &mut left[b])
+    }
+}
+
+/// Uncalibrated placeholder (`RB-PHYSICS-001-FR-035`): the world-space
+/// distance within which a `ContactCache` treats this call's contact as
+/// "the same" contact a previous call already cached an impulse for — no
+/// real recorded data exists to calibrate a "same contact" tolerance
+/// against, so this is loosely sized to this port's own scale (ball radius
+/// ~92, car half-extents up to ~60), mirroring Bullet's own fixed
+/// `gContactBreakingThreshold`-style point matching rather than tracking a
+/// genuine per-point stable ID (this port's narrow phase re-derives every
+/// contact from scratch each call and has no such ID to track).
+const CONTACT_MATCH_DISTANCE: f32 = 4.0;
+
+/// One contact's cached, converged real-channel impulses from a previous
+/// `ContactCache`-aware resolve call, matched to a future call's contact by
+/// `position` (see `CONTACT_MATCH_DISTANCE`) — never the split-impulse push
+/// channel, which Bullet's own warm-starting doesn't persist either (a
+/// resting contact's penetration should already be near zero, so there's
+/// nothing meaningful to carry over).
+#[derive(Clone, Copy)]
+struct CachedContact {
+    position: Vec3,
+    /// `[normal, friction]`, in the same row order
+    /// `setup_two_body_rows`/`setup_rows` always produce.
+    impulses: [f32; 2],
+}
+
+/// Warm-starting's own persistent state (`RB-PHYSICS-001-FR-035`) — the
+/// converged impulses one call's `resolve_dynamic_manifolds` leaves behind
+/// for a specific manifold, fed back into that same manifold's next call so
+/// its rows start iterating from an already-good guess instead of zero
+/// (mirroring Bullet's `SOLVER_USE_WARMSTARTING`, applied to a manifold's
+/// cached `btManifoldPoint`s at solver setup). The caller owns one
+/// `ContactCache` per manifold identity it cares to warm-start (e.g.
+/// `PhysicsWorld` keys one per ball-vs-car/car-vs-car body-index pair) and
+/// passes it back in on every call for that same manifold; passing a fresh
+/// `ContactCache::new()` is exactly equivalent to a cold start.
+#[derive(Clone, Default)]
+pub struct ContactCache {
+    entries: Vec<CachedContact>,
+}
+
+impl ContactCache {
+    pub fn new() -> Self {
+        ContactCache::default()
+    }
+
+    /// The closest cached entry's impulses within `CONTACT_MATCH_DISTANCE`
+    /// of `position`, or `(0.0, 0.0)` — an ordinary cold start — if
+    /// none is close enough (a genuinely new contact, or the old one moved
+    /// too far to trust).
+    fn seed_for(&self, position: Vec3) -> (f32, f32) {
+        self.entries
+            .iter()
+            .filter(|entry| (entry.position - position).length() < CONTACT_MATCH_DISTANCE)
+            .min_by(|a, b| {
+                (a.position - position)
+                    .length()
+                    .total_cmp(&(b.position - position).length())
+            })
+            .map(|entry| (entry.impulses[0], entry.impulses[1]))
+            .unwrap_or((0.0, 0.0))
+    }
+}
+
+/// Applies a warm-start seed impulse to one row and pre-loads its effect
+/// into the shared `DeltaVelocity`s before iteration begins — the actual
+/// mechanism that makes warm-starting change the solve at all. Merely
+/// setting `row.applied_impulse` to a nonzero seed would do nothing on its
+/// own here: `resolve_two_body_row`'s correction each iteration depends
+/// only on `rhs` and the delta accumulated *so far this call*
+/// (`GLOBAL_CFM` is always `0.0`, so `applied_impulse` never otherwise
+/// enters the math), so the seed must be baked into that starting delta
+/// directly for the first iteration's correction to actually be smaller —
+/// mirroring Bullet's own warm-start, which applies the cached impulse to
+/// the solver body's temporary velocity at setup time, before any
+/// iteration runs.
+fn warm_start_two_body_row(
+    row: &mut TwoBodyRow,
+    seed: f32,
+    inv_mass_a: f32,
+    inv_mass_b: f32,
+    delta_a: &mut DeltaVelocity,
+    delta_b: &mut DeltaVelocity,
+) {
+    if seed == 0.0 {
+        return;
+    }
+    row.applied_impulse = seed;
+    delta_a.linear += row.direction * (inv_mass_a * seed);
+    delta_a.angular += row.angular_component_a * seed;
+    delta_b.linear -= row.direction * (inv_mass_b * seed);
+    delta_b.angular -= row.angular_component_b * seed;
+}
+
+/// Resolves every dynamic-vs-dynamic contact manifold in the scene (every
+/// ball-vs-car and car-vs-car pair with at least one contact this step) as
+/// one shared island solve, fixing `RB-PHYSICS-001-FR-030`'s "combined
+/// multi-body solve" gap: calling `resolve_contacts_between` once per pair,
+/// as `PhysicsWorld::step` did before this function existed, fully resolves
+/// and applies one pair's `SOLVER_ITERATIONS` iterations before the next
+/// pair's setup even reads a body's velocity — a body touching two others
+/// in the same step (e.g. a car pinned between the ball and another car)
+/// never has both contacts reasoned about together, only sequentially, each
+/// one seeing the other's already-*finished* correction rather than genuinely
+/// sharing the solve.
+///
+/// Here, every body index that takes part in at least one manifold gets its
+/// own `DeltaVelocity` accumulator (`deltas[i]`, indexed the same way as
+/// `bodies`), and every manifold's rows draw from and add to whichever two
+/// accumulators its own two body indices name — shared across the *whole*
+/// `SOLVER_ITERATIONS` loop, not just within one manifold's own rows, so a
+/// third body's contact genuinely participates in the same convergence as
+/// the other two, the way Bullet's real per-island solver does (see this
+/// module's own doc comment for what's still simplified relative to that:
+/// average rather than max combine mode). Each body's split-impulse push
+/// accumulator (`push_deltas[i]`) is shared across manifolds the same way.
+/// `manifolds` is `(index_a, index_b, contacts)` triples indexing
+/// into `bodies`; omit a pair from `manifolds` entirely rather than passing
+/// it with an empty `contacts` (an empty manifold would still allocate a
+/// `DeltaVelocity`-touching no-op).
+///
+/// Since `RB-PHYSICS-001-FR-035`, `caches` carries one `ContactCache` per
+/// manifold identity across calls — keyed by `(index_a, index_b)`, order
+/// normalized (`min`, `max`) so a pair is found regardless of which side of
+/// `manifolds` names it first. Every call rebuilds `caches` from scratch
+/// (this call's manifolds only) rather than merging into whatever was
+/// there before: a pair no longer touching is naturally dropped (no
+/// separate eviction pass needed), and `seed_for`'s own position-based
+/// matching already handles a manifold's point count changing between
+/// calls (a brand-new point simply gets a cold `(0.0, 0.0)` seed).
+/// Pass an empty `HashMap` for a purely cold-started call (e.g. a one-shot
+/// test); `PhysicsWorld` instead keeps one across its own lifetime so a
+/// manifold under-converged at this port's fixed `SOLVER_ITERATIONS` (like
+/// the extreme mass-ratio "sandwiched" case
+/// `resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`
+/// measures) gets closer to the true answer call over call instead of
+/// restarting from zero every time — see
+/// `warm_starting_a_sandwiched_ball_across_two_calls_converges_closer_than_a_repeated_cold_start`
+/// for the direct proof.
+///
+/// Static contacts (ground, arena walls, curves, goal geometry) are not
+/// part of this function's own shared solve — this function only knows
+/// about `bodies`, and a static shape isn't one — but that does NOT mean
+/// resolving a body's static contact independently of this function's own
+/// dynamic-manifold solve is safe in general: `RB-PHYSICS-001-FR-052` found
+/// a body simultaneously touched by a static surface *and* another dynamic
+/// body in the same step (a car pinned against a wall by another car) is
+/// exactly the same order-dependent gap this function itself closes for
+/// two dynamic manifolds, just at the boundary between this function and a
+/// separate static-contact resolve instead of inside either one alone. See
+/// `resolve_manifolds` for the sibling function that folds a body's own
+/// static contacts into this same shared solve when that matters; this
+/// function stays as the plain dynamic-only path for a caller (like
+/// `net::NetMesh::step`) that never has static contacts to combine.
+///
+/// Since `RB-PHYSICS-001-FR-041`, each manifold's own velocity rows (normal
+/// plus both friction directions — not the split-impulse push rows, which
+/// stay unscaled) also scale their computed impulse delta by `1 / k`, where
+/// `k` is the largest number of manifolds either of that manifold's two
+/// bodies takes part in this step. A body touched by only one other body
+/// (`k == 1`, the overwhelming majority of contacts) is completely
+/// unaffected — see
+/// `resolve_dynamic_manifolds_with_one_manifold_per_body_matches_resolve_contacts_between`.
+/// A body simultaneously touched by `k >= 2` others (`RB-PHYSICS-001-FR-030`'s
+/// own "sandwiched" case) is the one this fixes: without it, each of the
+/// `k` manifolds applies its own *full* correction against that body's
+/// already-partially-updated velocity in turn, every iteration, which is
+/// exactly why the combined solve under-converges for this case in the
+/// first place. `1 / k` — the same "fair share" weighting position-based-
+/// dynamics solvers use for a point mass under several simultaneous
+/// constraints — brings the sandwiched-ball test's own combined-solve
+/// result from ~89.5 units/s down to ~32 units/s (both far below the
+/// independent-pairwise ~98.9 units/s), a real, further narrowing of the
+/// gap to the true zero-velocity answer, at zero added iteration cost. See
+/// `resolve_dynamic_manifolds_relaxes_a_shared_bodys_impulse_by_its_own_contact_degree`'s
+/// own doc comment for why a naive global relaxation factor (tried first,
+/// not shipped) was rejected: any factor above `1.0` made this exact
+/// scenario measurably *diverge*, matching standard PGS/SOR theory for a
+/// tightly-coupled multi-constraint body.
+pub fn resolve_dynamic_manifolds(
+    bodies: &mut [RigidBody],
+    manifolds: &[(usize, usize, Vec<Contact>)],
+    dt: f32,
+    caches: &mut HashMap<(usize, usize), ContactCache>,
+) {
+    if manifolds.is_empty() {
+        caches.clear();
+        return;
+    }
+
+    struct Manifold {
+        a: usize,
+        b: usize,
+        combined_friction: f32,
+        positions: Vec<Vec3>,
+        rows: Vec<[TwoBodyRow; 2]>,
+        impulse_scale: f32,
+    }
+
+    // RB-PHYSICS-001-FR-041: how many manifolds this step touch each body.
+    // A body touched by only one other body (the overwhelming majority of
+    // contacts) keeps `impulse_scale == 1.0` below — bit-for-bit the same
+    // behavior as before this requirement. A body simultaneously touched by
+    // `k >= 2` others (FR-030's own "sandwiched" case) is the one this
+    // requirement targets: applying each manifold's own full normal-row
+    // impulse against that shared body's *already-partially-updated*
+    // velocity, once per manifold per iteration, over-corrects it — the
+    // classic reason a Gauss-Seidel iterative solver under-converges for a
+    // tightly-coupled multi-constraint body. `1 / k` is the standard fix
+    // (the same "fair-share" weighting position-based-dynamics solvers use
+    // for a point mass under several simultaneous constraints): each of the
+    // `k` manifolds contributes only its own share of the shared body's
+    // correction per iteration, instead of all `k` fully overwriting each
+    // other in turn.
+    let mut manifold_count = vec![0u32; bodies.len()];
+    for (a, b, _) in manifolds {
+        manifold_count[*a] += 1;
+        manifold_count[*b] += 1;
+    }
+
+    let mut solved: Vec<Manifold> = manifolds
+        .iter()
+        .map(|(a, b, contacts)| {
+            let combined_restitution =
+                combine_restitution(bodies[*a].restitution, bodies[*b].restitution);
+            let combined_friction = combine_friction(bodies[*a].friction, bodies[*b].friction);
+            let rows = contacts
+                .iter()
+                .map(|c| setup_two_body_rows(&bodies[*a], &bodies[*b], c, combined_restitution, dt))
+                .collect();
+            let shared_degree = manifold_count[*a].max(manifold_count[*b]);
+            Manifold {
+                a: *a,
+                b: *b,
+                combined_friction,
+                positions: contacts.iter().map(|c| c.point).collect(),
+                rows,
+                impulse_scale: 1.0 / shared_degree as f32,
+            }
+        })
+        .collect();
+
+    let inv_masses: Vec<f32> = bodies.iter().map(RigidBody::inv_mass).collect();
+    let mut deltas: Vec<DeltaVelocity> = (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
+    let mut push_deltas: Vec<DeltaVelocity> =
+        (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
+
+    // Warm start (RB-PHYSICS-001-FR-035): seed each manifold's rows from
+    // whatever `ContactCache` this same (normalized) pair left behind last
+    // call, before any iteration runs.
+    for m in &mut solved {
+        let key = (m.a.min(m.b), m.a.max(m.b));
+        let Some(cache) = caches.get(&key) else {
+            continue;
+        };
+        let inv_mass_a = inv_masses[m.a];
+        let inv_mass_b = inv_masses[m.b];
+        let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
+        for (rows, position) in m.rows.iter_mut().zip(&m.positions) {
+            let seed = cache.seed_for(*position);
+            warm_start_two_body_row(
+                &mut rows[0],
+                seed.0,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+            warm_start_two_body_row(
+                &mut rows[1],
+                seed.1,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+        }
+    }
+
+    for _ in 0..SOLVER_ITERATIONS {
+        for m in &mut solved {
+            let inv_mass_a = inv_masses[m.a];
+            let inv_mass_b = inv_masses[m.b];
+            let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
+            let (push_delta_a, push_delta_b) = delta_pair_mut(&mut push_deltas, m.a, m.b);
+            for rows in &mut m.rows {
+                resolve_two_body_row_relaxed(
+                    &mut rows[0],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
+                resolve_two_body_push_row(
+                    &mut rows[0],
+                    inv_mass_a,
+                    inv_mass_b,
+                    push_delta_a,
+                    push_delta_b,
+                );
+
+                let friction_limit = m.combined_friction * rows[0].applied_impulse;
+                rows[1].lower_limit = -friction_limit;
+                rows[1].upper_limit = friction_limit;
+
+                resolve_two_body_row_relaxed(
+                    &mut rows[1],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
+            }
+        }
+    }
+
+    for ((body, delta), push_delta) in bodies.iter_mut().zip(deltas.iter()).zip(push_deltas.iter())
+    {
+        body.linear_velocity += delta.linear;
+        body.angular_velocity += delta.angular;
+        apply_push_delta(body, push_delta, dt);
+    }
+
+    // Replace, don't merge: a pair no longer in `manifolds` is dropped
+    // automatically, the same "no separate eviction pass" idiom
+    // `ContactCache`'s own per-call rebuild already uses implicitly.
+    *caches = solved
+        .into_iter()
+        .map(|m| {
+            let entries = m
+                .positions
+                .into_iter()
+                .zip(&m.rows)
+                .map(|(position, rows)| CachedContact {
+                    position,
+                    impulses: [rows[0].applied_impulse, rows[1].applied_impulse],
+                })
+                .collect();
+            ((m.a.min(m.b), m.a.max(m.b)), ContactCache { entries })
+        })
+        .collect();
+}
+
+/// What a static manifold's contacts bounce and slide with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StaticMaterial {
+    /// The shape's own coefficients, combined with the body's own
+    /// (`combine_restitution`, `combine_friction`).
+    Surface { restitution: f32, friction: f32 },
+    /// Coefficients fixed for the pair, used as they are: RocketSim's
+    /// car-vs-world override (`RB-PHYSICS-001-FR-100`).
+    Pair { restitution: f32, friction: f32 },
+    /// Position correction only (`RB-PHYSICS-001-FR-118`): the contacts
+    /// take part in the split-impulse penetration resolve at RocketSim's
+    /// `m_erp2` (0.8) but in no velocity or friction solve, like the
+    /// per-point rows RocketSim's solver marks `m_isSpecial` and skips while
+    /// their body's one combined contact (FR-108) bounces instead. Its
+    /// `solveGroupCacheFriendlySplitImpulseIterations` has no such skip.
+    PushOnly,
+}
+
+/// RocketSim's `m_erp2` (`Arena::Arena`, "closer to older Bullet").
+const ROCKETSIM_ERP2: f32 = 0.8;
+
+/// Restitution and friction fixed for a pair of dynamic bodies, used as
+/// they are instead of combining the bodies' own (`RB-PHYSICS-001-FR-107`):
+/// RocketSim's `CARBALL_COLLISION_*` and `CARCAR_COLLISION_*`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PairMaterial {
+    pub restitution: f32,
+    pub friction: f32,
+}
+
+impl StaticMaterial {
+    /// `(restitution, friction)` for a contact between `body` and this
+    /// material.
+    fn combined_with(self, body: &RigidBody) -> (f32, f32) {
+        match self {
+            Self::Surface {
+                restitution,
+                friction,
+            } => (
+                combine_restitution(body.restitution, restitution),
+                combine_friction(body.friction, friction),
+            ),
+            Self::Pair {
+                restitution,
+                friction,
+            } => (restitution, friction),
+            Self::PushOnly => (0.0, 0.0),
+        }
+    }
+
+    /// The error reduction parameter this material's penetration rows use.
+    fn erp(self) -> f32 {
+        match self {
+            Self::PushOnly => ROCKETSIM_ERP2,
+            Self::Surface { .. } | Self::Pair { .. } => ERP2,
+        }
+    }
+}
+
+/// Resolves every static-shape manifold and every dynamic-vs-dynamic
+/// manifold touching any of `bodies` together, in one combined solve
+/// (`RB-PHYSICS-001-FR-052`) — the same "share one accumulator instead of
+/// fully resolving and applying one independent solve before the next
+/// one's setup even reads the shared body's velocity" fix
+/// `RB-PHYSICS-001-FR-030` already made for two dynamic manifolds sharing a
+/// body and `RB-PHYSICS-001-FR-051` already made for two static manifolds
+/// sharing a body, extended one level further: a body touched by a static
+/// surface *and* another dynamic body in the same step (a car pinned
+/// against a wall by another car, or driving close enough to a wall while
+/// also touching the ball — a routine gameplay occurrence, not an edge
+/// case) used to have its static contact fully resolved by a separate
+/// `resolve_static_manifolds` call before `resolve_dynamic_manifolds`'s own
+/// setup even read that body's already-updated velocity. See
+/// `tests::resolving_a_bodys_static_and_dynamic_contact_together_avoids_the_order_dependent_bias_sequential_resolution_has`
+/// for the exact mechanism and proof (reusing `RB-PHYSICS-001-FR-051`'s own
+/// symmetric two-wall corner setup, with one wall replaced by a very-heavy
+/// dynamic body standing in for it).
+///
+/// `static_manifolds` is `(body_index, material, contacts)` tuples, one per
+/// static shape some `bodies[body_index]` currently touches — mirroring
+/// `resolve_static_manifolds`'s own per-manifold combined-restitution/
+/// friction setup, just indexed into `bodies` instead of naming a single
+/// body directly; `material` says whether the shape's coefficients combine
+/// with the body's or are fixed for the pair (`StaticMaterial`).
+/// `dynamic_manifolds` are `(index_a, index_b, material, contacts)`:
+/// `material` is `None` to combine the two bodies' own coefficients, as
+/// `resolve_dynamic_manifolds` does, or a `PairMaterial` fixed for the pair
+/// (RocketSim's car-ball and car-car overrides, `RB-PHYSICS-001-FR-107`). Every body's own static contacts and dynamic
+/// manifolds share one `DeltaVelocity`/push-delta accumulator (indexed by
+/// `body_index`) for the whole `SOLVER_ITERATIONS` loop, so an earlier
+/// static row's correction already influences a later dynamic row's `rhs`
+/// baseline within the same iteration, and vice versa.
+///
+/// `RB-PHYSICS-001-FR-041`'s own `1 / k` fair-share relaxation keeps its
+/// existing meaning unchanged here: `k` is still counted purely from
+/// `dynamic_manifolds` (a body's static contacts don't add to it), exactly
+/// matching `resolve_dynamic_manifolds`'s own behavior — this function
+/// doesn't relax a body's static rows at all, matching
+/// `resolve_static_manifolds`'s own unscaled convention (extending FR-041's
+/// relaxation to a body's static contacts changes their own established,
+/// tested convergence behavior — `RB-PHYSICS-001-FR-051`'s own two-static-wall
+/// test — and isn't part of this requirement's scope, which is purely
+/// about *when* a body's contacts are resolved, not adding new relaxation).
+///
+/// Only `dynamic_manifolds` warm-start from `caches`
+/// (`RB-PHYSICS-001-FR-035`, unchanged); a static contact still cold-starts
+/// every call, the same scoping `RB-PHYSICS-001-FR-051`'s own Non-goals
+/// already left open as separate future work.
+pub fn resolve_manifolds(
+    bodies: &mut [RigidBody],
+    static_manifolds: &[(usize, StaticMaterial, Vec<Contact>)],
+    dynamic_manifolds: &[(usize, usize, Option<PairMaterial>, Vec<Contact>)],
+    dt: f32,
+    caches: &mut HashMap<(usize, usize), ContactCache>,
+) {
+    if static_manifolds.is_empty() && dynamic_manifolds.is_empty() {
+        caches.clear();
+        return;
+    }
+
+    struct StaticManifold {
+        body_index: usize,
+        combined_friction: f32,
+        push_only: bool,
+        rows: Vec<[ConstraintRow; 2]>,
+    }
+
+    struct DynamicManifold {
+        a: usize,
+        b: usize,
+        combined_friction: f32,
+        positions: Vec<Vec3>,
+        rows: Vec<[TwoBodyRow; 2]>,
+        impulse_scale: f32,
+    }
+
+    // RB-PHYSICS-001-FR-041's own `k` — counted purely from
+    // `dynamic_manifolds`, unaffected by `static_manifolds`, so a body with
+    // no dynamic manifolds at all (the overwhelming majority of contacts)
+    // behaves bit-for-bit like `resolve_dynamic_manifolds` with an empty
+    // manifold list, same as before this requirement.
+    let mut dynamic_manifold_count = vec![0u32; bodies.len()];
+    for (a, b, _, _) in dynamic_manifolds {
+        dynamic_manifold_count[*a] += 1;
+        dynamic_manifold_count[*b] += 1;
+    }
+
+    let mut solved_static: Vec<StaticManifold> = static_manifolds
+        .iter()
+        .map(|(body_index, material, contacts)| {
+            let body = bodies[*body_index];
+            let (combined_restitution, combined_friction) = material.combined_with(&body);
+            let mut effective_body = body;
+            effective_body.restitution = combined_restitution;
+            let rows = contacts
+                .iter()
+                .map(|c| setup_rows_with_erp(&effective_body, c, dt, material.erp()))
+                .collect();
+            StaticManifold {
+                body_index: *body_index,
+                combined_friction,
+                push_only: *material == StaticMaterial::PushOnly,
+                rows,
+            }
+        })
+        .collect();
+
+    let mut solved_dynamic: Vec<DynamicManifold> = dynamic_manifolds
+        .iter()
+        .map(|(a, b, material, contacts)| {
+            let (combined_restitution, combined_friction) = match material {
+                Some(pair) => (pair.restitution, pair.friction),
+                None => (
+                    combine_restitution(bodies[*a].restitution, bodies[*b].restitution),
+                    combine_friction(bodies[*a].friction, bodies[*b].friction),
+                ),
+            };
+            let rows = contacts
+                .iter()
+                .map(|c| setup_two_body_rows(&bodies[*a], &bodies[*b], c, combined_restitution, dt))
+                .collect();
+            let shared_degree = dynamic_manifold_count[*a].max(dynamic_manifold_count[*b]);
+            DynamicManifold {
+                a: *a,
+                b: *b,
+                combined_friction,
+                positions: contacts.iter().map(|c| c.point).collect(),
+                rows,
+                impulse_scale: 1.0 / shared_degree as f32,
+            }
+        })
+        .collect();
+
+    let inv_masses: Vec<f32> = bodies.iter().map(RigidBody::inv_mass).collect();
+    let mut deltas: Vec<DeltaVelocity> = (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
+    let mut push_deltas: Vec<DeltaVelocity> =
+        (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
+
+    // Warm start (RB-PHYSICS-001-FR-035): dynamic manifolds only — see this
+    // function's own doc comment for why a static contact stays cold-started.
+    for m in &mut solved_dynamic {
+        let key = (m.a.min(m.b), m.a.max(m.b));
+        let Some(cache) = caches.get(&key) else {
+            continue;
+        };
+        let inv_mass_a = inv_masses[m.a];
+        let inv_mass_b = inv_masses[m.b];
+        let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
+        for (rows, position) in m.rows.iter_mut().zip(&m.positions) {
+            let seed = cache.seed_for(*position);
+            warm_start_two_body_row(
+                &mut rows[0],
+                seed.0,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+            warm_start_two_body_row(
+                &mut rows[1],
+                seed.1,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+        }
+    }
+
+    for _ in 0..SOLVER_ITERATIONS {
+        for m in &mut solved_static {
+            let inv_mass = inv_masses[m.body_index];
+            let delta = &mut deltas[m.body_index];
+            let push_delta = &mut push_deltas[m.body_index];
+            for rows in &mut m.rows {
+                if m.push_only {
+                    resolve_push_row(&mut rows[0], inv_mass, push_delta);
+                    continue;
+                }
+                resolve_row(&mut rows[0], inv_mass, delta);
+                resolve_push_row(&mut rows[0], inv_mass, push_delta);
+
+                let friction_limit = m.combined_friction * rows[0].applied_impulse;
+                rows[1].lower_limit = -friction_limit;
+                rows[1].upper_limit = friction_limit;
+
+                resolve_row(&mut rows[1], inv_mass, delta);
+            }
+        }
+
+        for m in &mut solved_dynamic {
+            let inv_mass_a = inv_masses[m.a];
+            let inv_mass_b = inv_masses[m.b];
+            let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
+            let (push_delta_a, push_delta_b) = delta_pair_mut(&mut push_deltas, m.a, m.b);
+            for rows in &mut m.rows {
+                resolve_two_body_row_relaxed(
+                    &mut rows[0],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
+                resolve_two_body_push_row(
+                    &mut rows[0],
+                    inv_mass_a,
+                    inv_mass_b,
+                    push_delta_a,
+                    push_delta_b,
+                );
+
+                let friction_limit = m.combined_friction * rows[0].applied_impulse;
+                rows[1].lower_limit = -friction_limit;
+                rows[1].upper_limit = friction_limit;
+
+                resolve_two_body_row_relaxed(
+                    &mut rows[1],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
+            }
+        }
+    }
+
+    for ((body, delta), push_delta) in bodies.iter_mut().zip(deltas.iter()).zip(push_deltas.iter())
+    {
+        body.linear_velocity += delta.linear;
+        body.angular_velocity += delta.angular;
+        apply_push_delta(body, push_delta, dt);
+    }
+
+    // Replace, don't merge — same idiom `resolve_dynamic_manifolds` already
+    // uses; static manifolds are never cached (see this function's own doc
+    // comment).
+    *caches = solved_dynamic
+        .into_iter()
+        .map(|m| {
+            let entries = m
+                .positions
+                .into_iter()
+                .zip(&m.rows)
+                .map(|(position, rows)| CachedContact {
+                    position,
+                    impulses: [rows[0].applied_impulse, rows[1].applied_impulse],
+                })
+                .collect();
+            ((m.a.min(m.b), m.a.max(m.b)), ContactCache { entries })
+        })
+        .collect();
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::body::{StaticPlane, CAR_HALF_EXTENTS};
+    use crate::collision::{contacts_between, contacts_vs_plane};
+
+    /// `RB-PHYSICS-001-FR-051`'s own root-cause proof: a ball wedged
+    /// symmetrically into a corner formed by two static walls (planes with
+    /// normals `(1,0,0)` and `(0,1,0)`, identical restitution/friction),
+    /// moving diagonally into both at once. By symmetry, the true answer
+    /// has equal `x`/`y` final velocity components. Resolving each wall
+    /// fully independently — the pre-FR-051 shape of `PhysicsWorld::step`'s
+    /// own per-static-shape contact loop — instead leaves the ball biased
+    /// toward whichever wall was resolved *last*: order A (`x` then `y`)
+    /// and order B (`y` then `x`) are exact mirror images of each other,
+    /// neither matching the true symmetric answer.
+    /// `solver::resolve_static_manifolds`'s combined solve — sharing one
+    /// accumulator across both walls' contacts instead of fully resolving
+    /// and applying one before the other's setup even reads the ball's
+    /// velocity — lands much closer to the true symmetric answer instead.
+    #[test]
+    fn sequential_wall_resolution_is_order_dependent_but_the_combined_solve_is_not() {
+        let make_scene = || {
+            let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(93.15, 93.15, 0.0));
+            ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
+            let plane_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+            let plane_y = StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), 0.0);
+            (ball, plane_x, plane_y)
+        };
+        let dt = 1.0 / 60.0;
+
+        let (mut ball_a, plane_x_a, plane_y_a) = make_scene();
+        let cx = contacts_vs_plane(&ball_a, &plane_x_a);
+        resolve_contacts(
+            &mut ball_a,
+            plane_x_a.restitution,
+            plane_x_a.friction,
+            &cx,
+            dt,
+        );
+        let cy = contacts_vs_plane(&ball_a, &plane_y_a);
+        resolve_contacts(
+            &mut ball_a,
+            plane_y_a.restitution,
+            plane_y_a.friction,
+            &cy,
+            dt,
+        );
+        let order_a = ball_a.linear_velocity;
+
+        let (mut ball_b, plane_x_b, plane_y_b) = make_scene();
+        let cyb = contacts_vs_plane(&ball_b, &plane_y_b);
+        resolve_contacts(
+            &mut ball_b,
+            plane_y_b.restitution,
+            plane_y_b.friction,
+            &cyb,
+            dt,
+        );
+        let cxb = contacts_vs_plane(&ball_b, &plane_x_b);
+        resolve_contacts(
+            &mut ball_b,
+            plane_x_b.restitution,
+            plane_x_b.friction,
+            &cxb,
+            dt,
+        );
+        let order_b = ball_b.linear_velocity;
+
+        let (mut ball_c, plane_x_c, plane_y_c) = make_scene();
+        let cxc = contacts_vs_plane(&ball_c, &plane_x_c);
+        let cyc = contacts_vs_plane(&ball_c, &plane_y_c);
+        let manifolds = vec![
+            (plane_x_c.restitution, plane_x_c.friction, cxc),
+            (plane_y_c.restitution, plane_y_c.friction, cyc),
+        ];
+        resolve_static_manifolds(&mut ball_c, &manifolds, dt);
+        let combined = ball_c.linear_velocity;
+
+        assert!(
+            (order_a.x - order_b.y).abs() < 1e-3 && (order_a.y - order_b.x).abs() < 1e-3,
+            "expected resolving the two symmetric walls sequentially, in opposite orders, to \
+             leave the ball with exactly mirror-image (x/y swapped) velocities, got \
+             order_a={order_a:?}, order_b={order_b:?}"
+        );
+        assert!(
+            (order_a.x - order_a.y).abs() > 15.0,
+            "expected one sequential order to leave the ball measurably asymmetric (biased \
+             toward whichever wall was resolved last), got order_a={order_a:?}"
+        );
+        assert!(
+            (combined.x - combined.y).abs() < (order_a.x - order_a.y).abs() * 0.2,
+            "expected the combined solve to leave the ball's x/y velocity components much \
+             closer to each other (the true symmetric answer) than either sequential order, \
+             got combined={combined:?}, order_a={order_a:?}"
+        );
+    }
+
+    /// `RB-PHYSICS-001-FR-052`'s own root-cause proof: the same symmetric
+    /// two-wall corner `sequential_wall_resolution_is_order_dependent_but_the_combined_solve_is_not`
+    /// uses above, except `plane_y` is replaced by a very-heavy dynamic body
+    /// (`mass = 1e9`) positioned so its own contact against the ball is
+    /// geometrically identical to `plane_y`'s (reusing `plane_y`'s own
+    /// `Contact` output directly for the dynamic manifold — `Contact`'s
+    /// normal/point/depth carry no reference to which body produced them,
+    /// and `resolve_dynamic_manifolds`' own normal convention, "points from
+    /// B toward A," matches a static contact's "points from the surface
+    /// toward the body" exactly). A body this heavy is, for all practical
+    /// purposes, as immovable as a real wall, so an order-independent solve
+    /// should land close to the same symmetric answer
+    /// `resolve_static_manifolds`'s own combined solve already reaches for
+    /// two *static* walls. Before `RB-PHYSICS-001-FR-052`, `PhysicsWorld::step`
+    /// instead resolved a body's static contacts fully via a separate
+    /// `resolve_static_manifolds` call before `resolve_dynamic_manifolds`'s
+    /// own setup even read that body's updated velocity — order A (static,
+    /// then dynamic, `step`'s own pre-fix order) and order B (reversed)
+    /// leave the ball measurably asymmetric in different directions, the
+    /// same order-dependent bias `RB-PHYSICS-001-FR-030`/`FR-051` already
+    /// found elsewhere. `resolve_manifolds`'s combined solve — sharing one
+    /// accumulator across the static and dynamic channel instead — lands
+    /// on the exact same near-symmetric answer `resolve_static_manifolds`'s
+    /// own two-*static*-wall result reaches, since the heavy body's own
+    /// negligible inverse mass means its dynamic-manifold row contributes
+    /// no meaningful correction of its own.
+    #[test]
+    fn resolving_a_bodys_static_and_dynamic_contact_together_avoids_the_order_dependent_bias_sequential_resolution_has(
+    ) {
+        let make_scene = || {
+            let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(93.15, 93.15, 0.0));
+            ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
+            let plane_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+            let plane_y = StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), 0.0);
+            // Tangent to the y=0 plane at (93.15, 0, 0) -- geometrically
+            // identical to `plane_y`'s own contact against `ball`, but
+            // resolved through the two-body dynamic-manifold path instead
+            // of the single-body static one.
+            let heavy = RigidBody::sphere(1000.0, 1.0e9, Vec3::new(93.15, -1000.0, 0.0));
+            (ball, plane_x, plane_y, heavy)
+        };
+        let dt = 1.0 / 60.0;
+
+        // Order A: static first, then dynamic -- `PhysicsWorld::step`'s own
+        // pre-FR-052 order.
+        let (mut ball_a, plane_x_a, plane_y_a, heavy_a) = make_scene();
+        let cx = contacts_vs_plane(&ball_a, &plane_x_a);
+        resolve_static_manifolds(
+            &mut ball_a,
+            &[(plane_x_a.restitution, plane_x_a.friction, cx)],
+            dt,
+        );
+        let cy = contacts_vs_plane(&ball_a, &plane_y_a);
+        let mut bodies_a = vec![ball_a, heavy_a];
+        resolve_dynamic_manifolds(&mut bodies_a, &[(0, 1, cy)], dt, &mut HashMap::new());
+        let order_a = bodies_a[0].linear_velocity;
+
+        // Order B: dynamic first, then static -- the reverse.
+        let (ball_b, plane_x_b, plane_y_b, heavy_b) = make_scene();
+        let cyb = contacts_vs_plane(&ball_b, &plane_y_b);
+        let mut bodies_b = vec![ball_b, heavy_b];
+        resolve_dynamic_manifolds(&mut bodies_b, &[(0, 1, cyb)], dt, &mut HashMap::new());
+        let mut ball_b = bodies_b[0];
+        let cxb = contacts_vs_plane(&ball_b, &plane_x_b);
+        resolve_static_manifolds(
+            &mut ball_b,
+            &[(plane_x_b.restitution, plane_x_b.friction, cxb)],
+            dt,
+        );
+        let order_b = ball_b.linear_velocity;
+
+        // Combined: both channels share one solve via `resolve_manifolds`.
+        let (ball_c, plane_x_c, plane_y_c, heavy_c) = make_scene();
+        let cxc = contacts_vs_plane(&ball_c, &plane_x_c);
+        let cyc = contacts_vs_plane(&ball_c, &plane_y_c);
+        let mut bodies_c = vec![ball_c, heavy_c];
+        resolve_manifolds(
+            &mut bodies_c,
+            &[(
+                0,
+                StaticMaterial::Surface {
+                    restitution: plane_x_c.restitution,
+                    friction: plane_x_c.friction,
+                },
+                cxc,
+            )],
+            &[(0, 1, None, cyc)],
+            dt,
+            &mut HashMap::new(),
+        );
+        let combined = bodies_c[0].linear_velocity;
+
+        assert!(
+            (order_a.x - order_a.y).abs() > 10.0,
+            "expected resolving the static wall and the heavy dynamic body \
+             sequentially to leave the ball measurably asymmetric (biased toward \
+             whichever channel was resolved last), got order_a={order_a:?}"
+        );
+        assert!(
+            (order_a.x - order_a.y).signum() != (order_b.x - order_b.y).signum(),
+            "expected the two sequential orders to be biased in opposite directions, \
+             got order_a={order_a:?}, order_b={order_b:?}"
+        );
+        assert!(
+            (combined.x - combined.y).abs() < (order_a.x - order_a.y).abs() * 0.2,
+            "expected the combined solve to leave the ball's x/y velocity components much \
+             closer to each other (the same near-symmetric answer resolving both as static \
+             walls already reaches, since a body this heavy contributes no meaningful \
+             correction of its own) than either sequential order, got combined={combined:?}, \
+             order_a={order_a:?}"
+        );
+    }
+
+    fn ground() -> StaticPlane {
+        StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
+    }
+
+    fn resting_sphere() -> RigidBody {
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        s.restitution = 0.0;
+        s.friction = 0.5;
+        s
+    }
+
+    fn resolve_single(body: &mut RigidBody, plane: &StaticPlane, dt: f32) {
+        let contacts = contacts_vs_plane(body, plane);
+        resolve_contacts(body, plane.restitution, plane.friction, &contacts, dt);
+    }
+
+    #[test]
+    fn resting_sphere_with_zero_restitution_has_zero_bounce_velocity() {
+        let mut s = resting_sphere();
+        let ground = ground();
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
+        assert!(s.linear_velocity.z.abs() < 1e-4);
+    }
+
+    #[test]
+    fn downward_impact_bounces_up_proportional_to_restitution() {
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        s.restitution = 1.0;
+        s.linear_velocity = Vec3::new(0.0, 0.0, -10.0);
+        let ground = ground();
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
+        // Combined restitution averages sphere (1.0) and plane (0.5
+        // default) to 0.75, so expect a strong but not fully elastic bounce.
+        assert!(
+            s.linear_velocity.z > 6.0,
+            "expected a strong bounce, got {}",
+            s.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn restitution_curve_clamps_a_fast_separating_relative_velocity_to_zero() {
+        // RB-PHYSICS-001-FR-048: real Bullet's own `restitutionCurve` would
+        // return a *negative* value here (`restitution * -rel_vel` with
+        // `rel_vel` positive/separating and past the threshold) — its own
+        // caller clamps that to 0 immediately afterward. This function
+        // folds that clamp inline, so it must never return a negative
+        // number for any input, confirming the two-step-vs-one-step
+        // restructuring is behaviorally exact.
+        let rel_vel = 50.0; // fast separating, well past the 0.2 threshold
+        let restitution = 0.8;
+        let result = restitution_curve(rel_vel, restitution, RESTITUTION_VELOCITY_THRESHOLD);
+        assert_eq!(
+            result, 0.0,
+            "expected the call-site clamp folded into restitution_curve to \
+             produce exactly 0.0, not a raw negative value"
+        );
+    }
+
+    #[test]
+    fn zero_restitution_impact_does_not_bounce_past_the_planes_own_restitution() {
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        s.restitution = 0.0;
+        s.linear_velocity = Vec3::new(0.0, 0.0, -10.0);
+        // Zero out the plane's contribution too, isolating "no bounce" from
+        // the combine-mode averaging tested above.
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..ground()
+        };
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
+        assert!(
+            s.linear_velocity.z <= 1e-3,
+            "expected no bounce, got {}",
+            s.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn sliding_sphere_decelerates_due_to_friction() {
+        let mut s = resting_sphere();
+        // A resting contact only generates a normal impulse (and hence a
+        // nonzero friction limit, which is derived from it) when there's
+        // an inward velocity for the solver to resist — exactly what
+        // `PhysicsWorld::step` provides every frame via gravity. Mirror
+        // that here rather than testing an unrealistic zero-normal-force
+        // contact, where friction is correctly zero (nothing to grip
+        // against).
+        s.linear_velocity = Vec3::new(5.0, 0.0, -1.0);
+        let ground = ground();
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
+        assert!(
+            s.linear_velocity.x < 5.0,
+            "friction should have removed some tangential speed"
+        );
+        // Friction couples into spin for a sphere in contact.
+        assert!(s.angular_velocity.length() > 0.0);
+    }
+
+    #[test]
+    fn friction_direction_aligns_with_the_tangential_component_of_relative_velocity() {
+        // RB-PHYSICS-001-FR-049: the direction must equal the normalized
+        // tangential (non-normal) component of the sliding velocity, not
+        // one of `plane_space`'s own fixed axes.
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let velocity = Vec3::new(3.0, 4.0, -2.0); // tangential component: (3, 4, 0)
+        let dir = friction_direction(&normal, &velocity);
+        let expected = Vec3::new(3.0, 4.0, 0.0).normalize().unwrap();
+        assert!(
+            (dir - expected).length() < 1e-5,
+            "expected the direction aligned with the tangential velocity, got {dir:?}"
+        );
+    }
+
+    #[test]
+    fn friction_direction_falls_back_to_plane_space_with_no_tangential_velocity() {
+        // RB-PHYSICS-001-FR-049: a purely normal-direction relative velocity
+        // (no sliding to align with) must reproduce `plane_space`'s first
+        // axis exactly, matching real Bullet's degenerate-case fallback.
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let velocity = Vec3::new(0.0, 0.0, -5.0);
+        assert_eq!(
+            friction_direction(&normal, &velocity),
+            plane_space(&normal).0
+        );
+    }
+
+    #[test]
+    fn friction_deceleration_is_isotropic_regardless_of_slide_direction() {
+        // RB-PHYSICS-001-FR-049: with a fixed friction basis
+        // (RB-PHYSICS-001-FR-048's own not-yet-adopted finding), two
+        // independently-clamped fixed axes approximate the true circular
+        // friction cone with a square in tangent space — a slide direction
+        // that doesn't line up with either axis could be decelerated
+        // differently (up to `sqrt(2)` times more) than one that does.
+        // Aligning friction direction 1 with the actual slide direction
+        // (this FR's own fix) makes the fractional tangential-speed loss
+        // from one resolve call the same regardless of which way the body
+        // happens to be sliding in world space.
+        let fraction_lost = |direction: Vec3| -> f32 {
+            let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+            s.restitution = 0.0;
+            s.friction = 0.5;
+            let speed = 5.0;
+            s.linear_velocity = direction * speed + Vec3::new(0.0, 0.0, -1.0);
+            let ground = ground();
+            resolve_single(&mut s, &ground, 1.0 / 60.0);
+            let remaining = Vec3::new(s.linear_velocity.x, s.linear_velocity.y, 0.0).length();
+            (speed - remaining) / speed
+        };
+
+        // One direction exactly aligned with `plane_space(normal)`'s own t2
+        // axis (see that function's own doc comment for the derivation),
+        // one at 45 degrees between it and t1 — the case a fixed-basis
+        // approach would have split unevenly across two clamped rows.
+        let axis_aligned = fraction_lost(Vec3::new(1.0, 0.0, 0.0));
+        let diagonal = fraction_lost(Vec3::new(1.0, 1.0, 0.0).normalize().unwrap());
+
+        assert!(
+            (axis_aligned - diagonal).abs() < 1e-3,
+            "expected isotropic friction deceleration: axis-aligned lost \
+             {axis_aligned}, diagonal lost {diagonal}"
+        );
+    }
+
+    #[test]
+    fn resolve_contacts_with_an_empty_manifold_is_a_no_op() {
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 10.0));
+        let before = s.linear_velocity;
+        let g = ground();
+        resolve_contacts(&mut s, g.restitution, g.friction, &[], 1.0 / 60.0);
+        assert_eq!(s.linear_velocity, before);
+    }
+
+    #[test]
+    fn resting_box_with_symmetric_contacts_settles_without_net_rotation() {
+        // A box resting flat and falling straight down generates 4
+        // symmetric contacts (RB-PHYSICS-001-FR-004's multi-contact case);
+        // resolving them together should cancel out to zero net torque by
+        // symmetry, not spin the box from solving corners one at a time.
+        let mut b = RigidBody::car_box(Vec3::new(1.0, 1.0, 0.5), 1.0, Vec3::new(0.0, 0.0, 0.5));
+        b.restitution = 0.0;
+        b.friction = 0.5;
+        b.linear_velocity = Vec3::new(0.0, 0.0, -1.0);
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..ground()
+        };
+        let contacts = contacts_vs_plane(&b, &ground);
+        assert_eq!(contacts.len(), 4);
+        resolve_contacts(
+            &mut b,
+            ground.restitution,
+            ground.friction,
+            &contacts,
+            1.0 / 60.0,
+        );
+        assert!(b.linear_velocity.z.abs() < 1e-3);
+        assert!(
+            b.angular_velocity.length() < 1e-3,
+            "expected no net spin from symmetric contacts, got {:?}",
+            b.angular_velocity
+        );
+    }
+
+    #[test]
+    fn plane_space_directions_are_orthonormal_and_perpendicular_to_normal() {
+        let n = Vec3::new(0.0, 0.0, 1.0).normalize().unwrap();
+        let (p, q) = plane_space(&n);
+        assert!(n.dot(&p).abs() < 1e-6);
+        assert!(n.dot(&q).abs() < 1e-6);
+        assert!(p.dot(&q).abs() < 1e-6);
+        assert!((p.length() - 1.0).abs() < 1e-5);
+        assert!((q.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn combine_restitution_preserves_a_uniform_coefficients_identity() {
+        // RB-PHYSICS-001-FR-043: this is the exact property Bullet's own
+        // reference default (an unclamped product) does not have — see
+        // `combine_restitution`'s own doc comment.
+        assert_eq!(combine_restitution(0.5, 0.5), 0.5);
+        assert_eq!(combine_restitution(0.8, 0.8), 0.8);
+        assert_ne!(combine_restitution(0.5, 0.5), 0.5 * 0.5);
+    }
+
+    #[test]
+    fn combine_friction_preserves_a_uniform_coefficients_identity() {
+        // RB-PHYSICS-001-FR-043: same property, same reference finding, see
+        // `combine_friction`'s own doc comment.
+        assert_eq!(combine_friction(0.5, 0.5), 0.5);
+        assert_eq!(combine_friction(0.9, 0.9), 0.9);
+        assert_ne!(combine_friction(0.5, 0.5), 0.5 * 0.5);
+    }
+
+    #[test]
+    fn combine_friction_clamps_to_the_same_bound_real_bullet_uses() {
+        // RB-PHYSICS-001-FR-053: real Bullet's own `calculateCombinedFriction`
+        // clamps its product result to [-10.0, 10.0] -- confirmed against
+        // real fetched `btManifoldResult.cpp`. This crate's own average
+        // never produces a value this large from any friction coefficient
+        // this crate itself actually sets (all positive placeholders in
+        // 0.1..=0.9), but the clamp still has real bite for an
+        // out-of-that-range input, proving it's genuinely wired in rather
+        // than a doc-comment-only claim.
+        assert_eq!(combine_friction(15.0, 15.0), 10.0);
+        assert_eq!(combine_friction(-15.0, -15.0), -10.0);
+        // Within bounds: unaffected, still the plain average.
+        assert_eq!(combine_friction(9.0, 9.0), 9.0);
+    }
+
+    fn car_at_origin() -> RigidBody {
+        RigidBody::standard_car(Vec3::ZERO)
+    }
+
+    fn overlapping_ball() -> RigidBody {
+        RigidBody::sphere(93.15, 1.0, Vec3::new(CAR_HALF_EXTENTS.x + 50.0, 0.0, 0.0))
+    }
+
+    /// Zero penetration on purpose: the deep overlap `overlapping_ball()`
+    /// gives is realistic for "detected mid-frame", but its Baumgarte
+    /// positional-correction term (proportional to penetration depth) then
+    /// dominates the post-solve relative velocity, which isn't what this
+    /// test means to check — same reasoning as `downward_impact_bounces_up_
+    /// proportional_to_restitution` using an exactly-touching sphere.
+    fn touching_ball() -> RigidBody {
+        // At the hitbox's height, so this is a face contact, not one on
+        // the front-bottom edge the margin rounds (FR-125).
+        RigidBody::sphere(
+            93.15,
+            1.0,
+            Vec3::new(
+                CAR_HALF_EXTENTS.x + 93.15,
+                0.0,
+                crate::body::CAR_HITBOX_OFFSET.z,
+            ),
+        )
+    }
+
+    #[test]
+    fn inelastic_head_on_collision_leaves_no_residual_closing_speed() {
+        let mut ball = touching_ball();
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(-100.0, 0.0, 0.0);
+        let mut car = car_at_origin();
+        car.restitution = 0.0;
+        let contacts = contacts_between(&ball, &car);
+        resolve_contacts_between(&mut ball, &mut car, &contacts, 1.0 / 60.0);
+        // At the contact point: the hitbox sits above the car's origin, so
+        // the hit also spins the car.
+        let point = contacts[0].point;
+        let rel_vel = contacts[0].normal.dot(
+            &(ball.velocity_at_point(&(point - ball.position))
+                - car.velocity_at_point(&(point - car.position))),
+        );
+        assert!(
+            rel_vel.abs() < 1e-2,
+            "expected no residual closing speed, got {rel_vel}"
+        );
+    }
+
+    #[test]
+    fn collision_conserves_linear_momentum() {
+        let mut ball = overlapping_ball();
+        ball.restitution = 0.8;
+        ball.linear_velocity = Vec3::new(-500.0, 0.0, 0.0);
+        let mut car = car_at_origin();
+        car.restitution = 0.8;
+        car.linear_velocity = Vec3::new(50.0, 0.0, 0.0);
+        let before = ball.linear_velocity * ball.mass() + car.linear_velocity * car.mass();
+        let contacts = contacts_between(&ball, &car);
+        resolve_contacts_between(&mut ball, &mut car, &contacts, 1.0 / 60.0);
+        let after = ball.linear_velocity * ball.mass() + car.linear_velocity * car.mass();
+        assert!(
+            (before - after).length() < 1.0,
+            "expected momentum conservation, before={before:?} after={after:?}"
+        );
+    }
+
+    #[test]
+    fn a_much_heavier_body_barely_moves_from_the_collision() {
+        // The car (mass 180) is vastly heavier than the ball (mass 1) —
+        // the ball should bounce back while the car barely budges, the
+        // same qualitative behavior as a ball bouncing off a wall.
+        let mut ball = touching_ball();
+        ball.restitution = 0.6;
+        ball.linear_velocity = Vec3::new(-500.0, 0.0, 0.0);
+        let mut car = car_at_origin();
+        car.restitution = 0.6;
+        let contacts = contacts_between(&ball, &car);
+        resolve_contacts_between(&mut ball, &mut car, &contacts, 1.0 / 60.0);
+        assert!(
+            ball.linear_velocity.x > 0.0,
+            "expected the light ball to bounce back, got {}",
+            ball.linear_velocity.x
+        );
+        assert!(
+            car.linear_velocity.x.abs() < 10.0,
+            "expected the much heavier car to barely move, got {}",
+            car.linear_velocity.x
+        );
+    }
+
+    /// Symmetric setup for `resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`:
+    /// a ball at the origin exactly touching two identical cars closing in
+    /// from either side at equal and opposite speed. Zero restitution and
+    /// exact (zero-penetration) contact throughout, same reasoning as
+    /// `touching_ball`, isolates the multi-body coupling this test checks
+    /// from restitution bounce and Baumgarte positional correction.
+    fn symmetric_pinch() -> (RigidBody, RigidBody, RigidBody) {
+        let half = CAR_HALF_EXTENTS;
+        let ball_radius = 93.15;
+        let gap = half.x + ball_radius;
+
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::ZERO);
+        ball.restitution = 0.0;
+        let mut left = RigidBody::car_box(half, 180.0, Vec3::new(-gap, 0.0, 0.0));
+        left.restitution = 0.0;
+        left.linear_velocity = Vec3::new(100.0, 0.0, 0.0);
+        let mut right = RigidBody::car_box(half, 180.0, Vec3::new(gap, 0.0, 0.0));
+        right.restitution = 0.0;
+        right.linear_velocity = Vec3::new(-100.0, 0.0, 0.0);
+        (ball, left, right)
+    }
+
+    #[test]
+    fn resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently(
+    ) {
+        // The real point of RB-PHYSICS-001-FR-030: a ball exactly, mutually
+        // touching two cars closing on it from opposite sides at equal
+        // speed is left-right symmetric, so a true simultaneous solve must
+        // leave it near stationary (both contacts equally constrain it,
+        // and total momentum is exactly zero). Resolving each pair to its
+        // own full, independent convergence — one call to
+        // `resolve_contacts_between` per pair, the pre-FR-030 shape of
+        // `PhysicsWorld::step` — can't see that: the *second* call's setup
+        // reads the ball's velocity only *after* the first pair's contact
+        // has already been fully solved and applied, so the ball ends up
+        // essentially adopting whichever car was resolved last (about 99%
+        // of that car's own closing speed), as if the first contact barely
+        // mattered. `resolve_dynamic_manifolds` shares one accumulator per
+        // body across both manifolds for the whole solve instead, so
+        // neither contact's information gets thrown away by the other —
+        // it doesn't fully converge to the true zero-velocity answer in
+        // just `SOLVER_ITERATIONS` iterations for this extreme a mass
+        // ratio (ball mass 1 vs. car mass 180 — a known, common limitation
+        // of projected Gauss-Seidel solvers for a light body sandwiched
+        // between two heavy ones, not unique to this port), but it must
+        // land measurably closer to it.
+        let (mut ball_a, mut left_a, mut right_a) = symmetric_pinch();
+        let contacts_left = contacts_between(&ball_a, &left_a);
+        resolve_contacts_between(&mut ball_a, &mut left_a, &contacts_left, 1.0 / 60.0);
+        let contacts_right = contacts_between(&ball_a, &right_a);
+        resolve_contacts_between(&mut ball_a, &mut right_a, &contacts_right, 1.0 / 60.0);
+        let independent_ball_speed = ball_a.linear_velocity.x.abs();
+
+        let (ball_b, left_b, right_b) = symmetric_pinch();
+        let mut bodies = vec![ball_b, left_b, right_b];
+        let manifolds = vec![
+            (0usize, 1usize, contacts_between(&bodies[0], &bodies[1])),
+            (0usize, 2usize, contacts_between(&bodies[0], &bodies[2])),
+        ];
+        resolve_dynamic_manifolds(&mut bodies, &manifolds, 1.0 / 60.0, &mut HashMap::new());
+        let combined_ball_speed = bodies[0].linear_velocity.x.abs();
+
+        assert!(
+            independent_ball_speed > 98.0,
+            "expected resolving each pair independently to leave the ball near a single car's \
+             own closing speed, got {independent_ball_speed}"
+        );
+        assert!(
+            combined_ball_speed < independent_ball_speed - 5.0,
+            "expected the combined solve to leave the ball measurably slower than resolving \
+             each pair independently, independent={independent_ball_speed}, \
+             combined={combined_ball_speed}"
+        );
+    }
+
+    #[test]
+    fn resolve_dynamic_manifolds_relaxes_a_shared_bodys_impulse_by_its_own_contact_degree() {
+        // RB-PHYSICS-001-FR-041: investigated whether anything short of
+        // real recorded data could narrow FR-030's own documented
+        // "sandwiched" under-convergence gap at this crate's fixed
+        // `SOLVER_ITERATIONS`. An experiment (not shipped as its own
+        // change) first tried a global SOR-style relaxation factor on
+        // every manifold's normal row: factors above 1.0 (over-relaxation)
+        // made this exact scenario measurably *worse* — the ball ended up
+        // faster than even the old independent-pairwise approach, i.e.
+        // genuinely diverging, not just under-converging — while factors
+        // below 1.0 (under-relaxation) made it monotonically *better* the
+        // smaller they got, with no instability observed down to 0.1. That
+        // matches standard PGS/SOR theory for a tightly-coupled multi-body
+        // constraint system: a body touched by `k` other bodies in the same
+        // step has each of those `k` manifolds independently apply its own
+        // full correction against the body's own accumulating delta
+        // velocity every iteration, over-shooting by roughly a factor of
+        // `k`. `1 / k` — the same "fair share" weighting position-based-
+        // dynamics solvers use for a point mass under several simultaneous
+        // constraints — is a parameter-free fix requiring no tuned magic
+        // number and no real data to justify: it is mathematically
+        // dominant (strictly reduces, never increases, a shared body's
+        // per-iteration overshoot) rather than a fidelity trade-off like
+        // raising `SOLVER_ITERATIONS` would be.
+        let (ball, left, right) = symmetric_pinch();
+        let mut bodies = vec![ball, left, right];
+        let manifolds = vec![
+            (0usize, 1usize, contacts_between(&bodies[0], &bodies[1])),
+            (0usize, 2usize, contacts_between(&bodies[0], &bodies[2])),
+        ];
+        resolve_dynamic_manifolds(&mut bodies, &manifolds, 1.0 / 60.0, &mut HashMap::new());
+        let combined_ball_speed = bodies[0].linear_velocity.x.abs();
+
+        // Measured directly: the pre-FR-041 combined solve (relaxation
+        // always 1.0) leaves this exact scenario's ball at ~89.5 units/s;
+        // relaxing the shared ball's own contribution by 1/2 (it's touched
+        // by exactly 2 manifolds this step) brings it to ~32 units/s — a
+        // real, further narrowing of the gap to the true zero-velocity
+        // answer, at zero added per-step iteration cost. Unaffected by
+        // RB-PHYSICS-001-FR-078's corrected `CAR_HALF_EXTENTS`: this is a
+        // purely 1D, mass/velocity-driven symmetric collision along the
+        // contact normal, so the exact half-extent value the contact
+        // happens at doesn't change the outcome (re-measured after FR-078
+        // and confirmed at ~32.0 unchanged).
+        assert!(
+            combined_ball_speed < 50.0,
+            "expected FR-041's shared-body relaxation to leave the sandwiched ball well below \
+             FR-030's own pre-FR-041 ~89.5 units/s, got {combined_ball_speed}"
+        );
+    }
+
+    #[test]
+    fn resolve_dynamic_manifolds_with_one_manifold_per_body_matches_resolve_contacts_between() {
+        // FR-041's shared-body relaxation (`1 / k`) must be a no-op for the
+        // overwhelming majority case — a body touched by only one other
+        // body this step (`k == 1`) — so every pre-existing single-manifold
+        // scenario this crate already tests stays bit-for-bit unaffected.
+        fn ball_and_car() -> (RigidBody, RigidBody) {
+            let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::ZERO);
+            ball.restitution = 0.0;
+            ball.linear_velocity = Vec3::new(100.0, 0.0, 0.0);
+            let mut car = RigidBody::car_box(
+                Vec3::new(60.0, 42.0, 18.0),
+                180.0,
+                Vec3::new(180.0, 0.0, 0.0),
+            );
+            car.restitution = 0.0;
+            (ball, car)
+        }
+
+        let (mut ball_via_between, mut car_via_between) = ball_and_car();
+        let contacts = contacts_between(&ball_via_between, &car_via_between);
+        resolve_contacts_between(
+            &mut ball_via_between,
+            &mut car_via_between,
+            &contacts,
+            1.0 / 60.0,
+        );
+
+        let (ball, car) = ball_and_car();
+        let mut bodies = vec![ball, car];
+        let manifolds = vec![(0usize, 1usize, contacts_between(&bodies[0], &bodies[1]))];
+        resolve_dynamic_manifolds(&mut bodies, &manifolds, 1.0 / 60.0, &mut HashMap::new());
+
+        assert!(
+            (bodies[0].linear_velocity.x - ball_via_between.linear_velocity.x).abs() < 1e-4,
+            "expected a single-manifold-per-body call to resolve_dynamic_manifolds to match \
+             resolve_contacts_between exactly, dynamic={}, between={}",
+            bodies[0].linear_velocity.x,
+            ball_via_between.linear_velocity.x
+        );
+        assert!(
+            (bodies[1].linear_velocity.x - car_via_between.linear_velocity.x).abs() < 1e-4,
+            "expected a single-manifold-per-body call to resolve_dynamic_manifolds to match \
+             resolve_contacts_between exactly, dynamic={}, between={}",
+            bodies[1].linear_velocity.x,
+            car_via_between.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn boxes_colliding_face_to_face_settle_without_net_rotation() {
+        // Two identical boxes closing head-on, face-to-face: a box-vs-box
+        // manifold (4 symmetric contacts, unlike sphere-vs-box's single
+        // point) resolved between two dynamic bodies should cancel out to
+        // zero net spin by symmetry, the same property
+        // `resting_box_with_symmetric_contacts_settles_without_net_rotation`
+        // checks for the one-body ground-manifold case.
+        let mut a = RigidBody::car_box(Vec3::new(10.0, 10.0, 10.0), 1.0, Vec3::ZERO);
+        a.restitution = 0.0;
+        a.linear_velocity = Vec3::new(1.0, 0.0, 0.0);
+        let mut b = RigidBody::car_box(Vec3::new(10.0, 10.0, 10.0), 1.0, Vec3::new(15.0, 0.0, 0.0));
+        b.restitution = 0.0;
+        b.linear_velocity = Vec3::new(-1.0, 0.0, 0.0);
+
+        let contacts = contacts_between(&a, &b);
+        assert_eq!(contacts.len(), 4);
+        resolve_contacts_between(&mut a, &mut b, &contacts, 1.0 / 60.0);
+
+        assert!(
+            a.angular_velocity.length() < 1e-3,
+            "expected no net spin on a, got {:?}",
+            a.angular_velocity
+        );
+        assert!(
+            b.angular_velocity.length() < 1e-3,
+            "expected no net spin on b, got {:?}",
+            b.angular_velocity
+        );
+    }
+
+    #[test]
+    fn split_impulse_corrects_deep_penetration_via_position_not_velocity() {
+        // The real point of `RB-PHYSICS-001-FR-034`: a body deeply embedded
+        // in a static surface, starting and staying at rest (restitution
+        // 0, zero incoming velocity), should be pushed back out of
+        // penetration by moving its *position*, not by picking up spurious
+        // velocity along the contact normal the way the old combined
+        // rhs/rhs_penetration term would have (a Baumgarte correction
+        // term folded into velocity looks, to every later reader of that
+        // velocity — restitution, friction, momentum — exactly like a real
+        // impact, which it isn't).
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 0.5));
+        s.restitution = 0.0;
+        s.friction = 0.5;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..ground()
+        };
+        let before_position_z = s.position.z;
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
+
+        assert!(
+            s.linear_velocity.z.abs() < 1e-3,
+            "expected split impulse to leave the real velocity near zero (no bounce from \
+             resolving penetration alone), got {}",
+            s.linear_velocity.z
+        );
+        assert!(
+            s.position.z > before_position_z + 1e-3,
+            "expected split impulse to correct the penetration directly via position, \
+             before={before_position_z} after={}",
+            s.position.z
+        );
+    }
+
+    #[test]
+    fn split_impulse_corrects_deep_penetration_via_position_not_velocity_between_two_bodies() {
+        // Two-body analog of `split_impulse_corrects_deep_penetration_via_
+        // position_not_velocity`: `overlapping_ball()` starts deeply
+        // embedded in `car_at_origin()` (RB-PHYSICS-001-FR-034's other
+        // path, `resolve_contacts_between`); with both bodies at rest and
+        // zero restitution, the post-solve real relative velocity along
+        // the contact normal should stay near zero, while the two bodies'
+        // positions separate to relieve the overlap.
+        let mut ball = overlapping_ball();
+        ball.restitution = 0.0;
+        let mut car = car_at_origin();
+        car.restitution = 0.0;
+        let contacts = contacts_between(&ball, &car);
+        let before_separation = (ball.position - car.position).x;
+        resolve_contacts_between(&mut ball, &mut car, &contacts, 1.0 / 60.0);
+
+        let rel_vel = contacts[0]
+            .normal
+            .dot(&(ball.linear_velocity - car.linear_velocity));
+        assert!(
+            rel_vel.abs() < 1e-2,
+            "expected no velocity injected purely from resolving penetration, got {rel_vel}"
+        );
+
+        let after_separation = (ball.position - car.position).x;
+        assert!(
+            after_separation > before_separation + 1.0,
+            "expected split impulse to separate the two bodies directly via position, \
+             before={before_separation} after={after_separation}"
+        );
+    }
+
+    #[test]
+    fn warm_starting_a_sandwiched_ball_across_two_calls_converges_closer_than_a_repeated_cold_start(
+    ) {
+        // The real point of `RB-PHYSICS-001-FR-035`: reuses
+        // `symmetric_pinch` (the same extreme-mass-ratio scenario
+        // `resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`
+        // already shows doesn't fully converge in one call's
+        // `SOLVER_ITERATIONS`) to isolate exactly what warm-starting itself
+        // contributes: call 1 (cold, an empty cache) partially converges
+        // and leaves its impulses in `caches`. From that identical
+        // post-call-1 state, call 2 then runs *twice* — once warm (reusing
+        // `caches`) and once cold (a fresh, empty map) — same positions,
+        // contacts, velocities, and iteration budget both times. Only the
+        // warm run starts its `DeltaVelocity` accumulators pre-loaded with
+        // call 1's converged impulse; if that's genuinely doing something,
+        // the warm run must land closer to the true zero-velocity
+        // equilibrium than the cold repeat does.
+        let (ball0, left0, right0) = symmetric_pinch();
+        let mut after_call_1 = vec![ball0, left0, right0];
+        let manifolds_1 = vec![
+            (
+                0usize,
+                1usize,
+                contacts_between(&after_call_1[0], &after_call_1[1]),
+            ),
+            (
+                0usize,
+                2usize,
+                contacts_between(&after_call_1[0], &after_call_1[2]),
+            ),
+        ];
+        let mut caches: HashMap<(usize, usize), ContactCache> = HashMap::new();
+        resolve_dynamic_manifolds(&mut after_call_1, &manifolds_1, 1.0 / 60.0, &mut caches);
+
+        let manifolds_2 = vec![
+            (
+                0usize,
+                1usize,
+                contacts_between(&after_call_1[0], &after_call_1[1]),
+            ),
+            (
+                0usize,
+                2usize,
+                contacts_between(&after_call_1[0], &after_call_1[2]),
+            ),
+        ];
+
+        // Two independent copies of the identical post-call-1 state: only
+        // the cache passed into call 2 differs between them.
+        let mut warm_bodies = after_call_1.clone();
+        let mut warm_caches = caches.clone();
+        resolve_dynamic_manifolds(&mut warm_bodies, &manifolds_2, 1.0 / 60.0, &mut warm_caches);
+        let warm_speed = warm_bodies[0].linear_velocity.x.abs();
+
+        let mut cold_bodies = after_call_1;
+        let mut cold_caches: HashMap<(usize, usize), ContactCache> = HashMap::new();
+        resolve_dynamic_manifolds(&mut cold_bodies, &manifolds_2, 1.0 / 60.0, &mut cold_caches);
+        let cold_speed = cold_bodies[0].linear_velocity.x.abs();
+
+        assert!(
+            warm_speed < cold_speed - 1.0,
+            "expected warm-starting call 2 from call 1's converged impulses to land closer to \
+             the true zero-velocity equilibrium than repeating a cold call 2, warm={warm_speed} \
+             cold={cold_speed}"
+        );
+    }
+
+    #[test]
+    fn a_pair_material_replaces_the_bodies_combined_coefficients() {
+        // RB-PHYSICS-001-FR-107: a ball dropped on a heavy box with a
+        // zero-restitution pair material does not bounce, though both
+        // bodies' own restitution would.
+        let dt = 1.0 / 120.0;
+        let mut ball = RigidBody::sphere(10.0, 1.0, Vec3::new(0.0, 0.0, 9.5));
+        ball.restitution = 0.9;
+        ball.linear_velocity = Vec3::new(0.0, 0.0, -500.0);
+        let mut heavy = RigidBody::car_box(
+            Vec3::new(100.0, 100.0, 10.0),
+            1.0e6,
+            Vec3::new(0.0, 0.0, -10.0),
+        );
+        heavy.restitution = 0.9;
+        let contacts = crate::collision::contacts_between(&ball, &heavy);
+        let mut bodies = vec![ball, heavy];
+        resolve_manifolds(
+            &mut bodies,
+            &[],
+            &[(
+                0,
+                1,
+                Some(PairMaterial {
+                    restitution: 0.0,
+                    friction: 2.0,
+                }),
+                contacts,
+            )],
+            dt,
+            &mut HashMap::new(),
+        );
+        assert!(
+            bodies[0].linear_velocity.z.abs() < 5.0,
+            "expected no bounce, got {:?}",
+            bodies[0].linear_velocity
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-108: RocketSim drops Bullet's speculative term, so
+    /// a contact still clear of its surface stops the approach outright
+    /// instead of letting the body close the gap this tick.
+    #[test]
+    fn a_contact_still_clear_of_its_surface_stops_the_approach_without_the_speculative_term() {
+        let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, 0.0, 94.15));
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(0.0, 0.0, -100.0);
+        let gap = Contact {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            point: Vec3::new(0.0, 0.0, 1.0),
+            penetration_depth: -1.0,
+        };
+        resolve_contacts(&mut ball, 0.0, 0.0, &[gap], 1.0 / 120.0);
+        assert!(
+            ball.linear_velocity.z.abs() < 1e-3,
+            "expected the approach stopped, got vz={}",
+            ball.linear_velocity.z
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-108: a combined ball-world normal is an average,
+    /// here exactly on `plane_space`'s branch boundary, with all velocity
+    /// along it; the fallback direction must still be a finite unit tangent.
+    #[test]
+    fn friction_direction_stays_finite_for_a_non_unit_averaged_normal() {
+        let normal = Vec3::new(0.0, 0.0, std::f32::consts::FRAC_1_SQRT_2);
+        let t = friction_direction(&normal, &Vec3::new(0.0, 0.0, -1000.0));
+        assert!((t.length() - 1.0).abs() < 1e-5, "not unit: {t:?}");
+        assert!(t.dot(&normal).abs() < 1e-5, "not tangent: {t:?}");
+    }
+
+    /// RB-PHYSICS-001-FR-118: a push-only manifold moves the body out of
+    /// penetration by RocketSim's `m_erp2` share (0.8) and never touches
+    /// its velocity, even while it approaches the surface.
+    #[test]
+    fn a_push_only_manifold_corrects_position_at_rocketsims_erp_and_leaves_velocity_alone() {
+        let dt = 1.0 / 120.0;
+        let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, 0.0, 83.15));
+        ball.linear_velocity = Vec3::new(0.0, 0.0, -300.0);
+        let contact = Contact {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            point: Vec3::ZERO,
+            penetration_depth: 10.0,
+        };
+        let mut bodies = [ball];
+        let mut caches = HashMap::new();
+        resolve_manifolds(
+            &mut bodies,
+            &[(0, StaticMaterial::PushOnly, vec![contact])],
+            &[],
+            dt,
+            &mut caches,
+        );
+        let after = bodies[0];
+        assert!(
+            (after.linear_velocity.z + 300.0).abs() < 1e-3,
+            "velocity changed: {:?}",
+            after.linear_velocity
+        );
+        let pushed = after.position.z - 83.15;
+        assert!(
+            (pushed - 0.8 * 10.0).abs() < 1e-2,
+            "expected 8 uu of push, got {pushed}"
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-135: a body's static-contact lever arm runs to its
+    /// own surface point, `penetration_depth` back along the normal. The
+    /// normal row's lever is unchanged (the shift is along the normal); the
+    /// friction row's is not.
+    #[test]
+    fn a_static_contacts_friction_lever_arm_runs_to_the_bodys_own_point() {
+        let mut car = RigidBody::standard_car(Vec3::ZERO);
+        car.linear_velocity = Vec3::new(100.0, 0.0, 0.0);
+        let contact = Contact {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            point: Vec3::new(10.0, 0.0, 0.0),
+            penetration_depth: 6.0,
+        };
+        let rows = setup_rows(&car, &contact, 1.0 / 120.0);
+        // The tangent runs along x, so its torque axis is the lever's z
+        // part, 6, about y (the sign follows the tangent's direction).
+        let friction = rows[1].torque_axis;
+        assert!((friction.y.abs() - 6.0).abs() < 1e-4, "{friction:?}");
+        assert!(friction.x.abs() < 1e-4 && friction.z.abs() < 1e-4);
+        // The normal row's lever, 10 about y, ignores the shift.
+        let normal = rows[0].torque_axis;
+        assert!((normal.y.abs() - 10.0).abs() < 1e-4, "{normal:?}");
+    }
+}

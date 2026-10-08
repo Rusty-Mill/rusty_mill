@@ -1,0 +1,224 @@
+{
+  "name": "duel_993: two cars run at each other, then seeded random tapes",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      289,
+      271,
+      17
+    ],
+    "rotation": [
+      0,
+      3.4897,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 33
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 95,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 28,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 48,
+      "throttle": 1
+    },
+    {
+      "ticks": 17,
+      "throttle": 1,
+      "steer": 0
+    },
+    {
+      "ticks": 30,
+      "throttle": -1,
+      "boost": true
+    },
+    {
+      "ticks": 34,
+      "throttle": 1
+    },
+    {
+      "ticks": 19,
+      "throttle": 1,
+      "steer": 0,
+      "handbrake": true
+    },
+    {
+      "ticks": 9,
+      "throttle": 1,
+      "steer": 0.5,
+      "jump": true
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "boost": true,
+      "jump": true,
+      "roll": 1
+    },
+    {
+      "ticks": 20,
+      "throttle": -1,
+      "steer": 0.5,
+      "boost": true
+    },
+    {
+      "ticks": 25,
+      "throttle": 1,
+      "steer": -1,
+      "pitch": -1
+    },
+    {
+      "ticks": 20,
+      "throttle": -1,
+      "steer": 0,
+      "boost": true,
+      "yaw": -0.5
+    },
+    {
+      "ticks": 16,
+      "throttle": 0,
+      "boost": true
+    },
+    {
+      "ticks": 33,
+      "throttle": -1,
+      "steer": 0,
+      "boost": true
+    },
+    {
+      "ticks": 20,
+      "throttle": -1
+    },
+    {
+      "ticks": 31,
+      "throttle": 1,
+      "steer": 1
+    },
+    {
+      "ticks": 27,
+      "throttle": -1,
+      "boost": true
+    },
+    {
+      "ticks": 23,
+      "throttle": 1,
+      "steer": 0,
+      "boost": true
+    },
+    {
+      "ticks": 25,
+      "throttle": 0
+    },
+    {
+      "ticks": 27,
+      "throttle": 1,
+      "steer": 0
+    },
+    {
+      "ticks": 48,
+      "throttle": 1,
+      "steer": 0
+    },
+    {
+      "ticks": 2,
+      "throttle": 0,
+      "steer": -1,
+      "jump": true
+    },
+    {
+      "ticks": 34,
+      "throttle": 1,
+      "steer": -0.5,
+      "yaw": 0.5,
+      "roll": -0.5
+    },
+    {
+      "ticks": 19,
+      "throttle": 1,
+      "steer": 0,
+      "boost": true,
+      "jump": true
+    },
+    {
+      "ticks": 33,
+      "throttle": 0,
+      "steer": -1,
+      "pitch": -1,
+      "yaw": 1,
+      "roll": -1
+    },
+    {
+      "ticks": 35,
+      "throttle": 1,
+      "steer": 1,
+      "boost": true,
+      "pitch": -0.5,
+      "yaw": -0.5
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          -135,
+          43,
+          17
+        ],
+        "rotation": [
+          0,
+          0.4584,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 33
+      },
+      "steps": [
+        {
+          "ticks": 95
+        },
+        {
+          "ticks": 625
+        }
+      ],
+      "team": 1
+    }
+  ]
+}

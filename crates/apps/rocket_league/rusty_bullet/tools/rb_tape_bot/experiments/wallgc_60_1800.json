@@ -1,0 +1,44 @@
+{
+  "name": "wallgc_60_1800: wall approach at 60 degrees, 1800 uu/s, throttle released",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      3036.5771365940054,
+      -3000,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      0.5235987755982988,
+      0
+    ],
+    "velocity": [
+      1558.8457268119894,
+      900.0000000000002,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 420
+    }
+  ]
+}

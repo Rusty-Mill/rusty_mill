@@ -1,0 +1,47 @@
+{
+  "name": "aircombo_pitch_rollneg: level at z = 1000, pitch 1 yaw 0 roll -1",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      0,
+      1000
+    ],
+    "rotation": [
+      0,
+      0,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 120,
+      "pitch": 1,
+      "yaw": 0,
+      "roll": -1
+    }
+  ]
+}

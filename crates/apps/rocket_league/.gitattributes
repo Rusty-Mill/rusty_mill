@@ -1,0 +1,4 @@
+# Binary inputs: never touched by the root `* text=auto eol=lf` rule.
+*.replay binary
+*.capture binary
+*.cmf binary
