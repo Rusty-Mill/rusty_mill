@@ -38,11 +38,22 @@ pub fn crop_slowest(mut v: Vec<f64>, percent: usize) -> Vec<f64> {
     v
 }
 
-/// Times `run(class)` `samples` times with classes chosen by a seeded
-/// xorshift generator, and returns `|t|` after cropping the slowest 5%.
-/// `run` must do the work for one input of the given class (`false` / `true`)
-/// and return something to keep the optimiser honest.
-pub fn leak_statistic<T>(samples: usize, seed: u64, mut run: impl FnMut(bool) -> T) -> Option<f64> {
+/// Times `measure()` `samples` times, after `prepare(class)` has set up that
+/// sample's input, with classes chosen by a seeded xorshift generator. Returns
+/// `|t|` after cropping the slowest 5%.
+///
+/// Only `measure` is timed. All class-dependent setup (copying a key into the
+/// buffer both classes share, choosing a value) belongs in `prepare`, so that
+/// the timed code is *identical* for both classes and touches the same
+/// addresses. Setup inside the timed region produced false detections of
+/// |t| above 20 on code with no leak (see `docs/research/crypto-evidence/`).
+/// `measure` must return something so the optimiser cannot drop the work.
+pub fn leak_statistic_split<T>(
+    samples: usize,
+    seed: u64,
+    mut prepare: impl FnMut(bool),
+    mut measure: impl FnMut() -> T,
+) -> Option<f64> {
     let mut state = seed | 1;
     let (mut zero, mut one) = (Vec::new(), Vec::new());
     for _ in 0..samples {
@@ -50,8 +61,9 @@ pub fn leak_statistic<T>(samples: usize, seed: u64, mut run: impl FnMut(bool) ->
         state ^= state >> 7;
         state ^= state << 17;
         let class = state & 1 == 1;
+        prepare(class);
         let start = Instant::now();
-        core::hint::black_box(run(class));
+        core::hint::black_box(measure());
         let ns = start.elapsed().as_nanos() as f64;
         if class {
             one.push(ns)
@@ -60,6 +72,14 @@ pub fn leak_statistic<T>(samples: usize, seed: u64, mut run: impl FnMut(bool) ->
         }
     }
     welch_t(&crop_slowest(zero, 5), &crop_slowest(one, 5)).map(f64::abs)
+}
+
+/// [`leak_statistic_split`] for work whose class-dependent setup is cheap and
+/// identical in code for both classes. Prefer the split form; this one times
+/// everything `run` does, including any branch on the class.
+pub fn leak_statistic<T>(samples: usize, seed: u64, mut run: impl FnMut(bool) -> T) -> Option<f64> {
+    let class = core::cell::Cell::new(false);
+    leak_statistic_split(samples, seed, |c| class.set(c), || run(class.get()))
 }
 
 #[cfg(test)]

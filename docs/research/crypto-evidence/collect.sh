@@ -7,7 +7,7 @@
 # Takes several minutes (timing tests run REPS times).
 set -u
 cd "$(git rev-parse --show-toplevel)"
-REPS=${REPS:-5}
+REPS=${REPS:-40}
 section() { printf '\n== %s ==\n' "$1"; }
 
 section "implementation"
@@ -33,7 +33,7 @@ grep -A1 'name = "ring"' Cargo.lock | tr '\n' ' '; echo
 section "vector files"
 for d in crates/foundation/rusty_sha2 crates/foundation/rusty_pk crates/foundation/rusty_aead; do
   echo "-- $d/tests/vectors/MANIFEST.txt"
-  head -3 "$d/tests/vectors/MANIFEST.txt" 2>/dev/null | sed 's/^/   /'
+  head -2 "$d/tests/vectors/MANIFEST.txt" 2>/dev/null | sed 's/^/   /'
   (cd "$d/tests/vectors" && sha256sum *.json *.txt 2>/dev/null | grep -v MANIFEST | sed 's/^/   /')
 done
 
@@ -85,15 +85,44 @@ for c in rusty_ct_check rusty_sha2 rusty_aead rusty_pk; do
   echo "   exit=$?"
 done
 
-section "timing tests, $REPS repetitions each (|t|; threshold 4.5; ignored tests, run with --ignored)"
-echo "classes and sample counts are in the test sources: rusty_sha2/tests/timing.rs (200000 samples), rusty_aead/tests/timing.rs (100000), rusty_pk/tests/timing.rs (20000); slowest 5% cropped; seeds fixed"
-for c in rusty_sha2 rusty_aead rusty_pk; do
-  i=1
-  while [ $i -le "$REPS" ]; do
-    cargo test --release -p $c --test timing -- --ignored --nocapture 2>&1 | grep -E '\|t\|' | sed "s/^/$c run $i: /"
-    i=$((i+1))
+section "timing tests: $REPS repetitions per test, with A/A (no-leak) baselines"
+cat <<'TXT'
+How to read this: each number is |t| from one run (dudect-style Welch t, slowest 5% cropped, fixed
+seed, ignored tests run with --ignored). Threshold 4.5. The A/A tests do identical work in both
+classes, so their spread is this machine's noise: a leak claim needs a clear, repeatable gap above
+the A/A spread, and a pass is only "no leak detected under these conditions". Samples per run:
+rusty_sha2 200000, rusty_aead 100000, rusty_pk 20000. Classes are written in each test's comments.
+The tests time only the operation; class-dependent setup is outside the clock and writes into one
+buffer shared by both classes. An earlier version that set up inside the timed region reported
+|t| up to 25 on this same code (see "harness history" in the plan, stage 3/4 notes).
+TXT
+summ() { sort -n | awk '{a[NR]=$1} END{c=0; for(i=1;i<=NR;i++) if(a[i]>4.5) c++; printf "n=%d min=%s median=%s p90=%s max=%s above_4.5=%d", NR, a[1], a[int((NR+1)/2)], a[int(NR*0.9)], a[NR], c}'; }
+series() { # crate test-name label
+  c=$1; t=$2; l=$3
+  bin=""
+  for b in $(ls -t target/release/deps/timing-* 2>/dev/null | grep -v '\.d$'); do
+    "$b" --ignored --list 2>/dev/null | grep -q "^$t: test" && { bin=$b; break; }
   done
-done
+  [ -n "$bin" ] || { echo "$l: test $t not found"; return; }
+  raw=""; i=1
+  while [ $i -le "$REPS" ]; do
+    v=$("$bin" --ignored --nocapture "$t" 2>&1 | grep -E '\|t\| = ' | grep -v panicked | head -1 | sed 's/.*|t| = //')
+    raw="$raw $v"; i=$((i+1))
+  done
+  echo "$l: $(echo $raw | tr ' ' '\n' | summ)"
+  echo "   raw:$raw"
+}
+for c in rusty_sha2 rusty_aead rusty_pk; do cargo test --release -p $c --test timing --no-run >/dev/null 2>&1; done
+series rusty_sha2 null_calibration_identical_classes "A/A  HMAC-SHA512 (baseline)"
+series rusty_sha2 hmac_sha512_key_classes_not_distinguishable "HMAC-SHA512 fixed vs other key"
+series rusty_sha2 hmac_sha256_key_classes_not_distinguishable "HMAC-SHA256 fixed vs other key"
+series rusty_aead null_calibration_identical_classes "A/A  ChaCha20-Poly1305 seal (baseline)"
+series rusty_aead key_classes_not_distinguishable "seal: fixed vs other key"
+series rusty_aead plaintext_classes_not_distinguishable "seal: all-zero vs all-ones plaintext"
+series rusty_aead tag_mismatch_position_not_distinguishable "open: first-byte vs last-byte tag mismatch"
+series rusty_pk null_calibration_identical_classes "A/A  X25519 (baseline)"
+series rusty_pk scalar_classes_not_distinguishable "x25519: sparse vs dense scalar"
+series rusty_pk fixed_vs_random_scalar "x25519: fixed vs other scalar"
 
 section "speed, one run each (not benchmarks)"
 cargo test --release -p rusty_pk --test perf -- --ignored --nocapture 2>&1 | grep -E 'ours'
