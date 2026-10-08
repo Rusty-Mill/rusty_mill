@@ -782,6 +782,17 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   (`RB-PHYSICS-001-FR-143`, both cars airborne only). Drifting attackers (the
   bump follows the heading, 0.3 / 0.1 uu), a flank hit on a moving car (4.1 /
   3.0) and a corner clip (11 / 6) match.
+- **Respawn (2026-10-08, ADR-0075, FR-151)**: twelve recorded demolitions (`demo_0` to
+  `demo_11`, `respawn_report.py`). Out for exactly 3.000 s; back at one of the ten kickoff
+  spawn points (random: the same tape gave three different points; not the victim's
+  position or team), at rest and facing the point's heading; first frame back z = 83 with
+  no boost, then z = 36 with 33.33 boost, falling. Implemented with the pick as an input;
+  victim mean error 0.1 to 0.3 uu over 700 ticks given the recorded point.
+- **Flip into a car (2026-10-08)**: `bumpf_flip` re-recorded cleanly (39 / 66 uu again). The
+  scorer's lag model puts a constant 25 uu offset on a fast start (it pairs the first
+  post-jump frame with the port's pre-jump state: lag 3 wins on whole-run error, lag 0
+  gives 202 uu, delaying only the input 158 uu), so this number is not the flip's own error;
+  the alignment of fast-start tapes needs a different model before the flip can be read.
 - **Open**: the respawn (three seconds later, at a spawn point the game picks,
   still, with 0 or 33 boost), a ground bumper on an airborne victim and the
   reverse, a bumper on a wall or ceiling, a flip into a car (`bumpf_flip`: 39 /

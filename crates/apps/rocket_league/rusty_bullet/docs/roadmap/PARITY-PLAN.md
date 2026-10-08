@@ -182,7 +182,7 @@ Part-time cycles (one cycle is roughly a session of a few PRs):
 | 4 | C step 3: pads in the port (done, ADR-0072, FR-149) | 1 |
 | 5 | A step 3 and 4: wall and ceiling fixes | 2 to 4 (largest uncertainty) |
 | 6 | B: ball contact | 1 to 2 |
-| 7 | D: respawn and multi-car | 1 to 2 |
+| 7 | D: respawn (done, ADR-0075, FR-151) and multi-car (open) | 1 to 2 |
 | 8 | Owner gate re-run, scoreboard, status refresh | 0.5 |
 | 9 | E: match flow | 2+, only if a full match is the goal |
 

@@ -8196,6 +8196,17 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     mean (max 8.7); every other recording unchanged. Not verified: edge and
     vertex contacts on convex ridges (no recording isolates one).
 
+- `RB-PHYSICS-001-FR-151` (demolition respawn; implemented and verified on 12 recorded
+  demolitions, ADR-0075): a demolished car returns after exactly 360 ticks at a kickoff spawn
+  point (`respawn::SPAWN_POINTS`, chosen by `PhysicsWorld::set_respawn_point` or
+  `respawn::default_pick`), level and at rest, in the raw spawn state (z = 83, no boost);
+  the next tick it is at z = 36 with a third of a tank (33.33) and falls.
+  - Why: `RB-RESEARCH-O018`: FR-142 removed the victim for good.
+  - **Verification**: `world` tests (three) and `respawn` tests (four); the twelve `demo_*`
+    recordings, victim mean error 0.1 to 0.3 uu over 700 ticks given the recorded spawn
+    point (max 47 uu in four where the capture lacks the z = 83 frame); golden `demo_4` and
+    `demo_9`; every earlier golden capture unchanged.
+
 - `RB-PHYSICS-001-FR-150` (a wheel's pushback against the ball reads the ball's
   velocity; implemented and verified on the `wob_*` drops; amends FR-138, ADR-0074):
   `RayHit::velocity` is the surface's velocity at the hit (zero for the arena, the
@@ -8336,6 +8347,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.153.0 (2026-10-08): `RB-PHYSICS-001-FR-151` (demolition respawn, ADR-0075). 501 tests in
+  `rb_physics_bullet`.
 - 0.152.0 (2026-10-08): `RB-PHYSICS-001-FR-150` (a wheel's pushback against the ball
   reads the ball's velocity; amends FR-138, ADR-0074). 493 tests in `rb_physics_bullet`.
 - 0.151.0 (2026-10-07): `RB-PHYSICS-001-FR-149` (boost pads, ADR-0072). 488 tests in
