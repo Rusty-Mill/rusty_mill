@@ -29,6 +29,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_bbp: Blackboard Protocol core joins libs/protocol (pending review)
+
+- **Added:** `rusty_bbp` at `crates/libs/protocol/rusty_bbp`, Tier S (`rusty_serde`, `rusty_rsa`; `proptest` dev-only). Moved from `baileyrd/rusty_bbp` after its stage-1 tests passed, so its first-party dependencies are path dependencies under the workspace layer check instead of a git pin. No consumers yet; `rusty_orch` is the intended first one.
+- **Known limitation:** stage 1 only. The store is in-memory; the durable log, the MCP adapter and the runner supervisor are stages 2 and 3. Tokens and run secrets are deterministic hashes until `rusty_rand` is wired in at stage 3.
+
+---
+
 ## 2026-10-08 - rusty-mcp-client split (pending review)
 
 - **Added:** `rusty-mcp-client`; **Changed:** `rusty-mcp` loses its `client` feature; `rk-mcp` depends on the new crate. Stdio verified again against a real `rusty-mcp-demo` after the move. No OpenSSL in the MCP client path (the `native-tls` still in `rk-mcp`'s tree comes from `aisdk`/`rk-feed`, the LLM client).
