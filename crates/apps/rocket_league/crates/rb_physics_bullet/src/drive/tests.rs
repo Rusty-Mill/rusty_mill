@@ -3388,6 +3388,33 @@ fn two_touching_wheels_coast_even_with_boost_held_and_no_throttle() {
 }
 
 #[test]
+fn boost_with_any_wheel_down_is_the_ground_acceleration() {
+    // RB-PHYSICS-001-FR-157: with one or two wheels touching, the fuzz drives' boosted ticks
+    // were 0.5 to 0.7 uu/s per tick short forward in the game against the port, which gave
+    // them the airborne boost (3175/3); the game uses the ground value (2975/3).
+    let mut c = car();
+    c.linear_velocity = Vec3::new(400.0, 0.0, 0.0);
+    let mut wheels = resting_contacts(&c);
+    for (contact, &(_, _, front)) in wheels.iter_mut().zip(super::wheels::WHEELS.iter()) {
+        if !front {
+            *contact = None;
+        }
+    }
+    let mut state = DriveState::new();
+    let input = ControllerInput {
+        boost: true,
+        ..Default::default()
+    };
+    apply_driven_forces(&mut c, &input, &wheels, None, &mut state, TICK);
+    let boost_force = c.total_force().x;
+    assert_close(
+        boost_force,
+        BOOST_ACCELERATION_GROUND * c.mass(),
+        "boost force on two wheels",
+    );
+}
+
+#[test]
 fn a_car_with_a_wheel_down_gets_no_air_throttle() {
     // RB-PHYSICS-001-FR-156: on 1 or 2 wheels the one-step forward error of the fuzz drives was
     // 0.56 uu/s per tick, the air throttle's 200/3 uu/s^2, in the direction of the throttle:
