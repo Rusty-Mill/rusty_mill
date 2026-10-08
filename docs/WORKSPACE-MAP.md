@@ -148,6 +148,13 @@ Families are the current directories immediately below `crates/`.
 | apps | coreutils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities | 0 |
 | apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. | 0 |
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) | 0 |
+| apps | rocket_league | rb_capture_ingest | BakkesMod offline-capture ingestion adapter (RB-VERIFY-002): implements PhysicsStateSource by parsing the JSON-Lines capture format (ADR-0005). BakkesMod-side plugin that writes it not yet built. | 1 |
+| apps | rocket_league | rb_domain | Domain types and ports for rusty_bullet: physics frames, divergence scoring, and the PhysicsStateSource port that ingestion adapters implement. | 6 |
+| apps | rocket_league | rb_env | A stepping environment over the physics port: reset to a frame, apply controller inputs, step one tick, observe (ADR-0059). | 1 |
+| apps | rocket_league | rb_physics_bullet | Physics core: a Rust port of Bullet3's rigid-body integration and sequential-impulse contact solver (zlib-licensed), scoped to sphere-vs-static-plane for v0 (RB-PHYSICS-001). | 2 |
+| apps | rocket_league | rb_replay_ingest | Replay-file ingestion adapter (RB-VERIFY-001): implements PhysicsStateSource by parsing .replay files via boxcars + subtr-actor. | 1 |
+| apps | rocket_league | rb_scenario | Scenario files for scripted mechanic captures: an initial game state plus a run-length input tape (docs/research/BOT-CAPTURE-PLAN.md). Read by rb-verify and by tools/rb_tape_bot. | 1 |
+| apps | rocket_league | rb_verify_cli | Composition root for the Phase 0 verification pipeline: wires ingestion adapters to the divergence scorer. | 0 |
 | apps | rush | rush | A small, bash-compatible shell written in Rust | 1 |
 | apps | rusty_agent_gateway | agentgateway | An AI-native gateway for MCP, speaking agentgateway's configuration | 0 |
 | apps | rusty_agent_gateway | agentgateway-a2a | Agent2Agent (A2A) method gating and agent-card discovery for rusty_agent_gateway | 1 |

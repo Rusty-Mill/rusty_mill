@@ -53,15 +53,15 @@ cargo test --workspace
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md).
+See [CONTRIBUTING.md](../../../../CONTRIBUTING.md).
 
 ## Security
 
-See [SECURITY.md](./SECURITY.md) to report a vulnerability.
+See [SECURITY.md](../../../../SECURITY.md) to report a vulnerability.
 
 ## License
 
-Dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE),
+Dual-licensed under [MIT](../LICENSE-MIT) or [Apache-2.0](../LICENSE-APACHE),
 at your option. Commits from ADR-0025 to ADR-0037 were GPL-3.0-only while
 the repository embedded RLUtilities' GPL-3.0 arena meshes; the arena now
 uses RocketSim's Apache-2.0 mesh files (`crates/rb_physics_bullet/assets/soccar/`,

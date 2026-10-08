@@ -62,7 +62,7 @@ logic:
 1. Reviewer inspects the actual exact head, diff, scope, authorities,
    tests, docs, threads, and CI.
 2. Pass → merge the exact reviewed head (merge commit — see
-   [CONTRIBUTING.md](./CONTRIBUTING.md); never squash or rebase).
+   [CONTRIBUTING.md](../../../../CONTRIBUTING.md); never squash or rebase).
 3. Otherwise → one correction packet; implementer updates the same branch;
    `branch updated`; re-review the new exact head.
 

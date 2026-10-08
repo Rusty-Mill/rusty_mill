@@ -105,8 +105,8 @@ Both goals are served by the same build — there is one project, not two.
 ## Ownership, license, and classification
 
 - Owner: baileyrd.
-- License: MIT OR Apache-2.0 (see [LICENSE-MIT](../../LICENSE-MIT) and
-  [LICENSE-APACHE](../../LICENSE-APACHE)). Commits from ADR-0025 to
+- License: MIT OR Apache-2.0 (see [LICENSE-MIT](../../../LICENSE-MIT) and
+  [LICENSE-APACHE](../../../LICENSE-APACHE)). Commits from ADR-0025 to
   ADR-0036 were GPL-3.0-only while `rb_physics_bullet` embedded
   RLUtilities' GPL-3.0 arena meshes; ADR-0037 replaced them with
   RocketSim's Apache-2.0 mesh files.
