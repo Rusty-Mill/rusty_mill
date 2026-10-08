@@ -4,11 +4,12 @@
 
 use rmcp::model as rm;
 use rusty_mcp_proto::{
-    CallToolParams, CallToolResult, CancelledParams, CompleteParams, CompleteResult, ContentBlock,
-    ErrorData, GetPromptParams, GetPromptResult, Implementation, ListPromptsResult,
+    CallToolParams, CallToolResult, CancelledParams, ClientCapabilities, CompleteParams,
+    CompleteResult, ContentBlock, DiscoverResult, ErrorData, GetPromptParams, GetPromptResult,
+    Implementation, InitializeParams, InitializeResult, ListPromptsResult,
     ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedParams,
-    ProgressParams, Prompt, ReadResourceParams, ReadResourceResult, Resource, ResourceContents,
-    ResourceTemplate, Tool, Wire,
+    ProgressParams, Prompt, ReadResourceParams, ReadResourceResult, RequestMeta, Resource,
+    ResourceContents, ResourceTemplate, ServerCapabilities, Tool, Wire,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -271,5 +272,112 @@ fn cancel_and_progress() {
     both_refuse::<ProgressParams, rm::ProgressNotificationParam>(r#"{"progressToken":"t"}"#);
     both_refuse::<ProgressParams, rm::ProgressNotificationParam>(
         r#"{"progressToken":"t","progress":"x"}"#,
+    );
+}
+
+const CLIENT_CAPS: &str =
+    r#"{"roots":{"listChanged":true},"sampling":{},"elicitation":{"form":{}}}"#;
+
+#[test]
+fn capabilities() {
+    agree::<ServerCapabilities, rm::ServerCapabilities>(r#"{}"#);
+    agree::<ServerCapabilities, rm::ServerCapabilities>(
+        r#"{"experimental":{"x":{"a":1}},"extensions":{"io.modelcontextprotocol/tasks":{}},
+        "logging":{},"completions":{},"prompts":{"listChanged":true},
+        "resources":{"subscribe":true,"listChanged":false},"tools":{"listChanged":true}}"#,
+    );
+    agree::<ServerCapabilities, rm::ServerCapabilities>(
+        r#"{"tools":{},"prompts":{},"resources":{}}"#,
+    );
+    both_refuse::<ServerCapabilities, rm::ServerCapabilities>(r#"{"tools":{"listChanged":"yes"}}"#);
+    agree::<ClientCapabilities, rm::ClientCapabilities>(r#"{}"#);
+    agree::<ClientCapabilities, rm::ClientCapabilities>(CLIENT_CAPS);
+    agree::<ClientCapabilities, rm::ClientCapabilities>(
+        r#"{"experimental":{"x":{}},"extensions":{"io.modelcontextprotocol/ui":{}}}"#,
+    );
+}
+
+#[test]
+fn initialize() {
+    let info = r#"{"name":"c","version":"1"}"#;
+    agree::<InitializeParams, rm::InitializeRequestParams>(&format!(
+        r#"{{"protocolVersion":"2025-06-18","capabilities":{{}},"clientInfo":{info}}}"#
+    ));
+    agree::<InitializeParams, rm::InitializeRequestParams>(&format!(
+        r#"{{"protocolVersion":"2025-11-25","capabilities":{CLIENT_CAPS},"clientInfo":{info},"_meta":{{"k":1}}}}"#
+    ));
+    both_refuse::<InitializeParams, rm::InitializeRequestParams>(&format!(
+        r#"{{"capabilities":{{}},"clientInfo":{info}}}"#
+    ));
+    both_refuse::<InitializeParams, rm::InitializeRequestParams>(
+        r#"{"protocolVersion":"2025-06-18","capabilities":{}}"#,
+    );
+
+    let server = r#"{"name":"s","version":"2"}"#;
+    agree::<InitializeResult, rm::InitializeResult>(&format!(
+        r#"{{"protocolVersion":"2025-06-18","capabilities":{{"tools":{{}}}},"serverInfo":{server}}}"#
+    ));
+    agree::<InitializeResult, rm::InitializeResult>(&format!(
+        r#"{{"protocolVersion":"2024-11-05","capabilities":{{"tools":{{"listChanged":true}}}},
+        "serverInfo":{server},"instructions":"use me","_meta":{{"k":1}}}}"#
+    ));
+    both_refuse::<InitializeResult, rm::InitializeResult>(
+        r#"{"protocolVersion":"2025-06-18","capabilities":{}}"#,
+    );
+}
+
+#[test]
+fn discover() {
+    agree::<DiscoverResult, rm::DiscoverResult>(
+        r#"{"resultType":"complete","supportedVersions":["2025-11-25","2026-07-28"],
+        "capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"}"#,
+    );
+    agree::<DiscoverResult, rm::DiscoverResult>(
+        r#"{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{},
+        "instructions":"hi","ttlMs":60000,"cacheScope":"public",
+        "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"s","version":"1"}}}"#,
+    );
+    both_refuse::<DiscoverResult, rm::DiscoverResult>(
+        r#"{"resultType":"complete","supportedVersions":[],"capabilities":{},"cacheScope":"private"}"#,
+    );
+    both_refuse::<DiscoverResult, rm::DiscoverResult>(
+        r#"{"resultType":"complete","supportedVersions":[],"capabilities":{},"ttlMs":0}"#,
+    );
+    let r = DiscoverResult::from_json(
+        r#"{"resultType":"complete","supportedVersions":[],"capabilities":{},"ttlMs":0,"cacheScope":"private",
+        "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"s","version":"1"}}}"#,
+    )
+    .expect("decodes");
+    assert_eq!(r.server_info().map(|i| i.name), Some("s".to_owned()));
+}
+
+/// `RequestMeta` reads the same members `rmcp`'s `RequestMetaObject` does.
+#[test]
+fn request_meta_matches_rmcp_accessors() {
+    let text = format!(
+        r#"{{"progressToken":"p1","io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientInfo":{{"name":"c","version":"1"}},
+        "io.modelcontextprotocol/clientCapabilities":{CLIENT_CAPS},
+        "io.modelcontextprotocol/logLevel":"info","traceparent":"00-abc-def-01","vendor/x":{{"a":1}}}}"#
+    );
+    let ours = RequestMeta::from_json(&text).expect("decodes");
+    let theirs: rm::RequestMetaObject = serde_json::from_str(&text).expect("rmcp decodes");
+    assert_eq!(
+        ours.protocol_version.as_ref().map(|v| v.as_str()),
+        Some(theirs.protocol_version().expect("version").as_str())
+    );
+    assert_eq!(
+        ours.client_info.as_ref().map(|i| i.name.as_str()),
+        theirs.client_info().as_ref().map(|i| i.name.as_ref())
+    );
+    assert_eq!(
+        json(&ours.client_capabilities.as_ref().expect("caps").to_json()),
+        serde_json::to_value(theirs.client_capabilities().expect("caps")).expect("json")
+    );
+    // Trace context and vendor keys survive a round trip.
+    assert_eq!(json(&ours.to_json()), json(&text));
+    assert_eq!(
+        ours.extra.get("traceparent").and_then(|v| v.as_str()),
+        Some("00-abc-def-01")
     );
 }

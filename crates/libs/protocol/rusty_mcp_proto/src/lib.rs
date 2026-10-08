@@ -5,9 +5,9 @@
 //! with a hand-written codec ([`Wire`]): no serde, no transport, no async.
 //! Servers and clients on stdio or Streamable HTTP are built on top of it.
 //!
-//! Covered so far: the envelope, tools, prompts, resources, completion and
-//! cancel/progress (the `initialize`/`server/discover` handshakes, subscriptions,
-//! tasks and multi-round-trip input come next):
+//! Covered so far: the envelope, both handshakes, capabilities, tools,
+//! prompts, resources, completion and cancel/progress (subscriptions, tasks
+//! and multi-round-trip input come next):
 //!
 //! - [`rpc`]: [`Message`], [`RequestId`], [`ErrorData`], [`ErrorCode`].
 //! - [`version`]: [`ProtocolVersion`] (both the classic and the stateless
@@ -20,6 +20,10 @@
 //! - [`prompt`]: [`Prompt`], [`GetPromptParams`], [`GetPromptResult`], [`Role`].
 //! - [`resource`] also has templates and the list/read params and results.
 //! - [`completion`]: [`Reference`], [`CompleteParams`], [`CompleteResult`].
+//! - [`capabilities`], [`lifecycle`], [`meta`]: [`ServerCapabilities`],
+//!   [`ClientCapabilities`], [`InitializeParams`]/[`InitializeResult`] (classic),
+//!   [`DiscoverResult`] (stateless) and [`RequestMeta`], the typed per-request
+//!   `_meta` of the stateless protocol.
 //! - [`notify`]: [`CancelledParams`], [`ProgressParams`].
 //!
 //! Open-ended members (`_meta`, annotations, icons, schemas, error data) are
@@ -39,9 +43,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod capabilities;
 pub mod codec;
 pub mod completion;
 pub mod content;
+pub mod lifecycle;
+pub mod meta;
 pub mod notify;
 pub mod page;
 pub mod prompt;
@@ -52,10 +59,18 @@ pub mod version;
 
 mod error;
 
+pub use capabilities::{
+    ClientCapabilities, PromptsCapability, ResourcesCapability, ServerCapabilities, ToolsCapability,
+};
 pub use codec::Wire;
 pub use completion::{ArgumentInfo, CompleteParams, CompleteResult, CompletionInfo, Reference};
 pub use content::{ContentBlock, Extras};
 pub use error::Error;
+pub use lifecycle::{
+    falls_back_to_initialize, negotiate_classic, pick_common, DiscoverParams, DiscoverResult,
+    InitializeParams, InitializeResult,
+};
+pub use meta::RequestMeta;
 pub use notify::{CancelledParams, ProgressParams, ProgressToken};
 pub use page::{CacheScope, PaginatedParams, Paging, ResultType};
 pub use prompt::{

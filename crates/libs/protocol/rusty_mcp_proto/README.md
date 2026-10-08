@@ -16,6 +16,9 @@ A2 of `docs/research/MCP-NATIVE-PLAN.md`, in slices. So far:
 | `tool` | `Tool`, `ListToolsResult`, `CallToolParams`, `CallToolResult` |
 | `prompt` | `Prompt`, `PromptMessage`, `Role`, `ListPromptsResult`, `GetPromptParams`, `GetPromptResult` |
 | `completion` | `Reference`, `CompleteParams`, `CompleteResult` |
+| `capabilities` | `ServerCapabilities`, `ClientCapabilities` and the typed `prompts`/`resources`/`tools` sub-capabilities |
+| `lifecycle` | `InitializeParams/Result` (classic), `DiscoverParams/Result` (stateless), `negotiate_classic`, `pick_common`, `falls_back_to_initialize` |
+| `meta` | `RequestMeta`: typed view of a request `_meta` (progress token, protocol version, client info and capabilities, log level), other keys kept |
 | `notify` | `CancelledParams`, `ProgressParams`, `ProgressToken` |
 
 Each module has a `method` submodule with the method-name constants.
@@ -36,6 +39,7 @@ known types are dropped on decode.
 (dev-dependency only): the fixture, this crate's re-encoding and `rmcp`'s
 re-encoding must agree, and malformed input must be refused by both.
 
-Not yet covered: `initialize` / `server/discover`, subscriptions, tasks and
-multi-round-trip input (`InputRequired` results).
+Not yet covered: subscriptions (`subscriptions/listen`, list-changed and
+updated notifications), tasks, and multi-round-trip input (`InputRequired`
+results, elicitation).
 Scope: `docs/research/MCP-PROTO-SCOPE.md`.
