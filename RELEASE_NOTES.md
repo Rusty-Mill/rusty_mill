@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - Crypto replacement plan (docs only)
+
+- **Added:** `docs/research/CRYPTO-REPLACEMENT-PLAN.md`. **Not changed:** any crate, dependency, `rusty_tls`, or gate. No primitive was written.
+- **Findings:** the safe stages (SHA-2/HMAC/HKDF, signature verify) are worth doing; portable AES-GCM would be roughly 60 to 150x slower than `ring` unless `unsafe` intrinsics are approved; `ring` stays in the lockfile via nine other packages.
+- **Known limitations:** native performance figures are estimates; only `ring` and `rusty_rsa` were measured (one run, noisy VM). The constant-time probe tested the tools on toy code only. Decisions in section 9 are the owner's.
+
 ## 2026-10-08 - TLS engine assessment (docs only)
 
 - **Added:** `docs/research/TLS-ENGINE-ASSESSMENT.md` and a repro for one engine bug. **Finding:** a wildcard certificate bypasses an excluded name constraint in the native engine; rustls rejects it. **Not changed:** the default engine, either gate, or any code.
