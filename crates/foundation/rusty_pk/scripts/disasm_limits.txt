@@ -1,0 +1,12 @@
+# Reviewed 2026-10-08 on rustc 1.99.0, x86_64, --release, for the secret-scalar
+# path (X25519). The counts are conditional jumps in the whole function, almost
+# all slice bounds checks and loop back-edges with public trip counts; they are
+# pinned so that a NEW branch fails the check. Evidence that it works: before
+# `black_box` was added to the select masks, LLVM compiled reduce_once's masked
+# select into a branch on the secret condition and this count was 17, not 10.
+# Re-review after any rustc or flag change.
+rusty_pk::mont::reduce_once 10
+Modulus>::mul 17
+Modulus>::add 6
+Field>::sub 17
+rusty_pk::x25519::x25519 9

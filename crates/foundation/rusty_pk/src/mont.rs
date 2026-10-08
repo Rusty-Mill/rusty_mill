@@ -142,7 +142,7 @@ impl Modulus {
             borrow = (b1 | b2) as u64;
         }
         // If a < b, add n back (masked, not branched).
-        let mask = 0u64.wrapping_sub(borrow);
+        let mask = core::hint::black_box(0u64.wrapping_sub(borrow));
         let mut carry = 0u64;
         for j in 0..k {
             let v = t[j] as u128 + (self.n[j] & mask) as u128 + carry as u128;
@@ -200,7 +200,9 @@ fn reduce_once(out: &mut [u64], t: &[u64], carry: u64, n: &[u64]) {
     }
     // t >= n iff there is a carry out of the top limb, or no borrow.
     let take_sub = carry | (borrow ^ 1);
-    let mask = 0u64.wrapping_sub(take_sub & 1);
+    // `black_box` stops LLVM from recognising the select and compiling it to a
+    // branch on `take_sub`, which valgrind taint runs showed it otherwise does.
+    let mask = core::hint::black_box(0u64.wrapping_sub(take_sub & 1));
     for j in 0..k {
         out[j] = (d[j] & mask) | (t[j] & !mask);
     }

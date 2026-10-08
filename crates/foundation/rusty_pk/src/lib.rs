@@ -26,6 +26,7 @@ mod weierstrass;
 pub mod ecdsa;
 pub mod ed25519;
 pub mod rsa;
+pub mod x25519;
 
 /// Verification failed. Deliberately carries no detail: a verifier that says
 /// *why* a signature was rejected is a verifier that can be probed.

@@ -130,6 +130,16 @@ impl Field {
     pub(crate) fn to_be_bytes(&self, a: &E, out: &mut [u8]) -> Option<()> {
         mont::to_be_bytes(&a.0[..self.k], out)
     }
+    /// Swaps `a` and `b` if `swap` is 1 and leaves them if it is 0, with no
+    /// branch or index depending on `swap`. Constant time.
+    pub(crate) fn cswap(a: &mut E, b: &mut E, swap: u64) {
+        let mask = core::hint::black_box(0u64.wrapping_sub(swap & 1));
+        for i in 0..LIMBS {
+            let t = mask & (a.0[i] ^ b.0[i]);
+            a.0[i] ^= t;
+            b.0[i] ^= t;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +156,17 @@ mod tests {
         assert_eq!(one.0, [1, 0, 0, 0, 0, 0]);
         let zero = f.add(&a, &f.neg(&a));
         assert!(f.is_zero_vartime(&zero));
+    }
+
+    #[test]
+    fn cswap_swaps_only_when_asked() {
+        let (mut a, mut b) = (E([1; LIMBS]), E([2; LIMBS]));
+        Field::cswap(&mut a, &mut b, 0);
+        assert_eq!((a.0[0], b.0[0]), (1, 2));
+        Field::cswap(&mut a, &mut b, 1);
+        assert_eq!((a.0[0], b.0[0]), (2, 1));
+        Field::cswap(&mut a, &mut b, 3); // only the low bit counts
+        assert_eq!((a.0[0], b.0[0]), (1, 2));
     }
 
     #[test]

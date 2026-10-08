@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - Crypto stage 4: X25519 (pending review)
+
+- **Added:** `rusty_pk::x25519`. **Not changed:** `rusty_tls`, consumers, gates. Work stops after this stage by owner decision.
+- **Verified:** tests, clippy `-D warnings`, RFC 7748, 518 Wycheproof cases, differential against `ring`, 14 mutants (2 equivalent survivors), valgrind taint (0 errors on the ladder), pinned disassembly counts, timing runs, policy scripts.
+- **Found and fixed:** the compiler turned a branch-free select into a branch on the secret scalar (caught by the taint run, invisible to all functional tests).
+- **Known limitations:** x86-64 only; `black_box` is best effort; 7.7x slower than `ring`; intermediates not wiped; no independent review, which the plan requires before use in `rusty_tls`.
+
 ## 2026-10-08 - Crypto stage 3: rusty_aead ChaCha20-Poly1305 (pending review)
 
 - **Added:** `rusty_aead`. **Not changed:** `rusty_tls`, consumers, gates. Local toolchain moved to Rust 1.99.0; stages 1 to 3 re-verified on it.

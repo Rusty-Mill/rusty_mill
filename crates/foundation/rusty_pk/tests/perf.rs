@@ -120,3 +120,35 @@ fn verification_speed() {
     });
     report("Ed25519", ours, ring);
 }
+
+/// X25519: one key generation plus one agreement (two scalar multiplications)
+/// on each side.
+#[test]
+#[ignore = "timing; run manually"]
+fn x25519_speed() {
+    use ring::agreement::{self, EphemeralPrivateKey};
+    use ring::rand::SystemRandom;
+    let rng = SystemRandom::new();
+    let peer = {
+        let k = EphemeralPrivateKey::generate(&agreement::X25519, &rng).unwrap();
+        let mut p = [0u8; 32];
+        p.copy_from_slice(k.compute_public_key().unwrap().as_ref());
+        p
+    };
+    let scalar = [0x5au8; 32];
+    let ours = time(300, || {
+        std::hint::black_box(rusty_pk::x25519::public_key(&scalar));
+        rusty_pk::x25519::agree(&scalar, &peer).is_ok()
+    });
+    let ring = time(300, || {
+        let k = EphemeralPrivateKey::generate(&agreement::X25519, &rng).unwrap();
+        std::hint::black_box(k.compute_public_key().unwrap());
+        agreement::agree_ephemeral(
+            k,
+            &agreement::UnparsedPublicKey::new(&agreement::X25519, &peer),
+            |_| true,
+        )
+        .unwrap()
+    });
+    report("X25519 keygen+agree", ours, ring);
+}

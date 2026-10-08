@@ -20,7 +20,7 @@ non-heap secrets; fiat-crypto not yet evaluated (stage 4).
 | 1 SHA-2, HMAC, HKDF | **Done** (`rusty_sha2`) | 18 tests plus doctest: FIPS 180 examples, RFC 4231 case 1, six Wycheproof files (HMAC and HKDF, SHA-256/384/512), differential vs `ring` over lengths 0 to 300 and block boundaries, long inputs, HMAC key lengths 0 to 1000, 600 random HKDF calls; 9 hand-made mutants all caught; valgrind taint run clean with a leaky control that is caught; disassembly budget pinned; timing test `|t|` 1.75 (HMAC-SHA256) and 0.56 (HMAC-SHA512), one run. |
 | 2 Signature verify | **Done** (`rusty_pk`: `rsa`, `ecdsa`, `ed25519`) | See "Stage 2 results" below. |
 | 3 ChaCha20-Poly1305 | **Done** (`rusty_aead`) | See "Stage 3 results" below. |
-| 4 X25519 | not started | |
+| 4 X25519 | **Done** (`rusty_pk::x25519`) | See "Stage 4 results" below. **Work stops here by owner decision; independent review is still required before any use in `rusty_tls`.** |
 
 ### Stage 2 results (`rusty_pk`, 2026-10-08)
 
@@ -102,6 +102,39 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
 - **Toolchain:** the sandbox's Rust was updated from 1.97.0 to 1.99.0 mid-session at the
   owner's request. The stage 1 and 2 checks were rerun on 1.99.0 and still pass, and the
   disassembly budgets did not move; this is the compiler-drift check the plan calls for, done once.
+
+### Stage 4 results (`rusty_pk::x25519`, 2026-10-08)
+
+- **Evidence:** RFC 7748 section 5.2, section 6.1 and the 1-iteration and 1000-iteration chains;
+  all 518 Wycheproof cases give the specified value, including twists, low-order and
+  non-canonical points (the "acceptable" ones too); `agree` rejects exactly the 38 all-zero
+  results, and for all 518 public keys makes the same accept/reject decision as `ring`; shared
+  secrets agree with `ring` in both directions over 50 random key pairs. 3 + 5 unit tests.
+- **Mutation check, 14 mutants:** 12 caught. Two survive and are equivalent: clearing bit 255 of
+  the scalar (the ladder reads bits 0 to 254 only), and the final conditional swap (clamping
+  forces bit 0 to zero, so the swap flag is already zero). The swap is kept to follow the RFC.
+- **The taint run found a real constant-time failure.** The first valgrind run reported many
+  conditional jumps on the secret scalar in `reduce_once` and `Field::sub`. The source was
+  branch-free (mask select), but LLVM recognised the pattern and compiled it to
+  `test; jne` on the secret condition, in a build that passed every functional test.
+  Fix: `core::hint::black_box` on the three masks (`reduce_once`, `Modulus::sub`,
+  `Field::cswap`). After it: `x25519` and `public_key` report 0 errors, `agree` reports exactly
+  1 (its all-zero check, which depends only on the public peer key and cannot be declassified
+  from outside), and a planted control branch is still caught. The pinned disassembly budget
+  discriminates: `reduce_once` had 17 conditional jumps before the fix and has 10 after.
+  `black_box` is best effort, not a guarantee; this is the compiler-drift risk (section 8
+  item 2) showing up on first contact, and the pinned counts must be re-reviewed on every
+  toolchain change.
+- **Timing (scheduled job, two runs):** sparse vs dense scalar `|t|` 1.1 and 1.6; fixed vs other
+  scalar 1.6 and 2.2 (threshold 4.5).
+- **Speed (once, VM, release):** key generation plus agreement, 525 us against `ring`'s 68 us:
+  about 7.7x slower, worse than the section 5 estimate (2 to 4x). A change that shrank the
+  scratch arrays gained only 10% and was reverted because it made the disassembly counts less
+  informative.
+- **Not done / limits:** fiat-crypto was not evaluated (hand-written field arithmetic
+  instead); intermediate field elements are stack copies that are not wiped (only the clamped
+  scalar and final ladder state are); x86-64 only; no independent review; `unsafe` intrinsics were
+  approved but nothing needed them yet.
 
 ## 1. Answer first
 
