@@ -21,8 +21,10 @@ family, so separate families would block that on day one.
    ADR-0001's bare `git subtree`: the rewrite is what lets private or oversized
    content stay out of this public repository's history. Each import is one PR.
 4. Replays, captures and corpora are never committed. They live in the private
-   repo `baileyrd/rocket_league_private` and are found through `RL_REPLAY_DIR`.
-   Fixtures stay in git only under `fixtures/` (or `rleval/assets/replays/`).
+   repo `baileyrd/rocket_league_private`, checked out under `rleval/` (gitignored), so the
+   existing relative paths keep working with no environment variable. Fixtures stay in git
+   only under `fixtures/` (or `rleval/assets/replays/`); tests that need the corpus skip
+   when it is absent.
 5. Reusable libraries (FlatBuffers, Protobuf) are `libs/protocol/` crates, not
    family crates.
 6. Licence: MIT OR Apache-2.0.
