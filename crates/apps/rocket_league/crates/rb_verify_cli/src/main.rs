@@ -300,6 +300,21 @@ fn run_scenario_against(
             );
         }
     }
+    // `RB_BOOST=1` lists the first car's recorded and predicted tank on every
+    // row where either changes, to see when a pad was taken on each side.
+    if std::env::var_os("RB_BOOST").is_some() {
+        let mut last: Option<(f32, f32)> = None;
+        for row in &comparison.rows {
+            let now = (row.recorded.boost_amount, row.predicted.boost_amount);
+            if last != Some(now) {
+                println!(
+                    "car 0 tick {:>4}: boost rec {:.1} pred {:.1}",
+                    row.tick, now.0, now.1
+                );
+                last = Some(now);
+            }
+        }
+    }
     if std::env::var_os("RB_OTHERS").is_some() {
         for (index, rows) in comparison.other_rows.iter().enumerate() {
             for (tick, recorded, predicted) in rows {
@@ -342,6 +357,11 @@ fn run_scenario_against(
         comparison.max_ball_error(),
         first_ball(10.0),
         first_ball(100.0),
+    );
+    println!(
+        "boost error: mean {:.1}, max {:.1} (tank units, 0 to 100)",
+        comparison.mean_boost_error(),
+        comparison.max_boost_error(),
     );
     for index in 0..comparison.other_rows.len() {
         println!(

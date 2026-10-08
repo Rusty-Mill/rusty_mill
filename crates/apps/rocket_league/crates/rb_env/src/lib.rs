@@ -20,6 +20,7 @@ pub struct Env {
     car_ball: CarBallTuning,
     teams: Vec<u32>,
     dodge_forward_from_throttle: bool,
+    boost_pads: bool,
 }
 
 impl Env {
@@ -34,6 +35,7 @@ impl Env {
             car_ball: CarBallTuning::default(),
             teams: Vec::new(),
             dodge_forward_from_throttle: false,
+            boost_pads: true,
         }
     }
 
@@ -56,12 +58,25 @@ impl Env {
         self.dodge_forward_from_throttle = on;
     }
 
+    /// Whether every later `reset` puts Soccar's 34 boost pads in the arena
+    /// (`RB-PHYSICS-001-FR-149`, ADR-0072): on by default, unlike
+    /// `PhysicsWorld::new`, because a policy plays on a field with pads.
+    pub fn set_boost_pads(&mut self, on: bool) {
+        self.boost_pads = on;
+    }
+
+    /// The boost pads of the current simulation and their cooldowns, if on.
+    pub fn boost_pads(&self) -> Option<&rb_physics_bullet::BoostPads> {
+        self.world.boost_pads()
+    }
+
     /// Replaces the simulation with `start` (ball and every car), keeping
     /// its timestamp as the clock. Returns the observation, which is
     /// `start` as the port represents it.
     pub fn reset(&mut self, start: &PhysicsFrame) -> PhysicsFrame {
         self.world = PhysicsWorld::from_frame_in(&self.arena, start);
         self.world.car_ball = self.car_ball;
+        self.world.set_boost_pads(self.boost_pads);
         self.world
             .set_dodge_forward_from_throttle(self.dodge_forward_from_throttle);
         for (index, team) in self.teams.iter().enumerate() {
@@ -227,6 +242,46 @@ mod tests {
         let seen = env.peek(&[]);
         assert_eq!(seen.cars[0].position, Vec3::new(500.0, 100.0, 17.0));
         assert_eq!(seen.cars[0].boost_amount, 40.0);
+    }
+
+    /// A parked car on small pad 14 at (0, -1024) with 20 boost.
+    fn on_pad() -> PhysicsFrame {
+        let mut frame = start();
+        frame.cars[0].position = Vec3::new(0.0, -1024.0, 17.0);
+        frame.cars[0].velocity = Vec3::new(0.0, 0.0, 0.0);
+        frame.cars[0].boost_amount = 20.0;
+        frame
+    }
+
+    #[test]
+    fn boost_pads_are_on_by_default_and_a_pickup_shows_in_the_observation() {
+        let mut env = Env::new();
+        env.reset(&on_pad());
+        assert_eq!(env.boost_pads().map(|pads| pads.len()), Some(34));
+        let seen = env.step(&[ControllerInput::default()]);
+        assert_eq!(seen.cars[0].boost_amount, 32.0);
+        assert_eq!(env.boost_pads().map(|pads| pads.is_active(14)), Some(false));
+    }
+
+    #[test]
+    fn boost_pads_can_be_switched_off() {
+        let mut env = Env::new();
+        env.set_boost_pads(false);
+        env.reset(&on_pad());
+        assert!(env.boost_pads().is_none());
+        let seen = env.step(&[ControllerInput::default()]);
+        assert_eq!(seen.cars[0].boost_amount, 20.0);
+    }
+
+    #[test]
+    fn a_reset_makes_every_pad_active_again() {
+        let mut env = Env::new();
+        env.reset(&on_pad());
+        env.step(&[ControllerInput::default()]);
+        env.reset(&on_pad());
+        assert_eq!(env.boost_pads().map(|pads| pads.is_active(14)), Some(true));
+        let seen = env.step(&[ControllerInput::default()]);
+        assert_eq!(seen.cars[0].boost_amount, 32.0);
     }
 
     #[test]

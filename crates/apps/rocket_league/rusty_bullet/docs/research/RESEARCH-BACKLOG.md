@@ -813,6 +813,10 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   100 (assume `min(100, boost + 12)`), the cylinder's bottom, pads in the air at
   a wall or ceiling, and two cars on one pad. The state-set artifact is the
   sweep of pads along the straight line from the previous position.
+- **2026-10-07 in the port** (`RB-PHYSICS-001-FR-149`, ADR-0072): the rule above is
+  implemented (`pads.rs`), on in `Env`, off in `PhysicsWorld::new`. Probe tapes: 32 of
+  34 pickup decisions match the game (16 of 21 pickups on the same tick, 5 one tick
+  late, same gain). Open: the 1-tick lag, the cap, pads in the air, two cars on one pad.
 - **Next** (first part done): dump `FieldInfo` (the pad list and kinds) from the tape bot's `new`;
   record the pad `is_active`/`timer` per tick (the game packet has them), which
   says exactly when a pad is taken, and drive over one pad at many offsets from a

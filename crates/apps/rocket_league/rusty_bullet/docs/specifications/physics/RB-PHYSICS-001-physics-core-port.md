@@ -8196,6 +8196,23 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     mean (max 8.7); every other recording unchanged. Not verified: edge and
     vertex contacts on convex ridges (no recording isolates one).
 
+- `RB-PHYSICS-001-FR-149` (boost pads; implemented and verified on the probe
+  recordings): Soccar's 34 pads (`pads::BoostPads::standard`, the game's order),
+  off by default in `PhysicsWorld` (`set_boost_pads`), on in `rb_env::Env`
+  (ADR-0072). A pad is taken when the car's origin is within 176 uu (small) or
+  208 uu (big) of it in the plane and no more than 160 uu above it, tested a
+  quarter of the way from the tick's start position to its end position; a small
+  pad adds 12 (cap 100), a big pad fills the tank, a full tank leaves the pad
+  alone; a taken pad is back after 480 (small) or 1200 (big) ticks.
+  - Why: `RB-RESEARCH-O021`: 190 pickups in the recordings, none in the port.
+    The rule is fitted to the game's pad logs (`pad_fit.py`, 153 runs).
+  - **Verification**: `pads` (11) and `world` (6) and `rb_env` (3) tests; the
+    probe recordings `padp_*`: 32 of 34 pickup decisions match (the other two are
+    the 95-boost probes the state-set sweep decided), 21 game pickups with the
+    same gain, 16 on the same tick and 5 one tick late; fuzz tapes 501-524: of 46
+    pickups on paths within 30 uu of the game, 36 match within 2 ticks, and the 10
+    missed are two boundary passes on paths 8 to 22 uu off.
+
 - `RB-PHYSICS-001-FR-148` (the wheels' throttle ignores the minimum burn;
   implemented and verified; amends FR-145): `effective_throttle` (the throttle
   the wheels see) is forced to 1 only while the boost button is held with fuel,
@@ -8304,6 +8321,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.151.0 (2026-10-07): `RB-PHYSICS-001-FR-149` (boost pads, ADR-0072). 488 tests in
+  `rb_physics_bullet`.
 - 0.150.0 (2026-10-07): `RB-PHYSICS-001-FR-148` (the wheels' throttle ignores the
   minimum burn; amends FR-145). 472 tests in `rb_physics_bullet`.
 - 0.149.0 (2026-10-07): `RB-PHYSICS-001-FR-147` (a dodge's forward part follows

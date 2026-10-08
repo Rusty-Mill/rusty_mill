@@ -10,6 +10,7 @@ use crate::body::{
 use crate::collision;
 use crate::mesh::{self, StaticMesh};
 use crate::net::NetMesh;
+use crate::pads::BoostPads;
 use crate::solver::ContactCache;
 use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
@@ -377,6 +378,9 @@ pub struct PhysicsWorld {
     demolished: Vec<bool>,
     /// Each car's supersonic state.
     supersonic: Vec<bool>,
+    /// The boost pads, if the scene has them (`RB-PHYSICS-001-FR-149`): none
+    /// by default, so a world built without them behaves as it always did.
+    boost_pads: Option<BoostPads>,
     /// The car-ball hit's adjustable numbers (RocketSim's by default).
     pub car_ball: CarBallTuning,
     /// Warm-starting's own persistent state (`RB-PHYSICS-001-FR-035`) for
@@ -532,6 +536,7 @@ impl PhysicsWorld {
             car_teams: Vec::new(),
             demolished: Vec::new(),
             supersonic: Vec::new(),
+            boost_pads: None,
             car_ball: CarBallTuning::default(),
             dynamic_manifold_caches: HashMap::new(),
             car_static_manifolds: Vec::new(),
@@ -797,6 +802,17 @@ impl PhysicsWorld {
         self.car_drive[index].boost_amount = amount.clamp(0.0, drive::MAX_BOOST);
     }
 
+    /// Puts Soccar's 34 boost pads in the scene, all active, or takes them out
+    /// (`RB-PHYSICS-001-FR-149`). Off by default.
+    pub fn set_boost_pads(&mut self, on: bool) {
+        self.boost_pads = on.then(BoostPads::standard);
+    }
+
+    /// The scene's boost pads and their cooldowns, if it has any.
+    pub fn boost_pads(&self) -> Option<&BoostPads> {
+        self.boost_pads.as_ref()
+    }
+
     /// Applies forces and integrates velocities for one body — the first
     /// phase of `btDiscreteDynamicsWorld::stepSimulation`
     /// (`predictUnconstrainedMotion`, run for every body before any
@@ -1050,6 +1066,12 @@ impl PhysicsWorld {
     /// resolution, before sleep evaluation and transform integration —
     /// matching real RocketSim's own placement for this same clamp.
     pub fn step(&mut self, dt: f32) {
+        // Where each car starts the tick, for the boost pad test at its end.
+        let pad_starts: Vec<Vec3> = if self.boost_pads.is_some() {
+            self.cars.iter().map(|car| car.position).collect()
+        } else {
+            Vec::new()
+        };
         // Ground contact for driving purposes is checked up front, against
         // each car's position at the start of this step (before gravity or
         // driven forces move anything). Since RB-PHYSICS-001-FR-088 it's
@@ -1376,6 +1398,20 @@ impl PhysicsWorld {
             // capture shows a flipping car turning at ~7.6 rad/s while its
             // reported spin stays at the 5.5 cap.
             drive::clamp_velocity(car);
+        }
+
+        if let Some(pads) = self.boost_pads.as_mut() {
+            // A pad taken last tick counts down first, so the tick it is taken
+            // on is not one of its 480 (or 1200).
+            pads.tick(dt);
+            for (index, start) in pad_starts.iter().enumerate() {
+                if self.demolished[index] {
+                    continue;
+                }
+                let drive = &mut self.car_drive[index];
+                drive.boost_amount =
+                    pads.collect(*start, self.cars[index].position, drive.boost_amount);
+            }
         }
 
         for victim in newly_demolished {
@@ -2983,6 +3019,86 @@ mod tests {
         );
         world.step(1.0 / 120.0);
         assert_eq!(world.frame().cars[0].boost_amount, crate::drive::MAX_BOOST);
+    }
+
+    /// A world with a car resting on the floor on small pad 14 at (0, -1024)
+    /// and `boost` in its tank; pads on or off.
+    fn car_on_pad_14(boost: f32, pads: bool) -> PhysicsWorld {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(3000.0, 3000.0, 93.0));
+        let car = some_car(Vec3::new(0.0, -1024.0, CAR_HALF_EXTENTS.z));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_boost(0, boost);
+        world.set_boost_pads(pads);
+        world
+    }
+
+    #[test]
+    fn a_world_has_no_boost_pads_unless_asked() {
+        let mut world = car_on_pad_14(20.0, false);
+        assert!(world.boost_pads().is_none());
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, 20.0);
+    }
+
+    #[test]
+    fn a_car_on_a_small_pad_gets_twelve_in_that_step_and_the_pad_is_used() {
+        let mut world = car_on_pad_14(20.0, true);
+        assert_eq!(world.boost_pads().map(|p| p.len()), Some(34));
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, 32.0);
+        assert_eq!(world.boost_pads().map(|p| p.is_active(14)), Some(false));
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, 32.0, "used up");
+    }
+
+    #[test]
+    fn the_pickup_adds_to_the_boost_the_tick_burned() {
+        // 26.2 -> 37.9 in the recordings: the pad's 12 on top of that tick's burn.
+        let mut world = car_on_pad_14(50.0, true);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                boost: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+        let burn = crate::drive::BOOST_USED_PER_SECOND / 120.0;
+        let boost = world.frame().cars[0].boost_amount;
+        assert!((boost - (50.0 - burn + 12.0)).abs() < 1e-3, "{boost}");
+    }
+
+    #[test]
+    fn a_full_tank_does_not_use_the_pad() {
+        let mut world = car_on_pad_14(crate::drive::MAX_BOOST, true);
+        world.step(1.0 / 120.0);
+        assert_eq!(world.boost_pads().map(|p| p.is_active(14)), Some(true));
+    }
+
+    #[test]
+    fn a_used_pad_gives_again_after_four_seconds() {
+        let mut world = car_on_pad_14(0.0, true);
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, 12.0);
+        for _ in 0..478 {
+            world.step(1.0 / 120.0);
+        }
+        assert_eq!(world.frame().cars[0].boost_amount, 12.0, "not yet");
+        world.step(1.0 / 120.0);
+        world.step(1.0 / 120.0);
+        assert_eq!(
+            world.frame().cars[0].boost_amount,
+            24.0,
+            "back after 480 ticks"
+        );
+    }
+
+    #[test]
+    fn a_demolished_car_takes_no_pad() {
+        let mut world = car_on_pad_14(0.0, true);
+        world.demolished[0] = true;
+        world.step(1.0 / 120.0);
+        assert_eq!(world.boost_pads().map(|p| p.is_active(14)), Some(true));
     }
 
     #[test]
