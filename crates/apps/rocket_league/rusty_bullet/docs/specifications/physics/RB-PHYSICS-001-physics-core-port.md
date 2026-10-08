@@ -8287,6 +8287,11 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     first kickoff of a match ends at frame 850 of the match (846 to 853 in five logs, not 826 from the
     first packet). Goal replays are not constant: 1076 to 1084 ticks in 31 of 41, 1103 to 1560 in the
     rest, for reasons the packets do not show (`Env::set_replay_ticks`).
+  - A whole match in the port (`cargo run --release -p rb_env --example play_match`, test
+    `rb_env/tests/full_match.rs`): two scripted chasers (`rb_env::chaser`) from the intro to `Ended` on a
+    five-minute clock: six goals, six kickoffs, 48270 ticks (402 s of match) in 1.1 s of computing; a
+    60 s match ending level goes through overtime to a golden goal. The test plays 30 s and checks the
+    phase order, the score and the clock.
   - Not modelled: the game's random slot choice (the caller may pass `set_kickoff_slots`; the default rotates),
     the spawn-height stagger between the two teams' cars (blue 35.0 against orange 39.5 on the first
     packets), the ball's missing drag while it falls (a tenth of a unit by tick 15).
