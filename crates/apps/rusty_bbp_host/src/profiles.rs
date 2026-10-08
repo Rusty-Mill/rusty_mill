@@ -72,19 +72,10 @@ impl ProfileSet {
     }
 }
 
+/// `<dir>/profiles/<sha256(task id)>.json`: injective, so no two tasks share a file.
 pub fn path(dir: &Path, task: &TaskId) -> PathBuf {
-    let safe: String = task
-        .0
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    dir.join("profiles").join(format!("{safe}.json"))
+    dir.join("profiles")
+        .join(format!("{}.json", Sha256::of(task.0.as_bytes()).hex()))
 }
 
 /// Read a profile set from a JSON file.
@@ -95,6 +86,9 @@ pub fn read_file(file: &Path) -> Result<ProfileSet, String> {
 
 /// Write the task's profile set and return its digest.
 pub fn freeze(dir: &Path, task: &TaskId, set: &ProfileSet) -> Result<Sha256, String> {
+    if set.profiles.is_empty() {
+        return Err("profile set has no profiles".into());
+    }
     let bytes = set.to_bytes()?;
     let p = path(dir, task);
     if let Some(parent) = p.parent() {

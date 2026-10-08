@@ -267,6 +267,101 @@ fn tampered_profile_set_is_refused() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn reopening_a_task_keeps_its_frozen_profile_set() {
+    let dir = tempdir("reopen");
+    let (repo, base) = repo(&dir);
+    let t = reach_test(&dir, &base, &[flag_diff("ok")]);
+    let r = admin::open_task(
+        &dir,
+        &t.id,
+        "local",
+        b"again",
+        &PrincipalId("human".into()),
+        &ProfileSet::shell("test", "false"),
+    )
+    .expect("call");
+    assert!(
+        matches!(r, Response::Rejected(ref rej) if rej.code == Code::AlreadyOpen),
+        "{r:?}"
+    );
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("the original profile set still runs");
+    assert_eq!(report_of(&t).0.status, RunStatus::Passed);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn profile_files_do_not_collide_across_task_ids() {
+    let dir = tempdir("collide");
+    let a = rusty_bbp_host::profiles::path(&dir, &TaskId("a/b".into()));
+    let b = rusty_bbp_host::profiles::path(&dir, &TaskId("a?b".into()));
+    assert_ne!(a, b);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn empty_profile_set_is_refused_at_open() {
+    let dir = tempdir("empty");
+    let mut set = ProfileSet::shell("test", "true");
+    set.profiles.clear();
+    let r = admin::open_task(
+        &dir,
+        &TaskId("T1".into()),
+        "local",
+        b"brief",
+        &PrincipalId("human".into()),
+        &set,
+    );
+    assert!(r.is_err_and(|e| e.contains("no profiles")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_whose_log_is_already_stored_is_completed_on_retry() {
+    let dir = tempdir("resume");
+    let (repo, base) = repo(&dir);
+    let t = reach_test(&dir, &base, &[flag_diff("ok")]);
+    // A previous runner stored the log and died before the report.
+    let mut d = open_driver(&dir, &t.id).expect("driver");
+    let run = d.state.selected_run().expect("run").clone();
+    let blob = d.store.blob_put(b"partial log\n");
+    let r = d
+        .dispatch(
+            &Command::Runner {
+                op: rusty_bbp_host::fresh_op(),
+                run: run.id,
+                secret: d.state.secret_for(run.id),
+                blob,
+                payload: ArtifactPayload::Log,
+            },
+            now(),
+        )
+        .expect("dispatch");
+    assert!(matches!(r, Response::Stored(_)), "{r:?}");
+    let r = runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    assert!(matches!(r, Response::Stored(_)), "{r:?}");
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Passed);
+    assert_eq!(log, "partial log\n", "report points at the log on record");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The sandboxed executor through the real `bbp __sandbox` helper. Where the
 /// kernel refuses Landlock or seccomp the run is reported as `error`, never
 /// as an unconfined pass.

@@ -25,7 +25,9 @@ pub fn role_name(r: Role) -> &'static str {
 }
 
 /// Open `task` in the store at `dir` with `brief` as its brief. The profile
-/// set is frozen first; its digest is the task's `profile_digest`.
+/// set is frozen first; its digest is the task's `profile_digest`. A task
+/// that is already open keeps its frozen file: the core's `AlreadyOpen`
+/// rejection is returned before anything is written.
 pub fn open_task(
     dir: &Path,
     task: &TaskId,
@@ -34,11 +36,17 @@ pub fn open_task(
     human: &PrincipalId,
     set: &ProfileSet,
 ) -> Result<Response, String> {
-    let profile_digest = profiles::freeze(dir, task, set)?;
-    let mut store = FsStore::open(dir).map_err(|e| e.to_string())?;
-    let blob = store.blob_put(brief);
+    let store = FsStore::open(dir).map_err(|e| e.to_string())?;
     let mut d = Driver::new(store, task.clone());
     let _ = d.reload();
+    if d.state.opened {
+        return Ok(Response::Rejected(Rejection::new(
+            Code::AlreadyOpen,
+            "task already opened",
+        )));
+    }
+    let profile_digest = profiles::freeze(dir, task, set)?;
+    let blob = d.store.blob_put(brief);
     let cmd = Command::Open(OpenTask {
         task: task.clone(),
         repo: repo.to_owned(),

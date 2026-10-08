@@ -124,6 +124,13 @@ fn execute<E: Executor>(exec: &E, set: &ProfileSet, work: &Path) -> Outcome
 where
     E::Error: std::fmt::Display,
 {
+    if set.profiles.is_empty() {
+        return Outcome {
+            status: RunStatus::Error,
+            profiles: vec![],
+            log: "profile set has no profiles\n".into(),
+        };
+    }
     let mut log = String::new();
     let mut results = Vec::new();
     let mut status = RunStatus::Passed;
@@ -278,21 +285,30 @@ where
         ),
     };
     let secret = d.state.secret_for(run.id);
-    let log_blob = d.store.blob_put(outcome.log.as_bytes());
-    let logged = d
-        .dispatch(
-            &Command::Runner {
-                op: fresh_op(),
-                run: run.id,
-                secret,
-                blob: log_blob,
-                payload: ArtifactPayload::Log,
-            },
-            now(),
-        )
-        .map_err(|e| format!("{e:?}"))?;
-    let Response::Stored(log_id) = logged else {
-        return Ok(logged);
+    // A previous invocation may have stored the log and died before the
+    // report (A4: log first, report second). The core accepts one log per
+    // run, so resume by reporting against the log already on record.
+    let log_id = match run.log {
+        Some(id) => id,
+        None => {
+            let log_blob = d.store.blob_put(outcome.log.as_bytes());
+            let logged = d
+                .dispatch(
+                    &Command::Runner {
+                        op: fresh_op(),
+                        run: run.id,
+                        secret,
+                        blob: log_blob,
+                        payload: ArtifactPayload::Log,
+                    },
+                    now(),
+                )
+                .map_err(|e| format!("{e:?}"))?;
+            match logged {
+                Response::Stored(id) => id,
+                other => return Ok(other),
+            }
+        }
     };
     let report = Report {
         candidate: run.candidate,
