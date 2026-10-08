@@ -17,7 +17,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 - **Fixed (rusty_aead):** `MAX_LEN` was one 64-byte block short of RFC 8439 section 2.8; now `u32::MAX * 64`, pinned by a test. Behaviour change only for a message of exactly 2^38 - 64 bytes.
 - **Fixed (evidence script):** failures in tests, lint, constant-time checks and timing now fail the run; constant-time checks run on every named compiler, including CI's 1.98.1 (identical results).
-- **Open:** no CI job runs the constant-time checks; `rust-version = 1.75` is unverified.
+- **Added (CI):** `crypto-constant-time` job (valgrind taint + pinned disassembly budgets for `rusty_sha2`, `rusty_aead`, `rusty_pk`, plus the harness self-test) on the pinned toolchain, selected by a new `crypto_ct` plan output when any of the five crypto crates is affected. Planner rule, workflow and tests updated; `actionlint` passes. Not yet seen running on a GitHub runner.
+- **Open:** `rust-version = 1.75` is unverified; the timing tests are not in CI.
 
 ## 2026-10-08 - Crypto claims corrected, evidence record, boundary tests (docs and tests only)
 
