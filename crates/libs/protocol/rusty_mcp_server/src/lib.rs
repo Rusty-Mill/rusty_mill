@@ -61,6 +61,8 @@ pub use rusty_mcp_proto as proto;
 
 pub use ask::{answer, Ask, ToolOutcome};
 pub use changes::{ChangeBroadcaster, ChangeEvent, ChangeKinds};
+#[cfg(feature = "request-state")]
+pub use connection::Turn;
 pub use connection::{CallContext, CancelToken, Connection, Job, Notifier, Started};
 #[cfg(feature = "http")]
 pub use http::{bind_http, HttpConfig, HttpHandler};
@@ -71,5 +73,5 @@ pub use server::{
 pub use stdio::{
     serve_lines, serve_stdio, StdioConfig, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_LINE_BYTES,
 };
-pub use tasks::{Cancelled, TaskContext, TaskHandler};
+pub use tasks::{ElicitError, TaskContext, TaskHandler};
 pub use uri_template::{TemplateError, UriVars};

@@ -113,20 +113,20 @@ impl Connection {
         let name = call.name.clone();
         #[cfg(feature = "request-state")]
         {
-            ctx.state = match &call.request_state {
-                Some(token) => Some(
-                    self.server()
-                        .state
-                        .open(&state_scope(&name), token)
-                        .map_err(|e| {
-                            invalid_params(match e {
-                                StateError::Expired => "requestState expired; start the call again",
-                                StateError::Invalid => "invalid requestState",
-                            })
-                        })?,
-                ),
-                None => None,
-            };
+            if let Some(token) = &call.request_state {
+                let (round, state) = self
+                    .server()
+                    .state
+                    .open(&state_scope(&name), token)
+                    .map_err(|e| {
+                        invalid_params(match e {
+                            StateError::Expired => "requestState expired; start the call again",
+                            StateError::Invalid => "invalid requestState",
+                        })
+                    })?;
+                ctx.state = Some(state);
+                ctx.round = round;
+            }
         }
         let ToolKind::Inline(handler) = &self.server().tools[index].kind else {
             return self.start_task(&ctx, index, call);
@@ -140,32 +140,28 @@ impl Connection {
         }
     }
 
-    /// Answer a call to a task tool: create the task, start its handler on a
-    /// thread of its own and announce the task.
+    /// Answer a call to a task tool. A client that declared the extension gets
+    /// a task: the handler starts on a thread of its own and the task is
+    /// announced. Any other client gets the handler's result in the reply.
     fn start_task(
         &self,
         ctx: &CallContext,
         index: usize,
         call: CallToolParams,
     ) -> Result<Value, ErrorData> {
-        if !ctx.protocol_version().is_stateless() {
-            return Err(ErrorData::new(
-                ErrorCode::INVALID_REQUEST,
-                "tasks need protocol revision 2026-07-28",
-            ));
-        }
-        let declared = ctx
-            .client_capabilities()
-            .and_then(|c| c.extensions.as_ref())
-            .is_some_and(|e| e.get(task::EXTENSION_ID).is_some());
+        let declared = ctx.protocol_version().is_stateless()
+            && ctx
+                .client_capabilities()
+                .and_then(|c| c.extensions.as_ref())
+                .is_some_and(|e| e.get(task::EXTENSION_ID).is_some());
         if !declared {
-            return Err(ErrorData::new(
-                ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY,
-                format!(
-                    "this tool runs as a task; the client must declare the {} extension",
-                    task::EXTENSION_ID
-                ),
-            ));
+            // The client cannot poll, so answer it the ordinary way.
+            let ToolKind::Task(handler) = &self.server().tools[index].kind else {
+                return Err(ErrorData::new(ErrorCode::INTERNAL_ERROR, "not a task tool"));
+            };
+            let mut result = handler(&TaskContext::inline(ctx.cancel_token()), call)?;
+            complete_type(ctx.protocol_version(), &mut result.result_type);
+            return Ok(result.to_value());
         }
         let entry = self.server().tasks.create().map_err(|e| {
             ErrorData::new(
@@ -280,9 +276,16 @@ impl Connection {
         };
         #[cfg(feature = "request-state")]
         {
+            let round = ctx.round.saturating_add(1);
+            if ask.state.is_some() && round > self.server().max_input_rounds {
+                return Err(invalid_params(format!(
+                    "this request exceeded the {} round limit",
+                    self.server().max_input_rounds
+                )));
+            }
             result.request_state = ask
                 .state
-                .map(|s| self.server().state.seal(&state_scope(name), &s));
+                .map(|s| self.server().state.seal(&state_scope(name), round, &s));
         }
         #[cfg(not(feature = "request-state"))]
         let _ = name;
@@ -610,6 +613,12 @@ fn resync_events(accepted: &SubscriptionFilter) -> Vec<ChangeEvent> {
     events
 }
 
+/// What a sealed `requestState` is bound to: the method and the tool.
+#[cfg(feature = "request-state")]
+fn state_scope(tool: &str) -> String {
+    format!("tools/call\0{tool}")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -694,10 +703,4 @@ mod tests {
         // One tools signal and one update per followed resource; nothing else.
         assert_eq!(sent.len(), 3);
     }
-}
-
-/// What a sealed `requestState` is bound to: the method and the tool.
-#[cfg(feature = "request-state")]
-fn state_scope(tool: &str) -> String {
-    format!("tools/call\0{tool}")
 }

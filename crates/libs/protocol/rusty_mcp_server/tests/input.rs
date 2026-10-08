@@ -9,7 +9,7 @@ use rusty_json::Value;
 use rusty_mcp_proto::{
     CallToolParams, CallToolResult, ContentBlock, ElicitAction, ElicitParams, ErrorData, Tool,
 };
-use rusty_mcp_server::{answer, Ask, BuildError, CallContext, Server, ToolOutcome};
+use rusty_mcp_server::{answer, Ask, CallContext, Server, ToolOutcome};
 use std::sync::Arc;
 use support::{code, reply, result, run_with};
 
@@ -69,10 +69,31 @@ fn book(ctx: &CallContext, call: CallToolParams) -> Result<ToolOutcome, ErrorDat
     })
 }
 
+/// Always asks again, so only the round limit can stop it. Uses `turn`, which
+/// also refuses answers that come without their state.
+#[cfg(feature = "request-state")]
+fn again(ctx: &CallContext, call: CallToolParams) -> Result<ToolOutcome, ErrorData> {
+    let _ = ctx.turn(&call)?;
+    let form = ElicitParams::Form {
+        message: "Again?".to_owned(),
+        requested_schema: schema(),
+        meta: None,
+    };
+    Ok(ToolOutcome::Ask(
+        Ask::new().elicit("confirm", &form).with_state("x"),
+    ))
+}
+
+#[cfg(not(feature = "request-state"))]
+fn again(_: &CallContext, _: CallToolParams) -> Result<ToolOutcome, ErrorData> {
+    Ok(text("n/a"))
+}
+
 fn builder() -> rusty_mcp_server::ServerBuilder {
     Server::builder("ask", "1")
         .interactive_tool(Tool::new("book", schema()), book)
         .interactive_tool(Tool::new("other", schema()), book)
+        .interactive_tool(Tool::new("again", schema()), again)
         .interactive_tool(Tool::new("empty", schema()), |_c, _p| {
             Ok(ToolOutcome::Ask(Ask::new()))
         })
@@ -207,6 +228,7 @@ fn a_tool_that_never_asks_ignores_input_responses() {
 #[cfg(feature = "request-state")]
 mod sealed {
     use super::*;
+    use rusty_mcp_server::BuildError;
     use std::time::Duration;
 
     fn state_of(server: &Arc<Server>, tool: &str) -> String {
@@ -271,6 +293,52 @@ mod sealed {
     }
 
     #[test]
+    fn answers_without_their_state_are_refused_not_restarted() {
+        let s = server();
+        let out = run_with(s, &call(1, "again", ACCEPT, ELICIT));
+        assert_eq!(code(reply(&out, 1)), -32602);
+        let why = reply(&out, 1)["error"]["message"].as_str().unwrap();
+        assert!(why.contains("without the matching requestState"), "{why}");
+    }
+
+    #[test]
+    fn a_state_with_no_answers_starts_over() {
+        let s = server();
+        let state = {
+            let out = run_with(s.clone(), &call(1, "again", "", ELICIT));
+            result(reply(&out, 1))["requestState"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let extra = format!(r#","requestState":"{state}""#);
+        let out = run_with(s, &call(2, "again", &extra, ELICIT));
+        assert_eq!(
+            result(reply(&out, 2))["resultType"].as_str(),
+            Some("input_required")
+        );
+    }
+
+    #[test]
+    fn a_request_cannot_be_sent_back_for_input_forever() {
+        let s = Arc::new(builder().max_input_rounds(3).build().unwrap());
+        let mut state = state_of(&s, "again"); // round 1
+        for round in 2..=3 {
+            let extra = format!(r#"{ACCEPT},"requestState":"{state}""#);
+            let out = run_with(s.clone(), &call(round, "again", &extra, ELICIT));
+            state = result(reply(&out, round))["requestState"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        }
+        let extra = format!(r#"{ACCEPT},"requestState":"{state}""#);
+        let out = run_with(s, &call(9, "again", &extra, ELICIT));
+        assert_eq!(code(reply(&out, 9)), -32602);
+        let why = reply(&out, 9)["error"]["message"].as_str().unwrap();
+        assert!(why.contains("round limit"), "{why}");
+    }
+
+    #[test]
     fn a_weak_key_or_zero_lifetime_is_refused_at_build() {
         assert!(matches!(
             builder().state_key(vec![1u8; 31]).build(),
@@ -278,6 +346,10 @@ mod sealed {
         ));
         assert!(matches!(
             builder().state_ttl(Duration::from_millis(500)).build(),
+            Err(BuildError::ZeroLimit(_))
+        ));
+        assert!(matches!(
+            builder().max_input_rounds(0).build(),
             Err(BuildError::ZeroLimit(_))
         ));
     }

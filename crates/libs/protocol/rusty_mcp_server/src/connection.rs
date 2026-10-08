@@ -48,6 +48,19 @@ impl CancelToken {
     }
 }
 
+/// Where a call is in a multi-round-trip exchange; see [`CallContext::turn`].
+#[cfg(feature = "request-state")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Turn<'a> {
+    /// The first call (or a retry that answered nothing): ask.
+    Fresh,
+    /// The client answered; `state` is what the last [`Ask`](crate::Ask) left.
+    Resumed {
+        /// The verified state.
+        state: &'a [u8],
+    },
+}
+
 /// What a tool knows about the call it is serving.
 pub struct CallContext {
     request_id: RequestId,
@@ -59,6 +72,9 @@ pub struct CallContext {
     notifier: Arc<dyn Notifier>,
     #[cfg(feature = "request-state")]
     pub(crate) state: Option<Vec<u8>>,
+    /// How many times this request has already been sent back for input.
+    #[cfg(feature = "request-state")]
+    pub(crate) round: u32,
 }
 
 impl CallContext {
@@ -68,6 +84,25 @@ impl CallContext {
     #[cfg(feature = "request-state")]
     pub fn request_state(&self) -> Option<&[u8]> {
         self.state.as_deref()
+    }
+
+    /// Where this call is in an exchange of questions and answers, checked
+    /// against the call's `inputResponses` and `requestState`. Start every
+    /// interactive handler with it: it refuses answers that arrive without the
+    /// state they belong to, which would otherwise be silently discarded by
+    /// starting over.
+    ///
+    /// # Errors
+    /// `-32602` for `inputResponses` without a `requestState`.
+    #[cfg(feature = "request-state")]
+    pub fn turn(&self, call: &rusty_mcp_proto::CallToolParams) -> Result<Turn<'_>, ErrorData> {
+        match (self.state.as_deref(), call.input_responses.is_some()) {
+            (Some(state), true) => Ok(Turn::Resumed { state }),
+            (_, false) => Ok(Turn::Fresh),
+            (None, true) => Err(invalid_params(
+                "inputResponses arrived without the matching requestState",
+            )),
+        }
     }
 
     /// The id of the `tools/call` request.
@@ -388,6 +423,8 @@ impl Connection {
             notifier: Arc::clone(&self.notifier),
             #[cfg(feature = "request-state")]
             state: None,
+            #[cfg(feature = "request-state")]
+            round: 0,
         }
     }
 

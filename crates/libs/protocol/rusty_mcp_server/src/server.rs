@@ -53,6 +53,11 @@ pub(crate) const MAX_COMPLETION_VALUES: usize = 100;
 /// otherwise.
 pub const DEFAULT_PAGE_SIZE: usize = 100;
 
+/// How many times one request may be sent back for input unless
+/// [`ServerBuilder::max_input_rounds`] says otherwise.
+#[cfg(feature = "request-state")]
+pub const DEFAULT_INPUT_ROUNDS: u32 = 8;
+
 /// How long a sealed `requestState` lasts unless
 /// [`ServerBuilder::state_ttl`] says otherwise.
 #[cfg(feature = "request-state")]
@@ -169,6 +174,8 @@ pub struct Server {
     pub(crate) tasks: TaskStore,
     #[cfg(feature = "request-state")]
     pub(crate) state: StateCodec,
+    #[cfg(feature = "request-state")]
+    pub(crate) max_input_rounds: u32,
 }
 
 impl Server {
@@ -196,6 +203,8 @@ impl Server {
             state_key: None,
             #[cfg(feature = "request-state")]
             state_ttl: DEFAULT_STATE_TTL,
+            #[cfg(feature = "request-state")]
+            max_input_rounds: DEFAULT_INPUT_ROUNDS,
         }
     }
 
@@ -242,6 +251,8 @@ pub struct ServerBuilder {
     state_key: Option<Vec<u8>>,
     #[cfg(feature = "request-state")]
     state_ttl: Duration,
+    #[cfg(feature = "request-state")]
+    max_input_rounds: u32,
 }
 
 impl ServerBuilder {
@@ -356,6 +367,15 @@ impl ServerBuilder {
     #[must_use]
     pub fn state_key(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.state_key = Some(key.into());
+        self
+    }
+
+    /// Most times one request may be sent back for input with state (default
+    /// 8), which stops a client and a tool from looping forever.
+    #[cfg(feature = "request-state")]
+    #[must_use]
+    pub fn max_input_rounds(mut self, rounds: u32) -> Self {
+        self.max_input_rounds = rounds;
         self
     }
 
@@ -512,6 +532,9 @@ impl ServerBuilder {
         }
         #[cfg(feature = "request-state")]
         let state = {
+            if self.max_input_rounds == 0 {
+                return Err(BuildError::ZeroLimit("input rounds"));
+            }
             if self.state_ttl.as_secs() == 0 {
                 return Err(BuildError::ZeroLimit("state lifetime (seconds)"));
             }
@@ -540,6 +563,8 @@ impl ServerBuilder {
             tasks: TaskStore::new(self.max_tasks, self.task_ttl),
             #[cfg(feature = "request-state")]
             state,
+            #[cfg(feature = "request-state")]
+            max_input_rounds: self.max_input_rounds,
         })
     }
 }

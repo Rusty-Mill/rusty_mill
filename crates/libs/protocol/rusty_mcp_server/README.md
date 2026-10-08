@@ -132,6 +132,11 @@ with `interactive_tool` and return `ToolOutcome::Ask`:
   the retry re-checks. Servers answering from several processes must share
   `state_key` (32+ bytes); the default is a random key per build, so a state
   from another process is refused and the client starts over.
+- `ctx.turn(&call)` classifies a call as `Fresh` or `Resumed { state }` and
+  refuses `inputResponses` that come without their `requestState` (`-32602`)
+  instead of silently starting over. A request is sent back for input at most
+  `max_input_rounds` times (8) when it leaves state; the count rides in the
+  sealed state.
 - Not bound to a client identity: if requests are authenticated, check the
   caller again on the retry.
 - Tools only for now; prompts and resources take no input yet. A task asks
@@ -153,9 +158,12 @@ a task; the handler runs on a thread of its own and the client polls
 })
 ```
 
-- The server advertises the extension once it has a task tool. A client
-  that did not declare it gets `-32021`; classic revisions have no tasks
-  (`-32600`). Task tools are task-only: there is no synchronous fallback.
+- The server advertises the extension once it has a task tool. A client that
+  did not declare it (or speaks a classic revision) gets the handler's result
+  in the reply, run inside the request; `TaskContext::elicit` then returns
+  `ElicitError::NotATask` (use `interactive_tool` for those clients). This is
+  the fork the demo's acceptance suite checks: the same tool, a handle or a
+  result, by the client's declared capabilities.
 - `TaskContext::elicit` shows the task as `input_required` with the question
   and blocks until `tasks/update` answers it (a malformed or unrelated answer
   is `-32602` and the task keeps waiting), or the task is cancelled.

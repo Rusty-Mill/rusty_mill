@@ -175,15 +175,32 @@ fn a_failing_or_panicking_tool_fails_its_task() {
 }
 
 #[test]
-fn only_a_client_that_declares_the_extension_may_start_a_task() {
+fn a_client_without_the_extension_gets_the_result_in_the_reply() {
     let f = fixture();
     let c = conn(&f.server);
-    assert_eq!(code(&call(&c, "quick", WITHOUT)), -32021);
-    // A tool that is not a task tool needs no extension.
-    assert!(call(&c, "plain", WITHOUT)["result"].is_object());
-    // And classic revisions have no tasks at all.
-    let classic = send(&c, "tools/call", r#"{"name":"quick"}"#);
-    assert_eq!(code(&classic), -32600);
+    let r = call(&c, "quick", WITHOUT);
+    assert_eq!(r["result"]["resultType"], "complete");
+    assert_eq!(r["result"]["content"][0]["text"], "done");
+    // Classic revisions have no tasks; same answer, no resultType.
+    let old = conn(&f.server);
+    send(
+        &old,
+        "initialize",
+        r#"{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}"#,
+    );
+    let classic = send(&old, "tools/call", r#"{"name":"quick"}"#);
+    assert_eq!(classic["result"]["content"][0]["text"], "done");
+    assert!(classic["result"].get("resultType").is_none());
+    // A failing tool is a plain error for such a client.
+    assert_eq!(code(&call(&c, "fails", WITHOUT)), -32603);
+}
+
+#[test]
+fn an_inline_task_tool_cannot_ask_through_a_task() {
+    let f = fixture();
+    let c = conn(&f.server);
+    let r = call(&c, "ask", WITHOUT);
+    assert_eq!(r["result"]["content"][0]["text"], "cancelled while asking");
 }
 
 #[test]

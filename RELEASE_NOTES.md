@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_server acceptance fixes (pending review)
+
+- **Changed:** task tools fall back to an inline result for clients without the extension; interactive tools get a `turn` gate and a round limit. Both came from reading `rusty-mcp-demo`'s acceptance suite.
+- **Not verified:** the demo's own suite has not been run against this server yet (it is written against `rmcp` and `rusty-mcp`); only my reading of it drove these changes. Clippy for `--features request-state` was red on the two previous commits (see CHANGELOG) and is clean now.
+
+---
+
 ## 2026-10-08 - rusty_mcp_server tasks (pending review)
 
 - **Added:** `task_tool` and the task methods (`tasks/get`, `tasks/update`, `tasks/cancel`) of the 2026-07-28 tasks extension, with an in-memory store.

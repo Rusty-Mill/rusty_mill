@@ -32,17 +32,26 @@ pub type TaskHandler = dyn Fn(&TaskContext, rusty_mcp_proto::CallToolParams) -> 
     + Send
     + Sync;
 
-/// The task was cancelled (or expired) while the handler waited.
+/// Why [`TaskContext::elicit`] got no answer.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Cancelled;
+pub enum ElicitError {
+    /// The task was cancelled (or expired) while the handler waited.
+    Cancelled,
+    /// The call is not running as a task (the client did not declare the
+    /// extension), so there is no `tasks/update` to answer with.
+    NotATask,
+}
 
-impl std::fmt::Display for Cancelled {
+impl std::fmt::Display for ElicitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the task was cancelled")
+        f.write_str(match self {
+            Self::Cancelled => "the task was cancelled",
+            Self::NotATask => "the call is not running as a task",
+        })
     }
 }
 
-impl std::error::Error for Cancelled {}
+impl std::error::Error for ElicitError {}
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -165,6 +174,24 @@ impl Entry {
         Ok(())
     }
 
+    /// An entry that no store holds, for a call that is not a task.
+    fn detached(cancel: CancelToken) -> Arc<Self> {
+        let now = now_secs();
+        Arc::new(Self {
+            id: String::new(),
+            created: now,
+            ttl: Duration::ZERO,
+            state: Mutex::new(State {
+                payload: TaskPayload::Working,
+                message: None,
+                updated: now,
+                answers: BTreeMap::new(),
+            }),
+            changed: Condvar::new(),
+            cancel,
+        })
+    }
+
     fn expired(&self, now: i64) -> bool {
         let ttl = i64::try_from(self.ttl.as_secs()).unwrap_or(i64::MAX);
         now > self.created.saturating_add(ttl)
@@ -174,11 +201,25 @@ impl Entry {
 /// What a task handler can do besides compute.
 pub struct TaskContext {
     entry: Arc<Entry>,
+    /// Running inside the request of a client without the extension.
+    inline: bool,
 }
 
 impl TaskContext {
     pub(crate) fn new(entry: Arc<Entry>) -> Self {
-        Self { entry }
+        Self {
+            entry,
+            inline: false,
+        }
+    }
+
+    /// The context for a task tool called by a client that cannot use tasks:
+    /// the handler runs inside the request and cancellation is the request's.
+    pub(crate) fn inline(cancel: CancelToken) -> Self {
+        Self {
+            entry: Entry::detached(cancel),
+            inline: true,
+        }
     }
 
     /// Whether the client cancelled the task (or it expired). Poll it in a
@@ -197,12 +238,17 @@ impl TaskContext {
     /// answer it under `key`. The task shows as `input_required` meanwhile.
     ///
     /// # Errors
-    /// [`Cancelled`] if the task is cancelled or expires while waiting.
-    pub fn elicit(&self, key: &str, params: &ElicitParams) -> Result<ElicitResult, Cancelled> {
+    /// [`ElicitError::Cancelled`] if the task is cancelled or expires while
+    /// waiting; [`ElicitError::NotATask`] when the client did not declare the
+    /// extension (use [`Ask`](crate::Ask) in an `interactive_tool` for those).
+    pub fn elicit(&self, key: &str, params: &ElicitParams) -> Result<ElicitResult, ElicitError> {
+        if self.inline {
+            return Err(ElicitError::NotATask);
+        }
         let e = &self.entry;
         let mut s = lock(&e.state);
         if s.payload.status().is_terminal() {
-            return Err(Cancelled);
+            return Err(ElicitError::Cancelled);
         }
         let mut requests = BTreeMap::new();
         requests.insert(key.to_owned(), InputRequest::elicitation(params));
@@ -213,12 +259,12 @@ impl TaskContext {
         s.updated = now_secs();
         loop {
             if s.payload.status().is_terminal() {
-                return Err(Cancelled);
+                return Err(ElicitError::Cancelled);
             }
             if let Some(raw) = s.answers.remove(key) {
                 s.payload = TaskPayload::Working;
                 s.updated = now_secs();
-                return ElicitResult::from_value(&raw).map_err(|_| Cancelled);
+                return ElicitResult::from_value(&raw).map_err(|_| ElicitError::Cancelled);
             }
             s = e.changed.wait(s).unwrap_or_else(PoisonError::into_inner);
         }

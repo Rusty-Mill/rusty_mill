@@ -2,7 +2,8 @@
 //! carries an HMAC-SHA256 over a domain tag, a scope (method and name, so a
 //! state is good for the request that issued it and no other) and an expiry.
 //!
-//! Token: `base64url(expiry_secs_be8 || payload) "." base64url(mac)`.
+//! Token: `base64url(expiry_secs_be8 || round_be4 || payload) "." base64url(mac)`.
+//! The round counts how many times a request has been sent back for input.
 
 use rusty_base64::{decode_url_safe, encode_url_safe_no_pad};
 use rusty_crypto_key::constant_time_eq;
@@ -48,17 +49,18 @@ impl StateCodec {
         Self { key, ttl }
     }
 
-    pub(crate) fn seal(&self, scope: &str, payload: &[u8]) -> String {
-        self.seal_at(now_secs(), scope, payload)
+    pub(crate) fn seal(&self, scope: &str, round: u32, payload: &[u8]) -> String {
+        self.seal_at(now_secs(), scope, round, payload)
     }
 
-    pub(crate) fn open(&self, scope: &str, token: &str) -> Result<Vec<u8>, StateError> {
+    pub(crate) fn open(&self, scope: &str, token: &str) -> Result<(u32, Vec<u8>), StateError> {
         self.open_at(now_secs(), scope, token)
     }
 
-    fn seal_at(&self, now: u64, scope: &str, payload: &[u8]) -> String {
+    fn seal_at(&self, now: u64, scope: &str, round: u32, payload: &[u8]) -> String {
         let expiry = now.saturating_add(self.ttl.as_secs());
         let mut body = expiry.to_be_bytes().to_vec();
+        body.extend_from_slice(&round.to_be_bytes());
         body.extend_from_slice(payload);
         let tag = mac(&self.key, scope, &body);
         format!(
@@ -68,7 +70,7 @@ impl StateCodec {
         )
     }
 
-    fn open_at(&self, now: u64, scope: &str, token: &str) -> Result<Vec<u8>, StateError> {
+    fn open_at(&self, now: u64, scope: &str, token: &str) -> Result<(u32, Vec<u8>), StateError> {
         let (body, tag) = token.split_once('.').ok_or(StateError::Invalid)?;
         let body = decode_url_safe(body).map_err(|_| StateError::Invalid)?;
         let tag = decode_url_safe(tag).map_err(|_| StateError::Invalid)?;
@@ -79,7 +81,10 @@ impl StateCodec {
         if now > u64::from_be_bytes(*expiry) {
             return Err(StateError::Expired);
         }
-        Ok(payload.to_vec())
+        let (round, payload) = payload
+            .split_first_chunk::<4>()
+            .ok_or(StateError::Invalid)?;
+        Ok((u32::from_be_bytes(*round), payload.to_vec()))
     }
 }
 
@@ -95,35 +100,31 @@ mod tests {
     #[test]
     fn a_sealed_state_opens_for_its_scope() {
         let c = codec();
-        let token = c.seal_at(1000, "tools/call\0ask", b"step 2");
-        assert_eq!(
-            c.open_at(1010, "tools/call\0ask", &token).unwrap(),
-            b"step 2"
-        );
-        assert_eq!(
-            c.open_at(1060, "tools/call\0ask", &token).unwrap(),
-            b"step 2"
-        );
+        let token = c.seal_at(1000, "tools/call\0ask", 3, b"step 2");
+        let opened = c.open_at(1010, "tools/call\0ask", &token).unwrap();
+        assert_eq!(opened, (3, b"step 2".to_vec()));
+        let last_second = c.open_at(1060, "tools/call\0ask", &token).unwrap();
+        assert_eq!(last_second.1, b"step 2");
     }
 
     #[test]
     fn an_empty_payload_round_trips() {
         let c = codec();
-        let token = c.seal_at(0, "s", b"");
-        assert_eq!(c.open_at(0, "s", &token).unwrap(), b"");
+        let token = c.seal_at(0, "s", 0, b"");
+        assert_eq!(c.open_at(0, "s", &token).unwrap(), (0, Vec::new()));
     }
 
     #[test]
     fn it_expires() {
         let c = codec();
-        let token = c.seal_at(1000, "s", b"x");
+        let token = c.seal_at(1000, "s", 0, b"x");
         assert_eq!(c.open_at(1061, "s", &token), Err(StateError::Expired));
     }
 
     #[test]
     fn another_scope_or_key_is_refused() {
         let c = codec();
-        let token = c.seal_at(1000, "tools/call\0a", b"x");
+        let token = c.seal_at(1000, "tools/call\0a", 0, b"x");
         assert_eq!(
             c.open_at(1000, "tools/call\0b", &token),
             Err(StateError::Invalid)
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn tampering_is_refused() {
         let c = codec();
-        let token = c.seal_at(1000, "s", b"price=1");
+        let token = c.seal_at(1000, "s", 0, b"price=1");
         let (body, tag) = token.split_once('.').unwrap();
         // Flip a payload byte, keep the old tag.
         let mut raw = decode_url_safe(body).unwrap();
