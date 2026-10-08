@@ -506,6 +506,21 @@ impl PhysicsWorld {
         drive::cast_wheels(&self.cars[index], |o, d, l| self.wheel_ray(o, d, l), dt)
     }
 
+    /// The deepest penetration (uu) between car `index`'s box and the ball, measured as
+    /// `step` does (the ball as its 91.25 uu hit sphere), or `None` when they do not
+    /// touch: an instrument for the ball-contact work (PARITY-PLAN workstream B).
+    /// Panics if `index` is out of bounds (see `set_car_input`).
+    pub fn car_ball_penetration(&self, index: usize) -> Option<f32> {
+        let mut hit_sphere = self.ball;
+        hit_sphere.shape = crate::body::Shape::Sphere {
+            radius: crate::body::BALL_COLLISION_RADIUS,
+        };
+        collision::contacts_between(&hit_sphere, &self.cars[index])
+            .iter()
+            .map(|contact| contact.penetration_depth)
+            .reduce(f32::max)
+    }
+
     fn static_scene(&self) -> StaticScene<'_> {
         StaticScene {
             ground: &self.ground,
@@ -1625,6 +1640,22 @@ pub fn wheel_contacts_along(
     hits
 }
 
+/// The first car's box-to-ball penetration at each recorded frame, as the engine would
+/// measure it from that state (`PhysicsWorld::car_ball_penetration`), one entry per step
+/// like `wheel_contacts_along`.
+pub fn car_ball_penetration_along(
+    mut world: PhysicsWorld,
+    recorded: &[PhysicsFrame],
+) -> Vec<Option<f32>> {
+    let mut depths = Vec::with_capacity(recorded.len());
+    for pair in recorded.windows(2) {
+        world.snap_to_frame(&pair[0]);
+        depths.push(world.car_ball_penetration(0));
+        step_recorded(&mut world, &pair[0], &pair[1]);
+    }
+    depths
+}
+
 /// k-step predictions of a recording (`RB-VERIFY-003-FR-008`): frame `i`
 /// of the result is the candidate's prediction of `recorded[i]` from
 /// `recorded[i - k]` (from `recorded[0]` for `i < k`), stepping the
@@ -1716,6 +1747,21 @@ mod tests {
             let ball_error = rec.ball.position.distance(&pred.ball.position);
             assert!(ball_error < 1e-3, "ball t={}", rec.timestamp_secs);
         }
+    }
+
+    #[test]
+    fn a_car_box_overlapping_the_ball_reports_a_penetration_and_a_distant_one_none() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let touching = RigidBody::standard_car(Vec3::new(0.0, 0.0, 150.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(touching);
+        let depth = world
+            .car_ball_penetration(0)
+            .expect("the box is inside the ball");
+        assert!(depth > 0.0, "{depth}");
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let far = RigidBody::standard_car(Vec3::new(2000.0, 0.0, 17.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(far);
+        assert!(world.car_ball_penetration(0).is_none());
     }
 
     /// The wheel instrument (PARITY-PLAN A.1): a car on flat ground has all four
