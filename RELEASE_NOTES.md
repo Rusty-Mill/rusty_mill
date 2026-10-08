@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_bbp driver boundary: payload derives from bytes (pending review)
+
+- **Added:** `rusty_bbp::codec` and two `Driver` boundary checks: a referenced blob must already be stored, and the claimed typed payload must equal what the bytes decode to. Closes the two compliance gaps found when ChatGPT's implementation-plan review was reassessed against the built code.
+- **Changed:** the `spec` artifact's on-disk shape is now JSON with `brief` and `markdown`, so its payload is derivable. Test fixtures encode through `codec`.
+
+---
+
 ## 2026-10-08 - rusty_bbp stage 2: durable store (pending review)
 
 - **Added:** `rusty_bbp::FsStore`, a file-backed store with one `fsync`ed JSON line per committed batch, crash truncation on open, revision-checked append and digest-verified blobs via `rusty_atomic_file`. Stage-2 exit criteria from the implementation plan are tests: reopen, crash mid-batch, conflict, blob consistency.

@@ -381,18 +381,9 @@ fn r16_gating_table() {
         rejected(fx.put(Role::Coder, ArtifactPayload::Spec { brief }, b"s")),
         Code::KindForbidden
     );
-    let too_big = BlobRef {
-        sha: Sha256([1; 32]),
-        len: 2_000_001,
-    };
+    let too_big = fx.d.store.blob_put(&vec![b'x'; 2_000_001]);
     assert_eq!(
-        rejected(fx.agent(
-            Role::Coder,
-            AgentAction::PutArtifact {
-                blob: too_big,
-                payload: ArtifactPayload::Diff
-            }
-        )),
+        rejected(fx.put_raw(Role::Coder, ArtifactPayload::Diff, too_big)),
         Code::TooLarge
     );
 }
@@ -431,14 +422,18 @@ fn r16_runner_secret_and_consistency() {
         tree: None,
         log,
     };
+    let payload = ArtifactPayload::TestReport(rep);
+    let rep_blob =
+        fx.d.store
+            .blob_put(&encode_artifact(&payload, b"").expect("encode"));
     let op = fx.op();
     assert_eq!(
         rejected(fx.run(&Command::Runner {
             op,
             run,
             secret,
-            blob,
-            payload: ArtifactPayload::TestReport(rep)
+            blob: rep_blob,
+            payload
         })),
         Code::InconsistentReport
     );

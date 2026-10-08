@@ -1,9 +1,11 @@
 //! Storage port and the in-memory adapter used for stage 1.
 
-use crate::command::{Command, Response};
+use crate::codec::decode_artifact;
+use crate::command::{AgentAction, Code, Command, Rejection, Response};
 use crate::engine::handle;
 use crate::event::Event;
 use crate::ids::*;
+use crate::record::ArtifactPayload;
 use crate::state::TaskState;
 use std::collections::HashMap;
 
@@ -95,6 +97,44 @@ impl<S: Store> Driver<S> {
         }
     }
 
+    fn check_boundary(&self, cmd: &Command) -> Option<Rejection> {
+        let (blob, payload) = match cmd {
+            Command::Agent {
+                action: AgentAction::PutArtifact { blob, payload },
+                ..
+            } => (blob, payload),
+            Command::Runner { blob, payload, .. } => (blob, payload),
+            Command::Open(o) => (&o.brief, &ArtifactPayload::Brief),
+            _ => return None,
+        };
+        let bytes = match self.store.blob_get(&blob.sha) {
+            Ok(b) => b,
+            Err(_) => {
+                return Some(Rejection::new(
+                    Code::BlobMissing,
+                    format!("{:?} is not in the store", blob.sha),
+                ))
+            }
+        };
+        if bytes.len() as u64 != blob.len {
+            return Some(Rejection::new(
+                Code::PayloadMismatch,
+                "blob length disagrees with the stored bytes",
+            ));
+        }
+        match decode_artifact(payload.kind(), &bytes) {
+            Ok(decoded) if decoded == *payload => None,
+            Ok(_) => Some(Rejection::new(
+                Code::PayloadMismatch,
+                "payload is not what the stored bytes decode to",
+            )),
+            Err(e) => Some(Rejection::new(
+                Code::PayloadMismatch,
+                format!("stored bytes do not decode: {e}"),
+            )),
+        }
+    }
+
     /// Rebuild state from the log.
     pub fn reload(&mut self) -> Result<(), StoreError> {
         let events = self.store.events(&self.state.task, 0)?;
@@ -104,7 +144,15 @@ impl<S: Store> Driver<S> {
 
     /// Dispatch one command. On a revision conflict, reload and recompute once
     /// with the same command; the command's own `op` and `expected_rev` are untouched.
+    ///
+    /// Before the core sees an artifact command, the driver checks the
+    /// boundary: the blob is already in the store (A3, blobs before references)
+    /// and the claimed payload is what those bytes decode to (A1). A failure is
+    /// a rejection returned without touching the log.
     pub fn dispatch(&mut self, cmd: &Command, now: Time) -> Result<Response, StoreError> {
+        if let Some(rej) = self.check_boundary(cmd) {
+            return Ok(Response::Rejected(rej));
+        }
         for _ in 0..2 {
             let out = handle(&self.state, cmd, now);
             match self
