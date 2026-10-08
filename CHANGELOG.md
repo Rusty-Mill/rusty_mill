@@ -8,6 +8,9 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Security
+- **`rusty_tls` native engine: a wildcard certificate no longer bypasses an excluded name constraint.** `handrolled::name` compared the literal SAN `*.example.com` against the excluded subtree `bad.example.com`, found it outside, and accepted a certificate that authenticates `bad.example.com`; webpki refused it. A wildcard is now excluded when any host it can match is inside the subtree. Only the opt-in engine (`handrolled-engine` plus `--cfg rusty_tls_handrolled`) was affected; the rustls default never was. New differential test (seven cases, both engines agree) and two unit tests. Also fixes two `needless_question_mark` lints in the engine that failed clippy on Rust 1.97.
+
 ### Added
 - **`docs/research/prompts/ring-track.md`**: session prompt for investigating a native, dependency-free replacement for `ring`, staged by side-channel risk (public-data verify paths first, signing last). Assessment and plan only; no primitives are to be written until the owner approves.
 - **`docs/research/TLS12-DESIGN.md`**: scope and six-stage plan for TLS 1.2 in the native engine (owner approved implementing it). ECDHE with AEAD suites only, extended master secret required, renegotiation refused; 27 to 35 days. Nothing built yet.

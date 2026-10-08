@@ -381,6 +381,33 @@ fn dns_within(subtree: &str, name: &str) -> bool {
     }
 }
 
+/// Could `presented` authenticate any name inside the excluded subtree `base`?
+///
+/// For an ordinary name that is [`dns_within`]. A wildcard is different: the
+/// certificate authenticates every `X.suffix` for one label `X`, so comparing
+/// the literal string `*.suffix` against `base` misses the case where `base`
+/// names one of those hosts. A wildcard is therefore excluded when either
+/// every name it can match lies inside `base` (`suffix` is within `base`), or
+/// `base` is exactly one label in front of `suffix` (one matched host is
+/// excluded). Anything else cannot overlap, because a wildcard covers exactly
+/// one label.
+///
+/// This must err towards excluding: a missed overlap lets a name-constrained
+/// CA issue for a name it was told to stay out of, while an extra refusal only
+/// rejects a certificate that was already at the edge of the constraint.
+fn dns_excluded(base: &str, presented: &str) -> bool {
+    let Some(suffix) = presented.strip_prefix("*.") else {
+        return dns_within(base, presented);
+    };
+    if dns_within(base, suffix) {
+        return true;
+    }
+    match base.split_once('.') {
+        Some((label, rest)) => !label.is_empty() && eq_ignore_case(rest, suffix),
+        None => false,
+    }
+}
+
 fn ip_within(address: &[u8], mask: &[u8], candidate: &[u8]) -> bool {
     if candidate.len() != address.len() {
         // An IPv4 name is never inside an IPv6 subtree, or the reverse.
@@ -417,7 +444,7 @@ fn check_one(
             GeneralName::DnsName(presented) => {
                 for subtree in &constraints.excluded {
                     if let Subtree::Dns(base) = subtree {
-                        if dns_within(base, presented) {
+                        if dns_excluded(base, presented) {
                             return Err(NameError::ExcludedByNameConstraint);
                         }
                     }
@@ -514,6 +541,34 @@ mod tests {
         assert!(!dns_name_matches("a.*.example.com", "a.b.example.com"));
         assert!(!dns_name_matches("*.com", "example.com"));
         assert!(!dns_name_matches("*", "example.com"));
+    }
+
+    #[test]
+    fn a_wildcard_is_excluded_when_it_can_match_an_excluded_host() {
+        // One matched host is the excluded one: the case that was missed.
+        assert!(dns_excluded("bad.example.com", "*.example.com"));
+        // Every matched host is inside the excluded subtree.
+        assert!(dns_excluded("example.com", "*.example.com"));
+        assert!(dns_excluded("com", "*.example.com"));
+        assert!(dns_excluded("", "*.example.com"));
+        assert!(dns_excluded("BAD.Example.COM", "*.example.com"));
+        // Ordinary names behave as before.
+        assert!(dns_excluded("example.com", "www.example.com"));
+        assert!(!dns_excluded("bad.example.com", "good.example.com"));
+    }
+
+    #[test]
+    fn a_wildcard_is_not_excluded_when_it_cannot_overlap() {
+        // Two labels deep: a wildcard covers one label only.
+        assert!(!dns_excluded("a.bad.example.com", "*.example.com"));
+        // Unrelated or sibling namespaces.
+        assert!(!dns_excluded("bad.example.org", "*.example.com"));
+        assert!(!dns_excluded("example.org", "*.example.com"));
+        // Label boundary, not a string suffix.
+        assert!(!dns_excluded("badexample.com", "*.example.com"));
+        assert!(!dns_excluded("notexample.com", "*.example.com"));
+        // A wildcard in a more specific zone than the exclusion's parent.
+        assert!(!dns_excluded("example.com", "*.sub.test"));
     }
 
     #[test]

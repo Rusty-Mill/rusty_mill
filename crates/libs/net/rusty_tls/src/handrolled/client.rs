@@ -1359,7 +1359,7 @@ impl ClientHandshake<'_> {
             random,
             session_id,
         };
-        Ok(plaintext_record(ContentType::Handshake, 0x0303, &second)?)
+        plaintext_record(ContentType::Handshake, 0x0303, &second)
     }
 }
 

@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+### Security
+- **Native engine: a wildcard certificate no longer bypasses an excluded name constraint.** `handrolled::name::check_one` compared the literal SAN `*.example.com` with the excluded subtree `bad.example.com`, found it outside, and accepted a certificate that authenticates `bad.example.com`. webpki refuses it. `dns_excluded` now treats a wildcard as excluded when any host it can match lies inside the subtree. Only the opt-in engine (`handrolled-engine` plus `--cfg rusty_tls_handrolled`) was affected, never the rustls default. `a_wildcard_certificate_is_refused_when_it_covers_an_excluded_host` runs seven cases against both engines; it fails without the fix. Also two `needless_question_mark` lints (`client.rs`, `server.rs`) that failed clippy on Rust 1.97.
+
 ### Fixed
 - **Async adapters: a lost wakeup that hung a `write` (or `flush`/
   `shutdown`) after the handshake** — the flaky Windows `async_handshake`

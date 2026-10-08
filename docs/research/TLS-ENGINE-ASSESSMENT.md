@@ -1,7 +1,8 @@
 # TLS engine assessment: can `rusty_tls`'s native engine replace rustls?
 
 Date: 2026-10-08. Scope: `crates/libs/net/rusty_tls/src/handrolled/` (about 10.5k lines).
-Status: assessment only. No engine code, default, or gate was changed. Three decisions
+Status: assessment. The default, both gates and all behaviour were left alone; the only engine
+changes are the F1 fix and the F11 lint fixes, made afterwards at the owner's request. Three decisions
 are the owner's and are listed in section 7.
 
 ## 1. Verdict
@@ -39,7 +40,7 @@ ignored tests are the real-network interop tests (4 against public servers, 4 ag
 `openssl s_server`). **They were not run here** and cannot be assumed to pass.
 
 Not run: libFuzzer targets (need nightly) and mutation testing. Clippy on the handrolled
-cfg was run and fails (F11).
+cfg initially failed (F11, since fixed).
 
 ## 3. Evidence that exists
 
@@ -61,7 +62,7 @@ Reviewed in full: `der.rs`, the parsing/time/extension code in `x509.rs`, `path.
 `ticket.rs`, and the `client.rs`/`server.rs` state machines (about 6.5k lines, including
 the largest attack surface, the server). Only targeted greps were run on those.
 
-### F1. Wildcard SAN bypasses an excluded name constraint (confirmed, accepts-by-default)
+### F1. Wildcard SAN bypasses an excluded name constraint (confirmed; **fixed** after this assessment)
 
 `name.rs` `check_one` tests each SAN against excluded subtrees with `dns_within`, a literal
 string comparison. A SAN of `*.example.com` is not "within" `bad.example.com`, so it is not
@@ -75,13 +76,19 @@ Reproduced with rcgen: a root with `excludedSubtrees: bad.example.com`, and a le
 | native | **Ok** (accepted) |
 | rustls / webpki | Err `NameConstraintViolation` |
 
-Impact: a name-constrained CA (the standard way to limit a private or enterprise CA) can
+**Status: fixed.** `name.rs` now has `dns_excluded`, which treats a wildcard as excluded when
+any host it can match falls inside the subtree. `a_wildcard_certificate_is_refused_when_it_covers_an_excluded_host`
+(in `tests/handrolled_path.rs`) runs seven cases against both engines and they agree on
+every row; it fails without the fix. Two unit tests cover the helper. Only wildcards under
+*excluded* subtrees were affected; the *permitted* side already failed closed. Other
+constraint shapes (IP ranges, intermediates carrying wildcards, permitted plus excluded
+together) have not been differentially tested; that remains gap G4.
+
+Impact before the fix: a name-constrained CA (the standard way to limit a private or enterprise CA) can
 issue a certificate for a name it was told to exclude. The mirror case (wildcard under a
-*permitted* subtree) fails closed, so only `excludedSubtrees` is affected. Fix is small:
+*permitted* subtree) fails closed, so only `excludedSubtrees` is affected. Fix was small:
 when a presented name is a wildcard, treat it as covering its whole subtree for the
-excluded test. The repro is kept at
-`docs/research/tls-engine-assessment/wildcard_excluded_repro.rs` and should become a
-permanent test.
+excluded test.
 
 ### Smaller findings (by reading; not all tested)
 
@@ -96,7 +103,7 @@ permanent test.
 | F8 | whole engine | No revocation (CRL) support, while the seam has `TrustPolicy::PinnedAnchorsWithRevocation`. No consumer in the workspace uses that variant today. | Seam gap |
 | F9 | `client.rs` | No ALPN handling found by grep in client or server (constant only). The seam offers ALPN, and `agentgateway-tls` uses `new_with_alpn`. Not confirmed by test. | Seam gap |
 | F10 | docs | `ARCHITECTURE.md` and ADR-0002 say client certificates and resumption are refused, and that HelloRetryRequest is not generated. The code and tests show client auth and TLS 1.3 resumption on both sides, and the server module documents HRR. The docs are stale. | Docs |
-| F11 | `client.rs` | `cargo clippy -p rusty_tls --all-targets --features handrolled-engine -- -D warnings` with the cfg **fails on rustc 1.97**: two `needless_question_mark` errors (one `Ok(..?)`, one `Some(..?)`), the first at `client.rs:1362`. Pre-existing and trivial, but it shows the engine is not linted by any CI job either. Not fixed here, since this session changes nothing in the engine. | Low |
+| F11 | `client.rs` | `cargo clippy -p rusty_tls --all-targets --features handrolled-engine -- -D warnings` failed on rustc 1.97 with two `needless_question_mark` errors (`client.rs:1362`, `server.rs:654`). Trivial, but it shows the engine is not linted by any CI job either. **Fixed** alongside F1 (behaviour-preserving). | Low |
 
 Good practice seen: Finished and PSK binders use `ring`'s constant-time `hmac::verify`; no
 CN fallback; NUL and trailing-dot handling in names; unhandled critical extensions fail
@@ -111,7 +118,7 @@ time. "Blocks default" means no evidence bar I would accept can be met without i
 
 | Rank | Gap | Blocks default | Effort |
 | --- | --- | --- | --- |
-| G1 | Fix F1, add the repro as a test, then run the broader name-constraint differential (excluded, permitted, IP, wildcard, intermediates). | Yes | 2 |
+| G1 | ~~Fix F1 and add it as a test~~ (done). Remaining: the broader name-constraint differential (permitted, IP, wildcards on intermediates, mixed). | Yes | 1 |
 | G2 | **No CI job runs the engine.** The only handrolled job is in the crate's own `.github/workflows/ci.yml`, which GitHub does not execute inside a monorepo. ADR-0002 says a stage not covered by that job "has not landed". Add a root job with `RUSTFLAGS` and `RUSTDOCFLAGS` cfg, plus the zero-tests guard. | Yes | 1 |
 | G3 | TLS 1.2 decision (section 7, D1). Implementing it is large; declining means a documented behaviour change or a retained rustls fallback. | Yes | 0 to 35 |
 | G4 | Certificate-path differential at scale: x509-limbo and BetterTLS style corpora, plus generated chains, run against both engines, with every divergence classified as stricter, looser or equal. Includes F2. | Yes | 6 to 8 |

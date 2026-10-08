@@ -651,7 +651,7 @@ impl<'a> ServerHandshake<'a> {
         // Always in the clear. A server that failed before deriving keys has
         // none, and one that failed afterwards is telling the peer something
         // the peer can already infer from the connection dying.
-        Some(plaintext_record(ContentType::Alert, &[2, description.0]).ok()?)
+        plaintext_record(ContentType::Alert, &[2, description.0]).ok()
     }
 
     fn read_record_inner(&mut self, record: &[u8]) -> Result<Vec<u8>> {
