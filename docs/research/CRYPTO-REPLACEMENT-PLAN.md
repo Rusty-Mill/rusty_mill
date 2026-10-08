@@ -107,7 +107,7 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
 
 - **Evidence:** RFC 7748 section 5.2, section 6.1 and the 1-iteration and 1000-iteration chains;
   all 518 Wycheproof cases give the specified value, including twists, low-order and
-  non-canonical points (the "acceptable" ones too); `agree` rejects exactly the 38 all-zero
+  non-canonical points (the "acceptable" ones too); `agree` rejects exactly the 31 all-zero
   results, and for all 518 public keys makes the same accept/reject decision as `ring`; shared
   secrets agree with `ring` in both directions over 50 random key pairs. 3 + 5 unit tests.
 - **Mutation check, 14 mutants:** 12 caught. Two survive and are equivalent: clearing bit 255 of
