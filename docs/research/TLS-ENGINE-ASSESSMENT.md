@@ -36,8 +36,7 @@ Clean runs, one at a time (an earlier attempt interleaved two logs and was disca
 | `cargo test -p rusty_tls --features rusty-tokio --no-fail-fast` | 39 | 0 | 0 |
 
 Of the 388, 359 are engine tests and 29 are seam/rustls tests plus one doctest. The 8
-ignored tests are the real-network interop tests (4 against public servers, 4 against
-`openssl s_server`). **They were not run here** and cannot be assumed to pass.
+ignored tests are interop tests (4 against public servers, 4 against `openssl s_server`). The 4 public-server tests were **not run** (they need real egress and cannot be assumed to pass). The 4 OpenSSL socket tests were run later, with OpenSSL 3.0.13, and passed.
 
 Not run: libFuzzer targets (need nightly) and mutation testing. Clippy on the handrolled
 cfg initially failed (F11, since fixed).
@@ -119,7 +118,7 @@ time. "Blocks default" means no evidence bar I would accept can be met without i
 | Rank | Gap | Blocks default | Effort |
 | --- | --- | --- | --- |
 | G1 | ~~Fix F1 and add it as a test~~ (done). Remaining: the broader name-constraint differential (permitted, IP, wildcards on intermediates, mixed). | Yes | 1 |
-| G2 | **No CI job runs the engine.** The only handrolled job is in the crate's own `.github/workflows/ci.yml`, which GitHub does not execute inside a monorepo. ADR-0002 says a stage not covered by that job "has not landed". Add a root job with `RUSTFLAGS` and `RUSTDOCFLAGS` cfg, plus the zero-tests guard. | Yes | 1 |
+| G2 | ~~No CI job runs the engine.~~ **Done.** Root job `rusty-tls-engine` (clippy, tests, docs with `-D warnings`, OpenSSL socket interop, and a self-discovering zero-tests guard), gated by a new `tls_engine` planner output. First real CI run is still to come. | Yes | 1 |
 | G3 | TLS 1.2 decision (section 7, D1). Implementing it is large; declining means a documented behaviour change or a retained rustls fallback. | Yes | 0 to 35 |
 | G4 | Certificate-path differential at scale: x509-limbo and BetterTLS style corpora, plus generated chains, run against both engines, with every divergence classified as stricter, looser or equal. Includes F2. | Yes | 6 to 8 |
 | G5 | Seam integration: engine-backed `TlsStream`, `AsyncTlsStream`, `TlsConnector` (with a resumption cache), `TlsAcceptor` and both server streams; `TrustPolicy` to anchors; ALPN; key-format detection; `peer_certificate_der`; error mapping; clock source. The core is sans-IO, so adapters are mostly mechanical. | Yes | 15 to 25 |

@@ -35,6 +35,7 @@ PACKAGE_JOB_NAMES = {
     "win32": frozenset({"rusty_win32"}),
     "multimodal_db": frozenset({"rusty_multimodal_db"}),
     "rusty_config_no_std": frozenset({"rusty_config"}),
+    "tls_engine": frozenset({"rusty_tls"}),
 }
 
 SPECIALIZED_JOB_NAMES = tuple(

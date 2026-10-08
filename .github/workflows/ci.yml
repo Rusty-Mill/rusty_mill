@@ -164,6 +164,7 @@ jobs:
       win32: ${{ steps.plan.outputs.win32 }}
       multimodal_db: ${{ steps.plan.outputs.multimodal_db }}
       rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
+      tls_engine: ${{ steps.plan.outputs.tls_engine }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
     steps:
@@ -1022,6 +1023,101 @@ jobs:
           shared-key: rusty-config-no-std
       - name: cargo check -p rusty_config --no-default-features
         run: cargo check -p rusty_config --no-default-features --all-targets
+
+  # The hand-rolled TLS engine (rusty_tls#25) compiles only with the cargo
+  # feature `handrolled-engine` AND `--cfg rusty_tls_handrolled`
+  # (crates/libs/net/rusty_tls/docs/adr/0002-*.md). Neither the generic clippy
+  # nor the generic test job sets the cfg, so before this job existed no CI job
+  # compiled, linted or ran a line of it, and a regression (including a
+  # security one) could land with every check green. The pre-merge crate
+  # workflow had this job; it went dead with the others when the crate moved
+  # under crates/ (see the header of this file). Ported from it.
+  rusty-tls-engine:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-tls-engine
+      queue: max
+      cancel-in-progress: false
+    name: rusty_tls native engine (handrolled cfg)
+    needs: plan
+    if: needs.plan.outputs.tls_engine == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg rusty_tls_handrolled
+      # rustdoc does not inherit RUSTFLAGS. Without this the module is absent
+      # from `cargo doc` and its doctests silently do not run.
+      RUSTDOCFLAGS: --cfg rusty_tls_handrolled
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rusty-tls-engine
+      - name: cargo clippy -p rusty_tls --features handrolled-engine
+        run: cargo clippy -p rusty_tls --all-targets --features handrolled-engine -- -D warnings
+      - name: cargo test -p rusty_tls --features handrolled-engine
+        run: cargo test -p rusty_tls --features handrolled-engine
+      # `--all-features` rather than just `handrolled-engine`: the crate's prose
+      # links to items behind `rusty-tokio`, so a partial-feature doc build has
+      # unresolved links that say nothing about the engine. `-D warnings` is set
+      # here and not on the job's RUSTDOCFLAGS because that variable also makes
+      # the doctests compile, and denying warnings for those is a different
+      # decision.
+      - name: cargo doc -p rusty_tls --all-features
+        env:
+          RUSTDOCFLAGS: --cfg rusty_tls_handrolled -D warnings
+        run: cargo doc -p rusty_tls --all-features --no-deps
+      # `handrolled_socket_interop` is `#[ignore]`d so it does not fail on a
+      # machine without OpenSSL. The runner has it and the tests are hermetic (a
+      # loopback listener and a child process, no network), so they run here
+      # instead of staying permanently unexercised. `openssl version` first so
+      # a missing binary fails loudly rather than running zero tests.
+      - name: socket interop against OpenSSL
+        run: |
+          openssl version
+          out=$(cargo test -p rusty_tls --features handrolled-engine \
+            --test handrolled_socket_interop -- --ignored --nocapture --color never)
+          echo "$out"
+          # `-- --ignored` runs ONLY ignored tests: if the attribute is removed
+          # this runs zero and exits 0. Assert the count, not the exit code.
+          echo "$out" | grep -qE 'test result: ok\. [1-9][0-9]* passed' || {
+            echo "::error::the socket-interop suite ran no tests -- is #[ignore] still on them?"
+            exit 1
+          }
+      # Every handrolled test file is `#![cfg(all(feature = ..., cfg))]`, so a
+      # typo in the cfg name (here, in Cargo.toml's check-cfg, or in a source
+      # file) compiles each one down to zero tests and still reports success.
+      # The suites are discovered from the directory rather than listed by hand,
+      # so a new `handrolled_*.rs` is guarded the moment it exists.
+      - name: prove the gated tests actually ran
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=0
+          for f in crates/libs/net/rusty_tls/tests/handrolled_*.rs; do
+            t=$(basename "$f" .rs)
+            n=$(cargo test -p rusty_tls --features handrolled-engine --test "$t" -- --list | grep -c ': test$' || true)
+            echo "$t: $n tests"
+            if [ "$n" -eq 0 ]; then
+              echo "::error::$t compiled to zero tests -- is --cfg rusty_tls_handrolled reaching it?"
+              exit 1
+            fi
+            count=$((count + 1))
+          done
+          if [ "$count" -lt 10 ]; then
+            echo "::error::found only $count handrolled suites; the glob matched too little"
+            exit 1
+          fi
+          # Same trap, different flag: the doctests only run when RUSTDOCFLAGS
+          # carries the cfg as well.
+          d=$(cargo test -p rusty_tls --features handrolled-engine --doc -- --list | grep -c ': test$' || true)
+          echo "doctests: $d"
+          if [ "$d" -lt 2 ]; then
+            echo "::error::the handrolled doctests did not run -- is RUSTDOCFLAGS set?"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's
