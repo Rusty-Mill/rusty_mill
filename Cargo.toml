@@ -51,6 +51,7 @@ members = [
     "crates/libs/net/rusty_oauth",
     "crates/libs/protocol/rusty_channel",
     "crates/libs/protocol/rusty_routine",
+    "crates/libs/protocol/rusty_bbp",
     "crates/libs/rusty_sandbox",
     "crates/libs/rusty_bot",
     "crates/libs/homelab/rusty_proxmox",
@@ -443,6 +444,7 @@ rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }
 rusty_agui = { path = "crates/libs/protocol/rusty_agui" }
 rusty_channel = { path = "crates/libs/protocol/rusty_channel" }
 rusty_routine = { path = "crates/libs/protocol/rusty_routine" }
+rusty_bbp = { path = "crates/libs/protocol/rusty_bbp" }
 rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
 rusty_bot = { path = "crates/libs/rusty_bot" }
 rusty_oauth = { path = "crates/libs/net/rusty_oauth" }
