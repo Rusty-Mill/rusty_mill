@@ -13,7 +13,7 @@ fn verbose_stdio_keeps_diagnostics_off_stdout() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_nexus"))
         .args(["-v", "--forge-path"])
         .arg(forge.path())
-        .args(["mcp", "serve", "--transport", "stdio"])
+        .args(["mcp", "serve"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
