@@ -1,0 +1,45 @@
+{
+  "name": "probe_nose_hit_glancing: car clips the ball at a diagonal",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -300,
+      -3000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.37,
+      0
+    ],
+    "velocity": [
+      200,
+      1000,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      -1500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 240,
+      "throttle": 1
+    }
+  ]
+}

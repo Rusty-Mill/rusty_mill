@@ -1,0 +1,52 @@
+{
+  "name": "wavedash (mid): nose-up car falling at 900 uu/s forward, forward flip 19 ticks in (0.16 s), as the wheels reach the floor; a late enough flip lands with its speed (the port predicts about 1350 uu/s), an early one hops",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -2000,
+      110
+    ],
+    "rotation": [
+      0.3,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      900,
+      -300
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3000,
+      3000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 19
+    },
+    {
+      "ticks": 1,
+      "jump": true,
+      "pitch": -1
+    },
+    {
+      "ticks": 220
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "name": "probe_dodge_fast_fwd: 1800 uu/s boosting forward dodge",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -4800,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      1800,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 10,
+      "jump": true,
+      "boost": true
+    },
+    {
+      "ticks": 10,
+      "boost": true
+    },
+    {
+      "ticks": 1,
+      "jump": true,
+      "pitch": -1,
+      "boost": true
+    },
+    {
+      "ticks": 100,
+      "boost": true
+    }
+  ]
+}

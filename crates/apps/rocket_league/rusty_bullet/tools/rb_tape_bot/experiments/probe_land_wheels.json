@@ -1,0 +1,44 @@
+{
+  "name": "probe_land_wheels: drop from 500 uu onto the wheels",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -2000,
+      517
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 240
+    }
+  ]
+}

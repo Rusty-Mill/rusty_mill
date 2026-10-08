@@ -1,0 +1,45 @@
+{
+  "name": "reproduces hitjump.jsonl 77.642 s without the held jump: a car at 2150 uu/s, throttle on, passing over a resting ball with its wheels (the 77.667 s ball residual; the original also had jump held from an earlier press, which a tape cannot start in the air)",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      76.57,
+      151.72,
+      154.48
+    ],
+    "rotation": [
+      -0.0095,
+      -2.2569,
+      0.0
+    ],
+    "velocity": [
+      -1358.63,
+      -1659.38,
+      320.43
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      0,
+      93.14
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 240,
+      "throttle": 1
+    }
+  ]
+}
