@@ -810,6 +810,21 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   but is still over its max bound 6.9). So the sequential order carries a real one-sided
   fit (all the golden wall and air captures are right-handed) that a symmetric form does
   not yet reproduce, and the left wall shows the price: 28.0 against 17.2 uu.
+- **Why the symmetric forms fail the golden wall ride (2026-10-08, scratch)**:
+  Bullet's order starts `probe_wall_ride_45` 9.9 uu off on the very first tick after
+  the state-set (vel error 4.5 uu/s against 0.3 for the current order), long before
+  the wall, so that fixture's 9.6 uu is mostly the start-up tick. On the steady wall,
+  Bullet's order is the better one-step model (mean one-step error 0.08 uu/s against
+  0.26: the 0.2 rest offset of O012 is gone). But re-seeding every wall run 0.7 s in
+  (the car already driving on the floor, `--scenario-from`) leaves the free-run picture
+  unchanged: right wall / left wall mean error 20.6 / 35.4 uu (current order), 24.7 /
+  26.2 (Bullet), 24.2 / 24.4 (mirror average). So the start-up tick does not explain
+  the wall climbs: even the symmetric forms are 24 to 26 uu off the game on both walls,
+  and the current order's advantage on the right wall (4 uu) is its one-sided fit.
+  What makes the game 20 uu closer than any damper order I have tried is still
+  unknown; the next place to look is the floor-to-wall ramp's first facets (`--wheel-kstep`
+  shows the error growing with the facets crossed) with an order-independent change
+  (the pushback timing, the average-normal sticky force one tick late).
 - **Next**: find what the sequential order stands in for (the damper
   reading after the drive impulses, FR-091; the first tick after a state
   set; the wall's normal on the wheels) and then read in Bullet's order.
