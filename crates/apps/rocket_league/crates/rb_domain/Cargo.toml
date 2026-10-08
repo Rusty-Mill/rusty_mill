@@ -4,10 +4,18 @@ description = "Domain types and ports for rusty_bullet: physics frames, divergen
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
+repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
 
 [dependencies]
+
+[package.metadata.rusty_mill]
+layer = "apps"

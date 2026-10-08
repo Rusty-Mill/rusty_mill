@@ -935,7 +935,7 @@ mod tests {
 
     fn scenario(name: &str) -> Scenario {
         let path = format!(
-            "{}/../../tools/rb_tape_bot/scenarios/{name}.json",
+            "{}/../../rusty_bullet/tools/rb_tape_bot/scenarios/{name}.json",
             env!("CARGO_MANIFEST_DIR")
         );
         Scenario::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()

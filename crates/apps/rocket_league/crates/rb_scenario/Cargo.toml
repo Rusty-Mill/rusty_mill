@@ -4,11 +4,16 @@ description = "Scenario files for scripted mechanic captures: an initial game st
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
+repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
 
 [dependencies]
 rb_domain = { path = "../rb_domain" }
@@ -17,3 +22,6 @@ rb_domain = { path = "../rb_domain" }
 # the workspace via rb_capture_ingest.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[package.metadata.rusty_mill]
+layer = "apps"

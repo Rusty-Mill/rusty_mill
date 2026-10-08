@@ -4,11 +4,16 @@ description = "BakkesMod offline-capture ingestion adapter (RB-VERIFY-002): impl
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
+repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
 
 [dependencies]
 rb_domain = { path = "../rb_domain" }
@@ -18,3 +23,6 @@ rb_domain = { path = "../rb_domain" }
 # benefit (no performance evidence yet that it's needed, see NFR-002).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[package.metadata.rusty_mill]
+layer = "apps"

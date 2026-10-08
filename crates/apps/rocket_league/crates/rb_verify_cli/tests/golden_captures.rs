@@ -557,7 +557,7 @@ const CASES: &[Case] = &[
 ];
 
 fn bot_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/rb_tape_bot")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rusty_bullet/tools/rb_tape_bot")
 }
 
 fn compare(

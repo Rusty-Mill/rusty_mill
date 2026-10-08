@@ -4,11 +4,16 @@ description = "Composition root for the Phase 0 verification pipeline: wires ing
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
+repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
 
 [[bin]]
 name = "rb-verify"
@@ -21,3 +26,6 @@ rb_capture_ingest = { path = "../rb_capture_ingest" }
 rb_physics_bullet = { path = "../rb_physics_bullet" }
 rb_scenario = { path = "../rb_scenario" }
 rb_env = { path = "../rb_env" }
+
+[package.metadata.rusty_mill]
+layer = "apps"

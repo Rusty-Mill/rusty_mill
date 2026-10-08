@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn every_shipped_scenario_parses() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tools/rb_tape_bot/scenarios");
+            .join("../../rusty_bullet/tools/rb_tape_bot/scenarios");
         let mut count = 0;
         for entry in std::fs::read_dir(dir).expect("scenarios dir") {
             let path = entry.expect("dir entry").path();

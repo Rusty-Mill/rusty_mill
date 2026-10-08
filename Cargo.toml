@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/apps/rocket_league/crates/rb_capture_ingest",
+    "crates/apps/rocket_league/crates/rb_domain",
+    "crates/apps/rocket_league/crates/rb_env",
+    "crates/apps/rocket_league/crates/rb_physics_bullet",
+    "crates/apps/rocket_league/crates/rb_replay_ingest",
+    "crates/apps/rocket_league/crates/rb_scenario",
+    "crates/apps/rocket_league/crates/rb_verify_cli",
     "crates/libs/net/rusty_kafka",
     "crates/apps/rusty_meshed/crates/rusty-meshed-core",
     "crates/apps/rusty_meshed/crates/rusty-meshed-schema-registry",
@@ -249,6 +256,7 @@ members = [
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
+    "crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot",
     "crates/libs/ui/rusty_term/fuzz",
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",

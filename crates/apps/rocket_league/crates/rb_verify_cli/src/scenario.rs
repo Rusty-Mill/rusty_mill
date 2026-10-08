@@ -787,7 +787,7 @@ mod tests {
 
     fn scenario(name: &str) -> Scenario {
         let path = format!(
-            "{}/../../tools/rb_tape_bot/scenarios/{name}.json",
+            "{}/../../rusty_bullet/tools/rb_tape_bot/scenarios/{name}.json",
             env!("CARGO_MANIFEST_DIR")
         );
         Scenario::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -996,7 +996,7 @@ mod tests {
     #[test]
     fn only_a_start_shown_repeated_has_leading_still_frames() {
         let path = format!(
-            "{}/../../tools/rb_tape_bot/experiments/bumpf_flip.json",
+            "{}/../../rusty_bullet/tools/rb_tape_bot/experiments/bumpf_flip.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let fast = Scenario::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
