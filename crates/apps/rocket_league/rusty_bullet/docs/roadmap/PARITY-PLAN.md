@@ -177,7 +177,7 @@ Part-time cycles (one cycle is roughly a session of a few PRs):
 | 1 | F: game spread measurement (done: spread 0.0 uu on 23 of 24 tapes) | 0.5 |
 | 2 | C step 1 and 2: pad data (fits on the same tape-bot runs as F) | 1 |
 | 3 | A steps 1 and 2: instrument and clean probes | 1 to 2 |
-| 4 | C step 3: pads in the port | 1 |
+| 4 | C step 3: pads in the port (done, ADR-0072, FR-149) | 1 |
 | 5 | A step 3 and 4: wall and ceiling fixes | 2 to 4 (largest uncertainty) |
 | 6 | B: ball contact | 1 to 2 |
 | 7 | D: respawn and multi-car | 1 to 2 |

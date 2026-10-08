@@ -71,6 +71,11 @@ impl ScenarioRow {
         self.recorded.velocity.distance(&self.predicted.velocity)
     }
 
+    /// Difference (boost units, 0 to 100) between recorded and predicted tanks.
+    pub fn boost_error(&self) -> f32 {
+        (self.recorded.boost_amount - self.predicted.boost_amount).abs()
+    }
+
     /// Distance (rad/s) between recorded and predicted spins.
     pub fn spin_error(&self) -> f32 {
         self.recorded
@@ -143,6 +148,22 @@ impl ScenarioComparison {
             return 0.0;
         }
         self.rows.iter().map(ScenarioRow::ball_error).sum::<f32>() / self.rows.len() as f32
+    }
+
+    /// Largest boost error over the run (boost units).
+    pub fn max_boost_error(&self) -> f32 {
+        self.rows
+            .iter()
+            .map(ScenarioRow::boost_error)
+            .fold(0.0, f32::max)
+    }
+
+    /// Mean boost error over the run (boost units).
+    pub fn mean_boost_error(&self) -> f32 {
+        if self.rows.is_empty() {
+            return 0.0;
+        }
+        self.rows.iter().map(ScenarioRow::boost_error).sum::<f32>() / self.rows.len() as f32
     }
 
     /// Position error (uu) of every row of car `index` after the first
@@ -419,7 +440,13 @@ pub fn compare_scenario_recorded(
         })
         .collect();
 
-    let start = scenario.initial_frame();
+    // The tank the recording shows at the start, not the scenario's: the game's
+    // state set can leave pads taken on its way (`padp_*`), and a recorded-input
+    // replay scores the tank (`boost error`) from the recording's own start.
+    let mut start = scenario.initial_frame();
+    for (car, seen) in start.cars.iter_mut().zip(&recorded[start_index].cars) {
+        car.boost_amount = seen.boost_amount;
+    }
     let teams = scenario.teams();
     type Rows = (Vec<ScenarioRow>, Vec<Vec<(usize, CarState, CarState)>>);
     // `lag`: recorded tick t is the port's tick t - lag (the state set can

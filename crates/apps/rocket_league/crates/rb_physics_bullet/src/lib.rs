@@ -112,6 +112,7 @@ pub mod integrate;
 pub mod mat3;
 pub mod mesh;
 pub mod net;
+pub mod pads;
 pub mod solver;
 pub mod world;
 
@@ -122,4 +123,5 @@ pub use body::{
 pub use collision::Contact;
 pub use mat3::Mat3;
 pub use net::NetMesh;
+pub use pads::{BoostPad, BoostPads};
 pub use world::{simulate, CarBallTuning, PhysicsWorld};
