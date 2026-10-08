@@ -38,14 +38,14 @@ const CASES: &[Case] = &[
         fixture: "bumpag_700_45.jsonl",
         car: (1.2, 1.7),
         ball: None,
-        other: Some((17.5, 45.0)),
+        other: Some((5.3, 11.3)),
     },
     Case {
         scenario: "experiments/bumpag_1000_45.json",
         fixture: "bumpag_1000_45.jsonl",
         car: (0.6, 1.2),
         ball: None,
-        other: Some((23.0, 45.0)),
+        other: Some((11.4, 36.8)),
     },
     // A boosting attacker demolishes a stopped enemy; the victim is back 3.000 s later at
     // the spawn point the recording shows (FR-151). `other` is the victim.
@@ -447,9 +447,9 @@ const CASES: &[Case] = &[
     Case {
         scenario: "experiments/bumph_500.json",
         fixture: "bumph_500.jsonl",
-        car: (6.8, 22.8),
+        car: (2.2, 10.2),
         ball: None,
-        other: Some((6.8, 20.5)),
+        other: Some((3.3, 10.9)),
     },
     Case {
         scenario: "experiments/bumpo_900.json",
@@ -461,9 +461,9 @@ const CASES: &[Case] = &[
     Case {
         scenario: "experiments/bumpm_1200.json",
         fixture: "bumpm_1200.jsonl",
-        car: (1.8, 4.5),
+        car: (0.3, 0.5),
         ball: None,
-        other: Some((3.4, 7.3)),
+        other: Some((1.7, 6.7)),
     },
     Case {
         scenario: "experiments/bumpd_1800.json",
