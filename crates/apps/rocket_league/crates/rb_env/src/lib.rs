@@ -7,6 +7,7 @@
 //! collision meshes cost far more to build than to copy, and a sweep or a
 //! policy resets thousands of times.
 
+pub mod chaser;
 pub mod flow;
 
 use flow::{Flow, MatchState, Phase, Transition};
