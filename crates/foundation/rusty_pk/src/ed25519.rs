@@ -1,4 +1,7 @@
-//! Ed25519 signature verification (RFC 8032), matching `ring`'s acceptance:
+//! Ed25519 signature verification. **Not strict RFC 8032:** it reproduces `ring` 0.17.14's
+//! acceptance, including two leniencies the RFC forbids, as a documented compatibility
+//! exception (see `docs/research/CRYPTO-REPLACEMENT-PLAN.md`, stage 2, for the regression
+//! vectors and the unreviewed security implication):
 //!
 //! - public key 32 bytes, signature exactly 64;
 //! - `S` canonical (`S < L`);

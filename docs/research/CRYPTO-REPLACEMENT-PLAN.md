@@ -1,41 +1,89 @@
 # Native replacement for `ring`: assessment and staged plan
 
 Date: 2026-10-08. Scope: the primitives `rusty_tls`'s native engine takes from `ring`.
-Status: **assessment and plan only. No primitive was written, no crate created, no
-consumer touched.** Everything marked "decision" is the owner's. Section 10 is a draft ADR
-and is **not accepted**.
+
+**Status.** Stages 0 to 4 are implemented with preliminary validation. **Independent review
+and TLS integration remain pending.** The set is partial: it covers hashes, HMAC, HKDF,
+signature verification, X25519 and ChaCha20-Poly1305, and does not cover AES-GCM, P-256 or P-384
+key exchange, signing, or randomness (section 0, "Scope limits"). **Consumer status:** no
+consumer, `rusty_tls` file, gate or default was changed; nothing here is used by anything.
+Work is frozen at stage 4 by owner decision; the next deliverable is review and reproducible
+evidence, not more primitives. Everything marked "decision" is the owner's. Section 10 is a
+draft ADR and is **not accepted**. Vocabulary used below: "implemented" means code and tests
+exist; it never means reviewed or approved for TLS use.
 
 ## 0. Progress and owner decisions (updated as stages land)
 
-Owner decision 2026-10-08: **`unsafe` intrinsics approved; stop after stage 4.** Stage 5
-(AES-GCM) and later are therefore out of scope unless the owner reopens them; the AES-NI
-approval is recorded but unused until then. Section 9 items 3 to 5 were not answered; I
-took the recommended defaults and say so here: new crates, not extensions of `rusty_rsa`
-(revisit at stage 2); one additive function, `rusty_crypto_key::wipe`, for zeroizing
-non-heap secrets; fiat-crypto not yet evaluated (stage 4).
+**Owner decisions (2026-10-08), the only two recorded:** `unsafe` intrinsics approved; stop
+after stage 4. Stage 5 (AES-GCM) and later are out of scope unless the owner reopens them;
+the intrinsics approval is unused until then (no stage so far needed `unsafe` beyond the
+valgrind helper).
 
-| Stage | State | Evidence so far |
+**Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
+answered. To keep moving I picked defaults; each is open for the owner to reverse:
+new crates rather than extending `rusty_rsa`; one additive function,
+`rusty_crypto_key::wipe` (a change to an existing crate); hand-written field arithmetic with
+fiat-crypto not evaluated. The constant-time evidence bar (section 4.4) is also my proposal,
+not an adopted bar.
+
+**Scope limits (read before reading "implemented").**
+- No AES-GCM (stage 5, not done). RFC 8446 section 9.1 requires `TLS_AES_128_GCM_SHA256`
+  for a compliant TLS 1.3 implementation, and `rusty_tls`'s ticket key is AES-256-GCM.
+- No P-256 or P-384 key exchange. ECDSA P-256 *verification* does not provide P-256 ECDHE,
+  which RFC 8446 also requires (secp256r1 key exchange); only X25519 is implemented.
+- No signing of any kind (server role, client certificates), and no randomness: the engine
+  still draws all randomness from `ring::rand`.
+- Therefore this is a **partial primitive replacement**, not a complete TLS 1.3 backend, and
+  `ring` stays a hard dependency of `rusty_tls`'s native engine until at least stage 5 and 6.
+
+**Status vocabulary.** "Implemented; independent review pending" is the strongest claim
+made for any stage. No stage is approved for TLS use.
+
+| Stage | State (implementation only; none is approved for TLS use) | Evidence so far (preliminary; see `docs/research/crypto-evidence/`) |
 | --- | --- | --- |
-| 0 Harness | **Done** (`rusty_ct_check`) | Taint tool, timing t-test and disassembly audit each catch a planted leak and pass a clean probe; Wycheproof loader. |
-| 1 SHA-2, HMAC, HKDF | **Done** (`rusty_sha2`) | 18 tests plus doctest: FIPS 180 examples, RFC 4231 case 1, six Wycheproof files (HMAC and HKDF, SHA-256/384/512), differential vs `ring` over lengths 0 to 300 and block boundaries, long inputs, HMAC key lengths 0 to 1000, 600 random HKDF calls; 9 hand-made mutants all caught; valgrind taint run clean with a leaky control that is caught; disassembly budget pinned; timing test `|t|` 1.75 (HMAC-SHA256) and 0.56 (HMAC-SHA512), one run. |
-| 2 Signature verify | **Done** (`rusty_pk`: `rsa`, `ecdsa`, `ed25519`) | See "Stage 2 results" below. |
-| 3 ChaCha20-Poly1305 | **Done** (`rusty_aead`) | See "Stage 3 results" below. |
-| 4 X25519 | **Done** (`rusty_pk::x25519`) | See "Stage 4 results" below. **Work stops here by owner decision; independent review is still required before any use in `rusty_tls`.** |
+| 0 Harness | Implemented; review pending (`rusty_ct_check`) | Taint tool, timing t-test and disassembly audit each catch a planted leak and pass a clean probe; Wycheproof loader. |
+| 1 SHA-2, HMAC, HKDF | Implemented; review pending (`rusty_sha2`) | 18 tests plus doctest: FIPS 180 examples, RFC 4231 case 1, six Wycheproof files (HMAC and HKDF, SHA-256/384/512), differential vs `ring` over lengths 0 to 300 and block boundaries, long inputs, HMAC key lengths 0 to 1000, 600 random HKDF calls; 9 hand-made mutants all caught; valgrind taint run clean with a leaky control that is caught; disassembly budget pinned; timing test `|t|` 1.75 (HMAC-SHA256) and 0.56 (HMAC-SHA512), one run. |
+| 2 Signature verify | Implemented; review pending (`rusty_pk`: `rsa`, `ecdsa`, `ed25519`) | See "Stage 2 results" below. |
+| 3 ChaCha20-Poly1305 | Implemented; review pending (`rusty_aead`) | See "Stage 3 results" below. |
+| 4 X25519 | Implemented; review pending (`rusty_pk::x25519`) | See "Stage 4 results" below. **Work stops here by owner decision. Independent review is required before any use in `rusty_tls`.** |
 
-### Stage 2 results (`rusty_pk`, 2026-10-08)
+### Stage 2 results (`rusty_pk`, 2026-10-08; preliminary)
 
 Layout taken: one crate, `rusty_pk`, with a shared Montgomery core (`mont`, branch-free
 `mul/add/sub`), `field`, and modules `rsa`, `ecdsa`, `ed25519` (X25519 joins it at stage 4).
 Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
 
-- **Accepts exactly what `ring` accepts**, including its quirks, read from `ring` 0.17.14
-  source and then checked by differential test: RSA modulus length is rounded up to bytes
-  before the 2048 floor, max 8192 bits, `e` odd in 3..2^33-1, signature length equals modulus
-  length; PSS salt = hash length; ECDSA strict DER; Ed25519 accepts a non-canonical `y`
-  and an `x = 0` key with the sign bit set (RFC 8032 rejects both) and requires canonical `S`.
-  These choices are **looser than the RFC** by design, to match `ring`; changing them is a
-  policy decision, not a bug fix.
-- **Evidence:** 42 tests (plus one ignored speed test). Every case in 19 vendored Wycheproof files (RSA PKCS#1 2048/3072/4096
+- **Compatibility claim, stated narrowly.** Matches `ring` 0.17.14 on the recorded test corpus
+  and on acceptance rules that were read from its source (below). A differential test shows
+  agreement on the inputs tried, not on every possible input, and says nothing about other
+  `ring` versions.
+- **Exactly the `ring` verifiers `rusty_tls` calls** (`verify.rs`), and nothing else: X.509
+  path: `RSA_PKCS1_2048_8192_SHA256/384/512`, `ECDSA_P256_SHA256_ASN1`,
+  `ECDSA_P384_SHA256_ASN1`, `ECDSA_P256_SHA384_ASN1`, `ECDSA_P384_SHA384_ASN1`, `ED25519`;
+  TLS 1.3 path: `RSA_PSS_2048_8192_SHA256/384/512`, `ECDSA_P256_SHA256_ASN1`,
+  `ECDSA_P384_SHA384_ASN1`, `ED25519`. Not covered: the legacy SHA-1 verifiers, the
+  1024-bit `RSA_PKCS1_1024_8192_*` verifier, P-521, and RSA-PSS keys in certificates.
+- **RSA rules, per verifier.** Both exposed RSA verifiers correspond to `ring`'s
+  `2048_8192` parameter sets: modulus at least 256 bytes after rounding the bit length up
+  to bytes (so a 2041-bit modulus passes, as in `ring`), at most 8192 bits, `n` odd, `e` odd
+  in 3..2^33-1, signature length equal to the modulus length, signature non-zero and below
+  `n`. PKCS#1 v1.5 compares the full re-encoded message; PSS requires salt length equal to the
+  hash length, MGF1 with the same hash, trailer 0xbc. These are the `2048_8192` rules only;
+  they say nothing about `ring`'s other RSA parameter sets.
+- **Ed25519 is a documented compatibility exception, not RFC 8032 conformance.** RFC 8032
+  section 5.1.3 rejects a point encoding whose `y` is not below `p`, and one with `x = 0`
+  and the sign bit set. `ring` 0.17.14 (its `x25519_ge_frombytes_vartime`, read in
+  `crypto/curve25519/curve25519.c`) accepts both, and this implementation reproduces that
+  on purpose so a swap does not change which keys verify. Regression vectors:
+  `identity_key_encodings_match_ring` in `tests/ed25519_vectors.rs` (identity, `y = p + 1`,
+  `x = 0` with sign bit set, and an off-curve `y`). **Security implication, not yet
+  reviewed:** a public key then has more than one accepted encoding, so code that treats the
+  key bytes as an identity (a hash input, a map key, a pin) can see two names for one key.
+  Signature malleability is separate and not introduced here (`S` must be canonical). For TLS
+  the key arrives inside a certificate whose signature covers the SPKI, which limits the
+  exposure, but that argument needs the independent reviewer's agreement. Tightening to the
+  RFC is a one-line policy change if the owner prefers strictness over `ring` parity.
+- **Evidence (preliminary):** 42 tests (plus one ignored speed test). Every case in 19 vendored Wycheproof files (RSA PKCS#1 2048/3072/4096
   x SHA-256/384/512, RSA-PSS incl. the parameter zoo, ECDSA P-256/SHA-256, P-384/SHA-384,
   P-384/SHA-256, Ed25519) gets the same verdict from `ring` and from us, and the
   vector's stated verdict. P-256/SHA-384 (no Wycheproof file; `ring` cannot sign it) uses 72
@@ -70,7 +118,7 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   named and documented. The `mont` primitives that stage 4 will use on secrets are not yet
   tainted-tested.
 
-### Stage 3 results (`rusty_aead`, 2026-10-08)
+### Stage 3 results (`rusty_aead`, 2026-10-08; preliminary)
 
 - **Evidence:** 12 tests plus doctest: RFC 8439 Poly1305 and AEAD examples, all 325 Wycheproof
   cases (nine wrong-nonce-size vectors are unrepresentable in the typed API and are asserted
@@ -103,7 +151,7 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   owner's request. The stage 1 and 2 checks were rerun on 1.99.0 and still pass, and the
   disassembly budgets did not move; this is the compiler-drift check the plan calls for, done once.
 
-### Stage 4 results (`rusty_pk::x25519`, 2026-10-08)
+### Stage 4 results (`rusty_pk::x25519`, 2026-10-08; preliminary)
 
 - **Evidence:** RFC 7748 section 5.2, section 6.1 and the 1-iteration and 1000-iteration chains;
   all 518 Wycheproof cases give the specified value, including twists, low-order and
@@ -216,6 +264,27 @@ Notes the earlier assessment did not have:
    `rp-router` (`lib.rs:4105`, a test) uses `ring::hmac`, which stage 1 would cover. I did
    not change them (consumers are out of scope).
 
+### 2.3 Coverage of `rusty_tls`'s `ring` call sites by stages 0 to 4
+
+Primitive coverage is not dependency removal. Call site by call site:
+
+| `ring` use in `rusty_tls` | Covered by stages 0 to 4? | Notes |
+| --- | --- | --- |
+| `digest` SHA-256/384 (transcript, empty hash) | Yes, `rusty_sha2` | Not wired. |
+| `hmac::Key/sign/Context/verify` (key schedule, Finished) | Yes, `rusty_sha2::Hmac` | `verify` semantics: full-length tag only. |
+| HKDF (hand-written over `ring::hmac`) | Yes, `rusty_sha2::extract`/`Prk::expand` | |
+| `aead` CHACHA20_POLY1305 (records) | Yes, `rusty_aead` | Nonce-uniqueness is the caller's contract. |
+| `aead` AES_128_GCM / AES_256_GCM (records) | **No** | Stage 5 not done. RFC 8446 mandates AES-128-GCM. |
+| `aead` AES_256_GCM (session tickets, `ticket.rs`) | **No** | Same. |
+| `agreement` X25519 | Yes, `rusty_pk::x25519` | Key generation needs a random scalar, which is `ring::rand` today. |
+| `agreement` ECDH P-256 / P-384 | **No** | Not planned before stage 6a. RFC 8446 requires secp256r1. |
+| `signature` verify (RSA, ECDSA, Ed25519) | Yes, `rusty_pk` | Exact verifier subset in section 0. |
+| `signature` signing (`EcdsaKeyPair`, `Ed25519KeyPair`, `RsaKeyPair`, `KeyPair`, PKCS#8 parsing) | **No** | Server role and client certificates. |
+| `rand::SystemRandom` / `SecureRandom` (client random, ephemeral keys, ticket keys and nonces, PSS salts) | **No** | `rusty_rand` exists but differs from `ring`'s (see section 3); not evaluated for this. |
+| Helper types: `aead::Nonce`, `Aad`, `UnboundKey`, `LessSafeKey`, `hmac::Context` | Replaced by typed arrays in the new APIs | The seam would need adapters. |
+
+Result: the native engine cannot drop `ring` on the strength of stages 0 to 4.
+
 ## 3. Reusable code in the foundation crates
 
 | Crate | What it has | Constant time? | Evidence | Use |
@@ -300,6 +369,18 @@ None proves the absence of a leak.
 5. **Independent review** for stages 4 to 6 before any use in `rusty_tls`.
 6. **Stated scope**: "no leak detected by methods 2 to 4 on rustc X, x86-64 and aarch64".
    Never "constant time".
+
+### 4.5 What the evidence so far supports (added after review)
+
+Every constant-time result in this document is **preliminary**: "no leak detected under
+these conditions", not "constant time". A small `|t|` from a statistical test is absence of
+detection (dudect is a detector, not a verifier); a taint run covers the paths it executes; a
+pinned jump count detects change, not independence from secrets. Each result must be read
+with its recorded conditions: sample counts, input classes, CPU, compiler, flags and
+repetitions, which `docs/research/crypto-evidence/EVIDENCE-2026-10-08.txt` records, with the raw
+numbers. Effort is aimed at the code that touches secrets (HMAC and HKDF keys, AEAD keys,
+X25519 scalars); signature verification handles public inputs and gets correctness evidence,
+not constant-time evidence.
 
 ## 5. Performance estimate against `ring`
 
@@ -417,6 +498,11 @@ Each stage is abandonable: a stage ships only when its bar is met and is not wir
 
 ## 9. Decisions for the owner (I make none of these)
 
+Answered 2026-10-08: item 2 (intrinsics: yes) and item 6 (stop after stage 4). **Unanswered**
+and currently running on provisional implementer defaults: items 1 (partly overtaken by item
+6), 3, 4 and 5. Item 3 in particular has not been decided: nothing may replace `ring` in
+`rusty_tls` without the owner, the independent review below and a backend seam.
+
 1. Proceed past stage 2? (My recommendation: yes to 3 and 4 only after 1 to 2 land; 5 and
    beyond only after 4 and 5 below.)
 2. Is `unsafe` allowed for AES-NI/PCLMUL (and a valgrind harness)? Recommendation: yes for a
@@ -464,17 +550,39 @@ Each stage is abandonable: a stage ships only when its bar is met and is not wir
 > public-data stages and keep `ring` for the rest (the recommended floor). Vendor generated,
 > formally verified field arithmetic (fiat-crypto) instead of writing it.
 
-## 11. What I did not verify
+## 11. Evidence package required before any TLS integration
 
-- No primitive was written; every native performance figure in section 5 is an estimate.
-  Only the `ring` numbers and the `rusty_rsa` numbers are measured, once, on a noisy VM.
-- The constant-time probe tested the tools on toy code, not on any real primitive.
-- The disassembly script was not finished; I only showed the idea needs symbol-exact extraction.
+Frozen at stage 4. Nothing below is satisfied by the implementer alone; the "state" column is
+the honest current position.
+
+| Requirement | State |
+| --- | --- |
+| Arithmetic review of the shared Montgomery core: carry bounds, reduction invariants, limb conversions, adversarial boundaries. Sharing the code concentrates the impact of a defect. | Boundary tests added (`mont::tests::adversarial_boundaries_match_biguint`, moduli of 1 to 128 limbs built from all-ones, near-2^(64k), sparse and top-bit patterns; operands 0, 1, n-1, n-2, R; mul, add, sub, enter/leave against an independent bignum): no defect found. `add`/`sub` assume inputs below `n` and `mul` assumes `a*b < n*R`; documented in code, enforced by callers. **A human review of the invariants has not happened.** |
+| AEAD failure tests: corrupted tag, AAD and ciphertext; no unauthenticated plaintext exposed; full-length tag comparison; counter limit; explicit nonce contract. | Corrupted tag/AAD/ciphertext/nonce: tested (differential and unit). Failed open leaves the buffer undecrypted: tested. Wrong-length and empty tags rejected: tested. Counter limit: only the value of `MAX_LEN` is pinned, the 256 GiB boundary is not exercised. Nonce contract: stated in the type's docs (never reuse under one key), not enforced by the API, and the caller owns uniqueness. |
+| X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
+| Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-08.txt`. **Review findings: none exist yet.** |
+| `ring` usage inventory including randomness and helper APIs. | Section 2.3. |
+| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Not done. Required.** |
+
+## 12. What I did not verify
+
+Added after review (current as of the evidence record):
+- No human has reviewed any of the new code; every statement above is the implementer's.
+- `ring` parity was established against 0.17.14 only, on the recorded corpus.
+- Constant-time results are single-machine, x86-64, rustc 1.99.0, and preliminary; aarch64 was
+  never run, and the taint tool is a no-op there (`rusty_ct_check::taint::SUPPORTED`).
+- The Ed25519 leniency and its effect on key identity were not reviewed by anyone else.
+- Nothing about randomness (`ring::rand` replacement) was evaluated.
+
+- Section 5's figures are estimates written before any code existed. Measured values (one run
+  each, noisy VM) are in the stage results and in the evidence record; they are not benchmarks.
+- The disassembly check counts conditional jumps in named functions of one build. It detects
+  change; it cannot show that any branch or memory access is independent of a secret.
 - The `rusty_oauth` P-256 code and `rusty_rdp` HMAC were skimmed, not audited.
-- `ring` behaviours were checked in source for: Ed25519 canonical `S`, RSA exponent range,
-  PSS salt length, ECDSA DER and key encoding. Modulus rules and SHA-1 legacy handling were not.
-- Wycheproof file availability and sizes were measured; contents and the exact commit to pin
-  were not examined. fiat-crypto's licence terms and output quality were not checked.
-- Licence statements other than Wycheproof's (read) come from general knowledge.
-- Whether aarch64 timing behaves as assumed was not tested (x86-64 only).
+- `ring` behaviours were checked in the 0.17.14 source for: Ed25519 point decoding and canonical
+  `S`, RSA exponent range and modulus rules, PSS salt length, ECDSA DER and key encoding.
+  SHA-1 legacy verifiers and the 1024-bit RSA verifier were out of scope.
+- Wycheproof was pinned to commit `12fd3aaf33eb5fa1f52e026912ee00c054f9d984` and fetched
+  in full for the files used; fiat-crypto was never evaluated and its licence terms never
+  checked. Licence statements other than Wycheproof's (read) come from general knowledge.
 - `rusty_tls#25` remains unread (see the TLS assessment).

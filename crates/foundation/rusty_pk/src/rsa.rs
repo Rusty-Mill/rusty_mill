@@ -1,7 +1,9 @@
 //! RSA signature verification: PKCS#1 v1.5 and PSS with SHA-256/384/512.
 //!
-//! Accepts exactly what `ring`'s `RSA_PKCS1_2048_8192_*` and
-//! `RSA_PSS_2048_8192_*` accept, so it can sit behind the same call sites:
+//! Implements the acceptance rules of `ring` 0.17.14's `RSA_PKCS1_2048_8192_*` and
+//! `RSA_PSS_2048_8192_*` verifiers (read from its source, and compared on a recorded
+//! test corpus; agreement on tested inputs is not a proof for all inputs). Only these
+//! two parameter sets; `ring`'s other RSA verifiers have other rules:
 //!
 //! - key: DER `RSAPublicKey { n, e }`, minimal positive integers;
 //! - `n` odd, at most 8192 bits, and at least 256 bytes long (ring rounds the

@@ -1,6 +1,7 @@
 //! ECDSA signature verification over P-256 and P-384 with DER signatures.
 //!
-//! Accepts what `ring`'s `ECDSA_P{256,384}_SHA{256,384}_ASN1` accept:
+//! Follows `ring` 0.17.14's `ECDSA_P{256,384}_SHA{256,384}_ASN1` acceptance rules (compared
+//! on a recorded test corpus, not proven for all inputs):
 //! uncompressed SEC1 public keys on the curve, strict DER `SEQUENCE { r, s }`
 //! with minimal positive integers, `0 < r, s < n`. The hash may be longer or
 //! shorter than the curve order; the leftmost `min(hash, order)` bytes are the

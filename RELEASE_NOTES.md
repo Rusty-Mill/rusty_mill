@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - Crypto claims corrected, evidence record, boundary tests (docs and tests only)
+
+- **Changed (docs):** `CRYPTO-REPLACEMENT-PLAN.md` no longer says "Done" or "exactly what ring accepts": stages are "implemented; independent review pending", ring parity is "on the recorded corpus", the Ed25519 leniency is a documented compatibility exception, provisional implementer choices are separated from owner decisions, scope limits (no AES-GCM, no P-256/P-384 key exchange, no signing, no randomness) and a call-site coverage table are stated. Added `docs/research/crypto-evidence/` (script and record).
+- **Added (tests):** adversarial boundary tests for the shared Montgomery core. No defect found.
+- **Not changed:** any primitive's behaviour, `rusty_tls`, consumers, gates. Stages 0 to 4 are frozen.
+
 ## 2026-10-08 - Crypto stage 4: X25519 (pending review)
 
 - **Added:** `rusty_pk::x25519`. **Not changed:** `rusty_tls`, consumers, gates. Work stops after this stage by owner decision.

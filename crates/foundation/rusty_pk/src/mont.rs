@@ -345,6 +345,113 @@ mod tests {
         }
     }
 
+    /// Moduli built to stress carries and the final conditional subtraction:
+    /// all-ones limbs, 2^(64k) - small, a top limb of 1 or 2^63, a sparse
+    /// middle, and minimal odd values with a non-zero top limb.
+    fn adversarial_moduli(k: usize) -> Vec<Vec<u64>> {
+        let mut out = Vec::new();
+        out.push(vec![u64::MAX; k]); // 2^(64k) - 1
+        let mut near_top = vec![u64::MAX; k];
+        near_top[0] = u64::MAX - 4; // 2^(64k) - 5
+        out.push(near_top);
+        let mut top_one = vec![0u64; k];
+        top_one[0] = 1;
+        top_one[k - 1] = 1; // 2^(64(k-1)) + 1 (or 1 when k = 1)
+        out.push(top_one);
+        let mut top_high = vec![0u64; k];
+        top_high[0] = 1;
+        top_high[k - 1] = 1 << 63; // top bit set, otherwise sparse
+        out.push(top_high);
+        let mut mid = vec![u64::MAX; k];
+        if k > 2 {
+            mid[k / 2] = 0;
+        }
+        out.push(mid);
+        let mut sparse = vec![0u64; k];
+        sparse[0] = 0xffff_ffff_0000_0001; // P-256-style limb pattern
+        sparse[k - 1] |= 0xffff_ffff_0000_0000;
+        out.push(sparse);
+        out
+    }
+
+    fn operands(n: &[u64]) -> Vec<Vec<u64>> {
+        let k = n.len();
+        let minus = |d: u64| {
+            let mut v = n.to_vec();
+            let mut borrow = d;
+            for limb in v.iter_mut() {
+                let (r, b) = limb.overflowing_sub(borrow);
+                *limb = r;
+                borrow = b as u64;
+                if borrow == 0 {
+                    break;
+                }
+            }
+            v
+        };
+        let mut out = vec![vec![0u64; k], minus(1), minus(2), minus(0xffff)];
+        let mut one = vec![0u64; k];
+        one[0] = 1;
+        out.push(one);
+        let mut r = vec![0u64; k];
+        r[k - 1] = 1 << 62;
+        out.push(r);
+        // keep only values below n
+        out.retain(|v| lt_vartime(v, n));
+        out
+    }
+
+    #[test]
+    fn adversarial_boundaries_match_biguint() {
+        for k in [1usize, 2, 3, 4, 6, 8, 33, 128] {
+            for n in adversarial_moduli(k) {
+                let Some(m) = Modulus::new(&n) else { continue };
+                let ops = operands(&n);
+                for a in &ops {
+                    for b in &ops {
+                        let (mut am, mut bm, mut pm, mut p) =
+                            (vec![0; k], vec![0; k], vec![0; k], vec![0; k]);
+                        m.enter(&mut am, a);
+                        m.enter(&mut bm, b);
+                        m.mul(&mut pm, &am, &bm);
+                        m.leave(&mut p, &pm);
+                        assert_eq!(big(&p), big(a).mulmod(&big(b), &big(&n)), "mul k={k}");
+
+                        let mut s = vec![0; k];
+                        m.add(&mut s, a, b);
+                        assert_eq!(big(&s), big(a).add(&big(b)).rem(&big(&n)), "add k={k}");
+                        let mut d = vec![0; k];
+                        m.sub(&mut d, a, b);
+                        let expect = big(a).add(&big(&n)).sub(&big(b)).rem(&big(&n));
+                        assert_eq!(big(&d), expect, "sub k={k}");
+                    }
+                    // enter/leave round trip
+                    let (mut e, mut l) = (vec![0; k], vec![0; k]);
+                    m.enter(&mut e, a);
+                    m.leave(&mut l, &e);
+                    assert_eq!(&l, a, "round trip k={k}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn montgomery_inputs_may_be_up_to_r_not_just_below_n() {
+        // `enter` is documented to accept any value below R (used by the
+        // Ed25519 digest reduction); check it for boundary moduli.
+        for k in [1usize, 4, 8] {
+            for n in adversarial_moduli(k) {
+                let Some(m) = Modulus::new(&n) else { continue };
+                for a in [vec![u64::MAX; k], vec![u64::MAX - 1; k]] {
+                    let (mut e, mut l) = (vec![0; k], vec![0; k]);
+                    m.enter(&mut e, &a);
+                    m.leave(&mut l, &e);
+                    assert_eq!(big(&l), big(&a).rem(&big(&n)), "k={k}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn one_is_r_mod_n_and_round_trips() {
         let mut rng = Rng(7);
