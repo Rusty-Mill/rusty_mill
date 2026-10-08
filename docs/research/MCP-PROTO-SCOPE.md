@@ -103,7 +103,7 @@ Boundary: `rusty_mcp_proto` (Tier S, on `rusty_json`) holds only sections 3 and 
 
 Questions for the owner (each changes what A2 builds):
 
-1. **Classic handshake:** keep `initialize` for `adk-mcp` / `remind_me_remote` (adds `InitializeRequestParams/Result`, `ping`, session id, `EventStore`) or require those two to move to 2026-07-28? Dropping it removes about a third of the transport work.
+1. **Classic handshake: decided, support both (owner, 2026-10-08).** The proto crate carries `initialize`/`InitializeResult` and `server/discover`/`DiscoverResult`. Server: mode chosen per request (`initialize` or `Mcp-Session-Id` selects classic; `server/discover` or `_meta` protocol version selects stateless), same handlers for both. Client: try stateless, fall back to `initialize` on `-32601` / `-32022`, remember the result per connection. Session ids, push `GET` and `EventStore` live behind a server-crate feature. Build order: stateless first, classic second; `adk-mcp` and `remind_me_remote` stay on `rmcp` until classic lands (they move last in A5).
 2. **Task and MRTR types:** include now (needed by `rusty-mcp` and demo) or defer until their servers move in A3? They are about a fifth of the type list.
 3. **`ElicitationSchema`:** an opaque JSON value is enough for every current consumer; confirm that is acceptable.
 
