@@ -38,22 +38,27 @@ bumps and demolition, powerslides including reverse ones, a car hitting a side
 wall below the lip, dodges with the throttle held.
 
 Does not agree yet, ranked by how often play hits it and how much error it
-causes:
+causes (refreshed 2026-10-08 after PRs #274 to #306):
 
 | # | Gap | Evidence | Backlog |
 |---|---|---|---|
-| 1 | Wall and ramp climbing (and falling off a wall) | `wallg_*` 2 to 32 uu by approach angle; wall-start tapes median 132 uu | O012, O019 |
-| 2 | Car-ball contact detail: resting ball hit from above, wheels on the ball | `hitfuzz` ball 4 to 260 uu/s on a hit; `car_over_ball` 27 / 44 | O014, O020 |
-| 3 | Ceiling | `probe_ceiling` 31 uu | O017 |
-| 4 | Boost pads (not in the port at all) | 190 pickups in the recordings | O021 |
-| 5 | Demolition respawn (not modelled) | game: 3.0 s later at a spawn point | O018 |
-| 6 | Flip into a car | `bumpf_flip` 39 / 65 | O018 |
-| 7 | Suspension damper order, rest pose | rest roll 0.003 rad the game does not have | O019 |
-| 8 | Smaller residuals, ball hovering when set at rest | `wavedash_early` 7, `half_flip` max 12 | O015, O016 |
+| 1 | Wall and ramp climbing, and a car at rest or sliding on a wall | `wallg_*` 2 to 32 uu by approach angle (coasting 6 to 14, powered 17 to 28); a car under 25 uu/s on a steep surface slides faster in the game | O012, O019 |
+| 2 | Car-ball contact detail: resting ball hit from above, wheels on the ball | `hitfuzz` clean first touches within 1 percent; the knife edge `hitfuzz_420`; `car_over_ball` 27 / 44; off-centre drops 18 to 191 uu | O014, O020 |
+| 3 | Landings with spin and bounces on geometry in random drives | the six worst tapes of `fuzz_601..624`, `fuzz_701..724` (all events) | O015 |
+| 4 | Two cars after a contact | `duel_*` medians 157 to 174 uu (chaos after two cars are thrown); the contact itself matches in time on 275 of 285 first velocity jumps | O018 |
+| 5 | Suspension damper order, rest pose | rest roll 0.003 rad the game does not have | O019 |
+| 6 | Smaller residuals, ball hovering when set at rest | `wavedash_early` 7, `half_flip` max 12 | O015, O016 |
 
-Not yet measured at all: three or more cars, a car driving on the ceiling,
-kickoff countdown and spawn sequence, goal scoring and replays, the net
-(ball into the goal's net), boost pad cooldowns.
+Closed since the plan was written: boost pads (FR-149), demolition respawn
+(FR-151), flip into a car (FR-152), mixed bumps (FR-153), the air throttle and
+the boost value with one or two wheels down (FR-156, FR-157), the bump nose test
+and the climbing bumper (FR-158, FR-159), ceiling probes (modelled except the
+nose-first sign tie). Random 6 s drives: mean of means 105 to 121 uu, median 25
+to 58 uu depending on the seeds; every systematic one-step bias is under 0.4 uu/s
+per tick (`regime_bias.py`), the rest is event chaos.
+
+Not yet measured at all: kickoff countdown and spawn sequence, goal scoring and
+replays, the net (ball into the goal's net).
 
 ## 3. Workstreams
 
