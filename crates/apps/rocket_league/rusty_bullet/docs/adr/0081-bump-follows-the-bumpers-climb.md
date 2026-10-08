@@ -29,6 +29,7 @@ starting tank from the first matching frame and missed it, so cars with room in 
 
 ## Consequences
 
-- Of the 151 bump, triple-car, demolition and duel tapes, 37 improve and 6 get worse by more than
-  1 uu; the airborne-airborne tapes are untouched. `duel_910` 3319 -> 638, `duel_911` 371 -> 38.
+- Of the 151 bump, triple-car, demolition and duel tapes, 17 improve and 4 get worse by more than
+  1 uu (`duel_868` 3251 -> 4604); the airborne-airborne tapes are untouched; the non-duel total falls
+  1735 -> 1292 uu. `duel_910` 3319 -> 638; `duel_911` 371 -> 38 (the pad rule).
 - A bumper hitting while falling pushes the victim down by its share (not measured on its own).

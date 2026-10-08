@@ -8252,7 +8252,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     `tri_chain_enemy` 111 -> 60); the bumper's velocity direction alone made `bumpo_900`'s second clip worse
     (the clipped bumper moves sideways of its nose), so the horizontal part stays the nose.
   - **Verification**: `world` test `a_rising_bumper_pushes_the_victim_up_along_its_velocity`; the 151
-    bump / tri / demolition / duel tapes: 37 improved, 6 worse by over 1 uu (the air-air `bumpa_air_*` unchanged);
+    bump / tri / demolition / duel tapes: 17 improved, 4 worse by over 1 uu (`duel_868` 3251 -> 4604, the rest within 30; the air-air `bumpa_air_*` unchanged); non-duel total 1735 -> 1292 uu, duel total 51847 -> 45321;
     golden gate unchanged (`bumpag_*` bounds can tighten).
 
 - `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
