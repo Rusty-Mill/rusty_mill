@@ -27,7 +27,19 @@ COMBOS = {
     "pitch_rollneg_boost": (1, 0, -1, True),
     "pitch_rollneg_moving": (1, 0, -1, False),
     "pitch_roll_moving": (1, 0, 1, False),
+    "jump_pitch_roll": (1, 0, 1, False),
+    "jump_half_pitch_roll": (-0.5, 0, -0.5, False),
+    "jump_pitch": (1, 0, 0, False),
+    "jump_half_pitch_roll_opp": (-0.5, 0, 0.5, False),
+    "late_pitch_roll": (1, 0, 1, False),
+    "late_pitch": (1, 0, 0, False),
+    "early_pitch": (1, 0, 0, False),
 }
+# Level car, 60 idle ticks first: does the first-0.2-s pitch silence belong to the tape start?
+LATE = {"late_pitch_roll", "late_pitch"}
+# Cases that start on the floor and jump first (the fuzz tape fuzz_722 pitched and rolled the
+# car right after a ground jump and the game pitched a little).
+JUMPED = {"jump_pitch_roll", "jump_half_pitch_roll", "jump_pitch", "jump_half_pitch_roll_opp"}
 # Start state for the moving cases: yaw 45 degrees, nose 30 degrees up, 1000 uu/s forward,
 # like the speed flip that first showed pitch surviving a held roll.
 MOVING = {"pitch_rollneg_moving", "pitch_roll_moving"}
@@ -37,18 +49,25 @@ def tape(name: str, pitch: float, yaw: float, roll: float, boost: bool, moving: 
     step = {"ticks": TICKS, "pitch": pitch, "yaw": yaw, "roll": roll}
     if boost:
         step["boost"] = True
+    steps = [step]
+    location = [0, 0, 1000]
+    if name in LATE:
+        steps = [{"ticks": 60}, step]
+    if name in JUMPED:
+        location = [0, 0, 17]
+        steps = [{"ticks": 3, "jump": True}, step]
     return {
         "name": f"aircombo_{name}: level at z = 1000, pitch {pitch} yaw {yaw} roll {roll}{' with boost' if boost else ''}",
         "settle_ticks": 0,
         "car": {
-            "location": [0, 0, 1000],
+            "location": location,
             "rotation": [0.5236, 0.7854, 0] if moving else [0, 0, 0],
             "velocity": [612, 612, 400] if moving else [0, 0, 0],
             "angular_velocity": [0, 0, 0],
             "boost": 100 if boost else 0,
         },
         "ball": {"location": [3500, 3500, 93.15], "velocity": [0, 0, 0]},
-        "steps": [step],
+        "steps": steps,
     }
 
 

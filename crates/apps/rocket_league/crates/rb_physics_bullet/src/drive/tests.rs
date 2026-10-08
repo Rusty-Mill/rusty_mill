@@ -2836,43 +2836,6 @@ fn full_stick_air_control_accelerates_each_axis_at_rocketsims_rate() {
 }
 
 #[test]
-fn held_roll_drops_the_pitch_torque_but_keeps_yaw() {
-    // FR-155: bot-driven recordings show pitch + roll spinning about the roll axis only.
-    let step = CAR_TORQUE_SCALE * TICK;
-    let mut c = car();
-    let input = ControllerInput {
-        pitch: Some(1.0),
-        yaw: Some(1.0),
-        roll: Some(-0.5),
-        ..Default::default()
-    };
-    apply_air_control(&mut c, &input, 1.0, TICK);
-    let expected = Vec3::new(
-        0.5 * AIR_CONTROL_TORQUE.z * step,
-        0.0,
-        AIR_CONTROL_TORQUE.y * step,
-    );
-    assert!(
-        (c.angular_velocity - expected).length() < 1e-5,
-        "got {:?}",
-        c.angular_velocity
-    );
-
-    // Without roll the same pitch still pitches the car.
-    let mut c = car();
-    apply_air_control(
-        &mut c,
-        &ControllerInput {
-            pitch: Some(1.0),
-            ..Default::default()
-        },
-        1.0,
-        TICK,
-    );
-    assert!(c.angular_velocity.y < 0.0);
-}
-
-#[test]
 fn air_control_damps_free_spin_and_held_pitch_turns_its_damping_off() {
     let step = CAR_TORQUE_SCALE * TICK;
     // Rolling at 1 rad/s with the stick centered: roll damping slows it.

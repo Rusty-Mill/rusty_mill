@@ -8208,20 +8208,6 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   - **Verification**: `drive` test `two_touching_wheels_coast_even_with_boost_held_and_no_throttle`;
     the one-step error in that landing 4.2 -> 0.6 to 0.7 uu/s per tick; golden gate unchanged.
 
-- `RB-PHYSICS-001-FR-155` (a held roll drops the air-control pitch torque; implemented and verified
-  on the bot-driven `aircombo_*` recordings; refines FR-082 and FR-093): with the roll stick held the
-  pitch torque is zero (yaw is kept, and the pitch damping fade still follows the pitch stick).
-  - Why: a level car at rest in the air with pitch and roll held spun about the roll axis only, for
-    pitch +1 or -1, roll +1 or -1, half sticks, with and without boost, and for a nose-up moving
-    car (spin direction = the car's forward axis). The port pitched as well: 2.4 rad/s of spin error
-    after 0.25 s, 44 uu mean position error on the boosted combination (15 uu after).
-  - Not covered: the keyboard `speed_flip` capture holds pitch and roll together and the game kept the
-    pitch there (its bound went 9.4 -> 72 uu max, legacy capture, owner decision 1). A roll spin at the
-    5.5 rad/s cap sprouts yaw/pitch spin in the game (about -2.2 rad/s after 1 s) that the port does not
-    reproduce (RB-RESEARCH-O023); the sum |spin| stays at the cap.
-  - **Verification**: `drive` test `held_roll_drops_the_pitch_torque_but_keeps_yaw`; `aircombo_pitch_roll`,
-    `_pitch_yaw_roll`, `_half_all`, `_pitch_rollneg_moving`, `_pitch_roll_moving` position error 0.1 uu.
-
 - `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
   verified on `bumpag_*` and `tri_chain`; refines FR-143): an airborne bumper on a grounded
   victim bumps like a ground bumper (victim 1.25 times the speed, up).
@@ -8394,8 +8380,6 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
-- 0.157.0 (2026-10-08): `RB-PHYSICS-001-FR-155` (a held roll drops the air-control pitch torque). 505 tests in
-  `rb_physics_bullet`.
 - 0.156.0 (2026-10-08): `RB-PHYSICS-001-FR-154` (a held boost does not force the throttle with fewer than three wheels down). 504 tests in
   `rb_physics_bullet`.
 - 0.155.0 (2026-10-08): `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars). 503 tests in

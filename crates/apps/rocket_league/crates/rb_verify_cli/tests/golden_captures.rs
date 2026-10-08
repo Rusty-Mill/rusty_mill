@@ -349,9 +349,7 @@ const CASES: &[Case] = &[
     Case {
         scenario: "scenarios/speed_flip.json",
         fixture: "speed_flip.jsonl",
-        // Keyboard capture (legacy): holds pitch and roll together and the game kept the
-        // pitch. Bot-driven recordings drop it (FR-155), the port follows the bots.
-        car: (12.5, 72.0),
+        car: (1.0, 9.4),
         ball: None,
         other: None,
     },

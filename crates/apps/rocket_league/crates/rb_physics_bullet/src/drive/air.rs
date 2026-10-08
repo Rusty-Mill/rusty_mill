@@ -46,13 +46,8 @@ pub(super) fn apply_air_control(
     let pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0) * pitch_scale;
     let yaw = input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);
     let roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
-    // The game drops the pitch torque while roll is held (bot-driven `aircombo_*`
-    // recordings, level and nose-up/moving, either sign, with and without boost:
-    // the spin is pure roll; yaw is kept). The pitch damping fade still follows
-    // the stick. The keyboard `speed_flip` capture kept pitch (legacy, FR-155).
-    let pitch_torque = if roll == 0.0 { pitch } else { 0.0 };
 
-    let torque = pitch_axis * (pitch_torque * AIR_CONTROL_TORQUE.x)
+    let torque = pitch_axis * (pitch * AIR_CONTROL_TORQUE.x)
         + yaw_axis * (yaw * AIR_CONTROL_TORQUE.y)
         + roll_axis * (roll * AIR_CONTROL_TORQUE.z);
     let spin = car.angular_velocity;
