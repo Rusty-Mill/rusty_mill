@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_serve: headers, limits, shared handler (pending review)
+
+- **Added:** `Response::with_header`, `Limits`/`Server::with_limits`, `SharedHandler`/`Server::bind_shared`. Existing behaviour and defaults are unchanged; `rusty_agui`, `rusty_routine`, `rusty_channel`, `adk-agui`, `rk-agui`, `agui-agent-server`, `rusty_tick` and `rusty_fair_play` were rebuilt, and the tests of `rusty_agui`, `rusty_routine` and `rusty_channel` were run.
+- **Known limitations:** still one thread per connection, so each open `subscriptions/listen` stream holds a thread (bounded by `Limits::max_connections`). A dead client is noticed only on the next write, so streams need keep-alive chunks. Request bodies are still buffered whole and chunked request bodies are still refused. `adk-agui`, `rk-agui`, `agui-agent-server`, `rusty_tick` and `rusty_fair_play` were only compiled, not tested.
+
+---
+
 ## 2026-10-08 - rusty_mcp_proto first slice (pending review)
 
 - **Added:** `rusty_mcp_proto`, the envelope and tools path of the MCP wire types on `rusty_json`, checked field by field against `rmcp` 3.1.4. Also `docs/research/MCP-PROTO-SCOPE.md` (A2 inventory and the three owner decisions: support both handshakes, tasks and multi-round-trip types now, opaque elicitation schema).
