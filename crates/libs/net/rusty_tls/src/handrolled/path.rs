@@ -223,6 +223,11 @@ pub enum PathError {
     /// A signature in an otherwise plausible path did not verify, or used an
     /// algorithm this implementation refuses.
     Signature(VerifyError),
+    /// The end-entity certificate has a `keyUsage` that does not include
+    /// `digitalSignature`, so its key may not sign a handshake (RFC 5280
+    /// §4.2.1.3; RFC 8446 §4.4.2.2). An RSA certificate marked for key
+    /// encipherment only is the classic case.
+    KeyUsageForbidsSigning,
     /// A name constraint was violated, or the end-entity certificate did not
     /// authenticate the requested server name.
     Name(NameError),
@@ -254,6 +259,9 @@ impl core::fmt::Display for PathError {
                 f.write_str("path search budget exhausted before a path was found")
             }
             Self::Signature(err) => write!(f, "signature: {err}"),
+            Self::KeyUsageForbidsSigning => {
+                f.write_str("the certificate's keyUsage does not allow digitalSignature")
+            }
             Self::Name(err) => write!(f, "name: {err}"),
         }
     }
@@ -607,5 +615,21 @@ pub fn verify_peer_certificate(
     options: &PathOptions,
 ) -> Result<VerifiedPath, PathError> {
     verify_server_name(end_entity, server_name)?;
-    validate_path(end_entity, intermediates, anchors, options)
+    let verified = validate_path(end_entity, intermediates, anchors, options)?;
+    require_signing_key_usage(end_entity)?;
+    Ok(verified)
+}
+
+/// Refuse an end-entity certificate whose `keyUsage`, if it has one, does not
+/// include `digitalSignature`.
+///
+/// Every suite this engine speaks proves identity by signing the handshake:
+/// TLS 1.3 always, and TLS 1.2 ECDHE. A certificate that says its key is for
+/// encipherment or agreement says it is not for that. Absence of the extension
+/// means unrestricted (RFC 5280), so only a present, wrong one is refused.
+pub fn require_signing_key_usage(end_entity: &Certificate<'_>) -> Result<(), PathError> {
+    match end_entity.extensions().key_usage() {
+        Some(usage) if !usage.digital_signature() => Err(PathError::KeyUsageForbidsSigning),
+        _ => Ok(()),
+    }
 }

@@ -172,6 +172,7 @@ impl<'a> ClientHello12<'a> {
             parse_extensions(&mut reader)?
         };
         reader.finish()?;
+        super::handshake::validate_client_extensions(&extensions)?;
         Ok(Self {
             version,
             random,

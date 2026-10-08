@@ -493,3 +493,68 @@ fn debug_output_does_not_contain_key_material() {
         assert!(rendered.contains("sequence"), "{rendered}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Padding
+// ---------------------------------------------------------------------------
+
+/// A record carrying exactly this inner plaintext, sealed under the test key at
+/// sequence zero. The real [`Sealer`] will not build an oversize one, which is
+/// the point: this is what a hostile peer sends.
+fn forged_record(inner: &[u8]) -> Vec<u8> {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+
+    let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &KEY).expect("key"));
+    let len = inner.len() + TAG_LEN;
+    let header = [23u8, 3, 3, (len >> 8) as u8, len as u8];
+    let mut body = inner.to_vec();
+    key.seal_in_place_append_tag(
+        Nonce::assume_unique_for_key(IV),
+        Aad::from(header),
+        &mut body,
+    )
+    .expect("seals");
+    [header.to_vec(), body].concat()
+}
+
+/// RFC 8446 §5.4: content, type octet and padding together may not exceed
+/// 2^14 + 1. Padding is the one part of a record a sender chooses freely, so a
+/// small message with enormous padding is as much an overflow as a big one
+/// (BoGo `LargePlaintext-TLS13-Padded-*`).
+#[test]
+fn padding_that_takes_a_record_past_the_limit_is_refused() {
+    let inner = |content: usize, padding: usize| {
+        let mut v = vec![b'x'; content];
+        v.push(ContentType::ApplicationData.as_u8());
+        v.extend(std::iter::repeat_n(0u8, padding));
+        v
+    };
+
+    // At the limit, in each of the ways to reach it.
+    for (content, padding) in [
+        (MAX_FRAGMENT_LEN, 0),
+        (1, MAX_FRAGMENT_LEN - 1),
+        (0, MAX_FRAGMENT_LEN),
+    ] {
+        let record = forged_record(&inner(content, padding));
+        let opened = opener().open(&record).expect("exactly at the limit");
+        assert_eq!(opened.fragment.len(), content);
+    }
+
+    // One past, in each of them.
+    for (content, padding) in [
+        (MAX_FRAGMENT_LEN, 1),
+        (8193, 8192),
+        (1, MAX_FRAGMENT_LEN),
+        (0, MAX_FRAGMENT_LEN + 1),
+    ] {
+        let record = forged_record(&inner(content, padding));
+        assert!(
+            matches!(
+                opener().open(&record),
+                Err(RecordError::FragmentTooLong { .. })
+            ),
+            "{content} + {padding}"
+        );
+    }
+}

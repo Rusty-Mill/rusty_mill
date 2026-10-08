@@ -1126,6 +1126,23 @@ jobs:
             echo "::error::the handrolled doctests did not run -- is RUSTDOCFLAGS set?"
             exit 1
           fi
+      # BoringSSL's protocol suite (BoGo) as an independent hostile peer. The
+      # run script pins the BoringSSL commit and exits non-zero on any FAIL;
+      # tests the shim does not implement are skipped, which is why the floor
+      # below exists: a shim that skipped everything would also exit 0.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: BoGo (BoringSSL protocol suite)
+        shell: bash
+        run: |
+          set -euo pipefail
+          crates/libs/net/rusty_tls/bogo/run.sh | tee bogo.out
+          passed=$(sed -nE 's/^BoGo: ([0-9]+) passed.*/\1/p' bogo.out)
+          if [ "${passed:-0}" -lt 400 ]; then
+            echo "::error::BoGo passed only ${passed:-0} tests (expected 400+) -- is the shim skipping everything?"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's

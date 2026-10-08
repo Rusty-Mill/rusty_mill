@@ -30,7 +30,7 @@ use rcgen::{
     KeyUsagePurpose, SanType,
 };
 use rusty_tls::handrolled::path::{
-    validate_path, PathError, PathOptions, TrustAnchor, VerifiedPath,
+    require_signing_key_usage, validate_path, PathError, PathOptions, TrustAnchor, VerifiedPath,
 };
 use rusty_tls::handrolled::x509::{oid, Certificate};
 
@@ -61,6 +61,7 @@ struct Bend {
     intermediate_extra_extension: Option<CustomExtension>,
     leaf_extra_extension: Option<CustomExtension>,
     leaf_ekus: Option<Vec<ExtendedKeyUsagePurpose>>,
+    leaf_key_usages: Vec<KeyUsagePurpose>,
     leaf_is_ca: Option<IsCa>,
     leaf_validity: Option<(time::OffsetDateTime, time::OffsetDateTime)>,
     intermediate_validity: Option<(time::OffsetDateTime, time::OffsetDateTime)>,
@@ -121,6 +122,7 @@ fn build(bend: Bend) -> Chain {
     leaf_params.extended_key_usages = bend
         .leaf_ekus
         .unwrap_or_else(|| vec![ExtendedKeyUsagePurpose::ServerAuth]);
+    leaf_params.key_usages = bend.leaf_key_usages;
     if let Some(extension) = bend.leaf_extra_extension {
         leaf_params.custom_extensions = vec![extension];
     }
@@ -733,6 +735,41 @@ fn name_constraints_apply_to_intermediates_below_the_constraining_ca() {
             Err(PathError::Name(_))
         ),
         "an intermediate's own SAN escaped its CA's name constraints"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Key usage on the end-entity certificate
+// ---------------------------------------------------------------------------
+
+fn signing_check(usages: Vec<KeyUsagePurpose>) -> Result<(), PathError> {
+    let chain = build(Bend {
+        leaf_key_usages: usages,
+        ..Default::default()
+    });
+    require_signing_key_usage(&Certificate::parse(&chain.leaf).expect("leaf parses"))
+}
+
+/// The handshake is proved by a signature, so a leaf whose `keyUsage` leaves
+/// out `digitalSignature` (an encipherment-only RSA certificate, say) is
+/// refused. A leaf with no `keyUsage` at all is unrestricted.
+#[test]
+fn a_leaf_whose_key_usage_forbids_signing_is_refused() {
+    assert_eq!(
+        signing_check(vec![KeyUsagePurpose::KeyEncipherment]),
+        Err(PathError::KeyUsageForbidsSigning)
+    );
+    assert_eq!(signing_check(vec![]), Ok(()));
+    assert_eq!(
+        signing_check(vec![KeyUsagePurpose::DigitalSignature]),
+        Ok(())
+    );
+    assert_eq!(
+        signing_check(vec![
+            KeyUsagePurpose::KeyEncipherment,
+            KeyUsagePurpose::DigitalSignature
+        ]),
+        Ok(())
     );
 }
 

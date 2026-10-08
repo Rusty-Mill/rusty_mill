@@ -93,6 +93,8 @@ pub enum HandshakeError {
     /// its own curve parameters, which is a documented attack surface and has
     /// no use on the modern internet.
     UnexpectedCurveType(u8),
+    /// A `key_share` offer named the same group twice (RFC 8446 §4.2.8).
+    DuplicateKeyShare(u16),
     /// A field was present and well-formed on the wire but violated a rule of
     /// its message, described by the string (a session id over 32 octets, an
     /// empty certificate in a chain, a `Finished` of the wrong length).
@@ -134,6 +136,9 @@ impl core::fmt::Display for HandshakeError {
                     f,
                     "ServerKeyExchange curve type {typ} is not named_curve(3)"
                 )
+            }
+            Self::DuplicateKeyShare(group) => {
+                write!(f, "key_share offers group 0x{group:04x} more than once")
             }
             Self::Malformed(why) => write!(f, "malformed message: {why}"),
         }
@@ -380,6 +385,10 @@ pub mod extension {
     pub const PSK_KEY_EXCHANGE_MODES: u16 = 45;
     /// `key_share(51)`.
     pub const KEY_SHARE: u16 = 51;
+    /// `cookie` — a HelloRetryRequest's token, echoed in the second hello.
+    pub const COOKIE: u16 = 44;
+    /// `certificate_authorities`.
+    pub const CERTIFICATE_AUTHORITIES: u16 = 47;
 }
 
 /// Parse an extensions block, rejecting duplicates.
@@ -402,6 +411,74 @@ pub(super) fn parse_extensions<'a>(reader: &mut Reader<'a>) -> Result<Vec<Extens
     }
 
     Ok(extensions)
+}
+
+/// Parse extensions that are not preceded by a length (a Certificate entry's,
+/// or a NewSessionTicket's once its own length has been taken).
+pub(super) fn parse_extension_list(data: &[u8]) -> Result<Vec<Extension<'_>>> {
+    let mut block = Reader::new(data);
+    let mut extensions: Vec<Extension<'_>> = Vec::new();
+    while !block.is_empty() {
+        let typ = block.u16()?;
+        let body = block.vector_u16()?;
+        if extensions.iter().any(|e| e.typ == typ) {
+            return Err(HandshakeError::DuplicateExtension(typ));
+        }
+        extensions.push(Extension { typ, data: body });
+    }
+    Ok(extensions)
+}
+
+/// Check the contents of the extensions a server reads and then ignores.
+///
+/// A server that skips an extension it does not act on still has to refuse one
+/// that is malformed (RFC 8446 §4.2, BoGo `ExtensionTrailingData-*`): "ignored"
+/// means the *meaning* is ignored, not that the bytes are unchecked.
+pub fn validate_client_extensions(extensions: &[Extension<'_>]) -> Result<()> {
+    for ext in extensions {
+        match ext.typ {
+            extension::SERVER_NAME => validate_server_name(ext.data)?,
+            extension::CERTIFICATE_AUTHORITIES => validate_certificate_authorities(ext.data)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// RFC 6066 §3: a list of `(name_type, name)`, no entry of a type twice.
+fn validate_server_name(data: &[u8]) -> Result<()> {
+    let mut reader = Reader::new(data);
+    let mut list = reader.sub_u16()?;
+    reader.finish()?;
+    let mut seen = Vec::new();
+    while !list.is_empty() {
+        let name_type = list.u8()?;
+        let name = list.vector_u16()?;
+        if name.is_empty() {
+            return Err(HandshakeError::Empty("server_name"));
+        }
+        if seen.contains(&name_type) {
+            return Err(HandshakeError::Malformed("server_name repeats a name type"));
+        }
+        seen.push(name_type);
+    }
+    Ok(())
+}
+
+/// RFC 8446 §4.2.4: a non-empty list of non-empty DER names.
+fn validate_certificate_authorities(data: &[u8]) -> Result<()> {
+    let mut reader = Reader::new(data);
+    let mut list = reader.sub_u16()?;
+    reader.finish()?;
+    if list.is_empty() {
+        return Err(HandshakeError::Empty("certificate_authorities"));
+    }
+    while !list.is_empty() {
+        if list.vector_u16()?.is_empty() {
+            return Err(HandshakeError::Empty("a certificate authority name"));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn write_extensions(writer: &mut Writer, extensions: &[Extension<'_>]) {
@@ -439,15 +516,35 @@ pub struct ClientHello<'a> {
 impl<'a> ClientHello<'a> {
     /// Parse a ClientHello body — the message with its four-octet header
     /// already removed.
+    ///
+    /// Strict about `legacy_version`: exactly the 0x0303 that
+    /// [`ClientHello::encode`] writes, so that parse and encode are inverses.
     pub fn parse(body: &'a [u8]) -> Result<Self> {
+        Self::parse_inner(body, true)
+    }
+
+    /// As [`ClientHello::parse`], for a server reading a hello from a peer it
+    /// does not control: RFC 8446 §4.1.2 has it accept any `legacy_version` of
+    /// 0x0303 or more, since a client from the future still negotiates in
+    /// `supported_versions`. The result does not round-trip through `encode`
+    /// for such a hello; nothing needs it to, because a transcript hashes the
+    /// bytes that arrived.
+    pub fn parse_lenient(body: &'a [u8]) -> Result<Self> {
+        Self::parse_inner(body, false)
+    }
+
+    fn parse_inner(body: &'a [u8], strict: bool) -> Result<Self> {
         let mut reader = Reader::new(body);
 
         let version = reader.u16()?;
-        if version != LEGACY_VERSION {
+        if version < LEGACY_VERSION || (strict && version != LEGACY_VERSION) {
             return Err(HandshakeError::UnexpectedLegacyVersion(version));
         }
         let random = reader.take(32)?;
         let session_id = reader.vector_u8()?;
+        if session_id.len() > 32 {
+            return Err(HandshakeError::Malformed("session_id is over 32 octets"));
+        }
 
         let mut suites = reader.sub_u16()?;
         let mut cipher_suites = Vec::new();
@@ -468,6 +565,7 @@ impl<'a> ClientHello<'a> {
 
         let extensions = parse_extensions(&mut reader)?;
         reader.finish()?;
+        validate_client_extensions(&extensions)?;
 
         Ok(Self {
             random,
@@ -789,6 +887,9 @@ impl<'a> ServerHello<'a> {
         }
         let random = reader.take(32)?;
         let session_id = reader.vector_u8()?;
+        if session_id.len() > 32 {
+            return Err(HandshakeError::Malformed("session_id is over 32 octets"));
+        }
         let cipher_suite = reader.u16()?;
 
         let compression = reader.u8()?;
@@ -870,6 +971,11 @@ impl<'a> CertificateRequestMessage<'a> {
         let context = reader.vector_u8()?;
         let extensions = parse_extensions(&mut reader)?;
         reader.finish()?;
+        // Contents the client does not act on are still checked (BoGo
+        // `ExtensionTrailingData-CertificateAuthorities-Client`).
+        if let Some(authorities) = find(&extensions, extension::CERTIFICATE_AUTHORITIES) {
+            validate_certificate_authorities(authorities)?;
+        }
 
         let offered = find(&extensions, extension::SIGNATURE_ALGORITHMS)
             .ok_or(HandshakeError::MissingSignatureAlgorithms)?;

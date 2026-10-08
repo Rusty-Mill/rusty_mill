@@ -603,6 +603,17 @@ impl Opener {
             .len();
         buf.truncate(plain_len);
 
+        // §5.4: content, type octet and padding together may not exceed
+        // 2^14 + 1. A record whose padding alone takes it over is an overflow
+        // even when the content is small (BoGo `LargePlaintext-*-Padded-*`):
+        // padding is the one part of a record a sender chooses freely.
+        if buf.len() > MAX_FRAGMENT_LEN + 1 {
+            return Err(RecordError::FragmentTooLong {
+                len: buf.len() - 1,
+                max: MAX_FRAGMENT_LEN,
+            });
+        }
+
         // §5.2: scan back past the zero padding; the first non-zero octet
         // from the end is the content type. Its index is therefore also the
         // length of the content that precedes it.

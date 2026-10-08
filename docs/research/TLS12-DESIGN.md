@@ -41,7 +41,7 @@ Each stage is independently reviewable and abandonable, as in ADR-0002.
 | 4b-iii | Client handshake: ServerHello, Certificate, ServerKeyExchange (signature over randoms and params), Finished, tickets. Reuses `path`/`name`. | Handshakes against rustls (restricted to TLS 1.2), OpenSSL, plus a hostile test server for refusals. | 7 to 9 |
 | 4b-iv | Server handshake: mirror, plus client auth. **Done**, see below. | rustls and OpenSSL clients. | 7 to 9 (took well under one) |
 | 4b-v | Version negotiation and downgrade protection in existing client and server; alerts. **Done**, see below. | rustls both directions; sentinel tests. | 3 to 4 (took well under one) |
-| 4b-vi | Fuzz targets and BoGo/tlsfuzzer cases for the 1.2 paths; resource limits. | libFuzzer; BoGo. | 4 to 5 |
+| 4b-vi | BoGo cases for the 1.2 and negotiation paths; resource limits. **Done**, see below. | libFuzzer; BoGo; mutation. | 4 to 5 |
 
 Total 27 to 35 days, matching the earlier estimate. Gate for each stage is the ADR-0002
 section 5 bar: differential, interop, rejection, fuzz, known-answer tests.
@@ -306,11 +306,61 @@ Limits of this evidence: the MITM tests rewrite one message and show the sentine
 catch it; they do not show a defence against an attacker who can also break a signature. The mutation,
 fuzz and framing figures are single runs. Interop is with two implementations on loopback.
 
+## Stage 4b-vi: done
+
+`rusty_tls/bogo/` is a shim that lets BoringSSL's protocol suite (BoGo, Go) drive the engine as a
+hostile peer. It is a separate unpublished package (like `fuzz/`), pinned to one BoringSSL commit, run
+by `bogo/run.sh`, and run by CI. Result at the pinned commit: **490 passed, 0 failed, 7476 skipped**.
+The skips are 4718 tests that need a shim flag it does not implement (client auth, resumption, 0-RTT,
+ECH, ...), 2065 DTLS, 693 QUIC, and 139 listed by exact name in `bogo/config.json`, each with a reason.
+Globs were tried first and abandoned: they hid 125 tests that pass.
+
+BoGo's failures were findings, and there were many. Fixed in the engine, each with an in-repo test:
+
+- **Alerts.** Every error now maps to the alert RFC 8446 / 5246 names (`handshake_alert`,
+  `record_alert`, one table per role, pinned by `tests/handrolled_alerts.rs`), and the connection says
+  it: plaintext before keys, under the handshake key (plus the compatibility CCS) on the client, under
+  the application key on the server after its flight. Illegal warnings in 1.3 are `unexpected_message`;
+  `user_canceled` is advisory and counted.
+- **Key-change boundaries** (RFC 8446 §5.1): handshake data spanning or following a key change is
+  `unexpected_message`, on both roles and in 1.2 before the flight is built.
+- **HelloRetryRequest**: cookie echoed, `key_share` optional, an empty HRR refused, the compatibility
+  CCS sent once, before the second hello.
+- **Extension strictness**: unsolicited extensions in ServerHello / EncryptedExtensions / Certificate
+  entries are `unsupported_extension`; `key_share` without `supported_groups` (and the reverse) is
+  `missing_extension`; duplicate key shares; `supported_versions` beats `client_version`; a future
+  `legacy_version` is tolerated by servers (`ClientHello::parse_lenient`; `parse` stays strict so the
+  encode/parse round trip holds); session id over 32 octets; a 1.2 ServerHello that does not echo the
+  session id; wrong-length 1.2 Finished; CertificateRequest CA list validated.
+- **Record layer**: a TLS 1.3 inner plaintext over 2^14 + 1 octets is `record_overflow`.
+- **Certificates**: a leaf with `keyUsage` lacking `digitalSignature` is refused (`bad_certificate`).
+- **Resource limits** (`handrolled::limits`, BoringSSL's numbers, all *consecutive* counts that real data
+  resets): 32 empty records (and 1.3 CCS), 4 warning alerts, 32 KeyUpdates. Applied in all six
+  machines, including the dispatchers before a version is chosen.
+
+| Gate | Result |
+| --- | --- |
+| BoGo | 490 pass, 0 fail at the pinned commit; CI fails on any FAIL or on fewer than 400 passes. |
+| Mutation | 20 deliberate bugs in the new limits, boundaries, allowlists, alert paths and key-usage check. First round: 12 caught, 6 survived (CCS counting on both roles, the client's mid-handshake empty-record count, both 1.2 client counters, the key-usage check), plus 2 patterns that matched two places (replaced by 4 anchored ones, 22 mutants in all). Each survivor got a test; all 22 are now caught. |
+| Fuzz | `client12`, `server12`, `negotiate_server`, `negotiate_client`, 45 s each: 943k, 812k, 640k, 536k executions, no findings. |
+| Existing suites | rustls and OpenSSL interop unchanged. Several existing tests asserted the old behaviour (a fatal `user_canceled`, a removed `key_share` triggering a retry, a duplicate-extension alert, and others); each was changed on purpose with a comment citing the RFC or BoGo case. |
+
+Deliberate differences from BoringSSL, all disabled by name with a reason: every KeyUpdate request is
+answered (BoringSSL coalesces); a renegotiation request gets a `no_renegotiation` warning and the
+connection carries on; 0-RTT is refused; RSA signing is PSS-only; the shim and the 1.2 client carry no
+client identity.
+
+Not done: tlsfuzzer (BoGo covered the same ground and was runnable); a cap on concurrent handshakes
+(that belongs to whatever owns the listener, not to a sans-IO machine); a cost limit on a hostile
+`Certificate` beyond the existing handshake-size cap. BoGo is one corpus at one commit, and 4718 of its
+tests were never run against this engine because the shim cannot express them, so "0 failed" means "of
+the 490 it could run".
+
 ## Next action
 
-Stage 4b-vi, the remainder: BoGo and tlsfuzzer cases for the 1.2 and negotiation paths, and the
-resource limits that are still implicit (the number of handshakes a server holds open, the cost of a
-hostile `Certificate`). BoGo is the first independent suite with cases written by someone who has tried
-to break TLS stacks, so its failures are findings rather than test bugs until shown otherwise. The
-first question is whether BoGo can run in this environment (it needs a Go toolchain and the BoringSSL
-test runner); if not, the stage is the tlsfuzzer subset that can.
+Decision for the owner, not another stage: the engine now has the evidence the earlier stages could
+produce (rustls and OpenSSL both directions, BoGo, mutation, fuzz, CI). Whether that meets the bar for
+the seam is theirs to set. If it does, stage 5 of the track is wiring (ALPN, SNI certificate selection,
+1.2 resumption are the known gaps) and an ADR superseding ADR-0002. If the bar includes more of BoGo,
+the next increment is shim flags: client certificates, resumption and ALPN unlock most of the 4718
+skipped tests.

@@ -995,19 +995,24 @@ fn a_server_alert_before_the_server_hello_is_reported_by_name() {
 }
 
 #[test]
-fn a_record_that_ends_inside_the_next_message_does_not_confuse_the_choice() {
+fn a_record_that_ends_inside_the_next_message_is_refused_by_the_machine_chosen() {
     // The hello, then the first two octets of whatever comes next, in one
-    // record. The version is judged by the complete hello alone; the stray
-    // octets are the chosen machine's business.
+    // record. The version is judged by the complete hello alone, so the
+    // machine that refuses is the one that was chosen — a TLS 1.2 or TLS 1.3
+    // server — and what it refuses is the stray octets at a change of keys,
+    // not the hello (BoGo `Partial*WithClientHello`).
     let material = Material::new();
-    for (hello, want) in [
-        (hello_12(&material), Version::Tls12),
-        (hello_both(&material), Version::Tls13),
-    ] {
+    for hello in [hello_12(&material), hello_both(&material)] {
         let mut fragment = hello[5..].to_vec();
         fragment.extend_from_slice(&[20, 0]);
         let straddling = record(ContentType::Handshake, &fragment);
-        assert_eq!(server_version_for(&material, &straddling), want);
+        let (error, alert) =
+            first_flight_of(&material, &straddling).expect_err("stray octets are refused");
+        assert!(
+            matches!(error, ServerError::UnexpectedMessage { .. }),
+            "{error:?}"
+        );
+        assert_eq!(alert.expect("alert")[5..7], [2, 10]);
     }
 }
 
@@ -1184,4 +1189,40 @@ fn a_retried_hello_still_offers_what_the_first_did() {
     }
     assert_eq!(client.version(), Some(Version::Tls13));
     assert!(client.is_finished());
+}
+
+/// Before the version is known, warnings and empty handshake records are
+/// held or dropped by the dispatcher itself — so it, not a machine, has to
+/// stop a peer that sends them without end.
+#[test]
+fn floods_before_the_version_is_chosen_are_cut_off_on_both_sides() {
+    use rusty_tls::handrolled::limits::{Flood, MAX_EMPTY_RECORDS, MAX_WARNING_ALERTS};
+
+    let material = Material::new();
+    let (tls13, tls12) = (material.server_13(), material.server_12());
+    let server_config = ServerConfigBoth {
+        tls13: &tls13,
+        tls12: &tls12,
+    };
+    let anchors = [anchor(&material.pki.root_der)];
+    let client_config = ClientConfigBoth::new(client_13(&anchors), CipherSuite12::SUPPORTED);
+
+    let warning = record(ContentType::Alert, &[1, 100]);
+    let empty = record(ContentType::Handshake, &[]);
+    for (junk, limit, flood) in [
+        (warning, MAX_WARNING_ALERTS, Flood::WarningAlerts),
+        (empty, MAX_EMPTY_RECORDS, Flood::EmptyRecords),
+    ] {
+        let mut server = ServerHandshakeBoth::new(&server_config);
+        let (mut client, _) = ClientHandshakeBoth::start(&client_config).expect("start");
+        for _ in 0..limit {
+            server.read_record(&junk).expect("server: within the limit");
+            client.read_record(&junk).expect("client: within the limit");
+        }
+        assert_eq!(server.read_record(&junk), Err(ServerError::Flood(flood)));
+        assert!(
+            matches!(client.read_record(&junk), Err(ClientError::Flood(f)) if f == flood),
+            "{flood:?}"
+        );
+    }
 }

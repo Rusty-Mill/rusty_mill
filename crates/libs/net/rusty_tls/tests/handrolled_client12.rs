@@ -1540,8 +1540,10 @@ mod refusals {
     fn an_extension_the_client_did_not_offer_is_refused() {
         let pki = pki_p256();
         // session_ticket, ALPN, supported_versions, heartbeat, signature_algorithms,
-        // supported_groups, key_share, and an unassigned value.
-        for typ in [35u16, 16, 43, 15, 13, 10, 51, 0xfffe] {
+        // key_share, and an unassigned value. (`supported_groups` is not here:
+        // RFC 8422 lets a server volunteer its groups, and it is ignored; see
+        // `a_servers_supported_groups_are_tolerated`.)
+        for typ in [35u16, 16, 43, 15, 13, 51, 0xfffe] {
             let err = refused(
                 &pki,
                 Script::new(Leaf::P256).flight(move |f, _| {
@@ -1550,6 +1552,22 @@ mod refusals {
             );
             assert_eq!(err, ClientError::UnofferedExtension(typ), "{typ}");
         }
+    }
+
+    /// BoGo SupportedCurves-ServerHello-TLS12.
+    #[test]
+    fn a_servers_supported_groups_are_tolerated() {
+        let pki = pki_p256();
+        let (result, _) = converse(
+            &pki,
+            Script::new(Leaf::P256).flight(|f, _| {
+                f.extensions
+                    .as_mut()
+                    .expect("block")
+                    .push((10, vec![0, 2, 0, 0x17]));
+            }),
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
     }
 
     #[test]
@@ -1617,7 +1635,12 @@ mod refusals {
             Script::new(Leaf::P256)
                 .flight(|f, _| f.extensions.as_mut().expect("block").push((0, vec![1]))),
         );
-        assert_eq!(err, ClientError::UnofferedExtension(0));
+        assert_eq!(
+            err,
+            ClientError::Handshake(HandshakeError::Malformed(
+                "a server_name acknowledgement is not empty"
+            ))
+        );
     }
 
     #[test]
@@ -2047,12 +2070,14 @@ mod refusals {
                     m.push(cert);
                 }),
         );
+        // Refused at the ServerHelloDone itself, before the client replies: the
+        // flight is over, and the extra message is not part of it.
         assert!(
             matches!(
                 err,
                 ClientError::UnexpectedMessage {
-                    expected: "ChangeCipherSpec",
-                    got: HandshakeType::Certificate
+                    expected: "nothing after ServerHelloDone",
+                    got: HandshakeType::ServerHelloDone
                 }
             ),
             "{err}"
@@ -2105,6 +2130,37 @@ mod refusals {
         // Without a request, no Certificate is sent at all.
         let (_, fake) = converse(&pki, Script::new(Leaf::P256));
         assert_eq!(fake.client_types, vec![HandshakeType::ClientKeyExchange]);
+    }
+
+    // ------------------------------------------------------------------ floods
+
+    /// Warnings are ignored up to a limit, empty handshake records likewise:
+    /// the peer pays nothing for either and this side pays a trip through the
+    /// state machine, so a run of them ends the connection.
+    #[test]
+    fn floods_of_warnings_and_empty_records_are_cut_off_in_the_handshake() {
+        use rusty_tls::handrolled::limits::{Flood, MAX_EMPTY_RECORDS, MAX_WARNING_ALERTS};
+
+        let pki = pki_p256();
+        let warning = vec![21u8, 3, 3, 0, 2, 1, 100];
+        let empty = vec![22u8, 3, 3, 0, 0];
+        let cases = [
+            (warning, MAX_WARNING_ALERTS, Flood::WarningAlerts),
+            (empty, MAX_EMPTY_RECORDS, Flood::EmptyRecords),
+        ];
+        for (record, limit, flood) in cases {
+            let padded = |count: u32| {
+                let record = record.clone();
+                Script::new(Leaf::P256)
+                    .records(move |r| (0..count).for_each(|_| r.insert(0, record.clone())))
+            };
+            let (result, _) = converse(&pki, padded(limit));
+            assert!(
+                result.is_ok(),
+                "{flood:?}: a run within the limit is ignored"
+            );
+            assert_eq!(refused(&pki, padded(limit + 1)), ClientError::Flood(flood));
+        }
     }
 
     // --------------------------------------------------------- ChangeCipherSpec
@@ -2205,10 +2261,9 @@ mod refusals {
             &pki,
             Script::new(Leaf::P256).finish(Finish::ShortVerifyData),
         );
-        assert_eq!(
-            err,
-            ClientError::Handshake(HandshakeError::Malformed("Finished is not 12 octets"))
-        );
+        // A Finished of the wrong length does not verify (BoGo
+        // `TrailingMessageData-ServerFinished`): decrypt_error, not decode_error.
+        assert_eq!(err, ClientError::BadFinished);
     }
 
     #[test]

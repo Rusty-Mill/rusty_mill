@@ -61,6 +61,7 @@ use super::client12::{
 };
 use super::handshake::{complete_prefix, extension, find, messages, HandshakeType};
 use super::handshake12::{ClientHello12, ServerHello12};
+use super::limits::Noise;
 use super::record::ContentType;
 use super::record12::split;
 use super::server::{ServerConfig, ServerError, ServerHandshake};
@@ -90,6 +91,15 @@ pub enum Established {
 }
 
 impl Established {
+    /// The fatal alert record to send for `error`, protected by this
+    /// connection's keys.
+    pub fn alert_record(&mut self, error: &ClientError) -> Option<Vec<u8>> {
+        match self {
+            Self::Tls13(c) => c.alert_record(error),
+            Self::Tls12(c) => c.alert_record(error),
+        }
+    }
+
     /// The negotiated version.
     pub const fn version(&self) -> Version {
         match self {
@@ -135,6 +145,7 @@ enum ClientState<'a> {
         tls13: Box<ClientHandshake<'a>>,
         buffer: Vec<u8>,
         records: Vec<Vec<u8>>,
+        noise: Noise,
     },
     Tls13(Box<ClientHandshake<'a>>),
     Tls12(Box<ClientHandshake12<'a>>),
@@ -159,6 +170,7 @@ impl<'a> ClientHandshakeBoth<'a> {
                     tls13: Box::new(tls13),
                     buffer: Vec::new(),
                     records: Vec::new(),
+                    noise: Noise::default(),
                 },
             },
             hello,
@@ -180,6 +192,17 @@ impl<'a> ClientHandshakeBoth<'a> {
             ClientState::Tls13(_) => Some(Version::Tls13),
             ClientState::Tls12(_) => Some(Version::Tls12),
             _ => None,
+        }
+    }
+
+    /// The fatal alert record to send for `error`, if the server should be
+    /// told. Whichever machine is running decides whether it goes in the clear.
+    pub fn alert_record(&mut self, error: &ClientError) -> Option<Vec<u8>> {
+        match &mut self.state {
+            ClientState::Tls12(h) => h.alert_record(error),
+            ClientState::Tls13(h) => h.alert_record(error),
+            // Before a version is chosen nothing is protected.
+            _ => super::client::plaintext_alert_record(error),
         }
     }
 
@@ -209,12 +232,23 @@ impl<'a> ClientHandshakeBoth<'a> {
 
     fn read_pending(&mut self, record: &[u8]) -> Result<Vec<u8>, ClientError> {
         let ClientState::Pending {
-            buffer, records, ..
+            buffer,
+            records,
+            noise,
+            ..
         } = &mut self.state
         else {
             return Err(ClientError::Failed);
         };
         let (typ, _, fragment) = split(record)?;
+        // A warning alert before the ServerHello is advisory in TLS 1.2 and
+        // harmless to a 1.3 handshake that has not begun, so it is counted and
+        // dropped here rather than decided on. Fatal ones go to a machine,
+        // which reports them by name.
+        if typ == ContentType::Alert && matches!(fragment, [1, d] if *d != 0) {
+            noise.warning()?;
+            return Ok(Vec::new());
+        }
         records.push(record.to_vec());
         // Anything but handshake bytes goes straight to the TLS 1.3 machine,
         // which owns the pre-ServerHello rules for them: it reports an alert
@@ -224,6 +258,11 @@ impl<'a> ClientHandshakeBoth<'a> {
         }
         if buffer.len() + fragment.len() > MAX_HANDSHAKE_BUFFER {
             return Err(ClientError::HandshakeTooLarge);
+        }
+        // Held records are the only thing an empty one adds to, so they are
+        // what has to be bounded here.
+        if fragment.is_empty() {
+            noise.empty_record()?;
         }
         buffer.extend_from_slice(fragment);
         if complete_prefix(buffer) == 0 {
@@ -250,9 +289,13 @@ impl<'a> ClientHandshakeBoth<'a> {
                 self.state = ClientState::Tls13(machine);
             }
             Version::Tls12 => {
-                let (hello, random) = (*tls13).into_tls12_hello()?;
-                let mut machine =
-                    ClientHandshake12::continue_from(&self.config.tls12, hello, &random)?;
+                let (hello, random, session_id) = (*tls13).into_tls12_hello()?;
+                let mut machine = ClientHandshake12::continue_from(
+                    &self.config.tls12,
+                    hello,
+                    &random,
+                    session_id,
+                )?;
                 for record in &records {
                     reply.extend(machine.read_record(record)?);
                 }
@@ -305,6 +348,7 @@ enum ServerState<'a> {
     Pending {
         buffer: Vec<u8>,
         records: Vec<Vec<u8>>,
+        noise: Noise,
     },
     Tls13(Box<ServerHandshake<'a>>),
     Tls12(Box<ServerHandshake12<'a>>),
@@ -325,6 +369,7 @@ impl<'a> ServerHandshakeBoth<'a> {
             state: ServerState::Pending {
                 buffer: Vec::new(),
                 records: Vec::new(),
+                noise: Noise::default(),
             },
         }
     }
@@ -357,9 +402,15 @@ impl<'a> ServerHandshakeBoth<'a> {
     }
 
     /// The fatal alert record to send for `error`, if the peer should be told.
-    pub fn alert_record(&self, error: &ServerError) -> Option<Vec<u8>> {
-        let description = error.alert()?;
-        plaintext_record(ContentType::Alert, 0x0303, &[2, description.0]).ok()
+    pub fn alert_record(&mut self, error: &ServerError) -> Option<Vec<u8>> {
+        match &mut self.state {
+            ServerState::Tls13(h) => h.alert_record(error),
+            ServerState::Tls12(h) => h.alert_record(error),
+            _ => {
+                let description = error.alert()?;
+                plaintext_record(ContentType::Alert, 0x0303, &[2, description.0]).ok()
+            }
+        }
     }
 
     /// Feed one whole TLS record, and get back the bytes to send in reply.
@@ -378,10 +429,21 @@ impl<'a> ServerHandshakeBoth<'a> {
     }
 
     fn read_pending(&mut self, record: &[u8]) -> Result<Vec<u8>, ServerError> {
-        let ServerState::Pending { buffer, records } = &mut self.state else {
+        let ServerState::Pending {
+            buffer,
+            records,
+            noise,
+        } = &mut self.state
+        else {
             return Err(ServerError::Failed);
         };
         let (typ, _, fragment) = split(record)?;
+        // As on the client side: a warning before a ClientHello is advisory in
+        // TLS 1.2, counted and dropped; a fatal alert goes to a machine.
+        if typ == ContentType::Alert && matches!(fragment, [1, d] if *d != 0) {
+            noise.warning()?;
+            return Ok(Vec::new());
+        }
         records.push(record.to_vec());
         // A record that is not handshake data cannot be a ClientHello. The 1.2
         // server is the stricter of the two about what may open a connection.
@@ -390,6 +452,9 @@ impl<'a> ServerHandshakeBoth<'a> {
         }
         if buffer.len() + fragment.len() > MAX_HANDSHAKE_BUFFER {
             return Err(ServerError::HandshakeTooLarge);
+        }
+        if fragment.is_empty() {
+            noise.empty_record()?;
         }
         buffer.extend_from_slice(fragment);
         if complete_prefix(buffer) == 0 {

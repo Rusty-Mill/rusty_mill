@@ -71,7 +71,8 @@ use super::handshake12::{
     ClientHello12, ServerHello12, ServerKeyExchange, TLS12,
 };
 use super::kx::{KeyExchange, NamedGroup};
-use super::path::validate_path;
+use super::limits::Noise;
+use super::path::{require_signing_key_usage, validate_path};
 use super::record::{Aead, ContentType, RecordError, MAX_FRAGMENT_LEN};
 use super::record12::{split, Opener, Sealer};
 use super::schedule::Hash;
@@ -174,6 +175,8 @@ pub struct ServerHandshake12<'a> {
     /// True when this server also speaks TLS 1.3 and is answering in 1.2
     /// anyway, which RFC 8446 §4.1.3 requires it to say in `random`.
     signals_tls13: bool,
+    /// Records that carried nothing, so they cannot go on for ever.
+    noise: Noise,
 }
 
 /// The last eight octets of a `ServerHello.random` from a TLS 1.3-capable
@@ -260,6 +263,7 @@ impl<'a> ServerHandshake12<'a> {
             buffer: Vec::new(),
             connection: None,
             signals_tls13: false,
+            noise: Noise::default(),
         })
     }
 
@@ -347,9 +351,12 @@ impl<'a> ServerHandshake12<'a> {
         }
     }
 
-    fn plaintext_alert(&self, fragment: &[u8]) -> Result<Vec<u8>> {
+    fn plaintext_alert(&mut self, fragment: &[u8]) -> Result<Vec<u8>> {
         match Alert::parse(fragment) {
-            Some(alert) if alert.is_advisory() => Ok(Vec::new()),
+            Some(alert) if alert.is_advisory() => {
+                self.noise.warning()?;
+                Ok(Vec::new())
+            }
             Some(alert) => Err(ServerError::PeerAlert(alert)),
             None => Err(ServerError::UnexpectedContentType(ContentType::Alert)),
         }
@@ -383,6 +390,11 @@ impl<'a> ServerHandshake12<'a> {
         if self.buffer.len() + fragment.len() > MAX_HANDSHAKE_BUFFER {
             return Err(ServerError::HandshakeTooLarge);
         }
+        if fragment.is_empty() {
+            self.noise.empty_record()?;
+        } else {
+            self.noise.data();
+        }
         self.buffer.extend_from_slice(fragment);
 
         let mut reply = Vec::new();
@@ -392,8 +404,23 @@ impl<'a> ServerHandshake12<'a> {
                 return Ok(reply);
             }
             let consumed: Vec<u8> = self.buffer.drain(..complete).collect();
-            for msg in messages(&consumed)? {
-                reply.extend_from_slice(&self.handle_message(&msg)?);
+            let parsed = messages(&consumed)?;
+            let last = parsed.len().saturating_sub(1);
+            for (index, msg) in parsed.iter().enumerate() {
+                // The server answers a ClientHello with a whole flight and then
+                // waits; a client has nothing legitimate to say before it has
+                // read that flight, so anything in the same record, or half-read,
+                // is refused (BoGo `Partial*WithClientHello`) — before the
+                // flight is built.
+                if msg.typ == HandshakeType::ClientHello
+                    && (index != last || !self.buffer.is_empty())
+                {
+                    return Err(ServerError::UnexpectedMessage {
+                        expected: "nothing after ClientHello",
+                        got: msg.typ,
+                    });
+                }
+                reply.extend_from_slice(&self.handle_message(msg)?);
             }
         }
     }
@@ -441,14 +468,15 @@ impl<'a> ServerHandshake12<'a> {
         let config = self.config;
 
         // 1. Version. client_version 0x0303 is also what a TLS 1.3 client
-        // sends, so supported_versions has the say when it is present.
-        if hello.version < TLS12 {
-            return Err(ServerError::NotTls12(hello.version));
-        }
-        if let Some(versions) = hello.supported_versions()? {
-            if !versions.contains(&TLS12) {
-                return Err(ServerError::NotTls12(hello.version));
+        // sends, so `supported_versions` has the say when it is present (RFC
+        // 8446 §4.2.1, and BoGo `ConflictingVersionNegotiation-2`); the field
+        // is consulted only when it is not.
+        match hello.supported_versions()? {
+            Some(versions) if !versions.contains(&TLS12) => {
+                return Err(ServerError::NotTls12(hello.version))
             }
+            None if hello.version < TLS12 => return Err(ServerError::NotTls12(hello.version)),
+            _ => {}
         }
         if !hello.compression.contains(&0) {
             return Err(ServerError::UnacceptableOffer(
@@ -619,6 +647,8 @@ impl<'a> ServerHandshake12<'a> {
         // No name check: a client certificate identifies a client, and there is
         // no hostname for it to match.
         validate_path(&leaf, &intermediates, auth.anchors, &auth.path)
+            .map(|_| ())
+            .and_then(|()| require_signing_key_usage(&leaf))
             .map_err(ServerError::ClientCertificate)?;
 
         self.hs.client_certificates = chain.certificates.iter().map(|der| der.to_vec()).collect();
@@ -683,7 +713,8 @@ impl<'a> ServerHandshake12<'a> {
     }
 
     fn client_finished(&mut self, msg: &Message<'_>) -> Result<Vec<u8>> {
-        let received = parse_finished(msg.body)?;
+        // A Finished of the wrong length is a Finished that does not verify.
+        let received = parse_finished(msg.body).map_err(|_| ServerError::BadFinished)?;
         // Nothing may follow the Finished in its record, or be left half-read.
         if !self.buffer.is_empty() {
             return Err(ServerError::UnexpectedMessage {

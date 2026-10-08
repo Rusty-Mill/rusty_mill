@@ -106,12 +106,14 @@ use ring::rand::{SecureRandom, SystemRandom};
 use super::client12::CipherSuite12;
 use super::handshake::{
     certificate_verify_content, complete_prefix, extension, find, messages,
-    parse_encrypted_extensions, parse_finished, pre_shared_key_placeholder, BinderHello,
-    CertificateMessage, CertificateRequestMessage, CertificateVerify, ClientHello, Extension,
-    HandshakeError, HandshakeType, Message, PskIdentity, ServerHello, Transcript,
-    CLIENT_CERTIFICATE_VERIFY_CONTEXT, SERVER_CERTIFICATE_VERIFY_CONTEXT,
+    parse_encrypted_extensions, parse_extension_list, parse_finished, pre_shared_key_placeholder,
+    BinderHello, CertificateMessage, CertificateRequestMessage, CertificateVerify, ClientHello,
+    Extension, HandshakeError, HandshakeType, Message, PskIdentity, ServerHello, Transcript,
+    CLIENT_CERTIFICATE_VERIFY_CONTEXT, HELLO_RETRY_REQUEST_RANDOM,
+    SERVER_CERTIFICATE_VERIFY_CONTEXT,
 };
 use super::kx::{KeyExchange, KxError, NamedGroup};
+use super::limits::{Flood, Noise};
 use super::name::ServerName;
 use super::path::{verify_peer_certificate, PathError, PathOptions, TrustAnchor};
 use super::record::{
@@ -167,6 +169,16 @@ pub struct AlertDescription(pub u8);
 impl AlertDescription {
     /// `close_notify(0)` — an orderly shutdown, not a failure.
     pub const CLOSE_NOTIFY: Self = Self(0);
+    /// `record_overflow(22)`.
+    pub const RECORD_OVERFLOW: Self = Self(22);
+    /// `internal_error(80)`.
+    pub const INTERNAL_ERROR: Self = Self(80);
+    /// `missing_extension(109)`.
+    pub const MISSING_EXTENSION: Self = Self(109);
+    /// `unsupported_extension(110)`.
+    pub const UNSUPPORTED_EXTENSION: Self = Self(110);
+    /// `user_canceled(90)`.
+    pub const USER_CANCELED: Self = Self(90);
     /// `bad_record_mac(20)`.
     pub const BAD_RECORD_MAC: Self = Self(20);
     /// `handshake_failure(40)`.
@@ -276,6 +288,9 @@ pub enum ClientError {
     Handshake(HandshakeError),
     /// A record was malformed or did not decrypt.
     Record(RecordError),
+    /// The peer sent too many records that carry nothing; see
+    /// [`super::limits`].
+    Flood(Flood),
     /// The key exchange failed.
     Kx(KxError),
     /// Signing this client's own CertificateVerify failed.
@@ -307,6 +322,15 @@ pub enum ClientError {
     /// `protocol_version` here, which is the difference between "something
     /// broke" and "this server is too old for this client".
     PeerAlert(Alert),
+    /// A TLS 1.3 ServerHello carried no `key_share` (RFC 8446 §4.2.8).
+    MissingKeyShare,
+    /// A HelloRetryRequest that asked for nothing (RFC 8446 §4.1.4).
+    EmptyRetryRequest,
+    /// A HelloRetryRequest that could not be read.
+    MalformedRetryRequest(HandshakeError),
+    /// A warning alert that TLS 1.3 does not permit (RFC 8446 §6): only
+    /// `close_notify` and `user_canceled` survive, and neither is this.
+    BadAlert(Alert),
     /// The server sent a ServerHello whose `random` carries the RFC 8446
     /// §4.1.3 downgrade sentinel.
     ///
@@ -445,11 +469,132 @@ pub enum ClientError {
     Schedule(super::schedule12::ScheduleError),
 }
 
+/// The alert a peer should be told about a handshake message this side could
+/// not accept. Shared by both roles, which read the same messages.
+///
+/// A compression method or a curve type are *values the peer chose wrongly*
+/// (`illegal_parameter`); everything else that fails to parse, including a
+/// repeated extension, is a message that is not shaped like one
+/// (`decode_error`).
+pub(super) fn handshake_alert(error: &HandshakeError) -> AlertDescription {
+    match error {
+        HandshakeError::UnexpectedCompression
+        | HandshakeError::UnexpectedCurveType(_)
+        | HandshakeError::DuplicateKeyShare(_) => AlertDescription::ILLEGAL_PARAMETER,
+        _ => AlertDescription::DECODE_ERROR,
+    }
+}
+
+/// As [`handshake_alert`], for the record layer: an oversized record is
+/// `record_overflow`, a malformed frame `decode_error`, and anything that
+/// failed to authenticate is `bad_record_mac`, which deliberately says nothing
+/// about *why* (RFC 8446 §5.2).
+pub(super) fn record_alert(error: &RecordError) -> AlertDescription {
+    match error {
+        RecordError::FragmentTooLong { .. } | RecordError::EncryptedFragmentTooLong { .. } => {
+            AlertDescription::RECORD_OVERFLOW
+        }
+        RecordError::Truncated { .. }
+        | RecordError::LengthMismatch { .. }
+        | RecordError::NoContentType
+        | RecordError::UnexpectedVersion(_) => AlertDescription::DECODE_ERROR,
+        RecordError::Decrypt | RecordError::UnexpectedOuterType(_) => {
+            AlertDescription::BAD_RECORD_MAC
+        }
+        _ => AlertDescription::INTERNAL_ERROR,
+    }
+}
+
+impl ClientError {
+    /// The fatal alert the server should be told about this, if any.
+    ///
+    /// `None` when the server already knows (it sent the alert, or the
+    /// connection is already dead).
+    pub fn alert(&self) -> Option<AlertDescription> {
+        Some(match self {
+            Self::Handshake(err) => handshake_alert(err),
+            // BoringSSL's choice, and as defensible as the alternative: a
+            // retry request that repeats an extension asked for something
+            // twice (a parameter), any other fault is its shape.
+            Self::MalformedRetryRequest(HandshakeError::DuplicateExtension(_)) => {
+                AlertDescription::ILLEGAL_PARAMETER
+            }
+            Self::MalformedRetryRequest(_) => AlertDescription::DECODE_ERROR,
+            Self::Record(err) => record_alert(err),
+            Self::Flood(_)
+            | Self::UnexpectedMessage { .. }
+            | Self::UnexpectedContentType(_)
+            | Self::UnexpectedChangeCipherSpec
+            | Self::UnusableSession => AlertDescription::UNEXPECTED_MESSAGE,
+            // A level that is neither warning nor fatal is a value the peer
+            // made up (§6); a warning TLS 1.3 forbids is a malformed alert.
+            Self::BadAlert(Alert {
+                level: AlertLevel::Unknown(_),
+                ..
+            }) => AlertDescription::ILLEGAL_PARAMETER,
+            Self::BadAlert(_) | Self::MalformedCertificate(_) => AlertDescription::DECODE_ERROR,
+            Self::NoCertificates => AlertDescription::BAD_CERTIFICATE,
+            Self::Kx(_)
+            | Self::DowngradeDetected
+            | Self::SessionIdMismatch
+            | Self::UnofferedCipherSuite(_)
+            | Self::UnofferedGroup(_)
+            | Self::UnofferedSignatureScheme(_)
+            | Self::BadKeyShare
+            | Self::UnofferedPsk
+            | Self::BadPskIdentity(_)
+            | Self::PskHashMismatch
+            | Self::UnsupportedPointFormat
+            | Self::HandshakeTooLarge => AlertDescription::ILLEGAL_PARAMETER,
+            Self::EmptyRetryRequest => AlertDescription::ILLEGAL_PARAMETER,
+            Self::MissingKeyShare => AlertDescription::MISSING_EXTENSION,
+            // §4.1.4: a second retry request is a message that is not allowed
+            // to be there, not a parameter that is wrong.
+            Self::RepeatedHelloRetryRequest => AlertDescription::UNEXPECTED_MESSAGE,
+            Self::UnofferedExtension(_) | Self::UnexpectedEarlyData => {
+                AlertDescription::UNSUPPORTED_EXTENSION
+            }
+            Self::NotTls13 | Self::NotTls12(_) => AlertDescription::PROTOCOL_VERSION,
+            Self::BadFinished | Self::Verify(_) => AlertDescription::DECRYPT_ERROR,
+            Self::Path(err) => path_alert(err),
+            Self::MissingExtendedMasterSecret
+            | Self::BadRenegotiationInfo
+            | Self::KeyTypeMismatch => AlertDescription::HANDSHAKE_FAILURE,
+            Self::Sign(_) | Self::Schedule(_) | Self::Random => AlertDescription::INTERNAL_ERROR,
+            // The peer already knows, or there is nobody left to tell.
+            Self::PeerAlert(_) | Self::Failed => return None,
+        })
+    }
+}
+
+/// The alert for a certificate chain that did not validate.
+fn path_alert(error: &PathError) -> AlertDescription {
+    match error {
+        PathError::Expired { .. } | PathError::NotYetValid { .. } => {
+            AlertDescription::CERTIFICATE_EXPIRED
+        }
+        PathError::NoPathToTrustAnchor => AlertDescription::UNKNOWN_CA,
+        _ => AlertDescription::BAD_CERTIFICATE,
+    }
+}
+
+/// A fatal alert record in the clear, for a handshake that failed before its
+/// keys were in force.
+pub(super) fn plaintext_alert_record(error: &ClientError) -> Option<Vec<u8>> {
+    let description = error.alert()?;
+    plaintext_record(ContentType::Alert, 0x0303, &[2, description.0]).ok()
+}
+
 impl core::fmt::Display for ClientError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Handshake(err) => write!(f, "malformed handshake message: {err}"),
             Self::Record(err) => write!(f, "record layer: {err}"),
+            Self::Flood(flood) => write!(f, "{flood}"),
+            Self::MissingKeyShare => f.write_str("the ServerHello has no key_share"),
+            Self::EmptyRetryRequest => f.write_str("the HelloRetryRequest asked for nothing"),
+            Self::MalformedRetryRequest(err) => write!(f, "malformed HelloRetryRequest: {err}"),
+            Self::BadAlert(alert) => write!(f, "an alert TLS 1.3 does not allow: {alert:?}"),
             Self::Kx(err) => write!(f, "key exchange: {err}"),
             Self::Sign(err) => write!(f, "signing this client's CertificateVerify: {err}"),
             Self::Path(err) => write!(f, "certificate: {err}"),
@@ -545,6 +690,11 @@ impl From<super::schedule12::ScheduleError> for ClientError {
 impl From<HandshakeError> for ClientError {
     fn from(err: HandshakeError) -> Self {
         Self::Handshake(err)
+    }
+}
+impl From<Flood> for ClientError {
+    fn from(err: Flood) -> Self {
+        Self::Flood(err)
     }
 }
 impl From<RecordError> for ClientError {
@@ -744,10 +894,18 @@ const DOWNGRADE_SENTINEL_TLS12: [u8; 8] = [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0
 /// As [`DOWNGRADE_SENTINEL_TLS12`], for TLS 1.1 and below.
 const DOWNGRADE_SENTINEL_OLDER: [u8; 8] = [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00];
 
-/// True if a `ServerHello.random` carries either downgrade sentinel.
+/// The marker JDK 11 servers wrote before RFC 8446 fixed one (JDK-8211806).
+/// Real servers still do, and BoringSSL refuses it, so this does too.
+const DOWNGRADE_SENTINEL_JDK11: [u8; 8] = [0xed, 0xbf, 0xb4, 0xa8, 0xc2, 0x47, 0x10, 0xff];
+
+/// True if a `ServerHello.random` carries a downgrade sentinel.
 pub(super) fn is_downgrade_sentinel(random: &[u8]) -> bool {
     match random.len().checked_sub(8).map(|at| &random[at..]) {
-        Some(tail) => tail == DOWNGRADE_SENTINEL_TLS12 || tail == DOWNGRADE_SENTINEL_OLDER,
+        Some(tail) => {
+            tail == DOWNGRADE_SENTINEL_TLS12
+                || tail == DOWNGRADE_SENTINEL_OLDER
+                || tail == DOWNGRADE_SENTINEL_JDK11
+        }
         None => false,
     }
 }
@@ -850,6 +1008,18 @@ pub struct ClientHandshake<'a> {
     /// Handshake bytes reassembled across records. Messages may span records
     /// and several may share one, so neither boundary lines up with the other.
     buffer: Vec<u8>,
+    /// Records that carried nothing, so they cannot go on for ever.
+    noise: Noise,
+    /// The key an alert would be sealed under, once the server's keys are in
+    /// force: the client handshake key, at sequence number zero. Held apart from
+    /// the state because a failure replaces the state, and the alert that
+    /// describes the failure is built afterwards.
+    alert_sealer: Option<Sealer>,
+    /// Whether the compatibility `change_cipher_spec` (RFC 8446 §D.4) has been
+    /// sent: before a second hello if the server retried, otherwise before the
+    /// first protected record. Sent once, because a second one is noise the
+    /// server may count against its limit.
+    sent_ccs: bool,
     /// The TLS 1.2 suites also offered in the hello, if this client is the
     /// first half of a [`super::negotiate`] handshake. Kept so a second hello
     /// after a HelloRetryRequest offers exactly what the first did.
@@ -889,7 +1059,7 @@ impl<'a> ClientHandshake<'a> {
             session_hash(resumption.session)?;
         }
         let kx = KeyExchange::generate(group)?;
-        let (hello, random, session_id) = build_client_hello(config, &kx, None, &[], tls12)?;
+        let (hello, random, session_id) = build_client_hello(config, &kx, None, &[], tls12, None)?;
 
         let record = plaintext_record(ContentType::Handshake, 0x0301, &hello)?;
         Ok((
@@ -903,6 +1073,9 @@ impl<'a> ClientHandshake<'a> {
                     session_id,
                 },
                 buffer: Vec::new(),
+                noise: Noise::default(),
+                alert_sealer: None,
+                sent_ccs: false,
                 tls12,
             },
             record,
@@ -910,18 +1083,46 @@ impl<'a> ClientHandshake<'a> {
     }
 
     /// Give up the TLS 1.3 handshake and hand back what a TLS 1.2 one needs to
-    /// carry on from the same ClientHello: the message as sent, and its random.
+    /// carry on from the same ClientHello: the message as sent, its random,
+    /// and the compatibility-mode session id it carried.
     /// Only possible before any ServerHello has been accepted.
-    pub(super) fn into_tls12_hello(self) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub(super) fn into_tls12_hello(self) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         match self.state {
             State::AwaitServerHello {
                 client_hello,
                 random,
+                session_id,
                 retried: false,
                 ..
-            } => Ok((client_hello, random)),
+            } => Ok((client_hello, random, session_id)),
             _ => Err(ClientError::Failed),
         }
+    }
+
+    /// The fatal alert record to send for `error`, if the server should be
+    /// told.
+    ///
+    /// In the clear until the server's keys are in force, then protected under
+    /// this client's handshake key, which is the one the server will read
+    /// anything this client sends next with.
+    pub fn alert_record(&mut self, error: &ClientError) -> Option<Vec<u8>> {
+        let description = error.alert()?;
+        if let Some(sealer) = self.alert_sealer.as_mut() {
+            // The compatibility change_cipher_spec comes before the first
+            // protected record, and this is it.
+            let mut out = if self.sent_ccs {
+                Vec::new()
+            } else {
+                plaintext_record(ContentType::ChangeCipherSpec, 0x0303, &[0x01]).ok()?
+            };
+            out.extend(
+                sealer
+                    .seal(ContentType::Alert, &[2, description.0], 0)
+                    .ok()?,
+            );
+            return Some(out);
+        }
+        plaintext_alert_record(error)
     }
 
     /// True once the handshake has completed and [`Self::into_connection`]
@@ -974,6 +1175,7 @@ impl<'a> ClientHandshake<'a> {
         // send one, and a client that treated it as an error would fail
         // against a large fraction of the internet for no security benefit.
         if record[0] == CHANGE_CIPHER_SPEC {
+            self.noise.empty_record()?;
             return Ok(Vec::new());
         }
 
@@ -1007,6 +1209,11 @@ impl<'a> ClientHandshake<'a> {
             // Before the ServerHello everything is in the clear, and a record
             // claiming to be protected cannot be: there is no key yet.
             State::AwaitServerHello { .. } => {
+                // The version of a plaintext record is a hint (servers differ
+                // on 3.1 and 3.3), but a major version other than 3 is not TLS.
+                if record[1] != 3 {
+                    return Err(RecordError::UnexpectedVersion([record[1], record[2]]).into());
+                }
                 if ContentType::from_u8(record[0]) != ContentType::Handshake {
                     return Err(ClientError::UnexpectedContentType(ContentType::from_u8(
                         record[0],
@@ -1030,6 +1237,11 @@ impl<'a> ClientHandshake<'a> {
             State::Done(_) | State::Failed => return Err(ClientError::Failed),
         };
 
+        if fragment.is_empty() {
+            self.noise.empty_record()?;
+        } else {
+            self.noise.data();
+        }
         self.buffer.extend_from_slice(&fragment);
         self.drain_buffer()
     }
@@ -1045,8 +1257,25 @@ impl<'a> ClientHandshake<'a> {
             }
             let consumed: Vec<u8> = self.buffer.drain(..complete).collect();
 
-            for message in messages(&consumed)? {
-                reply.extend_from_slice(&self.handle_message(&message)?);
+            let parsed = messages(&consumed)?;
+            let last = parsed.len().saturating_sub(1);
+            for (index, message) in parsed.iter().enumerate() {
+                reply.extend_from_slice(&self.handle_message(message)?);
+                // RFC 8446 §5.1: a handshake message must not span a change of
+                // keys, so whatever follows the ServerHello (or the server's
+                // Finished) in the same record is under the wrong key, and
+                // whatever is half-read when the keys change belongs to
+                // neither. Both are `unexpected_message`.
+                let changes_keys = matches!(
+                    message.typ,
+                    HandshakeType::ServerHello | HandshakeType::Finished
+                );
+                if changes_keys && (index != last || !self.buffer.is_empty()) {
+                    return Err(ClientError::UnexpectedMessage {
+                        expected: "a record boundary at a change of keys",
+                        got: message.typ,
+                    });
+                }
             }
         }
     }
@@ -1092,6 +1321,7 @@ fn build_client_hello(
     identity: Option<(&[u8], &[u8])>,
     transcript_prefix: &[u8],
     tls12: Option<&[CipherSuite12]>,
+    cookie: Option<&[u8]>,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let (random, session_id) = match identity {
         Some((random, session_id)) => (random.to_vec(), session_id.to_vec()),
@@ -1210,6 +1440,14 @@ fn build_client_hello(
         });
     }
 
+    // RFC 8446 §4.2.2: a retry request's cookie is echoed back unchanged.
+    if let Some(cookie) = cookie {
+        extensions.push(Extension {
+            typ: extension::COOKIE,
+            data: cookie,
+        });
+    }
+
     // `pre_shared_key` goes last, always, and nothing may be appended after
     // it. §4.2.11: the binder covers the hello truncated to just before the
     // binders, so an extension after the offer would sit outside what the
@@ -1312,7 +1550,15 @@ impl ClientHandshake<'_> {
             return Err(ClientError::Failed);
         };
 
-        let hello = ServerHello::parse(message.body)?;
+        let hello = ServerHello::parse(message.body).map_err(|error| {
+            // A retry request is a ServerHello that asks for something; one
+            // that cannot be read is told apart so the alert can say so.
+            if message.body.get(2..34) == Some(&HELLO_RETRY_REQUEST_RANDOM[..]) {
+                ClientError::MalformedRetryRequest(error)
+            } else {
+                ClientError::Handshake(error)
+            }
+        })?;
 
         // The selected suite must be one that was offered, and one this code
         // can actually use. A server naming something else is either confused
@@ -1350,15 +1596,39 @@ impl ClientHandshake<'_> {
             return Err(ClientError::SessionIdMismatch);
         }
 
-        if hello.is_hello_retry_request() {
+        // RFC 8446 §4.2: a server may only answer extensions it was offered,
+        // and these are the only ones a ServerHello or HelloRetryRequest may
+        // carry at all. `cookie` is the retry request's own.
+        let retry_request = hello.is_hello_retry_request();
+        for ext in &hello.extensions {
+            let allowed = match ext.typ {
+                extension::SUPPORTED_VERSIONS | extension::KEY_SHARE => true,
+                extension::PRE_SHARED_KEY => !retry_request,
+                extension::COOKIE => retry_request,
+                _ => false,
+            };
+            if !allowed {
+                return Err(ClientError::UnofferedExtension(ext.typ));
+            }
+        }
+
+        if retry_request {
             if retried {
                 return Err(ClientError::RepeatedHelloRetryRequest);
             }
-            return self.retry(client_hello, message, &hello, hash, &random, &session_id);
+            return self.retry(
+                client_hello,
+                kx,
+                message,
+                &hello,
+                hash,
+                &random,
+                &session_id,
+            );
         }
 
         let share =
-            find(&hello.extensions, extension::KEY_SHARE).ok_or(ClientError::BadKeyShare)?;
+            find(&hello.extensions, extension::KEY_SHARE).ok_or(ClientError::MissingKeyShare)?;
         let (group, peer_key) = server_key_share(share)?;
         // The group the server names must be the one whose share was sent.
         //
@@ -1431,6 +1701,8 @@ impl ClientHandshake<'_> {
 
         let keys = traffic_keys(hash, &server_handshake_secret, aead.key_len());
         let opener = Opener::new(aead, &keys.key, &keys.iv)?;
+        let alert_keys = traffic_keys(hash, &client_handshake_secret, aead.key_len());
+        self.alert_sealer = Some(Sealer::new(aead, &alert_keys.key, &alert_keys.iv)?);
 
         self.state = State::InFlight {
             expect: Expect::EncryptedExtensions,
@@ -1470,24 +1742,47 @@ impl ClientHandshake<'_> {
     fn retry(
         &mut self,
         client_hello: Vec<u8>,
+        previous: KeyExchange,
         message: &Message<'_>,
         hello: &ServerHello<'_>,
         hash: Hash,
         random: &[u8],
         session_id: &[u8],
     ) -> Result<Vec<u8>> {
-        let share =
-            find(&hello.extensions, extension::KEY_SHARE).ok_or(ClientError::BadKeyShare)?;
-        if share.len() != 2 {
-            return Err(ClientError::BadKeyShare);
+        let cookie = find(&hello.extensions, extension::COOKIE);
+        // RFC 8446 §4.1.4: a retry request must ask for something. One that
+        // asks for nothing would be answered with an identical hello, and a
+        // server that did that twice is a loop.
+        let share = find(&hello.extensions, extension::KEY_SHARE);
+        if share.is_none() && cookie.is_none() {
+            return Err(ClientError::EmptyRetryRequest);
         }
-        let wanted = u16::from_be_bytes([share[0], share[1]]);
-        let group = NamedGroup::from_u16(wanted).ok_or(ClientError::UnofferedGroup(wanted))?;
-        if !self.config.groups.contains(&group) {
-            return Err(ClientError::UnofferedGroup(wanted));
+        if cookie.is_some_and(|c| {
+            c.len() < 3 || usize::from(u16::from_be_bytes([c[0], c[1]])) != c.len() - 2
+        }) {
+            return Err(ClientError::MalformedRetryRequest(
+                HandshakeError::Malformed("cookie is not a non-empty vector"),
+            ));
         }
 
-        let kx = KeyExchange::generate(group)?;
+        // Without a key_share the group is not in question and the first
+        // share is simply sent again; with one, it must name a different
+        // group, one that was offered.
+        let kx = match share {
+            None => previous,
+            Some(share) => {
+                if share.len() != 2 {
+                    return Err(ClientError::BadKeyShare);
+                }
+                let wanted = u16::from_be_bytes([share[0], share[1]]);
+                let group =
+                    NamedGroup::from_u16(wanted).ok_or(ClientError::UnofferedGroup(wanted))?;
+                if !self.config.groups.contains(&group) || group == previous.group() {
+                    return Err(ClientError::UnofferedGroup(wanted));
+                }
+                KeyExchange::generate(group)?
+            }
+        };
 
         // §4.4.1: once a retry has happened, the transcript begins with a
         // synthetic `message_hash` message wrapping Hash(ClientHello1) rather
@@ -1512,6 +1807,7 @@ impl ClientHandshake<'_> {
             Some((random, session_id)),
             &replayed,
             self.tls12,
+            cookie,
         )?;
         replayed.extend_from_slice(&second);
 
@@ -1522,7 +1818,20 @@ impl ClientHandshake<'_> {
             random,
             session_id,
         };
-        plaintext_record(ContentType::Handshake, 0x0303, &second)
+        let mut out = Vec::new();
+        // §D.4: the client's "second flight" begins here, and a client that
+        // announced compatibility mode (a non-empty session id) sends its
+        // dummy change_cipher_spec before it.
+        if !self.sent_ccs {
+            out.extend(plaintext_record(
+                ContentType::ChangeCipherSpec,
+                0x0303,
+                &[0x01],
+            )?);
+            self.sent_ccs = true;
+        }
+        out.extend(plaintext_record(ContentType::Handshake, 0x0303, &second)?);
+        Ok(out)
     }
 }
 
@@ -1541,9 +1850,17 @@ impl Connection {
         let ticket = reader.vector_u16().map_err(HandshakeError::Wire)?.to_vec();
         // Extensions are read to prove the message is well-formed, then
         // dropped: the only one defined here is `early_data`, and ADR-0003
-        // says this client does not do early data.
-        let _extensions = reader.vector_u16().map_err(HandshakeError::Wire)?;
+        // says this client does not do early data. Well-formed means each is
+        // a whole extension, none is repeated, and `early_data` is the four
+        // octets RFC 8446 §4.6.1 gives it.
+        let extensions = reader.vector_u16().map_err(HandshakeError::Wire)?;
         reader.finish().map_err(HandshakeError::Wire)?;
+        let extensions = parse_extension_list(extensions)?;
+        if find(&extensions, extension::EARLY_DATA).is_some_and(|data| data.len() != 4) {
+            return Err(ClientError::Handshake(HandshakeError::Malformed(
+                "early_data in a NewSessionTicket is not four octets",
+            )));
+        }
 
         if ticket.is_empty() {
             return Err(ClientError::Handshake(HandshakeError::Empty(
@@ -1661,6 +1978,28 @@ impl ClientHandshake<'_> {
                 if find(&extensions, extension::EARLY_DATA).is_some() {
                     return Err(ClientError::UnexpectedEarlyData);
                 }
+                // RFC 8446 §4.2: nothing may be answered that was not asked.
+                // What this client asked for is `server_name` (acknowledged
+                // with an empty body) and `supported_groups`, which a server
+                // may volunteer a list for (§4.2.7). Everything else here —
+                // including the TLS 1.2 extensions a combined hello carried —
+                // is not a TLS 1.3 EncryptedExtensions extension at all.
+                let offered_name = matches!(self.config.server_name, ServerName::Dns(_));
+                for ext in &extensions {
+                    if ext.typ == extension::SERVER_NAME && !ext.data.is_empty() {
+                        return Err(ClientError::Handshake(HandshakeError::Malformed(
+                            "a server_name acknowledgement is not empty",
+                        )));
+                    }
+                    let allowed = match ext.typ {
+                        extension::SERVER_NAME => offered_name,
+                        extension::SUPPORTED_GROUPS => true,
+                        _ => false,
+                    };
+                    if !allowed {
+                        return Err(ClientError::UnofferedExtension(ext.typ));
+                    }
+                }
                 negotiated.transcript.add_message(message);
                 // A resumed handshake has no Certificate and no
                 // CertificateVerify: the PSK is the authentication. See the
@@ -1677,6 +2016,16 @@ impl ClientHandshake<'_> {
                 let certificate = CertificateMessage::parse(message.body)?;
                 if certificate.entries.is_empty() {
                     return Err(ClientError::NoCertificates);
+                }
+                // The only extensions a Certificate entry can carry are
+                // `status_request` and `signed_certificate_timestamp`, and
+                // each only as an answer to the same request in the hello.
+                // This client sends neither, so any extension at all is
+                // unsolicited (§4.4.2).
+                for entry in &certificate.entries {
+                    if let Some(ext) = parse_extension_list(entry.extensions)?.first() {
+                        return Err(ClientError::UnofferedExtension(ext.typ));
+                    }
                 }
                 negotiated.certificates = certificate
                     .entries
@@ -1840,7 +2189,11 @@ impl ClientHandshake<'_> {
 
         // Middlebox compatibility again: a bare change_cipher_spec ahead of
         // the first protected record the client sends.
-        let mut reply = plaintext_record(ContentType::ChangeCipherSpec, 0x0303, &[0x01])?;
+        let mut reply = if self.sent_ccs {
+            Vec::new()
+        } else {
+            plaintext_record(ContentType::ChangeCipherSpec, 0x0303, &[0x01])?
+        };
         reply.extend_from_slice(&sealer.seal(ContentType::Handshake, &flight, 0)?);
 
         let application =
@@ -1867,6 +2220,7 @@ impl ClientHandshake<'_> {
             certificates: negotiated.certificates,
             resumed: negotiated.resumed,
             resumption_master,
+            noise: Noise::default(),
         }));
         Ok(reply)
     }
@@ -1896,6 +2250,8 @@ pub struct Connection {
     /// old behaviour and the safe one: a PSK derived from nothing would be a
     /// key that looks usable and is not.
     resumption_master: Vec<u8>,
+    /// Records that carried nothing, so they cannot go on for ever.
+    noise: Noise,
 }
 
 /// A ticket and the pre-shared key it stands for.
@@ -2019,6 +2375,7 @@ impl Connection {
             // The server half does not issue tickets, so it has no resumption
             // secret to hand out. See the field's own docs.
             resumption_master: Vec::new(),
+            noise: Noise::default(),
         }
     }
 
@@ -2050,6 +2407,15 @@ impl Connection {
         Ok(self.sealer.seal(ContentType::ApplicationData, data, 0)?)
     }
 
+    /// The fatal alert record to send for `error`, protected: the handshake
+    /// is over, so the peer expects nothing in the clear.
+    pub fn alert_record(&mut self, error: &ClientError) -> Option<Vec<u8>> {
+        let description = error.alert()?;
+        self.sealer
+            .seal(ContentType::Alert, &[2, description.0], 0)
+            .ok()
+    }
+
     /// Send `close_notify`, the orderly end of the sending half (RFC 8446
     /// §6.1). The caller stops writing; the peer's own `close_notify` is still
     /// read. Without it a peer cannot tell the end of the data from a
@@ -2069,15 +2435,24 @@ impl Connection {
     /// its caller a ticket as if the server had sent it, which is how a
     /// protocol bug becomes a data-corruption bug.
     pub fn read(&mut self, record: &[u8]) -> Result<Incoming> {
-        // A change_cipher_spec after the handshake is not permitted, but it
-        // costs nothing to drop and some middleboxes still emit one.
+        // RFC 8446 §5: a change_cipher_spec is only ever a handshake-time
+        // compatibility record, and the handshake is over.
         if record.first() == Some(&CHANGE_CIPHER_SPEC) {
-            return Ok(Incoming::Handled);
+            return Err(ClientError::UnexpectedContentType(
+                ContentType::ChangeCipherSpec,
+            ));
         }
 
         let opened = self.opener.open(record)?;
         match opened.typ {
-            ContentType::ApplicationData => Ok(Incoming::Application(opened.fragment)),
+            ContentType::ApplicationData => {
+                if opened.fragment.is_empty() {
+                    self.noise.empty_record()?;
+                } else {
+                    self.noise.data();
+                }
+                Ok(Incoming::Application(opened.fragment))
+            }
             ContentType::Handshake => self.post_handshake(&opened.fragment),
             ContentType::Alert => match Alert::parse(&opened.fragment) {
                 // An orderly close is not a failure. Reporting it as one made
@@ -2087,6 +2462,21 @@ impl Connection {
                 // as correct behaviour.
                 Some(alert) if alert.description == AlertDescription::CLOSE_NOTIFY => {
                     Ok(Incoming::Closed)
+                }
+                // RFC 8446 §6.1: the one warning TLS 1.3 still has, a peer
+                // abandoning something. It is advisory, and counted.
+                Some(alert)
+                    if alert.level == AlertLevel::Warning
+                        && alert.description == AlertDescription::USER_CANCELED =>
+                {
+                    self.noise.warning()?;
+                    Ok(Incoming::Handled)
+                }
+                // Every other warning is illegal in TLS 1.3 (§6): alerts that
+                // end a connection are fatal, and the rest were removed. So is
+                // a level that is neither.
+                Some(alert) if alert.level != AlertLevel::Fatal => {
+                    Err(ClientError::BadAlert(alert))
                 }
                 Some(alert) => Err(ClientError::PeerAlert(alert)),
                 None => Err(ClientError::UnexpectedContentType(ContentType::Alert)),
@@ -2111,9 +2501,17 @@ impl Connection {
                     }
                 }
                 HandshakeType::KeyUpdate => {
+                    self.noise.key_update()?;
                     // RFC 8446 §4.6.3. The body is one octet:
                     // update_not_requested(0) or update_requested(1).
-                    let requested = message.body == [0x01];
+                    let requested =
+                        match message.body {
+                            [0x00] => false,
+                            [0x01] => true,
+                            _ => return Err(ClientError::Handshake(HandshakeError::Malformed(
+                                "KeyUpdate request is not update_not_requested or update_requested",
+                            ))),
+                        };
                     self.server_secret = update_traffic_secret(self.hash, &self.server_secret);
                     let keys = traffic_keys(self.hash, &self.server_secret, self.aead.key_len());
                     self.opener = Opener::new(self.aead, &keys.key, &keys.iv)?;

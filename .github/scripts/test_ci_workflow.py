@@ -81,6 +81,10 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # automatically, and each must list at least one test.
         self.assertIn("tests/handrolled_*.rs", job)
         self.assertIn("compiled to zero tests", job)
+        # BoGo: the run script fails on any FAIL, and the floor catches a shim
+        # that skips every test and so "passes".
+        self.assertIn("bogo/run.sh", job)
+        self.assertIn("-lt 400", job)
 
     def test_every_handrolled_suite_is_gated_on_the_cfg_the_job_sets(self) -> None:
         # The guard above only works if each suite really is cfg-gated: an

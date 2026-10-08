@@ -1128,6 +1128,7 @@ fn a_malformed_hello_is_a_decode_error_and_never_a_panic() {
         error,
         ServerError::Handshake(HandshakeError::DuplicateExtension(_))
     ));
+    // A message that is shaped wrong (BoGo DuplicateExtensionClient).
     assert_eq!(alert, AlertDescription::DECODE_ERROR);
 
     let mut long_id = honest.clone();
@@ -1977,17 +1978,15 @@ mod scripted {
             c.finished_record(&data, &[])
         });
         assert_eq!(short, ServerError::BadFinished);
-        // The wrong length is malformed rather than wrong.
+        // The wrong length is a Finished that does not verify, not a message
+        // that does not parse (BoGo `TrailingMessageData-ClientFinished`).
         for len in [0usize, 11, 13, 32] {
             let error = case(&|c, honest| {
                 let mut data = honest;
                 data.resize(len, 0);
                 c.finished_record(&data, &[])
             });
-            assert!(
-                matches!(error, ServerError::Handshake(HandshakeError::Malformed(_))),
-                "length {len}: {error:?}"
-            );
+            assert_eq!(error, ServerError::BadFinished, "length {len}");
         }
     }
 
@@ -2140,5 +2139,117 @@ mod scripted {
                 "{name}"
             );
         }
+    }
+
+    /// BoGo: SendEmptyRecords (32 pass, 33 fail), SendWarningAlerts (4 pass,
+    /// 5 fail), and the two counted separately so neither hides behind the
+    /// other.
+    #[test]
+    fn floods_of_empty_records_and_warnings_are_cut_off_on_an_established_connection() {
+        use rusty_tls::handrolled::limits::{Flood, MAX_EMPTY_RECORDS, MAX_WARNING_ALERTS};
+
+        let server = secure_server();
+        let (config, hello) = scripted_server(&server);
+        let established = || {
+            let mut srv = ServerHandshake12::new(&config).expect("server");
+            let mut client = Scripted::start(&mut srv, &hello);
+            srv.read_record(&client.cke_record()).expect("cke");
+            srv.read_record(&Scripted::ccs_record()).expect("ccs");
+            let data = client.verify_data(Side::Client, &client.transcript.clone());
+            let reply = srv
+                .read_record(&client.finished_record(&data, &[]))
+                .expect("finished");
+            client.check_server_finish(reply, &data);
+            (client, srv.into_connection().expect("connection"))
+        };
+
+        // Empty records: 32 are fine, data resets, the 33rd of a run is not.
+        let (mut client, mut connection) = established();
+        for _ in 0..MAX_EMPTY_RECORDS {
+            let r = client
+                .sealer
+                .seal(ContentType::ApplicationData, &[])
+                .expect("seal");
+            assert_eq!(
+                connection.read(&r).expect("within the limit"),
+                Incoming12::Application(vec![])
+            );
+        }
+        let r = client
+            .sealer
+            .seal(ContentType::ApplicationData, b"x")
+            .expect("seal");
+        connection.read(&r).expect("data");
+        for _ in 0..MAX_EMPTY_RECORDS {
+            let r = client
+                .sealer
+                .seal(ContentType::ApplicationData, &[])
+                .expect("seal");
+            connection.read(&r).expect("a fresh run");
+        }
+        let r = client
+            .sealer
+            .seal(ContentType::ApplicationData, &[])
+            .expect("seal");
+        assert!(matches!(
+            connection.read(&r),
+            Err(ClientError::Flood(Flood::EmptyRecords))
+        ));
+
+        // Warnings: 4 are fine, the 5th is not, empty records do not reset them.
+        let (mut client, mut connection) = established();
+        for i in 0..MAX_WARNING_ALERTS {
+            let r = client
+                .sealer
+                .seal(ContentType::Alert, &[1, 100])
+                .expect("seal");
+            assert_eq!(
+                connection.read(&r).expect("advisory"),
+                Incoming12::Handled,
+                "{i}"
+            );
+            let r = client
+                .sealer
+                .seal(ContentType::ApplicationData, &[])
+                .expect("seal");
+            connection.read(&r).expect("empty");
+        }
+        let r = client
+            .sealer
+            .seal(ContentType::Alert, &[1, 100])
+            .expect("seal");
+        assert!(matches!(
+            connection.read(&r),
+            Err(ClientError::Flood(Flood::WarningAlerts))
+        ));
+    }
+
+    /// Before keys exist the same floods apply to the handshake's own reader.
+    #[test]
+    fn floods_are_cut_off_during_the_handshake_too() {
+        use rusty_tls::handrolled::limits::{Flood, MAX_EMPTY_RECORDS, MAX_WARNING_ALERTS};
+
+        let server = secure_server();
+        let (config, _) = scripted_server(&server);
+
+        let mut srv = ServerHandshake12::new(&config).expect("server");
+        for _ in 0..MAX_EMPTY_RECORDS {
+            srv.read_record(&record(ContentType::Handshake, &[]))
+                .expect("within the limit");
+        }
+        assert_eq!(
+            srv.read_record(&record(ContentType::Handshake, &[])),
+            Err(ServerError::Flood(Flood::EmptyRecords))
+        );
+
+        let mut srv = ServerHandshake12::new(&config).expect("server");
+        for _ in 0..MAX_WARNING_ALERTS {
+            srv.read_record(&record(ContentType::Alert, &[1, 100]))
+                .expect("advisory");
+        }
+        assert_eq!(
+            srv.read_record(&record(ContentType::Alert, &[1, 100])),
+            Err(ServerError::Flood(Flood::WarningAlerts))
+        );
     }
 }

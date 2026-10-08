@@ -142,7 +142,8 @@ use super::handshake::{
     HELLO_RETRY_REQUEST_RANDOM, SERVER_CERTIFICATE_VERIFY_CONTEXT,
 };
 use super::kx::{KeyExchange, KxError, NamedGroup};
-use super::path::{validate_path, PathError, PathOptions, TrustAnchor};
+use super::limits::{Flood, Noise};
+use super::path::{require_signing_key_usage, validate_path, PathError, PathOptions, TrustAnchor};
 use super::record::{
     Aead, ContentType, Opener, RecordError, Sealer, HEADER_LEN, MAX_ENCRYPTED_FRAGMENT_LEN,
 };
@@ -157,7 +158,9 @@ use super::verify::{verify_tls13_signature, SignatureScheme, VerifyError};
 use super::wire::{Reader, Writer};
 use super::x509::{Certificate, X509Error};
 
-use super::client::{Alert, AlertDescription, AlertLevel, CipherSuite, Connection};
+use super::client::{
+    handshake_alert, record_alert, Alert, AlertDescription, AlertLevel, CipherSuite, Connection,
+};
 
 /// Everything the server handshake can refuse.
 ///
@@ -278,6 +281,13 @@ pub enum ServerError {
     HandshakeTooLarge,
     /// The TLS 1.2 key derivation was refused.
     Schedule(ScheduleError),
+    /// The peer sent too many records that carry nothing; see
+    /// [`super::limits`].
+    Flood(Flood),
+    /// A required extension was absent (RFC 8446 §9.2); carries its type.
+    MissingExtension(u16),
+    /// A warning alert that TLS 1.3 does not permit (RFC 8446 §6).
+    BadAlert(Alert),
     /// The client signalled `TLS_FALLBACK_SCSV` (RFC 7507) while offering
     /// less than this server's best version: it is retrying after a failure
     /// that an attacker may have caused, and answering would complete the
@@ -348,6 +358,9 @@ impl core::fmt::Display for ServerError {
             Self::UnexpectedChangeCipherSpec => f.write_str("unexpected ChangeCipherSpec"),
             Self::HandshakeTooLarge => f.write_str("the client's handshake message is too large"),
             Self::Schedule(err) => write!(f, "key derivation: {err}"),
+            Self::Flood(flood) => write!(f, "{flood}"),
+            Self::MissingExtension(typ) => write!(f, "the client did not send extension {typ}"),
+            Self::BadAlert(alert) => write!(f, "an alert TLS 1.3 does not allow: {alert:?}"),
             Self::InappropriateFallback => {
                 f.write_str("the client is falling back to a lower version than this server speaks")
             }
@@ -372,6 +385,11 @@ impl From<KxError> for ServerError {
         Self::Kx(err)
     }
 }
+impl From<Flood> for ServerError {
+    fn from(err: Flood) -> Self {
+        Self::Flood(err)
+    }
+}
 impl From<ScheduleError> for ServerError {
     fn from(err: ScheduleError) -> Self {
         Self::Schedule(err)
@@ -389,39 +407,48 @@ impl ServerError {
     /// Deliberately coarse. A server that mapped every internal distinction to
     /// its own alert would be describing its own parser to whoever asked, and
     /// the RFC's alert set is not that fine-grained anyway.
-    pub const fn alert(&self) -> Option<AlertDescription> {
+    pub fn alert(&self) -> Option<AlertDescription> {
         Some(match self {
-            Self::NotTls13 => AlertDescription::PROTOCOL_VERSION,
-            Self::Handshake(_) | Self::UnexpectedMessage { .. } => AlertDescription::DECODE_ERROR,
-            Self::UnexpectedContentType(_) => AlertDescription::ILLEGAL_PARAMETER,
-            Self::BadFinished | Self::ClientCertificateVerify(_) => AlertDescription::DECRYPT_ERROR,
+            Self::NotTls13 | Self::NotTls12(_) => AlertDescription::PROTOCOL_VERSION,
+            Self::Handshake(err) => handshake_alert(err),
+            Self::Record(err) => record_alert(err),
+            // The message was well formed and in the wrong place.
+            Self::UnexpectedMessage { .. }
+            | Self::UnexpectedContentType(_)
+            | Self::UnexpectedChangeCipherSpec
+            | Self::Flood(_) => AlertDescription::UNEXPECTED_MESSAGE,
+            Self::BadAlert(Alert {
+                level: AlertLevel::Unknown(_),
+                ..
+            }) => AlertDescription::ILLEGAL_PARAMETER,
+            Self::BadAlert(_) => AlertDescription::DECODE_ERROR,
+            Self::BadFinished | Self::ClientCertificateVerify(_) | Self::BadBinder => {
+                AlertDescription::DECRYPT_ERROR
+            }
             Self::ClientCertificateRequired => AlertDescription::CERTIFICATE_REQUIRED,
+            Self::MissingExtension(_) => AlertDescription::MISSING_EXTENSION,
             Self::ClientCertificate(_) | Self::MalformedClientCertificate(_) => {
                 AlertDescription::BAD_CERTIFICATE
             }
-            Self::Record(_) => AlertDescription::BAD_RECORD_MAC,
             Self::NoSharedCipherSuite
             | Self::NoSharedGroup
             | Self::RetriedHelloStillHasNoShare(_)
             | Self::Kx(_)
             | Self::NoSharedSignatureScheme
-            | Self::Sign(_)
-            | Self::Random => AlertDescription::HANDSHAKE_FAILURE,
+            | Self::MissingExtendedMasterSecret
+            | Self::BadRenegotiationInfo
+            | Self::Schedule(_)
+            | Self::Ticket(_) => AlertDescription::HANDSHAKE_FAILURE,
             // §4.1.2 calls a hello that changed where it may not an illegal
             // parameter, which is more specific than "handshake failure" and
             // tells the client which of the two hellos to look at.
-            Self::RetriedHelloChangedIdentity => AlertDescription::ILLEGAL_PARAMETER,
-            Self::BadBinder => AlertDescription::DECRYPT_ERROR,
-            Self::PskOfferNotLast | Self::EarlyDataOffered => AlertDescription::ILLEGAL_PARAMETER,
-            Self::Ticket(_) => AlertDescription::HANDSHAKE_FAILURE,
-            Self::NotTls12(_) => AlertDescription::PROTOCOL_VERSION,
-            Self::MissingExtendedMasterSecret
-            | Self::BadRenegotiationInfo
+            Self::RetriedHelloChangedIdentity
             | Self::UnacceptableOffer(_)
-            | Self::Schedule(_) => AlertDescription::HANDSHAKE_FAILURE,
-            Self::UnexpectedChangeCipherSpec => AlertDescription::UNEXPECTED_MESSAGE,
+            | Self::PskOfferNotLast
+            | Self::EarlyDataOffered
+            | Self::HandshakeTooLarge => AlertDescription::ILLEGAL_PARAMETER,
             Self::InappropriateFallback => AlertDescription::INAPPROPRIATE_FALLBACK,
-            Self::HandshakeTooLarge => AlertDescription::ILLEGAL_PARAMETER,
+            Self::Sign(_) | Self::Random => AlertDescription::INTERNAL_ERROR,
             // The peer already knows; telling it again is noise.
             Self::PeerAlert(_) | Self::Failed => return None,
         })
@@ -650,6 +677,13 @@ pub struct ServerHandshake<'a> {
     config: &'a ServerConfig<'a>,
     state: State,
     buffer: Vec<u8>,
+    /// Records that carried nothing, so they cannot go on for ever.
+    noise: Noise,
+    /// The key an alert would be sealed under once the server's flight is out:
+    /// its application traffic key at sequence zero. Held apart from the state
+    /// because a failure replaces the state, and the alert that describes the
+    /// failure is built afterwards.
+    alert_sealer: Option<Sealer>,
 }
 
 impl<'a> ServerHandshake<'a> {
@@ -662,6 +696,8 @@ impl<'a> ServerHandshake<'a> {
             config,
             state: State::AwaitClientHello,
             buffer: Vec::new(),
+            noise: Noise::new(),
+            alert_sealer: None,
         }
     }
 
@@ -701,12 +737,17 @@ impl<'a> ServerHandshake<'a> {
     ///
     /// Returns `None` when the peer should not be told — it already sent an
     /// alert of its own, or the connection was already dead.
-    pub fn alert_record(&self, error: &ServerError) -> Option<Vec<u8>> {
+    pub fn alert_record(&mut self, error: &ServerError) -> Option<Vec<u8>> {
         let description = error.alert()?;
-        // Always in the clear. A server that failed before deriving keys has
-        // none, and one that failed afterwards is telling the peer something
-        // the peer can already infer from the connection dying.
-        plaintext_record(ContentType::Alert, &[2, description.0]).ok()
+        let body = [2, description.0];
+        // Once the server has sent its flight it has moved to its application
+        // traffic key for everything it writes (RFC 8446 §7.1: the server's
+        // Finished is the last record under the handshake key), and the client
+        // reads under it. Before that there is nothing to protect with.
+        if let Some(sealer) = self.alert_sealer.as_mut() {
+            return sealer.seal(ContentType::Alert, &body, 0).ok();
+        }
+        plaintext_record(ContentType::Alert, &body).ok()
     }
 
     fn read_record_inner(&mut self, record: &[u8]) -> Result<Vec<u8>> {
@@ -718,6 +759,7 @@ impl<'a> ServerHandshake<'a> {
             .into());
         }
         if record[0] == CHANGE_CIPHER_SPEC {
+            self.noise.empty_record()?;
             return Ok(Vec::new());
         }
 
@@ -735,6 +777,11 @@ impl<'a> ServerHandshake<'a> {
 
         let fragment = match &mut self.state {
             State::AwaitClientHello | State::AwaitRetriedClientHello(_) => {
+                // A plaintext record's version is a hint (clients say 3.1 and
+                // 3.3 alike), but a major version other than 3 is not TLS.
+                if record[1] != 3 {
+                    return Err(RecordError::UnexpectedVersion([record[1], record[2]]).into());
+                }
                 if ContentType::from_u8(record[0]) == ContentType::Alert {
                     return Err(alert_error(&record[HEADER_LEN..]));
                 }
@@ -756,6 +803,11 @@ impl<'a> ServerHandshake<'a> {
             State::Done(_) | State::Failed => return Err(ServerError::Failed),
         };
 
+        if fragment.is_empty() {
+            self.noise.empty_record()?;
+        } else {
+            self.noise.data();
+        }
         self.buffer.extend_from_slice(&fragment);
 
         let mut reply = Vec::new();
@@ -765,8 +817,35 @@ impl<'a> ServerHandshake<'a> {
                 return Ok(reply);
             }
             let consumed: Vec<u8> = self.buffer.drain(..complete).collect();
-            for message in messages(&consumed)? {
-                reply.extend_from_slice(&self.handle(&message)?);
+            let parsed = messages(&consumed)?;
+            let last = parsed.len().saturating_sub(1);
+            for (index, message) in parsed.iter().enumerate() {
+                // RFC 8446 §5.1: no handshake message may span a change of
+                // keys. After a ClientHello the server answers under new keys
+                // (or asks for a second hello in a new record); after the
+                // client's Finished everything is application data. Bytes of
+                // another message in the same record, or half-read, are both
+                // `unexpected_message`. For a ClientHello that is decided
+                // before the flight is built, so the refusal goes out in the
+                // clear: nothing protected has been sent.
+                let changes_keys = matches!(
+                    message.typ,
+                    HandshakeType::ClientHello | HandshakeType::Finished
+                );
+                let stray = changes_keys && (index != last || !self.buffer.is_empty());
+                if stray && message.typ == HandshakeType::ClientHello {
+                    return Err(ServerError::UnexpectedMessage {
+                        expected: "a record boundary at a change of keys",
+                        got: message.typ,
+                    });
+                }
+                reply.extend_from_slice(&self.handle(message)?);
+                if stray {
+                    return Err(ServerError::UnexpectedMessage {
+                        expected: "a record boundary at a change of keys",
+                        got: message.typ,
+                    });
+                }
             }
         }
     }
@@ -783,10 +862,23 @@ impl<'a> ServerHandshake<'a> {
 
 fn alert_error(body: &[u8]) -> ServerError {
     match body {
-        [level, description] => ServerError::PeerAlert(Alert {
-            level: AlertLevel::from_wire(*level),
-            description: AlertDescription(*description),
-        }),
+        [level, description] => {
+            let alert = Alert {
+                level: AlertLevel::from_wire(*level),
+                description: AlertDescription(*description),
+            };
+            // RFC 8446 §6: the only warnings TLS 1.3 has are close_notify and
+            // user_canceled; any other is not an alert it can mean.
+            let legal = alert.description == AlertDescription::CLOSE_NOTIFY
+                || alert.description == AlertDescription::USER_CANCELED;
+            if (alert.level == AlertLevel::Warning && !legal)
+                || matches!(alert.level, AlertLevel::Unknown(_))
+            {
+                ServerError::BadAlert(alert)
+            } else {
+                ServerError::PeerAlert(alert)
+            }
+        }
         _ => ServerError::UnexpectedContentType(ContentType::Alert),
     }
 }
@@ -857,6 +949,9 @@ fn client_key_shares(data: &[u8]) -> core::result::Result<Vec<(u16, &[u8])>, Han
     while !list.is_empty() {
         let group = list.u16().map_err(HandshakeError::Wire)?;
         let key = list.vector_u16().map_err(HandshakeError::Wire)?;
+        if out.iter().any(|(seen, _)| *seen == group) {
+            return Err(HandshakeError::DuplicateKeyShare(group));
+        }
         out.push((group, key));
     }
     Ok(out)
@@ -1085,7 +1180,7 @@ impl ServerHandshake<'_> {
                 got: message.typ,
             });
         }
-        let hello = ClientHello::parse(message.body)?;
+        let hello = ClientHello::parse_lenient(message.body)?;
 
         // Version first. Everything below assumes TLS 1.3 semantics, so a
         // client that did not ask for it must be turned away before any of it
@@ -1122,14 +1217,19 @@ impl ServerHandshake<'_> {
         // share. A group offered with no share is not a failure — it is what
         // HelloRetryRequest is for, so the miss falls through to `retry`.
         //
-        // A *missing* `key_share` extension is treated the same as an empty
-        // one rather than as a malformed hello: sending no shares and waiting
-        // to be told which group to use is a legitimate thing for a client to
-        // do, and it is the case a retry serves best.
-        let shares = match find(&hello.extensions, extension::KEY_SHARE) {
-            Some(data) => client_key_shares(data)?,
-            None => Vec::new(),
-        };
+        // An *empty* `key_share` is a legitimate thing for a client to send —
+        // no shares, waiting to be told which group to use — and the case a
+        // retry serves best. An *absent* one is not: RFC 8446 §9.2 requires
+        // `key_share` and `supported_groups` together or not at all, and this
+        // server does no key exchange without them, so either missing is a
+        // `missing_extension` (BoGo `MissingKeyShare-Server`).
+        let shares = client_key_shares(
+            find(&hello.extensions, extension::KEY_SHARE)
+                .ok_or(ServerError::MissingExtension(extension::KEY_SHARE))?,
+        )?;
+        if find(&hello.extensions, extension::SUPPORTED_GROUPS).is_none() {
+            return Err(ServerError::MissingExtension(extension::SUPPORTED_GROUPS));
+        }
         let chosen = self.config.groups.iter().find_map(|group| {
             shares
                 .iter()
@@ -1180,8 +1280,11 @@ impl ServerHandshake<'_> {
         // Now the miss is fatal: with no group in common there is nothing to
         // retry *with*, and a retry the client cannot satisfy is worse than a
         // refusal it can understand.
+        // RFC 8446 §9.2: a client that offers key shares must say which groups
+        // it supports. Leaving it out is a missing extension, which is a
+        // different fault from supporting nothing this server has.
         let offered = find(&hello.extensions, extension::SUPPORTED_GROUPS)
-            .ok_or(ServerError::NoSharedGroup)?;
+            .ok_or(ServerError::MissingExtension(extension::SUPPORTED_GROUPS))?;
         let offered = client_supported_groups(offered)?;
         let group = *self
             .config
@@ -1267,7 +1370,7 @@ impl ServerHandshake<'_> {
                 got: message.typ,
             });
         }
-        let hello = ClientHello::parse(message.body)?;
+        let hello = ClientHello::parse_lenient(message.body)?;
 
         let State::AwaitRetriedClientHello(retrying) =
             core::mem::replace(&mut self.state, State::Failed)
@@ -1524,6 +1627,8 @@ impl ServerHandshake<'_> {
         }
         out.extend_from_slice(&sealer.seal(ContentType::Handshake, &flight, 0)?);
 
+        let alert_keys = traffic_keys(hash, &server_application_secret, aead.key_len());
+        self.alert_sealer = Some(Sealer::new(aead, &alert_keys.key, &alert_keys.iv)?);
         self.state = State::AwaitFinished(Box::new(Negotiated {
             aead,
             hash,
@@ -1601,6 +1706,8 @@ impl ServerHandshake<'_> {
                 // there is no hostname for it to match — using the server's
                 // own name here would be nonsense that happened to compile.
                 if let Err(err) = validate_path(end_entity, intermediates, auth.anchors, &auth.path)
+                    .map(|_| ())
+                    .and_then(|()| require_signing_key_usage(end_entity))
                 {
                     self.state = State::Failed;
                     return Err(ServerError::ClientCertificate(err));

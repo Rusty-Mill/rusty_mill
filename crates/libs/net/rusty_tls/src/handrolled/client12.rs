@@ -77,6 +77,7 @@ use super::handshake12::{
     ServerHello12, ServerKeyExchange, TLS12,
 };
 use super::kx::{KeyExchange, NamedGroup};
+use super::limits::Noise;
 use super::name::ServerName;
 use super::path::{verify_peer_certificate, PathOptions, TrustAnchor};
 use super::record::{Aead, ContentType, RecordError, MAX_FRAGMENT_LEN};
@@ -252,6 +253,11 @@ pub struct ClientHandshake12<'a> {
     /// True when the ClientHello also offered TLS 1.3, so a ServerHello that
     /// answers in 1.2 must not carry the `DOWNGRD` sentinel.
     offered_tls13: bool,
+    /// The session id the hello carried. Empty unless this handshake continues
+    /// a combined hello, whose 1.3 compatibility id is not a session.
+    offered_session_id: Vec<u8>,
+    /// Records that carried nothing, so they cannot go on for ever.
+    noise: Noise,
 }
 
 fn encode_client_hello(config: &ClientConfig12<'_>, random: &[u8]) -> Result<Vec<u8>> {
@@ -354,6 +360,8 @@ impl<'a> ClientHandshake12<'a> {
                 buffer: Vec::new(),
                 connection: None,
                 offered_tls13: false,
+                offered_session_id: Vec::new(),
+                noise: Noise::default(),
             },
             record,
         ))
@@ -369,6 +377,7 @@ impl<'a> ClientHandshake12<'a> {
         config: &'a ClientConfig12<'a>,
         hello: Vec<u8>,
         random: &[u8],
+        session_id: Vec<u8>,
     ) -> Result<Self> {
         let (mut handshake, _) = Self::start(config)?;
         let mut client_random = [0u8; RANDOM_LEN];
@@ -376,7 +385,24 @@ impl<'a> ClientHandshake12<'a> {
         handshake.hs.client_random = client_random;
         handshake.hs.transcript = hello;
         handshake.offered_tls13 = true;
+        handshake.offered_session_id = session_id;
         Ok(handshake)
+    }
+
+    /// The fatal alert record to send for `error`, if the server should be
+    /// told.
+    ///
+    /// In the clear until this client's own `ChangeCipherSpec` has been sent,
+    /// and protected after: from then on the server expects nothing else.
+    pub fn alert_record(&mut self, error: &ClientError) -> Option<Vec<u8>> {
+        let description = error.alert()?;
+        if let Some(established) = self.hs.established.as_mut() {
+            return established
+                .sealer
+                .seal(ContentType::Alert, &[2, description.0])
+                .ok();
+        }
+        plaintext_record(ContentType::Alert, RECORD_VERSION, &[2, description.0]).ok()
     }
 
     /// True once the handshake has completed and [`Self::into_connection`]
@@ -451,9 +477,12 @@ impl<'a> ClientHandshake12<'a> {
     /// An alert in the clear. Fatal ones, and `close_notify` (which cannot be
     /// orderly before the handshake is done), end the handshake; other warnings
     /// are advisory and ignored, as RFC 5246 §7.2 allows.
-    fn plaintext_alert(&self, fragment: &[u8]) -> Result<Vec<u8>> {
+    fn plaintext_alert(&mut self, fragment: &[u8]) -> Result<Vec<u8>> {
         match Alert::parse(fragment) {
-            Some(alert) if alert.is_advisory() => Ok(Vec::new()),
+            Some(alert) if alert.is_advisory() => {
+                self.noise.warning()?;
+                Ok(Vec::new())
+            }
             Some(alert) => Err(ClientError::PeerAlert(alert)),
             None => Err(ClientError::UnexpectedContentType(ContentType::Alert)),
         }
@@ -486,6 +515,11 @@ impl<'a> ClientHandshake12<'a> {
         if self.buffer.len() + fragment.len() > MAX_HANDSHAKE_BUFFER {
             return Err(ClientError::HandshakeTooLarge);
         }
+        if fragment.is_empty() {
+            self.noise.empty_record()?;
+        } else {
+            self.noise.data();
+        }
         self.buffer.extend_from_slice(fragment);
 
         let mut reply = Vec::new();
@@ -495,8 +529,24 @@ impl<'a> ClientHandshake12<'a> {
                 return Ok(reply);
             }
             let consumed: Vec<u8> = self.buffer.drain(..complete).collect();
-            for msg in messages(&consumed)? {
-                reply.extend_from_slice(&self.handle_message(&msg)?);
+            let parsed = messages(&consumed)?;
+            let last = parsed.len().saturating_sub(1);
+            for (index, msg) in parsed.iter().enumerate() {
+                // The server's flight ends at ServerHelloDone and nothing may
+                // follow it: this client answers it with its own flight, and
+                // bytes of a message left in the buffer would be glued to
+                // whatever comes next (BoGo `Partial*WithServerHelloDone`).
+                // Checked before the flight is built, so the refusal is an
+                // alert in the clear: nothing protected has been sent.
+                if msg.typ == HandshakeType::ServerHelloDone
+                    && (index != last || !self.buffer.is_empty())
+                {
+                    return Err(ClientError::UnexpectedMessage {
+                        expected: "nothing after ServerHelloDone",
+                        got: msg.typ,
+                    });
+                }
+                reply.extend_from_slice(&self.handle_message(msg)?);
             }
         }
     }
@@ -567,6 +617,13 @@ impl<'a> ClientHandshake12<'a> {
         if self.offered_tls13 && is_downgrade_sentinel(hello.random) {
             return Err(ClientError::DowngradeDetected);
         }
+        // A ServerHello that echoes the session id the hello carried claims to
+        // resume a session. The id in a combined hello is TLS 1.3's
+        // middlebox-compatibility filler (RFC 8446 §D.4), not a session, so an
+        // echo is a server that is confused about what it is resuming.
+        if !self.offered_session_id.is_empty() && hello.session_id == self.offered_session_id {
+            return Err(ClientError::SessionIdMismatch);
+        }
         let suite = CipherSuite12(hello.cipher_suite);
         if !self.config.cipher_suites.contains(&suite) {
             return Err(ClientError::UnofferedCipherSuite(hello.cipher_suite));
@@ -582,19 +639,25 @@ impl<'a> ClientHandshake12<'a> {
         // The set is what the ClientHello carried, minus the ones a server
         // never echoes with data (supported_groups, signature_algorithms).
         for ext in &hello.extensions {
-            let allowed = matches!(
-                ext.typ,
-                extension::SERVER_NAME
-                    | extension::EC_POINT_FORMATS
-                    | extension::EXTENDED_MASTER_SECRET
-                    | extension::RENEGOTIATION_INFO
-            );
+            let allowed = match ext.typ {
+                // Only as an answer to a name that was sent.
+                extension::SERVER_NAME => matches!(self.config.server_name, ServerName::Dns(_)),
+                // RFC 8422 lets a server volunteer its groups, and BoringSSL's
+                // suite checks that a client carries on.
+                extension::SUPPORTED_GROUPS => true,
+                extension::EC_POINT_FORMATS
+                | extension::EXTENDED_MASTER_SECRET
+                | extension::RENEGOTIATION_INFO => true,
+                _ => false,
+            };
             if !allowed {
                 return Err(ClientError::UnofferedExtension(ext.typ));
             }
         }
         if find(&hello.extensions, extension::SERVER_NAME).is_some_and(|data| !data.is_empty()) {
-            return Err(ClientError::UnofferedExtension(extension::SERVER_NAME));
+            return Err(ClientError::Handshake(HandshakeError::Malformed(
+                "a server_name acknowledgement is not empty",
+            )));
         }
         match find(&hello.extensions, extension::EXTENDED_MASTER_SECRET) {
             Some([]) => {}
@@ -750,7 +813,9 @@ impl<'a> ClientHandshake12<'a> {
     }
 
     fn server_finished(&mut self, body: &[u8]) -> Result<()> {
-        let received = parse_finished(body)?;
+        // A Finished of the wrong length is a Finished that does not verify
+        // (BoGo `TrailingMessageData-*Finished`): decrypt_error, not decode_error.
+        let received = parse_finished(body).map_err(|_| ClientError::BadFinished)?;
         // Nothing may follow the Finished in its record, or be left half-read.
         if !self.buffer.is_empty() {
             return Err(ClientError::UnexpectedMessage {
@@ -758,7 +823,10 @@ impl<'a> ClientHandshake12<'a> {
                 got: HandshakeType::Unknown(0),
             });
         }
-        let established = self.hs.established.take().ok_or(ClientError::Failed)?;
+        // Borrowed for the check and taken only after it passes: a failure here
+        // is answered with an alert under the keys this client already sends
+        // with, and they live in `established`.
+        let established = self.hs.established.as_ref().ok_or(ClientError::Failed)?;
         let hash = self.hs.hash;
         let handshake_hash = hash.hash(&self.hs.transcript);
         if !verify_finished(
@@ -770,6 +838,7 @@ impl<'a> ClientHandshake12<'a> {
         ) {
             return Err(ClientError::BadFinished);
         }
+        let established = self.hs.established.take().ok_or(ClientError::Failed)?;
 
         self.connection = Some(Connection12::new(
             Role::Client,
@@ -835,6 +904,8 @@ pub struct Connection12 {
     certificates: Vec<Vec<u8>>,
     closed: bool,
     failed: bool,
+    /// Records that carried nothing, so they cannot go on for ever.
+    noise: Noise,
 }
 
 impl Connection12 {
@@ -853,6 +924,7 @@ impl Connection12 {
             certificates,
             closed: false,
             failed: false,
+            noise: Noise::default(),
         }
     }
 
@@ -878,6 +950,14 @@ impl Connection12 {
             out.extend(self.sealer.seal(ContentType::ApplicationData, chunk)?);
         }
         Ok(out)
+    }
+
+    /// The fatal alert record to send for `error`, protected.
+    pub fn alert_record(&mut self, error: &ClientError) -> Option<Vec<u8>> {
+        let description = error.alert()?;
+        self.sealer
+            .seal(ContentType::Alert, &[2, description.0])
+            .ok()
     }
 
     /// Send `close_notify` and stop writing. The peer's own `close_notify` is
@@ -913,13 +993,23 @@ impl Connection12 {
     fn read_inner(&mut self, record: &[u8]) -> Result<Incoming12> {
         let opened = self.opener.open(record)?;
         match opened.typ {
-            ContentType::ApplicationData => Ok(Incoming12::Application(opened.fragment)),
+            ContentType::ApplicationData => {
+                if opened.fragment.is_empty() {
+                    self.noise.empty_record()?;
+                } else {
+                    self.noise.data();
+                }
+                Ok(Incoming12::Application(opened.fragment))
+            }
             ContentType::Alert => match Alert::parse(&opened.fragment) {
                 Some(alert) if alert.description == AlertDescription::CLOSE_NOTIFY => {
                     self.closed = true;
                     Ok(Incoming12::Closed)
                 }
-                Some(alert) if alert.level == AlertLevel::Warning => Ok(Incoming12::Handled),
+                Some(alert) if alert.level == AlertLevel::Warning => {
+                    self.noise.warning()?;
+                    Ok(Incoming12::Handled)
+                }
                 Some(alert) => Err(ClientError::PeerAlert(alert)),
                 None => Err(ClientError::UnexpectedContentType(ContentType::Alert)),
             },

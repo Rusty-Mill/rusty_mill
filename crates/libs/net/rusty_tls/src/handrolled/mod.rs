@@ -40,6 +40,8 @@
 //! - [`negotiate`] — one endpoint that speaks both (stage 4b-v): chooses the
 //!   version from the first message, writes and checks the `DOWNGRD` sentinel,
 //!   and refuses a `TLS_FALLBACK_SCSV` retry.
+//! - [`limits`] — the flood limits (stage 4b-vi): empty records, warning alerts
+//!   and `KeyUpdate`s a peer may send in a row before the connection is dropped.
 //! - [`der`] — a strict DER reader (stage 2a), the foundation everything
 //!   certificate-shaped sits on.
 //! - [`x509`] — certificate parsing (stage 2a). **Parsing only**: it reports
@@ -104,6 +106,7 @@ pub mod der;
 pub mod handshake;
 pub mod handshake12;
 pub mod kx;
+pub mod limits;
 pub mod name;
 pub mod negotiate;
 pub mod path;

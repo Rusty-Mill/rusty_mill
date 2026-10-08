@@ -1,0 +1,25 @@
+# BoringSSL's protocol test suite ("BoGo") shim for the hand-rolled engine.
+#
+# Deliberately a separate, unpublished package, like `fuzz/`: it is a test
+# harness with a binary, it needs a Go toolchain and a BoringSSL checkout to be
+# any use, and nothing about it belongs in the workspace's dependency graph.
+# See README.md for how to run it.
+#
+#   RUSTFLAGS='--cfg rusty_tls_handrolled' cargo build --release
+
+[package]
+name = "rusty_tls-bogo"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies.rusty_tls]
+path = ".."
+features = ["handrolled-engine"]
+
+[[bin]]
+name = "bogo_shim"
+path = "src/main.rs"
+
+# Standalone: not a member of the parent, which has no workspace of its own.
+[workspace]
