@@ -75,6 +75,12 @@ velocity report); touchdowns (`touchdown_errors.py`, 195 landings) have a median
 0.7 uu/s over four ticks. The remaining error is events: bounces on geometry, landings with spin,
 hits on a resting ball.
 
+Latest (2026-10-08, after FR-154 to FR-159; fresh seeds `wallfuzz_421` to `444`): **mean 121 uu, median
+43 uu**, 9 of 24 under 30 uu: the wall-start regime is no longer the weakest. Fresh hit tapes
+(`hitfuzz_401` to `424`): 14 of 24 have a ball error of 0.0, five are over 70 uu (the resting-ball knife
+edge, O020). Two-car duels (`duel_*`, held-out seeds 941 to 964): median 157 uu, total 11900 uu against 15514
+before the bump rules FR-158 and FR-159.
+
 ## Random ball launches
 
 `gen_ball_fuzz.py`: 24 seeded 6 s launches (random place, velocity 500 to 2500 uu/s,
