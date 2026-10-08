@@ -491,6 +491,14 @@ impl PhysicsWorld {
         }
     }
 
+    /// Where car `index`'s four wheel rays hit right now, as `step` casts them at
+    /// the start of a tick (`drive::cast_wheels` against the arena and the ball):
+    /// an instrument for the wall and ramp work (PARITY-PLAN workstream A), it
+    /// changes nothing. Panics if `index` is out of bounds (see `set_car_input`).
+    pub fn wheel_contacts(&self, index: usize, dt: f32) -> drive::WheelContacts {
+        drive::cast_wheels(&self.cars[index], |o, d, l| self.wheel_ray(o, d, l), dt)
+    }
+
     fn static_scene(&self) -> StaticScene<'_> {
         StaticScene {
             ground: &self.ground,
@@ -1592,6 +1600,24 @@ pub fn simulate_recorded_one_step(
     frames
 }
 
+/// The first car's wheel hits at each recorded frame, as `step` would cast them
+/// from that state (frame `i` of the result is the cast at `recorded[i]`, the
+/// state `simulate_recorded_one_step` steps from to predict `recorded[i + 1]`),
+/// for lining a tick's one-step error up with what the wheels touched. The
+/// world is snapped to each frame as in `simulate_recorded_one_step`.
+pub fn wheel_contacts_along(
+    mut world: PhysicsWorld,
+    recorded: &[PhysicsFrame],
+) -> Vec<drive::WheelContacts> {
+    let mut hits = Vec::with_capacity(recorded.len());
+    for pair in recorded.windows(2) {
+        world.snap_to_frame(&pair[0]);
+        hits.push(world.wheel_contacts(0, pair[1].timestamp_secs - pair[0].timestamp_secs));
+        step_recorded(&mut world, &pair[0], &pair[1]);
+    }
+    hits
+}
+
 /// k-step predictions of a recording (`RB-VERIFY-003-FR-008`): frame `i`
 /// of the result is the candidate's prediction of `recorded[i]` from
 /// `recorded[i - k]` (from `recorded[0]` for `i < k`), stepping the
@@ -1683,6 +1709,66 @@ mod tests {
             let ball_error = rec.ball.position.distance(&pred.ball.position);
             assert!(ball_error < 1e-3, "ball t={}", rec.timestamp_secs);
         }
+    }
+
+    /// The wheel instrument (PARITY-PLAN A.1): a car on flat ground has all four
+    /// wheels on the floor, normal up, and the instrument changes nothing.
+    #[test]
+    fn a_car_on_the_floor_reports_four_wheel_hits_with_the_floor_normal() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let before = world.frame();
+        let hits = world.wheel_contacts(0, 1.0 / 120.0);
+        assert_eq!(world.frame(), before, "casting rays moves nothing");
+        for hit in hits {
+            let hit = hit.expect("every wheel reaches the floor");
+            assert!((hit.normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
+            assert!(hit.suspension_length() > 0.0);
+        }
+    }
+
+    #[test]
+    fn a_car_in_the_air_reports_no_wheel_hits() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 400.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        assert!(world
+            .wheel_contacts(0, 1.0 / 120.0)
+            .iter()
+            .all(Option::is_none));
+    }
+
+    #[test]
+    fn wheel_hits_along_a_recording_are_one_per_step_and_follow_the_car_off_the_floor() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        let mut recorded = vec![world.frame()];
+        for _ in 0..30 {
+            world.step(1.0 / 120.0);
+            recorded.push(world.frame());
+        }
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let fresh = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let hits = wheel_contacts_along(fresh, &recorded);
+        assert_eq!(hits.len(), recorded.len() - 1);
+        assert!(
+            hits[0].iter().all(Option::is_some),
+            "on the floor at the start"
+        );
+        assert!(
+            hits[29].iter().all(Option::is_none),
+            "in the air after the jump"
+        );
     }
 
     /// A driven car on flat ground and a falling ball, 60 ticks, and a

@@ -70,7 +70,8 @@ wheel crosses); of the 24 wheel orders only 0123 reproduces 45 degree
 climbs, yet it leaves a rest roll the game lacks; reading before the drive
 impulses is worse everywhere.
 
-1. A wheel-ray instrument: record, per tick, which triangle each ray hits
+1. (Done 2026-10-07, ADR-0073: `rb-verify --wheel-trace`, `wheel_facets.py`; results in O012.)
+   A wheel-ray instrument: record, per tick, which triangle each ray hits
    (port) and compare to the car's per-tick force in the game. A per-tick
    force diff at each facet crossing says whether it is the contact normal, the
    suspension length jump, or the pushback.

@@ -108,6 +108,19 @@ pub struct WheelContact {
     pub(super) pushback: f32,
 }
 
+impl WheelContact {
+    /// The suspension's length this tick, clamped to its travel.
+    pub fn suspension_length(&self) -> f32 {
+        self.suspension_length
+    }
+
+    /// The extra pushback impulse this wheel adds (a quarter of the impulse that
+    /// would stop it sinking past its rest reach).
+    pub fn pushback(&self) -> f32 {
+        self.pushback
+    }
+}
+
 /// The four wheels' hits, in `WHEELS` order.
 pub type WheelContacts = [Option<WheelContact>; 4];
 
