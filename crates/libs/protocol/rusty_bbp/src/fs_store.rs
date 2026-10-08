@@ -11,7 +11,14 @@
 //! A batch is written as a single line and `fsync`ed, so a crash leaves at
 //! most one partial line; `open` truncates it. The revision is the number of
 //! events in all complete lines, and `append` rejects a caller whose expected
-//! revision is stale. One writer per directory is the caller's responsibility.
+//! revision is stale.
+//!
+//! Cross-process exclusion: every read-repair, revision check and append
+//! runs under an exclusive OS lock on `<root>/lock` (`std::fs::File::lock`,
+//! `flock` on Unix, `LockFileEx` on Windows), held for the operation only.
+//! Two processes on one directory therefore serialise: a repair never sees
+//! another writer's half-written batch, and two writers cannot both pass the
+//! revision check. The lock is never held across a caller's work.
 
 use crate::event::Event;
 use crate::ids::*;
@@ -84,9 +91,22 @@ fn safe_name(task: &TaskId) -> String {
         .collect()
 }
 
+/// Take the directory's exclusive lock. Released when the returned file drops.
+fn lock(root: &Path) -> Result<File, FsError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
 impl FsStore {
     /// Open or create a data directory. Loads every task log it finds,
-    /// truncating a trailing partial line left by a crash.
+    /// truncating a trailing partial line left by a crash. Holds the
+    /// directory lock while it reads and repairs.
     pub fn open(root: &Path) -> Result<FsStore, FsError> {
         fs::create_dir_all(root.join("tasks"))?;
         fs::create_dir_all(root.join("blobs"))?;
@@ -94,6 +114,7 @@ impl FsStore {
             root: root.to_path_buf(),
             logs: HashMap::new(),
         };
+        let _lock = lock(root)?;
         for entry in fs::read_dir(root.join("tasks"))? {
             let path = entry?.path();
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -130,6 +151,7 @@ impl FsStore {
     /// Re-read a task's log from disk, so a handle sees another writer's appends.
     pub fn refresh(&mut self, task: &TaskId) -> Result<(), FsError> {
         let path = self.log_path(task);
+        let _lock = lock(&self.root)?;
         let events = if path.exists() {
             load_log(&path)?
         } else {
@@ -185,7 +207,10 @@ impl Store for FsStore {
         events: &[Event],
     ) -> Result<(), StoreError> {
         // Check against disk, not only memory: another handle may have written.
+        // The lock spans repair, check, write and fsync, so no other process
+        // can slip a batch in between or repair ours away.
         let path = self.log_path(task);
+        let _lock = lock(&self.root).map_err(StoreError::from)?;
         let on_disk = if path.exists() {
             load_log(&path).map_err(StoreError::from)?
         } else {
@@ -202,15 +227,15 @@ impl Store for FsStore {
         if events.is_empty() {
             return Ok(());
         }
-        let line = rusty_serde::json::to_string(&events.to_vec())
+        let mut line = rusty_serde::json::to_string(&events.to_vec())
             .map_err(|e| StoreError::Backend(e.to_string()))?;
+        line.push('\n');
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(FsError::from)?;
         file.write_all(line.as_bytes()).map_err(FsError::from)?;
-        file.write_all(b"\n").map_err(FsError::from)?;
         file.sync_all().map_err(FsError::from)?;
         let log = self.logs.entry(task.clone()).or_default();
         *log = on_disk;
@@ -254,6 +279,16 @@ impl Store for FsStore {
         }
         Ok(bytes)
     }
+}
+
+/// Hold the directory lock from outside. Test support: stands in for a
+/// process that is mid-operation.
+#[doc(hidden)]
+pub fn lock_for_test(root: &Path) -> io::Result<File> {
+    lock(root).map_err(|e| match e {
+        FsError::Io(e) => e,
+        other => io::Error::other(other.to_string()),
+    })
 }
 
 /// Truncate a task log to `bytes` bytes. Test support: simulates a crash mid-write.
