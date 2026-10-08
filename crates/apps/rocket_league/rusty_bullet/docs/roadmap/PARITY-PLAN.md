@@ -180,9 +180,9 @@ Part-time cycles (one cycle is roughly a session of a few PRs):
 | 2 | C step 1 and 2: pad data (fits on the same tape-bot runs as F) | 1 |
 | 3 | A steps 1 and 2: instrument and clean probes | 1 to 2 |
 | 4 | C step 3: pads in the port (done, ADR-0072, FR-149) | 1 |
-| 5 | A step 3 and 4: wall and ceiling fixes | 2 to 4 (largest uncertainty) |
-| 6 | B: ball contact | 1 to 2 |
-| 7 | D: respawn (done, ADR-0075, FR-151) and multi-car (open) | 1 to 2 |
+| 5 | A step 3 and 4: wall and ceiling fixes (open; instrument, mirror set and symmetric-order tests done, see O012 / O019) | 2 to 4 (largest uncertainty) |
+| 6 | B: ball contact (plain hits within 1 percent, wheels on ball FR-150, flip FR-152; open: off-centre wheel drops, the O020 knife-edge) | 1 to 2 |
+| 7 | D: respawn (done, ADR-0075, FR-151) and multi-car (three-car tapes recorded; chain and double demolition good; pinch and two-on-one open) | 1 to 2 |
 | 8 | Owner gate re-run, scoreboard, status refresh | 0.5 |
 | 9 | E: match flow | 2+, only if a full match is the goal |
 
