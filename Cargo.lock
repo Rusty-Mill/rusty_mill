@@ -12540,6 +12540,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mcp_server"
+version = "0.1.0"
+dependencies = [
+ "rusty_base64",
+ "rusty_json",
+ "rusty_mcp_proto",
+]
+
+[[package]]
 name = "rusty_multimodal_db"
 version = "0.1.0"
 dependencies = [
