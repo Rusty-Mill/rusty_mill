@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_bbp stage 3a: per-turn MCP server and human CLI (pending review)
+
+- **Added:** `rusty_bbp_host` with the `bbp` binary. The MCP server is one process per turn, fenced by the turn id in its environment; artifact bytes are encoded server-side from typed tool arguments. Human channel and task administration as subcommands.
+- **Known limitation:** no runner and no moderator loop yet (stages 3b and 3c). Tokens and run secrets are deterministic until the moderator exists. The MCP server has not yet been exercised against a live Claude Code session; the end-to-end tests use a scripted JSON-RPC client.
+
+---
+
 ## 2026-10-08 - rusty_bbp driver boundary: payload derives from bytes (pending review)
 
 - **Added:** `rusty_bbp::codec` and two `Driver` boundary checks: a referenced blob must already be stored, and the claimed typed payload must equal what the bytes decode to. Closes the two compliance gaps found when ChatGPT's implementation-plan review was reassessed against the built code.

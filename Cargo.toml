@@ -59,6 +59,7 @@ members = [
     "crates/libs/protocol/rusty_channel",
     "crates/libs/protocol/rusty_routine",
     "crates/libs/protocol/rusty_bbp",
+    "crates/apps/rusty_bbp_host",
     "crates/libs/rusty_sandbox",
     "crates/libs/rusty_bot",
     "crates/libs/homelab/rusty_proxmox",

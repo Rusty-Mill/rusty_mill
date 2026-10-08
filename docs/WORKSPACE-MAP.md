@@ -35,11 +35,11 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
 | foundation | rusty_percent | rusty_percent | Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space). | 10 |
-| foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
+| foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 6 |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 6 |
 | foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. | 8 |
 | foundation | rusty_rsa | rusty_rsa | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256 -- the primitives rusty_oauth and rusty_rdp each independently reimplemented for their own RSA public-key verification/encryption. Named for the primary use case; BigUint is general-purpose (rusty_oauth's own ECC/ES256 code also builds on it) and SHA-256 is a general hash, not RSA-specific -- see lib.rs. | 5 |
-| foundation | rusty_serde | rusty_serde | A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format. | 11 |
+| foundation | rusty_serde | rusty_serde | A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format. | 12 |
 | foundation | rusty_serde | rusty_serde_derive | Hand-written #[derive(Serialize, Deserialize)] proc-macro for rusty_serde, built directly on proc_macro (no syn/quote). | 1 |
 | foundation | rusty_serde | rusty_serde_erased | A minimal, isolated unsafe primitive for erasing a serializer/deserializer's associated Ok type across an object-safe (dyn-compatible) boundary - internal to rusty_serde, not a public API. | 1 |
 | foundation | rusty_sha1 | rusty_sha1 | A zero-dependency SHA-1 (FIPS 180-1) implementation, shared by rusty_git's object hashing and rusty_term's WebSocket handshake | 3 |
@@ -90,7 +90,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 7 |
 | libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 2 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
-| libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. | 0 |
+| libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. | 1 |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary | 0 |
 | libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters | 1 |
 | libs | rusty_db | rusty-db | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core | 1 |
@@ -167,6 +167,7 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_agent_gateway | agentgateway-mcp | MCP federation for rusty_agent_gateway | 1 |
 | apps | rusty_agent_gateway | agentgateway-proxy | HTTP reverse proxying for rusty_agent_gateway host backends | 1 |
 | apps | rusty_agent_gateway | agentgateway-tls | TLS termination for rusty_agent_gateway, over rusty_tls | 1 |
+| apps | rusty_bbp_host | rusty_bbp_host | Host for the Blackboard Protocol: the per-turn MCP server agents talk to, the human channel CLI, and task administration over a rusty_bbp file store | 0 |
 | apps | rusty_croc | rusty-croc | Rust port of croc (https://github.com/schollz/croc) — secure peer-to-peer file transfer | 0 |
 | apps | rusty_fair_play | rusty_fair_play | Fair Play household cards: a JSON HTTP API and web UI over rusty_multimodal_db's fair_play domain | 0 |
 | apps | rusty_fedora_agent | rusty_fedora_agent | Unprivileged local agent exposing scoped systemd/dnf/config-file control over HTTP -- the backend rusty_homelab_mcp's fedora module talks to. | 0 |
