@@ -4,7 +4,7 @@
 
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, ClientInfo, ClientRequest, GetPromptRequestParams,
-    ProgressNotificationParam, ReadResourceRequestParams,
+    ProgressNotificationParam, ReadResourceRequestParams, ServerNotification, SubscriptionFilter,
 };
 use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService};
 use rmcp::{ClientHandler, RoleClient, ServiceError};
@@ -80,7 +80,11 @@ pub async fn exercise(
     }
     let all = client.list_all_tools().await.unwrap();
     let names: Vec<&str> = all.iter().map(|t| t.name.as_ref()).collect();
-    assert_eq!(names, ["add", "fail", "progress", "wait"], "{mode:?}");
+    assert_eq!(
+        names,
+        ["add", "fail", "progress", "wait", "touch"],
+        "{mode:?}"
+    );
 
     // A call, a tool failure (a result), and malformed calls (errors).
     let sum = client
@@ -105,6 +109,10 @@ pub async fn exercise(
     );
 
     exercise_prompts_resources_and_completion(&client, mode).await;
+
+    if matches!(mode, Mode::Stateless) {
+        exercise_listen(&client).await;
+    }
 
     // Progress: the client attaches a token; the server reports against it.
     let done = client
@@ -234,5 +242,47 @@ async fn exercise_prompts_resources_and_completion(
     assert!(
         matches!(&unknown, Err(ServiceError::McpError(e)) if as_json(&e.code) == -32602),
         "{mode:?}: {unknown:?}"
+    );
+}
+
+/// `subscriptions/listen`: stateless clients only. The server acknowledges
+/// what it granted, then forwards what `touch` publishes: an update to the
+/// one resource followed, and a change to the resource list.
+async fn exercise_listen(client: &RunningService<RoleClient, Recorder>) {
+    let mut subscription = client
+        .listen(
+            SubscriptionFilter::builder()
+                .resources_list_changed()
+                .resource_subscription("mem://a")
+                .resource_subscription("mem://b") // readable, but never published
+                .build(),
+        )
+        .await
+        .expect("subscriptions/listen");
+    client
+        .call_tool(CallToolRequestParams::new("touch"))
+        .await
+        .unwrap();
+
+    let first = tokio::time::timeout(Duration::from_secs(5), subscription.next())
+        .await
+        .expect("a notification should arrive")
+        .expect("the subscription is live")
+        .expect("not the end of the stream");
+    let second = tokio::time::timeout(Duration::from_secs(5), subscription.next())
+        .await
+        .expect("a second notification should arrive")
+        .expect("the subscription is live")
+        .expect("not the end of the stream");
+    assert!(
+        matches!(&first, ServerNotification::ResourceUpdatedNotification(n) if n.params.uri == "mem://a"),
+        "unexpected first notification: {first:?}"
+    );
+    assert!(
+        matches!(
+            second,
+            ServerNotification::ResourceListChangedNotification(_)
+        ),
+        "unexpected second notification: {second:?}"
     );
 }

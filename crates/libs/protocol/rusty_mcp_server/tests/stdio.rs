@@ -7,31 +7,12 @@ use rusty_mcp_proto::{CallToolResult, ContentBlock, ErrorCode, ErrorData, Protoc
 mod support;
 
 use rusty_mcp_server::{serve_lines, BuildError, Server, StdioConfig};
-use std::io::{self, BufReader, Cursor, Read, Write};
+use std::io::{self, BufReader, Cursor, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use support::{code, reply, result, run_with, Out};
-
-/// A reader fed from a channel, so a test can send a line after the server
-/// has started working on an earlier one.
-struct Feed(Receiver<Vec<u8>>, Vec<u8>);
-
-impl Read for Feed {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.1.is_empty() {
-            match self.0.recv() {
-                Ok(chunk) => self.1 = chunk,
-                Err(_) => return Ok(0),
-            }
-        }
-        let n = buf.len().min(self.1.len());
-        buf[..n].copy_from_slice(&self.1[..n]);
-        self.1.drain(..n);
-        Ok(n)
-    }
-}
+use support::{code, reply, result, run_with, Feed, Out};
 
 fn schema() -> Value {
     let mut s = Value::object();

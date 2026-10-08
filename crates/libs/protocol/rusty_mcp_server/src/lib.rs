@@ -39,6 +39,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod changes;
 pub mod connection;
 #[cfg(feature = "http")]
 pub mod http;
@@ -55,6 +56,7 @@ pub use rusty_json as json;
 /// for the same reason.
 pub use rusty_mcp_proto as proto;
 
+pub use changes::{ChangeBroadcaster, ChangeEvent, ChangeKinds};
 pub use connection::{CallContext, CancelToken, Connection, Job, Notifier, Started};
 #[cfg(feature = "http")]
 pub use http::{bind_http, HttpConfig, HttpHandler};

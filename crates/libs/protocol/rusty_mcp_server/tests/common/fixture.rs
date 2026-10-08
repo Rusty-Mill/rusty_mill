@@ -9,7 +9,7 @@ use rusty_mcp_proto::{
     PromptArgument, PromptMessage, ReadResourceResult, Reference, Resource, ResourceContents,
     ResourceTemplate, Role, Tool,
 };
-use rusty_mcp_server::Server;
+use rusty_mcp_server::{ChangeBroadcaster, ChangeKinds, Server};
 use std::time::Duration;
 
 fn schema() -> Value {
@@ -46,15 +46,20 @@ fn argument(name: &str, required: bool) -> PromptArgument {
     }
 }
 
-/// Four tools (`add`, `fail`, `progress`, `wait`), two prompts, four
-/// resources and two templates, three entries to a page. `on_cancel` runs
+/// Five tools (`add`, `fail`, `progress`, `wait`, `touch`), two prompts, four
+/// resources and two templates, three entries to a page. `touch` publishes a
+/// change to `mem://a` and to the resource list, and every kind of change is
+/// announced. `on_cancel` runs
 /// when a `wait` call sees its cancellation.
 pub fn interop_server(on_cancel: impl Fn() + Send + Sync + 'static) -> Server {
+    let changes = ChangeBroadcaster::new();
+    let touched = changes.clone();
     let mut greet = Prompt::new("greet");
     greet.arguments = Some(vec![argument("name", true), argument("tone", false)]);
     let mut builder = Server::builder("interop", "0.1.0")
         .instructions("a test server")
         .page_size(3)
+        .notify_changes(&changes, ChangeKinds::all())
         .tool(Tool::new("add", schema()), |_ctx, call| {
             let n = |k: &str| {
                 call.arguments
@@ -93,6 +98,11 @@ pub fn interop_server(on_cancel: impl Fn() + Send + Sync + 'static) -> Server {
                 on_cancel();
             }
             Ok(text("stopped"))
+        })
+        .tool(Tool::new("touch", schema()), move |_ctx, _call| {
+            touched.resource_updated("mem://a");
+            touched.resources_changed();
+            Ok(text("touched"))
         })
         .prompt(greet, |_ctx, get| {
             let name = get

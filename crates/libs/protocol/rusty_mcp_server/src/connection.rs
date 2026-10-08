@@ -14,7 +14,7 @@ use rusty_json::Value;
 use rusty_mcp_proto::lifecycle::{self, DiscoverParams, InitializeParams, InitializeResult};
 use rusty_mcp_proto::notify::{self, CancelledParams, ProgressParams};
 use rusty_mcp_proto::rpc::params as decode_params;
-use rusty_mcp_proto::{completion, prompt, resource, tool};
+use rusty_mcp_proto::{completion, prompt, resource, subscribe, tool};
 use rusty_mcp_proto::{
     ClientCapabilities, DiscoverResult, ErrorCode, ErrorData, Implementation, Message,
     PromptsCapability, ProtocolVersion, RequestId, RequestMeta, ResourcesCapability,
@@ -133,6 +133,8 @@ pub struct Connection {
     notifier: Arc<dyn Notifier>,
     state: Mutex<State>,
     inflight: Mutex<HashMap<RequestId, CancelToken>>,
+    /// Raised by [`Connection::close_streams`]: long-lived requests wind down.
+    closing: AtomicBool,
 }
 
 /// What [`Connection::start`] decided about a message.
@@ -189,6 +191,7 @@ impl Connection {
             notifier,
             state: Mutex::new(State::default()),
             inflight: Mutex::new(HashMap::new()),
+            closing: AtomicBool::new(false),
         }
     }
 
@@ -278,6 +281,22 @@ impl Connection {
         }
     }
 
+    /// Tell long-lived requests (open `subscriptions/listen`) to finish: they
+    /// are not work to wait for, so a transport calls this when its input
+    /// ends, before it drains the requests that are.
+    pub fn close_streams(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::SeqCst)
+    }
+
+    /// Send the client a notification of the server's own.
+    pub(crate) fn notify(&self, message: Message) {
+        self.notifier.notify(message);
+    }
+
     /// Raise the cancellation flag of every request in flight. Tools that
     /// poll it stop early; their answers are dropped.
     pub fn cancel_all(&self) {
@@ -301,11 +320,21 @@ impl Connection {
 
     pub(crate) fn capabilities(&self) -> ServerCapabilities {
         let s = &self.server;
+        let kinds = s.changes.as_ref().map(|(_, k)| *k).unwrap_or_default();
+        let flag = |on: bool| on.then_some(true);
         ServerCapabilities {
-            tools: (!s.tools.is_empty()).then(ToolsCapability::default),
-            prompts: (!s.prompts.is_empty()).then(PromptsCapability::default),
-            resources: (!s.resources.is_empty() || !s.templates.is_empty())
-                .then(ResourcesCapability::default),
+            tools: (!s.tools.is_empty()).then(|| ToolsCapability {
+                list_changed: flag(kinds.tools_list),
+            }),
+            prompts: (!s.prompts.is_empty()).then(|| PromptsCapability {
+                list_changed: flag(kinds.prompts_list),
+            }),
+            resources: (!s.resources.is_empty() || !s.templates.is_empty()).then(|| {
+                ResourcesCapability {
+                    subscribe: flag(kinds.resource_updates),
+                    list_changed: flag(kinds.resources_list),
+                }
+            }),
             completions: s.completer.is_some().then(Value::object),
             ..ServerCapabilities::default()
         }
@@ -360,6 +389,7 @@ impl Connection {
             resource::method::TEMPLATES_LIST => self.templates_list(params),
             resource::method::READ => self.resources_read(id, params, token),
             completion::method::COMPLETE => self.complete(id, params, token),
+            subscribe::method::LISTEN => self.listen(id, params, token),
             other => Err(ErrorData::new(
                 ErrorCode::METHOD_NOT_FOUND,
                 format!("unknown method {other:?}"),

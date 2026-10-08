@@ -4,7 +4,8 @@
 
 use rusty_json::Value;
 use rusty_mcp_server::{serve_lines, Server, StdioConfig};
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor, Read, Write};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 /// A writer whose contents the test reads back.
@@ -67,4 +68,23 @@ pub fn code(m: &Value) -> i32 {
 pub fn result(m: &Value) -> &Value {
     m.get("result")
         .unwrap_or_else(|| panic!("not a result: {m:?}"))
+}
+
+/// A reader fed from a channel, so a test can send a line after the server
+/// has started working on an earlier one.
+pub struct Feed(pub Receiver<Vec<u8>>, pub Vec<u8>);
+
+impl Read for Feed {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.1.is_empty() {
+            match self.0.recv() {
+                Ok(chunk) => self.1 = chunk,
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.1.len());
+        buf[..n].copy_from_slice(&self.1[..n]);
+        self.1.drain(..n);
+        Ok(n)
+    }
 }

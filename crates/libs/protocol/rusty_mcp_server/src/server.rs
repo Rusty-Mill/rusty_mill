@@ -2,6 +2,7 @@
 //! revisions it speaks and which tools it offers. Build one with
 //! [`Server::builder`], share it between connections with an `Arc`.
 
+use crate::changes::{ChangeBroadcaster, ChangeKinds};
 use crate::connection::CallContext;
 use crate::uri_template::{TemplateError, UriTemplate, UriVars};
 use rusty_mcp_proto::{
@@ -95,6 +96,9 @@ pub enum BuildError {
     DuplicateTemplate(String),
     /// A resource template this crate cannot match.
     BadTemplate(TemplateError),
+    /// [`ServerBuilder::notify_changes`] announces changes to something the
+    /// server does not offer (`"tools"`, `"prompts"` or `"resources"`).
+    ChangesWithoutFeature(&'static str),
     /// A page size or in-flight limit of zero would serve nothing.
     ZeroLimit(&'static str),
     /// No protocol revision to speak.
@@ -109,6 +113,12 @@ impl fmt::Display for BuildError {
             BuildError::DuplicateResource(uri) => write!(f, "resource {uri:?} is registered twice"),
             BuildError::DuplicateTemplate(t) => write!(f, "template {t:?} is registered twice"),
             BuildError::BadTemplate(e) => write!(f, "{e}"),
+            BuildError::ChangesWithoutFeature(what) => {
+                write!(
+                    f,
+                    "changes to {what} are announced but the server offers none"
+                )
+            }
             BuildError::ZeroLimit(what) => write!(f, "{what} must be at least 1"),
             BuildError::NoVersions => f.write_str("a server needs at least one protocol version"),
         }
@@ -127,6 +137,7 @@ pub struct Server {
     pub(crate) resources: Vec<RegisteredResource>,
     pub(crate) templates: Vec<RegisteredTemplate>,
     pub(crate) completer: Option<Box<CompletionHandler>>,
+    pub(crate) changes: Option<(ChangeBroadcaster, ChangeKinds)>,
     pub(crate) page_size: usize,
     pub(crate) max_in_flight: usize,
 }
@@ -146,6 +157,7 @@ impl Server {
             resources: Vec::new(),
             templates: Vec::new(),
             completer: None,
+            changes: None,
             deferred: Vec::new(),
             page_size: DEFAULT_PAGE_SIZE,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
@@ -177,6 +189,7 @@ pub struct ServerBuilder {
     resources: Vec<RegisteredResource>,
     templates: Vec<RegisteredTemplate>,
     completer: Option<Box<CompletionHandler>>,
+    changes: Option<(ChangeBroadcaster, ChangeKinds)>,
     /// Registration mistakes, reported by [`ServerBuilder::build`].
     deferred: Vec<BuildError>,
     page_size: usize,
@@ -305,17 +318,45 @@ impl ServerBuilder {
         self
     }
 
+    /// Announce the changes in `kinds` and let clients listen for them with
+    /// `subscriptions/listen`; publish them through (a clone of)
+    /// `broadcaster`. The matching capabilities are advertised, and
+    /// a category left out of `kinds` is never sent. Only 2026-07-28 clients
+    /// can listen.
+    #[must_use]
+    pub fn notify_changes(mut self, broadcaster: &ChangeBroadcaster, kinds: ChangeKinds) -> Self {
+        self.changes = Some((broadcaster.clone(), kinds));
+        self
+    }
+
     /// Finish.
     ///
     /// # Errors
     /// [`BuildError`] for a duplicate name, URI or template, a template that
-    /// cannot be matched, a zero limit or no versions.
+    /// cannot be matched, changes announced for a feature the server lacks, a
+    /// zero limit or no versions.
     pub fn build(self) -> Result<Server, BuildError> {
         if let Some(e) = self.deferred.into_iter().next() {
             return Err(e);
         }
         if self.versions.is_empty() {
             return Err(BuildError::NoVersions);
+        }
+        if let Some((_, k)) = &self.changes {
+            let has_resources = !self.resources.is_empty() || !self.templates.is_empty();
+            for (announced, offered, what) in [
+                (k.tools_list, !self.tools.is_empty(), "tools"),
+                (k.prompts_list, !self.prompts.is_empty(), "prompts"),
+                (
+                    k.resources_list || k.resource_updates,
+                    has_resources,
+                    "resources",
+                ),
+            ] {
+                if announced && !offered {
+                    return Err(BuildError::ChangesWithoutFeature(what));
+                }
+            }
         }
         if self.page_size == 0 {
             return Err(BuildError::ZeroLimit("page size"));
@@ -350,6 +391,7 @@ impl ServerBuilder {
             resources: self.resources,
             templates: self.templates,
             completer: self.completer,
+            changes: self.changes,
             page_size: self.page_size,
             max_in_flight: self.max_in_flight,
         })
@@ -366,4 +408,15 @@ fn first_duplicate<'a>(items: impl Iterator<Item = &'a str>) -> Option<&'a str> 
         seen.push(item);
     }
     None
+}
+
+impl Server {
+    /// Whether `uri` names something `resources/read` can serve.
+    pub(crate) fn can_read(&self, uri: &str) -> bool {
+        self.resources.iter().any(|r| r.resource.uri == uri)
+            || self
+                .templates
+                .iter()
+                .any(|t| t.matcher.matches(uri).is_some())
+    }
 }

@@ -673,3 +673,91 @@ fn slow_calls_do_not_block_each_other() {
         started.elapsed()
     );
 }
+
+#[test]
+fn a_listener_that_hangs_up_deregisters_and_one_that_stays_hears_changes() {
+    use rusty_mcp_proto::ResourceTemplate;
+    use rusty_mcp_server::{ChangeBroadcaster, ChangeKinds};
+
+    let changes = ChangeBroadcaster::new();
+    let server = Arc::new(
+        Server::builder("listen", "1")
+            .resource_template(ResourceTemplate::new("mem://{x}", "m"), |_c, _v, r| {
+                Ok(rusty_mcp_proto::ReadResourceResult {
+                    contents: vec![rusty_mcp_proto::ResourceContents::Text {
+                        uri: r.uri,
+                        mime_type: None,
+                        text: String::new(),
+                        meta: None,
+                    }],
+                    ..Default::default()
+                })
+            })
+            .notify_changes(&changes, ChangeKinds::all_resources())
+            .build()
+            .unwrap(),
+    );
+    let http = bind_http(
+        server,
+        "127.0.0.1:0".parse().unwrap(),
+        fast(),
+        Limits::default(),
+    )
+    .unwrap();
+    let addr = http.local_addr().unwrap();
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{{"notifications":{{"resourcesListChanged":true,"resourceSubscriptions":["mem://a"]}},{META}}}}}"#
+    );
+    let open = |body: &str| {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let raw = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAccept: {JSON_AND_SSE}\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: subscriptions/listen\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(raw.as_bytes()).unwrap();
+        stream
+    };
+    let read_until = |stream: &mut TcpStream, needle: &str| {
+        let mut seen = String::new();
+        let mut buf = [0u8; 512];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !seen.contains(needle) && Instant::now() < deadline {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+        }
+        seen
+    };
+
+    let mut stays = open(&body);
+    let acked = read_until(&mut stays, "subscriptions/acknowledged");
+    assert!(
+        acked.contains("text/event-stream") && acked.contains("subscriptionId"),
+        "{acked}"
+    );
+    let mut leaves = open(&body.replace(r#""id":1"#, r#""id":2"#));
+    read_until(&mut leaves, "subscriptions/acknowledged");
+    assert_eq!(changes.listeners(), 2);
+
+    drop(leaves);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while changes.listeners() > 1 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(changes.listeners(), 1, "the listener that hung up left");
+
+    changes.resource_updated("mem://a");
+    let heard = read_until(&mut stays, "notifications/resources/updated");
+    assert!(
+        heard.contains("mem://a"),
+        "the one that stayed hears the change: {heard}"
+    );
+    stop.shutdown();
+}

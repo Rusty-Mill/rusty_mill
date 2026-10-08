@@ -3,18 +3,31 @@
 //! generic work (revision, pagination, cache hints, argument checks, error
 //! codes) lives here so every feature behaves the same.
 
+use crate::changes::{ChangeEvent, ChangeKinds};
 use crate::connection::{CancelToken, Connection};
 use crate::page::{self, Kind};
 use crate::server::MAX_COMPLETION_VALUES;
 use rusty_json::Value;
 use rusty_mcp_proto::rpc::params as decode_params;
+use rusty_mcp_proto::subscribe::{
+    self, AcknowledgedParams, ListenParams, ListenResult, ResourceUpdatedParams,
+};
 use rusty_mcp_proto::{
     CacheScope, CallToolParams, CompleteParams, CompleteResult, ErrorCode, ErrorData,
     GetPromptParams, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
-    ListToolsResult, PaginatedParams, Paging, ProtocolVersion, ReadResourceParams, Reference,
-    RequestId, ResultType, Wire,
+    ListToolsResult, Message, PaginatedParams, Paging, ProtocolVersion, ReadResourceParams,
+    Reference, RequestId, ResultType, SubscriptionFilter, Wire,
 };
 use std::ops::Range;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
+
+/// How often an open listener looks up from waiting for events to check
+/// whether it was cancelled or the connection is closing.
+const LISTEN_POLL: Duration = Duration::from_millis(50);
+
+const SUBSCRIPTION_ID: &str = "io.modelcontextprotocol/subscriptionId";
 
 fn invalid_params(why: impl std::fmt::Display) -> ErrorData {
     ErrorData::new(ErrorCode::INVALID_PARAMS, why.to_string())
@@ -258,5 +271,244 @@ impl Connection {
         };
         complete_type(&version, &mut result.result_type);
         Ok(result.to_value())
+    }
+}
+
+/// The part of `requested` this server will send: only announced
+/// categories, and only URIs `resources/read` can serve.
+fn accept_filter(
+    requested: &SubscriptionFilter,
+    kinds: &ChangeKinds,
+    readable: impl Fn(&str) -> bool,
+) -> SubscriptionFilter {
+    let wants =
+        |asked: Option<bool>, announced: bool| (asked == Some(true) && announced).then_some(true);
+    let mut uris: Vec<String> = Vec::new();
+    if kinds.resource_updates {
+        for uri in requested.resource_subscriptions.iter().flatten() {
+            if readable(uri) && !uris.contains(uri) {
+                uris.push(uri.clone());
+            }
+        }
+    }
+    SubscriptionFilter {
+        tools_list_changed: wants(requested.tools_list_changed, kinds.tools_list),
+        prompts_list_changed: wants(requested.prompts_list_changed, kinds.prompts_list),
+        resources_list_changed: wants(requested.resources_list_changed, kinds.resources_list),
+        resource_subscriptions: (!uris.is_empty()).then_some(uris),
+    }
+}
+
+/// The notification for `event`, if `accepted` includes it, tagged with the
+/// subscription it belongs to.
+fn notification_for(
+    event: &ChangeEvent,
+    accepted: &SubscriptionFilter,
+    meta: &Value,
+) -> Option<Message> {
+    let list_changed = |on: Option<bool>, method: &str| {
+        (on == Some(true)).then(|| {
+            let mut params = Value::object();
+            params.insert("_meta", meta.clone());
+            Message::Notification {
+                method: method.to_owned(),
+                params: Some(params),
+            }
+        })
+    };
+    match event {
+        ChangeEvent::ToolsListChanged => list_changed(
+            accepted.tools_list_changed,
+            subscribe::method::TOOLS_LIST_CHANGED,
+        ),
+        ChangeEvent::PromptsListChanged => list_changed(
+            accepted.prompts_list_changed,
+            subscribe::method::PROMPTS_LIST_CHANGED,
+        ),
+        ChangeEvent::ResourcesListChanged => list_changed(
+            accepted.resources_list_changed,
+            subscribe::method::RESOURCES_LIST_CHANGED,
+        ),
+        ChangeEvent::ResourceUpdated { uri } => accepted
+            .resource_subscriptions
+            .as_ref()
+            .is_some_and(|uris| uris.contains(uri))
+            .then(|| {
+                Message::notification(
+                    subscribe::method::RESOURCE_UPDATED,
+                    &ResourceUpdatedParams {
+                        uri: uri.clone(),
+                        meta: Some(meta.clone()),
+                    },
+                )
+            }),
+    }
+}
+
+impl Connection {
+    /// `subscriptions/listen`: a request that stays open, acknowledging what
+    /// it was granted and then forwarding matching changes until the client
+    /// cancels or hangs up, the connection closes, or the broadcaster is
+    /// closed (which ends it with the final result).
+    pub(crate) fn listen(
+        &self,
+        id: &RequestId,
+        params: &Option<Value>,
+        token: &CancelToken,
+    ) -> Result<Value, ErrorData> {
+        let s = self.server();
+        let Some((changes, kinds)) = &s.changes else {
+            return Err(not_offered("subscriptions"));
+        };
+        let (version, _) = self.version_for(params)?;
+        if !version.is_stateless() {
+            return Err(ErrorData::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                "subscriptions/listen needs protocol version 2026-07-28",
+            ));
+        }
+        let req: ListenParams = decode_params(params).map_err(invalid_params)?;
+        let accepted = accept_filter(&req.notifications, kinds, |uri| s.can_read(uri));
+        // Subscribe before acknowledging, so nothing published in between is lost.
+        let subscription = changes.subscribe();
+        let mut meta = Value::object();
+        meta.insert(SUBSCRIPTION_ID, id.to_value());
+        self.notify(Message::notification(
+            subscribe::method::ACKNOWLEDGED,
+            &AcknowledgedParams {
+                meta: Some(meta.clone()),
+                notifications: accepted.clone(),
+            },
+        ));
+        loop {
+            if token.is_cancelled() || self.is_closing() {
+                break;
+            }
+            match subscription.events.recv_timeout(LISTEN_POLL) {
+                Ok(event) => {
+                    if let Some(message) = notification_for(&event, &accepted, &meta) {
+                        self.notify(message);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // Events were dropped while this listener was behind: say
+                    // everything it follows may have changed.
+                    if subscription.lagged.swap(false, Ordering::SeqCst) {
+                        for event in resync_events(&accepted) {
+                            if let Some(message) = notification_for(&event, &accepted, &meta) {
+                                self.notify(message);
+                            }
+                        }
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        Ok(ListenResult::complete(id)
+            .with_server_info(&s.info)
+            .to_value())
+    }
+}
+
+/// Everything a listener with `accepted` follows, as events.
+fn resync_events(accepted: &SubscriptionFilter) -> Vec<ChangeEvent> {
+    let mut events = vec![
+        ChangeEvent::ToolsListChanged,
+        ChangeEvent::PromptsListChanged,
+        ChangeEvent::ResourcesListChanged,
+    ];
+    events.extend(
+        accepted
+            .resource_subscriptions
+            .iter()
+            .flatten()
+            .map(|uri| ChangeEvent::ResourceUpdated { uri: uri.clone() }),
+    );
+    events
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn filter(tools: bool, uris: &[&str]) -> SubscriptionFilter {
+        SubscriptionFilter {
+            tools_list_changed: tools.then_some(true),
+            prompts_list_changed: None,
+            resources_list_changed: None,
+            resource_subscriptions: (!uris.is_empty())
+                .then(|| uris.iter().map(|u| (*u).to_owned()).collect()),
+        }
+    }
+
+    #[test]
+    fn only_announced_categories_and_readable_uris_are_accepted() {
+        let requested = SubscriptionFilter {
+            tools_list_changed: Some(true),
+            prompts_list_changed: Some(true),
+            resources_list_changed: Some(true),
+            resource_subscriptions: Some(vec!["a://1".into(), "b://2".into(), "a://1".into()]),
+        };
+        let kinds = ChangeKinds {
+            tools_list: true,
+            resource_updates: true,
+            ..ChangeKinds::default()
+        };
+        let accepted = accept_filter(&requested, &kinds, |u| u.starts_with("a://"));
+        assert_eq!(
+            accepted,
+            filter(true, &["a://1"]),
+            "prompts and list changes were not announced"
+        );
+
+        // Without announcing updates, subscriptions are dropped entirely.
+        let none = accept_filter(&requested, &ChangeKinds::default(), |_| true);
+        assert_eq!(none, SubscriptionFilter::default());
+        // `false` in a request is not a request.
+        let off = SubscriptionFilter {
+            tools_list_changed: Some(false),
+            ..SubscriptionFilter::default()
+        };
+        assert_eq!(
+            accept_filter(&off, &ChangeKinds::all(), |_| true),
+            SubscriptionFilter::default()
+        );
+    }
+
+    #[test]
+    fn notifications_follow_the_accepted_filter_and_carry_the_subscription() {
+        let accepted = filter(true, &["a://1"]);
+        let mut meta = Value::object();
+        meta.insert(SUBSCRIPTION_ID, 9);
+        let tools = notification_for(&ChangeEvent::ToolsListChanged, &accepted, &meta).unwrap();
+        let Message::Notification { method, params } = tools else {
+            panic!("not a notification")
+        };
+        assert_eq!(method, subscribe::method::TOOLS_LIST_CHANGED);
+        assert_eq!(params.unwrap().get("_meta"), Some(&meta));
+        assert!(notification_for(&ChangeEvent::PromptsListChanged, &accepted, &meta).is_none());
+        assert!(notification_for(&ChangeEvent::ResourcesListChanged, &accepted, &meta).is_none());
+        let updated = ChangeEvent::ResourceUpdated {
+            uri: "a://1".into(),
+        };
+        assert!(notification_for(&updated, &accepted, &meta).is_some());
+        let other = ChangeEvent::ResourceUpdated {
+            uri: "a://2".into(),
+        };
+        assert!(notification_for(&other, &accepted, &meta).is_none());
+    }
+
+    #[test]
+    fn a_resync_covers_exactly_what_the_listener_follows() {
+        let accepted = filter(true, &["a://1", "a://2"]);
+        let mut meta = Value::object();
+        meta.insert(SUBSCRIPTION_ID, 1);
+        let sent: Vec<Message> = resync_events(&accepted)
+            .iter()
+            .filter_map(|e| notification_for(e, &accepted, &meta))
+            .collect();
+        // One tools signal and one update per followed resource; nothing else.
+        assert_eq!(sent.len(), 3);
     }
 }

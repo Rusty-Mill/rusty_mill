@@ -175,6 +175,8 @@ where
     // End of input: let running requests finish, then cancel what is left. A
     // tool that still ignores the flag is abandoned; its thread dies with
     // the process.
+    // Open listeners are not work to wait for.
+    conn.close_streams();
     if !sink.pending.wait_zero(config.drain_timeout) {
         conn.cancel_all();
         sink.pending.wait_zero(CANCEL_GRACE);

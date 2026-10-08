@@ -51,6 +51,40 @@ does the generic part for you:
 - A method for a feature the server does not register is `-32601`, and its
   capability is not advertised.
 
+## Change notifications
+
+`subscriptions/listen` (2026-07-28 clients) is built in. Create a
+`ChangeBroadcaster`, pass it to `ServerBuilder::notify_changes(&broadcaster,
+ChangeKinds)`, keep a clone, and publish from anywhere:
+
+```rust
+let changes = ChangeBroadcaster::new();
+let server = Server::builder("demo", "1")
+    .resource(config, read_config)
+    .notify_changes(&changes, ChangeKinds::all_resources())
+    .build()?;
+// ... later, wherever the change happens:
+changes.resource_updated("config://demo");
+changes.resources_changed();
+```
+
+- `ChangeKinds` is what you announce: it sets `tools.listChanged`,
+  `prompts.listChanged`, `resources.listChanged` and `resources.subscribe`. A
+  category you did not announce is never sent, and announcing a change for a
+  feature the server lacks is a build error.
+- A listener asks for categories and resource URIs; the server acknowledges
+  what it granted (dropping unannounced categories and URIs `resources/read`
+  cannot serve) and then forwards matching events, each tagged with the
+  subscription id (the request id).
+- A listener ends when the client cancels or hangs up, when the transport closes
+  (stdio: at end of input, at once, not after the drain timeout), or when
+  `broadcaster.close()` is called, which ends every listener with its final
+  result. A listener that falls behind its buffer (64 events) is told
+  everything it follows may have changed, rather than losing events silently.
+- Each open listener holds a request slot (stdio) or a `rusty_serve`
+  connection thread (HTTP). Classic clients cannot listen (and the classic
+  `resources/subscribe` is not implemented).
+
 Behaviour worth knowing:
 
 - A tool that fails returns a result with `is_error: Some(true)`; return `Err`
@@ -101,7 +135,7 @@ header works without sessions.
 Tested with raw sockets (`tests/http.rs`) and against the `rmcp` HTTP client in
 both handshake modes (`tests/http_interop.rs`).
 
-Not here yet: subscriptions, tasks and multi-round-trip input on the server
-side (and so `resultType: input_required`), authentication (the existing
+Not here yet: classic `resources/subscribe`, tasks and multi-round-trip input
+on the server side (and so `resultType: input_required`), authentication (the existing
 `rusty-mcp` has OAuth, limits and telemetry that are not ported), and
 sessions or stream resumption.

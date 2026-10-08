@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_server subscriptions (pending review)
+
+- **Added:** `subscriptions/listen` with a `ChangeBroadcaster`, verified against the `rmcp` client's `listen` over stdio and HTTP.
+- **Known limitations:** 2026-07-28 clients only (no classic `resources/subscribe`); the tool, prompt and resource lists are fixed once a server is built, so list-changed signals are for applications that rebuild or otherwise know better, while resource-updated signals are the common case; template variables and the subscription URIs are matched exactly as sent. `rusty-mcp-demo` was not run against this server.
+
+---
+
 ## 2026-10-08 - rusty_mcp_server prompts, resources, completion (pending review)
 
 - **Added:** prompts, resources (exact and templated) and completion on `rusty_mcp_server`, verified against the `rmcp` client over stdio and HTTP in both handshake modes. 49 tests with the `http` feature.
