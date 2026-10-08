@@ -48,13 +48,17 @@ impl ProfileSet {
             }],
             read_roots: vec!["/bin".into(), "/usr".into(), "/lib".into(), "/lib64".into()],
             env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            // RLIMIT_NPROC counts every process of the uid, not just the
+            // workload's: CI's runner user cannot fork at 64 (rsi learned the
+            // same). A fork-bomb brake, not a quota; the wall-clock kill of the
+            // process group is what bounds a run.
             limits: LimitSpec {
                 cpu_secs: 60,
                 wall_secs: 120,
                 memory_bytes: 1 << 30,
                 file_bytes: 1 << 28,
                 open_files: 256,
-                processes: 64,
+                processes: 4096,
             },
             tree: "sha256(git write-tree id)".into(),
         }
