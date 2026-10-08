@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.141.0
+- Version: 0.157.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -8208,6 +8208,19 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   - **Verification**: `drive` test `two_touching_wheels_coast_even_with_boost_held_and_no_throttle`;
     the one-step error in that landing 4.2 -> 0.6 to 0.7 uu/s per tick; golden gate unchanged.
 
+- `RB-PHYSICS-001-FR-156` (the air throttle needs every wheel off the surface; implemented and verified
+  on the fuzz drives' one-step error; refines FR-099 and FR-148; FR-155 was drafted and withdrawn the same
+  day, see ADR-0077): a car with one or two wheels touching is driven through those wheels only; the
+  small forward push from throttle that an airborne car gets (200/3 uu/s^2) is not added.
+  - Why: the one-step forward velocity error of ticks with one or two wheels touching (fuzz drives
+    `601..624`, `701..724`, `two_wheel_errors.py`) was a steady -0.55 to -0.59 uu/s per tick with the
+    throttle held on every wheel pair and +0.5 with it reversed: the air throttle's 66.7 uu/s^2 over a
+    tick, in the throttle's direction.
+  - **Verification**: `drive` test `a_car_with_a_wheel_down_gets_no_air_throttle` (fails on the old rule:
+    12000 uu force); mean |forward one-step error| on one-wheel ticks 0.500 -> 0.366, two-wheel ticks
+    0.611 -> 0.445, three-wheel ticks unchanged; random drives 601..624 113.5 -> 112.1, 701..724 102.2 ->
+    102.5 uu mean of means (event-dominated); golden gate unchanged.
+
 - `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
   verified on `bumpag_*` and `tri_chain`; refines FR-143): an airborne bumper on a grounded
   victim bumps like a ground bumper (victim 1.25 times the speed, up).
@@ -8380,6 +8393,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.157.0 (2026-10-08): `RB-PHYSICS-001-FR-156` (the air throttle needs every wheel off the surface). 505 tests in
+  `rb_physics_bullet`.
 - 0.156.0 (2026-10-08): `RB-PHYSICS-001-FR-154` (a held boost does not force the throttle with fewer than three wheels down). 504 tests in
   `rb_physics_bullet`.
 - 0.155.0 (2026-10-08): `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars). 503 tests in

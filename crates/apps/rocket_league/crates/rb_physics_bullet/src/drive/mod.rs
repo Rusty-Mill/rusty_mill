@@ -631,11 +631,11 @@ pub fn apply_driven_forces(
         // counts as grounded for air control, as the sticky force does
         // (FR-092): the capture's car neither grips nor air-controls in the
         // step from 4.183 s, after its 4.142 s jump.
-        if !state.was_on_ground {
-            if !touching {
-                let pitch_scale = jump::flip_pitch_scale(state.flip);
-                air::apply_air_control(car, input, pitch_scale, dt);
-            }
+        // RB-PHYSICS-001-FR-156: the air throttle goes with air control, off while any wheel
+        // touches (the touching wheels drive the car).
+        if !state.was_on_ground && !touching {
+            let pitch_scale = jump::flip_pitch_scale(state.flip);
+            air::apply_air_control(car, input, pitch_scale, dt);
             air::apply_air_throttle(car, air_throttle(input, state), forward);
         }
         // RB-PHYSICS-001-FR-097: after air control, whose damping reads the
