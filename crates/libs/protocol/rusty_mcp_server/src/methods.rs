@@ -404,6 +404,12 @@ impl Connection {
             });
         };
         complete_type(&version, &mut result.result_type);
+        if version.is_stateless() {
+            // Not cacheable unless the handler says so, and then only by the
+            // requesting user's client: a read may depend on who asks.
+            result.ttl_ms.get_or_insert(0);
+            result.cache_scope.get_or_insert(CacheScope::Private);
+        }
         Ok(result.to_value())
     }
 

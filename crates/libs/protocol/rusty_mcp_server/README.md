@@ -181,6 +181,22 @@ a task; the handler runs on a thread of its own and the client polls
 - Status changes are polled; `notifications/tasks` is not sent. Tasks are not
   advertised per tool (no `execution` metadata).
 
+## Acceptance: the `rusty-mcp-demo` suite
+
+`tests/demo/` rebuilds `rusty-mcp-demo` (seven tools, two prompts, two
+resources, a template, completions) on this crate, and
+`tests/demo_acceptance.rs` is the demo's own test suite (tools, tasks, MRTR,
+resources and prompts, subscriptions: 43 tests) run against it with the `rmcp`
+client over real Streamable HTTP. The assertions are the originals'; the
+transport changed (they used an in-memory pipe to the `rmcp` server). Run it with
+`cargo test -p rusty_mcp_server --features http,request-state --test demo_acceptance`.
+The demo crate itself is untouched.
+
+Two deviations from the originals, both on purpose: the MRTR tests' client
+declares the `elicitation` capability (the old scaffold asked clients that had
+not; this server does not), and `Pinned` builds capabilities from JSON because
+the capability builder is behind a feature this crate does not enable.
+
 ## Streamable HTTP
 
 Enable with `features = ["http"]`. Which revision a request speaks comes from
@@ -203,12 +219,15 @@ its `_meta` (2026-07-28), else the `MCP-Protocol-Version` header, else
   `notifications/cancelled` POST (matched to the request running under that
   session; ids of other sessions never collide) and end the session with
   `DELETE`, which also cancels what it had running. An unknown, ended or idle
-  session is `404`. A session keeps only the negotiated revision and the
-  cancel flags of running requests, so any POST may still be served by a
-  fresh connection; it does not carry the client's `clientInfo` or
-  capabilities between POSTs. `max_sessions` (1024; `0` turns sessions off,
+  session is `404`. A session keeps the negotiated revision, the client's `clientInfo` and
+  capabilities from `initialize`, and the cancel flags of running requests;
+  every POST is still served by a fresh connection seeded from them. `max_sessions` (1024; `0` turns sessions off,
   full answers `503`) and `session_idle` (1 h) bound it. 2026-07-28 is
   stateless and has none.
+- A client that `initialize`s at 2026-07-28 (the `rmcp` client does when pinned
+  to it) gets that revision and a session; its later requests name the revision in
+  the header alone, with no `_meta`, and are served with the capabilities it
+  declared at `initialize`.
 - A client that hangs up on a streaming reply also cancels the call.
 - `GET` is `405`: there is nothing to push.
 - Each running call or open stream holds a connection thread of `rusty_serve`;

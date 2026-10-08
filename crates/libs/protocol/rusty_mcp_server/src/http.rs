@@ -32,8 +32,10 @@ use crate::server::Server;
 use rusty_base64::decode_standard;
 use rusty_http::{Method, StatusCode};
 use rusty_json::Value;
+use rusty_mcp_proto::lifecycle::InitializeParams;
 use rusty_mcp_proto::{
-    CancelledParams, ErrorCode, ErrorData, Message, ProtocolVersion, RequestId, RequestMeta, Wire,
+    CancelledParams, ClientCapabilities, ErrorCode, ErrorData, Implementation, Message,
+    ProtocolVersion, RequestId, RequestMeta, Wire,
 };
 use rusty_serve::{HeaderMap, Limits, Request, Response, SharedHandler};
 use std::collections::{HashMap, VecDeque};
@@ -260,6 +262,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// the requests running under it.
 struct Session {
     version: ProtocolVersion,
+    client_info: Option<Implementation>,
+    client_capabilities: Option<ClientCapabilities>,
     inflight: Mutex<HashMap<RequestId, CancelToken>>,
     last_used: Mutex<Instant>,
 }
@@ -323,6 +327,7 @@ impl Sessions {
     fn open(
         &self,
         version: ProtocolVersion,
+        client: Option<InitializeParams>,
         max: usize,
         idle: Duration,
     ) -> Result<(String, Arc<Session>), OpenError> {
@@ -336,8 +341,14 @@ impl Sessions {
         let mut raw = [0u8; 16];
         rusty_rand::fill(&mut raw).map_err(|_| OpenError::NoRandom)?;
         let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let (client_info, client_capabilities) = match client {
+            Some(p) => (Some(p.client_info), Some(p.capabilities)),
+            None => (None, None),
+        };
         let session = Arc::new(Session {
             version,
+            client_info,
+            client_capabilities,
             inflight: Mutex::new(HashMap::new()),
             last_used: Mutex::new(Instant::now()),
         });
@@ -458,13 +469,12 @@ impl HttpHandler {
         }
         let header_version = self.header_version(headers)?;
         let message = parse_body(request.body)?;
-        let modern = self.check_version_rules(headers, header_version.as_ref(), &message)?;
-        // 2026-07-28 is stateless: any session id it sends is ignored.
-        let session = if modern {
-            None
-        } else {
-            self.session_of(headers)?
-        };
+        let looked_up = self.session_of(headers);
+        let has_session = matches!(looked_up, Ok(Some(_)));
+        let modern =
+            self.check_version_rules(headers, header_version.as_ref(), &message, has_session)?;
+        // 2026-07-28 `_meta` requests are stateless: any session id is ignored.
+        let session = if modern { None } else { looked_up? };
         self.dispatch(message, header_version, modern, session)
     }
 
@@ -510,7 +520,11 @@ impl HttpHandler {
     /// Start a session for a successful classic `initialize` reply and name
     /// it in the response. Without room or randomness, the client is told
     /// plainly rather than handed a session that cannot work.
-    fn open_session(&self, reply: &Message) -> Result<Option<String>, Response> {
+    fn open_session(
+        &self,
+        reply: &Message,
+        client: Option<InitializeParams>,
+    ) -> Result<Option<String>, Response> {
         let Message::Response { result, .. } = reply else {
             return Ok(None);
         };
@@ -522,6 +536,7 @@ impl HttpHandler {
         }
         let opened = self.sessions.open(
             ProtocolVersion::new(version),
+            client,
             self.config.max_sessions,
             self.config.session_idle,
         );
@@ -594,6 +609,7 @@ impl HttpHandler {
         headers: &HeaderMap,
         header: Option<&ProtocolVersion>,
         message: &Message,
+        has_session: bool,
     ) -> Result<bool, Response> {
         let (id, method, params) = match message {
             Message::Request { id, method, params } => (Some(id.clone()), method, params),
@@ -650,6 +666,10 @@ impl HttpHandler {
                 );
             }
             (Some(m), Some(_)) => m.is_stateless(),
+            // A client that opened a session with `initialize` at a
+            // stateless revision names it in the header alone; the session
+            // remembers the rest.
+            (None, Some(h)) if h.is_stateless() && has_session => false,
             (None, Some(h)) if h.is_stateless() => {
                 return Err(reject_for(
                     id,
@@ -697,17 +717,28 @@ impl HttpHandler {
             }
         }
         let (tx, events) = channel();
-        let conn = Arc::new(Connection::with_protocol_version(
+        let init_params = match &message {
+            Message::Request { method, params, .. } if method == "initialize" => params
+                .as_ref()
+                .and_then(|p| InitializeParams::from_value(p).ok()),
+            _ => None,
+        };
+        let (info, caps) = session.as_ref().map_or((None, None), |s| {
+            (s.client_info.clone(), s.client_capabilities.clone())
+        });
+        let conn = Arc::new(Connection::resumed(
             Arc::clone(&self.server),
             Arc::new(EventNotifier(tx.clone())),
             assumed,
+            info,
+            caps,
         ));
         match conn.start(message) {
             Started::Done(None) => Ok(Response::json(StatusCode::ACCEPTED, Vec::new())),
             Started::Done(Some(reply)) => {
                 let mut response = json_reply(status_of(modern, &reply), &reply);
                 if is_initialize && !modern {
-                    if let Some(id) = self.open_session(&reply)? {
+                    if let Some(id) = self.open_session(&reply, init_params)? {
                         response = response.with_header(SESSION_HEADER, &id).map_err(|_| {
                             reject(
                                 StatusCode::INTERNAL_SERVER_ERROR,

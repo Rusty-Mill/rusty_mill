@@ -157,7 +157,7 @@ fn a_classic_session_initializes_lists_and_calls() {
 }
 
 #[test]
-fn an_unknown_classic_version_is_answered_with_the_newest_the_server_has() {
+fn an_unknown_version_gets_the_newest_classic_and_a_served_one_gets_itself() {
     let init = INIT.replace("2025-06-18", "2099-01-01");
     let out = run(&init);
     // The newest *classic* revision: 2026-07-28 has no initialize.
@@ -167,13 +167,15 @@ fn an_unknown_classic_version_is_answered_with_the_newest_the_server_has() {
             .and_then(Value::as_str),
         Some("2025-11-25")
     );
+    // A client that names a revision the server speaks gets it, 2026-07-28
+    // included (the reference client opens with `initialize` when pinned to it).
     let asks_stateless = INIT.replace("2025-06-18", "2026-07-28");
     let out = run(&asks_stateless);
     assert_eq!(
         result(reply(&out, 1))
             .get("protocolVersion")
             .and_then(Value::as_str),
-        Some("2025-11-25")
+        Some("2026-07-28")
     );
 }
 

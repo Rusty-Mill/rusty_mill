@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty-mcp-demo acceptance port (pending review)
+
+- **Added:** the demo's five test files, ported to run against a copy of the demo built on `rusty_mcp_server`; 43 of 43 pass over real HTTP with the `rmcp` client. Three server fixes came out of the first run (30 of 43): `initialize` at 2026-07-28, client capabilities kept in the HTTP session, cache hints on resource reads.
+- **Not verified:** the demo crate itself still runs on `rusty-mcp` and was not changed; the port covers the tests, not its binary, flags, logging or graceful shutdown. One test deviation (the MRTR client declares `elicitation`). Decision pending: swap the demo crate over, or keep the copy.
+
+---
+
 ## 2026-10-08 - rusty_mcp_server acceptance fixes (pending review)
 
 - **Changed:** task tools fall back to an inline result for clients without the extension; interactive tools get a `turn` gate and a round limit. Both came from reading `rusty-mcp-demo`'s acceptance suite.

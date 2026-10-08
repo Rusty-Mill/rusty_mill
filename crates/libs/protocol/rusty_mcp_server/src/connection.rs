@@ -254,8 +254,27 @@ impl Connection {
         notifier: Arc<dyn Notifier>,
         version: Option<ProtocolVersion>,
     ) -> Self {
+        Self::resumed(server, notifier, version, None, None)
+    }
+
+    /// Like [`Connection::with_protocol_version`], for a transport that also
+    /// remembers who the client is from an earlier `initialize` (an HTTP
+    /// session), so a request that carries no `_meta` of its own is still
+    /// served with the client's declared capabilities.
+    pub fn resumed(
+        server: Arc<Server>,
+        notifier: Arc<dyn Notifier>,
+        version: Option<ProtocolVersion>,
+        client_info: Option<Implementation>,
+        client_capabilities: Option<ClientCapabilities>,
+    ) -> Self {
         let conn = Self::new(server, notifier);
-        lock(&conn.state).negotiated = version;
+        {
+            let mut state = lock(&conn.state);
+            state.negotiated = version;
+            state.client_info = client_info;
+            state.client_capabilities = client_capabilities;
+        }
         conn
     }
 
@@ -460,14 +479,21 @@ impl Connection {
 
     fn initialize(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
         let p: InitializeParams = decode_params(params).map_err(invalid_params)?;
-        let chosen =
+        // A client that names a revision this server speaks gets it, even
+        // 2026-07-28: the reference SDK's client still opens with `initialize`
+        // when pinned to that revision, and the rest of the session then runs
+        // under it. Otherwise: the newest classic revision, as before.
+        let chosen = if self.server.supports(&p.protocol_version) {
+            Some(p.protocol_version.clone())
+        } else {
             lifecycle::negotiate_classic(&p.protocol_version, &self.server.classic_versions())
-                .ok_or_else(|| {
-                    ErrorData::new(
-                        ErrorCode::UNSUPPORTED_PROTOCOL_VERSION,
-                        "this server has no initialize handshake; use server/discover",
-                    )
-                })?;
+        }
+        .ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::UNSUPPORTED_PROTOCOL_VERSION,
+                "this server has no initialize handshake; use server/discover",
+            )
+        })?;
         let mut state = lock(&self.state);
         state.negotiated = Some(chosen.clone());
         state.client_info = Some(p.client_info);

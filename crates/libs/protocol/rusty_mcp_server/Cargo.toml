@@ -37,7 +37,7 @@ rusty_crypto_key = { workspace = true, optional = true }
 [dev-dependencies]
 # Interop oracle only (never shipped): the `rmcp` client, which the MCP crates
 # use today, drives this server over real stdio in `tests/interop.rs`.
-rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest", "elicitation"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "process", "time"] }
 serde = "1"
 serde_json = "1"
@@ -56,3 +56,9 @@ required-features = ["http"]
 [[test]]
 name = "http_interop"
 required-features = ["http"]
+
+# The ported rusty-mcp-demo acceptance suite: the demo's own assertions, run
+# over HTTP against the demo rebuilt on this crate.
+[[test]]
+name = "demo_acceptance"
+required-features = ["http", "request-state"]

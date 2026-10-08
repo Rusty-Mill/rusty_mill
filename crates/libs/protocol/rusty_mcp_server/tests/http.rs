@@ -919,3 +919,29 @@ fn a_task_started_in_one_post_is_polled_from_others() {
     let wrong = post(f.addr, &modern_headers("tasks/get", "other"), &get);
     assert_eq!(wrong.status, 400);
 }
+
+#[test]
+fn a_session_opened_at_the_stateless_revision_needs_no_meta_afterwards() {
+    let f = start(fast());
+    let init = INIT.replace("2025-06-18", "2026-07-28");
+    let opened = post(f.addr, &[("MCP-Protocol-Version", "2026-07-28")], &init);
+    assert_eq!(opened.status, 200);
+    assert_eq!(
+        opened.json()["result"]["protocolVersion"].as_str(),
+        Some("2026-07-28")
+    );
+    let id = opened.header("Mcp-Session-Id").unwrap().to_owned();
+    let headers = [
+        ("MCP-Protocol-Version", "2026-07-28"),
+        ("Mcp-Session-Id", id.as_str()),
+    ];
+    let listed = post(f.addr, &headers, LIST);
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    assert!(
+        listed.json()["result"]["ttlMs"].is_number(),
+        "the session's revision decides: cache hints are present"
+    );
+    // Without the session there is no way to know the revision.
+    let alone = post(f.addr, &[("MCP-Protocol-Version", "2026-07-28")], LIST);
+    assert_eq!(alone.status, 400);
+}
