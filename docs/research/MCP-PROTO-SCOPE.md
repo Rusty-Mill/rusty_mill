@@ -101,10 +101,12 @@ Everything is plain structs/enums with `camelCase` serde, `skip_serializing_if` 
 
 Boundary: `rusty_mcp_proto` (Tier S, on `rusty_json`) holds only sections 3 and the method constants of section 4, plus version negotiation helpers. Sessions, routers, tasks, SSE, transports go in separate crates (A3/A4). This keeps it small and testable against `rmcp` as a dev-only oracle: serialize each type with both and compare JSON for fixed fixtures.
 
-Questions for the owner (each changes what A2 builds):
+Owner decisions that shaped A2:
 
 1. **Classic handshake: decided, support both (owner, 2026-10-08).** The proto crate carries `initialize`/`InitializeResult` and `server/discover`/`DiscoverResult`. Server: mode chosen per request (`initialize` or `Mcp-Session-Id` selects classic; `server/discover` or `_meta` protocol version selects stateless), same handlers for both. Client: try stateless, fall back to `initialize` on `-32601` / `-32022`, remember the result per connection. Session ids, push `GET` and `EventStore` live behind a server-crate feature. Build order: stateless first, classic second; `adk-mcp` and `remind_me_remote` stay on `rmcp` until classic lands (they move last in A5).
-2. **Task and MRTR types:** include now (needed by `rusty-mcp` and demo) or defer until their servers move in A3? They are about a fifth of the type list.
-3. **`ElicitationSchema`:** an opaque JSON value is enough for every current consumer; confirm that is acceptable.
+2. **Task and MRTR types: decided, include now (owner, 2026-10-08).** The stateless servers (`rusty-mcp`, demo) need them from A3.
+3. **`ElicitationSchema`: decided, opaque JSON value (owner, 2026-10-08).** Revisit only if a consumer needs typed access.
+
+All three questions are closed; section 3 is the A2 type list as written (classic and stateless handshakes, tasks, MRTR, opaque elicitation schema).
 
 Suggested first code step once answered: `ContentBlock`, `Tool`, `CallToolParams/Result`, list and pagination types, JSON-RPC envelope, `ErrorData` (covers `rk-app` and the gateway's list/call path), with fixtures diffed against `rmcp` 3.1.4.
