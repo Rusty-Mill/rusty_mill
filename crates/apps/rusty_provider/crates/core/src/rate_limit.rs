@@ -13,16 +13,15 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
-    fn new(capacity: f64) -> Self {
+    fn new(capacity: f64, now: Instant) -> Self {
         Self {
             capacity,
             tokens: capacity,
-            last_refill: Instant::now(),
+            last_refill: now,
         }
     }
 
-    fn refill(&mut self) {
-        let now = Instant::now();
+    fn refill(&mut self, now: Instant) {
         let elapsed_secs = now.duration_since(self.last_refill).as_secs_f64();
         self.last_refill = now;
         self.tokens = (self.tokens + elapsed_secs * (self.capacity / 60.0)).min(self.capacity);
@@ -42,8 +41,8 @@ impl TokenBucket {
     /// Consume one token if available. `Ok`/`Err` both carry a
     /// [`RateLimitStatus`] snapshot -- the only difference is `remaining`
     /// (`0` on failure) and `retry_after_secs` (`0.0` on success).
-    fn try_acquire(&mut self) -> Result<RateLimitStatus, RateLimitStatus> {
-        self.refill();
+    fn try_acquire(&mut self, now: Instant) -> Result<RateLimitStatus, RateLimitStatus> {
+        self.refill(now);
         let limit = self.capacity.max(0.0) as u32;
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
@@ -142,6 +141,17 @@ impl RateLimiter {
         key: &str,
         requests_per_minute: u32,
     ) -> Result<RateLimitStatus, RateLimitStatus> {
+        self.check_at(key, requests_per_minute, Instant::now())
+    }
+
+    /// [`check`](Self::check) with the clock supplied, so refill can be
+    /// tested without sleeping.
+    fn check_at(
+        &self,
+        key: &str,
+        requests_per_minute: u32,
+        now: Instant,
+    ) -> Result<RateLimitStatus, RateLimitStatus> {
         let mut buckets = self.buckets.write().unwrap();
         if !buckets.contains_key(key) {
             let mut order = self.order.write().unwrap();
@@ -154,15 +164,14 @@ impl RateLimiter {
         }
         let bucket = buckets
             .entry(key.to_string())
-            .or_insert_with(|| TokenBucket::new(requests_per_minute as f64));
-        bucket.try_acquire()
+            .or_insert_with(|| TokenBucket::new(requests_per_minute as f64, now));
+        bucket.try_acquire(now)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::sleep;
     use std::time::Duration;
 
     #[test]
@@ -195,17 +204,16 @@ mod tests {
     #[test]
     fn refills_over_time() {
         let limiter = RateLimiter::new();
-        // 600 requests/minute = 10 tokens/sec. Draining the bucket takes a few
-        // ms, which refills a small fraction of a token even on a loaded CI
-        // shard (a 6000/min bucket refilled a whole token mid-drain there and
-        // made the `is_err` below flaky), while the 150 ms sleep refills 1.5.
-        for _ in 0..600 {
-            limiter.check("fast", 600).unwrap();
+        let t0 = Instant::now();
+        // 6000 requests/minute = 100 tokens/sec. The clock is supplied, so
+        // the drain happens at one instant whatever the host's load.
+        for _ in 0..6000 {
+            limiter.check_at("fast", 6000, t0).unwrap();
         }
-        assert!(limiter.check("fast", 600).is_err());
+        assert!(limiter.check_at("fast", 6000, t0).is_err());
 
-        sleep(Duration::from_millis(150));
-        assert!(limiter.check("fast", 600).is_ok());
+        let t1 = t0 + Duration::from_millis(50);
+        assert!(limiter.check_at("fast", 6000, t1).is_ok());
     }
 
     #[test]
