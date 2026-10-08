@@ -100,6 +100,21 @@ Final check of the run (2026-10-08, seeds none of the fixes saw: `fuzz_861` to `
 | Drives that start on a wall (`wallfuzz`) | 124 uu | 86 uu | 9 of 24 | |
 | Two-car duels (`duel`) | 259 uu | 92 uu | 5 of 24 | same-team second car mean 444, median 292 (11 tapes) |
 
+How long the port stays close (honest alignment, `RB_FORCE_ALIGN=0,0`: the first matching frame is the state
+set, the recorded input of frame k fed step k; a 6 s tape is 720 ticks), the same 96 tapes:
+
+| Family | Median time until 10 uu off | Median time until 100 uu off | Never 100 uu off in 6 s |
+|---|---|---|---|
+| Random drives | 3.0 s | 5.3 s | 10 of 24 |
+| Drives that start at the ball | 3.4 s | 5.4 s | 9 of 24 |
+| Drives that start on a wall | 2.3 s | 4.2 s | 6 of 24 |
+| Two-car duels | 1.3 s | 3.8 s | 3 of 24 |
+
+The scorer's default alignment (lag 0 to 3 chosen by the whole-run mean) hides some of this: on 19 of the 96 tapes it
+picks a lag of 1 to 3 that leaves 10 to 16 uu/s of velocity error in the first ticks and wins only because a later event
+lands closer by accident (`duel_974` mean 47 uu at lag 3, 586 uu at the honest lag 0, yet the honest run stays within
+10 uu for 156 ticks against 108). Use the time-to-10-uu / time-to-100-uu figures, not the mean, to follow progress.
+
 Seeds move these a lot (the earlier fresh sets gave 105 to 121 uu and medians 25 to 58 uu for random drives): the
 error is a few events per tape, not a drift. For comparison the same families before this run's fixes were 140 to
 354 uu (random drives, seeds 101 to 524), median 48 to 143, and the wall-start median was 132 uu.
