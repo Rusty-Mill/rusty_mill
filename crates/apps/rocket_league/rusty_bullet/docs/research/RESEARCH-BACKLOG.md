@@ -806,6 +806,14 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   nothing, so the side is a tie broken by sub-milliradian asymmetry (how the start quaternion or the
   contact order rounds), not a model error. Only exactly symmetric hits are affected.
 
+- **Air-control combinations (2026-10-08, `gen_air_combo.py`, `aircombo_*`, `batch_20261008-082806`/`-083436`)**:
+  a level car at z = 1000 with pitch/yaw/roll held. Yaw + roll, either sign, matches (0.1 uu). Pitch + roll:
+  the game spins about the roll axis only (any signs, half sticks, boost, nose-up moving start), so the pitch
+  torque is dropped while roll is held (FR-155, ADR-0077). Left open: a roll spin at the 5.5 rad/s cap sprouts
+  yaw (-2.2 rad/s) and pitch (+-0.5) spin in the game after ~0.25 s, keeping |spin| at the cap; the port stays
+  pure roll (15 uu by 1 s with boost, where the thrust direction follows). A gyroscopic term (Bullet's implicit
+  body-frame impulse) does nothing for a spin about a principal axis, so it is not the cause; cause unknown.
+
 ### RB-RESEARCH-O018 — Car bumps and demolitions
 
 - **Evidence (2026-10-07)**: 18 two-car recordings (hivemind bot, teammates).
@@ -1043,6 +1051,13 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   fresh match each time with the pad list as the only variable.
 - **Status**: Open. **Owner**: baileyrd.
 
+
+### RB-RESEARCH-O023 — A roll spin at the 5.5 rad/s cap sprouts yaw and pitch spin in the game
+
+Status: open. A level car in the air with roll held reaches the angular-speed cap (5.5 rad/s) at tick
+~24, then over the next 0.5 s the game's spin tilts to (5.0, +-0.5, -2.2): the magnitude stays at the cap,
+the direction rotates toward yaw (`aircombo_pitch_rollneg`, `aircombo_pitch_rollneg_boost`). The port
+stays pure roll. See the air-control note above (FR-155, ADR-0077); a gyroscopic term is ruled out.
 
 ### RB-RESEARCH-O022 — A nose-down car bouncing on the floor under boost (fuzz_512): chaotic, the game splits too
 
