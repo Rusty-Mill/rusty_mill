@@ -353,6 +353,83 @@ pub fn wheel_trace_capture(
     Ok(rows)
 }
 
+/// One tick of the k-step facet view (`rb-verify --wheel-kstep`): the error of the
+/// prediction of this frame made `k` ticks earlier, and how many wheel facet
+/// changes happened in between.
+#[derive(Debug, Clone, Copy)]
+pub struct WheelKStepRow {
+    /// Time of the predicted frame.
+    pub t_secs: f32,
+    /// The recorded car's position there.
+    pub position: Vec3,
+    /// Recorded minus predicted position (uu) after the window.
+    pub position_error: Vec3,
+    /// Recorded minus predicted velocity (uu/s) after the window.
+    pub velocity_error: Vec3,
+    /// Times a wheel's hit normal changed (or it gained or lost the surface)
+    /// from one tick to the next inside the window, front wheels.
+    pub front_changes: u32,
+    /// The same for the rear wheels.
+    pub rear_changes: u32,
+    /// Wheels touching at the window's start.
+    pub wheels_touching: usize,
+}
+
+/// The first car's `k`-step prediction error at each frame beside the wheel facet
+/// changes inside its window (PARITY-PLAN workstream A): a steady force bias is
+/// absorbed by the suspension within a window, so an error that grows with the
+/// changes is a force difference at the crossings.
+pub fn wheel_kstep_capture(
+    capture_path: impl AsRef<Path>,
+    k: usize,
+) -> Result<Vec<WheelKStepRow>, IngestError> {
+    let recorded = CaptureFileSource::new(capture_path.as_ref()).frames()?;
+    if recorded.first().is_none_or(|frame| frame.cars.is_empty()) {
+        return Err(IngestError::Malformed(
+            "the capture's first frame has no car to trace".to_string(),
+        ));
+    }
+    let k = k.max(1);
+    let world = PhysicsWorld::from_frame(&recorded[0]);
+    let predicted = simulate_recorded_k_step(world.clone(), &recorded, k);
+    let hits = wheel_contacts_along(world, &recorded);
+    let moved = |a: &WheelContacts, b: &WheelContacts, wheel: usize| match (&a[wheel], &b[wheel]) {
+        (Some(x), Some(y)) => x.normal.distance(&y.normal) > 1e-3,
+        (None, None) => false,
+        _ => true,
+    };
+    let mut rows = Vec::new();
+    for index in 1..recorded.len().min(predicted.len()) {
+        let (Some(rec), Some(pred)) = (recorded[index].cars.first(), predicted[index].cars.first())
+        else {
+            continue;
+        };
+        let start = index.saturating_sub(k);
+        let (mut front, mut rear) = (0, 0);
+        for j in (start + 1)..index.min(hits.len()) {
+            for wheel in 0..4 {
+                if moved(&hits[j - 1], &hits[j], wheel) {
+                    if wheel < 2 {
+                        front += 1;
+                    } else {
+                        rear += 1;
+                    }
+                }
+            }
+        }
+        rows.push(WheelKStepRow {
+            t_secs: recorded[index].timestamp_secs,
+            position: rec.position,
+            position_error: rec.position - pred.position,
+            velocity_error: rec.velocity - pred.velocity,
+            front_changes: front,
+            rear_changes: rear,
+            wheels_touching: hits.get(start).map_or(0, |h| h.iter().flatten().count()),
+        });
+    }
+    Ok(rows)
+}
+
 /// Default horizon (ticks) for `rb-verify --self-kstep`: a quarter second
 /// at 120 Hz, long enough for position-level effects (contact correction,
 /// suspension) to show, short enough that the chaos of a free run doesn't.
@@ -698,6 +775,35 @@ mod tests {
         // RB-VERIFY-003-FR-007: each row carries the ball too.
         assert_eq!(one_step[0].ball_velocity_error(), 0.0);
         assert_eq!(one_step[0].recorded_ball, one_step[0].candidate_ball);
+    }
+
+    #[test]
+    fn the_wheel_traces_cover_the_capture_and_count_no_facet_changes_on_a_flat_floor() {
+        let recorded = CaptureFileSource::new(capture_fixture()).frames().unwrap();
+        let rows = wheel_trace_capture(capture_fixture(), 0.0, f32::INFINITY).unwrap();
+        assert_eq!(rows.len(), recorded.len() - 1, "one row per step");
+        let kstep = wheel_kstep_capture(capture_fixture(), 10).unwrap();
+        assert_eq!(kstep.len(), recorded.len() - 1);
+        // The fixture is a flat-floor drive in the air and on the ground: a wheel
+        // that touches always stands on the floor, so its normal never turns (and a
+        // window's changes are only wheels gaining or losing the floor).
+        for row in &kstep {
+            assert!(row.wheels_touching <= 4);
+        }
+        for row in rows.iter().flat_map(|r| r.wheels.iter().flatten()) {
+            assert!(
+                (row.normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-3,
+                "{:?}",
+                row.normal
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_k_counts_as_one_in_the_kstep_view() {
+        let one = wheel_kstep_capture(capture_fixture(), 1).unwrap();
+        let zero = wheel_kstep_capture(capture_fixture(), 0).unwrap();
+        assert_eq!(one.len(), zero.len());
     }
 
     #[test]

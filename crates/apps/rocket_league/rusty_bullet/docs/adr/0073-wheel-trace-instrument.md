@@ -37,6 +37,12 @@ the one-step velocity and spin error and each wheel's hit normal and suspension
 length, with `FACET` where any wheel's normal changed. `wheel_facets.py` summarises
 a batch.
 
+Addendum (same day): `rb-verify --wheel-kstep <capture> [k]` prints the k-step
+(default 30) position and velocity error of each frame with the front and rear
+wheel facet changes inside its window, and `wheel_kstep.py` buckets a batch by that
+count. A steady force bias is absorbed by the suspension inside a window, which the
+one-step view cannot show, so this is the metric for facet hypotheses.
+
 ## Consequences
 
 ### Positive

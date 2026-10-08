@@ -62,9 +62,9 @@ use rb_verify_cli::{
     car_frame_spin, compare_scenario, compare_scenario_recorded, default_grid, k_step_capture,
     k_step_score, one_step_capture, rotation_rate, scenario_from_capture,
     score_capture_against_candidate, score_capture_growth, score_replay_against_capture,
-    simulate_scenario, sweep, trace_capture, wheel_trace_capture, Candidate, SeedFrame, TraceRow,
-    WheelTraceRow, Window, DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP,
-    DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    simulate_scenario, sweep, trace_capture, wheel_kstep_capture, wheel_trace_capture, Candidate,
+    SeedFrame, TraceRow, WheelKStepRow, WheelTraceRow, Window, DEFAULT_GROWTH_WINDOW_SECS,
+    DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::path::Path;
@@ -181,6 +181,25 @@ fn print_wheel_trace(rows: &[WheelTraceRow]) {
             if changed { "FACET" } else { "" },
         );
         previous = Some(row);
+    }
+}
+
+/// `--wheel-kstep`: one line per tick with the k-step position and velocity error
+/// of that frame and the wheel facet changes inside the window.
+fn print_wheel_kstep(rows: &[WheelKStepRow]) {
+    for row in rows {
+        println!(
+            "t={:>7.3}s pos {} | window front {:>2} rear {:>2} touching {} | pos err {} |{:>6.1}| vel err {} |{:>6.1}|",
+            row.t_secs,
+            fmt_vec(&row.position),
+            row.front_changes,
+            row.rear_changes,
+            row.wheels_touching,
+            fmt_vec(&row.position_error),
+            row.position_error.length(),
+            fmt_vec(&row.velocity_error),
+            row.velocity_error.length(),
+        );
     }
 }
 
@@ -674,6 +693,35 @@ fn main() -> ExitCode {
             }
             Ok(rows) => {
                 print_wheel_trace(&rows);
+                ExitCode::SUCCESS
+            }
+        };
+    }
+
+    if first == "--wheel-kstep" {
+        let Some(capture_path) = args.next() else {
+            eprintln!("{}", usage());
+            return ExitCode::FAILURE;
+        };
+        let k = match args.next().map(|raw| raw.parse::<usize>()) {
+            None => DEFAULT_K_STEP,
+            Some(Ok(k)) if k > 0 => k,
+            Some(_) => {
+                eprintln!(
+                    "invalid k (a positive tick count)
+{}",
+                    usage()
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        return match wheel_kstep_capture(capture_path, k) {
+            Err(e) => {
+                eprintln!("ingestion failed: {e}");
+                ExitCode::FAILURE
+            }
+            Ok(rows) => {
+                print_wheel_kstep(&rows);
                 ExitCode::SUCCESS
             }
         };

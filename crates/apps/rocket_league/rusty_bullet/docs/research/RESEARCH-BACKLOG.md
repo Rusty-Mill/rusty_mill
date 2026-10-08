@@ -607,6 +607,26 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   (O019), whose 0.2 uu/s per tick is the largest single one-step error on any
   surface.
 
+- **k-step view (2026-10-07, `--wheel-kstep`, `wheel_kstep.py`, k = 30)**: the
+  prediction error of each frame made 30 ticks earlier, beside the wheel facet
+  changes inside the window (a wheel's hit normal changed, or it gained or lost the
+  surface), on the 15 `wallg_*` recordings, windows that start with four wheels down
+  (8105 of them). A steady bias is absorbed in a window, so what stays is a real
+  difference. Mean velocity error rises with the changes: 0.44 uu/s with none
+  (3330 windows), 0.8 with 1 to 2, 1.9 with 3 to 5, 3.2 with 6 or more (position
+  error 0.09, 0.09, 0.18, 0.29 uu); a least-squares slope of **0.27 uu/s per facet
+  change**. Front wheels cost more than rear: 1.13 against 0.70 uu/s for windows
+  with 1 to 2 changes of one kind only. The sign of the dependence is the same at
+  all three speeds. So a force difference at facet crossings is real, small per
+  crossing, and adds up over a ramp. Caveat: the windows with many changes are also
+  the curved part of the ramp, so some of the rise is curvature; a control with the
+  same place and different speed is still to be done.
+- **Next**: test hypotheses against this slope (windows with changes, pooled error)
+  and not against the free-run climbs: the damper's reading of the new normal at a
+  crossing, the pushback on a facet change, `inv_contact_dot` at a steep normal; a
+  hypothesis that does not lower the slope is out. The front/rear asymmetry points
+  at the wheel order (O019).
+
 ### RB-RESEARCH-O013 — Powerslide: a long reverse slide loses speed too fast
 
 - **Evidence (2026-10-07)**: `probe_powerslide` (1400 uu/s, handbrake, full
