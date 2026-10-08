@@ -850,6 +850,12 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   port's first overlap of 0.12 uu is answered a tick before the game's; a minimum depth rule fixed that tape and
   broke `bumpr_300`, so it is not adopted).
 
+- **Held-out check of FR-156 and FR-157 (2026-10-08, `fuzz_761..784`, `batch_20261008-103103`)**: random 6 s drives
+  never used to find either rule, scored with and without them (code at `a726323` for `drive/mod.rs`, same scorer): eight
+  tapes better, five worse by over 1 uu, mean of means 121.2 -> 118.6 uu, median 55.8 -> 58.3. Neutral on free-run
+  position, as expected from rules that move the one-step forward error by 0.2 to 0.4 uu/s per tick on a small share of
+  ticks; they were adopted on the one-step evidence (`regime_bias.py`), not on these means.
+
 ### RB-RESEARCH-O018 — Car bumps and demolitions
 
 - **Evidence (2026-10-07)**: 18 two-car recordings (hivemind bot, teammates).
