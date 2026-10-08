@@ -12248,6 +12248,7 @@ name = "rusty_bbp"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "rusty_atomic_file",
  "rusty_rsa",
  "rusty_serde",
 ]
