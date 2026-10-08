@@ -839,6 +839,23 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   changed. Elsewhere: touchdowns (195 landings) median one-step error 0.2 to 0.7 uu/s over four ticks, spin bias
   under 0.02 rad/s per tick in every regime.
 
+- **Two-car random drives (2026-10-08, `gen_duel_fuzz.py`, `duel_801..924` found the rules, `duel_941..964` held out,
+  `duel_report.py`)**: two cars 450 to 800 uu apart, facing each other within 8 degrees, a boosted run and then a seeded
+  random tape each (same team: the hivemind plays both; enemy team: the second car stands still). Found: the second hive
+  car's input leads by a tick (scorer, `HIVE_INPUT_LEAD`), swept boost pads on the state set (scorer), the bump nose test
+  by the other car's origin (FR-158) and the ground bump following the bumper's climb (FR-159). Held-out check against
+  the code before FR-158 (same scorer): seven of 24 tapes differ, four improve (`duel_948` 1110 -> 80, `duel_951`
+  2025 -> 539 uu), none worse by over 2 uu, total 15514 -> 11900, median 174 -> 157. What is left after a contact is the
+  usual chaos: two cars thrown up and spinning; and the contact itself can still come a tick early (`duel_865`: the
+  port's first overlap of 0.12 uu is answered a tick before the game's; a minimum depth rule fixed that tape and
+  broke `bumpr_300`, so it is not adopted).
+
+- **Held-out check of FR-156 and FR-157 (2026-10-08, `fuzz_761..784`, `batch_20261008-103103`)**: random 6 s drives
+  never used to find either rule, scored with and without them (code at `a726323` for `drive/mod.rs`, same scorer): eight
+  tapes better, five worse by over 1 uu, mean of means 121.2 -> 118.6 uu, median 55.8 -> 58.3. Neutral on free-run
+  position, as expected from rules that move the one-step forward error by 0.2 to 0.4 uu/s per tick on a small share of
+  ticks; they were adopted on the one-step evidence (`regime_bias.py`), not on these means.
+
 ### RB-RESEARCH-O018 — Car bumps and demolitions
 
 - **Evidence (2026-10-07)**: 18 two-car recordings (hivemind bot, teammates).
