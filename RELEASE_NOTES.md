@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_proto first slice (pending review)
+
+- **Added:** `rusty_mcp_proto`, the envelope and tools path of the MCP wire types on `rusty_json`, checked field by field against `rmcp` 3.1.4. Also `docs/research/MCP-PROTO-SCOPE.md` (A2 inventory and the three owner decisions: support both handshakes, tasks and multi-round-trip types now, opaque elicitation schema).
+- **Known limitations:** nothing uses the crate yet, so no consumer behaviour changed. Prompts, resource methods, completion, cancel/progress, subscriptions, tasks, multi-round-trip input and both handshakes are not written yet. Annotation `priority` is forwarded as raw JSON, so a value like `0.2` survives exactly where `rmcp` (which stores `f32`) would re-encode it as `0.20000000298`. Unknown members of known types are dropped on decode. Verified by tests only, not against a live server.
+
+---
+
 ## 2026-10-08 - rusty-mcp-client split (pending review)
 
 - **Added:** `rusty-mcp-client`; **Changed:** `rusty-mcp` loses its `client` feature; `rk-mcp` depends on the new crate. Stdio verified again against a real `rusty-mcp-demo` after the move. No OpenSSL in the MCP client path (the `native-tls` still in `rk-mcp`'s tree comes from `aisdk`/`rk-feed`, the LLM client).

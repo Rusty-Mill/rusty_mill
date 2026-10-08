@@ -12530,6 +12530,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mcp_proto"
+version = "0.1.0"
+dependencies = [
+ "rmcp",
+ "rusty_json",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rusty_multimodal_db"
 version = "0.1.0"
 dependencies = [

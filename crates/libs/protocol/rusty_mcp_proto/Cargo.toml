@@ -1,0 +1,35 @@
+[package]
+name = "rusty_mcp_proto"
+version = "0.1.0"
+edition = "2021"
+description = "Sovereign MCP wire types on rusty_json: JSON-RPC 2.0 envelope, error codes, protocol versions, content, tools and paginated lists, with a hand-written codec and no serde"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["mcp", "json-rpc", "protocol"]
+categories = ["network-programming"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+# First-party only (ADR-0002 Tier S). `rusty_json` without its `serde`
+# feature: the codec is hand-written against `Value`. A path dependency, not
+# `workspace = true`, so `default-features = false` is honoured (as in
+# `rusty_agui`).
+rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Wire-format oracle only (never shipped): every type is round-tripped
+# against `rmcp` 3.1's model, which the MCP crates use today.
+rmcp = { workspace = true }
+serde = "1"
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"

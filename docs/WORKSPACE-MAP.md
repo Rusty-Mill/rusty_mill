@@ -30,7 +30,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_hex | rusty_hex | Hand-rolled, dependency-free hex encode and decode: lowercase output, either case accepted, fixed-size arrays for keys and digests. | 8 |
 | foundation | rusty_ip | rusty_ip | Allocation-free IP address classification facts without connection policy | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 31 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 32 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
@@ -113,6 +113,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 8 |
 | libs | rusty_mcp | rusty-mcp-client | Protocol-only MCP client: stdio child process and Streamable HTTP, with API-key, bearer and OAuth client-credentials auth | 1 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on the rusty-mcp scaffold | 0 |
+| libs | rusty_mcp_proto | rusty_mcp_proto | Sovereign MCP wire types on rusty_json: JSON-RPC 2.0 envelope, error codes, protocol versions, content, tools and paginated lists, with a hand-written codec and no serde | 0 |
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 7 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 8 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |

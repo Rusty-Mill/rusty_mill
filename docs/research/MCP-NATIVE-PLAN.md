@@ -12,7 +12,7 @@ MCP crates depend on `rusty_request` / `rusty_serve` and **`rusty_tls`**, never 
 |---|---|---|
 | A0 | Amend workspace ADR-0002: MCP crates move from Tier A (`rmcp`, permanent) to Tier T (transitional) with this plan as the milestone list | **needs owner sign-off** |
 | A1 | Split the client out of `rusty-mcp` into `rusty-mcp-client`; client on rustls, not OpenSSL | done |
-| A2 | `rusty_mcp_proto` (Tier S): JSON-RPC 2.0 + MCP types on `rusty_json`; `rmcp` as a **dev-only** wire-format oracle | open |
+| A2 | `rusty_mcp_proto` (Tier S): JSON-RPC 2.0 + MCP types on `rusty_json`; `rmcp` as a **dev-only** wire-format oracle | in progress: first slice (envelope, tools) done; scope in `MCP-PROTO-SCOPE.md` |
 | A3 | Server on `rusty_serve` (stdio + stateless Streamable HTTP); accept on `rk-app` and `rusty-mcp-demo` | open |
 | A4 | Client on `rusty_request` + `rusty_tls`; needs an SSE reader | open |
 | A5 | Move consumers one at a time: `rk-app`, `rk-mcp`, `rusty_homelab_mcp`, `rp-mcp`, ..., `agentgateway` last | open |
