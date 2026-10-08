@@ -63,7 +63,7 @@
 //! stage 4b-v, where version negotiation joins the TLS 1.3 client.
 
 use super::client::{
-    plaintext_record, random_bytes, record_length, Alert, AlertDescription, AlertLevel, ClientError,
+    plaintext_record, random_bytes, Alert, AlertDescription, AlertLevel, ClientError,
 };
 use super::handshake::{
     complete_prefix, extension, find, messages, ClientHello, Extension, HandshakeError,
@@ -76,8 +76,8 @@ use super::handshake12::{
 use super::kx::{KeyExchange, NamedGroup};
 use super::name::ServerName;
 use super::path::{verify_peer_certificate, PathOptions, TrustAnchor};
-use super::record::{Aead, ContentType, RecordError, HEADER_LEN, MAX_FRAGMENT_LEN};
-use super::record12::{Opener, Sealer, MAX_CIPHERTEXT_LEN};
+use super::record::{Aead, ContentType, RecordError, MAX_FRAGMENT_LEN};
+use super::record12::{split, Opener, Sealer};
 use super::schedule::Hash;
 use super::schedule12::{
     extended_master_secret, finished_verify_data, key_block, verify_finished, MasterSecret, Side,
@@ -369,7 +369,7 @@ impl<'a> ClientHandshake12<'a> {
     /// Feed one whole TLS record, and get back the bytes to send in reply.
     ///
     /// `record` must be exactly one record, header included; use
-    /// [`record_length`] to find where it ends. The reply is empty except after
+    /// [`super::client::record_length`] to find where it ends. The reply is empty except after
     /// the server's `ServerHelloDone`, which is answered with the client's
     /// whole flight.
     ///
@@ -396,25 +396,7 @@ impl<'a> ClientHandshake12<'a> {
     }
 
     fn read_record_inner(&mut self, record: &[u8]) -> Result<Vec<u8>> {
-        if record.len() < HEADER_LEN {
-            return Err(RecordError::Truncated {
-                len: record.len(),
-                min: HEADER_LEN,
-            }
-            .into());
-        }
-        let declared = record_length(record).map_or(0, |total| total - HEADER_LEN);
-        if record.len() != HEADER_LEN + declared {
-            return Err(RecordError::LengthMismatch {
-                declared,
-                available: record.len() - HEADER_LEN,
-            }
-            .into());
-        }
-        if declared > MAX_CIPHERTEXT_LEN {
-            return Err(RecordError::EncryptedFragmentTooLong { len: declared }.into());
-        }
-        let typ = ContentType::from_u8(record[0]);
+        let (typ, version, fragment) = split(record)?;
         let expect = self.expecting()?;
 
         // Only the server's Finished is protected. Everything before it,
@@ -426,10 +408,9 @@ impl<'a> ClientHandshake12<'a> {
         // The record version of a plaintext record is a hint, not a check:
         // servers differ on whether the first records say 3.1 or 3.3. A major
         // version other than 3 is not TLS.
-        if record[1] != 3 {
-            return Err(RecordError::UnexpectedVersion([record[1], record[2]]).into());
+        if version[0] != 3 {
+            return Err(RecordError::UnexpectedVersion(version).into());
         }
-        let fragment = &record[HEADER_LEN..];
         match typ {
             ContentType::Alert => self.plaintext_alert(fragment),
             ContentType::ChangeCipherSpec => self.change_cipher_spec(expect, fragment),
@@ -445,12 +426,7 @@ impl<'a> ClientHandshake12<'a> {
     /// are advisory and ignored, as RFC 5246 §7.2 allows.
     fn plaintext_alert(&self, fragment: &[u8]) -> Result<Vec<u8>> {
         match Alert::parse(fragment) {
-            Some(alert)
-                if alert.level == AlertLevel::Warning
-                    && alert.description != AlertDescription::CLOSE_NOTIFY =>
-            {
-                Ok(Vec::new())
-            }
+            Some(alert) if alert.is_advisory() => Ok(Vec::new()),
             Some(alert) => Err(ClientError::PeerAlert(alert)),
             None => Err(ClientError::UnexpectedContentType(ContentType::Alert)),
         }
@@ -762,14 +738,13 @@ impl<'a> ClientHandshake12<'a> {
             return Err(ClientError::BadFinished);
         }
 
-        self.connection = Some(Connection12 {
-            sealer: established.sealer,
-            opener: established.opener,
-            suite: self.hs.suite,
-            certificates: core::mem::take(&mut self.hs.certificates),
-            closed: false,
-            failed: false,
-        });
+        self.connection = Some(Connection12::new(
+            Role::Client,
+            established.sealer,
+            established.opener,
+            self.hs.suite,
+            core::mem::take(&mut self.hs.certificates),
+        ));
         self.phase = Phase::Done;
         Ok(())
     }
@@ -807,8 +782,20 @@ pub enum Incoming12 {
     Closed,
 }
 
-/// An established TLS 1.2 connection.
+/// Which end of the connection this is; decides only what a post-handshake
+/// request to renegotiate looks like.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Role {
+    Client,
+    Server,
+}
+
+/// An established TLS 1.2 connection, of either role.
+///
+/// Its error type is [`ClientError`] because this module was written first;
+/// a server's connection reports the same variants.
 pub struct Connection12 {
+    role: Role,
     sealer: Sealer,
     opener: Opener,
     suite: CipherSuite12,
@@ -818,12 +805,31 @@ pub struct Connection12 {
 }
 
 impl Connection12 {
+    pub(super) fn new(
+        role: Role,
+        sealer: Sealer,
+        opener: Opener,
+        suite: CipherSuite12,
+        certificates: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            role,
+            sealer,
+            opener,
+            suite,
+            certificates,
+            closed: false,
+            failed: false,
+        }
+    }
+
     /// The negotiated cipher suite.
     pub fn suite(&self) -> CipherSuite12 {
         self.suite
     }
 
-    /// The server's certificate chain as DER, end-entity first.
+    /// The peer's certificate chain as DER, end-entity first: the server's, on
+    /// a client; the client's, if it authenticated, on a server.
     pub fn peer_certificates(&self) -> &[Vec<u8>] {
         &self.certificates
     }
@@ -885,11 +891,11 @@ impl Connection12 {
                 None => Err(ClientError::UnexpectedContentType(ContentType::Alert)),
             },
             ContentType::Handshake => {
-                // The only post-handshake message this client expects is a
-                // HelloRequest, a server asking to renegotiate. Renegotiation
-                // is not implemented, and RFC 5746 says to refuse it with a
-                // no_renegotiation warning and carry on.
-                if opened.fragment == [0, 0, 0, 0] {
+                // The only post-handshake message expected is a request to
+                // renegotiate: a HelloRequest to a client, a ClientHello to a
+                // server. Renegotiation is not implemented, and RFC 5746 says
+                // to refuse it with a no_renegotiation warning and carry on.
+                if self.asks_to_renegotiate(&opened.fragment) {
                     let reply = self
                         .sealer
                         .seal(ContentType::Alert, &[1, NO_RENEGOTIATION.0])?;
@@ -905,6 +911,26 @@ impl Connection12 {
                 })
             }
             other => Err(ClientError::UnexpectedContentType(other)),
+        }
+    }
+}
+
+impl Connection12 {
+    /// Whether `fragment` is, whole, the message that starts a renegotiation.
+    /// A fragment that merely begins like one is not: it is an error.
+    fn asks_to_renegotiate(&self, fragment: &[u8]) -> bool {
+        match self.role {
+            Role::Client => fragment == [0, 0, 0, 0],
+            Role::Server => match fragment {
+                [typ, rest @ ..] if *typ == HandshakeType::ClientHello.as_u8() => {
+                    rest.len() >= 3
+                        && rest.len() - 3
+                            == usize::from(rest[0]) << 16
+                                | usize::from(rest[1]) << 8
+                                | usize::from(rest[2])
+                }
+                _ => false,
+            },
         }
     }
 }

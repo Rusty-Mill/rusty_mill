@@ -64,6 +64,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "server12"
+path = "fuzz_targets/server12.rs"
+test = false
+doc = false
+bench = false
+
 # Standalone: this is not a member of the parent, which is a single crate with
 # no workspace of its own.
 [workspace]

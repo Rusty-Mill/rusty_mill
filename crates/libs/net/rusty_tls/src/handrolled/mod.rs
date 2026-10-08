@@ -34,6 +34,9 @@
 //! - [`client12`] — the TLS 1.2 client handshake (stage 4b-iii): ECDHE with an
 //!   AEAD, extended master secret required, no resumption, no client
 //!   certificate. The first TLS 1.2 code here that talks to a peer.
+//! - [`server12`] — the TLS 1.2 server handshake (stage 4b-iv): the same
+//!   refusals as the client, an optional client certificate that must prove
+//!   its key, and a shared [`client12::Connection12`] once established.
 //! - [`der`] — a strict DER reader (stage 2a), the foundation everything
 //!   certificate-shaped sits on.
 //! - [`x509`] — certificate parsing (stage 2a). **Parsing only**: it reports
@@ -105,6 +108,7 @@ pub mod record12;
 pub mod schedule;
 pub mod schedule12;
 pub mod server;
+pub mod server12;
 pub mod sign;
 pub mod ticket;
 pub mod verify;

@@ -70,9 +70,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # The OpenSSL leg asserts a non-zero count rather than trusting an exit
         # code, because `--ignored` with nothing ignored runs zero tests.
         self.assertIn("openssl version", job)
-        # Both OpenSSL suites run: the TLS 1.3 server and the TLS 1.2 client.
+        # All three OpenSSL suites run: the TLS 1.3 server, the TLS 1.2 client
+        # and the TLS 1.2 server.
         self.assertIn("handrolled_socket_interop", job)
         self.assertIn("handrolled_client12_socket_interop", job)
+        self.assertIn("handrolled_server12_socket_interop", job)
         self.assertIn("[1-9][0-9]* passed", job)
         # Suites are discovered from the directory so a new one is guarded
         # automatically, and each must list at least one test.

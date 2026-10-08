@@ -194,6 +194,36 @@ fn additional_data(
     aad
 }
 
+/// Check the framing of one whole record, protected or not, and split it.
+///
+/// Returns the content type, the two version octets and the fragment. The
+/// version is returned unjudged: the first records of a handshake carry
+/// whatever the peer likes, and protected ones are checked by [`Opener`].
+pub(super) fn split(record: &[u8]) -> Result<(ContentType, [u8; 2], &[u8]), RecordError> {
+    if record.len() < HEADER_LEN {
+        return Err(RecordError::Truncated {
+            len: record.len(),
+            min: HEADER_LEN,
+        });
+    }
+    let declared = usize::from(u16::from_be_bytes([record[3], record[4]]));
+    let fragment = &record[HEADER_LEN..];
+    if fragment.len() != declared {
+        return Err(RecordError::LengthMismatch {
+            declared,
+            available: fragment.len(),
+        });
+    }
+    if declared > MAX_CIPHERTEXT_LEN {
+        return Err(RecordError::EncryptedFragmentTooLong { len: declared });
+    }
+    Ok((
+        ContentType::from_u8(record[0]),
+        [record[1], record[2]],
+        fragment,
+    ))
+}
+
 /// Protects outgoing records under one direction's key.
 ///
 /// ```

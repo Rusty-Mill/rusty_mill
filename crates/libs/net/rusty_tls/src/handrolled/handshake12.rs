@@ -115,6 +115,88 @@ impl<'a> ServerHello12<'a> {
     }
 }
 
+/// A ClientHello as a TLS 1.2 server must read it, RFC 5246 §7.4.1.2.
+///
+/// [`super::handshake::ClientHello`] is the TLS 1.3 reading of the same
+/// structure and is strict where TLS 1.2 is not: it accepts exactly one
+/// compression method and requires an extensions block. A server answers
+/// whoever connects, so this reader accepts what the RFC does and leaves
+/// refusing to the handshake, which can say why.
+///
+/// `client_version` is reported, not checked: a client offering TLS 1.3 sends
+/// `0x0303` here and says so in `supported_versions`, and one that offers
+/// something older is a protocol-version error for the caller to name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientHello12<'a> {
+    /// `client_version`.
+    pub version: u16,
+    /// `random`, 32 octets.
+    pub random: &'a [u8],
+    /// `session_id`, at most 32 octets; the client's resumption offer.
+    pub session_id: &'a [u8],
+    /// The offered cipher suites, in order, including any signalling values.
+    pub cipher_suites: Vec<u16>,
+    /// `compression_methods`, non-empty. The server needs null among them.
+    pub compression: &'a [u8],
+    /// The extensions, in order. Empty if the block was absent.
+    pub extensions: Vec<Extension<'a>>,
+}
+
+impl<'a> ClientHello12<'a> {
+    /// Parse a ClientHello body.
+    pub fn parse(body: &'a [u8]) -> Result<Self> {
+        let mut reader = Reader::new(body);
+        let version = reader.u16()?;
+        let random = reader.take(32)?;
+        let session_id = reader.vector_u8()?;
+        if session_id.len() > 32 {
+            return Err(HandshakeError::Malformed("session_id is over 32 octets"));
+        }
+
+        let mut suites = reader.sub_u16()?;
+        let mut cipher_suites = Vec::new();
+        while !suites.is_empty() {
+            cipher_suites.push(suites.u16()?);
+        }
+        if cipher_suites.is_empty() {
+            return Err(HandshakeError::Empty("cipher_suites"));
+        }
+
+        let compression = reader.vector_u8()?;
+        if compression.is_empty() {
+            return Err(HandshakeError::Empty("compression_methods"));
+        }
+        let extensions = if reader.is_empty() {
+            Vec::new()
+        } else {
+            parse_extensions(&mut reader)?
+        };
+        reader.finish()?;
+        Ok(Self {
+            version,
+            random,
+            session_id,
+            cipher_suites,
+            compression,
+            extensions,
+        })
+    }
+
+    /// Encode the body; the extensions block is omitted when there are none.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut writer = Writer::new();
+        writer.u16(self.version);
+        writer.bytes(self.random);
+        writer.vector_u8(|w| w.bytes(self.session_id));
+        writer.vector_u16(|w| self.cipher_suites.iter().for_each(|s| w.u16(*s)));
+        writer.vector_u8(|w| w.bytes(self.compression));
+        if !self.extensions.is_empty() {
+            write_extensions(&mut writer, &self.extensions);
+        }
+        writer.into_vec()
+    }
+}
+
 /// A `Certificate` message, RFC 5246 §7.4.2: a list of DER certificates,
 /// end-entity first.
 #[derive(Clone, Debug, PartialEq, Eq)]

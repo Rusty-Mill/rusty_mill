@@ -180,6 +180,8 @@ impl AlertDescription {
     pub const ILLEGAL_PARAMETER: Self = Self(47);
     /// `unknown_ca(48)`.
     pub const UNKNOWN_CA: Self = Self(48);
+    /// `unexpected_message(10)`.
+    pub const UNEXPECTED_MESSAGE: Self = Self(10);
     /// `decode_error(50)`.
     pub const DECODE_ERROR: Self = Self(50);
     /// `decrypt_error(51)`.
@@ -256,6 +258,12 @@ impl Alert {
             }),
             _ => None,
         }
+    }
+
+    /// A warning that is not `close_notify`: advisory, and ignorable before a
+    /// handshake completes (RFC 5246 §7.2).
+    pub(super) fn is_advisory(&self) -> bool {
+        self.level == AlertLevel::Warning && self.description != AlertDescription::CLOSE_NOTIFY
     }
 }
 

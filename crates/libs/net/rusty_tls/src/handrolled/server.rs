@@ -150,6 +150,7 @@ use super::schedule::{
     expand_label, finished_verify_data, traffic_keys, verify_finished, verify_psk_binder, Hash,
     KeySchedule,
 };
+use super::schedule12::ScheduleError;
 use super::sign::{SignError, SigningKey};
 use super::ticket::{TicketContents, TicketError, TicketKeys};
 use super::verify::{verify_tls13_signature, SignatureScheme, VerifyError};
@@ -257,6 +258,26 @@ pub enum ServerError {
     EarlyDataOffered,
     /// A ticket opened and its contents were not a ticket.
     Ticket(TicketError),
+    /// The client does not offer TLS 1.2 (stage 4b-iv).
+    NotTls12(u16),
+    /// A TLS 1.2 ClientHello did not offer the extended master secret.
+    ///
+    /// Refused for the reason [`super::client::ClientError::MissingExtendedMasterSecret`]
+    /// is: without RFC 7627 two handshakes can share a master secret.
+    MissingExtendedMasterSecret,
+    /// A TLS 1.2 ClientHello did not carry secure renegotiation (RFC 5746), or
+    /// carried a non-empty `renegotiated_connection` on an initial handshake.
+    BadRenegotiationInfo,
+    /// The client offers no compression method but null-excluding ones, or
+    /// excludes uncompressed points; the string says which.
+    UnacceptableOffer(&'static str),
+    /// A `ChangeCipherSpec` arrived at any moment but the one after the
+    /// client's last handshake message, or as anything but the octet `0x01`.
+    UnexpectedChangeCipherSpec,
+    /// The client's handshake messages were not complete within the cap.
+    HandshakeTooLarge,
+    /// The TLS 1.2 key derivation was refused.
+    Schedule(ScheduleError),
 }
 
 impl core::fmt::Display for ServerError {
@@ -309,6 +330,19 @@ impl core::fmt::Display for ServerError {
                 f.write_str("the client offered early_data, which this server does not accept")
             }
             Self::Ticket(err) => write!(f, "a session ticket: {err}"),
+            Self::NotTls12(version) => {
+                write!(f, "the client does not offer TLS 1.2 ({version:#06x})")
+            }
+            Self::MissingExtendedMasterSecret => {
+                f.write_str("the client did not offer the extended master secret")
+            }
+            Self::BadRenegotiationInfo => {
+                f.write_str("the client did not offer secure renegotiation correctly")
+            }
+            Self::UnacceptableOffer(what) => write!(f, "unacceptable offer: {what}"),
+            Self::UnexpectedChangeCipherSpec => f.write_str("unexpected ChangeCipherSpec"),
+            Self::HandshakeTooLarge => f.write_str("the client's handshake message is too large"),
+            Self::Schedule(err) => write!(f, "key derivation: {err}"),
         }
     }
 }
@@ -328,6 +362,11 @@ impl From<RecordError> for ServerError {
 impl From<KxError> for ServerError {
     fn from(err: KxError) -> Self {
         Self::Kx(err)
+    }
+}
+impl From<ScheduleError> for ServerError {
+    fn from(err: ScheduleError) -> Self {
+        Self::Schedule(err)
     }
 }
 impl From<SignError> for ServerError {
@@ -367,6 +406,13 @@ impl ServerError {
             Self::BadBinder => AlertDescription::DECRYPT_ERROR,
             Self::PskOfferNotLast | Self::EarlyDataOffered => AlertDescription::ILLEGAL_PARAMETER,
             Self::Ticket(_) => AlertDescription::HANDSHAKE_FAILURE,
+            Self::NotTls12(_) => AlertDescription::PROTOCOL_VERSION,
+            Self::MissingExtendedMasterSecret
+            | Self::BadRenegotiationInfo
+            | Self::UnacceptableOffer(_)
+            | Self::Schedule(_) => AlertDescription::HANDSHAKE_FAILURE,
+            Self::UnexpectedChangeCipherSpec => AlertDescription::UNEXPECTED_MESSAGE,
+            Self::HandshakeTooLarge => AlertDescription::ILLEGAL_PARAMETER,
             // The peer already knows; telling it again is noise.
             Self::PeerAlert(_) | Self::Failed => return None,
         })
@@ -476,7 +522,7 @@ pub struct ClientAuth<'a> {
 // Framing
 // ---------------------------------------------------------------------------
 
-fn plaintext_record(typ: ContentType, fragment: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn plaintext_record(typ: ContentType, fragment: &[u8]) -> Result<Vec<u8>> {
     if fragment.len() > usize::from(u16::MAX) {
         return Err(RecordError::FragmentTooLong {
             len: fragment.len(),
@@ -1743,7 +1789,7 @@ impl ServerHandshake<'_> {
     }
 }
 
-fn random_bytes(len: usize) -> Result<Vec<u8>> {
+pub(super) fn random_bytes(len: usize) -> Result<Vec<u8>> {
     use ring::rand::SecureRandom;
     let mut out = vec![0u8; len];
     ring::rand::SystemRandom::new()

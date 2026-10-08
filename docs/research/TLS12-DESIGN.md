@@ -39,7 +39,7 @@ Each stage is independently reviewable and abandonable, as in ADR-0002.
 | 4b-i | 1.2 record layer: explicit-nonce GCM, ChaCha nonce, sequence-number AAD, 2^14 limits. **Done**, see below. | Differential against rustls' 1.2 encrypter; independent vectors. | 3 to 4 (took well under one) |
 | 4b-ii | PRF, master secret, extended master secret, key block, Finished. **Done**, see below. | OpenSSL's own PRF; captured real OpenSSL handshakes; differential against rustls. | 3 to 4 (took well under one) |
 | 4b-iii | Client handshake: ServerHello, Certificate, ServerKeyExchange (signature over randoms and params), Finished, tickets. Reuses `path`/`name`. | Handshakes against rustls (restricted to TLS 1.2), OpenSSL, plus a hostile test server for refusals. | 7 to 9 |
-| 4b-iv | Server handshake: mirror, plus client auth. | rustls and OpenSSL clients. | 7 to 9 |
+| 4b-iv | Server handshake: mirror, plus client auth. **Done**, see below. | rustls and OpenSSL clients. | 7 to 9 (took well under one) |
 | 4b-v | Version negotiation and downgrade protection in existing client and server; alerts. | rustls both directions; sentinel tests. | 3 to 4 |
 | 4b-vi | Fuzz targets and BoGo/tlsfuzzer cases for the 1.2 paths; resource limits. | libFuzzer; BoGo. | 4 to 5 |
 
@@ -183,10 +183,59 @@ tests show the client rejects what the *script* got wrong, not that the script i
 (the live rustls and OpenSSL tests are what show that). The fuzz, mutation and bit-flip figures are single
 runs. Interop is with two implementations, both tested on loopback.
 
+## Stage 4b-iv: done
+
+`handrolled::server12` (`ServerConfig12`, `ServerHandshake12`), `ClientHello12` in `handshake12`, and a
+role on `Connection12` so one established-connection type serves both ends. A sans-IO ECDHE server for
+the same six AEAD suites, with an optional client certificate, speaking TLS 1.2 and nothing else.
+
+| Gate | Result |
+| --- | --- |
+| Live rustls client (TLS 1.2 only) | Every suite and group the key type allows, each the only one offered so it is actually negotiated, for ECDSA P-256, P-384, Ed25519 and RSA keys; 40 KB each way; `close_notify` both ways; a TLS 1.3-only client refused with `protocol_version`; client authentication with every client key type, a missing certificate (refused when required, tolerated when not) and an unrelated CA. |
+| Live OpenSSL `s_client` over a real socket | Eight tests, run by CI: all six suites with the negotiated one checked, each group, RSA-PSS at three hashes, Ed25519, a client certificate of three key types, a missing one, and a **renegotiation request** (`R`), which OpenSSL reports as refused with `no renegotiation`, i.e. our warning was exactly `no_renegotiation(100)`. OpenSSL also **verifies the chain and the name** of what the server sends. |
+| Self-interop | This crate's client against this crate's server for every suite and its key type, 50 KB each way, `close_notify`, and a ClientHello delivered in 1, 2, 3, 5, 7 and 50-octet records. |
+| Refusals | 41 tests asserting the specific error and alert: client version, `supported_versions` (including malformed lists), extended master secret, secure renegotiation in both forms, a stale `renegotiated_connection`, compression, suites with no overlap or the wrong key type, groups, signature schemes, point formats, duplicate extensions, over-long session ids, truncation of every prefix of a hello, an unbounded handshake message, and message order. |
+| Client authentication | A certificate without a `CertificateVerify` (the impersonation case), a signature that does not verify, **someone else's trusted certificate with my signature**, a skipped `Certificate`, an empty one followed by a proof, malformed chains. Each against a control that passes. |
+| Scripted client | Built from the public primitives only, so it can send what the real client never would: **a perfectly encrypted wrong `Finished`** (all 96 bit flips, the server's own label, a transcript without `ClientKeyExchange`, four wrong lengths), a handshake message or half a header trailing the `Finished` in its record, a `ChangeCipherSpec` with handshake bytes half-read, and a renegotiation request (and seven near misses). Its control completes and its verification of the server's `Finished` passes. |
+| Every byte | One bit flipped in every byte of the client's flight (744 handshakes). Exactly the 16 flips of the two plaintext records' minor-version octet still complete; the test requires that count and no other. |
+| Mutation | 46 deliberate bugs in `server12`, the hello parser and the server role of `Connection12`. 44 caught on the first or second round. The first round **survived 9**, and they were worth it: a wrong-but-valid `Finished` was never sent by any test, nothing put a message after `Finished`, the server's renegotiation recognition was untested, and one check turned out to be dead code (removed). One more was a mutation that changed nothing, and was replaced by a test that two handshakes never share a random or an ephemeral key. |
+| Fuzz | New libFuzzer target `server12` (client authentication on or off by the first octet): 1.37 million executions in 90 seconds, no findings; asserts no input completes a handshake. |
+
+**What the live peers taught, again.** For an ECDSA key the server must check that the client listed the
+certificate's curve (RFC 8422 §5.1), and a rustls client restricted to X25519 fails that: the first test
+run expected a handshake and the server was right to refuse. The matrix now asserts that refusal as its
+own case. Nothing in the server was wrong on first contact with rustls or OpenSSL; the bugs were all in
+tests, which is not evidence of correctness but is worth saying.
+
+Decisions made in this stage:
+
+- **The server's key decides what it can offer.** Suite authentication, signature scheme and certificate
+  curve are all derived from the `SigningKey`; a P-256 key is never offered an RSA suite.
+- **No PKCS#1 v1.5 signing.** `SigningKey` signs RSA-PSS only. A client that offers nothing else (an
+  `openssl s_client -sigalgs RSA+SHA256`) is refused with `NoSharedSignatureScheme` rather than answered
+  with something it did not offer. Adding PKCS#1 is a `SigningKey` change, not a server one.
+- **`ServerError` is shared with the TLS 1.3 server** and gains seven variants. `Connection12` still
+  reports `ClientError`, because it was written first; renaming it is a clean-up for 4b-v when the
+  errors are unified.
+- **A `CertificateVerify` signs the raw handshake messages** (TLS 1.2), checked with
+  `verify_tls12_signature`, so the TLS 1.2 verifier's ECDSA leniency now has a second caller.
+
+Not done in this stage, deliberately:
+
+- **No downgrade protection** (stage 4b-v): this server speaks 1.2 only, so it writes no `DOWNGRD`
+  sentinel. It also refuses a client that offers 1.3 only, instead of upgrading it.
+- **No resumption, no ALPN, no SNI-based certificate selection**; the server presents one chain.
+- **Not wired to any seam type** or the default build.
+- Secrets are not zeroized on drop, and ECDHE shared secrets pass through a `Vec`, as in the client.
+
+Limits of this evidence: the scripted client shares this crate's primitives, so its refusals show what
+the server rejects of *its* mistakes; the live tests are what show the server is a faithful TLS server.
+The fuzz, mutation and bit-flip figures are single runs. Interop is with two implementations on loopback.
+
 ## Next action
 
-Stage 4b-iv, the server handshake. The scripted server in `tests/handrolled_client12.rs` is already most
-of its skeleton, and the messages it needs (`ServerHello12`, `Certificate12`, `ServerKeyExchange`,
-`parse_client_key_exchange`, `CertificateRequest12`) have encoders and parsers. What is new is the state
-machine that receives hostile input, which is the larger attack surface, and client authentication. Its
-first oracle is a live rustls client and `openssl s_client`.
+Stage 4b-v, version negotiation and downgrade protection. The client and server in `client.rs` and
+`server.rs` speak 1.3 only and `client12`/`server12` speak 1.2 only; the next stage joins them, so a
+single endpoint offers both and the `DOWNGRD` sentinel (RFC 8446 §4.1.3) is written by the server and
+checked by the client. That is the property this track gave up when it started speaking something older.
+Its first oracle is rustls on both sides, with the sentinel tests written before the code.
