@@ -17,6 +17,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 - **Added:** `docs/research/TLS-ENGINE-ASSESSMENT.md` and a repro for one engine bug. **Finding:** a wildcard certificate bypasses an excluded name constraint in the native engine; rustls rejects it. **Not changed:** the default engine, either gate, or any code.
 - **Added:** `docs/research/TLS12-DESIGN.md`, the TLS 1.2 scope and stage plan. Design only; no code.
+- **Added:** `docs/research/prompts/ring-track.md`, a session prompt for assessing a native `ring` replacement. Prompt only; no code.
 - **Known limitations:** rusty_tls#25 lives in an archived repo outside this session's scope and was not read, so its acceptance criteria are taken from ADR-0002 section 5. Interop tests were not run, and about 6.5k lines of the engine (record, schedule, handshake, kx, ticket, client and server state machines) were not reviewed.
 
 ## 2026-10-08 - rusty-mcp-client split (pending review)
