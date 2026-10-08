@@ -818,6 +818,16 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   their first 0.25 s. The yaw/pitch "sprouting" at roll saturation (O023 as first written) was this pitch
   arriving in a rolling frame; O023 is closed.
 
+- **Fresh fuzz after the pitch revert (2026-10-08, `fuzz_701..724`, `batch_20261008-084009`; `hitfuzz_401..424`,
+  `batch_20261008-085403`)**: random drives mean of means 102 uu, median ~24 (six tapes over 100, all event-driven:
+  fuzz_706 is a bounce on something at z ~70 near (590, -650) that both game and port hit but resolve differently;
+  fuzz_714/722/723 start in landings after air control). No steady-force regime stands out in `onestep_episodes.py`.
+  Hit tapes: 14 of 24 have ball error 0.0 (no touch or exact), five are over 70 uu. `hitfuzz_420` is the O020 knife
+  edge: the car (z 80, level, 960 uu/s) clips the resting ball's top, the game drives it into the floor at -151 uu/s
+  against the port's -86, then both bounce at 0.6. Its car is exact (0.1 uu/s) when aligned by hand
+  (`RB_FORCE_ALIGN=0,0`): the scorer's whole-run pick of input offset 1 (mean 25.4 against 29.7) is a tick early
+  for the throttle onset, so alignment choice by whole-run error is itself a little noisy on tapes with a late event.
+
 ### RB-RESEARCH-O018 — Car bumps and demolitions
 
 - **Evidence (2026-10-07)**: 18 two-car recordings (hivemind bot, teammates).
