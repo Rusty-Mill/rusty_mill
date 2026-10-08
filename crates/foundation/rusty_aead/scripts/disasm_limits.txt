@@ -1,0 +1,6 @@
+# Reviewed 2026-10-08 on rustc 1.99.0, x86_64, --release. ChaCha20::block's one
+# conditional jump is the round-loop back-edge (public trip count); the
+# Poly1305 block function is straight-line. Poly1305::finalize and update
+# branch on the (public) message length and are not audited here.
+rusty_aead::chacha20::ChaCha20>::block 1
+rusty_aead::poly1305::Poly1305>::block 0

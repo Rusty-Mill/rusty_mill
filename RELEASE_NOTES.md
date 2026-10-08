@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - Crypto stage 3: rusty_aead ChaCha20-Poly1305 (pending review)
+
+- **Added:** `rusty_aead`. **Not changed:** `rusty_tls`, consumers, gates. Local toolchain moved to Rust 1.99.0; stages 1 to 3 re-verified on it.
+- **Verified:** tests, clippy `-D warnings` (1.99), differential against `ring`, 22 hand-made mutants (one real test gap found and closed), valgrind taint (seal clean; open shows exactly the public accept/reject branch), pinned disassembly budget, timing tests, policy scripts.
+- **Known limitations:** x86-64 only; `open` cannot be fully taint-clean because the verdict branch is public by design; 4 to 5.5x slower than `ring`; nothing independently reviewed.
+
 ## 2026-10-08 - Crypto stage 2: rusty_pk signature verification (pending review)
 
 - **Added:** `rusty_pk` (RSA, ECDSA P-256/P-384, Ed25519 verify). `ring` is a dev-dependency oracle only. **Not changed:** `rusty_tls`, consumers, gates.

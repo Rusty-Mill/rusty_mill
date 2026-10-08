@@ -19,7 +19,7 @@ non-heap secrets; fiat-crypto not yet evaluated (stage 4).
 | 0 Harness | **Done** (`rusty_ct_check`) | Taint tool, timing t-test and disassembly audit each catch a planted leak and pass a clean probe; Wycheproof loader. |
 | 1 SHA-2, HMAC, HKDF | **Done** (`rusty_sha2`) | 18 tests plus doctest: FIPS 180 examples, RFC 4231 case 1, six Wycheproof files (HMAC and HKDF, SHA-256/384/512), differential vs `ring` over lengths 0 to 300 and block boundaries, long inputs, HMAC key lengths 0 to 1000, 600 random HKDF calls; 9 hand-made mutants all caught; valgrind taint run clean with a leaky control that is caught; disassembly budget pinned; timing test `|t|` 1.75 (HMAC-SHA256) and 0.56 (HMAC-SHA512), one run. |
 | 2 Signature verify | **Done** (`rusty_pk`: `rsa`, `ecdsa`, `ed25519`) | See "Stage 2 results" below. |
-| 3 ChaCha20-Poly1305 | not started | |
+| 3 ChaCha20-Poly1305 | **Done** (`rusty_aead`) | See "Stage 3 results" below. |
 | 4 X25519 | not started | |
 
 ### Stage 2 results (`rusty_pk`, 2026-10-08)
@@ -69,6 +69,39 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
 - **Constant time:** not applicable to verification (public data); the `_vartime` routines are
   named and documented. The `mont` primitives that stage 4 will use on secrets are not yet
   tainted-tested.
+
+### Stage 3 results (`rusty_aead`, 2026-10-08)
+
+- **Evidence:** 12 tests plus doctest: RFC 8439 Poly1305 and AEAD examples, all 325 Wycheproof
+  cases (nine wrong-nonce-size vectors are unrepresentable in the typed API and are asserted
+  invalid), seal and open byte-identical to `ring` at every length 0 to 200 and at 255, 256,
+  257, 1000, 4096 and 16384, 300 damaged-input cases with the same verdict as `ring`, a
+  failed open leaves the buffer undecrypted, Poly1305 streaming at every split point, and the
+  final-reduction edge cases (accumulator exactly `p - 1`, `p`, `p + 3`) with tags computed by an
+  independent big-integer implementation.
+- **Mutation check, 22 mutants, all caught.** The first pass left one real gap: nothing
+  drove Poly1305's branch-free final reduction to the "subtract p" outcome, so replacing the
+  select with a constant passed every test, including Wycheproof. Fixed with the edge-case
+  vectors above. The block-counter bound (`MAX_LEN`, 256 GiB) cannot be run, so only its value
+  is pinned by a unit test.
+- **Constant-time evidence (`scripts/ct_check.sh`, rustc 1.99.0, x86-64):**
+  - valgrind taint, key and plaintext secret: `seal` reports 0; a planted branch on secret
+    data reports 1 (so the check can fail).
+  - `open` reports exactly 1, in `open_in_place`: the accept/reject branch on the tag
+    comparison. That bit is public by design and cannot be declassified from outside the
+    library, so the script requires exactly one report located there; a second one fails.
+  - disassembly: `ChaCha20::block` has 1 conditional jump (the round-loop back-edge) and the
+    Poly1305 block function has 0; both pinned.
+  - timing (scheduled job, two runs): fixed vs other key `|t|` 1.6 and 1.8; all-zero vs
+    all-ones plaintext 0.6 and 0.5; tag mismatch in first vs last byte 2.6 and 1.5 (threshold 4.5).
+  - Limits: x86-64 only; Poly1305 `update`/`finalize` and the tag assembly branch on public
+    lengths and are covered by taint but not by the disassembly budget.
+- **Speed (once, VM, release; `tests/perf.rs`):** 305 MB/s at 1 KiB, 341 MB/s at 16 KiB, 330 MB/s at
+  16 MiB, against `ring` at 1306, 1779 and 1804: 4.3x to 5.5x slower, inside the section 5
+  estimate (3 to 6x). No SIMD yet.
+- **Toolchain:** the sandbox's Rust was updated from 1.97.0 to 1.99.0 mid-session at the
+  owner's request. The stage 1 and 2 checks were rerun on 1.99.0 and still pass, and the
+  disassembly budgets did not move; this is the compiler-drift check the plan calls for, done once.
 
 ## 1. Answer first
 

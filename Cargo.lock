@@ -12148,6 +12148,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_aead"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "rusty_crypto_key",
+ "rusty_ct_check",
+ "rusty_hex",
+]
+
+[[package]]
 name = "rusty_agui"
 version = "0.1.0"
 dependencies = [

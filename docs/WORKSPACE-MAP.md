@@ -15,6 +15,7 @@ Families are the current directories immediately below `crates/`.
 | Layer | Family | Crate name | Description | Dependents count |
 | --- | --- | --- | --- | ---: |
 | foundation | rpath | rpath | Path translation and normalization engine for MSYS2/Git Bash/POSIX to Windows interop | 5 |
+| foundation | rusty_aead | rusty_aead | Dependency-free ChaCha20-Poly1305 (RFC 8439) AEAD. Portable, no unsafe, no allocation. Stage 3 of the native ring replacement plan. | 0 |
 | foundation | rusty_ansder | rusty_ansder | ASN.1 BER/DER TLV encoder and decoder for Rusty Mill, built on rusty_wire | 0 |
 | foundation | rusty_atomic_file | rusty_atomic_file | Replace a file crash-atomically: sibling temp file, fsync, rename, directory fsync. The one std-path helper the workspace's whole-file writers share. | 6 |
 | foundation | rusty_base64 | rusty_base64 | Hand-rolled, dependency-free Base64 (RFC 4648) -- standard and URL-safe alphabets, encode and decode -- extracted from rusty_oauth's own encoding module so rusty_acp, rusty-mcp, and rusty_a2a can depend on it instead of the external base64 crate. | 18 |
@@ -22,13 +23,13 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_compress | rusty_compress | A sans-IO stream compression and decompression abstraction crate for DEFLATE, Gzip, Zlib, and LZMA | 2 |
 | foundation | rusty_config | rusty_config | A zero-dependency, no_std INI and Key-Value configuration file parser for Rust | 0 |
 | foundation | rusty_confined_fs | rusty_confined_fs | Create directories and open files for writing beneath a root without following a symlink: openat/O_NOFOLLOW walk on Linux, checked fallback elsewhere. | 2 |
-| foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) | 9 |
-| foundation | rusty_ct_check | rusty_ct_check | Test-support harness for constant-time evidence: valgrind secret tainting, a dudect-style timing t-test and a disassembly audit script. Detects planted leaks; proves nothing about their absence. Not for production dependencies. | 2 |
+| foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) | 10 |
+| foundation | rusty_ct_check | rusty_ct_check | Test-support harness for constant-time evidence: valgrind secret tainting, a dudect-style timing t-test and a disassembly audit script. Detects planted leaks; proves nothing about their absence. Not for production dependencies. | 3 |
 | foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application | 1 |
 | foundation | rusty_dirs | rusty_dirs | Dependency-free per-user config directory lookup: %APPDATA% on Windows, $XDG_CONFIG_HOME or ~/.config elsewhere. | 2 |
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 17 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
-| foundation | rusty_hex | rusty_hex | Hand-rolled, dependency-free hex encode and decode: lowercase output, either case accepted, fixed-size arrays for keys and digests. | 11 |
+| foundation | rusty_hex | rusty_hex | Hand-rolled, dependency-free hex encode and decode: lowercase output, either case accepted, fixed-size arrays for keys and digests. | 12 |
 | foundation | rusty_ip | rusty_ip | Allocation-free IP address classification facts without connection policy | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
 | foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 32 |

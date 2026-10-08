@@ -1,4 +1,4 @@
-# Reviewed 2026-10-08, rustc 1.97.0, x86_64, --release. The 2 conditional jumps
+# Reviewed 2026-10-08 on rustc 1.97.0 and re-verified on 1.99.0, x86_64, --release. The 2 conditional jumps
 # per function are the loop back-edges (message schedule, rounds), both with
 # public trip counts. A third means the compiler or the code changed: review.
 rusty_sha2::sha256::compress 2

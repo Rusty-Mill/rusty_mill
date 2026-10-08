@@ -94,6 +94,7 @@ members = [
     "crates/foundation/rusty_ct_check",
     "crates/foundation/rusty_sha2",
     "crates/foundation/rusty_pk",
+    "crates/foundation/rusty_aead",
     "crates/foundation/rusty_percent",
     "crates/foundation/rusty_rand",
     "crates/foundation/rusty_atomic_file",
@@ -356,6 +357,7 @@ rusty_hex = { path = "crates/foundation/rusty_hex" }
 rusty_ct_check = { path = "crates/foundation/rusty_ct_check" }
 rusty_sha2 = { path = "crates/foundation/rusty_sha2" }
 rusty_pk = { path = "crates/foundation/rusty_pk" }
+rusty_aead = { path = "crates/foundation/rusty_aead" }
 rusty_percent = { path = "crates/foundation/rusty_percent" }
 rusty_codec = { path = "crates/foundation/rusty_codec" }
 rusty_compress = { path = "crates/foundation/rusty_compress" }

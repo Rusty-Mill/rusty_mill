@@ -1,0 +1,18 @@
+[package]
+name = "rusty_aead"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Dependency-free ChaCha20-Poly1305 (RFC 8439) AEAD. Portable, no unsafe, no allocation. Stage 3 of the native ring replacement plan."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[dependencies]
+rusty_crypto_key = { workspace = true }
+
+[dev-dependencies]
+ring.workspace = true
+rusty_ct_check.workspace = true
+rusty_hex.workspace = true
