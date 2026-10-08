@@ -89,6 +89,21 @@ whose random tape then amplifies it), `duel_952`. First-tick bump errors in 98 f
 3 uu/s along and across the bumper's heading; at 1500 to 2100 uu/s the port's upward kick is 13 to 36 uu/s high
 (the game's saturates near 345 uu/s).
 
+Final check of the run (2026-10-08, seeds none of the fixes saw: `fuzz_861` to `884`, `hitfuzz_441` to
+`464`, `wallfuzz_461` to `484`, `duel_971` to `994`, one run each, `batch_20261008-111216`; the same port as
+`main` after PR #312). Position error per tape, mean of means / median / tapes under 30 uu:
+
+| Family | Mean of means | Median | Under 30 uu | Also |
+|---|---|---|---|---|
+| Random drives (`fuzz`) | 163 uu | 46 uu | 10 of 24 | |
+| Drives that start at the ball (`hitfuzz`) | 124 uu | 46 uu | 11 of 24 | ball error median 7 uu, 10 of 24 exact (0.0) |
+| Drives that start on a wall (`wallfuzz`) | 124 uu | 86 uu | 9 of 24 | |
+| Two-car duels (`duel`) | 259 uu | 92 uu | 5 of 24 | same-team second car mean 444, median 292 (11 tapes) |
+
+Seeds move these a lot (the earlier fresh sets gave 105 to 121 uu and medians 25 to 58 uu for random drives): the
+error is a few events per tape, not a drift. For comparison the same families before this run's fixes were 140 to
+354 uu (random drives, seeds 101 to 524), median 48 to 143, and the wall-start median was 132 uu.
+
 ## Random ball launches
 
 `gen_ball_fuzz.py`: 24 seeded 6 s launches (random place, velocity 500 to 2500 uu/s,
