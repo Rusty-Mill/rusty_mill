@@ -16,7 +16,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-08 - rusty_mcp_proto first slice (pending review)
 
 - **Added:** `rusty_mcp_proto`, the envelope and tools path of the MCP wire types on `rusty_json`, checked field by field against `rmcp` 3.1.4. Also `docs/research/MCP-PROTO-SCOPE.md` (A2 inventory and the three owner decisions: support both handshakes, tasks and multi-round-trip types now, opaque elicitation schema).
-- **Known limitations:** nothing uses the crate yet, so no consumer behaviour changed. Prompts, resource methods, completion, cancel/progress, subscriptions, tasks, multi-round-trip input and both handshakes are not written yet. Annotation `priority` is forwarded as raw JSON, so a value like `0.2` survives exactly where `rmcp` (which stores `f32`) would re-encode it as `0.20000000298`. Unknown members of known types are dropped on decode. Verified by tests only, not against a live server.
+- **Added (second slice):** prompts, resource methods, completion and cancel/progress types, checked against `rmcp` the same way.
+- **Known limitations:** nothing uses the crate yet, so no consumer behaviour changed. Subscriptions, tasks, multi-round-trip input and both handshakes are not written yet. Completion's 100-value cap is not enforced by the codec (server policy). Annotation `priority` is forwarded as raw JSON, so a value like `0.2` survives exactly where `rmcp` (which stores `f32`) would re-encode it as `0.20000000298`. Unknown members of known types are dropped on decode. Verified by tests only, not against a live server.
 
 ---
 

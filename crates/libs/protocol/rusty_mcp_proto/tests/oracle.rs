@@ -4,8 +4,11 @@
 
 use rmcp::model as rm;
 use rusty_mcp_proto::{
-    CallToolParams, CallToolResult, ContentBlock, ErrorData, Implementation, ListToolsResult,
-    PaginatedParams, Resource, ResourceContents, Tool, Wire,
+    CallToolParams, CallToolResult, CancelledParams, CompleteParams, CompleteResult, ContentBlock,
+    ErrorData, GetPromptParams, GetPromptResult, Implementation, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedParams,
+    ProgressParams, Prompt, ReadResourceParams, ReadResourceResult, Resource, ResourceContents,
+    ResourceTemplate, Tool, Wire,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -149,5 +152,124 @@ fn implementation_and_pagination() {
     agree::<PaginatedParams, rm::PaginatedRequestParams>(r#"{}"#);
     agree::<PaginatedParams, rm::PaginatedRequestParams>(
         r#"{"cursor":"c","_meta":{"progressToken":1}}"#,
+    );
+}
+
+#[test]
+fn prompts() {
+    agree::<Prompt, rm::Prompt>(r#"{"name":"p"}"#);
+    agree::<Prompt, rm::Prompt>(
+        r#"{"name":"p","title":"P","description":"d","arguments":[{"name":"a"},
+        {"name":"b","title":"B","description":"x","required":true}],"icons":[{"src":"x"}],"_meta":{"k":1}}"#,
+    );
+    both_refuse::<Prompt, rm::Prompt>(r#"{"title":"P"}"#);
+    both_refuse::<Prompt, rm::Prompt>(r#"{"name":"p","arguments":[{"title":"no name"}]}"#);
+
+    agree::<ListPromptsResult, rm::ListPromptsResult>(r#"{"prompts":[{"name":"p"}]}"#);
+    agree::<ListPromptsResult, rm::ListPromptsResult>(
+        r#"{"prompts":[],"nextCursor":"n","ttlMs":60000,"cacheScope":"private"}"#,
+    );
+    both_refuse::<ListPromptsResult, rm::ListPromptsResult>(r#"{}"#);
+}
+
+#[test]
+fn get_prompt() {
+    agree::<GetPromptParams, rm::GetPromptRequestParams>(r#"{"name":"p"}"#);
+    agree::<GetPromptParams, rm::GetPromptRequestParams>(
+        r#"{"name":"p","arguments":{"a":"1"},"inputResponses":{"q":{}},"requestState":"s","_meta":{"k":1}}"#,
+    );
+    both_refuse::<GetPromptParams, rm::GetPromptRequestParams>(r#"{"arguments":{}}"#);
+
+    agree::<GetPromptResult, rm::GetPromptResult>(
+        r#"{"messages":[{"role":"user","content":{"type":"text","text":"hi"}}]}"#,
+    );
+    agree::<GetPromptResult, rm::GetPromptResult>(
+        r#"{"resultType":"complete","description":"d","messages":[
+        {"role":"assistant","content":{"type":"image","data":"aGk=","mimeType":"image/png"}},
+        {"role":"user","content":{"type":"resource","resource":{"uri":"u","text":"t"}}}],"_meta":{"k":1}}"#,
+    );
+    both_refuse::<GetPromptResult, rm::GetPromptResult>(
+        r#"{"messages":[{"role":"system","content":{"type":"text","text":"x"}}]}"#,
+    );
+    both_refuse::<GetPromptResult, rm::GetPromptResult>(r#"{"description":"d"}"#);
+}
+
+#[test]
+fn resource_methods() {
+    agree::<ResourceTemplate, rm::ResourceTemplate>(r#"{"uriTemplate":"file:///{p}","name":"f"}"#);
+    agree::<ResourceTemplate, rm::ResourceTemplate>(
+        r#"{"uriTemplate":"file:///{p}","name":"f","title":"F","description":"d","mimeType":"text/plain",
+        "icons":[{"src":"x"}],"_meta":{"k":1},"annotations":{"priority":0.5}}"#,
+    );
+    both_refuse::<ResourceTemplate, rm::ResourceTemplate>(r#"{"name":"f"}"#);
+
+    agree::<ListResourcesResult, rm::ListResourcesResult>(
+        r#"{"resources":[{"uri":"u","name":"n"}],"nextCursor":"c","ttlMs":0,"cacheScope":"public"}"#,
+    );
+    agree::<ListResourceTemplatesResult, rm::ListResourceTemplatesResult>(
+        r#"{"resourceTemplates":[{"uriTemplate":"u/{a}","name":"n"}]}"#,
+    );
+    both_refuse::<ListResourcesResult, rm::ListResourcesResult>(r#"{"nextCursor":"c"}"#);
+    both_refuse::<ListResourceTemplatesResult, rm::ListResourceTemplatesResult>(
+        r#"{"resources":[]}"#,
+    );
+
+    agree::<ReadResourceParams, rm::ReadResourceRequestParams>(r#"{"uri":"u"}"#);
+    agree::<ReadResourceParams, rm::ReadResourceRequestParams>(
+        r#"{"uri":"u","inputResponses":{"q":{}},"requestState":"s","_meta":{"k":1}}"#,
+    );
+    both_refuse::<ReadResourceParams, rm::ReadResourceRequestParams>(r#"{}"#);
+
+    agree::<ReadResourceResult, rm::ReadResourceResult>(r#"{"contents":[{"uri":"u","text":"t"}]}"#);
+    agree::<ReadResourceResult, rm::ReadResourceResult>(
+        r#"{"resultType":"complete","ttlMs":1000,"cacheScope":"private",
+        "contents":[{"uri":"u","text":"t"},{"uri":"v","blob":"aGk=","mimeType":"image/png"}],"_meta":{"k":1}}"#,
+    );
+    both_refuse::<ReadResourceResult, rm::ReadResourceResult>(r#"{"ttlMs":1}"#);
+}
+
+#[test]
+fn completion() {
+    agree::<CompleteParams, rm::CompleteRequestParams>(
+        r#"{"ref":{"type":"ref/prompt","name":"p"},"argument":{"name":"a","value":"x"}}"#,
+    );
+    agree::<CompleteParams, rm::CompleteRequestParams>(
+        r#"{"ref":{"type":"ref/resource","uri":"file:///{p}"},"argument":{"name":"p","value":""},
+        "context":{"arguments":{"q":"1"}},"_meta":{"k":1}}"#,
+    );
+    both_refuse::<CompleteParams, rm::CompleteRequestParams>(
+        r#"{"ref":{"type":"ref/other","name":"p"},"argument":{"name":"a","value":"x"}}"#,
+    );
+    both_refuse::<CompleteParams, rm::CompleteRequestParams>(
+        r#"{"ref":{"type":"ref/prompt","name":"p"},"argument":{"name":"a"}}"#,
+    );
+
+    agree::<CompleteResult, rm::CompleteResult>(r#"{"completion":{"values":[]}}"#);
+    agree::<CompleteResult, rm::CompleteResult>(
+        r#"{"resultType":"complete","completion":{"values":["a","b"],"total":10,"hasMore":true},"_meta":{"k":1}}"#,
+    );
+    both_refuse::<CompleteResult, rm::CompleteResult>(r#"{"completion":{"values":[1]}}"#);
+    both_refuse::<CompleteResult, rm::CompleteResult>(r#"{}"#);
+}
+
+#[test]
+fn cancel_and_progress() {
+    agree::<CancelledParams, rm::CancelledNotificationParam>(r#"{}"#);
+    agree::<CancelledParams, rm::CancelledNotificationParam>(
+        r#"{"requestId":7,"reason":"user","_meta":{"k":1}}"#,
+    );
+    agree::<CancelledParams, rm::CancelledNotificationParam>(r#"{"requestId":"abc"}"#);
+    both_refuse::<CancelledParams, rm::CancelledNotificationParam>(r#"{"requestId":true}"#);
+
+    agree::<ProgressParams, rm::ProgressNotificationParam>(
+        r#"{"progressToken":"t","progress":0.5}"#,
+    );
+    agree::<ProgressParams, rm::ProgressNotificationParam>(
+        r#"{"progressToken":3,"progress":1.5,"total":4.5,"message":"m","_meta":{"k":1}}"#,
+    );
+    both_refuse::<ProgressParams, rm::ProgressNotificationParam>(r#"{"progress":0.5}"#);
+    both_refuse::<ProgressParams, rm::ProgressNotificationParam>(r#"{"progressToken":"t"}"#);
+    both_refuse::<ProgressParams, rm::ProgressNotificationParam>(
+        r#"{"progressToken":"t","progress":"x"}"#,
     );
 }

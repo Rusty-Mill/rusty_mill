@@ -5,8 +5,9 @@
 //! with a hand-written codec ([`Wire`]): no serde, no transport, no async.
 //! Servers and clients on stdio or Streamable HTTP are built on top of it.
 //!
-//! This first slice covers the envelope and the tools path, enough for a
-//! server or client to list and call tools:
+//! Covered so far: the envelope, tools, prompts, resources, completion and
+//! cancel/progress (the `initialize`/`server/discover` handshakes, subscriptions,
+//! tasks and multi-round-trip input come next):
 //!
 //! - [`rpc`]: [`Message`], [`RequestId`], [`ErrorData`], [`ErrorCode`].
 //! - [`version`]: [`ProtocolVersion`] (both the classic and the stateless
@@ -16,6 +17,10 @@
 //! - [`page`]: [`PaginatedParams`], [`Paging`], [`CacheScope`].
 //! - [`tool`]: [`Tool`], [`ListToolsResult`], [`CallToolParams`],
 //!   [`CallToolResult`].
+//! - [`prompt`]: [`Prompt`], [`GetPromptParams`], [`GetPromptResult`], [`Role`].
+//! - [`resource`] also has templates and the list/read params and results.
+//! - [`completion`]: [`Reference`], [`CompleteParams`], [`CompleteResult`].
+//! - [`notify`]: [`CancelledParams`], [`ProgressParams`].
 //!
 //! Open-ended members (`_meta`, annotations, icons, schemas, error data) are
 //! kept as raw [`rusty_json::Value`] so a gateway forwards them untouched.
@@ -35,8 +40,11 @@
 #![forbid(unsafe_code)]
 
 pub mod codec;
+pub mod completion;
 pub mod content;
+pub mod notify;
 pub mod page;
+pub mod prompt;
 pub mod resource;
 pub mod rpc;
 pub mod tool;
@@ -45,10 +53,19 @@ pub mod version;
 mod error;
 
 pub use codec::Wire;
+pub use completion::{ArgumentInfo, CompleteParams, CompleteResult, CompletionInfo, Reference};
 pub use content::{ContentBlock, Extras};
 pub use error::Error;
+pub use notify::{CancelledParams, ProgressParams, ProgressToken};
 pub use page::{CacheScope, PaginatedParams, Paging, ResultType};
-pub use resource::{Resource, ResourceContents};
+pub use prompt::{
+    GetPromptParams, GetPromptResult, ListPromptsResult, Prompt, PromptArgument, PromptMessage,
+    Role,
+};
+pub use resource::{
+    ListResourceTemplatesResult, ListResourcesResult, ReadResourceParams, ReadResourceResult,
+    Resource, ResourceContents, ResourceTemplate,
+};
 pub use rpc::{ErrorCode, ErrorData, Message, RequestId};
 pub use tool::{CallToolParams, CallToolResult, ListToolsResult, Tool};
 pub use version::{Implementation, ProtocolVersion};

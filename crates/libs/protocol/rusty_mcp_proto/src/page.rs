@@ -1,6 +1,6 @@
 //! Pagination and the members every list result shares.
 
-use crate::codec::{object, opt_string, opt_value, Obj, Wire};
+use crate::codec::{array, decode_all, encode_all, object, opt_string, opt_value, Obj, Wire};
 use crate::{Error, Result};
 use rusty_json::Value;
 
@@ -86,36 +86,64 @@ pub struct Paging {
     pub meta: Option<Value>,
 }
 
+/// Read `ttlMs`; a negative value is clamped to 0 (immediately stale), as
+/// the spec asks clients to do.
+pub(crate) fn decode_ttl_ms(v: &Value, what: &'static str) -> Result<Option<u64>> {
+    match v.get("ttlMs") {
+        None | Some(Value::Null) => Ok(None),
+        Some(n) => n
+            .as_i64()
+            .map(|t| Some(t.max(0).unsigned_abs()))
+            .ok_or_else(|| Error::decode(what, "\"ttlMs\" is not an integer")),
+    }
+}
+
+pub(crate) fn decode_cache_scope(v: &Value) -> Result<Option<CacheScope>> {
+    match v.get("cacheScope") {
+        None | Some(Value::Null) => Ok(None),
+        Some(s) => CacheScope::parse(s).map(Some),
+    }
+}
+
+impl CacheScope {
+    pub(crate) fn encode(scope: Option<CacheScope>) -> Option<&'static str> {
+        scope.map(CacheScope::as_str)
+    }
+}
+
 impl Paging {
     /// Add these members to a list result under construction.
     pub(crate) fn encode(&self, obj: Obj) -> Obj {
         obj.opt("resultType", self.result_type.as_ref().map(|t| t.0.clone()))
             .opt("nextCursor", self.next_cursor.clone())
             .opt("ttlMs", self.ttl_ms)
-            .opt("cacheScope", self.cache_scope.map(CacheScope::as_str))
+            .opt("cacheScope", CacheScope::encode(self.cache_scope))
             .opt_value("_meta", &self.meta)
     }
 
-    /// Read the shared members of a list result. A negative `ttlMs` is
-    /// clamped to 0 (immediately stale), as the spec asks clients to do.
+    /// Read the shared members of a list result.
     pub(crate) fn decode(v: &Value, what: &'static str) -> Result<Self> {
-        let ttl_ms = match v.get("ttlMs") {
-            None | Some(Value::Null) => None,
-            Some(n) => Some(
-                n.as_i64()
-                    .map(|t| t.max(0).unsigned_abs())
-                    .ok_or_else(|| Error::decode(what, "\"ttlMs\" is not an integer"))?,
-            ),
-        };
         Ok(Self {
             result_type: opt_string(v, what, "resultType")?.map(ResultType),
             next_cursor: opt_string(v, what, "nextCursor")?,
-            ttl_ms,
-            cache_scope: match v.get("cacheScope") {
-                None | Some(Value::Null) => None,
-                Some(s) => Some(CacheScope::parse(s)?),
-            },
+            ttl_ms: decode_ttl_ms(v, what)?,
+            cache_scope: decode_cache_scope(v)?,
             meta: opt_value(v, "_meta"),
         })
     }
+}
+
+/// A list result: `items` under `key`, plus the shared [`Paging`] members.
+pub(crate) fn encode_list<T: Wire>(key: &str, items: &[T], paging: &Paging) -> Value {
+    paging.encode(Obj::new().set(key, encode_all(items))).done()
+}
+
+/// The inverse of [`encode_list`].
+pub(crate) fn decode_list<T: Wire>(
+    v: &Value,
+    what: &'static str,
+    key: &'static str,
+) -> Result<(Vec<T>, Paging)> {
+    object(v, what)?;
+    Ok((decode_all(array(v, what, key)?)?, Paging::decode(v, what)?))
 }

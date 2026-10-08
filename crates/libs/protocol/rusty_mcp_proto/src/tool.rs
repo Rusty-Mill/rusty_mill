@@ -1,11 +1,11 @@
 //! `tools/list` and `tools/call`.
 
 use crate::codec::{
-    array, decode_all, encode_all, field, object, opt_array, opt_bool, opt_string, opt_value,
-    string, Obj, Wire,
+    decode_all, encode_all, field, object, opt_array, opt_bool, opt_string, opt_value, string, Obj,
+    Wire,
 };
 use crate::content::ContentBlock;
-use crate::page::{Paging, ResultType};
+use crate::page::{decode_list, encode_list, Paging, ResultType};
 use crate::Result;
 use rusty_json::Value;
 
@@ -96,18 +96,12 @@ pub struct ListToolsResult {
 
 impl Wire for ListToolsResult {
     fn to_value(&self) -> Value {
-        self.paging
-            .encode(Obj::new().set("tools", encode_all(&self.tools)))
-            .done()
+        encode_list("tools", &self.tools, &self.paging)
     }
 
     fn from_value(v: &Value) -> Result<Self> {
-        const W: &str = "ListToolsResult";
-        object(v, W)?;
-        Ok(Self {
-            tools: decode_all(array(v, W, "tools")?)?,
-            paging: Paging::decode(v, W)?,
-        })
+        let (tools, paging) = decode_list(v, "ListToolsResult", "tools")?;
+        Ok(Self { tools, paging })
     }
 }
 

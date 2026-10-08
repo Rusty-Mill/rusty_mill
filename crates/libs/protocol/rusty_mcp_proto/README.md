@@ -4,16 +4,21 @@ MCP wire types on `rusty_json`: the JSON-RPC 2.0 envelope and the Model
 Context Protocol's methods and payloads as plain Rust types, with a
 hand-written codec and no serde, transport or async. ADR-0002 Tier S.
 
-First slice (A2 of `docs/research/MCP-NATIVE-PLAN.md`), enough to list and
-call tools:
+A2 of `docs/research/MCP-NATIVE-PLAN.md`, in slices. So far:
 
 | Module | Types |
 |---|---|
 | `rpc` | `Message` (request, notification, response, error), `RequestId`, `ErrorData`, `ErrorCode` |
 | `version` | `ProtocolVersion` (classic and stateless 2026-07-28), `Implementation` |
-| `content`, `resource` | `ContentBlock`, `Resource`, `ResourceContents` |
+| `content` | `ContentBlock` |
+| `resource` | `Resource`, `ResourceContents`, `ResourceTemplate`, list/read params and results |
 | `page` | `PaginatedParams`, `Paging` (cursor, `ttlMs`, `cacheScope`), `ResultType` |
 | `tool` | `Tool`, `ListToolsResult`, `CallToolParams`, `CallToolResult` |
+| `prompt` | `Prompt`, `PromptMessage`, `Role`, `ListPromptsResult`, `GetPromptParams`, `GetPromptResult` |
+| `completion` | `Reference`, `CompleteParams`, `CompleteResult` |
+| `notify` | `CancelledParams`, `ProgressParams`, `ProgressToken` |
+
+Each module has a `method` submodule with the method-name constants.
 
 ```rust
 use rusty_mcp_proto::{CallToolParams, Message, RequestId, Wire};
@@ -31,6 +36,6 @@ known types are dropped on decode.
 (dev-dependency only): the fixture, this crate's re-encoding and `rmcp`'s
 re-encoding must agree, and malformed input must be refused by both.
 
-Not yet covered: prompts, resources methods, completion, cancel/progress,
-subscriptions, tasks, multi-round-trip input, `initialize`/`server/discover`.
+Not yet covered: `initialize` / `server/discover`, subscriptions, tasks and
+multi-round-trip input (`InputRequired` results).
 Scope: `docs/research/MCP-PROTO-SCOPE.md`.
