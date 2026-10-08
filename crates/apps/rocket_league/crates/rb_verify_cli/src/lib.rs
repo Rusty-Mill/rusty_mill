@@ -312,6 +312,8 @@ pub struct WheelTraceRow {
     pub velocity_error: Vec3,
     /// Recorded minus predicted spin at the tick's end (rad/s).
     pub spin_error: Vec3,
+    /// Recorded minus predicted ball velocity at the tick's end (uu/s).
+    pub ball_velocity_error: Vec3,
     /// The first car's wheel hits at the start of the tick, in wheel order.
     pub wheels: WheelContacts,
 }
@@ -347,6 +349,7 @@ pub fn wheel_trace_capture(
             input: prev.cars.first().and_then(|car| car.input),
             velocity_error: rec.velocity - pred.velocity,
             spin_error: rec.angular_velocity - pred.angular_velocity,
+            ball_velocity_error: next.ball.velocity - candidate[index + 1].ball.velocity,
             wheels: *wheels,
         });
     }

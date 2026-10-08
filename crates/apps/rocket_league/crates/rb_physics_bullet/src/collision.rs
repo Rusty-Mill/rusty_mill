@@ -1055,6 +1055,10 @@ pub struct RayHit {
     /// than the static arena. Wheel pushback is for static surfaces only
     /// (`RB-PHYSICS-001-FR-138`).
     pub dynamic: bool,
+    /// The surface's own velocity at the hit (uu/s): zero for the static arena, the
+    /// ball's linear velocity plus its spin at the point for the ball. A wheel's
+    /// pushback against the ball reads its approach speed relative to this.
+    pub velocity: Vec3,
 }
 
 /// Bisection steps of `raycast`: brackets the surface to `length / 2^16`
@@ -1088,6 +1092,7 @@ pub fn raycast_sphere(
         distance,
         normal: (origin + direction * distance - center) * (1.0 / radius),
         dynamic: true,
+        velocity: Vec3::ZERO,
     })
 }
 
@@ -1134,6 +1139,7 @@ pub fn raycast(
         distance,
         normal: hit.normal,
         dynamic: false,
+        velocity: Vec3::ZERO,
     })
 }
 /// Analytic sphere-vs-box contact: the box's closest point to the sphere

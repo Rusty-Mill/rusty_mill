@@ -8196,6 +8196,21 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     mean (max 8.7); every other recording unchanged. Not verified: edge and
     vertex contacts on convex ridges (no recording isolates one).
 
+- `RB-PHYSICS-001-FR-150` (a wheel's pushback against the ball reads the ball's
+  velocity; implemented and verified on the `wob_*` drops; amends FR-138, ADR-0074):
+  `RayHit::velocity` is the surface's velocity at the hit (zero for the arena, the
+  ball's velocity plus spin at the point for the ball) and `stopping_impulse`
+  subtracts it from the car's speed at the wheel; the ball gets no reaction.
+  - Why: `RB-RESEARCH-O014`. A level car held up by its wheels on a resting ball sags in
+    the port (a steady +2.5 uu/s per tick missing, about 300 uu/s^2), and FR-138's
+    answer (no pushback) was a reaction to treating the ball as still.
+  - **Verification**: `drive` tests (three); the nine `wob_*` drops, car mean error
+    28.2 -> 21.8 uu, ball 67.8 -> 69.3 uu; golden `wob_0_200` 1.2 / 6.5 uu car and
+    `wob_0_500` 4.1 / 28 as new fixtures; `car_over_ball` 33.6 uu unchanged; the 62
+    earlier golden captures unchanged. Tried and dropped: a still-ball pushback
+    (`car_over_ball` 62.5), the ball's inverse mass in the denominator (car 28.9),
+    and the opposite impulse on the ball (car 59.7, ball 82.5).
+
 - `RB-PHYSICS-001-FR-149` (boost pads; implemented and verified on the probe
   recordings): Soccar's 34 pads (`pads::BoostPads::standard`, the game's order),
   off by default in `PhysicsWorld` (`set_boost_pads`), on in `rb_env::Env`
@@ -8321,6 +8336,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.152.0 (2026-10-08): `RB-PHYSICS-001-FR-150` (a wheel's pushback against the ball
+  reads the ball's velocity; amends FR-138, ADR-0074). 493 tests in `rb_physics_bullet`.
 - 0.151.0 (2026-10-07): `RB-PHYSICS-001-FR-149` (boost pads, ADR-0072). 488 tests in
   `rb_physics_bullet`.
 - 0.150.0 (2026-10-07): `RB-PHYSICS-001-FR-148` (the wheels' throttle ignores the

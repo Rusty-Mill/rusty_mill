@@ -424,6 +424,7 @@ impl StaticMesh {
                         distance,
                         normal: triangle.normal,
                         dynamic: false,
+                        velocity: Vec3::ZERO,
                     })
             })
             .min_by(|a, b| a.distance.total_cmp(&b.distance))

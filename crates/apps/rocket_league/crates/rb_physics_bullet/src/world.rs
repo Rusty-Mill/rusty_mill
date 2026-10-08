@@ -484,6 +484,13 @@ impl PhysicsWorld {
             direction,
             length,
         );
+        // The ball's own velocity at the hit, which a wheel's pushback reads
+        // (`RB-PHYSICS-001-FR-150`).
+        let ball = ball.map(|mut hit| {
+            let point = origin + direction * hit.distance;
+            hit.velocity = self.ball.velocity_at_point(&(point - self.ball.position));
+            hit
+        });
         match (ground, ball) {
             (Some(ground), Some(ball)) if ball.distance < ground.distance => Some(ball),
             (None, ball) => ball,

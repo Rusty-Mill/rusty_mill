@@ -678,6 +678,17 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   third law, scratch): any scale makes the car much worse (0.03: car 26.6 ->
   65.8 while the ball 43.8 -> 13.9; 0.5: ball 242), so the game does not
   react on the ball, as Bullet.
+- **Clean drops (2026-10-08, `gen_ball_wheels.py`, `wob_<offset>_<speed>`, 3 game runs
+  each, spread 0.0 uu)**: a level car falling onto a resting ball, 0 / 50 / 100 uu off
+  centre at 200 / 500 / 1000 uu/s. The port: car 2 to 56 uu, ball 6 to 191 uu mean. With
+  a car held up by the wheels (the box 5 uu clear of the ball) the game's support is
+  about 300 uu/s^2 (+2.5 uu/s per tick) stronger than the port's, steadily; the ball
+  jitters +-10 uu/s in the game. Fix (FR-150, ADR-0074): the wheel's pushback against
+  the ball reads the ball's velocity at the hit; car mean over the nine drops 28.2 ->
+  21.8 uu. Tried and dropped: pushback against a still ball (undoes FR-138,
+  `car_over_ball` 33.6 -> 62.5), the ball's inverse mass in the denominator (car 28.9),
+  the opposite impulse on the ball (car 59.7, ball 82.5). Off-centre drops stay 14 to
+  45 uu off (car) and 18 to 191 (ball): the ball's side of the contact is unexplained.
 - **Status**: Open. **Owner**: baileyrd.
 
 ### RB-RESEARCH-O015 — Smaller residuals

@@ -31,6 +31,30 @@ struct Case {
 }
 
 const CASES: &[Case] = &[
+    // A level car dropped on a ball at rest (RB-RESEARCH-O014, FR-150): the wheels
+    // hold the car up on the ball. The bounds are today's errors, not parity: the
+    // off-centre drops are far from the game (ball 92 uu mean at 100 uu off centre).
+    Case {
+        scenario: "experiments/wob_0_200.json",
+        fixture: "wob_0_200.jsonl",
+        car: (1.3, 7.0),
+        ball: Some((17.5, 64.0)),
+        other: None,
+    },
+    Case {
+        scenario: "experiments/wob_0_500.json",
+        fixture: "wob_0_500.jsonl",
+        car: (4.4, 30.0),
+        ball: Some((26.5, 92.0)),
+        other: None,
+    },
+    Case {
+        scenario: "experiments/wob_100_200.json",
+        fixture: "wob_100_200.jsonl",
+        car: (15.0, 37.0),
+        ball: Some((97.0, 212.0)),
+        other: None,
+    },
     Case {
         scenario: "scenarios/half_flip.json",
         fixture: "half_flip.jsonl",

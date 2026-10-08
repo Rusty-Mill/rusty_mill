@@ -174,8 +174,15 @@ fn cast_wheel(
     // Pushback is Bullet's collision response against a static surface
     // (the surface takes no impulse and its velocity is ignored); a wheel on
     // the ball is only sprung (`RB-PHYSICS-001-FR-138`).
-    let pushback = if trace < pushback_reach && !hit.dynamic {
-        stopping_impulse(car, rel_pos, normal, trace - pushback_reach, dt) / WHEELS.len() as f32
+    let pushback = if trace < pushback_reach {
+        stopping_impulse(
+            car,
+            rel_pos,
+            normal,
+            trace - pushback_reach,
+            dt,
+            hit.velocity,
+        ) / WHEELS.len() as f32
     } else {
         0.0
     };
@@ -193,8 +200,15 @@ fn cast_wheel(
 /// applying it: the impulse along `normal` at `rel_pos` that cancels the
 /// approach speed and `PUSHBACK_ERP` of the `distance` penetration per
 /// tick, never pulling.
-fn stopping_impulse(car: &RigidBody, rel_pos: Vec3, normal: Vec3, distance: f32, dt: f32) -> f32 {
-    let normal_speed = normal.dot(&car.velocity_at_point(&rel_pos));
+fn stopping_impulse(
+    car: &RigidBody,
+    rel_pos: Vec3,
+    normal: Vec3,
+    distance: f32,
+    dt: f32,
+    surface_velocity: Vec3,
+) -> f32 {
+    let normal_speed = normal.dot(&(car.velocity_at_point(&rel_pos) - surface_velocity));
     let positional_error = PUSHBACK_ERP * -distance / dt;
     let arm = car
         .inv_inertia_world()
