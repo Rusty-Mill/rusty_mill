@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/apps/rocket_league/crates/bc-clone",
+    "crates/apps/rocket_league/crates/recon-check",
+    "crates/apps/rocket_league/crates/replay-analyzer",
+    "crates/apps/rocket_league/crates/replay-pacifist",
+    "crates/apps/rocket_league/crates/replay-scoring",
+    "crates/apps/rocket_league/crates/replay-skills",
+    "crates/apps/rocket_league/crates/replay-value",
+    "crates/apps/rocket_league/crates/replay-viewer",
+    "crates/apps/rocket_league/crates/rleval-app",
     "crates/apps/rocket_league/crates/rb_capture_ingest",
     "crates/apps/rocket_league/crates/rb_domain",
     "crates/apps/rocket_league/crates/rb_env",
@@ -257,6 +266,7 @@ members = [
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
+    "crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot",
     "crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot",
     "crates/libs/ui/rusty_term/fuzz",
     "crates/apps/rush/fuzz",
