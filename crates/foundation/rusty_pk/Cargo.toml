@@ -1,0 +1,20 @@
+[package]
+name = "rusty_pk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, X25519. Portable, no unsafe. Stages 2 and 4 of the native ring replacement plan."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[dependencies]
+rusty_sha2 = { workspace = true }
+rusty_crypto_key = { workspace = true }
+
+[dev-dependencies]
+ring.workspace = true
+rusty_ct_check.workspace = true
+rusty_hex.workspace = true
+rusty_rsa.workspace = true
