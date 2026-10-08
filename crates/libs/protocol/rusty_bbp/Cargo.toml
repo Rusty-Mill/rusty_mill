@@ -1,0 +1,32 @@
+[package]
+name = "rusty_bbp"
+version = "0.1.0"
+edition = "2021"
+description = "Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["agents", "protocol", "blackboard", "orchestration"]
+categories = ["development-tools"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+# First-party only (ADR-0002 Tier S).
+# Typed payloads and the event log.
+rusty_serde = { workspace = true }
+# Blob content addressing and op payload hashing (SHA-256).
+rusty_rsa = { workspace = true }
+
+[dev-dependencies]
+# Independent test oracle for the model tests (dev-only, allowed in Tier S).
+proptest = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
