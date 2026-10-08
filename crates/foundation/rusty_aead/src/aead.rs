@@ -14,9 +14,10 @@ pub const NONCE_LEN: usize = 12;
 /// Authentication tag length in bytes.
 pub const TAG_LEN: usize = 16;
 
-/// Longest plaintext: block counter 1.. must not wrap a `u32`
-/// (RFC 8439: 2^32 - 1 blocks of 64 bytes, less the first block).
-const MAX_LEN: u64 = (u32::MAX as u64 - 1) * 64;
+/// Longest plaintext, RFC 8439 section 2.8: data uses block counters
+/// 1 ..= 2^32 - 1 (block 0 makes the Poly1305 key), so 2^32 - 1 blocks of 64
+/// bytes = 274,877,906,880 bytes, the same limit `ring` documents.
+const MAX_LEN: u64 = u32::MAX as u64 * 64;
 
 /// Sealing or opening failed. Carries no detail: a decryption failure must
 /// not say whether the tag, the nonce or the data was wrong.
@@ -118,9 +119,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn max_len_keeps_the_block_counter_from_wrapping() {
-        // Blocks 1..=MAX_LEN/64 must fit in a u32 counter without reaching 2^32.
-        assert_eq!(MAX_LEN / 64, u32::MAX as u64 - 1);
-        assert!(MAX_LEN.div_ceil(64) < u32::MAX as u64);
+    fn max_len_uses_every_legal_block_counter_and_no_more() {
+        // Data blocks are counters 1 ..= n with n = ceil(MAX_LEN / 64).
+        let last_counter = MAX_LEN.div_ceil(64);
+        assert_eq!(
+            last_counter,
+            u32::MAX as u64,
+            "the final legal counter is used"
+        );
+        assert_eq!(MAX_LEN, 274_877_906_880, "RFC 8439 section 2.8");
+        // One byte more would need counter 2^32, which wraps.
+        assert_eq!((MAX_LEN + 1).div_ceil(64), u32::MAX as u64 + 1);
     }
 }

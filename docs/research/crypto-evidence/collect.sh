@@ -6,6 +6,8 @@
 # usage: docs/research/crypto-evidence/collect.sh > docs/research/crypto-evidence/EVIDENCE-YYYY-MM-DD.txt
 # Takes several minutes (timing tests run REPS times).
 set -u
+FAIL=0   # set to 1 by any failed check; the script exits non-zero at the end
+fail() { FAIL=1; echo "!! FAILED: $1"; }
 cd "$(git rev-parse --show-toplevel)"
 REPS=${REPS:-40}
 section() { printf '\n== %s ==\n' "$1"; }
@@ -66,23 +68,34 @@ PY
 for f in crates/foundation/rusty_pk/tests/vectors/ecdsa_p256_sha384.txt crates/foundation/rusty_pk/tests/vectors/rsa_forgeries.txt; do echo "generated: $f lines=$(wc -l < $f)"; done
 
 section "tests (executed / failed / ignored per binary)"
+cargo test --release -p rusty_ct_check -p rusty_sha2 -p rusty_pk -p rusty_aead -p rusty_crypto_key >/dev/null 2>&1 || fail "cargo test"
 cargo test --release -p rusty_ct_check -p rusty_sha2 -p rusty_pk -p rusty_aead -p rusty_crypto_key 2>&1 \
   | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^\s+Running|^   Doc-tests|^test result' | paste -sd' ' | sed 's/ Running /\nRunning /g; s/ Doc-tests /\nDoc-tests /g'
 echo
 echo "ignored tests (run below): $(grep -rn '#\[ignore' crates/foundation/rusty_ct_check crates/foundation/rusty_sha2 crates/foundation/rusty_pk crates/foundation/rusty_aead --include=*.rs | wc -l)"
 
 section "lint and format"
-cargo fmt --all --check >/dev/null 2>&1 && echo "fmt: clean" || echo "fmt: DIFFERENCES"
+cargo fmt --all --check >/dev/null 2>&1 && echo "fmt: clean" || { echo "fmt: DIFFERENCES"; fail fmt; }
 for c in rusty_ct_check rusty_sha2 rusty_pk rusty_aead rusty_crypto_key; do
-  cargo clippy -p $c --all-targets -- -D warnings >/dev/null 2>&1 && echo "clippy $c: clean" || echo "clippy $c: FAILED"
+  cargo clippy -p $c --all-targets -- -D warnings >/dev/null 2>&1 && echo "clippy $c: clean" || { echo "clippy $c: FAILED"; fail "clippy $c"; }
 done
 
-section "constant-time checks (taint, disassembly budget, planted-leak controls)"
-for c in rusty_ct_check rusty_sha2 rusty_aead rusty_pk; do
-  s=crates/foundation/$c/scripts/valgrind_selftest.sh; [ "$c" = rusty_ct_check ] || s=crates/foundation/$c/scripts/ct_check.sh
-  echo "-- $s"
-  sh "$s" 2>&1 | grep -vE 'profiles for|^package:|^workspace:|Compiling|Finished|^warning' | sed 's/^/   /'
-  echo "   exit=$?"
+section "constant-time checks (taint, disassembly budget, planted-leak controls), per compiler"
+# The budgets and the compiler's treatment of masked selects are specific to a compiler version, so the
+# checks run on every toolchain named here; the default includes the version CI builds with
+# (RUST_TOOLCHAIN in .github/workflows/ci.yml) as well as the local default.
+CI_TC=$(sed -n 's/^  RUST_TOOLCHAIN: "\(.*\)"/\1/p' .github/workflows/ci.yml | head -1)
+CT_TOOLCHAINS=${CT_TOOLCHAINS:-"$CI_TC $(rustc -V | cut -d' ' -f2)"}
+for tc in $(echo $CT_TOOLCHAINS | tr ' ' '\n' | sort -u); do
+  if ! rustup toolchain list | grep -q "^$tc"; then echo "toolchain $tc: NOT INSTALLED"; fail "toolchain $tc missing"; continue; fi
+  echo "-- toolchain $tc ($(RUSTUP_TOOLCHAIN=$tc rustc -V))"
+  for c in rusty_ct_check rusty_sha2 rusty_aead rusty_pk; do
+    sc=crates/foundation/$c/scripts/valgrind_selftest.sh; [ "$c" = rusty_ct_check ] || sc=crates/foundation/$c/scripts/ct_check.sh
+    out=$(RUSTUP_TOOLCHAIN=$tc sh "$sc" 2>&1); st=$?
+    echo "$out" | grep -vE 'profiles for|^package:|^workspace:|Compiling|Finished|^warning' | sed 's/^/   /'
+    echo "   [$c] exit=$st"
+    [ $st -eq 0 ] || fail "ct check $c on $tc"
+  done
 done
 
 section "timing tests: $REPS repetitions per test, with A/A (no-leak) baselines"
@@ -96,6 +109,7 @@ The tests time only the operation; class-dependent setup is outside the clock an
 buffer shared by both classes. An earlier version that set up inside the timed region reported
 |t| up to 25 on this same code (see "harness history" in the plan, stage 3/4 notes).
 TXT
+BASE_NONZERO=0
 summ() { sort -n | awk '{a[NR]=$1} END{c=0; for(i=1;i<=NR;i++) if(a[i]>4.5) c++; printf "n=%d min=%s median=%s p90=%s max=%s above_4.5=%d", NR, a[1], a[int((NR+1)/2)], a[int(NR*0.9)], a[NR], c}'; }
 series() { # crate test-name label
   c=$1; t=$2; l=$3
@@ -104,13 +118,24 @@ series() { # crate test-name label
     "$b" --ignored --list 2>/dev/null | grep -q "^$t: test" && { bin=$b; break; }
   done
   [ -n "$bin" ] || { echo "$l: test $t not found"; return; }
-  raw=""; i=1
+  raw=""; i=1; nonzero=0; unparsed=0
   while [ $i -le "$REPS" ]; do
-    v=$("$bin" --ignored --nocapture "$t" 2>&1 | grep -E '\|t\| = ' | grep -v panicked | head -1 | sed 's/.*|t| = //')
+    # Capture the test binary's own exit status: it is non-zero exactly when |t| >= 4.5.
+    out=$("$bin" --ignored --nocapture "$t" 2>&1); st=$?
+    v=$(echo "$out" | grep -E '\|t\| = ' | grep -v panicked | head -1 | sed 's/.*|t| = //')
+    [ -n "$v" ] || unparsed=$((unparsed+1))
+    [ $st -eq 0 ] || nonzero=$((nonzero+1))
     raw="$raw $v"; i=$((i+1))
   done
-  echo "$l: $(echo $raw | tr ' ' '\n' | summ)"
+  echo "$l: $(echo $raw | tr ' ' '\n' | summ); test-binary exits non-zero: $nonzero of $REPS"
   echo "   raw:$raw"
+  [ $unparsed -eq 0 ] || fail "$l: $unparsed run(s) produced no |t| (test did not run)"
+  case "$l" in
+    A/A*) BASE_NONZERO=$nonzero ;;   # this machine's false-alarm count for the crate that follows
+    *) # A leak test fails the record if it alarms clearly more often than the no-leak baseline.
+       limit=$((2 * BASE_NONZERO + 1))
+       [ $nonzero -le $limit ] || fail "$l: $nonzero alarms of $REPS exceeds the baseline allowance ($limit; baseline $BASE_NONZERO)" ;;
+  esac
 }
 for c in rusty_sha2 rusty_aead rusty_pk; do cargo test --release -p $c --test timing --no-run >/dev/null 2>&1; done
 series rusty_sha2 null_calibration_identical_classes "A/A  HMAC-SHA512 (baseline)"
@@ -128,4 +153,6 @@ section "speed, one run each (not benchmarks)"
 cargo test --release -p rusty_pk --test perf -- --ignored --nocapture 2>&1 | grep -E 'ours'
 cargo test --release -p rusty_aead --test perf -- --ignored --nocapture 2>&1 | grep -E 'MB/s'
 echo
+if [ $FAIL -eq 0 ]; then echo "RESULT: all checks passed (this is evidence, not proof)"; else echo "RESULT: FAILED, see the !! lines above"; fi
 echo "end of record"
+exit $FAIL
