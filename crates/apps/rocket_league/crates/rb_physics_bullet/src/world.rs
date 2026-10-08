@@ -1394,9 +1394,13 @@ impl PhysicsWorld {
                             // collision itself still happens this tick).
                             newly_demolished.push(victim);
                         } else {
+                            // The air bump (down, 0.99 of the speed) is for two airborne
+                            // cars; an airborne bumper on a grounded victim bumps like a
+                            // ground one (`RB-PHYSICS-001-FR-153`).
                             bump_velocity[victim] += bump_velocity_of(
                                 &self.cars[bumper],
-                                !drive::is_on_ground(&car_wheels[bumper]),
+                                !drive::is_on_ground(&car_wheels[bumper])
+                                    && !drive::is_on_ground(&car_wheels[victim]),
                             );
                         }
                     }
@@ -3049,6 +3053,30 @@ mod tests {
             "a ground bump gives about 1330: {victim:?}"
         );
         assert!(victim.z < -100.0, "thrown down, not up: {victim:?}");
+    }
+
+    /// `RB-PHYSICS-001-FR-153`, measured on the game (`bumpag_*`): a level bumper in the air
+    /// (wheels off) on a grounded victim bumps like a ground bumper: the victim leaves at
+    /// 1.25 times its speed and up, not at 0.99 times and down (the two-airborne bump).
+    #[test]
+    fn an_airborne_bumper_bumps_a_grounded_victim_like_a_ground_bumper() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 40.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 1000.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        let victim = world.cars[1].linear_velocity;
+        assert!(
+            victim.y > 1100.0,
+            "about 1250, not the air bump's 1000: {victim:?}"
+        );
+        assert!(victim.z > 50.0, "thrown up, not down: {victim:?}");
     }
 
     /// `RB-PHYSICS-001-FR-152`, measured on the game (`bumpf_flip`): a car whose nose points

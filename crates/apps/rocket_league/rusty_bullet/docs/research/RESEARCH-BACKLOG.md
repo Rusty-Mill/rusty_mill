@@ -782,6 +782,15 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   (`RB-PHYSICS-001-FR-143`, both cars airborne only). Drifting attackers (the
   bump follows the heading, 0.3 / 0.1 uu), a flank hit on a moving car (4.1 /
   3.0) and a corner clip (11 / 6) match.
+- **Airborne bumper on a grounded victim (2026-10-08, `gen_bump_mixed.py`, `bumpag_*`,
+  FR-153)**: six tapes, two runs each (`batch_20261008-071650`): a level attacker 38 to 52 uu up,
+  wheels off, at 700 to 1800 uu/s into a stopped grounded teammate. The victim leaves at 1.25
+  times the speed (875 / 1250 / 1749 / 2140) and up (+100 to +240 uu/s); the attacker keeps
+  0.55 of its speed at every speed. That is the ground bump, not the two-airborne one
+  (0.99 times, down 178): the air bump is only for two airborne cars. Victim mean error
+  50 / 69 / 195 / 51 / 68 / 180 -> 14 / 18 / 109 / 14 / 39 / 93 uu; `tri_chain` third car
+  245 -> 58 uu. The 1400 uu/s tapes keep a large worst tick (500 uu): a chaotic detail after
+  the hit, not examined.
 - **Flip and three cars (2026-10-08, ADR-0076, FR-152)**: the scorer's start lag put a
   constant offset (speed x lag / 120) on every fast-start tape; at the right alignment the
   flip attacker matched the game for 36 ticks. The game gave the victim no bump (it reached
