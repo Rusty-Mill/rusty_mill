@@ -81,6 +81,14 @@ Latest (2026-10-08, after FR-154 to FR-159; fresh seeds `wallfuzz_421` to `444`)
 edge, O020). Two-car duels (`duel_*`, held-out seeds 941 to 964): median 157 uu, total 11900 uu against 15514
 before the bump rules FR-158 and FR-159.
 
+The game is not repeatable once two cars touch (`spread_report.py` on `duel_941` to `952`, 3 runs each, 2026-10-08):
+the median spread between the game's own runs is 63 uu (up to 439 mean), the port's best-run error median 30 uu, and
+**8 of 12 tapes are inside the game's own spread**. The four outside: `duel_946`, `duel_950` (game repeats to 0.0, a plain
+drive that goes wrong in the port at tick 150 to 290, 87 uu), `duel_944` (a head-on whose bump matches to 3 to 16 uu/s and
+whose random tape then amplifies it), `duel_952`. First-tick bump errors in 98 first-contact events are mostly under
+3 uu/s along and across the bumper's heading; at 1500 to 2100 uu/s the port's upward kick is 13 to 36 uu/s high
+(the game's saturates near 345 uu/s).
+
 ## Random ball launches
 
 `gen_ball_fuzz.py`: 24 seeded 6 s launches (random place, velocity 500 to 2500 uu/s,
