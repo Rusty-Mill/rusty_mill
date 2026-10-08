@@ -8196,6 +8196,17 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     mean (max 8.7); every other recording unchanged. Not verified: edge and
     vertex contacts on convex ridges (no recording isolates one).
 
+- `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
+  verified on `bumpag_*` and `tri_chain`; refines FR-143): an airborne bumper on a grounded
+  victim bumps like a ground bumper (victim 1.25 times the speed, up).
+  - Why: `bumpag_*`: a level attacker with its wheels off the ground, at 700 to 1800 uu/s,
+    sent a grounded victim away at 1.25 times its speed and up 100 to 240 uu/s, keeping
+    0.55 of its own speed; the port used the two-airborne rule (0.99 times, down 178).
+  - **Verification**: `world` test `an_airborne_bumper_bumps_a_grounded_victim_like_a_ground_bumper`;
+    victim mean error 50 / 69 / 195 / 51 / 68 / 180 -> 14 / 18 / 109 / 14 / 39 / 93 uu on the six
+    `bumpag` tapes; `tri_chain` third car 245 -> 58 uu; `bumpa_air_*`, `bumpa_victim_air` and
+    the golden gate unchanged; golden `bumpag_700_45`, `bumpag_1000_45`.
+
 - `RB-PHYSICS-001-FR-152` (a bump needs a level nose; implemented and verified on
   `bumpf_flip` and `tri_chain`, ADR-0076): a car bumps or demolishes another only when
   its nose is within 45 degrees of the horizontal (`BUMP_MAX_FORWARD_Z`); a front flip's
@@ -8357,6 +8368,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.155.0 (2026-10-08): `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars). 503 tests in
+  `rb_physics_bullet`.
 - 0.154.0 (2026-10-08): `RB-PHYSICS-001-FR-152` (a bump needs a level nose, ADR-0076). 502 tests in
   `rb_physics_bullet`.
 - 0.153.0 (2026-10-08): `RB-PHYSICS-001-FR-151` (demolition respawn, ADR-0075). 501 tests in

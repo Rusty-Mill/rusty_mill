@@ -31,6 +31,22 @@ struct Case {
 }
 
 const CASES: &[Case] = &[
+    // A level car with its wheels off the ground hits a stopped grounded one (FR-153): the
+    // victim leaves at 1.25 times its speed and up. `other` is the victim.
+    Case {
+        scenario: "experiments/bumpag_700_45.json",
+        fixture: "bumpag_700_45.jsonl",
+        car: (1.2, 1.7),
+        ball: None,
+        other: Some((17.5, 45.0)),
+    },
+    Case {
+        scenario: "experiments/bumpag_1000_45.json",
+        fixture: "bumpag_1000_45.jsonl",
+        car: (0.6, 1.2),
+        ball: None,
+        other: Some((23.0, 45.0)),
+    },
     // A boosting attacker demolishes a stopped enemy; the victim is back 3.000 s later at
     // the spawn point the recording shows (FR-151). `other` is the victim.
     Case {
