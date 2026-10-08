@@ -28,6 +28,8 @@ Blocking fact: `rusty_tls`'s own ADR-0002 records the gate as **permanently non-
 
 Track B has its own owner/session; it does not block Track A.
 
+Session prompts for each track: `docs/research/prompts/mcp-track.md`, `docs/research/prompts/tls-track.md`.
+
 ## Decisions still open
 
 1. Approve the ADR-0002 amendment (A0).
