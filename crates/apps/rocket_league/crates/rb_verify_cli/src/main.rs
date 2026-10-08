@@ -171,12 +171,14 @@ fn print_wheel_trace(rows: &[WheelTraceRow]) {
             })
             .collect();
         println!(
-            "t={:>7.3}s | {} | dv err {} |{:>6.1}| spin err {} | {} {}",
+            "t={:>7.3}s | {} | dv err {} |{:>6.1}| spin err {} | ball dv err {} |{:>6.1}| | {} {}",
             row.t_secs,
             fmt_input(row.input),
             fmt_vec(&row.velocity_error),
             row.velocity_error.length(),
             fmt_vec(&row.spin_error),
+            fmt_vec(&row.ball_velocity_error),
+            row.ball_velocity_error.length(),
             wheels.join(" "),
             if changed { "FACET" } else { "" },
         );

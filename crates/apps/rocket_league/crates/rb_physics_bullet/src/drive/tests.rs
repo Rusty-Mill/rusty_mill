@@ -3751,29 +3751,72 @@ fn a_press_just_after_a_jump_is_ignored_until_the_car_is_airborne() {
     assert!(car.linear_velocity.x > 100.0, "no flip once airborne");
 }
 
-/// RB-PHYSICS-001-FR-138: a wheel resting on the ball is sprung like one on
-/// the floor, but gets no pushback (that impulse treats the surface as still
-/// and unpushable, which a ball is not).
+/// A wheel's ray hits the ball: `RB-PHYSICS-001-FR-150`. The pushback reads the car's
+/// approach speed relative to the ball at the hit (FR-138 ignored the ball's own
+/// velocity, which sent a car at 2000 uu/s off a ball leaving at 1700 uu/s, and gave
+/// no pushback at all, which left a car resting on a ball sagging).
+fn ball_hit_with_velocity<'a>(
+    floor: &'a crate::body::StaticPlane,
+    velocity: Vec3,
+) -> impl Fn(Vec3, Vec3, f32) -> Option<crate::collision::RayHit> + 'a {
+    move |origin, direction, length| {
+        plane_contact(floor)(origin, direction, length).map(|hit| crate::collision::RayHit {
+            dynamic: true,
+            velocity,
+            ..hit
+        })
+    }
+}
+
 #[test]
-fn a_wheel_ray_that_hits_the_ball_gets_no_pushback() {
+fn a_wheel_on_a_still_ball_gets_the_pushback_of_a_still_surface_with_the_same_spring() {
     let car = level_car_at_height(15.0);
     let floor = floor();
     let on_floor = cast_wheels(&car, plane_contact(&floor), TICK);
-    let on_ball = cast_wheels(
-        &car,
-        |origin, direction, length| {
-            plane_contact(&floor)(origin, direction, length).map(|hit| crate::collision::RayHit {
-                dynamic: true,
-                ..hit
-            })
-        },
-        TICK,
-    );
+    let on_ball = cast_wheels(&car, ball_hit_with_velocity(&floor, Vec3::ZERO), TICK);
     let (floor_wheel, ball_wheel) = (on_floor[0].unwrap(), on_ball[0].unwrap());
     assert!(floor_wheel.pushback > 0.0, "the floor pushes the car back");
-    assert_eq!(ball_wheel.pushback, 0.0, "the ball does not");
+    assert_eq!(ball_wheel.pushback, floor_wheel.pushback);
     assert_eq!(
         ball_wheel.suspension_length, floor_wheel.suspension_length,
         "the spring is the same"
     );
+}
+
+#[test]
+fn a_wheel_on_a_ball_leaving_as_fast_as_the_car_closes_gets_no_pushback() {
+    let mut car = level_car_at_height(15.0);
+    car.linear_velocity = Vec3::new(0.0, 0.0, -1500.0);
+    let floor = floor();
+    let static_hit = cast_wheels(&car, plane_contact(&floor), TICK)[0].unwrap();
+    let leaving = cast_wheels(
+        &car,
+        ball_hit_with_velocity(&floor, Vec3::new(0.0, 0.0, -1500.0)),
+        TICK,
+    )[0]
+    .unwrap();
+    assert!(
+        static_hit.pushback > 0.0,
+        "against a still surface the car is stopped"
+    );
+    assert!(
+        leaving.pushback < static_hit.pushback * 0.2,
+        "moving with the ball: {} against {}",
+        leaving.pushback,
+        static_hit.pushback
+    );
+}
+
+#[test]
+fn a_wheel_on_a_ball_rising_into_it_gets_more_pushback_than_on_a_still_one() {
+    let car = level_car_at_height(15.0);
+    let floor = floor();
+    let still = cast_wheels(&car, ball_hit_with_velocity(&floor, Vec3::ZERO), TICK)[0].unwrap();
+    let rising = cast_wheels(
+        &car,
+        ball_hit_with_velocity(&floor, Vec3::new(0.0, 0.0, 500.0)),
+        TICK,
+    )[0]
+    .unwrap();
+    assert!(rising.pushback > still.pushback);
 }
