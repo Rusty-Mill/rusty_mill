@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_bullet catch-up: match flow (pending review)
+
+- **Changed:** brings in the 7 `baileyrd/rusty_bullet` commits (PRs #315-#317) pushed after the original import: `rb_env` match clock, overtime, match end and first-kickoff intro (FR-160), a whole-match check against game logs, scripted chasers and the `play_match` example, plus the matching ADR 0082 / parity-plan / spec updates and `rb_tape_bot` log tooling. Same `git filter-repo` rewrite, deterministic, so the already imported commits keep their SHAs and only these 7 come across; the new SHA map lines are appended to `docs/research/rl-migration/rusty_bullet-commit-map.txt`.
+- **Changed:** `rb_env` gains a `serde_json` dev-dependency (one `Cargo.lock` line, no new packages).
+- **Known limitation:** `claude/funny-clarke-tef4d0` and `claude/rocket-league-server-clone-u74q45` in the source repo are still not imported.
+
+---
+
 ## 2026-10-08 - CI: replay-viewer GL smoke test and rleval-app feature sets (pending review)
 
 - **Added:** two planner-gated jobs ported from RLEvalSystem's own CI: `rleval-viewer-gl-smoke` (the offline viewer rendered under software WebGL with a `npm ci`-pinned puppeteer; fails on page errors or a stalled render loop) and `rleval-app-feature-sets` (clippy for default, `mmdb` and `oidc`, plus default-feature tests). New planner flags `rleval_viewer` and `rleval_app`, with tests.
