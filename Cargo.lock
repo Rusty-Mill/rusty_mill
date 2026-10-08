@@ -2020,6 +2020,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bc-clone"
+version = "0.1.0"
+dependencies = [
+ "replay-analyzer",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "better_any"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10526,6 +10535,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "recon-check"
+version = "0.1.0"
+dependencies = [
+ "boxcars",
+ "replay-analyzer",
+ "serde",
+ "serde_json",
+ "subtr-actor",
+]
+
+[[package]]
 name = "redb"
 version = "2.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10774,6 +10794,66 @@ name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
+
+[[package]]
+name = "replay-analyzer"
+version = "0.2.0"
+dependencies = [
+ "boxcars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "replay-pacifist"
+version = "0.1.0"
+dependencies = [
+ "replay-analyzer",
+ "replay-scoring",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "replay-scoring"
+version = "0.1.0"
+dependencies = [
+ "replay-analyzer",
+ "replay-value",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "replay-skills"
+version = "0.1.0"
+dependencies = [
+ "replay-analyzer",
+ "replay-value",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "replay-value"
+version = "0.1.0"
+dependencies = [
+ "replay-analyzer",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "replay-viewer"
+version = "0.1.0"
+dependencies = [
+ "replay-analyzer",
+ "replay-scoring",
+ "replay-skills",
+ "replay-value",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "reqwest"
@@ -11059,6 +11139,27 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rleval-app"
+version = "0.1.0"
+dependencies = [
+ "bc-clone",
+ "replay-analyzer",
+ "replay-pacifist",
+ "replay-scoring",
+ "replay-skills",
+ "replay-value",
+ "replay-viewer",
+ "rusty_http",
+ "rusty_multimodal_db_engine",
+ "rusty_oauth",
+ "rusty_rand",
+ "rusty_tls",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
