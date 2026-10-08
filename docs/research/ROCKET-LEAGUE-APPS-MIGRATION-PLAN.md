@@ -156,3 +156,33 @@ No credentials found (no tokens/keys in any revision; `client_secret` hits in `a
 Private repo (name to choose, e.g. `rocket_league_private`): created by you or with your approval. It receives the stripped paths **with history preserved** via a second filter-repo pass (`--path` selecting just those paths), so nothing is lost by keeping them out of rusty_mill. rusty_mill refers to it only through `RL_REPLAY_DIR` and a README pointer.
 
 Revised order: phase 0 (ADR + licence + private repo exists) -> dry run -> rusty_bullet import -> RLEval import (only after you review the section 10 table).
+
+## 11. Dry-run results (2026-10-08, scratch clones only, nothing pushed)
+
+Reproduce with `rl-migration/filter.sh` (history rewrite) and `rl-migration/apply_manifests.py` (post-import manifest edits). Toolchain 1.98.1, as CI.
+
+| Check | Result |
+| --- | --- |
+| rusty_bullet rewrite | 793 of 794 commits (one became empty), 4.9 MiB pack |
+| RLEvalSystem public set | 201 of 222 commits, **3.9 MiB pack (was 98 MiB)**; no `myReplays`/`corpus`/`modes`/`case-studies` content in any revision |
+| RLEvalSystem private set | 59 commits, 94 MiB, history preserved; ready for the private repo |
+| Merge into rusty_mill | no conflicts; `git log --follow` crosses the import for both products |
+| `check_workspace_deps.py`, `check_workspace_layers.py` | pass (after the git-dep rewrite and layer metadata) |
+| `Cargo.lock` | +308 lines, **no changes to existing entries** |
+| `cargo test` on the 16 packages | 1,058 pass; remaining failures all explained below |
+| `fmt --check` / `clippy --all-targets -D warnings` (1.98.1) | 37 fmt diffs (fixed by `cargo fmt`); 4 clippy errors, all `chunks_exact_to_as_chunks` in `rleval-app/src/sha256.rs`; clean after; `--features mmdb,oidc` also clean |
+| `generate_workspace_map.py --verify` | fails until `docs/WORKSPACE-MAP.md` is regenerated (expected) |
+
+Corrections to the plan found by the dry run:
+1. **Lockfile pins are required.** Fresh resolution picks `subtr-actor 1.4.0`, which fails to compile `rb_replay_ingest`. Pin `subtr-actor 1.2.0` (rusty_bullet's lock). Pin `boxcars 0.11.3` (RLEval's lock), otherwise `replay-analyzer`'s golden fails: the digest embeds `parser_version`. Both pins keep every golden unchanged; remove them only as a deliberate upgrade PR.
+2. **Lints and repository were not safe to inherit**, as predicted: rusty_mill's `[workspace.lints]` is rustils's (`unsafe_code = "warn"`, `undocumented_unsafe_blocks`), and `[workspace.package].repository` points at `rusty_search`. `apply_manifests.py` inlines rusty_bullet's lints and the correct repository into the `rb_*` manifests.
+3. **Path-depth rewrites** touched 19 `.rs` files (tests and bins using `CARGO_MANIFEST_DIR`-relative paths): `../assets/replays` -> `../../rleval/assets/replays`, and `tools/rb_tape_bot` -> `rusty_bullet/tools/rb_tape_bot`. Crate-local `include_bytes!("../assets/soccar/*.cmf")` is unaffected.
+4. **Two tests need the private corpus.** `history_flow` asserts `composite.is_some()`, which needs `assets/corpus/rank_norms.json`. It passes with the corpus present and fails without. Required change: skip when `RL_ASSETS_DIR` has no corpus. `external_validation.rs` already degrades gracefully.
+5. **Two fixtures exceed 1 MB** (`419a.replay` 1.5 MB, `42f2.replay` 1.3 MB). They are used by most golden tests and the viewer smoke job. Plan keeps them (still ~2.8 MB in total); say so if you want a hard 1 MB ceiling.
+6. **Dangling references after the private split:** 9 broken relative links in `rleval/` (teardown docs) and 7 in `rusty_bullet/` (`CONTRIBUTING.md`, `SECURITY.md`, LICENSE paths), plus 6 files citing `docs/competitor/spire/`. Fix by link rewrite (or deleting the dead links); the family needs its own `LICENSE-*` links and a README pointer to the private repo.
+7. **`panels_api::a_signed_upload...` flaked once** under 16 parallel test binaries and passed 3/3 alone. It opens a local TCP server, so it is a CI risk independent of the migration; the monorepo's nextest timeout config applies.
+8. **Duplication spotted, not acted on:** `rleval-app/src/sha256.rs` is a hand-rolled SHA-256 inside a workspace that has its own crypto crates. Candidate for a `dedupe-loop` pass after the import; not in scope here.
+
+Not done by this session: creating `baileyrd/rocket_league_private`. The GitHub integration returned `403 Resource not accessible by integration` on repository creation, so the private repo must be created by you (empty, private); then push `rlpriv` to it.
+
+Still undecided: `bc-clone` and its teardown docs. You said everything identified stays private, but `rleval-app` has a path dependency on `bc-clone`, so moving the crate out breaks the app. The dry run kept the crate public and moved only the teardown docs; decide whether `bc-clone` should be feature-gated or its dependency removed.
