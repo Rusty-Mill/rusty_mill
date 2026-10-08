@@ -13,16 +13,24 @@ publish = false
 [package.metadata.rusty_mill]
 layer = "libs"
 
+[features]
+default = []
+# `http`: the Streamable HTTP transport on `rusty_serve`. Off by default so a
+# stdio-only server pulls in no HTTP stack.
+http = ["dep:rusty_serve", "dep:rusty_http"]
+
 [dependencies]
 # First-party only (ADR-0002 Tier S).
 rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
 rusty_mcp_proto = { workspace = true }
 rusty_base64 = { workspace = true }
+rusty_serve = { workspace = true, optional = true }
+rusty_http = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Interop oracle only (never shipped): the `rmcp` client, which the MCP crates
 # use today, drives this server over real stdio in `tests/interop.rs`.
-rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "process", "time"] }
 serde = "1"
 serde_json = "1"
@@ -33,3 +41,11 @@ missing_docs = "warn"
 
 [lints.clippy]
 unwrap_used = "warn"
+
+[[test]]
+name = "http"
+required-features = ["http"]
+
+[[test]]
+name = "http_interop"
+required-features = ["http"]

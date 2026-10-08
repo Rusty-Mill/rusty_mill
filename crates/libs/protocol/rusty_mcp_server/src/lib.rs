@@ -40,11 +40,15 @@
 #![forbid(unsafe_code)]
 
 pub mod connection;
+#[cfg(feature = "http")]
+pub mod http;
 mod page;
 pub mod server;
 pub mod stdio;
 
 pub use connection::{CallContext, CancelToken, Connection, Job, Notifier, Started};
+#[cfg(feature = "http")]
+pub use http::{bind_http, HttpConfig, HttpHandler};
 pub use server::{BuildError, Server, ServerBuilder, ToolHandler};
 pub use stdio::{
     serve_lines, serve_stdio, StdioConfig, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_LINE_BYTES,

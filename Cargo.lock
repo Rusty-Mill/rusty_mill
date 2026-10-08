@@ -12545,8 +12545,10 @@ version = "0.1.0"
 dependencies = [
  "rmcp",
  "rusty_base64",
+ "rusty_http",
  "rusty_json",
  "rusty_mcp_proto",
+ "rusty_serve",
  "serde",
  "serde_json",
  "tokio",

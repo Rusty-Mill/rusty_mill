@@ -188,6 +188,21 @@ impl Connection {
         }
     }
 
+    /// A connection whose protocol revision is already known, for a
+    /// transport that learns it out of band (the Streamable HTTP
+    /// `MCP-Protocol-Version` header) instead of from an `initialize` on this
+    /// very connection. A request that names its own revision in `_meta`
+    /// still wins.
+    pub fn with_protocol_version(
+        server: Arc<Server>,
+        notifier: Arc<dyn Notifier>,
+        version: Option<ProtocolVersion>,
+    ) -> Self {
+        let conn = Self::new(server, notifier);
+        lock(&conn.state).negotiated = version;
+        conn
+    }
+
     /// Admit a message. Cheap and non-blocking: a notification is acted on
     /// here (a cancellation raises its flag at once), `initialize`,
     /// `server/discover` and `ping` are answered here, and any other request
@@ -460,6 +475,12 @@ impl Job {
     /// The id of the request this job answers.
     pub fn id(&self) -> &RequestId {
         &self.guard.id
+    }
+
+    /// The job's cancellation flag, for a transport that cancels a request
+    /// when its client goes away.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.token.clone()
     }
 
     /// Run the request to completion and return the reply to send, or `None`

@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_server over Streamable HTTP (pending review)
+
+- **Added:** feature `http` on `rusty_mcp_server`: a stateless Streamable HTTP transport, verified over real sockets and against the `rmcp` HTTP client in both handshake modes.
+- **Known limitations:** no sessions, no stream resumption, no authentication, no TLS. A classic-handshake client's `notifications/cancelled` cannot reach a running call (cancellation works by hanging up, which the stateless mode does). Each running call or open stream holds a `rusty_serve` connection thread. Not run against the `rusty-mcp-demo` acceptance suite, `adk-mcp`'s or `remind_me_remote`'s clients, or any HTTP client other than `rmcp`'s.
+
+---
+
 ## 2026-10-08 - rusty_mcp_server first slice (pending review)
 
 - **Added:** `rusty_mcp_server`, a tools-only MCP server core with a stdio transport, serving both protocol generations. Nothing consumes it yet.
