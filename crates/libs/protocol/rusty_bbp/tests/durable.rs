@@ -197,15 +197,22 @@ fn open_waits_for_a_process_that_holds_the_lock() {
     // The "other process" is mid-write: it holds the lock while its batch is
     // not yet complete on disk.
     let held = lock_for_test(&dir).expect("lock");
-    let size = std::fs::metadata(dir.join("tasks").join("T1.log"))
-        .expect("meta")
-        .len();
+    // The last line of the log is the batch that will be cut; everything
+    // before it must survive exactly.
+    let log_path = dir.join("tasks").join("T1.log");
+    let text = std::fs::read_to_string(&log_path).expect("read log");
+    let last_line = text.lines().last().expect("a batch");
+    let cut: Vec<Event> = rusty_serde::json::from_str(last_line).expect("batch json");
+    let all = fx.d.store.events(&task, 0).expect("events");
+    let expected: Vec<Event> = all[..all.len() - cut.len()].to_vec();
+    let size = text.len() as u64;
     truncate_log_for_test(&dir, &task, size - 5).expect("truncate");
     let (tx, rx) = std::sync::mpsc::channel();
     let dir2 = dir.clone();
     let opener = std::thread::spawn(move || {
         let store = open(&dir2);
-        tx.send(store.rev(&TaskId("T1".into()))).expect("send");
+        let events = store.events(&TaskId("T1".into()), 0).expect("events");
+        tx.send(events).expect("send");
     });
     assert!(
         rx.recv_timeout(std::time::Duration::from_millis(300))
@@ -217,11 +224,10 @@ fn open_waits_for_a_process_that_holds_the_lock() {
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("open completes once the lock is released");
     opener.join().expect("join");
-    // Repair ran after the lock was released and dropped exactly the cut batch.
-    assert!(
-        seen < before,
-        "the cut batch is gone: {seen:?} < {before:?}"
-    );
+    // Repair ran after the lock was released and dropped exactly the cut
+    // batch: every earlier batch is intact, in order.
+    assert_eq!(seen.len() as u64, before.0 - cut.len() as u64);
+    assert_eq!(seen, expected, "only the cut batch is gone");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -240,33 +246,36 @@ fn racing_writers_never_both_pass_the_revision_check() {
         std::thread::spawn(move || {
             let task = TaskId("T1".into());
             let mut store = open(&dir);
-            let mut wins = 0u64;
+            let mut outcomes = Vec::with_capacity(rounds);
             for _ in 0..rounds {
                 store.refresh(&task).expect("refresh");
                 let rev = store.rev(&task);
                 barrier.wait();
-                match store.append(&task, rev, std::slice::from_ref(&ev)) {
-                    Ok(()) => wins += 1,
-                    Err(StoreError::Conflict { .. }) => {}
+                let landed = match store.append(&task, rev, std::slice::from_ref(&ev)) {
+                    Ok(()) => true,
+                    Err(StoreError::Conflict { .. }) => false,
                     Err(e) => panic!("unexpected {e:?}"),
-                }
+                };
+                outcomes.push(landed);
                 barrier.wait();
             }
-            wins
+            outcomes
         })
     };
     let a = writer(dir.clone(), barrier.clone(), payload.clone());
     let b = writer(dir.clone(), barrier, payload);
-    let wins = a.join().expect("a") + b.join().expect("b");
-    assert!(
-        wins >= rounds,
-        "at least one writer lands per round: {wins}"
-    );
+    let (a, b) = (a.join().expect("a"), b.join().expect("b"));
+    for (round, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert!(
+            x != y,
+            "round {round}: exactly one writer lands and the other conflicts, got {x} and {y}"
+        );
+    }
     let reopened = open(&dir);
     assert_eq!(
         reopened.rev(&task).0,
-        base.0 + wins,
-        "every acknowledged batch is on disk and nothing else is"
+        base.0 + rounds as u64,
+        "one batch per round is on disk and nothing else"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
