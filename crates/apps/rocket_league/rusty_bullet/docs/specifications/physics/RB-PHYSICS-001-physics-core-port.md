@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.157.0
+- Version: 0.158.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -8221,6 +8221,17 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     0.611 -> 0.445, three-wheel ticks unchanged; random drives 601..624 113.5 -> 112.1, 701..724 102.2 ->
     102.5 uu mean of means (event-dominated); golden gate unchanged.
 
+- `RB-PHYSICS-001-FR-157` (any wheel on the surface gives the ground boost acceleration; implemented and
+  verified on the fuzz drives' one-step error; refines FR-056): the boost force is `2975/3` uu/s^2 while at
+  least one wheel touches and `3175/3` only with none, not only with three or more down.
+  - Why: after FR-156, `regime_bias.py` over 96 fuzz drives showed every boosted regime with one or two
+    wheels down short of the game by 0.5 to 0.7 uu/s per tick forward whatever the throttle (`2w thr+ boost`
+    -0.62, `thr0 boost` -0.54 and -0.59, `thr- boost` -0.53): the 66.7 uu/s^2 that separates the two values.
+  - **Verification**: `drive` test `boost_with_any_wheel_down_is_the_ground_acceleration` (fails on the old
+    rule); those regimes' forward error -0.62 -> -0.12, -0.54 -> +0.02; random drives 601..624 112.1 -> 114.2,
+    701..724 102.5 -> 105.0 uu mean of means (nine tapes better, eight worse; the sums move with two
+    landings, `fuzz_714` and `fuzz_619`, that the one-step view does not see); golden gate unchanged.
+
 - `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
   verified on `bumpag_*` and `tri_chain`; refines FR-143): an airborne bumper on a grounded
   victim bumps like a ground bumper (victim 1.25 times the speed, up).
@@ -8393,6 +8404,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.158.0 (2026-10-08): `RB-PHYSICS-001-FR-157` (any wheel down gives the ground boost acceleration). 506 tests in
+  `rb_physics_bullet`.
 - 0.157.0 (2026-10-08): `RB-PHYSICS-001-FR-156` (the air throttle needs every wheel off the surface). 505 tests in
   `rb_physics_bullet`.
 - 0.156.0 (2026-10-08): `RB-PHYSICS-001-FR-154` (a held boost does not force the throttle with fewer than three wheels down). 504 tests in

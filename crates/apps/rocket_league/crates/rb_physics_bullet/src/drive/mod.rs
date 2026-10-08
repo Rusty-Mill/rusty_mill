@@ -662,7 +662,7 @@ pub fn apply_driven_forces(
     boost::apply_boost(
         car,
         boosting,
-        on_ground,
+        wheels.iter().any(Option::is_some),
         forward,
         &mut state.boost_amount,
         state.boost_used_per_second,
