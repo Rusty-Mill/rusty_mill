@@ -25,6 +25,9 @@
 //! - [`record12`] — the TLS 1.2 record layer (stage 4b-i): the same AEADs as
 //!   [`record`], with a different nonce, a visible content type, and a
 //!   different additional-data layout. Protection only; no handshake yet.
+//! - [`schedule12`] — the TLS 1.2 key derivation (stage 4b-ii): the PRF, the
+//!   extended master secret, the key block and `Finished`. Extended master
+//!   secret only; the original RFC 5246 derivation is deliberately absent.
 //! - [`der`] — a strict DER reader (stage 2a), the foundation everything
 //!   certificate-shaped sits on.
 //! - [`x509`] — certificate parsing (stage 2a). **Parsing only**: it reports
@@ -74,7 +77,7 @@
 //!   [`ticket::TicketKeys`] is the shape that makes rotating possible.
 //!
 //! TLS 1.2 (4b) is being built in stages; `docs/research/TLS12-DESIGN.md` has
-//! the plan. Only its record layer exists so far.
+//! the plan. Its record layer and key derivation exist so far.
 //!
 //! # What is deliberately *not* here
 //!
@@ -92,6 +95,7 @@ pub mod path;
 pub mod record;
 pub mod record12;
 pub mod schedule;
+pub mod schedule12;
 pub mod server;
 pub mod sign;
 pub mod ticket;
