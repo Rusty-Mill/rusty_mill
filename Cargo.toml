@@ -16,6 +16,7 @@ members = [
     "crates/libs/ui/rusty_gpu",
     "crates/libs/ui/rusty_gui",
     "crates/libs/ui/rusty_font",
+    "crates/libs/ui/rusty_ttf_parser",
     "crates/foundation/rusty_regx",
     "crates/foundation/rusty_win32",
     "crates/foundation/rpath",
@@ -357,6 +358,7 @@ rusty_diff = { path = "crates/foundation/rusty_diff" }
 rusty_err = { path = "crates/foundation/rusty_err" }
 rusty_fedora = { path = "crates/libs/homelab/rusty_fedora" }
 rusty_font = { path = "crates/libs/ui/rusty_font" }
+rusty-ttf-parser = { path = "crates/libs/ui/rusty_ttf_parser", version = "0.1.0" }
 rusty_git = { path = "crates/libs/rusty_git" }
 rusty_gpu = { path = "crates/libs/ui/rusty_gpu" }
 rusty_gui = { path = "crates/libs/ui/rusty_gui" }
