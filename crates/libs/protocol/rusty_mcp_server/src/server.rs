@@ -2,8 +2,11 @@
 //! revisions it speaks and which tools it offers. Build one with
 //! [`Server::builder`], share it between connections with an `Arc`.
 
+use crate::ask::ToolOutcome;
 use crate::changes::{ChangeBroadcaster, ChangeKinds};
 use crate::connection::CallContext;
+#[cfg(feature = "request-state")]
+use crate::state::StateCodec;
 use crate::uri_template::{TemplateError, UriTemplate, UriVars};
 use rusty_mcp_proto::{
     CallToolParams, CallToolResult, CompleteParams, CompletionInfo, ErrorData, GetPromptParams,
@@ -11,6 +14,8 @@ use rusty_mcp_proto::{
     ReadResourceResult, Resource, ResourceTemplate, Tool,
 };
 use std::fmt;
+#[cfg(feature = "request-state")]
+use std::time::Duration;
 
 /// A tool's implementation. It gets the call's context (cancellation,
 /// progress, who is calling) and the parameters, and answers with a result
@@ -18,7 +23,7 @@ use std::fmt;
 /// result with `is_error: Some(true)`, which the model can read and react
 /// to; return `Err` only for a malformed call.
 pub type ToolHandler =
-    dyn Fn(&CallContext, CallToolParams) -> Result<CallToolResult, ErrorData> + Send + Sync;
+    dyn Fn(&CallContext, CallToolParams) -> Result<ToolOutcome, ErrorData> + Send + Sync;
 
 /// A prompt's implementation: the arguments are already checked against the
 /// prompt's declared required ones.
@@ -47,6 +52,11 @@ pub(crate) const MAX_COMPLETION_VALUES: usize = 100;
 /// Entries per list page unless [`ServerBuilder::page_size`] says
 /// otherwise.
 pub const DEFAULT_PAGE_SIZE: usize = 100;
+
+/// How long a sealed `requestState` lasts unless
+/// [`ServerBuilder::state_ttl`] says otherwise.
+#[cfg(feature = "request-state")]
+pub const DEFAULT_STATE_TTL: Duration = Duration::from_secs(600);
 
 /// Requests in flight per connection unless
 /// [`ServerBuilder::max_in_flight`] says otherwise.
@@ -103,6 +113,10 @@ pub enum BuildError {
     ZeroLimit(&'static str),
     /// No protocol revision to speak.
     NoVersions,
+    /// [`ServerBuilder::state_key`] was given fewer than 32 bytes.
+    WeakStateKey,
+    /// The operating system could not supply a random state key.
+    NoRandomKey,
 }
 
 impl fmt::Display for BuildError {
@@ -121,6 +135,12 @@ impl fmt::Display for BuildError {
             }
             BuildError::ZeroLimit(what) => write!(f, "{what} must be at least 1"),
             BuildError::NoVersions => f.write_str("a server needs at least one protocol version"),
+            BuildError::WeakStateKey => {
+                f.write_str("the request-state key needs at least 32 bytes")
+            }
+            BuildError::NoRandomKey => {
+                f.write_str("could not get random bytes for the request-state key")
+            }
         }
     }
 }
@@ -140,6 +160,8 @@ pub struct Server {
     pub(crate) changes: Option<(ChangeBroadcaster, ChangeKinds)>,
     pub(crate) page_size: usize,
     pub(crate) max_in_flight: usize,
+    #[cfg(feature = "request-state")]
+    pub(crate) state: StateCodec,
 }
 
 impl Server {
@@ -161,6 +183,10 @@ impl Server {
             deferred: Vec::new(),
             page_size: DEFAULT_PAGE_SIZE,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            #[cfg(feature = "request-state")]
+            state_key: None,
+            #[cfg(feature = "request-state")]
+            state_ttl: DEFAULT_STATE_TTL,
         }
     }
 
@@ -194,6 +220,10 @@ pub struct ServerBuilder {
     deferred: Vec<BuildError>,
     page_size: usize,
     max_in_flight: usize,
+    #[cfg(feature = "request-state")]
+    state_key: Option<Vec<u8>>,
+    #[cfg(feature = "request-state")]
+    state_ttl: Duration,
 }
 
 impl ServerBuilder {
@@ -231,9 +261,26 @@ impl ServerBuilder {
     /// arguments.
     #[must_use]
     pub fn tool(
-        mut self,
+        self,
         tool: Tool,
         handler: impl Fn(&CallContext, CallToolParams) -> Result<CallToolResult, ErrorData>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.interactive_tool(tool, move |ctx, call| {
+            handler(ctx, call).map(ToolOutcome::Done)
+        })
+    }
+
+    /// Offer a tool that may need the user's input mid-call (2026-07-28
+    /// clients only): `handler` answers [`ToolOutcome::Ask`] and is called
+    /// again with the client's answers. See [`Ask`](crate::Ask).
+    #[must_use]
+    pub fn interactive_tool(
+        mut self,
+        tool: Tool,
+        handler: impl Fn(&CallContext, CallToolParams) -> Result<ToolOutcome, ErrorData>
             + Send
             + Sync
             + 'static,
@@ -242,6 +289,25 @@ impl ServerBuilder {
             tool,
             handler: Box::new(handler),
         });
+        self
+    }
+
+    /// The key that seals `requestState` (at least 32 bytes). Servers that
+    /// answer from several processes must all share one; the default is a
+    /// random key per build, which makes a state from one process invalid
+    /// at another (the client sees a refused `requestState`).
+    #[cfg(feature = "request-state")]
+    #[must_use]
+    pub fn state_key(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.state_key = Some(key.into());
+        self
+    }
+
+    /// How long a sealed `requestState` stays valid (default 10 minutes).
+    #[cfg(feature = "request-state")]
+    #[must_use]
+    pub fn state_ttl(mut self, ttl: Duration) -> Self {
+        self.state_ttl = ttl;
         self
     }
 
@@ -382,6 +448,21 @@ impl ServerBuilder {
         ) {
             return Err(BuildError::DuplicateTemplate(d.to_owned()));
         }
+        #[cfg(feature = "request-state")]
+        let state = {
+            if self.state_ttl.as_secs() == 0 {
+                return Err(BuildError::ZeroLimit("state lifetime (seconds)"));
+            }
+            let key = match self.state_key {
+                Some(k) if k.len() < crate::state::MIN_KEY_BYTES => {
+                    return Err(BuildError::WeakStateKey)
+                }
+                Some(k) => k,
+                None => rusty_rand::bytes(crate::state::MIN_KEY_BYTES)
+                    .map_err(|_| BuildError::NoRandomKey)?,
+            };
+            StateCodec::new(key, self.state_ttl)
+        };
         Ok(Server {
             info: self.info,
             instructions: self.instructions,
@@ -394,6 +475,8 @@ impl ServerBuilder {
             changes: self.changes,
             page_size: self.page_size,
             max_in_flight: self.max_in_flight,
+            #[cfg(feature = "request-state")]
+            state,
         })
     }
 }

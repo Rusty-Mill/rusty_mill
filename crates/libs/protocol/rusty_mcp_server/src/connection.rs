@@ -57,9 +57,19 @@ pub struct CallContext {
     meta: RequestMeta,
     cancel: CancelToken,
     notifier: Arc<dyn Notifier>,
+    #[cfg(feature = "request-state")]
+    pub(crate) state: Option<Vec<u8>>,
 }
 
 impl CallContext {
+    /// The state this handler left with its last [`Ask`](crate::Ask), checked
+    /// and unsealed; `None` on a first call. A forged, altered, expired or
+    /// foreign state never gets this far: the call is refused with `-32602`.
+    #[cfg(feature = "request-state")]
+    pub fn request_state(&self) -> Option<&[u8]> {
+        self.state.as_deref()
+    }
+
     /// The id of the `tools/call` request.
     pub fn request_id(&self) -> &RequestId {
         &self.request_id
@@ -367,6 +377,8 @@ impl Connection {
             meta,
             cancel: token.clone(),
             notifier: Arc::clone(&self.notifier),
+            #[cfg(feature = "request-state")]
+            state: None,
         }
     }
 

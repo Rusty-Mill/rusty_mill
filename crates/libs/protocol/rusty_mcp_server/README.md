@@ -103,6 +103,40 @@ pagination, completion, errors, progress, cancellation; both transports share
 one fixture and one scenario). `rmcp` is a dev-dependency
 only.
 
+## Asking the user mid-call (multi-round-trip input)
+
+On 2026-07-28 a tool that needs the user's input does not call the client; it
+answers `input_required` and the client retries with the answers. Register it
+with `interactive_tool` and return `ToolOutcome::Ask`:
+
+```rust,ignore
+.interactive_tool(tool, |ctx, call| {
+    let Some(reply) = answer(&call, "confirm")? else {
+        let form = ElicitParams::Form { message: "Book it?".into(), requested_schema, meta: None };
+        return Ok(ToolOutcome::Ask(Ask::new().elicit("confirm", &form).with_state("draft:42")));
+    };
+    // ... reply.action, reply.content; ctx.request_state() is "draft:42" ...
+})
+```
+
+- The server refuses an `Ask` (never reaches the client) when the revision is
+  not 2026-07-28 (`-32600`), when the client declared no `elicitation`
+  capability (`-32021`), or when the ask is empty (`-32603`).
+- **`requestState`** (feature `request-state`; pulls in `rusty_oauth`'s
+  HMAC-SHA256, `rusty_crypto_key` and `rusty_rand`, all first-party). State
+  left with `Ask::with_state` is sealed: HMAC over the bytes, an expiry and
+  the method and tool name, so a client cannot alter it, extend it, or use it
+  on another tool. A bad, foreign or expired one is `-32602` before the
+  handler runs. It is **not encrypted** (the client can read it) and it can be
+  replayed until it expires (10 minutes; `state_ttl`), so keep in it only what
+  the retry re-checks. Servers answering from several processes must share
+  `state_key` (32+ bytes); the default is a random key per build, so a state
+  from another process is refused and the client starts over.
+- Not bound to a client identity: if requests are authenticated, check the
+  caller again on the retry.
+- Tools only for now; prompts and resources take no input yet. Task-based
+  input (`tasks/update`) is not here.
+
 ## Streamable HTTP
 
 Enable with `features = ["http"]`. Which revision a request speaks comes from

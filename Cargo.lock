@@ -12544,9 +12544,11 @@ version = "0.1.0"
 dependencies = [
  "rmcp",
  "rusty_base64",
+ "rusty_crypto_key",
  "rusty_http",
  "rusty_json",
  "rusty_mcp_proto",
+ "rusty_oauth",
  "rusty_rand",
  "rusty_serve",
  "serde",

@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_mcp_server multi-round-trip input (pending review)
+
+- **Added:** tools can ask the user mid-call (2026-07-28) with `interactive_tool`; `requestState` is HMAC-sealed under the new `request-state` feature.
+- **Not verified:** no real MCP client has driven an `input_required` round (tests play the client over the stdio loop); `rusty-mcp-demo` was not run. State is authenticated but not encrypted, and replayable until it expires. Prompts, resources and tasks take no input yet.
+
+---
+
 ## 2026-10-08 - rusty_mcp_server HTTP sessions (pending review)
 
 - **Added:** `Mcp-Session-Id` for the classic handshake over Streamable HTTP, so `notifications/cancelled` and `DELETE` work as the spec describes. Verified with the `rmcp` classic HTTP client (mid-call cancel) and socket tests.

@@ -33,12 +33,11 @@
 //! - [`stdio`]: newline-delimited JSON on stdin/stdout, requests running
 //!   concurrently; end of input drains them for a bounded time, then cancels.
 //!
-//! Not here yet: prompts, resources, completion, subscriptions, tasks and
-//! multi-round-trip input on the server side, and the Streamable HTTP
-//! transport.
+//! Not here yet: tasks, and multi-round-trip input for prompts and resources.
 
 #![forbid(unsafe_code)]
 
+pub mod ask;
 pub mod changes;
 pub mod connection;
 #[cfg(feature = "http")]
@@ -46,6 +45,8 @@ pub mod http;
 mod methods;
 mod page;
 pub mod server;
+#[cfg(feature = "request-state")]
+mod state;
 pub mod stdio;
 mod uri_template;
 
@@ -56,6 +57,7 @@ pub use rusty_json as json;
 /// for the same reason.
 pub use rusty_mcp_proto as proto;
 
+pub use ask::{answer, Ask, ToolOutcome};
 pub use changes::{ChangeBroadcaster, ChangeEvent, ChangeKinds};
 pub use connection::{CallContext, CancelToken, Connection, Job, Notifier, Started};
 #[cfg(feature = "http")]

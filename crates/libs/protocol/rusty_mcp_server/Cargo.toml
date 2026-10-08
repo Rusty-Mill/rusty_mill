@@ -18,6 +18,9 @@ default = []
 # `http`: the Streamable HTTP transport on `rusty_serve`. Off by default so a
 # stdio-only server pulls in no HTTP stack.
 http = ["dep:rusty_serve", "dep:rusty_http", "dep:rusty_rand"]
+# `request-state`: seal the `requestState` of multi-round-trip input with an
+# HMAC, so a client cannot forge or alter what it echoes back.
+request-state = ["dep:rusty_oauth", "dep:rusty_crypto_key", "dep:rusty_rand"]
 
 [dependencies]
 # First-party only (ADR-0002 Tier S).
@@ -27,6 +30,8 @@ rusty_base64 = { workspace = true }
 rusty_serve = { workspace = true, optional = true }
 rusty_http = { workspace = true, optional = true }
 rusty_rand = { workspace = true, optional = true }
+rusty_oauth = { workspace = true, optional = true }
+rusty_crypto_key = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Interop oracle only (never shipped): the `rmcp` client, which the MCP crates

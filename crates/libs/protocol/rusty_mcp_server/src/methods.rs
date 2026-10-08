@@ -3,10 +3,13 @@
 //! generic work (revision, pagination, cache hints, argument checks, error
 //! codes) lives here so every feature behaves the same.
 
+use crate::ask::{Ask, ToolOutcome};
 use crate::changes::{ChangeEvent, ChangeKinds};
-use crate::connection::{CancelToken, Connection};
+use crate::connection::{CallContext, CancelToken, Connection};
 use crate::page::{self, Kind};
 use crate::server::MAX_COMPLETION_VALUES;
+#[cfg(feature = "request-state")]
+use crate::state::StateError;
 use rusty_json::Value;
 use rusty_mcp_proto::rpc::params as decode_params;
 use rusty_mcp_proto::subscribe::{
@@ -14,9 +17,9 @@ use rusty_mcp_proto::subscribe::{
 };
 use rusty_mcp_proto::{
     CacheScope, CallToolParams, CompleteParams, CompleteResult, ErrorCode, ErrorData,
-    GetPromptParams, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
-    ListToolsResult, Message, PaginatedParams, Paging, ProtocolVersion, ReadResourceParams,
-    Reference, RequestId, ResultType, SubscriptionFilter, Wire,
+    GetPromptParams, InputRequiredResult, ListPromptsResult, ListResourceTemplatesResult,
+    ListResourcesResult, ListToolsResult, Message, PaginatedParams, Paging, ProtocolVersion,
+    ReadResourceParams, Reference, RequestId, ResultType, SubscriptionFilter, Wire,
 };
 use std::ops::Range;
 use std::sync::atomic::Ordering;
@@ -100,9 +103,73 @@ impl Connection {
             .iter()
             .find(|t| t.tool.name == call.name)
             .ok_or_else(|| invalid_params(format!("unknown tool {:?}", call.name)))?;
-        let ctx = self.call_context(id, version.clone(), meta, token);
-        let mut result = (entry.handler)(&ctx, call)?;
-        complete_type(&version, &mut result.result_type);
+        #[allow(unused_mut)]
+        let mut ctx = self.call_context(id, version.clone(), meta, token);
+        let name = call.name.clone();
+        #[cfg(feature = "request-state")]
+        {
+            ctx.state = match &call.request_state {
+                Some(token) => Some(
+                    self.server()
+                        .state
+                        .open(&state_scope(&name), token)
+                        .map_err(|e| {
+                            invalid_params(match e {
+                                StateError::Expired => "requestState expired; start the call again",
+                                StateError::Invalid => "invalid requestState",
+                            })
+                        })?,
+                ),
+                None => None,
+            };
+        }
+        match (entry.handler)(&ctx, call)? {
+            ToolOutcome::Done(mut result) => {
+                complete_type(&version, &mut result.result_type);
+                Ok(result.to_value())
+            }
+            ToolOutcome::Ask(ask) => self.input_required(&ctx, &name, ask),
+        }
+    }
+
+    /// The reply for a handler that wants input: checks the client can be
+    /// asked, seals any state, and shapes the `input_required` result.
+    fn input_required(&self, ctx: &CallContext, name: &str, ask: Ask) -> Result<Value, ErrorData> {
+        if !ctx.protocol_version().is_stateless() {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_REQUEST,
+                "asking for input mid-call needs protocol revision 2026-07-28",
+            ));
+        }
+        if ask.requests.is_empty() && ask.state.is_none() {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "the tool asked for input but gave no questions and no state",
+            ));
+        }
+        let can_elicit = ctx
+            .client_capabilities()
+            .is_some_and(|c| c.elicitation.is_some());
+        if !ask.requests.is_empty() && !can_elicit {
+            return Err(ErrorData::new(
+                ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY,
+                "this tool asks the user questions; the client must declare the elicitation capability",
+            ));
+        }
+        #[allow(unused_mut)]
+        let mut result = InputRequiredResult {
+            input_requests: (!ask.requests.is_empty()).then_some(ask.requests),
+            request_state: None,
+            meta: None,
+        };
+        #[cfg(feature = "request-state")]
+        {
+            result.request_state = ask
+                .state
+                .map(|s| self.server().state.seal(&state_scope(name), &s));
+        }
+        #[cfg(not(feature = "request-state"))]
+        let _ = name;
         Ok(result.to_value())
     }
 
@@ -511,4 +578,10 @@ mod tests {
         // One tools signal and one update per followed resource; nothing else.
         assert_eq!(sent.len(), 3);
     }
+}
+
+/// What a sealed `requestState` is bound to: the method and the tool.
+#[cfg(feature = "request-state")]
+fn state_scope(tool: &str) -> String {
+    format!("tools/call\0{tool}")
 }
