@@ -15,7 +15,11 @@ prints the list).
   it, waits 5 s, then drives +y at half throttle with its origin d uu to the
   side (nothing else is within 1000 uu of the path);
 * padp_b_<d>: big pad 18 at (3584, 0), same, d uu toward the field centre;
-* padp_drop_<d>: the car falls from 400 uu onto small pad 14, d uu to the side.
+* padp_drop_<d>: the car falls from 400 uu onto small pad 14, d uu to the side;
+* padp_full_<boost>: pass small pad 14 head-on starting with that much boost
+  (does a full tank consume the pad, and is the tank capped at 100?);
+* padp_fullbig_<boost>: the same for big pad 18;
+* padp_bdrop_<d>: the car falls from 400 uu onto big pad 18, d uu to the side.
 """
 import json
 import pathlib
@@ -51,6 +55,10 @@ def write(tape: dict, name: str) -> None:
 DRIVE = [{"ticks": WAIT_TICKS}, {"ticks": DRIVE_TICKS, "throttle": 0.5}]
 
 
+FULL_BOOST = [100, 95]
+BDROP_SIDE = [0, 100, 180, 200]
+
+
 def main() -> None:
     names = []
     for d in SIDE:
@@ -66,6 +74,22 @@ def main() -> None:
     for d in DROP_SIDE:
         name = f"padp_drop_{d}"
         tape = scenario(f"{name}: car falls from 400 uu onto small pad 14, {d} uu to the side", [SMALL[0] + d, SMALL[1], 400], [0, 0, 0], [{"ticks": 150}])
+        write(tape, name)
+        names.append(name)
+    for amount in FULL_BOOST:
+        name = f"padp_full_{amount}"
+        tape = scenario(f"{name}: small pad 14 head-on with {amount} boost", [SMALL[0], -1700, 17], [0, 0, 0], DRIVE)
+        tape["car"]["boost"] = amount
+        write(tape, name)
+        names.append(name)
+        name = f"padp_fullbig_{amount}"
+        tape = scenario(f"{name}: big pad 18 head-on with {amount} boost", [BIG[0], -700, 17], [0, 0, 0], DRIVE)
+        tape["car"]["boost"] = amount
+        write(tape, name)
+        names.append(name)
+    for d in BDROP_SIDE:
+        name = f"padp_bdrop_{d}"
+        tape = scenario(f"{name}: car falls from 400 uu onto big pad 18, {d} uu to the side", [BIG[0] - d, BIG[1], 400], [0, 0, 0], [{"ticks": 150}])
         write(tape, name)
         names.append(name)
     print(",".join(names))

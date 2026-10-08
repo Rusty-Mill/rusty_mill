@@ -794,6 +794,25 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   radius shrinks with height. The field line of the first run in a batch can be
   a stale one (38 pads, the GUI's previous match); the log now writes a new
   field line whenever core sends a different one.
+- **2026-10-07 pickup rule fitted** (`pad_fit.py` on 153 runs, 323 pad events: the
+  24 x 5 fuzz batch, the `padp_*` probes and the full-tank probes; 63 small and 24
+  big pickups, about 11800 passes without one). A pad is taken when the car's
+  origin (not the hitbox centre: that is contradicted by 8 to 10 uu) is within
+  **176 uu** (small, interval 175.8 to 176.5) or **207.7 uu** (big; RocketSim's
+  208) of its centre in the plane and no higher than **about 160 uu** above the
+  pad (small 157.2 to 161.9, big 158.6 to 163.2; the same for both), tested
+  at the car's position about 0.75 of a tick before the one the packet shows
+  (the interval is empty by 0.7 uu at 0.75 and by 2.4 uu with the whole previous
+  row, so the port can test the previous step's position moved a quarter of the
+  way to the new one). A **full tank (100) does not consume the pad** (four
+  probes passed 1.8 to 1.9 uu from a pad with 100 boost and it stayed active).
+  Amounts: small pad +12, big pad to 100, applied in the same row as the flip
+  (`87.5 -> 99.5`; a pickup tick's burn still applies: `26.2 -> 37.9`). Respawn:
+  the `timer` is 3.99 (small) / 9.99 (big) at the pickup, then counts down to
+  active: 4 s and 10 s. Not tested: the cap when a small pad takes the tank over
+  100 (assume `min(100, boost + 12)`), the cylinder's bottom, pads in the air at
+  a wall or ceiling, and two cars on one pad. The state-set artifact is the
+  sweep of pads along the straight line from the previous position.
 - **Next** (first part done): dump `FieldInfo` (the pad list and kinds) from the tape bot's `new`;
   record the pad `is_active`/`timer` per tick (the game packet has them), which
   says exactly when a pad is taken, and drive over one pad at many offsets from a
