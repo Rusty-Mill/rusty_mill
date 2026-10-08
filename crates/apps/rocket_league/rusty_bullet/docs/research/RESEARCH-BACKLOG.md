@@ -782,6 +782,17 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   (`RB-PHYSICS-001-FR-143`, both cars airborne only). Drifting attackers (the
   bump follows the heading, 0.3 / 0.1 uu), a flank hit on a moving car (4.1 /
   3.0) and a corner clip (11 / 6) match.
+- **Flip and three cars (2026-10-08, ADR-0076, FR-152)**: the scorer's start lag put a
+  constant offset (speed x lag / 120) on every fast-start tape; at the right alignment the
+  flip attacker matched the game for 36 ticks. The game gave the victim no bump (it reached
+  half the attacker's speed over 8 ticks) because the flipping nose pointed down (-85 to
+  -77 degrees); a bumped level car did bump a third (2253 uu/s). Rule: a bump needs the nose
+  within 45 degrees of the horizontal. `bumpf_flip` 20.6 / 43.8 uu (was 202 / 341 at that
+  alignment). Three-car tapes (`gen_tri.py`, 2 runs each, `batch_20261008-070119`), car 0 /
+  car 1 / car 2 mean uu: `double_demo` 1.8 / 9.4 / 0.0, `mate_into_enemy` 1.2 / 28.9 / 0.1,
+  `pinch` 17 / 122 / 13, `chain` 10 / 42 to 142 / 245, `chain_enemy` 11 / 42 / 242,
+  `two_on_one` 244 / 292 / 0.0 (the victim's demolition matches; the two attackers
+  diverge after it). `chain` itself does not repeat in the game (spread 19 uu mean, 53 max).
 - **Respawn (2026-10-08, ADR-0075, FR-151)**: twelve recorded demolitions (`demo_0` to
   `demo_11`, `respawn_report.py`). Out for exactly 3.000 s; back at one of the ten kickoff
   spawn points (random: the same tape gave three different points; not the victim's

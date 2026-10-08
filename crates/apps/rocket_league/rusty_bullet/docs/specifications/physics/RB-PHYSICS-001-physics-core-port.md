@@ -8196,6 +8196,16 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     mean (max 8.7); every other recording unchanged. Not verified: edge and
     vertex contacts on convex ridges (no recording isolates one).
 
+- `RB-PHYSICS-001-FR-152` (a bump needs a level nose; implemented and verified on
+  `bumpf_flip` and `tri_chain`, ADR-0076): a car bumps or demolishes another only when
+  its nose is within 45 degrees of the horizontal (`BUMP_MAX_FORWARD_Z`); a front flip's
+  nose, pointing down at the hit, gives a plain inelastic collision.
+  - Why: `bumpf_flip`: the victim reached half the attacker's speed over 8 ticks, no bump;
+    the port gave 1739 uu/s at once.
+  - **Verification**: `world` test `a_nose_pitched_far_off_the_horizontal_bumps_nobody`;
+    `bumpf_flip` 202 / 341 -> 20.6 / 43.8 uu (at the honest alignment); `tri_chain`
+    (a bumped, level car bumps a third) unchanged; golden gate unchanged.
+
 - `RB-PHYSICS-001-FR-151` (demolition respawn; implemented and verified on 12 recorded
   demolitions, ADR-0075): a demolished car returns after exactly 360 ticks at a kickoff spawn
   point (`respawn::SPAWN_POINTS`, chosen by `PhysicsWorld::set_respawn_point` or
@@ -8347,6 +8357,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.154.0 (2026-10-08): `RB-PHYSICS-001-FR-152` (a bump needs a level nose, ADR-0076). 502 tests in
+  `rb_physics_bullet`.
 - 0.153.0 (2026-10-08): `RB-PHYSICS-001-FR-151` (demolition respawn, ADR-0075). 501 tests in
   `rb_physics_bullet`.
 - 0.152.0 (2026-10-08): `RB-PHYSICS-001-FR-150` (a wheel's pushback against the ball
