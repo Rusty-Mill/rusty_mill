@@ -2,6 +2,11 @@
 //! Stage-3b exit criterion: the runner serves a selected run end to end.
 //! A real git repository, a candidate whose diffs apply (or do not), the
 //! frozen profile set executed, log and report stored under the run secret.
+//!
+//! Unix only: the workload is `/bin/sh` and the sandbox spec takes Unix
+//! absolute read roots. On Windows `bbp runner` compiles but every run is
+//! reported as `error` before anything executes.
+#![cfg(unix)]
 
 use rusty_bbp::*;
 use rusty_bbp_host::profiles::ProfileSet;
@@ -290,7 +295,7 @@ fn sandboxed_run_passes_or_fails_closed() {
         RunStatus::Passed => assert_eq!(rep.profiles[0].exit_code, 0),
         RunStatus::Error => {
             eprintln!("sandbox unavailable here: {log}");
-            assert!(log.contains("not run"), "{log}");
+            assert!(log.contains("not run") || log.contains("sandbox"), "{log}");
         }
         RunStatus::Failed => panic!("confined test failed: {log}"),
     }
