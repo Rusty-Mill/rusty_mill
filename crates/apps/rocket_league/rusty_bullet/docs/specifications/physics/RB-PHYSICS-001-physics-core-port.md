@@ -8196,6 +8196,18 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     mean (max 8.7); every other recording unchanged. Not verified: edge and
     vertex contacts on convex ridges (no recording isolates one).
 
+- `RB-PHYSICS-001-FR-154` (with fewer than three wheels down a held boost does not force
+  the wheels' throttle; implemented and verified on `fuzz_513`; refines FR-099 and FR-148): a
+  car landing on one or two wheels is driven or braked by the raw throttle, not the throttle 1
+  that a held boost forces on a car with three or four wheels down.
+  - Why: `fuzz_513` t = 5.34 to 5.45 s: nose-first landing on the two front wheels, boost held,
+    throttle 0: the game coast-brakes (half strength, as FR-099 found without boost); the port
+    drove the car (engine quartered but forward): 4.2 uu/s per tick of error for 14 ticks, then a
+    11.7 uu/s jump on touchdown. The only anomalous bucket of `kstep_regimes.py` (coasting, half
+    steer, boost, under 1000 uu/s: 61 uu/s over 40 windows) was this one event.
+  - **Verification**: `drive` test `two_touching_wheels_coast_even_with_boost_held_and_no_throttle`;
+    the one-step error in that landing 4.2 -> 0.6 to 0.7 uu/s per tick; golden gate unchanged.
+
 - `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
   verified on `bumpag_*` and `tri_chain`; refines FR-143): an airborne bumper on a grounded
   victim bumps like a ground bumper (victim 1.25 times the speed, up).
@@ -8368,6 +8380,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.156.0 (2026-10-08): `RB-PHYSICS-001-FR-154` (a held boost does not force the throttle with fewer than three wheels down). 504 tests in
+  `rb_physics_bullet`.
 - 0.155.0 (2026-10-08): `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars). 503 tests in
   `rb_physics_bullet`.
 - 0.154.0 (2026-10-08): `RB-PHYSICS-001-FR-152` (a bump needs a level nose, ADR-0076). 502 tests in
