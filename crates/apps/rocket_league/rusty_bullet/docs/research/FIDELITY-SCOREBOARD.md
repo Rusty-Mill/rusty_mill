@@ -66,6 +66,15 @@ grip, powerslide steer, rise and fall rates, lateral curve end, pushback ERP,
 sticky force) worsens it when moved: the remaining error is structural, not a
 constant.
 
+Latest (2026-10-08, after FR-156 and FR-157): fresh seeds 601 to 624 **114 uu mean of means,
+median 34 uu**; seeds 701 to 724 (never looked at before the check) **105 uu, median 25 uu**, 16
+of 24 under 30 uu; the six worst tapes are landings and bounces. Systematic one-step bias by
+regime (`regime_bias.py`, 96 tapes) is now under 0.02 rad/s per tick in spin everywhere and under
+0.4 uu/s per tick in velocity (the 4-wheel resting 0.2 uu/s per tick is the game's resting
+velocity report); touchdowns (`touchdown_errors.py`, 195 landings) have a median error of 0.2 to
+0.7 uu/s over four ticks. The remaining error is events: bounces on geometry, landings with spin,
+hits on a resting ball.
+
 ## Random ball launches
 
 `gen_ball_fuzz.py`: 24 seeded 6 s launches (random place, velocity 500 to 2500 uu/s,

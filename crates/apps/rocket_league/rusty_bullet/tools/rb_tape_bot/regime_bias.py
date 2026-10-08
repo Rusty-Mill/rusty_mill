@@ -9,11 +9,13 @@ the recorded rotation and groups it by regime: wheels touching (0 to 4), throttl
 boost, handbrake, steer size. For each group it prints the tick count and the mean error per
 tick on each axis (forward, left, up) and a bias score, ticks x |mean|, which is the velocity
 the port drifts by over the batch in that regime: a large score with a steady direction is a
-missing or wrong force, a small mean with a big spread is noise.
+missing or wrong force, a small mean with a big spread is noise. `SPIN=1` ranks and prints the
+angular velocity error (rad/s per tick) instead; `TOP=n` lists n regimes.
 """
 import collections
 import json
 import math
+import os
 import pathlib
 import re
 import subprocess
@@ -24,6 +26,7 @@ VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
 LINE = re.compile(
     r"t=\s*([\d.]+)s \| thr\s+(-?[\d.]+) str\s+(-?[\d.]+) p\s+(-?[\d.]+) y\s+(-?[\d.]+) r\s+(-?[\d.]+) (\S+) .*?"
     r"dv err \(\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\) \|\s*([\d.]+)\|"
+    r" spin err \(\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\)"
 )
 WHEELS = re.compile(r"(FR|FL|BR|BL) (n\(|-)")
 
@@ -75,15 +78,18 @@ def main() -> int:
                     continue
                 touching = sum(1 for _, kind in WHEELS.findall(line) if kind == "n(")
                 err = rotate_inverse(q, (float(m.group(8)), float(m.group(9)), float(m.group(10))))
-                groups[regime(float(m.group(2)), float(m.group(3)), m.group(7), touching)].append(err)
+                spin = rotate_inverse(q, (float(m.group(12)), float(m.group(13)), float(m.group(14))))
+                groups[regime(float(m.group(2)), float(m.group(3)), m.group(7), touching)].append(err + spin)
     rows = []
     for key, errs in groups.items():
         n = len(errs)
-        mean = [sum(e[i] for e in errs) / n for i in range(3)]
-        rows.append((n * math.sqrt(sum(c * c for c in mean)), n, key, mean))
+        mean = [sum(e[i] for e in errs) / n for i in range(6)]
+        which = slice(3, 6) if os.environ.get('SPIN') else slice(0, 3)
+        rows.append((n * math.sqrt(sum(c * c for c in mean[which])), n, key, mean))
     print(f"{'regime':<44}{'ticks':>7}  mean error per tick, car frame (fwd, left, up)   score")
     for score, n, key, mean in sorted(rows, reverse=True)[:int(__import__("os").environ.get("TOP", "14"))]:
-        print(f"{' '.join(key):<44}{n:>7}  ({mean[0]:6.2f}, {mean[1]:6.2f}, {mean[2]:6.2f})   {score:8.0f}")
+        shown = mean[3:6] if os.environ.get('SPIN') else mean[0:3]
+        print(f"{' '.join(key):<44}{n:>7}  ({shown[0]:6.3f}, {shown[1]:6.3f}, {shown[2]:6.3f})   {score:8.0f}")
     return 0
 
 
