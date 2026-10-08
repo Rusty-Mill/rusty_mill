@@ -29,8 +29,8 @@ impl Core {
         let state = &mut self.state;
         self.buffer.finish(16, |block| compress(state, block));
         let mut out = [0u8; 64];
-        for (chunk, word) in out.chunks_exact_mut(8).zip(self.state) {
-            chunk.copy_from_slice(&word.to_be_bytes());
+        for (chunk, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(self.state) {
+            *chunk = word.to_be_bytes();
         }
         out
     }
@@ -105,10 +105,8 @@ impl Default for Sha384 {
 
 fn compress(state: &mut [u64; 8], block: &[u8; 128]) {
     let mut w = [0u64; 80];
-    for (word, bytes) in w.iter_mut().zip(block.chunks_exact(8)) {
-        let mut be = [0u8; 8];
-        be.copy_from_slice(bytes);
-        *word = u64::from_be_bytes(be);
+    for (word, bytes) in w.iter_mut().zip(block.as_chunks::<8>().0) {
+        *word = u64::from_be_bytes(*bytes);
     }
     for i in 16..80 {
         let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);

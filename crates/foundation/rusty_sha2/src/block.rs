@@ -33,15 +33,10 @@ impl<const N: usize> Buffer<N> {
             compress(&self.buf);
             self.len = 0;
         }
-        let mut blocks = data.chunks_exact(N);
-        for block in &mut blocks {
-            // `chunks_exact(N)` yields N-byte slices, so the conversion cannot fail;
-            // the fallback only keeps this function panic-free.
-            if let Ok(array) = <&[u8; N]>::try_from(block) {
-                compress(array);
-            }
+        let (blocks, rest) = data.as_chunks::<N>();
+        for block in blocks {
+            compress(block);
         }
-        let rest = blocks.remainder();
         self.buf[..rest.len()].copy_from_slice(rest);
         self.len = rest.len();
     }

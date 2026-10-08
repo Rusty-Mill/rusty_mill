@@ -19,6 +19,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Fixed (evidence script):** failures in tests, lint, constant-time checks and timing now fail the run; constant-time checks run on every named compiler, including CI's 1.98.1 (identical results).
 - **Added (CI):** `crypto-constant-time` job (valgrind taint + pinned disassembly budgets for `rusty_sha2`, `rusty_aead`, `rusty_pk`, plus the harness self-test) on the pinned toolchain, selected by a new `crypto_ct` plan output when any of the five crypto crates is affected. Planner rule, workflow and tests updated; `actionlint` passes. First runner run passed (valgrind 3.22.0, rustc 1.98.1, identical counts to local).
 - **Changed:** the four new crates (`rusty_ct_check`, `rusty_sha2`, `rusty_pk`, `rusty_aead`) now declare `rust-version = "1.98.1"` instead of an untested 1.75, matching the compiler their checks run on. Behaviour change only for anyone building them with an older toolchain (Cargo now refuses).
+- **Fixed (CI):** the version raise activated a Clippy lint gated on `rust-version` (`chunks_exact_to_as_chunks`) that failed the 1.98.1 clippy job; ten call sites moved to `as_chunks`. The evidence script now lints on CI's compiler too.
 - **Open:** the timing tests are not in CI.
 
 ## 2026-10-08 - Crypto claims corrected, evidence record, boundary tests (docs and tests only)

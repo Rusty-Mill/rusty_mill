@@ -76,8 +76,14 @@ echo "ignored tests (run below): $(grep -rn '#\[ignore' crates/foundation/rusty_
 
 section "lint and format"
 cargo fmt --all --check >/dev/null 2>&1 && echo "fmt: clean" || { echo "fmt: DIFFERENCES"; fail fmt; }
-for c in rusty_ct_check rusty_sha2 rusty_pk rusty_aead rusty_crypto_key; do
-  cargo clippy -p $c --all-targets -- -D warnings >/dev/null 2>&1 && echo "clippy $c: clean" || { echo "clippy $c: FAILED"; fail "clippy $c"; }
+# Clippy lints depend on the compiler AND on the declared rust-version (some lints only fire above a
+# minimum version), so lint on CI's pinned toolchain as well as the local default: a clean run on one
+# compiler has missed a failure on the other (chunks_exact_to_as_chunks, 1.98.1, PR #540).
+CI_TC_LINT=$(sed -n 's/^  RUST_TOOLCHAIN: "\(.*\)"/\1/p' .github/workflows/ci.yml | head -1)
+for tc in "$CI_TC_LINT" stable; do
+  for c in rusty_ct_check rusty_sha2 rusty_pk rusty_aead rusty_crypto_key; do
+    RUSTUP_TOOLCHAIN=$tc cargo clippy -p $c --all-targets -- -D warnings >/dev/null 2>&1 && echo "clippy $c ($tc): clean" || { echo "clippy $c ($tc): FAILED"; fail "clippy $c on $tc"; }
+  done
 done
 
 section "constant-time checks (taint, disassembly budget, planted-leak controls), per compiler"

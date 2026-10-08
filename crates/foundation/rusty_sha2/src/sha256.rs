@@ -33,8 +33,8 @@ impl Hash for Sha256 {
         let state = &mut self.state;
         self.buffer.finish(8, |block| compress(state, block));
         let mut out = [0u8; 32];
-        for (chunk, word) in out.chunks_exact_mut(4).zip(self.state) {
-            chunk.copy_from_slice(&word.to_be_bytes());
+        for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
+            *chunk = word.to_be_bytes();
         }
         out
     }
@@ -55,8 +55,8 @@ impl Drop for Sha256 {
 
 fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
-    for (word, bytes) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*bytes);
     }
     for i in 16..64 {
         let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);

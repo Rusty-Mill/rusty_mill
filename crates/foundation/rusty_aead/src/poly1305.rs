@@ -58,11 +58,10 @@ impl Poly1305 {
             self.block(&block, 1 << 24);
             self.len = 0;
         }
-        let mut blocks = data.chunks_exact(16);
-        for block in &mut blocks {
+        let (blocks, rest) = data.as_chunks::<16>();
+        for block in blocks {
             self.block(block, 1 << 24);
         }
-        let rest = blocks.remainder();
         self.buffer[..rest.len()].copy_from_slice(rest);
         self.len = rest.len();
     }
@@ -176,8 +175,8 @@ impl Poly1305 {
         let t3 = f as u32;
 
         let mut tag = [0u8; 16];
-        for (chunk, word) in tag.chunks_exact_mut(4).zip([t0, t1, t2, t3]) {
-            chunk.copy_from_slice(&word.to_le_bytes());
+        for (chunk, word) in tag.as_chunks_mut::<4>().0.iter_mut().zip([t0, t1, t2, t3]) {
+            *chunk = word.to_le_bytes();
         }
         tag
     }

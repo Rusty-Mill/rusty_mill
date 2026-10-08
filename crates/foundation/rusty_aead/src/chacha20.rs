@@ -13,12 +13,12 @@ pub(crate) struct ChaCha20 {
 impl ChaCha20 {
     pub(crate) fn new(key: &[u8; 32], nonce: &[u8; 12]) -> Self {
         let mut k = [0u32; 8];
-        for (word, bytes) in k.iter_mut().zip(key.chunks_exact(4)) {
-            *word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        for (word, bytes) in k.iter_mut().zip(key.as_chunks::<4>().0) {
+            *word = u32::from_le_bytes(*bytes);
         }
         let mut n = [0u32; 3];
-        for (word, bytes) in n.iter_mut().zip(nonce.chunks_exact(4)) {
-            *word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        for (word, bytes) in n.iter_mut().zip(nonce.as_chunks::<4>().0) {
+            *word = u32::from_le_bytes(*bytes);
         }
         Self { key: k, nonce: n }
     }
@@ -42,8 +42,8 @@ impl ChaCha20 {
             quarter(&mut x, 3, 4, 9, 14);
         }
         let mut out = [0u8; 64];
-        for ((chunk, mixed), original) in out.chunks_exact_mut(4).zip(x).zip(state) {
-            chunk.copy_from_slice(&mixed.wrapping_add(original).to_le_bytes());
+        for ((chunk, mixed), original) in out.as_chunks_mut::<4>().0.iter_mut().zip(x).zip(state) {
+            *chunk = mixed.wrapping_add(original).to_le_bytes();
         }
         wipe(&mut x);
         wipe(&mut state);
