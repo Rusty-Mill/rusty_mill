@@ -794,6 +794,18 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   not the mesh; a ridge or goal-post contact has no recording.
 - **Status**: Partly done. **Owner**: baileyrd.
 
+- **Ceiling probes (2026-10-08, `gen_ceiling.py`, `ceil_*`, `batch_20261008-082019`, 2 runs each)**:
+  driving and coasting upside down on the ceiling are modelled well: `ceil_drive` 2.1, `ceil_coast`
+  0.9, `ceil_slow` 2.1 uu (the game's own `ceil_slow` varies between runs, 38 uu). The two
+  nose-first hits are not: `ceil_up` (nose 86 degrees up, 1200 uu/s into the ceiling) 11.5 uu and
+  `ceil_60` 20.6 uu, repeatable in the game to 0.0 uu. On `ceil_up` the impact is right in size
+  (tick 55: vy 113, vz 429 against the game's 113, 429) but **mirrored sideways**: the game's car
+  leaves with vx +43 and spin (2.1, -4.2, -2.8), the port's with vx -41 and spin (2.1, +4.2, +2.8).
+  It is an exactly symmetric hit: nudging the port's start yaw by +0.0001 rad flips its sideways
+  result to vx +28.9 (the game's +29) and spin to the game's sign, while a 0.1 uu nudge in x changes
+  nothing, so the side is a tie broken by sub-milliradian asymmetry (how the start quaternion or the
+  contact order rounds), not a model error. Only exactly symmetric hits are affected.
+
 ### RB-RESEARCH-O018 — Car bumps and demolitions
 
 - **Evidence (2026-10-07)**: 18 two-car recordings (hivemind bot, teammates).
