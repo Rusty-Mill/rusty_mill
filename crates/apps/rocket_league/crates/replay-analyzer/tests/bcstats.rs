@@ -261,10 +261,10 @@ fn reverse_and_facing_from_orientation() {
         }],
     };
     let frames = vec![
-        yaw(0.0, 1000.0, 17.0),                     // grounded, forward, facing ball
-        yaw(0.0, -1000.0, 17.0),                    // grounded, reverse, facing ball
-        yaw(std::f32::consts::PI, 1000.0, 17.0),    // grounded, reverse, facing away
-        yaw(0.0, 1000.0, 700.0),                    // airborne (not driving), facing ball
+        yaw(0.0, 1000.0, 17.0),                  // grounded, forward, facing ball
+        yaw(0.0, -1000.0, 17.0),                 // grounded, reverse, facing ball
+        yaw(std::f32::consts::PI, 1000.0, 17.0), // grounded, reverse, facing away
+        yaw(0.0, 1000.0, 700.0),                 // airborne (not driving), facing ball
     ];
     let mut f = frames;
     for (i, fr) in f.iter_mut().enumerate() {

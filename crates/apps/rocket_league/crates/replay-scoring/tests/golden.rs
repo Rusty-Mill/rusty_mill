@@ -33,7 +33,7 @@ fn x10(v: f32) -> i64 {
 #[test]
 fn scoring_report_matches_golden() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../assets/replays")
+        .join("../../rleval/assets/replays")
         .join(format!("{SAMPLE}.replay"));
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let decoded = BoxcarsParser::new().parse(&data).expect("decode");

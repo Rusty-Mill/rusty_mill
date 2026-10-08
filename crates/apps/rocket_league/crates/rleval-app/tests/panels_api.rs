@@ -17,7 +17,7 @@ impl Server {
             .local_addr()
             .unwrap()
             .port();
-        let replays = format!("{}/../assets/replays", env!("CARGO_MANIFEST_DIR"));
+        let replays = format!("{}/../../rleval/assets/replays", env!("CARGO_MANIFEST_DIR"));
         let child = Command::new(env!("CARGO_BIN_EXE_rleval"))
             .args(["serve", "--port", &port.to_string(), "--replays", &replays])
             .stdout(Stdio::null())
@@ -105,13 +105,13 @@ impl Server {
         let Ok(mut s) = TcpStream::connect(("127.0.0.1", self.1)) else {
             return (0, String::new());
         };
-        write!(
-            s,
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
+        // A reset or short read while the child is still starting counts as "not up yet"
+        // (status 0), like a refused connect: `start` retries, real assertions still fail.
         let mut raw = Vec::new();
-        s.read_to_end(&mut raw).unwrap();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        if s.write_all(req.as_bytes()).is_err() || s.read_to_end(&mut raw).is_err() {
+            return (0, String::new());
+        }
         let text = String::from_utf8_lossy(&raw).into_owned();
         let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
         let status = head
@@ -217,7 +217,7 @@ fn run_job(srv: &Server, bytes: &[u8]) -> (String, String, Vec<String>) {
 fn a_job_runs_to_done_and_its_result_and_panels_are_served() {
     let srv = Server::start();
     let bytes = std::fs::read(format!(
-        "{}/../assets/replays/419a.replay",
+        "{}/../../rleval/assets/replays/419a.replay",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();
@@ -267,7 +267,7 @@ fn upload_url(srv: &Server, bytes: &[u8], sha: &str) -> String {
 fn a_signed_upload_is_verified_then_becomes_a_job_and_works_once() {
     let srv = Server::start();
     let bytes = std::fs::read(format!(
-        "{}/../assets/replays/419a.replay",
+        "{}/../../rleval/assets/replays/419a.replay",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();
@@ -287,7 +287,7 @@ fn a_signed_upload_is_verified_then_becomes_a_job_and_works_once() {
 fn a_signed_upload_rejects_wrong_bytes_a_forged_url_and_a_bad_declaration() {
     let srv = Server::start();
     let bytes = std::fs::read(format!(
-        "{}/../assets/replays/419a.replay",
+        "{}/../../rleval/assets/replays/419a.replay",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();
@@ -340,7 +340,7 @@ fn wait_done(srv: &Server, id: &str) -> (String, Vec<String>) {
 fn job_events_stream_every_state_until_the_job_ends() {
     let srv = Server::start();
     let bytes = std::fs::read(format!(
-        "{}/../assets/replays/419a.replay",
+        "{}/../../rleval/assets/replays/419a.replay",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();

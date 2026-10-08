@@ -251,12 +251,18 @@ fn bcstats_agrees_with_ballchasing() {
     use replay_analyzer::analyze::bcstats::ballchasing_stats;
     use replay_analyzer::analyze::roster_match::{team_anchored_pairs, RosterSlot};
 
-    let fixture = Path::new("assets/corpus/ballchasing_stats.json");
+    let fixture = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../rleval/assets/corpus/ballchasing_stats.json"
+    ));
     if !fixture.exists() {
         eprintln!("skip bcstats gate: no ground-truth fixture");
         return;
     }
-    let corpus = Path::new("assets/corpus");
+    let corpus = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../rleval/assets/corpus"
+    ));
     let truth: GroundTruth =
         serde_json::from_slice(&std::fs::read(fixture).expect("read fixture")).expect("parse");
     let mut ids: Vec<&String> = truth.replays.keys().collect();
@@ -396,12 +402,18 @@ fn bcstats_full_agrees_with_ballchasing() {
         positioning: HashMap<String, f64>,
     }
 
-    let fixture = Path::new("assets/corpus/ballchasing_bcstats.json");
+    let fixture = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../rleval/assets/corpus/ballchasing_bcstats.json"
+    ));
     if !fixture.exists() {
         eprintln!("skip bcstats-full gate: no fixture");
         return;
     }
-    let corpus = Path::new("assets/corpus");
+    let corpus = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../rleval/assets/corpus"
+    ));
     let truth: FullGt =
         serde_json::from_slice(&std::fs::read(fixture).expect("read")).expect("parse");
 
@@ -659,7 +671,10 @@ fn bcstats_full_agrees_with_ballchasing() {
 
 #[test]
 fn corpus_agrees_with_ballchasing() {
-    let fixture = Path::new("assets/corpus/ballchasing_stats.json");
+    let fixture = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../rleval/assets/corpus/ballchasing_stats.json"
+    ));
     if !fixture.exists() {
         eprintln!(
             "skip corpus gate: no ground-truth fixture at {}",
@@ -667,7 +682,10 @@ fn corpus_agrees_with_ballchasing() {
         );
         return;
     }
-    let corpus = Path::new("assets/corpus");
+    let corpus = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../rleval/assets/corpus"
+    ));
     let raw = std::fs::read(fixture).expect("read fixture");
     let truth: GroundTruth = serde_json::from_slice(&raw).expect("parse fixture");
 

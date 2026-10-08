@@ -10,7 +10,7 @@ use recon_check::{cross_check_recon, cross_check_replay, reconstructions};
 
 fn replay_bytes(name: &str) -> Vec<u8> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../assets/replays")
+        .join("../../rleval/assets/replays")
         .join(name);
     std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }

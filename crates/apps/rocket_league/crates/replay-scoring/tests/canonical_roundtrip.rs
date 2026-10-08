@@ -13,7 +13,8 @@ use replay_scoring::{score_all, ScoreConfig};
 
 #[test]
 fn scoring_a_roundtripped_canonical_is_identical() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/replays/42f2.replay");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rleval/assets/replays/42f2.replay");
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let decoded = BoxcarsParser::new().parse(&data).expect("decode");
     let canonical = build_canonical(&decoded, "42f2");

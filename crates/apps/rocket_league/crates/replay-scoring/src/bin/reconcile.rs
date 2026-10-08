@@ -256,8 +256,8 @@ fn run() -> Result<bool, Box<dyn Error>> {
                     verdict
                 );
             }
-            let n_promoted = candidates.len()
-                - promoted.metrics.iter().filter(|s| s.experimental).count();
+            let n_promoted =
+                candidates.len() - promoted.metrics.iter().filter(|s| s.experimental).count();
             let mut out = promoted;
             if n_promoted > 0 && !out.version.ends_with("+promoted") {
                 out.version = format!("{}+promoted", out.version);

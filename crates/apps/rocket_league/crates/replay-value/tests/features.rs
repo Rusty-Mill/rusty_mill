@@ -91,9 +91,23 @@ fn v2_features_swap_between_perspectives() {
             v: v(0.0, 500.0, 0.0),
         }),
         cars: vec![
-            cv(1, 0, v(0.0, 500.0, 17.0), v(0.0, 800.0, 0.0), 200, std::f32::consts::FRAC_PI_2),
+            cv(
+                1,
+                0,
+                v(0.0, 500.0, 17.0),
+                v(0.0, 800.0, 0.0),
+                200,
+                std::f32::consts::FRAC_PI_2,
+            ),
             cv(2, 0, v(-1000.0, 0.0, 17.0), v(0.0, 0.0, 0.0), 100, 0.0),
-            cv(3, 1, v(0.0, 2000.0, 17.0), v(0.0, -300.0, 0.0), 50, -std::f32::consts::FRAC_PI_2),
+            cv(
+                3,
+                1,
+                v(0.0, 2000.0, 17.0),
+                v(0.0, -300.0, 0.0),
+                50,
+                -std::f32::consts::FRAC_PI_2,
+            ),
         ],
     };
     let s0 = state_features(&frame, 0, &signs).unwrap();

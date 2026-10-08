@@ -822,7 +822,10 @@ fn issue_upload(req: &Request, state: &AppState, account: &AccountId) -> Respons
         return Response::text(400, "size must be at least 1 byte");
     }
     if size > server::MAX_BODY {
-        return Response::text(413, format!("size must be at most {} bytes", server::MAX_BODY));
+        return Response::text(
+            413,
+            format!("size must be at most {} bytes", server::MAX_BODY),
+        );
     }
     if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Response::text(400, "sha256 must be 64 hex digits");

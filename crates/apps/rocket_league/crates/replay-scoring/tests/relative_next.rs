@@ -23,7 +23,7 @@ fn bucket(name: &str, tier: f32, recovery: f32) -> Vec<NormSample> {
 #[test]
 fn next_median_is_the_bracket_above_and_none_at_the_top() {
     let path = format!(
-        "{}/../assets/replays/419a.replay",
+        "{}/../../rleval/assets/replays/419a.replay",
         env!("CARGO_MANIFEST_DIR")
     );
     let data = std::fs::read(path).expect("read 419a");

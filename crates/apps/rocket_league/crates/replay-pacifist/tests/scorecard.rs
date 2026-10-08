@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 fn timeline(name: &str) -> Timeline {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../assets/replays")
+        .join("../../rleval/assets/replays")
         .join(name);
     let data = std::fs::read(&path).expect("read sample replay");
     let decoded = BoxcarsParser::new().parse(&data).expect("decode");

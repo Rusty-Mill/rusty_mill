@@ -8,7 +8,7 @@ use replay_scoring::{extract, score, Episode, ScoreConfig};
 
 fn canonical(name: &str) -> CanonicalMatch {
     let path = format!(
-        "{}/../assets/replays/{name}.replay",
+        "{}/../../rleval/assets/replays/{name}.replay",
         env!("CARGO_MANIFEST_DIR")
     );
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

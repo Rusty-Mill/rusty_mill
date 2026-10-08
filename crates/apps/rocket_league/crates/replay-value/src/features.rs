@@ -32,14 +32,14 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "def_goalside_frac", // fraction of defenders goal-side of the ball
     "boost_diff",        // mean attacker boost − mean defender boost (fraction)
     // --- v2 additions ---
-    "man_advantage",   // (attackers alive − defenders alive) / 3 — demo/numerical edge
-    "ball_goal_dist",  // ball → opponent-goal-mouth distance (nonlinear shot proximity)
+    "man_advantage",  // (attackers alive − defenders alive) / 3 — demo/numerical edge
+    "ball_goal_dist", // ball → opponent-goal-mouth distance (nonlinear shot proximity)
     "min_att_closing", // nearest attacker's closing speed toward the ball (+ = onto it)
     "min_def_closing", // nearest defender's closing speed toward the ball
     "att_facing_ball", // nearest attacker's forward·(to-ball) alignment (−1..1)
     "def_facing_ball", // nearest defender's forward·(to-ball) alignment (−1..1)
-    "max_att_boost",   // most boost held by any attacker (a loaded threat)
-    "max_def_boost",   // most boost held by any defender (can they challenge/clear)
+    "max_att_boost",  // most boost held by any attacker (a loaded threat)
+    "max_def_boost",  // most boost held by any defender (can they challenge/clear)
     // --- v3: temporal / context (need the frame sequence + events) ---
     "ball_vy_trend",        // ball y-velocity now − ~0.4s ago (momentum toward goal)
     "time_since_att_touch", // seconds since the attacking team last touched (recency)
@@ -277,7 +277,9 @@ pub fn features_at(
     let last_touch = events
         .iter()
         .filter_map(|e| match e {
-            Event::Touch { t, team: Some(tt), .. } if *tt == team && *t <= now => Some(*t),
+            Event::Touch {
+                t, team: Some(tt), ..
+            } if *tt == team && *t <= now => Some(*t),
             _ => None,
         })
         .fold(f32::NEG_INFINITY, f32::max);

@@ -32,13 +32,13 @@ use std::collections::BTreeSet;
 
 use replay_analyzer::model::CanonicalMatch;
 
+pub use chains::{chains, ChainEnd};
 pub use config::{ScoreConfig, SCORE_CONFIG_VERSION};
 pub use contract::{cross_check, BallchasingReplay, CrossCheckReport};
-pub use chains::{chains, ChainEnd};
 pub use episodes::{extract, extract_with, Episode};
-pub use xg::{level_of, XgModel};
 pub use relative::{attach_relative, BucketNorm, RankNorms, RelativeReport};
 pub use report::{Confidence, MetricBreakdown, Report};
+pub use xg::{level_of, XgModel};
 
 /// The teams present, sorted.
 pub(crate) fn teams(m: &CanonicalMatch) -> Vec<i32> {

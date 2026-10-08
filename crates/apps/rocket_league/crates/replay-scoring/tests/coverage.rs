@@ -10,7 +10,8 @@ use replay_scoring::{score_all, Confidence, ScoreConfig};
 use std::path::PathBuf;
 
 fn decode_sample() -> replay_analyzer::model::CanonicalMatch {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/replays/42f2.replay");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rleval/assets/replays/42f2.replay");
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read sample: {e}"));
     let decoded = BoxcarsParser::new().parse(&data).expect("decode");
     build_canonical(&decoded, "42f2")

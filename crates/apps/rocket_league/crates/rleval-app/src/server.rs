@@ -157,7 +157,11 @@ where
         Ok(None) => return Ok(()), // empty/closed connection
         Err(e) => (Response::text(400, format!("bad request: {e}")), false),
     };
-    let response = if gzip_ok { compressed(response) } else { response };
+    let response = if gzip_ok {
+        compressed(response)
+    } else {
+        response
+    };
     write_response(&stream, response)
 }
 

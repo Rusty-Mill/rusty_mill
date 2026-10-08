@@ -2,6 +2,8 @@
 name = "recon-check"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
 description = "Phase 2 cross-check: our boxcars reconstruction vs subtr-actor's independent reconstruction of the same replay"
 
 [lib]
@@ -18,11 +20,14 @@ path = "src/bin/batch_recon_check.rs"
 
 [dependencies]
 # Our reconstruction (the thing under test) via its PUBLIC model + build_canonical.
-replay-analyzer = { path = ".." }
+replay-analyzer = { path = "../replay-analyzer" }
 # The independent reconstructor. It pins boxcars 0.11.x — the same major we use —
 # so a single decoded `boxcars::Replay` feeds both sides. Independence is at the
 # *reconstruction* layer; the parse layer (boxcars) is deliberately shared.
 boxcars = "0.11"
-subtr-actor = "1.0"
+subtr-actor = "~1.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[package.metadata.rusty_mill]
+layer = "apps"

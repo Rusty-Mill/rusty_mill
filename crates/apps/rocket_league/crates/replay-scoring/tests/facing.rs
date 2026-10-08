@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 #[test]
 fn heading_aligns_with_velocity_on_real_sample() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/replays/42f2.replay");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rleval/assets/replays/42f2.replay");
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let decoded = BoxcarsParser::new().parse(&data).expect("decode");
     let canonical = build_canonical(&decoded, "42f2");

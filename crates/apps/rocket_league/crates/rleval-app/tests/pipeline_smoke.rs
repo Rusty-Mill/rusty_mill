@@ -8,7 +8,7 @@ fn sample(name: &str) -> Vec<u8> {
     // CARGO_MANIFEST_DIR is `app/`; the samples live at the workspace root.
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("assets/replays")
+        .join("../rleval/assets/replays")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
@@ -20,7 +20,8 @@ use rleval_app::pipeline;
 fn analyzes_a_sample_into_every_view() {
     let bytes = sample("42f2.replay");
     // No norms ⇒ purely absolute scoring (the rank-relative layer is optional).
-    let a = pipeline::analyze(&bytes, "42f2", None, None, &XgModel::default()).expect("pipeline should succeed");
+    let a = pipeline::analyze(&bytes, "42f2", None, None, &XgModel::default())
+        .expect("pipeline should succeed");
 
     // Match summary is populated.
     assert_eq!(a.replay_id, "42f2");

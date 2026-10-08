@@ -108,13 +108,26 @@ fn feature_importance_concentrates_on_the_predictive_feature() {
     // band_dataset only varies feature 0, so every split must be on feature 0.
     let m = GbtModel::train(&band_dataset(), &GbtConfig::default());
     let imp = m.feature_importance();
-    assert!((imp[0] - 1.0).abs() < 1e-6, "feature 0 importance = {}", imp[0]);
-    assert!(imp[1..].iter().all(|&w| w == 0.0), "other features should be unused");
-    assert!((imp.iter().sum::<f32>() - 1.0).abs() < 1e-6, "importance sums to 1");
+    assert!(
+        (imp[0] - 1.0).abs() < 1e-6,
+        "feature 0 importance = {}",
+        imp[0]
+    );
+    assert!(
+        imp[1..].iter().all(|&w| w == 0.0),
+        "other features should be unused"
+    );
+    assert!(
+        (imp.iter().sum::<f32>() - 1.0).abs() < 1e-6,
+        "importance sums to 1"
+    );
 
     // An untrained model has no splits -> all-zero importance.
     let empty = GbtModel::train(
-        &Dataset { rows: vec![], horizon_s: 10.0 },
+        &Dataset {
+            rows: vec![],
+            horizon_s: 10.0,
+        },
         &GbtConfig::default(),
     );
     assert!(empty.feature_importance().iter().all(|&w| w == 0.0));

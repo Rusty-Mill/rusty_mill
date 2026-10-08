@@ -278,7 +278,10 @@ fn experimental_metrics_are_excluded_from_weight_fitting() {
             }
         }
         assert!(
-            fitted.metrics.iter().any(|s| !s.experimental && s.weight > 0.0),
+            fitted
+                .metrics
+                .iter()
+                .any(|s| !s.experimental && s.weight > 0.0),
             "a real metric should still earn weight"
         );
     }

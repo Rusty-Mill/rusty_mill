@@ -275,7 +275,11 @@ pub fn relativize(
         });
         // Leak/strength weigh by composite weight so trivial metrics don't win.
         if !spec.experimental && bd.effective_weight > 0.0 {
-            weighted.push((bd.effective_weight * (50.0 - within), within, bd.key.clone()));
+            weighted.push((
+                bd.effective_weight * (50.0 - within),
+                within,
+                bd.key.clone(),
+            ));
         }
     }
 
@@ -321,8 +325,7 @@ pub fn attach_relative(
     let (bucket, basis) = match override_bracket.and_then(|n| norms.bracket_named(n)) {
         Some(b) => (Some(b), "explicit"),
         None => {
-            let mean =
-                reports.iter().map(|r| r.composite).sum::<f32>() / reports.len() as f32;
+            let mean = reports.iter().map(|r| r.composite).sum::<f32>() / reports.len() as f32;
             (norms.nearest_bracket(mean), "lobby")
         }
     };
@@ -353,8 +356,14 @@ mod tests {
 
     #[test]
     fn orient_flips_lower_is_better() {
-        let hi = Curve::Higher { zero: 0.0, full: 1.0 };
-        let lo = Curve::Lower { zero: 1.0, full: 0.0 };
+        let hi = Curve::Higher {
+            zero: 0.0,
+            full: 1.0,
+        };
+        let lo = Curve::Lower {
+            zero: 1.0,
+            full: 0.0,
+        };
         // A top-quantile value: good for higher, bad for lower.
         assert!((orient(&hi, 0.9) - 0.9).abs() < 1e-6);
         assert!((orient(&lo, 0.9) - 0.1).abs() < 1e-6);

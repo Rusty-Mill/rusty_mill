@@ -18,7 +18,10 @@ use replay_analyzer::{
 };
 
 static M: LazyLock<CanonicalMatch> = LazyLock::new(|| {
-    let path = format!("{}/assets/replays/419a.replay", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../rleval/assets/replays/419a.replay",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let decoded = BoxcarsParser::new().parse(&bytes).expect("decode 419a");
     replay_analyzer::build_canonical(&decoded, "419a")

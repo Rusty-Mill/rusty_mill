@@ -32,7 +32,7 @@ static MATCH: LazyLock<CanonicalMatch> = LazyLock::new(|| {
 
 fn sample_path(id: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets/replays")
+        .join("../../rleval/assets/replays")
         .join(format!("{id}.replay"))
 }
 

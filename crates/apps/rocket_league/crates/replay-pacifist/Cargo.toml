@@ -2,6 +2,8 @@
 name = "replay-pacifist"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
 description = "Pacifist System scoring over the canonical match model (consolidated from PacifistScore)"
 default-run = "replay-pacifist"
 
@@ -36,7 +38,10 @@ required-features = ["corpus-validate"]
 corpus-validate = ["dep:replay-scoring", "dep:serde", "dep:serde_json"]
 
 [dependencies]
-replay-analyzer = { path = ".." }
-replay-scoring = { path = "../scoring", optional = true }
+replay-analyzer = { path = "../replay-analyzer" }
+replay-scoring = { path = "../replay-scoring", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+
+[package.metadata.rusty_mill]
+layer = "apps"

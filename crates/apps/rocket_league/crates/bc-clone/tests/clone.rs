@@ -16,7 +16,8 @@ fn sample_doc() -> Value {
     use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
     use replay_analyzer::decode::ReplayParser;
 
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/replays/419a.replay");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rleval/assets/replays/419a.replay");
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let decoded = BoxcarsParser::new().parse(&data).expect("decode");
     let doc = ballchasing_document(&build_canonical(&decoded, "419a"));
@@ -86,7 +87,8 @@ fn html_dashboard_renders_self_contained() {
     use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
     use replay_analyzer::decode::ReplayParser;
 
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/replays/419a.replay");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rleval/assets/replays/419a.replay");
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let decoded = BoxcarsParser::new().parse(&data).expect("decode");
     let canonical = build_canonical(&decoded, "419a");

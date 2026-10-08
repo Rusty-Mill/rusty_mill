@@ -84,15 +84,25 @@ fn promotes_candidates_that_track_value() {
         match s.metric {
             Metric::FacingBallShare => {
                 s.experimental = true;
-                s.curve = Curve::Higher { zero: 0.0, full: 1.0 };
+                s.curve = Curve::Higher {
+                    zero: 0.0,
+                    full: 1.0,
+                };
             }
             Metric::ReverseDriving => {
                 s.experimental = true;
-                s.curve = Curve::Lower { zero: 1.0, full: 0.0 };
+                s.curve = Curve::Lower {
+                    zero: 1.0,
+                    full: 0.0,
+                };
             }
             Metric::SupportSpacing => {
                 s.experimental = true;
-                s.curve = Curve::Band { lo: 0.3, hi: 0.6, falloff: 0.3 };
+                s.curve = Curve::Band {
+                    lo: 0.3,
+                    hi: 0.6,
+                    falloff: 0.3,
+                };
             }
             _ => {}
         }
@@ -116,7 +126,8 @@ fn promotes_candidates_that_track_value() {
 
     let rec = reconcile(&cfg, &samples);
     let promoted = promote_candidates(&cfg, &rec, 0.5);
-    let spec = |c: &ScoreConfig, m: Metric| c.metrics.iter().find(|s| s.metric == m).unwrap().clone();
+    let spec =
+        |c: &ScoreConfig, m: Metric| c.metrics.iter().find(|s| s.metric == m).unwrap().clone();
 
     // Candidates were experimental to begin with.
     assert!(spec(&cfg, Metric::FacingBallShare).experimental);

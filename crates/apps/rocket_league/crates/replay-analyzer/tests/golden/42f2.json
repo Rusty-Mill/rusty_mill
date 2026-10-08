@@ -1,6 +1,6 @@
 {
   "replay_id": "42f2",
-  "parser_version": "boxcars-0.11.3",
+  "parser_version": "boxcars-0.11.5",
   "map": "EuroStadium_P",
   "team_size": 2,
   "record_fps": 30.0,

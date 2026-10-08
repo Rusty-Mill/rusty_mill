@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 #[test]
 fn non_standard_map_forces_low_confidence() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/replays/42f2.replay");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rleval/assets/replays/42f2.replay");
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read sample: {e}"));
     let decoded = BoxcarsParser::new().parse(&data).expect("decode");
     let mut canonical = build_canonical(&decoded, "42f2");

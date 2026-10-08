@@ -2,6 +2,8 @@
 name = "replay-viewer"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
 description = "Self-contained 3D HTML replay viewer over the canonical match model"
 default-run = "replay-viewer"
 
@@ -14,9 +16,12 @@ name = "replay-viewer"
 path = "src/main.rs"
 
 [dependencies]
-replay-analyzer = { path = ".." }
-replay-skills = { path = "../skills" }
-replay-scoring = { path = "../scoring" }
-replay-value = { path = "../value" }
+replay-analyzer = { path = "../replay-analyzer" }
+replay-skills = { path = "../replay-skills" }
+replay-scoring = { path = "../replay-scoring" }
+replay-value = { path = "../replay-value" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[package.metadata.rusty_mill]
+layer = "apps"

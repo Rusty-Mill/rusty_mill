@@ -50,7 +50,9 @@ pub struct PanelCache {
 impl PanelCache {
     /// Keep `panels` for `account`'s analysis `id`, evicting the oldest past `KEEP`.
     pub fn put(&self, account: &AccountId, id: &str, panels: Panels) {
-        let Ok(mut q) = self.entries.lock() else { return };
+        let Ok(mut q) = self.entries.lock() else {
+            return;
+        };
         q.retain(|(a, i, _)| !(a == account.as_str() && i == id));
         q.push_back((account.as_str().into(), id.into(), Arc::new(panels)));
         while q.len() > KEEP {
@@ -74,7 +76,10 @@ mod tests {
         AccountId::new(s).expect("valid account")
     }
     fn panels(tag: &str) -> Panels {
-        Panels { viewer: tag.into(), ..Panels::default() }
+        Panels {
+            viewer: tag.into(),
+            ..Panels::default()
+        }
     }
 
     #[test]
@@ -83,7 +88,10 @@ mod tests {
         cache.put(&acct("ann"), "r1", panels("v"));
         let p = cache.get(&acct("ann"), "r1").expect("owner sees it");
         assert_eq!((p.get("viewer"), p.get("nope")), (Some("v"), None));
-        assert!(cache.get(&acct("bob"), "r1").is_none(), "not another account's");
+        assert!(
+            cache.get(&acct("bob"), "r1").is_none(),
+            "not another account's"
+        );
         assert!(cache.get(&acct("ann"), "r2").is_none());
     }
 

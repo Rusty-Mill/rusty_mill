@@ -13,8 +13,8 @@ const K: [u32; 64] = [
 
 fn compress(h: &mut [u32; 8], block: &[u8]) {
     let mut w = [0u32; 64];
-    for (i, c) in block.chunks_exact(4).enumerate() {
-        w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+    for (i, c) in block.as_chunks::<4>().0.iter().enumerate() {
+        w[i] = u32::from_be_bytes(*c);
     }
     for i in 16..64 {
         let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -58,17 +58,20 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
     ];
-    let mut blocks = data.chunks_exact(64);
-    blocks.by_ref().for_each(|b| compress(&mut h, b));
-    let mut tail = blocks.remainder().to_vec();
+    let (blocks, rest) = data.as_chunks::<64>();
+    blocks.iter().for_each(|b| compress(&mut h, b));
+    let mut tail = rest.to_vec();
     tail.push(0x80);
     while tail.len() % 64 != 56 {
         tail.push(0);
     }
     tail.extend_from_slice(&(data.len() as u64 * 8).to_be_bytes());
-    tail.chunks_exact(64).for_each(|b| compress(&mut h, b));
+    tail.as_chunks::<64>()
+        .0
+        .iter()
+        .for_each(|b| compress(&mut h, b));
     let mut out = [0u8; 32];
-    for (o, v) in out.chunks_exact_mut(4).zip(h) {
+    for (o, v) in out.as_chunks_mut::<4>().0.iter_mut().zip(h) {
         o.copy_from_slice(&v.to_be_bytes());
     }
     out

@@ -6,7 +6,10 @@ use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 
 fn canonical(name: &str) -> replay_analyzer::CanonicalMatch {
-    let path = format!("{}/assets/replays/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../rleval/assets/replays/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let decoded = BoxcarsParser::new()
         .parse(&bytes)
