@@ -581,6 +581,14 @@ pub fn compare_scenario_recorded(
     if shifted.1 < (best.0).1 {
         best = (shifted, lag_ticks, 1);
     }
+    // `RB_FORCE_ALIGN=lag,offset` overrides the whole-run pick (a diagnostic: the pick can
+    // land a tick early on a tape whose late events dominate the mean).
+    if let Ok(force) = std::env::var("RB_FORCE_ALIGN") {
+        let parts: Vec<usize> = force.split(',').filter_map(|p| p.parse().ok()).collect();
+        if let [lag, offset] = parts[..] {
+            best = (run(lag, offset, limit), lag, offset);
+        }
+    }
     let (((rows, other_rows), _), _, input_offset) = best;
     Ok(ScenarioComparison {
         start_index,
