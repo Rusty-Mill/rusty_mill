@@ -115,8 +115,9 @@ const CAR_CAR_MATERIAL: solver::PairMaterial = solver::PairMaterial {
     friction: 0.09,
 };
 
-/// `BUMP_MIN_FORWARD_DIST` (uu): a car bumps another only when the contact
-/// point on it is at least this far ahead of its origin, i.e. with its nose.
+/// `BUMP_MIN_FORWARD_DIST` (uu): a car bumps another only when the other car's
+/// origin is at least this far ahead of its own, along its forward axis
+/// (`RB-PHYSICS-001-FR-140`, `FR-158`).
 const BUMP_MIN_FORWARD_DIST: f32 = 64.5;
 /// Largest `|forward.z|` of a bumping car's nose: sin 45 degrees. A nose pitched past it
 /// gives no bump (`RB-PHYSICS-001-FR-152`): the flipping car of `bumpf_flip` hit with its
@@ -1357,26 +1358,13 @@ impl PhysicsWorld {
                 // (RB-PHYSICS-001-FR-140); both do in a head-on.
                 for (bumper, victim) in [(i, j), (j, i)] {
                     let forward = drive::forward_axis(&self.cars[bumper]);
-                    // The contact's centre, not any one point of it: two cars
-                    // crossing at right angles touch along the bumper's whole
-                    // flank (points from -20 to +66 uu ahead of its origin),
-                    // which is not a nose hit; the car whose nose lands has
-                    // every point at 66 to 67.
-                    let on_bumper = |contact: &collision::Contact| {
-                        if bumper == i {
-                            contact.point_on_a()
-                        } else {
-                            contact.point
-                        }
-                    };
-                    let mean_forward = contacts
-                        .iter()
-                        .map(|contact| {
-                            (on_bumper(contact) - self.cars[bumper].position).dot(&forward)
-                        })
-                        .sum::<f32>()
-                        / contacts.len() as f32;
-                    let front = mean_forward > BUMP_MIN_FORWARD_DIST;
+                    // How far ahead of the bumper's origin the other car's origin lies
+                    // (`RB-PHYSICS-001-FR-158`): two cars driving at each other 100 uu
+                    // off line bump each other although one's nose lands on the other's
+                    // front corner, not nose to nose.
+                    let front = (self.cars[victim].position - self.cars[bumper].position)
+                        .dot(&forward)
+                        > BUMP_MIN_FORWARD_DIST;
                     let last = &mut self.bump_ticks[bumper][victim];
                     // A nose pitched far off the horizontal (a front flip's, straight down
                     // at the hit) bumps nobody (`RB-PHYSICS-001-FR-152`): the two push on in
@@ -2842,6 +2830,31 @@ mod tests {
         );
         assert!(world.cars[0].linear_velocity.y < 0.0);
         assert!(world.cars[1].linear_velocity.y > 0.0);
+    }
+
+    /// `RB-PHYSICS-001-FR-158`, `duel_865`: two cars at 1000 uu/s driving at each
+    /// other 100 uu off line touch with one car's nose on the other's front corner;
+    /// the game bumped both (each ahead of the other), the contact-point rule only one.
+    #[test]
+    fn an_off_centre_head_on_bumps_both_cars() {
+        let mut world = bump_world([
+            (
+                Vec3::new(-35.0, -120.0, 17.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 700.0, 0.0),
+            ),
+            (
+                Vec3::new(35.0, 120.0, 17.0),
+                FACING_MINUS_Y,
+                Vec3::new(0.0, -700.0, 0.0),
+            ),
+        ]);
+        for _ in 0..12 {
+            world.step(1.0 / 120.0);
+        }
+        for car in &world.cars {
+            assert!(car.linear_velocity.z > 40.0, "{:?}", car.linear_velocity);
+        }
     }
 
     /// Only the car whose nose touched bumps: a car hit on its side does not

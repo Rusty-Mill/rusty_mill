@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.158.0
+- Version: 0.159.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -8232,6 +8232,16 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     701..724 102.5 -> 105.0 uu mean of means (nine tapes better, eight worse; the sums move with two
     landings, `fuzz_714` and `fuzz_619`, that the one-step view does not see); golden gate unchanged.
 
+- `RB-PHYSICS-001-FR-158` (a car bumps when the other car's origin is ahead of its own; implemented and
+  verified on `duel_*`; refines FR-140): the nose test is the other car's origin more than 64.5 uu ahead along
+  the bumper's forward axis, no longer the mean contact point on the bumper being that far ahead.
+  - Why: `duel_865` (two same-team cars boosting at each other 70 uu off line, ~1000 uu/s each): the game threw
+    both up and back (vz +202 each); the port bumped one, because the other car's contact point lay at 26 uu
+    along its forward axis (the first car's nose touched its front corner). Car 0 error 679 -> 167 uu.
+    The other 124 bump, tri and demolition tapes score identically under both rules.
+  - **Verification**: `world` test `an_off_centre_head_on_bumps_both_cars` (fails on the old rule); golden gate
+    unchanged; `duel_848` 524 -> 447, `duel_875` 1748 -> 1522 uu.
+
 - `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
   verified on `bumpag_*` and `tri_chain`; refines FR-143): an airborne bumper on a grounded
   victim bumps like a ground bumper (victim 1.25 times the speed, up).
@@ -8404,6 +8414,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.159.0 (2026-10-08): `RB-PHYSICS-001-FR-158` (the bump's nose test uses the other car's origin). 507 tests in
+  `rb_physics_bullet`.
 - 0.158.0 (2026-10-08): `RB-PHYSICS-001-FR-157` (any wheel down gives the ground boost acceleration). 506 tests in
   `rb_physics_bullet`.
 - 0.157.0 (2026-10-08): `RB-PHYSICS-001-FR-156` (the air throttle needs every wheel off the surface). 505 tests in
