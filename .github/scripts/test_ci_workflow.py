@@ -32,6 +32,8 @@ PLAN_KEYS = {
     "win32",
     "multimodal_db",
     "rusty_config_no_std",
+    "rleval_viewer",
+    "rleval_app",
     "crypto_ct",
     "shards",
     "components",
@@ -199,8 +201,34 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
         )
+
+    def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
+        # A change to a crate the viewer and the app both build on reaches both
+        # (affected_crates.py expands it to its reverse dependents first).
+        flags = specialized_job_flags([], ["replay-analyzer", "replay-viewer", "rleval-app"])
+        self.assertTrue(flags["rleval_viewer"])
+        self.assertTrue(flags["rleval_app"])
+        # The app alone does not need the headless-GL smoke test...
+        flags = specialized_job_flags([], ["rleval-app"])
+        self.assertTrue(flags["rleval_app"])
+        self.assertFalse(flags["rleval_viewer"])
+        # ...and the fixture the smoke test renders is a path-only trigger.
+        flags = specialized_job_flags(
+            ["crates/apps/rocket_league/rleval/assets/replays/42f2.replay"], []
+        )
+        self.assertTrue(flags["rleval_viewer"])
+        self.assertFalse(flags["rleval_app"])
+        # An unrelated change selects neither.
+        flags = specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"])
+        self.assertFalse(flags["rleval_viewer"])
+        self.assertFalse(flags["rleval_app"])
+
+    def test_rleval_jobs_are_planned_and_gated(self) -> None:
+        for key in ("rleval_viewer", "rleval_app"):
+            self.assertIn(f"{key}: ${{{{ steps.plan.outputs.{key} }}}}", self.workflow)
+            self.assertIn(f"if: needs.plan.outputs.{key} == 'true'", self.workflow)
 
     def test_fair_play_reverse_dependencies_select_its_specialized_jobs(self) -> None:
         # affected_crates.py expands a changed domain/shared crate to these
@@ -277,11 +305,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
@@ -297,23 +325,6 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertTrue(flags["multimodal_db"])
         self.assertTrue(flags["rusty_config_no_std"])
         self.assertTrue(flags["remind_me"])
-
-    def test_crypto_constant_time_job_follows_its_crates(self) -> None:
-        for package in ("rusty_pk", "rusty_sha2", "rusty_aead", "rusty_ct_check", "rusty_crypto_key"):
-            with self.subTest(package=package):
-                self.assertTrue(specialized_job_flags([], [package])["crypto_ct"])
-        self.assertFalse(specialized_job_flags([], ["rusty_config", "rusty_tls"])["crypto_ct"])
-        self.assertIn("crypto_ct: ${{ steps.plan.outputs.crypto_ct }}", self.workflow)
-        self.assertIn("if: needs.plan.outputs.crypto_ct == 'true'", self.workflow)
-        for script in (
-            "crates/foundation/rusty_ct_check/scripts/valgrind_selftest.sh",
-            "crates/foundation/rusty_sha2/scripts/ct_check.sh",
-            "crates/foundation/rusty_aead/scripts/ct_check.sh",
-            "crates/foundation/rusty_pk/scripts/ct_check.sh",
-        ):
-            with self.subTest(script=script):
-                self.assertIn(f"run: sh {script}", self.workflow)
-                self.assertTrue((WORKFLOW.parents[2] / script).is_file())
 
     def test_legacy_import_routes_sources_contracts_and_dependencies(self) -> None:
         hub = "crates/apps/rusty_remind_me/crates/remind_me_hub/"
@@ -444,6 +455,23 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         if result.returncode:
             raise AssertionError(result.stderr)
         return dict(line.split("=", 1) for line in result.stdout.splitlines())
+
+    def test_crypto_constant_time_job_follows_its_crates(self) -> None:
+        for package in ("rusty_pk", "rusty_sha2", "rusty_aead", "rusty_ct_check", "rusty_crypto_key"):
+            with self.subTest(package=package):
+                self.assertTrue(specialized_job_flags([], [package])["crypto_ct"])
+        self.assertFalse(specialized_job_flags([], ["rusty_config", "rusty_tls"])["crypto_ct"])
+        self.assertIn("crypto_ct: ${{ steps.plan.outputs.crypto_ct }}", self.workflow)
+        self.assertIn("if: needs.plan.outputs.crypto_ct == 'true'", self.workflow)
+        for script in (
+            "crates/foundation/rusty_ct_check/scripts/valgrind_selftest.sh",
+            "crates/foundation/rusty_sha2/scripts/ct_check.sh",
+            "crates/foundation/rusty_aead/scripts/ct_check.sh",
+            "crates/foundation/rusty_pk/scripts/ct_check.sh",
+        ):
+            with self.subTest(script=script):
+                self.assertIn(f"run: sh {script}", self.workflow)
+                self.assertTrue((WORKFLOW.parents[2] / script).is_file())
 
 
 if __name__ == "__main__":

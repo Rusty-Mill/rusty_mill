@@ -7,7 +7,9 @@ RENAME = {"..": "../replay-analyzer", "../scoring": "../replay-scoring", "../ski
           "../value": "../replay-value", "../viewer": "../replay-viewer", "../pacifist": "../replay-pacifist"}
 members = []
 for d in sorted(p for p in fam.iterdir() if p.is_dir()):
-    m = d/"Cargo.toml"; t = m.read_text(); members.append(f"crates/apps/rocket_league/crates/{d.name}")
+    m = d/"Cargo.toml"; t = m.read_text()
+    if "metadata.rusty_mill" in t: continue  # already wired by an earlier import
+    members.append(f"crates/apps/rocket_league/crates/{d.name}")
     if d.name.startswith("rb_"):
         t = t.replace("repository.workspace = true", REPO)
         t = re.sub(r"\[lints\]\s*workspace = true\n?", LINTS, t)

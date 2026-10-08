@@ -81,6 +81,28 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `docs/research/TLS12-DESIGN.md`, the TLS 1.2 scope and stage plan. Design only; no code.
 - **Added:** `docs/research/prompts/ring-track.md`, a session prompt for assessing a native `ring` replacement. Prompt only; no code.
 - **Known limitations:** rusty_tls#25 lives in an archived repo outside this session's scope and was not read, so its acceptance criteria are taken from ADR-0002 section 5. Interop tests were not run, and about 6.5k lines of the engine (record, schedule, handshake, kx, ticket, client and server state machines) were not reviewed.
+
+## 2026-10-08 - CI: replay-viewer GL smoke test and rleval-app feature sets (pending review)
+
+- **Added:** two planner-gated jobs ported from RLEvalSystem's own CI: `rleval-viewer-gl-smoke` (the offline viewer rendered under software WebGL with a `npm ci`-pinned puppeteer; fails on page errors or a stalled render loop) and `rleval-app-feature-sets` (clippy for default, `mmdb` and `oidc`, plus default-feature tests). New planner flags `rleval_viewer` and `rleval_app`, with tests.
+- **Not ported, by design:** the `mmdb,oidc` job (the workspace-wide clippy/nextest/doctest jobs already run `--all-features`, which includes that set on Linux and Windows) and the Python service job (the service was moved without CI, ADR-0008).
+- **Known limitation:** the smoke test was verified locally against the Playwright-installed Chromium; the first CI run on `ubuntu-latest` downloads puppeteer's own.
+
+---
+
+## 2026-10-08 - RLEvalSystem imported into crates/apps/rocket_league (pending review)
+
+- **Added:** `replay-analyzer`, `replay-scoring`, `replay-skills`, `replay-value`, `replay-viewer`, `replay-pacifist`, `bc-clone`, `recon-check`, `rleval-app` and the `rleval/` product dir (docs, Python `service/`, scripts). History preserved via `git filter-repo` (201 of 222 commits; the rest only touched private material). Stacked on the rusty_bullet import.
+- **Changed:** replays, corpus, player sessions and the Spire capture kit are excluded and live in the private repo `baileyrd/rocket_league_private`. `rleval-app`'s git-pinned rusty_mill dependencies became workspace dependencies. `replay-analyzer`'s golden records `boxcars-0.11.5` (was 0.11.3; no other change). `rleval-app`'s SHA-256 uses `as_chunks`, its upload-signing key comes from `rusty_rand` (the old `/dev/urandom` read made signed uploads return 501 on Windows, which the old Ubuntu-only CI never ran). `history_flow` skips without the corpus.
+- **Known limitation:** the Python service and Docker files are moved, not built or tested in CI; the viewer headless-GL smoke test and the `mmdb,oidc` feature job of the old CI are not ported yet.
+
+---
+
+## 2026-10-08 - rusty_bbp stage 2: durable store (pending review)
+
+- **Added:** `rusty_bbp::FsStore`, a file-backed store with one `fsync`ed JSON line per committed batch, crash truncation on open, revision-checked append and digest-verified blobs via `rusty_atomic_file`. Stage-2 exit criteria from the implementation plan are tests: reopen, crash mid-batch, conflict, blob consistency.
+- **Changed:** `Store::blob_get` returns `Vec<u8>`; `StoreError::Backend` added.
+- **Known limitation:** no directory lock; one writer per data directory is the host's job. Blob garbage collection and retention are not implemented.
 ## 2026-10-08 - rusty_bullet imported as crates/apps/rocket_league (pending review)
 
 - **Added:** `crates/apps/rocket_league/` (ADR-0008) with `rb_domain`, `rb_env`, `rb_physics_bullet`, `rb_replay_ingest`, `rb_capture_ingest`, `rb_scenario`, `rb_verify_cli` and the product's docs, BakkesMod plugin and tape-bot tooling. Full history preserved via `git filter-repo` + merge (SHAs differ from `baileyrd/rusty_bullet`; map in the PR).

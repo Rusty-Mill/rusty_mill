@@ -5,8 +5,8 @@
 
 use rusty_bbp::*;
 
-pub struct Fx {
-    pub d: Driver<MemStore>,
+pub struct Fx<S: Store = MemStore> {
+    pub d: Driver<S>,
     pub now: Time,
     ops: u64,
 }
@@ -26,10 +26,16 @@ pub fn vendor(role: Role) -> &'static str {
 
 pub const DIGEST: Sha256 = Sha256([7; 32]);
 
-impl Fx {
+impl Fx<MemStore> {
     pub fn new() -> Fx {
+        Fx::with_store(MemStore::new())
+    }
+}
+
+impl<S: Store> Fx<S> {
+    /// Open a task on any store and assign the four roles.
+    pub fn with_store(mut store: S) -> Fx<S> {
         let task = TaskId("T1".into());
-        let mut store = MemStore::new();
         let brief = store.blob_put(b"Add retry with backoff to the HTTP client.");
         let mut fx = Fx {
             d: Driver::new(store, task.clone()),

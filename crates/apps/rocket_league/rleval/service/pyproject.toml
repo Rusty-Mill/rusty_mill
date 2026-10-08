@@ -1,0 +1,41 @@
+[project]
+name = "rls-service"
+version = "0.1.0"
+description = "Replay-Scoring Service (M2): FastAPI + SQLModel API/persistence/credit layer over the Rust scoring worker"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "sqlmodel>=0.0.14",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+# Broker-backed job queue (§4): the API enqueues, Celery workers score.
+queue = ["celery>=5.3", "redis>=5"]
+# S3/object-storage blob backend (§5): the multi-node artifact store.
+s3 = ["boto3>=1.28"]
+# Schema migrations (§5): `alembic upgrade head` at deploy time.
+migrations = ["alembic>=1.13"]
+# Postgres driver (§5): the production database.
+postgres = ["psycopg2-binary>=2.9"]
+# AES-GCM / KMS-envelope at-rest encryption (§12): the production cipher backends.
+crypto = ["cryptography>=41"]
+# dev pulls in the queue/s3/migration/crypto deps (and moto) so CI exercises them.
+dev = [
+    "pytest>=8", "httpx>=0.27", "celery>=5.3", "redis>=5",
+    "boto3>=1.28", "moto>=5", "alembic>=1.13", "cryptography>=41",
+]
+# Production PDF rendering (weasyprint needs native libs: pango, cairo, gdk-pixbuf).
+pdf = ["weasyprint>=60"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

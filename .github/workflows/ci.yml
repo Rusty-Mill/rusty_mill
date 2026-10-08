@@ -164,6 +164,8 @@ jobs:
       win32: ${{ steps.plan.outputs.win32 }}
       multimodal_db: ${{ steps.plan.outputs.multimodal_db }}
       rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
+      rleval_viewer: ${{ steps.plan.outputs.rleval_viewer }}
+      rleval_app: ${{ steps.plan.outputs.rleval_app }}
       crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
@@ -1025,27 +1027,26 @@ jobs:
         run: cargo check -p rusty_config --no-default-features --all-targets
 
   # ---------------------------------------------------------------------------
-  # Constant-time evidence for the native crypto crates (rusty_ct_check,
-  # rusty_sha2, rusty_pk, rusty_aead). Compiler-sensitive: LLVM can turn a
-  # branch-free masked select into a branch on a secret, which no functional
-  # test sees (it happened once in rusty_pk::mont::reduce_once and was caught
-  # only by the valgrind taint run below). The jump-count budgets in each
-  # crate's scripts/disasm_limits.txt are tied to a compiler version, so this
-  # job runs on the pinned RUST_TOOLCHAIN every other job ships with; moving
-  # that toolchain is a global change that reruns this job, and a changed count
-  # fails it until someone re-reviews the budget. Evidence, not proof: see
-  # docs/research/CRYPTO-REPLACEMENT-PLAN.md section 4.5. The statistical
-  # timing tests are deliberately NOT run here (noisy shared runners); they run
-  # from docs/research/crypto-evidence/collect.sh.
+  # Rocket League family: RLEvalSystem's two product-specific checks, ported from
+  # its pre-merge CI (baileyrd/RLEvalSystem .github/workflows/ci.yml). The
+  # workspace-wide jobs above already cover everything else (fmt; clippy, nextest
+  # and doctests with --all-features, which includes rleval-app's `mmdb,oidc`
+  # set on Linux and Windows). Its Python service job is deliberately not ported:
+  # the service and Docker files were moved as-is, with no CI (ADR-0008).
   # ---------------------------------------------------------------------------
-  crypto-constant-time:
+
+  # The offline replay viewer bundles three.js and a render loop in JS that the
+  # Rust golden tests cannot exercise. Render it under software WebGL
+  # (swiftshader) and fail on any page error or if the render loop never ticks.
+  # puppeteer is pinned by tests/package-lock.json, installed with `npm ci`.
+  rleval-viewer-gl-smoke:
     concurrency:
-      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-crypto-constant-time
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-viewer-gl-smoke
       queue: max
       cancel-in-progress: false
-    name: crypto constant-time checks (valgrind taint, disassembly budget)
+    name: replay-viewer headless-GL smoke
     needs: plan
-    if: needs.plan.outputs.crypto_ct == 'true'
+    if: needs.plan.outputs.rleval_viewer == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1054,21 +1055,50 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: crypto-constant-time
-      - name: Install valgrind
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends valgrind
-          valgrind --version
-          objdump --version | head -1
-      - name: Harness self-test (planted leaks must be caught)
-        run: sh crates/foundation/rusty_ct_check/scripts/valgrind_selftest.sh
-      - name: rusty_sha2 (HMAC / HKDF keys)
-        run: sh crates/foundation/rusty_sha2/scripts/ct_check.sh
-      - name: rusty_aead (ChaCha20-Poly1305)
-        run: sh crates/foundation/rusty_aead/scripts/ct_check.sh
-      - name: rusty_pk (X25519, shared Montgomery core)
-        run: sh crates/foundation/rusty_pk/scripts/ct_check.sh
+          shared-key: rleval-viewer-gl-smoke
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rocket_league/crates/replay-viewer/tests/package-lock.json
+      - name: Generate offline viewer
+        run: cargo run -q -p replay-viewer -- crates/apps/rocket_league/rleval/assets/replays/42f2.replay --offline --hz 15 --html "$RUNNER_TEMP/viewer.html"
+      - name: Install puppeteer
+        working-directory: crates/apps/rocket_league/crates/replay-viewer/tests
+        run: npm ci --no-audit --no-fund
+      - name: Headless-GL smoke test
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/gl_smoke.mjs "$RUNNER_TEMP/viewer.html"
+
+  # Every other Rust job passes --all-features, which hides a broken default or
+  # single-feature build of rleval-app: its default build is the token-only
+  # server and must not need the rustls stack (`oidc`) or the engine (`mmdb`).
+  # The combined `mmdb,oidc` set is what --all-features already builds.
+  rleval-app-feature-sets:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-app-feature-sets
+      queue: max
+      cancel-in-progress: false
+    name: rleval-app feature sets (default, mmdb, oidc)
+    needs: plan
+    if: needs.plan.outputs.rleval_app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rleval-app-feature-sets
+      - name: cargo clippy -p rleval-app (default features)
+        run: cargo clippy -p rleval-app --all-targets -- -D warnings
+      - name: cargo clippy -p rleval-app --features mmdb
+        run: cargo clippy -p rleval-app --all-targets --features mmdb -- -D warnings
+      - name: cargo clippy -p rleval-app --features oidc
+        run: cargo clippy -p rleval-app --all-targets --features oidc -- -D warnings
+      - name: cargo test -p rleval-app (default features)
+        run: cargo test -p rleval-app
 
   # ---------------------------------------------------------------------------
   # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's
@@ -1284,3 +1314,49 @@ jobs:
         run: cargo test --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
       - name: cargo clippy
         run: cargo clippy --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Constant-time evidence for the native crypto crates (rusty_ct_check,
+  # rusty_sha2, rusty_pk, rusty_aead). Compiler-sensitive: LLVM can turn a
+  # branch-free masked select into a branch on a secret, which no functional
+  # test sees (it happened once in rusty_pk::mont::reduce_once and was caught
+  # only by the valgrind taint run below). The jump-count budgets in each
+  # crate's scripts/disasm_limits.txt are tied to a compiler version, so this
+  # job runs on the pinned RUST_TOOLCHAIN every other job ships with; moving
+  # that toolchain is a global change that reruns this job, and a changed count
+  # fails it until someone re-reviews the budget. Evidence, not proof: see
+  # docs/research/CRYPTO-REPLACEMENT-PLAN.md section 4.5. The statistical
+  # timing tests are deliberately NOT run here (noisy shared runners); they run
+  # from docs/research/crypto-evidence/collect.sh.
+  # ---------------------------------------------------------------------------
+  crypto-constant-time:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-crypto-constant-time
+      queue: max
+      cancel-in-progress: false
+    name: crypto constant-time checks (valgrind taint, disassembly budget)
+    needs: plan
+    if: needs.plan.outputs.crypto_ct == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: crypto-constant-time
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version
+          objdump --version | head -1
+      - name: Harness self-test (planted leaks must be caught)
+        run: sh crates/foundation/rusty_ct_check/scripts/valgrind_selftest.sh
+      - name: rusty_sha2 (HMAC / HKDF keys)
+        run: sh crates/foundation/rusty_sha2/scripts/ct_check.sh
+      - name: rusty_aead (ChaCha20-Poly1305)
+        run: sh crates/foundation/rusty_aead/scripts/ct_check.sh
+      - name: rusty_pk (X25519, shared Montgomery core)
+        run: sh crates/foundation/rusty_pk/scripts/ct_check.sh

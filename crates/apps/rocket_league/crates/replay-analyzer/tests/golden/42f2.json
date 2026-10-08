@@ -1,0 +1,159 @@
+{
+  "replay_id": "42f2",
+  "parser_version": "boxcars-0.11.5",
+  "map": "EuroStadium_P",
+  "team_size": 2,
+  "record_fps": 30.0,
+  "num_frames": 11642,
+  "duration_cs": 44166,
+  "team_scores": {
+    "0": 5,
+    "1": 2
+  },
+  "ball_min": [
+    -4003,
+    -5192,
+    87
+  ],
+  "ball_max": [
+    4003,
+    5211,
+    1115
+  ],
+  "tracks": [
+    {
+      "player": "xFaceMcMurphyx",
+      "pri": 14,
+      "team": 0,
+      "num_segments": 19,
+      "num_samples": 6250,
+      "num_gaps": 14,
+      "first_cs": 2301,
+      "last_cs": 44166,
+      "p_min": [
+        -4081,
+        -5237,
+        12
+      ],
+      "p_max": [
+        4084,
+        5986,
+        963
+      ]
+    },
+    {
+      "player": "Schutzein",
+      "pri": 17,
+      "team": 0,
+      "num_segments": 21,
+      "num_samples": 6722,
+      "num_gaps": 17,
+      "first_cs": 2301,
+      "last_cs": 44162,
+      "p_min": [
+        -4086,
+        -5145,
+        6
+      ],
+      "p_max": [
+        4075,
+        5984,
+        2032
+      ]
+    },
+    {
+      "player": "Unlucky Odd",
+      "pri": 6,
+      "team": 1,
+      "num_segments": 30,
+      "num_samples": 6272,
+      "num_gaps": 22,
+      "first_cs": 2301,
+      "last_cs": 44162,
+      "p_min": [
+        -4084,
+        -5984,
+        9
+      ],
+      "p_max": [
+        4081,
+        5960,
+        987
+      ]
+    }
+  ],
+  "events_by_type": {
+    "demo": 73,
+    "goal": 7,
+    "kickoff": 7,
+    "possession": 77,
+    "stat": 23,
+    "touch": 219
+  },
+  "goals": [
+    {
+      "t_cs": 17686,
+      "scorer": "Schutzein",
+      "team": 0
+    },
+    {
+      "t_cs": 20016,
+      "scorer": "xFaceMcMurphyx",
+      "team": 0
+    },
+    {
+      "t_cs": 27082,
+      "scorer": "Unlucky Odd",
+      "team": 1
+    },
+    {
+      "t_cs": 28508,
+      "scorer": "Schutzein",
+      "team": 0
+    },
+    {
+      "t_cs": 31851,
+      "scorer": "Schutzein",
+      "team": 0
+    },
+    {
+      "t_cs": 39150,
+      "scorer": "Unlucky Odd",
+      "team": 1
+    },
+    {
+      "t_cs": 44166,
+      "scorer": "xFaceMcMurphyx",
+      "team": 0
+    }
+  ],
+  "features": [
+    {
+      "player": "xFaceMcMurphyx",
+      "team": 0,
+      "touches": 45,
+      "boost_used": 1271,
+      "supersonic_cs": 6100,
+      "mean_dist": 2702,
+      "possession_cs": 14757
+    },
+    {
+      "player": "Schutzein",
+      "team": 0,
+      "touches": 89,
+      "boost_used": 1846,
+      "supersonic_cs": 10030,
+      "mean_dist": 2025,
+      "possession_cs": 14757
+    },
+    {
+      "player": "Unlucky Odd",
+      "team": 1,
+      "touches": 85,
+      "boost_used": 2067,
+      "supersonic_cs": 9567,
+      "mean_dist": 2055,
+      "possession_cs": 6297
+    }
+  ]
+}

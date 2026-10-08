@@ -8,3 +8,11 @@
 /rusty_bullet/bakkesmod-plugin/rusty_bullet_capture/build/
 /rusty_bullet/tools/rb_tape_bot/target/
 .env
+# Private companion repo (baileyrd/rocket_league_private), checked out under rleval/
+/rleval/assets/corpus/
+/rleval/assets/myReplays/
+/rleval/assets/modes/
+/rleval/assets/case-studies/
+/rleval/data/local/
+# puppeteer for the replay-viewer headless-GL smoke test
+node_modules/
