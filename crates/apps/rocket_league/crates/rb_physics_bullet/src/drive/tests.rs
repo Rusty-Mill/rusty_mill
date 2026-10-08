@@ -3388,6 +3388,33 @@ fn two_touching_wheels_coast_even_with_boost_held_and_no_throttle() {
 }
 
 #[test]
+fn a_car_with_a_wheel_down_gets_no_air_throttle() {
+    // RB-PHYSICS-001-FR-156: on 1 or 2 wheels the one-step forward error of the fuzz drives was
+    // 0.56 uu/s per tick, the air throttle's 200/3 uu/s^2, in the direction of the throttle:
+    // the game drives such a car through its wheels only. `was_on_ground` (the step before)
+    // must not matter for the throttle then.
+    let mut c = car();
+    c.linear_velocity = Vec3::new(400.0, 0.0, 0.0);
+    let mut wheels = resting_contacts(&c);
+    for (contact, &(_, _, front)) in wheels.iter_mut().zip(super::wheels::WHEELS.iter()) {
+        if !front {
+            *contact = None;
+        }
+    }
+    let run = |was_on_ground: bool| {
+        let mut car = c;
+        let mut state = DriveState::new();
+        state.was_on_ground = was_on_ground;
+        apply_driven_forces(&mut car, &full_throttle(), &wheels, None, &mut state, TICK);
+        // The air throttle is a force; the wheels' drive acts on the velocity directly.
+        (car.total_force().x, car.linear_velocity.x)
+    };
+    let (air_force, _) = run(false);
+    assert_eq!(air_force, 0.0, "air throttle force with two wheels down");
+    assert_eq!(run(false), run(true));
+}
+
+#[test]
 fn a_ground_jump_pushes_along_the_cars_up_axis() {
     // RB-PHYSICS-001-FR-101: RocketSim's `_UpdateJump` pushes along
     // `GetUpDir()`; a car pitched on its suspension jumps slightly forward.

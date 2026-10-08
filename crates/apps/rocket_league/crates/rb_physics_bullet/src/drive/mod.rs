@@ -635,8 +635,8 @@ pub fn apply_driven_forces(
             if !touching {
                 let pitch_scale = jump::flip_pitch_scale(state.flip);
                 air::apply_air_control(car, input, pitch_scale, dt);
+                air::apply_air_throttle(car, air_throttle(input, state), forward);
             }
-            air::apply_air_throttle(car, air_throttle(input, state), forward);
         }
         // RB-PHYSICS-001-FR-097: after air control, whose damping reads the
         // spin before this tick's flip torque, as Bullet integrates the
