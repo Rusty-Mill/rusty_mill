@@ -471,11 +471,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 with self.subTest(file=path.name, line=number):
                     self.assertRegex(match[1], r"@[0-9a-f]{40}$")
 
-    def test_cargo_deny_runs_every_event_and_is_non_blocking(self) -> None:
-        deny = self.workflow.split("  cargo-deny:\n")[1].split("  plan:\n")[0]
+    def test_cargo_deny_runs_every_event_and_blocks(self) -> None:
+        deny = self.workflow.split("  cargo-deny:\n")[1].split("  cargo-shear:\n")[0]
         self.assertNotIn("    if:", deny)
         self.assertNotIn("    concurrency:", deny)
-        self.assertIn("continue-on-error: true", deny)
+        self.assertNotIn("continue-on-error", deny)
         self.assertIn("cargo deny --workspace check", deny)
         self.assertTrue((REPO / "deny.toml").is_file())
 
