@@ -429,6 +429,30 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   its floor; the game's ball drops 1 uu) and the extra velocity's z share;
   a sleeping-ball wake rule was tried (no floor contact on the wake tick) and
   did not change the push, so it is not that.
+- **Hit-tick ball velocity, tried and not explained (2026-10-06)**: the
+  state at the start of the hit tick is `hitjump` 77.6583 s, ball 91.25-uu
+  hit sphere against the car's hitbox: one contact, normal (-0.41, -0.50,
+  -0.77), depth 2.9 uu. With the floor removed the port's solved ball
+  velocity is (-488, -629, -146) and its centre drops 1.5 uu; with the floor
+  it is (-506, -709, 0) and does not drop; the game's ball drops 1.0 uu
+  (implied (-607, -787, -120)). Tried: a sleeping ball taking no floor
+  contact on the wake tick (matches the drop, leaves the car's push
+  unchanged, horizontal still low); solver iteration count (1-10): at 2
+  iterations the ball's vz and drop match (-93, z 92.28) but its horizontal
+  speed falls further from the game's (-488, -643), so not that. Open: the
+  game's horizontal solved speed is 17% above the port's under any of these.
+  One event cannot separate a floor-row difference from a car-ball friction
+  or restitution one; wait for more recorded hits (the tape-bot
+  `car_over_ball` capture, other bot hits) before changing the solver.
+- **Dribble and flip-reset sanity (2026-10-06, FR-138's unverified case)**:
+  with no recording of a wheel on the ball, an `Env` run drops a ball onto an
+  inverted car's wheels at 600, 1500 and 100 uu/s relative: no tunnelling
+  (nearest centre distance 87.6 uu at 1500 uu/s), finite throughout, and a
+  fast ball bounces off upward (+603 uu/s, car -280). Pinned as test
+  `a_fast_ball_hits_an_inverted_cars_wheels_and_bounces_off`. Whether the
+  game gives a wheel the same grip on the ball (a flip reset needs three
+  wheels) is untested; a capture of a flip reset or dribble is the missing
+  data.
 - **Next**: compare the ball's post-hit velocity between port and game
   (`--scenario` prints only the car; add the ball), then look at the
   contact model: a sustained (multi-tick) car-ball contact with the ball
@@ -867,7 +891,17 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   match runs 6.9 s (an intro). The first frame of every tape-bot capture is such a countdown frame: ball 100.49,
   cars at z 83 falling to 36.
 - **Modelled**: FR-160 (`rb_env::flow`).
-- **Open**: the clock and overtime; the random spawn slot (five, point-reflected for the other team) and the two
+- **Clock, overtime, end (2026-10-08, `log4..6`)**: a five-minute match, game_time_remaining 300.0 down 1 s per
+  second of `Active` only; at zero play goes on (the clock negative) until the ball is low (match ended at ball z
+  92.2 and 97.3), then a lead gives `Ended` (after 0.26 to 0.49 s below zero) and a tie gives overtime: a 4 s
+  countdown with no replay, the clock counting on from the negative value, `is_overtime`; the golden goal is
+  followed by the usual 3 s and 9 s and then `Ended`. The first countdown of a match is 850 frames. After a goal
+  the packets carry no ball, so the net cannot be observed. Modelled in FR-160.
+- **Whole matches (2026-10-08, `match_log_check`)**: replaying four logs through `Flow`: phases agree on all but
+  10 to 26 frames per match, scores and overtime as the game's, clock within 0.15 s (0.5 s in overtime). Found: an
+  untouched kickoff goes live at 600 ticks; the intro ends at match frame 850; replays vary (1076-1084 in 31 of
+  41 goals, up to 1560 in 8), cause unknown.
+- **Open**: why some replays run long; the random spawn slot (five, point-reflected for the other team) and the two
   teams' different drop heights on the first packets; goal-line geometry for a ball that crosses between the posts
   only (the test is the line alone); demolitions and bumps during the countdown; the ball's missing drag.
 - **Status**: Modelled in `Env`; owner: baileyrd.

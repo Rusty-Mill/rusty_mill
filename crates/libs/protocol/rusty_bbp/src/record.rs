@@ -96,6 +96,10 @@ pub struct Report {
     pub status: RunStatus,
     pub profiles: Vec<ProfileResult>,
     pub tree: Option<Sha256>,
+    /// The sandbox profile the run executed under, as the supervisor names it
+    /// (for example `landlock+seccomp:no-net`, or `unconfined` for a trusted
+    /// local run). Reviewers read it; the core records it.
+    pub sandbox: String,
     pub log: ArtId,
 }
 

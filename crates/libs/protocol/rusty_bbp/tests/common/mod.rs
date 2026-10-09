@@ -70,6 +70,8 @@ impl<S: Store> Fx<S> {
             };
             fx.run(&Command::Assign { role, principal });
         }
+        // Assignment grants nothing; the first tick does.
+        fx.run(&Command::Tick);
         fx
     }
 
@@ -138,8 +140,16 @@ impl<S: Store> Fx<S> {
         self.agent(role, AgentAction::Post(d))
     }
 
-    pub fn put(&mut self, role: Role, payload: ArtifactPayload, bytes: &[u8]) -> Response {
-        let blob = self.d.store.blob_put(bytes);
+    /// Store `body` encoded for `payload` and submit it. `body` is the raw
+    /// content for brief, diff and log, the Markdown for a spec, ignored otherwise.
+    pub fn put(&mut self, role: Role, payload: ArtifactPayload, body: &[u8]) -> Response {
+        let bytes = encode_artifact(&payload, body).expect("encode");
+        let blob = self.d.store.blob_put(&bytes);
+        self.agent(role, AgentAction::PutArtifact { blob, payload })
+    }
+
+    /// Submit `payload` claiming `blob` without encoding: for boundary tests.
+    pub fn put_raw(&mut self, role: Role, payload: ArtifactPayload, blob: BlobRef) -> Response {
         self.agent(role, AgentAction::PutArtifact { blob, payload })
     }
 
@@ -157,7 +167,7 @@ impl<S: Store> Fx<S> {
 
     pub fn selected_run(&self) -> (RunId, RunSecret) {
         let r = self.st().selected_run().expect("selected run");
-        (r.id, r.secret)
+        (r.id, self.st().secret_for(r.id))
     }
 
     /// Runner stores a log then a report for the selected run.
@@ -197,16 +207,19 @@ impl<S: Store> Fx<S> {
                 failed,
             }],
             tree: Some(Sha256([9; 32])),
+            sandbox: "test".into(),
             log,
         };
-        let blob = self.d.store.blob_put(b"report");
+        let payload = ArtifactPayload::TestReport(rep);
+        let bytes = encode_artifact(&payload, b"").expect("encode");
+        let blob = self.d.store.blob_put(&bytes);
         let op = self.op();
         self.run(&Command::Runner {
             op,
             run,
             secret,
             blob,
-            payload: ArtifactPayload::TestReport(rep),
+            payload,
         })
     }
 

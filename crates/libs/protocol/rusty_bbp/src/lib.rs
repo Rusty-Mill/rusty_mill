@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod codec;
 pub mod command;
 pub mod engine;
 pub mod event;
@@ -15,6 +16,7 @@ pub mod record;
 pub mod state;
 pub mod store;
 
+pub use codec::{decode_artifact, encode_artifact, SpecFile};
 pub use command::{AgentAction, Code, Command, HumanAction, OpenTask, Rejection, Response};
 pub use engine::{handle, Handled};
 pub use event::Event;

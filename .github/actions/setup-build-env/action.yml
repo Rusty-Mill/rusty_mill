@@ -73,10 +73,26 @@ runs:
 
     # rusty_a2a's grpc feature needs protoc on Windows too (cpal talks to
     # WASAPI directly there, so no ALSA/X11/dbus equivalent is needed).
+    # Not via Chocolatey: its community feed fails intermittently and
+    # `choco install` then exits 0 with "installed 0/0 packages", so the job
+    # only dies later in rusty_a2a's build script. A pinned release zip from
+    # the protobuf project, verified by running it, fails here and loudly.
     - name: Install protoc (Windows)
       if: runner.os == 'Windows'
-      shell: bash
-      run: choco install protoc -y
+      shell: pwsh
+      env:
+        PROTOC_VERSION: "36.2"
+      run: |
+        $ErrorActionPreference = "Stop"
+        $v = $env:PROTOC_VERSION
+        $dest = Join-Path $env:RUNNER_TEMP "protoc"
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-win64.zip"
+        Invoke-WebRequest -Uri $url -OutFile "$dest\protoc.zip" -MaximumRetryCount 3 -RetryIntervalSec 5
+        Expand-Archive -Force -Path "$dest\protoc.zip" -DestinationPath $dest
+        Add-Content -Path $env:GITHUB_PATH -Value "$dest\bin"
+        & "$dest\bin\protoc.exe" --version
+        if ($LASTEXITCODE -ne 0) { throw "protoc did not run" }
 
     - uses: Swatinem/rust-cache@v2
       with:

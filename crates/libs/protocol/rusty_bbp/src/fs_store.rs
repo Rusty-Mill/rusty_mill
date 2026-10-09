@@ -248,6 +248,10 @@ impl Store for FsStore {
         Ok(log.get(after..).unwrap_or(&[]).to_vec())
     }
 
+    fn refresh(&mut self, task: &TaskId) -> Result<(), StoreError> {
+        FsStore::refresh(self, task).map_err(StoreError::from)
+    }
+
     fn blob_put(&mut self, bytes: &[u8]) -> BlobRef {
         let sha = Sha256::of(bytes);
         let path = self.blob_path(&sha);
