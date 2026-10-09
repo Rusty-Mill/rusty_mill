@@ -1,0 +1,9 @@
+# Keep the build context (and the stage-1 Rust COPY) lean.
+target/
+.git/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+*.db
+service/blobs/
+data/

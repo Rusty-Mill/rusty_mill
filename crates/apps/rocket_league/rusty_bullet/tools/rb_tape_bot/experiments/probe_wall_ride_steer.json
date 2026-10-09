@@ -1,0 +1,50 @@
+{
+  "name": "probe_wall_ride_steer: on the wall, then steer right",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      3300,
+      -3000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.2217,
+      0
+    ],
+    "velocity": [
+      410,
+      1128,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 200,
+      "throttle": 1
+    },
+    {
+      "ticks": 120,
+      "throttle": 1,
+      "steer": 1
+    }
+  ]
+}

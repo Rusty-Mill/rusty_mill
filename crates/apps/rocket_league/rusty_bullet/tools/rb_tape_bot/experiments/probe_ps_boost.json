@@ -1,0 +1,51 @@
+{
+  "name": "probe_ps_boost: 1200 uu/s, handbrake, boost and full right steer",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -2000,
+      -4500,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      1200,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 150,
+      "throttle": 1,
+      "boost": true,
+      "steer": 1,
+      "handbrake": true
+    },
+    {
+      "ticks": 60
+    }
+  ]
+}

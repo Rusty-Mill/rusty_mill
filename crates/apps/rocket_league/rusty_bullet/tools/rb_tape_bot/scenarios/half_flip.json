@@ -1,0 +1,69 @@
+{
+  "name": "half flip: car facing -y rolling +y at 600 uu/s, jump, back flip, cancel the pitch and air roll to face the direction of travel; checks the flip cancel rule and air roll",
+  "settle_ticks": 180,
+  "car": {
+    "location": [
+      0,
+      -3000,
+      17.01
+    ],
+    "rotation": [
+      -0.0096,
+      -1.5708,
+      0.0
+    ],
+    "velocity": [
+      0,
+      600,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3000,
+      3000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 2,
+      "jump": true
+    },
+    {
+      "ticks": 5
+    },
+    {
+      "ticks": 1,
+      "jump": true,
+      "pitch": 1
+    },
+    {
+      "ticks": 8,
+      "pitch": 1
+    },
+    {
+      "ticks": 8,
+      "pitch": -1,
+      "roll": 1
+    },
+    {
+      "ticks": 22,
+      "roll": 1
+    },
+    {
+      "ticks": 150
+    }
+  ]
+}

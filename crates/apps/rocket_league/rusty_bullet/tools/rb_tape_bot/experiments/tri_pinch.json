@@ -1,0 +1,110 @@
+{
+  "name": "tri_pinch: A and B at 1400 uu/s from both sides into stopped enemy C",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -900,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.5707963267948966,
+      0
+    ],
+    "velocity": [
+      0,
+      1400,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 300,
+      "throttle": 1
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          900,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          -1.5707963267948966,
+          0
+        ],
+        "velocity": [
+          0,
+          -1400,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 300,
+          "throttle": 1
+        }
+      ],
+      "team": 0
+    },
+    {
+      "car": {
+        "location": [
+          0,
+          0,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          1.5707963267948966,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 300
+        }
+      ],
+      "team": 1
+    }
+  ]
+}

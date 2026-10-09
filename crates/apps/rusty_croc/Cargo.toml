@@ -8,18 +8,24 @@ license = "MIT"
 [package.metadata.rusty_mill]
 layer = "apps"
 
+[package.metadata.cargo-shear]
+# Used (cargo check fails without them) but cargo-shear's source scan does not
+# see the uses; confirmed when the first batch of unused dependencies was
+# removed.
+ignored = ["p256", "p384", "p521"]
+
 [dependencies]
 rusty_dirs = { workspace = true }
 rusty_retry = { workspace = true }
 rusty_hex = { workspace = true }
 aes-gcm = "0.10"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = { workspace = true }
 pbkdf2 = { version = "0.12", features = ["simple"] }
 sha2 = "0.10"
 argon2 = "0.5"
-rand = "0.8"
+rand = { workspace = true }
 flate2 = "1"
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 # `raw_value`, not `arbitrary_precision`: the PAKE handshake needs the exact
 # decimal text of curve-sized integers (see `pake::Pake::update`), and
 # `arbitrary_precision` is a workspace-wide behaviour change once cargo unifies
@@ -47,7 +53,7 @@ murmur3 = "0.5"
 highway = "1"
 if-addrs = "0.13"
 socket2 = { version = "0.5", features = ["all"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { workspace = true }
 qrcode = { version = "0.14", default-features = false }
 ignore = "0.4"
 zeroize = "1"

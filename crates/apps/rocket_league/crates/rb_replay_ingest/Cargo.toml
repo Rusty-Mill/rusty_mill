@@ -1,0 +1,37 @@
+[package]
+name = "rb_replay_ingest"
+description = "Replay-file ingestion adapter (RB-VERIFY-001): implements PhysicsStateSource by parsing .replay files via boxcars + subtr-actor."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+rb_domain = { path = "../rb_domain" }
+# Required by RB-VERIFY-001: the actual Rocket League replay parser.
+boxcars = "0.11"
+# boxcars only parses the raw network stream into per-actor attribute
+# updates; resolving which actor is the ball/which are cars and tracking
+# their RigidBody state over time (net-cache/property-id resolution,
+# quantized rotation decoding, version differences) is a substantial,
+# error-prone parser layer on its own. subtr-actor (MIT, actively
+# maintained, purpose-built for this) already solves it — reimplementing
+# it here would be reinventing a hard, already-solved problem, not saving
+# a dependency.
+# subtr-actor 1.2 accepts boxcars >=0.11.3,<1.0, so a fresh resolve gives it 0.12 while
+# this crate (and rb_verify_cli) hands it a 0.11 `boxcars::Replay`: two incompatible
+# types. The workspace lock keeps both on one 0.11.x (`cargo update -p boxcars@0.12.0
+# --precise 0.11.5`); `~1.2` also stops a move to 1.3+, which needs boxcars 0.12.
+subtr-actor = "~1.2"
+
+[package.metadata.rusty_mill]
+layer = "apps"

@@ -1,0 +1,109 @@
+{
+  "name": "tri_chain: A at 1400 uu/s bumps teammate B, which is 160 uu short of teammate C",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -700,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.5707963267948966,
+      0
+    ],
+    "velocity": [
+      0,
+      1400,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 300,
+      "throttle": 1
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          0,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          1.5707963267948966,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 300
+        }
+      ],
+      "team": 0
+    },
+    {
+      "car": {
+        "location": [
+          0,
+          230,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          1.5707963267948966,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 300
+        }
+      ],
+      "team": 0
+    }
+  ]
+}

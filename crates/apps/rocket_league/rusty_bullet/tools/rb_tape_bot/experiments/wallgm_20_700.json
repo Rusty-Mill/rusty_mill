@@ -1,0 +1,45 @@
+{
+  "name": "wallgm_20_700: mirror of wallg_20_700: wall approach at 20 degrees, 700 uu/s",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -3696.292949836016,
+      -3000,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.9198621771937625,
+      0
+    ],
+    "velocity": [
+      -239.4141003279681,
+      657.7848345501359,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 420,
+      "throttle": 1
+    }
+  ]
+}

@@ -25,13 +25,13 @@ path = "src/main.rs"
 
 [dependencies]
 rusty-mcp = { path = "../rusty-mcp", version = "0.5.0" }
-rmcp = { version = "3.1", default-features = false, features = ["server", "macros", "schemars"] }
-clap = { version = "4", features = ["derive", "env"] }
+rmcp = { workspace = true, features = ["server", "macros", "schemars"] }
+clap = { workspace = true }
 serde_json = "1"
-schemars = "1.0"
-serde = { version = "1", features = ["derive"] }
+schemars = { workspace = true }
+serde = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
-tracing = "0.1"
+tracing = { workspace = true }
 
 [dev-dependencies]
 rmcp = { version = "3.1", default-features = false, features = [

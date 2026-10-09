@@ -1,0 +1,45 @@
+{
+  "name": "probe_accel: full throttle from rest, no boost",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      0,
+      -4500,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 400,
+      "throttle": 1
+    }
+  ]
+}

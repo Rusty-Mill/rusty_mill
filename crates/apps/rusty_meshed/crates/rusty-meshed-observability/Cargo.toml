@@ -20,7 +20,6 @@ rusty_request = { workspace = true }
 rusty_tokio = { workspace = true }
 rusty_uuid = { workspace = true }
 rusty-meshed-core = { path = "../rusty-meshed-core" }
-rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
 
 [dev-dependencies]
 # Test-only: stands in as a fake Schema Registry HTTP server (no

@@ -1,0 +1,54 @@
+{
+ "name": "wj_jump",
+ "settle_ticks": 0,
+ "car": {
+  "location": [
+   2800,
+   -3000,
+   17
+  ],
+  "rotation": [
+   0,
+   0.7854,
+   0
+  ],
+  "velocity": [
+   850,
+   850,
+   0
+  ],
+  "angular_velocity": [
+   0,
+   0,
+   0
+  ],
+  "boost": 0
+ },
+ "ball": {
+  "location": [
+   3500,
+   3500,
+   93.15
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ]
+ },
+ "steps": [
+  {
+   "ticks": 250,
+   "throttle": 1
+  },
+  {
+   "ticks": 2,
+   "throttle": 1,
+   "jump": true
+  },
+  {
+   "ticks": 80,
+   "throttle": 0
+  }
+ ]
+}

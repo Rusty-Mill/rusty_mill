@@ -1,0 +1,48 @@
+{
+  "name": "padp_fullbig_95: big pad 18 head-on with 95 boost",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      3584,
+      -700,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.5707963,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 95
+  },
+  "ball": {
+    "location": [
+      -3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 600
+    },
+    {
+      "ticks": 240,
+      "throttle": 0.5
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "name": "probe_wall_land: jump toward the side wall and land on it",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      3600,
+      -2000,
+      17
+    ],
+    "rotation": [
+      0,
+      0.7854,
+      0
+    ],
+    "velocity": [
+      600,
+      600,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 20,
+      "jump": true,
+      "throttle": 1
+    },
+    {
+      "ticks": 200,
+      "throttle": 1
+    }
+  ]
+}

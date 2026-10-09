@@ -17,4 +17,3 @@ async-stream.workspace = true
 sqlx = { workspace = true, features = ["mysql", "chrono"] }
 
 [dev-dependencies]
-tokio.workspace = true

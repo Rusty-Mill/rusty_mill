@@ -1,0 +1,219 @@
+{
+  "name": "fuzz_707: seeded random tape, 6 s",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      -1928,
+      1963,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      0.8334362640839736,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 33,
+      "throttle": -1,
+      "handbrake": true
+    },
+    {
+      "ticks": 45,
+      "throttle": -1,
+      "handbrake": true
+    },
+    {
+      "ticks": 16,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 40,
+      "throttle": 1
+    },
+    {
+      "ticks": 35,
+      "throttle": -1,
+      "steer": 1,
+      "boost": true
+    },
+    {
+      "ticks": 12,
+      "throttle": 0,
+      "jump": true
+    },
+    {
+      "ticks": 31,
+      "throttle": -1,
+      "steer": 0.5,
+      "pitch": 0.5,
+      "yaw": 0.5
+    },
+    {
+      "ticks": 46,
+      "throttle": 1,
+      "steer": -0.5
+    },
+    {
+      "ticks": 12,
+      "throttle": 1
+    },
+    {
+      "ticks": 13,
+      "throttle": 1,
+      "steer": 0.5,
+      "boost": true,
+      "jump": true
+    },
+    {
+      "ticks": 32,
+      "throttle": -1,
+      "steer": -0.5,
+      "boost": true,
+      "handbrake": true,
+      "yaw": -1,
+      "roll": -1
+    },
+    {
+      "ticks": 2,
+      "throttle": -1,
+      "steer": -1,
+      "boost": true,
+      "jump": true,
+      "yaw": 1,
+      "roll": 1
+    },
+    {
+      "ticks": 2,
+      "throttle": -1,
+      "boost": true,
+      "jump": true,
+      "yaw": 1
+    },
+    {
+      "ticks": 44,
+      "throttle": 1,
+      "steer": 1,
+      "boost": true,
+      "yaw": 1,
+      "roll": -0.5
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "boost": true,
+      "jump": true
+    },
+    {
+      "ticks": 2,
+      "throttle": -1,
+      "boost": true,
+      "jump": true,
+      "pitch": 1,
+      "roll": -1
+    },
+    {
+      "ticks": 23,
+      "throttle": -1,
+      "steer": 1,
+      "pitch": -1
+    },
+    {
+      "ticks": 15,
+      "throttle": 0,
+      "steer": -0.5,
+      "yaw": -1
+    },
+    {
+      "ticks": 2,
+      "throttle": 0,
+      "jump": true,
+      "pitch": -1,
+      "yaw": -1,
+      "roll": 1
+    },
+    {
+      "ticks": 38,
+      "throttle": -1,
+      "pitch": 1
+    },
+    {
+      "ticks": 36,
+      "throttle": -1,
+      "boost": true
+    },
+    {
+      "ticks": 32,
+      "throttle": -1,
+      "steer": 0.5,
+      "boost": true
+    },
+    {
+      "ticks": 44,
+      "throttle": 1,
+      "steer": 0.5,
+      "boost": true
+    },
+    {
+      "ticks": 14,
+      "throttle": 0,
+      "steer": 1
+    },
+    {
+      "ticks": 18,
+      "throttle": 1,
+      "steer": 0
+    },
+    {
+      "ticks": 28,
+      "throttle": 0,
+      "boost": true
+    },
+    {
+      "ticks": 20,
+      "throttle": 1,
+      "steer": 0
+    },
+    {
+      "ticks": 40,
+      "throttle": 0,
+      "steer": 0,
+      "boost": true
+    },
+    {
+      "ticks": 16,
+      "throttle": 1
+    },
+    {
+      "ticks": 27,
+      "throttle": 1,
+      "steer": 0.5,
+      "boost": true
+    }
+  ]
+}

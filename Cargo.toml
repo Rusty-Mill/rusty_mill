@@ -1,6 +1,22 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/apps/rocket_league/crates/bc-clone",
+    "crates/apps/rocket_league/crates/recon-check",
+    "crates/apps/rocket_league/crates/replay-analyzer",
+    "crates/apps/rocket_league/crates/replay-pacifist",
+    "crates/apps/rocket_league/crates/replay-scoring",
+    "crates/apps/rocket_league/crates/replay-skills",
+    "crates/apps/rocket_league/crates/replay-value",
+    "crates/apps/rocket_league/crates/replay-viewer",
+    "crates/apps/rocket_league/crates/rleval-app",
+    "crates/apps/rocket_league/crates/rb_capture_ingest",
+    "crates/apps/rocket_league/crates/rb_domain",
+    "crates/apps/rocket_league/crates/rb_env",
+    "crates/apps/rocket_league/crates/rb_physics_bullet",
+    "crates/apps/rocket_league/crates/rb_replay_ingest",
+    "crates/apps/rocket_league/crates/rb_scenario",
+    "crates/apps/rocket_league/crates/rb_verify_cli",
     "crates/libs/net/rusty_kafka",
     "crates/apps/rusty_meshed/crates/rusty-meshed-core",
     "crates/apps/rusty_meshed/crates/rusty-meshed-schema-registry",
@@ -16,6 +32,7 @@ members = [
     "crates/libs/ui/rusty_gpu",
     "crates/libs/ui/rusty_gui",
     "crates/libs/ui/rusty_font",
+    "crates/libs/ui/rusty_ttf_parser",
     "crates/foundation/rusty_regx",
     "crates/foundation/rusty_win32",
     "crates/foundation/rpath",
@@ -51,6 +68,9 @@ members = [
     "crates/libs/net/rusty_oauth",
     "crates/libs/protocol/rusty_channel",
     "crates/libs/protocol/rusty_routine",
+    "crates/libs/protocol/rusty_bbp",
+    "crates/libs/protocol/rusty_flatbuffers",
+    "crates/apps/rusty_bbp_host",
     "crates/libs/rusty_sandbox",
     "crates/libs/rusty_bot",
     "crates/libs/homelab/rusty_proxmox",
@@ -91,6 +111,10 @@ members = [
     "crates/foundation/rusty_base64",
     "crates/foundation/rusty_dirs",
     "crates/foundation/rusty_hex",
+    "crates/foundation/rusty_ct_check",
+    "crates/foundation/rusty_sha2",
+    "crates/foundation/rusty_pk",
+    "crates/foundation/rusty_aead",
     "crates/foundation/rusty_percent",
     "crates/foundation/rusty_rand",
     "crates/foundation/rusty_atomic_file",
@@ -249,6 +273,8 @@ members = [
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
+    "crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot",
+    "crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot",
     "crates/libs/ui/rusty_term/fuzz",
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
@@ -325,6 +351,62 @@ exclude = [
 # *dependencies* are hoisted below (their keys don't collide), reusing
 # rusty_search's `async-trait`/`serde_json` entries as-is and widening
 # `tokio`'s feature set to the union both crates need.
+[workspace.metadata.cargo-shear]
+# Workspace dependencies no root member uses today, on purpose (ADR-0009):
+# the frozen nexus crates (crates/apps/nexus/FROZEN.md) inherit them when
+# they are moved back into `members`, and the crypto, RLBot and ADR-0007
+# plans pre-register their crates. `rush` is inherited only by rusty_boot,
+# which does not call it (see rusty_boot's own cargo-shear ignore). Remove a
+# name from this list when its reason is gone.
+ignored = [
+    "base64",
+    "clap_complete",
+    "comfy-table",
+    "comrak",
+    "conformance",
+    "csv",
+    "ctrlc",
+    "diffy",
+    "filetime",
+    "git2",
+    "hmac",
+    "jsonschema",
+    "landlock",
+    "lettre",
+    "nexus-hashline",
+    "nexus-plugin-api",
+    "notify",
+    "notify-debouncer-mini",
+    "petgraph",
+    "r2d2",
+    "r2d2_sqlite",
+    "regex-lite",
+    "rush",
+    "rusty_aead",
+    "rusty_bot",
+    "rusty_flatbuffers",
+    "rusty_pk",
+    "rusty_routine",
+    "rustyline",
+    "seccompiler",
+    "semver",
+    "streaming-iterator",
+    "tauri-plugin-dialog",
+    "tokio-tungstenite",
+    "tracing-appender",
+    "trash",
+    "tree-sitter",
+    "tree-sitter-go",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-typescript",
+    "ts-net",
+    "ts-rs",
+    "wasmtime",
+    "webpki-roots",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -350,6 +432,10 @@ rusty_audio = { path = "crates/libs/ui/rusty_audio" }
 rusty_base64 = { path = "crates/foundation/rusty_base64" }
 rusty_dirs = { path = "crates/foundation/rusty_dirs" }
 rusty_hex = { path = "crates/foundation/rusty_hex" }
+rusty_ct_check = { path = "crates/foundation/rusty_ct_check" }
+rusty_sha2 = { path = "crates/foundation/rusty_sha2" }
+rusty_pk = { path = "crates/foundation/rusty_pk" }
+rusty_aead = { path = "crates/foundation/rusty_aead" }
 rusty_percent = { path = "crates/foundation/rusty_percent" }
 rusty_codec = { path = "crates/foundation/rusty_codec" }
 rusty_compress = { path = "crates/foundation/rusty_compress" }
@@ -357,6 +443,7 @@ rusty_diff = { path = "crates/foundation/rusty_diff" }
 rusty_err = { path = "crates/foundation/rusty_err" }
 rusty_fedora = { path = "crates/libs/homelab/rusty_fedora" }
 rusty_font = { path = "crates/libs/ui/rusty_font" }
+rusty-ttf-parser = { path = "crates/libs/ui/rusty_ttf_parser", version = "0.1.0" }
 rusty_git = { path = "crates/libs/rusty_git" }
 rusty_gpu = { path = "crates/libs/ui/rusty_gpu" }
 rusty_gui = { path = "crates/libs/ui/rusty_gui" }
@@ -443,6 +530,8 @@ rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }
 rusty_agui = { path = "crates/libs/protocol/rusty_agui" }
 rusty_channel = { path = "crates/libs/protocol/rusty_channel" }
 rusty_routine = { path = "crates/libs/protocol/rusty_routine" }
+rusty_bbp = { path = "crates/libs/protocol/rusty_bbp" }
+rusty_flatbuffers = { path = "crates/libs/protocol/rusty_flatbuffers" }
 rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
 rusty_bot = { path = "crates/libs/rusty_bot" }
 rusty_oauth = { path = "crates/libs/net/rusty_oauth" }

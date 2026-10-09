@@ -12,11 +12,19 @@ inputs:
     description: 'Cache namespace shared across jobs/matrix legs that should reuse the same target-dir cache'
     required: false
     default: ''
+  sccache:
+    description: >
+      'true' routes rustc through sccache (GitHub Actions cache backend) and
+      stops rust-cache from saving/restoring `target/`, so compilation units
+      are cached individually instead of as one compressed directory. A trial,
+      enabled per job by the caller; see ADR-0009 (sccache non-adoption).
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
     # The calling workflow's pinned toolchain (`RUST_TOOLCHAIN`, ci.yml).
-    - uses: dtolnay/rust-toolchain@master
+    - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
       with:
         toolchain: ${{ env.RUST_TOOLCHAIN }}
         components: ${{ inputs.components }}
@@ -73,11 +81,45 @@ runs:
 
     # rusty_a2a's grpc feature needs protoc on Windows too (cpal talks to
     # WASAPI directly there, so no ALSA/X11/dbus equivalent is needed).
+    # Not via Chocolatey: its community feed fails intermittently and
+    # `choco install` then exits 0 with "installed 0/0 packages", so the job
+    # only dies later in rusty_a2a's build script. A pinned release zip from
+    # the protobuf project, verified by running it, fails here and loudly.
     - name: Install protoc (Windows)
       if: runner.os == 'Windows'
-      shell: bash
-      run: choco install protoc -y
+      shell: pwsh
+      env:
+        PROTOC_VERSION: "36.2"
+      run: |
+        $ErrorActionPreference = "Stop"
+        $v = $env:PROTOC_VERSION
+        $dest = Join-Path $env:RUNNER_TEMP "protoc"
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-win64.zip"
+        Invoke-WebRequest -Uri $url -OutFile "$dest\protoc.zip" -MaximumRetryCount 3 -RetryIntervalSec 5
+        Expand-Archive -Force -Path "$dest\protoc.zip" -DestinationPath $dest
+        Add-Content -Path $env:GITHUB_PATH -Value "$dest\bin"
+        & "$dest\bin\protoc.exe" --version
+        if ($LASTEXITCODE -ne 0) { throw "protoc did not run" }
 
-    - uses: Swatinem/rust-cache@v2
+    - name: Install sccache
+      if: inputs.sccache == 'true'
+      uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      with:
+        # The action's omitted `version` installs the latest release, which
+        # would make a cold and a warm run use different binaries.
+        version: v0.18.0
+
+    - name: Route rustc through sccache
+      if: inputs.sccache == 'true'
+      shell: bash
+      run: |
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+
+    # With sccache on, rust-cache keeps only the registry and git checkouts;
+    # compiled output is sccache's job. Caching both would blur the trial.
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
         shared-key: ${{ inputs.cache-shared-key }}
+        cache-targets: ${{ inputs.sccache != 'true' }}

@@ -1,0 +1,100 @@
+{
+  "blue": {
+    "players": [
+      {
+        "id": {
+          "id": null,
+          "platform": "xbox"
+        },
+        "name": "Mlg bigpot",
+        "stats": {
+          "core": {
+            "assists": 2,
+            "goals": 2,
+            "mvp": false,
+            "saves": 2,
+            "score": 630,
+            "shots": 5
+          }
+        }
+      },
+      {
+        "id": {
+          "id": null,
+          "platform": "xbox"
+        },
+        "name": "The nuke159355",
+        "stats": {
+          "core": {
+            "assists": 1,
+            "goals": 3,
+            "mvp": false,
+            "saves": 0,
+            "score": 354,
+            "shots": 3
+          }
+        }
+      }
+    ],
+    "stats": {
+      "core": {
+        "assists": 3,
+        "goals": 5,
+        "saves": 2,
+        "shots": 8
+      }
+    }
+  },
+  "duration": 391,
+  "id": "990e4485-71c0-41a4-bc9a-ef3923871906",
+  "map_code": "utopiastadium_p",
+  "map_name": "Utopia Coliseum",
+  "orange": {
+    "players": [
+      {
+        "id": {
+          "id": null,
+          "platform": "epic"
+        },
+        "name": "SevensGG",
+        "stats": {
+          "core": {
+            "assists": 1,
+            "goals": 3,
+            "mvp": true,
+            "saves": 1,
+            "score": 639,
+            "shots": 4
+          }
+        }
+      },
+      {
+        "id": {
+          "id": null,
+          "platform": "epic"
+        },
+        "name": "brendanhockey10",
+        "stats": {
+          "core": {
+            "assists": 1,
+            "goals": 2,
+            "mvp": false,
+            "saves": 1,
+            "score": 525,
+            "shots": 6
+          }
+        }
+      }
+    ],
+    "stats": {
+      "core": {
+        "assists": 2,
+        "goals": 5,
+        "saves": 2,
+        "shots": 10
+      }
+    }
+  },
+  "status": "ok",
+  "team_size": 2
+}

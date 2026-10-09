@@ -1,0 +1,55 @@
+{
+  "name": "probe_double_jump: jump, then a second plain press 30 ticks later",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      0,
+      -2000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 10,
+      "jump": true
+    },
+    {
+      "ticks": 20
+    },
+    {
+      "ticks": 1,
+      "jump": true
+    },
+    {
+      "ticks": 120
+    }
+  ]
+}

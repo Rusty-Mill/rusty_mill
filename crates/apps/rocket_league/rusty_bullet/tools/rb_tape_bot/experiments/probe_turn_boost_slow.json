@@ -1,0 +1,47 @@
+{
+  "name": "probe_turn_boost_slow: boosting from 800 uu/s with right steer",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -2500,
+      -4500,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      800,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 240,
+      "throttle": 1,
+      "boost": true,
+      "steer": 1
+    }
+  ]
+}

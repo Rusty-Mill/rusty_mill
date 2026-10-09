@@ -11,8 +11,6 @@ layer = "apps"
 
 [dependencies]
 tokio = { workspace = true, features = ["net", "rt", "macros"] }
-thiserror.workspace = true
-tracing.workspace = true
 # rustils' Tun/virtual-link surface (rustils#56, decision D14) — justified in DESIGN.md:
 platform = { workspace = true }
 platform-linux = { workspace = true }

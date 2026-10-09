@@ -1,0 +1,157 @@
+//! End-to-end: a real replay through the pipeline into stored history and out
+//! as a habit report — the same path `POST /api/analyze` takes with `--data-dir`.
+//! Run against every storage backend, so the engine store is held to the same
+//! contract as the JSON files.
+
+use std::path::PathBuf;
+
+use replay_scoring::XgModel;
+use rleval_app::history::{habits, summarize, SessionRecord};
+use rleval_app::pipeline;
+use rleval_app::store::{session_key, AccountId, FsSessionStore, SaveOutcome, SessionStore};
+
+/// `None` (test skipped) unless the private corpus is checked out under
+/// `rleval/assets/corpus` (baileyrd/rocket_league_private): rank norms
+/// give the composite score these tests assert on.
+fn analyzed_record() -> Option<SessionRecord> {
+    let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rleval/assets/corpus");
+    if !corpus.join("rank_norms.json").exists() {
+        eprintln!("skipped: {} has no rank_norms.json", corpus.display());
+        return None;
+    }
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rleval/assets/replays/42f2.replay");
+    let bytes = std::fs::read(&path).expect("sample replay");
+    let norms = pipeline::load_rank_norms(&corpus);
+    let analysis = pipeline::analyze(&bytes, "42f2", norms.as_ref(), None, &XgModel::default())
+        .expect("analyze");
+
+    let record = SessionRecord::from_analysis(session_key(&bytes), 1, &analysis);
+    assert_eq!(record.players.len(), analysis.pacifist.players.len());
+    assert!(record.players.iter().all(|p| p.dimensions.len() == 8));
+    assert!(
+        record.players.iter().any(|p| p.platform_id.is_some()),
+        "platform ids flow from the replay header into stored history"
+    );
+    assert!(
+        record.players.iter().any(|p| p.won == Some(true))
+            && record.players.iter().any(|p| p.won == Some(false)),
+        "a decided match has winners and losers"
+    );
+    assert!(
+        record.players.iter().all(|p| p.composite.is_some())
+            && record.players.iter().any(|p| !p.metrics.is_empty()),
+        "the composite and rank-relative metrics are kept for progress tracking"
+    );
+    Some(record)
+}
+
+/// Save → idempotent re-save → list → summarize → habits, against `store`.
+fn round_trip(store: &dyn SessionStore, record: &SessionRecord) {
+    let me = AccountId::new("me").unwrap();
+    assert_eq!(store.save(&me, record).unwrap(), SaveOutcome::Saved);
+    assert_eq!(store.save(&me, record).unwrap(), SaveOutcome::AlreadyStored);
+
+    let stored = store.list(&me).unwrap();
+    assert_eq!(
+        stored,
+        vec![record.clone()],
+        "what comes out is what went in"
+    );
+    assert_eq!(summarize(&stored).sessions.len(), 1);
+
+    let key = &summarize(&stored).players[0].key;
+    let report = habits(key, &stored).expect("player is in history");
+    assert_eq!(report.matches, 1);
+    // One match can't claim a win/loss habit — it falls back to weakest dimension.
+    if let Some(f) = report.focus {
+        assert_eq!(f.gap, None);
+    }
+}
+
+fn temp_root(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rleval-flow-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+#[test]
+fn analysis_round_trips_through_the_json_store() {
+    let root = temp_root("fs");
+    let Some(record) = analyzed_record() else {
+        return;
+    };
+    round_trip(&FsSessionStore::new(&root), &record);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(feature = "mmdb")]
+#[test]
+fn analysis_round_trips_through_the_engine_store() {
+    let root = temp_root("mmdb");
+    {
+        let store = rleval_app::store_mmdb::MmdbSessionStore::new(&root);
+        let Some(record) = analyzed_record() else {
+            return;
+        };
+        round_trip(&store, &record);
+    } // dropped: releases the directory lock
+      // ...and the session is still there after a reopen.
+    let reopened = rleval_app::store_mmdb::MmdbSessionStore::new(&root);
+    let me = AccountId::new("me").unwrap();
+    assert_eq!(reopened.list(&me).unwrap().len(), 1);
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The training plan over real analysis output: one real match stored as four records
+/// (two play sessions), so the metric snapshots have the shape a real history has.
+#[test]
+fn a_plan_is_built_from_real_snapshots_across_two_sessions() {
+    use rleval_app::progress::{progress, MIN_MATCHES, PLAN_LEN};
+
+    let Some(base) = analyzed_record() else {
+        return;
+    };
+    let t0 = 1_700_000_000;
+    let records: Vec<SessionRecord> = [0, 600, 1200, 4 * 3600]
+        .iter()
+        .enumerate()
+        .map(|(i, dt)| SessionRecord {
+            key: format!("{i:024x}"),
+            saved_at: t0 + dt,
+            played_at: None, // order by save time, as a replay with no header date would
+            ..base.clone()
+        })
+        .collect();
+    let player = records[0]
+        .players
+        .iter()
+        .find(|p| !p.metrics.is_empty())
+        .expect("a player with metrics");
+    let report = progress(player.key(), &records).expect("report");
+
+    assert_eq!(
+        report
+            .sessions
+            .iter()
+            .map(|s| s.matches)
+            .collect::<Vec<_>>(),
+        [3, 1],
+        "a 4 h gap splits sessions"
+    );
+    assert!(!report.plan.is_empty() && report.plan.len() <= PLAN_LEN);
+    assert!(report
+        .plan
+        .iter()
+        .all(|i| i.matches >= MIN_MATCHES && i.now.is_finite() && i.target.is_finite()));
+    assert!(
+        report.plan.windows(2).all(|w| w[0].pct <= w[1].pct),
+        "lowest percentile first"
+    );
+    // Identical matches: nothing moved, so no metric can claim a trend.
+    assert!(report
+        .plan
+        .iter()
+        .all(|i| i.trend == rleval_app::progress::Trend::Flat));
+}

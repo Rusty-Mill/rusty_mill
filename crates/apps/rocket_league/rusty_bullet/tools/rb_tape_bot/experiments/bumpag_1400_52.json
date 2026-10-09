@@ -1,0 +1,77 @@
+{
+  "name": "bumpag_1400_52: level attacker 52 uu up at 1400 uu/s coasts into a stopped grounded teammate",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -258.0,
+      52
+    ],
+    "rotation": [
+      0,
+      1.5707963267948966,
+      0
+    ],
+    "velocity": [
+      0,
+      1400,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 150
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          0,
+          17
+        ],
+        "rotation": [
+          0,
+          1.5707963267948966,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 150
+        }
+      ],
+      "team": 0
+    }
+  ]
+}

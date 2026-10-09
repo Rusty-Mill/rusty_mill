@@ -29,10 +29,23 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue (ADR-0009) validates each queued entry on a temporary
+  # branch; `required-gate` must run here or the queue waits forever for a
+  # check that never starts. `ci_plan.py` scopes it against the entry's base.
+  merge_group:
+    types: [checks_requested]
   # A manual run deliberately uses the same full-sweep plan as a main push.
   # It is useful for re-running the whole workspace after runner or cache
   # incidents without creating a no-op commit.
   workflow_dispatch:
+  # Weekly full-workspace sweep: catches drift that scoped PR runs cannot see
+  # (ADR-0009). `ci_plan.py` treats any event other than push, PR and merge_group as full.
+  schedule:
+    - cron: "17 3 * * 1"
+
+# Least privilege (ADR-0009): no job here writes to the repository.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -80,8 +93,8 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
@@ -95,7 +108,7 @@ jobs:
     name: plan script unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
   workflow-lint:
@@ -104,7 +117,7 @@ jobs:
     name: workflow lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download verified actionlint
         shell: bash
         run: |
@@ -133,11 +146,11 @@ jobs:
     name: dependency policy (workspace sovereignty)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: dependency-policy
           cache-targets: false
@@ -145,6 +158,42 @@ jobs:
       - run: python3 .github/scripts/check_workspace_deps.py /tmp/metadata.json
       - run: python3 .github/scripts/check_workspace_layers.py /tmp/metadata.json
       - run: python3 .github/scripts/generate_workspace_map.py /tmp/metadata.json --verify docs/WORKSPACE-MAP.md
+
+  cargo-deny:
+    # Advisories, licences, sources (deny.toml, ADR-0009). Workspace-wide like
+    # dependency-policy, so it runs for every event and the weekly sweep picks
+    # up new RustSec entries. Non-blocking until the first findings are
+    # triaged: then delete `continue-on-error`.
+    name: cargo-deny (advisories, licenses, sources)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --workspace check
+
+  cargo-shear:
+    # Unused dependencies (ADR-0009). Source-scan based, so it can be wrong
+    # (it was, three times, when the first batch was removed): non-blocking, a
+    # finding is a prompt to look, not a verdict. Intentional exceptions live
+    # in the root `[workspace.metadata.cargo-shear] ignored` list.
+    name: cargo-shear (unused dependencies)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        with:
+          tool: cargo-shear
+      - run: cargo shear
 
   plan:
     name: plan (affected crates)
@@ -165,19 +214,22 @@ jobs:
       multimodal_db: ${{ steps.plan.outputs.multimodal_db }}
       rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
       tls_engine: ${{ steps.plan.outputs.tls_engine }}
+      rleval_viewer: ${{ steps.plan.outputs.rleval_viewer }}
+      rleval_app: ${{ steps.plan.outputs.rleval_app }}
+      crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The planner verifies the event base is an ancestor before it
           # selects a narrow range. A shallow checkout cannot prove that for
           # a multi-commit push, so fetch complete history here.
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: plan
           cache-targets: false
@@ -199,7 +251,8 @@ jobs:
           mapfile -t event_plan < <(python3 .github/scripts/ci_plan.py \
             --event "${{ github.event_name }}" \
             --pr-base "${{ github.event.pull_request.base.sha }}" \
-            --push-before "${{ github.event.before }}")
+            --push-before "${{ github.event.before }}" \
+            --merge-base "${{ github.event.merge_group.base_sha }}")
           mode="${event_plan[0]#mode=}"
           base="${event_plan[1]#base=}"
           if [ "$mode" = "full" ]; then
@@ -313,7 +366,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     name: clippy (${{ matrix.scope.component }}, ${{ matrix.os }})
-    needs: plan
+    needs: [plan, fmt]
     if: needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''
     strategy:
       fail-fast: false
@@ -322,7 +375,7 @@ jobs:
         scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
         with:
           components: clippy
@@ -373,7 +426,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
         with:
           cache-shared-key: ci-smoke-${{ matrix.os }}
@@ -385,7 +438,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     name: test (${{ matrix.scope.component }}, ${{ matrix.os }}, shard ${{ matrix.shard }})
-    needs: plan
+    needs: [plan, fmt]
     if: needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''
     strategy:
       fail-fast: false
@@ -395,10 +448,13 @@ jobs:
         scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
         with:
           cache-shared-key: test-${{ matrix.scope.component }}-${{ matrix.os }}
+          # Trial (ADR-0009): sccache instead of a cached target/ on Windows,
+          # whose shards are the slowest jobs. Linux keeps rust-cache as is.
+          sccache: ${{ runner.os == 'Windows' && 'true' || 'false' }}
 
       - uses: ./.github/actions/select-packages
         id: scope
@@ -432,7 +488,7 @@ jobs:
 
       - name: Install cargo-nextest
         if: steps.scope.outputs.args != ''
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: nextest
 
@@ -510,7 +566,7 @@ jobs:
       # Keep both even when the test step fails for later diagnosis.
       - name: Upload nextest timing and retry reports
         if: ${{ always() && steps.scope.outputs.args != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nextest-${{ matrix.scope.component }}-${{ matrix.os }}-shard-${{ matrix.shard }}
           path: |
@@ -569,6 +625,18 @@ jobs:
             fi
           fi
 
+      # Hit rate for the sccache trial, in the job summary (Windows only).
+      - name: sccache statistics
+        if: always() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          {
+            echo "### sccache (${{ matrix.scope.component }}, shard ${{ matrix.shard }})"
+            echo '```'
+            sccache --show-stats || echo "sccache not available"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # rusty_meshed's data-mesh-monitor dashboard: a vendored Vite/React app
   # (not a Cargo crate, so none of the cargo jobs above see it). Builds
   # it and runs its `npm test`, which re-traces the vendored reverse-trace
@@ -587,8 +655,8 @@ jobs:
       run:
         working-directory: crates/apps/rusty_meshed/data-mesh-monitor
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -615,8 +683,8 @@ jobs:
       run:
         working-directory: crates/libs/ui/rusty_term/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -640,8 +708,8 @@ jobs:
       run:
         working-directory: crates/apps/rusty_tick/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -671,14 +739,14 @@ jobs:
       run:
         working-directory: crates/apps/rusty_tick/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: rusty-tick-e2e
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -694,7 +762,7 @@ jobs:
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npm run e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: rusty-tick-e2e-results
@@ -720,14 +788,14 @@ jobs:
       run:
         working-directory: crates/libs/protocol/rusty_agui/conformance
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: rusty-agui-conformance
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -798,8 +866,8 @@ jobs:
       run:
         working-directory: crates/apps/rusty_fair_play/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -824,14 +892,14 @@ jobs:
       run:
         working-directory: crates/apps/rusty_fair_play/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: rusty-fair-play-e2e
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -843,7 +911,7 @@ jobs:
       - run: npm run test:integration
       - run: npx playwright install --with-deps chromium
       - run: npm run e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: rusty-fair-play-e2e-results
@@ -867,8 +935,8 @@ jobs:
       run:
         working-directory: crates/apps/rusty_key/desktop
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -890,13 +958,13 @@ jobs:
     if: needs.plan.outputs.win32 == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-pc-windows-gnu
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: win32-cross
       - name: Install mingw-w64
@@ -942,12 +1010,12 @@ jobs:
     if: needs.plan.outputs.multimodal_db == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: multimodal-db-feature-sets
       - name: cargo clippy -p rusty_multimodal_db (default features)
@@ -995,10 +1063,15 @@ jobs:
     needs: plan
     if: needs.plan.outputs.multimodal_db == 'true'
     runs-on: ubuntu-latest
+    env:
+      # rust-toolchain.toml would otherwise win over the action's default.
+      RUSTUP_TOOLCHAIN: "1.89.0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # 1.89.0
+        with:
+          toolchain: "1.89.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: multimodal-db-msrv
       - name: cargo check on the declared rust-version
@@ -1014,11 +1087,11 @@ jobs:
     if: needs.plan.outputs.rusty_config_no_std == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: rusty-config-no-std
       - name: cargo check -p rusty_config --no-default-features
@@ -1047,12 +1120,12 @@ jobs:
       # from `cargo doc` and its doctests silently do not run.
       RUSTDOCFLAGS: --cfg rusty_tls_handrolled
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: rusty-tls-engine
       - name: cargo clippy -p rusty_tls --features handrolled-engine
@@ -1130,13 +1203,14 @@ jobs:
       # run script pins the BoringSSL commit and exits non-zero on any FAIL;
       # tests the shim does not implement are skipped, which is why the floor
       # below exists: a shim that skipped everything would also exit 0.
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
+      # No setup-go: this repo pins every action to a commit SHA and none is
+      # pinned for it. The runner image ships Go; the version is printed so a
+      # too-old one shows in the log.
       - name: BoGo (BoringSSL protocol suite)
         shell: bash
         run: |
           set -euo pipefail
+          go version
           crates/libs/net/rusty_tls/bogo/run.sh | tee bogo.out
           passed=$(sed -nE 's/^BoGo: ([0-9]+) passed.*/\1/p' bogo.out)
           if [ "${passed:-0}" -lt 830 ]; then
@@ -1145,11 +1219,85 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # Rocket League family: RLEvalSystem's two product-specific checks, ported from
+  # its pre-merge CI (baileyrd/RLEvalSystem .github/workflows/ci.yml). The
+  # workspace-wide jobs above already cover everything else (fmt; clippy, nextest
+  # and doctests with --all-features, which includes rleval-app's `mmdb,oidc`
+  # set on Linux and Windows). Its Python service job is deliberately not ported:
+  # the service and Docker files were moved as-is, with no CI (ADR-0008).
+  # ---------------------------------------------------------------------------
+
+  # The offline replay viewer bundles three.js and a render loop in JS that the
+  # Rust golden tests cannot exercise. Render it under software WebGL
+  # (swiftshader) and fail on any page error or if the render loop never ticks.
+  # puppeteer is pinned by tests/package-lock.json, installed with `npm ci`.
+  rleval-viewer-gl-smoke:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-viewer-gl-smoke
+      queue: max
+      cancel-in-progress: false
+    name: replay-viewer headless-GL smoke
+    needs: plan
+    if: needs.plan.outputs.rleval_viewer == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: rleval-viewer-gl-smoke
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rocket_league/crates/replay-viewer/tests/package-lock.json
+      - name: Generate offline viewer
+        run: cargo run -q -p replay-viewer -- crates/apps/rocket_league/rleval/assets/replays/42f2.replay --offline --hz 15 --html "$RUNNER_TEMP/viewer.html"
+      - name: Install puppeteer
+        working-directory: crates/apps/rocket_league/crates/replay-viewer/tests
+        run: npm ci --no-audit --no-fund
+      - name: Headless-GL smoke test
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/gl_smoke.mjs "$RUNNER_TEMP/viewer.html"
+
+  # Every other Rust job passes --all-features, which hides a broken default or
+  # single-feature build of rleval-app: its default build is the token-only
+  # server and must not need the rustls stack (`oidc`) or the engine (`mmdb`).
+  # The combined `mmdb,oidc` set is what --all-features already builds.
+  rleval-app-feature-sets:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-app-feature-sets
+      queue: max
+      cancel-in-progress: false
+    name: rleval-app feature sets (default, mmdb, oidc)
+    needs: plan
+    if: needs.plan.outputs.rleval_app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: rleval-app-feature-sets
+      - name: cargo clippy -p rleval-app (default features)
+        run: cargo clippy -p rleval-app --all-targets -- -D warnings
+      - name: cargo clippy -p rleval-app --features mmdb
+        run: cargo clippy -p rleval-app --all-targets --features mmdb -- -D warnings
+      - name: cargo clippy -p rleval-app --features oidc
+        run: cargo clippy -p rleval-app --all-targets --features oidc -- -D warnings
+      - name: cargo test -p rleval-app (default features)
+        run: cargo test -p rleval-app
+
+  # ---------------------------------------------------------------------------
   # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's
   # own pre-merge CI (its crates/apps/rusty_remind_me/.github/workflows/ci.yml,
   # dead now that it is not at a repository root -- the full rationale for
   # each leg is in its comments there). Its toolchain-independent check
-  # (plugin.json version) lives in remind-me-checks.yml.
+  # (plugin.json version) is the `remind-me-plugin-version` job below.
   # `fmt` is covered by the workspace-wide job above.
   # ---------------------------------------------------------------------------
 
@@ -1165,12 +1313,12 @@ jobs:
     env:
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: remind-me
       - name: cargo build
@@ -1215,12 +1363,12 @@ jobs:
           # too (remind_me_core's build.rs asks for -llzma -- its docs/adr/0014).
           - { feature: stack-dumps, test: true, clippy: true, apt: libunwind-dev liblzma-dev }
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: remind-me-feature-${{ matrix.feature }}
       - name: Install system packages this feature needs
@@ -1247,12 +1395,12 @@ jobs:
     env:
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: remind-me-combined
       - name: cargo build --features ann,ocr,rerank,local-embed,pdf
@@ -1261,6 +1409,25 @@ jobs:
         run: cargo test --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf
       - name: cargo clippy --features ann,ocr,rerank,local-embed,pdf
         run: cargo clippy --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --all-targets -- -D warnings
+
+  remind-me-plugin-version:
+    # rusty_remind_me's `.claude-plugin/plugin.json` version must equal its six
+    # crates' versions (check_plugin_version.sh also fails if the crates
+    # disagree). Lives here, not in its own workflow, so `required-gate` covers
+    # it: a drifted bump must not merge while the sole required check is green.
+    # Runs whenever the product's directory changes (the `remind_me` plan flag).
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-remind-me-plugin-version
+      queue: max
+      cancel-in-progress: false
+    name: rusty_remind_me plugin.json version vs. crate versions
+    needs: plan
+    if: needs.plan.outputs.remind_me == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Compare .claude-plugin/plugin.json against the crates' Cargo.toml
+        run: crates/apps/rusty_remind_me/scripts/check_plugin_version.sh
 
   remind-me-hub:
     concurrency:
@@ -1274,12 +1441,12 @@ jobs:
     env:
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: remind-me-hub
       - name: cargo clippy -p remind_me_hub --no-default-features
@@ -1313,12 +1480,12 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: remind-me-legacy-import
       - name: Lint the recovery feature and binaries
@@ -1344,12 +1511,12 @@ jobs:
     env:
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: remind-me-windows
       - name: cargo build
@@ -1358,3 +1525,114 @@ jobs:
         run: cargo test --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
       - name: cargo clippy
         run: cargo clippy --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Constant-time evidence for the native crypto crates (rusty_ct_check,
+  # rusty_sha2, rusty_pk, rusty_aead). Compiler-sensitive: LLVM can turn a
+  # branch-free masked select into a branch on a secret, which no functional
+  # test sees (it happened once in rusty_pk::mont::reduce_once and was caught
+  # only by the valgrind taint run below). The jump-count budgets in each
+  # crate's scripts/disasm_limits.txt are tied to a compiler version, so this
+  # job runs on the pinned RUST_TOOLCHAIN every other job ships with; moving
+  # that toolchain is a global change that reruns this job, and a changed count
+  # fails it until someone re-reviews the budget. Evidence, not proof: see
+  # docs/research/CRYPTO-REPLACEMENT-PLAN.md section 4.5. The statistical
+  # timing tests are deliberately NOT run here (noisy shared runners); they run
+  # from docs/research/crypto-evidence/collect.sh.
+  # ---------------------------------------------------------------------------
+  crypto-constant-time:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-crypto-constant-time
+      queue: max
+      cancel-in-progress: false
+    name: crypto constant-time checks (valgrind taint, disassembly budget)
+    needs: plan
+    if: needs.plan.outputs.crypto_ct == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: crypto-constant-time
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version
+          objdump --version | head -1
+      - name: Harness self-test (planted leaks must be caught)
+        run: sh crates/foundation/rusty_ct_check/scripts/valgrind_selftest.sh
+      - name: rusty_sha2 (HMAC / HKDF keys)
+        run: sh crates/foundation/rusty_sha2/scripts/ct_check.sh
+      - name: rusty_aead (ChaCha20-Poly1305)
+        run: sh crates/foundation/rusty_aead/scripts/ct_check.sh
+      - name: rusty_pk (X25519, shared Montgomery core)
+        run: sh crates/foundation/rusty_pk/scripts/ct_check.sh
+      - name: Vector manifests (hashes, missing and unlisted files)
+        run: >
+          python3 -I docs/research/crypto-evidence/check_manifests.py
+          crates/foundation/rusty_sha2/tests/vectors
+          crates/foundation/rusty_pk/tests/vectors
+          crates/foundation/rusty_aead/tests/vectors
+      - name: Evidence tooling self-tests (collector, manifests, taint exit status, disassembly counts)
+        run: |
+          python3 -I docs/research/crypto-evidence/test_timing_series.py
+          python3 -I docs/research/crypto-evidence/test_check_manifests.py
+          python3 -I docs/research/crypto-evidence/test_planted_leak.py
+          python3 -I crates/foundation/rusty_ct_check/scripts/test_disasm_audit.py
+          sh crates/foundation/rusty_ct_check/scripts/test_taint_lib.sh
+
+  # ---------------------------------------------------------------------------
+  required-gate:
+    # The one check branch protection requires (ADR-0009). Planned-out jobs
+    # are `skipped`, which passes; a failed or cancelled job fails the gate.
+    # `test_ci_workflow` fails if a job is missing from `needs`.
+    name: required-gate
+    if: always()
+    needs:
+      - fmt
+      - plan-tests
+      - workflow-lint
+      - dependency-policy
+      - cargo-deny
+      - cargo-shear
+      - plan
+      - clippy
+      - ci-smoke
+      - test
+      - data-mesh-monitor
+      - rusty-term-web
+      - rusty-tick-web
+      - rusty-tick-e2e
+      - rusty-agui-conformance
+      - rusty-fair-play-web
+      - rusty-fair-play-e2e
+      - rusty-key-desktop
+      - win32-cross-compile-check
+      - multimodal-db-feature-sets
+      - multimodal-db-msrv
+      - rusty-config-no-std-check
+      - rusty-tls-engine
+      - crypto-constant-time
+      - rleval-viewer-gl-smoke
+      - rleval-app-feature-sets
+      - remind-me
+      - remind-me-features
+      - remind-me-combined-features
+      - remind-me-plugin-version
+      - remind-me-hub
+      - remind-me-legacy-import
+      - remind-me-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed or was cancelled
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          case " $RESULTS " in
+            *" failure "*|*" cancelled "*) exit 1 ;;
+          esac

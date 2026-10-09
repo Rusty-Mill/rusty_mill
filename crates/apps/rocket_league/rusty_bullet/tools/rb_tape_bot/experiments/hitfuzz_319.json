@@ -1,0 +1,255 @@
+{
+  "name": "hitfuzz_319: a run at the ball, then a seeded random tape",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      -588,
+      -2907,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.8814,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      -772,
+      -2168,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 44,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 20,
+      "throttle": -1,
+      "steer": 0,
+      "boost": true,
+      "jump": true
+    },
+    {
+      "ticks": 34,
+      "throttle": 1,
+      "yaw": 1,
+      "roll": 1
+    },
+    {
+      "ticks": 23,
+      "throttle": 1,
+      "steer": 1,
+      "handbrake": true,
+      "yaw": -0.5
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "steer": 0,
+      "jump": true,
+      "pitch": 1
+    },
+    {
+      "ticks": 42,
+      "throttle": 1,
+      "steer": -0.5,
+      "pitch": 0.5
+    },
+    {
+      "ticks": 16,
+      "throttle": 1,
+      "steer": -0.5,
+      "handbrake": true
+    },
+    {
+      "ticks": 16,
+      "throttle": 1,
+      "steer": -1
+    },
+    {
+      "ticks": 36,
+      "throttle": 0,
+      "steer": 0.5
+    },
+    {
+      "ticks": 14,
+      "throttle": -1,
+      "boost": true,
+      "handbrake": true,
+      "jump": true
+    },
+    {
+      "ticks": 37,
+      "throttle": 1,
+      "steer": 0,
+      "pitch": -1,
+      "roll": 1
+    },
+    {
+      "ticks": 14,
+      "throttle": 1,
+      "steer": -1,
+      "boost": true,
+      "yaw": 1,
+      "roll": 1
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "steer": 1,
+      "boost": true,
+      "handbrake": true,
+      "jump": true,
+      "pitch": 1,
+      "yaw": 1,
+      "roll": -1
+    },
+    {
+      "ticks": 26,
+      "throttle": 1,
+      "steer": 0.5,
+      "pitch": 0.5,
+      "yaw": 1,
+      "roll": -0.5
+    },
+    {
+      "ticks": 32,
+      "throttle": 1,
+      "steer": -0.5,
+      "boost": true,
+      "handbrake": true
+    },
+    {
+      "ticks": 18,
+      "throttle": 1
+    },
+    {
+      "ticks": 17,
+      "throttle": 0,
+      "steer": 0.5,
+      "boost": true,
+      "jump": true
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "steer": 1,
+      "boost": true,
+      "jump": true,
+      "yaw": 1,
+      "roll": -1
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "jump": true,
+      "pitch": 1,
+      "yaw": 1,
+      "roll": 1
+    },
+    {
+      "ticks": 18,
+      "throttle": 1,
+      "steer": 0,
+      "boost": true,
+      "roll": 1
+    },
+    {
+      "ticks": 26,
+      "throttle": 1,
+      "yaw": 1
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "steer": 0.5,
+      "boost": true,
+      "jump": true,
+      "roll": -1
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "steer": -1,
+      "boost": true,
+      "jump": true,
+      "pitch": -1,
+      "yaw": -1,
+      "roll": -1
+    },
+    {
+      "ticks": 19,
+      "throttle": 1,
+      "boost": true,
+      "yaw": -0.5,
+      "roll": -1
+    },
+    {
+      "ticks": 37,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 35,
+      "throttle": 1,
+      "steer": 1
+    },
+    {
+      "ticks": 43,
+      "throttle": 1,
+      "steer": -0.5,
+      "boost": true,
+      "handbrake": true
+    },
+    {
+      "ticks": 43,
+      "throttle": 1,
+      "steer": 0.5,
+      "handbrake": true
+    },
+    {
+      "ticks": 5,
+      "throttle": -1,
+      "steer": 0,
+      "boost": true,
+      "jump": true
+    },
+    {
+      "ticks": 29,
+      "throttle": -1,
+      "roll": 0.5
+    },
+    {
+      "ticks": 37,
+      "throttle": -1,
+      "boost": true,
+      "yaw": -1,
+      "roll": -1
+    },
+    {
+      "ticks": 42,
+      "throttle": -1,
+      "steer": -1
+    }
+  ]
+}

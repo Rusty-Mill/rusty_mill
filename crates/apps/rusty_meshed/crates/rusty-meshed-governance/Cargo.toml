@@ -11,6 +11,5 @@ publish = false
 layer = "apps"
 
 [dependencies]
-rusty_err = { workspace = true }
 
 [dev-dependencies]

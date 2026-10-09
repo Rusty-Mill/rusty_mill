@@ -1,0 +1,45 @@
+{
+  "name": "probe_ball_bounce_car_side: car drives into a rolling ball from the side",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -2000,
+      -2000,
+      17
+    ],
+    "rotation": [
+      0,
+      0.0,
+      0
+    ],
+    "velocity": [
+      1000,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      -2000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      400,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 240,
+      "throttle": 1
+    }
+  ]
+}
