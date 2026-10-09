@@ -270,6 +270,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_mcp_proto slice 1 and ADR-0002 Amendment 1 (pending review)
+
+- **Added:** `rusty_mcp_proto` (P0: JSON-RPC, initialize, tools, schema builder); **Changed:** workspace ADR-0002 reclassifies the MCP crates as Tier T. No consumer uses the new crate yet.
+- **Known limitation:** wire compatibility is checked for P0 only, against `rmcp` 3.1; `resultType` is not emitted yet, so a 2026-07-28 peer that requires it will need P2 first. Batches are not decoded.
+
+---
+
 ## 2026-10-08 - rusty-mcp-client split (pending review)
 
 - **Added:** `rusty-mcp-client`; **Changed:** `rusty-mcp` loses its `client` feature; `rk-mcp` depends on the new crate. Stdio verified again against a real `rusty-mcp-demo` after the move. No OpenSSL in the MCP client path (the `native-tls` still in `rk-mcp`'s tree comes from `aisdk`/`rk-feed`, the LLM client).

@@ -10,9 +10,9 @@ MCP crates depend on `rusty_request` / `rusty_serve` and **`rusty_tls`**, never 
 
 | Step | Work | State |
 |---|---|---|
-| A0 | Amend workspace ADR-0002: MCP crates move from Tier A (`rmcp`, permanent) to Tier T (transitional) with this plan as the milestone list | **needs owner sign-off** |
+| A0 | Amend workspace ADR-0002: MCP crates move from Tier A (`rmcp`, permanent) to Tier T (transitional) with this plan as the milestone list | done (Amendment 1, 2026-10-09) |
 | A1 | Split the client out of `rusty-mcp` into `rusty-mcp-client`; client on rustls, not OpenSSL | done |
-| A2 | `rusty_mcp_proto` (Tier S): JSON-RPC 2.0 + MCP types on `rusty_json`; `rmcp` as a **dev-only** wire-format oracle | open |
+| A2 | `rusty_mcp_proto` (Tier S): JSON-RPC 2.0 + MCP types on `rusty_json`; `rmcp` as a **dev-only** wire-format oracle | slice 1 done (P0: JSON-RPC, initialize, tools, schema builder); P1 resources/prompts/completion next, then P2 |
 | A3 | Server on `rusty_serve` (stdio + stateless Streamable HTTP); accept on `rk-app` and `rusty-mcp-demo` | open |
 | A4 | Client on `rusty_request` + `rusty_tls`; needs an SSE reader | open |
 | A5 | Move consumers one at a time: `rk-app`, `rk-mcp`, `rusty_homelab_mcp`, `rp-mcp`, ..., `agentgateway` last | open |
@@ -30,10 +30,6 @@ Track B has its own owner/session; it does not block Track A.
 
 Session prompts for each track: `docs/research/prompts/mcp-track.md`, `docs/research/prompts/tls-track.md`.
 
-## Decisions still open
+## Decisions (owner, 2026-10-09)
 
-1. Approve the ADR-0002 amendment (A0).
-2. Tool schemas: builder first, derive later?
-3. Blocking thread-per-connection servers on `rusty_serve` acceptable for MCP?
-4. Scope: only `rmcp`, or its whole stack (`axum`, `tokio`, `reqwest`, `clap`, `tracing-subscriber`, `jsonwebtoken`)? Plan above assumes the whole stack.
-5. TLS bar for making the native engine default (Track B).
+1. ADR-0002 amendment: **yes** (done). 2. Tool schemas: **builder first** (done: `rusty_mcp_proto::Schema`). 3. Blocking thread-per-connection servers on `rusty_serve`: **yes**. 4. Scope: **rmcp and its whole stack**. Still open: 5, the TLS evidence bar for making the native engine default (Track B).
