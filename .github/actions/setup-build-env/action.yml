@@ -105,6 +105,10 @@ runs:
     - name: Install sccache
       if: inputs.sccache == 'true'
       uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      with:
+        # The action's omitted `version` installs the latest release, which
+        # would make a cold and a warm run use different binaries.
+        version: v0.18.0
 
     - name: Route rustc through sccache
       if: inputs.sccache == 'true'

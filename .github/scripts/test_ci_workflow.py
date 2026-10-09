@@ -420,6 +420,8 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertRegex(inputs, r"sccache:\n(?:.*\n)*?    default: 'false'")
         self.assertIn("cache-targets: ${{ inputs.sccache != 'true' }}", action)
         self.assertEqual(action.count("if: inputs.sccache == 'true'"), 2)
+        # A floating sccache binary would make cold/warm comparisons meaningless.
+        self.assertRegex(action, r"mozilla-actions/sccache-action@[0-9a-f]{40}.*\n\s+with:\n(?:\s+#.*\n)*\s+version: v\d+\.\d+\.\d+")
 
     def test_workflows_default_to_read_only_token(self) -> None:
         for path in (WORKFLOW, BASELINE_WORKFLOW):
