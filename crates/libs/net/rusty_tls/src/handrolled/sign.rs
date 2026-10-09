@@ -166,6 +166,17 @@ impl SigningKey {
         }
     }
 
+    /// The TLS 1.2 `ClientCertificateType` for this key (RFC 5246 section
+    /// 7.4.4; RFC 8422 section 3 puts Ed25519 under `ecdsa_sign`): `rsa_sign`
+    /// (1) or `ecdsa_sign` (64). A server naming only the other one has not
+    /// asked for this key, whatever signature algorithms it lists.
+    pub fn certificate_type(&self) -> u8 {
+        match &self.inner {
+            Inner::Rsa(_) => 1,
+            Inner::Ecdsa { .. } | Inner::Ed25519(_) => 64,
+        }
+    }
+
     /// The `SubjectPublicKeyInfo`-independent public key bytes, for checking
     /// that a key and a certificate belong together.
     ///

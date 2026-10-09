@@ -230,6 +230,8 @@ fn serve(listener: TcpListener, pki: Pki) -> Report {
         // hermetic coverage in `handrolled_server`.
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
 
     let Ok((mut socket, _)) = listener.accept() else {

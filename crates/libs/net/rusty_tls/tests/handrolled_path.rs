@@ -30,7 +30,7 @@ use rcgen::{
     KeyUsagePurpose, SanType,
 };
 use rusty_tls::handrolled::path::{
-    validate_path, PathError, PathOptions, TrustAnchor, VerifiedPath,
+    require_signing_key_usage, validate_path, PathError, PathOptions, TrustAnchor, VerifiedPath,
 };
 use rusty_tls::handrolled::x509::{oid, Certificate};
 
@@ -61,6 +61,7 @@ struct Bend {
     intermediate_extra_extension: Option<CustomExtension>,
     leaf_extra_extension: Option<CustomExtension>,
     leaf_ekus: Option<Vec<ExtendedKeyUsagePurpose>>,
+    leaf_key_usages: Vec<KeyUsagePurpose>,
     leaf_is_ca: Option<IsCa>,
     leaf_validity: Option<(time::OffsetDateTime, time::OffsetDateTime)>,
     intermediate_validity: Option<(time::OffsetDateTime, time::OffsetDateTime)>,
@@ -121,6 +122,7 @@ fn build(bend: Bend) -> Chain {
     leaf_params.extended_key_usages = bend
         .leaf_ekus
         .unwrap_or_else(|| vec![ExtendedKeyUsagePurpose::ServerAuth]);
+    leaf_params.key_usages = bend.leaf_key_usages;
     if let Some(extension) = bend.leaf_extra_extension {
         leaf_params.custom_extensions = vec![extension];
     }
@@ -737,6 +739,41 @@ fn name_constraints_apply_to_intermediates_below_the_constraining_ca() {
 }
 
 // ---------------------------------------------------------------------------
+// Key usage on the end-entity certificate
+// ---------------------------------------------------------------------------
+
+fn signing_check(usages: Vec<KeyUsagePurpose>) -> Result<(), PathError> {
+    let chain = build(Bend {
+        leaf_key_usages: usages,
+        ..Default::default()
+    });
+    require_signing_key_usage(&Certificate::parse(&chain.leaf).expect("leaf parses"))
+}
+
+/// The handshake is proved by a signature, so a leaf whose `keyUsage` leaves
+/// out `digitalSignature` (an encipherment-only RSA certificate, say) is
+/// refused. A leaf with no `keyUsage` at all is unrestricted.
+#[test]
+fn a_leaf_whose_key_usage_forbids_signing_is_refused() {
+    assert_eq!(
+        signing_check(vec![KeyUsagePurpose::KeyEncipherment]),
+        Err(PathError::KeyUsageForbidsSigning)
+    );
+    assert_eq!(signing_check(vec![]), Ok(()));
+    assert_eq!(
+        signing_check(vec![KeyUsagePurpose::DigitalSignature]),
+        Ok(())
+    );
+    assert_eq!(
+        signing_check(vec![
+            KeyUsagePurpose::KeyEncipherment,
+            KeyUsagePurpose::DigitalSignature
+        ]),
+        Ok(())
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Extended key usage
 // ---------------------------------------------------------------------------
 
@@ -1104,4 +1141,104 @@ fn a_constrained_intermediate_constrains_the_intermediate_below_it() {
         &options(),
     )
     .expect("a compliant intermediate validates");
+}
+
+/// A wildcard certificate under a CA that excludes one of the hosts the
+/// wildcard covers must be refused.
+///
+/// The constraint is on the certificate's *names*, not on the host the client
+/// asked for, so `*.example.com` is refused under `excludedSubtrees:
+/// bad.example.com` whichever host is requested. This was a real hole: the
+/// excluded-subtree test compared the literal string `*.example.com` against
+/// the subtree, found it was not inside, and accepted a certificate that
+/// authenticates `bad.example.com`. webpki refuses it, so the table is also a
+/// differential against rustls, and the two must agree on every row.
+#[test]
+fn a_wildcard_certificate_is_refused_when_it_covers_an_excluded_host() {
+    use rcgen::{GeneralSubtree, NameConstraints};
+    use rustls::client::verify_server_cert_signed_by_trust_anchor;
+    use rustls::pki_types::{CertificateDer, UnixTime};
+    use rusty_tls::handrolled::name::ServerName;
+    use rusty_tls::handrolled::path::verify_peer_certificate;
+    use std::time::Duration;
+
+    // (excluded subtree, certificate SAN, host to ask for, accepted?)
+    let cases: [(&str, &str, &str, bool); 7] = [
+        ("bad.example.com", "*.example.com", "ok.example.com", false),
+        ("example.com", "*.example.com", "ok.example.com", false),
+        ("com", "*.example.com", "ok.example.com", false),
+        (
+            "bad.example.com",
+            "bad.example.com",
+            "bad.example.com",
+            false,
+        ),
+        // A wildcard covers one label, so two labels down is out of reach.
+        ("a.bad.example.com", "*.example.com", "ok.example.com", true),
+        ("bad.example.org", "*.example.com", "ok.example.com", true),
+        (
+            "bad.example.com",
+            "good.example.com",
+            "good.example.com",
+            true,
+        ),
+    ];
+
+    for (excluded, san, host, accepted) in cases {
+        let root_key = KeyPair::generate().expect("key");
+        let mut root_params = CertificateParams::new(vec![]).expect("params");
+        root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root_params
+            .distinguished_name
+            .push(DnType::CommonName, "Wildcard Exclusion Root");
+        root_params.name_constraints = Some(NameConstraints {
+            permitted_subtrees: vec![],
+            excluded_subtrees: vec![GeneralSubtree::DnsName(excluded.into())],
+        });
+        let root = root_params.self_signed(&root_key).expect("root");
+
+        let leaf_key = KeyPair::generate().expect("key");
+        let leaf = CertificateParams::new(vec![san.into()])
+            .expect("params")
+            .signed_by(&leaf_key, &root, &root_key)
+            .expect("leaf");
+
+        let root_der = root.der().to_vec();
+        let leaf_der = leaf.der().to_vec();
+        let root_cert = Certificate::parse(&root_der).expect("root parses");
+        let leaf_cert = Certificate::parse(&leaf_der).expect("leaf parses");
+        let anchors = [TrustAnchor::from_certificate(&root_cert)];
+        let opts = PathOptions {
+            time: NOW,
+            ..PathOptions::default()
+        };
+
+        let ours =
+            verify_peer_certificate(&leaf_cert, &[], &anchors, &ServerName::Dns(host), &opts);
+        assert_eq!(
+            ours.is_ok(),
+            accepted,
+            "excluded {excluded:?}, SAN {san:?}: native engine gave {ours:?}"
+        );
+
+        let mut store = rustls::RootCertStore::empty();
+        store
+            .add(CertificateDer::from(root_der.clone()))
+            .expect("usable anchor");
+        let ee = CertificateDer::from(leaf_der.clone());
+        let theirs = verify_server_cert_signed_by_trust_anchor(
+            &rustls::server::ParsedCertificate::try_from(&ee).expect("parses"),
+            &store,
+            &[],
+            UnixTime::since_unix_epoch(Duration::from_secs(NOW as u64)),
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .all,
+        );
+        assert_eq!(
+            theirs.is_ok(),
+            accepted,
+            "excluded {excluded:?}, SAN {san:?}: rustls gave {theirs:?}"
+        );
+    }
 }
