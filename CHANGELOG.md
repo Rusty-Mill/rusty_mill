@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rb_rlbot_client`** (`crates/apps/rocket_league/crates/rb_rlbot_client`): a blocking RLBot v5 client on `std::net` over `rb_rlbot_wire`: `Connection` (handshake, send, receive with timeout), `run_bots` / `run_hivemind` agent loops that answer pings, and `Environment`. Stage 3 of the native RLBot port (`rlbot/PLAN.md`). `rb_rlbot_wire` gains `DisconnectSignal`, `PingRequest` and `PingResponse`.
 - **`rb_rlbot_wire`** (`crates/apps/rocket_league/crates/rb_rlbot_wire`): the RLBot v5 socket protocol on `rusty_flatbuffers`: framing plus the client and core messages a bot or match runner uses, encodable and decodable. Stage 2 of the native RLBot port.
 - **Design: Dots-style always-on agents** (`docs/design/DOTS-AGENT.md`, PR pending). Design only, approved; composes `rusty_agui`, `rusty_channel`, `rusty_routine`, `adk-*` and `rusty_remind_me` (MCP) with two new crates (`dots-core`, `dots-app`) to be built later. No code.
 - **Merge queue support** (ADR-0009 §8): `ci.yml` runs on `merge_group`; `ci_plan.py` scopes a queue entry against `merge_group.base_sha` (`--merge-base`) instead of a full sweep; concurrency stays event-isolated (pinned by tests). The ADR carries the ruleset checklist (`required-gate`, merge commit, group size 1, build concurrency 3, 120-minute timeout, empty bypass list). The queue becomes active when that ruleset is applied by hand.

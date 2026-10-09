@@ -13,6 +13,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rb_rlbot_client: blocking RLBot client (RLBot port stage 3) (pending review)
+
+- **Added:** `crates/apps/rocket_league/crates/rb_rlbot_client`: `Connection` (connect, send, receive with or without a timeout, handshake), `run_bots` and `run_hivemind` (handshake, `InitComplete`, packet loop, ping replies, clean exit on disconnect), and `Environment` for the `RLBOT_*` variables. `std::net` only, one thread; depends on `rb_rlbot_wire` alone.
+- **Added (`rb_rlbot_wire`):** `CoreMessage::DisconnectSignal`, `CoreMessage::PingRequest` and `InterfaceMessage::PingResponse` (a shared `Ping { cookie }`), with `From` conversions into `InterfaceMessage`. The ping and disconnect bytes are pinned against `rlbot_flat` fixtures and by `planus` reading what this crate encodes. Core pings used to arrive as `CoreMessage::Other(9)`; they are now `PingRequest`, so `Other(9)` is gone.
+- **Tested:** 20 tests against an in-process fake core (split and coalesced frames, timeouts that keep a half frame, handshake in any order, ping replies, garbage frames, every way a connection ends, car-order of replies), 25 repeated runs without a failure.
+- **Known limitation:** nothing here has talked to the real core; stage 4 does that once. Comms, ball prediction and rendering callbacks of the `rlbot` crate are not carried over (nothing in `rb_tape_bot` uses them).
+
+---
+
 ## 2026-10-09 - rk-kernel: rk-observe is a dev-dependency (pending review)
 
 - **Fixed:** `cargo-shear` failed on `main` with `misplaced dependency rk-observe`. `rk-kernel` only names `rk_observe::ToolOutcome` in a doc comment and in `tests/loop_test.rs`, so the dependency moves to `[dev-dependencies]` and the doc comment's intra-doc link becomes plain code (a link would not resolve without the dependency). No code change; `Cargo.lock` unchanged.
