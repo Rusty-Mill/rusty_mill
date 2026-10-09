@@ -385,10 +385,36 @@ and client authentication. Resumption is the next best: the engine already issue
 tickets, and `-resume-count` alone gates about 265 tests; the shim would need to repeat the connection
 in one process.
 
+## Stage 8: BoGo resumption
+
+`-resume-count`, and BoGo's per-connection flags (`-on-initial-X` for the first connection,
+`-on-resume-X` for later ones): the shim now runs every connection of a scenario in one process, keeps
+the tickets a client was given, offers the oldest on the next connection, and gives a server a ticket key
+that outlives a connection (`-no-ticket` turns tickets off). **645 passed, 0 failed** (was 590), 264
+disabled by name.
+
+BoGo found four TLS 1.3 server defects the in-repo resumption tests never reached, each now fixed with a
+test that fails without it (mutation-checked):
+
+- **A PSK offered without `psk_key_exchange_modes` was ignored**; RFC 8446 §4.2.9 says abort with
+  `missing_extension`, whether or not the server would resume.
+- **Tickets were issued to a client that could not redeem them** (offered no `psk_dhe_ke`).
+- **A retried ClientHello could drop every PSK** the first one offered; it may drop unusable ones, not all
+  (`missing_extension`).
+- **Binder count mismatch was a `decode_error`**; with a non-empty binder list of the wrong length it is
+  `illegal_parameter`, while an empty list stays a decode error.
+
+47 newly runnable tests fail by design and are disabled with reasons: TLS 1.2 resumption (session IDs and
+tickets; none exists), 1.2 without extended master secret, ECH, BoringSSL's GREASE ticket extension, and
+TLS 1.0/1.1 variants.
+
+Still unrun: credentials, verify callbacks, OCSP, ALPN and client authentication (see the log with
+`BOGO_UNIMPLEMENTED_LOG`).
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could
 produce (rustls and OpenSSL both directions, BoGo, mutation, fuzz, CI). Whether that meets the bar for
 the seam is theirs to set. If it does, stage 5 of the track is wiring (ALPN, SNI certificate selection,
 1.2 resumption are the known gaps) and an ADR superseding ADR-0002. If the bar includes more of BoGo,
-the next increment is shim resumption (`-resume-count`), then credentials and client certificates.
+the next increment is client certificates and credentials (`-new-x509-credential`, `-verify-fail`).

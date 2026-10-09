@@ -480,7 +480,8 @@ pub(super) fn handshake_alert(error: &HandshakeError) -> AlertDescription {
     match error {
         HandshakeError::UnexpectedCompression
         | HandshakeError::UnexpectedCurveType(_)
-        | HandshakeError::DuplicateKeyShare(_) => AlertDescription::ILLEGAL_PARAMETER,
+        | HandshakeError::DuplicateKeyShare(_)
+        | HandshakeError::PskBinderCountMismatch => AlertDescription::ILLEGAL_PARAMETER,
         _ => AlertDescription::DECODE_ERROR,
     }
 }

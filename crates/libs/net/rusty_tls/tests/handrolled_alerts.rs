@@ -171,6 +171,10 @@ fn what_a_server_tells_a_client() {
             Some(A::ILLEGAL_PARAMETER),
         ),
         (
+            ServerError::Handshake(HandshakeError::PskBinderCountMismatch),
+            Some(A::ILLEGAL_PARAMETER),
+        ),
+        (
             ServerError::Kx(KxError::BadPeerKey),
             Some(A::ILLEGAL_PARAMETER),
         ),

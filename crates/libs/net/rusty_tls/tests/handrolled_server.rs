@@ -693,6 +693,11 @@ struct TestClient {
 
 impl TestClient {
     fn new() -> Self {
+        Self::with_psk_modes(None)
+    }
+
+    /// As [`Self::new`], also sending `psk_key_exchange_modes` with this body.
+    fn with_psk_modes(psk_modes: Option<&[u8]>) -> Self {
         use rusty_tls::handrolled::handshake::extension;
         use rusty_tls::handrolled::wire::Writer;
 
@@ -744,6 +749,15 @@ impl TestClient {
                 },
             ],
         };
+        let mut hello = hello;
+        if let Some(modes) = &psk_modes {
+            hello
+                .extensions
+                .push(rusty_tls::handrolled::handshake::Extension {
+                    typ: extension::PSK_KEY_EXCHANGE_MODES,
+                    data: modes,
+                });
+        }
 
         Self {
             kx,
@@ -2996,4 +3010,171 @@ fn a_flood_of_change_cipher_specs_is_cut_off() {
     assert_eq!(feed(&within), Ok(Vec::new()));
     let over = vec![ccs; MAX_EMPTY_RECORDS as usize + 1];
     assert_eq!(feed(&over), Err(ServerError::Flood(Flood::EmptyRecords)));
+}
+
+/// A server that issues tickets, finishing a handshake with a client that
+/// offered these `psk_key_exchange_modes`; the bytes the server sent after the
+/// client's Finished.
+fn with_ticketing_server<T>(f: impl FnOnce(&mut ServerHandshake<'_>) -> T) -> T {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = Tickets {
+        keys: TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        now: options().time,
+        lifetime: 7200,
+        max_age_skew_ms: None,
+        count: 1,
+    };
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+    };
+    f(&mut ServerHandshake::new(&config))
+}
+
+fn tickets_after_handshake(modes: &[u8]) -> Vec<u8> {
+    with_ticketing_server(|server| {
+        let client = TestClient::with_psk_modes(Some(modes));
+        let mut flight = server.read_record(&client.hello_record()).expect("flight");
+        let records = take_records(&mut flight);
+        let finished = client.finished(&records, false);
+        server
+            .read_record(&finished)
+            .expect("the handshake completes")
+    })
+}
+
+/// RFC 8446 section 4.2.9: a ticket the client said it cannot use is not sent
+/// (BoGo TLS13-ExpectNoSessionTicketOnBadKEMode-Server). `psk_dhe_ke` is the
+/// only mode this server resumes with.
+#[test]
+fn no_ticket_is_sent_to_a_client_that_cannot_redeem_one() {
+    // psk_dhe_ke(1) offered: tickets follow the handshake. The control.
+    assert!(
+        !tickets_after_handshake(&[1, 1]).is_empty(),
+        "a client that offered psk_dhe_ke got no ticket"
+    );
+    // psk_ke(0) alone, and a list with only an unknown mode: none.
+    assert!(tickets_after_handshake(&[1, 0]).is_empty());
+    assert!(tickets_after_handshake(&[1, 0x1a]).is_empty());
+}
+
+/// RFC 8446 section 4.2.9: offering a PSK without saying how it may be used is
+/// a missing extension, whether or not this server would have resumed.
+#[test]
+fn a_psk_offer_without_key_exchange_modes_is_a_missing_extension() {
+    use rusty_tls::handrolled::handshake::extension;
+
+    // A hello that ends in a pre_shared_key and has no modes extension.
+    let mut psk = vec![0x00, 0x08, 0x00, 0x02, 0xaa, 0xbb, 0x00, 0x00, 0x00, 0x00]; // one identity
+    psk.extend_from_slice(&[0x00, 0x21, 0x20]); // one 32-octet binder
+    psk.extend_from_slice(&[0u8; 32]);
+    let record = client_hello(Edit {
+        remove: vec![extension::PSK_KEY_EXCHANGE_MODES],
+        append: vec![(extension::PRE_SHARED_KEY, psk)],
+        ..Default::default()
+    });
+    assert_eq!(
+        refuse(&record),
+        ServerError::MissingExtension(extension::PSK_KEY_EXCHANGE_MODES)
+    );
+}
+
+/// RFC 8446 section 4.1.2 lets the retried hello drop PSKs the server cannot
+/// use, but not all of them (BoGo Resume-Server-OmitAllPSKsOnSecondClientHello).
+#[test]
+fn a_retried_hello_cannot_drop_every_psk() {
+    let psk = || {
+        let mut psk = vec![0x00, 0x08, 0x00, 0x02, 0xaa, 0xbb, 0x00, 0x00, 0x00, 0x00];
+        psk.extend_from_slice(&[0x00, 0x21, 0x20]);
+        psk.extend_from_slice(&[0u8; 32]);
+        psk
+    };
+    let first = client_hello(Edit {
+        replace: vec![(extension::KEY_SHARE, vec![0x00, 0x00])],
+        append: vec![(extension::PRE_SHARED_KEY, psk())],
+        ..Edit::default()
+    });
+    // The same client, now with a share the server can use.
+    let fresh = client_hello(Edit::default());
+    let parsed = messages(&fresh[5..]).expect("parses");
+    let fresh = ClientHello::parse(parsed[0].body).expect("parses");
+    let share = find(&fresh.extensions, extension::KEY_SHARE)
+        .expect("a share")
+        .to_vec();
+
+    let keeps = re_edit(
+        &first,
+        Edit {
+            replace: vec![(extension::KEY_SHARE, share.clone())],
+            ..Edit::default()
+        },
+    );
+    after_a_retry(&first, &keeps).expect("a retried hello that keeps its PSK is accepted");
+
+    let drops = re_edit(
+        &first,
+        Edit {
+            remove: vec![extension::PRE_SHARED_KEY],
+            replace: vec![(extension::KEY_SHARE, share)],
+            ..Edit::default()
+        },
+    );
+    let error = after_a_retry(&first, &drops).expect_err("every PSK was dropped");
+    assert_eq!(
+        error,
+        ServerError::MissingExtension(extension::PRE_SHARED_KEY)
+    );
+    assert_eq!(error.alert(), Some(AlertDescription::MISSING_EXTENSION));
+}
+
+/// A `pre_shared_key` whose binder list is empty cannot be encoded at all
+/// (RFC 8446 section 4.2.11: `binders<33..2^16-1>`), so it is a decode error;
+/// one with the wrong number of binders is a well-formed lie, an illegal
+/// parameter (BoGo Resume-Server-NoPSKBinder, -ExtraPSKBinder).
+#[test]
+fn a_psk_offer_with_the_wrong_binders_is_refused_by_the_right_alert() {
+    let hello_with = |binders: &[u8]| {
+        let mut psk = vec![0x00, 0x08, 0x00, 0x02, 0xaa, 0xbb, 0x00, 0x00, 0x00, 0x00];
+        psk.extend_from_slice(binders);
+        client_hello(Edit {
+            append: vec![(extension::PRE_SHARED_KEY, psk)],
+            ..Edit::default()
+        })
+    };
+    let one_binder = || {
+        let mut b = vec![0x20];
+        b.extend_from_slice(&[0u8; 32]);
+        b
+    };
+
+    // No binders at all.
+    let error = with_ticketing_server(|s| s.read_record(&hello_with(&[0x00, 0x00])))
+        .expect_err("an empty binder list");
+    assert_eq!(
+        error.alert(),
+        Some(AlertDescription::DECODE_ERROR),
+        "{error:?}"
+    );
+
+    // Two binders for one identity.
+    let mut two = one_binder();
+    two.extend(one_binder());
+    let mut body = (two.len() as u16).to_be_bytes().to_vec();
+    body.extend(two);
+    let error = with_ticketing_server(|s| s.read_record(&hello_with(&body)))
+        .expect_err("two binders for one identity");
+    assert_eq!(
+        error.alert(),
+        Some(AlertDescription::ILLEGAL_PARAMETER),
+        "{error:?}"
+    );
 }

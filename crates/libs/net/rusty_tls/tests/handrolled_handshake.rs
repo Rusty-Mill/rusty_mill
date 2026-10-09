@@ -769,7 +769,9 @@ fn an_offer_with_mismatched_lists_is_refused() {
     assert!(
         matches!(
             PresharedKeyOffer::parse(&writer.into_vec()),
-            Err(HandshakeError::PskOffer(_))
+            // Its own error, not a decode error: the lists parse fine and
+            // disagree, which RFC 8446 4.2.11 and BoGo want as illegal_parameter.
+            Err(HandshakeError::PskBinderCountMismatch)
         ),
         "an offer with two binders for one identity was accepted"
     );

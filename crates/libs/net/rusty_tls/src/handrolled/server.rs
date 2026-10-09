@@ -617,6 +617,10 @@ struct Negotiated {
     /// what its CertificateVerify signs. Captured when that message is added
     /// rather than recomputed later.
     client_certificate_transcript: Vec<u8>,
+    /// Whether the client offered `psk_dhe_ke`, the only mode this server
+    /// resumes with. A ticket it could never redeem is not sent (RFC 8446
+    /// section 4.2.9; BoGo `TLS13-ExpectNoSessionTicketOnBadKEMode-Server`).
+    can_resume: bool,
 }
 
 /// The message a server will accept next from the client.
@@ -664,6 +668,10 @@ struct Retrying {
     transcript_head: Vec<u8>,
     random: Vec<u8>,
     session_id: Vec<u8>,
+    /// Whether the first hello carried `pre_shared_key`. The second must too:
+    /// it may drop PSKs the server's suite cannot use, but not all of them
+    /// (BoGo `Resume-Server-OmitAllPSKsOnSecondClientHello`).
+    offered_psk: bool,
 }
 
 enum State {
@@ -1058,12 +1066,20 @@ impl ServerHandshake<'_> {
             _ => return Err(ServerError::PskOfferNotLast),
         }
 
+        // §4.2.9: a client that offers a PSK MUST say how it may be used, and a
+        // server MUST abort if it did not. Before the `tickets` check below,
+        // for the same reason as the check above: the hello is malformed
+        // whether or not this server resumes anything.
+        let Some(modes) = find(&hello.extensions, extension::PSK_KEY_EXCHANGE_MODES) else {
+            return Err(ServerError::MissingExtension(
+                extension::PSK_KEY_EXCHANGE_MODES,
+            ));
+        };
         let Some(tickets) = self.config.tickets else {
             return Ok(None);
         };
-        match find(&hello.extensions, extension::PSK_KEY_EXCHANGE_MODES) {
-            Some(modes) if offers_psk_dhe_ke(modes) => {}
-            _ => return Ok(None),
+        if !offers_psk_dhe_ke(modes) {
+            return Ok(None);
         }
 
         let offer = PresharedKeyOffer::parse(data)?;
@@ -1347,6 +1363,7 @@ impl ServerHandshake<'_> {
             transcript_head,
             random: hello.random.to_vec(),
             session_id: hello.session_id.to_vec(),
+            offered_psk: find(&hello.extensions, extension::PRE_SHARED_KEY).is_some(),
         }));
         Ok(out)
     }
@@ -1395,6 +1412,9 @@ impl ServerHandshake<'_> {
         }
         if !hello.cipher_suites.contains(&retrying.suite.0) {
             return Err(ServerError::RetriedHelloChangedIdentity);
+        }
+        if retrying.offered_psk && find(&hello.extensions, extension::PRE_SHARED_KEY).is_none() {
+            return Err(ServerError::MissingExtension(extension::PRE_SHARED_KEY));
         }
 
         // The signature scheme is re-selected rather than remembered, because
@@ -1652,6 +1672,8 @@ impl ServerHandshake<'_> {
             // which is the gap `rusty_tls#43` closed.
             client_certificates: psk.map(|psk| psk.client_certificates).unwrap_or_default(),
             client_certificate_transcript: Vec::new(),
+            can_resume: find(&hello.extensions, extension::PSK_KEY_EXCHANGE_MODES)
+                .is_some_and(offers_psk_dhe_ke),
         }));
         Ok(out)
     }
@@ -1840,7 +1862,7 @@ impl ServerHandshake<'_> {
         let Some(tickets) = self.config.tickets else {
             return Ok(Vec::new());
         };
-        if tickets.count == 0 {
+        if tickets.count == 0 || !negotiated.can_resume {
             return Ok(Vec::new());
         }
 

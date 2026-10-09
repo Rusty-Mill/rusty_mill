@@ -86,6 +86,10 @@ pub enum HandshakeError {
     /// while sitting somewhere else is exactly the case a binder would fail to
     /// cover.
     PskOffer(&'static str),
+    /// A `pre_shared_key` offer with a different number of binders than
+    /// identities. Well-formed, but a lie about what was offered, so RFC 8446
+    /// section 4.2.11 treats it as an illegal parameter, not a decode error.
+    PskBinderCountMismatch,
     /// A TLS 1.2 `ServerKeyExchange` named a curve type other than
     /// `named_curve(3)`.
     ///
@@ -131,6 +135,9 @@ impl core::fmt::Display for HandshakeError {
             Self::DuplicateExtension(id) => write!(f, "extension {id} appears more than once"),
             Self::Empty(what) => write!(f, "{what} is empty"),
             Self::PskOffer(why) => write!(f, "malformed pre_shared_key offer: {why}"),
+            Self::PskBinderCountMismatch => {
+                f.write_str("the binder count does not match the identity count")
+            }
             Self::UnexpectedCurveType(typ) => {
                 write!(
                     f,
@@ -666,10 +673,13 @@ impl<'a> PresharedKeyOffer<'a> {
         if identities.is_empty() {
             return Err(HandshakeError::PskOffer("no identities"));
         }
+        // An empty binder list is not a count mismatch but a list that cannot
+        // be encoded at all (it is `<33..2^16-1>`): a decode error.
+        if binders.is_empty() {
+            return Err(HandshakeError::PskOffer("no binders"));
+        }
         if identities.len() != binders.len() {
-            return Err(HandshakeError::PskOffer(
-                "the binder count does not match the identity count",
-            ));
+            return Err(HandshakeError::PskBinderCountMismatch);
         }
 
         Ok(Self {

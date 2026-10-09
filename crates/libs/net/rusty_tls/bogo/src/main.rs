@@ -22,10 +22,10 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::exit;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rusty_tls::handrolled::client::{
-    CipherSuite, ClientConfig, ClientError, ClientHandshake, Incoming,
+    CipherSuite, ClientConfig, ClientError, ClientHandshake, Incoming, Resumption, Session,
 };
 use rusty_tls::handrolled::client12::{CipherSuite12, ClientConfig12, ClientHandshake12, Incoming12};
 use rusty_tls::handrolled::kx::NamedGroup;
@@ -34,7 +34,8 @@ use rusty_tls::handrolled::negotiate::{
     ClientConfigBoth, ClientHandshakeBoth, Established, ServerConfigBoth, ServerHandshakeBoth,
 };
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
-use rusty_tls::handrolled::server::{ServerConfig, ServerHandshake};
+use rusty_tls::handrolled::server::{ServerConfig, ServerHandshake, Tickets};
+use rusty_tls::handrolled::ticket::{TicketKey, TicketKeys};
 use rusty_tls::handrolled::server12::{ServerConfig12, ServerHandshake12};
 use rusty_tls::handrolled::sign::SigningKey;
 use rusty_tls::handrolled::x509::Certificate;
@@ -95,19 +96,34 @@ struct Config {
     /// `-curves`, in order; empty means the default list.
     curves: Vec<NamedGroup>,
     check_close_notify: bool,
+    resume_count: usize,
+    no_ticket: bool,
 }
 
 const TLS12: u16 = 0x0303;
 const TLS13: u16 = 0x0304;
 
-fn parse_args() -> Config {
+/// The flags for connection `index`. BoGo's `-on-initial-X` and `-on-resume-X`
+/// apply to the first connection and to every later one; any other flag to all.
+fn parse_args(index: usize) -> Config {
     let mut config = Config {
         min_version: 0x0301,
         max_version: TLS13,
         ..Config::default()
     };
+    let mut ignored = Config::default();
     let mut args = std::env::args().skip(1);
-    while let Some(flag) = args.next() {
+    while let Some(raw) = args.next() {
+        let (flag, applies) = if let Some(rest) = raw.strip_prefix("-on-initial-") {
+            (format!("-{rest}"), index == 0)
+        } else if let Some(rest) = raw.strip_prefix("-on-resume-") {
+            (format!("-{rest}"), index > 0)
+        } else {
+            (raw, true)
+        };
+        // A flag for another connection is still parsed, so its value is
+        // consumed, but into a config nobody reads.
+        let cfg = if applies { &mut config } else { &mut ignored };
         let mut value = |name: &str| {
             args.next()
                 .unwrap_or_else(|| fail(format!("{name} needs a value")))
@@ -118,27 +134,29 @@ fn parse_args() -> Config {
                 println!("No");
                 exit(0)
             }
-            "-port" => config.port = value("-port").parse().unwrap_or_else(|_| fail("bad port")),
-            "-shim-id" => config.shim_id = value("-shim-id").parse().unwrap_or(0),
-            "-ipv6" => config.ipv6 = true,
-            "-server" => config.server = true,
-            "-cert-file" => config.cert_file = Some(value("-cert-file")),
-            "-key-file" => config.key_file = Some(value("-key-file")),
-            "-trust-cert" => config.trust_cert = Some(value("-trust-cert")),
-            "-host-name" => config.host_name = Some(value("-host-name")),
-            "-min-version" => config.min_version = value("-min-version").parse().unwrap_or(0),
-            "-max-version" => config.max_version = value("-max-version").parse().unwrap_or(0),
-            "-expect-version" => config.expect_version = value("-expect-version").parse().ok(),
-            "-no-tls1" => config.no_tls[0] = true,
-            "-no-tls11" => config.no_tls[1] = true,
-            "-no-tls12" => config.no_tls[2] = true,
-            "-no-tls13" => config.no_tls[3] = true,
+            "-port" => cfg.port = value("-port").parse().unwrap_or_else(|_| fail("bad port")),
+            "-shim-id" => cfg.shim_id = value("-shim-id").parse().unwrap_or(0),
+            "-ipv6" => cfg.ipv6 = true,
+            "-server" => cfg.server = true,
+            "-cert-file" => cfg.cert_file = Some(value("-cert-file")),
+            "-key-file" => cfg.key_file = Some(value("-key-file")),
+            "-trust-cert" => cfg.trust_cert = Some(value("-trust-cert")),
+            "-host-name" => cfg.host_name = Some(value("-host-name")),
+            "-min-version" => cfg.min_version = value("-min-version").parse().unwrap_or(0),
+            "-max-version" => cfg.max_version = value("-max-version").parse().unwrap_or(0),
+            "-expect-version" => cfg.expect_version = value("-expect-version").parse().ok(),
+            "-no-tls1" => cfg.no_tls[0] = true,
+            "-no-tls11" => cfg.no_tls[1] = true,
+            "-no-tls12" => cfg.no_tls[2] = true,
+            "-no-tls13" => cfg.no_tls[3] = true,
             // The runner's asynchronous-callback modes change *how* a stack
             // gets its answers, not what it must conclude; this shim has no
             // callbacks, so there is nothing to defer and the outcome is the
             // one the runner checks.
             "-async" => {}
-            "-check-close-notify" => config.check_close_notify = true,
+            "-resume-count" => cfg.resume_count = value("-resume-count").parse().unwrap_or(0),
+            "-no-ticket" => cfg.no_ticket = true,
+            "-check-close-notify" => cfg.check_close_notify = true,
             "-curves" => {
                 let id = value("-curves").parse().unwrap_or(0);
                 // A group the engine lacks (P-521, the hybrids) must not be
@@ -146,7 +164,7 @@ fn parse_args() -> Config {
                 // negotiation than the one it names.
                 let group = NamedGroup::from_u16(id)
                     .unwrap_or_else(|| unimplemented(&format!("curve {id}")));
-                config.curves.push(group);
+                cfg.curves.push(group);
             }
             other => unimplemented(&format!("flag {other}")),
         }
@@ -371,6 +389,7 @@ fn run_handshake(stream: &mut TcpStream, mut handshake: Box<dyn Handshake + '_>)
 
 enum Got {
     Data(Vec<u8>),
+    Tickets(Vec<Session>),
     Reply(Vec<u8>),
     Closed,
     Nothing,
@@ -382,6 +401,7 @@ fn read_app(connection: &mut Established, record: &[u8]) -> Result<Got, ClientEr
             Incoming::Application(data) => Got::Data(data),
             Incoming::Reply(bytes) => Got::Reply(bytes),
             Incoming::Closed => Got::Closed,
+            Incoming::Tickets(sessions) => Got::Tickets(sessions),
             _ => Got::Nothing,
         },
         Established::Tls12(c) => match c.read(record)? {
@@ -410,7 +430,12 @@ fn close(connection: &mut Established) -> Result<Vec<u8>, String> {
     }
 }
 
-fn exchange(config: &Config, stream: &mut TcpStream, mut connection: Established) {
+fn exchange(
+    config: &Config,
+    stream: &mut TcpStream,
+    mut connection: Established,
+    sessions: &mut Vec<(Session, Instant)>,
+) {
     let mut closed = false;
     while let Some(record) = read_record(stream) {
         match read_app(&mut connection, &record) {
@@ -422,6 +447,10 @@ fn exchange(config: &Config, stream: &mut TcpStream, mut connection: Established
                 }
             }
             Ok(Got::Reply(bytes)) => send(stream, &bytes),
+            Ok(Got::Tickets(new)) => {
+                let now = Instant::now();
+                sessions.extend(new.into_iter().map(|s| (s, now)));
+            }
             Ok(Got::Closed) => {
                 closed = true;
                 break;
@@ -446,15 +475,23 @@ fn exchange(config: &Config, stream: &mut TcpStream, mut connection: Established
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let config = parse_args();
-    let (tls12, tls13) = versions(&config);
-    if !tls12 && !tls13 {
-        unimplemented("a scenario that allows neither TLS 1.2 nor 1.3");
-    }
-    if config.server {
-        serve(&config, tls12, tls13);
-    } else {
-        connect_client(&config, tls12, tls13);
+    // One process runs every connection of a scenario: a resumption test is
+    // the same shim opening a second connection and offering what the first
+    // one was given, so what it was given has to outlive a connection.
+    let resume_count = parse_args(0).resume_count;
+    let ticket_key = TicketKey::generate().unwrap_or_else(|e| fail(e));
+    let mut sessions = Vec::new();
+    for index in 0..=resume_count {
+        let config = parse_args(index);
+        let (tls12, tls13) = versions(&config);
+        if !tls12 && !tls13 {
+            unimplemented("a scenario that allows neither TLS 1.2 nor 1.3");
+        }
+        if config.server {
+            serve(&config, tls12, tls13, &ticket_key);
+        } else {
+            connect_client(&config, tls12, tls13, &mut sessions);
+        }
     }
 }
 
@@ -471,7 +508,7 @@ fn expect_version(config: &Config, connection: &Established) {
     }
 }
 
-fn serve(config: &Config, tls12: bool, tls13: bool) {
+fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
     let cert = config
         .cert_file
         .as_deref()
@@ -480,13 +517,23 @@ fn serve(config: &Config, tls12: bool, tls13: bool) {
     let chain = certificates(cert);
     let key = signing_key(key_file);
 
+    let tickets = Tickets {
+        keys: TicketKeys {
+            current: ticket_key,
+            previous: &[],
+        },
+        now: now(),
+        lifetime: 3600,
+        max_age_skew_ms: None,
+        count: 1,
+    };
     let server_13 = ServerConfig {
         certificates: &chain,
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups: groups(config),
         client_auth: None,
-        tickets: None,
+        tickets: (!config.no_ticket).then_some(&tickets),
     };
     let server_12 = ServerConfig12 {
         certificates: &chain,
@@ -512,10 +559,15 @@ fn serve(config: &Config, tls12: bool, tls13: bool) {
     };
     let connection = run_handshake(&mut stream, handshake);
     expect_version(config, &connection);
-    exchange(config, &mut stream, connection);
+    exchange(config, &mut stream, connection, &mut Vec::new());
 }
 
-fn connect_client(config: &Config, tls12: bool, tls13: bool) {
+fn connect_client(
+    config: &Config,
+    tls12: bool,
+    tls13: bool,
+    sessions: &mut Vec<(Session, Instant)>,
+) {
     if config.cert_file.is_some() || config.key_file.is_some() {
         unimplemented("a client certificate");
     }
@@ -531,6 +583,9 @@ fn connect_client(config: &Config, tls12: bool, tls13: bool) {
     let anchors: Vec<TrustAnchor<'_>> = parsed.iter().map(TrustAnchor::from_certificate).collect();
     let name = config.host_name.as_deref().unwrap_or("test");
 
+    // A ticket is single-use (RFC 8446 section 4.6.1): take the oldest, so the
+    // next connection is offered a different one.
+    let offer = (!sessions.is_empty()).then(|| sessions.remove(0));
     let tls13_config = || ClientConfig {
         server_name: ServerName::Dns(name),
         anchors: &anchors,
@@ -538,7 +593,10 @@ fn connect_client(config: &Config, tls12: bool, tls13: bool) {
         groups: groups(config),
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
-        resumption: None,
+        resumption: offer.as_ref().map(|(session, at)| Resumption {
+            session,
+            age_ms: u32::try_from(at.elapsed().as_millis()).unwrap_or(u32::MAX),
+        }),
     };
     let tls12_config = ClientConfig12 {
         server_name: ServerName::Dns(name),
@@ -567,5 +625,5 @@ fn connect_client(config: &Config, tls12: bool, tls13: bool) {
     send(&mut stream, &hello);
     let connection = run_handshake(&mut stream, handshake);
     expect_version(config, &connection);
-    exchange(config, &mut stream, connection);
+    exchange(config, &mut stream, connection, sessions);
 }
