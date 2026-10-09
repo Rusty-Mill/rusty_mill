@@ -39,8 +39,8 @@ into exactly one:
 | Tier | Rule | Examples in this workspace |
 | --- | --- | --- |
 | **S -- Sovereign** | No external normal or build dependencies. Dev-only external dependencies are allowed as independent test oracles and must not ship. | `rusty_std`, `rusty_libc`, `rusty_wire`, `rusty_json`, `rusty_regx` |
-| **T -- Transitional** | External dependencies are present but are meant to be replaced or narrowed; each one needs an owner, a rationale, a first-party seam consumers code against, and a tracked replacement/parity milestone. | `rusty_request`'s pluggable async backend, crates mid-migration off `thiserror`/`uuid`/`base64`/`url` per issues #119-#121 |
-| **A -- Adapter/application** | External integration is allowed behind a first-party boundary and is not expected to ever reach zero dependencies; it must not be marketed as dependency-free. | `rusty_tls` (rustls default path), `rusty_sqlite` (bundled SQLite), SQLx-based database adapters, Tauri desktop shells, `rmcp`-based MCP crates |
+| **T -- Transitional** | External dependencies are present but are meant to be replaced or narrowed; each one needs an owner, a rationale, a first-party seam consumers code against, and a tracked replacement/parity milestone. | `rusty_request`'s pluggable async backend, crates mid-migration off `thiserror`/`uuid`/`base64`/`url` per issues #119-#121, the `rmcp`-based MCP crates (see Amendment 1) |
+| **A -- Adapter/application** | External integration is allowed behind a first-party boundary and is not expected to ever reach zero dependencies; it must not be marketed as dependency-free. | `rusty_tls` (rustls default path), `rusty_sqlite` (bundled SQLite), SQLx-based database adapters, Tauri desktop shells |
 
 A crate's tier is a claim about its own manifest, not a judgment on the
 crates it depends on within the workspace -- a Tier A crate may depend on
@@ -109,3 +109,17 @@ deciding which tier it belongs to.
   or an explicitly scoped shipping profile of one, can be described as
   sovereign; the workspace overall remains, and is expected to remain, a
   sovereign core surrounded by transitional and adapter-layer crates.
+
+## Amendment 1 (2026-10-09): the MCP crates move from Tier A to Tier T
+
+Status: Accepted (owner decision).
+
+The original table listed "`rmcp`-based MCP crates" as Tier A, permanent. That is withdrawn. The MCP crates (`rusty-mcp`, `rusty-mcp-client`, `rusty-mcp-demo` and their consumers: `rk-app`, `rk-mcp`, `adk-mcp`, `remind_me_remote`, `rp-mcp`, `agentgateway-mcp`, `rusty_homelab_mcp`) are **Tier T**, with these terms:
+
+- **Owner:** the repository owner.
+- **Seam:** consumers code against first-party crates only (`rusty_mcp_proto`, `rusty-mcp`, `rusty-mcp-client`); no new direct `rmcp` use outside those crates.
+- **What is replaced, not only `rmcp`:** the stack under it as well: `axum`, `tokio`, `reqwest`, `clap`, `tracing-subscriber`, `jsonwebtoken`, replaced by `rusty_json`, `rusty_tokio`, `rusty_http`/`rusty_serve`, `rusty_request`, `rusty_oauth` (ES256 to be added) and `rusty_tls`.
+- **Milestones:** the steps A2 to A6 in `docs/research/MCP-NATIVE-PLAN.md`: native protocol crate with `rmcp` kept only as a dev-dependency wire-format oracle (permitted by the S-tier rule); server on `rusty_serve` (blocking, thread per connection; stateless Streamable HTTP and stdio); client on `rusty_request`/`rusty_tls`; consumers moved one at a time; `rmcp` removed.
+- **Tool schemas:** a small first-party schema builder first; a derive macro is deferred until there is a second real call site.
+- **TLS:** MCP crates depend on `rusty_tls`, never on `rustls`, `reqwest` or `native-tls`. `rusty_tls` itself stays Tier A until its separate track decides otherwise (its own ADR-0002 keeps the native engine permanently non-default today).
+- **Done when:** `rmcp` appears only in `[dev-dependencies]`, and each MCP crate is Tier S or states why not.
