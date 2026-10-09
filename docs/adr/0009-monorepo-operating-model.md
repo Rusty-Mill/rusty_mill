@@ -144,8 +144,13 @@ queue waits for a check that never starts.
 - [ ] **Require merge queue**, with:
   - [ ] Merge method: **Merge commit**.
   - [ ] Build concurrency: **3** (entries build speculatively in parallel).
-  - [ ] Minimum group size: **1**; Maximum group size: **1** (no batching:
-        one flaky test would eject a whole batch).
+        Each speculative build sits on top of the entries queued ahead of it,
+        so a later entry's CI also covers the earlier PRs' changes.
+  - [ ] Minimum group size: **1**; Maximum group size: **1**. This sets how
+        many PRs are merged together at the end (no batching: one flaky test
+        would eject the whole batch). It does **not** isolate what a queue
+        run tests: with build concurrency above 1, a run's changed-file list
+        spans everything between its event base and its head.
   - [ ] Wait time to meet minimum group size: leave the default (unused at 1).
   - [ ] Status check timeout: **120 minutes** (the default 60 is inside the
         full-sweep Windows runtime).
@@ -153,9 +158,11 @@ queue waits for a check that never starts.
 - [ ] Repository Settings > General > Pull Requests: Allow merge commits
       **on**; squash and rebase **off** (matches CONTRIBUTING).
 
-Check after applying: open a trivial docs PR, "Merge when ready", and confirm
-a `ci.yml` run for `merge_group` appears, the `plan` job lists only that PR's
-files, `required-gate` passes, and the result is a merge commit on `main`.
+Check after applying: with an empty queue, open a trivial docs PR, "Merge
+when ready", and confirm a `ci.yml` run for `merge_group` appears, the `plan`
+job's changed files are that PR's (with other PRs already queued, expect their
+files too), `required-gate` passes, and the result is a merge commit on
+`main`.
 Rollback: turn off "Require merge queue" in the ruleset (queued entries are
 dropped, nothing merges), or set the ruleset to Disabled temporarily.
 
