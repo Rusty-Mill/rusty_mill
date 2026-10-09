@@ -7,14 +7,12 @@
 //! collision meshes cost far more to build than to copy, and a sweep or a
 //! policy resets thousands of times.
 
+pub mod chaser;
 pub mod flow;
 
-use flow::{Flow, MatchState, Phase, Transition};
+use flow::{ball_met_floor, Flow, MatchState, Phase, Transition, BALL_FLOOR_CONTACT_HEIGHT};
 use rb_domain::{ControllerInput, PhysicsFrame, Vec3};
 use rb_physics_bullet::{CarBallTuning, PhysicsWorld, RigidBody};
-
-/// Height of the ball's centre where it touches the floor (uu).
-const BALL_FLOOR_CONTACT_HEIGHT: f32 = 93.2;
 
 /// Seconds per tick: the game's 120 Hz physics rate.
 pub const TICK_SECS: f32 = 1.0 / 120.0;
@@ -31,6 +29,10 @@ pub struct Env {
     flow: Option<Flow>,
     /// The spawn slots (0 to 4) of the next kickoff, car by car, if given.
     kickoff_slots: Option<Vec<usize>>,
+    /// Ticks of a goal replay (the game's vary), if not the usual.
+    replay_ticks: Option<u32>,
+    /// Ticks of play in a match, if it has a clock.
+    match_ticks: Option<i64>,
     /// Kickoffs started so far, which rotates the default slots.
     kickoffs: usize,
 }
@@ -50,6 +52,8 @@ impl Env {
             boost_pads: true,
             flow: None,
             kickoff_slots: None,
+            replay_ticks: None,
+            match_ticks: None,
             kickoffs: 0,
         }
     }
@@ -98,7 +102,7 @@ impl Env {
             self.world.set_car_team(index, *team);
         }
         if self.flow.is_some() {
-            self.flow = Some(Flow::new(Phase::Active));
+            self.flow = Some(self.new_flow(Phase::Active));
         }
         self.world.frame()
     }
@@ -109,7 +113,40 @@ impl Env {
     /// then `kickoff`s: cars at their spawn slots with inputs ignored for four seconds, the ball
     /// held on the centre spot until the first touch.
     pub fn enable_match_flow(&mut self, on: bool) {
-        self.flow = on.then(|| Flow::new(Phase::Active));
+        self.flow = on.then(|| self.new_flow(Phase::Active));
+    }
+
+    fn new_flow(&self, phase: Phase) -> Flow {
+        let flow = Flow::new(phase).with_replay(self.replay_ticks.unwrap_or(flow::REPLAY_TICKS));
+        match self.match_ticks {
+            Some(ticks) => flow.with_clock(ticks),
+            None => flow,
+        }
+    }
+
+    /// Sets the length of goal replays for later flows (the world is frozen throughout); the
+    /// default is the usual 1080 ticks.
+    pub fn set_replay_ticks(&mut self, ticks: Option<u32>) {
+        self.replay_ticks = ticks;
+    }
+
+    /// Gives matches a clock of `ticks` of play (`flow::FIVE_MINUTES` for the standard five
+    /// minutes), counted down while the ball is in play, for every later `reset` or
+    /// `enable_match_flow`; `None` (the default) is an unlimited match. At zero play goes on until
+    /// the ball is low, then a lead ends the match and a tie starts overtime.
+    pub fn set_match_length(&mut self, ticks: Option<i64>) {
+        self.match_ticks = ticks;
+    }
+
+    /// Starts a match from its first kickoff: like `start_kickoff`, but with the intro that makes
+    /// the first countdown 850 ticks.
+    pub fn start_match(&mut self) -> PhysicsFrame {
+        self.flow = Some(
+            self.new_flow(Phase::Countdown)
+                .with_countdown(flow::FIRST_COUNTDOWN_TICKS),
+        );
+        self.kickoffs = 0;
+        self.place_kickoff()
     }
 
     /// The match phase, ticks in it and the score, if match flow is on.
@@ -126,16 +163,20 @@ impl Env {
     /// Starts a kickoff now (match flow on): places the cars and the ball and begins the
     /// countdown. Returns the first observation.
     pub fn start_kickoff(&mut self) -> PhysicsFrame {
+        self.flow = Some(match self.flow {
+            Some(flow) => flow.restarted(Phase::Countdown),
+            None => self.new_flow(Phase::Countdown),
+        });
+        self.place_kickoff()
+    }
+
+    fn place_kickoff(&mut self) -> PhysicsFrame {
         let slots = self
             .kickoff_slots
             .take()
             .unwrap_or_else(|| self.default_slots());
         self.kickoffs += 1;
         self.world.kickoff(&slots);
-        self.flow = Some(match self.flow {
-            Some(flow) => flow.restarted(Phase::Countdown),
-            None => Flow::new(Phase::Countdown),
-        });
         self.world.frame()
     }
 
@@ -154,15 +195,20 @@ impl Env {
             .collect()
     }
 
-    /// Runs the phase machine after a tick and does what the new phase asks of the world.
-    fn advance_flow(&mut self) {
+    /// Runs the phase machine after a tick (the ball was `before` it, as position and velocity)
+    /// and does what the new phase asks of the world.
+    fn advance_flow(&mut self, before: (Vec3, Vec3)) {
         let Some(mut flow) = self.flow else {
             return;
         };
         let frame = self.world.frame();
-        let transition = flow.after_step(frame.ball.position, frame.ball.velocity);
+        let after = (frame.ball.position, frame.ball.velocity);
+        let transition = flow.after_step(after.0, after.1, ball_met_floor(before, after));
         self.flow = Some(flow);
-        if transition == Transition::CountdownStarted {
+        if matches!(
+            transition,
+            Transition::CountdownStarted | Transition::OvertimeStarted
+        ) {
             self.start_kickoff();
             return;
         }
@@ -217,10 +263,11 @@ impl Env {
     /// the frame.
     pub fn step(&mut self, inputs: &[ControllerInput]) -> PhysicsFrame {
         let phase = self.flow.map(|flow| flow.state().phase);
-        if phase == Some(Phase::Replay) {
+        if matches!(phase, Some(Phase::Replay | Phase::Ended)) {
             // The replay shows the goal again: the clock runs, the world does not.
-            self.advance_flow();
-            return self.world.frame();
+            let frame = self.world.frame();
+            self.advance_flow((frame.ball.position, frame.ball.velocity));
+            return frame;
         }
         let countdown = phase == Some(Phase::Countdown);
         for (index, input) in inputs.iter().enumerate() {
@@ -231,8 +278,9 @@ impl Env {
             };
             self.world.set_car_input(index, input);
         }
+        let before = self.world.frame().ball;
         self.world.step(TICK_SECS);
-        self.advance_flow();
+        self.advance_flow((before.position, before.velocity));
         self.world.frame()
     }
 }
@@ -400,6 +448,33 @@ mod tests {
         assert_eq!(seen.cars[0].boost_amount, 32.0);
     }
 
+    /// A characterisation, not a verification: no recording has a ball on a
+    /// car's wheels (`RB-PHYSICS-001-FR-138`), so this only pins that an
+    /// inverted car's wheels stop a fast ball without letting it through.
+    #[test]
+    fn a_fast_ball_hits_an_inverted_cars_wheels_and_bounces_off() {
+        let mut frame = start();
+        frame.cars[0].position = Vec3::new(0.0, 0.0, 800.0);
+        frame.cars[0].velocity = Vec3::new(0.0, 0.0, 0.0);
+        frame.cars[0].rotation = Quat::new(1.0, 0.0, 0.0, 0.0);
+        frame.ball.position = Vec3::new(0.0, 0.0, 1000.0);
+        frame.ball.velocity = Vec3::new(0.0, 0.0, -1500.0);
+        let mut env = Env::new();
+        env.reset(&frame);
+        let mut nearest = f32::MAX;
+        let mut last = env.peek(&[]);
+        for _ in 0..30 {
+            last = env.step(&[ControllerInput::default()]);
+            nearest = nearest.min((last.ball.position - last.cars[0].position).length());
+        }
+        assert!(nearest > 80.0, "the ball got within {nearest} of the car");
+        assert!(last.ball.velocity.z > 0.0, "and left upward");
+        assert!(
+            last.ball.position.z > last.cars[0].position.z,
+            "still above it"
+        );
+    }
+
     #[test]
     fn reset_observes_the_start_and_keeps_its_clock() {
         let mut frame = start();
@@ -551,5 +626,82 @@ mod tests {
             rb_physics_bullet::respawn::KICKOFF_BALL_REST_HEIGHT
         );
         assert_eq!(frames[39].ball.velocity, Vec3::ZERO);
+    }
+
+    /// A match from its first kickoff has the 850-tick intro countdown and a clock that starts
+    /// when the ball is first touched.
+    /// A one-tick match with the ball at `height` moving at `vz`; steps until the phase leaves
+    /// `Active` and returns the ball heights of every tick that did not end it, and the end's (`None`
+    /// if it never ends).
+    fn heights_until_regulation_ends(height: f32, vz: f32) -> Option<(Vec<f32>, f32, MatchState)> {
+        let mut frame = start();
+        frame.ball.position.z = height;
+        frame.ball.velocity.z = vz;
+        let mut env = Env::new();
+        env.enable_match_flow(true);
+        env.set_match_length(Some(1));
+        env.reset(&frame);
+        let mut before = Vec::new();
+        for _ in 0..600 {
+            let z = env.step(&idle()).ball.position.z;
+            let state = env.match_state().unwrap();
+            if state.phase != Phase::Active {
+                return Some((before, z, state));
+            }
+            before.push(z);
+        }
+        None
+    }
+
+    #[test]
+    fn a_tied_regulation_waits_for_the_floor_and_a_bounce_on_the_last_tick_counts() {
+        // Falling from above: nothing ends it until the tick the ball meets the floor.
+        let (before, z, state) = heights_until_regulation_ends(300.0, 0.0).unwrap();
+        assert!(state.overtime, "a tie goes to overtime");
+        assert!(before.len() > 10 && before.iter().all(|z| *z > flow::BALL_FLOOR_CONTACT_HEIGHT));
+        assert!(z < 120.0, "it ended at the floor, at {z}");
+        // Coming down fast enough to bounce within one tick: it still ends on that tick, even
+        // though the ball is above the contact height after it.
+        let (before, z, state) = heights_until_regulation_ends(100.0, -1500.0).unwrap();
+        assert!(state.overtime);
+        assert!(
+            before.len() <= 1,
+            "ended at once, not {} ticks later",
+            before.len()
+        );
+        assert!(
+            z > flow::BALL_FLOOR_CONTACT_HEIGHT,
+            "ended above the threshold, at {z}"
+        );
+    }
+
+    #[test]
+    fn a_match_starts_with_the_long_countdown_and_a_clock_that_waits_for_play() {
+        let mut env = Env::new();
+        env.enable_match_flow(true);
+        env.set_match_length(Some(flow::FIVE_MINUTES));
+        env.reset(&start());
+        env.set_kickoff_slots(Some(vec![4]));
+        env.start_match();
+        for _ in 0..flow::FIRST_COUNTDOWN_TICKS - 1 {
+            env.step(&idle());
+        }
+        assert_eq!(env.match_state().map(|m| m.phase), Some(Phase::Countdown));
+        env.step(&idle());
+        let state = env.match_state().unwrap();
+        assert_eq!(state.phase, Phase::Kickoff);
+        assert_eq!(state.seconds_remaining(), Some(300.0));
+        // Play starts the clock.
+        for _ in 0..600 {
+            env.step(&[throttle()]);
+            if env.match_state().map(|m| m.phase) == Some(Phase::Active) {
+                break;
+            }
+        }
+        env.step(&[throttle()]);
+        assert!(env
+            .match_state()
+            .and_then(|m| m.seconds_remaining())
+            .is_some_and(|s| s < 300.0));
     }
 }

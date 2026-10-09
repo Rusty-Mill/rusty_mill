@@ -420,6 +420,7 @@ fn r16_runner_secret_and_consistency() {
             failed: 1,
         }],
         tree: None,
+        sandbox: "test".into(),
         log,
     };
     let payload = ArtifactPayload::TestReport(rep);
@@ -512,5 +513,107 @@ fn r18_terminal_rejects_everything() {
             expected_rev: rev
         })),
         Code::Terminal
+    );
+}
+
+/// Tokens and run secrets are keyed by the master secret, which is not in the
+/// log: a state folded from the same log under another master derives other
+/// tokens, and the core refuses them.
+#[test]
+fn tokens_are_keyed_by_the_master_secret_not_the_log() {
+    let mut fx = Fx::new();
+    let turn = fx.st().turn.as_ref().expect("planner turn").id;
+    let events = fx.d.store.events(&fx.st().task, 0).expect("events");
+    let other = TaskState::fold_with(fx.st().task.clone(), [7; 32], &events);
+    let forged = other.token_for(&pid(Role::Planner), turn);
+    assert_ne!(forged, fx.st().token_for(&pid(Role::Planner), turn));
+    let op = fx.op();
+    let r = fx.agent_with(
+        Role::Planner,
+        Some(forged),
+        op,
+        AgentAction::Post(ask(Role::Coder, "forged")),
+    );
+    assert_eq!(rejected(r), Code::StaleTurn);
+    assert_ne!(other.secret_for(RunId(1)), fx.st().secret_for(RunId(1)));
+}
+
+/// Submitting a candidate ends the Coder turn and moves the task to `test`.
+/// Nothing is granted in between: a turn the transition would only revoke
+/// costs a turn of budget and skips an id.
+#[test]
+fn candidate_submission_grants_no_turn_for_the_transition_to_revoke() {
+    let mut fx = Fx::new();
+    fx.reach_build();
+    let (next_turn, turns_spent) = (fx.st().next_turn, fx.st().spent.turns);
+    fx.candidate();
+    assert_eq!(fx.st().state, State::Test);
+    assert!(fx.st().turn.is_none(), "test waits for the runner");
+    assert_eq!(fx.st().next_turn, next_turn, "no turn was granted");
+    assert_eq!(fx.st().spent.turns, turns_spent, "no budget spent");
+    let task = fx.st().task.clone();
+    let events = fx.d.store.events(&task, 0).expect("events");
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            Event::TurnEnded {
+                cause: rusty_bbp::event::TurnEnd::Revoked,
+                ..
+            }
+        )),
+        "no turn was revoked on the way to test"
+    );
+}
+
+/// Assignment grants no turn: nothing is ready to serve it. The first `Tick`
+/// grants the Planner's turn, and a second `Tick` grants nothing more.
+#[test]
+fn assignment_grants_nothing_until_the_first_tick() {
+    let mut store = MemStore::new();
+    let brief = store.blob_put(b"brief");
+    let task = TaskId("T2".into());
+    let mut d = Driver::new(store, task.clone());
+    let open = Command::Open(OpenTask {
+        task,
+        repo: "r".into(),
+        profile_digest: DIGEST,
+        budget: Budget {
+            messages: 40,
+            bytes: 5_000_000,
+            reads: 150,
+            reads_per_turn: 30,
+            turns: 60,
+            iterations: 4,
+        },
+        turn_ms: 60_000,
+        request_ms: 3_600_000,
+        brief,
+        human: PrincipalId("human".into()),
+    });
+    assert!(matches!(
+        d.dispatch(&open, Time(1)).expect("open"),
+        Response::Stored(_)
+    ));
+    for role in Role::ALL {
+        let principal = Principal {
+            id: pid(role),
+            kind: PrincipalKind::Agent {
+                role,
+                vendor: vendor(role).into(),
+            },
+        };
+        ok(d.dispatch(&Command::Assign { role, principal }, Time(2))
+            .expect("assign"));
+    }
+    assert!(d.state.turn.is_none(), "assignment granted a turn");
+    assert_eq!(d.state.next_turn, 1);
+    ok(d.dispatch(&Command::Tick, Time(3)).expect("tick"));
+    let turn = d.state.turn.clone().expect("the first tick grants");
+    assert_eq!((turn.id, turn.role), (TurnId(1), Role::Planner));
+    ok(d.dispatch(&Command::Tick, Time(4)).expect("tick"));
+    assert_eq!(d.state.turn.as_ref().map(|t| t.id), Some(TurnId(1)));
+    assert_eq!(
+        d.state.next_turn, 2,
+        "a tick with a live turn grants nothing"
     );
 }

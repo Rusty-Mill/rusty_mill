@@ -15,7 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rb_tape_bot::vector;
+use rb_tape_bot::{
+    tie_up::{Action, TieUp},
+    vector,
+};
 use rlbot::{
     flat::{
         ConnectionSettings, CoreMessage, DebugRendering, DesiredBallState, DesiredGameState,
@@ -48,7 +51,7 @@ fn bot(team: u32, player_id: i32) -> PlayerConfiguration {
     }
 }
 
-fn config() -> MatchConfiguration {
+fn config(length: MatchLengthMutator) -> MatchConfiguration {
     MatchConfiguration {
         launcher: Launcher::Epic,
         auto_start_agents: true,
@@ -57,7 +60,7 @@ fn config() -> MatchConfiguration {
         player_configurations: vec![bot(0, 0), bot(1, 1)],
         game_mode: GameMode::Soccar,
         mutators: Some(Box::new(MutatorSettings {
-            match_length: MatchLengthMutator::Unlimited,
+            match_length: length,
             ..Default::default()
         })),
         existing_match_behavior: ExistingMatchBehavior::Restart,
@@ -132,7 +135,15 @@ fn main() -> Result<()> {
     })?;
     conn.send_packet(InitComplete {})?;
     conn.set_nonblocking(true)?;
-    conn.send_packet(config())?;
+    let length = match arg("--length").as_deref() {
+        Some("five") => MatchLengthMutator::FiveMinutes,
+        _ => MatchLengthMutator::Unlimited,
+    };
+    let overtime_goal = std::env::args().any(|a| a == "--overtime-goal");
+    let mut overtime_goal_sent = false;
+    let tie_up = std::env::args().any(|a| a == "--tie-up");
+    let mut tie = TieUp::default();
+    conn.send_packet(config(length))?;
     let mut file = File::create(&out)?;
     let started = Instant::now();
     let goals: u32 = arg("--goals").and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -150,6 +161,31 @@ fn main() -> Result<()> {
                         active_since = Some(p.match_info.seconds_elapsed);
                     }
                     last_phase = p.match_info.match_phase;
+                }
+                if tie_up
+                    && !p.match_info.is_overtime
+                    && p.match_info.match_phase == MatchPhase::Active
+                    && p.match_info.game_time_remaining < 20.0
+                    && p.match_info.game_time_remaining > 8.0
+                {
+                    let score = |i: usize| p.teams.get(i).map_or(0, |t| t.score);
+                    if let Action::Shoot(side) = tie.observe(score(0), score(1)) {
+                        conn.send_packet(goal_state(side))?;
+                        println!(
+                            "tie-up goal sent at remaining {:.2}",
+                            p.match_info.game_time_remaining
+                        );
+                    }
+                }
+                if overtime_goal
+                    && !overtime_goal_sent
+                    && p.match_info.is_overtime
+                    && p.match_info.match_phase == MatchPhase::Active
+                    && p.match_info.game_time_remaining > 3.0
+                {
+                    conn.send_packet(goal_state(1.0))?;
+                    overtime_goal_sent = true;
+                    println!("overtime goal sent at remaining {:.2}", p.match_info.game_time_remaining);
                 }
                 if let (MatchPhase::Active, Some(since), Some(after)) =
                     (p.match_info.match_phase, active_since, goal_after)
