@@ -12507,6 +12507,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_bbp_host"
+version = "0.1.0"
+dependencies = [
+ "rusty_atomic_file",
+ "rusty_bbp",
+ "rusty_libc",
+ "rusty_rand",
+ "rusty_sandbox",
+ "rusty_serde",
+]
+
+[[package]]
 name = "rusty_boot"
 version = "0.1.0"
 dependencies = [
