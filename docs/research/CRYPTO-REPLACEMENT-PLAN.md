@@ -3,7 +3,8 @@
 Date: 2026-10-08. Scope: the primitives `rusty_tls`'s native engine takes from `ring`.
 
 **Status.** Stages 0 to 4 are implemented with preliminary validation. **Independent review
-was completed by the owner (section 11, row "Independent review"); TLS integration is pending
+was reported complete by the owner, with its scope, commit and findings unrecorded (section 11, row
+"Independent review"), so the stage rows below keep "review pending"; TLS integration is pending
 and the gap-closure plan is section 13. Gaps 1 (randomness) and 2 (ECDH P-256/P-384) are
 implemented with preliminary validation and not independently reviewed (section 13.4).** The set is partial: it covers hashes, HMAC, HKDF,
 signature verification, X25519 and ChaCha20-Poly1305, and does not cover AES-GCM, P-256 or P-384
@@ -57,6 +58,14 @@ made for any stage. No stage is approved for TLS use.
 | 2 Signature verify | Implemented; review pending (`rusty_pk`: `rsa`, `ecdsa`, `ed25519`) | See "Stage 2 results" below. |
 | 3 ChaCha20-Poly1305 | Implemented; review pending (`rusty_aead`) | See "Stage 3 results" below. |
 | 4 X25519 | Implemented; review pending (`rusty_pk::x25519`) | See "Stage 4 results" below. **Work stops here by owner decision. Independent review is required before any use in `rusty_tls`.** |
+
+**Review status, reconciled (2026-10-09).** The owner reported that an independent review is complete,
+that the reviewer was the owner, and that both Ed25519 behaviours (small-order keys rejected, then accepted)
+were seen. The owner did not state which components, which commit, by what method, or with what findings, and
+nothing in this repository records it. This plan therefore does **not** treat any stage as reviewed:
+the "review pending" labels above and the statement in section 11 that no human review of the Montgomery
+invariants has happened stay until the owner records the scope. The owner's report is not contradicted; it is
+unscoped. The ECDH and `rusty_rand` work added on 2026-10-09 post-dates it and has had no independent review.
 
 ### Stage 2 results (`rusty_pk`, 2026-10-08; preliminary)
 
@@ -600,7 +609,7 @@ the honest current position.
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
 | Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-09.txt`. **Review findings: none exist yet.** |
 | `ring` usage inventory including randomness and helper APIs. | Section 2.3. |
-| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Done by the owner (baileyrd), reported 2026-10-09.** The owner saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. The depth, method and any findings of that review are not recorded here; the implementer did not see them. It is one reviewer, who also owns the project. |
+| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Reported complete by the owner (baileyrd), 2026-10-09; scope unrecorded.** The reviewer was the owner, who saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. Which of the listed components were covered, the commit reviewed, the method and any findings are not recorded here and the implementer did not see them, so this row is **not** evidence that the Montgomery-core invariants (row above), the AEAD or the HMAC/HKDF paths were reviewed. One reviewer, who also owns the project. **Open: the owner states the reviewed scope; the ECDH and `rusty_rand` code has had no review.** |
 
 ## 11a. Independent review, round 1 (Codex, PR #540, reviewed commit `25fcc18`)
 
@@ -649,7 +658,7 @@ checked by running code here.
 
 | Finding | Verified? | Disposition |
 | --- | --- | --- |
-| P1: an Ed25519 public key of small order (e.g. the identity) leaves no `[h]A` term, so `R = identity, S = 0` verifies every message. | **Yes for the identity** (the old `identity_key_encodings_match_ring` test asserted exactly this acceptance, and `ring` accepts it); for the other seven torsion points the same signature shapes verify only for some messages (`[h]A` depends on `h` modulo the point's order), still without any secret. All eight are rejected. | Was fixed by rejecting `[8]A = identity` keys; **reverted by owner decision** (accept, as `ring` and RFC 8032 do; callers screen keys). See section 2 stage notes. The finding stands as a documented caller precondition. |
+| P1: an Ed25519 public key of small order (e.g. the identity) leaves no `[h]A` term, so `R = identity, S = 0` verifies every message. | **Yes for the identity** (the old `identity_key_encodings_match_ring` test asserted exactly this acceptance, and `ring` accepts it); for the other seven torsion points the same signature shapes verify only for some messages (`[h]A` depends on `h` modulo the point's order), still without any secret. (The original fix rejected all eight; that was reversed, see Disposition.) | Was fixed by rejecting `[8]A = identity` keys; **reverted by owner decision** (accept, as `ring` and RFC 8032 do; callers screen keys). See section 2 stage notes. The finding stands as a documented caller precondition. |
 | P2: the taint scripts ended in `\|\| true`, so an example that panicked, was misspelled, or a missing `valgrind` read as "0 errors", the expected answer for the clean modes. | **Yes**, in all three `ct_check.sh` and in `valgrind_selftest.sh`. | Fixed in one shared `rusty_ct_check/scripts/taint_lib.sh`: each mode runs once, output to a file, and a non-zero status fails the check. `test_taint_lib.sh` uses a fake `valgrind` (clean, diagnostic, exit 3, exit 127, diagnostic plus failure); weakening the status check fails it. |
 | P2: `collect.sh` never ran the ignored `planted_early_exit_is_detected` test, so the timing detector's own sensitivity was not part of the record. | **Yes.** | Fixed: `collect.sh` runs it explicitly (`--ignored --exact`), propagates its status and requires exactly one passing test. It passed here (0.02 s). |
 | P2: the vector hashes were printed, not compared with the manifests (and the two generated corpora were not pinned). | **Yes**, and the check found a real gap on its first run: `x25519_test.json` was vendored but missing from the `rusty_pk` manifest. | Fixed: `check_manifests.py` fails on a hash mismatch (including whitespace-only drift), a missing file, an unlisted file, a file listed twice and a malformed pin line; both generated corpora and `x25519_test.json` are now pinned; it runs in `collect.sh` and in the `crypto-constant-time` CI job; 9 tests. **Limit:** the manifest sits beside the vectors, so this catches drift and accidents, not a deliberate change of corpus and manifest together; provenance rests on the pinned upstream commit and human review. All 27 vendored Wycheproof files were also compared byte for byte with upstream at `12fd3aaf` (identical). |
