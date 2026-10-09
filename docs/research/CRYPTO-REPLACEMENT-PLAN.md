@@ -808,8 +808,8 @@ deliberately simple (no window table); that costs speed.
   passed every criterion. Neither threshold nor allowance rule was changed. Across the two runs the alarms fell in
   different tests (run 1: HMAC-SHA512 2, HMAC-SHA256 1, ChaCha20-Poly1305 open 1, X25519 A/A 1; run 2: ECDH P-256
   sparse-vs-dense 1, at |t| 4.83), which is what noise looks like and is **not** proof of it. The ECDH P-256
-  sparse-vs-dense series is the one to watch: its maxima were 3.54 (single run), 4.31 and 4.83 against about 3.3
-  to 3.7 for its A/A baselines; a second reading of that test on a quiet machine, and a look at what differs
+  sparse-vs-dense series is the one to watch: its maxima were 3.54 (an earlier single run), 4.31 (run 1) and 4.83 (run 2)
+  against matched P-256 A/A maxima of 2.67 (run 1) and 3.31 (run 2); a second reading of that test on a quiet machine, and a look at what differs
   between the classes beyond the scalar (the key slot is rewritten in `prepare`), would be the next step. A first
   version of the ECDH test chose between two separately stored keys inside the timed closure (review finding on
   #576) and its numbers are discarded.
