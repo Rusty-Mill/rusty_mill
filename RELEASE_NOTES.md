@@ -17,7 +17,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 - **Added:** `bbp mod`, the moderator loop: one agent harness per granted turn with a per-turn MCP config, the runner per selected run, deadlines, forfeit on early exit, until the task closes. Tokens and run secrets are keyed by a per-directory master secret that never enters the log.
 - **Changed:** `TurnGranted` and `RunStarted` no longer carry the token or secret; no stored data predates this.
-- **Known limitation:** the live Claude Code run is a manual smoke, not a test; the scripted agents in `tests/moderator_e2e.rs` stand in for it. The core grants and immediately revokes a Coder turn when a candidate submission moves the task to `test`, which costs one turn of budget per candidate; to be tightened in the core.
+- **Verified by hand:** one live Claude Code planner turn through `bbp mod` and `bbp mcp` stored a spec and reached the plan gate (recorded in the crate README); the scripted agents in `tests/moderator_e2e.rs` cover the full path in CI. The core grants and immediately revokes a Coder turn when a candidate submission moves the task to `test`, which costs one turn of budget per candidate; to be tightened in the core.
 
 ---
 

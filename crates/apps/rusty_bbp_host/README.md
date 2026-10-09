@@ -64,6 +64,10 @@ The runner is Unix-shaped: profile sets take Unix absolute read roots and the de
 
 Arguments may use `{dir}`, `{task}`, `{principal}`, `{turn}`, `{role}`, `{bbp}` (this binary) and `{mcp_config}`: a Claude Code MCP config written per turn at `<dir>/mcp/turn-N.json` that starts `bbp mcp` bound to that turn. The harness also gets `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL`, `BBP_TURN`, `BBP_ROLE`, `BBP_BIN` and `BBP_MCP_CONFIG` in its environment; its output goes to `<dir>/agents/turn-N.log`. A harness that exits without ending its turn forfeits it: the moderator aborts the turn so the protocol moves on. A role without a launcher is left to its deadline.
 
+### Live smoke
+
+Run once by hand with Claude Code 2.1.295 as the planner (`claude -p … --mcp-config {mcp_config} --strict-mcp-config --allowedTools mcp__bbp__…`, no coder, tester or reviewer launcher): the moderator granted turn 1 and launched the harness; the model read the card and the brief, stored a spec with two acceptance criteria (artifact 2, 392 bytes) and posted a gated `request_decision` referencing it; the core moved the task to `plan_gate` and ended the turn; the moderator stopped the harness and waited at the gate until its wall limit. The scripted agents in `tests/moderator_e2e.rs` cover the rest of the path in CI.
+
 ## The master secret
 
 `bbp open` creates `<dir>/master`, 32 random bytes from `rusty_rand`, owner-readable only. Every execution token and run secret is a digest keyed by it, and neither ever enters the log. A process that can read the log but not the master cannot forge a token; the agent harness sees neither, only the per-turn `bbp mcp` server, which derives the token for its own turn.
