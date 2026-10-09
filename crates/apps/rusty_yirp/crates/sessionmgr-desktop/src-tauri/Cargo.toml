@@ -19,7 +19,7 @@ name = "sessionmgr_desktop_lib"
 crate-type = ["staticlib", "cdylib", "lib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { workspace = true }
 
 [dependencies]
 # Tauri's own async runtime is real `tokio`, not `rusty_tokio`

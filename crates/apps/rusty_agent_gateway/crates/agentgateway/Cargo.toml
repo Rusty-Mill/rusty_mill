@@ -91,8 +91,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 rusty_base64 = { workspace = true }
 rsa = "0.9"
-rand = "0.8"
-tempfile = "3"
+rand = { workspace = true }
+tempfile = { workspace = true }
 rcgen = "0.13"
 # File locking, for the port bands in tests/common. A safe wrapper, which
 # matters here: the workspace forbids `unsafe`, tests included. `fs4` rather
