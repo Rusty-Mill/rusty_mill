@@ -18,6 +18,8 @@ Priorities 1 to 6 of the table in section 5 are done (rows 17 and parts of 5, 13
 
 **Direction change (owner, 2026-10-08):** replace `rmcp` and its stack with first-party crates, and make `rusty_tls`'s native engine a valid replacement for `rustls`. This supersedes the "converge onto `rusty-mcp`" plan for `adk-mcp`/`remind_me_remote`/`remind_me_mcp` and amends workspace ADR-0002 (MCP crates Tier A to Tier T), pending sign-off. Plan, open decisions and the two independent session prompts: `docs/research/MCP-NATIVE-PLAN.md`, `docs/research/prompts/mcp-track.md`, `docs/research/prompts/tls-track.md`.
 
+**Update 2026-10-10:** MCP track decisions answered (ADR amendment yes, schema builder, blocking servers, whole stack). The implementation is #577 (canonical); #586 is reduced to ADR-0002 Amendment 1 and the plan. TLS evidence bar still open.
+
 **Not started** (need owner answers): priorities 8 and 9 (HTTP/`Url` convergence, LLM wire types; Q2, Q3, Q10).
 
 **Known unverified:** `platform-bsd` and `rusty_term`'s `gui` feature were not built; Streamable HTTP in `rusty-mcp-client` and `rusty-keys --mcp` end to end were not exercised against a live peer; `rusty_term` clippy fails without `gui` on unused `Grid` methods, also on the baseline.
