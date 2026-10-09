@@ -17,7 +17,7 @@ use axum::Router;
 use rusty_http::{HeaderMap, Method};
 use rusty_mcp_server::json::Value;
 use rusty_mcp_server::HttpHandler;
-use rusty_serve::{Body as ServeBody, Request, SharedHandler};
+use rusty_serve::{Body as ServeBody, Request};
 use tokio::sync::{mpsc, oneshot};
 
 /// Chunks buffered between the handler's thread and the connection.
