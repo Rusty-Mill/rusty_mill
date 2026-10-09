@@ -526,7 +526,6 @@ dependencies = [
  "rusty-mcp",
  "rusty_mcp_client_native",
  "rusty_mcp_server",
- "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",

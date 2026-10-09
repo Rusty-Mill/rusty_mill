@@ -382,6 +382,11 @@ impl Gateway {
                         Arc::new(federation.server()?),
                         HttpConfig {
                             path: MCP_PATH.to_owned(),
+                            // Every reply is an event stream whose head is sent
+                            // at once, so a route's `requestTimeout` (which
+                            // bounds producing the head) never cuts off a slow
+                            // tool; `backendRequestTimeout` does that.
+                            sse_after: std::time::Duration::ZERO,
                             ..HttpConfig::default()
                         },
                     ));
