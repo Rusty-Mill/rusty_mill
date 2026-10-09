@@ -414,3 +414,36 @@ fn spawn(
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     cmd.spawn().map_err(|e| format!("spawn {}: {e}", l.program))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proving(file: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/proving")
+            .join(file)
+    }
+
+    /// The shipped proving-run configs parse against the schemas they document.
+    #[test]
+    fn proving_run_configs_match_the_schemas() -> Result<(), String> {
+        let agents = Launchers::read_file(&proving("agents.json"))?;
+        for role in [Role::Planner, Role::Coder, Role::Tester, Role::Reviewer] {
+            let l = agents
+                .for_role(role)
+                .ok_or_else(|| format!("{role:?} has no launcher"))?;
+            assert!(
+                l.args.iter().any(|a| a.contains("{mcp_config}")),
+                "{role:?} gets the MCP config"
+            );
+        }
+        let set = crate::profiles::read_file(&proving("profiles.json"))?;
+        assert_eq!(set.profiles.len(), 1);
+        assert!(
+            set.read_roots.iter().any(|r| r.ends_with(".rustup")),
+            "toolchain is readable"
+        );
+        Ok(())
+    }
+}
