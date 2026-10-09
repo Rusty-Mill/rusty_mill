@@ -35,6 +35,16 @@ const CBDT: Tag = Tag::from_bytes(b"CBDT");
 const SBIX: Tag = Tag::from_bytes(b"sbix");
 const PNG_: u32 = u32::from_be_bytes(*b"png ");
 const DUPE: u32 = u32::from_be_bytes(*b"dupe");
+/// How many glyph records a `dupe` chain may visit (the same bound `ttf-parser`
+/// uses), so cyclic or maliciously long chains end in `None`.
+const MAX_DUPE_STEPS: usize = 10;
+
+/// A font-declared offset, accepted only if it lies within `table`. Everything
+/// derived from it by adding small constants then stays within the table too,
+/// so no addition can overflow, even on a 32-bit `usize`.
+fn offset_in(table: &[u8], offset: u32) -> Option<usize> {
+    usize::try_from(offset).ok().filter(|o| *o <= table.len())
+}
 
 /// A record count read from the font, clamped to how many `record`-byte
 /// entries could physically fit in `len` bytes. Loops over font-declared
@@ -79,8 +89,7 @@ impl<'a> Face<'a> {
         let ppem = u16_at(strike, 0)?;
 
         let mut id = glyph.0;
-        for _ in 0..2 {
-            // One `dupe` hop at most.
+        for _ in 0..MAX_DUPE_STEPS {
             let slot = 4usize.checked_add(usize::from(id).checked_mul(4)?)?;
             let (start, end) = (u32_at(strike, slot)?, u32_at(strike, slot + 4)?);
             let record = strike.get(usize::try_from(start).ok()?..usize::try_from(end).ok()?)?;
@@ -120,7 +129,7 @@ impl<'a> Face<'a> {
         let ppem = u16::from(u8_at(cblc, size + 45)?);
 
         // Find the index subtable covering the glyph.
-        let array = usize::try_from(u32_at(cblc, size)?).ok()?;
+        let array = offset_in(cblc, u32_at(cblc, size)?)?;
         let tables = bounded(u32_at(cblc, size + 8)?, cblc.len(), 8);
         let index_sub = (0..tables).find_map(|i| {
             let entry = array.checked_add(i.checked_mul(8)?)?;
@@ -128,13 +137,13 @@ impl<'a> Face<'a> {
             if glyph.0 < first || glyph.0 > last {
                 return None;
             }
-            let at = array.checked_add(usize::try_from(u32_at(cblc, entry + 4)?).ok()?)?;
+            let at = array.checked_add(offset_in(cblc, u32_at(cblc, entry + 4)?)?)?;
             Some((at, usize::from(glyph.0 - first)))
         })?;
         let (table, slot) = index_sub;
 
         let (index_format, image_format) = (u16_at(cblc, table)?, u16_at(cblc, table + 2)?);
-        let image_base = usize::try_from(u32_at(cblc, table + 4)?).ok()?;
+        let image_base = offset_in(cbdt, u32_at(cblc, table + 4)?)?;
         let body = table.checked_add(8)?;
         let (start, end, shared_metrics) = match index_format {
             1 | 3 => {

@@ -100,10 +100,10 @@ impl<'a> Face<'a> {
                 if index >= count {
                     return Err(FaceParsingError::FaceIndexOutOfBounds);
                 }
-                let at = 12usize
-                    .checked_add(
-                        usize::try_from(index).map_err(|_| FaceParsingError::MalformedFont)? * 4,
-                    )
+                let at = usize::try_from(index)
+                    .ok()
+                    .and_then(|i| i.checked_mul(4))
+                    .and_then(|i| i.checked_add(12))
                     .ok_or(FaceParsingError::MalformedFont)?;
                 let offset = u32_at(data, at).ok_or(FaceParsingError::MalformedFont)?;
                 reader::tail32(data, offset).ok_or(FaceParsingError::MalformedFont)?

@@ -103,9 +103,13 @@ fn format6(t: &[u8], code: u32) -> Option<u16> {
 }
 
 fn format12(t: &[u8], code: u32) -> Option<u16> {
-    let groups = usize::try_from(u32_at(t, 12)?).ok()?;
+    // The declared count is untrusted: only groups that fit in the table exist.
+    // With `i < groups`, `16 + i * 12` is within the table, so it cannot
+    // overflow even a 32-bit `usize`.
+    let declared = usize::try_from(u32_at(t, 12)?).ok()?;
+    let groups = declared.min(t.len().saturating_sub(16) / 12);
     let group = |i: usize| -> Option<(u32, u32, u32)> {
-        let at = 16 + i.checked_mul(12)?;
+        let at = i.checked_mul(12)?.checked_add(16)?;
         Some((u32_at(t, at)?, u32_at(t, at + 4)?, u32_at(t, at + 8)?))
     };
     let (mut lo, mut hi) = (0, groups);

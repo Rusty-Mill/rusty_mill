@@ -57,8 +57,15 @@ about 789,000 `cmap` mappings, every GSUB feature, lookup and subtable
 one real bug (a format 12 `cmap` lookup past the last group read the following
 bytes), now a regression test.
 
-Not covered by that corpus, so covered only by hand-built fonts in
-`tests/synthetic.rs`: context lookup format 1 and `sbix`.
+Not covered by that corpus, so covered only by hand-built fonts
+(`tests/synthetic.rs`, `tests/context.rs`, `tests/hostile.rs`): context lookup
+format 1 (decoded behaviourally, like formats 2-3) and `sbix`. `sbix` `dupe`
+chains are followed up to 10 hops, then give up.
+
+Offsets and counts come from untrusted font data, so they are bounds-checked
+with `usize::try_from` / checked arithmetic and safe on 32-bit targets
+(`cargo test --target i686-unknown-linux-musl`; `tests/hostile.rs` covers
+cmap format 12, TTC index and `CBLC` overflow cases).
 
 ## Limits (deliberate)
 
