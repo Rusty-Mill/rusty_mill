@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rb_rlbot_wire: RLBot protocol messages (RLBot port stage 2) (pending review)
+
+- **Added:** `crates/apps/rocket_league/crates/rb_rlbot_wire`: `u16` framing (blocking reader and an incremental `FrameDecoder`), `InterfaceMessage` (connection settings, init complete, stop, player input, state setting, match configuration) and `CoreMessage` (game packet, field info, controllable team info, match configuration, `Other(tag)` for the rest), each encodable and decodable so a stand-in core can use them. Depends only on `rusty_flatbuffers`.
+- **Verified:** 13 tests. Ten messages decode from payloads made by `rlbot_flat` 0.6.0 (schema rev c38374e) to the values they were built from, and round-trip through this crate; truncating or flipping any byte of the larger payloads never panics. Checked once outside CI: `planus` accepts what this crate encodes for all six client messages.
+- **Known limitation:** a subset by design (no loadouts, 37 of 38 mutators, scripts, hitboxes, scores, rendering, comms, ball prediction); omitted fields are written as schema defaults. String and vector fields are always written because the reference reader treats them as required.
+
+---
+
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
 - **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).

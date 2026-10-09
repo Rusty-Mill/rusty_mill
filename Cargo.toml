@@ -15,6 +15,7 @@ members = [
     "crates/apps/rocket_league/crates/rb_env",
     "crates/apps/rocket_league/crates/rb_physics_bullet",
     "crates/apps/rocket_league/crates/rb_replay_ingest",
+    "crates/apps/rocket_league/crates/rb_rlbot_wire",
     "crates/apps/rocket_league/crates/rb_scenario",
     "crates/apps/rocket_league/crates/rb_verify_cli",
     "crates/libs/net/rusty_kafka",
