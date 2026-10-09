@@ -1,0 +1,122 @@
+{
+  "analyzer_version": "0.2.0",
+  "duration_s": 451.0512,
+  "events": [
+    {
+      "scorer": "brendanhockey10",
+      "t": 23.006243,
+      "team": 1,
+      "type": "goal"
+    },
+    {
+      "scorer": "SevensGG",
+      "t": 76.27978,
+      "team": 1,
+      "type": "goal"
+    },
+    {
+      "scorer": "SevensGG",
+      "t": 100.64371,
+      "team": 1,
+      "type": "goal"
+    },
+    {
+      "scorer": "Mlg bigpot",
+      "t": 127.21556,
+      "team": 0,
+      "type": "goal"
+    },
+    {
+      "scorer": "Mlg bigpot",
+      "t": 203.73218,
+      "team": 0,
+      "type": "goal"
+    },
+    {
+      "scorer": "The nuke159355",
+      "t": 232.08594,
+      "team": 0,
+      "type": "goal"
+    },
+    {
+      "scorer": "SevensGG",
+      "t": 258.69635,
+      "team": 1,
+      "type": "goal"
+    },
+    {
+      "scorer": "The nuke159355",
+      "t": 323.25116,
+      "team": 0,
+      "type": "goal"
+    },
+    {
+      "scorer": "SevensGG",
+      "t": 423.20645,
+      "team": 1,
+      "type": "goal"
+    },
+    {
+      "scorer": "brendanhockey10",
+      "t": 448.03827,
+      "team": 1,
+      "type": "goal"
+    }
+  ],
+  "features": [],
+  "frames": [],
+  "map": "UtopiaStadium_P",
+  "num_frames": 11762,
+  "parser_version": "boxcars-0.11.3",
+  "players": [
+    {
+      "assists": 1,
+      "goals": 2,
+      "name": "brendanhockey10",
+      "saves": 1,
+      "score": 525,
+      "shots": 6,
+      "team": 1
+    },
+    {
+      "assists": 1,
+      "goals": 2,
+      "name": "The nuke159355",
+      "saves": 0,
+      "score": 354,
+      "shots": 3,
+      "team": 0
+    },
+    {
+      "assists": 1,
+      "goals": 4,
+      "name": "SevensGG",
+      "saves": 1,
+      "score": 639,
+      "shots": 4,
+      "team": 1
+    },
+    {
+      "assists": 2,
+      "goals": 2,
+      "name": "Mlg bigpot",
+      "saves": 2,
+      "score": 630,
+      "shots": 5,
+      "team": 0
+    }
+  ],
+  "record_fps": 30.0,
+  "replay_id": "990e4485",
+  "resampled": {
+    "frames": [],
+    "hz": 30.0,
+    "team_attack_sign": {}
+  },
+  "team_scores": {
+    "0": 4,
+    "1": 6
+  },
+  "team_size": 2,
+  "tracks": []
+}

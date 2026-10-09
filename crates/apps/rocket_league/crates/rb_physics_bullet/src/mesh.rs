@@ -1,0 +1,1238 @@
+//! Static triangle meshes (`RB-PHYSICS-001-FR-106`, ADR-0025): the arena's
+//! curved ramps and corners as Rocket League's own collision triangles,
+//! which RocketSim also collides against (`btBvhTriangleMeshShape`). The
+//! flat facets sit up to ~2.5 uu inside the smooth curves the port used
+//! before, and the owner's corner-wall ride (`test2.jsonl` 8.96-9.07 s)
+//! touches those facets where the smooth curve leaves a gap.
+//!
+//! A `StaticMesh` holds triangles with normals facing the arena interior
+//! and a uniform grid for broad-phase queries. Contact generation for a
+//! car (one deepest corner per triangle a tick, kept in a persistent
+//! manifold) lives in `collision::ContactManifold`; the ball and wheel
+//! rays query the mesh directly here.
+
+use crate::bvh::visit_order;
+use crate::collision::{
+    replacement_slot, Contact, RayHit, CONTACT_BREAKING_FACTOR, CONTACT_PROCESSING_THRESHOLD,
+    MANIFOLD_CAPACITY,
+};
+use rb_domain::{Quat, Vec3};
+use std::collections::HashMap;
+
+/// Unreal units per Bullet unit, the scale RocketSim's mesh files use.
+const BT_TO_UU: f32 = 50.0;
+
+/// Broad-phase grid cell edge (uu).
+const CELL_SIZE: f32 = 256.0;
+
+/// How far past a triangle's edges (uu) a point still counts as over it,
+/// plus a quarter of its depth behind the triangle: behind a concave seam
+/// the two facets' prisms leave a gap that widens with depth (~11 degrees
+/// between ramp facets), which Bullet's closest-feature search covers.
+const EDGE_TOLERANCE: f32 = 0.5;
+const EDGE_TOLERANCE_PER_DEPTH: f32 = 0.25;
+
+/// Vertices this close (uu) are shared (Bullet's `btTriangleInfoMap`
+/// `m_equalVertexThreshold`, 0.0001 BT^2).
+const EQUAL_VERTEX_DISTANCE: f32 = 0.5;
+
+/// A contact this close (uu) to an edge is on it (`m_edgeDistanceThreshold`,
+/// 0.1 BT).
+const EDGE_DISTANCE_THRESHOLD: f32 = 5.0;
+
+/// Neighbouring faces closer than this (`sin^2` of the angle between their
+/// normals, `m_planarEpsilon`) are flat.
+const PLANAR_EPSILON: f32 = 0.0001;
+
+/// How a contact on one triangle edge is adjusted, Bullet's
+/// `btAdjustInternalEdgeContacts` (`RB-PHYSICS-001-FR-109`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EdgeKind {
+    /// Unshared: left alone (its Bullet edge angle stays at 2 pi, past
+    /// `m_maxEdgeAngleThreshold`).
+    Open,
+    /// Concave or flat: a contact here takes the face's normal, since the
+    /// neighbouring face already covers the rest.
+    Smooth,
+    /// Convex: the normal may turn from the face's toward `neighbor`'s, no
+    /// further.
+    Convex { neighbor: Vec3 },
+}
+
+/// One triangle, wound so that `(b - a) x (c - a)` points along `normal`,
+/// the side facing the arena.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Triangle {
+    pub vertices: [Vec3; 3],
+    pub normal: Vec3,
+}
+
+impl Triangle {
+    /// The triangle `a, b, c` with its normal turned toward `inside`, or
+    /// `None` when it has no area.
+    pub fn facing(a: Vec3, b: Vec3, c: Vec3, inside: Vec3) -> Option<Triangle> {
+        let normal = (b - a).cross(&(c - a)).normalize()?;
+        let centroid = (a + b + c) * (1.0 / 3.0);
+        Some(if normal.dot(&(inside - centroid)) >= 0.0 {
+            Triangle {
+                vertices: [a, b, c],
+                normal,
+            }
+        } else {
+            Triangle {
+                vertices: [a, c, b],
+                normal: -normal,
+            }
+        })
+    }
+
+    /// The triangle `a, b, c` facing along `(b - a) x (c - a)`, or `None`
+    /// when it has no area.
+    pub fn wound(a: Vec3, b: Vec3, c: Vec3) -> Option<Triangle> {
+        let normal = (b - a).cross(&(c - a)).normalize()?;
+        Some(Triangle {
+            vertices: [a, b, c],
+            normal,
+        })
+    }
+
+    /// Height of `point` above the triangle's plane, positive on the
+    /// arena side.
+    pub fn signed_distance(&self, point: &Vec3) -> f32 {
+        self.normal.dot(&(*point - self.vertices[0]))
+    }
+
+    /// `normal . p` for every `p` on the plane.
+    pub fn offset(&self) -> f32 {
+        self.normal.dot(&self.vertices[0])
+    }
+
+    /// Whether `point` projects onto the triangle, `tolerance` uu past its
+    /// edges allowed.
+    pub fn covers(&self, point: &Vec3, tolerance: f32) -> bool {
+        (0..3).all(|i| {
+            let start = self.vertices[i];
+            let edge = self.vertices[(i + 1) % 3] - start;
+            let length = edge.length();
+            length > 0.0 && edge.cross(&(*point - start)).dot(&self.normal) / length >= -tolerance
+        })
+    }
+
+    /// `covers` with the depth-dependent tolerance used for contacts.
+    pub fn covers_at_depth(&self, point: &Vec3, gap: f32) -> bool {
+        self.covers(
+            point,
+            EDGE_TOLERANCE + EDGE_TOLERANCE_PER_DEPTH * (-gap).max(0.0),
+        )
+    }
+
+    /// The triangle's point nearest `point` (Ericson, Real-Time Collision
+    /// Detection 5.1.5).
+    pub fn closest_point(&self, point: &Vec3) -> Vec3 {
+        let [a, b, c] = self.vertices;
+        let (ab, ac, ap) = (b - a, c - a, *point - a);
+        let (d1, d2) = (ab.dot(&ap), ac.dot(&ap));
+        if d1 <= 0.0 && d2 <= 0.0 {
+            return a;
+        }
+        let bp = *point - b;
+        let (d3, d4) = (ab.dot(&bp), ac.dot(&bp));
+        if d3 >= 0.0 && d4 <= d3 {
+            return b;
+        }
+        let vc = d1 * d4 - d3 * d2;
+        if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            return a + ab * (d1 / (d1 - d3));
+        }
+        let cp = *point - c;
+        let (d5, d6) = (ab.dot(&cp), ac.dot(&cp));
+        if d6 >= 0.0 && d5 <= d6 {
+            return c;
+        }
+        let vb = d5 * d2 - d1 * d6;
+        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            return a + ac * (d2 / (d2 - d6));
+        }
+        let va = d3 * d6 - d5 * d4;
+        if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 {
+            return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+        }
+        let denominator = 1.0 / (va + vb + vc);
+        a + ab * (vb * denominator) + ac * (vc * denominator)
+    }
+
+    /// Distance along a ray from the arena side to the triangle
+    /// (Moller-Trumbore), front face only.
+    fn ray_distance(&self, origin: &Vec3, direction: &Vec3, length: f32) -> Option<f32> {
+        if direction.dot(&self.normal) >= 0.0 {
+            return None;
+        }
+        let [a, b, c] = self.vertices;
+        let (ab, ac) = (b - a, c - a);
+        let p = direction.cross(&ac);
+        let determinant = ab.dot(&p);
+        if determinant.abs() < 1e-9 {
+            return None;
+        }
+        let inverse = 1.0 / determinant;
+        let t_vec = *origin - a;
+        let u = t_vec.dot(&p) * inverse;
+        if !(0.0..=1.0).contains(&u) {
+            return None;
+        }
+        let q = t_vec.cross(&ab);
+        let v = direction.dot(&q) * inverse;
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        let distance = ac.dot(&q) * inverse;
+        (0.0..=length).contains(&distance).then_some(distance)
+    }
+
+    fn bounds(&self) -> (Vec3, Vec3) {
+        let [a, b, c] = self.vertices;
+        (
+            Vec3::new(
+                a.x.min(b.x).min(c.x),
+                a.y.min(b.y).min(c.y),
+                a.z.min(b.z).min(c.z),
+            ),
+            Vec3::new(
+                a.x.max(b.x).max(c.x),
+                a.y.max(b.y).max(c.y),
+                a.z.max(b.z).max(c.z),
+            ),
+        )
+    }
+}
+
+/// An immovable triangle mesh with a broad-phase grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticMesh {
+    triangles: Vec<Triangle>,
+    /// Per triangle, edge `i` runs from vertex `i` to `i + 1`.
+    edges: Vec<[EdgeKind; 3]>,
+    cells: HashMap<(i32, i32, i32), Vec<u32>>,
+    /// Per triangle, its place in Bullet's BVH report order (FR-117);
+    /// file order unless built from one (`from_cmf`).
+    visit_rank: Vec<u32>,
+    pub restitution: f32,
+    pub friction: f32,
+}
+
+fn cell_of(value: f32) -> i32 {
+    (value / CELL_SIZE).floor() as i32
+}
+
+impl StaticMesh {
+    /// Indexes `triangles` with the same default material as the other
+    /// static shapes.
+    pub fn new(triangles: Vec<Triangle>) -> StaticMesh {
+        let triangles_len = u32::try_from(triangles.len()).unwrap_or(u32::MAX);
+        let mut cells: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+        for (index, triangle) in triangles.iter().enumerate() {
+            let (min, max) = triangle.bounds();
+            for x in cell_of(min.x)..=cell_of(max.x) {
+                for y in cell_of(min.y)..=cell_of(max.y) {
+                    for z in cell_of(min.z)..=cell_of(max.z) {
+                        cells.entry((x, y, z)).or_default().push(index as u32);
+                    }
+                }
+            }
+        }
+        let mut mesh = StaticMesh {
+            triangles,
+            edges: Vec::new(),
+            cells,
+            visit_rank: (0..triangles_len).collect(),
+            restitution: 0.5,
+            friction: 0.5,
+        };
+        mesh.edges = (0..mesh.triangles.len())
+            .map(|index| mesh.edge_kinds(index))
+            .collect();
+        mesh
+    }
+
+    /// Classifies triangle `index`'s edges against the neighbours sharing
+    /// them (Bullet's `btGenerateInternalEdgeInfo`).
+    fn edge_kinds(&self, index: usize) -> [EdgeKind; 3] {
+        let mut kinds = [EdgeKind::Open; 3];
+        let Some(triangle) = self.triangles.get(index) else {
+            return kinds;
+        };
+        let (min, max) = triangle.bounds();
+        for other in self.near_indices(min, max) {
+            if other as usize == index {
+                continue;
+            }
+            let Some(neighbor) = self.triangles.get(other as usize) else {
+                continue;
+            };
+            for (edge, kind) in kinds.iter_mut().enumerate() {
+                if let Some(found) = edge_kind(triangle, edge, neighbor) {
+                    *kind = found;
+                }
+            }
+        }
+        kinds
+    }
+
+    /// Classifies the edges each of `meshes` left `Open` against the other
+    /// meshes' triangles (`RB-PHYSICS-001-FR-120`, ADR-0040). Bullet keeps
+    /// each mesh's edge info to itself, so where RocketSim's goal halves
+    /// meet at `x = 0` a ball straddling the seam got one half's unadjusted
+    /// edge normal and a sideways kick the game does not have
+    /// (`hitjump.jsonl` 119.9 s).
+    pub fn classify_seams(meshes: &mut [StaticMesh]) {
+        let seams: Vec<Vec<(usize, [EdgeKind; 3])>> = meshes
+            .iter()
+            .enumerate()
+            .map(|(index, mesh)| {
+                let others = meshes.iter().enumerate().filter(|(o, _)| *o != index);
+                let open = mesh
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, kinds)| kinds.contains(&EdgeKind::Open));
+                open.filter_map(|(t, kinds)| {
+                    let triangle = mesh.triangles.get(t)?;
+                    let (min, max) = triangle.bounds();
+                    let mut kinds = *kinds;
+                    for (_, other) in others.clone() {
+                        for neighbor in other.near(min, max) {
+                            for (edge, kind) in kinds.iter_mut().enumerate() {
+                                if *kind != EdgeKind::Open {
+                                    continue;
+                                }
+                                if let Some(found) = edge_kind(triangle, edge, neighbor) {
+                                    *kind = found;
+                                }
+                            }
+                        }
+                    }
+                    Some((t, kinds))
+                })
+                .collect()
+            })
+            .collect();
+        for (mesh, found) in meshes.iter_mut().zip(seams) {
+            for (t, kinds) in found {
+                mesh.edges[t] = kinds;
+            }
+        }
+    }
+
+    /// A RocketSim collision mesh file (`.cmf`: `i32` triangle and vertex
+    /// counts, `i32` index triples, `f32` vertex triples in Bullet units,
+    /// little-endian), triangles wound as the file winds them and reported
+    /// in the order Bullet's BVH over them would (`RB-PHYSICS-001-FR-117`).
+    /// `None` if the file is malformed. Triangles without area are dropped
+    /// after ordering, as Bullet keeps them in its tree but never touches
+    /// them.
+    pub fn from_cmf(bytes: &[u8]) -> Option<StaticMesh> {
+        let word = |at: usize| -> Option<[u8; 4]> { bytes.get(at..at + 4)?.try_into().ok() };
+        let count = |at: usize| usize::try_from(i32::from_le_bytes(word(at)?)).ok();
+        let (triangle_count, vertex_count) = (count(0)?, count(4)?);
+        let vertices_at = 8 + 12 * triangle_count;
+        if bytes.len() != vertices_at + 12 * vertex_count {
+            return None;
+        }
+        let vertex = |index: usize| -> Option<[f32; 3]> {
+            let at = vertices_at + 12 * index;
+            let component = |k: usize| Some(f32::from_le_bytes(word(at + 4 * k)?));
+            (index < vertex_count).then_some(())?;
+            Some([component(0)?, component(1)?, component(2)?])
+        };
+        let corners: Vec<[[f32; 3]; 3]> = (0..triangle_count)
+            .map(|t| {
+                let id = |k: usize| vertex(count(8 + 12 * t + 4 * k)?);
+                Some([id(0)?, id(1)?, id(2)?])
+            })
+            .collect::<Option<_>>()?;
+        let mut rank = vec![0; triangle_count];
+        for (place, triangle) in visit_order(&corners).into_iter().enumerate() {
+            rank[triangle] = place;
+        }
+        let uu = |p: [f32; 3]| Vec3::new(p[0], p[1], p[2]) * BT_TO_UU;
+        let (triangles, ranks): (Vec<Triangle>, Vec<u32>) = corners
+            .iter()
+            .zip(rank)
+            .filter_map(|([a, b, c], place)| {
+                let triangle = Triangle::wound(uu(*a), uu(*b), uu(*c))?;
+                Some((triangle, u32::try_from(place).ok()?))
+            })
+            .unzip();
+        let mut mesh = StaticMesh::new(triangles);
+        mesh.visit_rank = ranks;
+        Some(mesh)
+    }
+
+    /// Every triangle.
+    pub fn triangles(&self) -> &[Triangle] {
+        &self.triangles
+    }
+
+    /// Triangles whose grid cells overlap the box `min..max`.
+    pub fn near_indexed(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = (usize, &Triangle)> {
+        self.near_indices(min, max)
+            .into_iter()
+            .filter_map(|index| Some((index as usize, self.triangles.get(index as usize)?)))
+    }
+
+    /// Triangles whose grid cells overlap the box `min..max`.
+    pub fn near(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = &Triangle> {
+        self.near_indices(min, max)
+            .into_iter()
+            .filter_map(|index| self.triangles.get(index as usize))
+    }
+
+    fn near_indices(&self, min: Vec3, max: Vec3) -> Vec<u32> {
+        let mut indices: Vec<u32> = Vec::new();
+        for x in cell_of(min.x)..=cell_of(max.x) {
+            for y in cell_of(min.y)..=cell_of(max.y) {
+                for z in cell_of(min.z)..=cell_of(max.z) {
+                    if let Some(cell) = self.cells.get(&(x, y, z)) {
+                        indices.extend(cell);
+                    }
+                }
+            }
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+
+    /// The nearest front-facing triangle along the ray, if within `length`.
+    pub fn raycast(&self, origin: Vec3, direction: Vec3, length: f32) -> Option<RayHit> {
+        let end = origin + direction * length;
+        let min = Vec3::new(
+            origin.x.min(end.x),
+            origin.y.min(end.y),
+            origin.z.min(end.z),
+        );
+        let max = Vec3::new(
+            origin.x.max(end.x),
+            origin.y.max(end.y),
+            origin.z.max(end.z),
+        );
+        self.near(min, max)
+            .filter_map(|triangle| {
+                triangle
+                    .ray_distance(&origin, &direction, length)
+                    .map(|distance| RayHit {
+                        distance,
+                        normal: triangle.normal,
+                        dynamic: false,
+                        velocity: Vec3::ZERO,
+                    })
+            })
+            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+
+    /// A sphere's contacts, one per triangle it reaches, as Bullet's
+    /// `btSphereTriangleCollisionAlgorithm` makes them, gathered into at
+    /// most 4 as a persistent manifold keeps them (`add_manifold_point`,
+    /// `RB-PHYSICS-001-FR-115`). A contact on an edge
+    /// is adjusted as `btAdjustInternalEdgeContacts` does
+    /// (`RB-PHYSICS-001-FR-109`), its point moved to keep the sphere's
+    /// own contact point.
+    pub fn sphere_contacts(&self, center: Vec3, radius: f32) -> Vec<Contact> {
+        let mut manifold = BallManifold::default();
+        let limits = SphereLimits::plain(radius);
+        self.sphere_manifold(center, &Quat::IDENTITY, radius, &limits, &mut manifold)
+    }
+
+    /// `btSphereTriangleCollisionAlgorithm`'s contact between the sphere
+    /// and triangle `index`, if within the processing threshold, with its
+    /// normal edge-adjusted afterwards (`btAdjustInternalEdgeContacts`).
+    fn sphere_triangle_contact(
+        &self,
+        index: usize,
+        center: Vec3,
+        radius: f32,
+        admit: f32,
+    ) -> Option<ManifoldEntry> {
+        let triangle = self.triangles.get(index)?;
+        let height = triangle.signed_distance(&center);
+        if height < -radius {
+            return None;
+        }
+        let closest = triangle.closest_point(&center);
+        let offset = center - closest;
+        let distance = offset.length();
+        let (normal, depth) = if height > 0.0 && distance > 1e-6 {
+            (offset * (1.0 / distance), radius - distance)
+        } else if triangle.covers_at_depth(&center, height) {
+            (triangle.normal, radius - height)
+        } else {
+            return None;
+        };
+        if depth < -admit {
+            return None;
+        }
+        let adjusted = self.adjust_edge_normal(index, &closest, normal);
+        let on_ball = center - normal * radius;
+        let on_mesh = on_ball + adjusted * depth;
+        Some(ManifoldEntry {
+            on_ball,
+            local_on_ball: on_ball - center,
+            on_mesh,
+            contact: Contact {
+                normal: adjusted,
+                point: on_mesh,
+                penetration_depth: depth,
+            },
+        })
+    }
+
+    /// `sphere_contacts` with the ball's persistent `manifold` against this
+    /// mesh (`RB-PHYSICS-001-FR-121`): last tick's points stay, matched and
+    /// sorted by their ball-frame position as this tick's triangles report
+    /// (their depth still last tick's, as Bullet's are), then every point
+    /// is refreshed against the ball's new transform and dropped once past
+    /// the breaking threshold.
+    pub fn sphere_manifold(
+        &self,
+        center: Vec3,
+        orientation: &Quat,
+        radius: f32,
+        limits: &SphereLimits,
+        manifold: &mut BallManifold,
+    ) -> Vec<Contact> {
+        let reach = Vec3::new(radius, radius, radius);
+        let breaking = limits.breaking;
+        let to_local = orientation.conjugate();
+        let mut near = self.near_indices(center - reach, center + reach);
+        near.sort_unstable_by_key(|&index| self.visit_rank.get(index as usize).copied());
+        for index in near {
+            if let Some(mut entry) =
+                self.sphere_triangle_contact(index as usize, center, radius, limits.admit)
+            {
+                entry.local_on_ball = to_local.rotate(&(entry.on_ball - center));
+                add_manifold_point(&mut manifold.entries, entry, breaking);
+            }
+        }
+        manifold.refresh(center, orientation, limits);
+        manifold.entries.iter().map(|entry| entry.contact).collect()
+    }
+}
+
+/// A ball-mesh contact as a Bullet manifold point: `on_ball` is where the
+/// ball's surface meets the triangle along the *unadjusted* normal
+/// (`m_positionWorldOnA`), `local_on_ball` the same in the ball's frame
+/// (`m_localPointA`, which Bullet matches and sorts points by, and which
+/// turns with the ball), `on_mesh` the point on the triangle
+/// (`m_positionWorldOnB`); the edge adjustment, applied after, changes
+/// only `contact`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ManifoldEntry {
+    on_ball: Vec3,
+    local_on_ball: Vec3,
+    on_mesh: Vec3,
+    contact: Contact,
+}
+
+/// The ball's persistent manifold against one mesh, Bullet's
+/// `btPersistentManifold` kept across ticks (`RB-PHYSICS-001-FR-121`,
+/// ADR-0041).
+/// How a sphere's manifold with a mesh makes, keeps and folds contacts
+/// (uu), `RB-PHYSICS-001-FR-127`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SphereLimits {
+    /// A contact is made while the sphere is within this far of a triangle
+    /// (`SphereTriangleDetector`'s threshold slack).
+    pub admit: f32,
+    /// A kept point stays while its sphere point is within this far of its
+    /// surface along the normal (`validContactDistance`).
+    pub retain: f32,
+    /// A new point within this far of a kept one replaces it
+    /// (`getCacheEntry`), and a kept point that slides this far sideways
+    /// is dropped (`getContactBreakingThreshold`).
+    pub breaking: f32,
+}
+
+impl SphereLimits {
+    /// A bare sphere: the processing tolerance to make a contact, 0.02 x
+    /// its radius to keep and fold.
+    pub fn plain(radius: f32) -> SphereLimits {
+        let breaking = CONTACT_BREAKING_FACTOR * radius;
+        SphereLimits {
+            admit: CONTACT_PROCESSING_THRESHOLD,
+            retain: breaking,
+            breaking,
+        }
+    }
+
+    /// The ball, whose contact sphere (`body::BALL_RADIUS`) stands 1.9 uu
+    /// off Bullet's own 91.25 sphere.
+    pub const BALL: SphereLimits = SphereLimits {
+        admit: crate::body::BALL_CONTACT_SLACK,
+        retain: crate::body::BALL_CONTACT_SLACK,
+        breaking: crate::body::BALL_BREAKING_THRESHOLD,
+    };
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BallManifold {
+    entries: Vec<ManifoldEntry>,
+}
+
+impl BallManifold {
+    /// `refreshContactPoints`: each point's ball side follows the ball's
+    /// transform; a point further than `limits.retain` from its triangle
+    /// along its normal, or slid further than `limits.breaking` sideways,
+    /// is dropped.
+    fn refresh(&mut self, center: Vec3, orientation: &Quat, limits: &SphereLimits) {
+        // Bullet's `removeContactPoint` (RB-PHYSICS-001-FR-126): walking
+        // from the last slot down, a dropped slot takes the last entry.
+        // `sortCachedPoints`'s area terms pair slots by position, so the
+        // order a refresh leaves decides which point a full manifold gives
+        // up next tick.
+        let mut slot = self.entries.len();
+        while slot > 0 {
+            slot -= 1;
+            let entry = &mut self.entries[slot];
+            let on_ball = center + orientation.rotate(&entry.local_on_ball);
+            let distance = (on_ball - entry.on_mesh).dot(&entry.contact.normal);
+            let drift = entry.on_mesh - (on_ball - entry.contact.normal * distance);
+            if distance > limits.retain
+                || drift.length_squared() > limits.breaking * limits.breaking
+            {
+                self.entries.swap_remove(slot);
+                continue;
+            }
+            entry.on_ball = on_ball;
+            entry.contact.penetration_depth = -distance;
+        }
+    }
+
+    /// Points kept.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no point is kept.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Adds `entry` to a ball's per-tick manifold `kept` the way Bullet's
+/// `btManifoldResult::addContactPoint` does as each triangle reports
+/// (`RB-PHYSICS-001-FR-115`, ADR-0035; ball-side matching since FR-116,
+/// ADR-0036): an entry whose `on_ball` is within `breaking` (uu) of a
+/// kept one replaces it (`getCacheEntry`); a full manifold gives up the
+/// slot `replacement_slot` picks (`sortCachedPoints`), never the deepest.
+/// Every triangle meeting the ball at one shared vertex reports the same
+/// ball point, so they fold into one contact, the last one reported.
+fn add_manifold_point(kept: &mut Vec<ManifoldEntry>, entry: ManifoldEntry, breaking: f32) {
+    let limit = breaking * breaking;
+    // `getCacheEntry`: the nearest kept point within the threshold, not
+    // the first (FR-126).
+    let near = kept
+        .iter()
+        .enumerate()
+        .map(|(slot, k)| {
+            (
+                slot,
+                (k.local_on_ball - entry.local_on_ball).length_squared(),
+            )
+        })
+        .filter(|(_, d)| *d < limit)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(slot, _)| slot);
+    let sorted = |e: &ManifoldEntry| (e.local_on_ball, e.contact.penetration_depth);
+    if let Some(slot) = near {
+        kept[slot] = entry;
+    } else if kept.len() < MANIFOLD_CAPACITY {
+        kept.push(entry);
+    } else if let Some(slot) =
+        replacement_slot(&kept.iter().map(sorted).collect::<Vec<_>>(), sorted(&entry))
+    {
+        kept[slot] = entry;
+    }
+}
+
+impl StaticMesh {
+    /// `normal` for a contact at `point` on triangle `index`, adjusted for
+    /// the edge nearest `point` if one is within `EDGE_DISTANCE_THRESHOLD`.
+    pub(crate) fn adjust_edge_normal(&self, index: usize, point: &Vec3, normal: Vec3) -> Vec3 {
+        let (Some(triangle), Some(kinds)) = (self.triangles.get(index), self.edges.get(index))
+        else {
+            return normal;
+        };
+        let nearest = (0..3)
+            .map(|edge| {
+                let (start, end) = edge_vertices(triangle, edge);
+                (edge, segment_distance(point, &start, &end))
+            })
+            .filter(|(edge, distance)| {
+                *distance < EDGE_DISTANCE_THRESHOLD && kinds[*edge] != EdgeKind::Open
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((edge, _)) = nearest else {
+            return normal;
+        };
+        let face = triangle.normal;
+        match kinds[edge] {
+            EdgeKind::Open => normal,
+            EdgeKind::Smooth if face.dot(&normal) >= 0.0 => face,
+            EdgeKind::Smooth => normal,
+            EdgeKind::Convex { neighbor } => {
+                let (start, end) = edge_vertices(triangle, edge);
+                clamp_to_wedge(normal, face, neighbor, &(end - start))
+            }
+        }
+    }
+}
+
+fn edge_vertices(triangle: &Triangle, edge: usize) -> (Vec3, Vec3) {
+    let [a, b, c] = triangle.vertices;
+    match edge {
+        0 => (a, b),
+        1 => (b, c),
+        _ => (c, a),
+    }
+}
+
+fn segment_distance(point: &Vec3, start: &Vec3, end: &Vec3) -> f32 {
+    let along = *end - *start;
+    let length_sq = along.length_squared();
+    let t = if length_sq > 0.0 {
+        ((*point - *start).dot(&along) / length_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (*point - (*start + along * t)).length()
+}
+
+/// The kind of `triangle`'s edge `edge` if `neighbor` shares it.
+fn edge_kind(triangle: &Triangle, edge: usize, neighbor: &Triangle) -> Option<EdgeKind> {
+    let (start, end) = edge_vertices(triangle, edge);
+    let shares = |p: &Vec3| {
+        neighbor
+            .vertices
+            .iter()
+            .any(|v| (*v - *p).length_squared() < EQUAL_VERTEX_DISTANCE * EQUAL_VERTEX_DISTANCE)
+    };
+    if !shares(&start) || !shares(&end) {
+        return None;
+    }
+    let far = neighbor.vertices.iter().copied().max_by(|a, b| {
+        segment_distance(a, &start, &end).total_cmp(&segment_distance(b, &start, &end))
+    })?;
+    let bent = triangle.normal.cross(&neighbor.normal).length_squared() >= PLANAR_EPSILON;
+    Some(if bent && triangle.signed_distance(&far) < 0.0 {
+        EdgeKind::Convex {
+            neighbor: neighbor.normal,
+        }
+    } else {
+        EdgeKind::Smooth
+    })
+}
+
+/// `normal` turned about `axis` back into the wedge from `face` to
+/// `neighbor` if it has turned past `neighbor` (Bullet's `btClampNormal`),
+/// unless that would face away from `face`.
+fn clamp_to_wedge(normal: Vec3, face: Vec3, neighbor: Vec3, axis: &Vec3) -> Vec3 {
+    let Some(axis) = axis.normalize() else {
+        return normal;
+    };
+    // `across` points from the face over the edge, the way it bends.
+    let across = axis.cross(&face);
+    let across = if across.dot(&neighbor) < 0.0 {
+        -across
+    } else {
+        across
+    };
+    let limit = neighbor.dot(&across).atan2(neighbor.dot(&face));
+    let (along_face, along_across) = (normal.dot(&face), normal.dot(&across));
+    if along_across.atan2(along_face) <= limit {
+        return normal;
+    }
+    let radial = (along_face * along_face + along_across * along_across).sqrt();
+    let clamped = (face * limit.cos() + across * limit.sin()) * radial + axis * normal.dot(&axis);
+    if clamped.dot(&face) > 0.0 {
+        clamped
+    } else {
+        normal
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn floor_quad() -> StaticMesh {
+        let inside = Vec3::new(0.0, 0.0, 100.0);
+        let (a, b, c, d) = (
+            Vec3::new(-100.0, -100.0, 0.0),
+            Vec3::new(100.0, -100.0, 0.0),
+            Vec3::new(100.0, 100.0, 0.0),
+            Vec3::new(-100.0, 100.0, 0.0),
+        );
+        StaticMesh::new(vec![
+            Triangle::facing(a, c, b, inside).expect("has area"),
+            Triangle::facing(a, d, c, inside).expect("has area"),
+        ])
+    }
+
+    #[test]
+    fn triangles_face_the_inside_point_whatever_their_winding() {
+        let mesh = floor_quad();
+        for triangle in mesh.triangles() {
+            assert!((triangle.normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+            let [a, b, c] = triangle.vertices;
+            let wound = (b - a).cross(&(c - a)).normalize().expect("has area");
+            assert!((wound - triangle.normal).length() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_ray_hits_the_front_face_only() {
+        let mesh = floor_quad();
+        let down = Vec3::new(0.0, 0.0, -1.0);
+        let hit = mesh
+            .raycast(Vec3::new(10.0, 20.0, 30.0), down, 50.0)
+            .expect("the floor is 30 uu below");
+        assert!((hit.distance - 30.0).abs() < 1e-4);
+        assert!(mesh
+            .raycast(Vec3::new(10.0, 20.0, 30.0), down, 20.0)
+            .is_none());
+        assert!(mesh
+            .raycast(Vec3::new(10.0, 20.0, -30.0), -down, 50.0)
+            .is_none());
+        assert!(mesh
+            .raycast(Vec3::new(500.0, 0.0, 30.0), down, 50.0)
+            .is_none());
+    }
+
+    #[test]
+    fn a_sphere_touching_the_mesh_gets_one_contact_per_triangle_it_reaches() {
+        let mesh = floor_quad();
+        let contacts = mesh.sphere_contacts(Vec3::new(30.0, -40.0, 8.0), 10.0);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].penetration_depth - 2.0).abs() < 1e-4);
+        assert!((contacts[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-4);
+        // On the shared diagonal both triangles report the same point,
+        // which the manifold keeps once (FR-115).
+        assert_eq!(
+            mesh.sphere_contacts(Vec3::new(0.0, 0.0, 8.0), 10.0).len(),
+            1
+        );
+        assert!(mesh
+            .sphere_contacts(Vec3::new(30.0, -40.0, 12.0), 10.0)
+            .is_empty());
+    }
+
+    #[test]
+    fn closest_point_clamps_to_edges_and_vertices() {
+        let triangle = Triangle::facing(
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(0.0, 10.0, 0.0),
+            Vec3::new(0.0, 0.0, 5.0),
+        )
+        .expect("has area");
+        assert_eq!(
+            triangle.closest_point(&Vec3::new(-5.0, -5.0, 3.0)),
+            Vec3::ZERO
+        );
+        let on_edge = triangle.closest_point(&Vec3::new(5.0, -3.0, 0.0));
+        assert!((on_edge - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-5);
+        let inside = triangle.closest_point(&Vec3::new(2.0, 2.0, 7.0));
+        assert!((inside - Vec3::new(2.0, 2.0, 0.0)).length() < 1e-5);
+    }
+
+    /// A floor for `x <= 0` meeting a second face along `x = 0` that rises
+    /// (`rise` > 0, a concave valley) or falls (a convex ridge) at 30
+    /// degrees.
+    fn bent_mesh(rise: f32) -> StaticMesh {
+        let inside = Vec3::new(0.0, 0.0, 100.0);
+        let (back, near, far) = (
+            Vec3::new(-100.0, -100.0, 0.0),
+            Vec3::new(0.0, -100.0, 0.0),
+            Vec3::new(0.0, 100.0, 0.0),
+        );
+        let tip = Vec3::new(100.0, 0.0, rise * 100.0 * (30.0f32).to_radians().tan());
+        StaticMesh::new(vec![
+            Triangle::facing(back, near, far, inside).expect("has area"),
+            Triangle::facing(near, far, tip, inside).expect("has area"),
+        ])
+    }
+
+    fn contact_with_depth(contacts: &[Contact], depth: f32) -> Contact {
+        *contacts
+            .iter()
+            .find(|c| (c.penetration_depth - depth).abs() < 1e-3)
+            .expect("a contact at that depth")
+    }
+
+    #[test]
+    fn a_contact_on_a_concave_edge_takes_the_face_normal() {
+        // Past the floor's edge, its closest point is the edge itself;
+        // raw, the contact would lean toward the rising face.
+        let center = Vec3::new(5.0, 0.0, 8.0);
+        let contacts = bent_mesh(1.0).sphere_contacts(center, 10.0);
+        let edge = contact_with_depth(&contacts, 10.0 - center.length());
+        assert!((edge.normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
+        // The point moves with the normal; the sphere's own point stays.
+        let on_sphere = edge.point - edge.normal * edge.penetration_depth;
+        let raw_normal = center.normalize().expect("nonzero");
+        assert!((on_sphere - (center - raw_normal * 10.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn a_contact_on_a_convex_edge_turns_no_further_than_the_next_face() {
+        let ridge = bent_mesh(-1.0);
+        let slope = Vec3::new(0.5, 0.0, 0.75f32.sqrt());
+        // Over the ridge at 60 degrees: clamped to the slope's normal.
+        let past = Vec3::new(60f32.to_radians().sin(), 0.0, 0.5) * 10.0;
+        let contacts = ridge.sphere_contacts(past, 10.5);
+        let edge = contact_with_depth(&contacts, 0.5);
+        assert!((edge.normal - slope).length() < 1e-4, "{:?}", edge.normal);
+        // At 20 degrees, inside the wedge: kept.
+        let within = Vec3::new(20f32.to_radians().sin(), 0.0, 20f32.to_radians().cos()) * 10.0;
+        let contacts = ridge.sphere_contacts(within, 10.5);
+        let edge = contact_with_depth(&contacts, 0.5);
+        let raw = within.normalize().expect("nonzero");
+        assert!((edge.normal - raw).length() < 1e-4, "{:?}", edge.normal);
+    }
+
+    #[test]
+    fn a_contact_on_an_open_edge_keeps_its_own_normal() {
+        let center = Vec3::new(105.0, 0.0, 5.0);
+        let contacts = floor_quad().sphere_contacts(center, 10.0);
+        let raw = Vec3::new(1.0, 0.0, 1.0).normalize().expect("nonzero");
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].normal - raw).length() < 1e-5);
+    }
+
+    fn touch(x: f32, depth: f32) -> ManifoldEntry {
+        let point = Vec3::new(x, x * x / 40.0, 0.0);
+        ManifoldEntry {
+            on_ball: point,
+            local_on_ball: point,
+            on_mesh: point,
+            contact: Contact {
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                point,
+                penetration_depth: depth,
+            },
+        }
+    }
+
+    #[test]
+    fn a_point_within_the_breaking_threshold_refreshes_the_kept_one() {
+        let mut kept = vec![touch(0.0, 5.0)];
+        add_manifold_point(&mut kept, touch(1.0, 2.0), 1.8);
+        assert_eq!(kept, vec![touch(1.0, 2.0)]);
+        add_manifold_point(&mut kept, touch(3.0, 2.0), 1.8);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn a_full_ball_manifold_never_gives_up_its_deepest_point() {
+        let mut kept = Vec::new();
+        for (x, depth) in [
+            (0.0, 9.0),
+            (10.0, 1.0),
+            (20.0, 1.0),
+            (30.0, 1.0),
+            (40.0, 1.0),
+        ] {
+            add_manifold_point(&mut kept, touch(x, depth), 1.8);
+        }
+        assert_eq!(kept.len(), MANIFOLD_CAPACITY);
+        assert!(kept.contains(&touch(0.0, 9.0)));
+        assert!(
+            kept.contains(&touch(40.0, 1.0)),
+            "the newest point always enters"
+        );
+    }
+
+    #[test]
+    fn triangles_meeting_the_ball_at_one_ball_point_fold_into_the_last() {
+        let at = |mesh_x: f32, normal_z: f32| ManifoldEntry {
+            on_ball: Vec3::new(0.0, 0.0, -93.15),
+            local_on_ball: Vec3::new(0.0, 0.0, -93.15),
+            on_mesh: Vec3::new(mesh_x, 0.0, 0.0),
+            contact: Contact {
+                normal: Vec3::new(0.0, (1.0 - normal_z * normal_z).sqrt(), normal_z),
+                point: Vec3::new(mesh_x, 0.0, 0.0),
+                penetration_depth: 3.0,
+            },
+        };
+        let mut kept = Vec::new();
+        add_manifold_point(&mut kept, at(0.0, 1.0), 1.8);
+        add_manifold_point(&mut kept, at(5.0, 0.7), 1.8);
+        assert_eq!(kept, vec![at(5.0, 0.7)]);
+    }
+
+    fn cmf(triangles: &[[i32; 3]], vertices: &[[f32; 3]]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for count in [triangles.len(), vertices.len()] {
+            bytes.extend(i32::try_from(count).expect("small").to_le_bytes());
+        }
+        for index in triangles.iter().flatten() {
+            bytes.extend(index.to_le_bytes());
+        }
+        for component in vertices.iter().flatten() {
+            bytes.extend(component.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_cmf_mesh_is_scaled_to_uu_and_wound_as_written() {
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [2.0, 2.0, 0.0],
+        ];
+        let bytes = cmf(&[[0, 1, 2], [1, 3, 2], [0, 0, 1]], &vertices);
+        let mesh = StaticMesh::from_cmf(&bytes).expect("well formed");
+        // The degenerate third triangle is dropped.
+        assert_eq!(mesh.triangles().len(), 2);
+        let [a, b, _] = mesh.triangles()[0].vertices;
+        assert_eq!((a, b), (Vec3::ZERO, Vec3::new(100.0, 0.0, 0.0)));
+        assert!((mesh.triangles()[1].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_malformed_cmf_is_rejected() {
+        let bytes = cmf(&[[0, 1, 2]], &[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        assert!(StaticMesh::from_cmf(&bytes[..bytes.len() - 1]).is_none());
+        let bad_index = cmf(&[[0, 1, 7]], &[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        assert!(StaticMesh::from_cmf(&bad_index).is_none());
+    }
+
+    /// RB-PHYSICS-001-FR-120: a flat floor split into two meshes along
+    /// `x = 0`. A ball just past the seam reaches the left half only at
+    /// its seam edge; unclassified, that edge keeps the tilted edge-to-
+    /// centre normal, classified across meshes it is smooth and takes the
+    /// face normal.
+    #[test]
+    fn a_seam_between_meshes_is_smooth_once_classified_across_them() {
+        let inside = Vec3::new(0.0, 0.0, 100.0);
+        let (a, b, c, d) = (
+            Vec3::new(-100.0, -100.0, 0.0),
+            Vec3::new(0.0, -100.0, 0.0),
+            Vec3::new(0.0, 100.0, 0.0),
+            Vec3::new(-100.0, 100.0, 0.0),
+        );
+        let shift = Vec3::new(100.0, 0.0, 0.0);
+        let left = StaticMesh::new(vec![
+            Triangle::facing(a, b, c, inside).expect("has area"),
+            Triangle::facing(a, c, d, inside).expect("has area"),
+        ]);
+        let right = StaticMesh::new(vec![
+            Triangle::facing(a + shift, b + shift, c + shift, inside).expect("has area"),
+            Triangle::facing(a + shift, c + shift, d + shift, inside).expect("has area"),
+        ]);
+        let centre = Vec3::new(5.0, 0.0, 90.0);
+        let before = left.sphere_contacts(centre, 93.15);
+        assert_eq!(before.len(), 1);
+        assert!(
+            before[0].normal.x > 0.05,
+            "edge normal kept: {:?}",
+            before[0].normal
+        );
+
+        let mut meshes = vec![left, right];
+        StaticMesh::classify_seams(&mut meshes);
+        let after = meshes[0].sphere_contacts(centre, 93.15);
+        assert_eq!(after.len(), 1);
+        assert!(
+            (after[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5,
+            "seam not smoothed: {:?}",
+            after[0].normal
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-121: a kept point follows the ball's transform
+    /// and is dropped once the ball is past the breaking threshold along
+    /// the normal or has slid past it sideways.
+    #[test]
+    fn a_persistent_point_follows_the_ball_until_it_leaves() {
+        let limits = SphereLimits {
+            admit: 0.01,
+            retain: 1.86,
+            breaking: 1.86,
+        };
+        let resting = || BallManifold {
+            entries: vec![ManifoldEntry {
+                on_ball: Vec3::new(0.0, 0.0, -3.15),
+                local_on_ball: Vec3::new(0.0, 0.0, -93.15),
+                on_mesh: Vec3::ZERO,
+                contact: Contact {
+                    normal: Vec3::new(0.0, 0.0, 1.0),
+                    point: Vec3::ZERO,
+                    penetration_depth: 3.15,
+                },
+            }],
+        };
+        let mut nudged = resting();
+        nudged.refresh(Vec3::new(1.0, 0.0, 91.0), &Quat::IDENTITY, &limits);
+        assert_eq!(nudged.len(), 1);
+        assert!((nudged.entries[0].contact.penetration_depth - 2.15).abs() < 1e-5);
+
+        let mut lifted = resting();
+        lifted.refresh(Vec3::new(0.0, 0.0, 96.0), &Quat::IDENTITY, &limits);
+        assert!(lifted.is_empty(), "2.85 uu clear is past the threshold");
+
+        let mut slid = resting();
+        slid.refresh(Vec3::new(5.0, 0.0, 90.0), &Quat::IDENTITY, &limits);
+        assert!(slid.is_empty(), "5 uu sideways is past the threshold");
+    }
+
+    /// RB-PHYSICS-001-FR-126: a refresh drops a slot the way Bullet's
+    /// `removeContactPoint` does, moving the last entry into it, so the
+    /// survivors' order is [0, 3, 2] when slot 1 leaves, not [0, 2, 3].
+    #[test]
+    fn a_dropped_slot_takes_the_last_entry() {
+        let entry = |x: f32, mesh_z: f32| ManifoldEntry {
+            on_ball: Vec3::new(x, 0.0, -3.15),
+            local_on_ball: Vec3::new(x, 0.0, -93.15),
+            on_mesh: Vec3::new(x, 0.0, mesh_z),
+            contact: Contact {
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                point: Vec3::new(x, 0.0, mesh_z),
+                penetration_depth: 3.15 + mesh_z,
+            },
+        };
+        let mut manifold = BallManifold {
+            entries: vec![
+                entry(0.0, 0.0),
+                entry(10.0, -6.0),
+                entry(20.0, 0.0),
+                entry(30.0, 0.0),
+            ],
+        };
+        manifold.refresh(
+            Vec3::new(0.0, 0.0, 90.0),
+            &Quat::IDENTITY,
+            &SphereLimits::plain(93.15),
+        );
+        let order: Vec<f32> = manifold.entries.iter().map(|e| e.on_mesh.x).collect();
+        assert_eq!(order, vec![0.0, 30.0, 20.0]);
+    }
+
+    /// RB-PHYSICS-001-FR-126: a new point within the threshold of two kept
+    /// ones refreshes the nearer (`getCacheEntry`), not the first found.
+    #[test]
+    fn a_new_point_folds_into_the_nearest_kept_one() {
+        let at = |x: f32, depth: f32| ManifoldEntry {
+            on_ball: Vec3::new(x, 0.0, 0.0),
+            local_on_ball: Vec3::new(x, 0.0, 0.0),
+            on_mesh: Vec3::new(x, 0.0, -depth),
+            contact: Contact {
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                point: Vec3::new(x, 0.0, -depth),
+                penetration_depth: depth,
+            },
+        };
+        let mut kept = vec![at(0.0, 1.0), at(1.5, 2.0)];
+        add_manifold_point(&mut kept, at(1.2, 3.0), 1.86);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].contact.penetration_depth, 1.0);
+        assert_eq!(kept[1].contact.penetration_depth, 3.0);
+    }
+
+    /// RB-PHYSICS-001-FR-121: the kept point turns with the ball, so a
+    /// spinning ball's contact slides out of the threshold even in place.
+    #[test]
+    fn a_spinning_balls_point_slides_away_with_its_surface() {
+        let mesh = floor_quad();
+        let centre = Vec3::new(0.0, 0.0, 90.0);
+        let mut manifold = BallManifold::default();
+        assert_eq!(
+            mesh.sphere_manifold(
+                centre,
+                &Quat::IDENTITY,
+                93.15,
+                &SphereLimits::BALL,
+                &mut manifold
+            )
+            .len(),
+            1
+        );
+        let kept = manifold.entries[0];
+        // A quarter turn about x moves the bottom point to the side.
+        let half = std::f32::consts::FRAC_PI_4;
+        let turned = Quat::new(half.sin(), 0.0, 0.0, half.cos());
+        manifold.refresh(centre, &turned, &SphereLimits::BALL);
+        assert!(manifold.is_empty(), "kept {kept:?}");
+    }
+
+    fn resting_point() -> BallManifold {
+        BallManifold {
+            entries: vec![ManifoldEntry {
+                on_ball: Vec3::new(0.0, 0.0, -3.15),
+                local_on_ball: Vec3::new(0.0, 0.0, -93.15),
+                on_mesh: Vec3::ZERO,
+                contact: Contact {
+                    normal: Vec3::new(0.0, 0.0, 1.0),
+                    point: Vec3::ZERO,
+                    penetration_depth: 0.0,
+                },
+            }],
+        }
+    }
+
+    /// RB-PHYSICS-001-FR-127: the ball's contact sphere stands 1.9 uu off
+    /// Bullet's own, so a kept point stays only 0.005 uu past it, not the
+    /// 1.86 uu of a bare 93.15 uu sphere (`hitjump.jsonl` 20.775-20.800 s).
+    #[test]
+    fn a_ball_point_is_kept_only_within_bullets_slack() {
+        let mut near = resting_point();
+        near.refresh(
+            Vec3::new(0.0, 0.0, 93.154),
+            &Quat::IDENTITY,
+            &SphereLimits::BALL,
+        );
+        assert_eq!(near.len(), 1);
+        let mut far = resting_point();
+        far.refresh(
+            Vec3::new(0.0, 0.0, 93.2),
+            &Quat::IDENTITY,
+            &SphereLimits::BALL,
+        );
+        assert!(far.is_empty(), "0.05 uu clear is past Bullet's threshold");
+        let mut bare = resting_point();
+        bare.refresh(
+            Vec3::new(0.0, 0.0, 93.2),
+            &Quat::IDENTITY,
+            &SphereLimits::plain(93.15),
+        );
+        assert_eq!(bare.len(), 1, "a bare sphere keeps it");
+    }
+
+    /// RB-PHYSICS-001-FR-127: the ball makes a contact only within the same
+    /// 0.005 uu.
+    #[test]
+    fn a_ball_makes_a_mesh_contact_only_within_bullets_slack() {
+        let mesh = floor_quad();
+        let mut clear = BallManifold::default();
+        let none = mesh.sphere_manifold(
+            Vec3::new(0.0, 0.0, 93.159),
+            &Quat::IDENTITY,
+            93.15,
+            &SphereLimits::BALL,
+            &mut clear,
+        );
+        assert!(none.is_empty());
+        let mut touching = BallManifold::default();
+        let one = mesh.sphere_manifold(
+            Vec3::new(0.0, 0.0, 93.152),
+            &Quat::IDENTITY,
+            93.15,
+            &SphereLimits::BALL,
+            &mut touching,
+        );
+        assert_eq!(one.len(), 1);
+    }
+}

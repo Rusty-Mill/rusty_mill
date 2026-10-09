@@ -1,0 +1,47 @@
+{
+ "name": "bs_half",
+ "settle_ticks": 60,
+ "car": {
+  "location": [
+   0,
+   -3000,
+   17
+  ],
+  "rotation": [
+   -0.0096,
+   1.5707963,
+   0
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ],
+  "angular_velocity": [
+   0,
+   0,
+   0
+  ],
+  "boost": 100
+ },
+ "ball": {
+  "location": [
+   3500,
+   3500,
+   93.15
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ]
+ },
+ "steps": [
+  {
+   "ticks": 120,
+   "throttle": 1,
+   "steer": 0.5,
+   "boost": true
+  }
+ ]
+}

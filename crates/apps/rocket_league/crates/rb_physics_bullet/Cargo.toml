@@ -1,0 +1,22 @@
+[package]
+name = "rb_physics_bullet"
+description = "Physics core: a Rust port of Bullet3's rigid-body integration and sequential-impulse contact solver (zlib-licensed), scoped to sphere-vs-static-plane for v0 (RB-PHYSICS-001)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+rb_domain = { path = "../rb_domain" }
+
+[package.metadata.rusty_mill]
+layer = "apps"

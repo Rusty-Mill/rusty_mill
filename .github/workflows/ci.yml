@@ -34,11 +34,11 @@ on:
   # incidents without creating a no-op commit.
   workflow_dispatch:
   # Weekly full-workspace sweep: catches drift that scoped PR runs cannot see
-  # (ADR-0008). `ci_plan.py` treats any event other than push/PR as full.
+  # (ADR-0009). `ci_plan.py` treats any event other than push/PR as full.
   schedule:
     - cron: "17 3 * * 1"
 
-# Least privilege (ADR-0008): no job here writes to the repository.
+# Least privilege (ADR-0009): no job here writes to the repository.
 permissions:
   contents: read
 
@@ -155,7 +155,7 @@ jobs:
       - run: python3 .github/scripts/generate_workspace_map.py /tmp/metadata.json --verify docs/WORKSPACE-MAP.md
 
   cargo-deny:
-    # Advisories, licences, sources (deny.toml, ADR-0008). Workspace-wide like
+    # Advisories, licences, sources (deny.toml, ADR-0009). Workspace-wide like
     # dependency-policy, so it runs for every event and the weekly sweep picks
     # up new RustSec entries. Non-blocking until the first findings are
     # triaged: then delete `continue-on-error`.
@@ -190,6 +190,8 @@ jobs:
       win32: ${{ steps.plan.outputs.win32 }}
       multimodal_db: ${{ steps.plan.outputs.multimodal_db }}
       rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
+      rleval_viewer: ${{ steps.plan.outputs.rleval_viewer }}
+      rleval_app: ${{ steps.plan.outputs.rleval_app }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
     steps:
@@ -1055,6 +1057,80 @@ jobs:
         run: cargo check -p rusty_config --no-default-features --all-targets
 
   # ---------------------------------------------------------------------------
+  # Rocket League family: RLEvalSystem's two product-specific checks, ported from
+  # its pre-merge CI (baileyrd/RLEvalSystem .github/workflows/ci.yml). The
+  # workspace-wide jobs above already cover everything else (fmt; clippy, nextest
+  # and doctests with --all-features, which includes rleval-app's `mmdb,oidc`
+  # set on Linux and Windows). Its Python service job is deliberately not ported:
+  # the service and Docker files were moved as-is, with no CI (ADR-0008).
+  # ---------------------------------------------------------------------------
+
+  # The offline replay viewer bundles three.js and a render loop in JS that the
+  # Rust golden tests cannot exercise. Render it under software WebGL
+  # (swiftshader) and fail on any page error or if the render loop never ticks.
+  # puppeteer is pinned by tests/package-lock.json, installed with `npm ci`.
+  rleval-viewer-gl-smoke:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-viewer-gl-smoke
+      queue: max
+      cancel-in-progress: false
+    name: replay-viewer headless-GL smoke
+    needs: plan
+    if: needs.plan.outputs.rleval_viewer == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: rleval-viewer-gl-smoke
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rocket_league/crates/replay-viewer/tests/package-lock.json
+      - name: Generate offline viewer
+        run: cargo run -q -p replay-viewer -- crates/apps/rocket_league/rleval/assets/replays/42f2.replay --offline --hz 15 --html "$RUNNER_TEMP/viewer.html"
+      - name: Install puppeteer
+        working-directory: crates/apps/rocket_league/crates/replay-viewer/tests
+        run: npm ci --no-audit --no-fund
+      - name: Headless-GL smoke test
+        run: node crates/apps/rocket_league/crates/replay-viewer/tests/gl_smoke.mjs "$RUNNER_TEMP/viewer.html"
+
+  # Every other Rust job passes --all-features, which hides a broken default or
+  # single-feature build of rleval-app: its default build is the token-only
+  # server and must not need the rustls stack (`oidc`) or the engine (`mmdb`).
+  # The combined `mmdb,oidc` set is what --all-features already builds.
+  rleval-app-feature-sets:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rleval-app-feature-sets
+      queue: max
+      cancel-in-progress: false
+    name: rleval-app feature sets (default, mmdb, oidc)
+    needs: plan
+    if: needs.plan.outputs.rleval_app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: rleval-app-feature-sets
+      - name: cargo clippy -p rleval-app (default features)
+        run: cargo clippy -p rleval-app --all-targets -- -D warnings
+      - name: cargo clippy -p rleval-app --features mmdb
+        run: cargo clippy -p rleval-app --all-targets --features mmdb -- -D warnings
+      - name: cargo clippy -p rleval-app --features oidc
+        run: cargo clippy -p rleval-app --all-targets --features oidc -- -D warnings
+      - name: cargo test -p rleval-app (default features)
+        run: cargo test -p rleval-app
+
+  # ---------------------------------------------------------------------------
   # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's
   # own pre-merge CI (its crates/apps/rusty_remind_me/.github/workflows/ci.yml,
   # dead now that it is not at a repository root -- the full rationale for
@@ -1270,7 +1346,7 @@ jobs:
         run: cargo clippy --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub --all-targets -- -D warnings
 
   required-gate:
-    # The one check branch protection requires (ADR-0008). Planned-out jobs
+    # The one check branch protection requires (ADR-0009). Planned-out jobs
     # are `skipped`, which passes; a failed or cancelled job fails the gate.
     # `test_ci_workflow` fails if a job is missing from `needs`.
     name: required-gate
@@ -1297,6 +1373,8 @@ jobs:
       - multimodal-db-feature-sets
       - multimodal-db-msrv
       - rusty-config-no-std-check
+      - rleval-viewer-gl-smoke
+      - rleval-app-feature-sets
       - remind-me
       - remind-me-features
       - remind-me-combined-features

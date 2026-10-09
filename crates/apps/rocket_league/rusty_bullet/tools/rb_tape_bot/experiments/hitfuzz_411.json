@@ -1,0 +1,179 @@
+{
+  "name": "hitfuzz_411: a run at the ball, then a seeded random tape",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      -977,
+      -1595,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      -1.2469,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      -614,
+      -2287,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 40,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 37,
+      "throttle": 1
+    },
+    {
+      "ticks": 45,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 30,
+      "throttle": 1,
+      "steer": -1,
+      "boost": true
+    },
+    {
+      "ticks": 24,
+      "throttle": -1,
+      "steer": -1,
+      "boost": true
+    },
+    {
+      "ticks": 28,
+      "throttle": 1,
+      "steer": 0.5,
+      "boost": true
+    },
+    {
+      "ticks": 20,
+      "throttle": -1,
+      "steer": 0.5,
+      "handbrake": true
+    },
+    {
+      "ticks": 32,
+      "throttle": 1,
+      "boost": true,
+      "handbrake": true
+    },
+    {
+      "ticks": 47,
+      "throttle": 1,
+      "steer": 1
+    },
+    {
+      "ticks": 39,
+      "throttle": 0,
+      "steer": -1,
+      "boost": true
+    },
+    {
+      "ticks": 48,
+      "throttle": -1
+    },
+    {
+      "ticks": 23,
+      "throttle": 0,
+      "steer": -0.5
+    },
+    {
+      "ticks": 19,
+      "throttle": 1,
+      "steer": 1,
+      "boost": true
+    },
+    {
+      "ticks": 40,
+      "throttle": -1,
+      "boost": true
+    },
+    {
+      "ticks": 28,
+      "throttle": -1,
+      "steer": 1,
+      "boost": true
+    },
+    {
+      "ticks": 38,
+      "throttle": 1
+    },
+    {
+      "ticks": 42,
+      "throttle": -1,
+      "steer": -0.5
+    },
+    {
+      "ticks": 9,
+      "throttle": 1,
+      "steer": 0,
+      "jump": true
+    },
+    {
+      "ticks": 45,
+      "throttle": 0,
+      "handbrake": true,
+      "yaw": 1,
+      "roll": 0.5
+    },
+    {
+      "ticks": 24,
+      "throttle": 0
+    },
+    {
+      "ticks": 14,
+      "throttle": 0,
+      "steer": 1,
+      "boost": true,
+      "jump": true
+    },
+    {
+      "ticks": 12,
+      "throttle": 0,
+      "yaw": 0.5
+    },
+    {
+      "ticks": 16,
+      "throttle": 1,
+      "pitch": -0.5
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "steer": 0.5,
+      "jump": true,
+      "pitch": -1,
+      "roll": -1
+    },
+    {
+      "ticks": 39,
+      "throttle": -1,
+      "steer": 1,
+      "pitch": 0.5
+    }
+  ]
+}

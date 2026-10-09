@@ -1,4 +1,4 @@
-# cargo-deny policy (ADR-0008, ADR-0002). Introduced warn-only: the CI job
+# cargo-deny policy (ADR-0009, ADR-0002). Introduced warn-only: the CI job
 # is non-blocking until the first run's findings are triaged, then drop
 # `continue-on-error` in ci.yml. Run locally: `cargo deny check`.
 [graph]
