@@ -124,6 +124,7 @@ fn setup(dir: &Path) -> TaskId {
         )
         .expect("assign");
     }
+    admin::tick(dir, &task).expect("tick");
     task
 }
 

@@ -70,6 +70,8 @@ impl<S: Store> Fx<S> {
             };
             fx.run(&Command::Assign { role, principal });
         }
+        // Assignment grants nothing; the first tick does.
+        fx.run(&Command::Tick);
         fx
     }
 

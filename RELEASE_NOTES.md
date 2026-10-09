@@ -19,6 +19,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_bbp: no wasted Coder turn on candidate submission
+
+- **Fixed:** submitting a candidate ended the Coder turn and scheduled the next one while the task was still in `build`, granting a Coder turn that the transition to `test` revoked on the next line. Each candidate cost one turn of budget and skipped a turn id. The turn now ends without scheduling; the `test` entry schedules once.
+- **Changed:** `Assign` no longer grants a turn; the first `Tick` does. A turn needs a host ready to launch its harness, and roles are assigned before any moderator runs, so the turn `assign` granted was always aborted by the moderator's restart fence (another wasted turn and skipped id). `bbp mod` ticks first thing; a hand-driven flow runs `bbp tick` after assigning. Regression tests in `tests/rules.rs`; the moderator test asserts turns 1 to 4 exactly.
+
+---
+
 ## 2026-10-09 - rb_env match flow: review fixes for the rusty_bullet catch-up (pending review)
 
 - **Fixed:** regulation no longer ends on a height guess. `Flow::after_step` takes whether the ball met the floor during the tick (`flow::ball_met_floor`, from the ball before and after it), so a bounce on the tick the clock reaches zero counts even though the ball ends it above 97.5, and a low ball still in the air (z 97) does not end it. Tests: pure `ball_met_floor` cases, `Flow` tie and lead, and an `Env` run for a fall and a bounce on the last tick. The `MATCH_END_BALL_HEIGHT` constant is gone; a ball met on the curve (the game once ended a match at 97.3 there) now reads as in the air until it reaches the floor.
@@ -42,7 +49,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `bbp mod`, the moderator loop: one agent harness per granted turn with a per-turn MCP config, the runner per selected run, deadlines, forfeit on early exit, until the task closes. One moderator per task; a restart aborts the turn it cannot see so the old invocation is fenced; harnesses die with their process group on every exit path; the runner runs on its own thread so cancellation is honoured mid-profile. Tokens and run secrets are keyed by a per-directory master secret that never enters the log and is created with a single winner.
 - **Boundary:** the harness runs as the moderator's user and is trusted with the task directory; `bbp mcp` fences the model's tool calls, not the harness process. An untrusted harness needs its own sandbox or user.
 - **Changed:** `TurnGranted` and `RunStarted` no longer carry the token or secret; no stored data predates this.
-- **Verified by hand:** one live Claude Code planner turn through `bbp mod` and `bbp mcp` stored a spec and reached the plan gate (recorded in the crate README); the scripted agents in `tests/moderator_e2e.rs` cover the full path in CI. The core grants and immediately revokes a Coder turn when a candidate submission moves the task to `test`, which costs one turn of budget per candidate; to be tightened in the core.
+- **Verified by hand:** one live Claude Code planner turn through `bbp mod` and `bbp mcp` stored a spec and reached the plan gate (recorded in the crate README); the scripted agents in `tests/moderator_e2e.rs` cover the full path in CI. The core granted and immediately revoked a Coder turn when a candidate submission moved the task to `test`; fixed below.
 
 ---
 
