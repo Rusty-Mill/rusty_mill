@@ -158,6 +158,8 @@ struct Pool {
     freed: Condvar,
     dial: Box<Dial>,
     max: usize,
+    /// How many times a connection has been taken.
+    leases: std::sync::atomic::AtomicUsize,
 }
 
 struct Slots {
@@ -215,6 +217,8 @@ impl Drop for Lease<'_> {
 impl Pool {
     /// A connection, waiting for one (or dialling one) until `deadline`.
     fn lease(&self, deadline: Instant) -> Result<Lease<'_>, ClientError> {
+        self.leases
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut slots = lock(&self.state);
         loop {
             if let Some(conn) = slots.idle.pop() {
@@ -383,6 +387,7 @@ impl Target {
                 freed: Condvar::new(),
                 dial,
                 max,
+                leases: std::sync::atomic::AtomicUsize::new(0),
             },
             timeout,
         })
@@ -479,6 +484,12 @@ impl Target {
                 ))
             }
         }
+    }
+
+    /// How many times a connection has been taken from the pool so far: one per
+    /// call, and one per whole paged listing. For metrics and tests.
+    pub fn leases(&self) -> usize {
+        self.pool.leases.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether this target advertised prompts in its handshake.

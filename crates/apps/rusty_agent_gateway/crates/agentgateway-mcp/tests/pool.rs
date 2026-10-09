@@ -14,7 +14,7 @@ use rusty_mcp_server::json::Value;
 use rusty_mcp_server::proto::{
     CallToolParams, CallToolResult, ContentBlock, ErrorData, ProtocolVersion, Tool,
 };
-use rusty_mcp_server::{bind_http, CallContext, HttpConfig, Server, ServerBuilder, ToolSource};
+use rusty_mcp_server::{CallContext, HttpConfig, Server, ServerBuilder, ToolSource, bind_http};
 use rusty_serve::{Limits, ShutdownHandle};
 
 fn schema() -> Value {
@@ -69,7 +69,14 @@ fn target(up: &Up, connections: usize, timeout: Duration) -> Target {
         }),
         filters: Vec::new(),
     };
-    Target::connect_with(&config, &Override::default(), Some(timeout), connections, "t").unwrap()
+    Target::connect_with(
+        &config,
+        &Override::default(),
+        Some(timeout),
+        connections,
+        "t",
+    )
+    .unwrap()
 }
 
 fn call(name: &str) -> CallToolParams {
@@ -135,7 +142,9 @@ impl ToolSource for Many {
             .unwrap()
             .push(ctx.caller().header("mcp-session-id").map(str::to_owned));
         std::thread::sleep(Duration::from_millis(self.1));
-        Ok((0..8).map(|i| Tool::new(format!("t{i}"), schema())).collect())
+        Ok((0..8)
+            .map(|i| Tool::new(format!("t{i}"), schema()))
+            .collect())
     }
 
     fn call(
@@ -200,4 +209,19 @@ fn every_page_of_a_listing_goes_over_one_session_even_with_competing_traffic() {
         ids.iter().all(|id| *id == ids[0]),
         "pages hopped between sessions: {ids:?}"
     );
+}
+
+#[test]
+fn a_paged_listing_takes_one_connection_for_all_its_pages() {
+    // A cursor belongs to the session that issued it, so the pages must not be
+    // spread over leases: one lease for the listing, however many pages.
+    let up = serve(
+        Server::builder("pages", "1")
+            .page_size(1)
+            .tool_source(Many(Arc::new(Mutex::new(Vec::new())), 0)),
+    );
+    let target = target(&up, 2, Duration::from_secs(5));
+    let before = target.leases();
+    assert_eq!(target.tools(&HeaderOverride::default()).unwrap().len(), 8);
+    assert_eq!(target.leases() - before, 1);
 }
