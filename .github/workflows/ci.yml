@@ -1211,21 +1211,14 @@ jobs:
       - name: live internet (non-blocking)
         continue-on-error: true
         shell: bash
-        run: |
-          set -euo pipefail
-          out=$(cargo test -p rusty_tls --features handrolled-engine \
-            --test handrolled_live -- --ignored --nocapture --color never)
-          echo "$out"
-          {
-            echo '### rusty_tls native engine, live internet'
-            echo '```'
-            echo "$out" | grep -E '^(accounts|oauth2|www)[a-z0-9.]*:|test result' || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "$out" | grep -qE 'test result: ok\. 1 passed' || {
-            echo "::warning::the live internet check did not pass; see the step output"
-            exit 1
-          }
+        # The script always prints and summarises the output, even when cargo
+        # fails (a bare command substitution under `set -e` would lose it), and
+        # fails the step on a failure or a zero-test run. It is tested offline
+        # by test_live_internet_check.py.
+        run: >-
+          bash .github/scripts/live_internet_check.sh
+          cargo test -p rusty_tls --features handrolled-engine
+          --test handrolled_live -- --ignored --nocapture --color never
 
   # ---------------------------------------------------------------------------
   # Rocket League family: RLEvalSystem's two product-specific checks, ported from

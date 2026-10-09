@@ -95,17 +95,21 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_the_live_internet_step_can_inform_but_never_gate(self) -> None:
         # A third party's server must not decide whether a PR merges, so the
-        # live step is continue-on-error; it still has to run the ignored test
-        # and insist on a real pass, so it cannot report success on zero tests.
+        # live step is continue-on-error. Its output and exit logic live in
+        # live_internet_check.sh (tested offline, including a failing command),
+        # so the step must go through that script and not inline its own.
         start = self.workflow.index("  rusty-tls-engine:\n")
         end = self.workflow.find("\n  # ----", start)
         job = self.workflow[start : end if end != -1 else None]
-        step = job[job.index("      - name: live internet (non-blocking)") :]
+        marker = "      - name: live internet (non-blocking)"
+        step = job[job.index(marker) :]
         self.assertIn("continue-on-error: true", step)
+        self.assertIn("bash .github/scripts/live_internet_check.sh", step)
         self.assertIn("--test handrolled_live -- --ignored", step)
-        self.assertIn("test result: ok\\. 1 passed", step)
+        # No inline `out=$(cargo ...)`: under `set -e` that loses the output.
+        self.assertNotIn("out=$(", step)
         # Last in the job, so nothing after it can be skipped by its failure.
-        self.assertNotIn("\n      - name:", step[len("      - name: live internet (non-blocking)") :])
+        self.assertNotIn("\n      - name:", step[len(marker) :])
 
     def test_every_handrolled_suite_is_gated_on_the_cfg_the_job_sets(self) -> None:
         # The guard above only works if each suite really is cfg-gated: an

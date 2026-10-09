@@ -15,7 +15,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ## 2026-10-09 - CI: live-internet check added to rusty-tls-engine (non-blocking)
 
-- **Added (CI):** a last step in `rusty-tls-engine` runs `handrolled_live` on the runner and writes its results to the step summary. It is `continue-on-error`: the first real evidence about Google's endpoints comes from this run, and it cannot block a merge. A guard in `test_ci_workflow` keeps it non-blocking and requires `1 passed`.
+- **Added (CI):** a last step in `rusty-tls-engine` runs `handrolled_live` on the runner and writes its results to the step summary. It is `continue-on-error`: the first real evidence about Google's endpoints comes from this run, and it cannot block a merge. The logic is a tested script (`live_internet_check.sh`): output and summary are written even when cargo fails, and a failure or zero-test run fails the step. A guard in `test_ci_workflow` keeps the step non-blocking.
 - **Known limitations:** it depends on a third party's servers and on the runner's network. Until a run is read, the claim that the engine works with Google's real endpoints is unproven; the sandbox runs only reached an intercepting proxy.
 
 ## 2026-10-09 - rusty_tls: live-internet check, first wiring candidate proposed
