@@ -6,10 +6,13 @@
 //! `os_random` -- which had each independently arrived at the same
 //! two-backend design:
 //!
-//! - Unix: read from `/dev/urandom`, which never blocks once the kernel
-//!   entropy pool is initialized (Linux 5.6+, macOS, the BSDs). The file
-//!   handle is opened once and cached, as `rusty_uuid`'s copy did, so a
-//!   caller minting many small values doesn't pay an `open(2)` each time.
+//! - Linux on x86_64/aarch64: `getrandom(2)` with flags 0 (via `rusty_libc`), which
+//!   blocks until the kernel pool is seeded; `/dev/urandom` is the fallback
+//!   for `ENOSYS` (kernel before 3.17).
+//! - Other Unix (macOS, the BSDs, other Linux targets): read from `/dev/urandom`,
+//!   which never blocks once the kernel entropy pool is initialized. The file
+//!   handle is opened once and cached, so a caller minting many small values
+//!   doesn't pay an `open(2)` each time; reads take no lock.
 //! - Windows: `BCryptGenRandom` with `BCRYPT_USE_SYSTEM_PREFERRED_RNG`
 //!   from the CNG API, via a hand-declared FFI binding to `bcrypt.dll` --
 //!   no `windows-sys`, no crate.
@@ -18,10 +21,8 @@
 //! caller deriving a PKCE verifier or a session id from these bytes must
 //! find out if the OS could not supply them.
 //!
-//! Deliberately *not* the raw `getrandom(2)` syscall that `rusty_libc` and
-//! `rustils`' `platform-linux` use. Those are Linux-only (or, for
-//! `platform`, gated behind that project's own consumer policy), and this
-//! crate has to serve macOS/BSD consumers through the same code path.
+//! The kernel holds all the state, so there is no userspace generator to reseed after a
+//! `fork`. Randomness *quality* is the OS's; this crate does not and cannot test it.
 
 use std::fmt;
 
@@ -44,7 +45,8 @@ impl From<Error> for std::io::Error {
 }
 
 /// Fills `buf` with cryptographically secure random bytes from the OS
-/// CSPRNG. An empty `buf` is a no-op that never touches the OS.
+/// CSPRNG. An empty `buf` is a no-op that never touches the OS. On `Err` the
+/// contents of `buf` are unspecified (possibly partly filled): do not use it.
 pub fn fill(buf: &mut [u8]) -> Result<(), Error> {
     if buf.is_empty() {
         return Ok(());
@@ -59,36 +61,91 @@ pub fn bytes(len: usize) -> Result<Vec<u8>, Error> {
     Ok(buf)
 }
 
+/// Calls `read` until `buf` is full. `read` fills a prefix of the slice it is
+/// given and returns its length. Interrupted calls are retried; a read that
+/// makes no progress, claims more than it was given, or fails is an error, so a
+/// short or empty read can never leave an unfilled tail that reads as random.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn fill_with(
+    buf: &mut [u8],
+    mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
+) -> Result<(), Error> {
+    let mut done = 0;
+    while done < buf.len() {
+        let rest = &mut buf[done..];
+        let cap = rest.len();
+        match read(rest) {
+            Ok(0) => return Err(Error("the source returned no bytes".to_string())),
+            Ok(n) if n > cap => {
+                return Err(Error(format!("the source claimed {n} of {cap} bytes")))
+            }
+            Ok(n) => done += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(Error(e.to_string())),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 mod imp {
-    use super::Error;
+    use super::{fill_with, Error};
     use std::fs::File;
     use std::io::Read;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
 
-    static URANDOM: OnceLock<Mutex<File>> = OnceLock::new();
+    static URANDOM: OnceLock<File> = OnceLock::new();
 
     /// The cached `/dev/urandom` handle, opened on first use. `OnceLock`
     /// can't run a fallible initializer, so the open happens outside it;
     /// two threads racing here both open the device and one handle wins,
-    /// the other closing on drop -- harmless.
-    fn urandom() -> Result<&'static Mutex<File>, Error> {
+    /// the other closing on drop -- harmless. Reads go through `&File`, which
+    /// the kernel serialises, so no lock is held across them.
+    fn urandom() -> Result<&'static File, Error> {
         if let Some(file) = URANDOM.get() {
             return Ok(file);
         }
         let file =
             File::open("/dev/urandom").map_err(|e| Error(format!("open /dev/urandom: {e}")))?;
-        Ok(URANDOM.get_or_init(|| Mutex::new(file)))
+        Ok(URANDOM.get_or_init(|| file))
     }
 
+    fn fill_urandom(buf: &mut [u8]) -> Result<(), Error> {
+        let mut file = urandom()?;
+        fill_with(buf, |chunk| file.read(chunk))
+            .map_err(|e| Error(format!("read /dev/urandom: {}", e.0)))
+    }
+
+    /// `getrandom(2)` with flags 0: blocks until the kernel pool is seeded, which
+    /// `/dev/urandom` does not. `ENOSYS` (kernel before 3.17) falls back to
+    /// `/dev/urandom`.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     pub fn fill(buf: &mut [u8]) -> Result<(), Error> {
-        let file = urandom()?;
-        // A poisoned lock means another thread panicked mid-read; the
-        // handle itself is still a valid, readable `/dev/urandom`.
-        let mut guard = file.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard
-            .read_exact(buf)
-            .map_err(|e| Error(format!("read /dev/urandom: {e}")))
+        use rusty_libc::{rand::getrandom, Errno};
+        let mut unsupported = false;
+        let result = fill_with(buf, |chunk| match getrandom(chunk, 0) {
+            Ok(n) => Ok(n),
+            Err(Errno::ENOSYS) => {
+                unsupported = true;
+                Ok(chunk.len()) // stop the loop; the buffer is refilled below
+            }
+            Err(e) => Err(std::io::Error::from_raw_os_error(e.0)),
+        });
+        if unsupported {
+            return fill_urandom(buf);
+        }
+        result.map_err(|e| Error(format!("getrandom: {}", e.0)))
+    }
+
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    pub fn fill(buf: &mut [u8]) -> Result<(), Error> {
+        fill_urandom(buf)
     }
 }
 
@@ -195,6 +252,63 @@ mod tests {
                 assert_ne!(a, b, "two threads got identical 64-byte outputs");
             }
         }
+    }
+
+    use std::io::{Error as IoError, ErrorKind};
+
+    /// A scripted source: each call pops the next step.
+    fn scripted(
+        steps: Vec<Result<usize, ErrorKind>>,
+    ) -> impl FnMut(&mut [u8]) -> std::io::Result<usize> {
+        let mut steps = steps.into_iter();
+        move |chunk: &mut [u8]| match steps.next().expect("source called more than scripted") {
+            Ok(n) => {
+                let len = n.min(chunk.len());
+                chunk[..len].fill(0xAB);
+                Ok(n)
+            }
+            Err(kind) => Err(IoError::from(kind)),
+        }
+    }
+
+    #[test]
+    fn short_and_interrupted_reads_are_continued_until_full() {
+        let mut buf = [0u8; 10];
+        let src = scripted(vec![Ok(3), Err(ErrorKind::Interrupted), Ok(4), Ok(3)]);
+        fill_with(&mut buf, src).expect("fill");
+        assert_eq!(buf, [0xAB; 10]);
+    }
+
+    #[test]
+    fn a_read_that_makes_no_progress_is_an_error() {
+        let mut buf = [0u8; 4];
+        let err = fill_with(&mut buf, scripted(vec![Ok(2), Ok(0)])).unwrap_err();
+        assert!(err.to_string().contains("no bytes"), "{err}");
+    }
+
+    #[test]
+    fn a_source_claiming_more_than_it_was_given_is_an_error() {
+        let mut buf = [0u8; 4];
+        assert!(fill_with(&mut buf, scripted(vec![Ok(5)])).is_err());
+    }
+
+    #[test]
+    fn a_failing_source_propagates_the_error() {
+        let mut buf = [0u8; 4];
+        let err = fill_with(
+            &mut buf,
+            scripted(vec![Ok(1), Err(ErrorKind::PermissionDenied)]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("permission denied"), "{err}");
+    }
+
+    #[test]
+    fn large_fills_are_complete() {
+        // Larger than one getrandom(2) call may be guaranteed to return.
+        let out = bytes(1 << 20).expect("1 MiB");
+        assert_eq!(out.len(), 1 << 20);
+        assert!(out.iter().any(|&b| b != 0));
     }
 
     #[test]

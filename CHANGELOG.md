@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- **`rusty_rand` hardened** (crypto track gap 1): on Linux x86_64/aarch64 it calls `getrandom(2)` with flags 0 through `rusty_libc` (blocks until the kernel pool is seeded; `/dev/urandom` was not), other Unix keeps `/dev/urandom` but without the global `Mutex`; a short, empty or failed read is an error, never an unfilled tail (`fill_with`, tested with a scripted source). API unchanged. `rust-version` of `rusty_rand` raised 1.75 to 1.88 (`rusty_libc`'s floor). Quality of the randomness is the OS's and is not tested here.
 - **`rusty_pk::ed25519::verify` accepts small-order public keys again** (owner decision, reverses the round 3 rejection from #540): matches `ring` and RFC 8032, which does not require rejection. The identity key verifies `R = identity, S = 0` for every message, so callers admitting keys from untrusted input must screen them. The Ed25519 vectors are unchanged; tests now assert agreement with `ring` on the identity encodings.
 
 ### Added
