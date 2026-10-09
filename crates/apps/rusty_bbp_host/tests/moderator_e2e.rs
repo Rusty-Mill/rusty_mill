@@ -289,3 +289,22 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
     assert_eq!(first.state, State::Planning);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An agents file may name only some roles.
+#[test]
+fn launchers_file_may_omit_roles() {
+    let dir = tempdir("launchers");
+    let file = dir.join("agents.json");
+    std::fs::write(
+        &file,
+        r#"{"planner": {"program": "sh", "args": ["-c", "true"]}}"#,
+    )
+    .expect("write");
+    let l = Launchers::read_file(&file).expect("parse");
+    assert_eq!(
+        l.for_role(Role::Planner).map(|x| x.program.as_str()),
+        Some("sh")
+    );
+    assert!(l.for_role(Role::Coder).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -31,9 +31,13 @@ pub struct Launcher {
 /// One launcher per role; a role without one is left to its deadline.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Launchers {
+    #[rusty_serde(default)]
     pub planner: Option<Launcher>,
+    #[rusty_serde(default)]
     pub coder: Option<Launcher>,
+    #[rusty_serde(default)]
     pub tester: Option<Launcher>,
+    #[rusty_serde(default)]
     pub reviewer: Option<Launcher>,
 }
 
