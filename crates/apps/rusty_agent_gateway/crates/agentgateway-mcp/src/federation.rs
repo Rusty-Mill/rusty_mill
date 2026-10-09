@@ -139,7 +139,8 @@ impl std::fmt::Debug for Federation {
 }
 
 fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
@@ -422,7 +423,9 @@ fn forward_meta(meta: &Option<Value>) -> Option<Value> {
             kept.insert(key, value.clone());
         }
     }
-    kept.as_object().is_some_and(|o| !o.is_empty()).then_some(kept)
+    kept.as_object()
+        .is_some_and(|o| !o.is_empty())
+        .then_some(kept)
 }
 
 /// A guardrail's JSON-RPC refusal.
@@ -858,8 +861,7 @@ impl ResourceSource for Federation {
         let mut index = HashMap::new();
 
         for target in targets {
-            let Some(upstream) =
-                self.upstream(target, "resources", || target.resources(&headers))
+            let Some(upstream) = self.upstream(target, "resources", || target.resources(&headers))
             else {
                 continue;
             };
@@ -1010,8 +1012,7 @@ impl Federation {
         // Contents come back carrying the target's own URIs, which no client
         // could read back to us. Re-qualify them so the round trip closes.
         for content in &mut result.contents {
-            let (ResourceContents::Text { uri, .. } | ResourceContents::Blob { uri, .. }) =
-                content;
+            let (ResourceContents::Text { uri, .. } | ResourceContents::Blob { uri, .. }) = content;
             *uri = self.inner.namer.qualify_uri(&target.name, uri);
         }
 
@@ -1207,7 +1208,10 @@ impl Federation {
                 // that failed, so it takes the same path as one that could not
                 // be reached rather than being ignored.
                 None => {
-                    tracing::warn!(method, "a guardrail rewrote a request into something unusable");
+                    tracing::warn!(
+                        method,
+                        "a guardrail rewrote a request into something unusable"
+                    );
                     return Err(error(
                         ErrorCode::INTERNAL_ERROR,
                         "mcpGuardrails returned an unusable request",
@@ -1268,7 +1272,10 @@ impl Federation {
         )) {
             Outcome::Pass => Ok(value.clone()),
             Outcome::Mutated(body) => decode(&body).ok_or_else(|| {
-                tracing::warn!(method, "a guardrail rewrote a result into something unusable");
+                tracing::warn!(
+                    method,
+                    "a guardrail rewrote a result into something unusable"
+                );
                 error(
                     ErrorCode::INTERNAL_ERROR,
                     "mcpGuardrails returned an unusable result",

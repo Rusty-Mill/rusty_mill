@@ -55,10 +55,13 @@ const PREFIX: &str = "mcpGuardrails.";
 /// one. A malformed context is treated as absent, which is what W3C requires.
 pub fn request(method: &'static str, context: &CallContext) -> Span {
     let meta = &context.meta().extra;
-    let text = |key: &str| meta.get(key).and_then(rusty_mcp_server::json::Value::as_str);
-    match text("traceparent")
-        .and_then(|parent| rusty_mcp::trace::TraceContext::from_parts(parent, text("tracestate"), text("baggage")))
-    {
+    let text = |key: &str| {
+        meta.get(key)
+            .and_then(rusty_mcp_server::json::Value::as_str)
+    };
+    match text("traceparent").and_then(|parent| {
+        rusty_mcp::trace::TraceContext::from_parts(parent, text("tracestate"), text("baggage"))
+    }) {
         Some(trace) => trace.span(method),
         None => tracing::info_span!("mcp.request", otel.name = method),
     }

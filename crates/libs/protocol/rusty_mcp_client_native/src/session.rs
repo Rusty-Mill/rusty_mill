@@ -162,13 +162,19 @@ impl ClientSession {
         id
     }
 
-    /// `server/discover`.
+    /// `server/discover`. Like every stateless request it carries `_meta`
+    /// naming the revision tried (the newest stateless one this client
+    /// speaks), the client and its capabilities: some servers refuse a
+    /// discovery without it rather than falling back.
     pub fn discover_request(&mut self) -> (RequestId, Message) {
         let id = self.allocate();
+        let tried = self.config.versions.iter().find(|v| v.is_stateless());
+        // Nothing is negotiated yet, so name the revision being tried.
+        let params = self.with_meta_for(None, tried);
         let message = Message::Request {
             id: id.clone(),
             method: method::DISCOVER.to_owned(),
-            params: None,
+            params: Some(params),
         };
         (id, message)
     }
@@ -289,6 +295,10 @@ impl ClientSession {
     }
 
     fn with_meta(&self, params: Option<Value>) -> Value {
+        self.with_meta_for(params, self.negotiated.as_ref())
+    }
+
+    fn with_meta_for(&self, params: Option<Value>, version: Option<&ProtocolVersion>) -> Value {
         let mut params = match params {
             Some(p) if p.as_object().is_some() => p,
             _ => Value::object(),
@@ -298,7 +308,7 @@ impl ClientSession {
             .filter(|m| m.as_object().is_some())
             .cloned()
             .unwrap_or_else(Value::object);
-        if let Some(version) = &self.negotiated {
+        if let Some(version) = version {
             meta.insert(META_VERSION, version.as_str());
         }
         meta.insert(META_INFO, self.config.info.to_value());
