@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - Cargo.lock: bump yanked wnaf 0.14.0 to 0.14.1
+
+- **Fixed:** `wnaf 0.14.0` (via `p256` -> `rusty_a2a`) was yanked. `cargo update -p wnaf` moves it to 0.14.1: one package, plus its `primefield` edge. `cargo deny check advisories`, the workspace-map and dependency checks and the `rusty_a2a` tests pass. No source changes.
+
+---
+
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
 - **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
