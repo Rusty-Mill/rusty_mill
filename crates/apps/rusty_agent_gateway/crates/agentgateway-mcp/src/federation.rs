@@ -86,8 +86,8 @@ pub enum FederationError {
     Transform(#[from] TransformError),
 
     /// Every target failed to come up, so there is nothing to serve.
-    #[error("no MCP target could be reached; the federation would serve nothing")]
-    NoTargets,
+    #[error("no MCP target could be reached; the federation would serve nothing: {0}")]
+    NoTargets(String),
 
     /// The server could not be assembled from the federation.
     #[error("assembling the MCP server: {0}")]
@@ -230,7 +230,7 @@ impl Federation {
         }
 
         if targets.is_empty() {
-            return Err(FederationError::NoTargets);
+            return Err(FederationError::NoTargets(degraded.join("; ")));
         }
 
         let namer = ToolNamer::new(
