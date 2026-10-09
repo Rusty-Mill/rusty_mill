@@ -10,7 +10,6 @@ publish = false
 layer = "apps"
 
 [dependencies]
-rk-observe.workspace = true
 rk-constrain.workspace = true
 aisdk.workspace = true
 async-trait.workspace = true
@@ -25,7 +24,8 @@ futures = { workspace = true }
 fake = []
 
 [dev-dependencies]
-rk-kernel = { path = ".", features = ["fake"] }
+rk-observe.workspace = true
+rk-kernel ={ path = ".", features = ["fake"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 # De-inherited from rusty_key's own former `[workspace.lints]`: this

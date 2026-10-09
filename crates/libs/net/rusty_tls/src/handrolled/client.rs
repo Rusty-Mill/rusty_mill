@@ -2627,17 +2627,17 @@ impl Connection {
     /// its caller a ticket as if the server had sent it, which is how a
     /// protocol bug becomes a data-corruption bug.
     pub fn read(&mut self, record: &[u8]) -> Result<Incoming> {
+        // RFC 8446 section 6.1: anything after the peer's close_notify is ignored.
+        if self.peer_closed {
+            return Ok(Incoming::Closed);
+        }
+
         // RFC 8446 §5: a change_cipher_spec is only ever a handshake-time
         // compatibility record, and the handshake is over.
         if record.first() == Some(&CHANGE_CIPHER_SPEC) {
             return Err(ClientError::UnexpectedContentType(
                 ContentType::ChangeCipherSpec,
             ));
-        }
-
-        // RFC 8446 section 6.1: anything after the peer's close_notify is ignored.
-        if self.peer_closed {
-            return Ok(Incoming::Closed);
         }
 
         let opened = self.opener.open(record)?;

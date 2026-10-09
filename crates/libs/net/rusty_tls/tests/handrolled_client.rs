@@ -2190,6 +2190,11 @@ fn nothing_is_delivered_after_the_peers_close_notify() {
             "application data after close_notify must not be delivered"
         );
     }
+    // Not even a plaintext change_cipher_spec is an error after the close.
+    assert_eq!(
+        connection.read(&[20, 3, 3, 0, 1, 1]).expect("ignored"),
+        Incoming::Closed
+    );
     // The reply to the close is still ours to send.
     assert!(connection.close().is_ok());
 }

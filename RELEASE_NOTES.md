@@ -13,6 +13,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - CI: cargo-deny and cargo-shear fixed on #572
+
+- **Fixed (CI):** `cargo-deny` failed on RUSTSEC-2025-0141 (bincode 1.3.3 unmaintained, no upgrade); now an ignore with a reason in `deny.toml`. `cargo-shear` failed on `rk-observe`, a dev-only use in `rk-kernel`; moved to `[dev-dependencies]`. Both pass locally; `Cargo.lock` unchanged.
+- **Known limitations:** the bincode ignore hides an unmaintained crate until `rusty_multimodal_db` migrates off it. The yanked `wnaf 0.14.0` (via `p256 0.14.0`, `rusty_a2a`) is still a warning.
+
 ## 2026-10-09 - rusty_tls native engine: four review findings on #572
 
 - **Fixed (rusty_tls, P2 x4, engine is double-gated and not wired):** TLS 1.2 client flight fragmented at 2^14 (a long client chain made an oversized record); `CertificateRequest.certificate_types` honoured (an RSA identity is no longer offered for an `ecdsa_sign`-only request); nothing delivered after the peer's `close_notify` in TLS 1.2 or 1.3 (local `close()` still reads the reply); TLS 1.3 sealer and opener share one inner-plaintext limit (2^14 + 1). Each finding has a test, and each test was checked to fail with its fix reverted.
