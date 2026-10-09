@@ -1,6 +1,5 @@
-# cargo-deny policy (ADR-0009, ADR-0002). Introduced warn-only: the CI job
-# is non-blocking until the first run's findings are triaged, then drop
-# `continue-on-error` in ci.yml. Run locally: `cargo deny check`.
+# cargo-deny policy (ADR-0009, ADR-0002). The CI job is blocking: a finding is
+# fixed, or ignored below with a reason. Run locally: `cargo deny check`.
 [graph]
 all-features = true
 
@@ -14,6 +13,7 @@ ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing attack, no patched release exists (patched = []). Reached via jsonwebtoken for JWT RS* verification; re-check on every rsa release." },
     { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 is unmaintained, not vulnerable: its authors declared 1.3.3 complete and no upgrade exists. Used by rusty_multimodal_db(_engine) for stored data, so replacing it is a format migration, not a patch; track that separately and drop this entry when it lands." },
     { id = "RUSTSEC-2023-0018", reason = "remove_dir_all 0.5 via tempdir <- mmap <- perfcnt <- criterion-perf-events: optional Linux-only `perf-events` benchmark feature of rusty_multimodal_db, never in a shipped binary." },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 unmaintained (its team ceased development; 1.3.3 is declared complete, no known defect). It is the on-disk and wire encoding of rusty_multimodal_db and rusty_multimodal_db_engine (pinned \"1\" on purpose), so replacing it needs a format migration. Planned: ADR-0009 future growth." },
 ]
 
 [licenses]
