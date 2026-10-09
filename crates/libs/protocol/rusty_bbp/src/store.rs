@@ -102,6 +102,13 @@ impl<S: Store> Driver<S> {
         }
     }
 
+    /// The same driver keyed by `master`: every token and run secret it
+    /// derives or checks uses it. Survives `reload`.
+    pub fn with_master(mut self, master: [u8; 32]) -> Driver<S> {
+        self.state.master = master;
+        self
+    }
+
     fn check_boundary(&self, cmd: &Command) -> Option<Rejection> {
         let (blob, payload) = match cmd {
             Command::Agent {
@@ -150,7 +157,7 @@ impl<S: Store> Driver<S> {
     /// Rebuild state from the log.
     pub fn reload(&mut self) -> Result<(), StoreError> {
         let events = self.store.events(&self.state.task, 0)?;
-        self.state = TaskState::fold(self.state.task.clone(), &events);
+        self.state = TaskState::fold_with(self.state.task.clone(), self.state.master, &events);
         Ok(())
     }
 

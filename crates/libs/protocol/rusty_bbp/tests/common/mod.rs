@@ -165,7 +165,7 @@ impl<S: Store> Fx<S> {
 
     pub fn selected_run(&self) -> (RunId, RunSecret) {
         let r = self.st().selected_run().expect("selected run");
-        (r.id, r.secret)
+        (r.id, self.st().secret_for(r.id))
     }
 
     /// Runner stores a log then a report for the selected run.

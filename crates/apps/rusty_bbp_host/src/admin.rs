@@ -36,8 +36,9 @@ pub fn open_task(
     human: &PrincipalId,
     set: &ProfileSet,
 ) -> Result<Response, String> {
+    let master = crate::master::ensure(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
-    let mut d = Driver::new(store, task.clone());
+    let mut d = Driver::new(store, task.clone()).with_master(master);
     let _ = d.reload();
     if d.state.opened {
         return Ok(Response::Rejected(Rejection::new(

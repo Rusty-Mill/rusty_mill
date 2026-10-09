@@ -22,6 +22,10 @@ rusty_atomic_file = { workspace = true }
 # The runner's workload sandbox: Landlock, seccomp, rlimits, process group.
 rusty_sandbox = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# killpg: the moderator kills a harness's whole process group.
+rusty_libc = { workspace = true, features = ["std"] }
+
 [[bin]]
 name = "bbp"
 path = "src/bin/bbp.rs"
