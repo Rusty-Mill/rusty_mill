@@ -1,5 +1,6 @@
 //! Open a task and assign roles: moderator operations a host runs once.
 
+use crate::profiles::{self, ProfileSet};
 use crate::{now, open_driver};
 use rusty_bbp::*;
 use std::path::Path;
@@ -23,22 +24,33 @@ pub fn role_name(r: Role) -> &'static str {
     }
 }
 
-/// Open `task` in the store at `dir` with `brief` as its brief.
+/// Open `task` in the store at `dir` with `brief` as its brief. The profile
+/// set is frozen first; its digest is the task's `profile_digest`. A task
+/// that is already open keeps its frozen file: the core's `AlreadyOpen`
+/// rejection is returned before anything is written.
 pub fn open_task(
     dir: &Path,
     task: &TaskId,
     repo: &str,
     brief: &[u8],
     human: &PrincipalId,
+    set: &ProfileSet,
 ) -> Result<Response, String> {
-    let mut store = FsStore::open(dir).map_err(|e| e.to_string())?;
-    let blob = store.blob_put(brief);
+    let store = FsStore::open(dir).map_err(|e| e.to_string())?;
     let mut d = Driver::new(store, task.clone());
     let _ = d.reload();
+    if d.state.opened {
+        return Ok(Response::Rejected(Rejection::new(
+            Code::AlreadyOpen,
+            "task already opened",
+        )));
+    }
+    let profile_digest = profiles::freeze(dir, task, set)?;
+    let blob = d.store.blob_put(brief);
     let cmd = Command::Open(OpenTask {
         task: task.clone(),
         repo: repo.to_owned(),
-        profile_digest: Sha256::of(b"default"),
+        profile_digest,
         budget: Budget {
             messages: 40,
             bytes: 5_000_000,

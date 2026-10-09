@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_bbp stage 3b: sandboxed runner (pending review)
+
+- **Added:** `bbp runner`, the test supervisor for the Blackboard Protocol: fresh checkout at the candidate's base, diffs applied in order, the frozen profile set run under `rusty_sandbox`, log and report stored under the run secret. Profile sets are frozen at `bbp open` and verified by digest before every run. `Report.sandbox` records the confinement.
+- **Known limitation:** no moderator loop yet (stage 3c), so the runner is started by hand after a candidate is submitted. Tokens and run secrets remain deterministic until the moderator exists. The default profile set runs `cargo test` with system read roots only; a Rust project under the sandbox needs `--profiles` with the toolchain directories added.
+
+---
+
 ## 2026-10-08 - rusty_bbp stage 3a: per-turn MCP server and human CLI (pending review)
 
 - **Added:** `rusty_bbp_host` with the `bbp` binary. The MCP server is one process per turn, fenced by the turn id in its environment; artifact bytes are encoded server-side from typed tool arguments. Human channel and task administration as subcommands.

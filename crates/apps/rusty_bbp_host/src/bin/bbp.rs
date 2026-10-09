@@ -8,10 +8,13 @@
 //! bbp tick    --dir D --task T
 //! bbp human   --dir D --task T [--rev N] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
+//! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
+//! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
 use rusty_bbp::*;
-use rusty_bbp_host::{admin, args::Args, human, mcp, response_json};
+use rusty_bbp_host::{admin, args::Args, human, mcp, profiles, response_json, runner};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -20,7 +23,13 @@ fn run() -> Result<String, String> {
     let sub = argv
         .first()
         .cloned()
-        .ok_or("usage: bbp <mcp|open|assign|card|tick|human> ...")?;
+        .ok_or("usage: bbp <mcp|open|assign|card|tick|human|runner> ...")?;
+    if sub == "__sandbox" {
+        let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
+        let err = rusty_sandbox::run_helper(&rest);
+        eprintln!("bbp __sandbox: {err}");
+        std::process::exit(i32::from(rusty_sandbox::SETUP_FAILED));
+    }
     let a = Args::parse(argv.into_iter().skip(1));
     if sub == "mcp" {
         let binding = mcp::Binding::from_env()?;
@@ -40,7 +49,37 @@ fn run() -> Result<String, String> {
                     .cloned()
                     .unwrap_or_else(|| "human".into()),
             );
-            admin::open_task(&dir, &task, a.flag("repo")?, &brief, &human)?
+            let set = match a.flags.get("profiles") {
+                Some(file) => profiles::read_file(&PathBuf::from(file))?,
+                None => profiles::ProfileSet::shell("test", "cargo test"),
+            };
+            admin::open_task(&dir, &task, a.flag("repo")?, &brief, &human, &set)?
+        }
+        "runner" => {
+            let repo = PathBuf::from(a.flag("repo-path")?);
+            let work = PathBuf::from(a.flag("work")?);
+            match a.flags.get("confine").map(String::as_str) {
+                Some("none") => runner::run_once(
+                    &dir,
+                    &task,
+                    &repo,
+                    &work,
+                    &runner::Unconfined,
+                    runner::Confinement::Unconfined,
+                )?,
+                None | Some("sandbox") => {
+                    let exec = runner::sandboxed(&dir.join("sandbox-state"))?;
+                    runner::run_once(
+                        &dir,
+                        &task,
+                        &repo,
+                        &work,
+                        &exec,
+                        runner::Confinement::Sandboxed,
+                    )?
+                }
+                Some(other) => return Err(format!("unknown confinement {other}")),
+            }
         }
         "assign" => admin::assign(
             &dir,

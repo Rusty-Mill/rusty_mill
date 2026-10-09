@@ -420,6 +420,7 @@ fn r16_runner_secret_and_consistency() {
             failed: 1,
         }],
         tree: None,
+        sandbox: "test".into(),
         log,
     };
     let payload = ArtifactPayload::TestReport(rep);

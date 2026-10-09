@@ -106,6 +106,7 @@ fn setup(dir: &Path) -> TaskId {
         "github.com/example/repo",
         b"Add retry with backoff.",
         &PrincipalId("human".into()),
+        &rusty_bbp_host::profiles::ProfileSet::shell("test", "true"),
     )
     .expect("open");
     for (role, vendor) in [
@@ -362,6 +363,7 @@ fn runner_passes(dir: &Path, task: &TaskId, log: &[u8]) -> (ArtId, ArtId) {
             failed: 0,
         }],
         tree: Some(Sha256([9; 32])),
+        sandbox: "unconfined".into(),
         log: log_id,
     });
     let bytes = encode_artifact(&report, b"").expect("encode");
