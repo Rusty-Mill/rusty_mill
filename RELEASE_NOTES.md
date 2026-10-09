@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_bullet source repo frozen (pending review)
+
+- **Changed:** ADR-0008 and the migration plan record that `baileyrd/rusty_bullet` is frozen and archived (README notice `7d5a07f`; read-only, reversible, not deleted). `baileyrd/RLEvalSystem` is unchanged. Docs only.
+
+---
+
 ## 2026-10-09 - rusty_bbp: no wasted Coder turn on candidate submission
 
 - **Fixed:** submitting a candidate ended the Coder turn and scheduled the next one while the task was still in `build`, granting a Coder turn that the transition to `test` revoked on the next line. Each candidate cost one turn of budget and skipped a turn id. The turn now ends without scheduling; the `test` entry schedules once.
