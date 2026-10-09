@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_bullet: import `claude/funny-clarke-tef4d0` (pending review)
+
+- **Changed:** brings in the 4 commits of the source repo's `claude/funny-clarke-tef4d0` branch (docs on the hit-tick and landing investigations, the `bot-focus-and-automation` prompt, one `rb_env` characterisation test of an inverted car's wheels against a fast ball) through the same `git filter-repo` rewrite, merged with history. 4 new lines in the SHA map.
+- **Changed:** one conflict, in `rb_env/src/lib.rs`: both sides added tests after the same line; both kept.
+- **Known limitation:** `claude/rocket-league-server-clone-u74q45` (49 commits, +82k lines) is deliberately not imported: it forked on Sept 4, reuses FR-079 to FR-094 for different findings than `main`'s, has no counterpart for `main`'s wheel-ray grounding, and carries 35 MiB of raw capture fixtures. It stays readable in the source repo once archived.
+
+---
+
 ## 2026-10-09 - rusty_bbp stage 3c: moderator loop and master secret (pending review)
 
 - **Added:** `bbp mod`, the moderator loop: one agent harness per granted turn with a per-turn MCP config, the runner per selected run, deadlines, forfeit on early exit, until the task closes. One moderator per task; a restart aborts the turn it cannot see so the old invocation is fenced; harnesses die with their process group on every exit path; the runner runs on its own thread so cancellation is honoured mid-profile. Tokens and run secrets are keyed by a per-directory master secret that never enters the log and is created with a single winner.

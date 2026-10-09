@@ -429,6 +429,30 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   its floor; the game's ball drops 1 uu) and the extra velocity's z share;
   a sleeping-ball wake rule was tried (no floor contact on the wake tick) and
   did not change the push, so it is not that.
+- **Hit-tick ball velocity, tried and not explained (2026-10-06)**: the
+  state at the start of the hit tick is `hitjump` 77.6583 s, ball 91.25-uu
+  hit sphere against the car's hitbox: one contact, normal (-0.41, -0.50,
+  -0.77), depth 2.9 uu. With the floor removed the port's solved ball
+  velocity is (-488, -629, -146) and its centre drops 1.5 uu; with the floor
+  it is (-506, -709, 0) and does not drop; the game's ball drops 1.0 uu
+  (implied (-607, -787, -120)). Tried: a sleeping ball taking no floor
+  contact on the wake tick (matches the drop, leaves the car's push
+  unchanged, horizontal still low); solver iteration count (1-10): at 2
+  iterations the ball's vz and drop match (-93, z 92.28) but its horizontal
+  speed falls further from the game's (-488, -643), so not that. Open: the
+  game's horizontal solved speed is 17% above the port's under any of these.
+  One event cannot separate a floor-row difference from a car-ball friction
+  or restitution one; wait for more recorded hits (the tape-bot
+  `car_over_ball` capture, other bot hits) before changing the solver.
+- **Dribble and flip-reset sanity (2026-10-06, FR-138's unverified case)**:
+  with no recording of a wheel on the ball, an `Env` run drops a ball onto an
+  inverted car's wheels at 600, 1500 and 100 uu/s relative: no tunnelling
+  (nearest centre distance 87.6 uu at 1500 uu/s), finite throughout, and a
+  fast ball bounces off upward (+603 uu/s, car -280). Pinned as test
+  `a_fast_ball_hits_an_inverted_cars_wheels_and_bounces_off`. Whether the
+  game gives a wheel the same grip on the ball (a flip reset needs three
+  wheels) is untested; a capture of a flip reset or dribble is the missing
+  data.
 - **Next**: compare the ball's post-hit velocity between port and game
   (`--scenario` prints only the car; add the ball), then look at the
   contact model: a sustained (multi-tick) car-ball contact with the ball
