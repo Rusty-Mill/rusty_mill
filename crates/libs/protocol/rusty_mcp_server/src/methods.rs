@@ -665,7 +665,9 @@ impl Connection {
             ));
         }
         let req: ListenParams = decode_params(params).map_err(invalid_params)?;
-        let accepted = accept_filter(&req.notifications, kinds, |uri| s.can_read(uri));
+        let accepted = accept_filter(&req.notifications, kinds, |uri| {
+            s.can_read(&self.caller, uri)
+        });
         // Subscribe before acknowledging, so nothing published in between is lost.
         let subscription = changes.subscribe();
         let mut meta = Value::object();

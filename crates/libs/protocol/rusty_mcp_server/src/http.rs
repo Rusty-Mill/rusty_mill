@@ -75,10 +75,14 @@ pub struct HttpConfig {
     /// `Host` values accepted, with or without a port; empty accepts any.
     /// The default is loopback only, which with the `Origin` rule below is
     /// what keeps a web page from reaching a local server (DNS rebinding).
+    /// An empty list accepts any `Host`, for a host that routes by name
+    /// itself.
     pub allowed_hosts: Vec<String>,
-    /// `Origin` values accepted. A request with no `Origin` (every non-browser
-    /// client) is accepted; one with an `Origin` that is not listed here is
-    /// refused, so the default of none refuses all browsers.
+    /// `Origin` values accepted, or `"*"` for any (a host that decides who may
+    /// call from a browser in front of this, with CORS, say). A request with
+    /// no `Origin` (every non-browser client) is accepted; one with an
+    /// `Origin` that is not listed here is refused, so the default of none
+    /// refuses all browsers.
     pub allowed_origins: Vec<String>,
     /// How long a call may run before its reply switches from plain JSON to
     /// an event stream. Default 250 ms.
@@ -708,6 +712,7 @@ impl HttpHandler {
         id: &RequestId,
         method: &str,
         params: &Option<Value>,
+        caller: &Caller,
     ) -> Message {
         let fail = |code: ErrorCode, why: String| {
             Message::error(Some(id.clone()), ErrorData::new(code, why))
@@ -729,7 +734,7 @@ impl HttpHandler {
                 Err(e) => return fail(ErrorCode::INVALID_PARAMS, e.to_string()),
             };
         if method == "resources/subscribe" {
-            if !self.server.can_read(&parsed.uri) {
+            if !self.server.can_read(caller, &parsed.uri) {
                 return fail(
                     ErrorCode::RESOURCE_NOT_FOUND,
                     format!("resource not found: {}", parsed.uri),
@@ -831,7 +836,7 @@ impl HttpHandler {
                     .config
                     .allowed_origins
                     .iter()
-                    .any(|o| o.eq_ignore_ascii_case(origin)) =>
+                    .any(|o| o == "*" || o.eq_ignore_ascii_case(origin)) =>
             {
                 forbid("Origin header is not allowed")
             }
@@ -975,7 +980,7 @@ impl HttpHandler {
         }
         if let (Some(session), Message::Request { id, method, params }) = (&session, &message) {
             if method == "resources/subscribe" || method == "resources/unsubscribe" {
-                let reply = self.session_subscription(session, id, method, params);
+                let reply = self.session_subscription(session, id, method, params, &caller);
                 return Ok(json_reply(StatusCode::OK, &reply));
             }
         }

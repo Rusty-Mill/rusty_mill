@@ -207,7 +207,7 @@ pub struct Connection {
     inflight: Mutex<HashMap<RequestId, CancelToken>>,
     /// Raised by [`Connection::close_streams`]: long-lived requests wind down.
     closing: AtomicBool,
-    caller: Arc<Caller>,
+    pub(crate) caller: Arc<Caller>,
 }
 
 /// What [`Connection::start`] decided about a message.

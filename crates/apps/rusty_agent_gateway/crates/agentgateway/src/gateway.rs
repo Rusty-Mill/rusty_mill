@@ -387,6 +387,12 @@ impl Gateway {
                             // bounds producing the head) never cuts off a slow
                             // tool; `backendRequestTimeout` does that.
                             sse_after: std::time::Duration::ZERO,
+                            // Which hosts and browser origins may reach a route
+                            // is the gateway's routing and `cors` policy, applied
+                            // before this handler; the handler's own loopback-
+                            // only default would refuse every public host.
+                            allowed_hosts: Vec::new(),
+                            allowed_origins: vec!["*".to_owned()],
                             ..HttpConfig::default()
                         },
                     ));

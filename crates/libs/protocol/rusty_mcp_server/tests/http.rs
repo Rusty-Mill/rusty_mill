@@ -1299,3 +1299,103 @@ fn the_stream_is_refused_without_what_it_needs() {
     );
     assert_eq!(request(off.addr, "GET", "/mcp", &[sse], "").status, 405);
 }
+
+struct Gated;
+
+impl rusty_mcp_server::ResourceSource for Gated {
+    fn resources(
+        &self,
+        _ctx: &rusty_mcp_server::CallContext,
+    ) -> Result<Vec<rusty_mcp_proto::Resource>, rusty_mcp_proto::ErrorData> {
+        Ok(vec![rusty_mcp_proto::Resource::new("src://ok", "ok")])
+    }
+
+    fn templates(
+        &self,
+        _ctx: &rusty_mcp_server::CallContext,
+    ) -> Result<Vec<rusty_mcp_proto::ResourceTemplate>, rusty_mcp_proto::ErrorData> {
+        Ok(Vec::new())
+    }
+
+    fn knows(&self, caller: &rusty_mcp_server::Caller, uri: &str) -> bool {
+        uri == "src://ok" && caller.header("x-pass").is_some()
+    }
+
+    fn read(
+        &self,
+        _ctx: &rusty_mcp_server::CallContext,
+        _params: &rusty_mcp_proto::ReadResourceParams,
+    ) -> Option<Result<rusty_mcp_proto::ReadResourceResult, rusty_mcp_proto::ErrorData>> {
+        None
+    }
+}
+
+#[test]
+fn a_classic_subscription_to_a_source_resource_follows_the_sources_say_per_caller() {
+    let changes = ChangeBroadcaster::new();
+    let kinds = ChangeKinds {
+        resource_updates: true,
+        ..ChangeKinds::default()
+    };
+    let server = Arc::new(
+        Server::builder("src", "1")
+            .resource_source(Gated)
+            .notify_changes(&changes, kinds)
+            .build()
+            .unwrap(),
+    );
+    let http = bind_http(
+        server,
+        "127.0.0.1:0".parse().unwrap(),
+        fast(),
+        Limits::default(),
+    )
+    .unwrap();
+    let addr = http.local_addr().unwrap();
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    let f = Fixture {
+        addr,
+        stop,
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    let id = session_on(&f);
+    let sub = SUB_A.replace("mem://a", "src://ok");
+    // Known to the source for a caller that sent the pass...
+    let with_pass = [CLASSIC, ("Mcp-Session-Id", id.as_str()), ("X-Pass", "1")];
+    let ok = post(f.addr, &with_pass, &sub);
+    assert_eq!(ok.status, 200, "{}", ok.body);
+    assert!(ok.json()["result"].is_object());
+    // ...and not for one that did not, nor for a URI it does not know.
+    assert_eq!(code(&post(f.addr, &sub_headers(&id), &sub)), -32002);
+    let other = SUB_A.replace("mem://a", "src://other");
+    assert_eq!(code(&post(f.addr, &with_pass, &other)), -32002);
+}
+
+#[test]
+fn a_host_that_screens_origins_and_hosts_itself_can_open_both() {
+    let f = start(HttpConfig {
+        allowed_hosts: Vec::new(),
+        allowed_origins: vec!["*".to_owned()],
+        ..fast()
+    });
+    assert_eq!(
+        post(
+            f.addr,
+            &[
+                ("Host", "mcp.public.example"),
+                ("Origin", "https://app.example")
+            ],
+            INIT
+        )
+        .status,
+        200,
+        "a public host and a browser origin"
+    );
+    // The default stays closed.
+    let closed = start(fast());
+    assert_eq!(
+        post(closed.addr, &[("Host", "mcp.public.example")], INIT).status,
+        403
+    );
+}

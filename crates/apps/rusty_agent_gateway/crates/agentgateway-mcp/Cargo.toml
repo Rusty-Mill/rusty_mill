@@ -48,6 +48,8 @@ thiserror = "2"
 tracing = { workspace = true }
 
 [dev-dependencies]
+rusty_mcp_server = { workspace = true, features = ["http"] }
+rusty_serve = { workspace = true }
 # `http2` is dev-only on purpose: the gateway speaks gRPC as a *client*, and
 # the scripted processor in the tests is the only thing here that serves it.
 axum = { workspace = true, features = ["http2"] }

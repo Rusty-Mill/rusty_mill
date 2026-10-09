@@ -4,7 +4,7 @@
 
 use crate::ask::ToolOutcome;
 use crate::changes::{ChangeBroadcaster, ChangeKinds};
-use crate::connection::CallContext;
+use crate::connection::{CallContext, Caller};
 #[cfg(feature = "request-state")]
 use crate::state::StateCodec;
 use crate::tasks::{TaskContext, TaskHandler, TaskStore, DEFAULT_MAX_TASKS, DEFAULT_TASK_TTL};
@@ -90,6 +90,15 @@ pub trait ResourceSource: Send + Sync {
     /// # Errors
     /// The listing is refused with this error.
     fn templates(&self, ctx: &CallContext) -> Result<Vec<ResourceTemplate>, ErrorData>;
+
+    /// Whether `uri` names something this source would serve to `caller`: the
+    /// test a subscription must pass (`resources/subscribe`, and the `uri`
+    /// filters of `subscriptions/listen`). Defaults to `false`: a source that
+    /// wants its resources subscribable says which, by caller.
+    fn knows(&self, caller: &Caller, uri: &str) -> bool {
+        let _ = (caller, uri);
+        false
+    }
 
     /// Read the resource, or answer `None` if this source has no such
     /// resource.
@@ -718,12 +727,16 @@ fn first_duplicate<'a>(items: impl Iterator<Item = &'a str>) -> Option<&'a str> 
 }
 
 impl Server {
-    /// Whether `uri` names something `resources/read` can serve.
-    pub(crate) fn can_read(&self, uri: &str) -> bool {
+    /// Whether `uri` names something `resources/read` can serve `caller`.
+    pub(crate) fn can_read(&self, caller: &Caller, uri: &str) -> bool {
         self.resources.iter().any(|r| r.resource.uri == uri)
             || self
                 .templates
                 .iter()
                 .any(|t| t.matcher.matches(uri).is_some())
+            || self
+                .resource_source
+                .as_ref()
+                .is_some_and(|s| s.knows(caller, uri))
     }
 }

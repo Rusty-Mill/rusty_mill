@@ -135,10 +135,18 @@ impl Transport for Link {
             Self::Stdio(t) => t.set_protocol_version(version),
         }
     }
+
+    fn clear_protocol_version(&mut self) {
+        match self {
+            Self::Http(t) => t.clear_protocol_version(),
+            Self::Stdio(t) => t.clear_protocol_version(),
+        }
+    }
 }
 
 type Conn = Client<Link, NoHandler>;
-type Dial = dyn Fn() -> Result<Conn, ClientError> + Send + Sync;
+/// Opens a connection, giving the handshake at most the time it is handed.
+type Dial = dyn Fn(Duration) -> Result<Conn, ClientError> + Send + Sync;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -150,8 +158,6 @@ struct Pool {
     freed: Condvar,
     dial: Box<Dial>,
     max: usize,
-    /// How long a call waits for a free connection.
-    patience: Duration,
 }
 
 struct Slots {
@@ -177,6 +183,26 @@ impl Lease<'_> {
     }
 }
 
+impl Lease<'_> {
+    /// One request, given what is left of `deadline` to complete.
+    fn call(
+        &mut self,
+        deadline: Instant,
+        method: &str,
+        params: Option<Value>,
+        headers: &rusty_mcp_client_native::HeaderOverride,
+    ) -> Result<Value, ClientError> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ClientError::Timeout);
+        }
+        self.with(|conn| {
+            conn.set_call_timeout(left);
+            conn.call_with(method, params, headers)
+        })
+    }
+}
+
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
@@ -187,8 +213,8 @@ impl Drop for Lease<'_> {
 }
 
 impl Pool {
-    fn lease(&self) -> Result<Lease<'_>, ClientError> {
-        let deadline = Instant::now() + self.patience;
+    /// A connection, waiting for one (or dialling one) until `deadline`.
+    fn lease(&self, deadline: Instant) -> Result<Lease<'_>, ClientError> {
         let mut slots = lock(&self.state);
         loop {
             if let Some(conn) = slots.idle.pop() {
@@ -200,7 +226,13 @@ impl Pool {
             if slots.open < self.max {
                 slots.open += 1;
                 drop(slots);
-                return match (self.dial)() {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    lock(&self.state).open -= 1;
+                    self.freed.notify_one();
+                    return Err(ClientError::Timeout);
+                }
+                return match (self.dial)(left) {
                     Ok(conn) => Ok(Lease {
                         pool: self,
                         conn: Some(conn),
@@ -239,6 +271,9 @@ pub struct Target {
     pub http: bool,
     capabilities: ServerCapabilities,
     pool: Pool,
+    /// What one operation (a call, or a whole paged listing) may take, from
+    /// asking for a connection to the last answer.
+    timeout: Duration,
 }
 
 impl std::fmt::Debug for Target {
@@ -264,6 +299,18 @@ impl Target {
         call_timeout: Option<Duration>,
         at: &str,
     ) -> Result<Self, TargetError> {
+        Self::connect_with(config, over, call_timeout, HTTP_CONNECTIONS, at)
+    }
+
+    /// [`Target::connect`] with at most `connections` open to an HTTP target
+    /// (a child process always has one).
+    pub fn connect_with(
+        config: &McpTarget,
+        over: &Override,
+        call_timeout: Option<Duration>,
+        connections: usize,
+        at: &str,
+    ) -> Result<Self, TargetError> {
         let filter = TargetFilter::new(&config.filters, at)?;
         let name = config.name.clone();
         let timeout = call_timeout.unwrap_or(DEFAULT_CALL_TIMEOUT);
@@ -271,14 +318,14 @@ impl Target {
         let (dial, max): (Box<Dial>, usize) = match &config.kind {
             McpTargetKind::Stdio(stdio) => {
                 let (cmd, args, env) = (stdio.cmd.clone(), stdio.args.clone(), stdio.env.clone());
-                let dial = move || {
+                let dial = move |left: Duration| {
                     let mut command = Command::new(&cmd);
                     command.args(&args);
                     for (key, value) in &env {
                         command.env(key, value);
                     }
                     let transport = StdioTransport::spawn(command)?;
-                    handshake(Link::Stdio(transport), timeout)
+                    handshake(Link::Stdio(transport), left, timeout)
                 };
                 (Box::new(dial), 1)
             }
@@ -295,18 +342,18 @@ impl Target {
                     None => (http.host.as_str(), http.port),
                 };
                 let url = format!("http://{host}:{port}{path}");
-                let dial = move || {
+                let dial = move |left: Duration| {
                     let transport = HttpTransport::new(HttpConfig::new(url.as_str()))?;
-                    handshake(Link::Http(Box::new(transport)), timeout)
+                    handshake(Link::Http(Box::new(transport)), left, timeout)
                 };
-                (Box::new(dial), HTTP_CONNECTIONS)
+                (Box::new(dial), connections.max(1))
             }
             McpTargetKind::Sse(_) => {
                 return Err(TargetError::UnsupportedTransport { name });
             }
         };
 
-        let first = dial().map_err(|source| match (&config.kind, source) {
+        let first = dial(timeout).map_err(|source| match (&config.kind, source) {
             (McpTargetKind::Stdio(stdio), ClientError::Io(source)) => TargetError::Spawn {
                 name: name.clone(),
                 cmd: stdio.cmd.clone(),
@@ -336,42 +383,50 @@ impl Target {
                 freed: Condvar::new(),
                 dial,
                 max,
-                patience: timeout,
             },
+            timeout,
         })
     }
 
-    /// One request to the target, with `headers` (a guardrail's changes to the
-    /// upstream HTTP request) applied if the target speaks HTTP.
+    /// The headers for one request: `headers` (a guardrail's changes to the
+    /// upstream HTTP request) if the target speaks HTTP.
+    fn native(&self, headers: &HeaderOverride) -> rusty_mcp_client_native::HeaderOverride {
+        if self.http {
+            return headers.to_native();
+        }
+        if !headers.is_empty() {
+            tracing::debug!(
+                target = %self.name,
+                "a guardrail asked to change headers on a stdio target; there are none"
+            );
+        }
+        rusty_mcp_client_native::HeaderOverride::default()
+    }
+
+    /// One request to the target, within one operation budget.
     fn request(
         &self,
         method: &str,
         params: Option<Value>,
         headers: &HeaderOverride,
     ) -> Result<Value, ClientError> {
-        let native = if self.http {
-            headers.to_native()
-        } else {
-            if !headers.is_empty() {
-                tracing::debug!(
-                    target = %self.name,
-                    "a guardrail asked to change headers on a stdio target; there are none"
-                );
-            }
-            rusty_mcp_client_native::HeaderOverride::default()
-        };
+        let deadline = Instant::now() + self.timeout;
         self.pool
-            .lease()?
-            .with(|conn| conn.call_with(method, params, &native))
+            .lease(deadline)?
+            .call(deadline, method, params, &self.native(headers))
     }
 
-    /// Every page of a list.
+    /// Every page of a list, on one connection (a cursor belongs to the
+    /// session that issued it) and within one budget for the whole listing.
     fn pages<R: Wire, T>(
         &self,
         method: &str,
         headers: &HeaderOverride,
         split: impl Fn(R) -> (Vec<T>, Option<String>),
     ) -> Result<Vec<T>, ClientError> {
+        let deadline = Instant::now() + self.timeout;
+        let native = self.native(headers);
+        let mut lease = self.pool.lease(deadline)?;
         let mut all = Vec::new();
         let mut cursor = None;
         loop {
@@ -379,7 +434,7 @@ impl Target {
                 cursor: cursor.take(),
                 meta: None,
             };
-            let page = self.request(method, Some(params.to_value()), headers)?;
+            let page = lease.call(deadline, method, Some(params.to_value()), &native)?;
             let (items, next) = split(R::from_value(&page)?);
             all.extend(items);
             match next {
@@ -492,9 +547,9 @@ impl Target {
     }
 }
 
-/// Run the MCP handshake over `link`.
-fn handshake(link: Link, timeout: Duration) -> Result<Conn, ClientError> {
+/// Run the MCP handshake over `link`, which may take `handshake` at most.
+fn handshake(link: Link, handshake: Duration, call_timeout: Duration) -> Result<Conn, ClientError> {
     let mut config = ClientConfig::new("rusty-agent-gateway", env!("CARGO_PKG_VERSION"));
-    config.call_timeout = timeout;
-    Client::connect(link, config, NoHandler, timeout)
+    config.call_timeout = call_timeout;
+    Client::connect(link, config, NoHandler, handshake)
 }

@@ -228,6 +228,13 @@ impl<T: Transport, H: Handler> Client<T, H> {
         }
     }
 
+    /// How long each later call may wait for its answer, replacing what the
+    /// config said. For a caller that budgets a whole operation and gives
+    /// each call what is left of it.
+    pub fn set_call_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
     /// Any request, answered with its raw result.
     ///
     /// # Errors

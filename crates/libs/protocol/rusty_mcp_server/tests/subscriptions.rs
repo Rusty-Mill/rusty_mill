@@ -4,6 +4,7 @@
 mod support;
 
 use rusty_json::Value;
+use rusty_mcp_proto::Wire as _;
 use rusty_mcp_proto::{
     CallToolResult, ErrorCode, Prompt, ReadResourceResult, Resource, ResourceTemplate, Tool,
 };
@@ -408,4 +409,139 @@ fn announcing_changes_for_a_feature_the_server_lacks_is_a_build_error() {
         )
         .build();
     assert!(with_prompt.is_ok());
+}
+
+/// A source whose `src://ok` resource may be followed by callers that sent
+/// `x-pass`.
+struct Gated;
+
+impl rusty_mcp_server::ResourceSource for Gated {
+    fn resources(
+        &self,
+        _ctx: &rusty_mcp_server::CallContext,
+    ) -> Result<Vec<Resource>, rusty_mcp_proto::ErrorData> {
+        Ok(vec![Resource::new("src://ok", "ok")])
+    }
+
+    fn templates(
+        &self,
+        _ctx: &rusty_mcp_server::CallContext,
+    ) -> Result<Vec<ResourceTemplate>, rusty_mcp_proto::ErrorData> {
+        Ok(Vec::new())
+    }
+
+    fn knows(&self, caller: &rusty_mcp_server::Caller, uri: &str) -> bool {
+        uri == "src://ok" && caller.header("x-pass").is_some()
+    }
+
+    fn read(
+        &self,
+        _ctx: &rusty_mcp_server::CallContext,
+        _params: &rusty_mcp_proto::ReadResourceParams,
+    ) -> Option<Result<ReadResourceResult, rusty_mcp_proto::ErrorData>> {
+        None
+    }
+}
+
+fn sourced(changes: &ChangeBroadcaster) -> Arc<Server> {
+    let kinds = ChangeKinds {
+        resource_updates: true,
+        ..ChangeKinds::default()
+    };
+    Arc::new(
+        Server::builder("src", "1")
+            .resource_source(Gated)
+            .notify_changes(changes, kinds)
+            .build()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn a_source_decides_which_of_its_resources_a_listener_may_follow() {
+    // Over stdio there is no request, so no caller: the source says no, and
+    // the listener is granted nothing it has not earned.
+    let changes = ChangeBroadcaster::new();
+    let s = Session::start(sourced(&changes));
+    s.send(&listen(
+        7,
+        r#"{"resourceSubscriptions":["src://ok","src://other"]}"#,
+    ));
+    let acks = s.wait(1, |m| {
+        method(m) == Some("notifications/subscriptions/acknowledged")
+    });
+    let granted = &acks[0]["params"]["notifications"];
+    assert!(
+        granted.get("resourceSubscriptions").is_none(),
+        "{}",
+        granted.to_json_string()
+    );
+    s.send(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#);
+    s.finish();
+}
+
+/// Collects what the server pushes.
+#[derive(Default)]
+struct Collect(std::sync::Mutex<Vec<rusty_mcp_proto::Message>>);
+
+impl rusty_mcp_server::Notifier for Collect {
+    fn notify(&self, message: rusty_mcp_proto::Message) {
+        self.0.lock().unwrap().push(message);
+    }
+}
+
+#[test]
+fn a_caller_the_source_knows_is_granted_its_resource_on_listen() {
+    let changes = ChangeBroadcaster::new();
+    let sink = Arc::new(Collect::default());
+    let caller = rusty_mcp_server::Caller {
+        headers: vec![("X-Pass".to_owned(), "1".to_owned())],
+        principal: None,
+    };
+    let conn = Arc::new(
+        rusty_mcp_server::Connection::new(sourced(&changes), Arc::clone(&sink) as _)
+            .with_caller(caller),
+    );
+    // `listen` runs until cancelled, so ask on a thread and read the ack.
+    let asker = Arc::clone(&conn);
+    let thread = std::thread::spawn(move || {
+        let request = rusty_mcp_proto::Message::from_json(&listen(
+            9,
+            r#"{"resourceSubscriptions":["src://ok","src://other"]}"#,
+        ))
+        .unwrap();
+        asker.handle(request)
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let ack = loop {
+        let heard: Vec<Value> = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| Value::from_json_str(&m.to_json()).unwrap())
+            .collect();
+        if let Some(a) = heard
+            .into_iter()
+            .find(|m| method(m) == Some("notifications/subscriptions/acknowledged"))
+        {
+            break a;
+        }
+        assert!(Instant::now() < deadline, "no acknowledgement");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let uris: Vec<&str> = ack["params"]["notifications"]["resourceSubscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(uris, ["src://ok"]);
+    conn.handle(
+        rusty_mcp_proto::Message::from_json(
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}"#,
+        )
+        .unwrap(),
+    );
+    thread.join().unwrap();
 }
