@@ -1,6 +1,6 @@
 # Dots-style always-on agents, composed from rusty_mill
 
-Date: 2026-10-07 · Status: **design approved 2026-10-09 with the recommendations in §9; implementation not started** · Base: `main` @ 4506e96
+Date: 2026-10-09 · Status: **design approved by the owner in-session on 2026-10-09 ("Approved with your recommendations; Open PR", session `session_01NpQxpBrCRubGfHp52L1JXr`) and revised after the owner's review on #581 (comment 6086800645: REST auth, cross-channel refresh, stale prerequisites, Q3). That review does not authorize implementation, which has not started and needs a separate go-ahead.** · Base: `main` (merged at bc1fb7b5 + later)
 
 ## 0. Verdict
 
@@ -17,7 +17,7 @@ Date: 2026-10-07 · Status: **design approved 2026-10-09 with the recommendation
 |---|---|---|
 | OpenDots clone, `CopilotKit/OpenDots` @ 625452e (2026-10-06), MIT, **alpha**, "template" | Architecture (§2) | High for code paths cited; README says live Slack is **unverified** (`README.md:212`) |
 | `docs.ag-ui.com`, GitHub releases | AG-UI **1.0.0 shipped 2026-09-17** ("Ships the AG-UI 1.0 specification, JSON Schema"); `@ag-ui/{core,client}` now **1.0.2** (release/2026-10-05) | High (fetched). Spec pages were summarised by a small model: re-check against the JSON Schema before coding (task 1) |
-| `docs/research/CONSOLIDATION-AUDIT.md` | **Not on `main`.** Read from `origin/claude/peaceful-dirac-200syz`. Its steps 1-3 (bearer helper, `constant_time_eq`, `Emitter` helpers) are **not on `main`** yet (grep: no `token_from_authorization`, no `Emitter::tool_call`) | High |
+| `docs/research/CONSOLIDATION-AUDIT.md` | On `main` now. Its steps 1-3 have landed: `rusty_oauth/src/bearer.rs:22` `token_from_authorization`, `rusty_crypto_key/src/lib.rs:24` `constant_time_eq`, `rusty_agui/src/serve.rs:82-138` `Emitter::{text_delta,end_text,tool_call,tool_result}`. (This doc first said otherwise: it was written against an older `main`; corrected after owner review on #581.) | High (grepped on the merged head) |
 | remind-me | Nexus unused (`mem_e81f28b4`); goal of OpenBot-shaped platform (`mem_564ef208`); Agent OS / Hermes on LXC 107 is a **separate homelab stack** (`mem_15b753fd`, `mem_4aad781c`) | High |
 | Repo inventory (crate READMEs + spot checks) | §3 | Medium: LOC/test counts are greps, nothing was built or run |
 
@@ -57,13 +57,13 @@ Effort S/M/L. "Crate" paths are under `crates/`. Rows marked **gap** drive §4.
 | 10 | Sandboxed "computer" | Docker per Dot | `libs/rusty_sandbox` (Landlock+seccomp, Linux), `rusty_bot::BotSpec` | No browser tool; Linux only. **Defer** until a Dot gets shell/file tools | M |
 | 11 | Spaces/pages domain | `pages.ts` | none | **New**: `dots-core` | M |
 | 12 | Page editor UI | TipTap | React 18/Vite/zustand/Tailwind stack in `apps/rusty_tick/web`; `agui-react` | **New**: `web/` (textarea/markdown first) | M |
-| 13 | State sync agent<->human | REST + polling | `rusty_agui` STATE_SNAPSHOT/DELTA, `foundation/rusty_json_patch`, `useSharedState` | Wire pages onto shared state | S |
+| 13 | State sync agent<->human | REST + polling | In-run: `rusty_agui` STATE_SNAPSHOT/DELTA, `rusty_json_patch`, `useSharedState`. Cross-channel: none, so a change-feed poll (§4.2) | Wire pages onto shared state; add change `seq` + feed | S |
 | 14 | Conversation store | CopilotKit Intelligence (hard dep) | `adk-sessions` SQLite; thread history is also replayed by client in AG-UI (`RunAgentInput.messages`) | Choose source of truth (Q3) | S |
 | 15 | App store (pages, Dots, bindings, routines) | `node:sqlite` | `libs/storage/rusty_sqlite` (1.1k LOC, 21 tests) or `rusty_multimodal_db_engine` (backs `rusty_tick`, FOLLOW-ONS Q2) | Decide (Q2) | S |
 | 16 | Memory | per-Dot memories + "Automatic Learning" | `apps/rusty_remind_me` (MCP: `remind_me_mcp` stdio, `remind_me_remote` Streamable HTTP + bearer/OAuth) via MCP only | None: adapter | S |
 | 17 | Tools / MCP | `@modelcontextprotocol/sdk` | `adk-mcp` (client toolset), `libs/protocol/rusty_mcp`; gateway `agentgateway-mcp` allow/deny + CEL | Audit row 11: MCP client is converging on `rusty_mcp`; use `adk-mcp` now, follow later | S |
 | 18 | Policy + audit | `computer_audit` table | `apps/rusty_agent_gateway` `agentgateway-agui` (`AguiGateway::check`, deny-by-default CEL, pre/post audit as tracing target `agentgateway::audit`) | Audit is logs, not a store | S |
-| 19 | Auth (single owner) | `OWNER_TOKEN` | `libs/net/rusty_oauth/src/bearer.rs`, constant-time compare (audit rows 1-2) | `AgentHandler` has **no auth**; audit helpers not on `main` | S |
+| 19 | Auth (single owner) | `OWNER_TOKEN` | `libs/net/rusty_oauth/src/bearer.rs`, constant-time compare (audit rows 1-2) | `AgentHandler` has **no auth**; reuse `token_from_authorization` + `constant_time_eq` (on `main`) | S |
 | 20 | Multi-user | none | `rusty_tick` per-user tokens (`auth.rs`) | Out of scope | - |
 | 21 | Observability | telemetry (on by default) | `tracing` | None for MVP | S |
 
@@ -101,7 +101,7 @@ flowchart LR
   GW["rusty_agent_gateway<br/>agui route (optional, deny-by-default)"]
 
   WEB -- "AG-UI SSE + state deltas" --> AUTH --> H
-  WEB -- "page save" --> REST
+  WEB -- "page read/save + change feed" --> AUTH --> REST
   SLK -- "signed webhook" --> CH -- "RunAgentInput" --> H
   CH -. "later: via" .-> GW -.-> H
   RT -- "RunAgentInput" --> H
@@ -127,9 +127,10 @@ flowchart LR
 
 | Direction | Mechanism |
 |---|---|
-| Human -> store | `PUT /api/pages/:id {markdown, expectedRevision}`; 409 on stale |
+| Human -> store | `PUT /api/pages/:id {markdown, expectedRevision}`; 409 on stale. **Every `/api/pages*` route (read, write, change feed) sits behind the same owner-token guard as AG-UI**; only the signed Slack webhook is a separate ingress, authenticated by its signature |
 | Agent -> store | adk tool `edit_page` calls the same `PagePatch` rule (so agent and human race under one rule) |
-| Agent -> open view | `STATE_DELTA` (RFC 6902, `rusty_json_patch`) on the thread's shared state; the view's `useSharedState` applies it |
+| Agent -> open view, same run | `STATE_DELTA` (RFC 6902, `rusty_json_patch`) on the browser-initiated run's stream; `useSharedState` applies it. **Scope: only the run the browser itself started.** `useSharedState` is not a cross-client subscription |
+| Edit from another channel -> open view | Slack's `Bot` consumes its own run stream (`rusty_channel/src/bot.rs:75-76`); an idle browser never sees it. So every `PageStore` write (agent, REST, any channel) appends a monotonic change `seq`; the view polls `GET /api/pages/changes?after=<seq>` (owner-token guarded, returns changed page ids + revisions) and refetches. Polling, not SSE, for MVP: one blocking thread per open SSE stream is risk R1, and `rusty_tick` already syncs by polling. A push channel waits for a forcing function |
 | Open view -> agent | current page `{id, revision, markdown}` rides `RunAgentInput.state`; page content is wrapped as **untrusted data** in the prompt (OpenDots does the same) |
 | Concurrent human typing | not solved; conflict dialog. No CRDT (YAGNI; OpenDots has none either) |
 
@@ -204,14 +205,14 @@ Scope: Scribe reads and edits pages, recalls and stores memory (remind_me over M
 |---|---|---|---|---|
 | 0 | Design approved, §9 answered (2026-10-09) | this PR | - | - |
 | 1 | D0: run `rusty-agui-conformance` on 1.0.2; schema-validate fixtures | green CI or a concrete delta list | S | 0 |
-| 2 | Land audit steps 1-3 (bearer helper, `constant_time_eq`, `Emitter` helpers) or confirm we call current locations | no duplicate helper added | S | 0 |
+| 2 | Reuse current helpers (`token_from_authorization`, `constant_time_eq`, `Emitter` helpers); add none | grep gate in review: no new Bearer parse or constant-time compare in `dots-*` | S | 0 |
 | 3 | `dots-core`: `Page`/`PagePatch`/conflict rules, `Router`, `Pause`, ports | unit tests: stale revision => Conflict; size cap; cycle; unknown identity unrouted; paused refuses | M | 0 |
 | 4 | Store adapter (Q2) implementing `PageStore`/`DotStore`; file-backed | contract tests run against an in-memory fake and the real adapter | M | 3 |
-| 5 | `dots-app` skeleton: `rusty_serve` + owner-token guard + `AgentHandler` with a mock `Agent` | e2e: unauthenticated POST => 401; authed run => RUN_STARTED..RUN_FINISHED | S | 1,2,3 |
+| 5 | `dots-app` skeleton: `rusty_serve` + one owner-token guard wrapping **all** private routes (AG-UI and `/api/pages*`) + `AgentHandler` with a mock `Agent` | e2e: missing or invalid token => 401 on AG-UI **and** on every page route (table-driven over the route list, so a new route cannot be added unguarded); valid token => RUN_STARTED..RUN_FINISHED | S | 1,2,3 |
 | 6 | `DotAgent`: adk `Runner` from `DotSpec` + page tools + `adk-mcp` memory toolset; state delta on `edit_page` | scripted-model e2e over a socket (pattern of `adk-agui/tests/end_to_end.rs`) | M | 3,4,5 |
 | 7 | D4: relax verifier for parallel tool calls | verifier tests for interleaved ids | M | 1 |
-| 8 | REST `/api/pages` with `expectedRevision` | 409 test; agent and REST race test | S | 4,5 |
-| 9 | `web/`: page tree, markdown editor, chat panel with `useAgent`+`useSharedState`, conflict dialog | Vitest + Playwright (as `rusty_tick/web`) | M | 6,8 |
+| 8 | REST `/api/pages` with `expectedRevision`, plus the change feed `GET /api/pages/changes?after=<seq>` (§4.2) | 409 test; agent and REST race test; 401 without/with bad token on each route; feed returns only changes after `seq`, in order | S | 4,5 |
+| 9 | `web/`: page tree, markdown editor, chat panel with `useAgent`+`useSharedState`, change-feed poller, conflict dialog | Vitest + Playwright (as `rusty_tick/web`). **Acceptance: an edit made through Slack appears in an idle, already-open browser view within one poll interval, without sending a chat message** | M | 6,8 |
 | 10 | Slack: embed `rusty_channel::Bot<Slack>` pointing `AGENT_URL` at loopback; persist in-flight runs via port (retry drop fix) | signature, retry, thread-key tests (exist); new: crash-between-200-and-reply test | M | 6 |
 | 11 | Live Slack run via tunnel; record result honestly (OpenDots itself has not verified theirs) | manual checklist in doc | S | 10 |
 | 12 | Hardening: pause switch end to end, body/size limits, audit via tracing | tests | S | 9,10 |
@@ -225,7 +226,7 @@ Post-MVP (unordered): D1+D2 interrupts; routines with persistence + channel deli
 | R1 | `rusty_serve` is blocking thread-per-connection; each open SSE stream holds a thread; ADK runs under `block_on` | `rusty_serve` 768 LOC / 8 tests; FOLLOW-ONS "Departures" step 1 & 10 | Fine for one owner. Load-test in task 5/6; async handler is the first extraction pressure |
 | R2 | Verifier rejects parallel tool calls real models emit | `verify.rs:12-13` | Task 7 early |
 | R3 | adk and `rusty_key` both embed MCP clients; audit says converge on `rusty_mcp` | audit §2.5 | Use `adk-mcp`; swap when audit row 11 lands |
-| R4 | Audit steps 1-3 sit on an unmerged branch | grep on `main` | Task 2 |
+| R4 | ~~Audit steps 1-3 unmerged~~ Resolved: they are on `main` (owner review of #581) | grep on merged head | Task 2 reuses them |
 | R5 | `adk-models` uses reqwest 0.12, tokio | audit §2.6 | Tier A accepted; no new dep from us |
 | R6 | Slack retries dropped, run lost between 200 and reply | FOLLOW-ONS "Step 5 ignores Slack's retries" | Task 10 |
 | R7 | No auth/CORS on `AgentHandler`; exposing it equals an open agent with tools | grep: `rusty_serve` exposes `authorization` header only | Task 5; bind loopback + tunnel only |
@@ -235,6 +236,7 @@ Post-MVP (unordered): D1+D2 interrupts; routines with persistence + channel deli
 | R11 | Gateway README stale ("A2A/LLM not built") | inventory | ignore, fix in docs-loop |
 | R12 | CopilotKit React SDK not in CI, only `@ag-ui/client` | FOLLOW-ONS:110-117 | Keep `copilotkit-demo` as manual check |
 | R13 | This design overlaps the homelab **Agent OS / Hermes** stack (LXC 107) | remind-me | Q5 |
+| R14 | Cross-channel refresh promise (Slack edit -> idle browser) is not covered by AG-UI state events | owner review of #581; `bot.rs:75-76` | Change feed, §4.2; acceptance test in task 9 |
 
 ## 9. Decisions
 
@@ -244,11 +246,11 @@ Approved 2026-10-09 with each recommendation below. Q2 stays conditional on its 
 |---|---|---|
 | Q1 | Agent runtime: `rusty_adk` or `rusty_key`? | **adk**: libs-layer, graph + HITL suspension, SQLite sessions, `adk-mcp`, no external `aisdk`. `rusty_key` is an app; its approval gate is richer but app-to-app dependency is illegal |
 | Q2 | App store: `rusty_sqlite` or `rusty_multimodal_db_engine`? (FOLLOW-ONS open Q2) | `rusty_sqlite` for relational page tree and revisions, **after** a half-day spike confirming it covers transactions + the tree query; engine if you want one store across `rusty_tick`, remind_me |
-| Q3 | Conversation source of truth | Client replays `messages` (AG-UI default) plus `adk-sessions` for server-side thread state; **no Intelligence-like hosted store** |
+| Q3 | Conversation source of truth | **`adk-sessions` is the authority** for thread history: `AdkAgent` takes only the last incoming message as the turn and keeps history in ADK sessions, so a client replaying `messages` does not duplicate history (confirmed by owner review; no duplicate-history bug found). No Intelligence-like hosted store |
 | Q4 | MVP channel = Slack (as scoped) vs Teams/SMS first | Slack; adapters for the others already exist |
 | Q5 | Relationship to Agent OS / Hermes: replace, coexist, or have Dots be a UI/runtime Hermes can call? | Coexist; keep scopes separate until MVP proves value |
 | Q6 | Gateway in MVP? | No. Add when a second Dot or channel arrives; MVP uses owner token |
-| Q7 | Landing audit steps 1-3 first (task 2) or code against current locations? | Land first (small, reviewed) |
+| Q7 | Landing audit steps 1-3 first, or code against current locations? | Superseded: they already landed; reuse current APIs (task 2) |
 | Q8 | Voice: defer entirely, or browser speech API in MVP+1? | Browser speech => text; no WebRTC/TTS crate until a forcing function |
 | Q9 | Location/name: `crates/apps/rusty_dots` OK? Any name conflict with your other "Dots" notes? | OK |
 | Q10 | Interrupts (D1+D2): build now for conformance, or keep the `request_input` tool workaround until a consumer needs it? | Keep workaround; build with first consumer (YAGNI), but track as conformance debt |

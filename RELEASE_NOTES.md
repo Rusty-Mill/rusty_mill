@@ -15,8 +15,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ## 2026-10-09 - Design: Dots-style always-on agents (pending review)
 
-- **Added:** `docs/design/DOTS-AGENT.md`, an approved design for always-on agents with Slack and a pages workspace, composed from existing crates. Documentation only; no code, no new dependencies.
-- **Known limitations:** nothing was built or run; AG-UI 1.0 deltas for `rusty_agui` are listed, not fixed; the consolidation audit it cites is still on `claude/peaceful-dirac-200syz`.
+- **Added:** `docs/design/DOTS-AGENT.md`, a design for always-on agents with Slack and a pages workspace, composed from existing crates. Approved in-session by the owner on 2026-10-09, then revised after their review on #581 (all page routes behind owner auth, a change feed so edits from Slack reach an idle browser, prerequisites refreshed against current `main`). Documentation only; implementation is not authorized yet. Also carries a port of #582 (`rk-kernel`: `rk-observe` to dev-dependencies) to clear `cargo-shear`.
+- **Known limitations:** nothing was built or run; AG-UI 1.0 deltas for `rusty_agui` are listed, not fixed.
+
+---
+
+## 2026-10-09 - rusty_bbp_host: proving-run runbook, README status, protoc pin
+
+- **Added:** `crates/apps/rusty_bbp_host/docs/proving-run.md` and `docs/proving/{brief.md,profiles.json,agents.json}`: how to run the first live Blackboard Protocol task end to end (build, throwaway target crate, open and assign, `bbp mod` in one shell and `bbp human` in another) and what to record afterwards, so the spec's post-proving-run questions get data rather than opinion.
+- **Changed:** the host README's stale "Not here yet" section (stages 3b and 3c, long merged) becomes "Status". The Windows `protoc` 36.2 zip in `setup-build-env` is checked against a pinned SHA-256 before `Expand-Archive`; a mismatch fails the step loudly.
+- **Known limitation:** the runbook's paths assume `/tmp/bbp` and a `nano` user; the sandboxed profile must list the toolchain's directories as read roots, and the target crate must build offline. Docs and CI only; no runtime code changed.
 
 ---
 
