@@ -118,6 +118,7 @@ fn codec_round_trips_every_kind() {
                     failed: 2,
                 }],
                 tree: None,
+                sandbox: "test".into(),
                 log: ArtId(5),
             }),
             b"".as_slice(),

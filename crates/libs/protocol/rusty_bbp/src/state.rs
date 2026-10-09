@@ -127,7 +127,6 @@ pub struct Turn {
     pub id: TurnId,
     pub role: Role,
     pub kind: TurnKind,
-    pub token: Token,
     pub deadline: Time,
     pub return_to: Option<Role>,
     pub read_arts: HashSet<ArtId>,
@@ -141,7 +140,6 @@ pub struct Turn {
 pub struct Run {
     pub id: RunId,
     pub candidate: ArtId,
-    pub secret: RunSecret,
     pub status: Option<RunStatus>,
     pub report: Option<ArtId>,
     pub log: Option<ArtId>,
@@ -185,6 +183,10 @@ pub struct Card {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskState {
     pub task: TaskId,
+    /// Keys every execution token and run secret. Never logged: the host
+    /// keeps it beside the store and sets it on the driver. All zero in the
+    /// in-memory tests.
+    pub master: [u8; 32],
     pub rev: Rev,
     pub repo: String,
     pub profile_digest: Sha256,
@@ -223,6 +225,7 @@ impl TaskState {
     pub fn new(task: TaskId) -> TaskState {
         TaskState {
             task,
+            master: [0; 32],
             rev: Rev(0),
             repo: String::new(),
             profile_digest: Sha256([0; 32]),
@@ -265,7 +268,13 @@ impl TaskState {
     }
 
     pub fn fold(task: TaskId, events: &[Event]) -> TaskState {
+        Self::fold_with(task, [0; 32], events)
+    }
+
+    /// [`Self::fold`] under a master secret.
+    pub fn fold_with(task: TaskId, master: [u8; 32], events: &[Event]) -> TaskState {
         let mut s = TaskState::new(task);
+        s.master = master;
         for e in events {
             s.apply(e);
         }
@@ -317,16 +326,23 @@ impl TaskState {
         })
     }
 
+    /// Execution token for `principal` in `turn`: a digest keyed by the
+    /// task's master secret. Not in the log; a reader of the log cannot
+    /// forge it without the master.
     pub fn token_for(&self, principal: &PrincipalId, turn: TurnId) -> Token {
-        Token(Sha256::of(
-            format!("token|{}|{}|{}", self.task, principal, turn.0).as_bytes(),
-        ))
+        Token(self.keyed(format!("token|{}|{}|{}", self.task, principal, turn.0)))
     }
 
+    /// Run secret for `run`, keyed like [`Self::token_for`].
     pub fn secret_for(&self, run: RunId) -> RunSecret {
-        RunSecret(Sha256::of(
-            format!("run|{}|{}", self.task, run.0).as_bytes(),
-        ))
+        RunSecret(self.keyed(format!("run|{}|{}", self.task, run.0)))
+    }
+
+    fn keyed(&self, label: String) -> Sha256 {
+        let mut bytes = Vec::with_capacity(32 + label.len());
+        bytes.extend_from_slice(&self.master);
+        bytes.extend_from_slice(label.as_bytes());
+        Sha256::of(&bytes)
     }
 
     pub fn card(&self) -> Card {
@@ -383,7 +399,6 @@ impl TaskState {
                 role,
                 turn,
                 kind,
-                token,
                 deadline,
                 return_to,
             } => {
@@ -391,7 +406,6 @@ impl TaskState {
                     id: *turn,
                     role: *role,
                     kind: *kind,
-                    token: *token,
                     deadline: *deadline,
                     return_to: *return_to,
                     read_arts: HashSet::new(),
@@ -428,15 +442,10 @@ impl TaskState {
                 self.candidate = Some(*candidate);
                 self.merge_approval = None;
             }
-            Event::RunStarted {
-                candidate,
-                run,
-                secret,
-            } => {
+            Event::RunStarted { candidate, run } => {
                 self.run = Some(Run {
                     id: *run,
                     candidate: *candidate,
-                    secret: *secret,
                     status: None,
                     report: None,
                     log: None,
