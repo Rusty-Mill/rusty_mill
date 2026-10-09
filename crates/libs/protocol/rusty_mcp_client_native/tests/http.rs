@@ -324,6 +324,11 @@ fn a_redirect_is_not_followed_and_nothing_is_sent_to_where_it_points() {
                 )
                 .as_bytes(),
             );
+            // Close gracefully and drain: dropping with unread request bytes
+            // sends an RST on Windows that can discard the response.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            while matches!(stream.read(&mut buf), Ok(n) if n > 0) {}
         }
     });
     let mut config = HttpConfig::new(origin_url);

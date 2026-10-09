@@ -4,6 +4,7 @@
 //! reconnecting to) an upstream server.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -261,16 +262,17 @@ async fn a_restarted_upstream_is_reconnected_by_the_supervisor() {
     up_stop.shutdown();
 }
 
-/// How long `calls` take when each runs `up/sleep` against the rp server,
-/// one client per call (a client runs its calls one at a time).
-async fn time_parallel_sleeps(connections: usize, calls: usize) -> Duration {
-    let (up, up_stop) = serve(sleeping_upstream(), "127.0.0.1:0");
+/// The most `up/sleep` calls the upstream ever ran at once when `calls`
+/// clients (one call each) go through an rp server with `connections`.
+/// Counting overlap, not wall time, keeps this independent of runner speed.
+async fn peak_concurrency(connections: usize, calls: usize) -> usize {
+    let gauge = Arc::new(Gauge::default());
+    let (up, up_stop) = serve(sleeping_upstream(gauge.clone()), "127.0.0.1:0");
     let (rp, stop) = serve_rp(vec![upstream_config(up)], 10, connections).await;
     let mut clients = Vec::new();
     for _ in 0..calls {
         clients.push(McpClient::connect("rp", &spec(rp)).await.unwrap());
     }
-    let t = Instant::now();
     let mut pending = Vec::new();
     for client in clients {
         pending.push(tokio::spawn(async move {
@@ -280,16 +282,24 @@ async fn time_parallel_sleeps(connections: usize, calls: usize) -> Duration {
     for p in pending {
         p.await.unwrap();
     }
-    let took = t.elapsed();
     stop.shutdown();
     up_stop.shutdown();
-    took
+    gauge.peak.load(Ordering::SeqCst)
 }
 
-fn sleeping_upstream() -> Server {
+#[derive(Default)]
+struct Gauge {
+    running: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+fn sleeping_upstream(gauge: Arc<Gauge>) -> Server {
     Server::builder("sleepy", "1")
-        .tool(Tool::new("sleep", schema()), |_c, _p| {
-            std::thread::sleep(Duration::from_millis(800));
+        .tool(Tool::new("sleep", schema()), move |_c, _p| {
+            let now = gauge.running.fetch_add(1, Ordering::SeqCst) + 1;
+            gauge.peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(500));
+            gauge.running.fetch_sub(1, Ordering::SeqCst);
             Ok(text("rested"))
         })
         .build()
@@ -298,10 +308,8 @@ fn sleeping_upstream() -> Server {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn calls_to_one_upstream_run_in_parallel_up_to_the_pool_size() {
-    let parallel = time_parallel_sleeps(3, 3).await;
-    assert!(parallel < Duration::from_millis(2000), "{parallel:?}");
-    let serial = time_parallel_sleeps(1, 3).await;
-    assert!(serial >= Duration::from_millis(2300), "{serial:?}");
+    assert_eq!(peak_concurrency(3, 3).await, 3);
+    assert_eq!(peak_concurrency(1, 3).await, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
