@@ -5,8 +5,9 @@ use rusty_flatbuffers::{Builder, Offset, Table};
 
 use crate::codec::{
     add_offset, add_opt_struct, add_struct, enum_field, opt_struct, opt_table, opt_table_vec,
-    req_table, required_table_vec_offset, string, string_offset, struct_or_default, struct_vec,
-    struct_vec_offset, table_offset, table_vec, table_vec_offset, TableCodec, R,
+    req_table, require, required_table_vec_offset, string_offset, string_req, struct_req,
+    struct_vec_offset, struct_vec_req, table_offset, table_vec_offset, table_vec_req, TableCodec,
+    R,
 };
 use crate::types::*;
 use crate::Error;
@@ -52,7 +53,7 @@ impl TableCodec for ConnectionSettings {
     }
     fn read(t: &Table<'_>) -> R<Self> {
         Ok(ConnectionSettings {
-            agent_id: string(t, 0)?,
+            agent_id: string_req(t, 0, "agent_id")?,
             wants_ball_predictions: t.scalar(1, false)?,
             wants_comms: t.scalar(2, false)?,
             close_between_matches: t.scalar(3, false)?,
@@ -105,7 +106,7 @@ impl TableCodec for PlayerInput {
     fn read(t: &Table<'_>) -> R<Self> {
         Ok(PlayerInput {
             player_index: t.scalar(0, 0)?,
-            controller_state: struct_or_default(t, 1)?,
+            controller_state: struct_req(t, 1, "controller_state")?,
         })
     }
 }
@@ -125,8 +126,8 @@ impl TableCodec for EnvironmentVariable {
     }
     fn read(t: &Table<'_>) -> R<Self> {
         Ok(EnvironmentVariable {
-            name: string(t, 0)?,
-            value: string(t, 1)?,
+            name: string_req(t, 0, "name")?,
+            value: string_req(t, 1, "value")?,
         })
     }
 }
@@ -150,10 +151,10 @@ impl TableCodec for CustomBot {
     }
     fn read(t: &Table<'_>) -> R<Self> {
         Ok(CustomBot {
-            name: string(t, 0)?,
-            root_dir: string(t, 1)?,
-            run_command: string(t, 2)?,
-            agent_id: string(t, 4)?,
+            name: string_req(t, 0, "name")?,
+            root_dir: string_req(t, 1, "root_dir")?,
+            run_command: string_req(t, 2, "run_command")?,
+            agent_id: string_req(t, 4, "agent_id")?,
             hivemind: t.scalar(5, false)?,
             environment: opt_table_vec(t, 6)?,
         })
@@ -171,7 +172,7 @@ impl TableCodec for PsyonixBot {
     }
     fn read(t: &Table<'_>) -> R<Self> {
         Ok(PsyonixBot {
-            name: string(t, 0)?,
+            name: string_req(t, 0, "name")?,
             skill: enum_field(t, 2, PsyonixSkill::from_u8)?,
         })
     }
@@ -199,7 +200,10 @@ impl TableCodec for PlayerConfiguration {
     fn read(t: &Table<'_>) -> R<Self> {
         let tag = t.scalar(0, 0u8)?;
         let variety = match tag {
-            HUMAN => PlayerClass::Human,
+            HUMAN => {
+                require(t, 1, "variety")?;
+                PlayerClass::Human
+            }
             CUSTOM_BOT => PlayerClass::CustomBot(req_table(t, 1, "variety")?),
             PSYONIX_BOT => PlayerClass::PsyonixBot(req_table(t, 1, "variety")?),
             0 => return Err(Error::Missing("variety")),
@@ -257,13 +261,14 @@ impl TableCodec for MatchConfiguration {
         })
     }
     fn read(t: &Table<'_>) -> R<Self> {
+        require(t, 6, "script_configurations")?;
         Ok(MatchConfiguration {
             launcher: enum_field(t, 0, Launcher::from_u8)?,
-            launcher_arg: string(t, 1)?,
+            launcher_arg: string_req(t, 1, "launcher_arg")?,
             auto_start_agents: t.scalar(2, true)?,
             wait_for_agents: t.scalar(3, true)?,
-            game_map_upk: string(t, 4)?,
-            player_configurations: table_vec(t, 5)?,
+            game_map_upk: string_req(t, 4, "game_map_upk")?,
+            player_configurations: table_vec_req(t, 5, "player_configurations")?,
             game_mode: enum_field(t, 7, GameMode::from_u8)?,
             skip_replays: t.scalar(8, false)?,
             instant_start: t.scalar(9, false)?,
@@ -393,8 +398,8 @@ impl TableCodec for DesiredGameState {
     }
     fn read(t: &Table<'_>) -> R<Self> {
         Ok(DesiredGameState {
-            ball_states: table_vec(t, 0)?,
-            car_states: table_vec(t, 1)?,
+            ball_states: table_vec_req(t, 0, "ball_states")?,
+            car_states: table_vec_req(t, 1, "car_states")?,
             match_info: opt_table(t, 2)?,
         })
     }
@@ -427,11 +432,30 @@ impl TableCodec for MatchInfo {
 }
 
 impl TableCodec for PlayerInfo {
+    /// Fields this crate does not model are required by the schema, so they are written as
+    /// placeholders: zero score, an Octane-sized hitbox, no accolades, neutral input.
     fn write(&self, b: &mut Builder) -> R<Offset> {
         let name = string_offset(b, &self.name)?;
+        let hitbox = build(b, |t| {
+            t.add_scalar(0, 118.0f32, 0.0)?; // length
+            t.add_scalar(1, 84.2f32, 0.0)?; // width
+            Ok(t.add_scalar(2, 36.2f32, 0.0)?) // height
+        })?;
+        let accolades = b.create_offset_vector(&[])?;
         build(b, |t| {
             add_struct(t, 0, &self.physics)?;
-            // slots 1-4: score, hitbox, hitbox offset, latest touch, not modelled
+            t.add_struct(1, &[0u8; 28], 4)?; // score_info: seven zero counters
+            t.add_offset(2, hitbox)?;
+            add_struct(
+                t,
+                3,
+                &Vec3 {
+                    x: 13.88,
+                    y: 0.0,
+                    z: 20.75,
+                },
+            )?; // hitbox_offset
+                // slot 4: latest touch, optional
             t.add_scalar(5, self.air_state as u8, 0)?;
             // slot 6: dodge timeout; slot 8: supersonic
             t.add_scalar(7, self.demolished_timeout, 0.0)?;
@@ -439,16 +463,30 @@ impl TableCodec for PlayerInfo {
             add_offset(t, 10, name)?;
             t.add_scalar(11, self.team, 0)?;
             t.add_scalar(12, self.boost, 0.0)?;
-            Ok(t.add_scalar(13, self.player_id, 0)?)
+            t.add_scalar(13, self.player_id, 0)?;
+            t.add_offset(14, accolades)?;
+            add_struct(t, 15, &ControllerState::default())?; // last_input
+            t.add_struct(20, &[0u8; 8], 4)?; // dodge_dir
+            Ok(())
         })
     }
     fn read(t: &Table<'_>) -> R<Self> {
+        for (slot, name) in [
+            (1, "score_info"),
+            (2, "hitbox"),
+            (3, "hitbox_offset"),
+            (14, "accolades"),
+            (15, "last_input"),
+            (20, "dodge_dir"),
+        ] {
+            require(t, slot, name)?;
+        }
         Ok(PlayerInfo {
-            physics: struct_or_default(t, 0)?,
+            physics: struct_req(t, 0, "physics")?,
             air_state: enum_field(t, 5, AirState::from_u8)?,
             demolished_timeout: t.scalar(7, 0.0)?,
             is_bot: t.scalar(9, false)?,
-            name: string(t, 10)?,
+            name: string_req(t, 10, "name")?,
             team: t.scalar(11, 0)?,
             boost: t.scalar(12, 0.0)?,
             player_id: t.scalar(13, 0)?,
@@ -457,13 +495,25 @@ impl TableCodec for PlayerInfo {
 }
 
 impl TableCodec for BallInfo {
+    /// The collision shape is required by the schema and not modelled: written as the standard
+    /// ball sphere.
     fn write(&self, b: &mut Builder) -> R<Offset> {
-        // slots 1-2 (the collision shape union), 3, 4: not modelled
-        build(b, |t| add_struct(t, 0, &self.physics))
+        let sphere = build(b, |t| Ok(t.add_scalar(0, 182.5f32, 0.0)?))?; // diameter
+        build(b, |t| {
+            add_struct(t, 0, &self.physics)?;
+            t.add_scalar(1, 2u8, 0)?; // CollisionShape::SphereShape
+            t.add_offset(2, sphere)?;
+            // slots 3-4: charge level and target speed, not modelled
+            Ok(())
+        })
     }
     fn read(t: &Table<'_>) -> R<Self> {
+        if t.scalar(1, 0u8)? == 0 {
+            return Err(Error::Missing("shape"));
+        }
+        require(t, 2, "shape")?;
         Ok(BallInfo {
-            physics: struct_or_default(t, 0)?,
+            physics: struct_req(t, 0, "physics")?,
         })
     }
 }
@@ -475,21 +525,24 @@ impl TableCodec for GamePacket {
         let balls = required_table_vec_offset(b, &self.balls)?;
         let info = self.match_info.write(b)?;
         let teams = struct_vec_offset(b, &self.teams)?;
+        let tiles = b.create_offset_vector(&[])?; // dropshot tile damage: not modelled
         build(b, |t| {
             add_offset(t, 0, players)?;
             add_offset(t, 1, pads)?;
             add_offset(t, 2, balls)?;
             t.add_offset(3, info)?;
-            add_offset(t, 4, teams)
+            add_offset(t, 4, teams)?;
+            Ok(t.add_offset(5, tiles)?)
         })
     }
     fn read(t: &Table<'_>) -> R<Self> {
+        require(t, 5, "tiles")?;
         Ok(GamePacket {
-            players: table_vec(t, 0)?,
-            boost_pads: struct_vec(t, 1)?,
-            balls: table_vec(t, 2)?,
+            players: table_vec_req(t, 0, "players")?,
+            boost_pads: struct_vec_req(t, 1, "boost_pads")?,
+            balls: table_vec_req(t, 2, "balls")?,
             match_info: req_table(t, 3, "match_info")?,
-            teams: struct_vec(t, 4)?,
+            teams: struct_vec_req(t, 4, "teams")?,
         })
     }
 }
@@ -503,7 +556,7 @@ impl TableCodec for BoostPad {
     }
     fn read(t: &Table<'_>) -> R<Self> {
         Ok(BoostPad {
-            location: struct_or_default(t, 0)?,
+            location: struct_req(t, 0, "location")?,
             is_full_boost: t.scalar(1, false)?,
         })
     }
@@ -522,8 +575,8 @@ impl TableCodec for GoalInfo {
     fn read(t: &Table<'_>) -> R<Self> {
         Ok(GoalInfo {
             team_num: t.scalar(0, 0)?,
-            location: struct_or_default(t, 1)?,
-            direction: struct_or_default(t, 2)?,
+            location: struct_req(t, 1, "location")?,
+            direction: struct_req(t, 2, "direction")?,
             width: t.scalar(3, 0.0)?,
             height: t.scalar(4, 0.0)?,
         })
@@ -534,15 +587,18 @@ impl TableCodec for FieldInfo {
     fn write(&self, b: &mut Builder) -> R<Offset> {
         let pads = required_table_vec_offset(b, &self.boost_pads)?;
         let goals = required_table_vec_offset(b, &self.goals)?;
+        let tiles = b.create_offset_vector(&[])?; // dropshot tiles: not modelled
         build(b, |t| {
             add_offset(t, 0, pads)?;
-            add_offset(t, 1, goals)
+            add_offset(t, 1, goals)?;
+            Ok(t.add_offset(2, tiles)?)
         })
     }
     fn read(t: &Table<'_>) -> R<Self> {
+        require(t, 2, "tiles")?;
         Ok(FieldInfo {
-            boost_pads: table_vec(t, 0)?,
-            goals: table_vec(t, 1)?,
+            boost_pads: table_vec_req(t, 0, "boost_pads")?,
+            goals: table_vec_req(t, 1, "goals")?,
         })
     }
 }
@@ -573,7 +629,7 @@ impl TableCodec for ControllableTeamInfo {
     fn read(t: &Table<'_>) -> R<Self> {
         Ok(ControllableTeamInfo {
             team: t.scalar(0, 0)?,
-            controllables: table_vec(t, 1)?,
+            controllables: table_vec_req(t, 1, "controllables")?,
         })
     }
 }

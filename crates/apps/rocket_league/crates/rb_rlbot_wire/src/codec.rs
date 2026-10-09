@@ -58,8 +58,21 @@ pub(crate) use wire_enum;
 
 // ---- reading ----
 
-pub(crate) fn string(t: &Table<'_>, slot: usize) -> R<String> {
-    Ok(t.string(slot)?.unwrap_or_default().to_owned())
+/// A string the protocol requires: absent is an error, empty is fine.
+pub(crate) fn string_req(t: &Table<'_>, slot: usize, name: &'static str) -> R<String> {
+    t.string(slot)?
+        .map(str::to_owned)
+        .ok_or(Error::Missing(name))
+}
+
+/// Field `slot` must be present, whatever it holds (for required fields this crate does not
+/// model).
+pub(crate) fn require(t: &Table<'_>, slot: usize, name: &'static str) -> R<()> {
+    if t.has_field(slot)? {
+        Ok(())
+    } else {
+        Err(Error::Missing(name))
+    }
 }
 
 pub(crate) fn opt_struct<S: Struct>(t: &Table<'_>, slot: usize) -> R<Option<S>> {
@@ -69,15 +82,18 @@ pub(crate) fn opt_struct<S: Struct>(t: &Table<'_>, slot: usize) -> R<Option<S>> 
     }
 }
 
-/// A struct field the protocol always sends; absent reads as `S::default()`.
-pub(crate) fn struct_or_default<S: Struct + Default>(t: &Table<'_>, slot: usize) -> R<S> {
-    Ok(opt_struct(t, slot)?.unwrap_or_default())
+/// A struct field the protocol requires.
+pub(crate) fn struct_req<S: Struct>(t: &Table<'_>, slot: usize, name: &'static str) -> R<S> {
+    opt_struct(t, slot)?.ok_or(Error::Missing(name))
 }
 
-pub(crate) fn struct_vec<S: Struct>(t: &Table<'_>, slot: usize) -> R<Vec<S>> {
-    let Some(v) = t.vector(slot)? else {
-        return Ok(Vec::new());
-    };
+/// A vector of structs the protocol requires.
+pub(crate) fn struct_vec_req<S: Struct>(
+    t: &Table<'_>,
+    slot: usize,
+    name: &'static str,
+) -> R<Vec<S>> {
+    let v = t.vector(slot)?.ok_or(Error::Missing(name))?;
     (0..v.len())
         .map(|i| S::read(v.struct_bytes(i, S::SIZE)?).ok_or(Error::Missing("struct bytes")))
         .collect()
@@ -93,8 +109,13 @@ pub(crate) fn opt_table_vec<T: TableCodec>(t: &Table<'_>, slot: usize) -> R<Opti
         .map(Some)
 }
 
-pub(crate) fn table_vec<T: TableCodec>(t: &Table<'_>, slot: usize) -> R<Vec<T>> {
-    Ok(opt_table_vec(t, slot)?.unwrap_or_default())
+/// A vector of tables the protocol requires.
+pub(crate) fn table_vec_req<T: TableCodec>(
+    t: &Table<'_>,
+    slot: usize,
+    name: &'static str,
+) -> R<Vec<T>> {
+    opt_table_vec(t, slot)?.ok_or(Error::Missing(name))
 }
 
 pub(crate) fn opt_table<T: TableCodec>(t: &Table<'_>, slot: usize) -> R<Option<T>> {

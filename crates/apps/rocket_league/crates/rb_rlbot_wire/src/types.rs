@@ -122,7 +122,8 @@ impl Struct for ControllerState {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BoostPadState {
     pub is_active: bool,
-    /// Seconds until the pad is active again.
+    /// Seconds since the pad was picked up, or 0 while it is active (a big pad is active again
+    /// after 10 seconds, a small one after 4).
     pub timer: f32,
 }
 

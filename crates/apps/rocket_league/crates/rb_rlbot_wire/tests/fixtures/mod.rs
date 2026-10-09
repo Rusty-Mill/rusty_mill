@@ -2,6 +2,8 @@
 //! values in `tests/golden.rs`. Regenerate by serialising those values with that crate;
 //! nothing in this repository depends on it.
 
+#![allow(dead_code)]
+
 pub const I_CONNECTION: &str = "04000000f4ffffff10000000090000000800090008000400f4ffffff14000000010100000c000a0004000800000009000a00000072757374792f626f743100";
 pub const I_STOP: &str = "04000000f4ffffff100000000a0000000800090008000400faffffff0100060005000400";
 pub const I_INIT: &str = "04000000f4ffffff100000000c0000000800090008000400fcffffff04000400";

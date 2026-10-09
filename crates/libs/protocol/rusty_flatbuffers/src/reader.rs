@@ -81,6 +81,11 @@ impl<'a> Table<'a> {
         }
     }
 
+    /// Whether the buffer holds field `slot` at all (as opposed to omitting it).
+    pub fn has_field(&self, slot: usize) -> Result<bool> {
+        Ok(self.field(slot)?.is_some())
+    }
+
     /// A scalar field, or `default` if absent.
     pub fn scalar<T: Scalar>(&self, slot: usize, default: T) -> Result<T> {
         match self.field(slot)? {
