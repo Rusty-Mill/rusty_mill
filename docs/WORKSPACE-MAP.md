@@ -105,7 +105,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_db | rusty-db-sqlite | SQLite driver for rusty_db, built on sqlx | 1 |
 | libs | rusty_fair_play_domain | rusty_fair_play_domain | The Fair Play household-card domain on rusty_multimodal_db_engine: Person, Card (a tree with an owner per card), CardDefault (the shipped baseline), the queries, and the seed loader with the deck embedded | 2 |
 | libs | rusty_fedora | rusty_fedora | Async client for rusty_fedora_agent's local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write. | 1 |
-| libs | rusty_flatbuffers | rusty_flatbuffers | Dependency-free FlatBuffers runtime: a bounds-checked table/vector reader that returns errors instead of panicking, and a back-to-front builder. No code generation; schemas are hand-written on top. | 0 |
+| libs | rusty_flatbuffers | rusty_flatbuffers | Dependency-free FlatBuffers runtime: a bounds-checked table/vector reader that returns errors instead of panicking, and a back-to-front builder. No code generation; schemas are hand-written on top. | 1 |
 | libs | rusty_font | rusty_font | A #![no_std] + alloc sovereign TrueType/OpenType font table parser and SIMD-accelerated glyph rasterizer | 2 |
 | libs | rusty_git | rusty_git | Pure Rust implementation of Git object model, index, refs, and CLI binary | 1 |
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
@@ -161,6 +161,7 @@ Families are the current directories immediately below `crates/`.
 | apps | rocket_league | rb_env | A stepping environment over the physics port: reset to a frame, apply controller inputs, step one tick, observe (ADR-0059). | 1 |
 | apps | rocket_league | rb_physics_bullet | Physics core: a Rust port of Bullet3's rigid-body integration and sequential-impulse contact solver (zlib-licensed), scoped to sphere-vs-static-plane for v0 (RB-PHYSICS-001). | 2 |
 | apps | rocket_league | rb_replay_ingest | Replay-file ingestion adapter (RB-VERIFY-001): implements PhysicsStateSource by parsing .replay files via boxcars + subtr-actor. | 1 |
+| apps | rocket_league | rb_rlbot_wire | RLBot v5 socket protocol, hand-written on rusty_flatbuffers: the u16-framed messages a bot or match runner exchanges with RLBot core (connection, match setup, player input, state setting, game packets). Replaces the external rlbot/rlbot_flat crates (see rlbot/PLAN.md). | 0 |
 | apps | rocket_league | rb_scenario | Scenario files for scripted mechanic captures: an initial game state plus a run-length input tape (docs/research/BOT-CAPTURE-PLAN.md). Read by rb-verify and by tools/rb_tape_bot. | 1 |
 | apps | rocket_league | rb_verify_cli | Composition root for the Phase 0 verification pipeline: wires ingestion adapters to the divergence scorer. | 0 |
 | apps | rocket_league | recon-check | Phase 2 cross-check: our boxcars reconstruction vs subtr-actor's independent reconstruction of the same replay | 0 |

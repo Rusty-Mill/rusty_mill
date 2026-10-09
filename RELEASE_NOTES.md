@@ -23,6 +23,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 - **Changed (rusty_pk):** reverses the rejection added after Codex round 3 on #540, by owner decision. Behaviour now matches `ring` and RFC 8032 (which does not require rejecting small-order keys). **Known limitation:** the identity key verifies `R = identity, S = 0` for every message; callers must screen untrusted keys themselves. The evidence record `EVIDENCE-2026-10-09.txt` predates this change; Ed25519 verify is variable time and outside the constant-time budgets, so its counts are unaffected, but the vector run was not regenerated.
 
+## 2026-10-09 - rb_rlbot_wire: RLBot protocol messages (RLBot port stage 2) (pending review)
+
+- **Added:** `crates/apps/rocket_league/crates/rb_rlbot_wire`: `u16` framing (blocking reader and an incremental `FrameDecoder`), `InterfaceMessage` (connection settings, init complete, stop, player input, state setting, match configuration) and `CoreMessage` (game packet, field info, controllable team info, match configuration, `Other(tag)` for the rest), each encodable and decodable so a stand-in core can use them. Depends only on `rusty_flatbuffers`.
+- **Strict decoding:** schema-required fields (strings, vectors, structs, tables, unions) are required on read (`Error::Missing`); optional ones may be absent. Encoders write valid placeholders for required fields they do not model, checked by `tests/verified.rs` (bytes accepted by `planus`) and `tests/required.rs`. `rusty_flatbuffers` `Table::has_field` added.
+- **Verified:** 13 tests. Ten messages decode from payloads made by `rlbot_flat` 0.6.0 (schema rev c38374e) to the values they were built from, and round-trip through this crate; truncating or flipping any byte of the larger payloads never panics. Checked once outside CI: `planus` accepts what this crate encodes for all six client messages.
+- **Known limitation:** a subset by design (no loadouts, 37 of 38 mutators, scripts, hitboxes, scores, rendering, comms, ball prediction); omitted fields are written as schema defaults. String and vector fields are always written because the reference reader treats them as required.
+
 ## 2026-10-09 - Design: Dots-style always-on agents (pending review)
 
 - **Added:** `docs/design/DOTS-AGENT.md`, a design for always-on agents with Slack and a pages workspace, composed from existing crates. Approved in-session by the owner on 2026-10-09, then revised after their review on #581 (all page routes behind owner auth, a change feed so edits from Slack reach an idle browser, prerequisites refreshed against current `main`). Documentation only; implementation is not authorized yet. Also carries a port of #582 (`rk-kernel`: `rk-observe` to dev-dependencies) to clear `cargo-shear`.
