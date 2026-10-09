@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
-//! A server that refuses a bare `server/discover` with `-32602` (as `rmcp`
-//! does) is asked again with `_meta` before the client gives up on stateless.
+//! `server/discover` carries `_meta` (an `rmcp` server refuses a bare one, and
+//! over stdio then hangs up), and the transport is told the revision being
+//! tried (an HTTP server checks its header against `_meta`).
 
 use rusty_mcp_client_native::json::Value;
 use rusty_mcp_client_native::proto::{ErrorCode, ErrorData, Message, ProtocolVersion};
@@ -89,7 +90,7 @@ fn connect(refuse_everything: bool) -> (Client<Picky, NoHandler>, Vec<Option<Str
 }
 
 #[test]
-fn a_bare_discovery_refused_as_invalid_params_is_retried_with_meta() {
+fn a_discovery_that_carries_meta_settles_the_stateless_revision() {
     let (client, _) = connect(false);
     assert_eq!(
         client.session().negotiated().unwrap().as_str(),
@@ -98,9 +99,9 @@ fn a_bare_discovery_refused_as_invalid_params_is_retried_with_meta() {
 }
 
 #[test]
-fn the_retry_names_the_revision_to_the_transport_and_keeps_it() {
+fn the_transport_is_told_the_revision_tried_and_keeps_it() {
     let (_, told) = connect(false);
-    // Set for the retry, announced again once settled; never cleared.
+    // Set for the discovery, announced again once settled; never cleared.
     assert!(!told.is_empty());
     assert!(
         told.iter().all(|v| v.as_deref() == Some("2026-07-28")),
@@ -109,7 +110,7 @@ fn the_retry_names_the_revision_to_the_transport_and_keeps_it() {
 }
 
 #[test]
-fn when_the_retry_finds_no_discovery_the_client_falls_back_and_unsets_the_revision() {
+fn when_there_is_no_discovery_the_client_falls_back_and_unsets_the_revision() {
     let (client, told) = connect(true);
     assert_eq!(
         client.session().negotiated().unwrap().as_str(),

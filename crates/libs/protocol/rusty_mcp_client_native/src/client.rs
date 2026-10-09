@@ -96,25 +96,8 @@ impl<T: Transport, H: Handler> Client<T, H> {
     }
 
     fn handshake(&mut self) -> Result<(), ClientError> {
-        if self.session.prefers_stateless() {
-            let (id, message) = self.session.discover_request();
-            match self.exchange(id, &message, &HeaderOverride::default()) {
-                Ok(result) => {
-                    if self.session.on_discover(&result)? {
-                        self.announce_version();
-                        return Ok(());
-                    }
-                }
-                // Some servers want a discovery to carry `_meta` like any
-                // other request, and call its absence invalid params.
-                Err(ClientError::Rpc(e)) if e.code == ErrorCode::INVALID_PARAMS => {
-                    if self.discover_with_meta()? {
-                        return Ok(());
-                    }
-                }
-                Err(ClientError::Rpc(e)) if self.session.falls_back_to_initialize(&e) => {}
-                Err(e) => return Err(e),
-            }
+        if self.session.prefers_stateless() && self.discover()? {
+            return Ok(());
         }
         let (id, message) = self.session.initialize_request()?;
         let result = self.exchange(id, &message, &HeaderOverride::default())?;
@@ -125,9 +108,11 @@ impl<T: Transport, H: Handler> Client<T, H> {
         Ok(())
     }
 
-    /// The discovery retried with `_meta`. Whether it settled a stateless
-    /// revision; `false` leaves the transport as it was, for `initialize`.
-    fn discover_with_meta(&mut self) -> Result<bool, ClientError> {
+    /// `server/discover`, carrying `_meta` like every stateless request (a
+    /// server may refuse a bare one, and a stdio server may then hang up).
+    /// Whether it settled a stateless revision; `false` leaves the transport
+    /// as it was, for `initialize`.
+    fn discover(&mut self) -> Result<bool, ClientError> {
         let Some(tried) = self.session.discovery_version() else {
             return Ok(false);
         };
