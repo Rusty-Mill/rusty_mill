@@ -33,9 +33,9 @@ bbp human   --dir D --task T [--rev N] VERB ARGS...
 
 `--dir` and `--task` fall back to `BBP_DIR` and `BBP_TASK`. `reject`, `rerun`, `resume` and `cancel` take `--rev N`, the card revision the human saw (`bbp card` prints it), and refuse to run without it; the core answers `stale_rev` when the card has moved on, so a delayed command is refused rather than applied to newer work.
 
-## Not here yet
+## Status
 
-Stage 3b adds `bbp runner`, the sandboxed test supervisor on `rusty_sandbox`. Stage 3c adds `bbp mod`, the loop that grants turns, launches one agent harness per turn with this server, and starts runs. Tokens and run secrets are still the deterministic derivations from stage 1; `rusty_rand` replaces them when the moderator exists to hand them out.
+Stages 3a to 3c of the implementation plan are in: the per-turn MCP server, the human channel, the sandboxed runner and the moderator. Execution tokens and run secrets are digests keyed by the task directory's master secret, 32 random bytes from `rusty_rand` (see "The master secret"). What is not here: an agent harness sandbox (the harness is trusted with the directory; see "The moderator"), and the live proving run, whose runbook is [`docs/proving-run.md`](docs/proving-run.md).
 
 Tier S: `rusty_bbp`, `rusty_serde`, `rusty_rand`.
 
