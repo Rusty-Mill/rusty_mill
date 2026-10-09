@@ -2,11 +2,14 @@
 """Count conditional jumps and divisions in named functions of one binary.
 
 usage: disasm_audit.py BINARY LIMITS
-LIMITS lines: `<symbol-substring> <max-jcc>`; `div`/`idiv` are always zero.
+LIMITS lines: `<symbol-substring> <jcc-count>`; `div`/`idiv` are always zero.
 Every function whose demangled name contains the substring is checked, and a
 substring that matches nothing is an error (a renamed function must not pass
-silently). A budget of 0 means straight-line code; a non-zero budget pins a
-reviewed loop-back count so a new branch shows up as a failure.
+silently). The count must match EXACTLY, in both directions: a count that rises
+is a new branch, and one that falls can hide a new secret-dependent jump behind
+a removed bounds check or loop (a total hides what moved), so every change
+forces a re-review of the listed count. 0 means straight-line code; a non-zero
+count pins a reviewed loop-back/bounds-check count.
 Valid for this binary only: rerun after any rustc, flag or target change.
 """
 import re
@@ -34,6 +37,11 @@ def functions(binary):
         yield name, body
 
 
+def verdict(jcc, div, expected):
+    """True iff the reviewed jump count is matched exactly and there is no division."""
+    return jcc == expected and div == 0
+
+
 def main(argv):
     if len(argv) != 3:
         sys.exit(__doc__)
@@ -53,10 +61,11 @@ def main(argv):
         for name, body in hits:
             jcc = sum(1 for l in body if JCC.search(l))
             div = sum(1 for l in body if DIV.search(l))
-            ok = jcc <= budget and div == 0
+            ok = verdict(jcc, div, budget)
             bad |= not ok
-            print(f"{'ok  ' if ok else 'FAIL'} {name[:90]}: jcc={jcc} (max {budget}) div={div}")
+            print(f"{'ok  ' if ok else 'FAIL'} {name[:90]}: jcc={jcc} (reviewed {budget}) div={div}")
     sys.exit(1 if bad else 0)
 
 
-main(sys.argv)
+if __name__ == "__main__":
+    main(sys.argv)

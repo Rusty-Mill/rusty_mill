@@ -32,11 +32,12 @@ echo "virtualised: $(systemd-detect-virt 2>/dev/null || echo 'unknown (sandbox V
 section "dependencies pinned"
 grep -A1 'name = "ring"' Cargo.lock | tr '\n' ' '; echo
 
-section "vector files"
+section "vector files (hashes checked against each MANIFEST.txt; a mismatch fails the record)"
+python3 -I docs/research/crypto-evidence/check_manifests.py \
+  crates/foundation/rusty_sha2/tests/vectors crates/foundation/rusty_pk/tests/vectors \
+  crates/foundation/rusty_aead/tests/vectors || fail "vector manifest check"
 for d in crates/foundation/rusty_sha2 crates/foundation/rusty_pk crates/foundation/rusty_aead; do
-  echo "-- $d/tests/vectors/MANIFEST.txt"
-  head -2 "$d/tests/vectors/MANIFEST.txt" 2>/dev/null | sed 's/^/   /'
-  (cd "$d/tests/vectors" && sha256sum *.json *.txt 2>/dev/null | grep -v MANIFEST | sed 's/^/   /')
+  head -2 "$d/tests/vectors/MANIFEST.txt" | sed "s|^|   $(basename $d): |"
 done
 
 section "vector case counts (declared vs parsed; executed = parsed unless noted)"
@@ -118,6 +119,18 @@ TXT
 # Resolution, execution and judging live in timing_series.py (tested by test_timing_series.py): the
 # executable comes from Cargo's compiler-artifact JSON for the requested package, any build, discovery or
 # execution failure fails the record, and alarms are counted from the printed |t| values.
+# The timing detector itself: a deliberately leaky early-exit comparison must be flagged. This test is
+# #[ignore]d in plain `cargo test` (timing-sensitive), so it is run explicitly here and its status counts.
+if out=$(cargo test --release -p rusty_ct_check --lib -- --ignored --exact timing::tests::planted_early_exit_is_detected 2>&1); then
+  echo "planted timing leak: detected (rusty_ct_check timing::tests::planted_early_exit_is_detected passed)"
+  echo "$out" | grep -E '^test |test result' | sed 's/^/   /'
+else
+  echo "planted timing leak: NOT detected or the test failed to run"
+  echo "$out" | tail -15 | sed 's/^/   /'
+  fail "planted timing leak test"
+fi
+echo "$out" | grep -q '1 passed' || fail "planted timing leak test did not report exactly one passing test"
+
 REPS=$REPS python3 -I docs/research/crypto-evidence/timing_series.py <<'SPECS' || FAIL=1
 rusty_sha2|null_calibration_identical_classes|A/A  HMAC-SHA512 (baseline)
 rusty_sha2|hmac_sha512_key_classes_not_distinguishable|HMAC-SHA512 fixed vs other key
@@ -130,7 +143,11 @@ rusty_pk|null_calibration_identical_classes|A/A  X25519 (baseline)
 rusty_pk|scalar_classes_not_distinguishable|x25519: sparse vs dense scalar
 rusty_pk|fixed_vs_random_scalar|x25519: fixed vs other scalar
 SPECS
-python3 -I docs/research/crypto-evidence/test_timing_series.py >/dev/null 2>&1 && echo "collector self-test: passed" || { echo "collector self-test: FAILED"; fail "timing_series self-test"; }
+for tf in test_timing_series.py test_check_manifests.py; do
+  python3 -I docs/research/crypto-evidence/$tf >/dev/null 2>&1 && echo "collector self-test $tf: passed" || { echo "collector self-test $tf: FAILED"; fail "$tf"; }
+done
+sh crates/foundation/rusty_ct_check/scripts/test_taint_lib.sh >/dev/null 2>&1 && echo "taint_lib self-test: passed" || { echo "taint_lib self-test: FAILED"; fail "test_taint_lib.sh"; }
+python3 -I crates/foundation/rusty_ct_check/scripts/test_disasm_audit.py >/dev/null 2>&1 && echo "disasm_audit self-test: passed" || { echo "disasm_audit self-test: FAILED"; fail "test_disasm_audit.py"; }
 
 section "speed, one run each (not benchmarks)"
 cargo test --release -p rusty_pk --test perf -- --ignored --nocapture 2>&1 | grep -E 'ours'

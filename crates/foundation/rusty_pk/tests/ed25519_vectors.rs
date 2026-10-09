@@ -35,41 +35,53 @@ fn wycheproof_and_ring_agree_on_every_case() {
 
 /// Encodings Wycheproof does not cover, where an implementation could differ
 /// from ring: the identity (a valid point of order 1) under several encodings,
-/// with `S = 0` and `R` = identity, which verifies whenever the key decodes.
-/// Ours must make the same accept/reject decision as ring on each.
+/// with `S = 0` and `R` = identity, which verifies every message under such a
+/// key. `ring` accepts these; we deliberately do not (small-order public keys
+/// are rejected, a documented deviation stricter than ring, Codex round 3 on
+/// #540). Every other case must still make the same decision as ring.
 #[test]
-fn identity_key_encodings_match_ring() {
+fn identity_key_encodings_are_rejected_unlike_ring() {
     let identity = {
         let mut b = [0u8; 32];
         b[0] = 1;
         b
     };
-    let mut non_canonical_y = [0xffu8; 32]; // y = p + 1 = 2^255 - 18
+    let mut non_canonical_y = [0xffu8; 32]; // y = p + 1 = 2^255 - 18, i.e. the identity
     non_canonical_y[0] = 0xee;
     non_canonical_y[31] = 0x7f;
-    let mut x_zero_sign_set = identity; // x = 0 with the sign bit set
+    let mut x_zero_sign_set = identity; // x = 0 with the sign bit set: still the identity
     x_zero_sign_set[31] |= 0x80;
     let mut not_on_curve = [0u8; 32]; // y = 2 has no x
     not_on_curve[0] = 2;
     let mut sig = [0u8; 64];
     sig[..32].copy_from_slice(&identity);
     let mut report = Vec::new();
-    for (name, key) in [
-        ("identity", identity),
-        ("non-canonical y", non_canonical_y),
-        ("x=0, sign bit set", x_zero_sign_set),
-        ("not on curve", not_on_curve),
+    // (name, key, small order: ring accepts, we reject)
+    for (name, key, small_order) in [
+        ("identity", identity, true),
+        ("non-canonical y", non_canonical_y, true),
+        ("x=0, sign bit set", x_zero_sign_set, true),
+        ("not on curve", not_on_curve, false),
     ] {
-        let ours = verify(&key, b"msg", &sig).is_ok();
-        let ring = UnparsedPublicKey::new(&ED25519, &key)
-            .verify(b"msg", &sig)
-            .is_ok();
-        report.push((name, ours, ring));
-        assert_eq!(ours, ring, "{name}");
+        for msg in [&b"msg"[..], b"", b"another message"] {
+            let ours = verify(&key, msg, &sig).is_ok();
+            let ring = UnparsedPublicKey::new(&ED25519, &key)
+                .verify(msg, &sig)
+                .is_ok();
+            report.push((name, ours, ring));
+            assert!(
+                !ours,
+                "{name}: a small-order or invalid key must not verify"
+            );
+            if small_order {
+                // Non-vacuous: ring really does accept the forgery we reject.
+                assert!(ring, "{name}: ring is expected to accept this encoding");
+            } else {
+                assert_eq!(ours, ring, "{name}");
+            }
+        }
     }
     eprintln!("(case, ours, ring): {report:?}");
-    // Non-vacuous: at least the plain identity must be accepted by both.
-    assert!(report[0].1 && report[0].2);
 }
 
 #[test]

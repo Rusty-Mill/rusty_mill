@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
+
+- **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
+- **Fixed (evidence tooling, 4 x P2):** taint scripts check the example's exit status (shared `taint_lib.sh`, fake-valgrind regression test); `collect.sh` runs the ignored planted timing leak test and checks every vector file against its `MANIFEST.txt` (found `x25519_test.json` unlisted; 27 vendored files compared byte for byte with upstream); disassembly jump counts are matched exactly.
+- **Added to CI:** the `crypto-constant-time` job runs the manifest check and the evidence-tooling self-tests.
+- **Known limitations:** unchanged. Still only evidence, not proof; the human independent review remains required before any `rusty_tls` seam.
+
 ## 2026-10-09 - Codex review round 2 on #540: timing-evidence collector corrected
 
 - **Fixed (evidence collector):** `collect.sh` picked one `target/release/deps/timing-*` binary for all three crates' same-named A/A tests, ignored build and discovery failures, and counted baseline alarms from exit codes the calibration tests never produce. Replaced by `timing_series.py`: executable from Cargo's artifact JSON per package (identity recorded), every failure fails the record, alarms counted from printed `|t|` (>= 4.5). Covered by 12 deterministic tests (`test_timing_series.py`, also run in `crypto-constant-time`), including custom target directories, stale binaries after a failed build, zero repetitions and above-threshold A/A output.

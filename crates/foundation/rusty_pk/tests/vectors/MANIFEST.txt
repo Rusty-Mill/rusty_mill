@@ -1,6 +1,6 @@
 Source: https://github.com/C2SP/wycheproof @ 12fd3aaf33eb5fa1f52e026912ee00c054f9d984, testvectors_v1/ (the *_test.json files)
 Licence: Apache-2.0 (LICENSE-wycheproof). Fetched 2026-10-08. Do not edit; refetch and compare.
-Generated (not Wycheproof): ecdsa_p256_sha384.txt, rsa_forgeries.txt -- see ../../scripts/.
+Generated (not Wycheproof): ecdsa_p256_sha384.txt, rsa_forgeries.txt -- see ../../scripts/. Their hashes are pinned below like the rest.
 182db4f3e230f6f9fa9f800d2a614dede30284b8e8438bbfe1171905402e9332  ecdsa_secp256r1_sha256_test.json
 660c948e5433279ecdf966e8a1386b69ecec618efc1ff00269e85aa9dc84f0a6  ecdsa_secp384r1_sha256_test.json
 8a5b3ae1760975143414811f13588c24d951d9d8c904195087ba327591dfe9cc  ecdsa_secp384r1_sha384_test.json
@@ -20,3 +20,6 @@ c571c105d261c0ff588a2888a529f152563fb3b77894b7620d4e4f8f934f2c1d  rsa_signature_
 957aca128e30bd02c8982f8ca482d6521d16683f4bbc3f193cdfd4c8f04bc667  rsa_signature_4096_sha256_test.json
 bc26f16b9fc9a90628864d3d1111ef48a4bd00b9d4870bfab88ff326e309e073  rsa_signature_4096_sha384_test.json
 9d6e67b1eb0d7040db411835238efd20e9302399a258bdff82de3f38e0f2855a  rsa_signature_4096_sha512_test.json
+db214c7352b11acb498474400352d8b43c118cc043a36151510d94a253f404ab  ecdsa_p256_sha384.txt
+a53fc8e58aa07a4203eaa9c0111d6726ceb45621699a46d45980639cf80061ac  rsa_forgeries.txt
+35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d  x25519_test.json

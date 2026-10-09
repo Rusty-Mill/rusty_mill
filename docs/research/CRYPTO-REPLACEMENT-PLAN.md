@@ -74,15 +74,25 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   section 5.1.3 rejects a point encoding whose `y` is not below `p`, and one with `x = 0`
   and the sign bit set. `ring` 0.17.14 (its `x25519_ge_frombytes_vartime`, read in
   `crypto/curve25519/curve25519.c`) accepts both, and this implementation reproduces that
-  on purpose so a swap does not change which keys verify. Regression vectors:
-  `identity_key_encodings_match_ring` in `tests/ed25519_vectors.rs` (identity, `y = p + 1`,
-  `x = 0` with sign bit set, and an off-curve `y`). **Security implication, not yet
+  on purpose so a swap does not change which keys verify. **One deviation goes the other
+  way, stricter than `ring`:** a public key of small order (the eight torsion points,
+  including the identity) is rejected, because for such a key `[h]A` vanishes and the
+  signature `R = identity, S = 0` verifies every message under it (Codex round 3, P1).
+  `ring` accepts that signature. Regression tests: `identity_key_encodings_are_rejected_unlike_ring`
+  in `tests/ed25519_vectors.rs` (identity, `y = p + 1`, `x = 0` with sign bit set: we reject,
+  `ring` is asserted to accept, three messages each; an off-curve `y`: both reject) and
+  `small_order_public_keys_are_rejected` / `every_torsion_point_is_small_order_and_the_base_point_is_not`
+  in `src/ed25519.rs` (all eight torsion encodings, several messages; the first fails without
+  the check). Small-order `R` is not rejected (it cannot verify under a key that is not itself
+  small order). The `ring` parity statement is therefore "same verdicts on the recorded corpus,
+  except small-order public keys". **Security implication of the encoding leniencies, not yet
   reviewed:** a public key then has more than one accepted encoding, so code that treats the
   key bytes as an identity (a hash input, a map key, a pin) can see two names for one key.
   Signature malleability is separate and not introduced here (`S` must be canonical). For TLS
   the key arrives inside a certificate whose signature covers the SPKI, which limits the
-  exposure, but that argument needs the independent reviewer's agreement. Tightening to the
-  RFC is a one-line policy change if the owner prefers strictness over `ring` parity.
+  exposure, but that argument needs the independent reviewer's agreement. Tightening the
+  remaining two leniencies to the RFC is a one-line policy change if the owner prefers
+  strictness over `ring` parity.
 - **Evidence (preliminary):** 42 tests (plus one ignored speed test). Every case in 19 vendored Wycheproof files (RSA PKCS#1 2048/3072/4096
   x SHA-256/384/512, RSA-PSS incl. the parameter zoo, ECDSA P-256/SHA-256, P-384/SHA-384,
   P-384/SHA-256, Ed25519) gets the same verdict from `ring` and from us, and the
@@ -615,6 +625,20 @@ its three A/A baselines now come from three different executables (see the ident
 reports one A/A crossing (HMAC-SHA512, max 5.32) and none for ChaCha20-Poly1305 or X25519. The
 previous record (commit `ea0e234`) used the old collector and is not evidence for the new one; it
 was replaced, not kept.
+
+## 11a-3. Independent review, round 3 (Codex, PR #540, reviewed commit `61621ade`)
+
+Five findings (1 P1, 4 P2) from a focused cryptography review. Automated pass; it does not
+satisfy the human-review gate. Codex states it ran no tests; every disposition below was
+checked by running code here.
+
+| Finding | Verified? | Disposition |
+| --- | --- | --- |
+| P1: an Ed25519 public key of small order (e.g. the identity) leaves no `[h]A` term, so `R = identity, S = 0` verifies every message. | **Yes**: the old `identity_key_encodings_match_ring` test asserted exactly this acceptance, and `ring` accepts it. | Fixed, stricter than `ring` on purpose: `[8]A = identity` keys are rejected before hashing (section 2 stage notes). Regression tests fail without the check (mutation-checked) and cover all eight torsion encodings. This is a new documented deviation from `ring` parity, in the safe direction; the owner may revert it by deleting one `if`, but should not without a reason. |
+| P2: the taint scripts ended in `\|\| true`, so an example that panicked, was misspelled, or a missing `valgrind` read as "0 errors", the expected answer for the clean modes. | **Yes**, in all three `ct_check.sh` and in `valgrind_selftest.sh`. | Fixed in one shared `rusty_ct_check/scripts/taint_lib.sh`: each mode runs once, output to a file, and a non-zero status fails the check. `test_taint_lib.sh` uses a fake `valgrind` (clean, diagnostic, exit 3, exit 127, diagnostic plus failure); weakening the status check fails it. |
+| P2: `collect.sh` never ran the ignored `planted_early_exit_is_detected` test, so the timing detector's own sensitivity was not part of the record. | **Yes.** | Fixed: `collect.sh` runs it explicitly (`--ignored --exact`), propagates its status and requires exactly one passing test. It passed here (0.02 s). |
+| P2: the vector hashes were printed, not compared with the manifests (and the two generated corpora were not pinned). | **Yes**, and the check found a real gap on its first run: `x25519_test.json` was vendored but missing from the `rusty_pk` manifest. | Fixed: `check_manifests.py` fails on a hash mismatch, a missing file and an unlisted file; both generated corpora and `x25519_test.json` are now pinned; it runs in `collect.sh` and in the `crypto-constant-time` CI job; 5 tests. All 27 vendored Wycheproof files were also compared byte for byte with upstream at `12fd3aaf` (identical). |
+| P2: `jcc <= budget` let a lower count pass unreviewed, and a removed bounds check or loop can mask an added secret-dependent jump at an unchanged or lower total. | **Yes** (the first half is plain; the second half is the reason exactness matters, not a demonstrated miss). | Fixed: counts must match exactly. They already do on 1.98.1 and 1.99.0 (identical), so nothing moved. `test_disasm_audit.py` pins the rule. Still a count, not a proof: it does not say which jump moved. |
 
 ## 12. What I did not verify
 

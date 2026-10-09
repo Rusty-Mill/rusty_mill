@@ -1,4 +1,5 @@
-# Reviewed 2026-10-08 on rustc 1.99.0, x86_64, --release, for the secret-scalar
+# Reviewed 2026-10-09 on rustc 1.98.1 and 1.99.0 (identical counts), x86_64, --release, for the secret-scalar
+# Counts are matched EXACTLY (fewer is as much a change as more: a removed check can hide a new jump).
 # path (X25519). The counts are conditional jumps in the whole function, almost
 # all slice bounds checks and loop back-edges with public trip counts; they are
 # pinned so that a NEW branch fails the check. Evidence that it works: before
