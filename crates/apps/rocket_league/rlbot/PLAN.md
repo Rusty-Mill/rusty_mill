@@ -51,3 +51,4 @@ Status: **proposal, no code.** Replaces the external `rlbot` 0.6.0 client (and i
 
 ## Progress
 - Stage 1: `rusty_flatbuffers` (reader, builder, golden fixtures from `rlbot_flat` schema rev c38374e). Cross-checked both ways: its reader reads planus-built buffers (committed fixtures), and planus reads its builder's output (checked once in a scratch crate).
+- Stage 2: `rb_rlbot_wire` (framing, 6 client messages, 4 core messages, both directions). Golden payloads from `rlbot_flat` decode to the expected values; `planus` accepts what this crate encodes for all six client messages. Not yet covered: `RenderGroup`, `StartCommand`, `SetLoadout`, comms, ball prediction, pings (core pings arrive as `CoreMessage::Other`).

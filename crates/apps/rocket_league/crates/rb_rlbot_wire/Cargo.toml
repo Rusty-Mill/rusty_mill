@@ -1,0 +1,22 @@
+[package]
+name = "rb_rlbot_wire"
+description = "RLBot v5 socket protocol, hand-written on rusty_flatbuffers: the u16-framed messages a bot or match runner exchanges with RLBot core (connection, match setup, player input, state setting, game packets). Replaces the external rlbot/rlbot_flat crates (see rlbot/PLAN.md)."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+rusty_flatbuffers = { workspace = true }
+
+[package.metadata.rusty_mill]
+layer = "apps"
