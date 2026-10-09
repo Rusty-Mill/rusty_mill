@@ -13,6 +13,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_bbp driver boundary: payload derives from bytes (pending review)
+
+- **Added:** `rusty_bbp::codec` and two `Driver` boundary checks: a referenced blob must already be stored, and the claimed typed payload must equal what the bytes decode to. Closes the two compliance gaps found when ChatGPT's implementation-plan review was reassessed against the built code.
+- **Changed:** the `spec` artifact's on-disk shape is now JSON with `brief` and `markdown`, so its payload is derivable. Test fixtures encode through `codec`.
+
 ## 2026-10-08 - rusty_bullet catch-up: match flow (pending review)
 
 - **Changed:** brings in the 7 `baileyrd/rusty_bullet` commits (PRs #315-#317) pushed after the original import: `rb_env` match clock, overtime, match end and first-kickoff intro (FR-160), a whole-match check against game logs, scripted chasers and the `play_match` example, plus the matching ADR 0082 / parity-plan / spec updates and `rb_tape_bot` log tooling. Same `git filter-repo` rewrite, deterministic, so the already imported commits keep their SHAs and only these 7 come across; the new SHA map lines are appended to `docs/research/rl-migration/rusty_bullet-commit-map.txt`.

@@ -63,14 +63,17 @@ fn stage_one_end_to_end() {
         tree: Some(Sha256([2; 32])),
         log,
     };
-    let rep_blob = fx.d.store.blob_put(b"rep2");
+    let payload = ArtifactPayload::TestReport(rep);
+    let rep_blob =
+        fx.d.store
+            .blob_put(&encode_artifact(&payload, b"").expect("encode"));
     let op_rep = fx.op();
     let cmd = Command::Runner {
         op: op_rep,
         run,
         secret,
         blob: rep_blob,
-        payload: ArtifactPayload::TestReport(rep),
+        payload,
     };
     let first = fx.run(&cmd);
     let rev = fx.rev();
