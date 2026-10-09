@@ -25,7 +25,8 @@ use std::process::exit;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rusty_tls::handrolled::client::{
-    CipherSuite, ClientConfig, ClientError, ClientHandshake, Incoming, Resumption, Session,
+    CipherSuite, ClientConfig, ClientError, ClientHandshake, ClientIdentity, Incoming, Resumption,
+    Session,
 };
 use rusty_tls::handrolled::client12::{CipherSuite12, ClientConfig12, ClientHandshake12, Incoming12};
 use rusty_tls::handrolled::kx::NamedGroup;
@@ -34,7 +35,7 @@ use rusty_tls::handrolled::negotiate::{
     ClientConfigBoth, ClientHandshakeBoth, Established, ServerConfigBoth, ServerHandshakeBoth,
 };
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
-use rusty_tls::handrolled::server::{ServerConfig, ServerHandshake, Tickets};
+use rusty_tls::handrolled::server::{ClientAuth, ServerConfig, ServerHandshake, Tickets};
 use rusty_tls::handrolled::ticket::{TicketKey, TicketKeys};
 use rusty_tls::handrolled::server12::{ServerConfig12, ServerHandshake12};
 use rusty_tls::handrolled::sign::SigningKey;
@@ -98,6 +99,10 @@ struct Config {
     check_close_notify: bool,
     resume_count: usize,
     no_ticket: bool,
+    /// `-verify-peer`: a server asks for a client certificate.
+    verify_peer: bool,
+    /// `-require-any-client-certificate`: ...and refuses a client without one.
+    require_client_cert: bool,
 }
 
 const TLS12: u16 = 0x0303;
@@ -156,6 +161,8 @@ fn parse_args(index: usize) -> Config {
             "-async" => {}
             "-resume-count" => cfg.resume_count = value("-resume-count").parse().unwrap_or(0),
             "-no-ticket" => cfg.no_ticket = true,
+            "-verify-peer" => cfg.verify_peer = true,
+            "-require-any-client-certificate" => cfg.require_client_cert = true,
             "-check-close-notify" => cfg.check_close_notify = true,
             "-curves" => {
                 let id = value("-curves").parse().unwrap_or(0);
@@ -517,6 +524,31 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
     let chain = certificates(cert);
     let key = signing_key(key_file);
 
+    // Asking for a client certificate means verifying it: the engine has no
+    // "accept any chain" mode (and should not grow one for a test suite), so a
+    // scenario that names no trust anchor to verify against is skipped.
+    let client_roots: Vec<Vec<u8>> = if config.verify_peer || config.require_client_cert {
+        let trust = config
+            .trust_cert
+            .as_deref()
+            .unwrap_or_else(|| unimplemented("client authentication without a trust anchor"));
+        certificates(trust)
+    } else {
+        Vec::new()
+    };
+    let client_parsed: Vec<Certificate<'_>> = client_roots
+        .iter()
+        .map(|der| Certificate::parse(der).unwrap_or_else(|e| fail(format!("trust anchor: {e}"))))
+        .collect();
+    let client_anchors: Vec<TrustAnchor<'_>> =
+        client_parsed.iter().map(TrustAnchor::from_certificate).collect();
+    let auth = ClientAuth {
+        anchors: &client_anchors,
+        path: path_options(),
+        required: config.require_client_cert,
+    };
+    let client_auth = (config.verify_peer || config.require_client_cert).then_some(&auth);
+
     let tickets = Tickets {
         keys: TicketKeys {
             current: ticket_key,
@@ -532,7 +564,7 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups: groups(config),
-        client_auth: None,
+        client_auth,
         tickets: (!config.no_ticket).then_some(&tickets),
     };
     let server_12 = ServerConfig12 {
@@ -540,7 +572,7 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
         key: &key,
         cipher_suites: CipherSuite12::SUPPORTED,
         groups: groups(config),
-        client_auth: None,
+        client_auth,
     };
     let both = ServerConfigBoth {
         tls13: &server_13,
@@ -568,9 +600,12 @@ fn connect_client(
     tls13: bool,
     sessions: &mut Vec<(Session, Instant)>,
 ) {
-    if config.cert_file.is_some() || config.key_file.is_some() {
-        unimplemented("a client certificate");
-    }
+    // Both halves or neither: a chain without its key cannot sign.
+    let identity_material = match (&config.cert_file, &config.key_file) {
+        (Some(cert), Some(key)) => Some((certificates(cert), signing_key(key))),
+        (None, None) => None,
+        _ => unimplemented("a client certificate without its key (or the reverse)"),
+    };
     let trust = config
         .trust_cert
         .as_deref()
@@ -581,6 +616,9 @@ fn connect_client(
         .map(|der| Certificate::parse(der).unwrap_or_else(|e| fail(format!("trust anchor: {e}"))))
         .collect();
     let anchors: Vec<TrustAnchor<'_>> = parsed.iter().map(TrustAnchor::from_certificate).collect();
+    let identity = identity_material
+        .as_ref()
+        .map(|(certificates, key)| ClientIdentity { certificates, key });
     let name = config.host_name.as_deref().unwrap_or("test");
 
     // A ticket is single-use (RFC 8446 section 4.6.1): take the oldest, so the
@@ -592,7 +630,7 @@ fn connect_client(
         path: path_options(),
         groups: groups(config),
         cipher_suites: CipherSuite::SUPPORTED,
-        identity: None,
+        identity: identity.as_ref(),
         resumption: offer.as_ref().map(|(session, at)| Resumption {
             session,
             age_ms: u32::try_from(at.elapsed().as_millis()).unwrap_or(u32::MAX),

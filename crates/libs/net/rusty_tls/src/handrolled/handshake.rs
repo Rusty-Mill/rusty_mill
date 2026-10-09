@@ -997,6 +997,12 @@ impl<'a> CertificateRequestMessage<'a> {
         while !list.is_empty() {
             schemes.push(list.u16()?);
         }
+        // `SignatureScheme supported_signature_algorithms<2..2^16-2>`: an empty
+        // list cannot be encoded, so it is a decode error and not "no scheme
+        // in common" (BoGo ClientAuth-NoFallback-TLS13).
+        if schemes.is_empty() {
+            return Err(HandshakeError::Empty("signature_algorithms"));
+        }
         Ok(Self { context, schemes })
     }
 }

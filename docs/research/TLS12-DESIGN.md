@@ -411,10 +411,35 @@ TLS 1.0/1.1 variants.
 Still unrun: credentials, verify callbacks, OCSP, ALPN and client authentication (see the log with
 `BOGO_UNIMPLEMENTED_LOG`).
 
+## Stage 9: BoGo client authentication
+
+The shim now presents a client certificate (`-cert-file`/`-key-file`, TLS 1.3 only) and, as a server,
+asks for one (`-verify-peer`, `-require-any-client-certificate`, verified against `-trust-cert`; the
+engine has no accept-any-chain mode and does not get one for a test suite). **721 passed, 0 failed** (was
+645), 321 disabled by name.
+
+Two client defects found and fixed, each with a test that fails without it (mutation-checked):
+
+- **A handshake CertificateRequest with a non-empty `certificate_request_context` was answered.** RFC 8446
+  section 4.3.2 reserves a context for post-handshake requests; the client now refuses with
+  `decode_error` (`ClientError::NonEmptyRequestContext`).
+- **A CertificateRequest with an empty `signature_algorithms` list was read as "no scheme in common".**
+  The list is `<2..2^16-2>`, so empty is malformed.
+
+57 newly runnable tests are disabled with reasons: 22 TLS 1.0/1.1 variants; 28 TLS 1.2 client-auth
+scenarios, because the TLS 1.2 client carries no identity; 6 where the server accepts only PKCS#1 v1.5 or
+SHA-1 (this client sends an empty Certificate, which RFC 8446 section 4.4.2.3 allows, where BoringSSL
+aborts); 1 BoringSSL certificate-type policy.
+
+**The 1.2 client identity is the largest engine gap this surfaced.** A TLS 1.2 client cannot authenticate
+to a server that requires a certificate, which a drop-in replacement for rustls has to do. It is a real
+feature (Certificate, CertificateVerify over the 1.2 transcript, `ClientConfig12.identity`), not a shim
+flag, and is the proposed next stage.
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could
 produce (rustls and OpenSSL both directions, BoGo, mutation, fuzz, CI). Whether that meets the bar for
 the seam is theirs to set. If it does, stage 5 of the track is wiring (ALPN, SNI certificate selection,
 1.2 resumption are the known gaps) and an ADR superseding ADR-0002. If the bar includes more of BoGo,
-the next increment is client certificates and credentials (`-new-x509-credential`, `-verify-fail`).
+the next increment is a TLS 1.2 client identity, then credentials (`-new-x509-credential`) and verify callbacks (`-verify-fail`).

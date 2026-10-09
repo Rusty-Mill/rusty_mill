@@ -423,6 +423,11 @@ pub enum ClientError {
     /// scope, and quietly tolerating the extension is how a feature nobody
     /// decided to build gets half-built.
     UnexpectedEarlyData,
+    /// A `CertificateRequest` inside the handshake with a non-empty
+    /// `certificate_request_context`. RFC 8446 section 4.3.2 reserves a
+    /// non-empty context for post-handshake requests; in the handshake it is
+    /// zero length.
+    NonEmptyRequestContext,
     /// The server selected a protocol version other than TLS 1.2.
     ///
     /// Reported by [`super::client12`], which offers TLS 1.2 and nothing else.
@@ -533,7 +538,9 @@ impl ClientError {
                 level: AlertLevel::Unknown(_),
                 ..
             }) => AlertDescription::ILLEGAL_PARAMETER,
-            Self::BadAlert(_) | Self::MalformedCertificate(_) => AlertDescription::DECODE_ERROR,
+            Self::BadAlert(_) | Self::MalformedCertificate(_) | Self::NonEmptyRequestContext => {
+                AlertDescription::DECODE_ERROR
+            }
             Self::NoCertificates => AlertDescription::BAD_CERTIFICATE,
             Self::Kx(_)
             | Self::DowngradeDetected
@@ -618,6 +625,9 @@ impl core::fmt::Display for ClientError {
                 f.write_str("the server did not echo the session id that was sent")
             }
             Self::NotTls13 => f.write_str("the server did not select TLS 1.3"),
+            Self::NonEmptyRequestContext => {
+                f.write_str("a handshake CertificateRequest carried a non-empty context")
+            }
             Self::UnofferedCipherSuite(suite) => {
                 write!(
                     f,
@@ -1952,6 +1962,9 @@ impl ClientHandshake<'_> {
                 });
             }
             let request = CertificateRequestMessage::parse(message.body)?;
+            if !request.context.is_empty() {
+                return Err(ClientError::NonEmptyRequestContext);
+            }
             negotiated.certificate_request = Some(CertificateRequest {
                 context: request.context.to_vec(),
                 schemes: request.schemes,

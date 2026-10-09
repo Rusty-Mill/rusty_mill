@@ -100,6 +100,7 @@ fn what_a_client_tells_a_server() {
         (ClientError::EmptyRetryRequest, Some(A::ILLEGAL_PARAMETER)),
         // Versions and the downgrade sentinel.
         (ClientError::NotTls13, Some(A::PROTOCOL_VERSION)),
+        (ClientError::NonEmptyRequestContext, Some(A::DECODE_ERROR)),
         (ClientError::NotTls12(0x0301), Some(A::PROTOCOL_VERSION)),
         (ClientError::DowngradeDetected, Some(A::ILLEGAL_PARAMETER)),
         // Authentication.

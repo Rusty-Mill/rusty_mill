@@ -617,6 +617,17 @@ fn a_certificate_request_without_signature_algorithms_is_refused() {
     );
 }
 
+/// RFC 8446 section 4.3.2: inside the handshake the request context is empty
+/// (BoGo RequestContextInHandshake-TLS13); a server that sets one is confused
+/// or probing, and the client says decode_error.
+#[test]
+fn a_handshake_certificate_request_with_a_context_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let error = against_test_server(&pki, Shape::RequestWithContext)
+        .expect_err("a CertificateRequest with a context was answered");
+    assert_eq!(error, ClientError::NonEmptyRequestContext);
+}
+
 /// A minimal TLS 1.3 server, built from this crate's own primitives.
 ///
 /// It exists because the server's flight arrives inside one AEAD-protected
@@ -658,6 +669,9 @@ enum Shape {
     CorruptFinished,
     /// A CertificateRequest, which this client refuses.
     RequestClientCertificate,
+    /// A well-formed CertificateRequest whose context is not empty, which only
+    /// a post-handshake request may carry.
+    RequestWithContext,
     /// A `key_share` naming a group other than the one the client sent.
     WrongKeyShareGroup,
     /// A fatal alert where the encrypted flight should be — a server changing
@@ -783,6 +797,17 @@ impl TestServer<'_> {
             let mut body = Writer::new();
             body.vector_u8(|_| {}); // certificate_request_context
             body.vector_u16(|_| {}); // extensions
+            let request = Message::encode(HandshakeType::CertificateRequest, &body.into_vec());
+            add(&mut transcript, &mut flight, &request);
+        }
+
+        if self.shape == Shape::RequestWithContext {
+            let mut body = Writer::new();
+            body.vector_u8(|w| w.bytes(&[0x01])); // certificate_request_context
+            body.vector_u16(|w| {
+                w.u16(13); // signature_algorithms
+                w.vector_u16(|w| w.vector_u16(|w| w.u16(0x0403)));
+            });
             let request = Message::encode(HandshakeType::CertificateRequest, &body.into_vec());
             add(&mut transcript, &mut flight, &request);
         }
