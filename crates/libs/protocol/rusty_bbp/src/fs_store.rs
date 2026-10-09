@@ -131,9 +131,27 @@ impl FsStore {
             }
             let events = load_log(&path)?;
             // An empty log (a crash before its first batch) names no task.
-            if let Some(task) = task_of(&path, &events)? {
-                store.logs.insert(task, events);
+            let Some(task) = task_of(&path, &events)? else {
+                continue;
+            };
+            // Every later read and append goes to the canonical path, so a
+            // log anywhere else (a pre-digest name, a copy under another
+            // task's digest) would be visible here and unreachable after:
+            // refuse it rather than load history nothing can address. One
+            // path per digest also means no two logs can claim one id.
+            let canonical = log_path_for(root, &task);
+            if path != canonical {
+                return Err(FsError::Corrupt {
+                    path: path.clone(),
+                    line: 1,
+                    detail: format!(
+                        "log names task {} whose canonical path is {}; move or remove it",
+                        task.0,
+                        canonical.display()
+                    ),
+                });
             }
+            store.logs.insert(task, events);
         }
         Ok(store)
     }

@@ -22,7 +22,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-09 - rusty_bbp: task logs named by digest
 
 - **Fixed:** `FsStore` named each task log after a lossy sanitisation of the task id and read the id back from the filename, so `a/b` and `a_b` shared one log and a reopened store misnamed them. Logs are now `tasks/<sha256(task id)>.log`, and the id comes from the log's opening event. Two tests: six colliding and awkward ids keep separate logs and reopen verbatim; an empty log is skipped and reused.
-- **Migration:** logs written under the old naming are not read; no deployed data predates this.
+- **Migration:** none. A directory holding a pre-digest log (or any log off its canonical path) refuses to open with `Corrupt` naming the file; move it to `fs_store::log_path_for(dir, task)` or remove it. Nothing is loaded that a later refresh or append could not address. No deployed data predates this.
 
 ---
 

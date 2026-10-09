@@ -370,3 +370,67 @@ fn an_empty_log_is_skipped_and_reused() {
     assert!(open(&dir).events(&task, 0).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn corrupt_path(dir: &Path) -> PathBuf {
+    match FsStore::open(dir) {
+        Err(FsError::Corrupt { path, .. }) => path,
+        Err(other) => panic!("expected a corrupt-log refusal, got {other}"),
+        Ok(_) => panic!("expected a corrupt-log refusal, the store opened"),
+    }
+}
+
+/// A log anywhere but its task's canonical path is refused at `open`,
+/// naming the file: a pre-digest `T1.log`, a copy under another task's
+/// digest, and a legacy copy beside the canonical one. Nothing is loaded
+/// that a later `refresh` or `append` could not address, and the task's
+/// real history is untouched.
+#[test]
+fn a_log_off_its_canonical_path_is_refused_not_loaded() {
+    let dir = tempdir();
+    let task = TaskId("T1".into());
+    drop(open_task(&dir, "T1"));
+    let canonical = fs_store::log_path_for(&dir, &task);
+    let legacy = dir.join("tasks").join("T1.log");
+
+    // Pre-digest name only.
+    std::fs::rename(&canonical, &legacy).expect("rename");
+    assert_eq!(corrupt_path(&dir), legacy);
+    std::fs::rename(&legacy, &canonical).expect("rename back");
+
+    // Legacy copy beside the canonical log: refused, canonical untouched.
+    std::fs::copy(&canonical, &legacy).expect("copy");
+    let before = std::fs::read(&canonical).expect("read");
+    assert_eq!(corrupt_path(&dir), legacy);
+    assert_eq!(std::fs::read(&canonical).expect("read"), before);
+    std::fs::remove_file(&legacy).expect("rm");
+
+    // A valid log under another task's digest path.
+    let other = fs_store::log_path_for(&dir, &TaskId("T2".into()));
+    std::fs::copy(&canonical, &other).expect("copy");
+    assert_eq!(corrupt_path(&dir), other);
+    std::fs::remove_file(&other).expect("rm");
+
+    // Canonical alone: opens, refreshes and appends against the same file.
+    let mut d = Driver::new(open(&dir), task.clone());
+    d.reload().expect("reload");
+    assert!(d.state.opened);
+    let rev = d.state.rev;
+    let principal = Principal {
+        id: pid(Role::Planner),
+        kind: PrincipalKind::Agent {
+            role: Role::Planner,
+            vendor: vendor(Role::Planner).into(),
+        },
+    };
+    d.dispatch(
+        &Command::Assign {
+            role: Role::Planner,
+            principal,
+        },
+        Time(5),
+    )
+    .expect("assign");
+    assert!(d.state.rev > rev, "appended to the canonical log");
+    assert!(canonical.exists() && !legacy.exists() && !other.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
