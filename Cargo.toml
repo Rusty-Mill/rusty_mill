@@ -351,6 +351,61 @@ exclude = [
 # *dependencies* are hoisted below (their keys don't collide), reusing
 # rusty_search's `async-trait`/`serde_json` entries as-is and widening
 # `tokio`'s feature set to the union both crates need.
+[workspace.metadata.cargo-shear]
+# Workspace dependencies no root member uses today, on purpose (ADR-0009):
+# the frozen nexus crates (crates/apps/nexus/FROZEN.md) inherit them when
+# they are moved back into `members`, and the crypto, RLBot and ADR-0007
+# plans pre-register their crates. `rush` is a false positive (rusty_boot
+# inherits it). Remove a name from this list when its reason is gone.
+ignored = [
+    "base64",
+    "clap_complete",
+    "comfy-table",
+    "comrak",
+    "conformance",
+    "csv",
+    "ctrlc",
+    "diffy",
+    "filetime",
+    "git2",
+    "hmac",
+    "jsonschema",
+    "landlock",
+    "lettre",
+    "nexus-hashline",
+    "nexus-plugin-api",
+    "notify",
+    "notify-debouncer-mini",
+    "petgraph",
+    "r2d2",
+    "r2d2_sqlite",
+    "regex-lite",
+    "rush",
+    "rusty_aead",
+    "rusty_bot",
+    "rusty_flatbuffers",
+    "rusty_pk",
+    "rusty_routine",
+    "rustyline",
+    "seccompiler",
+    "semver",
+    "streaming-iterator",
+    "tauri-plugin-dialog",
+    "tokio-tungstenite",
+    "tracing-appender",
+    "trash",
+    "tree-sitter",
+    "tree-sitter-go",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-typescript",
+    "ts-net",
+    "ts-rs",
+    "wasmtime",
+    "webpki-roots",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

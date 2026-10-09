@@ -172,6 +172,24 @@ jobs:
           tool: cargo-deny
       - run: cargo deny --workspace check
 
+  cargo-shear:
+    # Unused dependencies (ADR-0009). Source-scan based, so it can be wrong
+    # (it was, three times, when the first batch was removed): non-blocking, a
+    # finding is a prompt to look, not a verdict. Intentional exceptions live
+    # in the root `[workspace.metadata.cargo-shear] ignored` list.
+    name: cargo-shear (unused dependencies)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        with:
+          tool: cargo-shear
+      - run: cargo shear
+
   plan:
     name: plan (affected crates)
     runs-on: ubuntu-latest
@@ -1437,6 +1455,7 @@ jobs:
       - workflow-lint
       - dependency-policy
       - cargo-deny
+      - cargo-shear
       - plan
       - clippy
       - ci-smoke

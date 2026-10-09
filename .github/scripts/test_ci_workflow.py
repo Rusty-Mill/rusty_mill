@@ -375,7 +375,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         jobs = re.split(r"^  ([a-z][a-z0-9-]+):\n", self.workflow.split("\njobs:\n", 1)[1], flags=re.M)
         groups = []
         for job, body in zip(jobs[1::2], jobs[2::2]):
-            if job in {"fmt", "plan-tests", "workflow-lint", "dependency-policy", "cargo-deny", "plan", "required-gate"}:
+            if job in {"fmt", "plan-tests", "workflow-lint", "dependency-policy", "cargo-deny", "cargo-shear", "plan", "required-gate"}:
                 self.assertNotIn("    concurrency:", body)
                 continue  # These start for every SHA, without a coalescing lock.
             with self.subTest(job=job):
@@ -430,6 +430,15 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("continue-on-error: true", deny)
         self.assertIn("cargo deny --workspace check", deny)
         self.assertTrue((REPO / "deny.toml").is_file())
+
+    def test_cargo_shear_runs_every_event_and_is_non_blocking(self) -> None:
+        shear = self.workflow.split("  cargo-shear:\n")[1].split("  plan:\n")[0]
+        self.assertNotIn("    if:", shear)
+        self.assertNotIn("    concurrency:", shear)
+        self.assertIn("continue-on-error: true", shear)
+        self.assertIn("run: cargo shear", shear)
+        root = tomllib.loads((REPO / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertTrue(root["workspace"]["metadata"]["cargo-shear"]["ignored"])
 
     def test_dependabot_tracks_github_actions(self) -> None:
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")

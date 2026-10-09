@@ -8,6 +8,12 @@ license = "MIT"
 [package.metadata.rusty_mill]
 layer = "apps"
 
+[package.metadata.cargo-shear]
+# Used (cargo check fails without them) but cargo-shear's source scan does not
+# see the uses; confirmed when the first batch of unused dependencies was
+# removed.
+ignored = ["p256", "p384", "p521"]
+
 [dependencies]
 rusty_dirs = { workspace = true }
 rusty_retry = { workspace = true }
