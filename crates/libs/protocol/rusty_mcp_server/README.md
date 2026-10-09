@@ -23,7 +23,7 @@ serve_stdio(Arc::new(server))?;
 
 | Piece | What it does |
 |---|---|
-| `Server` / `ServerBuilder` | Immutable description: identity, instructions, protocol revisions, page size, in-flight limit, and what it offers: `.tool(..)`, `.prompt(..)`, `.resource(..)`, `.resource_template(..)`, `.completer(..)`. Duplicate names, URIs or templates, a template that cannot be matched, and zero limits are refused at `build`. |
+| `Server` / `ServerBuilder` | Immutable description: identity, instructions, protocol revisions, page size, in-flight limit, and what it offers: `.tool(..)`, `.prompt(..)`, `.resource(..)`, `.resource_template(..)`, `.completer(..)`, `.tool_source(..)` (tools known only at request time, e.g. a proxy). Duplicate names, URIs or templates, a template that cannot be matched, and zero limits are refused at `build`. |
 | `Connection` | One client's conversation, no I/O. `start(message)` answers `initialize`, `server/discover` and `ping` at once, handles `notifications/cancelled`, and hands any other request back as a `Job` to `run` on any thread. |
 | `CallContext` | What a tool sees: request id, protocol revision, client info and capabilities, `_meta` (trace context in `meta().extra`), `is_cancelled()`, `progress(..)`. |
 | `serve_stdio` / `serve_lines` | Newline-delimited JSON; each request runs on its own thread so a cancellation can reach a running tool; an over-long line is refused and skipped. At end of input running requests get `StdioConfig::drain_timeout` (10 s) to finish, then are cancelled, and a tool that still ignores the flag is abandoned after half a second, so the server can always exit. |

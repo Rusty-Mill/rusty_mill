@@ -25,6 +25,22 @@ use std::time::Duration;
 pub type ToolHandler =
     dyn Fn(&CallContext, CallToolParams) -> Result<ToolOutcome, ErrorData> + Send + Sync;
 
+/// Tools that are not known when the server is built, such as those of
+/// another server this one proxies. Asked on every `tools/list` and for any
+/// `tools/call` that names no tool registered with the builder.
+pub trait ToolSource: Send + Sync {
+    /// The tools on offer now. Registered tools win a name clash.
+    fn tools(&self) -> Vec<Tool>;
+
+    /// Run `call`, or answer `None` if this source has no such tool. Plain
+    /// calls only: no tasks, no input requests.
+    fn call(
+        &self,
+        ctx: &CallContext,
+        call: &CallToolParams,
+    ) -> Option<Result<CallToolResult, ErrorData>>;
+}
+
 /// A prompt's implementation: the arguments are already checked against the
 /// prompt's declared required ones.
 pub type PromptHandler =
@@ -164,6 +180,7 @@ pub struct Server {
     pub(crate) instructions: Option<String>,
     pub(crate) versions: Vec<ProtocolVersion>,
     pub(crate) tools: Vec<RegisteredTool>,
+    pub(crate) tool_source: Option<Box<dyn ToolSource>>,
     pub(crate) prompts: Vec<RegisteredPrompt>,
     pub(crate) resources: Vec<RegisteredResource>,
     pub(crate) templates: Vec<RegisteredTemplate>,
@@ -189,6 +206,7 @@ impl Server {
                 .map(|v| ProtocolVersion::new(*v))
                 .collect(),
             tools: Vec::new(),
+            tool_source: None,
             prompts: Vec::new(),
             resources: Vec::new(),
             templates: Vec::new(),
@@ -206,6 +224,11 @@ impl Server {
             #[cfg(feature = "request-state")]
             max_input_rounds: DEFAULT_INPUT_ROUNDS,
         }
+    }
+
+    /// Whether the server offers tools at all.
+    pub(crate) fn offers_tools(&self) -> bool {
+        !self.tools.is_empty() || self.tool_source.is_some()
     }
 
     /// Whether any tool runs as a task, which is what turns the extension on.
@@ -236,6 +259,7 @@ pub struct ServerBuilder {
     instructions: Option<String>,
     versions: Vec<ProtocolVersion>,
     tools: Vec<RegisteredTool>,
+    tool_source: Option<Box<dyn ToolSource>>,
     prompts: Vec<RegisteredPrompt>,
     resources: Vec<RegisteredResource>,
     templates: Vec<RegisteredTemplate>,
@@ -300,6 +324,14 @@ impl ServerBuilder {
         self.interactive_tool(tool, move |ctx, call| {
             handler(ctx, call).map(ToolOutcome::Done)
         })
+    }
+
+    /// Also offer the tools `source` has at the time of each request. A later
+    /// call replaces an earlier one.
+    #[must_use]
+    pub fn tool_source(mut self, source: impl ToolSource + 'static) -> Self {
+        self.tool_source = Some(Box::new(source));
+        self
     }
 
     /// Offer a tool that may need the user's input mid-call (2026-07-28
@@ -487,7 +519,11 @@ impl ServerBuilder {
         if let Some((_, k)) = &self.changes {
             let has_resources = !self.resources.is_empty() || !self.templates.is_empty();
             for (announced, offered, what) in [
-                (k.tools_list, !self.tools.is_empty(), "tools"),
+                (
+                    k.tools_list,
+                    !self.tools.is_empty() || self.tool_source.is_some(),
+                    "tools",
+                ),
                 (k.prompts_list, !self.prompts.is_empty(), "prompts"),
                 (
                     k.resources_list || k.resource_updates,
@@ -553,6 +589,7 @@ impl ServerBuilder {
             instructions: self.instructions,
             versions: self.versions,
             tools: self.tools,
+            tool_source: self.tool_source,
             prompts: self.prompts,
             resources: self.resources,
             templates: self.templates,

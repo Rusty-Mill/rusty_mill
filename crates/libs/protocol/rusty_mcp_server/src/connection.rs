@@ -391,7 +391,7 @@ impl Connection {
         let kinds = s.changes.as_ref().map(|(_, k)| *k).unwrap_or_default();
         let flag = |on: bool| on.then_some(true);
         ServerCapabilities {
-            tools: (!s.tools.is_empty()).then(|| ToolsCapability {
+            tools: s.offers_tools().then(|| ToolsCapability {
                 list_changed: flag(kinds.tools_list),
             }),
             prompts: (!s.prompts.is_empty()).then(|| PromptsCapability {

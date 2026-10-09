@@ -70,7 +70,7 @@ pub use connection::{CallContext, CancelToken, Connection, Job, Notifier, Starte
 pub use http::{bind_http, HttpConfig, HttpHandler};
 pub use server::{
     BuildError, CompletionHandler, PromptHandler, ResourceHandler, Server, ServerBuilder,
-    TemplateHandler, ToolHandler,
+    TemplateHandler, ToolHandler, ToolSource,
 };
 pub use stdio::{
     serve_lines, serve_stdio, StdioConfig, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_LINE_BYTES,

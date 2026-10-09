@@ -22,7 +22,7 @@ use rusty_mcp_proto::{
     ErrorData, GetPromptParams, InputRequiredResult, ListPromptsResult,
     ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, Message, PaginatedParams,
     Paging, ProtocolVersion, ReadResourceParams, Reference, RequestId, ResultType,
-    SubscriptionFilter, Wire,
+    SubscriptionFilter, Tool, Wire,
 };
 use std::ops::Range;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -82,13 +82,22 @@ impl Connection {
     }
 
     pub(crate) fn tools_list(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
-        let tools = &self.server().tools;
-        if tools.is_empty() {
+        let server = self.server();
+        if !server.offers_tools() {
             return Err(not_offered("tools"));
+        }
+        let mut tools: Vec<Tool> = server.tools.iter().map(|t| t.tool.clone()).collect();
+        if let Some(source) = &server.tool_source {
+            let registered = tools.len();
+            for t in source.tools() {
+                if !tools[..registered].iter().any(|r| r.name == t.name) {
+                    tools.push(t);
+                }
+            }
         }
         let (range, paging) = self.list_window(params, Kind::Tools, tools.len())?;
         Ok(ListToolsResult {
-            tools: tools[range].iter().map(|t| t.tool.clone()).collect(),
+            tools: tools[range].to_vec(),
             paging,
         }
         .to_value())
@@ -102,12 +111,21 @@ impl Connection {
     ) -> Result<Value, ErrorData> {
         let (version, meta) = self.version_for(params)?;
         let call: CallToolParams = decode_params(params).map_err(invalid_params)?;
-        let index = self
+        let unknown = || invalid_params(format!("unknown tool {:?}", call.name));
+        let Some(index) = self
             .server()
             .tools
             .iter()
             .position(|t| t.tool.name == call.name)
-            .ok_or_else(|| invalid_params(format!("unknown tool {:?}", call.name)))?;
+        else {
+            let ctx = self.call_context(id, version.clone(), meta, token);
+            let source = self.server().tool_source.as_ref();
+            let mut result = source
+                .and_then(|s| s.call(&ctx, &call))
+                .ok_or_else(unknown)??;
+            complete_type(&version, &mut result.result_type);
+            return Ok(result.to_value());
+        };
         #[allow(unused_mut)]
         let mut ctx = self.call_context(id, version.clone(), meta, token);
         let name = call.name.clone();

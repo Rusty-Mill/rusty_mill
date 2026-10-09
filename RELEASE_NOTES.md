@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_mcp_server ToolSource (pending review)
+
+- **Added:** `ServerBuilder::tool_source`: tools supplied at request time (for proxying another server). 6 tests.
+- **Not done:** no consumer uses it yet (`rp-mcp` is next).
+
+---
+
 ## 2026-10-09 - rusty-mcp-client on the native client, rk-mcp moved (pending review)
 
 - **Changed (breaking):** `rusty-mcp-client` returns `rusty_mcp_proto` types and runs on `rusty_mcp_client_native`; no `rmcp`/`reqwest` in that crate. `rk-mcp` updated. HTTP tries `server/discover` first and falls back to `initialize`; redirects are no longer followed; calls time out after 600 s.
