@@ -460,12 +460,8 @@ fn a_delayed_rerun_meets_stale_rev_and_the_newer_run_survives() {
     let (_, _, cand) = drive_to_test(&dir, &task);
     let cand = cand.to_string();
     let seen = admin::card(&dir, &task).expect("card").rev;
-    assert_eq!(
-        human::perform(&dir, &task, "rerun", &[&cand], None)
-            .unwrap_err()
-            .contains("--rev"),
-        true
-    );
+    let refused = human::perform(&dir, &task, "rerun", &[&cand], None).unwrap_err();
+    assert!(refused.contains("--rev"), "{refused}");
     let r = human::perform(&dir, &task, "rerun", &[&cand], Some(seen)).expect("rerun");
     assert_eq!(r, Response::Ok);
     let run2 = open_driver(&dir, &task)
