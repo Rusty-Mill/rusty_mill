@@ -99,7 +99,7 @@ pub struct Override {
 
 /// The two ways to reach a server, as one transport type.
 enum Link {
-    Http(HttpTransport),
+    Http(Box<HttpTransport>),
     Stdio(StdioTransport),
 }
 
@@ -297,7 +297,7 @@ impl Target {
                 let url = format!("http://{host}:{port}{path}");
                 let dial = move || {
                     let transport = HttpTransport::new(HttpConfig::new(url.as_str()))?;
-                    handshake(Link::Http(transport), timeout)
+                    handshake(Link::Http(Box::new(transport)), timeout)
                 };
                 (Box::new(dial), HTTP_CONNECTIONS)
             }

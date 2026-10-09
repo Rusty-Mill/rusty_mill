@@ -30,7 +30,6 @@ agentgateway-core = { workspace = true }
 rusty_mcp_server = { workspace = true }
 rusty_mcp_client_native = { workspace = true, features = ["http"] }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
-serde = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }
 cel = { workspace = true }
