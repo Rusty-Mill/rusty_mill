@@ -59,8 +59,11 @@ Shell B, the human (a fresh shell: set the same variables first):
 export MILL=/path/to/rusty_mill            # its own command: the next line expands $MILL before export runs
 export BBP_DIR=/tmp/bbp/store BBP_TASK=slug-1 PATH="$MILL/target/release:$PATH"
 watch -n 5 'bbp card | python3 -m json.tool | head -40'
-bbp human approve-plan  ART                 # at plan_gate: ART is the spec's artifact id from the card
-bbp human approve-merge ART RUN             # at merge_gate: the candidate and its selected run
+T=$BBP_DIR/tasks/$(printf %s "$BBP_TASK" | sha256sum | cut -c1-64).log   # the task's event log, one JSON array per line
+# at plan_gate: the proposed spec is refs[0] of the pending gate request, not card.spec (that is the approved spec, null until now)
+SPEC=$(jq -r --argjson m "$(bbp card | jq .pending_request)" '.[] | .MessageAppended? // empty | select(.id==$m) | .draft.refs[0].Art.id' "$T")
+bbp human approve-plan  "$SPEC"
+bbp human approve-merge ART RUN             # at merge_gate: the current candidate and its selected run, both on the card
 git -C /tmp/bbp/work/run-RUN diff --cached > /tmp/bbp/cand.diff   # the runner's checkout holds the applied candidate
 git -C /tmp/bbp/target apply --index /tmp/bbp/cand.diff && git -C /tmp/bbp/target commit -qm "slug (BBP slug-1)"
 bbp human receipt ART "$(git -C /tmp/bbp/target rev-parse HEAD)"   # closes the task
@@ -90,7 +93,7 @@ jq -r 'select(.type=="user") | .message.content[] | select(.type=="tool_result" 
 bbp card
 ```
 
-The last `tool_use` must be the call the card says ended the turn: for the Planner, `mcp__bbp__post` with `input.kind == "request_decision"` and `input.gate == true` whose `refs` name the spec id the card now shows, and the card in `plan_gate`. Match the terminal call by name and input, not by "a post or a put happened": the Planner's earlier spec `put_artifact` is also in the log and proves nothing about the gate. If the last `tool_use` is not that call, or the card did not move, the harness ended without its terminal call (it forfeited the turn, or was killed early) and the run is not evidence yet; read the log's tail and the moderator's stderr before continuing.
+The last `tool_use` must be the call the card says ended the turn. For the Planner: `mcp__bbp__post` with `input.kind == "request_decision"`, `input.gate == true` and `input.refs == ["art:<SPEC>"]`, where `SPEC` is derived from the task log as in shell B (the message whose id is the card's `pending_request`, `refs[0]`); the card is in `plan_gate` with `pending_request` set and `spec` still `null`, because `spec` is the approved spec and nothing is approved yet. Match the terminal call by name and input, not by "a post or a put happened": the Planner's earlier spec `put_artifact` is also in the log and proves nothing about the gate. If the last `tool_use` is not that call, or the card did not move, the harness ended without its terminal call (it forfeited the turn, or was killed early) and the run is not evidence yet; read the log's tail and the moderator's stderr before continuing.
 
 ## 5. Record
 
