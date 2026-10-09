@@ -8,7 +8,7 @@
 
 use crate::error::ClientError;
 use crate::session::{ClientConfig, ClientSession, Incoming};
-use crate::transport::{Recv, Transport};
+use crate::transport::{HeaderOverride, Recv, Transport};
 use rusty_json::Value;
 use rusty_mcp_proto::task::{method as task_method, TaskPayload};
 use rusty_mcp_proto::{
@@ -98,7 +98,7 @@ impl<T: Transport, H: Handler> Client<T, H> {
     fn handshake(&mut self) -> Result<(), ClientError> {
         if self.session.prefers_stateless() {
             let (id, message) = self.session.discover_request();
-            match self.exchange(id, &message) {
+            match self.exchange(id, &message, &HeaderOverride::default()) {
                 Ok(result) => {
                     if self.session.on_discover(&result)? {
                         self.announce_version();
@@ -110,7 +110,7 @@ impl<T: Transport, H: Handler> Client<T, H> {
             }
         }
         let (id, message) = self.session.initialize_request()?;
-        let result = self.exchange(id, &message)?;
+        let result = self.exchange(id, &message, &HeaderOverride::default())?;
         self.session.on_initialize(&result)?;
         self.announce_version();
         let initialized = self.session.initialized_notification();
@@ -171,8 +171,9 @@ impl<T: Transport, H: Handler> Client<T, H> {
         &mut self,
         id: rusty_mcp_proto::RequestId,
         message: &Message,
+        overrides: &HeaderOverride,
     ) -> Result<Value, ClientError> {
-        self.transport.send(message)?;
+        self.transport.send_with(message, overrides)?;
         let deadline = Instant::now() + self.timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -210,8 +211,22 @@ impl<T: Transport, H: Handler> Client<T, H> {
     /// # Errors
     /// Transport failure, timeout, or the server's error.
     pub fn call(&mut self, method: &str, params: Option<Value>) -> Result<Value, ClientError> {
+        self.call_with(method, params, &HeaderOverride::default())
+    }
+
+    /// [`Client::call`] with `overrides` applied to the HTTP request that
+    /// carries it (ignored over stdio).
+    ///
+    /// # Errors
+    /// As [`Client::call`].
+    pub fn call_with(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+        overrides: &HeaderOverride,
+    ) -> Result<Value, ClientError> {
         let (id, message) = self.session.request(method, params);
-        self.exchange(id, &message)
+        self.exchange(id, &message, overrides)
     }
 
     /// Any notification.

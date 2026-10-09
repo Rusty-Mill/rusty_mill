@@ -6,9 +6,12 @@ mod common;
 
 use common::{builder, eliciting, first_text, serve, serve_with, with_tasks, Asker, SECS};
 use rusty_mcp_client_native::json::Value;
+use rusty_mcp_client_native::proto::Wire;
 use rusty_mcp_client_native::{
-    Client, ClientConfig, ClientError, Handler, HttpConfig, HttpTransport, NoHandler,
+    Client, ClientConfig, ClientError, Handler, HeaderOverride, HttpConfig, HttpTransport,
+    NoHandler,
 };
+use rusty_mcp_server::Server;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -409,4 +412,47 @@ fn a_notification_sent_just_before_closing_is_not_lost() {
         .recv_timeout(SECS)
         .expect("the notification never arrived");
     assert!(got.contains("notifications/initialized"), "{got}");
+}
+
+/// A tool that answers with the `x-trace` and `x-extra` headers it was called with.
+fn header_echo() -> common::Running {
+    let server = Server::builder("echo", "1")
+        .tool(
+            rusty_mcp_client_native::proto::Tool::new("headers", Value::object()),
+            |ctx, _call| {
+                let h = |n: &str| ctx.caller().header(n).unwrap_or("-").to_owned();
+                Ok(common::text(&format!("{}|{}", h("x-trace"), h("x-extra"))))
+            },
+        )
+        .build()
+        .unwrap();
+    common::serve_server(server, rusty_mcp_server::ChangeBroadcaster::new())
+}
+
+#[test]
+fn a_call_can_set_and_remove_headers_and_the_next_call_is_unaffected() {
+    let s = header_echo();
+    let mut config = HttpConfig::new(&s.url);
+    config.headers.push(("X-Trace".to_owned(), "t1".to_owned()));
+    let mut c = Client::connect(
+        HttpTransport::new(config).unwrap(),
+        ClientConfig::new("c", "1"),
+        NoHandler,
+        SECS,
+    )
+    .unwrap();
+    let call = |c: &mut Client<HttpTransport>, over: &HeaderOverride| {
+        let mut p = Value::object();
+        p.insert("name", "headers");
+        let result = c.call_with("tools/call", Some(p), over).unwrap();
+        let result = rusty_mcp_client_native::proto::CallToolResult::from_value(&result).unwrap();
+        first_text(&result)
+    };
+    assert_eq!(call(&mut c, &HeaderOverride::default()), "t1|-");
+    let change = HeaderOverride {
+        set: vec![("x-extra".to_owned(), "e1".to_owned())],
+        remove: vec!["X-TRACE".to_owned()],
+    };
+    assert_eq!(call(&mut c, &change), "-|e1");
+    assert_eq!(call(&mut c, &HeaderOverride::default()), "t1|-");
 }

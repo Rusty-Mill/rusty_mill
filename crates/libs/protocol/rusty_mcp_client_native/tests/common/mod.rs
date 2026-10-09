@@ -211,6 +211,11 @@ pub fn serve_with(builder: ServerBuilder) -> Running {
         .notify_changes(&changes, rusty_mcp_server::ChangeKinds::all())
         .build()
         .unwrap();
+    serve_server(server, changes)
+}
+
+/// Serve an already built `server`.
+pub fn serve_server(server: Server, changes: rusty_mcp_server::ChangeBroadcaster) -> Running {
     let config = rusty_mcp_server::HttpConfig {
         sse_after: Duration::from_millis(100),
         keep_alive: Duration::from_millis(100),

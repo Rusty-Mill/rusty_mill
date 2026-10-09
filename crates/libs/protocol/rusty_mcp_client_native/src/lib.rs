@@ -40,4 +40,4 @@ pub use rusty_json as json;
 pub use rusty_mcp_proto as proto;
 pub use session::{ClientConfig, ClientSession, Incoming};
 pub use stdio::StdioTransport;
-pub use transport::{Recv, Transport};
+pub use transport::{HeaderOverride, Recv, Transport};

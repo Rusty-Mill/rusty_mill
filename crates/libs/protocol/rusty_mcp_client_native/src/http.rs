@@ -28,7 +28,7 @@
 //! long-lived call (the blocking client has one call at a time).
 
 use crate::sse::SseParser;
-use crate::transport::{Recv, Transport};
+use crate::transport::{HeaderOverride, Recv, Transport};
 use rusty_json::Value;
 use rusty_mcp_proto::{ErrorCode, ErrorData, Message, ProtocolVersion, RequestId, Wire};
 use rusty_request::{Client, StatusCode};
@@ -123,16 +123,6 @@ fn build_client(config: &HttpConfig) -> io::Result<Client> {
     if !config.follow_redirects {
         builder = builder.no_redirects();
     }
-    if let Some(token) = &config.bearer_token {
-        builder = builder
-            .bearer_auth(token)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-    }
-    for (name, value) in &config.headers {
-        builder = builder
-            .default_header(name, value)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-    }
     Ok(builder.build())
 }
 
@@ -143,9 +133,19 @@ impl HttpTransport {
     /// The runtime could not start, or a header in the config is invalid.
     pub fn new(config: HttpConfig) -> io::Result<Self> {
         let (tx, inbox) = channel();
+        let client = build_client(&config)?;
+        // Refuse an unusable header now rather than on the first call.
+        let mut probe = client
+            .post(&config.url)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        for (name, value) in standing_headers(&config) {
+            probe = probe
+                .header(&name, &value)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        }
         Ok(Self {
             runtime: Runtime::new()?,
-            client: build_client(&config)?,
+            client,
             config: Arc::new(config),
             shared: Arc::new(Shared::default()),
             tx,
@@ -164,6 +164,18 @@ impl HttpTransport {
     pub fn failed_notifications(&self) -> usize {
         self.shared.failed_notifications.load(Ordering::SeqCst)
     }
+}
+
+/// The headers every request carries: the bearer token, then
+/// [`HttpConfig::headers`]. Per request (not on the client) so that
+/// [`HeaderOverride::remove`] can drop one.
+fn standing_headers(config: &HttpConfig) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if let Some(token) = &config.bearer_token {
+        headers.push(("Authorization".to_owned(), format!("Bearer {token}")));
+    }
+    headers.extend(config.headers.iter().cloned());
+    headers
 }
 
 /// `Mcp-Name` for `method`, from its parameters.
@@ -243,6 +255,7 @@ async fn post(
     shared: Arc<Shared>,
     tx: Sender<Event>,
     message: Message,
+    overrides: HeaderOverride,
 ) {
     let request_id = match &message {
         Message::Request { id, .. } => Some(id.clone()),
@@ -263,13 +276,12 @@ async fn post(
         Ok(r) => r,
         Err(e) => return fail(format!("bad url: {e}")),
     };
-    let mut headers: Vec<(String, String)> = vec![
-        ("Content-Type".into(), "application/json".into()),
-        (
-            "Accept".into(),
-            "application/json, text/event-stream".into(),
-        ),
-    ];
+    let mut headers = standing_headers(&config);
+    headers.push(("Content-Type".into(), "application/json".into()));
+    headers.push((
+        "Accept".into(),
+        "application/json, text/event-stream".into(),
+    ));
     let version = lock(&shared.version).clone();
     if let Some(v) = &version {
         headers.push(("MCP-Protocol-Version".into(), v.as_str().to_owned()));
@@ -287,6 +299,7 @@ async fn post(
     if let Some(id) = lock(&shared.session_id).clone() {
         headers.push(("Mcp-Session-Id".into(), id));
     }
+    overrides.apply(&mut headers);
     for (k, v) in &headers {
         req = match req.header(k, v) {
             Ok(r) => r,
@@ -408,10 +421,9 @@ async fn push_loop(
         let Ok(mut req) = client.get(&config.url) else {
             return;
         };
-        let mut headers = vec![
-            ("Accept".to_owned(), "text/event-stream".to_owned()),
-            ("Mcp-Session-Id".to_owned(), session),
-        ];
+        let mut headers = standing_headers(&config);
+        headers.push(("Accept".to_owned(), "text/event-stream".to_owned()));
+        headers.push(("Mcp-Session-Id".to_owned(), session));
         if let Some(v) = lock(&shared.version).as_ref() {
             headers.push(("MCP-Protocol-Version".into(), v.as_str().to_owned()));
         }
@@ -449,6 +461,10 @@ async fn push_loop(
 
 impl Transport for HttpTransport {
     fn send(&mut self, message: &Message) -> io::Result<()> {
+        self.send_with(message, &HeaderOverride::default())
+    }
+
+    fn send_with(&mut self, message: &Message, overrides: &HeaderOverride) -> io::Result<()> {
         self.in_flight.retain(|_, h| !h.is_finished());
         if let Some(id) = cancelled_id(message) {
             if let Some(handle) = self.in_flight.remove(&id) {
@@ -469,6 +485,7 @@ impl Transport for HttpTransport {
             Arc::clone(&self.shared),
             self.tx.clone(),
             message.clone(),
+            overrides.clone(),
         ));
         match id {
             Some(id) => {
@@ -520,11 +537,16 @@ impl Drop for HttpTransport {
             return;
         };
         let (client, url) = (self.client.clone(), self.config.url.clone());
+        let mut headers = standing_headers(&self.config);
+        headers.push(("Mcp-Session-Id".to_owned(), session));
         self.runtime.block_on(async move {
-            let Ok(req) = client.delete(&url) else { return };
-            let Ok(req) = req.header("Mcp-Session-Id", &session) else {
+            let Ok(mut req) = client.delete(&url) else {
                 return;
             };
+            for (k, v) in &headers {
+                let Ok(r) = req.header(k, v) else { return };
+                req = r;
+            }
             let _ = rusty_tokio::time::timeout(Duration::from_secs(2), req.send()).await;
         });
     }
