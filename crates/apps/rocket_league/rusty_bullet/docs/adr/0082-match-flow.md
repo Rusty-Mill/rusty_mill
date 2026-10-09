@@ -29,6 +29,6 @@ bot per team and logged every packet (phase, score, clock, ball, cars, pad count
   is opt-in: `Env::set_match_length`).
 - `Env::set_replay_ticks` exists because the game's replays vary; `match_log_check` replays a game log through
   `Flow` (the log's ball, each goal's own replay length) and reports where the phases and the clock differ.
-- Not covered: the teams' drop-height stagger, the end test on the curve (a ball height of 97.5 stands for
-  "on the ground"), a goal in the same tick as the clock reaching zero.
+- Not covered: the teams' drop-height stagger, the end test on the curve (regulation ends on the tick the
+  ball meets the floor, `flow::ball_met_floor`; a ball met on the curve reads as in the air), a goal in the same tick as the clock reaching zero.
 - The probe needs the game up as the tape runner does; its logs are not committed.
