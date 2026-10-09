@@ -385,7 +385,11 @@ mod tests {
             replay.find(&early).is_none(),
             "an unservable resume was accepted"
         );
-        let last = stream.event_id(lock(&stream.state).base + lock(&stream.state).frames.len() - 1);
+        let newest = {
+            let state = lock(&stream.state);
+            state.base + state.frames.len() - 1
+        };
+        let last = stream.event_id(newest);
         assert!(
             replay.find(&last).is_some(),
             "the newest frame is still resumable"
