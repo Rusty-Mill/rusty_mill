@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - Crypto gaps 1 and 2: `rusty_rand` hardened, ECDH P-256/P-384
+
+- **Changed (rusty_rand):** `getrandom(2)` on Linux x86_64/aarch64, lock-free `/dev/urandom` elsewhere, a tested read loop; `rust-version` 1.75 to 1.88.
+- **Added (rusty_pk::ecdh):** ECDH on P-256 and P-384, validated against Wycheproof, RFC 5903 and `ring`; constant-time evidence added (taint, exact jump counts, timing). Moved a pinned jump count (`Modulus::add` inlined into `Field::add`, re-read).
+- **Known limitations:** slower than `ring` (14x P-256, 5x P-384); constant-time results are x86-64, one VM, preliminary; the new 40-repetition timing series and a new evidence record have not been produced; not independently reviewed; not wired into `rusty_tls`.
+
 ## 2026-10-09 - Ed25519 accepts small-order public keys again
 
 - **Changed (rusty_pk):** reverses the rejection added after Codex round 3 on #540, by owner decision. Behaviour now matches `ring` and RFC 8032 (which does not require rejecting small-order keys). **Known limitation:** the identity key verifies `R = identity, S = 0` for every message; callers must screen untrusted keys themselves. The evidence record `EVIDENCE-2026-10-09.txt` predates this change; Ed25519 verify is variable time and outside the constant-time budgets, so its counts are unaffected, but the vector run was not regenerated.

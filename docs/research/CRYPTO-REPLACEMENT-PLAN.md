@@ -4,7 +4,8 @@ Date: 2026-10-08. Scope: the primitives `rusty_tls`'s native engine takes from `
 
 **Status.** Stages 0 to 4 are implemented with preliminary validation. **Independent review
 was completed by the owner (section 11, row "Independent review"); TLS integration is pending
-and the gap-closure plan is section 13.** The set is partial: it covers hashes, HMAC, HKDF,
+and the gap-closure plan is section 13. Gaps 1 (randomness) and 2 (ECDH P-256/P-384) are
+implemented with preliminary validation and not independently reviewed (section 13.4).** The set is partial: it covers hashes, HMAC, HKDF,
 signature verification, X25519 and ChaCha20-Poly1305, and does not cover AES-GCM, P-256 or P-384
 key exchange, signing, or randomness (section 0, "Scope limits"). **Consumer status:** no
 consumer, `rusty_tls` file, gate or default was changed; nothing here is used by anything.
@@ -20,6 +21,10 @@ after stage 4. Stage 5 (AES-GCM) and later are out of scope unless the owner reo
 the intrinsics approval is unused until then (no stage so far needed `unsafe` beyond the
 valgrind helper).
 
+**Owner decision (2026-10-09):** the stage-4 freeze is reopened for **randomness and ECDH
+P-256/P-384 only** (section 13.1 gaps 1 and 2). AES-GCM, the `rusty_tls` seam and signing stay
+closed. The 2026-10-08 intrinsics approval was not reconfirmed and is not relied on.
+
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
 new crates rather than extending `rusty_rsa`; one additive function,
@@ -30,8 +35,8 @@ not an adopted bar.
 **Scope limits (read before reading "implemented").**
 - No AES-GCM (stage 5, not done). RFC 8446 section 9.1 requires `TLS_AES_128_GCM_SHA256`
   for a compliant TLS 1.3 implementation, and `rusty_tls`'s ticket key is AES-256-GCM.
-- No P-256 or P-384 key exchange. ECDSA P-256 *verification* does not provide P-256 ECDHE,
-  which RFC 8446 also requires (secp256r1 key exchange); only X25519 is implemented.
+- P-256 and P-384 key exchange: implemented 2026-10-09 (`rusty_pk::ecdh`, section 13.4); preliminary,
+  not independently reviewed. (ECDSA verification alone never provided it.)
 - No signing of any kind (server role, client certificates), and no randomness: the engine
   still draws all randomness from `ring::rand`.
 - Therefore this is a **partial primitive replacement**, not a complete TLS 1.3 backend, and
@@ -292,10 +297,10 @@ Primitive coverage is not dependency removal. Call site by call site:
 | `aead` AES_128_GCM / AES_256_GCM (records) | **No** | Stage 5 not done. RFC 8446 mandates AES-128-GCM. |
 | `aead` AES_256_GCM (session tickets, `ticket.rs`) | **No** | Same. |
 | `agreement` X25519 | Yes, `rusty_pk::x25519` | Key generation needs a random scalar, which is `ring::rand` today. |
-| `agreement` ECDH P-256 / P-384 | **No** | Not planned before stage 6a. RFC 8446 requires secp256r1. |
+| `agreement` ECDH P-256 / P-384 | Yes, `rusty_pk::ecdh` (2026-10-09) | Not wired. Preliminary; the key is generated from a caller-supplied fill function. |
 | `signature` verify (RSA, ECDSA, Ed25519) | Yes, `rusty_pk` | Exact verifier subset in section 0. |
 | `signature` signing (`EcdsaKeyPair`, `Ed25519KeyPair`, `RsaKeyPair`, `KeyPair`, PKCS#8 parsing) | **No** | Server role and client certificates. |
-| `rand::SystemRandom` / `SecureRandom` (client random, ephemeral keys, ticket keys and nonces, PSS salts) | **No** | `rusty_rand` exists but differs from `ring`'s (see section 3); not evaluated for this. |
+| `rand::SystemRandom` / `SecureRandom` (client random, ephemeral keys, ticket keys and nonces, PSS salts) | Yes, `rusty_rand` (hardened 2026-10-09) | Not wired. OS entropy only; quality is the OS's. |
 | Helper types: `aead::Nonce`, `Aad`, `UnboundKey`, `LessSafeKey`, `hmac::Context` | Replaced by typed arrays in the new APIs | The seam would need adapters. |
 
 Result: the native engine cannot drop `ring` on the strength of stages 0 to 4.
@@ -729,3 +734,46 @@ re-derived.
   "no leak found by these methods", never proof.
 - No wiring into `rusty_tls` before the seam item, and no default changes without the owner.
 - Every divergence from `ring` is listed and classified, as for Ed25519 (section 2, stage 2).
+
+### 13.4 Results for gaps 1 and 2 (2026-10-09; preliminary, not independently reviewed)
+
+**Gap 1, `rusty_rand`.** On Linux x86_64/aarch64 `fill` now calls `getrandom(2)` with flags 0 through
+`rusty_libc` (blocks until the kernel pool is seeded; `strace` shows one 1 MiB call and no
+`/dev/urandom` open); other Unix keeps `/dev/urandom` but reads without the global `Mutex`. The read
+loop (`fill_with`) is separate from the OS call and tested with a scripted source: short reads, `EINTR`,
+a zero-progress read, a source claiming more than it was given, and a failing source. No path returns an
+unfilled tail. `rust-version` is now 1.88 (`rusty_libc`'s floor); the public API is unchanged. Not
+verified: entropy quality, behaviour on Windows or macOS (not built here), `fork` behaviour beyond the
+argument that all state is in the kernel.
+
+**Gap 2, `rusty_pk::ecdh`.** `PrivateKey::{from_bytes, generate, public_key, agree}` on P-256 and P-384,
+SEC 1 uncompressed points only (compressed points are refused, as TLS 1.3 requires).
+Scalar multiplication is double-and-add-always over the complete projective formulas of Renes,
+Costello and Batina (algorithms 4 and 6, `a = -3`), with a mask select and a fixed iteration count. It is
+deliberately simple (no window table); that costs speed.
+- *Correctness:* unit tests compare the complete formulas with the existing reference arithmetic
+  (`P + P`, `P + (-P)`, infinity on both sides, doubling infinity) and scalar multiplication for edge and
+  pseudo-random scalars; Wycheproof `ecdh_secp{256,384}r1_ecpoint_test.json` at the pinned commit, all
+  355 and 790 cases (330 + 771 valid with matching shared secrets, 24 + 18 invalid rejected, the one
+  compressed-point case refused); RFC 5903 public keys; agreement with `ring` both ways; the same accept and
+  reject verdicts as `ring` on every Wycheproof public key. The two files are pinned in `MANIFEST.txt`.
+  Mutation checks (select ignores its mask, one line of `add`, one line of `double`, prefix check removed)
+  each make a test fail.
+- *Constant-time evidence (x86-64, rustc 1.98.1, one VM; none of it proves anything):* valgrind taint with a
+  secret scalar reports exactly two things per curve, the "is the result the point at infinity" test in
+  `public_key` and in `agree`, which depends on a value derived from the secret but is false for every
+  valid key (prime-order group); a planted branch on the scalar is reported (16 reports instead of 2, and
+  the disassembly count of `mul` goes from 2 to 10). Exact jump counts are pinned for `select` (0), `add` (1),
+  `double` (1) and `mul` (2); `select` was read by hand (SIMD and/or/andn, no branch), and the scalar bit
+  becomes a mask via `sar` and `bt`/`sbb`. A single timing run shows |t| 0.29 (P-256) and 0.23 (P-384) for sparse
+  against dense scalars, and 2.71 for the A/A baseline; the 40-repetition series in `collect.sh` has been
+  extended but **not yet run**, so there is no new evidence record.
+- *Side effect on earlier evidence:* adding this code made LLVM inline `Modulus::add` into `Field::add`
+  (6 jumps became 16, all comparisons against the public limb count); the pin was updated after reading
+  it. This is the drift detection working, and a reminder that every counts pin is per binary.
+- *Speed:* about 0.9 ms (P-256) and 1.9 ms (P-384) per agreement, 14x and 5x slower than `ring` (`ring`
+  has assembly for P-256); `ring` cannot import a scalar, so its time is generate-and-agree minus generate.
+- *Known limits:* no windowed multiplication, no blinding; the private scalar's bytes are wiped on drop but
+  intermediate field elements live in unwiped stack copies; the peer-point validation and the infinity test
+  are variable time on public or irrelevant data by design; cofactor 1, so no subgroup check; not reviewed.
+- *Review needed (D4):* the scalar loop, the transcription of the two formulas, and the pinned counts.

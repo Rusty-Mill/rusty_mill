@@ -1432,7 +1432,7 @@ jobs:
         run: sh crates/foundation/rusty_sha2/scripts/ct_check.sh
       - name: rusty_aead (ChaCha20-Poly1305)
         run: sh crates/foundation/rusty_aead/scripts/ct_check.sh
-      - name: rusty_pk (X25519, shared Montgomery core)
+      - name: rusty_pk (X25519, ECDH P-256/P-384, shared Montgomery core)
         run: sh crates/foundation/rusty_pk/scripts/ct_check.sh
       - name: Vector manifests (hashes, missing and unlisted files)
         run: >

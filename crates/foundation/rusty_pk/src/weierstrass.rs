@@ -9,7 +9,7 @@ use crate::params::*;
 pub(crate) struct Curve {
     pub(crate) fp: Field,
     pub(crate) fnn: Field,
-    b: E,
+    pub(crate) b: E,
     gx: E,
     gy: E,
     /// Byte length of a field element / scalar (32 or 48).
@@ -19,9 +19,9 @@ pub(crate) struct Curve {
 /// A Jacobian point; `z == 0` is the point at infinity.
 #[derive(Clone, Copy)]
 pub(crate) struct Jac {
-    x: E,
-    y: E,
-    z: E,
+    pub(crate) x: E,
+    pub(crate) y: E,
+    pub(crate) z: E,
 }
 
 impl Curve {
