@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_mcp_server resumable replies (pending review)
+
+- **Added:** `HttpConfig::resume_buffer` / `resume_grace`: replies become resumable event streams (`GET` + `Last-Event-ID`, no session). Off by default. 9 tests.
+- **Not done:** untested behind axum; `remind_me_remote` is next.
+
+---
+
 ## 2026-10-09 - adk-mcp on the native MCP stack (pending review)
 
 - **Changed:** `adk-mcp` no longer uses `rmcp`; same public functions and types, but `McpServer` is no longer an `rmcp` handler. Conformance suite (17 cases) passes unchanged.

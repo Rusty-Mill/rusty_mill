@@ -47,6 +47,8 @@ mod methods;
 mod page;
 #[cfg(feature = "http")]
 mod push;
+#[cfg(feature = "http")]
+mod replay;
 pub mod server;
 #[cfg(feature = "request-state")]
 mod state;

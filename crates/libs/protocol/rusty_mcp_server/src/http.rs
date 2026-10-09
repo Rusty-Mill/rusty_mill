@@ -25,6 +25,13 @@
 //! 2026-07-28 requests are stateless and never get or use a session.
 //! [`HttpConfig::max_sessions`] of `0` turns sessions off.
 //!
+//! **Resumable replies** (off unless [`HttpConfig::resume_buffer`] is set; see
+//! `replay.rs`). Every answer to a request is an event stream opening with a
+//! priming event, each frame has an id, and `GET` with `Last-Event-ID` and no
+//! session replays what the client missed and follows the stream live. The
+//! request keeps running when the connection drops and is cancelled only if
+//! no reader returns within [`HttpConfig::resume_grace`].
+//!
 //! **Push.** A classic session can open the standalone server-to-client stream
 //! with `GET` (`Accept: text/event-stream`, `Mcp-Session-Id`): list changes and
 //! updates to resources followed with `resources/subscribe` arrive on it, with
@@ -35,6 +42,7 @@
 use crate::changes::ChangeKinds;
 use crate::connection::{CancelToken, Connection, Notifier, Started};
 use crate::push::Push;
+use crate::replay::{Replay, Shared};
 use crate::server::Server;
 use rusty_base64::decode_standard;
 use rusty_http::{Method, StatusCode};
@@ -84,6 +92,16 @@ pub struct HttpConfig {
     pub max_sessions: usize,
     /// A session unused for this long is forgotten. Default one hour.
     pub session_idle: Duration,
+    /// Bytes of reply kept so a dropped connection can be resumed; `0` (the
+    /// default) keeps nothing. When set, every answer to a request is an
+    /// event stream opening with a priming event, and `GET` with
+    /// `Last-Event-ID` and no session replays the missed frames (see
+    /// `replay.rs`). Memory use is bounded by this, except that one reply
+    /// larger than it is still kept whole.
+    pub resume_buffer: usize,
+    /// With resumption on: how long a running request whose connection
+    /// dropped waits for a resume before it is cancelled. Default 30 s.
+    pub resume_grace: Duration,
 }
 
 impl Default for HttpConfig {
@@ -96,6 +114,8 @@ impl Default for HttpConfig {
             keep_alive: Duration::from_secs(15),
             max_sessions: 1024,
             session_idle: Duration::from_secs(3600),
+            resume_buffer: 0,
+            resume_grace: Duration::from_secs(30),
         }
     }
 }
@@ -127,15 +147,19 @@ pub struct HttpHandler {
     server: Arc<Server>,
     config: HttpConfig,
     sessions: Sessions,
+    replay: Option<Replay>,
 }
 
 impl HttpHandler {
     /// Serve `server` per `config`.
     pub fn new(server: Arc<Server>, config: HttpConfig) -> Self {
+        let replay = (config.resume_buffer > 0)
+            .then(|| Replay::new(config.resume_buffer, config.resume_grace));
         Self {
             server,
             config,
             sessions: Sessions::default(),
+            replay,
         }
     }
 }
@@ -514,6 +538,11 @@ impl HttpHandler {
     /// `405` where there is nothing to push (no sessions, or a server that
     /// announces no changes), as the spec allows.
     fn open_push_stream(&self, headers: &HeaderMap) -> Result<Response, Response> {
+        if let (Some(replay), Some(id)) = (&self.replay, headers.get("last-event-id")) {
+            if id.starts_with('s') {
+                return self.resume(replay, headers, id);
+            }
+        }
         let not_offered = || {
             let mut r = reject(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -556,6 +585,98 @@ impl HttpHandler {
             Box::new(move || touched.touch()),
         );
         Ok(Response::stream("text/event-stream", stream))
+    }
+
+    /// `GET` with the id of an event of a resumable reply: the frames after
+    /// it, then the rest of the stream as it happens.
+    fn resume(&self, replay: &Replay, headers: &HeaderMap, id: &str) -> Result<Response, Response> {
+        if !headers
+            .get("accept")
+            .is_some_and(|a| a.contains("text/event-stream"))
+        {
+            return Err(reject(
+                StatusCode::NOT_ACCEPTABLE,
+                ErrorCode::INVALID_REQUEST,
+                "the client must accept text/event-stream",
+            ));
+        }
+        let Some((shared, n)) = replay.find(id) else {
+            return Err(reject(
+                StatusCode::NOT_FOUND,
+                ErrorCode::INVALID_REQUEST,
+                "unknown or expired stream",
+            ));
+        };
+        Ok(Response::stream(
+            "text/event-stream",
+            shared.reader(n + 1, self.config.keep_alive),
+        ))
+    }
+
+    /// An answer that is already known, as a resumable event stream.
+    fn replayed(&self, replay: &Replay, reply: &Message) -> Result<Response, Response> {
+        let shared = self.start_replay(replay)?;
+        shared.push(reply);
+        shared.finish();
+        Ok(self.replay_response(&shared))
+    }
+
+    fn start_replay(&self, replay: &Replay) -> Result<Arc<Shared>, Response> {
+        replay.start().ok_or_else(|| {
+            reject(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::INTERNAL_ERROR,
+                "could not make a stream id",
+            )
+        })
+    }
+
+    fn replay_response(&self, shared: &Arc<Shared>) -> Response {
+        Response::stream(
+            "text/event-stream",
+            shared.reader(0, self.config.keep_alive),
+        )
+    }
+
+    /// A running request as a resumable stream: a pump thread files what the
+    /// worker reports, so the work goes on after the connection drops, and
+    /// cancels it if nobody comes back within the grace period.
+    fn replayed_run(
+        &self,
+        replay: &Replay,
+        events: Receiver<Event>,
+        cancel: CancelToken,
+    ) -> Result<Response, Response> {
+        let shared = self.start_replay(replay)?;
+        let response = self.replay_response(&shared);
+        let grace = replay.grace();
+        let pumped = Arc::clone(&shared);
+        let pump = std::thread::Builder::new().spawn(move || {
+            loop {
+                match events.recv_timeout(Duration::from_millis(250)) {
+                    Ok(Event::Note(m)) => pumped.push(&m),
+                    Ok(Event::Done(Some(m))) => {
+                        pumped.push(&m);
+                        break;
+                    }
+                    Ok(Event::Done(None)) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if pumped.abandoned_for().is_some_and(|gone| gone > grace) {
+                            cancel.cancel();
+                        }
+                    }
+                }
+            }
+            pumped.finish();
+        });
+        if pump.is_err() {
+            return Err(reject(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::INTERNAL_ERROR,
+                "could not start a worker thread",
+            ));
+        }
+        Ok(response)
     }
 
     /// `resources/subscribe` and `resources/unsubscribe` of a classic
@@ -856,7 +977,11 @@ impl HttpHandler {
         match conn.start(message) {
             Started::Done(None) => Ok(Response::json(StatusCode::ACCEPTED, Vec::new())),
             Started::Done(Some(reply)) => {
-                let mut response = json_reply(status_of(modern, &reply), &reply);
+                let status = status_of(modern, &reply);
+                let mut response = match &self.replay {
+                    Some(replay) if status == StatusCode::OK => self.replayed(replay, &reply)?,
+                    _ => json_reply(status, &reply),
+                };
                 if is_initialize && !modern {
                     if let Some(id) = self.open_session(&reply, init_params)? {
                         response = response.with_header(SESSION_HEADER, &id).map_err(|_| {
@@ -891,7 +1016,10 @@ impl HttpHandler {
                         "could not start a worker thread",
                     ));
                 }
-                Ok(self.await_reply(events, cancel, modern))
+                match &self.replay {
+                    Some(replay) => self.replayed_run(replay, events, cancel),
+                    None => Ok(self.await_reply(events, cancel, modern)),
+                }
             }
         }
     }
