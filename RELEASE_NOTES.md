@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - Operating model (ADR-0009) and rusty-ttf-parser (pending review)
+
+- **Added:** ADR-0009, `required-gate`, scheduled sweep, toolchain pin, CODEOWNERS, SHA-pinned actions, warn-only `cargo-deny`, root licence files; `rusty-ttf-parser`. **Changed:** `rusty_term` uses it instead of `ttf-parser`; `remind_me_core`'s S3 client moves to the SDK's current HTTP stack. **Fixed:** four advisories via the AWS change.
+- **Known limitations:** `cargo-deny` is non-blocking until `bincode` and `rustls-pemfile` are resolved. Set `required-gate` as the only required check in branch protection after merge. `rusty-ttf-parser` decodes GSUB types 1/4/5/6 only; context format 1 and `sbix` are covered by hand-built fonts, not by the real-font comparison.
+
+---
+
 ## 2026-10-09 - RLBot native port: plan (pending review)
 
 - **Added:** `crates/apps/rocket_league/rlbot/PLAN.md`: five stages (FlatBuffers runtime, wire subset, client, port `rb_tape_bot`, `rb_env` bridge), measured from rlbot 0.6.0, risks and rollback. Docs only; three decisions listed for the owner before stage 1.
