@@ -13,6 +13,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_flatbuffers: FlatBuffers runtime (RLBot port stage 1) (pending review)
+
+- **Added:** `crates/libs/protocol/rusty_flatbuffers` (Tier S, no dependencies): a bounds-checked reader (`Table`, `Vector`; every access returns `Error`, none panics) and a back-to-front `Builder`/`TableBuilder` (strings, scalar/offset/struct vectors, inline structs, unions as type+offset slots, optional file identifier). No code generation; schemas are hand-written on top.
+- **Hardened (review):** an `Offset` remembers its builder and a foreign one is `ForeignOffset`; struct alignment, size and item lengths are validated before anything is written (`InvalidLayout`); field slots are bounded by `MAX_SLOTS` on both sides (`SlotTooLarge` when building, absent when reading). The `add_*` methods now return `Result`, and a rejected call changes nothing.
+- **Verified:** 15 tests (10 golden, 5 boundary; also run in release). Reader against five buffers made by `rlbot_flat` 0.6.0 (nested tables, a vector of tables, optional structs, a union root); every prefix of each fixture and every flipped byte of the largest never panics; builder output reads back and `planus` reads it too (checked once outside CI).
+- **Changed:** `rlbot/PLAN.md` records the owner's decisions (through the `rb_env` bridge, hand-written subset then a generator, `rb_rlbot_*` names).
+
+---
+
 ## 2026-10-08 - Operating model (ADR-0009) and rusty-ttf-parser (pending review)
 
 - **Added:** ADR-0009, `required-gate`, scheduled sweep, toolchain pin, CODEOWNERS, SHA-pinned actions, warn-only `cargo-deny`, root licence files; `rusty-ttf-parser`. **Changed:** `rusty_term` uses it instead of `ttf-parser`; `remind_me_core`'s S3 client moves to the SDK's current HTTP stack. **Fixed:** four advisories via the AWS change.
