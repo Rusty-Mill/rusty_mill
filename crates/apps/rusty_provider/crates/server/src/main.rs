@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mcp = match &config.mcp {
         Some(mcp_config) if mcp_config.enabled => {
-            let handler = rp_mcp::build(mcp_config, Arc::clone(&router)).await;
+            let handler = rp_mcp::build(mcp_config, Arc::clone(&router)).await?;
             tracing::info!(path = %mcp_config.path, upstreams = mcp_config.upstreams.len(), "MCP endpoint enabled");
             Some(handler)
         }
@@ -105,7 +105,8 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("MCP_STDIO is set but [mcp].enabled is not true in config");
         };
         tracing::info!("serving MCP over stdio (MCP_STDIO set)");
-        rusty_mcp::serve(move || Ok((*mcp).clone()), rusty_mcp::ServerConfig::stdio()).await?;
+        // The server's handlers block, so serve from a thread of its own.
+        tokio::task::spawn_blocking(move || rusty_mcp_server::serve_stdio(mcp)).await??;
         return Ok(());
     }
 

@@ -17,7 +17,7 @@
 use std::io;
 use std::time::Duration;
 
-use rusty_mcp_client_native::proto::{CallToolResult, Message, Prompt, Resource, Tool};
+use rusty_mcp_client_native::proto::{CallToolResult, ErrorCode, Message, Prompt, Resource, Tool};
 use rusty_mcp_client_native::{
     AsyncClient, ClientConfig, ClientError, HttpConfig, HttpTransport, NoHandler, Recv,
     StdioTransport, Transport,
@@ -229,9 +229,32 @@ impl McpClient {
     /// - [`McpClientError::Handshake`] if the handshake fails or a step
     ///   exceeds [`DEFAULT_CONNECT_TIMEOUT`].
     pub async fn connect(name: &str, spec: &McpServerSpec) -> Result<Self, McpClientError> {
+        Self::connect_inner(name, spec, None).await
+    }
+
+    /// [`connect`](Self::connect), with every later call bounded by
+    /// `call_timeout` instead of the ten-minute default. Calls on one client
+    /// run one at a time, so this also bounds how long a hung call can hold
+    /// up the ones queued behind it.
+    ///
+    /// # Errors
+    /// As for [`connect`](Self::connect).
+    pub async fn connect_with(
+        name: &str,
+        spec: &McpServerSpec,
+        call_timeout: Duration,
+    ) -> Result<Self, McpClientError> {
+        Self::connect_inner(name, spec, Some(call_timeout)).await
+    }
+
+    async fn connect_inner(
+        name: &str,
+        spec: &McpServerSpec,
+        call_timeout: Option<Duration>,
+    ) -> Result<Self, McpClientError> {
         match spec.transport {
-            McpTransport::Stdio => Self::connect_stdio(name, spec).await,
-            McpTransport::Http => Self::connect_http(name, spec).await,
+            McpTransport::Stdio => Self::connect_stdio(name, spec, call_timeout).await,
+            McpTransport::Http => Self::connect_http(name, spec, call_timeout).await,
             McpTransport::Websocket => Err(McpClientError::Unsupported {
                 reason: format!(
                     "server '{name}': WebSocket transport is reserved in the config schema \
@@ -245,7 +268,11 @@ impl McpClient {
 
     /// Stdio path — spawn the configured command and run the MCP handshake
     /// over the child's stdio.
-    async fn connect_stdio(name: &str, spec: &McpServerSpec) -> Result<Self, McpClientError> {
+    async fn connect_stdio(
+        name: &str,
+        spec: &McpServerSpec,
+        call_timeout: Option<Duration>,
+    ) -> Result<Self, McpClientError> {
         if spec.command.trim().is_empty() {
             return Err(McpClientError::Config {
                 reason: format!("server '{name}': stdio transport needs a non-empty `command`"),
@@ -257,7 +284,7 @@ impl McpClient {
             command: spec.command.clone(),
             source: e,
         })?;
-        Self::run_handshake(name, Link::Stdio(transport)).await
+        Self::run_handshake(name, Link::Stdio(transport), call_timeout).await
     }
 
     /// Streamable HTTP path — the modern remote MCP transport (single
@@ -265,7 +292,11 @@ impl McpClient {
     /// headers and custom HTTP headers from the spec are forwarded on
     /// every request. Redirects are not followed: they would carry those
     /// headers to wherever the redirect points.
-    async fn connect_http(name: &str, spec: &McpServerSpec) -> Result<Self, McpClientError> {
+    async fn connect_http(
+        name: &str,
+        spec: &McpServerSpec,
+        call_timeout: Option<Duration>,
+    ) -> Result<Self, McpClientError> {
         let url = spec.url.as_deref().unwrap_or("").trim();
         if url.is_empty() {
             return Err(McpClientError::Config {
@@ -323,15 +354,22 @@ impl McpClient {
         let transport = HttpTransport::new(config).map_err(|e| McpClientError::Config {
             reason: format!("server '{name}': {e}"),
         })?;
-        Self::run_handshake(name, Link::Http(Box::new(transport))).await
+        Self::run_handshake(name, Link::Http(Box::new(transport)), call_timeout).await
     }
 
     /// Shared handshake driver: every step is bounded by
     /// [`DEFAULT_CONNECT_TIMEOUT`], so a non-responsive server doesn't hang
     /// `connect` forever. Later calls are bounded by the client's call timeout
     /// instead (ten minutes unless the config says otherwise).
-    async fn run_handshake(name: &str, link: Link) -> Result<Self, McpClientError> {
-        let config = ClientConfig::new("rusty-mcp-client", env!("CARGO_PKG_VERSION"));
+    async fn run_handshake(
+        name: &str,
+        link: Link,
+        call_timeout: Option<Duration>,
+    ) -> Result<Self, McpClientError> {
+        let mut config = ClientConfig::new("rusty-mcp-client", env!("CARGO_PKG_VERSION"));
+        if let Some(timeout) = call_timeout {
+            config.call_timeout = timeout;
+        }
         let client = AsyncClient::connect(link, config, NoHandler, CONNECT_TIMEOUT)
             .await
             .map_err(|e| McpClientError::Handshake {
@@ -341,6 +379,20 @@ impl McpClient {
             name: name.to_string(),
             client,
         })
+    }
+
+    /// Whether the connection still works: `false` once a probe (`ping`)
+    /// shows the transport closed or failed, which for HTTP includes an ended
+    /// session or an unreachable server. A server that is merely slow, or
+    /// that answers the probe with some other error, counts as up. Queued
+    /// behind any call in flight.
+    pub async fn is_alive(&self) -> bool {
+        match self.client.ping().await {
+            Err(ClientError::Closed | ClientError::Io(_)) => false,
+            // An HTTP request that failed is reported as an internal error.
+            Err(ClientError::Rpc(e)) => e.code != ErrorCode::INTERNAL_ERROR,
+            _ => true,
+        }
     }
 
     /// Logical name of this connection (the key from `mcp.toml`).

@@ -13,10 +13,20 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rp-mcp and rp-server on the native MCP stack (pending review)
+
+- **Changed (breaking for `rp-mcp`'s API):** `rp_mcp::build` returns a `rusty_mcp_server::Server`; no `rmcp`, `rusty-mcp` or `schemars` in `rp-mcp` / `rp-server` (non-dev). Gateway on `rusty-mcp-client`; mounted through a small axum bridge.
+- **Behaviour:** upstream calls run one at a time per upstream; the tool list is not sorted across native and proxied tools.
+- **Added:** `McpClient::connect_with`, `McpClient::is_alive`.
+- **Fixed:** the native client took a `404` on an ended session for an ordinary answer.
+- **Not done:** `MCP_STDIO=1` untested; `adk-mcp`, `remind_me_remote`, `rusty_homelab_mcp`, `agentgateway` still on `rmcp`.
+
+---
+
 ## 2026-10-09 - rusty_mcp_server ToolSource (pending review)
 
 - **Added:** `ServerBuilder::tool_source`: tools supplied at request time (for proxying another server). 6 tests.
-- **Not done:** no consumer uses it yet (`rp-mcp` is next).
+- **Used by:** `rp-mcp`'s gateway (entry above).
 
 ---
 

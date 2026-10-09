@@ -1,17 +1,18 @@
 pub mod credentials;
 pub mod errors;
 pub mod jwt;
+mod mcp_bridge;
 pub mod routes;
 pub mod state;
 
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
+use axum::extract::OriginalUri;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, patch, post};
 use axum::Router as AxumRouter;
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-use rmcp::transport::streamable_http_server::StreamableHttpService;
+use rusty_mcp_server::{HttpConfig, HttpHandler};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -48,32 +49,39 @@ fn build_cors_layer(cors_allowed_origins: &Option<Vec<String>>) -> CorsLayer {
 
 /// Mount the MCP endpoint at `state.mcp_path`, guarded by [`routes::mcp_auth`]
 /// (the same `check_auth` every other route already uses -- see that
-/// function's doc comment for why this isn't rusty_mcp's own OAuth 2.1
-/// auth).
+/// function's doc comment for why this isn't an OAuth 2.1 resource-server
+/// auth of the MCP library's own).
 ///
-/// Uses `LocalSessionManager` rather than the newer, stateless
-/// `NeverSessionManager` rusty_mcp defaults to: `NeverSessionManager`
-/// rejects any client that opens with the legacy `initialize` handshake
-/// instead of spec-2026-07-28's stateless `discover` bootstrap, and that
-/// spec revision is barely a month old -- most MCP clients in the wild
-/// today (desktop clients included) still only speak the legacy handshake.
-/// `LocalSessionManager` serves both.
+/// The handler serves both generations of the protocol: clients that open
+/// with the legacy `initialize` handshake (most desktop clients today) get a
+/// session, and clients on spec 2026-07-28 use the stateless `server/discover`
+/// bootstrap. Its default `Host`/`Origin` rules apply (loopback hosts, no
+/// browser origins).
 fn mount_mcp(router: AxumRouter<AppState>, state: &AppState) -> AxumRouter<AppState> {
     let Some(mcp) = state.mcp.clone() else {
         return router;
     };
 
-    let factory = move || Ok((*mcp).clone());
-    let service = StreamableHttpService::new(
-        factory,
-        Arc::new(LocalSessionManager::default()),
-        Default::default(),
-    );
+    let path = state.mcp_path.trim_end_matches('/');
+    let handler = Arc::new(HttpHandler::new(
+        mcp,
+        HttpConfig {
+            path: if path.is_empty() { "/" } else { path }.to_owned(),
+            ..HttpConfig::default()
+        },
+    ));
+    let max_body_bytes = state.max_body_bytes;
     let guarded = AxumRouter::new()
-        .fallback_service(service)
+        .fallback(
+            move |OriginalUri(uri): OriginalUri, request: axum::extract::Request| {
+                let target = uri
+                    .path_and_query()
+                    .map_or_else(|| uri.path().to_owned(), |pq| pq.as_str().to_owned());
+                mcp_bridge::serve(Arc::clone(&handler), target, request, max_body_bytes)
+            },
+        )
         .layer(from_fn_with_state(state.clone(), routes::mcp_auth));
 
-    let path = state.mcp_path.trim_end_matches('/');
     if path.is_empty() {
         router.fallback_service(guarded)
     } else {

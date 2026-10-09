@@ -1,43 +1,46 @@
 //! Proxies tools from other, already-running MCP servers -- Direction B
 //! ("rusty_provider as an MCP gateway") from the design doc.
 //!
-//! `rusty_mcp` only covers the server side of MCP (its `client` feature is
-//! dev-dependency-only), so this module talks to `rmcp`'s client API
-//! directly: spawning stdio subprocesses via `TokioChildProcess`, or
-//! connecting to Streamable HTTP endpoints via `StreamableHttpClientTransport`.
+//! Each upstream is reached with [`rusty_mcp_client::McpClient`] (a child
+//! process over stdio, or a Streamable HTTP endpoint), and its tools are
+//! offered to our own clients through [`GatewaySource`], renamed
+//! `"{upstream}/{tool}"`.
 //!
 //! A connection that fails at *startup* is logged and skipped -- same
 //! soft-fail convention as `[jwt]`/`[webhook]`/`[persistence]` elsewhere in
 //! this codebase -- rather than a hard failure of the whole server; it stays
 //! absent from the tool list until restart. A connection that drops *after*
 //! connecting is different: a background supervisor task per upstream
-//! (spawned in [`McpGateway::connect`]) reconnects it with exponential
+//! (spawned in [`McpGateway::connect`]) probes it every
+//! [`LIVENESS_POLL`] and, once it is gone, reconnects it with exponential
 //! backoff (`[mcp].reconnect_backoff_secs`/`reconnect_backoff_max_secs`/
 //! `max_reconnect_attempts`), so a transient upstream outage recovers on its
 //! own instead of needing a full `rp-server` restart.
+//!
+//! Calls to one upstream run one at a time over its connection, so a call
+//! that hangs holds up the ones behind it until `[mcp].timeout_secs` ends it.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rmcp::model::{CallToolRequestParams, CallToolResponse, JsonObject, Tool};
-use rmcp::service::RunningService;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
-use rmcp::{Peer, RoleClient, ServiceExt};
+use rusty_mcp_client::{
+    McpAuth, McpAuthSecret, McpClient, McpClientError, McpServerSpec, McpTransport,
+};
+use rusty_mcp_server::proto::{CallToolParams, CallToolResult, ErrorCode, ErrorData, Tool};
+use rusty_mcp_server::{CallContext, ToolSource};
 use rusty_retry::Backoff;
+use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 
 use rp_router::{McpConfig, McpUpstreamConfig, McpUpstreamTransport};
 
-/// A connected upstream's `Peer` handle, keyed by its configured name --
-/// `Peer` is cheaply `Clone`, so this is what `list_tools`/`call_tool`
-/// read, kept separate from the `RunningService` each per-upstream
-/// supervisor task owns exclusively (see [`spawn_supervisor`]) so both can
-/// be used concurrently without fighting over ownership: `waiting()` on a
-/// `RunningService` consumes it, which a value shared behind a `RwLock`
-/// read guard can never do.
-type Peers = HashMap<String, Peer<RoleClient>>;
+/// How often a connected upstream is probed to notice that it dropped.
+pub const LIVENESS_POLL: Duration = Duration::from_secs(2);
+
+/// Connected upstreams by configured name, in name order so the tool list is
+/// stable between requests.
+type Peers = BTreeMap<String, Arc<McpClient>>;
 
 /// Backoff policy for reconnecting a dropped (previously-connected)
 /// upstream. Doesn't apply to a startup connection failure -- see this
@@ -80,7 +83,7 @@ impl McpGateway {
     /// A gateway with no upstreams configured.
     pub fn empty() -> Self {
         Self {
-            peers: Arc::new(RwLock::new(HashMap::new())),
+            peers: Arc::new(RwLock::new(BTreeMap::new())),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
@@ -90,18 +93,25 @@ impl McpGateway {
     /// own background supervisor task that reconnects it with backoff if
     /// the connection later drops -- see this module's doc comment.
     pub async fn connect(upstreams: &[McpUpstreamConfig], config: &McpConfig) -> Self {
-        let peers = Arc::new(RwLock::new(HashMap::new()));
+        let peers = Arc::new(RwLock::new(BTreeMap::new()));
         let policy = ReconnectPolicy::from(config);
         let timeout = Duration::from_secs(config.timeout_secs);
         for upstream in upstreams {
-            match connect_one(upstream).await {
-                Ok(service) => {
+            match connect_one(upstream, timeout).await {
+                Ok(client) => {
                     tracing::info!(upstream = %upstream.name, "connected MCP upstream");
+                    let client = Arc::new(client);
                     peers
                         .write()
                         .await
-                        .insert(upstream.name.clone(), service.peer().clone());
-                    spawn_supervisor(upstream.clone(), service, Arc::clone(&peers), policy);
+                        .insert(upstream.name.clone(), Arc::clone(&client));
+                    spawn_supervisor(
+                        upstream.clone(),
+                        client,
+                        Arc::clone(&peers),
+                        policy,
+                        timeout,
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -125,11 +135,11 @@ impl McpGateway {
     pub async fn list_tools(&self) -> Vec<Tool> {
         let peers = self.peers.read().await;
         let mut tools = Vec::new();
-        for (name, peer) in peers.iter() {
-            match tokio::time::timeout(self.timeout, peer.list_tools(None)).await {
-                Ok(Ok(result)) => {
-                    for mut tool in result.tools {
-                        tool.name = format!("{name}/{}", tool.name).into();
+        for (name, client) in peers.iter() {
+            match tokio::time::timeout(self.timeout, client.list_tools()).await {
+                Ok(Ok(listed)) => {
+                    for mut tool in listed {
+                        tool.name = format!("{name}/{}", tool.name);
                         tools.push(tool);
                     }
                 }
@@ -155,21 +165,16 @@ impl McpGateway {
         &self,
         upstream: &str,
         tool: &str,
-        arguments: Option<JsonObject>,
-    ) -> Result<CallToolResponse, GatewayError> {
-        let peer = {
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<CallToolResult, GatewayError> {
+        let client = {
             let peers = self.peers.read().await;
             peers
                 .get(upstream)
                 .cloned()
                 .ok_or_else(|| GatewayError::UnknownUpstream(upstream.to_string()))?
         };
-
-        let mut params = CallToolRequestParams::new(tool.to_string());
-        if let Some(arguments) = arguments {
-            params = params.with_arguments(arguments);
-        }
-        tokio::time::timeout(self.timeout, peer.call_tool_once(params))
+        tokio::time::timeout(self.timeout, client.call_tool(tool, arguments))
             .await
             .map_err(|_elapsed| GatewayError::Timeout(upstream.to_string()))?
             .map_err(GatewayError::Service)
@@ -181,68 +186,113 @@ pub enum GatewayError {
     #[error("no MCP upstream named '{0}' is connected")]
     UnknownUpstream(String),
     #[error(transparent)]
-    Service(#[from] rmcp::ServiceError),
+    Service(#[from] McpClientError),
     #[error("call to MCP upstream '{0}' timed out")]
     Timeout(String),
 }
 
-async fn connect_one(
-    upstream: &McpUpstreamConfig,
-) -> anyhow::Result<RunningService<RoleClient, ()>> {
-    match &upstream.transport {
-        McpUpstreamTransport::Stdio { command, args } => {
-            let transport =
-                TokioChildProcess::new(tokio::process::Command::new(command).configure(|c| {
-                    c.args(args);
-                }))?;
-            Ok(().serve(transport).await?)
-        }
-        McpUpstreamTransport::Http {
-            url,
-            bearer_token_env,
-        } => {
-            let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone());
-            if let Some(var) = bearer_token_env {
-                let token = std::env::var(var).map_err(|_| {
-                    anyhow::anyhow!("bearer_token_env '{var}' is not set in the environment")
-                })?;
-                config = config.auth_header(token);
-            }
-            let transport = StreamableHttpClientTransport::from_config(config);
-            Ok(().serve(transport).await?)
-        }
+/// A [`McpGateway`] as the server's [`ToolSource`]. The server's handlers
+/// block, so each request runs the gateway's async calls on `rt`.
+pub struct GatewaySource {
+    gateway: Arc<McpGateway>,
+    rt: Handle,
+}
+
+impl GatewaySource {
+    /// Offer `gateway`'s tools; `rt` is the runtime to drive it on.
+    pub fn new(gateway: Arc<McpGateway>, rt: Handle) -> Self {
+        Self { gateway, rt }
     }
 }
 
-/// Owns `service` for as long as it's alive, blocking on
-/// [`RunningService::waiting`] (which requires ownership -- exactly why
-/// this task, not [`McpGateway`] itself, holds the `RunningService`; the
-/// shared `peers` map only ever holds the cheaply-`Clone`able `Peer`
-/// handle). Once that connection ends, removes it from `peers` (so
-/// `list_tools`/`call_tool` stop attempting doomed calls to it) and retries
-/// [`connect_one`] with exponential backoff until it reconnects or
-/// `policy.max_attempts` is exhausted, at which point this upstream is
-/// given up on for good -- same as if it had failed at startup.
+impl ToolSource for GatewaySource {
+    fn tools(&self) -> Vec<Tool> {
+        self.rt.block_on(self.gateway.list_tools())
+    }
+
+    fn call(
+        &self,
+        _ctx: &CallContext,
+        call: &CallToolParams,
+    ) -> Option<Result<CallToolResult, ErrorData>> {
+        let (upstream, tool) = call.name.split_once('/')?;
+        Some(self.forward(upstream, tool, call))
+    }
+}
+
+impl GatewaySource {
+    fn forward(
+        &self,
+        upstream: &str,
+        tool: &str,
+        call: &CallToolParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let invalid = |message: String| ErrorData::new(ErrorCode::INVALID_PARAMS, message);
+        let arguments = call
+            .arguments
+            .as_ref()
+            .map(|a| serde_json::from_str(&a.to_json_string()))
+            .transpose()
+            .map_err(|e| invalid(format!("invalid arguments: {e}")))?;
+        self.rt
+            .block_on(self.gateway.call_tool(upstream, tool, arguments))
+            .map_err(|e| invalid(e.to_string()))
+    }
+}
+
+/// The client spec for one configured upstream.
+fn spec_for(upstream: &McpUpstreamConfig) -> McpServerSpec {
+    match &upstream.transport {
+        McpUpstreamTransport::Stdio { command, args } => McpServerSpec {
+            transport: McpTransport::Stdio,
+            command: command.clone(),
+            args: args.clone(),
+            ..McpServerSpec::default()
+        },
+        McpUpstreamTransport::Http {
+            url,
+            bearer_token_env,
+        } => McpServerSpec {
+            transport: McpTransport::Http,
+            url: Some(url.clone()),
+            auth: bearer_token_env.as_ref().map(|env| McpAuth::Bearer {
+                token: McpAuthSecret::Env { env: env.clone() },
+            }),
+            ..McpServerSpec::default()
+        },
+    }
+}
+
+async fn connect_one(
+    upstream: &McpUpstreamConfig,
+    call_timeout: Duration,
+) -> Result<McpClient, McpClientError> {
+    McpClient::connect_with(&upstream.name, &spec_for(upstream), call_timeout).await
+}
+
+/// Watches one connected upstream. Every [`LIVENESS_POLL`] it asks the client
+/// whether the connection still works; once it does not, it removes the
+/// upstream from `peers` (so `list_tools`/`call_tool` stop attempting doomed
+/// calls to it) and retries [`connect_one`] with exponential backoff until it
+/// reconnects or `policy.max_attempts` is exhausted, at which point this
+/// upstream is given up on for good -- same as if it had failed at startup.
 fn spawn_supervisor(
     upstream: McpUpstreamConfig,
-    mut service: RunningService<RoleClient, ()>,
+    mut client: Arc<McpClient>,
     peers: Arc<RwLock<Peers>>,
     policy: ReconnectPolicy,
+    call_timeout: Duration,
 ) {
     tokio::spawn(async move {
         loop {
-            match service.waiting().await {
-                Ok(reason) => tracing::warn!(
-                    upstream = %upstream.name,
-                    ?reason,
-                    "MCP upstream connection ended; attempting to reconnect"
-                ),
-                Err(error) => tracing::warn!(
-                    upstream = %upstream.name,
-                    %error,
-                    "MCP upstream connection task failed; attempting to reconnect"
-                ),
+            tokio::time::sleep(LIVENESS_POLL).await;
+            if client.is_alive().await {
+                continue;
             }
+            tracing::warn!(
+                upstream = %upstream.name,
+                "MCP upstream connection ended; attempting to reconnect"
+            );
             peers.write().await.remove(&upstream.name);
 
             let backoff = Backoff::exponential(policy.initial_backoff, policy.max_backoff, 0.0);
@@ -258,10 +308,10 @@ fn spawn_supervisor(
                 }
                 tokio::time::sleep(backoff.delay_for(attempts)).await;
                 attempts += 1;
-                match connect_one(&upstream).await {
-                    Ok(new_service) => {
+                match connect_one(&upstream, call_timeout).await {
+                    Ok(new_client) => {
                         tracing::info!(upstream = %upstream.name, attempts, "reconnected MCP upstream");
-                        break Some(new_service);
+                        break Some(Arc::new(new_client));
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -276,12 +326,12 @@ fn spawn_supervisor(
             };
 
             match reconnected {
-                Some(new_service) => {
+                Some(new_client) => {
                     peers
                         .write()
                         .await
-                        .insert(upstream.name.clone(), new_service.peer().clone());
-                    service = new_service;
+                        .insert(upstream.name.clone(), Arc::clone(&new_client));
+                    client = new_client;
                 }
                 None => return,
             }
@@ -313,60 +363,31 @@ mod tests {
         assert!(should_give_up(4, Some(3)));
     }
 
-    // --- call_tool timeout -----------------------------------------------------
-
-    /// An MCP server whose `tools/call` handler never resolves, standing in
-    /// for a hung/misbehaving upstream.
-    struct HangingHandler;
-
-    impl rmcp::ServerHandler for HangingHandler {
-        async fn call_tool(
-            &self,
-            _request: rmcp::model::CallToolRequestParams,
-            _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-        ) -> Result<CallToolResponse, rmcp::model::ErrorData> {
-            std::future::pending().await
-        }
-    }
-
-    #[tokio::test]
-    async fn call_tool_returns_a_timeout_error_instead_of_hanging_forever() {
-        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-        tokio::spawn(async move {
-            if let Ok(service) = HangingHandler.serve(server_io).await {
-                let _ = service.waiting().await;
-            }
-        });
-
-        let client = tokio::time::timeout(Duration::from_secs(5), ().serve(client_io))
-            .await
-            .expect("handshake timed out")
-            .expect("client handshake failed");
-
-        let gateway = McpGateway {
-            peers: Arc::new(RwLock::new(HashMap::from([(
-                "slow".to_string(),
-                client.peer().clone(),
-            )]))),
-            // Short enough that a passing test proves the internal timeout
-            // fired, not that it happened to finish before the outer
-            // `tokio::time::timeout` below.
-            timeout: Duration::from_millis(200),
+    #[test]
+    fn a_bearer_env_becomes_env_auth_and_stdio_args_carry_over() {
+        let http = McpUpstreamConfig {
+            name: "h".into(),
+            transport: McpUpstreamTransport::Http {
+                url: "http://x/mcp".into(),
+                bearer_token_env: Some("TOK".into()),
+            },
         };
-
-        // The outer timeout is only a test-hang guard, generous enough that
-        // it would never fire on its own -- if `call_tool` didn't enforce
-        // its own timeout, this would hang until it did (or forever, absent
-        // this belt-and-braces bound).
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            gateway.call_tool("slow", "hangs_forever", None),
-        )
-        .await
-        .expect("call_tool hung past the outer test-hang guard");
-
-        assert!(matches!(&result, Err(GatewayError::Timeout(name)) if name == "slow"));
-
-        let _ = client.cancel().await;
+        let spec = spec_for(&http);
+        assert_eq!(spec.transport, McpTransport::Http);
+        assert_eq!(spec.url.as_deref(), Some("http://x/mcp"));
+        assert!(matches!(
+            spec.auth,
+            Some(McpAuth::Bearer { token: McpAuthSecret::Env { env } }) if env == "TOK"
+        ));
+        let stdio = McpUpstreamConfig {
+            name: "s".into(),
+            transport: McpUpstreamTransport::Stdio {
+                command: "srv".into(),
+                args: vec!["--x".into()],
+            },
+        };
+        let spec = spec_for(&stdio);
+        assert_eq!((spec.command.as_str(), spec.args.len()), ("srv", 1));
+        assert!(spec.auth.is_none());
     }
 }

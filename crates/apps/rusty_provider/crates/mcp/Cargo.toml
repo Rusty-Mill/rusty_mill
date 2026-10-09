@@ -11,16 +11,8 @@ layer = "apps"
 rusty_retry = { workspace = true }
 rp-core.workspace = true
 rp-router.workspace = true
-rusty-mcp.workspace = true
-rmcp = { workspace = true, features = [
-    "server",
-    "client",
-    "macros",
-    "schemars",
-    "transport-child-process",
-    "transport-streamable-http-client-reqwest",
-] }
-schemars.workspace = true
+rusty_mcp_server = { workspace = true }
+rusty-mcp-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -30,3 +22,5 @@ thiserror = "2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+rusty_mcp_server = { workspace = true, features = ["http"] }
+rusty_serve = { workspace = true }

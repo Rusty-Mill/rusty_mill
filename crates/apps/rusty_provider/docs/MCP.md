@@ -1,8 +1,8 @@
 # MCP (Model Context Protocol)
 
 `rp-mcp` gives rusty_provider a Model Context Protocol surface, built on
-[`rusty_mcp`](https://github.com/baileyrd/rusty_mcp) (spec revision
-2026-07-28), in both directions at once:
+`rusty_mcp_server` and `rusty-mcp-client` (spec revision 2026-07-28 and the
+older ones), in both directions at once:
 
 - **Server** (`crates/mcp/src/native.rs`) — rusty_provider's own routing
   exposed as MCP tools: `chat_completion`, `list_models`, `embeddings`. Any
@@ -12,11 +12,13 @@
 - **Gateway** (`crates/mcp/src/gateway.rs`) — other, already-running MCP
   servers connected to and re-exposed through the same endpoint, each
   upstream's tools namespaced `"{upstream}/{tool}"` so names never collide.
-  `rusty_mcp` only covers the server side of MCP (its `client` feature is
-  dev-dependency-only), so this half talks to `rmcp`'s client API directly.
+  Each upstream is reached with `rusty-mcp-client`, and its tools are offered
+  through the server's `ToolSource` hook, asked afresh on every `tools/list`.
+  Calls to one upstream run one at a time over its connection, so a call that
+  hangs holds up the ones behind it until `timeout_secs` ends it.
 
 Both are merged into one `tools/list`/`tools/call` surface
-(`crates/mcp/src/server.rs`'s `RustyMcpServer`) — a client sees rusty_provider's
+(`rp_mcp::build`, which returns one `rusty_mcp_server::Server`) — a client sees rusty_provider's
 own tools and every proxied upstream tool side by side, not two things to
 configure separately.
 
@@ -76,13 +78,10 @@ The MCP endpoint is mounted **inside** rp-server's existing axum app and
 port, guarded by the exact same `server.api_key_env`/`[[clients]]`/`[jwt]`
 check every other route already goes through (`routes::mcp_auth`, which
 just calls the same `check_auth` `/v1/chat/completions` does). This is a
-deliberate choice, not an oversight: `rusty_mcp` brings its own OAuth 2.1
-resource-server auth model (`rusty_mcp::auth::AuthConfig`), but that's a
-second auth system to reconcile with the one this router already has.
-`rusty_mcp`'s own docs note that leaving its `auth` unset is "fine behind a
-gateway that already authenticates callers" — which is exactly this
-deployment shape, so this integration doesn't use `rusty_mcp`'s auth at
-all.
+deliberate choice, not an oversight: an MCP OAuth 2.1 resource-server model
+would be a second auth system to reconcile with the one this router already
+has, and the server library has none: it expects to sit behind a gateway
+that already authenticates callers, which is exactly this deployment shape.
 
 If neither `server.api_key_env`, `[[clients]]`, nor `[jwt]` is configured,
 the MCP endpoint is unauthenticated, same as every other route in that
@@ -91,18 +90,18 @@ case.
 ## Transports
 
 **Streamable HTTP** (the default) is mounted at `[mcp].path` on the normal
-`rp-server` listener. It uses `LocalSessionManager` rather than the newer,
-fully stateless `NeverSessionManager` `rusty_mcp` defaults to:
-`NeverSessionManager` only accepts clients using spec 2026-07-28's new
-stateless `discover` bootstrap, and that revision is barely a month old —
-most MCP clients in the wild today, desktop clients included, still only
-speak the older `initialize` handshake. `LocalSessionManager` serves both.
+`rp-server` listener, through `crates/server/src/mcp_bridge.rs`, which runs
+the (blocking) `rusty_mcp_server` HTTP handler on a blocking thread per
+request and pumps a streamed reply into the response. It serves both
+generations: clients on the older `initialize` handshake get a session, and
+clients on spec 2026-07-28 use the stateless `server/discover`. The handler's
+default `Host` (loopback) and `Origin` (no browsers) rules apply.
 
 **stdio** — for a desktop client that spawns its MCP server as a
 subprocess instead of talking HTTP — is available by setting `MCP_STDIO=1`
 when starting `rp-server`. With that env var set, `rp-server` skips its
 normal HTTP listener entirely and instead serves the same combined tool set
-over stdin/stdout via `rusty_mcp::serve(..., ServerConfig::stdio())`. Point
+over stdin/stdout via `rusty_mcp_server::serve_stdio`. Point
 a desktop client's MCP server config at the `rp-server` binary with
 `MCP_STDIO=1` set in its environment and a `CONFIG_PATH` pointing at your
 `config.toml`.

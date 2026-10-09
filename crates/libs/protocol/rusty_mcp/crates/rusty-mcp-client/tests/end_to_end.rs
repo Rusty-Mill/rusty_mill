@@ -227,3 +227,115 @@ mod oauth {
         );
     }
 }
+
+#[tokio::test]
+async fn is_alive_tells_a_live_server_from_a_stopped_one() {
+    let (spec, stop) = http_spec();
+    let client = McpClient::connect("e2e", &spec).await.unwrap();
+    assert!(client.is_alive().await);
+    stop.shutdown();
+    // The listener closes asynchronously; give it a moment.
+    let mut alive = true;
+    for _ in 0..50 {
+        alive = client.is_alive().await;
+        if !alive {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(!alive, "a stopped server still looked alive");
+}
+
+#[tokio::test]
+async fn connect_with_bounds_each_call() {
+    use std::time::{Duration, Instant};
+    let slow = Server::builder("slow", "1")
+        .tool(Tool::new("sleep", schema()), |_c, _p| {
+            std::thread::sleep(Duration::from_secs(3));
+            Ok(CallToolResult::default())
+        })
+        .build()
+        .unwrap();
+    let http = bind_http(
+        Arc::new(slow),
+        "127.0.0.1:0".parse().unwrap(),
+        HttpConfig::default(),
+        Limits::default(),
+    )
+    .unwrap();
+    let url = format!("http://{}/mcp", http.local_addr().unwrap());
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    let spec = McpServerSpec {
+        transport: McpTransport::Http,
+        url: Some(url),
+        ..McpServerSpec::default()
+    };
+    let client = McpClient::connect_with("slow", &spec, Duration::from_millis(300))
+        .await
+        .unwrap();
+    let t = Instant::now();
+    let err = client.call_tool("sleep", None).await.unwrap_err();
+    assert!(matches!(err, McpClientError::Service(_)), "{err:?}");
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    stop.shutdown();
+}
+
+#[tokio::test]
+async fn a_session_the_server_forgot_counts_as_dead() {
+    use rusty_mcp_server::proto::ProtocolVersion;
+    let classic = || {
+        Server::builder("old", "1")
+            .tool(Tool::new("t", schema()), |_c, _p| {
+                Ok(CallToolResult::default())
+            })
+            .versions(vec![ProtocolVersion::new(ProtocolVersion::V_2025_06_18)])
+            .build()
+            .unwrap()
+    };
+    let bind = |addr: &str| {
+        let http = bind_http(
+            Arc::new(classic()),
+            addr.parse().unwrap(),
+            HttpConfig::default(),
+            Limits::default(),
+        )
+        .unwrap();
+        let bound = http.local_addr().unwrap();
+        let stop = http.shutdown_handle().unwrap();
+        std::thread::spawn(move || http.run().unwrap());
+        (bound, stop)
+    };
+    let (addr, stop) = bind("127.0.0.1:0");
+    let spec = McpServerSpec {
+        transport: McpTransport::Http,
+        url: Some(format!("http://{addr}/mcp")),
+        ..McpServerSpec::default()
+    };
+    let client = McpClient::connect("old", &spec).await.unwrap();
+    assert!(client.is_alive().await);
+    stop.shutdown();
+    // Same address, new server: it has never heard of the client's session.
+    let again = addr.to_string();
+    let mut rebound = None;
+    for _ in 0..50 {
+        // The old listener closes asynchronously; retry until it lets go.
+        let attempt = std::panic::catch_unwind(|| bind(&again));
+        if let Ok(b) = attempt {
+            rebound = Some(b);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (_, stop) = rebound.expect("could not rebind the address");
+    let mut alive = true;
+    for _ in 0..50 {
+        alive = client.is_alive().await;
+        if !alive {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(!alive, "a forgotten session still looked alive");
+    stop.shutdown();
+}

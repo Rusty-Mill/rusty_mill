@@ -314,8 +314,12 @@ async fn post(
     if !status.is_success() {
         let body = read_all(&mut resp, MAX_ERROR_BODY).await;
         let text = String::from_utf8_lossy(&body);
+        // A 404 on a session means the session ended whatever the body says
+        // (the spec's rule), so it is a failure to reconnect from, not an
+        // answer to this request.
+        let session_gone = status.as_u16() == 404 && lock(&shared.session_id).is_some();
         // A JSON-RPC error body is the server's real answer; use it.
-        if let Ok(value) = Value::from_json_str(&text) {
+        if let Some(value) = Value::from_json_str(&text).ok().filter(|_| !session_gone) {
             if let Ok(m @ Message::Error { .. }) = Message::from_value(&value) {
                 let m = match (m, request_id.as_ref()) {
                     (Message::Error { id: None, error }, Some(id)) => {
@@ -327,7 +331,7 @@ async fn post(
                 return;
             }
         }
-        let hint = if status.as_u16() == 404 && lock(&shared.session_id).is_some() {
+        let hint = if session_gone {
             " (the session ended; reconnect)"
         } else {
             ""
