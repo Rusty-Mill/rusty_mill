@@ -71,13 +71,13 @@ pub const MAX_FRAGMENT_LEN: usize = 1 << 14;
 /// Maximum `TLSCiphertext.encrypted_record` length — 2^14 + 256, per §5.2.
 pub const MAX_ENCRYPTED_FRAGMENT_LEN: usize = MAX_FRAGMENT_LEN + 256;
 
-/// Maximum `TLSInnerPlaintext` length, derived rather than quoted.
+/// Maximum `TLSInnerPlaintext` length: content, type octet and padding together
+/// may not exceed 2^14 + 1 (RFC 8446 §5.4). The sealer and the opener both
+/// enforce exactly this, so nothing this engine seals is refused by this engine.
 ///
-/// §5.2 bounds what goes on the wire (`MAX_ENCRYPTED_FRAGMENT_LEN`) and that
-/// is inner plaintext plus tag, so the inner plaintext itself is bounded by
-/// the difference. Deriving it from the wire limit avoids depending on a
-/// reading of §5.4's padding language.
-pub const MAX_INNER_PLAINTEXT_LEN: usize = MAX_ENCRYPTED_FRAGMENT_LEN - TAG_LEN;
+/// The wire bound (`MAX_ENCRYPTED_FRAGMENT_LEN`, §5.2) is looser: it also leaves
+/// room for a ciphertext expansion that no suite here uses.
+pub const MAX_INNER_PLAINTEXT_LEN: usize = MAX_FRAGMENT_LEN + 1;
 
 /// The only outer type a TLS 1.3 protected record may carry (§5.2).
 const OUTER_TYPE: u8 = 23;
@@ -236,6 +236,22 @@ pub enum RecordError {
     /// The sequence number reached `u64::MAX` and this key may not be used
     /// again (§5.3 forbids wrapping).
     SequenceExhausted,
+    /// The fixed part of the nonce was the wrong length for the algorithm.
+    ///
+    /// Only the TLS 1.2 record layer ([`super::record12`]) reports this: it
+    /// takes a 4-byte implicit salt for AES-GCM and a 12-byte IV for
+    /// ChaCha20-Poly1305, where TLS 1.3 always takes 12.
+    FixedIvLength {
+        /// What the algorithm requires.
+        expected: usize,
+        /// What was supplied.
+        actual: usize,
+    },
+    /// A protected TLS 1.2 record carried a version other than `0x0303`.
+    ///
+    /// Reported by [`super::record12`] only. TLS 1.2 authenticates the version
+    /// bytes, so unlike TLS 1.3 they are not "ignored for all purposes".
+    UnexpectedVersion([u8; 2]),
 }
 
 impl fmt::Display for RecordError {
@@ -275,6 +291,12 @@ impl fmt::Display for RecordError {
             }
             Self::SequenceExhausted => {
                 f.write_str("record sequence number exhausted; this key may not be used again")
+            }
+            Self::FixedIvLength { expected, actual } => {
+                write!(f, "fixed iv is {actual} bytes, algorithm needs {expected}")
+            }
+            Self::UnexpectedVersion([major, minor]) => {
+                write!(f, "record version {major}.{minor} is not TLS 1.2 (3.3)")
             }
         }
     }
@@ -353,18 +375,18 @@ fn additional_data(encrypted_len: usize) -> [u8; HEADER_LEN] {
 /// `None` means exhausted. The counter only advances after an operation
 /// succeeds, so a rejected record does not consume a sequence number.
 #[derive(Debug)]
-struct Sequence(Option<u64>);
+pub(super) struct Sequence(pub(super) Option<u64>);
 
 impl Sequence {
-    const fn starting_at(seq: u64) -> Self {
+    pub(super) const fn starting_at(seq: u64) -> Self {
         Self(Some(seq))
     }
 
-    fn peek(&self) -> Result<u64, RecordError> {
+    pub(super) fn peek(&self) -> Result<u64, RecordError> {
         self.0.ok_or(RecordError::SequenceExhausted)
     }
 
-    fn advance(&mut self, used: u64) {
+    pub(super) fn advance(&mut self, used: u64) {
         self.0 = used.checked_add(1);
     }
 }
@@ -580,6 +602,17 @@ impl Opener {
             .map_err(|_| RecordError::Decrypt)?
             .len();
         buf.truncate(plain_len);
+
+        // §5.4: content, type octet and padding together may not exceed
+        // 2^14 + 1. A record whose padding alone takes it over is an overflow
+        // even when the content is small (BoGo `LargePlaintext-*-Padded-*`):
+        // padding is the one part of a record a sender chooses freely.
+        if buf.len() > MAX_INNER_PLAINTEXT_LEN {
+            return Err(RecordError::FragmentTooLong {
+                len: buf.len() - 1,
+                max: MAX_FRAGMENT_LEN,
+            });
+        }
 
         // §5.2: scan back past the zero padding; the first non-zero octet
         // from the end is the content type. Its index is therefore also the

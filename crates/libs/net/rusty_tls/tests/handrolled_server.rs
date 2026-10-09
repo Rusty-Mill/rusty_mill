@@ -35,6 +35,7 @@ use rusty_tls::handrolled::client::{
     record_length, AlertDescription, CipherSuite, ClientConfig, ClientHandshake, Incoming,
     Resumption,
 };
+use rusty_tls::handrolled::handshake::HandshakeError;
 use rusty_tls::handrolled::handshake::{
     extension, find, messages, pre_shared_key_placeholder, ClientHello, Extension, HandshakeType,
     Message, PskIdentity, ServerHello, HELLO_RETRY_REQUEST_RANDOM,
@@ -42,6 +43,7 @@ use rusty_tls::handrolled::handshake::{
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
+use rusty_tls::handrolled::record::RecordError;
 use rusty_tls::handrolled::server::{
     ClientAuth, ServerConfig, ServerError, ServerHandshake, Tickets,
 };
@@ -175,6 +177,8 @@ fn interop_with_groups(
         groups,
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let mut client = rustls_client(&pki);
@@ -273,6 +277,8 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&server_config);
 
@@ -290,6 +296,7 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (mut client, hello) = ClientHandshake::start(&client_config).expect("start");
@@ -382,6 +389,7 @@ fn client_hello(edit: Edit) -> Vec<u8> {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
     let (_, record) = ClientHandshake::start(&config).expect("start");
     let parsed = messages(&record[5..]).expect("parses");
@@ -414,6 +422,16 @@ fn client_hello(edit: Edit) -> Vec<u8> {
 
 /// Run one ClientHello at a fresh server and report what happened.
 fn refuse(record: &[u8]) -> ServerError {
+    first_flight(record).expect_err("the server accepted a ClientHello it should not have")
+}
+
+/// As [`refuse`], for a hello that may be accepted: the server's reply.
+fn first_flight(record: &[u8]) -> Result<Vec<u8>, ServerError> {
+    feed(&[record])
+}
+
+/// Several records, one after another, at a fresh server; the last reply.
+fn feed(records: &[&[u8]]) -> Result<Vec<u8>, ServerError> {
     let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
     let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
     let config = ServerConfig {
@@ -423,11 +441,18 @@ fn refuse(record: &[u8]) -> ServerError {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
-    server
-        .read_record(record)
-        .expect_err("the server accepted a ClientHello it should not have")
+    let mut reply = Ok(Vec::new());
+    for record in records {
+        reply = server.read_record(record);
+        if reply.is_err() {
+            break;
+        }
+    }
+    reply
 }
 
 /// A client that does not offer TLS 1.3 is turned away with
@@ -520,9 +545,11 @@ fn a_client_with_no_shared_signature_scheme_is_refused() {
 #[test]
 fn a_client_with_no_group_in_common_is_refused() {
     let record = client_hello(Edit {
-        remove: vec![extension::KEY_SHARE],
         // A group nobody implements, so there is nothing to retry *with*.
-        replace: vec![(extension::SUPPORTED_GROUPS, vec![0x00, 0x02, 0x12, 0x34])],
+        replace: vec![
+            (extension::KEY_SHARE, vec![0x00, 0x00]),
+            (extension::SUPPORTED_GROUPS, vec![0x00, 0x02, 0x12, 0x34]),
+        ],
         ..Edit::default()
     });
 
@@ -590,6 +617,8 @@ fn a_truncated_client_hello_is_waited_for_rather_than_refused() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
 
     let whole = client_hello(Edit::default());
@@ -640,6 +669,8 @@ fn a_peer_cannot_drive_the_server_with_incomplete_messages() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -674,6 +705,11 @@ struct TestClient {
 
 impl TestClient {
     fn new() -> Self {
+        Self::with_psk_modes(None)
+    }
+
+    /// As [`Self::new`], also sending `psk_key_exchange_modes` with this body.
+    fn with_psk_modes(psk_modes: Option<&[u8]>) -> Self {
         use rusty_tls::handrolled::handshake::extension;
         use rusty_tls::handrolled::wire::Writer;
 
@@ -725,6 +761,15 @@ impl TestClient {
                 },
             ],
         };
+        let mut hello = hello;
+        if let Some(modes) = &psk_modes {
+            hello
+                .extensions
+                .push(rusty_tls::handrolled::handshake::Extension {
+                    typ: extension::PSK_KEY_EXCHANGE_MODES,
+                    data: modes,
+                });
+        }
 
         Self {
             kx,
@@ -810,6 +855,8 @@ fn against_test_client(corrupt_finished: bool) -> Result<(), ServerError> {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -865,6 +912,8 @@ fn a_corrupted_protected_record_fails_at_the_record_layer() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -1005,6 +1054,8 @@ fn first_reply(record: &[u8]) -> Vec<u8> {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     server
@@ -1059,6 +1110,8 @@ fn after_a_retry(first: &[u8], second: &[u8]) -> Result<Vec<u8>, ServerError> {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let retry = server
@@ -1080,7 +1133,7 @@ fn after_a_retry(first: &[u8], second: &[u8]) -> Result<Vec<u8>, ServerError> {
 #[test]
 fn a_client_that_sent_no_usable_share_is_asked_to_retry() {
     let record = client_hello(Edit {
-        remove: vec![extension::KEY_SHARE],
+        replace: vec![(extension::KEY_SHARE, vec![0x00, 0x00])],
         ..Edit::default()
     });
     let sent = messages(&record[5..]).expect("parses");
@@ -1163,6 +1216,7 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
     let server_config = ServerConfig {
         certificates: &pki.chain,
@@ -1171,6 +1225,8 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
         groups: &[NamedGroup::SecP256R1],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
 
     let mut server = ServerHandshake::new(&server_config);
@@ -1216,7 +1272,7 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
 #[test]
 fn a_client_that_ignores_the_retry_is_refused_rather_than_retried_again() {
     let record = client_hello(Edit {
-        remove: vec![extension::KEY_SHARE],
+        replace: vec![(extension::KEY_SHARE, vec![0x00, 0x00])],
         ..Edit::default()
     });
 
@@ -1238,7 +1294,7 @@ fn a_client_that_ignores_the_retry_is_refused_rather_than_retried_again() {
 #[test]
 fn a_retried_hello_from_a_different_client_is_refused() {
     let first = client_hello(Edit {
-        remove: vec![extension::KEY_SHARE],
+        replace: vec![(extension::KEY_SHARE, vec![0x00, 0x00])],
         ..Edit::default()
     });
     // A fresh hello: new random, new session id, and a perfectly good share.
@@ -1261,7 +1317,7 @@ fn a_retried_hello_from_a_different_client_is_refused() {
 #[test]
 fn a_retried_hello_that_dropped_the_negotiated_cipher_suite_is_refused() {
     let first = client_hello(Edit {
-        remove: vec![extension::KEY_SHARE],
+        replace: vec![(extension::KEY_SHARE, vec![0x00, 0x00])],
         ..Edit::default()
     });
     // The same hello — same `random`, same `legacy_session_id` — offering a
@@ -1288,7 +1344,7 @@ fn a_retried_hello_that_dropped_the_negotiated_cipher_suite_is_refused() {
 #[test]
 fn a_retried_hello_that_stopped_offering_tls13_is_refused() {
     let first = client_hello(Edit {
-        remove: vec![extension::KEY_SHARE],
+        replace: vec![(extension::KEY_SHARE, vec![0x00, 0x00])],
         ..Edit::default()
     });
     let second = re_edit(
@@ -1303,6 +1359,165 @@ fn a_retried_hello_that_stopped_offering_tls13_is_refused() {
     let error = after_a_retry(&first, &second).expect_err("the server accepted a downgrade");
     assert_eq!(error, ServerError::NotTls13);
     assert_eq!(error.alert(), Some(AlertDescription::PROTOCOL_VERSION));
+}
+
+// ---------------------------------------------------------------------------
+// BoGo regressions (stage 4b-vi)
+//
+// Each of these was found by BoringSSL's suite, which is run by
+// `bogo/run.sh` and in CI; they are repeated here so the behaviour is pinned
+// by a test that needs no Go toolchain.
+// ---------------------------------------------------------------------------
+
+/// RFC 8446 §9.2: `key_share` and `supported_groups` come together. An empty
+/// share list is the way to ask for a retry; an absent one is a missing
+/// extension (BoGo `MissingKeyShare-Server`, `NoSupportedCurves`).
+#[test]
+fn a_hello_without_key_share_or_supported_groups_is_a_missing_extension() {
+    use rusty_tls::handrolled::handshake::extension;
+
+    for (gone, typ) in [
+        (extension::KEY_SHARE, extension::KEY_SHARE),
+        (extension::SUPPORTED_GROUPS, extension::SUPPORTED_GROUPS),
+    ] {
+        let error = refuse(&client_hello(Edit {
+            remove: vec![gone],
+            ..Edit::default()
+        }));
+        assert_eq!(error, ServerError::MissingExtension(typ));
+        assert_eq!(error.alert(), Some(AlertDescription::MISSING_EXTENSION));
+    }
+
+    // And the control: an empty list is answered with a retry, not refused.
+    let flight = first_flight(&client_hello(Edit {
+        replace: vec![(extension::KEY_SHARE, vec![0x00, 0x00])],
+        ..Edit::default()
+    }))
+    .expect("an empty key_share is a request for a HelloRetryRequest");
+    assert_eq!(flight[0], 22);
+}
+
+/// RFC 8446 §4.2.8: one share per group.
+#[test]
+fn a_hello_offering_a_group_twice_is_refused() {
+    use rusty_tls::handrolled::handshake::extension;
+
+    let share = vec![0u8; 32];
+    let mut entries = Vec::new();
+    for _ in 0..2 {
+        entries.extend_from_slice(&0x001du16.to_be_bytes());
+        entries.extend_from_slice(&(share.len() as u16).to_be_bytes());
+        entries.extend_from_slice(&share);
+    }
+    let mut data = (entries.len() as u16).to_be_bytes().to_vec();
+    data.extend_from_slice(&entries);
+
+    let error = refuse(&client_hello(Edit {
+        replace: vec![(extension::KEY_SHARE, data)],
+        ..Edit::default()
+    }));
+    assert_eq!(
+        error,
+        ServerError::Handshake(HandshakeError::DuplicateKeyShare(0x001d))
+    );
+    assert_eq!(error.alert(), Some(AlertDescription::ILLEGAL_PARAMETER));
+}
+
+/// RFC 8446 §4.1.2: a future `legacy_version` is tolerated; the real version is
+/// in `supported_versions`. Anything below 1.2 is not a TLS 1.3 hello.
+#[test]
+fn a_future_legacy_version_is_tolerated_and_an_old_one_is_not() {
+    let record = client_hello(Edit::default());
+    // Record header (5), handshake header (4), then client_version.
+    for version in [[0x04u8, 0x00], [0x03, 0x05], [0xff, 0xff]] {
+        let mut hello = record.clone();
+        hello[9..11].copy_from_slice(&version);
+        assert!(first_flight(&hello).is_ok(), "{version:02x?}");
+    }
+    for version in [[0x03u8, 0x02], [0x03, 0x01], [0x00, 0x00]] {
+        let mut hello = record.clone();
+        hello[9..11].copy_from_slice(&version);
+        let error = refuse(&hello);
+        assert!(
+            matches!(
+                error,
+                ServerError::Handshake(HandshakeError::UnexpectedLegacyVersion(_))
+            ),
+            "{version:02x?}: {error:?}"
+        );
+    }
+}
+
+/// An extension a server does not act on can still be malformed (BoGo
+/// `ExtensionTrailingData-*`, `RejectEmptyCertificateAuthorities`).
+#[test]
+fn the_contents_of_ignored_extensions_are_still_checked() {
+    use rusty_tls::handrolled::handshake::extension;
+
+    // server_name: a list holding one host_name "a", then a stray octet.
+    let name = vec![0x00, 0x05, 0x00, 0x00, 0x02, b'a', b'b', 0xff];
+    let error = refuse(&client_hello(Edit {
+        replace: vec![(extension::SERVER_NAME, name)],
+        ..Edit::default()
+    }));
+    assert!(matches!(error, ServerError::Handshake(_)), "{error:?}");
+    assert_eq!(error.alert(), Some(AlertDescription::DECODE_ERROR));
+
+    // certificate_authorities: an empty list, and a list with an empty name.
+    for data in [vec![0x00, 0x00], vec![0x00, 0x02, 0x00, 0x00]] {
+        let error = refuse(&client_hello(Edit {
+            append: vec![(extension::CERTIFICATE_AUTHORITIES, data.clone())],
+            ..Edit::default()
+        }));
+        assert!(
+            matches!(error, ServerError::Handshake(_)),
+            "{data:?}: {error:?}"
+        );
+    }
+}
+
+/// A plaintext record's version is a hint, but a major version other than 3 is
+/// not TLS (BoGo `GarbageInitialRecordVersion`).
+#[test]
+fn a_first_record_with_a_garbage_version_is_refused() {
+    let mut record = client_hello(Edit::default());
+    for version in [[0xffu8, 0xff], [0x02, 0x00], [0x00, 0x03]] {
+        record[1..3].copy_from_slice(&version);
+        let error = refuse(&record);
+        assert!(
+            matches!(
+                error,
+                ServerError::Record(RecordError::UnexpectedVersion(_))
+            ),
+            "{version:02x?}: {error:?}"
+        );
+    }
+    // 3.1 and 3.3 are both what real clients send.
+    for version in [[0x03u8, 0x01], [0x03, 0x03]] {
+        record[1..3].copy_from_slice(&version);
+        assert!(first_flight(&record).is_ok());
+    }
+}
+
+/// RFC 8446 §5.1: a handshake message may not span a change of keys, so
+/// whatever follows a ClientHello in its record is refused (BoGo
+/// `PartialSecondClientHelloAfterFirst`, `PartialClientFinishedWithClientHello`).
+#[test]
+fn bytes_after_a_client_hello_in_its_record_are_refused() {
+    let record = client_hello(Edit::default());
+    for tail in [&[20u8, 0][..], &[1, 0, 0, 0], &[0]] {
+        let mut fragment = record[5..].to_vec();
+        fragment.extend_from_slice(tail);
+        let mut hello = vec![22u8, 3, 1];
+        hello.extend_from_slice(&(fragment.len() as u16).to_be_bytes());
+        hello.extend_from_slice(&fragment);
+        let error = refuse(&hello);
+        assert!(
+            matches!(error, ServerError::UnexpectedMessage { .. }),
+            "{tail:?}: {error:?}"
+        );
+        assert_eq!(error.alert(), Some(AlertDescription::UNEXPECTED_MESSAGE));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1365,6 +1580,8 @@ fn client_auth_interop(client: Option<&Pki>, required: bool) -> Result<Vec<Vec<u
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1482,6 +1699,8 @@ fn a_client_certificate_from_an_unrelated_ca_is_refused() {
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1660,6 +1879,8 @@ fn against_certificate_client(corrupt_signature: bool) -> Result<(), ServerError
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1835,6 +2056,8 @@ fn a_rustls_client_resumes_against_this_server() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
 
@@ -1893,6 +2116,8 @@ fn a_corrupted_binder_is_refused_rather_than_ignored() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
 
@@ -1940,6 +2165,8 @@ fn an_unopenable_ticket_falls_back_to_a_full_handshake() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&issuing_tickets),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
     serve_rustls(&config, &client_config, |_, record| record).expect("first");
@@ -2010,6 +2237,8 @@ fn an_expired_ticket_falls_back_to_a_full_handshake() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&issuing),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
     serve_rustls(&config, &client_config, |_, record| record).expect("first");
@@ -2065,6 +2294,8 @@ fn a_ticket_does_not_resume_under_a_different_certificate() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&first_pki);
     serve_rustls(&config, &client_config, |_, record| record).expect("first");
@@ -2096,6 +2327,8 @@ fn a_ticket_does_not_resume_under_a_different_certificate() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let resumed = serve_rustls(&other, &both, |_, record| record)
         .expect("a server presenting a different chain refused instead of falling back");
@@ -2124,6 +2357,8 @@ fn an_early_data_extension_is_refused() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -2155,6 +2390,8 @@ fn a_pre_shared_key_that_is_not_last_is_refused() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -2211,6 +2448,8 @@ fn this_client_resumes_against_this_server() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
 
     let root = Certificate::parse(&pki.root_der).expect("root parses");
@@ -2280,6 +2519,7 @@ fn run_both(
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(server_config);
     let (client, hello) = ClientHandshake::start(&client_config).map_err(|e| e.to_string())?;
@@ -2364,6 +2604,8 @@ fn a_ticket_does_not_resume_under_a_suite_with_a_different_hash() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
     serve_rustls(&sha256, &client_config, |_, record| record).expect("first");
@@ -2502,6 +2744,8 @@ fn a_resumed_handshake_still_knows_which_client_it_is_talking_to() {
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
 
@@ -2559,6 +2803,8 @@ fn a_ticket_with_no_client_chain_does_not_resume_where_one_is_required() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
     serve_rustls_recording_peer(&anonymous, &client_config).expect("the first handshake");
@@ -2630,6 +2876,8 @@ fn a_ticket_with_a_client_chain_does_not_resume_where_client_auth_is_off() {
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
     serve_rustls_recording_peer(&authenticating, &client_config).expect("the first handshake");
@@ -2690,6 +2938,8 @@ fn a_client_certificate_that_expired_since_issuance_does_not_resume() {
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
     serve_rustls_recording_peer(&config, &client_config).expect("the first handshake");
@@ -2765,6 +3015,8 @@ fn an_implausible_ticket_age_falls_back_to_a_full_handshake() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
     };
     let root = Certificate::parse(&pki.root_der).expect("root parses");
     let anchors = [TrustAnchor {
@@ -2804,5 +3056,187 @@ fn an_implausible_ticket_age_falls_back_to_a_full_handshake() {
     assert!(
         !absurd.0.resumed(),
         "a ticket reporting an age an hour out of step resumed anyway"
+    );
+}
+
+/// A `ChangeCipherSpec` before the ClientHello is dropped, but a run of them
+/// is a flood and not a client being cautious.
+#[test]
+fn a_flood_of_change_cipher_specs_is_cut_off() {
+    use rusty_tls::handrolled::limits::{Flood, MAX_EMPTY_RECORDS};
+
+    let ccs: &[u8] = &[20, 3, 3, 0, 1, 1];
+    let within = vec![ccs; MAX_EMPTY_RECORDS as usize];
+    assert_eq!(feed(&within), Ok(Vec::new()));
+    let over = vec![ccs; MAX_EMPTY_RECORDS as usize + 1];
+    assert_eq!(feed(&over), Err(ServerError::Flood(Flood::EmptyRecords)));
+}
+
+/// A server that issues tickets, finishing a handshake with a client that
+/// offered these `psk_key_exchange_modes`; the bytes the server sent after the
+/// client's Finished.
+fn with_ticketing_server<T>(f: impl FnOnce(&mut ServerHandshake<'_>) -> T) -> T {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = Tickets {
+        keys: TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        now: options().time,
+        lifetime: 7200,
+        max_age_skew_ms: None,
+        count: 1,
+    };
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+        alpn: &[],
+        sni: &[],
+    };
+    f(&mut ServerHandshake::new(&config))
+}
+
+fn tickets_after_handshake(modes: &[u8]) -> Vec<u8> {
+    with_ticketing_server(|server| {
+        let client = TestClient::with_psk_modes(Some(modes));
+        let mut flight = server.read_record(&client.hello_record()).expect("flight");
+        let records = take_records(&mut flight);
+        let finished = client.finished(&records, false);
+        server
+            .read_record(&finished)
+            .expect("the handshake completes")
+    })
+}
+
+/// RFC 8446 section 4.2.9: a ticket the client said it cannot use is not sent
+/// (BoGo TLS13-ExpectNoSessionTicketOnBadKEMode-Server). `psk_dhe_ke` is the
+/// only mode this server resumes with.
+#[test]
+fn no_ticket_is_sent_to_a_client_that_cannot_redeem_one() {
+    // psk_dhe_ke(1) offered: tickets follow the handshake. The control.
+    assert!(
+        !tickets_after_handshake(&[1, 1]).is_empty(),
+        "a client that offered psk_dhe_ke got no ticket"
+    );
+    // psk_ke(0) alone, and a list with only an unknown mode: none.
+    assert!(tickets_after_handshake(&[1, 0]).is_empty());
+    assert!(tickets_after_handshake(&[1, 0x1a]).is_empty());
+}
+
+/// RFC 8446 section 4.2.9: offering a PSK without saying how it may be used is
+/// a missing extension, whether or not this server would have resumed.
+#[test]
+fn a_psk_offer_without_key_exchange_modes_is_a_missing_extension() {
+    use rusty_tls::handrolled::handshake::extension;
+
+    // A hello that ends in a pre_shared_key and has no modes extension.
+    let mut psk = vec![0x00, 0x08, 0x00, 0x02, 0xaa, 0xbb, 0x00, 0x00, 0x00, 0x00]; // one identity
+    psk.extend_from_slice(&[0x00, 0x21, 0x20]); // one 32-octet binder
+    psk.extend_from_slice(&[0u8; 32]);
+    let record = client_hello(Edit {
+        remove: vec![extension::PSK_KEY_EXCHANGE_MODES],
+        append: vec![(extension::PRE_SHARED_KEY, psk)],
+        ..Default::default()
+    });
+    assert_eq!(
+        refuse(&record),
+        ServerError::MissingExtension(extension::PSK_KEY_EXCHANGE_MODES)
+    );
+}
+
+/// RFC 8446 section 4.1.2 lets the retried hello drop PSKs the server cannot
+/// use, but not all of them (BoGo Resume-Server-OmitAllPSKsOnSecondClientHello).
+#[test]
+fn a_retried_hello_cannot_drop_every_psk() {
+    let psk = || {
+        let mut psk = vec![0x00, 0x08, 0x00, 0x02, 0xaa, 0xbb, 0x00, 0x00, 0x00, 0x00];
+        psk.extend_from_slice(&[0x00, 0x21, 0x20]);
+        psk.extend_from_slice(&[0u8; 32]);
+        psk
+    };
+    let first = client_hello(Edit {
+        replace: vec![(extension::KEY_SHARE, vec![0x00, 0x00])],
+        append: vec![(extension::PRE_SHARED_KEY, psk())],
+        ..Edit::default()
+    });
+    // The same client, now with a share the server can use.
+    let fresh = client_hello(Edit::default());
+    let parsed = messages(&fresh[5..]).expect("parses");
+    let fresh = ClientHello::parse(parsed[0].body).expect("parses");
+    let share = find(&fresh.extensions, extension::KEY_SHARE)
+        .expect("a share")
+        .to_vec();
+
+    let keeps = re_edit(
+        &first,
+        Edit {
+            replace: vec![(extension::KEY_SHARE, share.clone())],
+            ..Edit::default()
+        },
+    );
+    after_a_retry(&first, &keeps).expect("a retried hello that keeps its PSK is accepted");
+
+    let drops = re_edit(
+        &first,
+        Edit {
+            remove: vec![extension::PRE_SHARED_KEY],
+            replace: vec![(extension::KEY_SHARE, share)],
+            ..Edit::default()
+        },
+    );
+    let error = after_a_retry(&first, &drops).expect_err("every PSK was dropped");
+    assert_eq!(
+        error,
+        ServerError::MissingExtension(extension::PRE_SHARED_KEY)
+    );
+    assert_eq!(error.alert(), Some(AlertDescription::MISSING_EXTENSION));
+}
+
+/// A `pre_shared_key` whose binder list is empty cannot be encoded at all
+/// (RFC 8446 section 4.2.11: `binders<33..2^16-1>`), so it is a decode error;
+/// one with the wrong number of binders is a well-formed lie, an illegal
+/// parameter (BoGo Resume-Server-NoPSKBinder, -ExtraPSKBinder).
+#[test]
+fn a_psk_offer_with_the_wrong_binders_is_refused_by_the_right_alert() {
+    let hello_with = |binders: &[u8]| {
+        let mut psk = vec![0x00, 0x08, 0x00, 0x02, 0xaa, 0xbb, 0x00, 0x00, 0x00, 0x00];
+        psk.extend_from_slice(binders);
+        client_hello(Edit {
+            append: vec![(extension::PRE_SHARED_KEY, psk)],
+            ..Edit::default()
+        })
+    };
+    let one_binder = || {
+        let mut b = vec![0x20];
+        b.extend_from_slice(&[0u8; 32]);
+        b
+    };
+
+    // No binders at all.
+    let error = with_ticketing_server(|s| s.read_record(&hello_with(&[0x00, 0x00])))
+        .expect_err("an empty binder list");
+    assert_eq!(
+        error.alert(),
+        Some(AlertDescription::DECODE_ERROR),
+        "{error:?}"
+    );
+
+    // Two binders for one identity.
+    let mut two = one_binder();
+    two.extend(one_binder());
+    let mut body = (two.len() as u16).to_be_bytes().to_vec();
+    body.extend(two);
+    let error = with_ticketing_server(|s| s.read_record(&hello_with(&body)))
+        .expect_err("two binders for one identity");
+    assert_eq!(
+        error.alert(),
+        Some(AlertDescription::ILLEGAL_PARAMETER),
+        "{error:?}"
     );
 }

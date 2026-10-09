@@ -22,6 +22,26 @@
 //!
 //! - [`record`] — the TLS 1.3 record layer (stage 1): AEAD protection and
 //!   framing for an already-established connection.
+//! - [`record12`] — the TLS 1.2 record layer (stage 4b-i): the same AEADs as
+//!   [`record`], with a different nonce, a visible content type, and a
+//!   different additional-data layout. Protection only; no handshake yet.
+//! - [`schedule12`] — the TLS 1.2 key derivation (stage 4b-ii): the PRF, the
+//!   extended master secret, the key block and `Finished`. Extended master
+//!   secret only; the original RFC 5246 derivation is deliberately absent.
+//! - [`handshake12`] — the TLS 1.2 handshake messages (stage 4b-iii) that TLS 1.3
+//!   does not share: `ServerKeyExchange`, `ClientKeyExchange`, the bare
+//!   `Certificate`, `ServerHelloDone`.
+//! - [`client12`] — the TLS 1.2 client handshake (stage 4b-iii): ECDHE with an
+//!   AEAD, extended master secret required, no resumption, no client
+//!   certificate. The first TLS 1.2 code here that talks to a peer.
+//! - [`server12`] — the TLS 1.2 server handshake (stage 4b-iv): the same
+//!   refusals as the client, an optional client certificate that must prove
+//!   its key, and a shared [`client12::Connection12`] once established.
+//! - [`negotiate`] — one endpoint that speaks both (stage 4b-v): chooses the
+//!   version from the first message, writes and checks the `DOWNGRD` sentinel,
+//!   and refuses a `TLS_FALLBACK_SCSV` retry.
+//! - [`limits`] — the flood limits (stage 4b-vi): empty records, warning alerts
+//!   and `KeyUpdate`s a peer may send in a row before the connection is dropped.
 //! - [`der`] — a strict DER reader (stage 2a), the foundation everything
 //!   certificate-shaped sits on.
 //! - [`x509`] — certificate parsing (stage 2a). **Parsing only**: it reports
@@ -70,8 +90,8 @@
 //!   the certificate's private key and needs rotating; the module says why and
 //!   [`ticket::TicketKeys`] is the shape that makes rotating possible.
 //!
-//! TLS 1.2 (4b) is not built, and the ADR records why as a decision rather
-//! than an omission.
+//! TLS 1.2 (4b) is being built in stages; `docs/research/TLS12-DESIGN.md` has
+//! the plan. Its record layer and key derivation exist so far.
 //!
 //! # What is deliberately *not* here
 //!
@@ -81,14 +101,22 @@
 //! module's testing strategy can see.
 
 pub mod client;
+pub mod client12;
 pub mod der;
+pub mod export;
 pub mod handshake;
+pub mod handshake12;
 pub mod kx;
+pub mod limits;
 pub mod name;
+pub mod negotiate;
 pub mod path;
 pub mod record;
+pub mod record12;
 pub mod schedule;
+pub mod schedule12;
 pub mod server;
+pub mod server12;
 pub mod sign;
 pub mod ticket;
 pub mod verify;

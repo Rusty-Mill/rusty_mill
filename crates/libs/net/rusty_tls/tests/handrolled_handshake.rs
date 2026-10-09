@@ -769,8 +769,29 @@ fn an_offer_with_mismatched_lists_is_refused() {
     assert!(
         matches!(
             PresharedKeyOffer::parse(&writer.into_vec()),
-            Err(HandshakeError::PskOffer(_))
+            // Its own error, not a decode error: the lists parse fine and
+            // disagree, which RFC 8446 4.2.11 and BoGo want as illegal_parameter.
+            Err(HandshakeError::PskBinderCountMismatch)
         ),
         "an offer with two binders for one identity was accepted"
     );
+}
+
+/// A CertificateRequest whose `signature_algorithms` is present but empty is
+/// malformed (`<2..2^16-2>`), not a request nothing can answer.
+#[test]
+fn a_certificate_request_with_an_empty_scheme_list_is_malformed() {
+    use rusty_tls::handrolled::handshake::CertificateRequestMessage;
+
+    // context: none; one extension, type 13, whose list is empty.
+    let body = [0x00, 0x00, 0x06, 0x00, 0x0d, 0x00, 0x02, 0x00, 0x00];
+    assert_eq!(
+        CertificateRequestMessage::parse(&body).map(|_| ()),
+        Err(HandshakeError::Empty("signature_algorithms"))
+    );
+    // One scheme: the control.
+    let body = [
+        0x00, 0x00, 0x08, 0x00, 0x0d, 0x00, 0x04, 0x00, 0x02, 0x04, 0x03,
+    ];
+    assert!(CertificateRequestMessage::parse(&body).is_ok());
 }

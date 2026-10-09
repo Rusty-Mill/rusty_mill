@@ -212,6 +212,7 @@ jobs:
       win32: ${{ steps.plan.outputs.win32 }}
       multimodal_db: ${{ steps.plan.outputs.multimodal_db }}
       rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
+      tls_engine: ${{ steps.plan.outputs.tls_engine }}
       rleval_viewer: ${{ steps.plan.outputs.rleval_viewer }}
       rleval_app: ${{ steps.plan.outputs.rleval_app }}
       crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
@@ -1080,6 +1081,145 @@ jobs:
       - name: cargo check -p rusty_config --no-default-features
         run: cargo check -p rusty_config --no-default-features --all-targets
 
+  # The hand-rolled TLS engine (rusty_tls#25) compiles only with the cargo
+  # feature `handrolled-engine` AND `--cfg rusty_tls_handrolled`
+  # (crates/libs/net/rusty_tls/docs/adr/0002-*.md). Neither the generic clippy
+  # nor the generic test job sets the cfg, so before this job existed no CI job
+  # compiled, linted or ran a line of it, and a regression (including a
+  # security one) could land with every check green. The pre-merge crate
+  # workflow had this job; it went dead with the others when the crate moved
+  # under crates/ (see the header of this file). Ported from it.
+  rusty-tls-engine:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-tls-engine
+      queue: max
+      cancel-in-progress: false
+    name: rusty_tls native engine (handrolled cfg)
+    needs: plan
+    if: needs.plan.outputs.tls_engine == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg rusty_tls_handrolled
+      # rustdoc does not inherit RUSTFLAGS. Without this the module is absent
+      # from `cargo doc` and its doctests silently do not run.
+      RUSTDOCFLAGS: --cfg rusty_tls_handrolled
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: rusty-tls-engine
+      - name: cargo clippy -p rusty_tls --features handrolled-engine
+        run: cargo clippy -p rusty_tls --all-targets --features handrolled-engine -- -D warnings
+      - name: cargo test -p rusty_tls --features handrolled-engine
+        run: cargo test -p rusty_tls --features handrolled-engine
+      # `--all-features` rather than just `handrolled-engine`: the crate's prose
+      # links to items behind `rusty-tokio`, so a partial-feature doc build has
+      # unresolved links that say nothing about the engine. `-D warnings` is set
+      # here and not on the job's RUSTDOCFLAGS because that variable also makes
+      # the doctests compile, and denying warnings for those is a different
+      # decision.
+      - name: cargo doc -p rusty_tls --all-features
+        env:
+          RUSTDOCFLAGS: --cfg rusty_tls_handrolled -D warnings
+        run: cargo doc -p rusty_tls --all-features --no-deps
+      # `handrolled_socket_interop` is `#[ignore]`d so it does not fail on a
+      # machine without OpenSSL. The runner has it and the tests are hermetic (a
+      # loopback listener and a child process, no network), so they run here
+      # instead of staying permanently unexercised. `openssl version` first so
+      # a missing binary fails loudly rather than running zero tests.
+      - name: socket interop against OpenSSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          openssl version
+          # Four suites: the TLS 1.3 server (OpenSSL as the client), the
+          # TLS 1.2 client and server (OpenSSL as the other end), and version
+          # negotiation with the downgrade sentinel (both directions).
+          for suite in handrolled_socket_interop handrolled_client12_socket_interop \
+            handrolled_server12_socket_interop handrolled_negotiate_socket_interop; do
+            out=$(cargo test -p rusty_tls --features handrolled-engine \
+              --test "$suite" -- --ignored --nocapture --color never)
+            echo "$out"
+            # `-- --ignored` runs ONLY ignored tests: if the attribute is removed
+            # this runs zero and exits 0. Assert the count, not the exit code.
+            echo "$out" | grep -qE 'test result: ok\. [1-9][0-9]* passed' || {
+              echo "::error::the $suite suite ran no tests -- is #[ignore] still on them?"
+              exit 1
+            }
+          done
+      # Every handrolled test file is `#![cfg(all(feature = ..., cfg))]`, so a
+      # typo in the cfg name (here, in Cargo.toml's check-cfg, or in a source
+      # file) compiles each one down to zero tests and still reports success.
+      # The suites are discovered from the directory rather than listed by hand,
+      # so a new `handrolled_*.rs` is guarded the moment it exists.
+      - name: prove the gated tests actually ran
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=0
+          for f in crates/libs/net/rusty_tls/tests/handrolled_*.rs; do
+            t=$(basename "$f" .rs)
+            n=$(cargo test -p rusty_tls --features handrolled-engine --test "$t" -- --list | grep -c ': test$' || true)
+            echo "$t: $n tests"
+            if [ "$n" -eq 0 ]; then
+              echo "::error::$t compiled to zero tests -- is --cfg rusty_tls_handrolled reaching it?"
+              exit 1
+            fi
+            count=$((count + 1))
+          done
+          if [ "$count" -lt 10 ]; then
+            echo "::error::found only $count handrolled suites; the glob matched too little"
+            exit 1
+          fi
+          # Same trap, different flag: the doctests only run when RUSTDOCFLAGS
+          # carries the cfg as well.
+          d=$(cargo test -p rusty_tls --features handrolled-engine --doc -- --list | grep -c ': test$' || true)
+          echo "doctests: $d"
+          if [ "$d" -lt 2 ]; then
+            echo "::error::the handrolled doctests did not run -- is RUSTDOCFLAGS set?"
+            exit 1
+          fi
+      # BoringSSL's protocol suite (BoGo) as an independent hostile peer. The
+      # run script pins the BoringSSL commit and exits non-zero on any FAIL;
+      # tests the shim does not implement are skipped, which is why the floor
+      # below exists: a shim that skipped everything would also exit 0.
+      # No setup-go: this repo pins every action to a commit SHA and none is
+      # pinned for it. The runner image ships Go; the version is printed so a
+      # too-old one shows in the log.
+      - name: BoGo (BoringSSL protocol suite)
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
+          crates/libs/net/rusty_tls/bogo/run.sh | tee bogo.out
+          passed=$(sed -nE 's/^BoGo: ([0-9]+) passed.*/\1/p' bogo.out)
+          if [ "${passed:-0}" -lt 830 ]; then
+            echo "::error::BoGo passed only ${passed:-0} tests (expected 830+) -- is the shim skipping everything?"
+            exit 1
+          fi
+      # Evidence, not a gate: the native engine against real servers (Google's
+      # sign-in endpoints, the first candidate consumer's peers), compared with
+      # the rustls-backed stream. A third party's server must not decide whether
+      # a PR merges, so a failure here is a visible warning, not a red job; read
+      # the step summary. The runner reaches the internet directly, which the
+      # sandboxes this was developed in do not (they re-sign TLS with their own
+      # CA, and the test says so when it sees that).
+      - name: live internet (non-blocking)
+        continue-on-error: true
+        shell: bash
+        # The script always prints and summarises the output, even when cargo
+        # fails (a bare command substitution under `set -e` would lose it), and
+        # fails the step on a failure or a zero-test run. It is tested offline
+        # by test_live_internet_check.py.
+        run: >-
+          bash .github/scripts/live_internet_check.sh
+          cargo test -p rusty_tls --features handrolled-engine
+          --test handrolled_live -- --ignored --nocapture --color never
+
   # ---------------------------------------------------------------------------
   # Rocket League family: RLEvalSystem's two product-specific checks, ported from
   # its pre-merge CI (baileyrd/RLEvalSystem .github/workflows/ci.yml). The
@@ -1478,6 +1618,7 @@ jobs:
       - multimodal-db-feature-sets
       - multimodal-db-msrv
       - rusty-config-no-std-check
+      - rusty-tls-engine
       - crypto-constant-time
       - rleval-viewer-gl-smoke
       - rleval-app-feature-sets
