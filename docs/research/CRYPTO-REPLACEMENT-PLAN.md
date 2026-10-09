@@ -801,12 +801,18 @@ deliberately simple (no window table); that costs speed.
   `select` was read by hand (SIMD and/or/andn, no branch), and the scalar bit becomes a mask via `sar` and
   `bt`/`sbb`. **Limits:** the verdict branch itself is allowed and reveals only valid/invalid (a rejected
   candidate is discarded; for a valid key the answer is fixed), the site check assumes valgrind's PIE load base
-  0x108000 and fails if that changes, and everything else in the earlier caveats stands. One timing run with the corrected method
-  (class chosen outside the clock, one shared key slot) gave |t| 3.54 (P-256) and 0.72 (P-384) for sparse
-  against dense scalars, with A/A baselines of 1.56 and 1.64; 3.54 is close to the 4.5 threshold, so read the
-  40-repetition series (own A/A baseline per curve, own sample counts) rather than this run. A first version
-  of the test chose between two separately stored keys inside the timed closure (review finding on #576)
-  and its numbers are discarded.
+  0x108000 and fails if that changes, and everything else in the earlier caveats stands. Two full records exist and **both are kept**:
+  `EVIDENCE-2026-10-09-ecdh-run1-FAILED.txt` (clean tree at `200ab7b5`) failed one criterion, HMAC-SHA512
+  fixed-vs-other-key (`rusty_sha2`, unchanged code), 2 alarms of 40 (|t| 4.54, 4.74) against an allowance of 1;
+  `EVIDENCE-2026-10-09-ecdh-run2.txt` (clean tree at `77396880`, started on an idle machine, which run 1 was not)
+  passed every criterion. Neither threshold nor allowance rule was changed. Across the two runs the alarms fell in
+  different tests (run 1: HMAC-SHA512 2, HMAC-SHA256 1, ChaCha20-Poly1305 open 1, X25519 A/A 1; run 2: ECDH P-256
+  sparse-vs-dense 1, at |t| 4.83), which is what noise looks like and is **not** proof of it. The ECDH P-256
+  sparse-vs-dense series is the one to watch: its maxima were 3.54 (single run), 4.31 and 4.83 against about 3.3
+  to 3.7 for its A/A baselines; a second reading of that test on a quiet machine, and a look at what differs
+  between the classes beyond the scalar (the key slot is rewritten in `prepare`), would be the next step. A first
+  version of the ECDH test chose between two separately stored keys inside the timed closure (review finding on
+  #576) and its numbers are discarded.
 - *Side effect on earlier evidence:* adding this code twice changed LLVM's inlining of `Modulus::add` (once into
   `Field::add`, 6 jumps to 16, then back). `Modulus::add` is now `#[inline(never)]` so its originally reviewed
   count of 6 is stable; the counts were re-read each time. Every pin is per binary.
