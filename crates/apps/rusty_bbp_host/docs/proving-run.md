@@ -56,7 +56,8 @@ bbp mod --repo-path /tmp/bbp/target --work /tmp/bbp/work --agents $P/agents.json
 Shell B, the human (a fresh shell: set the same variables first):
 
 ```sh
-export MILL=/path/to/rusty_mill BBP_DIR=/tmp/bbp/store BBP_TASK=slug-1 PATH="$MILL/target/release:$PATH"
+export MILL=/path/to/rusty_mill            # its own command: the next line expands $MILL before export runs
+export BBP_DIR=/tmp/bbp/store BBP_TASK=slug-1 PATH="$MILL/target/release:$PATH"
 watch -n 5 'bbp card | python3 -m json.tool | head -40'
 bbp human approve-plan  ART                 # at plan_gate: ART is the spec's artifact id from the card
 bbp human approve-merge ART RUN             # at merge_gate: the candidate and its selected run
@@ -75,18 +76,21 @@ Logs: `$BBP_DIR/agents/<sha256(task)>/turn-N.log` per harness, `$BBP_DIR/mcp/<sh
 
 `agents.json` restricts each harness two ways. `--tools ""` removes every built-in tool from the Planner, Tester and Reviewer, so their only actions are the five bbp tools (`--allowedTools` alone would pre-approve those calls without removing Read, Bash and the rest). The Coder keeps `Bash,Edit,Read,Write` for its own clone. This is the model's tool surface, not an OS sandbox: the process still runs as your user, which is the harness-isolation question the record is meant to answer.
 
-Every launcher runs with `--output-format stream-json --verbose`, so `turn-N.log` is one JSON object per line: `system/init` (tools and MCP servers the model saw), `assistant` messages with their `tool_use` blocks, `user` messages with the `tool_result` each call returned (a bbp refusal is the `isError` result with its code), and a final `result`. Each line is written as it happens. When the harness ends its own turn with a terminal bbp call (candidate, verdict, gated request), the moderator kills the process group, so the `result` line and any text after that call may be missing; everything up to and including that call is on disk.
+Every launcher runs with `--output-format stream-json --verbose`, so `turn-N.log` is one JSON object per line: `system/init` (the tools and MCP servers the model saw), `assistant` messages with their `tool_use` blocks, `user` messages with the `tool_result` each call returned (a bbp refusal is a result with `is_error`), and a final `result`. Each line is written as it happens.
+
+What the log does and does not promise. A `tool_use` is written before the call is made, so every call the model issued is on disk. The call that ends the turn (a candidate, a verdict, a gated request) is different: the core records the turn's end before `bbp mcp` renders the response, and the moderator may see that and kill the process group first. So the terminal call's `tool_result`, the `result` line and anything after them may be missing, by design, and the log alone cannot say whether that call was accepted. The store can: the card and its artifacts are the record of what the core admitted. Read the harness's intent from the log and its effect from the card.
 
 Validate this once, after turn 1 ends, before trusting the run:
 
 ```sh
 L=$BBP_DIR/agents/$(printf %s "$BBP_TASK" | sha256sum | cut -c1-64)/turn-1.log
-jq -r 'select(.type=="assistant") | .message.content[] | select(.type=="tool_use") | .name' "$L"   # the calls, in order
+jq -r 'select(.type=="system" and .subtype=="init") | .tools[]' "$L"            # an MCP-only role lists only mcp__bbp__*
+jq -c 'select(.type=="assistant") | .message.content[] | select(.type=="tool_use") | {name, input}' "$L"   # every call, in order
 jq -r 'select(.type=="user") | .message.content[] | select(.type=="tool_result" and .is_error==true) | .content' "$L"   # refusals
-jq -r 'select(.type=="system" and .subtype=="init") | .tools[]' "$L"   # must list only mcp__bbp__* for an MCP-only role
+bbp card
 ```
 
-If the first command shows no `mcp__bbp__post` or `mcp__bbp__put_artifact` for a turn the card says ended on one, the log is losing events and the run is not evidence; stop and fix the launcher before continuing.
+The last `tool_use` must be the call the card says ended the turn: for the Planner, `mcp__bbp__post` with `input.kind == "request_decision"` and `input.gate == true` whose `refs` name the spec id the card now shows, and the card in `plan_gate`. Match the terminal call by name and input, not by "a post or a put happened": the Planner's earlier spec `put_artifact` is also in the log and proves nothing about the gate. If the last `tool_use` is not that call, or the card did not move, the harness ended without its terminal call (it forfeited the turn, or was killed early) and the run is not evidence yet; read the log's tail and the moderator's stderr before continuing.
 
 ## 5. Record
 
