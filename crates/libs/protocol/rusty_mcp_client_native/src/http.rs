@@ -510,6 +510,10 @@ impl Transport for HttpTransport {
     fn set_protocol_version(&mut self, version: &ProtocolVersion) {
         *lock(&self.shared.version) = Some(version.clone());
     }
+
+    fn clear_protocol_version(&mut self) {
+        *lock(&self.shared.version) = None;
+    }
 }
 
 impl Drop for HttpTransport {

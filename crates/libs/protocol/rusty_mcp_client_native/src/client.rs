@@ -105,6 +105,13 @@ impl<T: Transport, H: Handler> Client<T, H> {
                         return Ok(());
                     }
                 }
+                // Some servers want a discovery to carry `_meta` like any
+                // other request, and call its absence invalid params.
+                Err(ClientError::Rpc(e)) if e.code == ErrorCode::INVALID_PARAMS => {
+                    if self.discover_with_meta()? {
+                        return Ok(());
+                    }
+                }
                 Err(ClientError::Rpc(e)) if self.session.falls_back_to_initialize(&e) => {}
                 Err(e) => return Err(e),
             }
@@ -116,6 +123,36 @@ impl<T: Transport, H: Handler> Client<T, H> {
         let initialized = self.session.initialized_notification();
         self.transport.send(&initialized)?;
         Ok(())
+    }
+
+    /// The discovery retried with `_meta`. Whether it settled a stateless
+    /// revision; `false` leaves the transport as it was, for `initialize`.
+    fn discover_with_meta(&mut self) -> Result<bool, ClientError> {
+        let Some(tried) = self.session.discovery_version() else {
+            return Ok(false);
+        };
+        // An HTTP server checks the revision header against `_meta`.
+        self.transport.set_protocol_version(&tried);
+        let (id, message) = self.session.discover_request_with_meta(&tried);
+        let outcome = match self.exchange(id, &message, &HeaderOverride::default()) {
+            Ok(result) => self.session.on_discover(&result),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(true) => {
+                self.announce_version();
+                Ok(true)
+            }
+            Ok(false) => {
+                self.transport.clear_protocol_version();
+                Ok(false)
+            }
+            Err(ClientError::Rpc(e)) if self.session.falls_back_to_initialize(&e) => {
+                self.transport.clear_protocol_version();
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn announce_version(&mut self) {

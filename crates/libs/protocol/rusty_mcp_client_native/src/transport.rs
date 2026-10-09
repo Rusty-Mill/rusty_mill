@@ -75,6 +75,9 @@ pub trait Transport {
     /// in every request (HTTP's `MCP-Protocol-Version`) start doing so;
     /// the others ignore it.
     fn set_protocol_version(&mut self, _version: &ProtocolVersion) {}
+
+    /// Stop naming a revision: the one set was only being tried.
+    fn clear_protocol_version(&mut self) {}
 }
 
 #[cfg(test)]

@@ -162,15 +162,36 @@ impl ClientSession {
         id
     }
 
-    /// `server/discover`. Like every stateless request it carries `_meta`
-    /// naming the revision tried (the newest stateless one this client
-    /// speaks), the client and its capabilities: some servers refuse a
-    /// discovery without it rather than falling back.
+    /// `server/discover`.
     pub fn discover_request(&mut self) -> (RequestId, Message) {
         let id = self.allocate();
-        let tried = self.config.versions.iter().find(|v| v.is_stateless());
-        // Nothing is negotiated yet, so name the revision being tried.
-        let params = self.with_meta_for(None, tried);
+        let message = Message::Request {
+            id: id.clone(),
+            method: method::DISCOVER.to_owned(),
+            params: None,
+        };
+        (id, message)
+    }
+
+    /// The revision a discovery tries: the newest stateless one this client
+    /// speaks.
+    pub fn discovery_version(&self) -> Option<ProtocolVersion> {
+        self.config
+            .versions
+            .iter()
+            .find(|v| v.is_stateless())
+            .cloned()
+    }
+
+    /// `server/discover` again, for a server that refused the bare one with
+    /// `-32602`: with `_meta` naming `version`, the client and its
+    /// capabilities, as every other stateless request has.
+    pub fn discover_request_with_meta(
+        &mut self,
+        version: &ProtocolVersion,
+    ) -> (RequestId, Message) {
+        let params = self.with_meta_for(None, Some(version));
+        let id = self.allocate();
         let message = Message::Request {
             id: id.clone(),
             method: method::DISCOVER.to_owned(),
