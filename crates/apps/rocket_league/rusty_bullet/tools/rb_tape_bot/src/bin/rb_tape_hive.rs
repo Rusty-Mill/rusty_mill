@@ -9,16 +9,10 @@
 //! start every car of the scenario as a player of one team with the
 //! hivemind flag (`rb_run_tapes` does).
 
+use rb_rlbot_client::{run_hivemind, Agent, Connection, Environment, Outbox, StartingInfo};
+use rb_rlbot_wire::{ConnectionSettings, GamePacket, MatchPhase, PlayerInput};
 use rb_scenario::Scenario;
 use rb_tape_bot::{controller, start_state};
-use rlbot::{
-    agents::{run_hivemind_agent, HivemindAgent},
-    flat::{
-        ControllableTeamInfo, FieldInfo, GamePacket, MatchConfiguration, MatchPhase, PlayerInput,
-    },
-    util::{AgentEnvironment, PacketQueue},
-    RLBotConnection,
-};
 
 struct TapeHive {
     /// Game car indices this process drives, from core.
@@ -31,17 +25,13 @@ struct TapeHive {
     start_frame: Option<u32>,
 }
 
-impl HivemindAgent for TapeHive {
-    fn new(
-        controllable_team_info: ControllableTeamInfo,
-        _match_configuration: MatchConfiguration,
-        _field_info: FieldInfo,
-        _packet_queue: &mut PacketQueue,
-    ) -> Self {
+impl TapeHive {
+    fn new(info: &StartingInfo) -> Self {
         let path = std::env::var("RB_TAPE").expect("set RB_TAPE to the scenario JSON path");
         let text = std::fs::read_to_string(&path).expect("read the scenario file");
         let scenario = Scenario::from_json(&text).expect("parse the scenario");
-        let indices: Vec<u32> = controllable_team_info
+        let indices: Vec<u32> = info
+            .controllable_team_info
             .controllables
             .iter()
             .map(|controllable| controllable.index)
@@ -60,8 +50,10 @@ impl HivemindAgent for TapeHive {
             start_frame: None,
         }
     }
+}
 
-    fn tick(&mut self, game_packet: GamePacket, packet_queue: &mut PacketQueue) {
+impl Agent for TapeHive {
+    fn tick(&mut self, game_packet: &GamePacket, packet_queue: &mut Outbox) {
         let info = &game_packet.match_info;
         // Same gate as `rb_tape_bot`: act only when the physics frame
         // advanced (core reports `Paused` throughout freeplay).
@@ -108,13 +100,19 @@ impl HivemindAgent for TapeHive {
 }
 
 fn main() {
-    let AgentEnvironment {
+    let Environment {
         server_addr,
         agent_id,
-    } = AgentEnvironment::from_env();
+    } = Environment::from_env();
     let agent_id = agent_id.unwrap_or_else(|| "rusty_bullet/tape_hive".into());
-    let connection = RLBotConnection::new(&server_addr).expect("connect to RLBot core");
-    run_hivemind_agent::<TapeHive>(agent_id.clone(), false, false, connection)
-        .expect("run_hivemind_agent crashed");
+    let mut connection = Connection::connect(&server_addr).expect("connect to RLBot core");
+    let settings = ConnectionSettings {
+        agent_id: agent_id.clone(),
+        wants_ball_predictions: false,
+        wants_comms: false,
+        close_between_matches: true,
+    };
+    run_hivemind(&mut connection, settings, |info, _| TapeHive::new(info))
+        .expect("run_hivemind crashed");
     println!("tape hive `{agent_id}` exited");
 }

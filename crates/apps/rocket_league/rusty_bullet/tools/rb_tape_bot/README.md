@@ -5,10 +5,17 @@ state, so the BakkesMod capture plugin
 (`bakkesmod-plugin/rusty_bullet_capture`) records a repeatable run of one
 mechanic. Plan and reasoning: `docs/research/BOT-CAPTURE-PLAN.md`.
 
-Standalone package, not in the root workspace (its own `[workspace]`), so the
-`rlbot` dependency stays out of the main build and CI. The scenario format
-lives in the workspace crate `crates/rb_scenario`, which this package and
+A member of the root workspace. It talks to RLBot core through the in-repo
+`rb_rlbot_client` and `rb_rlbot_wire` crates (no external `rlbot` dependency
+since stage 4 of `../../../rlbot/PLAN.md`). The scenario format lives in the
+workspace crate `crates/rb_scenario`, which this package and
 `rb-verify --scenario` share.
+
+Build from this directory: `.cargo/config.toml` keeps the output in
+`./target`, where `bot.toml`, `bots/*.bot.toml` and `rb_run_tapes` start the
+bots from (`target\release\rb_tape_bot.exe`). `cargo build -p rb_tape_bot` from
+the repository root builds the same code into the workspace `target/`
+instead, which is fine for CI and for tests but is not where core looks.
 
 Status: **run against the game on 2026-10-06** (RLBot core v5.0.0-rc17,
 Epic Rocket League, BakkesMod injector 32): all eleven scenarios captured
@@ -205,9 +212,11 @@ a file; the GUI reconnects on the next Start Match.
 - **Alignment.** `rb-verify --scenario ... --against` found the start in
   every capture with lag 0 to 2. It now places recorded frames by
   timestamp, because of the holes below.
-- **Protocol.** `rlbot` 0.6.0 (newest crate, schema `c38374e`) against
-  core rc17 (schema `f90c844`): the `.fbs` diff is comments and one
-  `deprecated` attribute; no crate bump needed.
+- **Protocol.** Schema `c38374e` (what `rb_rlbot_wire` pins; the former
+  `rlbot` 0.6.0 crate used the same) against core rc17 (schema `f90c844`):
+  the `.fbs` diff is comments and one `deprecated` attribute; no bump needed.
+  The 2026-10-06 session ran on the external crate; the in-repo client's
+  first run against the game is the stage 4 check below.
 - **Recorded inputs are all zero for the bot's car.** The plugin reads
   `CarWrapper::GetInput()`, which stays neutral when RLBot drives the car,
   so the "recorded inputs that differ from the tape" count only reflects
@@ -406,3 +415,21 @@ tape, no settling. The bot then replays the performance exactly, and
 `--scenario <it> --against <new capture>` scores the replay. The capture
 must be 120 Hz (mean frame interval within 5%) and must carry inputs, so a
 replay-derived capture cannot be cut.
+
+## Stage 4 check against the game (manual, once)
+
+CI cannot run Rocket League, so what it proves is the bots against a stand-in
+core (`tests/processes.rs`: handshake, start state, one input per physics frame,
+car index and hivemind behaviour). The remaining check is the real core accepting
+the in-repo client's bytes. With the game and core set up as above:
+
+1. `cargo build --release` in this directory.
+2. `target\release\rb_probe.exe 6`: packets flow at about 120 per second, phase
+   and car 0 print (this alone proves the handshake and `GamePacket` decoding).
+3. `target\release\rb_match_log.exe --out match_log.jsonl --seconds 60 --goal-after 10`
+   and the same with `--tie-up` / `--overtime-goal`: the four match-log scenarios
+   (a real match, state setting, goal, replay, kickoff) end with `N packets written`.
+4. `target\release\rb_run_tapes.exe --repeat 1 pogo` (one car), then a two-car hivemind
+   scenario and one with a car on each team: each capture exists and scores as before.
+
+Record the outcome in the stage 4 PR.

@@ -28,7 +28,7 @@ these.
     `rb_domain`; `rb-verify` scores it against recorded ground truth.
   - `crates/rb_scenario` — scenario files (initial state plus input tape)
     for scripted mechanic captures; read by `rb-verify --scenario` and by
-    `tools/rb_tape_bot` (a standalone RLBot bot outside the workspace). Depends
+    `tools/rb_tape_bot` (an RLBot bot, a workspace member since stage 4). Depends
     only on `rb_domain`.
   - `crates/rb_env` — stepping environment over `rb_physics_bullet`
     (`reset` / `step` / observe, ADR-0060); the caller surface for scenario
