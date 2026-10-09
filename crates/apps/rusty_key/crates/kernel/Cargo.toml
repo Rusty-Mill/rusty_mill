@@ -25,7 +25,7 @@ fake = []
 
 [dev-dependencies]
 rk-observe.workspace = true
-rk-kernel ={ path = ".", features = ["fake"] }
+rk-kernel = { path = ".", features = ["fake"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 # De-inherited from rusty_key's own former `[workspace.lints]`: this
