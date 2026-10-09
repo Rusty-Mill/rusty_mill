@@ -432,6 +432,32 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("format('run-{0}', github.run_id)", key)
         self.assertEqual(cancel, "${{ github.event_name == 'pull_request' }}")
         self.assertNotIn("merge_group", key)
+    def job_text(self, job: str) -> str:
+        body = self.workflow.split("\njobs:\n", 1)[1]
+        chunk = body.split(f"\n  {job}:\n", 1)[1]
+        return re.split(r"\n  [a-z][a-z0-9-]+:\n", chunk, maxsplit=1)[0]
+
+    def test_heavy_matrix_jobs_wait_for_the_format_check(self) -> None:
+        # A formatting typo should cost ~30 s, not start the 45-minute shards.
+        for job in ("clippy", "test"):
+            with self.subTest(job=job):
+                self.assertIn("    needs: [plan, fmt]\n", self.job_text(job))
+        self.assertNotIn("    needs: fmt\n", self.workflow)
+
+    def test_sccache_trial_is_windows_test_shards_only(self) -> None:
+        self.assertEqual(self.workflow.count("sccache: ${{"), 1)
+        test = self.job_text("test")
+        self.assertIn("sccache: ${{ runner.os == 'Windows' && 'true' || 'false' }}", test)
+        self.assertIn("sccache --show-stats", test)
+
+    def test_sccache_is_opt_in_and_replaces_the_target_cache(self) -> None:
+        action = (REPO / ".github" / "actions" / "setup-build-env" / "action.yml").read_text()
+        inputs = action.split("runs:", 1)[0]
+        self.assertRegex(inputs, r"sccache:\n(?:.*\n)*?    default: 'false'")
+        self.assertIn("cache-targets: ${{ inputs.sccache != 'true' }}", action)
+        self.assertEqual(action.count("if: inputs.sccache == 'true'"), 2)
+        # A floating sccache binary would make cold/warm comparisons meaningless.
+        self.assertRegex(action, r"mozilla-actions/sccache-action@[0-9a-f]{40}.*\n\s+with:\n(?:\s+#.*\n)*\s+version: v\d+\.\d+\.\d+")
 
     def test_workflows_default_to_read_only_token(self) -> None:
         for path in (WORKFLOW, BASELINE_WORKFLOW):
