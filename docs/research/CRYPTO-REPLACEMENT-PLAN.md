@@ -381,7 +381,7 @@ these conditions", not "constant time". A small `|t|` from a statistical test is
 detection (dudect is a detector, not a verifier); a taint run covers the paths it executes; a
 pinned jump count detects change, not independence from secrets. Each result must be read
 with its recorded conditions: sample counts, input classes, CPU, compiler, flags and
-repetitions, which `docs/research/crypto-evidence/EVIDENCE-2026-10-08.txt` records, with the raw
+repetitions, which `docs/research/crypto-evidence/EVIDENCE-2026-10-09.txt` records, with the raw
 numbers (40 repetitions per test, with no-leak baselines). Effort is aimed at the code that touches secrets (HMAC and HKDF keys, AEAD keys,
 X25519 scalars); signature verification handles public inputs and gets correctness evidence,
 not constant-time evidence.
@@ -577,7 +577,7 @@ the honest current position.
 | Arithmetic review of the shared Montgomery core: carry bounds, reduction invariants, limb conversions, adversarial boundaries. Sharing the code concentrates the impact of a defect. | Boundary tests added (`mont::tests::adversarial_boundaries_match_biguint`, moduli of 1 to 128 limbs built from all-ones, near-2^(64k), sparse and top-bit patterns; operands 0, 1, n-1, n-2, R; mul, add, sub, enter/leave against an independent bignum): no defect found. `add`/`sub` assume inputs below `n` and `mul` assumes `a*b < n*R`; documented in code, enforced by callers. **A human review of the invariants has not happened.** |
 | AEAD failure tests: corrupted tag, AAD and ciphertext; no unauthenticated plaintext exposed; full-length tag comparison; counter limit; explicit nonce contract. | Corrupted tag/AAD/ciphertext/nonce: tested (differential and unit). Failed open leaves the buffer undecrypted: tested. Wrong-length and empty tags rejected: tested. Counter limit: `MAX_LEN` is now `u32::MAX * 64` (274,877,906,880 bytes, RFC 8439 section 2.8; it was one block short, found by Codex round 1) and its value and boundary arithmetic are pinned by a unit test, but a message of that size is never actually sealed. Nonce contract: stated in the type's docs (never reuse under one key), not enforced by the API, and the caller owns uniqueness. |
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
-| Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-08.txt`. **Review findings: none exist yet.** |
+| Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-09.txt`. **Review findings: none exist yet.** |
 | `ring` usage inventory including randomness and helper APIs. | Section 2.3. |
 | Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Not done. Required.** |
 
@@ -596,6 +596,25 @@ Observation for the human reviewer: in every timing series so far, the HMAC-SHA5
 has had the highest tail (4.33, 4.80 at the latest record; no-leak baselines 3.0 to 4.95). That is
 inside the allowance and inside the noise seen, but it is the series I would repeat on quiet
 hardware first.
+
+## 11a-2. Independent review, round 2 (Codex, PR #540, reviewed commit `112a53cb`)
+
+Three P2 findings, all in the timing-evidence collector (evidence correctness; none shows a
+primitive leak or forgery). Automated pass; it does not satisfy the human-review gate.
+
+| Finding | Verified? | Disposition |
+| --- | --- | --- |
+| P2: `series()` ignored its crate argument and ran the newest `target/release/deps/timing-*` containing the test name, so the three same-named A/A baselines could all come from one crate's binary. | **Yes** (by reading the code; the old record's three baselines were not shown to be wrong, but nothing guaranteed them right). | Fixed: `timing_series.py` takes each crate's executable from Cargo's compiler-artifact JSON for that package and records its path and hash. Test: three same-named calibration tests, shuffled mtimes. |
+| P2: a missing test printed "not found" and succeeded; timing build failures were ignored, so a custom `CARGO_TARGET_DIR` or a stale binary could yield "all checks passed" with no series run. | **Yes.** | Fixed: build, discovery, a missing test, zero repetitions and runs without a printed `|t|` each fail the record. Tests: custom target directory, missing test, failed build with an old executable present, zero repetitions, no output. |
+| P2: baseline alarms came from process exit codes, but the A/A tests only print `|t|`, so a baseline printing 20 counted as zero alarms and the allowance collapsed to one. | **Yes.** | Fixed: alarms are printed `|t|` values >= 4.5, per crate; exit codes are tracked separately as execution failures. Test: above-threshold A/A output, boundary of the `2*baseline+1` allowance. |
+
+The 12 collector tests (`test_timing_series.py`) use a fake cargo and fake test binaries, run in the
+`crypto-constant-time` CI job, and were mutation-checked (breaking the alarm count or the package
+filter fails them). `EVIDENCE-2026-10-09.txt` was regenerated at `fe31044c` with the new collector;
+its three A/A baselines now come from three different executables (see the identity lines). It
+reports one A/A crossing (HMAC-SHA512, max 5.32) and none for ChaCha20-Poly1305 or X25519. The
+previous record (commit `ea0e234`) used the old collector and is not evidence for the new one; it
+was replaced, not kept.
 
 ## 12. What I did not verify
 
