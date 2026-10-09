@@ -1,5 +1,7 @@
 # Scope of `rusty_mcp_proto` (MCP track, step A2)
 
+> **Status:** the scoping record only. The implementation is [#577](https://github.com/Rusty-Mill/rusty_mill/pull/577) (`crates/libs/protocol/rusty_mcp_proto`); a parallel build of the first slices in #586 was dropped in its favour. The "Next" section at the end is superseded.
+
 Method: every `use rmcp...` and inline `rmcp::...` path in the non-Nexus crates (`crates/`, excluding `apps/nexus`) was extracted and flattened to type and macro names. 123 distinct `rmcp` names are used. Counts below are *crates* that use a name. This is a static name inventory; the **wire format has not yet been compared** against `rmcp` (that is the oracle test in A2).
 
 Who uses `rmcp` (names touched): `rusty-mcp` 80, `agentgateway-mcp` 52, `rusty-mcp-demo` 50, `agentgateway` 38, `remind_me_remote` 28, `adk-mcp` 28, `rp-mcp` 27, `rusty_homelab_mcp` 18, `rusty_mcp/template` 17, `rk-app` 14, `rusty-mcp-client` 11.
