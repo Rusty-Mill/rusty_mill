@@ -1,4 +1,4 @@
-# ADR-0008: Monorepo operating model
+# ADR-0009: Monorepo operating model
 
 Status: Proposed
 Date: 2026-10-08

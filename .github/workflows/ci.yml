@@ -34,11 +34,11 @@ on:
   # incidents without creating a no-op commit.
   workflow_dispatch:
   # Weekly full-workspace sweep: catches drift that scoped PR runs cannot see
-  # (ADR-0008). `ci_plan.py` treats any event other than push/PR as full.
+  # (ADR-0009). `ci_plan.py` treats any event other than push/PR as full.
   schedule:
     - cron: "17 3 * * 1"
 
-# Least privilege (ADR-0008): no job here writes to the repository.
+# Least privilege (ADR-0009): no job here writes to the repository.
 permissions:
   contents: read
 
@@ -155,7 +155,7 @@ jobs:
       - run: python3 .github/scripts/generate_workspace_map.py /tmp/metadata.json --verify docs/WORKSPACE-MAP.md
 
   cargo-deny:
-    # Advisories, licences, sources (deny.toml, ADR-0008). Workspace-wide like
+    # Advisories, licences, sources (deny.toml, ADR-0009). Workspace-wide like
     # dependency-policy, so it runs for every event and the weekly sweep picks
     # up new RustSec entries. Non-blocking until the first findings are
     # triaged: then delete `continue-on-error`.
@@ -1346,7 +1346,7 @@ jobs:
         run: cargo clippy --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub --all-targets -- -D warnings
 
   required-gate:
-    # The one check branch protection requires (ADR-0008). Planned-out jobs
+    # The one check branch protection requires (ADR-0009). Planned-out jobs
     # are `skipped`, which passes; a failed or cancelled job fails the gate.
     # `test_ci_workflow` fails if a job is missing from `needs`.
     name: required-gate
