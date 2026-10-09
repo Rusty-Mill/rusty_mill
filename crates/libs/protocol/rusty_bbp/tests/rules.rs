@@ -515,3 +515,25 @@ fn r18_terminal_rejects_everything() {
         Code::Terminal
     );
 }
+
+/// Tokens and run secrets are keyed by the master secret, which is not in the
+/// log: a state folded from the same log under another master derives other
+/// tokens, and the core refuses them.
+#[test]
+fn tokens_are_keyed_by_the_master_secret_not_the_log() {
+    let mut fx = Fx::new();
+    let turn = fx.st().turn.as_ref().expect("planner turn").id;
+    let events = fx.d.store.events(&fx.st().task, 0).expect("events");
+    let other = TaskState::fold_with(fx.st().task.clone(), [7; 32], &events);
+    let forged = other.token_for(&pid(Role::Planner), turn);
+    assert_ne!(forged, fx.st().token_for(&pid(Role::Planner), turn));
+    let op = fx.op();
+    let r = fx.agent_with(
+        Role::Planner,
+        Some(forged),
+        op,
+        AgentAction::Post(ask(Role::Coder, "forged")),
+    );
+    assert_eq!(rejected(r), Code::StaleTurn);
+    assert_ne!(other.secret_for(RunId(1)), fx.st().secret_for(RunId(1)));
+}

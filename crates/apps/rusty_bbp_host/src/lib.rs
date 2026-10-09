@@ -30,12 +30,50 @@ pub fn now() -> Time {
     Time(ms)
 }
 
-/// Open the file store at `dir` and rebuild `task`'s state.
+/// Open the file store at `dir` and rebuild `task`'s state under the
+/// directory's master secret.
 pub fn open_driver(dir: &Path, task: &TaskId) -> Result<Driver<FsStore>, String> {
+    let master = master::load(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
-    let mut d = Driver::new(store, task.clone());
+    let mut d = Driver::new(store, task.clone()).with_master(master);
     d.reload().map_err(|e| format!("{e:?}"))?;
     Ok(d)
+}
+
+/// The per-directory master secret that keys every execution token and run
+/// secret. `<dir>/master`, 64 hex characters, owner-readable only. It is the
+/// one thing a reader of the log must not have.
+pub mod master {
+    use rusty_bbp::Sha256;
+    use std::path::Path;
+
+    fn path(dir: &Path) -> std::path::PathBuf {
+        dir.join("master")
+    }
+
+    /// Create the master if the directory has none, from `rusty_rand`.
+    pub fn ensure(dir: &Path) -> Result<[u8; 32], String> {
+        if path(dir).exists() {
+            return load(dir);
+        }
+        let bytes = rusty_rand::bytes(32).map_err(|e| format!("rusty_rand: {e}"))?;
+        let mut master = [0u8; 32];
+        master.copy_from_slice(&bytes);
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let hex = Sha256(master).hex();
+        rusty_atomic_file::write_private(&path(dir), hex.as_bytes())
+            .map_err(|e| format!("master: {e}"))?;
+        Ok(master)
+    }
+
+    /// Read the master; a directory without one was never opened.
+    pub fn load(dir: &Path) -> Result<[u8; 32], String> {
+        let text = std::fs::read_to_string(path(dir))
+            .map_err(|e| format!("{}: {e} (open the task first)", path(dir).display()))?;
+        Sha256::from_hex(text.trim())
+            .map(|s| s.0)
+            .ok_or_else(|| "master file is not 64 hex characters".to_owned())
+    }
 }
 
 /// A fresh operation id for a call the agent did not name.
