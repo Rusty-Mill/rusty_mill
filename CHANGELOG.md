@@ -8,6 +8,9 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- **`rusty_pk::ed25519::verify` accepts small-order public keys again** (owner decision, reverses the round 3 rejection from #540): matches `ring` and RFC 8032, which does not require rejection. The identity key verifies `R = identity, S = 0` for every message, so callers admitting keys from untrusted input must screen them. The Ed25519 vectors are unchanged; tests now assert agreement with `ring` on the identity encodings.
+
 ### Added
 - **Merge queue support** (ADR-0009 §8): `ci.yml` runs on `merge_group`; `ci_plan.py` scopes a queue entry against `merge_group.base_sha` (`--merge-base`) instead of a full sweep; concurrency stays event-isolated (pinned by tests). The ADR carries the ruleset checklist (`required-gate`, merge commit, group size 1, build concurrency 3, 120-minute timeout, empty bypass list). The queue becomes active when that ruleset is applied by hand.
 - **Codex review round 3 on #540** (one P1, four P2, all verified): `rusty_pk::ed25519::verify` now rejects small-order public keys (stricter than `ring`, which accepts the identity-key forgery `R = identity, S = 0` for every message); the taint scripts no longer read a crashed example as "0 errors" (shared `taint_lib.sh`, fake-`valgrind` test); `collect.sh` runs the ignored planted-timing-leak test and fails on vector-manifest mismatches (`check_manifests.py`; it found `x25519_test.json` missing from the `rusty_pk` manifest, now pinned along with the two generated corpora); disassembly jump counts must match exactly (drift detection only; a same-count substitution is not caught, so the disassembly still needs a human read). Plan section 11a-3; the evidence record is regenerated.

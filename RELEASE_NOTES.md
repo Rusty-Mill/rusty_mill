@@ -13,6 +13,10 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - Ed25519 accepts small-order public keys again
+
+- **Changed (rusty_pk):** reverses the rejection added after Codex round 3 on #540, by owner decision. Behaviour now matches `ring` and RFC 8032 (which does not require rejecting small-order keys). **Known limitation:** the identity key verifies `R = identity, S = 0` for every message; callers must screen untrusted keys themselves. The evidence record `EVIDENCE-2026-10-09.txt` predates this change; Ed25519 verify is variable time and outside the constant-time budgets, so its counts are unaffected, but the vector run was not regenerated.
+
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
 - **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).

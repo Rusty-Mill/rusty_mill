@@ -11,17 +11,12 @@
 //! - cofactorless check: `encode([S]B - [h]A)` must equal the 32 bytes of `R`,
 //!   so a non-canonical `R` can never match.
 //!
-//! One deliberate deviation is *stricter* than `ring`: a public key of small
-//! order (one of the eight torsion points, including the identity) is rejected.
-//! For the identity, `[h]A` vanishes for every `h`, so the single signature
-//! `R = identity, S = 0` verifies every message, and `ring` accepts that. For the
-//! other seven torsion points `[h]A` depends on `h` modulo the point's order (2, 4
-//! or 8), so the equation does not hold for every message, but a signature can
-//! still be produced without any secret; all eight are rejected as one weak-key
-//! policy. Rejecting is the safe direction for a key admitted from a certificate
-//! or trusted configuration. (Codex review round 3 on #540.) Small-order `R` is a
-//! separate policy and is not rejected: a valid zero-nonce signature has
-//! `R = identity`, `S = h*a mod L`.
+//! Small-order public keys (the eight torsion points, including the identity) are
+//! **accepted**, as in `ring` and RFC 8032, which does not require rejecting them. For
+//! the identity, `[h]A` vanishes for every `h`, so `R = identity, S = 0` verifies every
+//! message; for the other seven torsion points a secret-free forgery exists for some
+//! messages. A caller that admits keys from untrusted input must screen small-order keys
+//! itself. (Owner decision after Codex review round 3 on #540, which had this rejected.)
 //!
 //! All inputs are public, so the arithmetic is variable time.
 
@@ -49,9 +44,6 @@ pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(),
 
     let curve = Edwards::new().ok_or(VerifyError)?;
     let a = curve.decode(key).ok_or(VerifyError)?;
-    if curve.is_small_order(&a) {
-        return Err(VerifyError);
-    }
     let neg_a = curve.negate(&a);
 
     let mut hasher = Sha512::new();
@@ -187,12 +179,6 @@ impl Edwards {
         }
     }
 
-    /// Whether `p` lies in the order-8 torsion subgroup, i.e. `[8]p` is the identity.
-    fn is_small_order(&self, p: &Point) -> bool {
-        let eight_p = self.double(&self.double(&self.double(p)));
-        self.encode(&eight_p) == self.encode(&self.identity())
-    }
-
     /// `s*B + h*Q` (Shamir). Scalars are plain limbs. Variable time.
     fn mul2_vartime(&self, s: &E, h: &E, q: &Point) -> Point {
         let bq = self.add(&self.base, q);
@@ -293,81 +279,23 @@ mod tests {
         assert_ne!(c.encode(&p), c.encode(&c.identity()));
     }
 
-    /// The eight torsion points (libsodium's small-order blocklist), as encoded.
-    const TORSION: [&str; 8] = [
-        "0100000000000000000000000000000000000000000000000000000000000000",
-        "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
-        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-        "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
-        "0000000000000000000000000000000000000000000000000000000000000080",
-        "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
-    ];
-
-    fn key(hex: &str) -> [u8; 32] {
-        let mut out = [0u8; 32];
-        for (i, b) in out.iter_mut().enumerate() {
-            *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
-        }
-        out
-    }
-
-    /// Non-canonical aliases of torsion points (`y` in `[p, 2^255)` is read mod `p`):
-    /// `y = p` is `y = 0` (order 4), `y = p + 1` is the identity; each with the sign bit
-    /// clear and set. Decoded small-order rejection must cover them; a byte blacklist
-    /// of the canonical encodings would not.
-    fn aliases() -> [[u8; 32]; 4] {
-        let mut out = [[0xffu8; 32]; 4];
-        for (k, (low, sign)) in
-            out.iter_mut()
-                .zip([(0xedu8, 0u8), (0xed, 0x80), (0xee, 0), (0xee, 0x80)])
-        {
-            k[0] = low; // p = 2^255 - 19 is ed ff .. ff 7f; p + 1 is ee ff .. ff 7f
-            k[31] = 0x7f | sign;
-        }
-        out
-    }
-
+    /// Small-order keys are accepted, as in `ring`: the identity key verifies
+    /// `R = identity, S = 0` for every message, under each of its encodings
+    /// (canonical, `y = p + 1`, `x = 0` with the sign bit set).
     #[test]
-    fn non_canonical_aliases_of_torsion_points_are_rejected_too() {
-        let c = Edwards::new().unwrap();
-        let mut forged = [0u8; 64];
-        forged[0] = 1;
-        for k in aliases() {
-            let p = c.decode(&k).expect("aliases decode, as in ring");
-            assert!(c.is_small_order(&p), "{k:02x?}");
-            assert!(verify(&k, b"msg", &forged).is_err(), "{k:02x?}");
-        }
-    }
-
-    #[test]
-    fn every_torsion_point_is_small_order_and_the_base_point_is_not() {
-        let c = Edwards::new().unwrap();
-        for hex in TORSION {
-            let p = c.decode(&key(hex)).expect(hex);
-            assert!(c.is_small_order(&p), "{hex}");
-        }
-        assert!(!c.is_small_order(&c.base));
-        let two_b = c.double(&c.base);
-        assert!(!c.is_small_order(&two_b));
-    }
-
-    /// A small-order key must never verify. Without the check, the identity key
-    /// accepts `R = identity, S = 0` for every message (as does `ring`); for the
-    /// other torsion points the same shapes verify only some messages, so this
-    /// asserts rejection for the shapes tried, not a count of messages.
-    #[test]
-    fn small_order_public_keys_are_rejected() {
-        let mut forged = [0u8; 64];
-        forged[0] = 1; // R = identity, S = 0
-        for hex in TORSION {
-            let pk = key(hex);
+    fn identity_public_key_is_accepted_in_every_encoding() {
+        let mut canonical = [0u8; 32];
+        canonical[0] = 1;
+        let mut alias = [0xffu8; 32];
+        alias[0] = 0xee; // y = p + 1
+        alias[31] = 0x7f;
+        let mut signed = canonical;
+        signed[31] |= 0x80;
+        let mut sig = [0u8; 64];
+        sig[0] = 1; // R = identity, S = 0
+        for pk in [canonical, alias, signed] {
             for msg in [&b""[..], b"a", b"another message"] {
-                assert!(verify(&pk, msg, &forged).is_err(), "{hex}");
-                let mut other = [0u8; 64];
-                other[..32].copy_from_slice(&pk); // R = the key itself, S = 0
-                assert!(verify(&pk, msg, &other).is_err(), "{hex}");
+                assert!(verify(&pk, msg, &sig).is_ok(), "{pk:02x?}");
             }
         }
     }

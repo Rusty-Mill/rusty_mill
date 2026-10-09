@@ -74,34 +74,18 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   section 5.1.3 rejects a point encoding whose `y` is not below `p`, and one with `x = 0`
   and the sign bit set. `ring` 0.17.14 (its `x25519_ge_frombytes_vartime`, read in
   `crypto/curve25519/curve25519.c`) accepts both, and this implementation reproduces that
-  on purpose so a swap does not change which keys verify. **One deviation goes the other
-  way, stricter than `ring`:** a public key of small order (the eight torsion points,
-  including the identity) is rejected (Codex round 3, P1). For the **identity** specifically,
-  `[h]A` vanishes for every `h`, so the single signature `R = identity, S = 0` verifies every
-  message; `ring` accepts it. For the other seven torsion points `[h]A` depends on `h` modulo the
-  point's order (2, 4 or 8), so the equation does not collapse for every message: a forger can only
-  hit messages (or choices among the few torsion `R` encodings) for which it holds. That is still
-  forgery with no secret, and cheap, but its exact success rate was not measured, so no
-  universal-message claim is made for them. Rejecting all eight is the broader weak-key policy. Regression tests: `identity_key_encodings_are_rejected_unlike_ring`
-  in `tests/ed25519_vectors.rs` (identity, `y = p + 1`, `x = 0` with sign bit set: we reject,
-  `ring` is asserted to accept, three messages each; an off-curve `y`: both reject) and
-  `small_order_public_keys_are_rejected` / `every_torsion_point_is_small_order_and_the_base_point_is_not`
-  in `src/ed25519.rs` (all eight torsion encodings, several messages; the first fails without
-  the check) and `non_canonical_aliases_of_torsion_points_are_rejected_too` (the accepted
-  `y = p` and `y = p + 1` aliases, both sign bits; the rejection is on the decoded point, not a
-  byte blacklist). **What the flaw was:** with a small-order key the verification is
-  message-independent for the identity (one signature verifies every message) and
-  secret-free for the other small-order keys. **Precondition:** it needs such a
-  key to be admitted as a trusted verification identity (a certificate or configuration that
-  accepts it); it does not forge under an honest key or forge a CA signature, and this PR has
-  no TLS consumer. The rejection sits in `verify`, i.e. at the verification boundary, so every
-  caller gets it; a separate strict-vs-compatible API was not needed because no caller wants
-  the weak behaviour. Full prime-subgroup checks and restrictions on `R` are separate policy
-  choices, not made here. Small-order `R` is not rejected, and no impossibility is claimed: a valid
-  zero-nonce signature has `R = identity` and `S = h*a mod L`, so a rule rejecting small-order `R` would
-  reject a mathematically valid (if astronomically rare) signature. That is a separate policy choice
-  and does not affect the public-key rejection above. The `ring` parity statement is therefore "same verdicts on the recorded corpus,
-  except small-order public keys". **Security implication of the encoding leniencies, not yet
+  on purpose so a swap does not change which keys verify. **Small-order public keys (the
+  eight torsion points, including the identity) are accepted, as in `ring`; RFC 8032 does not
+  require rejecting them. Owner decision, reversing the round 3 rejection.** For the identity,
+  `[h]A` vanishes for every `h`, so `R = identity, S = 0` verifies every message under that key;
+  for the other seven torsion points a secret-free forgery works for some messages (success rate
+  not measured, no universal claim). **Consequence:** a caller that admits a verification key
+  from untrusted input must screen small-order keys itself; `verify` does not. It does not forge
+  under an honest key or forge a CA signature, and this PR has no TLS consumer. Regression test:
+  `identity_key_encodings_match_ring` in `tests/ed25519_vectors.rs` (identity, `y = p + 1`, `x = 0`
+  with sign bit set: both accept; an off-curve `y`: both reject) and
+  `identity_public_key_is_accepted_in_every_encoding` in `src/ed25519.rs`. Small-order `R` is
+  accepted too (a zero-nonce signature has `R = identity`, `S = h*a mod L`). The `ring` parity statement is "same verdicts on the recorded corpus". **Security implication of the encoding leniencies, not yet
   reviewed:** a public key then has more than one accepted encoding, so code that treats the
   key bytes as an identity (a hash input, a map key, a pin) can see two names for one key.
   Signature malleability is separate and not introduced here (`S` must be canonical). For TLS
@@ -654,7 +638,7 @@ checked by running code here.
 
 | Finding | Verified? | Disposition |
 | --- | --- | --- |
-| P1: an Ed25519 public key of small order (e.g. the identity) leaves no `[h]A` term, so `R = identity, S = 0` verifies every message. | **Yes for the identity** (the old `identity_key_encodings_match_ring` test asserted exactly this acceptance, and `ring` accepts it); for the other seven torsion points the same signature shapes verify only for some messages (`[h]A` depends on `h` modulo the point's order), still without any secret. All eight are rejected. | Fixed, stricter than `ring` on purpose: `[8]A = identity` keys are rejected before hashing (section 2 stage notes). Regression tests fail without the check (mutation-checked) and cover all eight torsion encodings. This is a new documented deviation from `ring` parity, in the safe direction; the owner may revert it by deleting one `if`, but should not without a reason. |
+| P1: an Ed25519 public key of small order (e.g. the identity) leaves no `[h]A` term, so `R = identity, S = 0` verifies every message. | **Yes for the identity** (the old `identity_key_encodings_match_ring` test asserted exactly this acceptance, and `ring` accepts it); for the other seven torsion points the same signature shapes verify only for some messages (`[h]A` depends on `h` modulo the point's order), still without any secret. All eight are rejected. | Was fixed by rejecting `[8]A = identity` keys; **reverted by owner decision** (accept, as `ring` and RFC 8032 do; callers screen keys). See section 2 stage notes. The finding stands as a documented caller precondition. |
 | P2: the taint scripts ended in `\|\| true`, so an example that panicked, was misspelled, or a missing `valgrind` read as "0 errors", the expected answer for the clean modes. | **Yes**, in all three `ct_check.sh` and in `valgrind_selftest.sh`. | Fixed in one shared `rusty_ct_check/scripts/taint_lib.sh`: each mode runs once, output to a file, and a non-zero status fails the check. `test_taint_lib.sh` uses a fake `valgrind` (clean, diagnostic, exit 3, exit 127, diagnostic plus failure); weakening the status check fails it. |
 | P2: `collect.sh` never ran the ignored `planted_early_exit_is_detected` test, so the timing detector's own sensitivity was not part of the record. | **Yes.** | Fixed: `collect.sh` runs it explicitly (`--ignored --exact`), propagates its status and requires exactly one passing test. It passed here (0.02 s). |
 | P2: the vector hashes were printed, not compared with the manifests (and the two generated corpora were not pinned). | **Yes**, and the check found a real gap on its first run: `x25519_test.json` was vendored but missing from the `rusty_pk` manifest. | Fixed: `check_manifests.py` fails on a hash mismatch (including whitespace-only drift), a missing file, an unlisted file, a file listed twice and a malformed pin line; both generated corpora and `x25519_test.json` are now pinned; it runs in `collect.sh` and in the `crypto-constant-time` CI job; 9 tests. **Limit:** the manifest sits beside the vectors, so this catches drift and accidents, not a deliberate change of corpus and manifest together; provenance rests on the pinned upstream commit and human review. All 27 vendored Wycheproof files were also compared byte for byte with upstream at `12fd3aaf` (identical). |

@@ -36,11 +36,10 @@ fn wycheproof_and_ring_agree_on_every_case() {
 /// Encodings Wycheproof does not cover, where an implementation could differ
 /// from ring: the identity (a valid point of order 1) under several encodings,
 /// with `S = 0` and `R` = identity, which verifies every message under such a
-/// key. `ring` accepts these; we deliberately do not (small-order public keys
-/// are rejected, a documented deviation stricter than ring, Codex round 3 on
-/// #540). Every other case must still make the same decision as ring.
+/// key. Small-order public keys are accepted by design (as by ring and RFC
+/// 8032); every case must make the same decision as ring.
 #[test]
-fn identity_key_encodings_are_rejected_unlike_ring() {
+fn identity_key_encodings_match_ring() {
     let identity = {
         let mut b = [0u8; 32];
         b[0] = 1;
@@ -56,8 +55,7 @@ fn identity_key_encodings_are_rejected_unlike_ring() {
     let mut sig = [0u8; 64];
     sig[..32].copy_from_slice(&identity);
     let mut report = Vec::new();
-    // (name, key, small order: ring accepts, we reject)
-    for (name, key, small_order) in [
+    for (name, key, accepted) in [
         ("identity", identity, true),
         ("non-canonical y", non_canonical_y, true),
         ("x=0, sign bit set", x_zero_sign_set, true),
@@ -69,16 +67,8 @@ fn identity_key_encodings_are_rejected_unlike_ring() {
                 .verify(msg, &sig)
                 .is_ok();
             report.push((name, ours, ring));
-            assert!(
-                !ours,
-                "{name}: a small-order or invalid key must not verify"
-            );
-            if small_order {
-                // Non-vacuous: ring really does accept the forgery we reject.
-                assert!(ring, "{name}: ring is expected to accept this encoding");
-            } else {
-                assert_eq!(ours, ring, "{name}");
-            }
+            assert_eq!(ours, ring, "{name}");
+            assert_eq!(ours, accepted, "{name}");
         }
     }
     eprintln!("(case, ours, ring): {report:?}");
