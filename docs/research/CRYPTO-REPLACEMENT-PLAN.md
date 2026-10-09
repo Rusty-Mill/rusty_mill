@@ -637,10 +637,12 @@ primitive leak or forgery). Automated pass; it does not satisfy the human-review
 The 12 collector tests (`test_timing_series.py`) use a fake cargo and fake test binaries, run in the
 `crypto-constant-time` CI job, and were mutation-checked (breaking the alarm count or the package
 filter fails them). `EVIDENCE-2026-10-09.txt` was first regenerated at `fe31044c` with the new collector and then
-again at `06a7312f` after the round 3 fixes (section 11a-3); the current file is the second run (clean tree,
-exit 0, planted timing leak detected, manifests matched, tooling self-tests passed). Its three A/A
-baselines come from three different executables (see the identity lines). It reports one A/A
-crossing (HMAC-SHA512, max 4.54) and none for ChaCha20-Poly1305 or X25519. The
+again at `06a7312f` after the round 3 fixes (section 11a-3), and finally at `e3266f2e` (the
+current file; see the evidence status below). Its three A/A baselines come from three different
+executables (see the identity lines). The final run has no A/A or leak-series crossing of 4.5 in
+any of its 10 series of 40 runs (largest |t| 4.40, the HMAC-SHA512 A/A baseline); an earlier run
+had one A/A crossing, which is the 2% no-leak false-positive rate showing, so a single run
+is not stable evidence of either. The
 previous record (commit `ea0e234`) used the old collector and is not evidence for the new one; it
 was replaced, not kept.
 
@@ -667,11 +669,11 @@ named are closed: `planted_leak.sh` (the planted-leak guard, with `test_planted_
 injecting a non-zero exit, a filter that runs zero tests, two tests and a missing cargo) and
 `test_disasm_audit.py` now also runs the script against a fake `objdump` (exact count,
 higher/lower count, a symbol matching nothing, a division, `objdump` failing).
-**Evidence status:** `EVIDENCE-2026-10-09.txt` was produced at `06a7312f` (clean tree, exit 0).
-Later commits change comments, documentation, tests and merges of `main`, not primitive or
-script behaviour, apart from the guard refactor above (`planted_leak.sh`), which `collect.sh`
-now calls; that refactor's behaviour was exercised by its tests but is not in the record, so
-the record does not yet cover it. Regenerate it before relying on it as the final record.
+**Evidence status:** `EVIDENCE-2026-10-09.txt` was produced at `e3266f2e` (clean tree, exit 0),
+which includes the guard refactor (`planted_leak.sh`), the manifest check and all the tooling
+self-tests, and so covers the final collector. Later commits are merges of `main` that touch
+none of `crates/foundation`, `docs/research` or the CI scripts, plus the record itself.
+It is still evidence, not proof: one container VM, x86-64, 40 repetitions per series.
 
 ## 12. What I did not verify
 
