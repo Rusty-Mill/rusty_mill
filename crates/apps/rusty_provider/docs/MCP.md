@@ -14,8 +14,11 @@ older ones), in both directions at once:
   upstream's tools namespaced `"{upstream}/{tool}"` so names never collide.
   Each upstream is reached with `rusty-mcp-client`, and its tools are offered
   through the server's `ToolSource` hook, asked afresh on every `tools/list`.
-  Calls to one upstream run one at a time over its connection, so a call that
-  hangs holds up the ones behind it until `timeout_secs` ends it.
+  Each connection runs one call at a time, so an HTTP upstream gets
+  `[mcp].connections` of them (default 4) and a call goes to the one with the
+  fewest in flight; a call that hangs holds up only its own connection until
+  `timeout_secs` ends it. A stdio upstream is one child process and gets one
+  connection.
 
 Both are merged into one `tools/list`/`tools/call` surface
 (`rp_mcp::build`, which returns one `rusty_mcp_server::Server`) — a client sees rusty_provider's
@@ -63,6 +66,8 @@ enabled = true
 reconnect_backoff_secs = 1        # optional, this is the default
 reconnect_backoff_max_secs = 60   # optional, this is the default
 # max_reconnect_attempts = 10     # optional -- unset (default) retries forever
+timeout_secs = 30                 # optional, per forwarded call; this is the default
+connections = 4                   # optional, per HTTP upstream; this is the default
 ```
 
 The delay doubles after each failed attempt, capped at

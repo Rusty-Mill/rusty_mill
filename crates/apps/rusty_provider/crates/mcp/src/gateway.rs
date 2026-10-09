@@ -17,10 +17,14 @@
 //! `max_reconnect_attempts`), so a transient upstream outage recovers on its
 //! own instead of needing a full `rp-server` restart.
 //!
-//! Calls to one upstream run one at a time over its connection, so a call
-//! that hangs holds up the ones behind it until `[mcp].timeout_secs` ends it.
+//! Each connection runs one call at a time, so an HTTP upstream is given
+//! `[mcp].connections` of them and a call goes to the one with the fewest in
+//! flight; a call that hangs holds up only its own connection until
+//! `[mcp].timeout_secs` ends it. A stdio upstream is one child process and
+//! gets a single connection.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +44,79 @@ pub const LIVENESS_POLL: Duration = Duration::from_secs(2);
 
 /// Connected upstreams by configured name, in name order so the tool list is
 /// stable between requests.
-type Peers = BTreeMap<String, Arc<McpClient>>;
+type Peers = BTreeMap<String, Arc<Pool>>;
+
+/// The connections to one upstream.
+struct Pool {
+    slots: Vec<Slot>,
+}
+
+struct Slot {
+    client: McpClient,
+    /// Calls running on `client` now.
+    busy: AtomicUsize,
+}
+
+/// A connection taken from a [`Pool`] for one call; releases it on drop.
+struct Lease<'a> {
+    slot: &'a Slot,
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        self.slot.busy.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Lease<'_> {
+    fn client(&self) -> &McpClient {
+        &self.slot.client
+    }
+}
+
+impl Pool {
+    /// `size` connections to `upstream` (at least one; a stdio upstream gets
+    /// exactly one).
+    async fn connect(
+        upstream: &McpUpstreamConfig,
+        size: usize,
+        call_timeout: Duration,
+    ) -> Result<Self, McpClientError> {
+        let size = match upstream.transport {
+            McpUpstreamTransport::Stdio { .. } => 1,
+            McpUpstreamTransport::Http { .. } => size.max(1),
+        };
+        let mut slots = Vec::with_capacity(size);
+        for _ in 0..size {
+            slots.push(Slot {
+                client: connect_one(upstream, call_timeout).await?,
+                busy: AtomicUsize::new(0),
+            });
+        }
+        Ok(Self { slots })
+    }
+
+    /// The connection with the fewest calls in flight (the first of equals).
+    fn lease(&self) -> Lease<'_> {
+        let slot = self
+            .slots
+            .iter()
+            .min_by_key(|s| s.busy.load(Ordering::SeqCst))
+            .unwrap_or(&self.slots[0]);
+        slot.busy.fetch_add(1, Ordering::SeqCst);
+        Lease { slot }
+    }
+
+    /// Whether every connection still works.
+    async fn is_alive(&self) -> bool {
+        for slot in &self.slots {
+            if !slot.client.is_alive().await {
+                return false;
+            }
+        }
+        true
+    }
+}
 
 /// Backoff policy for reconnecting a dropped (previously-connected)
 /// upstream. Doesn't apply to a startup connection failure -- see this
@@ -93,21 +169,23 @@ impl McpGateway {
     /// own background supervisor task that reconnects it with backoff if
     /// the connection later drops -- see this module's doc comment.
     pub async fn connect(upstreams: &[McpUpstreamConfig], config: &McpConfig) -> Self {
+        let size = config.connections;
         let peers = Arc::new(RwLock::new(BTreeMap::new()));
         let policy = ReconnectPolicy::from(config);
         let timeout = Duration::from_secs(config.timeout_secs);
         for upstream in upstreams {
-            match connect_one(upstream, timeout).await {
-                Ok(client) => {
+            match Pool::connect(upstream, size, timeout).await {
+                Ok(pool) => {
                     tracing::info!(upstream = %upstream.name, "connected MCP upstream");
-                    let client = Arc::new(client);
+                    let pool = Arc::new(pool);
                     peers
                         .write()
                         .await
-                        .insert(upstream.name.clone(), Arc::clone(&client));
+                        .insert(upstream.name.clone(), Arc::clone(&pool));
                     spawn_supervisor(
                         upstream.clone(),
-                        client,
+                        pool,
+                        size,
                         Arc::clone(&peers),
                         policy,
                         timeout,
@@ -135,8 +213,9 @@ impl McpGateway {
     pub async fn list_tools(&self) -> Vec<Tool> {
         let peers = self.peers.read().await;
         let mut tools = Vec::new();
-        for (name, client) in peers.iter() {
-            match tokio::time::timeout(self.timeout, client.list_tools()).await {
+        for (name, pool) in peers.iter() {
+            let lease = pool.lease();
+            match tokio::time::timeout(self.timeout, lease.client().list_tools()).await {
                 Ok(Ok(listed)) => {
                     for mut tool in listed {
                         tool.name = format!("{name}/{}", tool.name);
@@ -167,14 +246,15 @@ impl McpGateway {
         tool: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<CallToolResult, GatewayError> {
-        let client = {
+        let pool = {
             let peers = self.peers.read().await;
             peers
                 .get(upstream)
                 .cloned()
                 .ok_or_else(|| GatewayError::UnknownUpstream(upstream.to_string()))?
         };
-        tokio::time::timeout(self.timeout, client.call_tool(tool, arguments))
+        let lease = pool.lease();
+        tokio::time::timeout(self.timeout, lease.client().call_tool(tool, arguments))
             .await
             .map_err(|_elapsed| GatewayError::Timeout(upstream.to_string()))?
             .map_err(GatewayError::Service)
@@ -270,15 +350,16 @@ async fn connect_one(
     McpClient::connect_with(&upstream.name, &spec_for(upstream), call_timeout).await
 }
 
-/// Watches one connected upstream. Every [`LIVENESS_POLL`] it asks the client
-/// whether the connection still works; once it does not, it removes the
+/// Watches one connected upstream. Every [`LIVENESS_POLL`] it asks the pool
+/// whether its connections still work; once it does not, it removes the
 /// upstream from `peers` (so `list_tools`/`call_tool` stop attempting doomed
 /// calls to it) and retries [`connect_one`] with exponential backoff until it
 /// reconnects or `policy.max_attempts` is exhausted, at which point this
 /// upstream is given up on for good -- same as if it had failed at startup.
 fn spawn_supervisor(
     upstream: McpUpstreamConfig,
-    mut client: Arc<McpClient>,
+    mut pool: Arc<Pool>,
+    size: usize,
     peers: Arc<RwLock<Peers>>,
     policy: ReconnectPolicy,
     call_timeout: Duration,
@@ -286,7 +367,7 @@ fn spawn_supervisor(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(LIVENESS_POLL).await;
-            if client.is_alive().await {
+            if pool.is_alive().await {
                 continue;
             }
             tracing::warn!(
@@ -308,10 +389,10 @@ fn spawn_supervisor(
                 }
                 tokio::time::sleep(backoff.delay_for(attempts)).await;
                 attempts += 1;
-                match connect_one(&upstream, call_timeout).await {
-                    Ok(new_client) => {
+                match Pool::connect(&upstream, size, call_timeout).await {
+                    Ok(new_pool) => {
                         tracing::info!(upstream = %upstream.name, attempts, "reconnected MCP upstream");
-                        break Some(Arc::new(new_client));
+                        break Some(Arc::new(new_pool));
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -326,12 +407,12 @@ fn spawn_supervisor(
             };
 
             match reconnected {
-                Some(new_client) => {
+                Some(new_pool) => {
                     peers
                         .write()
                         .await
-                        .insert(upstream.name.clone(), Arc::clone(&new_client));
-                    client = new_client;
+                        .insert(upstream.name.clone(), Arc::clone(&new_pool));
+                    pool = new_pool;
                 }
                 None => return,
             }

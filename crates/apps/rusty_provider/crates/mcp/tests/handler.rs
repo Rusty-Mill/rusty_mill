@@ -79,6 +79,16 @@ async fn connected(
     upstreams: Vec<McpUpstreamConfig>,
     timeout_secs: u64,
 ) -> (McpClient, ShutdownHandle) {
+    let (addr, stop) = serve_rp(upstreams, timeout_secs, 4).await;
+    (McpClient::connect("rp", &spec(addr)).await.unwrap(), stop)
+}
+
+/// The rp-mcp server alone: where it listens, and how to stop it.
+async fn serve_rp(
+    upstreams: Vec<McpUpstreamConfig>,
+    timeout_secs: u64,
+    connections: usize,
+) -> (SocketAddr, ShutdownHandle) {
     let router =
         Arc::new(Router::from_config(&Config::from_toml_str("providers = {}").unwrap()).await);
     let config = McpConfig {
@@ -87,6 +97,7 @@ async fn connected(
         reconnect_backoff_secs: 1,
         reconnect_backoff_max_secs: 1,
         timeout_secs,
+        connections,
         ..McpConfig::default()
     };
     let server = rp_mcp::build(&config, router).await.unwrap();
@@ -100,8 +111,7 @@ async fn connected(
     let addr = http.local_addr().unwrap();
     let stop = http.shutdown_handle().unwrap();
     std::thread::spawn(move || http.run().unwrap());
-    let client = McpClient::connect("rp", &spec(addr)).await.unwrap();
-    (client, stop)
+    (addr, stop)
 }
 
 fn upstream_config(addr: SocketAddr) -> McpUpstreamConfig {
@@ -247,6 +257,72 @@ async fn a_restarted_upstream_is_reconnected_by_the_supervisor() {
         "the upstream never came back"
     );
     client.call_tool("up/echo", None).await.unwrap();
+    stop.shutdown();
+    up_stop.shutdown();
+}
+
+/// How long `calls` take when each runs `up/sleep` against the rp server,
+/// one client per call (a client runs its calls one at a time).
+async fn time_parallel_sleeps(connections: usize, calls: usize) -> Duration {
+    let (up, up_stop) = serve(sleeping_upstream(), "127.0.0.1:0");
+    let (rp, stop) = serve_rp(vec![upstream_config(up)], 10, connections).await;
+    let mut clients = Vec::new();
+    for _ in 0..calls {
+        clients.push(McpClient::connect("rp", &spec(rp)).await.unwrap());
+    }
+    let t = Instant::now();
+    let mut pending = Vec::new();
+    for client in clients {
+        pending.push(tokio::spawn(async move {
+            client.call_tool("up/sleep", None).await.unwrap();
+        }));
+    }
+    for p in pending {
+        p.await.unwrap();
+    }
+    let took = t.elapsed();
+    stop.shutdown();
+    up_stop.shutdown();
+    took
+}
+
+fn sleeping_upstream() -> Server {
+    Server::builder("sleepy", "1")
+        .tool(Tool::new("sleep", schema()), |_c, _p| {
+            std::thread::sleep(Duration::from_millis(800));
+            Ok(text("rested"))
+        })
+        .build()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn calls_to_one_upstream_run_in_parallel_up_to_the_pool_size() {
+    let parallel = time_parallel_sleeps(3, 3).await;
+    assert!(parallel < Duration::from_millis(2000), "{parallel:?}");
+    let serial = time_parallel_sleeps(1, 3).await;
+    assert!(serial >= Duration::from_millis(2300), "{serial:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_hung_call_does_not_block_a_free_connection() {
+    let (up, up_stop) = serve(upstream_server(), "127.0.0.1:0");
+    let (rp, stop) = serve_rp(vec![upstream_config(up)], 2, 2).await;
+    let slow = McpClient::connect("rp", &spec(rp)).await.unwrap();
+    let fast = McpClient::connect("rp", &spec(rp)).await.unwrap();
+    let hung = tokio::spawn(async move { slow.call_tool("up/sleep", None).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let t = Instant::now();
+    fast.call_tool("up/echo", None).await.unwrap();
+    assert!(
+        t.elapsed() < Duration::from_millis(1000),
+        "{:?}",
+        t.elapsed()
+    );
+    assert!(
+        hung.await.unwrap().is_err(),
+        "the hung call should time out"
+    );
     stop.shutdown();
     up_stop.shutdown();
 }

@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rp-mcp connection pool (pending review)
+
+- **Added:** `[mcp].connections` (default 4): connections per HTTP upstream, least-busy first, so calls to one upstream run in parallel again.
+- **Note:** a stateful upstream no longer sees all calls on one connection.
+
+---
+
 ## 2026-10-09 - rp-mcp and rp-server on the native MCP stack (pending review)
 
 - **Changed (breaking for `rp-mcp`'s API):** `rp_mcp::build` returns a `rusty_mcp_server::Server`; no `rmcp`, `rusty-mcp` or `schemars` in `rp-mcp` / `rp-server` (non-dev). Gateway on `rusty-mcp-client`; mounted through a small axum bridge.
