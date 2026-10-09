@@ -1001,6 +1001,8 @@ struct Negotiated {
     resumed: bool,
     /// The application protocol the server selected, if any.
     alpn: Option<Vec<u8>>,
+    /// Whether the server answered `server_name` (RFC 6066 section 3).
+    name_acknowledged: bool,
 }
 
 enum State {
@@ -1767,6 +1769,7 @@ impl ClientHandshake<'_> {
                 certificate_request: None,
                 resumed: resumed.is_some(),
                 alpn: None,
+                name_acknowledged: false,
             }),
         };
         Ok(Vec::new())
@@ -2035,6 +2038,9 @@ impl ClientHandshake<'_> {
                         negotiated.alpn = Some(selected.to_vec());
                         continue;
                     }
+                    if ext.typ == extension::SERVER_NAME {
+                        negotiated.name_acknowledged = true;
+                    }
                     if ext.typ == extension::SERVER_NAME && !ext.data.is_empty() {
                         return Err(ClientError::Handshake(HandshakeError::Malformed(
                             "a server_name acknowledgement is not empty",
@@ -2269,6 +2275,8 @@ impl ClientHandshake<'_> {
             certificates: negotiated.certificates,
             resumed: negotiated.resumed,
             alpn: negotiated.alpn,
+            server_name: None,
+            name_acknowledged: negotiated.name_acknowledged,
             resumption_master,
             noise: Noise::default(),
         }));
@@ -2294,6 +2302,10 @@ pub struct Connection {
     resumed: bool,
     /// The application protocol selected by ALPN, if one was.
     alpn: Option<Vec<u8>>,
+    /// On a server connection, the `host_name` the client asked for.
+    server_name: Option<String>,
+    /// On a client connection, whether the server answered its `server_name`.
+    name_acknowledged: bool,
     /// `res master`, from which a ticket's PSK is derived.
     ///
     /// Empty for a connection built by the server half, which does not issue
@@ -2425,6 +2437,8 @@ impl Connection {
             certificates,
             resumed: false,
             alpn: None,
+            server_name: None,
+            name_acknowledged: false,
             // The server half does not issue tickets, so it has no resumption
             // secret to hand out. See the field's own docs.
             resumption_master: Vec::new(),
@@ -2465,6 +2479,24 @@ impl Connection {
     pub(super) fn with_alpn(mut self, alpn: Option<Vec<u8>>) -> Self {
         self.alpn = alpn;
         self
+    }
+
+    /// On a server connection, the `host_name` the client asked for (RFC 6066),
+    /// whether or not a certificate was chosen by it. Always `None` on a client.
+    pub fn server_name(&self) -> Option<&str> {
+        self.server_name.as_deref()
+    }
+
+    pub(super) fn with_server_name(mut self, name: Option<String>) -> Self {
+        self.server_name = name;
+        self
+    }
+
+    /// On a client, whether the server answered the `server_name` it sent,
+    /// which a server that used the name to choose a certificate does
+    /// (RFC 6066 section 3). Informative only: its absence is not an error.
+    pub const fn server_name_acknowledged(&self) -> bool {
+        self.name_acknowledged
     }
 
     /// Protect application data as one record.

@@ -137,13 +137,14 @@
 
 use super::handshake::{
     certificate_verify_content, choose_alpn, complete_prefix, encode_alpn_selection, extension,
-    find, messages, parse_finished, AlpnChoice, CertificateMessage, CertificateVerify, ClientHello,
-    Extension, HandshakeError, HandshakeType, Message, PresharedKeyOffer, ServerHello, Transcript,
-    CLIENT_CERTIFICATE_VERIFY_CONTEXT, HELLO_RETRY_REQUEST_RANDOM,
-    SERVER_CERTIFICATE_VERIFY_CONTEXT,
+    find, host_name_from, messages, parse_finished, AlpnChoice, CertificateMessage,
+    CertificateVerify, ClientHello, Extension, HandshakeError, HandshakeType, Message,
+    PresharedKeyOffer, ServerHello, Transcript, CLIENT_CERTIFICATE_VERIFY_CONTEXT,
+    HELLO_RETRY_REQUEST_RANDOM, SERVER_CERTIFICATE_VERIFY_CONTEXT,
 };
 use super::kx::{KeyExchange, KxError, NamedGroup};
 use super::limits::{Flood, Noise};
+use super::name::dns_name_matches;
 use super::path::{require_signing_key_usage, validate_path, PathError, PathOptions, TrustAnchor};
 use super::record::{
     Aead, ContentType, Opener, RecordError, Sealer, HEADER_LEN, MAX_ENCRYPTED_FRAGMENT_LEN,
@@ -503,6 +504,70 @@ pub struct ServerConfig<'a> {
     /// ALPN, which is what this server did before. A client that offers ALPN
     /// and shares none of these is refused with `no_application_protocol`.
     pub alpn: &'a [&'a [u8]],
+    /// Further identities, each for the names it covers. A client whose
+    /// `server_name` matches one of them is shown that certificate and
+    /// signed to with that key; any other client, or one that sent no name,
+    /// gets `certificates` and `key`. Empty is a server with one identity.
+    pub sni: &'a [SniIdentity<'a>],
+}
+
+/// A certificate chain and key for the names it answers to.
+///
+/// A name is a DNS name, or one with a leftmost `*.` wildcard label covering
+/// exactly one label (`*.example.com` matches `a.example.com`, not
+/// `example.com` or `a.b.example.com`). Matching ignores case. The first
+/// identity in the list that matches wins.
+pub struct SniIdentity<'a> {
+    /// The names this identity serves.
+    pub names: &'a [&'a str],
+    /// The chain to present, DER-encoded, end-entity first.
+    pub certificates: &'a [Vec<u8>],
+    /// The private key for the end-entity certificate.
+    pub key: &'a SigningKey,
+}
+
+/// The chain and key chosen for one handshake.
+#[derive(Clone, Copy)]
+pub(super) struct Identity<'a> {
+    pub(super) certificates: &'a [Vec<u8>],
+    pub(super) key: &'a SigningKey,
+}
+
+/// What a ClientHello's `server_name` led to.
+pub(super) struct Resolved<'a> {
+    pub(super) identity: Identity<'a>,
+    /// The `host_name` the client sent, if any.
+    pub(super) host: Option<String>,
+    /// True if an [`SniIdentity`] was chosen for it, which is when RFC 6066
+    /// section 3 has the server acknowledge the extension.
+    pub(super) matched: bool,
+}
+
+/// Choose the identity for a ClientHello: the first of `sni` covering its
+/// `host_name`, else `default`.
+pub(super) fn resolve_identity<'a>(
+    default: Identity<'a>,
+    sni: &'a [SniIdentity<'a>],
+    extensions: &[Extension<'_>],
+) -> core::result::Result<Resolved<'a>, HandshakeError> {
+    let Some(host) = host_name_from(extensions)? else {
+        return Ok(Resolved {
+            identity: default,
+            host: None,
+            matched: false,
+        });
+    };
+    let found = sni
+        .iter()
+        .find(|identity| identity.names.iter().any(|n| dns_name_matches(n, host)));
+    Ok(Resolved {
+        identity: found.map_or(default, |identity| Identity {
+            certificates: identity.certificates,
+            key: identity.key,
+        }),
+        host: Some(host.to_string()),
+        matched: found.is_some(),
+    })
 }
 
 /// How a server handles resumption.
@@ -636,6 +701,8 @@ struct Negotiated {
     can_resume: bool,
     /// The ALPN protocol this server selected, if any.
     alpn: Option<Vec<u8>>,
+    /// The `host_name` the client sent, if any.
+    server_name: Option<String>,
 }
 
 /// The message a server will accept next from the client.
@@ -712,6 +779,13 @@ pub struct ServerHandshake<'a> {
     /// because a failure replaces the state, and the alert that describes the
     /// failure is built afterwards.
     alert_sealer: Option<Sealer>,
+    /// The chain and key for this handshake: the configured default until a
+    /// ClientHello names something else.
+    identity: Identity<'a>,
+    /// The `host_name` the client sent, if any.
+    server_name: Option<String>,
+    /// Whether `server_name` chose an identity, so the extension is answered.
+    name_matched: bool,
 }
 
 impl<'a> ServerHandshake<'a> {
@@ -726,6 +800,19 @@ impl<'a> ServerHandshake<'a> {
             buffer: Vec::new(),
             noise: Noise::new(),
             alert_sealer: None,
+            identity: Identity {
+                certificates: config.certificates,
+                key: config.key,
+            },
+            server_name: None,
+            name_matched: false,
+        }
+    }
+
+    fn default_identity(&self) -> Identity<'a> {
+        Identity {
+            certificates: self.config.certificates,
+            key: self.config.key,
         }
     }
 
@@ -1104,7 +1191,7 @@ impl ServerHandshake<'_> {
         covered.extend_from_slice(truncated);
         let covered = hash.hash(&covered);
 
-        let identity = TicketContents::identity_of(self.config.certificates);
+        let identity = TicketContents::identity_of(self.identity.certificates);
         for (index, offered) in offer.identities.iter().enumerate() {
             let Some(contents) = TicketContents::open(offered.identity, &tickets.keys) else {
                 continue;
@@ -1217,6 +1304,11 @@ impl ServerHandshake<'_> {
             });
         }
         let hello = ClientHello::parse_lenient(message.body)?;
+        let resolved =
+            resolve_identity(self.default_identity(), self.config.sni, &hello.extensions)?;
+        self.identity = resolved.identity;
+        self.server_name = resolved.host;
+        self.name_matched = resolved.matched;
 
         // Version first. Everything below assumes TLS 1.3 semantics, so a
         // client that did not ask for it must be turned away before any of it
@@ -1242,7 +1334,7 @@ impl ServerHandshake<'_> {
             .ok_or(ServerError::NoSharedSignatureScheme)?;
         let offered = client_signature_schemes(offered)?;
         let scheme = *self
-            .config
+            .identity
             .key
             .schemes()
             .iter()
@@ -1408,6 +1500,10 @@ impl ServerHandshake<'_> {
             });
         }
         let hello = ClientHello::parse_lenient(message.body)?;
+        // The identity chosen for the first hello stands: RFC 8446 section 4.1.2
+        // has the second hello repeat the first's extensions, `server_name`
+        // included, so choosing again could only differ for a client that broke
+        // that rule, and then the first choice is the one already committed to.
 
         let State::AwaitRetriedClientHello(retrying) =
             core::mem::replace(&mut self.state, State::Failed)
@@ -1438,7 +1534,7 @@ impl ServerHandshake<'_> {
             .ok_or(ServerError::NoSharedSignatureScheme)?;
         let offered = client_signature_schemes(offered)?;
         let scheme = *self
-            .config
+            .identity
             .key
             .schemes()
             .iter()
@@ -1585,7 +1681,14 @@ impl ServerHandshake<'_> {
             AlpnChoice::NoOverlap => return Err(ServerError::NoApplicationProtocol),
         };
         let mut extensions = Writer::new();
+        let acknowledge_name = self.name_matched;
         extensions.vector_u16(|w| {
+            // RFC 6066 section 3: a server that used the name answers with an
+            // empty `server_name`.
+            if acknowledge_name {
+                w.u16(extension::SERVER_NAME);
+                w.vector_u16(|_| {});
+            }
             if let Some(protocol) = alpn {
                 w.u16(extension::ALPN);
                 w.vector_u16(|w| w.bytes(&encode_alpn_selection(protocol)));
@@ -1638,7 +1741,7 @@ impl ServerHandshake<'_> {
         // has not already proved, over a transcript the client would then have
         // to reconcile with a certificate it did not ask for.
         if psk.is_none() {
-            let certificate = certificate_message(self.config.certificates);
+            let certificate = certificate_message(self.identity.certificates);
             transcript.add(&certificate);
             flight.extend_from_slice(&certificate);
 
@@ -1646,7 +1749,7 @@ impl ServerHandshake<'_> {
             // §4.4.3 padding and context string. Never over a bare hash.
             let content =
                 certificate_verify_content(SERVER_CERTIFICATE_VERIFY_CONTEXT, &transcript.hash());
-            let signature = self.config.key.sign(scheme, &content)?;
+            let signature = self.identity.key.sign(scheme, &content)?;
             let mut verify = Writer::new();
             verify.u16(scheme.0);
             verify.vector_u16(|w| w.bytes(&signature));
@@ -1700,6 +1803,7 @@ impl ServerHandshake<'_> {
             can_resume: find(&hello.extensions, extension::PSK_KEY_EXCHANGE_MODES)
                 .is_some_and(offers_psk_dhe_ke),
             alpn: alpn.map(<[u8]>::to_vec),
+            server_name: self.server_name.clone(),
         }));
         Ok(out)
     }
@@ -1868,7 +1972,8 @@ impl ServerHandshake<'_> {
                 negotiated.client_application_secret,
                 negotiated.client_certificates,
             )
-            .with_alpn(negotiated.alpn),
+            .with_alpn(negotiated.alpn)
+            .with_server_name(negotiated.server_name),
         ));
         Ok(out)
     }
@@ -1898,7 +2003,7 @@ impl ServerHandshake<'_> {
         let resumption_master = negotiated
             .master
             .derive("res master", &negotiated.transcript.hash());
-        let identity = TicketContents::identity_of(self.config.certificates);
+        let identity = TicketContents::identity_of(self.identity.certificates);
 
         let mut flight = Vec::new();
         for _ in 0..tickets.count {

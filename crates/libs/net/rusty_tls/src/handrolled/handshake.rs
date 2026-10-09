@@ -538,6 +538,29 @@ pub fn choose_alpn<'s>(
         .map_or(AlpnChoice::NoOverlap, |ours| AlpnChoice::Selected(ours)))
 }
 
+/// The `host_name` a ClientHello's `server_name` extension carries, if any
+/// (RFC 6066 section 3). Only a name of type `host_name(0)` counts; an address
+/// or an unknown type is not a name to select a certificate by. The extension
+/// is parsed strictly whether or not a name is wanted.
+pub fn host_name_from<'a>(extensions: &[Extension<'a>]) -> Result<Option<&'a str>> {
+    let Some(data) = find(extensions, extension::SERVER_NAME) else {
+        return Ok(None);
+    };
+    validate_server_name(data)?;
+    let mut reader = Reader::new(data);
+    let mut list = reader.sub_u16()?;
+    while !list.is_empty() {
+        let name_type = list.u8()?;
+        let name = list.vector_u16()?;
+        if name_type == 0 {
+            return core::str::from_utf8(name)
+                .map(Some)
+                .map_err(|_| HandshakeError::Malformed("server_name is not valid UTF-8"));
+        }
+    }
+    Ok(None)
+}
+
 /// RFC 6066 §3: a list of `(name_type, name)`, no entry of a type twice.
 fn validate_server_name(data: &[u8]) -> Result<()> {
     let mut reader = Reader::new(data);

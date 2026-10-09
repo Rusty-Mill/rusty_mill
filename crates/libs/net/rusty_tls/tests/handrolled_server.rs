@@ -178,6 +178,7 @@ fn interop_with_groups(
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let mut client = rustls_client(&pki);
@@ -277,6 +278,7 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&server_config);
 
@@ -440,6 +442,7 @@ fn feed(records: &[&[u8]]) -> Result<Vec<u8>, ServerError> {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let mut reply = Ok(Vec::new());
@@ -615,6 +618,7 @@ fn a_truncated_client_hello_is_waited_for_rather_than_refused() {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
 
     let whole = client_hello(Edit::default());
@@ -666,6 +670,7 @@ fn a_peer_cannot_drive_the_server_with_incomplete_messages() {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -851,6 +856,7 @@ fn against_test_client(corrupt_finished: bool) -> Result<(), ServerError> {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -907,6 +913,7 @@ fn a_corrupted_protected_record_fails_at_the_record_layer() {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -1048,6 +1055,7 @@ fn first_reply(record: &[u8]) -> Vec<u8> {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     server
@@ -1103,6 +1111,7 @@ fn after_a_retry(first: &[u8], second: &[u8]) -> Result<Vec<u8>, ServerError> {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let retry = server
@@ -1217,6 +1226,7 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
 
     let mut server = ServerHandshake::new(&server_config);
@@ -1571,6 +1581,7 @@ fn client_auth_interop(client: Option<&Pki>, required: bool) -> Result<Vec<Vec<u
         client_auth: Some(&auth),
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1689,6 +1700,7 @@ fn a_client_certificate_from_an_unrelated_ca_is_refused() {
         client_auth: Some(&auth),
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1868,6 +1880,7 @@ fn against_certificate_client(corrupt_signature: bool) -> Result<(), ServerError
         client_auth: Some(&auth),
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -2044,6 +2057,7 @@ fn a_rustls_client_resumes_against_this_server() {
         client_auth: None,
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
 
@@ -2103,6 +2117,7 @@ fn a_corrupted_binder_is_refused_rather_than_ignored() {
         client_auth: None,
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
 
@@ -2151,6 +2166,7 @@ fn an_unopenable_ticket_falls_back_to_a_full_handshake() {
         client_auth: None,
         tickets: Some(&issuing_tickets),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
     serve_rustls(&config, &client_config, |_, record| record).expect("first");
@@ -2222,6 +2238,7 @@ fn an_expired_ticket_falls_back_to_a_full_handshake() {
         client_auth: None,
         tickets: Some(&issuing),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
     serve_rustls(&config, &client_config, |_, record| record).expect("first");
@@ -2278,6 +2295,7 @@ fn a_ticket_does_not_resume_under_a_different_certificate() {
         client_auth: None,
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&first_pki);
     serve_rustls(&config, &client_config, |_, record| record).expect("first");
@@ -2310,6 +2328,7 @@ fn a_ticket_does_not_resume_under_a_different_certificate() {
         client_auth: None,
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let resumed = serve_rustls(&other, &both, |_, record| record)
         .expect("a server presenting a different chain refused instead of falling back");
@@ -2339,6 +2358,7 @@ fn an_early_data_extension_is_refused() {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -2371,6 +2391,7 @@ fn a_pre_shared_key_that_is_not_last_is_refused() {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -2428,6 +2449,7 @@ fn this_client_resumes_against_this_server() {
         client_auth: None,
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
 
     let root = Certificate::parse(&pki.root_der).expect("root parses");
@@ -2583,6 +2605,7 @@ fn a_ticket_does_not_resume_under_a_suite_with_a_different_hash() {
         client_auth: None,
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
     serve_rustls(&sha256, &client_config, |_, record| record).expect("first");
@@ -2722,6 +2745,7 @@ fn a_resumed_handshake_still_knows_which_client_it_is_talking_to() {
         client_auth: Some(&auth),
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
 
@@ -2780,6 +2804,7 @@ fn a_ticket_with_no_client_chain_does_not_resume_where_one_is_required() {
         client_auth: None,
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
     serve_rustls_recording_peer(&anonymous, &client_config).expect("the first handshake");
@@ -2852,6 +2877,7 @@ fn a_ticket_with_a_client_chain_does_not_resume_where_client_auth_is_off() {
         client_auth: Some(&auth),
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
     serve_rustls_recording_peer(&authenticating, &client_config).expect("the first handshake");
@@ -2913,6 +2939,7 @@ fn a_client_certificate_that_expired_since_issuance_does_not_resume() {
         client_auth: Some(&auth),
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
     serve_rustls_recording_peer(&config, &client_config).expect("the first handshake");
@@ -2989,6 +3016,7 @@ fn an_implausible_ticket_age_falls_back_to_a_full_handshake() {
         client_auth: None,
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     let root = Certificate::parse(&pki.root_der).expect("root parses");
     let anchors = [TrustAnchor {
@@ -3069,6 +3097,7 @@ fn with_ticketing_server<T>(f: impl FnOnce(&mut ServerHandshake<'_>) -> T) -> T 
         client_auth: None,
         tickets: Some(&tickets),
         alpn: &[],
+        sni: &[],
     };
     f(&mut ServerHandshake::new(&config))
 }

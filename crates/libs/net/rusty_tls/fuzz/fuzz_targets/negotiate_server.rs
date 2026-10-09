@@ -45,6 +45,7 @@ fuzz_target!(|data: &[u8]| {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
     let tls12 = ServerConfig12 {
         certificates: &certificates,
@@ -53,6 +54,7 @@ fuzz_target!(|data: &[u8]| {
         groups: &groups,
         client_auth: None,
         alpn: &[],
+        sni: &[],
     };
     let config = ServerConfigBoth {
         tls13: &tls13,

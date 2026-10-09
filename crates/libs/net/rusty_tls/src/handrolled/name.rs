@@ -188,7 +188,7 @@ fn eq_ignore_case(left: &str, right: &str) -> bool {
 ///
 /// `presented` may carry a leftmost wildcard label; see the module docs for
 /// the three wildcard forms that are refused.
-fn dns_name_matches(presented: &str, reference: &str) -> bool {
+pub(super) fn dns_name_matches(presented: &str, reference: &str) -> bool {
     match presented.strip_prefix("*.") {
         None => is_valid_dns_name(presented) && eq_ignore_case(presented, reference),
         Some(suffix) => {

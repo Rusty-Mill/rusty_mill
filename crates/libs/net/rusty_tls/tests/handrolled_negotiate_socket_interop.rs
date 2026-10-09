@@ -35,7 +35,7 @@ use rusty_tls::handrolled::negotiate::{
     Version,
 };
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
-use rusty_tls::handrolled::server::{ServerConfig, ServerError};
+use rusty_tls::handrolled::server::{ServerConfig, ServerError, SniIdentity};
 use rusty_tls::handrolled::server12::ServerConfig12;
 use rusty_tls::handrolled::sign::SigningKey;
 use rusty_tls::handrolled::x509::Certificate;
@@ -77,7 +77,7 @@ fn pki(leaf: Leaf, name: &str) -> Pki {
     root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     root_params.distinguished_name.push(
         rcgen::DnType::CommonName,
-        rcgen::DnValue::Utf8String("tls12 server socket test root".to_string()),
+        rcgen::DnValue::Utf8String(format!("tls12 server socket test root for {name}")),
     );
     dated(&mut root_params);
     let root = root_params.self_signed(&root_key).expect("root");
@@ -302,7 +302,24 @@ fn s_client_alpn(
     args: &[&str],
     alpn: &[&[u8]],
 ) -> (Result<Served, Failure>, Output) {
-    let files = Files::new(&[("root.pem", material.pki.root_pem.as_str())]);
+    s_client_full(material, args, alpn, &[], None)
+}
+
+/// As [`s_client_alpn`], with further identities served by name and a second
+/// root OpenSSL should also trust (the other identities' CA).
+fn s_client_full(
+    material: &Material,
+    args: &[&str],
+    alpn: &[&[u8]],
+    sni: &[SniIdentity<'_>],
+    extra_root_pem: Option<&str>,
+) -> (Result<Served, Failure>, Output) {
+    let roots = format!(
+        "{}{}",
+        material.pki.root_pem,
+        extra_root_pem.unwrap_or_default()
+    );
+    let files = Files::new(&[("root.pem", roots.as_str())]);
     let tls13 = ServerConfig {
         certificates: &material.certificates,
         key: &material.key,
@@ -311,6 +328,7 @@ fn s_client_alpn(
         client_auth: None,
         tickets: None,
         alpn,
+        sni,
     };
     let tls12 = ServerConfig12 {
         certificates: &material.certificates,
@@ -319,6 +337,7 @@ fn s_client_alpn(
         groups: ALL_GROUPS,
         client_auth: None,
         alpn,
+        sni,
     };
     let config = ServerConfigBoth {
         tls13: &tls13,
@@ -679,6 +698,51 @@ fn alpn_agrees_with_openssl_in_both_directions_and_both_versions() {
             said.contains("alert number 120"),
             "{version}: OpenSSL did not report alert 120 (no_application_protocol):\n{said}"
         );
+    }
+}
+
+/// OpenSSL verifies the name against the certificate our server chose for the
+/// `server_name` it sent: a second CA and identity for `other.example`, the
+/// default for everything else, in both versions.
+#[test]
+#[ignore = "needs the openssl binary; CI runs it with --ignored"]
+fn openssl_is_shown_the_certificate_for_the_name_it_asked_for() {
+    let default = Material::new();
+    let other_pki = pki(Leaf::P256, "other.example");
+    let other_chain = vec![other_pki.leaf_der.clone(), other_pki.root_der.clone()];
+    let other_key = SigningKey::ecdsa_p256(&other_pki.key_pkcs8).expect("key");
+    let sni = [SniIdentity {
+        names: &["other.example"],
+        certificates: &other_chain,
+        key: &other_key,
+    }];
+
+    for version in ["-tls1_3", "-tls1_2"] {
+        // The name selects the other identity; OpenSSL only passes if it did.
+        let (served, output) = s_client_full(
+            &default,
+            &[
+                version,
+                "-servername",
+                "other.example",
+                "-verify_hostname",
+                "other.example",
+            ],
+            &[],
+            &sni,
+            Some(&other_pki.root_pem),
+        );
+        let said = the_client_said(&output);
+        let served = served.unwrap_or_else(|f| panic!("{version}: {f:?}\n{said}"));
+        assert!(output.status.success(), "{version}: {said}");
+        assert_eq!(served.request, "hello\n", "{version}");
+
+        // Its own name gets the default.
+        let (served, output) =
+            s_client_full(&default, &[version], &[], &sni, Some(&other_pki.root_pem));
+        let said = the_client_said(&output);
+        served.unwrap_or_else(|f| panic!("{version}: {f:?}\n{said}"));
+        assert!(output.status.success(), "{version}: {said}");
     }
 }
 

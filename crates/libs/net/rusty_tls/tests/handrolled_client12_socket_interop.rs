@@ -186,6 +186,21 @@ fn free_port() -> u16 {
 /// Start `openssl s_server -www` with extra arguments, and wait until it
 /// accepts connections.
 fn serve(pki: &Pki, extra: &[&str]) -> Server {
+    // A free port is found by binding and letting go of it, which another test
+    // in this process (or another suite) can take before `s_server` binds it.
+    // That is a property of the harness, not of the engine, so a failed start
+    // is retried on a fresh port before it is reported.
+    let mut last = String::new();
+    for _ in 0..5 {
+        match try_serve(pki, extra) {
+            Ok(server) => return server,
+            Err(why) => last = why,
+        }
+    }
+    panic!("{last}");
+}
+
+fn try_serve(pki: &Pki, extra: &[&str]) -> Result<Server, String> {
     let files = Files::new(pki);
     let port = free_port();
     let child = Command::new("openssl")
@@ -209,13 +224,15 @@ fn serve(pki: &Pki, extra: &[&str]) -> Server {
     };
     for _ in 0..100 {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return server;
+            return Ok(server);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     let why = std::fs::read_to_string(server._files.0.join("stderr.txt")).unwrap_or_default();
     let status = server.child.try_wait().ok().flatten();
-    panic!("openssl s_server did not start on port {port} (exit {status:?}): {extra:?}\n{why}");
+    Err(format!(
+        "openssl s_server did not start on port {port} (exit {status:?}): {extra:?}\n{why}"
+    ))
 }
 
 fn read_record(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {

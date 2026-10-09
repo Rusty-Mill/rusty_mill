@@ -245,6 +245,8 @@ struct Hs {
     certificate_request: Option<Vec<u16>>,
     /// The application protocol the server selected, if any.
     alpn: Option<Vec<u8>>,
+    /// Whether the server answered `server_name`.
+    name_acknowledged: bool,
     /// Set once the client flight is sent.
     established: Option<Established>,
 }
@@ -378,6 +380,7 @@ impl<'a> ClientHandshake12<'a> {
                     server_key: None,
                     certificate_request: None,
                     alpn: None,
+                    name_acknowledged: false,
                     established: None,
                 },
                 buffer: Vec::new(),
@@ -686,6 +689,7 @@ impl<'a> ClientHandshake12<'a> {
             }
             self.hs.alpn = Some(selected.to_vec());
         }
+        self.hs.name_acknowledged = find(&hello.extensions, extension::SERVER_NAME).is_some();
         if find(&hello.extensions, extension::SERVER_NAME).is_some_and(|data| !data.is_empty()) {
             return Err(ClientError::Handshake(HandshakeError::Malformed(
                 "a server_name acknowledgement is not empty",
@@ -907,7 +911,8 @@ impl<'a> ClientHandshake12<'a> {
                 self.hs.suite,
                 core::mem::take(&mut self.hs.certificates),
             )
-            .with_alpn(self.hs.alpn.take()),
+            .with_alpn(self.hs.alpn.take())
+            .with_name_acknowledged(self.hs.name_acknowledged),
         );
         self.phase = Phase::Done;
         Ok(())
@@ -965,6 +970,8 @@ pub struct Connection12 {
     suite: CipherSuite12,
     certificates: Vec<Vec<u8>>,
     alpn: Option<Vec<u8>>,
+    server_name: Option<String>,
+    name_acknowledged: bool,
     closed: bool,
     failed: bool,
     /// Records that carried nothing, so they cannot go on for ever.
@@ -986,6 +993,8 @@ impl Connection12 {
             suite,
             certificates,
             alpn: None,
+            server_name: None,
+            name_acknowledged: false,
             closed: false,
             failed: false,
             noise: Noise::default(),
@@ -1004,6 +1013,28 @@ impl Connection12 {
 
     pub(super) fn with_alpn(mut self, alpn: Option<Vec<u8>>) -> Self {
         self.alpn = alpn;
+        self
+    }
+
+    /// On a server connection, the `host_name` the client asked for (RFC 6066).
+    /// Always `None` on a client.
+    pub fn server_name(&self) -> Option<&str> {
+        self.server_name.as_deref()
+    }
+
+    pub(super) fn with_server_name(mut self, name: Option<String>) -> Self {
+        self.server_name = name;
+        self
+    }
+
+    /// On a client, whether the server answered the `server_name` it sent
+    /// (RFC 6066 section 3). Informative only.
+    pub const fn server_name_acknowledged(&self) -> bool {
+        self.name_acknowledged
+    }
+
+    pub(super) fn with_name_acknowledged(mut self, acknowledged: bool) -> Self {
+        self.name_acknowledged = acknowledged;
         self
     }
 

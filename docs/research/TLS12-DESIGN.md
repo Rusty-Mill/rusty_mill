@@ -485,10 +485,39 @@ the application, which nothing asks for yet. BoringSSL lets a server's selection
 failing; here "offered some, share none" always fails, as RFC 7301 says, and `-decline-alpn` is modelled as a
 server with no list.
 
+## Stage 12: SNI-based certificate selection
+
+`ServerConfig.sni` and `ServerConfig12.sni`: a list of `SniIdentity { names, certificates, key }`, each for
+the names it covers (exact DNS names or a leftmost `*.` wildcard of exactly one label, case-insensitive,
+first match wins). A client whose `host_name` matches is shown that chain and signed to with that key;
+anyone else, including a client that sent no name, gets the configured default. The signature scheme is
+chosen from the key that was chosen, and a resumption ticket is bound to the chain that was served. Both
+versions, and the identity from the first ClientHello stands across a HelloRetryRequest (RFC 8446 section
+4.1.2 has the second hello repeat the first's extensions). A server that used the name answers with an empty
+`server_name` (RFC 6066 section 3); one that fell back to the default says nothing.
+
+New read-only accessors: `Connection::server_name()` (on a server, what the client asked for, whether or not
+it chose anything), `Connection::server_name_acknowledged()` (on a client), and the same on `Connection12` and
+`Established`.
+
+| Gate | Result |
+| --- | --- |
+| Live rustls, TLS 1.2 and 1.3 | rustls verifies the chain against the name it asked for: exact and wildcard names complete, and the default is shown for an uncovered name (a name mismatch, not a handshake failure). A wildcard covers exactly one label: the bare domain and a two-label subdomain are not served by it. |
+| Live OpenSSL (`s_client -servername -verify_hostname`, CI) | The other identity is shown for its name and the default for the default's, in both versions, with two CAs. |
+| Our client | A differently-cased name finds its identity; a client with no name gets the default; the acknowledgement appears only when a name chose something, in both versions. |
+| Retry | With only P-256 enabled so rustls is sent a HelloRetryRequest, the retried handshake keeps the identity. |
+| Mutation | 18 deliberate bugs over the matching, the order, the key, the chain and the scheme in each version, the recorded name, the acknowledgement on both sides, and the name-type test: all caught. One survived at first (re-resolving after a retry): it was equivalent for a well-behaved client, so the re-resolution was removed rather than tested. |
+| BoGo | **755 passed, 0 failed** (was 754), 313 disabled. `-expect-server-name` now runs. The four `ServerNameExtensionServer` cases are disabled: BoringSSL acknowledges any name its callback accepts, this engine only a name that chose an identity. |
+
+Not done: no resolver callback. A fixed list is enough for a server whose certificates are known up front and
+is checkable; a callback that loads or mints certificates on demand is a larger API (and a place to hold
+state) and nothing asks for it yet. A name that is not a valid DNS name is matched as written, never as a
+wildcard (`name::dns_name_matches` refuses malformed patterns).
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could
 produce (rustls and OpenSSL both directions, BoGo, mutation, fuzz, CI). Whether that meets the bar for
 the seam is theirs to set. If it does, stage 5 of the track is wiring (ALPN, SNI certificate selection,
 1.2 resumption are the known gaps) and an ADR superseding ADR-0002. If the bar includes more of BoGo,
-the next increment is credentials (`-new-x509-credential`) and verify callbacks (`-verify-fail`); the engine gaps left are RSA PKCS#1 v1.5 signing, 1.2 resumption, ALPN-aware resumption and SNI-based certificate selection.
+the next increment is credentials (`-new-x509-credential`) and verify callbacks (`-verify-fail`); the engine gaps left are RSA PKCS#1 v1.5 signing, 1.2 resumption, and ALPN-aware resumption.

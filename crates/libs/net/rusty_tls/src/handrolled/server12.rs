@@ -80,7 +80,10 @@ use super::schedule12::{
     extended_master_secret, finished_verify_data, key_block, verify_finished, MasterSecret, Side,
     RANDOM_LEN,
 };
-use super::server::{plaintext_record, random_bytes, ClientAuth, ServerError};
+use super::server::{
+    plaintext_record, random_bytes, resolve_identity, ClientAuth, Identity, ServerError,
+    SniIdentity,
+};
 use super::sign::SigningKey;
 use super::verify::{verify_tls12_signature, SignatureScheme};
 use super::wire::Reader;
@@ -114,6 +117,9 @@ pub struct ServerConfig12<'a> {
     /// ALPN. A client offering some and sharing none gets
     /// `no_application_protocol`.
     pub alpn: &'a [&'a [u8]],
+    /// Further identities for the names they cover; see
+    /// [`SniIdentity`]. Empty is a server with one identity.
+    pub sni: &'a [SniIdentity<'a>],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,6 +166,8 @@ struct Hs {
     client_certificates: Vec<Vec<u8>>,
     /// The application protocol selected by ALPN, if any.
     alpn: Option<Vec<u8>>,
+    /// The `host_name` the client sent, if any.
+    server_name: Option<String>,
     /// Set once `ClientKeyExchange` has been processed.
     established: Option<Established>,
 }
@@ -266,6 +274,7 @@ impl<'a> ServerHandshake12<'a> {
                 kx: None,
                 client_certificates: Vec::new(),
                 alpn: None,
+                server_name: None,
                 established: None,
             },
             buffer: Vec::new(),
@@ -474,6 +483,16 @@ impl<'a> ServerHandshake12<'a> {
     fn client_hello(&mut self, body: &[u8]) -> Result<Vec<u8>> {
         let hello = ClientHello12::parse(body)?;
         let config = self.config;
+        let resolved = resolve_identity(
+            Identity {
+                certificates: config.certificates,
+                key: config.key,
+            },
+            config.sni,
+            &hello.extensions,
+        )?;
+        let identity = resolved.identity;
+        self.hs.server_name = resolved.host;
 
         // 1. Version. client_version 0x0303 is also what a TLS 1.3 client
         // sends, so `supported_versions` has the say when it is present (RFC
@@ -526,7 +545,7 @@ impl<'a> ServerHandshake12<'a> {
             .transpose()?
             .ok_or(ServerError::NoSharedSignatureScheme)?;
 
-        let scheme = config
+        let scheme = identity
             .key
             .schemes()
             .iter()
@@ -535,7 +554,7 @@ impl<'a> ServerHandshake12<'a> {
             .find(|s| scheme_curve(*s).is_none_or(|curve| client_groups.contains(&curve.as_u16())))
             .ok_or(ServerError::NoSharedSignatureScheme)?;
 
-        let authentication = key_authentication(config.key);
+        let authentication = key_authentication(identity.key);
         let (suite, aead, hash) = config
             .cipher_suites
             .iter()
@@ -573,6 +592,14 @@ impl<'a> ServerHandshake12<'a> {
                 data: &[],
             },
         ];
+        // RFC 6066 section 3: a server that used the name answers with an
+        // empty `server_name`.
+        if resolved.matched {
+            extensions.push(Extension {
+                typ: extension::SERVER_NAME,
+                data: &[],
+            });
+        }
         if point_formats.is_some() {
             extensions.push(Extension {
                 typ: extension::EC_POINT_FORMATS,
@@ -602,7 +629,7 @@ impl<'a> ServerHandshake12<'a> {
         };
         let mut flight = message(HandshakeType::ServerHello, &server_hello.encode());
 
-        let chain: Vec<&[u8]> = config.certificates.iter().map(Vec::as_slice).collect();
+        let chain: Vec<&[u8]> = identity.certificates.iter().map(Vec::as_slice).collect();
         flight.extend(message(
             HandshakeType::Certificate,
             &Certificate12::encode(&chain),
@@ -613,7 +640,7 @@ impl<'a> ServerHandshake12<'a> {
         let kx = KeyExchange::generate(group)?;
         let params = ServerKeyExchange::encode_params(group.as_u16(), kx.public_key());
         let signed = handshake12::signed_content(&self.hs.client_random, &random, &params);
-        let signature = config.key.sign(scheme, &signed)?;
+        let signature = identity.key.sign(scheme, &signed)?;
         flight.extend(message(
             HandshakeType::ServerKeyExchange,
             &ServerKeyExchange::encode(&params, scheme.0, &signature),
@@ -779,7 +806,8 @@ impl<'a> ServerHandshake12<'a> {
                 self.hs.suite,
                 core::mem::take(&mut self.hs.client_certificates),
             )
-            .with_alpn(self.hs.alpn.take()),
+            .with_alpn(self.hs.alpn.take())
+            .with_server_name(self.hs.server_name.take()),
         );
         self.phase = Phase::Done;
         Ok(reply)

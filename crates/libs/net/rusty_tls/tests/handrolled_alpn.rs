@@ -270,6 +270,7 @@ fn server_against_rustls(
         client_auth: None,
         tickets: None,
         alpn: server_alpn,
+        sni: &[],
     };
     let server_12 = ServerConfig12 {
         certificates: &pki.chain,
@@ -278,6 +279,7 @@ fn server_against_rustls(
         groups: &[NamedGroup::X25519],
         client_auth: None,
         alpn: server_alpn,
+        sni: &[],
     };
     let both = ServerConfigBoth {
         tls13: &server_13,

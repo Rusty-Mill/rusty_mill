@@ -344,6 +344,7 @@ fn config<'a>(
         groups,
         client_auth,
         alpn: &[],
+        sni: &[],
     }
 }
 

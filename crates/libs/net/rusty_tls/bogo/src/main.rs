@@ -133,6 +133,8 @@ struct Config {
     decline_alpn: bool,
     /// `-expect-alpn` / `-expect-no-alpn`: what the handshake must have selected.
     expect_alpn: Option<Vec<u8>>,
+    /// `-expect-server-name`: the `host_name` a server must have been sent.
+    expect_server_name: Option<String>,
 }
 
 const TLS12: u16 = 0x0303;
@@ -196,6 +198,7 @@ fn parse_args(index: usize) -> Config {
             "-decline-alpn" => cfg.decline_alpn = true,
             "-expect-alpn" => cfg.expect_alpn = Some(value("-expect-alpn").into_bytes()),
             "-expect-no-alpn" => cfg.expect_alpn = Some(Vec::new()),
+            "-expect-server-name" => cfg.expect_server_name = Some(value("-expect-server-name")),
             "-verify-peer" => cfg.verify_peer = true,
             "-require-any-client-certificate" => cfg.require_client_cert = true,
             "-check-close-notify" => cfg.check_close_notify = true,
@@ -573,6 +576,14 @@ fn expect_version(config: &Config, connection: &Established) {
             ));
         }
     }
+    if let Some(want) = &config.expect_server_name {
+        if connection.server_name() != Some(want.as_str()) {
+            fail(format!(
+                "wrong server name: expected {want:?}, the client sent {:?}",
+                connection.server_name()
+            ));
+        }
+    }
     if let Some(want) = &config.expect_alpn {
         let got = connection.alpn_protocol().unwrap_or_default();
         if want != got {
@@ -647,6 +658,7 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
         client_auth,
         tickets: (!config.no_ticket).then_some(&tickets),
         alpn: &server_alpn,
+        sni: &[],
     };
     let server_12 = ServerConfig12 {
         certificates: &chain,
@@ -655,6 +667,7 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
         groups: groups(config),
         client_auth,
         alpn: &server_alpn,
+        sni: &[],
     };
     let both = ServerConfigBoth {
         tls13: &server_13,

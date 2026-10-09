@@ -169,6 +169,7 @@ impl Material {
             client_auth: None,
             tickets: None,
             alpn: &[],
+            sni: &[],
         }
     }
 
@@ -180,6 +181,7 @@ impl Material {
             groups: ALL_GROUPS,
             client_auth: None,
             alpn: &[],
+            sni: &[],
         }
     }
 }

@@ -91,6 +91,24 @@ pub enum Established {
 }
 
 impl Established {
+    /// On a server, the `host_name` the client asked for, whichever version
+    /// was chosen.
+    pub fn server_name(&self) -> Option<&str> {
+        match self {
+            Self::Tls13(connection) => connection.server_name(),
+            Self::Tls12(connection) => connection.server_name(),
+        }
+    }
+
+    /// On a client, whether the server answered the `server_name` it sent,
+    /// whichever version was chosen.
+    pub fn server_name_acknowledged(&self) -> bool {
+        match self {
+            Self::Tls13(connection) => connection.server_name_acknowledged(),
+            Self::Tls12(connection) => connection.server_name_acknowledged(),
+        }
+    }
+
     /// The application protocol ALPN selected, whichever version was chosen.
     pub fn alpn_protocol(&self) -> Option<&[u8]> {
         match self {

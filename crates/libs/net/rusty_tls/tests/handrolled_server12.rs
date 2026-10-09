@@ -213,6 +213,7 @@ impl Server {
             groups,
             client_auth,
             alpn: &[],
+            sni: &[],
         }
     }
 }

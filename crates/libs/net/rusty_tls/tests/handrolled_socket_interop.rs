@@ -231,6 +231,7 @@ fn serve(listener: TcpListener, pki: Pki) -> Report {
         client_auth: None,
         tickets: None,
         alpn: &[],
+        sni: &[],
     };
 
     let Ok((mut socket, _)) = listener.accept() else {
