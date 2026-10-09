@@ -55,7 +55,7 @@ fn crash_mid_batch_drops_only_the_partial_batch() {
     let task = fx.st().task.clone();
     // A whole batch lands, then "the machine dies" halfway through the next one:
     // simulate by appending a batch and cutting its line in half.
-    let log = dir.join("tasks").join("T1.log");
+    let log = fs_store::log_path_for(&dir, &task);
     let len_before = std::fs::metadata(&log).expect("meta").len();
     posted(fx.post(Role::Coder, ask(Role::Tester, "Which 429 cases matter?")));
     let len_after = std::fs::metadata(&log).expect("meta").len();
@@ -199,7 +199,7 @@ fn open_waits_for_a_process_that_holds_the_lock() {
     let held = lock_for_test(&dir).expect("lock");
     // The last line of the log is the batch that will be cut; everything
     // before it must survive exactly.
-    let log_path = dir.join("tasks").join("T1.log");
+    let log_path = fs_store::log_path_for(&dir, &task);
     let text = std::fs::read_to_string(&log_path).expect("read log");
     let last_line = text.lines().last().expect("a batch");
     let cut: Vec<Event> = rusty_serde::json::from_str(last_line).expect("batch json");
@@ -277,5 +277,96 @@ fn racing_writers_never_both_pass_the_revision_check() {
         base.0 + rounds as u64,
         "one batch per round is on disk and nothing else"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn open_task(dir: &Path, id: &str) -> Driver<FsStore> {
+    let mut store = open(dir);
+    let brief = store.blob_put(b"brief");
+    let task = TaskId(id.into());
+    let mut d = Driver::new(store, task.clone());
+    let cmd = Command::Open(OpenTask {
+        task,
+        repo: "r".into(),
+        profile_digest: DIGEST,
+        budget: Budget {
+            messages: 40,
+            bytes: 5_000_000,
+            reads: 150,
+            reads_per_turn: 30,
+            turns: 60,
+            iterations: 4,
+        },
+        turn_ms: 60_000,
+        request_ms: 3_600_000,
+        brief,
+        human: PrincipalId("human".into()),
+    });
+    assert!(matches!(
+        d.dispatch(&cmd, Time(1)).expect("open"),
+        Response::Stored(_)
+    ));
+    d
+}
+
+/// Task ids that a lossy filename would fold together keep separate logs,
+/// and a reopened store recovers each id from its log, not its filename.
+#[test]
+fn task_ids_never_share_a_log_and_survive_reopen_verbatim() {
+    let dir = tempdir();
+    let ids = ["a/b", "a_b", "A_B", "täsk 1", "con", "../x"];
+    for (i, id) in ids.iter().enumerate() {
+        let mut d = open_task(&dir, id);
+        for _ in 0..i {
+            d.dispatch(&Command::Tick, Time(2)).expect("tick");
+        }
+    }
+    let paths: std::collections::HashSet<PathBuf> = ids
+        .iter()
+        .map(|id| fs_store::log_path_for(&dir, &TaskId((*id).into())))
+        .collect();
+    assert_eq!(paths.len(), ids.len(), "one log per task id");
+    for p in &paths {
+        let name = p.file_name().and_then(|n| n.to_str()).expect("name");
+        assert!(
+            name.len() == 68 && name.ends_with(".log") && !name.contains('/'),
+            "{name}"
+        );
+    }
+    let store = open(&dir);
+    for id in ids {
+        let events = store
+            .events(&TaskId(id.into()), 0)
+            .unwrap_or_else(|e| panic!("{id}: {e:?}"));
+        assert!(
+            matches!(&events[0], Event::TaskOpened { task, .. } if task.0 == id),
+            "{id}: {:?}",
+            events[0]
+        );
+    }
+    assert!(matches!(
+        store.events(&TaskId("T1".into()), 0),
+        Err(StoreError::UnknownTask)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A log left empty by a crash before its first batch names no task and is
+/// skipped; the task opens afresh and lands in that same file.
+#[test]
+fn an_empty_log_is_skipped_and_reused() {
+    let dir = tempdir();
+    std::fs::create_dir_all(dir.join("tasks")).expect("mkdir");
+    let task = TaskId("later".into());
+    std::fs::write(fs_store::log_path_for(&dir, &task), b"").expect("write");
+    let store = open(&dir);
+    assert!(matches!(
+        store.events(&task, 0),
+        Err(StoreError::UnknownTask)
+    ));
+    drop(store);
+    let d = open_task(&dir, "later");
+    assert_eq!(d.state.task, task);
+    assert!(open(&dir).events(&task, 0).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }

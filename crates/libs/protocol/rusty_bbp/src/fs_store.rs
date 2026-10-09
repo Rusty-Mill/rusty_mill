@@ -78,17 +78,26 @@ impl From<FsError> for StoreError {
     }
 }
 
-fn safe_name(task: &TaskId) -> String {
-    task.0
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+/// `<root>/tasks/<sha256(task id) hex>.log`. The digest is injective and
+/// filesystem-neutral (no case folding, no reserved characters), so two
+/// task ids never share a log. The id itself is read back from the log's
+/// first event, never from the filename.
+pub fn log_path_for(root: &Path, task: &TaskId) -> PathBuf {
+    root.join("tasks")
+        .join(format!("{}.log", Sha256::of(task.0.as_bytes()).hex()))
+}
+
+/// The task a log belongs to: the id its opening event recorded.
+fn task_of(path: &Path, events: &[Event]) -> Result<Option<TaskId>, FsError> {
+    match events.first() {
+        None => Ok(None),
+        Some(Event::TaskOpened { task, .. }) => Ok(Some(task.clone())),
+        Some(other) => Err(FsError::Corrupt {
+            path: path.to_path_buf(),
+            line: 1,
+            detail: format!("log does not start with TaskOpened: {other:?}"),
+        }),
+    }
 }
 
 /// Take the directory's exclusive lock. Released when the returned file drops.
@@ -117,14 +126,14 @@ impl FsStore {
         let _lock = lock(root)?;
         for entry in fs::read_dir(root.join("tasks"))? {
             let path = entry?.path();
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
             if path.extension().and_then(|e| e.to_str()) != Some("log") {
                 continue;
             }
             let events = load_log(&path)?;
-            store.logs.insert(TaskId(stem.to_owned()), events);
+            // An empty log (a crash before its first batch) names no task.
+            if let Some(task) = task_of(&path, &events)? {
+                store.logs.insert(task, events);
+            }
         }
         Ok(store)
     }
@@ -134,9 +143,7 @@ impl FsStore {
     }
 
     fn log_path(&self, task: &TaskId) -> PathBuf {
-        self.root
-            .join("tasks")
-            .join(format!("{}.log", safe_name(task)))
+        log_path_for(&self.root, task)
     }
 
     fn blob_path(&self, sha: &Sha256) -> PathBuf {
@@ -294,8 +301,7 @@ pub fn lock_for_test(root: &Path) -> io::Result<File> {
 /// Truncate a task log to `bytes` bytes. Test support: simulates a crash mid-write.
 #[doc(hidden)]
 pub fn truncate_log_for_test(root: &Path, task: &TaskId, bytes: u64) -> io::Result<()> {
-    let path = root.join("tasks").join(format!("{}.log", safe_name(task)));
-    let file = File::options().write(true).open(path)?;
+    let file = File::options().write(true).open(log_path_for(root, task))?;
     file.set_len(bytes)?;
     file.sync_all()
 }
