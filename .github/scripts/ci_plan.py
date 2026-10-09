@@ -39,6 +39,7 @@ PACKAGE_JOB_NAMES = {
     "rleval_viewer": frozenset({"replay-viewer"}),
     "rleval_app": frozenset({"rleval-app"}),
     "rusty_config_no_std": frozenset({"rusty_config"}),
+    "tls_engine": frozenset({"rusty_tls"}),
     # The constant-time evidence for the native crypto crates (valgrind taint
     # runs and pinned disassembly budgets). Selected when any of them, or a
     # dependency that makes one of them affected, changes.
