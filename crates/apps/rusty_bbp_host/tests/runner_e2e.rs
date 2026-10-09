@@ -406,7 +406,10 @@ fn patches_never_touch_a_candidate_controlled_path() {
     .expect("run");
     let (rep, log) = report_of(&t);
     assert_eq!(rep.status, RunStatus::Error, "{log}");
-    assert!(log.contains("git apply") && log.contains("missing.txt"), "{log}");
+    assert!(
+        log.contains("git apply") && log.contains("missing.txt"),
+        "{log}"
+    );
     assert_eq!(
         std::fs::read_to_string(&sentinel).expect("read"),
         "untouched\n"
