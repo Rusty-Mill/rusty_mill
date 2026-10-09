@@ -22,12 +22,12 @@ mod passthrough;
 use std::sync::Once;
 
 use std::collections::BTreeMap;
-use std::io::BufReader;
-use std::path::Path;
 use std::sync::Arc;
 
 use agentgateway_config::{Config, Protocol, TlsConfig};
 use agentgateway_core::HostnamePattern;
+use rustls_pki_types::pem::{self, PemObject};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use rusty_tls::TlsAcceptor;
 use tokio::net::TcpStream;
 
@@ -399,45 +399,112 @@ impl TlsBinds {
 }
 
 fn load_certs(path: &str, at: &str) -> Result<Vec<Vec<u8>>, TlsError> {
-    let file = open(path, at)?;
-    let certs: Vec<Vec<u8>> = rustls_pemfile::certs(&mut BufReader::new(file))
-        .filter_map(Result::ok)
-        .map(|der| der.to_vec())
-        .collect();
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(|e| pem_error(e, path, at, "certificates"))?
+        .map(|cert| cert.map(|der| der.to_vec()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| pem_error(e, path, at, "certificates"))?;
 
     if certs.is_empty() {
-        return Err(TlsError::Empty {
-            at: at.to_string(),
-            path: path.to_string(),
-            kind: "certificates",
-        });
+        return Err(empty(path, at, "certificates"));
     }
     Ok(certs)
 }
 
 fn load_key(path: &str, at: &str) -> Result<Vec<u8>, TlsError> {
-    let file = open(path, at)?;
-    // `private_key` accepts PKCS#8, PKCS#1 and SEC1 alike, so an operator does
+    // `from_pem_file` accepts PKCS#8, PKCS#1 and SEC1 alike, so an operator does
     // not have to know which one their tooling emitted.
-    let key =
-        rustls_pemfile::private_key(&mut BufReader::new(file)).map_err(|source| TlsError::Io {
-            at: at.to_string(),
-            path: path.to_string(),
-            source,
-        })?;
-
-    key.map(|key| key.secret_der().to_vec())
-        .ok_or_else(|| TlsError::Empty {
-            at: at.to_string(),
-            path: path.to_string(),
-            kind: "private key",
-        })
+    PrivateKeyDer::from_pem_file(path)
+        .map(|key| key.secret_der().to_vec())
+        .map_err(|e| pem_error(e, path, at, "private key"))
 }
 
-fn open(path: &str, at: &str) -> Result<std::fs::File, TlsError> {
-    std::fs::File::open(Path::new(path)).map_err(|source| TlsError::Io {
+fn empty(path: &str, at: &str, kind: &'static str) -> TlsError {
+    TlsError::Empty {
+        at: at.to_string(),
+        path: path.to_string(),
+        kind,
+    }
+}
+
+/// Map a PEM failure onto [`TlsError`]: no items is `Empty`, an unreadable
+/// file keeps its `io::Error`, and a malformed section is `InvalidData`
+/// rather than silently skipped.
+fn pem_error(error: pem::Error, path: &str, at: &str, kind: &'static str) -> TlsError {
+    let source = match error {
+        pem::Error::NoItemsFound => return empty(path, at, kind),
+        pem::Error::Io(source) => source,
+        other => std::io::Error::new(std::io::ErrorKind::InvalidData, other.to_string()),
+    };
+    TlsError::Io {
         at: at.to_string(),
         path: path.to_string(),
         source,
-    })
+    }
+}
+
+#[cfg(test)]
+mod pem_tests {
+    use super::*;
+
+    fn write(name: &str, body: &str) -> String {
+        let path = std::env::temp_dir().join(format!("agtls-{}-{name}", std::process::id()));
+        std::fs::write(&path, body).expect("write fixture");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn pair() -> (String, String) {
+        let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("cert");
+        (ck.cert.pem(), ck.key_pair.serialize_pem())
+    }
+
+    #[test]
+    fn loads_a_chain_and_a_key() {
+        let (cert, key) = pair();
+        let chain = write("chain.pem", &format!("{cert}{cert}"));
+        assert_eq!(load_certs(&chain, "t").expect("certs").len(), 2);
+        let key = write("key.pem", &key);
+        assert!(!load_key(&key, "t").expect("key").is_empty());
+    }
+
+    #[test]
+    fn a_pkcs1_key_is_accepted() {
+        // PKCS#1 header around arbitrary base64: the parser only classifies.
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n";
+        assert!(load_key(&write("pkcs1.pem", pem), "t").is_ok());
+    }
+
+    #[test]
+    fn a_file_without_pem_is_empty() {
+        let path = write("none.pem", "not pem at all\n");
+        assert!(matches!(
+            load_certs(&path, "t"),
+            Err(TlsError::Empty {
+                kind: "certificates",
+                ..
+            })
+        ));
+        assert!(matches!(
+            load_key(&path, "t"),
+            Err(TlsError::Empty {
+                kind: "private key",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_missing_file_is_an_io_error() {
+        let path = "/nonexistent/agtls.pem";
+        assert!(matches!(load_certs(path, "t"), Err(TlsError::Io { .. })));
+        assert!(matches!(load_key(path, "t"), Err(TlsError::Io { .. })));
+    }
+
+    #[test]
+    fn a_corrupt_certificate_is_an_error_not_skipped() {
+        let (cert, _) = pair();
+        let bad = "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n";
+        let path = write("bad.pem", &format!("{cert}{bad}"));
+        assert!(matches!(load_certs(&path, "t"), Err(TlsError::Io { .. })));
+    }
 }
