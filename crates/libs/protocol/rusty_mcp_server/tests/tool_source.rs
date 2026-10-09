@@ -218,3 +218,52 @@ fn announcing_tool_changes_needs_only_a_source() {
         Err(BuildError::ChangesWithoutFeature("tools"))
     ));
 }
+
+/// Lists a tool only for callers that sent `x-pass`.
+struct ByCaller;
+impl ToolSource for ByCaller {
+    fn tools(&self) -> Vec<Tool> {
+        Vec::new()
+    }
+
+    fn tools_for(&self, ctx: &CallContext) -> Result<Vec<Tool>, ErrorData> {
+        if ctx.caller().header("x-pass").is_some() {
+            Ok(vec![Tool::new("shown", schema())])
+        } else {
+            Err(ErrorData::new(
+                rusty_mcp_proto::ErrorCode::INVALID_REQUEST,
+                "no pass",
+            ))
+        }
+    }
+
+    fn call(
+        &self,
+        _ctx: &CallContext,
+        _call: &CallToolParams,
+    ) -> Option<Result<CallToolResult, ErrorData>> {
+        None
+    }
+}
+
+#[test]
+fn a_source_can_list_per_caller_and_refuse() {
+    let server = || {
+        Server::builder("s", "1")
+            .tool_source(ByCaller)
+            .build()
+            .unwrap()
+    };
+    let denied = send(
+        &conn(server()),
+        "tools/list",
+        &format!(r#"{{"_meta":{{{V}}}}}"#),
+    );
+    assert_eq!(denied["error"]["message"].as_str(), Some("no pass"));
+    let caller = rusty_mcp_server::Caller {
+        headers: vec![("X-Pass".to_owned(), "1".to_owned())],
+        principal: None,
+    };
+    let c = Arc::new(Connection::new(Arc::new(server()), Arc::new(Mute)).with_caller(caller));
+    assert_eq!(list(&c), ["shown"]);
+}

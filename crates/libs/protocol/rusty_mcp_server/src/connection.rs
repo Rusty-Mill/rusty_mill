@@ -431,14 +431,12 @@ impl Connection {
             tools: s.offers_tools().then(|| ToolsCapability {
                 list_changed: flag(kinds.tools_list),
             }),
-            prompts: (!s.prompts.is_empty()).then(|| PromptsCapability {
+            prompts: s.offers_prompts().then(|| PromptsCapability {
                 list_changed: flag(kinds.prompts_list),
             }),
-            resources: (!s.resources.is_empty() || !s.templates.is_empty()).then(|| {
-                ResourcesCapability {
-                    subscribe: flag(kinds.resource_updates),
-                    list_changed: flag(kinds.resources_list),
-                }
+            resources: s.offers_resources().then(|| ResourcesCapability {
+                subscribe: flag(kinds.resource_updates),
+                list_changed: flag(kinds.resources_list),
             }),
             completions: s.completer.is_some().then(Value::object),
             extensions: s.has_task_tools().then(|| {
@@ -496,12 +494,12 @@ impl Connection {
             lifecycle::method::INITIALIZE => self.initialize(params),
             lifecycle::method::DISCOVER => self.discover(params),
             lifecycle::method::PING => Ok(Value::object()),
-            tool::method::LIST => self.tools_list(params),
+            tool::method::LIST => self.tools_list(id, params, token),
             tool::method::CALL => self.tools_call(id, params, token),
-            prompt::method::LIST => self.prompts_list(params),
+            prompt::method::LIST => self.prompts_list(id, params, token),
             prompt::method::GET => self.prompts_get(id, params, token),
-            resource::method::LIST => self.resources_list(params),
-            resource::method::TEMPLATES_LIST => self.templates_list(params),
+            resource::method::LIST => self.resources_list(id, params, token),
+            resource::method::TEMPLATES_LIST => self.templates_list(id, params, token),
             resource::method::READ => self.resources_read(id, params, token),
             completion::method::COMPLETE => self.complete(id, params, token),
             subscribe::method::LISTEN => self.listen(id, params, token),

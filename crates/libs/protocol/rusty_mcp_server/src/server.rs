@@ -32,6 +32,17 @@ pub trait ToolSource: Send + Sync {
     /// The tools on offer now. Registered tools win a name clash.
     fn tools(&self) -> Vec<Tool>;
 
+    /// The tools on offer to the caller of this `tools/list`, or the error
+    /// that refuses the listing. Defaults to [`ToolSource::tools`]; a source
+    /// that filters by who asks, or asks another server, overrides this.
+    ///
+    /// # Errors
+    /// The listing is refused with this error.
+    fn tools_for(&self, ctx: &CallContext) -> Result<Vec<Tool>, ErrorData> {
+        let _ = ctx;
+        Ok(self.tools())
+    }
+
     /// Run `call`, or answer `None` if this source has no such tool. Plain
     /// calls only: no tasks, no input requests.
     fn call(
@@ -39,6 +50,54 @@ pub trait ToolSource: Send + Sync {
         ctx: &CallContext,
         call: &CallToolParams,
     ) -> Option<Result<CallToolResult, ErrorData>>;
+}
+
+/// Prompts that are not known when the server is built, such as those of
+/// another server this one proxies. Asked on every `prompts/list` and for
+/// any `prompts/get` that names no prompt registered with the builder.
+pub trait PromptSource: Send + Sync {
+    /// The prompts on offer to the caller of this `prompts/list`, or the
+    /// error that refuses the listing. Registered prompts win a name clash.
+    ///
+    /// # Errors
+    /// The listing is refused with this error.
+    fn prompts(&self, ctx: &CallContext) -> Result<Vec<Prompt>, ErrorData>;
+
+    /// Get the prompt, or answer `None` if this source has no such prompt.
+    /// The arguments are not checked against the prompt's declared ones.
+    fn get(
+        &self,
+        ctx: &CallContext,
+        params: &GetPromptParams,
+    ) -> Option<Result<GetPromptResult, ErrorData>>;
+}
+
+/// Resources that are not known when the server is built, such as those of
+/// another server this one proxies. Asked on every `resources/list` and
+/// `resources/templates/list`, and for any `resources/read` that matches no
+/// resource or template registered with the builder.
+pub trait ResourceSource: Send + Sync {
+    /// The resources on offer to the caller of this `resources/list`, or the
+    /// error that refuses the listing. Registered resources win a URI clash.
+    ///
+    /// # Errors
+    /// The listing is refused with this error.
+    fn resources(&self, ctx: &CallContext) -> Result<Vec<Resource>, ErrorData>;
+
+    /// The resource templates on offer to the caller of this
+    /// `resources/templates/list`, or the error that refuses the listing.
+    ///
+    /// # Errors
+    /// The listing is refused with this error.
+    fn templates(&self, ctx: &CallContext) -> Result<Vec<ResourceTemplate>, ErrorData>;
+
+    /// Read the resource, or answer `None` if this source has no such
+    /// resource.
+    fn read(
+        &self,
+        ctx: &CallContext,
+        params: &ReadResourceParams,
+    ) -> Option<Result<ReadResourceResult, ErrorData>>;
 }
 
 /// A prompt's implementation: the arguments are already checked against the
@@ -182,8 +241,10 @@ pub struct Server {
     pub(crate) tools: Vec<RegisteredTool>,
     pub(crate) tool_source: Option<Box<dyn ToolSource>>,
     pub(crate) prompts: Vec<RegisteredPrompt>,
+    pub(crate) prompt_source: Option<Box<dyn PromptSource>>,
     pub(crate) resources: Vec<RegisteredResource>,
     pub(crate) templates: Vec<RegisteredTemplate>,
+    pub(crate) resource_source: Option<Box<dyn ResourceSource>>,
     pub(crate) completer: Option<Box<CompletionHandler>>,
     pub(crate) changes: Option<(ChangeBroadcaster, ChangeKinds)>,
     pub(crate) page_size: usize,
@@ -208,8 +269,10 @@ impl Server {
             tools: Vec::new(),
             tool_source: None,
             prompts: Vec::new(),
+            prompt_source: None,
             resources: Vec::new(),
             templates: Vec::new(),
+            resource_source: None,
             completer: None,
             changes: None,
             deferred: Vec::new(),
@@ -229,6 +292,16 @@ impl Server {
     /// Whether the server offers tools at all.
     pub(crate) fn offers_tools(&self) -> bool {
         !self.tools.is_empty() || self.tool_source.is_some()
+    }
+
+    /// Whether the server offers prompts at all.
+    pub(crate) fn offers_prompts(&self) -> bool {
+        !self.prompts.is_empty() || self.prompt_source.is_some()
+    }
+
+    /// Whether the server offers resources (or templates) at all.
+    pub(crate) fn offers_resources(&self) -> bool {
+        !self.resources.is_empty() || !self.templates.is_empty() || self.resource_source.is_some()
     }
 
     /// Whether any tool runs as a task, which is what turns the extension on.
@@ -261,8 +334,10 @@ pub struct ServerBuilder {
     tools: Vec<RegisteredTool>,
     tool_source: Option<Box<dyn ToolSource>>,
     prompts: Vec<RegisteredPrompt>,
+    prompt_source: Option<Box<dyn PromptSource>>,
     resources: Vec<RegisteredResource>,
     templates: Vec<RegisteredTemplate>,
+    resource_source: Option<Box<dyn ResourceSource>>,
     completer: Option<Box<CompletionHandler>>,
     changes: Option<(ChangeBroadcaster, ChangeKinds)>,
     /// Registration mistakes, reported by [`ServerBuilder::build`].
@@ -331,6 +406,22 @@ impl ServerBuilder {
     #[must_use]
     pub fn tool_source(mut self, source: impl ToolSource + 'static) -> Self {
         self.tool_source = Some(Box::new(source));
+        self
+    }
+
+    /// Also offer the prompts `source` has at the time of each request. A
+    /// later call replaces an earlier one.
+    #[must_use]
+    pub fn prompt_source(mut self, source: impl PromptSource + 'static) -> Self {
+        self.prompt_source = Some(Box::new(source));
+        self
+    }
+
+    /// Also offer the resources and templates `source` has at the time of
+    /// each request. A later call replaces an earlier one.
+    #[must_use]
+    pub fn resource_source(mut self, source: impl ResourceSource + 'static) -> Self {
+        self.resource_source = Some(Box::new(source));
         self
     }
 
@@ -517,14 +608,20 @@ impl ServerBuilder {
             return Err(BuildError::NoVersions);
         }
         if let Some((_, k)) = &self.changes {
-            let has_resources = !self.resources.is_empty() || !self.templates.is_empty();
+            let has_resources = !self.resources.is_empty()
+                || !self.templates.is_empty()
+                || self.resource_source.is_some();
             for (announced, offered, what) in [
                 (
                     k.tools_list,
                     !self.tools.is_empty() || self.tool_source.is_some(),
                     "tools",
                 ),
-                (k.prompts_list, !self.prompts.is_empty(), "prompts"),
+                (
+                    k.prompts_list,
+                    !self.prompts.is_empty() || self.prompt_source.is_some(),
+                    "prompts",
+                ),
                 (
                     k.resources_list || k.resource_updates,
                     has_resources,
@@ -591,8 +688,10 @@ impl ServerBuilder {
             tools: self.tools,
             tool_source: self.tool_source,
             prompts: self.prompts,
+            prompt_source: self.prompt_source,
             resources: self.resources,
             templates: self.templates,
+            resource_source: self.resource_source,
             completer: self.completer,
             changes: self.changes,
             page_size: self.page_size,

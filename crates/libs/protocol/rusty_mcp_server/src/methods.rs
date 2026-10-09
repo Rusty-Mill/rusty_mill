@@ -21,8 +21,8 @@ use rusty_mcp_proto::{
     CacheScope, CallToolParams, CompleteParams, CompleteResult, CreateTaskResult, ErrorCode,
     ErrorData, GetPromptParams, InputRequiredResult, ListPromptsResult,
     ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, Message, PaginatedParams,
-    Paging, ProtocolVersion, ReadResourceParams, Reference, RequestId, ResultType,
-    SubscriptionFilter, Tool, Wire,
+    Paging, Prompt, ProtocolVersion, ReadResourceParams, Reference, RequestId, Resource,
+    ResourceTemplate, ResultType, SubscriptionFilter, Tool, Wire,
 };
 use std::ops::Range;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -56,6 +56,17 @@ fn complete_type(version: &ProtocolVersion, slot: &mut Option<ResultType>) {
 }
 
 impl Connection {
+    /// The context a source is asked for a listing in.
+    fn list_context(
+        &self,
+        id: &RequestId,
+        params: &Option<Value>,
+        token: &CancelToken,
+    ) -> Result<CallContext, ErrorData> {
+        let (version, meta) = self.version_for(params)?;
+        Ok(self.call_context(id, version, meta, token))
+    }
+
     /// The common front of every list method: the revision in force, the
     /// slice of the list the request asks for, and the paging members of the
     /// reply (next cursor, and the cache hints a stateless revision carries).
@@ -81,7 +92,12 @@ impl Connection {
         Ok((start..end, paging))
     }
 
-    pub(crate) fn tools_list(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
+    pub(crate) fn tools_list(
+        &self,
+        id: &RequestId,
+        params: &Option<Value>,
+        token: &CancelToken,
+    ) -> Result<Value, ErrorData> {
         let server = self.server();
         if !server.offers_tools() {
             return Err(not_offered("tools"));
@@ -89,7 +105,7 @@ impl Connection {
         let mut tools: Vec<Tool> = server.tools.iter().map(|t| t.tool.clone()).collect();
         if let Some(source) = &server.tool_source {
             let registered = tools.len();
-            for t in source.tools() {
+            for t in source.tools_for(&self.list_context(id, params, token)?)? {
                 if !tools[..registered].iter().any(|r| r.name == t.name) {
                     tools.push(t);
                 }
@@ -310,14 +326,28 @@ impl Connection {
         Ok(result.to_value())
     }
 
-    pub(crate) fn prompts_list(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
-        let prompts = &self.server().prompts;
-        if prompts.is_empty() {
+    pub(crate) fn prompts_list(
+        &self,
+        id: &RequestId,
+        params: &Option<Value>,
+        token: &CancelToken,
+    ) -> Result<Value, ErrorData> {
+        let server = self.server();
+        if !server.offers_prompts() {
             return Err(not_offered("prompts"));
+        }
+        let mut prompts: Vec<Prompt> = server.prompts.iter().map(|p| p.prompt.clone()).collect();
+        if let Some(source) = &server.prompt_source {
+            let registered = prompts.len();
+            for p in source.prompts(&self.list_context(id, params, token)?)? {
+                if !prompts[..registered].iter().any(|r| r.name == p.name) {
+                    prompts.push(p);
+                }
+            }
         }
         let (range, paging) = self.list_window(params, Kind::Prompts, prompts.len())?;
         Ok(ListPromptsResult {
-            prompts: prompts[range].iter().map(|p| p.prompt.clone()).collect(),
+            prompts: prompts[range].to_vec(),
             paging,
         }
         .to_value())
@@ -329,17 +359,26 @@ impl Connection {
         params: &Option<Value>,
         token: &CancelToken,
     ) -> Result<Value, ErrorData> {
-        if self.server().prompts.is_empty() {
+        if !self.server().offers_prompts() {
             return Err(not_offered("prompts"));
         }
         let (version, meta) = self.version_for(params)?;
         let get: GetPromptParams = decode_params(params).map_err(invalid_params)?;
-        let entry = self
+        let unknown = || invalid_params(format!("unknown prompt {:?}", get.name));
+        let Some(entry) = self
             .server()
             .prompts
             .iter()
             .find(|p| p.prompt.name == get.name)
-            .ok_or_else(|| invalid_params(format!("unknown prompt {:?}", get.name)))?;
+        else {
+            let ctx = self.call_context(id, version.clone(), meta, token);
+            let source = self.server().prompt_source.as_ref();
+            let mut result = source
+                .and_then(|s| s.get(&ctx, &get))
+                .ok_or_else(unknown)??;
+            complete_type(&version, &mut result.result_type);
+            return Ok(result.to_value());
+        };
         // Arguments the prompt declares required must be given.
         for arg in entry.prompt.arguments.iter().flatten() {
             let given = get
@@ -359,33 +398,59 @@ impl Connection {
         Ok(result.to_value())
     }
 
-    pub(crate) fn resources_list(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
+    pub(crate) fn resources_list(
+        &self,
+        id: &RequestId,
+        params: &Option<Value>,
+        token: &CancelToken,
+    ) -> Result<Value, ErrorData> {
         let s = self.server();
-        if s.resources.is_empty() && s.templates.is_empty() {
+        if !s.offers_resources() {
             return Err(not_offered("resources"));
         }
-        let (range, paging) = self.list_window(params, Kind::Resources, s.resources.len())?;
+        let mut resources: Vec<Resource> = s.resources.iter().map(|r| r.resource.clone()).collect();
+        if let Some(source) = &s.resource_source {
+            let registered = resources.len();
+            for r in source.resources(&self.list_context(id, params, token)?)? {
+                if !resources[..registered].iter().any(|k| k.uri == r.uri) {
+                    resources.push(r);
+                }
+            }
+        }
+        let (range, paging) = self.list_window(params, Kind::Resources, resources.len())?;
         Ok(ListResourcesResult {
-            resources: s.resources[range]
-                .iter()
-                .map(|r| r.resource.clone())
-                .collect(),
+            resources: resources[range].to_vec(),
             paging,
         }
         .to_value())
     }
 
-    pub(crate) fn templates_list(&self, params: &Option<Value>) -> Result<Value, ErrorData> {
+    pub(crate) fn templates_list(
+        &self,
+        id: &RequestId,
+        params: &Option<Value>,
+        token: &CancelToken,
+    ) -> Result<Value, ErrorData> {
         let s = self.server();
-        if s.resources.is_empty() && s.templates.is_empty() {
+        if !s.offers_resources() {
             return Err(not_offered("resources"));
         }
-        let (range, paging) = self.list_window(params, Kind::Templates, s.templates.len())?;
+        let mut templates: Vec<ResourceTemplate> =
+            s.templates.iter().map(|t| t.template.clone()).collect();
+        if let Some(source) = &s.resource_source {
+            let registered = templates.len();
+            for t in source.templates(&self.list_context(id, params, token)?)? {
+                if !templates[..registered]
+                    .iter()
+                    .any(|k| k.uri_template == t.uri_template)
+                {
+                    templates.push(t);
+                }
+            }
+        }
+        let (range, paging) = self.list_window(params, Kind::Templates, templates.len())?;
         Ok(ListResourceTemplatesResult {
-            resource_templates: s.templates[range]
-                .iter()
-                .map(|t| t.template.clone())
-                .collect(),
+            resource_templates: templates[range].to_vec(),
             paging,
         }
         .to_value())
@@ -398,7 +463,7 @@ impl Connection {
         token: &CancelToken,
     ) -> Result<Value, ErrorData> {
         let s = self.server();
-        if s.resources.is_empty() && s.templates.is_empty() {
+        if !s.offers_resources() {
             return Err(not_offered("resources"));
         }
         let (version, meta) = self.version_for(params)?;
@@ -412,6 +477,8 @@ impl Connection {
             .find_map(|t| t.matcher.matches(&read.uri).map(|vars| (t, vars)))
         {
             (t.handler)(&ctx, &vars, read)?
+        } else if let Some(r) = s.resource_source.as_ref().and_then(|s| s.read(&ctx, &read)) {
+            r?
         } else {
             let mut data = Value::object();
             data.insert("uri", read.uri.as_str());
