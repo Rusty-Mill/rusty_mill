@@ -76,10 +76,16 @@ def ci_smoke_plan_outputs() -> dict[str, str]:
     }
 
 
-def event_plan(event: str, pr_base: str = "", push_before: str = "") -> tuple[str, str]:
+def event_plan(
+    event: str, pr_base: str = "", push_before: str = "", merge_base: str = ""
+) -> tuple[str, str]:
     """Return ``(mode, base)`` before Git history is fetched and verified."""
     if event == "workflow_dispatch":
         return "full", ""
+    if event == "merge_group":
+        # The queue's temporary branch is the base commit plus the queued PRs;
+        # the diff from that base is exactly what this entry would merge.
+        return ("scoped", merge_base) if merge_base else ("full", "")
     if event == "pull_request":
         return ("scoped", pr_base) if pr_base else ("full", "")
     if event == "push":
@@ -203,6 +209,7 @@ def main() -> None:
     parser.add_argument("--event")
     parser.add_argument("--pr-base", default="")
     parser.add_argument("--push-before", default="")
+    parser.add_argument("--merge-base", default="")
     parser.add_argument("--verify-base")
     parser.add_argument(
         "--changed-from",
@@ -224,7 +231,7 @@ def main() -> None:
             print(f"{key}={value}")
         return
     if args.event:
-        mode, base = event_plan(args.event, args.pr_base, args.push_before)
+        mode, base = event_plan(args.event, args.pr_base, args.push_before, args.merge_base)
         print(f"mode={mode}")
         print(f"base={base}")
         return

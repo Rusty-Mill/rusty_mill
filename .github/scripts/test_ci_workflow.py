@@ -12,7 +12,7 @@ import textwrap
 import tomllib
 import unittest
 
-from ci_plan import changed_paths_from_git, is_workspace_wide_change, specialized_job_flags
+from ci_plan import changed_paths_from_git, event_plan, is_workspace_wide_change, specialized_job_flags
 
 
 WORKFLOW = Path(__file__).parents[1] / "workflows" / "ci.yml"
@@ -396,6 +396,42 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("if: always()", gate)
         self.assertIn("*\" failure \"*|*\" cancelled \"*) exit 1", gate)
 
+    def test_merge_group_entries_are_scoped_against_their_base(self) -> None:
+        self.assertEqual(event_plan("merge_group", merge_base="abc123"), ("scoped", "abc123"))
+        # No usable base: fall back to the full sweep rather than guess.
+        self.assertEqual(event_plan("merge_group"), ("full", ""))
+        # Unchanged behaviour for the other events.
+        self.assertEqual(event_plan("pull_request", pr_base="b"), ("scoped", "b"))
+        self.assertEqual(event_plan("workflow_dispatch", merge_base="abc123"), ("full", ""))
+        self.assertEqual(event_plan("schedule"), ("full", ""))
+
+    def test_planner_cli_accepts_a_merge_group_base(self) -> None:
+        out = subprocess.run(
+            [sys.executable, str(PLANNER), "--event", "merge_group", "--merge-base", "abc123"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        self.assertEqual(out, ["mode=scoped", "base=abc123"])
+
+    def test_ci_runs_on_the_merge_queue_and_scopes_it(self) -> None:
+        # Without this trigger the queue waits forever for required-gate.
+        self.assertRegex(self.workflow, r"(?m)^  merge_group:\n    types: \[checks_requested\]\n")
+        self.assertIn('--merge-base "${{ github.event.merge_group.base_sha }}"', self.workflow)
+        # ci.yml is the only workflow that feeds the required check.
+        for path in sorted(REPO.glob(".github/workflows/*.yml")):
+            if path != WORKFLOW:
+                with self.subTest(workflow=path.name):
+                    self.assertNotIn("merge_group", path.read_text(encoding="utf-8"))
+
+    def test_merge_group_runs_never_share_a_concurrency_key_with_pull_requests(self) -> None:
+        group = re.search(r"(?m)^concurrency:\n(?:  #.*\n)*  group: (.+)\n  cancel-in-progress: (.+)\n", self.workflow)
+        self.assertIsNotNone(group)
+        key, cancel = group.groups()
+        # The per-PR key (and cancellation) applies to pull_request only; every
+        # other event, merge_group included, gets its own run-id key.
+        self.assertIn("github.event_name == 'pull_request' && format('pr-{0}'", key)
+        self.assertIn("format('run-{0}', github.run_id)", key)
+        self.assertEqual(cancel, "${{ github.event_name == 'pull_request' }}")
+        self.assertNotIn("merge_group", key)
     def job_text(self, job: str) -> str:
         body = self.workflow.split("\njobs:\n", 1)[1]
         chunk = body.split(f"\n  {job}:\n", 1)[1]
