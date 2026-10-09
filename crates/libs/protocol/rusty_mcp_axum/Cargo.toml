@@ -1,0 +1,26 @@
+[package]
+name = "rusty_mcp_axum"
+version = "0.1.0"
+edition = "2021"
+description = "Mount a rusty_mcp_server Streamable HTTP handler inside an axum app"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["mcp", "axum", "http"]
+categories = ["network-programming"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+rusty_mcp_server = { workspace = true, features = ["http"] }
+rusty_serve = { workspace = true }
+rusty_http = { workspace = true }
+axum = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
+rusty_mcp_client_native = { workspace = true, features = ["http"] }

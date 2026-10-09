@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_mcp_axum (pending review)
+
+- **Added:** `rusty_mcp_axum::router`: mount a `rusty_mcp_server` handler in an axum app. Used by `rp-server`; `adk-mcp` is next.
+- **Not done:** resumption and hang-up behaviour through axum are untested.
+
+---
+
 ## 2026-10-09 - rp-mcp connection pool (pending review)
 
 - **Added:** `[mcp].connections` (default 4): connections per HTTP upstream, least-busy first, so calls to one upstream run in parallel again.

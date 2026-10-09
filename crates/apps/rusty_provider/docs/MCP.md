@@ -95,7 +95,7 @@ case.
 ## Transports
 
 **Streamable HTTP** (the default) is mounted at `[mcp].path` on the normal
-`rp-server` listener, through `crates/server/src/mcp_bridge.rs`, which runs
+`rp-server` listener, through `rusty_mcp_axum`, which runs
 the (blocking) `rusty_mcp_server` HTTP handler on a blocking thread per
 request and pumps a streamed reply into the response. It serves both
 generations: clients on the older `initialize` handshake get a session, and

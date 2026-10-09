@@ -11031,10 +11031,9 @@ dependencies = [
  "rp-mcp",
  "rp-providers",
  "rp-router",
- "rusty_http",
+ "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
- "rusty_serve",
  "serde",
  "serde_json",
  "tokio",
@@ -12526,6 +12525,19 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rusty_mcp_axum"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "futures",
+ "rusty_http",
+ "rusty_mcp_client_native",
+ "rusty_mcp_server",
+ "rusty_serve",
+ "tokio",
 ]
 
 [[package]]

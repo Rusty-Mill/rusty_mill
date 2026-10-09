@@ -1,14 +1,12 @@
 pub mod credentials;
 pub mod errors;
 pub mod jwt;
-mod mcp_bridge;
 pub mod routes;
 pub mod state;
 
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
-use axum::extract::OriginalUri;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, patch, post};
 use axum::Router as AxumRouter;
@@ -70,16 +68,7 @@ fn mount_mcp(router: AxumRouter<AppState>, state: &AppState) -> AxumRouter<AppSt
             ..HttpConfig::default()
         },
     ));
-    let max_body_bytes = state.max_body_bytes;
-    let guarded = AxumRouter::new()
-        .fallback(
-            move |OriginalUri(uri): OriginalUri, request: axum::extract::Request| {
-                let target = uri
-                    .path_and_query()
-                    .map_or_else(|| uri.path().to_owned(), |pq| pq.as_str().to_owned());
-                mcp_bridge::serve(Arc::clone(&handler), target, request, max_body_bytes)
-            },
-        )
+    let guarded = rusty_mcp_axum::router(handler, state.max_body_bytes)
         .layer(from_fn_with_state(state.clone(), routes::mcp_auth));
 
     if path.is_empty() {

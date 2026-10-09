@@ -1,4 +1,4 @@
-//! Serves `rusty_mcp_server`'s HTTP handler from inside the axum app.
+//! Serves `rusty_mcp_server`'s HTTP handler from inside an axum app.
 //!
 //! The handler is blocking and written for `rusty_serve`, so each request is
 //! handed to a blocking thread: the request is copied across, the handler
@@ -10,8 +10,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
+use axum::extract::OriginalUri;
 use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
+use axum::Router;
 use rusty_http::{HeaderMap, Method};
 use rusty_mcp_server::HttpHandler;
 use rusty_serve::{Body as ServeBody, Request, SharedHandler};
@@ -33,9 +35,23 @@ enum Payload {
     Stream(mpsc::Receiver<Bytes>),
 }
 
+/// A router answering every request with `handler`, whose request bodies may
+/// be at most `max_body_bytes`. Put layers on it, then nest it at the path
+/// `handler` serves (see the crate docs).
+pub fn router(handler: Arc<HttpHandler>, max_body_bytes: usize) -> Router {
+    Router::new().fallback(
+        move |OriginalUri(uri): OriginalUri, request: axum::extract::Request| {
+            let target = uri
+                .path_and_query()
+                .map_or_else(|| uri.path().to_owned(), |pq| pq.as_str().to_owned());
+            serve(Arc::clone(&handler), target, request, max_body_bytes)
+        },
+    )
+}
+
 /// Answer `request` (whose path was `target` before any mount prefix was
 /// stripped) with `handler`. `max_body_bytes` bounds the request body.
-pub async fn serve(
+async fn serve(
     handler: Arc<HttpHandler>,
     target: String,
     request: axum::extract::Request,
