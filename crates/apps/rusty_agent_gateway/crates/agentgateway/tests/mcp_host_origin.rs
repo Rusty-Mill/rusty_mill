@@ -86,7 +86,11 @@ async fn a_public_host_and_a_browser_origin_reach_the_handler() {
     let (url, shutdown) = start().await;
 
     let response = initialize(&url, "mcp.public.example", "https://app.example").await;
-    assert_eq!(response.status(), 200, "the handler must not refuse a public host");
+    assert_eq!(
+        response.status(),
+        200,
+        "the handler must not refuse a public host"
+    );
     assert_eq!(
         response
             .headers()
