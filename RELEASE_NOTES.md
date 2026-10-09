@@ -270,6 +270,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-10 - rusty_mcp_server Streamable HTTP (pending review)
+
+- **Added:** `http::McpHttp` (feature `http`), verified by an independent `rmcp` HTTP client over a real socket.
+- **Known limitations:** `rusty_serve` caps request bodies at 1 MiB and speaks plain HTTP (TLS is for a reverse proxy or the `rusty_tls` listener, not wired here); no server-sent events, so no server-to-client requests, sampling, elicitation or progress over HTTP; a dropped connection does not cancel a running handler; `rusty_serve` serialises only the cheap routing step, but each connection is a thread (bounded by its connection limit). `rusty_homelab_mcp`, `rp-mcp` and the gateways are not ported yet.
+
+---
+
 ## 2026-10-10 - rusty_mcp_server resources, prompts, completion (pending review)
 
 - **Added:** the three method families, tested by 4 dispatcher tests and a second `rmcp`-client acceptance test.

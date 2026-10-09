@@ -6,6 +6,8 @@
 //!   get back the response to send, if any. No threads, no I/O.
 //! - [`Server`]: a [`Service`] built from registered tools
 //!   (`Server::new(..).tool(Tool, handler)`), with `Schema`-built input schemas.
+//! - [`http`] (feature `http`): a stateless Streamable HTTP endpoint for
+//!   `rusty_serve`.
 //! - [`stdio`]: newline-delimited JSON over a reader and a writer, with a
 //!   bounded line length and `notifications/cancelled` honoured while a
 //!   handler runs.
@@ -17,6 +19,8 @@
 
 mod context;
 mod dispatch;
+#[cfg(feature = "http")]
+pub mod http;
 mod server;
 pub mod stdio;
 
