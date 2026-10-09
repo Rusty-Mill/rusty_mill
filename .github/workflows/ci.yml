@@ -1135,7 +1135,7 @@ jobs:
   # own pre-merge CI (its crates/apps/rusty_remind_me/.github/workflows/ci.yml,
   # dead now that it is not at a repository root -- the full rationale for
   # each leg is in its comments there). Its toolchain-independent check
-  # (plugin.json version) lives in remind-me-checks.yml.
+  # (plugin.json version) is the `remind-me-plugin-version` job below.
   # `fmt` is covered by the workspace-wide job above.
   # ---------------------------------------------------------------------------
 
@@ -1247,6 +1247,25 @@ jobs:
         run: cargo test --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf
       - name: cargo clippy --features ann,ocr,rerank,local-embed,pdf
         run: cargo clippy --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --all-targets -- -D warnings
+
+  remind-me-plugin-version:
+    # rusty_remind_me's `.claude-plugin/plugin.json` version must equal its six
+    # crates' versions (check_plugin_version.sh also fails if the crates
+    # disagree). Lives here, not in its own workflow, so `required-gate` covers
+    # it: a drifted bump must not merge while the sole required check is green.
+    # Runs whenever the product's directory changes (the `remind_me` plan flag).
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-remind-me-plugin-version
+      queue: max
+      cancel-in-progress: false
+    name: rusty_remind_me plugin.json version vs. crate versions
+    needs: plan
+    if: needs.plan.outputs.remind_me == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Compare .claude-plugin/plugin.json against the crates' Cargo.toml
+        run: crates/apps/rusty_remind_me/scripts/check_plugin_version.sh
 
   remind-me-hub:
     concurrency:
@@ -1378,6 +1397,7 @@ jobs:
       - remind-me
       - remind-me-features
       - remind-me-combined-features
+      - remind-me-plugin-version
       - remind-me-hub
       - remind-me-legacy-import
       - remind-me-windows
