@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_bullet source repo frozen (pending review)
+
+- **Changed:** ADR-0008 and the migration plan record that `baileyrd/rusty_bullet` is frozen and archived (README notice `7d5a07f`; read-only, reversible, not deleted). `baileyrd/RLEvalSystem` is unchanged. Docs only.
+
+---
+
 ## 2026-10-09 - rb_env match flow: review fixes for the rusty_bullet catch-up (pending review)
 
 - **Fixed:** regulation no longer ends on a height guess. `Flow::after_step` takes whether the ball met the floor during the tick (`flow::ball_met_floor`, from the ball before and after it), so a bounce on the tick the clock reaches zero counts even though the ball ends it above 97.5, and a low ball still in the air (z 97) does not end it. Tests: pure `ball_met_floor` cases, `Flow` tie and lead, and an `Env` run for a fall and a bounce on the last tick. The `MATCH_END_BALL_HEIGHT` constant is gone; a ball met on the curve (the game once ended a match at 97.3 there) now reads as in the air until it reaches the floor.

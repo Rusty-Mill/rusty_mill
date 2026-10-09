@@ -1,6 +1,6 @@
 # Rocket League apps family: migration plan
 
-Status: **proposal, nothing executed.** Source repos are never modified or deleted.
+Status: **executed for `rusty_bullet` (imported and caught up, #541/#552/#556) and `RLEvalSystem` (#544); `baileyrd/rusty_bullet` frozen and archived 2026-10-09.** Source repos are never deleted. The plan text below is kept as written, in the future tense.
 Inspected 2026-10-08: `baileyrd/rusty_bullet` (public), `baileyrd/RLEvalSystem` (private), full-history fetches of both.
 
 ## 0. What is actually being moved
@@ -128,7 +128,7 @@ Because sources are never touched, rollback is cheap:
 - **Before merge:** delete the scratch clones and the PR branch. Nothing changed anywhere.
 - **After merge to main:** `git revert -m 1 <import-merge-sha>` for the PR (one revert per import; the later PRs revert first). History of the other crates is unaffected. The source repos remain the source of truth and keep working (they were never archived or altered).
 - **If a replay blob leaks in anyway:** do not fix forward; revert the merge before others branch from it, redo the filter, re-merge. A post-hoc history rewrite on rusty_mill is the expensive case, which is why the size gate runs before the merge.
-- The source repos stay un-archived and un-deleted until at least one release cycle after phase 4, then archiving (not deleting) is a separate decision for you.
+- The source repos stay un-archived and un-deleted until at least one release cycle after phase 4, then archiving (not deleting) is a separate decision for you. **Update 2026-10-09:** the owner chose to freeze `baileyrd/rusty_bullet` early, right after the catch-up: a README notice was pushed (`7d5a07f`) and the repo archived. It remains readable and unarchiving is possible, so the rollback above still has its source. `baileyrd/RLEvalSystem` is unchanged.
 
 ## 9. Decisions (2026-10-08) and what they change
 
