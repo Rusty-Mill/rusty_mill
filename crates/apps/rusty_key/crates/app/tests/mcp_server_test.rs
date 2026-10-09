@@ -189,12 +189,15 @@ async fn a_failed_turn_is_a_tool_error_not_a_protocol_error() {
     let ws = workspace("fail");
     let model = FakeLanguageModel::new(vec![vec![Scripted::Text("never delivered".into())]]);
     // Make the evidence journal unwritable once the session exists, so the
-    // turn itself fails after the model has answered.
+    // turn itself fails after the model has answered. A directory where the
+    // journal file belongs fails the append on every platform (deleting the
+    // state directory instead fails on Windows while the session holds files
+    // open in it).
     let broken = ws.clone();
     let out = exchange_with(&ws, model, &[init(), chat(2, "hello")], move || {
-        let dir = broken.join(".rustykeys");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::write(&dir, "not a directory").unwrap();
+        let journal = broken.join(".rustykeys").join("evidence.jsonl");
+        let _ = std::fs::remove_file(&journal);
+        std::fs::create_dir_all(&journal).unwrap();
     })
     .await;
     let m = reply(&out, 2);
