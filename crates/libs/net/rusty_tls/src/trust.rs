@@ -110,7 +110,7 @@ pub enum TrustPolicy {
 /// layer.
 ///
 /// [`ErrorKind::NotFound`]: platform::error::ErrorKind::NotFound
-fn system_anchors() -> Result<Vec<Vec<u8>>, Error> {
+pub(crate) fn system_anchors() -> Result<Vec<Vec<u8>>, Error> {
     use platform::security::TrustAnchors;
 
     #[cfg(target_os = "linux")]

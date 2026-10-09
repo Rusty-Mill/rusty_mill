@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_tls: a blocking stream on the native engine (opt-in, not the seam)
+
+- **Added:** `handrolled::stream::NativeTlsStream`, a `Read + Write` client stream shaped like `TlsStream`, inside the double-gated `handrolled` module. It is the piece a consumer such as `rleval-app`'s Google sign-in would opt into locally. It was built there, and not as a change to `TlsStream`, because ADR-0002 keeps rustls behind every type this crate exports at the root; adding it at the root would have needed that ADR superseded.
+- **Behaviour worth knowing:** only `System` and `PinnedAnchors` trust are supported (the rest are refused at construction); a TCP close without `close_notify` is `UnexpectedEof`; nothing is delivered after the peer's `close_notify`; one record is written per `write` call. Testing it found a real bug first: a 100 KB write failed because the TLS 1.3 connection seals one record at a time.
+- **Not done, and not mine to do:** nothing selects this stream for any caller, `rleval-app` is untouched, and the evidence bar and the ADR superseding ADR-0002 are the owner's.
+
 ## 2026-10-09 - CI: live-internet check added to rusty-tls-engine (non-blocking)
 
 - **Added (CI):** a last step in `rusty-tls-engine` runs `handrolled_live` on the runner and writes its results to the step summary. It is `continue-on-error`: the first real evidence about Google's endpoints comes from this run, and it cannot block a merge. The logic is a tested script (`live_internet_check.sh`): output and summary are written even when cargo fails, and a failure or zero-test run fails the step. A guard in `test_ci_workflow` keeps the step non-blocking.

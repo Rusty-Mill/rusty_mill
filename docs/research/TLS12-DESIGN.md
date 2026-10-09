@@ -590,6 +590,31 @@ Source review of `d38efa61` found four defects, all confirmed against the code:
 Each test was run against the code with its fix reverted and fails there. Not covered: TLS 1.3 servers' own
 `close_notify` handling beyond the shared `Connection`, and 0-RTT (not implemented).
 
+## A blocking stream on the engine (opt-in, not the seam)
+
+`handrolled::stream::NativeTlsStream<S: Read + Write>` is the engine as a consumer's code would hold it: wrap a
+socket, give it a name and a `TrustPolicy`, read and write. It runs the whole handshake in one blocking call (so the
+borrowed anchors and config never outlive it), then holds the owned `Established` connection.
+
+Choices, and why:
+
+- **Inside `handrolled`, not a change to `TlsStream`.** ADR-0002 section 3 keeps rustls behind every exported type.
+  A type reachable only under both gates and chosen only by a consumer's own code leaves that intact; changing
+  `TlsStream` would not.
+- **`System` and `PinnedAnchors` only.** The engine cannot skip or relax verification and this type adds no way to.
+  The other policies are an `Unsupported` I/O error at construction. `Error` is not `#[non_exhaustive]`, so no variant
+  was added to it.
+- **Truncation is an error.** A TCP close with no `close_notify` is `UnexpectedEof`; only an authenticated
+  `close_notify` ends the stream with `Ok(0)`, and nothing is delivered after it.
+- **One record per `write`.** The TLS 1.3 connection seals a single record, so `write` is partial above 2^14 and
+  `write_all` loops. Found by the first 100 KB test.
+- **No resumption.** Tickets the connection yields are dropped; a stream is one connection.
+
+Tested against a real rustls server on both versions. Two mutants (truncation read as EOF; close_notify ignored)
+are caught. Not covered: a server that sends a post-handshake KeyUpdate or a renegotiation request mid-stream
+(the engine's own suites cover the state machines), an OpenSSL peer, and any peer on a network other than loopback
+apart from the live test.
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could
