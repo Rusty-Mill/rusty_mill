@@ -10,12 +10,9 @@
 pub mod chaser;
 pub mod flow;
 
-use flow::{Flow, MatchState, Phase, Transition};
+use flow::{ball_met_floor, Flow, MatchState, Phase, Transition, BALL_FLOOR_CONTACT_HEIGHT};
 use rb_domain::{ControllerInput, PhysicsFrame, Vec3};
 use rb_physics_bullet::{CarBallTuning, PhysicsWorld, RigidBody};
-
-/// Height of the ball's centre where it touches the floor (uu).
-const BALL_FLOOR_CONTACT_HEIGHT: f32 = 93.2;
 
 /// Seconds per tick: the game's 120 Hz physics rate.
 pub const TICK_SECS: f32 = 1.0 / 120.0;
@@ -198,13 +195,15 @@ impl Env {
             .collect()
     }
 
-    /// Runs the phase machine after a tick and does what the new phase asks of the world.
-    fn advance_flow(&mut self) {
+    /// Runs the phase machine after a tick (the ball was `before` it, as position and velocity)
+    /// and does what the new phase asks of the world.
+    fn advance_flow(&mut self, before: (Vec3, Vec3)) {
         let Some(mut flow) = self.flow else {
             return;
         };
         let frame = self.world.frame();
-        let transition = flow.after_step(frame.ball.position, frame.ball.velocity);
+        let after = (frame.ball.position, frame.ball.velocity);
+        let transition = flow.after_step(after.0, after.1, ball_met_floor(before, after));
         self.flow = Some(flow);
         if matches!(
             transition,
@@ -266,8 +265,9 @@ impl Env {
         let phase = self.flow.map(|flow| flow.state().phase);
         if matches!(phase, Some(Phase::Replay | Phase::Ended)) {
             // The replay shows the goal again: the clock runs, the world does not.
-            self.advance_flow();
-            return self.world.frame();
+            let frame = self.world.frame();
+            self.advance_flow((frame.ball.position, frame.ball.velocity));
+            return frame;
         }
         let countdown = phase == Some(Phase::Countdown);
         for (index, input) in inputs.iter().enumerate() {
@@ -278,8 +278,9 @@ impl Env {
             };
             self.world.set_car_input(index, input);
         }
+        let before = self.world.frame().ball;
         self.world.step(TICK_SECS);
-        self.advance_flow();
+        self.advance_flow((before.position, before.velocity));
         self.world.frame()
     }
 }
@@ -602,6 +603,51 @@ mod tests {
 
     /// A match from its first kickoff has the 850-tick intro countdown and a clock that starts
     /// when the ball is first touched.
+    /// A one-tick match with the ball at `height` moving at `vz`; steps until the phase leaves
+    /// `Active` and returns the ball heights of every tick that did not end it, and the end's (`None`
+    /// if it never ends).
+    fn heights_until_regulation_ends(height: f32, vz: f32) -> Option<(Vec<f32>, f32, MatchState)> {
+        let mut frame = start();
+        frame.ball.position.z = height;
+        frame.ball.velocity.z = vz;
+        let mut env = Env::new();
+        env.enable_match_flow(true);
+        env.set_match_length(Some(1));
+        env.reset(&frame);
+        let mut before = Vec::new();
+        for _ in 0..600 {
+            let z = env.step(&idle()).ball.position.z;
+            let state = env.match_state().unwrap();
+            if state.phase != Phase::Active {
+                return Some((before, z, state));
+            }
+            before.push(z);
+        }
+        None
+    }
+
+    #[test]
+    fn a_tied_regulation_waits_for_the_floor_and_a_bounce_on_the_last_tick_counts() {
+        // Falling from above: nothing ends it until the tick the ball meets the floor.
+        let (before, z, state) = heights_until_regulation_ends(300.0, 0.0).unwrap();
+        assert!(state.overtime, "a tie goes to overtime");
+        assert!(before.len() > 10 && before.iter().all(|z| *z > flow::BALL_FLOOR_CONTACT_HEIGHT));
+        assert!(z < 120.0, "it ended at the floor, at {z}");
+        // Coming down fast enough to bounce within one tick: it still ends on that tick, even
+        // though the ball is above the contact height after it.
+        let (before, z, state) = heights_until_regulation_ends(100.0, -1500.0).unwrap();
+        assert!(state.overtime);
+        assert!(
+            before.len() <= 1,
+            "ended at once, not {} ticks later",
+            before.len()
+        );
+        assert!(
+            z > flow::BALL_FLOOR_CONTACT_HEIGHT,
+            "ended above the threshold, at {z}"
+        );
+    }
+
     #[test]
     fn a_match_starts_with_the_long_countdown_and_a_clock_that_waits_for_play() {
         let mut env = Env::new();

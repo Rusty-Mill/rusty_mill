@@ -15,7 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rb_tape_bot::vector;
+use rb_tape_bot::{
+    tie_up::{Action, TieUp},
+    vector,
+};
 use rlbot::{
     flat::{
         ConnectionSettings, CoreMessage, DebugRendering, DesiredBallState, DesiredGameState,
@@ -139,7 +142,7 @@ fn main() -> Result<()> {
     let overtime_goal = std::env::args().any(|a| a == "--overtime-goal");
     let mut overtime_goal_sent = false;
     let tie_up = std::env::args().any(|a| a == "--tie-up");
-    let mut tied = false;
+    let mut tie = TieUp::default();
     conn.send_packet(config(length))?;
     let mut file = File::create(&out)?;
     let started = Instant::now();
@@ -160,19 +163,18 @@ fn main() -> Result<()> {
                     last_phase = p.match_info.match_phase;
                 }
                 if tie_up
-                    && !tied
                     && !p.match_info.is_overtime
                     && p.match_info.match_phase == MatchPhase::Active
                     && p.match_info.game_time_remaining < 20.0
                     && p.match_info.game_time_remaining > 8.0
                 {
-                    let (blue, orange) = (p.teams.first().map_or(0, |t| t.score), p.teams.get(1).map_or(0, |t| t.score));
-                    if blue == orange {
-                        tied = true;
-                    } else {
-                        conn.send_packet(goal_state(if blue < orange { 1.0 } else { -1.0 }))?;
-                        println!("tie-up goal sent at remaining {:.2}", p.match_info.game_time_remaining);
-                        tied = true;
+                    let score = |i: usize| p.teams.get(i).map_or(0, |t| t.score);
+                    if let Action::Shoot(side) = tie.observe(score(0), score(1)) {
+                        conn.send_packet(goal_state(side))?;
+                        println!(
+                            "tie-up goal sent at remaining {:.2}",
+                            p.match_info.game_time_remaining
+                        );
                     }
                 }
                 if overtime_goal

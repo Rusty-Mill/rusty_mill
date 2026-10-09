@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rb_env match flow: review fixes for the rusty_bullet catch-up (pending review)
+
+- **Fixed:** regulation no longer ends on a height guess. `Flow::after_step` takes whether the ball met the floor during the tick (`flow::ball_met_floor`, from the ball before and after it), so a bounce on the tick the clock reaches zero counts even though the ball ends it above 97.5, and a low ball still in the air (z 97) does not end it. Tests: pure `ball_met_floor` cases, `Flow` tie and lead, and an `Env` run for a fall and a bounce on the last tick. The `MATCH_END_BALL_HEIGHT` constant is gone; a ball met on the curve (the game once ended a match at 97.3 there) now reads as in the air until it reaches the floor.
+- **Fixed:** `match_log_check` compares the recorded `blue`, `orange` and `overtime` fields with the port's on every frame and reports the mismatches, instead of printing only the port's final score. Synthetic rows corrupting each field alone are tested.
+- **Fixed:** `rb_match_log --tie-up` confirms equality from a later score observation (`tie_up::TieUp`) before it stops, so a multi-goal deficit gets one shot per goal and a shot that does not score is fired again after 120 observations.
+- **Fixed:** `rb_tape_bot`'s path to `rb_scenario` pointed at the old repo layout, so the tool could not be built; it now builds standalone (`cargo test --lib`, `cargo build --bins` in its directory).
+- **Known limitation:** the four real-game logs are not tracked, so none of this was run against them; the floor rule has not been checked against the game's 92.2 and 97.3 match ends.
+
+---
+
 ## 2026-10-08 - rusty_bullet catch-up: match flow (pending review)
 
 - **Changed:** brings in the 7 `baileyrd/rusty_bullet` commits (PRs #315-#317) pushed after the original import: `rb_env` match clock, overtime, match end and first-kickoff intro (FR-160), a whole-match check against game logs, scripted chasers and the `play_match` example, plus the matching ADR 0082 / parity-plan / spec updates and `rb_tape_bot` log tooling. Same `git filter-repo` rewrite, deterministic, so the already imported commits keep their SHAs and only these 7 come across; the new SHA map lines are appended to `docs/research/rl-migration/rusty_bullet-commit-map.txt`.

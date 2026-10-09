@@ -1,6 +1,8 @@
 //! Shared pieces of the tape bots: the scenario's start state and a tape
 //! input as RLBot messages. See docs/research/BOT-CAPTURE-PLAN.md.
 
+pub mod tie_up;
+
 use rb_scenario::{BallStart, CarStart, Input, Scenario};
 use rlbot::flat::{
     ControllerState, DesiredBallState, DesiredCarState, DesiredGameState, DesiredPhysics, Float,
