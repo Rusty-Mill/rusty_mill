@@ -1446,6 +1446,7 @@ jobs:
           python3 -I docs/research/crypto-evidence/test_check_manifests.py
           python3 -I docs/research/crypto-evidence/test_planted_leak.py
           python3 -I crates/foundation/rusty_ct_check/scripts/test_disasm_audit.py
+          python3 -I crates/foundation/rusty_pk/scripts/test_verdict_sites.py
           sh crates/foundation/rusty_ct_check/scripts/test_taint_lib.sh
 
   # ---------------------------------------------------------------------------

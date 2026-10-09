@@ -10,6 +10,14 @@
 //! taint runs, exact disassembly counts and a timing test (`scripts/ct_check.sh`),
 //! and **not proven**.
 //!
+//! Validating a private scalar (`1 <= d < n`) is also secret-dependent work: its limbs
+//! are the secret. [`scalar_valid`] does the same fixed work for every input (an
+//! OR-reduction for zero and a full-width borrow chain for the range), the length is
+//! rejected first (it is public), and the only branch is on the final verdict
+//! (the `?` after [`ensure`]); `scripts/verdict_sites.py` checks that every valgrind taint
+//! report is exactly that jump. The same holds for the "result is the point at infinity" test
+//! on the secret-derived `Z`.
+//!
 //! The peer's point is public: it is validated with variable-time code (both
 //! coordinates below `p`, on the curve; the cofactor is 1, so there is no subgroup
 //! check) and the point at infinity cannot be encoded. Intermediate field elements
@@ -136,15 +144,17 @@ impl core::fmt::Debug for PrivateKey {
 
 impl PrivateKey {
     /// A key from exactly `curve.len()` big-endian bytes, which must encode
-    /// `1 <= d < n`. The range check is variable time: a rejected candidate is
-    /// discarded, and an accepted one's validity is not secret.
+    /// `1 <= d < n`. The length is checked first (it is public); the range check does
+    /// the same work whatever the scalar is, and only its final verdict is branched on.
     pub fn from_bytes(curve: Curve, bytes: &[u8]) -> Result<Self, InvalidKey> {
         let c = curve.build().ok_or(InvalidKey)?;
-        let d = c.fnn.parse_be(bytes).ok_or(InvalidKey)?;
-        if bytes.len() != curve.len() || c.fnn.is_zero_vartime(&d) || !c.fnn.is_reduced_vartime(&d)
-        {
+        if bytes.len() != curve.len() {
             return Err(InvalidKey);
         }
+        let mut d = limbs_from_be(bytes);
+        let verdict = scalar_valid(&d, &c.fnn.modulus(), curve.len() / 8);
+        wipe(&mut d.0);
+        ensure(verdict)?;
         let mut key = Self {
             curve,
             bytes: [0; MAX_LEN],
@@ -174,13 +184,6 @@ impl PrivateKey {
         Err(GenerateError::Exhausted)
     }
 
-    /// The scalar's bytes, so the valgrind taint example can mark them secret. Not
-    /// part of the supported API: nothing else should read a private key's bytes.
-    #[doc(hidden)]
-    pub fn scalar_bytes_for_taint_run(&self) -> &[u8] {
-        &self.bytes[..self.curve.len()]
-    }
-
     /// The public key `d * G`, uncompressed.
     pub fn public_key(&self) -> Result<Point, InvalidKey> {
         let c = self.curve.build().ok_or(InvalidKey)?;
@@ -197,11 +200,9 @@ impl PrivateKey {
         let len = self.curve.len();
         let q = decode(&c, peer).ok_or(InvalidKey)?;
         let r = mul(&c, &self.bytes[..len], &q);
-        // Infinity is impossible for a valid point and a scalar in [1, n-1]
-        // (prime order); the test depends on public data only.
-        if c.fp.is_zero_vartime(&r.z) {
-            return Err(InvalidKey);
-        }
+        // Infinity is impossible for a valid point and a scalar in [1, n-1] (prime
+        // order). `Z` derives from the secret, so the test is fixed-work as well.
+        ensure(is_nonzero(&r.z, len / 8))?;
         let x = c.fp.leave(&c.fp.mul(&r.x, &c.fp.invert(&r.z)));
         let mut out = SharedSecret {
             bytes: [0; MAX_LEN],
@@ -242,9 +243,7 @@ fn decode(c: &Wc, bytes: &[u8]) -> Option<Proj> {
 
 fn encode(c: &Wc, p: &Proj) -> Option<Point> {
     let f = &c.fp;
-    if f.is_zero_vartime(&p.z) {
-        return None;
-    }
+    ensure(is_nonzero(&p.z, c.len / 8)).ok()?;
     let zi = f.invert(&p.z);
     let (x, y) = (f.leave(&f.mul(&p.x, &zi)), f.leave(&f.mul(&p.y, &zi)));
     let mut out = Point {
@@ -255,6 +254,51 @@ fn encode(c: &Wc, p: &Proj) -> Option<Point> {
     f.to_be_bytes(&x, &mut out.bytes[1..=c.len])?;
     f.to_be_bytes(&y, &mut out.bytes[1 + c.len..out.len])?;
     Some(out)
+}
+
+/// Parses exactly `bytes.len() <= 48` big-endian bytes into limbs, with no branch on their
+/// values and no heap copy (so the caller can wipe the only copy).
+fn limbs_from_be(bytes: &[u8]) -> E {
+    let mut out = E::ZERO;
+    for (i, &b) in bytes.iter().rev().enumerate() {
+        out.0[i / 8] |= u64::from(b) << (8 * (i % 8));
+    }
+    out
+}
+
+/// 1 if `x != 0`, else 0, without a branch.
+fn nonzero(x: u64) -> u64 {
+    let x = core::hint::black_box(x);
+    (x | x.wrapping_neg()) >> 63
+}
+
+/// 1 if any of the first `k` limbs of `a` is non-zero, else 0. Always reads `k` limbs.
+fn is_nonzero(a: &E, k: usize) -> u64 {
+    nonzero(a.0[..k].iter().fold(0, |acc, &l| acc | l))
+}
+
+/// 1 iff `1 <= d < n` for `k`-limb values. The same `k` limb operations for every input:
+/// an OR-reduction for non-zero and a full-width borrow chain for `d < n`.
+fn scalar_valid(d: &E, n: &E, k: usize) -> u64 {
+    let mut borrow = 0u64;
+    for i in 0..k {
+        let (t, b1) = d.0[i].overflowing_sub(n.0[i]);
+        let (_, b2) = t.overflowing_sub(borrow);
+        borrow = u64::from(b1 | b2);
+    }
+    is_nonzero(d, k) & core::hint::black_box(borrow)
+}
+
+/// Turns a secret-derived verdict (`1` means fine) into a `Result`. The callers' `?` is the
+/// one branch that depends on it; `scripts/verdict_sites.py` checks that every taint report
+/// is exactly that jump (a conditional jump right after a call to this function).
+#[inline(never)]
+fn ensure(ok: u64) -> Result<(), InvalidKey> {
+    if core::hint::black_box(ok) == 1 {
+        Ok(())
+    } else {
+        Err(InvalidKey)
+    }
 }
 
 fn infinity(f: &Field) -> Proj {
@@ -520,6 +564,41 @@ mod tests {
             assert!(PrivateKey::from_bytes(curve, &n).is_ok(), "d = n - 1");
             assert!(PrivateKey::from_bytes(curve, &alloc::vec![1u8; len - 1]).is_err());
             assert!(PrivateKey::from_bytes(curve, &alloc::vec![1u8; len + 1]).is_err());
+        }
+    }
+
+    #[test]
+    fn range_check_boundaries_every_power_of_two_and_all_ones() {
+        for (curve, c) in curves() {
+            let len = curve.len();
+            let mut n = alloc::vec![0u8; len];
+            c.fnn.to_be_bytes(&c.fnn.modulus(), &mut n).unwrap();
+            // Every single-bit scalar 2^i is below n (n > 2^(8*len - 1)): all valid.
+            for bit in 0..len * 8 {
+                let mut k = alloc::vec![0u8; len];
+                k[len - 1 - bit / 8] = 1 << (bit % 8);
+                assert!(
+                    PrivateKey::from_bytes(curve, &k).is_ok(),
+                    "{curve:?} 2^{bit}"
+                );
+            }
+            // n + 1, n + 2^64 and 2^(8*len) - 1 are all >= n: rejected, including when only the
+            // top limb or only the bottom limb differs from n - 1.
+            let plus = |delta_limb: usize| {
+                let mut k = n.clone();
+                let i = len - 1 - delta_limb * 8;
+                k[i] = k[i].wrapping_add(1);
+                k
+            };
+            assert!(PrivateKey::from_bytes(curve, &plus(0)).is_err(), "n + 1");
+            assert!(PrivateKey::from_bytes(curve, &plus(1)).is_err(), "n + 2^64");
+            assert!(
+                PrivateKey::from_bytes(curve, &alloc::vec![0xffu8; len]).is_err(),
+                "all ones"
+            );
+            let mut top_only = alloc::vec![0u8; len];
+            top_only[0] = 0xff; // large top limb, zero below
+            assert!(PrivateKey::from_bytes(curve, &top_only).is_err() == (top_only >= n));
         }
     }
 

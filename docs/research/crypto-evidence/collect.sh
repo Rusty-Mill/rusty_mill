@@ -144,6 +144,7 @@ for tf in test_timing_series.py test_check_manifests.py test_planted_leak.py; do
 done
 sh crates/foundation/rusty_ct_check/scripts/test_taint_lib.sh >/dev/null 2>&1 && echo "taint_lib self-test: passed" || { echo "taint_lib self-test: FAILED"; fail "test_taint_lib.sh"; }
 python3 -I crates/foundation/rusty_ct_check/scripts/test_disasm_audit.py >/dev/null 2>&1 && echo "disasm_audit self-test: passed" || { echo "disasm_audit self-test: FAILED"; fail "test_disasm_audit.py"; }
+python3 -I crates/foundation/rusty_pk/scripts/test_verdict_sites.py >/dev/null 2>&1 && echo "verdict_sites self-test: passed" || { echo "verdict_sites self-test: FAILED"; fail "test_verdict_sites.py"; }
 
 section "speed, one run each (not benchmarks)"
 cargo test --release -p rusty_pk --test perf -- --ignored --nocapture 2>&1 | grep -E 'ours'

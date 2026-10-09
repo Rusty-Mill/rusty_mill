@@ -759,21 +759,34 @@ deliberately simple (no window table); that costs speed.
   reject verdicts as `ring` on every Wycheproof public key. The two files are pinned in `MANIFEST.txt`.
   Mutation checks (select ignores its mask, one line of `add`, one line of `double`, prefix check removed)
   each make a test fail.
-- *Constant-time evidence (x86-64, rustc 1.98.1, one VM; none of it proves anything):* valgrind taint with a
-  secret scalar reports exactly two things per curve, the "is the result the point at infinity" test in
-  `public_key` and in `agree`, which depends on a value derived from the secret but is false for every
-  valid key (prime-order group); a planted branch on the scalar is reported (16 reports instead of 2, and
-  the disassembly count of `mul` goes from 2 to 10). Exact jump counts are pinned for `select` (0), `add` (1),
-  `double` (1) and `mul` (2); `select` was read by hand (SIMD and/or/andn, no branch), and the scalar bit
-  becomes a mask via `sar` and `bt`/`sbb`. A single timing run shows |t| 0.29 (P-256) and 0.23 (P-384) for sparse
-  against dense scalars, and 2.71 for the A/A baseline; the 40-repetition series in `collect.sh` has been
-  extended but **not yet run**, so there is no new evidence record.
-- *Side effect on earlier evidence:* adding this code made LLVM inline `Modulus::add` into `Field::add`
-  (6 jumps became 16, all comparisons against the public limb count); the pin was updated after reading
-  it. This is the drift detection working, and a reminder that every counts pin is per binary.
+- *Constant-time evidence (x86-64, rustc 1.98.1, one VM; none of it proves anything):* a review of the first
+  version (PR #576 comment, da929dfa) found that private-scalar validation (`from_bytes`: zero test and range
+  check, also reached by `generate`) used early-exit `*_vartime` helpers on the secret's limbs, that the taint run
+  marked the bytes only after import so it excluded exactly that code, and that the "result is infinity"
+  test on the secret-derived `Z` was a short-circuit limb test whose permitted taint report sat in whole
+  functions (`public_key`, `agree`). A valid scalar is a public fact; the number of limbs examined to establish
+  it was not. Fixed: the length is rejected first (public); `scalar_valid` does the same `k` limb operations for
+  every input (an OR-reduction for non-zero and a full-width borrow chain for `d < n`); the infinity test is the
+  same fixed OR-reduction; the scalar is parsed into a stack array (no heap copy to leave unwiped) and wiped; the
+  only branch on a secret-derived value is the caller's `?` after `ensure(verdict)`. The taint example now marks
+  the bytes secret **before** import and covers `from_bytes` (accepted 1, 2^64, 2^128, 2^(8*len-1), n-1; rejected
+  0, n, all ones; both curves), `generate`, `public_key` and `agree`. `scripts/verdict_sites.py` requires every
+  report to be a conditional jump right after a call to `ecdh::ensure` (one site each in `from_bytes`,
+  `public_key`, `agree`; 3 reports for a full run, 1 for import or generate). Mutation checks: an early exit in
+  the range check, and a short-circuit zero test, are both rejected by `ct_check.sh`; a planted branch on the
+  shared secret still is. Exact jump counts are pinned for `select` (0), `add` (1), `double` (1), `mul` (2);
+  `select` was read by hand (SIMD and/or/andn, no branch), and the scalar bit becomes a mask via `sar` and
+  `bt`/`sbb`. **Limits:** the verdict branch itself is allowed and reveals only valid/invalid (a rejected
+  candidate is discarded; for a valid key the answer is fixed), the site check assumes valgrind's PIE load base
+  0x108000 and fails if that changes, and everything else in the earlier caveats stands. A single timing run
+  shows |t| 0.29 (P-256) and 0.23 (P-384) for sparse against dense scalars, and 2.71 for the A/A baseline; the
+  40-repetition series in `collect.sh` has been extended but its record is produced separately.
+- *Side effect on earlier evidence:* adding this code twice changed LLVM's inlining of `Modulus::add` (once into
+  `Field::add`, 6 jumps to 16, then back). `Modulus::add` is now `#[inline(never)]` so its originally reviewed
+  count of 6 is stable; the counts were re-read each time. Every pin is per binary.
 - *Speed:* about 0.9 ms (P-256) and 1.9 ms (P-384) per agreement, 14x and 5x slower than `ring` (`ring`
   has assembly for P-256); `ring` cannot import a scalar, so its time is generate-and-agree minus generate.
 - *Known limits:* no windowed multiplication, no blinding; the private scalar's bytes are wiped on drop but
   intermediate field elements live in unwiped stack copies; the peer-point validation and the infinity test
   are variable time on public or irrelevant data by design; cofactor 1, so no subgroup check; not reviewed.
-- *Review needed (D4):* the scalar loop, the transcription of the two formulas, and the pinned counts.
+- *Review needed (D4):* the scalar loop, the transcription of the two formulas, the validation helpers and the pinned counts.

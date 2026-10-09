@@ -9,10 +9,7 @@
 # Re-review after any rustc or flag change.
 rusty_pk::mont::reduce_once 10
 Modulus>::mul 17
-# Modulus::add was a separate symbol (6 jumps) until ECDH went into the same binary; LLVM now inlines it into
-# Field::add (16 jumps). Read 2026-10-09 on 1.98.1: every jump compares the public limb count against an
-# unrolled index (cmp $n, k; je), carries are add/adc/setb, the reduction stays in reduce_once above.
-Field>::add 16
+Modulus>::add 6
 Field>::sub 17
 rusty_pk::x25519::x25519 9
 # ECDH P-256/P-384 secret path. Jump counts are public bounds checks and the fixed-trip scalar loop; the
