@@ -102,7 +102,8 @@ the first three is the trigger for the deferred items below.
 | --- | --- | --- |
 | Merge queue | Single maintainer, per-component main queues already exist | Second regular maintainer, or PRs repeatedly rebased for staleness |
 | `cargo-hakari` workspace-hack | Few shared external deps; adds a crate every manifest must reference | Measured feature-thrash rebuilds, or external deps grow |
-| `sccache`/`mold` in CI | Swatinem cache works; no measured link/cache bottleneck | p90 CI time regresses |
+| `mold` in CI | Rust 1.90+ already links with `lld` on x86_64 Linux; the slow jobs are Windows | A Linux link step shows up in job timings |
+| `sccache` beyond the trial | Trial only on the Windows test shards (`setup-build-env` input `sccache`); Linux keeps Swatinem's cache | Trial shows a warm-run win on Windows shards (compare against the 30-45 min baseline) and a stable hit rate |
 | Resolver 3 / edition 2024 workspace-wide | Members carry mixed editions on purpose (see root `Cargo.toml` notes) | Own PR with broad validation, per crate family |
 | Bazel, `cargo-rail`, "monorepo council" | Scale and team size don't justify | Never without a new ADR |
 | Crate-catalog YAML | `generate_workspace_map.py` already emits a map; ownership lives in CODEOWNERS | Need for tier/owner data that CODEOWNERS can't carry |
