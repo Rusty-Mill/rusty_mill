@@ -16,7 +16,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-09 - CI: live-internet check added to rusty-tls-engine (non-blocking)
 
 - **Added (CI):** a last step in `rusty-tls-engine` runs `handrolled_live` on the runner and writes its results to the step summary. It is `continue-on-error`: the first real evidence about Google's endpoints comes from this run, and it cannot block a merge. The logic is a tested script (`live_internet_check.sh`): output and summary are written even when cargo fails, and a failure or zero-test run fails the step. A guard in `test_ci_workflow` keeps the step non-blocking.
-- **Known limitations:** it depends on a third party's servers and on the runner's network. Until a run is read, the claim that the engine works with Google's real endpoints is unproven; the sandbox runs only reached an intercepting proxy.
+- **First real result (runner, run 37997454486, #572):** the native engine completed TLS 1.3 (X25519, `ecdsa_secp256r1_sha256`) with `accounts.google.com`, `oauth2.googleapis.com` and `www.googleapis.com` using the OS trust anchors, and got the same HTTP status as the rustls-backed stream on all three (302, 404, 404). The sandbox runs before it only reached an intercepting proxy and are not evidence about Google.
+- **Known limitations:** one run, three hosts, TLS 1.3 only, one network. It depends on a third party's servers and on the runner's network, which is why the step is non-blocking. Not the evidence bar, which is the owner's to set.
 
 ## 2026-10-09 - rusty_tls: live-internet check, first wiring candidate proposed
 
