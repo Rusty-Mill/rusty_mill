@@ -12683,6 +12683,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_flatbuffers"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_font"
 version = "0.1.0"
 dependencies = [

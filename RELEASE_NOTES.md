@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_flatbuffers: FlatBuffers runtime (RLBot port stage 1) (pending review)
+
+- **Added:** `crates/libs/protocol/rusty_flatbuffers` (Tier S, no dependencies): a bounds-checked reader (`Table`, `Vector`; every access returns `Error`, none panics) and a back-to-front `Builder`/`TableBuilder` (strings, scalar/offset/struct vectors, inline structs, unions as type+offset slots, optional file identifier). No code generation; schemas are hand-written on top.
+- **Verified:** 10 tests. Reader against five buffers made by `rlbot_flat` 0.6.0 (nested tables, a vector of tables, optional structs, a union root); every prefix of each fixture and every flipped byte of the largest never panics; builder output reads back and `planus` reads it too (checked once outside CI).
+- **Changed:** `rlbot/PLAN.md` records the owner's decisions (through the `rb_env` bridge, hand-written subset then a generator, `rb_rlbot_*` names).
+
+---
+
 ## 2026-10-09 - RLBot native port: plan (pending review)
 
 - **Added:** `crates/apps/rocket_league/rlbot/PLAN.md`: five stages (FlatBuffers runtime, wire subset, client, port `rb_tape_bot`, `rb_env` bridge), measured from rlbot 0.6.0, risks and rollback. Docs only; three decisions listed for the owner before stage 1.
