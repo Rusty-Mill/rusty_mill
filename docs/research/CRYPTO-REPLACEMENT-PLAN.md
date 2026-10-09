@@ -629,9 +629,11 @@ primitive leak or forgery). Automated pass; it does not satisfy the human-review
 
 The 12 collector tests (`test_timing_series.py`) use a fake cargo and fake test binaries, run in the
 `crypto-constant-time` CI job, and were mutation-checked (breaking the alarm count or the package
-filter fails them). `EVIDENCE-2026-10-09.txt` was regenerated at `fe31044c` with the new collector;
-its three A/A baselines now come from three different executables (see the identity lines). It
-reports one A/A crossing (HMAC-SHA512, max 5.32) and none for ChaCha20-Poly1305 or X25519. The
+filter fails them). `EVIDENCE-2026-10-09.txt` was first regenerated at `fe31044c` with the new collector and then
+again at `06a7312f` after the round 3 fixes (section 11a-3); the current file is the second run (clean tree,
+exit 0, planted timing leak detected, manifests matched, tooling self-tests passed). Its three A/A
+baselines come from three different executables (see the identity lines). It reports one A/A
+crossing (HMAC-SHA512, max 4.54) and none for ChaCha20-Poly1305 or X25519. The
 previous record (commit `ea0e234`) used the old collector and is not evidence for the new one; it
 was replaced, not kept.
 
