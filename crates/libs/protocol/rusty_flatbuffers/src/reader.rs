@@ -64,8 +64,11 @@ impl<'a> Table<'a> {
         if vtable_len < 4 || vtable_len % 2 != 0 || bytes(self.buf, vtable, vtable_len).is_err() {
             return Err(Error::BadVtable);
         }
-        let entry = 4 + 2 * slot;
-        if entry + 2 > vtable_len {
+        // A slot too large to address is simply not in any vtable.
+        let Some(entry) = slot.checked_mul(2).and_then(|n| n.checked_add(4)) else {
+            return Ok(None);
+        };
+        if entry.saturating_add(2) > vtable_len {
             return Ok(None);
         }
         match read::<u16>(self.buf, vtable + entry)? {

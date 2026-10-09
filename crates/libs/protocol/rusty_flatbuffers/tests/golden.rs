@@ -150,14 +150,14 @@ fn builder_output_reads_back_and_follows_the_layout_rules() {
     let mut b = Builder::new();
     let name = b.create_string("rusty/bot1").unwrap();
     let mut t = b.start_table();
-    t.add_offset(0, name);
-    t.add_scalar(1, true, false);
-    t.add_scalar(2, false, false);
-    t.add_scalar(3, true, false);
+    t.add_offset(0, name).unwrap();
+    t.add_scalar(1, true, false).unwrap();
+    t.add_scalar(2, false, false).unwrap();
+    t.add_scalar(3, true, false).unwrap();
     let msg = t.finish().unwrap();
     let mut r = b.start_table();
-    r.add_scalar(0, 9u8, 0);
-    r.add_offset(1, msg);
+    r.add_scalar(0, 9u8, 0).unwrap();
+    r.add_offset(1, msg).unwrap();
     let root = r.finish().unwrap();
     let buf = b.finish(root, None).unwrap();
 
@@ -189,12 +189,12 @@ fn builder_vectors_structs_and_identifiers_round_trip() {
     let (p, q) = (xyz(1.0, 2.0, 3.0), xyz(4.0, 5.0, 6.0));
     let pts = b.create_struct_vector(&[&p, &q], 12, 4).unwrap();
     let mut t = b.start_table();
-    t.add_offset(0, nums);
-    t.add_offset(1, strings);
-    t.add_offset(2, pts);
-    t.add_struct(3, &p, 4);
-    t.add_scalar(4, 2.5f64, 0.0);
-    t.add_scalar(5, -7i16, 0);
+    t.add_offset(0, nums).unwrap();
+    t.add_offset(1, strings).unwrap();
+    t.add_offset(2, pts).unwrap();
+    t.add_struct(3, &p, 4).unwrap();
+    t.add_scalar(4, 2.5f64, 0.0).unwrap();
+    t.add_scalar(5, -7i16, 0).unwrap();
     let root = t.finish().unwrap();
     let buf = b.finish(root, Some(*b"TEST")).unwrap();
 
@@ -224,12 +224,12 @@ fn builder_vectors_structs_and_identifiers_round_trip() {
 fn defaults_are_not_stored() {
     let mut b = Builder::new();
     let mut t = b.start_table();
-    t.add_scalar(0, 0u32, 0);
+    t.add_scalar(0, 0u32, 0).unwrap();
     let root = t.finish().unwrap();
     let small = b.finish(root, None).unwrap();
     let mut b = Builder::new();
     let mut t = b.start_table();
-    t.add_scalar(0, 1u32, 0);
+    t.add_scalar(0, 1u32, 0).unwrap();
     let root = t.finish().unwrap();
     let big = b.finish(root, None).unwrap();
     assert!(small.len() < big.len());
@@ -241,7 +241,7 @@ fn bad_utf8_and_bad_vtables_are_errors() {
     let mut b = Builder::new();
     let s = b.create_string("é").unwrap();
     let mut t = b.start_table();
-    t.add_offset(0, s);
+    t.add_offset(0, s).unwrap();
     let root = t.finish().unwrap();
     let mut buf = b.finish(root, None).unwrap();
     let at = buf.windows(2).position(|w| w == [0xc3, 0xa9]).unwrap();

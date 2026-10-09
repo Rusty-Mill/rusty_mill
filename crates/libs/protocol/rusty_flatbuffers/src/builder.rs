@@ -1,19 +1,55 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::{Error, Scalar};
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// The most field slots a table can have: its vtable length must fit a `u16`.
+pub const MAX_SLOTS: usize = (u16::MAX as usize - 4) / 2;
+
+static NEXT_BUILDER: AtomicU64 = AtomicU64::new(1);
+
 /// Where an object written by a [`Builder`] starts, as its distance from the end of the buffer.
-/// Only a builder hands these out, so a stale or invented position cannot be passed back.
+/// It remembers which builder wrote it, and every method that takes one rejects an offset from
+/// another builder with [`Error::ForeignOffset`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Offset(usize);
+pub struct Offset {
+    pos: usize,
+    owner: u64,
+}
 
 /// Builds a buffer back to front. Objects a table refers to (strings, vectors, sub-tables)
 /// are created first; the table is written last and the root is passed to [`Builder::finish`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Builder {
     /// The buffer so far, reversed: `rev[0]` is the last byte of the finished buffer.
     rev: Vec<u8>,
     min_align: usize,
+    id: u64,
+}
+
+impl Default for Builder {
+    fn default() -> Builder {
+        Builder::new()
+    }
+}
+
+/// A struct layout the padding arithmetic can honour: a power-of-two alignment and a size that
+/// is a non-zero multiple of it.
+fn check_layout(size: usize, align: usize) -> Result<()> {
+    if align.is_power_of_two() && size != 0 && size % align == 0 {
+        Ok(())
+    } else {
+        Err(Error::InvalidLayout)
+    }
+}
+
+fn check_slot(slot: usize) -> Result<()> {
+    if slot < MAX_SLOTS {
+        Ok(())
+    } else {
+        Err(Error::SlotTooLarge)
+    }
 }
 
 impl Builder {
@@ -21,11 +57,30 @@ impl Builder {
         Builder {
             rev: Vec::new(),
             min_align: 1,
+            id: NEXT_BUILDER.fetch_add(1, Ordering::Relaxed),
         }
     }
 
-    /// Pads so that after writing `additional` more bytes the position is a multiple of `size`.
+    fn offset(&self) -> Offset {
+        Offset {
+            pos: self.rev.len(),
+            owner: self.id,
+        }
+    }
+
+    /// The position of an offset this builder wrote, or [`Error::ForeignOffset`].
+    fn own(&self, offset: Offset) -> Result<usize> {
+        if offset.owner == self.id && offset.pos <= self.rev.len() {
+            Ok(offset.pos)
+        } else {
+            Err(Error::ForeignOffset)
+        }
+    }
+
+    /// Pads so that after writing `additional` more bytes the position is a multiple of `size`
+    /// (a power of two; callers validate untrusted layouts first).
     fn prep(&mut self, size: usize, additional: usize) {
+        debug_assert!(size.is_power_of_two());
         self.min_align = self.min_align.max(size);
         let pad = self.rev.len().wrapping_add(additional).wrapping_neg() & (size - 1);
         self.rev.resize(self.rev.len() + pad, 0);
@@ -37,13 +92,13 @@ impl Builder {
         self.rev.len()
     }
 
-    /// A forward `u32` offset to `target`, written at the current end.
-    fn push_offset(&mut self, target: Offset) -> usize {
+    /// A forward `u32` offset to `target` (a position already checked with `own`).
+    fn push_offset(&mut self, target: usize) -> Result<usize> {
         self.prep(4, 0);
-        let rel = self.rev.len() + 4 - target.0;
         // `target` was written earlier, so it is nearer the end: `rel` cannot underflow.
-        (rel as u32).push_rev(&mut self.rev);
-        self.rev.len()
+        let rel = u32::try_from(self.rev.len() + 4 - target).map_err(|_| Error::TooLarge)?;
+        rel.push_rev(&mut self.rev);
+        Ok(self.rev.len())
     }
 
     /// Writes a string (length, bytes, terminating zero).
@@ -52,7 +107,8 @@ impl Builder {
         self.prep(4, s.len() + 1);
         self.rev.push(0);
         self.rev.extend(s.bytes().rev());
-        Ok(Offset(self.push_scalar(len)))
+        self.push_scalar(len);
+        Ok(self.offset())
     }
 
     /// Writes a vector of scalars.
@@ -63,35 +119,47 @@ impl Builder {
         for item in items.iter().rev() {
             item.push_rev(&mut self.rev);
         }
-        Ok(Offset(self.push_scalar(len)))
+        self.push_scalar(len);
+        Ok(self.offset())
     }
 
-    /// Writes a vector of offsets (to strings or tables) written earlier.
+    /// Writes a vector of offsets (to strings or tables) written earlier by this builder.
     pub fn create_offset_vector(&mut self, items: &[Offset]) -> Result<Offset> {
         let len = u32::try_from(items.len()).map_err(|_| Error::TooLarge)?;
+        let targets = items
+            .iter()
+            .map(|o| self.own(*o))
+            .collect::<Result<Vec<_>>>()?;
         self.prep(4, items.len() * 4);
-        for item in items.iter().rev() {
-            self.push_offset(*item);
+        for target in targets.into_iter().rev() {
+            self.push_offset(target)?;
         }
-        Ok(Offset(self.push_scalar(len)))
+        self.push_scalar(len);
+        Ok(self.offset())
     }
 
     /// Writes a vector of structs given as their inline little-endian bytes, `size` each and
-    /// aligned to `align`.
+    /// aligned to `align`. Rejects an invalid layout or an item that is not `size` bytes
+    /// before writing anything.
     pub fn create_struct_vector(
         &mut self,
         items: &[&[u8]],
         size: usize,
         align: usize,
     ) -> Result<Offset> {
+        check_layout(size, align)?;
+        if items.iter().any(|item| item.len() != size) {
+            return Err(Error::InvalidLayout);
+        }
         let len = u32::try_from(items.len()).map_err(|_| Error::TooLarge)?;
-        self.prep(4, items.len() * size);
-        self.prep(align, items.len() * size);
+        let total = items.len().checked_mul(size).ok_or(Error::TooLarge)?;
+        self.prep(4, total);
+        self.prep(align, total);
         for item in items.iter().rev() {
-            debug_assert_eq!(item.len(), size);
             self.rev.extend(item.iter().rev());
         }
-        Ok(Offset(self.push_scalar(len)))
+        self.push_scalar(len);
+        Ok(self.offset())
     }
 
     /// Starts a table. Its fields go in with the `add_*` methods and `finish` closes it.
@@ -104,15 +172,16 @@ impl Builder {
         }
     }
 
-    /// Completes the buffer with `root` as its root table and an optional 4-byte file
-    /// identifier.
+    /// Completes the buffer with `root` (a table this builder wrote) as its root and an
+    /// optional 4-byte file identifier.
     pub fn finish(mut self, root: Offset, identifier: Option<[u8; 4]>) -> Result<Vec<u8>> {
+        let root = self.own(root)?;
         let id_len = if identifier.is_some() { 4 } else { 0 };
         self.prep(self.min_align.max(4), 4 + id_len);
         if let Some(id) = identifier {
             self.rev.extend(id.iter().rev());
         }
-        self.push_offset(root);
+        self.push_offset(root)?;
         u32::try_from(self.rev.len()).map_err(|_| Error::TooLarge)?;
         self.rev.reverse();
         Ok(self.rev)
@@ -121,6 +190,7 @@ impl Builder {
 
 /// A table under construction (see [`Builder::start_table`]). Holding the builder mutably
 /// means nothing else can be written until the table is finished, as the format requires.
+/// Each `add_*` validates its arguments before writing, so a rejected call changes nothing.
 pub struct TableBuilder<'b> {
     builder: &'b mut Builder,
     start: usize,
@@ -130,24 +200,33 @@ pub struct TableBuilder<'b> {
 
 impl TableBuilder<'_> {
     /// Adds a scalar field unless it equals `default` (absent fields read back as the default).
-    pub fn add_scalar<T: Scalar>(&mut self, slot: usize, value: T, default: T) {
+    /// `slot` must be below [`MAX_SLOTS`].
+    pub fn add_scalar<T: Scalar>(&mut self, slot: usize, value: T, default: T) -> Result<()> {
+        check_slot(slot)?;
         if value != default {
             let at = self.builder.push_scalar(value);
             self.fields.push((slot, at));
         }
+        Ok(())
     }
 
-    /// Adds a field referring to a string, vector or sub-table written earlier.
-    pub fn add_offset(&mut self, slot: usize, target: Offset) {
-        let at = self.builder.push_offset(target);
+    /// Adds a field referring to a string, vector or sub-table this builder wrote earlier.
+    pub fn add_offset(&mut self, slot: usize, target: Offset) -> Result<()> {
+        check_slot(slot)?;
+        let target = self.builder.own(target)?;
+        let at = self.builder.push_offset(target)?;
         self.fields.push((slot, at));
+        Ok(())
     }
 
     /// Adds an inline struct given as its little-endian bytes, aligned to `align`.
-    pub fn add_struct(&mut self, slot: usize, bytes: &[u8], align: usize) {
+    pub fn add_struct(&mut self, slot: usize, bytes: &[u8], align: usize) -> Result<()> {
+        check_slot(slot)?;
+        check_layout(bytes.len(), align)?;
         self.builder.prep(align, 0);
         self.builder.rev.extend(bytes.iter().rev());
         self.fields.push((slot, self.builder.rev.len()));
+        Ok(())
     }
 
     /// Writes the vtable and the table header, and returns the table.
@@ -158,6 +237,7 @@ impl TableBuilder<'_> {
             fields,
         } = self;
         let table = builder.push_scalar(0i32);
+        // Every slot is below MAX_SLOTS, so the vtable length fits a u16.
         let slots = fields.iter().map(|(slot, _)| slot + 1).max().unwrap_or(0);
         let mut entries = vec![0u16; slots];
         for (slot, at) in fields {
@@ -173,8 +253,10 @@ impl TableBuilder<'_> {
         let vtable = builder.rev.len();
         // The vtable sits before the table, so the table's signed offset to it is positive.
         let soffset = i32::try_from(vtable - table).map_err(|_| Error::TooLarge)?;
-        let end = table;
-        builder.rev[end - 4..end].copy_from_slice(&soffset.to_be_bytes());
-        Ok(Offset(table))
+        builder.rev[table - 4..table].copy_from_slice(&soffset.to_be_bytes());
+        Ok(Offset {
+            pos: table,
+            owner: builder.id,
+        })
     }
 }

@@ -13,7 +13,7 @@ mod error;
 mod reader;
 mod scalar;
 
-pub use builder::{Builder, Offset, TableBuilder};
+pub use builder::{Builder, Offset, TableBuilder, MAX_SLOTS};
 pub use error::Error;
 pub use reader::{has_identifier, Table, Vector};
 pub use scalar::Scalar;

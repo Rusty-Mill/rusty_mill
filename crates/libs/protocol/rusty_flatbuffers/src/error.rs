@@ -19,6 +19,13 @@ pub enum Error {
     IndexOutOfRange { index: usize, len: usize },
     /// The built data does not fit the format's 16- or 32-bit fields.
     TooLarge,
+    /// An [`Offset`](crate::Offset) came from a different [`Builder`](crate::Builder).
+    ForeignOffset,
+    /// A struct's alignment is zero or not a power of two, or its size or item lengths do not
+    /// match (the size must be a non-zero multiple of the alignment).
+    InvalidLayout,
+    /// A field slot does not fit a vtable (see [`MAX_SLOTS`](crate::MAX_SLOTS)).
+    SlotTooLarge,
 }
 
 impl fmt::Display for Error {
@@ -37,6 +44,9 @@ impl fmt::Display for Error {
                 write!(f, "index {index} is past a vector of {len}")
             }
             Error::TooLarge => f.write_str("buffer too large for the format's offsets"),
+            Error::ForeignOffset => f.write_str("offset belongs to a different builder"),
+            Error::InvalidLayout => f.write_str("invalid struct alignment, size or item length"),
+            Error::SlotTooLarge => f.write_str("field slot does not fit a vtable"),
         }
     }
 }
