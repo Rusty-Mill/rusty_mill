@@ -2,10 +2,13 @@
 
 from pathlib import Path
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import tomllib
 import unittest
 
@@ -430,6 +433,85 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_dependabot_tracks_github_actions(self) -> None:
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
         self.assertIn("package-ecosystem: github-actions", text)
+
+    def test_every_pr_check_runs_through_ci_yml_and_so_through_the_gate(self) -> None:
+        # A PR-triggered workflow outside ci.yml is a check `required-gate`
+        # cannot see: it can fail while the sole required check stays green.
+        outside = [
+            path.name
+            for path in sorted(WORKFLOW.parent.glob("*.yml"))
+            if path != WORKFLOW and re.search(r"(?m)^  pull_request(_target)?:", path.read_text(encoding="utf-8"))
+        ]
+        self.assertEqual(outside, [], "PR checks outside ci.yml bypass required-gate")
+
+    def test_plugin_version_check_is_a_gated_planner_job(self) -> None:
+        job = self.workflow.split("  remind-me-plugin-version:\n")[1].split("  remind-me-hub:\n")[0]
+        self.assertIn("if: needs.plan.outputs.remind_me == 'true'", job)
+        self.assertIn("crates/apps/rusty_remind_me/scripts/check_plugin_version.sh", job)
+        gate = self.workflow.split("  required-gate:\n")[1]
+        self.assertIn("      - remind-me-plugin-version\n", gate.split("runs-on:")[0])
+
+    def test_plugin_version_job_runs_for_product_changes_and_not_for_unrelated_ones(self) -> None:
+        def flag(paths: list[str]) -> bool:
+            return specialized_job_flags(paths, [])["remind_me"]
+
+        self.assertTrue(flag(["crates/apps/rusty_remind_me/.claude-plugin/plugin.json"]))
+        self.assertTrue(flag(["crates/apps/rusty_remind_me/crates/remind_me_core/Cargo.toml"]))
+        self.assertFalse(flag(["crates/libs/net/rusty_http/src/lib.rs", "README.md"]))
+        # Sweeps that run everything (manual, scheduled, no usable base) include it.
+        self.assertEqual(self._planner_map("--emit-full")["remind_me"], "true")
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "bash and jq are needed to run the check")
+    def test_plugin_version_drift_fails_the_check_and_agreement_passes(self) -> None:
+        product = Path(__file__).parents[2] / "crates" / "apps" / "rusty_remind_me"
+        members = "remind_me_core remind_me_mcp remind_me_api remind_me_cli remind_me_remote remind_me_hub".split()
+
+        def run(edit=None) -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                shutil.copytree(product / "scripts", root / "scripts")
+                (root / ".claude-plugin").mkdir()
+                shutil.copy(product / ".claude-plugin" / "plugin.json", root / ".claude-plugin" / "plugin.json")
+                for member in members:
+                    (root / "crates" / member).mkdir(parents=True)
+                    shutil.copy(product / "crates" / member / "Cargo.toml", root / "crates" / member / "Cargo.toml")
+                if edit:
+                    edit(root)
+                return subprocess.run(
+                    ["bash", str(root / "scripts" / "check_plugin_version.sh")],
+                    capture_output=True, text=True, check=False,
+                )
+
+        self.assertEqual(run().returncode, 0, "the repo as committed must agree")
+
+        def bump_plugin(root: Path) -> None:
+            manifest = root / ".claude-plugin" / "plugin.json"
+            manifest.write_text(re.sub(r'("version"\s*:\s*")[^"]+', r"\g<1>99.0.0", manifest.read_text()))
+
+        drifted = run(bump_plugin)
+        self.assertEqual(drifted.returncode, 1, drifted.stderr)
+        self.assertIn("Plugin version drift", drifted.stderr)
+
+        def bump_one_crate(root: Path) -> None:
+            manifest = root / "crates" / "remind_me_hub" / "Cargo.toml"
+            manifest.write_text(re.sub(r'(?m)^version = "[^"]+"', 'version = "99.0.0"', manifest.read_text(), count=1))
+
+        self.assertEqual(run(bump_one_crate).returncode, 1, "crates disagreeing also fails")
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is needed to run the gate step")
+    def test_required_gate_fails_when_any_needed_job_fails_and_passes_when_skipped(self) -> None:
+        gate = self.workflow.split("  required-gate:\n")[1]
+        script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+
+        def run(results: str) -> int:
+            return subprocess.run(
+                ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                env=dict(os.environ, RESULTS=results), capture_output=True, text=True, check=False,
+            ).returncode
+
+        self.assertEqual(run("success skipped success"), 0, "jobs the planner skipped must not fail the gate")
+        self.assertEqual(run("success failure skipped"), 1, "a failed job (e.g. plugin version drift) fails the gate")
+        self.assertEqual(run("success cancelled"), 1)
 
     def test_generic_matrix_uses_component_scope_and_unique_artifacts(self) -> None:
         for job, end in (("clippy", "ci-smoke"), ("test", "data-mesh-monitor")):

@@ -157,7 +157,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # remind-me-checks.yml should already have blocked a drifted PR, but a
+      # ci.yml's remind-me-plugin-version job should already have blocked a drifted PR, but a
       # release must never ship a plugin archive claiming the wrong version.
       - name: Verify plugin.json version matches this release
         run: '"$PRODUCT_DIR/scripts/check_plugin_version.sh"'
