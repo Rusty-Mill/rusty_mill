@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - Codex review round 2 on #540: timing-evidence collector corrected
+
+- **Fixed (evidence collector):** `collect.sh` picked one `target/release/deps/timing-*` binary for all three crates' same-named A/A tests, ignored build and discovery failures, and counted baseline alarms from exit codes the calibration tests never produce. Replaced by `timing_series.py`: executable from Cargo's artifact JSON per package (identity recorded), every failure fails the record, alarms counted from printed `|t|` (>= 4.5). Covered by 12 deterministic tests (`test_timing_series.py`, also run in `crypto-constant-time`), including custom target directories, stale binaries after a failed build, zero repetitions and above-threshold A/A output.
+- **Changed:** the evidence record is regenerated at the fixed commit. No primitive code changed; the review states these findings concern evidence correctness, not a leak or forgery.
+- **Known limitations:** unchanged from round 1. Statistical timing tests are still not a CI gate; the human independent review is still required before any `rusty_tls` seam.
+
 ## 2026-10-08 - Codex review round 1 on #540: three findings fixed
 
 - **Fixed (rusty_aead):** `MAX_LEN` was one 64-byte block short of RFC 8439 section 2.8; now `u32::MAX * 64`, pinned by a test. Behaviour change only for a message of exactly 2^38 - 64 bytes.

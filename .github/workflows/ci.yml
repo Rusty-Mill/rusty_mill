@@ -1360,3 +1360,5 @@ jobs:
         run: sh crates/foundation/rusty_aead/scripts/ct_check.sh
       - name: rusty_pk (X25519, shared Montgomery core)
         run: sh crates/foundation/rusty_pk/scripts/ct_check.sh
+      - name: Evidence collector self-test (timing series selection, failure and baseline logic)
+        run: python3 -I docs/research/crypto-evidence/test_timing_series.py
