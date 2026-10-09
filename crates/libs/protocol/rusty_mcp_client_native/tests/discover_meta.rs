@@ -28,7 +28,7 @@ impl Transport for Picky {
         let has_meta = params.as_ref().is_some_and(|p| p.get("_meta").is_some());
         let reply = match (method.as_str(), has_meta) {
             ("server/discover", true) if !self.refuse_everything => {
-                let body = r#"{"resultType":"complete","supportedVersions":["2025-11-25","2026-07-28"],"capabilities":{"tools":{}}}"#;
+                let body = r#"{"resultType":"complete","supportedVersions":["2025-11-25","2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"}"#;
                 Message::Response {
                     id: id.clone(),
                     result: Value::from_json_str(body).unwrap(),
