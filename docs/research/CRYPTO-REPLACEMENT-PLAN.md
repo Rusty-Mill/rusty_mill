@@ -28,10 +28,12 @@ closed. The 2026-10-08 intrinsics approval was not reconfirmed and is not relied
 *Provenance:* this is the implementer's transcription of the owner's instruction in the
 implementing session on 2026-10-09, "go ahead with randomness and ECDH", given in answer to
 "Which gaps do you want me to start on?" after the implementer had explained what reopening the freeze
-means. **Confirmed by the owner, 2026-10-09:** the implementer then listed three open confirmations
+means. **Owner confirmation reported by the implementer, 2026-10-09 (pending direct owner verification):** the implementer then listed three open confirmations
 (the freeze reopening for randomness and ECDH, accepting small-order Ed25519 public keys, and the actual scope of the
 owner's review) and the owner replied "Confirm them." This is the implementer's transcription of that reply in the
-implementing session, not a GitHub review; the PR carries a relay comment quoting it. The confirmation covers
+implementing session, not a GitHub review; the PR carries a relay comment quoting it, which does not
+authenticate the approval to a reviewer. A direct confirmation from the owner's own GitHub account has been
+requested and is **not yet received**. The reported confirmation covers
 exactly the first two items as stated here. For the third it affirms that the owner's review stands as reported but
 names no components, commit or method, so **the scope of that review stays unrecorded** and nothing more is
 claimed for it. The scope above is exactly what the original instruction names.
@@ -101,7 +103,7 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   `crypto/curve25519/curve25519.c`) accepts both, and this implementation reproduces that
   on purpose so a swap does not change which keys verify. **Small-order public keys (the
   eight torsion points, including the identity) are accepted, as in `ring`; RFC 8032 does not
-  require rejecting them. Owner decision, confirmed by the owner on 2026-10-09, reversing the round 3 rejection.** For the identity,
+  require rejecting them. Owner decision, with the owner's confirmation reported by the implementer on 2026-10-09 (pending direct owner verification), reversing the round 3 rejection.** For the identity,
   `[h]A` vanishes for every `h`, so `R = identity, S = 0` verifies every message under that key;
   for the other seven torsion points a secret-free forgery works for some messages (success rate
   not measured, no universal claim). **Consequence:** a caller that admits a verification key
@@ -614,7 +616,7 @@ the honest current position.
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
 | Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-09.txt`. **Review findings: none exist yet.** |
 | `ring` usage inventory including randomness and helper APIs. | Section 2.3. |
-| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Reported complete by the owner (baileyrd), 2026-10-09; scope unrecorded.** The reviewer was the owner, who saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. Which of the listed components were covered, the commit reviewed, the method and any findings are not recorded here and the implementer did not see them, so this row is **not** evidence that the Montgomery-core invariants (row above), the AEAD or the HMAC/HKDF paths were reviewed. One reviewer, who also owns the project. On 2026-10-09 the owner affirmed ("Confirm them.") that this review stands as reported, without stating components, commit or method. **Open: the owner states the reviewed scope; the ECDH and `rusty_rand` code has had no review.** |
+| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Reported complete by the owner (baileyrd), 2026-10-09; scope unrecorded.** The reviewer was the owner, who saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. Which of the listed components were covered, the commit reviewed, the method and any findings are not recorded here and the implementer did not see them, so this row is **not** evidence that the Montgomery-core invariants (row above), the AEAD or the HMAC/HKDF paths were reviewed. One reviewer, who also owns the project. On 2026-10-09 the owner is reported by the implementer (pending direct owner verification) to have affirmed ("Confirm them.") that this review stands as reported, without stating components, commit or method. **Open: the owner states the reviewed scope; the ECDH and `rusty_rand` code has had no review.** |
 
 ## 11a. Independent review, round 1 (Codex, PR #540, reviewed commit `25fcc18`)
 
@@ -712,8 +714,8 @@ Added after review (current as of the evidence record):
 Context: stages 0 to 4 are implemented; the owner reported an independent review, but its scope is
 unrecorded, so none of them is treated as reviewed (section 0, "Review status, reconciled", and section 11). The
 stage-4 freeze (section 0) covers *implementation*. It was reopened for gaps 1 and 2 only, on the
-implementer's transcription of the owner's instruction, which the owner then confirmed in the implementing
-session (section 0);
+implementer's transcription of the owner's instruction, whose confirmation is reported by the implementer and
+pending direct owner verification (section 0);
 gaps 3 to 5 stay closed until the owner reopens them. Gaps are those in section 2.3. The goal of this plan is a **client-role native
 engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate decision.
 
