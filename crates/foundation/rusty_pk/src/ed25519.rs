@@ -13,11 +13,15 @@
 //!
 //! One deliberate deviation is *stricter* than `ring`: a public key of small
 //! order (one of the eight torsion points, including the identity) is rejected.
-//! For such a key `[h]A` vanishes, so `R = identity, S = 0` would verify every
-//! message under it, and `ring` accepts that. Rejecting is the safe direction
-//! for a key admitted from a certificate or trusted configuration. (Codex
-//! review round 3 on #540.) Small-order `R` is not rejected: it cannot make a
-//! signature verify for a key that is not itself small order.
+//! For the identity, `[h]A` vanishes for every `h`, so the single signature
+//! `R = identity, S = 0` verifies every message, and `ring` accepts that. For the
+//! other seven torsion points `[h]A` depends on `h` modulo the point's order (2, 4
+//! or 8), so the equation does not hold for every message, but a signature can
+//! still be produced without any secret; all eight are rejected as one weak-key
+//! policy. Rejecting is the safe direction for a key admitted from a certificate
+//! or trusted configuration. (Codex review round 3 on #540.) Small-order `R` is a
+//! separate policy and is not rejected: a valid zero-nonce signature has
+//! `R = identity`, `S = h*a mod L`.
 //!
 //! All inputs are public, so the arithmetic is variable time.
 
@@ -349,9 +353,10 @@ mod tests {
         assert!(!c.is_small_order(&two_b));
     }
 
-    /// A small-order key must never verify, whatever `R` and `S` are: the
-    /// identity-key forgery `R = identity, S = 0` verifies every message
-    /// without this check (and under `ring`).
+    /// A small-order key must never verify. Without the check, the identity key
+    /// accepts `R = identity, S = 0` for every message (as does `ring`); for the
+    /// other torsion points the same shapes verify only some messages, so this
+    /// asserts rejection for the shapes tried, not a count of messages.
     #[test]
     fn small_order_public_keys_are_rejected() {
         let mut forged = [0u8; 64];

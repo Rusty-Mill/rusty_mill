@@ -119,17 +119,10 @@ TXT
 # Resolution, execution and judging live in timing_series.py (tested by test_timing_series.py): the
 # executable comes from Cargo's compiler-artifact JSON for the requested package, any build, discovery or
 # execution failure fails the record, and alarms are counted from the printed |t| values.
-# The timing detector itself: a deliberately leaky early-exit comparison must be flagged. This test is
-# #[ignore]d in plain `cargo test` (timing-sensitive), so it is run explicitly here and its status counts.
-if out=$(cargo test --release -p rusty_ct_check --lib -- --ignored --exact timing::tests::planted_early_exit_is_detected 2>&1); then
-  echo "planted timing leak: detected (rusty_ct_check timing::tests::planted_early_exit_is_detected passed)"
-  echo "$out" | grep -E '^test |test result' | sed 's/^/   /'
-else
-  echo "planted timing leak: NOT detected or the test failed to run"
-  echo "$out" | tail -15 | sed 's/^/   /'
-  fail "planted timing leak test"
-fi
-echo "$out" | grep -q '1 passed' || fail "planted timing leak test did not report exactly one passing test"
+# The timing detector itself: a deliberately leaky early-exit comparison must be flagged. The test is
+# #[ignore]d in plain `cargo test` (timing-sensitive), so it runs through planted_leak.sh, which fails
+# on a non-zero status or on anything but exactly one passing test (tested by test_planted_leak.py).
+sh docs/research/crypto-evidence/planted_leak.sh || fail "planted timing leak test"
 
 REPS=$REPS python3 -I docs/research/crypto-evidence/timing_series.py <<'SPECS' || FAIL=1
 rusty_sha2|null_calibration_identical_classes|A/A  HMAC-SHA512 (baseline)
@@ -143,7 +136,7 @@ rusty_pk|null_calibration_identical_classes|A/A  X25519 (baseline)
 rusty_pk|scalar_classes_not_distinguishable|x25519: sparse vs dense scalar
 rusty_pk|fixed_vs_random_scalar|x25519: fixed vs other scalar
 SPECS
-for tf in test_timing_series.py test_check_manifests.py; do
+for tf in test_timing_series.py test_check_manifests.py test_planted_leak.py; do
   python3 -I docs/research/crypto-evidence/$tf >/dev/null 2>&1 && echo "collector self-test $tf: passed" || { echo "collector self-test $tf: FAILED"; fail "$tf"; }
 done
 sh crates/foundation/rusty_ct_check/scripts/test_taint_lib.sh >/dev/null 2>&1 && echo "taint_lib self-test: passed" || { echo "taint_lib self-test: FAILED"; fail "test_taint_lib.sh"; }

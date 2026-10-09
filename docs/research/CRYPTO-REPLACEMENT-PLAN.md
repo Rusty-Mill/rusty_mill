@@ -76,9 +76,13 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   `crypto/curve25519/curve25519.c`) accepts both, and this implementation reproduces that
   on purpose so a swap does not change which keys verify. **One deviation goes the other
   way, stricter than `ring`:** a public key of small order (the eight torsion points,
-  including the identity) is rejected, because for such a key `[h]A` vanishes and the
-  signature `R = identity, S = 0` verifies every message under it (Codex round 3, P1).
-  `ring` accepts that signature. Regression tests: `identity_key_encodings_are_rejected_unlike_ring`
+  including the identity) is rejected (Codex round 3, P1). For the **identity** specifically,
+  `[h]A` vanishes for every `h`, so the single signature `R = identity, S = 0` verifies every
+  message; `ring` accepts it. For the other seven torsion points `[h]A` depends on `h` modulo the
+  point's order (2, 4 or 8), so the equation does not collapse for every message: a forger can only
+  hit messages (or choices among the few torsion `R` encodings) for which it holds. That is still
+  forgery with no secret, and cheap, but its exact success rate was not measured, so no
+  universal-message claim is made for them. Rejecting all eight is the broader weak-key policy. Regression tests: `identity_key_encodings_are_rejected_unlike_ring`
   in `tests/ed25519_vectors.rs` (identity, `y = p + 1`, `x = 0` with sign bit set: we reject,
   `ring` is asserted to accept, three messages each; an off-curve `y`: both reject) and
   `small_order_public_keys_are_rejected` / `every_torsion_point_is_small_order_and_the_base_point_is_not`
@@ -86,14 +90,17 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   the check) and `non_canonical_aliases_of_torsion_points_are_rejected_too` (the accepted
   `y = p` and `y = p + 1` aliases, both sign bits; the rejection is on the decoded point, not a
   byte blacklist). **What the flaw was:** with a small-order key the verification is
-  message-independent, one signature verifies every message. **Precondition:** it needs such a
+  message-independent for the identity (one signature verifies every message) and
+  secret-free for the other small-order keys. **Precondition:** it needs such a
   key to be admitted as a trusted verification identity (a certificate or configuration that
   accepts it); it does not forge under an honest key or forge a CA signature, and this PR has
   no TLS consumer. The rejection sits in `verify`, i.e. at the verification boundary, so every
   caller gets it; a separate strict-vs-compatible API was not needed because no caller wants
   the weak behaviour. Full prime-subgroup checks and restrictions on `R` are separate policy
-  choices, not made here. Small-order `R` is not rejected (it cannot verify under a key that is not itself
-  small order). The `ring` parity statement is therefore "same verdicts on the recorded corpus,
+  choices, not made here. Small-order `R` is not rejected, and no impossibility is claimed: a valid
+  zero-nonce signature has `R = identity` and `S = h*a mod L`, so a rule rejecting small-order `R` would
+  reject a mathematically valid (if astronomically rare) signature. That is a separate policy choice
+  and does not affect the public-key rejection above. The `ring` parity statement is therefore "same verdicts on the recorded corpus,
   except small-order public keys". **Security implication of the encoding leniencies, not yet
   reviewed:** a public key then has more than one accepted encoding, so code that treats the
   key bytes as an identity (a hash input, a map key, a pin) can see two names for one key.
@@ -645,11 +652,26 @@ checked by running code here.
 
 | Finding | Verified? | Disposition |
 | --- | --- | --- |
-| P1: an Ed25519 public key of small order (e.g. the identity) leaves no `[h]A` term, so `R = identity, S = 0` verifies every message. | **Yes**: the old `identity_key_encodings_match_ring` test asserted exactly this acceptance, and `ring` accepts it. | Fixed, stricter than `ring` on purpose: `[8]A = identity` keys are rejected before hashing (section 2 stage notes). Regression tests fail without the check (mutation-checked) and cover all eight torsion encodings. This is a new documented deviation from `ring` parity, in the safe direction; the owner may revert it by deleting one `if`, but should not without a reason. |
+| P1: an Ed25519 public key of small order (e.g. the identity) leaves no `[h]A` term, so `R = identity, S = 0` verifies every message. | **Yes for the identity** (the old `identity_key_encodings_match_ring` test asserted exactly this acceptance, and `ring` accepts it); for the other seven torsion points the same signature shapes verify only for some messages (`[h]A` depends on `h` modulo the point's order), still without any secret. All eight are rejected. | Fixed, stricter than `ring` on purpose: `[8]A = identity` keys are rejected before hashing (section 2 stage notes). Regression tests fail without the check (mutation-checked) and cover all eight torsion encodings. This is a new documented deviation from `ring` parity, in the safe direction; the owner may revert it by deleting one `if`, but should not without a reason. |
 | P2: the taint scripts ended in `\|\| true`, so an example that panicked, was misspelled, or a missing `valgrind` read as "0 errors", the expected answer for the clean modes. | **Yes**, in all three `ct_check.sh` and in `valgrind_selftest.sh`. | Fixed in one shared `rusty_ct_check/scripts/taint_lib.sh`: each mode runs once, output to a file, and a non-zero status fails the check. `test_taint_lib.sh` uses a fake `valgrind` (clean, diagnostic, exit 3, exit 127, diagnostic plus failure); weakening the status check fails it. |
 | P2: `collect.sh` never ran the ignored `planted_early_exit_is_detected` test, so the timing detector's own sensitivity was not part of the record. | **Yes.** | Fixed: `collect.sh` runs it explicitly (`--ignored --exact`), propagates its status and requires exactly one passing test. It passed here (0.02 s). |
 | P2: the vector hashes were printed, not compared with the manifests (and the two generated corpora were not pinned). | **Yes**, and the check found a real gap on its first run: `x25519_test.json` was vendored but missing from the `rusty_pk` manifest. | Fixed: `check_manifests.py` fails on a hash mismatch (including whitespace-only drift), a missing file, an unlisted file, a file listed twice and a malformed pin line; both generated corpora and `x25519_test.json` are now pinned; it runs in `collect.sh` and in the `crypto-constant-time` CI job; 9 tests. **Limit:** the manifest sits beside the vectors, so this catches drift and accidents, not a deliberate change of corpus and manifest together; provenance rests on the pinned upstream commit and human review. All 27 vendored Wycheproof files were also compared byte for byte with upstream at `12fd3aaf` (identical). |
-| P2: `jcc <= budget` let a lower count pass unreviewed. | **Partly.** The script's interface was an explicit maximum, and `<=` implements it; the point that a lower count also deserves review is fair, but exactness does **not** close the security gap Codex described (the human review of this PR says so too): replacing one public branch with a secret-dependent one keeps the total and still passes. | Changed to exact equality as stricter drift detection only. Counts already match on 1.98.1 and 1.99.0 (identical), so nothing moved. `test_disasm_audit.py` pins the rule. **Not a proof and not branch identity:** the disassembly of the listed functions must still be read by a human after relevant source or compiler changes. The earlier wording that exactness catches a masked new jump overstated it and is corrected here, in the script docstring and in the limits files. |
+| P2: `jcc <= budget` let a lower count pass unreviewed. | **Partly.** The script's interface was an explicit maximum, and `<=` implements it; the point that a lower count also deserves review is fair, but exactness does **not** close the security gap Codex described (the automated follow-up review comment on this PR says so too; it is not the independent human review, which is still outstanding): replacing one public branch with a secret-dependent one keeps the total and still passes. | Changed to exact equality as stricter drift detection only. Counts already match on 1.98.1 and 1.99.0 (identical), so nothing moved. `test_disasm_audit.py` pins the rule. **Not a proof and not branch identity:** the disassembly of the listed functions must still be read by a human after relevant source or compiler changes. The earlier wording that exactness catches a masked new jump overstated it and is corrected here, in the script docstring and in the limits files. |
+
+**Follow-up to round 3** (automated re-review of `06a7312f`, not the human review): three
+statements of mine were wrong and are corrected above: the identity-only universal-message
+claim (the other seven torsion points verify only some messages), the "no small-order `R`
+can verify" impossibility claim (false; a zero-nonce signature has `R = identity`), and a
+sentence that called an automated comment "the human review of this PR". Two test gaps it
+named are closed: `planted_leak.sh` (the planted-leak guard, with `test_planted_leak.py`
+injecting a non-zero exit, a filter that runs zero tests, two tests and a missing cargo) and
+`test_disasm_audit.py` now also runs the script against a fake `objdump` (exact count,
+higher/lower count, a symbol matching nothing, a division, `objdump` failing).
+**Evidence status:** `EVIDENCE-2026-10-09.txt` was produced at `06a7312f` (clean tree, exit 0).
+Later commits change comments, documentation, tests and merges of `main`, not primitive or
+script behaviour, apart from the guard refactor above (`planted_leak.sh`), which `collect.sh`
+now calls; that refactor's behaviour was exercised by its tests but is not in the record, so
+the record does not yet cover it. Regenerate it before relying on it as the final record.
 
 ## 12. What I did not verify
 
