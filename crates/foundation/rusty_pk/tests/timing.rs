@@ -63,26 +63,32 @@ fn null_calibration_identical_classes() {
 }
 
 /// ECDH `agree` with two scalar classes. Scalars are built below the group order
-/// (top byte 0x01 or 0x7f, rest as given) so both classes are valid keys.
+/// (top byte 0x01 or 0x7f, rest as given) so both classes are valid keys. As the header
+/// says, the class is chosen in `prepare` (untimed), which loads that class's key into the
+/// one slot that the timed closure always reads, so both classes run the identical code on
+/// the same storage.
 fn ecdh_classes(curve: Curve, fill_a: u8, fill_b: u8, seed: u64, samples: usize) -> Option<f64> {
     let make = |fill: u8| {
         let mut bytes = vec![fill; curve.len()];
         bytes[0] = if fill == 0xff { 0x7f } else { fill & 0x7f };
-        PrivateKey::from_bytes(curve, &bytes).expect("valid scalar")
+        bytes
     };
     let (a, b) = (make(fill_a), make(fill_b));
+    let slot = RefCell::new(PrivateKey::from_bytes(curve, &a).expect("valid scalar"));
     let peer = PrivateKey::from_bytes(curve, &vec![0x05; curve.len()])
         .unwrap()
         .public_key()
         .unwrap();
-    let which = RefCell::new(false);
     leak_statistic_split(
         samples,
         seed,
-        |class| *which.borrow_mut() = class,
+        |class| {
+            let bytes = if class { &b } else { &a };
+            *slot.borrow_mut() = PrivateKey::from_bytes(curve, bytes).expect("valid scalar");
+        },
         || {
-            let key = if *which.borrow() { &b } else { &a };
-            key.agree(black_box(peer.as_bytes()))
+            slot.borrow()
+                .agree(black_box(peer.as_bytes()))
                 .map(|s| s.as_bytes()[0])
         },
     )
@@ -106,10 +112,18 @@ fn ecdh_p384_sparse_vs_dense_scalar() {
     );
 }
 
-/// A/A calibration for ECDH: the same scalar in both classes, so any `|t|` is noise.
+/// A/A calibrations for ECDH, one per curve with that curve's own sample count (the same
+/// counts as the leak tests), so each leak test is read against a baseline of its own size.
 #[test]
 #[ignore = "calibration; scheduled job only"]
 fn ecdh_null_calibration_identical_classes() {
     let t = ecdh_classes(Curve::P256, 0x55, 0x55, 13, 4_000).expect("enough samples");
     eprintln!("A/A ecdh p256: |t| = {t:.2}");
+}
+
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn ecdh_p384_null_calibration_identical_classes() {
+    let t = ecdh_classes(Curve::P384, 0x55, 0x55, 14, 2_000).expect("enough samples");
+    eprintln!("A/A ecdh p384: |t| = {t:.2}");
 }

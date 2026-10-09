@@ -24,6 +24,11 @@ valgrind helper).
 **Owner decision (2026-10-09):** the stage-4 freeze is reopened for **randomness and ECDH
 P-256/P-384 only** (section 13.1 gaps 1 and 2). AES-GCM, the `rusty_tls` seam and signing stay
 closed. The 2026-10-08 intrinsics approval was not reconfirmed and is not relied on.
+*Provenance:* this is the implementer's transcription of the owner's instruction in the
+implementing session on 2026-10-09, "go ahead with randomness and ECDH", given in answer to
+"Which gaps do you want me to start on?" after the implementer had explained what reopening the freeze
+means. The PR cannot verify it by itself: **the owner is asked to confirm it with a comment or
+review on PR #576**, and the scope above is exactly what that instruction names.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -737,14 +742,21 @@ re-derived.
 
 ### 13.4 Results for gaps 1 and 2 (2026-10-09; preliminary, not independently reviewed)
 
-**Gap 1, `rusty_rand`.** On Linux x86_64/aarch64 `fill` now calls `getrandom(2)` with flags 0 through
-`rusty_libc` (blocks until the kernel pool is seeded; `strace` shows one 1 MiB call and no
-`/dev/urandom` open); other Unix keeps `/dev/urandom` but reads without the global `Mutex`. The read
-loop (`fill_with`) is separate from the OS call and tested with a scripted source: short reads, `EINTR`,
-a zero-progress read, a source claiming more than it was given, and a failing source. No path returns an
-unfilled tail. `rust-version` is now 1.88 (`rusty_libc`'s floor); the public API is unchanged. Not
-verified: entropy quality, behaviour on Windows or macOS (not built here), `fork` behaviour beyond the
-argument that all state is in the kernel.
+**Gap 1, `rusty_rand`.** On Linux x86_64/aarch64 `fill` calls `getrandom(2)` with flags 0 through
+`rusty_libc` (blocks until the kernel pool is initialised; `strace` shows one 1 MiB call and no
+`/dev/urandom` open). If the kernel lacks it (`ENOSYS`) the whole buffer is refilled from `/dev/random`,
+never `/dev/urandom` (review finding on #576: a `/dev/urandom` fallback would keep the early-boot risk). Other
+Linux targets (no `rusty_libc` support) use `/dev/random`, which also waits for pool initialisation (on kernels
+before 5.6 it can additionally block on a low entropy estimate). Other Unix keeps `/dev/urandom` with
+**no initialised-pool claim**: its early-boot behaviour per BSD was not checked. Reads take no lock. The read loop
+(`fill_with`) and the `getrandom` loop (`fill_getrandom_with`) are separate from the OS and tested with scripted
+sources: short reads, `EINTR`, a zero-progress read, a source claiming too much, a failing source, `ENOSYS` first
+and after a partial fill (the fallback must replace stale bytes), a failing fallback, other errnos failing closed
+without the fallback, and the real `/dev/random` fallback filling a buffer. Backend selection is a pure function
+tested for every target class, plus a test that Linux never selects `/dev/urandom`. No path returns an unfilled
+tail. `rust-version` is now 1.88 (`rusty_libc`'s floor); the public API is unchanged. Not verified:
+entropy quality, Windows and macOS builds (not built here), `fork` behaviour beyond the argument that all state
+is in the kernel, and the blocking behaviour of `/dev/random` on kernels before 5.6.
 
 **Gap 2, `rusty_pk::ecdh`.** `PrivateKey::{from_bytes, generate, public_key, agree}` on P-256 and P-384,
 SEC 1 uncompressed points only (compressed points are refused, as TLS 1.3 requires).
@@ -778,9 +790,12 @@ deliberately simple (no window table); that costs speed.
   `select` was read by hand (SIMD and/or/andn, no branch), and the scalar bit becomes a mask via `sar` and
   `bt`/`sbb`. **Limits:** the verdict branch itself is allowed and reveals only valid/invalid (a rejected
   candidate is discarded; for a valid key the answer is fixed), the site check assumes valgrind's PIE load base
-  0x108000 and fails if that changes, and everything else in the earlier caveats stands. A single timing run
-  shows |t| 0.29 (P-256) and 0.23 (P-384) for sparse against dense scalars, and 2.71 for the A/A baseline; the
-  40-repetition series in `collect.sh` has been extended but its record is produced separately.
+  0x108000 and fails if that changes, and everything else in the earlier caveats stands. One timing run with the corrected method
+  (class chosen outside the clock, one shared key slot) gave |t| 3.54 (P-256) and 0.72 (P-384) for sparse
+  against dense scalars, with A/A baselines of 1.56 and 1.64; 3.54 is close to the 4.5 threshold, so read the
+  40-repetition series (own A/A baseline per curve, own sample counts) rather than this run. A first version
+  of the test chose between two separately stored keys inside the timed closure (review finding on #576)
+  and its numbers are discarded.
 - *Side effect on earlier evidence:* adding this code twice changed LLVM's inlining of `Modulus::add` (once into
   `Field::add`, 6 jumps to 16, then back). `Modulus::add` is now `#[inline(never)]` so its originally reviewed
   count of 6 is stable; the counts were re-read each time. Every pin is per binary.

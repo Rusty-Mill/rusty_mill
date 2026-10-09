@@ -137,6 +137,7 @@ rusty_pk|scalar_classes_not_distinguishable|x25519: sparse vs dense scalar
 rusty_pk|fixed_vs_random_scalar|x25519: fixed vs other scalar
 rusty_pk|ecdh_null_calibration_identical_classes|A/A  ECDH P-256 agree (baseline)
 rusty_pk|ecdh_p256_sparse_vs_dense_scalar|ecdh p256: sparse vs dense scalar
+rusty_pk|ecdh_p384_null_calibration_identical_classes|A/A  ECDH P-384 agree (baseline)
 rusty_pk|ecdh_p384_sparse_vs_dense_scalar|ecdh p384: sparse vs dense scalar
 SPECS
 for tf in test_timing_series.py test_check_manifests.py test_planted_leak.py; do

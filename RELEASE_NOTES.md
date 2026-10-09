@@ -15,7 +15,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ## 2026-10-09 - Crypto gaps 1 and 2: `rusty_rand` hardened, ECDH P-256/P-384
 
-- **Changed (rusty_rand):** `getrandom(2)` on Linux x86_64/aarch64, lock-free `/dev/urandom` elsewhere, a tested read loop; `rust-version` 1.75 to 1.88.
+- **Changed (rusty_rand):** `getrandom(2)` on Linux x86_64/aarch64 (`/dev/random` fallback, never `/dev/urandom`), `/dev/random` on other Linux, lock-free `/dev/urandom` on other Unix with no initialised-pool claim, a tested read loop and backend selection; `rust-version` 1.75 to 1.88.
 - **Added (rusty_pk::ecdh):** ECDH on P-256 and P-384, validated against Wycheproof, RFC 5903 and `ring`; constant-time evidence added (taint, exact jump counts, timing). Moved a pinned jump count (`Modulus::add` inlined into `Field::add`, re-read).
 - **Known limitations:** slower than `ring` (14x P-256, 5x P-384); constant-time results are x86-64, one VM, preliminary; the new 40-repetition timing series and a new evidence record have not been produced; not independently reviewed; not wired into `rusty_tls`.
 
