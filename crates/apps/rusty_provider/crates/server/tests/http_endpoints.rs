@@ -2558,18 +2558,29 @@ async fn admin_client_usage_history_reports_a_dispatched_requests_usage() {
         .unwrap();
     assert_eq!(dispatch.status(), 200);
 
-    // The persistence writer thread is asynchronous relative to the
-    // response; give it a moment to land before reading it back.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    let resp = client
-        .get(format!("{base_url}/v1/admin/clients/acme/usage-history"))
-        .bearer_auth("admin-secret")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: Value = resp.json().await.unwrap();
+    // The persistence writer thread is asynchronous relative to the response,
+    // so poll for the row instead of sleeping a fixed time: a slow runner
+    // (Windows CI) otherwise reads the history before it lands.
+    let url = format!("{base_url}/v1/admin/clients/acme/usage-history");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let body: Value = loop {
+        let resp = client
+            .get(&url)
+            .bearer_auth("admin-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: Value = resp.json().await.unwrap();
+        if body["data"].as_array().is_some_and(|d| !d.is_empty()) {
+            break body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "usage history still empty after 10s: {body}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
     assert_eq!(body["client"], "acme");
     let data = body["data"].as_array().unwrap();
     assert_eq!(data.len(), 1, "exactly one day's worth of history so far");
