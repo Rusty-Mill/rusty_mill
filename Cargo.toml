@@ -385,7 +385,6 @@ ignored = [
     "rush",
     "rusty_aead",
     "rusty_bot",
-    "rusty_flatbuffers",
     "rusty_pk",
     "rusty_routine",
     "rustyline",
