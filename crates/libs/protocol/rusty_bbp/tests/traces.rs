@@ -497,6 +497,7 @@ fn tr_22_coder_cannot_write_report() {
         status: RunStatus::Passed,
         profiles: vec![],
         tree: None,
+        sandbox: "test".into(),
         log: ArtId(1),
     };
     assert_eq!(

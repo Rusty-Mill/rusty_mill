@@ -41,11 +41,12 @@ pub enum Event {
         role: Role,
         principal: Principal,
     },
+    /// The turn's token is not logged: it is derived from the task's master
+    /// secret, which lives outside the log, so a log reader cannot forge it.
     TurnGranted {
         role: Role,
         turn: TurnId,
         kind: TurnKind,
-        token: Token,
         deadline: Time,
         return_to: Option<Role>,
     },
@@ -59,10 +60,10 @@ pub enum Event {
         candidate: ArtId,
         spec: ArtId,
     },
+    /// The run secret is not logged, for the same reason as the turn token.
     RunStarted {
         candidate: ArtId,
         run: RunId,
-        secret: RunSecret,
     },
     RunRevoked {
         run: RunId,

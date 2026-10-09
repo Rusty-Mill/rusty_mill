@@ -31,6 +31,11 @@ pub trait Store {
         events: &[Event],
     ) -> Result<(), StoreError>;
     fn events(&self, task: &TaskId, after: usize) -> Result<Vec<Event>, StoreError>;
+    /// Re-read a task from the medium so another writer's appends are visible.
+    /// No-op for a store that is the only writer.
+    fn refresh(&mut self, _task: &TaskId) -> Result<(), StoreError> {
+        Ok(())
+    }
     /// The store computes the digest; callers never supply it.
     fn blob_put(&mut self, bytes: &[u8]) -> BlobRef;
     fn blob_get(&self, sha: &Sha256) -> Result<Vec<u8>, StoreError>;
@@ -97,6 +102,13 @@ impl<S: Store> Driver<S> {
         }
     }
 
+    /// The same driver keyed by `master`: every token and run secret it
+    /// derives or checks uses it. Survives `reload`.
+    pub fn with_master(mut self, master: [u8; 32]) -> Driver<S> {
+        self.state.master = master;
+        self
+    }
+
     fn check_boundary(&self, cmd: &Command) -> Option<Rejection> {
         let (blob, payload) = match cmd {
             Command::Agent {
@@ -135,10 +147,17 @@ impl<S: Store> Driver<S> {
         }
     }
 
+    /// Refresh the store from its medium, then rebuild state from the log.
+    pub fn sync(&mut self) -> Result<(), StoreError> {
+        let task = self.state.task.clone();
+        self.store.refresh(&task)?;
+        self.reload()
+    }
+
     /// Rebuild state from the log.
     pub fn reload(&mut self) -> Result<(), StoreError> {
         let events = self.store.events(&self.state.task, 0)?;
-        self.state = TaskState::fold(self.state.task.clone(), &events);
+        self.state = TaskState::fold_with(self.state.task.clone(), self.state.master, &events);
         Ok(())
     }
 

@@ -137,11 +137,14 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
                 role: *role,
                 principal: principal.clone(),
             });
-            schedule(w, now);
+            // No grant here: a turn needs a host ready to launch its harness,
+            // and assignment happens before any moderator runs. The first
+            // `Tick` grants it.
             Ok(Flow::Done(Response::Ok))
         }
         Command::Tick => {
             require_open(&w.st)?;
+            schedule(w, now);
             Ok(Flow::Done(Response::Ok))
         }
         Command::AbortTurn => {
@@ -483,7 +486,11 @@ fn put_artifact(
             candidate: id,
             spec,
         });
-        end_turn(w, TurnEnd::Candidate, now);
+        // End the turn without scheduling: the task leaves `build` on the
+        // next line, and scheduling here would grant a Coder turn only for
+        // the transition to revoke it (one turn of budget, a skipped id).
+        // `transition` runs the Test entry, which schedules once.
+        end_turn_only(w, TurnEnd::Candidate);
         transition(w, State::Test, now);
     }
     Ok(Response::Stored(id))
@@ -884,7 +891,7 @@ fn runner(
     if sel.id != run {
         return Err(rej(Code::StaleRun, "not the selected run"));
     }
-    if sel.secret != secret {
+    if w.st.secret_for(run) != secret {
         return Err(rej(Code::BadRunSecret, "bad run secret"));
     }
     if blob.len > MAX_ARTIFACT_BYTES {
@@ -1311,19 +1318,14 @@ fn human_post(w: &mut Work, d: &Draft, now: Time) -> R<Response> {
 // ---------------------------------------------------------------- turns and lifecycle
 
 fn grant(w: &mut Work, role: Role, kind: TurnKind, return_to: Option<Role>, now: Time) {
-    let Some(p) = w.st.assigned.get(&role).cloned() else {
-        return;
-    };
-    if w.st.turn.is_some() {
+    if !w.st.assigned.contains_key(&role) || w.st.turn.is_some() {
         return;
     }
     let turn = TurnId(w.st.next_turn);
-    let token = w.st.token_for(&p, turn);
     w.emit(Event::TurnGranted {
         role,
         turn,
         kind,
-        token,
         deadline: now.plus(w.st.turn_ms),
         return_to,
     });
@@ -1367,12 +1369,7 @@ fn end_turn(w: &mut Work, cause: TurnEnd, now: Time) {
 
 fn start_run(w: &mut Work, candidate: ArtId) {
     let run = RunId(w.st.next_run);
-    let secret = w.st.secret_for(run);
-    w.emit(Event::RunStarted {
-        candidate,
-        run,
-        secret,
-    });
+    w.emit(Event::RunStarted { candidate, run });
 }
 
 fn transition(w: &mut Work, to: State, now: Time) {

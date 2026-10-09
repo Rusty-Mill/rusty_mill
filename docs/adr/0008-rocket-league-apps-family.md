@@ -36,3 +36,9 @@ family, so separate families would block that on day one.
   enters the lock through it).
 - `boxcars`/`subtr-actor` stay external (Tier T) until a first-party replay
   parser is decided separately.
+- `baileyrd/rusty_bullet` is frozen (2026-10-09): everything on its `main` and the
+  `claude/funny-clarke-tef4d0` branch is imported with history; a README notice points
+  here (`7d5a07f`) and the repo is archived, which is read-only and reversible, not a
+  deletion. Its branch `claude/rocket-league-server-clone-u74q45` is deliberately not
+  imported (see the 2026-10-09 release note) and stays readable there.
+  `baileyrd/RLEvalSystem` is not frozen yet.

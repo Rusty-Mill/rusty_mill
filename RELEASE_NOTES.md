@@ -13,10 +13,78 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - RLBot native port: plan (pending review)
+
+- **Added:** `crates/apps/rocket_league/rlbot/PLAN.md`: five stages (FlatBuffers runtime, wire subset, client, port `rb_tape_bot`, `rb_env` bridge), measured from rlbot 0.6.0, risks and rollback. Docs only; three decisions listed for the owner before stage 1.
+
+---
+
+## 2026-10-09 - rusty_bullet source repo frozen (pending review)
+
+- **Changed:** ADR-0008 and the migration plan record that `baileyrd/rusty_bullet` is frozen and archived (README notice `7d5a07f`; read-only, reversible, not deleted). `baileyrd/RLEvalSystem` is unchanged. Docs only.
+
+---
+
+## 2026-10-09 - rusty_bbp: no wasted Coder turn on candidate submission
+
+- **Fixed:** submitting a candidate ended the Coder turn and scheduled the next one while the task was still in `build`, granting a Coder turn that the transition to `test` revoked on the next line. Each candidate cost one turn of budget and skipped a turn id. The turn now ends without scheduling; the `test` entry schedules once.
+- **Changed:** `Assign` no longer grants a turn; the first `Tick` does. A turn needs a host ready to launch its harness, and roles are assigned before any moderator runs, so the turn `assign` granted was always aborted by the moderator's restart fence (another wasted turn and skipped id). `bbp mod` ticks first thing; a hand-driven flow runs `bbp tick` after assigning. Regression tests in `tests/rules.rs`; the moderator test asserts turns 1 to 4 exactly.
+
+---
+
+## 2026-10-09 - rb_env match flow: review fixes for the rusty_bullet catch-up (pending review)
+
+- **Fixed:** regulation no longer ends on a height guess. `Flow::after_step` takes whether the ball met the floor during the tick (`flow::ball_met_floor`, from the ball before and after it), so a bounce on the tick the clock reaches zero counts even though the ball ends it above 97.5, and a low ball still in the air (z 97) does not end it. Tests: pure `ball_met_floor` cases, `Flow` tie and lead, and an `Env` run for a fall and a bounce on the last tick. The `MATCH_END_BALL_HEIGHT` constant is gone; a ball met on the curve (the game once ended a match at 97.3 there) now reads as in the air until it reaches the floor.
+- **Fixed:** `match_log_check` compares the recorded `blue`, `orange` and `overtime` fields with the port's on every frame and reports the mismatches, instead of printing only the port's final score. Synthetic rows corrupting each field alone are tested.
+- **Fixed:** `rb_match_log --tie-up` confirms equality from a later score observation (`tie_up::TieUp`) before it stops, so a multi-goal deficit gets one shot per goal and a shot that does not score is fired again after 120 observations.
+- **Fixed:** `rb_tape_bot`'s path to `rb_scenario` pointed at the old repo layout, so the tool could not be built; it now builds standalone (`cargo test --lib`, `cargo build --bins` in its directory).
+- **Known limitation:** the four real-game logs are not tracked, so none of this was run against them; the floor rule has not been checked against the game's 92.2 and 97.3 match ends.
+
+---
+
+## 2026-10-09 - rusty_bullet: import `claude/funny-clarke-tef4d0` (pending review)
+
+- **Changed:** brings in the 4 commits of the source repo's `claude/funny-clarke-tef4d0` branch (docs on the hit-tick and landing investigations, the `bot-focus-and-automation` prompt, one `rb_env` characterisation test of an inverted car's wheels against a fast ball) through the same `git filter-repo` rewrite, merged with history. 4 new lines in the SHA map.
+- **Changed:** one conflict, in `rb_env/src/lib.rs`: both sides added tests after the same line; both kept.
+- **Known limitation:** `claude/rocket-league-server-clone-u74q45` (49 commits, +82k lines) is deliberately not imported: it forked on Sept 4, reuses FR-079 to FR-094 for different findings than `main`'s, has no counterpart for `main`'s wheel-ray grounding, and carries 35 MiB of raw capture fixtures. It stays readable in the source repo once archived.
+
+---
+
+## 2026-10-09 - rusty_bbp stage 3c: moderator loop and master secret (pending review)
+
+- **Added:** `bbp mod`, the moderator loop: one agent harness per granted turn with a per-turn MCP config, the runner per selected run, deadlines, forfeit on early exit, until the task closes. One moderator per task; a restart aborts the turn it cannot see so the old invocation is fenced; harnesses die with their process group on every exit path; the runner runs on its own thread so cancellation is honoured mid-profile. Tokens and run secrets are keyed by a per-directory master secret that never enters the log and is created with a single winner.
+- **Boundary:** the harness runs as the moderator's user and is trusted with the task directory; `bbp mcp` fences the model's tool calls, not the harness process. An untrusted harness needs its own sandbox or user.
+- **Changed:** `TurnGranted` and `RunStarted` no longer carry the token or secret; no stored data predates this.
+- **Verified by hand:** one live Claude Code planner turn through `bbp mod` and `bbp mcp` stored a spec and reached the plan gate (recorded in the crate README); the scripted agents in `tests/moderator_e2e.rs` cover the full path in CI. The core granted and immediately revoked a Coder turn when a candidate submission moved the task to `test`; fixed below.
+
+---
+
+## 2026-10-08 - rusty_bbp stage 3b: sandboxed runner (pending review)
+
+- **Added:** `bbp runner`, the test supervisor for the Blackboard Protocol: fresh checkout at the candidate's base, diffs applied in order, the frozen profile set run under `rusty_sandbox`, log and report stored under the run secret. Profile sets are frozen at `bbp open` and verified by digest before every run. `Report.sandbox` records the confinement.
+- **Known limitation:** no moderator loop yet (stage 3c), so the runner is started by hand after a candidate is submitted. Tokens and run secrets remain deterministic until the moderator exists. The default profile set runs `cargo test` with system read roots only; a Rust project under the sandbox needs `--profiles` with the toolchain directories added.
+
+---
+
+## 2026-10-08 - rusty_bbp stage 3a: per-turn MCP server and human CLI (pending review)
+
+- **Added:** `rusty_bbp_host` with the `bbp` binary. The MCP server is one process per turn, fenced by the turn id in its environment; artifact bytes are encoded server-side from typed tool arguments. Human channel and task administration as subcommands.
+- **Known limitation:** no runner and no moderator loop yet (stages 3b and 3c). Tokens and run secrets are deterministic until the moderator exists. The MCP server has not yet been exercised against a live Claude Code session; the end-to-end tests use a scripted JSON-RPC client.
+
+---
+
 ## 2026-10-08 - rusty_bbp driver boundary: payload derives from bytes (pending review)
 
 - **Added:** `rusty_bbp::codec` and two `Driver` boundary checks: a referenced blob must already be stored, and the claimed typed payload must equal what the bytes decode to. Closes the two compliance gaps found when ChatGPT's implementation-plan review was reassessed against the built code.
 - **Changed:** the `spec` artifact's on-disk shape is now JSON with `brief` and `markdown`, so its payload is derivable. Test fixtures encode through `codec`.
+
+---
+
+## 2026-10-08 - rusty_bullet catch-up: match flow (pending review)
+
+- **Changed:** brings in the 7 `baileyrd/rusty_bullet` commits (PRs #315-#317) pushed after the original import: `rb_env` match clock, overtime, match end and first-kickoff intro (FR-160), a whole-match check against game logs, scripted chasers and the `play_match` example, plus the matching ADR 0082 / parity-plan / spec updates and `rb_tape_bot` log tooling. Same `git filter-repo` rewrite, deterministic, so the already imported commits keep their SHAs and only these 7 come across; the new SHA map lines are appended to `docs/research/rl-migration/rusty_bullet-commit-map.txt`.
+- **Changed:** `rb_env` gains a `serde_json` dev-dependency (one `Cargo.lock` line, no new packages).
+- **Known limitation:** `claude/funny-clarke-tef4d0` and `claude/rocket-league-server-clone-u74q45` in the source repo are still not imported.
 
 ---
 
