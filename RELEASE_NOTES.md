@@ -206,6 +206,226 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added (third slice):** the classic and stateless handshakes, capabilities, typed per-request `_meta`, and the version-negotiation and fallback rules.
 - **Added (fourth slice):** subscriptions, tasks and multi-round-trip input. The A2 type list is now complete.
 - **Known limitations:** nothing uses the crate yet, so no consumer behaviour changed. There is no session or dispatch layer, SSE framing or transport yet (A3/A4). `RequestMeta` refuses a mistyped known key where `rmcp`'s accessors silently return `None`, so a server can answer `-32602` instead of ignoring bad metadata. Completion's 100-value cap is not enforced by the codec (server policy). Annotation `priority` is forwarded as raw JSON, so a value like `0.2` survives exactly where `rmcp` (which stores `f32`) would re-encode it as `0.20000000298`. Unknown members of known types are dropped on decode. Verified by tests only, not against a live server.
+## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
+
+- **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
+- **Fixed (evidence tooling, 4 x P2):** taint scripts check the example's exit status (shared `taint_lib.sh`, fake-valgrind regression test); `collect.sh` runs the ignored planted timing leak test and checks every vector file against its `MANIFEST.txt` (found `x25519_test.json` unlisted; 27 vendored files compared byte for byte with upstream); disassembly jump counts are matched exactly, as drift detection only (it does not catch a same-count substitution; the disassembly still needs a human read).
+- **Added to CI:** the `crypto-constant-time` job runs the manifest check and the evidence-tooling self-tests.
+- **Known limitations:** unchanged. Still only evidence, not proof; the human independent review remains required before any `rusty_tls` seam.
+
+## 2026-10-09 - Codex review round 2 on #540: timing-evidence collector corrected
+
+- **Fixed (evidence collector):** `collect.sh` picked one `target/release/deps/timing-*` binary for all three crates' same-named A/A tests, ignored build and discovery failures, and counted baseline alarms from exit codes the calibration tests never produce. Replaced by `timing_series.py`: executable from Cargo's artifact JSON per package (identity recorded), every failure fails the record, alarms counted from printed `|t|` (>= 4.5). Covered by 12 deterministic tests (`test_timing_series.py`, also run in `crypto-constant-time`), including custom target directories, stale binaries after a failed build, zero repetitions and above-threshold A/A output.
+- **Changed:** the evidence record is regenerated with the new collector (final run at `e3266f2e`, after the round 3 fixes and their follow-ups) and renamed `EVIDENCE-2026-10-09.txt`; the `ea0e234` record used the old collector and is removed. No primitive code changed; the review states these findings concern evidence correctness, not a leak or forgery.
+- **Known limitations:** unchanged from round 1. Statistical timing tests are still not a CI gate; the human independent review is still required before any `rusty_tls` seam.
+
+## 2026-10-08 - Codex review round 1 on #540: three findings fixed
+
+- **Fixed (rusty_aead):** `MAX_LEN` was one 64-byte block short of RFC 8439 section 2.8; now `u32::MAX * 64`, pinned by a test. Behaviour change only for a message of exactly 2^38 - 64 bytes.
+- **Fixed (evidence script):** failures in tests, lint, constant-time checks and timing now fail the run; constant-time checks run on every named compiler, including CI's 1.98.1 (identical results).
+- **Added (CI):** `crypto-constant-time` job (valgrind taint + pinned disassembly budgets for `rusty_sha2`, `rusty_aead`, `rusty_pk`, plus the harness self-test) on the pinned toolchain, selected by a new `crypto_ct` plan output when any of the five crypto crates is affected. Planner rule, workflow and tests updated; `actionlint` passes. First runner run passed (valgrind 3.22.0, rustc 1.98.1, identical counts to local).
+- **Changed:** the four new crates (`rusty_ct_check`, `rusty_sha2`, `rusty_pk`, `rusty_aead`) now declare `rust-version = "1.98.1"` instead of an untested 1.75, matching the compiler their checks run on. Behaviour change only for anyone building them with an older toolchain (Cargo now refuses).
+- **Fixed (CI):** the version raise activated a Clippy lint gated on `rust-version` (`chunks_exact_to_as_chunks`) that failed the 1.98.1 clippy job; ten call sites moved to `as_chunks`. The evidence script now lints on CI's compiler too.
+- **Open:** the timing tests are not in CI.
+
+---
+
+## 2026-10-08 - Crypto claims corrected, evidence record, boundary tests (docs and tests only)
+
+- **Changed (docs):** `CRYPTO-REPLACEMENT-PLAN.md` no longer says "Done" or "exactly what ring accepts": stages are "implemented; independent review pending", ring parity is "on the recorded corpus", the Ed25519 leniency is a documented compatibility exception, provisional implementer choices are separated from owner decisions, scope limits (no AES-GCM, no P-256/P-384 key exchange, no signing, no randomness) and a call-site coverage table are stated. Added `docs/research/crypto-evidence/` (script and record).
+- **Added (tests):** adversarial boundary tests for the shared Montgomery core. No defect found.
+- **Found (test method, not a primitive):** repeated timing runs exposed two harness artifacts (|t| = 7.9 and 25 on code with no leak). Fixed by timing only the operation on a shared buffer; added A/A baselines (2 of 120 no-leak runs exceed 4.5) and a 40-repetition evidence record (`docs/research/crypto-evidence/`, produced at commit `c4bbb66`).
+- **Not changed:** any primitive's behaviour, `rusty_tls`, consumers, gates. Stages 0 to 4 are frozen.
+
+---
+
+## 2026-10-08 - Crypto stage 4: X25519 (pending review)
+
+- **Added:** `rusty_pk::x25519`. **Not changed:** `rusty_tls`, consumers, gates. Work stops after this stage by owner decision.
+- **Verified:** tests, clippy `-D warnings`, RFC 7748, 518 Wycheproof cases, differential against `ring`, 14 mutants (2 equivalent survivors), valgrind taint (0 errors on the ladder), pinned disassembly counts, timing runs, policy scripts.
+- **Found and fixed:** the compiler turned a branch-free select into a branch on the secret scalar (caught by the taint run, invisible to all functional tests).
+- **Known limitations:** x86-64 only; `black_box` is best effort; 7.7x slower than `ring`; intermediates not wiped; no independent review, which the plan requires before use in `rusty_tls`.
+
+---
+
+## 2026-10-08 - Crypto stage 3: rusty_aead ChaCha20-Poly1305 (pending review)
+
+- **Added:** `rusty_aead`. **Not changed:** `rusty_tls`, consumers, gates. Local toolchain moved to Rust 1.99.0; stages 1 to 3 re-verified on it.
+- **Verified:** tests, clippy `-D warnings` (1.99), differential against `ring`, 22 hand-made mutants (one real test gap found and closed), valgrind taint (seal clean; open shows exactly the public accept/reject branch), pinned disassembly budget, timing tests, policy scripts.
+- **Known limitations:** x86-64 only; `open` cannot be fully taint-clean because the verdict branch is public by design; 4 to 5.5x slower than `ring`; nothing independently reviewed.
+
+---
+
+## 2026-10-08 - Crypto stage 2: rusty_pk signature verification (pending review)
+
+- **Added:** `rusty_pk` (RSA, ECDSA P-256/P-384, Ed25519 verify). `ring` is a dev-dependency oracle only. **Not changed:** `rusty_tls`, consumers, gates.
+- **Verified:** tests, clippy `-D warnings`, differential against `ring` on every Wycheproof case in 19 files and several thousand mutated or `ring`-signed inputs, more than 20 hand-made mutants (all caught after fixing two test gaps), workspace policy scripts.
+- **Known limitations:** deliberately as lenient as `ring` where `ring` is looser than RFC 8032 (non-canonical Ed25519 `y`, `x = 0` with sign bit); mutation fuzzing is deterministic, not coverage-guided; speed is 1.7x to 9x slower than `ring`; nothing is independently reviewed.
+
+---
+
+## 2026-10-08 - Crypto stages 0 and 1: rusty_ct_check, rusty_sha2 (pending review)
+
+- **Added:** `rusty_ct_check` (harness), `rusty_sha2` (SHA-2, HMAC, HKDF), `rusty_crypto_key::wipe`. `ring` is a dev-dependency oracle only. **Not changed:** `rusty_tls`, any consumer, any gate.
+- **Decision recorded:** `unsafe` intrinsics approved, work stops after stage 4 (`docs/research/CRYPTO-REPLACEMENT-PLAN.md` section 0).
+- **Verified:** tests, clippy `-D warnings`, differential against `ring`, mutation by hand (9 of 9 caught), valgrind taint and disassembly gates on the planted-leak controls, workspace policy scripts.
+- **Known limitations:** constant-time evidence covers x86-64 and rustc 1.97 only; the timing results are single runs on a noisy VM; nothing here is independently reviewed; the HMAC/HKDF functions other than `compress` are inlined, so the disassembly audit covers only the compression functions.
+
+---
+
+## 2026-10-08 - Crypto replacement plan (docs only)
+
+- **Added:** `docs/research/CRYPTO-REPLACEMENT-PLAN.md`. **Not changed:** any crate, dependency, `rusty_tls`, or gate. No primitive was written.
+- **Findings:** the safe stages (SHA-2/HMAC/HKDF, signature verify) are worth doing; portable AES-GCM would be roughly 60 to 150x slower than `ring` unless `unsafe` intrinsics are approved; `ring` stays in the lockfile via nine other packages.
+- **Known limitations:** native performance figures are estimates; only `ring` and `rusty_rsa` were measured (one run, noisy VM). The constant-time probe tested the tools on toy code only. Decisions in section 9 are the owner's.
+
+---
+
+## 2026-10-08 - TLS engine assessment (docs only)
+
+- **Added:** `docs/research/TLS-ENGINE-ASSESSMENT.md` and a repro for one engine bug. **Finding:** a wildcard certificate bypasses an excluded name constraint in the native engine; rustls rejects it. **Not changed:** the default engine, either gate, or any code.
+- **Added:** `docs/research/TLS12-DESIGN.md`, the TLS 1.2 scope and stage plan. Design only; no code.
+- **Added:** `docs/research/prompts/ring-track.md`, a session prompt for assessing a native `ring` replacement. Prompt only; no code.
+- **Known limitations:** rusty_tls#25 lives in an archived repo outside this session's scope and was not read, so its acceptance criteria are taken from ADR-0002 section 5. Interop tests were not run, and about 6.5k lines of the engine (record, schedule, handshake, kx, ticket, client and server state machines) were not reviewed.
+
+## 2026-10-09 - rusty_flatbuffers: FlatBuffers runtime (RLBot port stage 1) (pending review)
+
+- **Added:** `crates/libs/protocol/rusty_flatbuffers` (Tier S, no dependencies): a bounds-checked reader (`Table`, `Vector`; every access returns `Error`, none panics) and a back-to-front `Builder`/`TableBuilder` (strings, scalar/offset/struct vectors, inline structs, unions as type+offset slots, optional file identifier). No code generation; schemas are hand-written on top.
+- **Hardened (review):** an `Offset` remembers its builder and a foreign one is `ForeignOffset`; struct alignment, size and item lengths are validated before anything is written (`InvalidLayout`); field slots are bounded by `MAX_SLOTS` on both sides (`SlotTooLarge` when building, absent when reading). The `add_*` methods now return `Result`, and a rejected call changes nothing.
+- **Verified:** 15 tests (10 golden, 5 boundary; also run in release). Reader against five buffers made by `rlbot_flat` 0.6.0 (nested tables, a vector of tables, optional structs, a union root); every prefix of each fixture and every flipped byte of the largest never panics; builder output reads back and `planus` reads it too (checked once outside CI).
+- **Changed:** `rlbot/PLAN.md` records the owner's decisions (through the `rb_env` bridge, hand-written subset then a generator, `rb_rlbot_*` names).
+
+---
+
+## 2026-10-08 - Operating model (ADR-0009) and rusty-ttf-parser (pending review)
+
+- **Added:** ADR-0009, `required-gate`, scheduled sweep, toolchain pin, CODEOWNERS, SHA-pinned actions, warn-only `cargo-deny`, root licence files; `rusty-ttf-parser`. **Changed:** `rusty_term` uses it instead of `ttf-parser`; `remind_me_core`'s S3 client moves to the SDK's current HTTP stack. **Fixed:** four advisories via the AWS change.
+- **Known limitations:** `cargo-deny` is non-blocking until `bincode` and `rustls-pemfile` are resolved. Set `required-gate` as the only required check in branch protection after merge. `rusty-ttf-parser` decodes GSUB types 1/4/5/6 only; context format 1 and `sbix` are covered by hand-built fonts, not by the real-font comparison.
+
+---
+
+## 2026-10-09 - RLBot native port: plan (pending review)
+
+- **Added:** `crates/apps/rocket_league/rlbot/PLAN.md`: five stages (FlatBuffers runtime, wire subset, client, port `rb_tape_bot`, `rb_env` bridge), measured from rlbot 0.6.0, risks and rollback. Docs only; three decisions listed for the owner before stage 1.
+
+---
+
+## 2026-10-09 - rusty_bullet source repo frozen (pending review)
+
+- **Changed:** ADR-0008 and the migration plan record that `baileyrd/rusty_bullet` is frozen and archived (README notice `7d5a07f`; read-only, reversible, not deleted). `baileyrd/RLEvalSystem` is unchanged. Docs only.
+
+---
+
+## 2026-10-09 - rusty_bbp: design record moved into the monorepo
+
+- **Changed:** the Blackboard Protocol specification (v0.4 plus the v0 to v0.3 drafts) and its review record (four model-review rounds, merged findings, prompts, the implementation-plan review, the sovereignty audit, the orch-core decision) now live at `crates/libs/protocol/rusty_bbp/docs/`, indexed by its README. `baileyrd/rusty_bbp` carries a pointer here and is to be archived. One copy of the trace catalog remains, the crate's `TRACES.md`, which the tests reproduce.
+
+---
+
+## 2026-10-09 - rusty_bbp: task logs named by digest
+
+- **Fixed:** `FsStore` named each task log after a lossy sanitisation of the task id and read the id back from the filename, so `a/b` and `a_b` shared one log and a reopened store misnamed them. Logs are now `tasks/<sha256(task id)>.log`, and the id comes from the log's opening event. Two tests: six colliding and awkward ids keep separate logs and reopen verbatim; an empty log is skipped and reused.
+- **Migration:** none. A directory holding a pre-digest log (or any log off its canonical path) refuses to open with `Corrupt` naming the file; move it to `fs_store::log_path_for(dir, task)` or remove it. Nothing is loaded that a later refresh or append could not address. No deployed data predates this.
+
+---
+
+## 2026-10-09 - rusty_bbp: no wasted Coder turn on candidate submission
+
+- **Fixed:** submitting a candidate ended the Coder turn and scheduled the next one while the task was still in `build`, granting a Coder turn that the transition to `test` revoked on the next line. Each candidate cost one turn of budget and skipped a turn id. The turn now ends without scheduling; the `test` entry schedules once.
+- **Changed:** `Assign` no longer grants a turn; the first `Tick` does. A turn needs a host ready to launch its harness, and roles are assigned before any moderator runs, so the turn `assign` granted was always aborted by the moderator's restart fence (another wasted turn and skipped id). `bbp mod` ticks first thing; a hand-driven flow runs `bbp tick` after assigning. Regression tests in `tests/rules.rs`; the moderator test asserts turns 1 to 4 exactly.
+
+---
+
+## 2026-10-09 - rb_env match flow: review fixes for the rusty_bullet catch-up (pending review)
+
+- **Fixed:** regulation no longer ends on a height guess. `Flow::after_step` takes whether the ball met the floor during the tick (`flow::ball_met_floor`, from the ball before and after it), so a bounce on the tick the clock reaches zero counts even though the ball ends it above 97.5, and a low ball still in the air (z 97) does not end it. Tests: pure `ball_met_floor` cases, `Flow` tie and lead, and an `Env` run for a fall and a bounce on the last tick. The `MATCH_END_BALL_HEIGHT` constant is gone; a ball met on the curve (the game once ended a match at 97.3 there) now reads as in the air until it reaches the floor.
+- **Fixed:** `match_log_check` compares the recorded `blue`, `orange` and `overtime` fields with the port's on every frame and reports the mismatches, instead of printing only the port's final score. Synthetic rows corrupting each field alone are tested.
+- **Fixed:** `rb_match_log --tie-up` confirms equality from a later score observation (`tie_up::TieUp`) before it stops, so a multi-goal deficit gets one shot per goal and a shot that does not score is fired again after 120 observations.
+- **Fixed:** `rb_tape_bot`'s path to `rb_scenario` pointed at the old repo layout, so the tool could not be built; it now builds standalone (`cargo test --lib`, `cargo build --bins` in its directory).
+- **Known limitation:** the four real-game logs are not tracked, so none of this was run against them; the floor rule has not been checked against the game's 92.2 and 97.3 match ends.
+
+---
+
+## 2026-10-09 - rusty_bullet: import `claude/funny-clarke-tef4d0` (pending review)
+
+- **Changed:** brings in the 4 commits of the source repo's `claude/funny-clarke-tef4d0` branch (docs on the hit-tick and landing investigations, the `bot-focus-and-automation` prompt, one `rb_env` characterisation test of an inverted car's wheels against a fast ball) through the same `git filter-repo` rewrite, merged with history. 4 new lines in the SHA map.
+- **Changed:** one conflict, in `rb_env/src/lib.rs`: both sides added tests after the same line; both kept.
+- **Known limitation:** `claude/rocket-league-server-clone-u74q45` (49 commits, +82k lines) is deliberately not imported: it forked on Sept 4, reuses FR-079 to FR-094 for different findings than `main`'s, has no counterpart for `main`'s wheel-ray grounding, and carries 35 MiB of raw capture fixtures. It stays readable in the source repo once archived.
+
+---
+
+## 2026-10-09 - rusty_bbp stage 3c: moderator loop and master secret (pending review)
+
+- **Added:** `bbp mod`, the moderator loop: one agent harness per granted turn with a per-turn MCP config, the runner per selected run, deadlines, forfeit on early exit, until the task closes. One moderator per task; a restart aborts the turn it cannot see so the old invocation is fenced; harnesses die with their process group on every exit path; the runner runs on its own thread so cancellation is honoured mid-profile. Tokens and run secrets are keyed by a per-directory master secret that never enters the log and is created with a single winner.
+- **Boundary:** the harness runs as the moderator's user and is trusted with the task directory; `bbp mcp` fences the model's tool calls, not the harness process. An untrusted harness needs its own sandbox or user.
+- **Changed:** `TurnGranted` and `RunStarted` no longer carry the token or secret; no stored data predates this.
+- **Verified by hand:** one live Claude Code planner turn through `bbp mod` and `bbp mcp` stored a spec and reached the plan gate (recorded in the crate README); the scripted agents in `tests/moderator_e2e.rs` cover the full path in CI. The core granted and immediately revoked a Coder turn when a candidate submission moved the task to `test`; fixed below.
+
+---
+
+## 2026-10-08 - rusty_bbp stage 3b: sandboxed runner (pending review)
+
+- **Added:** `bbp runner`, the test supervisor for the Blackboard Protocol: fresh checkout at the candidate's base, diffs applied in order, the frozen profile set run under `rusty_sandbox`, log and report stored under the run secret. Profile sets are frozen at `bbp open` and verified by digest before every run. `Report.sandbox` records the confinement.
+- **Known limitation:** no moderator loop yet (stage 3c), so the runner is started by hand after a candidate is submitted. Tokens and run secrets remain deterministic until the moderator exists. The default profile set runs `cargo test` with system read roots only; a Rust project under the sandbox needs `--profiles` with the toolchain directories added.
+
+---
+
+## 2026-10-08 - rusty_bbp stage 3a: per-turn MCP server and human CLI (pending review)
+
+- **Added:** `rusty_bbp_host` with the `bbp` binary. The MCP server is one process per turn, fenced by the turn id in its environment; artifact bytes are encoded server-side from typed tool arguments. Human channel and task administration as subcommands.
+- **Known limitation:** no runner and no moderator loop yet (stages 3b and 3c). Tokens and run secrets are deterministic until the moderator exists. The MCP server has not yet been exercised against a live Claude Code session; the end-to-end tests use a scripted JSON-RPC client.
+
+---
+
+## 2026-10-08 - rusty_bbp driver boundary: payload derives from bytes (pending review)
+
+- **Added:** `rusty_bbp::codec` and two `Driver` boundary checks: a referenced blob must already be stored, and the claimed typed payload must equal what the bytes decode to. Closes the two compliance gaps found when ChatGPT's implementation-plan review was reassessed against the built code.
+- **Changed:** the `spec` artifact's on-disk shape is now JSON with `brief` and `markdown`, so its payload is derivable. Test fixtures encode through `codec`.
+
+---
+
+## 2026-10-08 - rusty_bullet catch-up: match flow (pending review)
+
+- **Changed:** brings in the 7 `baileyrd/rusty_bullet` commits (PRs #315-#317) pushed after the original import: `rb_env` match clock, overtime, match end and first-kickoff intro (FR-160), a whole-match check against game logs, scripted chasers and the `play_match` example, plus the matching ADR 0082 / parity-plan / spec updates and `rb_tape_bot` log tooling. Same `git filter-repo` rewrite, deterministic, so the already imported commits keep their SHAs and only these 7 come across; the new SHA map lines are appended to `docs/research/rl-migration/rusty_bullet-commit-map.txt`.
+- **Changed:** `rb_env` gains a `serde_json` dev-dependency (one `Cargo.lock` line, no new packages).
+- **Known limitation:** `claude/funny-clarke-tef4d0` and `claude/rocket-league-server-clone-u74q45` in the source repo are still not imported.
+
+---
+
+## 2026-10-08 - CI: replay-viewer GL smoke test and rleval-app feature sets (pending review)
+
+- **Added:** two planner-gated jobs ported from RLEvalSystem's own CI: `rleval-viewer-gl-smoke` (the offline viewer rendered under software WebGL with a `npm ci`-pinned puppeteer; fails on page errors or a stalled render loop) and `rleval-app-feature-sets` (clippy for default, `mmdb` and `oidc`, plus default-feature tests). New planner flags `rleval_viewer` and `rleval_app`, with tests.
+- **Not ported, by design:** the `mmdb,oidc` job (the workspace-wide clippy/nextest/doctest jobs already run `--all-features`, which includes that set on Linux and Windows) and the Python service job (the service was moved without CI, ADR-0008).
+- **Known limitation:** the smoke test was verified locally against the Playwright-installed Chromium; the first CI run on `ubuntu-latest` downloads puppeteer's own.
+
+---
+
+## 2026-10-08 - RLEvalSystem imported into crates/apps/rocket_league (pending review)
+
+- **Added:** `replay-analyzer`, `replay-scoring`, `replay-skills`, `replay-value`, `replay-viewer`, `replay-pacifist`, `bc-clone`, `recon-check`, `rleval-app` and the `rleval/` product dir (docs, Python `service/`, scripts). History preserved via `git filter-repo` (201 of 222 commits; the rest only touched private material). Stacked on the rusty_bullet import.
+- **Changed:** replays, corpus, player sessions and the Spire capture kit are excluded and live in the private repo `baileyrd/rocket_league_private`. `rleval-app`'s git-pinned rusty_mill dependencies became workspace dependencies. `replay-analyzer`'s golden records `boxcars-0.11.5` (was 0.11.3; no other change). `rleval-app`'s SHA-256 uses `as_chunks`, its upload-signing key comes from `rusty_rand` (the old `/dev/urandom` read made signed uploads return 501 on Windows, which the old Ubuntu-only CI never ran). `history_flow` skips without the corpus.
+- **Known limitation:** the Python service and Docker files are moved, not built or tested in CI; the viewer headless-GL smoke test and the `mmdb,oidc` feature job of the old CI are not ported yet.
+
+---
+
+## 2026-10-08 - rusty_bbp stage 2: durable store (pending review)
+
+- **Added:** `rusty_bbp::FsStore`, a file-backed store with one `fsync`ed JSON line per committed batch, crash truncation on open, revision-checked append and digest-verified blobs via `rusty_atomic_file`. Stage-2 exit criteria from the implementation plan are tests: reopen, crash mid-batch, conflict, blob consistency.
+- **Changed:** `Store::blob_get` returns `Vec<u8>`; `StoreError::Backend` added.
+- **Known limitation:** no directory lock; one writer per data directory is the host's job. Blob garbage collection and retention are not implemented.
+
+## 2026-10-08 - rusty_bullet imported as crates/apps/rocket_league (pending review)
+
+- **Added:** `crates/apps/rocket_league/` (ADR-0008) with `rb_domain`, `rb_env`, `rb_physics_bullet`, `rb_replay_ingest`, `rb_capture_ingest`, `rb_scenario`, `rb_verify_cli` and the product's docs, BakkesMod plugin and tape-bot tooling. Full history preserved via `git filter-repo` + merge (SHAs differ from `baileyrd/rusty_bullet`; map in the PR).
+- **Changed:** `Cargo.lock` gains 20 packages, no existing entry changes. `boxcars` is held on one 0.11.x so `subtr-actor ~1.2` and `rb_replay_ingest` share a `Replay` type.
+- **Known limitation:** `tools/rb_tape_bot` is excluded from the workspace (own lockfile, external `rlbot` client). RLEvalSystem is a separate follow-up import; replays and corpora stay out of git.
+
+---
+
+## 2026-10-08 - rusty_bbp: Blackboard Protocol core joins libs/protocol (pending review)
+
+- **Added:** `rusty_bbp` at `crates/libs/protocol/rusty_bbp`, Tier S (`rusty_serde`, `rusty_rsa`; `proptest` dev-only). Moved from `baileyrd/rusty_bbp` after its stage-1 tests passed, so its first-party dependencies are path dependencies under the workspace layer check instead of a git pin. No consumers yet; `rusty_orch` is the intended first one.
+- **Known limitation:** stage 1 only. The store is in-memory; the durable log, the MCP adapter and the runner supervisor are stages 2 and 3. Tokens and run secrets are deterministic hashes until `rusty_rand` is wired in at stage 3.
 
 ---
 

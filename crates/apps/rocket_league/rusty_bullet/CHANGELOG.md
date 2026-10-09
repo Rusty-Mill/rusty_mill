@@ -1,0 +1,1675 @@
+# Changelog
+
+All notable changes to this repo are documented here.
+Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
+
+## [Unreleased]
+### Changed
+- `docs/roadmap/PARITY-PLAN.md`: the plan to parity with Rocket League (measures, ranked gaps, workstreams A to G, order, owner decisions).
+- Scoreboard: random drives on fresh seeds 501 to 524, before FR-144 against now: 354 -> 239 uu
+  mean of means (median 143 -> 104).
+- `padpass_*` probes and `RB-RESEARCH-O021` (boost pads are in the recordings, not in the
+  port; their geometry is not settled).
+- `gen_wall_fuzz.py` and `wallfuzz_401` to `416` (random tapes from a wall start): median 132 uu
+  of mean position error, the weakest regime.
+- `gen_hit_fuzz.py`, `hitfuzz_301` to `324` and `bsl_*` probes (a resting ball clipped by a
+  jumping car); `RB-RESEARCH-O020` recorded (the floor's push back on the first
+  tick of a hit is in the game in half the cases): not fixed.
+- `gen_ball_fuzz.py` and `ballfuzz_201` to `224`: random ball launches against the game, mean
+  ball error 8.3 uu over 6 s; two in the golden gate (62 recordings).
+- Tools: `impulse_fit.py` (a contact's impulse and line of action off a recording),
+  `kstep_regimes.py` (the k-step error by controls and speed), probe scenarios
+  `bs_*` (boost and full steer at low speed), `wj_*` (wall jumps), all agreeing
+  to 0.3 to 2.4 uu; the fuzz holdout (seeds 101 to 124); the scoreboard's
+  random-drive numbers.
+- `rb-verify --scenario` with `RB_STATES=1` also prints the recorded and predicted
+  orientation of the first car. RB-RESEARCH-O019 (the suspension damper reads
+  the car's velocity in wheel order, not Bullet's order) recorded, not fixed.
+
+### Fixed
+- `RB-PHYSICS-001-FR-148` (spec 0.150.0): the wheels' throttle is forced to 1 only
+  while the boost button is held, not through the 0.1 s minimum burn (amends
+  FR-145, which keeps the air throttle off): a reverse press during a boost
+  tap's burn brakes. Golden fixtures `bt_rev`, `bt_rev_ground`; `fuzz_110`
+  73 -> 30 uu.
+- `RB-PHYSICS-001-FR-147` (spec 0.149.0, ADR-0070): a dodge's forward part follows
+  the throttle only for the owner's keyboard captures
+  (`set_dodge_forward_from_throttle`, on in `rb-verify`'s capture modes, off by
+  default): a bot's yaw-only dodge with the throttle held is purely sideways, as
+  RocketSim and the game (`fuzz_23` 123 -> 54 uu). Golden fixtures `dodgeth_yaw`,
+  `dodgeth_pitch`. `Env::set_dodge_forward_from_throttle` is new.
+- `RB-PHYSICS-001-FR-146` (spec 0.148.0, ADR-0069): a box meets a mesh
+  triangle's edge or vertex by the separating-axis test, with the ball's
+  internal-edge normal adjustment. `probe_wall_land` (a car hitting the side
+  wall below the lip) 77 -> 4.4 uu; no other recording moves. Golden fixture
+  `probe_wall_land`. `RB_STATES=1` in `rb-verify --scenario` lists the first
+  car's velocity and spin.
+- `RB-PHYSICS-001-FR-145` (spec 0.147.0): a short boost press keeps the boost's
+  throttle (and no air throttle) for the whole 0.1 s minimum burn; an airborne
+  boost tap with throttle held ended 4 uu/s too fast. Golden fixture `ja_thr`.
+- `RB-PHYSICS-001-FR-144` (spec 0.146.0): the engine's speed fade reads the
+  absolute forward speed, as RocketSim. A reverse throttle under the handbrake
+  on a fast forward car no longer pushes at full strength: `hb_rev_1400` 212 ->
+  0.2 uu, the long reverse powerslides `probe_powerslide` 35 -> 4.8,
+  `probe_ps_boost` 18 -> 4.9, `probe_ps_slow` 12 -> 7.3 (RB-RESEARCH-O013 closed).
+  Seven more recordings in the golden gate (54 in all).
+
+### Added
+- `RB-PHYSICS-001-FR-143` (spec 0.145.0): a bumper in the air throws its victim
+  forward by 0.99 of its speed and down 178 uu/s (second car 165 -> 1.2 to 5.9
+  uu); and the bump's nose test uses the contact's mean forward position, so a
+  crossing hit bumps only the car whose nose lands (second car 244 -> 3.0 uu).
+  Four more recordings in the golden gate (47 in all).
+### Added
+- `RB-PHYSICS-001-FR-142` (spec 0.144.0): demolition. A supersonic car whose nose
+  touches an enemy-team car removes it (teams in `PhysicsWorld`, `Env` and
+  scenarios; `"team": 1` makes a scenario car an enemy and its own passive
+  bot). Six recordings: the enemy tracks the game to 0.1 uu until removed, the
+  attacker to about 1 uu; the respawn (3 s later at a spawn point) is not
+  modelled.
+### Added
+- ADR-0068 (`RB-PHYSICS-001-FR-140`, `FR-141`, spec 0.143.0): car bumps. A car
+  whose nose touches another gives it an extra velocity along its heading
+  (about 0.8 of its speed, 0.2 upward, once per pair per 0.25 s), as measured
+  on 13 two-car recordings; and box-box contacts as `dBoxBox` (a clipped
+  incident face, the 1.05 edge-axis fudge factor). Bump scenarios from
+  100 to 430 uu of error to within about 10 uu per car; nine are in the golden
+  gate. Demolitions are not modelled (RB-RESEARCH-O018).
+### Added
+- ADR-0067 (`RB-VERIFY-003-FR-018`, spec 0.29.0): scenarios with several cars
+  (`others`), a hivemind bot `rb_tape_hive` that drives them all on one clock,
+  and `rb-verify` scoring every car. First car-vs-car ground truth: a 500 uu/s
+  push sends a stopped car to 1293 uu/s and up into the air, which the port
+  (no bump model) gives 496 uu/s (RB-RESEARCH-O018).
+### Changed
+- `rb-verify --recorded-inputs` finds the start lag (spec 0.28.0); the golden
+  gate holds 30 recordings and runs its cases in parallel (3 s). Round 3 of the
+  mechanics probes (jumps, flips, landings, fast dodges, ball on the car):
+  all within 0.2 to 1.3 uu except `wall_land` (77 uu) and `ceiling` (31 uu).
+### Added
+- ADR-0066 (`RB-VERIFY-003-FR-017`, spec 0.27.0): a fidelity gate in `cargo test`.
+  24 real Rocket League tape-bot recordings (`tools/rb_tape_bot/fixtures/`,
+  4.4 MB) are replayed with their recorded input and the port's car and ball
+  error must stay within bounds; undoing FR-139 fails it. Also 42 mechanics
+  probe scenarios (`gen_probes.py`, `experiments/probe_*`): driving, powerslide,
+  dodges, boost, wall rides, ball bounces, car-ball hits.
+### Added
+- `RB-VERIFY-003-FR-016` (spec 0.26.0): `rb-verify --scenario --against
+  --recorded-inputs` replays the recording's own input in the port, so what is
+  left is physics, not the tape bot's variable start delay. Probes: `brake`
+  18.2 -> 0.3, `reverse` 7.4 -> 0.3, dodges 9 to 11 -> 0.5, `turn_fast` 38 -> 3
+  uu mean. Capture plugin 1.5 records boost from `ActivateBoost` as well as
+  `HoldingBoost` (RLBot's boost never set the latter).
+### Changed
+- `rb-verify --scenario --against` chooses its lag on car and ball together and
+  prints the ball columns; `tools/rb_tape_bot/score_dir.py` scores a batch
+  directory in one line per capture. Ball-only probes read 1.4 to 4.2 uu mean
+  instead of 15 to 65.
+### Added
+- `RB-VERIFY-003-FR-015` (spec 0.25.0): `rb-verify --scenario --against`
+  prints the ball's position error beside the car's (`car_over_ball`: 61.3
+  mean / 120.0 max uu).
+### Fixed
+- ADR-0065 (`RB-PHYSICS-001-FR-139`, spec 0.142.0): a jump press within 6
+  ticks of the first jump is ignored, as in the game (a 28-tape sweep of
+  jump hold and release gaps found the rule). `speed_flip` position error
+  87.4 / 273.7 -> 4.8 / 16.6 uu (mean / max); the port no longer starts a
+  second ground jump or flips a tick early.
+### Changed
+- The shipped `hard_landing_nose_first` starts 0.3 s earlier on its ballistic
+  path (repeatable, port 4.9 / 11.2 uu); the original start is
+  `experiments/hard_landing_original.json` (RB-RESEARCH-O011).
+### Added
+- ADR-0064: unattended tape runs. Capture plugin 1.4 polls a job file
+  (`{"start": path}` / `{"stop": true}`, plus a heartbeat file);
+  `tools/rb_tape_bot` gets `rb_run_tapes` (starts a freeplay match with the
+  tape bot over core's socket, no GUI) and `run_batch.ps1` (runs it, scores
+  every capture with `rb-verify`, writes `results.md`). All eleven scenarios
+  twice in about five minutes, nobody touching the machine; ten repeat to
+  under 4 uu, `corner_slide` does not (RB-RESEARCH-O011; ten more runs
+  cluster into three outcomes). `run_batch.ps1` reports repeatability over
+  all runs. The shipped `corner_slide` is now the repeatable start 0.5 s earlier (the
+  original is `experiments/corner_slide_original.json`).
+  `hard_landing_nose_first` shows the same fault and a repeatable far variant
+  exists in `experiments/`; `car_over_ball` repeats as shipped. Experiments in `tools/rb_tape_bot/experiments/`: started 0.5 s
+  earlier, `corner_slide` is bit-identical in six runs; padded, it is not
+  (the variation is the state set beside the wall).
+### Fixed
+- Plugin 1.3 verified on four bot-driven tapes (inputs recorded, match the
+  tape); focus claim corrected: tapes ran with the game minimised and unfocused
+  (`BOT-RUN-SHEET.md` session 2 stage 1, partial).
+- Capture plugin 1.3 (`RB-RESEARCH-O008`): the recorded car `input` is the
+  `SetVehicleInput` hook's argument, not `CarWrapper::GetInput()`, which
+  stays all-zero for an RLBot-driven car. Logs both sources for the first
+  five ticks of a capture. Built-from-source change only: not yet built or
+  run against the game.
+- ADR-0063 (`RB-PHYSICS-001-FR-138`, spec 0.141.0): a wheel ray that hits
+  the ball gets no pushback impulse (spring and damper only). The car's lift
+  after a ball hit now follows the game (+36, +27, +20 uu/s against +40, +30,
+  +23; was +129); `hitjump` 77.6-77.8 s window car velocity error 25.3 ->
+  11.0 uu/s; the four k = 30 scores unchanged.
+- ADR-0062 (`RB-PHYSICS-001-FR-137`, spec 0.140.0): the extra ball-hit
+  velocity is added after the ball's transform integrates, as RocketSim
+  does, not before. `test2` k = 30 ball distance 0.54 -> 0.17 uu,
+  `hitjump` car 10.60 -> 10.49 uu/s, `front`/`side` unchanged; the
+  `hitjump` 77.6 s hit window's car velocity error 51.5 -> 25.3 uu/s.
+- `rb-verify --scenario --against` (`RB-VERIFY-003-FR-011`, spec 0.23.0)
+  places recorded frames by timestamp, so a capture hole skips ticks
+  instead of shifting every later comparison. The eleven tape-bot
+  captures re-scored: eight within 25 uu, prompt_dodge 1.2 uu mean.
+### Added
+- ADR-0061 (`RB-VERIFY-003-FR-014`, spec 0.24.0): `rb-verify --sweep-hit <k>
+  <capture> <from> <to> [...]` ranks car-ball hit tunings over windows of
+  recordings on `rb_env::Env` (`Env::snap`, `Env::peek`,
+  `rb_physics_bullet::CarBallTuning`, RocketSim's values by default). Output
+  is candidates; the full-capture `--self-kstep 30` table decides.
+- `rb_env` (ADR-0060, accepted): `Env` with `reset`/`step` over
+  `PhysicsWorld`, building the arena once (29 ms) and resetting in 0.25 ms;
+  `PhysicsWorld::from_frame_in`; `simulate_scenario` now runs on it with
+  identical output. Also a "port as the bot's second target" section in
+  `BOT-CAPTURE-PLAN.md` and a shared-bot-surface note on `RB-RESEARCH-O007`.
+- ADR-0059: first real `rb_tape_bot` session (RLBot core v5.0.0-rc17,
+  Epic, BakkesMod): all eleven scenarios captured and scored
+  (`docs/research/BOT-RUN-SHEET.md` session 1). The bot now gates on the
+  physics frame counter (core reports `Paused` for all of freeplay), one
+  `bots/<scenario>.bot.toml` per scenario for the GUI, `rb_probe`
+  diagnostic, verified install and run sequence in the README. New
+  backlog items RB-RESEARCH-O008 (no inputs recorded for a bot car) and
+  RB-RESEARCH-O009 (one 5-tick hole per capture).
+- ADR-0058 (`RB-VERIFY-003-FR-012`, `FR-013`): `rb-verify --scenario-from
+  <capture> <from> <to> [name]` cuts a scenario from a window of a capture
+  (`scenario_from_capture`, `rb_scenario::quat_to_rotator`,
+  `Scenario::to_json`), and the global `--seed-first-frame` flag seeds the
+  `--self*` modes from the capture's first frame (`SeedFrame`).
+- ADR-0057 (`RB-VERIFY-003-FR-011`): `rb-verify --scenario <file> --against
+  <capture>` scores a scripted scenario's recording against the port's
+  prediction (`compare_scenario`).
+- ADR-0056 (`RB-VERIFY-003-FR-010`): `rb_scenario` crate and
+  `rb-verify --scenario`, which runs a scripted scenario through the port.
+- ADR-0055 (`RB-PHYSICS-001-FR-136`): `jump::JumpClock`; the second jump
+  or dodge expires 1.25 s after the first jump's hold ends.
+- ADR-0054 (`RB-PHYSICS-001-FR-135`): a body's static-contact lever arm
+  runs to `Contact::point_on_a`, shifting the friction rows' lever.
+- ADR-0053 (`RB-PHYSICS-001-FR-134`): `ground::NON_STICKY_FRICTION_CURVE`;
+  a coasting car's tires grip less on steep surfaces.
+- ADR-0052 (`RB-PHYSICS-001-FR-133`): `boost::update_boosting`; a boost
+  burns for at least `BOOST_MIN_TIME` (0.1 s) after a press.
+- ADR-0051 (`RB-PHYSICS-001-FR-132`): `ground::wheel_impulses` applies a
+  tire's side force along the wheel's own axle, not flattened onto the
+  surface.
+- ADR-0050 (`RB-PHYSICS-001-FR-131`): `drive::roll::auto_roll`,
+  RocketSim's `_UpdateAutoRoll`: throttle plus partial surface contact
+  presses the car down and turns it toward flat.
+- ADR-0049 (`RB-PHYSICS-001-FR-130`): `Contact::point_on_a`
+  (`m_positionWorldOnA`); `solver::setup_two_body_rows` measures body A's
+  lever arm to its own contact point, not the shared point on B.
+- ADR-0048 (`RB-PHYSICS-001-FR-129`): `collision::raycast_sphere` and
+  `PhysicsWorld::wheel_ray`; a car's wheel rays hit the ball as well as
+  the arena, so wheels on the ball suspend, push back and count toward
+  being grounded.
+- ADR-0047 (`RB-PHYSICS-001-FR-127`, `FR-128`): `mesh::SphereLimits`
+  (`SphereLimits::BALL`, `body::BALL_BREAKING_THRESHOLD`,
+  `body::BALL_CONTACT_SLACK`) make, keep and fold the ball's mesh
+  contacts at Bullet's thresholds; `PhysicsWorld::snap_to_frame` keeps
+  the ball's contact history unless the ball teleported more than its
+  radius.
+### Changed
+- `PhysicsWorld::snap_to_frame` no longer always clears the ball's mesh
+  manifolds (FR-121 amended): one-step and k-step predictions now carry
+  them.
+- ADR-0046 (`RB-PHYSICS-001-FR-126`): `mesh::BallManifold::refresh`
+  drops a slot as Bullet's `removeContactPoint` does (last entry moves
+  into the hole) and `mesh::add_manifold_point` folds into the nearest
+  kept point (`getCacheEntry`); the slot order decides what a full
+  manifold gives up next tick.
+- ADR-0045 (`RB-PHYSICS-001-FR-125`): `collision::sphere_vs_box` is
+  Bullet's `getSphereDistance` (core box plus margin, a rounded hitbox);
+  `collision::breaking_threshold` admits a car-ball contact up to the
+  pair's threshold; `PhysicsWorld::step` uses `BALL_COLLISION_RADIUS` for
+  it. Supersedes FR-114 / ADR-0034.
+### Removed
+- `body::BALL_CAR_CONTACT_RADIUS` (FR-114's calibrated 92.3 uu): the
+  source explains the recorded hits (FR-125).
+- ADR-0044 (`RB-PHYSICS-001-FR-124`): `body::BOX_COLLISION_MARGIN`,
+  Bullet's 2 uu `CONVEX_DISTANCE_MARGIN` on the car's box; a corner meets
+  a mesh facet rounded by it (`collision::BoxCorners::gap`), a static
+  plane sharp, as Bullet's two algorithms do. The box's contact breaking
+  threshold counts the margin (2.06 uu, was 1.99).
+- ADR-0043 (`RB-PHYSICS-001-FR-123`): `drive::jump::auto_flip`,
+  RocketSim's `_UpdateAutoFlip` (a car on its roof pops up 200 uu/s and
+  rolls toward upright on a jump press); `drive::AutoFlip`,
+  `DriveState::world_contact_normal` and `DriveState::auto_flip`.
+- ADR-0042 (`RB-PHYSICS-001-FR-122`): the wheel pushback's ERP
+  (`drive::wheels::PUSHBACK_ERP`) is 0.1, calibrated from a recorded
+  bottomed-out landing; was Bullet's default 0.2.
+- ADR-0041 (`RB-PHYSICS-001-FR-121`): `mesh::BallManifold` and
+  `StaticMesh::sphere_manifold`, Bullet's persistent manifold for the
+  ball against each mesh, kept across ticks by `PhysicsWorld` and cleared
+  by `snap_to_frame`.
+- ADR-0040 (`RB-PHYSICS-001-FR-120`): `StaticMesh::classify_seams`
+  classifies edges on a seam between meshes across them;
+  `arena::standard_meshes` applies it to the 16 arena meshes.
+- ADR-0039 (`RB-PHYSICS-001-FR-119`): the combined ball-world normal is
+  renormalized, so the friction direction is orthogonal to the normal
+  row again (amends ADR-0027).
+- ADR-0038 (`RB-PHYSICS-001-FR-118`): `solver::StaticMaterial::PushOnly`
+  (split-impulse penetration rows only, at RocketSim's `m_erp2` 0.8) and
+  `body::BALL_COLLISION_RADIUS` (91.25 uu); `PhysicsWorld::step` pushes
+  every raw ball-world contact out from that sphere beside the combined
+  bounce.
+- ADR-0037 (`RB-PHYSICS-001-FR-117`): `bvh::visit_order` (Bullet's
+  `btQuantizedBvh` build order), `StaticMesh::from_cmf` (RocketSim's
+  mesh file format), and RocketSim's 16 soccar meshes under
+  `assets/soccar/` (Apache-2.0, from `rlgym_rocket_league` 2.0.1).
+- ADR-0036 (`RB-PHYSICS-001-FR-116`): `mesh::ManifoldEntry`.
+- ADR-0035 (`RB-PHYSICS-001-FR-115`): `collision::replacement_slot`
+  (Bullet's `sortCachedPoints`) and `mesh::add_manifold_point`.
+- ADR-0033 (`RB-PHYSICS-001-FR-113`): the goals and back walls are
+  Rocket League's collision mesh (`arena::standard_goal_meshes`,
+  RLUtilities' `soccar_goal`, GPL-3.0, under `assets/soccar/`), loaded as
+  wound (`StaticMesh::from_wound_buffers`, `Triangle::wound`).
+- ADR-0031 (`RB-PHYSICS-001-FR-111`): unlimited boost —
+  `PhysicsWorld::set_boost_used_per_second` (`drive::BOOST_USED_PER_SECOND`
+  by default, 0 unlimited), detected by `rb_verify_cli::boost_is_unlimited`
+  when a capture's fuel never drops while boost is held. Renames
+  `BOOST_CONSUMPTION_RATE` to the public `BOOST_USED_PER_SECOND`.
+- `rb-verify --self-kstep <capture> [k] [count]` (`RB-VERIFY-003-FR-008`,
+  ADR-0030): every frame predicted `k` ticks ahead from the recording
+  (`k_step_score`, `world::simulate_recorded_k_step`); `PhysicsWorld` and
+  `NetMesh` are `Clone`.
+- ADR-0028 (`RB-PHYSICS-001-FR-109`): `mesh::StaticMesh` classifies its
+  triangle edges (convex, smooth, open), and sphere contacts on an edge
+  follow Bullet's `btAdjustInternalEdgeContacts`.
+- ADR-0027 (`RB-PHYSICS-001-FR-108`): ball-world contacts fold into one
+  velocity-only contact (`world::combined_ball_world_contact`) with the
+  arena's material, restitution max(ball, 0.3) / friction min(ball, 0.6)
+  (`world::ball_world_material`).
+- `rb-verify --self-onestep` rows print the ball's recorded and simulated
+  velocity (`RB-VERIFY-003-FR-007`).
+- ADR-0026 (`RB-PHYSICS-001-FR-107`): car-ball contacts use RocketSim's
+  material (restitution 0, friction 2) and add Psyonix's extra ball-hit
+  velocity; car-car contacts 0.1 / 0.09; `solver::resolve_manifolds`'s
+  dynamic manifolds take an optional `PairMaterial`.
+- `rb-verify --self-onestep` prints the ball's velocity error per row;
+  `TraceRow` carries the ball (`RB-VERIFY-003-FR-007`).
+- ADR-0025 (`RB-PHYSICS-001-FR-106`): the arena's side ramps and corners
+  are Rocket League's collision triangles (`mesh::StaticMesh`,
+  `arena::standard_meshes`, RLUtilities' GPL-3.0 soccar assets under
+  `crates/rb_physics_bullet/assets/soccar/`); cars meet them through
+  `collision::ContactManifold` (was `PlaneManifold`), which now hands
+  speculative points to the solver; wheel rays hit triangles
+  (`drive::cast_wheels` takes a ray function).
+### Changed
+- The workspace is `MIT OR Apache-2.0` again (`LICENSE-MIT`,
+  `LICENSE-APACHE`); it was GPL-3.0-only from ADR-0025 to ADR-0036 for
+  RLUtilities' meshes (`RB-PHYSICS-001-FR-117`, ADR-0037).
+- `arena::standard_meshes` is RocketSim's 16 soccar meshes in its load
+  order, and `StaticMesh::sphere_contacts` visits triangles in Bullet's
+  BVH order (`RB-PHYSICS-001-FR-117`, ADR-0037).
+- Ball-mesh manifold points are matched and sorted by their ball-side
+  point along the unadjusted normal, as Bullet does; triangles meeting
+  the ball at one vertex fold into one contact (`RB-PHYSICS-001-FR-116`,
+  ADR-0036). `collision::replacement_slot` takes (point, depth) pairs.
+- `StaticMesh::sphere_contacts` keeps contacts as Bullet's manifold
+  does: a point within 0.02 × radius of a kept one replaces it, and a full
+  manifold keeps the largest area and its deepest point, instead of the 4
+  deepest (`RB-PHYSICS-001-FR-115`, ADR-0035).
+- Car-ball contacts use `body::BALL_CAR_CONTACT_RADIUS` (92.3 uu,
+  calibrated from 28 recorded hits) instead of the ball's 93.15 world
+  radius (`RB-PHYSICS-001-FR-114`, ADR-0034).
+- `PhysicsWorld::standard_arena` is RLUtilities' soccar arena: ground,
+  side walls and ceiling as planes plus 10 meshes. The back-wall seams,
+  goal walls, goal boxes and soft nets are no longer part of it
+  (`RB-PHYSICS-001-FR-113`).
+- One friction row per contact, Bullet's default solver mode
+  (`RB-PHYSICS-001-FR-110`, ADR-0029): `solver::friction_directions` is
+  `friction_direction`, `ContactCache` keeps `[normal, friction]`.
+- The solver drops Bullet's speculative velocity term for contacts still
+  clear of their surface, as RocketSim does (`RB-PHYSICS-001-FR-108`); an
+  embedded ball is no longer pushed out of the arena.
+- **License: GPL-3.0-only** (was MIT OR Apache-2.0), to embed the GPL-3.0
+  arena meshes (ADR-0025). `LICENSE-MIT`/`LICENSE-APACHE` replaced by
+  `LICENSE`.
+### Fixed
+- The goal mouth is open (`RB-PHYSICS-001-FR-112`, ADR-0032):
+  `standard_arena` drops the goal cutout and corner fillets, which filled
+  it, and the back-wall floor seam stops at the posts
+  (`StaticQuarterPipe::span`).
+- BakkesMod capture plugin 1.2 no longer crashes Rocket League on a
+  freeplay reset: it reads only live actors (`bDeleteMe` unset), takes the
+  first live ball from `GetGameBalls()`, keeps timestamps increasing across
+  a ball respawn, null-checks the boost component and unhooks on unload.
+- `PhysicsWorld::snap_to_frame` takes the recorded boost fuel
+  (`RB-VERIFY-003-FR-009`): one-step and k-step predictions of an
+  unlimited-boost capture no longer run out of boost.
+- `world::combined_ball_world_contact` averages the distance to the ball's
+  own contact point, as Bullet's `rel_pos1` does (was the surface point).
+- `solver::friction_directions` normalizes a non-unit normal before
+  `plane_space` (it returned NaN on the branch boundary).
+### Removed
+- RLUtilities' `assets/soccar/*.bin` meshes (GPL-3.0) and their loaders
+  `StaticMesh::from_buffers`/`from_wound_buffers`, and `/LICENSE` (GPL
+  text), replaced by RocketSim's `.cmf` meshes and `StaticMesh::from_cmf`
+  (`RB-PHYSICS-001-FR-117`, ADR-0037).
+- `body::StaticSweptFillet`, `arena::standard_corner_sweeps`,
+  `SIDE_FLOOR_RADIUS`, `CORNER_FLOOR_RADIUS`, `CORNER_EDGE_RADIUS`, the
+  corner wall planes and the side/corner seams (replaced by the meshes);
+  `arena::standard_walls` returns 3 planes, `standard_curves` the 4
+  back-wall seams.
+- ADR-0024 (`RB-PHYSICS-001-FR-105`): `collision::PlaneManifold`, Bullet's
+  one-corner-a-tick persistent manifold, for every car against the ground
+  and walls; supersedes FR-047's all-corner box-vs-plane contact in the
+  world's solve.
+- Stalls (`RB-PHYSICS-001-FR-104`, ADR-0023 amendment): an airborne jump
+  press flips once `|yaw| + |pitch| + |roll| >= 0.5`
+  (`drive::jump::FLIP_INPUT_DEADZONE`); yaw against air roll is a
+  zero-direction flip, not a double jump.
+- ADR-0023 (`RB-PHYSICS-001-FR-103`): a dodge's forward part follows the
+  throttle when pitch is centred (`drive::jump::dodge_direction`), and
+  car linear speed is capped at 2300 uu/s each step;
+  `drive::clamp_angular_speed` renamed `drive::clamp_velocity`.
+- ADR-0022 (`RB-PHYSICS-001-FR-102`): arena curves take the real soccar
+  mesh's radii (floor ramps 256 uu, 160 uu at the back walls, ceiling
+  ramps 512 uu, vertical corner edges 864 uu); `body::StaticSweptFillet`
+  and `arena::standard_corner_sweeps` replace the 16 corner spheres; wheel
+  rays hit every static shape (`collision::raycast`), not just the floor.
+  Removes `arena::FILLET_RADIUS`, `CORNER_ARCH_RADIUS` and
+  `standard_corner_fillets`; the goal fillets keep 292 uu as
+  `GOAL_FILLET_RADIUS`. `drive::cast_wheels` takes a point-contact
+  function instead of a plane.
+- `rb-verify --self-onestep <capture> [count]` (`RB-VERIFY-003-FR-006`):
+  one-step prediction error, each frame predicted from the recorded frame
+  before it, listing the model's worst single steps.
+- `rb-verify --self-trace` prints each car's spin in its own
+  `(forward, side, up)` frame (`RB-VERIFY-003` 0.14.0), to read a spin
+  change as roll, pitch or yaw.
+- `rb-verify --self-trace` prints each stream's orientation-implied spin
+  (`q-rate`, `rb_verify_cli::rotation_rate`; `RB-VERIFY-003` 0.13.0).
+- ADR-0016: steer through per-wheel side impulses (supersedes ADR-0011).
+- `rb-verify --self-trace` prints recorded and simulated angular velocity
+  and a spin error per row (`TraceRow::spin_error`, `RB-VERIFY-003` 0.12.0).
+- ADR-0015: RocketSim's air control and damping; no airborne auto-upright.
+- ADR-0014: a dodge's flip as a timed torque with vertical damping and
+  pitch-stick cancel.
+- ADR-0013: RocketSim stick sign convention and real dodge impulse.
+- ADR-0012: per-axis tire grip on a box with no floor friction (partially
+  supersedes ADR-0009).
+- Tire grip (`RB-PHYSICS-001-FR-081`, ADR-0012): a car's floor contact is
+  frictionless and `drive::ground` ports RocketSim's per-axis tire grip,
+  brake/coast pedal rules, and handbrake ramp with its anisotropic
+  factors. Removes `HANDBRAKE_FRICTION_MULTIPLIER` and
+  `DriveState::base_friction`; `DriveState::new` takes no arguments.
+  Grounded steering now targets zero yaw rate with no steer input.
+- ADR-0011: curve-based yaw-rate steering (partially supersedes ADR-0009).
+- `rb-verify --self-trace <capture-file> <from-secs> <to-secs>`
+  (`RB-VERIFY-003-FR-005`, `rb_verify_cli::trace_capture`): per-frame
+  trace of a capture against its simulated candidate, printing each car's
+  recorded input and recorded vs. simulated position, velocity and
+  orientation error on the same time axis as `--self-growth`.
+- ADR-0006 to ADR-0010, recorded retroactively for Phase 1's physics
+  modeling choices: analytic-primitive arena, corner testing for car vs.
+  curved geometry, combined multi-body contact solve, single-rigid-box car
+  with direct forces, and mass-spring goal nets. Indexed in
+  `TRACEABILITY.md`.
+- Repo lifecycle bootstrap: charter, system architecture, spec tree
+  (`RB-VERIFY-001/002/003`, `RB-PHYSICS-001`, `RB-SIM-001`, `RB-NET-001`),
+  ADR-0001..0003, research backlog, roadmap, traceability, AGENTS.md,
+  WORKFLOW.md, and the standard governance file set.
+- Cargo workspace (`rb_domain`, `rb_replay_ingest`, `rb_capture_ingest`,
+  `rb_verify_cli`) with a working, unit-tested divergence-scoring algorithm
+  and stubbed ingestion adapters.
+- `rb_physics_bullet`: a Rust port of Bullet3's rigid-body integration and
+  sequential-impulse contact solver, scoped to a dynamic sphere vs. a
+  static plane (ADR-0004). Vector/quaternion algebra added to
+  `rb_domain::state`.
+- `rb_replay_ingest`: real `.replay` parsing via `boxcars` + `subtr-actor`
+  (`RB-VERIFY-001-FR-001/002/003`), verified against a vendored real
+  replay fixture.
+- `rb_replay_ingest`: `corpus_check` bin, a local/gitignored-corpus health
+  check (`RB-VERIFY-001-NFR-003`) — validated against 40 of the owner's
+  real match replays (40/40 clean), closing the "runs correctly on real
+  owner data at scale" half of `RB-VERIFY-001`'s owner-data acceptance
+  criterion.
+- `rb_domain::ControllerInput` and `CarState.input` (ADR-0005), a shared
+  controller-input schema; `rb_replay_ingest` now attaches recovered input
+  to every car (`RB-VERIFY-001-FR-004`).
+- `rb_capture_ingest`: real capture-file parsing via a new JSON-Lines
+  format (`RB-VERIFY-002-FR-002`/`NFR-001`, ADR-0005), verified against a
+  synthetic fixture and, now that the BakkesMod-side plugin is built, a
+  real capture too.
+- `bakkesmod-plugin/rusty_bullet_capture/`: the BakkesMod-side capture
+  plugin's C++ source (`RB-VERIFY-002-FR-001`), grounded against a real
+  `BakkesModSDK` clone and emitting ADR-0005's JSON-Lines format. Outside
+  the Cargo workspace and this repo's CI (Windows/BakkesMod/Rocket League
+  only). Built with MSVC + CMake, loaded into a real Rocket League +
+  BakkesMod session, and run in freeplay; a real capture caught and fixed a
+  bug where cars were enumerated via a PRI back-reference that's never
+  updated in freeplay, switched to `ServerWrapper::GetCars()` instead.
+- `rb_verify_cli`: `score_replay_against_capture`, wiring ingestion to
+  `rb_domain::divergence::score`. Manually run end-to-end against a real
+  replay fixture and a capture file; not yet a fidelity measurement.
+- Ran `rb_verify_cli` end-to-end against the real vendored replay fixture
+  and a real BakkesMod capture for the first time (343 frames compared,
+  mean ball distance 3640.81 uu, mean car position/rotation/velocity
+  distance 4714.78 uu / 2.31 rad / 2127.93 uu/s), closing `PHASE-0-EXIT`'s
+  literal exit criterion and all four `PHASE-0-*` roadmap units. Not a
+  fidelity measurement — the replay and capture are unrelated matches;
+  that needs a Phase 1 candidate engine that doesn't exist yet.
+- `RB-PHYSICS-001-FR-076`: `rb_physics_bullet` can now seed a
+  `PhysicsWorld` from a recorded `PhysicsFrame` (`PhysicsWorld::from_frame`)
+  and simulate it forward using a recorded per-tick controller-input
+  sequence (`world::simulate_recorded`) — the candidate-engine plumbing
+  `FR-005`'s real-data calibration needs. Along the way, fetched
+  RocketSim's own real car mass/hitbox and ball mass
+  (`body::CAR_MASS`/`CAR_HALF_EXTENTS`/`BALL_MASS`, new
+  `RigidBody::standard_car`/`standard_ball`), surfacing a real ~44% width
+  discrepancy in this crate's own long-standing car hitbox test
+  placeholder. `RB-PHYSICS-001-FR-077` wires that capability into
+  `rb_verify_cli`: `score_capture_against_candidate` seeds a
+  `PhysicsWorld` from a capture's own first grounded, neutral frame
+  (`is_grounded_and_neutral`) and scores a candidate simulated from that
+  capture's own recorded input against its own recorded outcome — this
+  project's first fidelity comparison with a genuine physical reason to
+  be small if the physics core is accurate — exposed via a new `rb-verify
+  --self <capture-file>` CLI mode. `RB-PHYSICS-001-FR-078` then retuned
+  every existing test that models a real car (across
+  `body.rs`/`collision.rs`/`drive.rs`/`net.rs`/`solver.rs`/`world.rs`)
+  from that old placeholder to `CAR_HALF_EXTENTS`, closing the
+  discrepancy FR-076 had deliberately left open — no test count change,
+  all 335 `rb_physics_bullet` tests still pass. The owner then ran
+  `rb-verify --self` against the real capture on their own machine,
+  producing this project's first genuine fidelity number (2,818 frames:
+  mean ball distance 2206.08 uu, mean car position/rotation/velocity
+  distance 4508.71 uu / 2.12 rad / 1421.73 uu/s) — a large divergence
+  consistent with near-total trajectory decorrelation over the run's own
+  ~23-second span, not yet the right shape of evidence to calibrate
+  `RB-PHYSICS-001-FR-005`'s constants from (see that spec's own
+  Interpretation note). The recommended follow-up — a diagnostic into how
+  that divergence grows *within* the run, not just its whole-run total —
+  is now implemented as `RB-VERIFY-003-FR-004`: a windowed
+  `rb_domain::divergence::score_windows` (sharing a `matched_pairs`/
+  `score_pairs` pipeline with the existing `score`, so the two can't
+  drift apart) and a new `rb-verify --self-growth` CLI mode, sanity-checked
+  against the synthetic capture fixture. Running it against `FR-077`'s own
+  real capture — the run that would actually answer gradual-vs-abrupt —
+  is still pending the owner's own machine.
+- `rb_domain::divergence::score` now also scores car position/rotation/
+  velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
+  sequences by `player_id`. New `Quat::angle_to` computes rotation
+  distance.
+- `rb_domain::divergence::score` now aligns frames by nearest timestamp
+  instead of list index (`RB-VERIFY-003-FR-003`), within a new required
+  `max_timestamp_delta_secs` parameter. `rb_verify_cli` gains
+  `DEFAULT_MAX_TIMESTAMP_DELTA_SECS` and an optional third CLI argument
+  to override it. `RB-VERIFY-003` now has all three functional
+  requirements implemented.
+- `rb_physics_bullet`: box-shaped car bodies (`RB-PHYSICS-001-FR-004`) —
+  a unified `RigidBody`/`Shape` design, a general 3x3 inverse inertia
+  tensor (`Mat3`), analytic box-vs-plane contact generation (1-4 points),
+  and multi-contact manifold resolution in the solver. `PhysicsWorld`
+  gains an optional car body (`with_car`). Box-vs-sphere collision and
+  driven car input remain not implemented.
+- `rb_physics_bullet`: ball-vs-car collision, completing
+  `RB-PHYSICS-001-FR-004` — analytic sphere-vs-box contact generation
+  (`collision::sphere_vs_box`/`contact_between`, handling both the
+  ordinary and deep-penetration cases) and a two-dynamic-body
+  sequential-impulse solver path (`solver::resolve_contact_between`).
+  `rb_domain::Quat` gains `conjugate`. Box-vs-box collision and driven car
+  input remain not implemented.
+- `rb_physics_bullet`: car-vs-car collision *detection*
+  (`RB-PHYSICS-001-FR-006`) — `collision::box_vs_box`, a 15-axis
+  separating-axis test between two oriented boxes, producing a clipped
+  face manifold (0-4 points) or a single edge-edge point. Not wired into
+  `PhysicsWorld`: this scope has exactly one car, so the collision has no
+  live caller yet — multi-car `PhysicsWorld` support remains not
+  implemented.
+- `rb_physics_bullet`: multi-car `PhysicsWorld` support, completing
+  `RB-PHYSICS-001-FR-006` — `PhysicsWorld::step` now resolves every car's
+  ground contact, every ball-vs-car pair, and every car-vs-car pair
+  (running `box_vs_box` for real in a live scene for the first time), one
+  pair at a time. A combined multi-body solve across 3+ simultaneously
+  touching bodies and driven car input remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-007`) — couples
+  `rb_domain::ControllerInput` into ground-driving throttle force and
+  steering torque on a car, gated on ground contact. `PhysicsWorld` gains
+  `set_car_input` (a car's current, persistent input) and `frame()` now
+  reports it. Boost, jump, air control, and handbrake remain not
+  implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-008`) — boost: a flat
+  forward force (not speed-tapered like throttle), not gated on ground
+  contact (works identically airborne). `PhysicsWorld` gains a depletable
+  `car_boost: Vec<f32>` resource and `set_car_boost`; holding boost drains
+  it over time, even once the force stops applying at `MAX_CAR_SPEED`;
+  `frame()` now reports each car's actual `boost_amount`. Jump, air
+  control, and handbrake remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-009`) — handbrake: while
+  held and grounded, temporarily reduces the car's `RigidBody.friction`
+  (restored on release), letting existing momentum carry it into a slide.
+  `PhysicsWorld` gains `car_base_friction: Vec<f32>`, snapshotted per car
+  by `with_car`, so release restores each car's own base friction. Jump
+  and air control remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-010`) — a single ground
+  jump: a fixed instantaneous upward velocity change fired on the rising
+  edge of `ControllerInput.jump` while grounded, gated so holding or a
+  release-then-re-press mid-air doesn't re-fire it. `PhysicsWorld` gains
+  `car_jump_held: Vec<bool>` to track the rising-edge state per car.
+  Double jump/dodge, variable jump height, wall jump, and air control
+  remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-011`) — air control:
+  torque about the car's local right/up/forward axes from
+  `ControllerInput.pitch`/`yaw`/`roll`, gated on the car *not* touching
+  the ground, not speed-scaled (unlike ground steering). Double
+  jump/dodge, variable jump height, and wall jump remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-012`) — double jump: one
+  more, identical `JUMP_SPEED` impulse fired on a fresh airborne press of
+  `ControllerInput.jump`, reusing the ground jump's own rising-edge
+  detection and the `JUMP_SPEED` constant (now `pub`) itself. Gated on a
+  new per-car `double_jump_available` flag rather than ground contact —
+  restored on landing, consumed by use. `PhysicsWorld` gains
+  `car_double_jump_available: Vec<bool>`. The dodge directional
+  impulse/torque, variable jump height, and wall jump remain not
+  implemented.
+- `rb_physics_bullet` (`RB-PHYSICS-001-FR-013`) — arena walls and wall
+  jump: `PhysicsWorld` gains `walls: Vec<StaticPlane>`/`with_wall`, and
+  every body now collides with every wall via the same
+  body-vs-static-plane machinery the ground already uses
+  (`resolve_ground_contact` renamed `resolve_plane_contact`).
+  `rb_physics_bullet::drive::apply_driven_forces` gains a wall jump — an
+  outward-plus-upward impulse fired on a fresh airborne jump press while
+  touching a wall, taking priority over the double jump on that press but
+  restoring (not consuming) `double_jump_available` on mere contact. The
+  dodge directional impulse/torque, variable jump height, and a modeled
+  arena footprint beyond generic flat walls remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-014`) — dodge: the double
+  jump's fresh press now checks `ControllerInput.pitch`/`roll`, firing a
+  directional dodge (a horizontal `DODGE_SPEED` impulse plus an
+  instantaneous `DODGE_ANGULAR_SPEED` spin) instead of the plain vertical
+  double jump whenever either exceeds a new `DODGE_DEADZONE`, reusing air
+  control's own pitch/roll axis and sign conventions. Shares the double
+  jump's `double_jump_available` resource; wall jump never dodges,
+  regardless of stick input. `DODGE_SPEED` and `WALL_JUMP_HORIZONTAL_SPEED`
+  are now `pub`. A dodge variant of the wall jump, flip-cancel, landing
+  auto-orientation assistance, and variable jump height remain not
+  implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-015`) — variable jump
+  height: the ground jump gains a hold window — continuing to hold
+  `ControllerInput.jump` after the fresh press that fires it adds a
+  continuous `JUMP_HOLD_ACCELERATION` upward force, for up to
+  `JUMP_HOLD_MAX_DURATION` seconds, on top of the fixed `JUMP_SPEED`
+  impulse; releasing `jump` (or the window running out) stops the extra
+  acceleration immediately. A new `jump_hold_time_remaining` is checked
+  and decremented before the ground jump's own fresh-press handling can
+  re-arm it, so a fresh press's own step is unaffected. Scoped to the
+  ground jump alone — the double jump, a dodge, and the wall jump remain
+  fixed-impulse. `PhysicsWorld` gains `car_jump_hold_time_remaining:
+  Vec<f32>`.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-016`) — flip-cancel: a
+  dodge's spin can now be canceled early — a further fresh
+  `ControllerInput.jump` press while airborne, not touching a wall, with
+  the double jump already spent, zeroes `RigidBody.angular_velocity`
+  outright. A new `dodge_flip_active` flag tracks this: the dodge branch
+  sets it, the plain-double-jump branch explicitly clears it (preventing a
+  stale flag from an earlier dodge from leaking into a later unrelated
+  double jump). Doesn't touch linear velocity or `double_jump_available`;
+  wall jump keeps priority, unchanged. `PhysicsWorld` gains
+  `car_dodge_flip_active: Vec<bool>`.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-017`) — wall-jump dodge:
+  the wall jump's own fresh press now checks
+  `ControllerInput.pitch`/`roll` against `DODGE_DEADZONE`, same as the
+  ground double jump; at or above it, a wall-jump dodge fires (the wall
+  push-off combined with a `DODGE_SPEED` component and
+  `DODGE_ANGULAR_SPEED` spin, arming `dodge_flip_active`); below it, the
+  plain wall jump fires unchanged. Unlike the plain wall jump, the dodge
+  variant consumes `double_jump_available` — a documented simplification,
+  since gating it on that flag would be vacuous (wall touch always
+  restores it first). No new physics constants. Two pre-existing tests
+  asserting the old "wall jump always ignores stick input" premise were
+  repurposed to assert the new behavior.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-018`) — landing
+  auto-orientation assist: a gentle continuous restoring torque, applied
+  while airborne, nudging the car's local up axis back toward world up
+  (`up_axis(car).cross(&world_up) * LANDING_AUTO_UPRIGHT_TORQUE`, whose
+  magnitude is already proportional to the tilt angle's sine). Gated on no
+  active `pitch`/`roll` this step and no fresh `jump` press this step
+  (avoiding a same-step conflict with a dodge's/wall-jump-dodge's/
+  double-jump's/flip-cancel's own direct angular-velocity change). Applies
+  continuously whenever airborne rather than only near the ground — this
+  port has no raycast/distance query to replicate real Rocket League's
+  actual ground-proximity trigger. New constant
+  `LANDING_AUTO_UPRIGHT_TORQUE` is an uncalibrated placeholder, one order
+  of magnitude smaller than `AIR_CONTROL_TORQUE`. No new `PhysicsWorld`
+  state.
+- `rb_physics_bullet::arena` (`RB-PHYSICS-001-FR-019`) — modeled arena
+  footprint: a new module builds Rocket League's real standard-arena
+  boundary from FR-013's existing `StaticPlane`/`with_wall` machinery (no
+  new collision code). `standard_ground` is the flat floor at `z = 0`;
+  `standard_walls` returns 9 planes — 2 side walls, 2 back walls, a
+  ceiling, and 4 diagonal corner walls cutting off the true rectangular
+  corner, giving the field its real octagonal footprint. `SIDE_WALL_X`
+  (4096), `BACK_WALL_Y` (5120), and `CEILING_Z` (2044) are commonly-cited
+  field dimensions; the corner inset (`CORNER_LENGTH`) is this project's
+  own uncalibrated placeholder with no real-mesh reference. New
+  `PhysicsWorld::standard_arena` convenience constructor wires both into a
+  scene in one call, alongside the existing `PhysicsWorld::new`/`with_wall`
+  ad-hoc-wall capability. Curved wall-to-floor/wall-to-ceiling transitions,
+  goal cutouts, and corner-touch disambiguation for wall-jump purposes
+  remain not modeled.
+- `rb_physics_bullet::body`/`collision`/`world`/`arena`
+  (`RB-PHYSICS-001-FR-020`) — curved wall-to-floor/wall-to-ceiling
+  transitions: a new `StaticQuarterPipe` shape (an immovable
+  partial-cylinder fillet, infinite along its own axis) and
+  `contacts_vs_quarter_pipe` (sphere-only; a box always returns no
+  contact). The playable side is the *inside* of the fillet's concave face
+  (like a skateboard quarter-pipe): governed only within a 90-degree
+  sector, contact fires as the sphere's surface crosses the fillet's own
+  radius from inside, pushing back toward the axis (the opposite direction
+  from a flat plane's push). `StaticQuarterPipe::between_planes` derives a
+  fillet's geometry automatically from two perpendicular, axis-aligned
+  flat planes. `PhysicsWorld` gains `curves`/`with_curve`/
+  `resolve_curve_contact`; `solver::resolve_contacts`'s second parameter
+  changed from `&StaticPlane` to plain `restitution`/`friction` (the only
+  two fields it ever used) so the same solver path serves a fillet too.
+  `arena::standard_curves` builds the 8 cardinal-wall fillets (new
+  uncalibrated placeholder `FILLET_RADIUS`); `PhysicsWorld::standard_arena`
+  now adds these alongside its 9 walls. A car (box) actually being
+  deflected by a fillet, fillets at the 4 diagonal corner walls, and goal
+  cutouts remain not modeled.
+- `rb_physics_bullet::arena` (`RB-PHYSICS-001-FR-021`) — curved
+  corner-wall-to-floor/wall-to-ceiling transitions, extending FR-020 to the
+  4 diagonal corner walls: `arena::standard_curves` now returns 16
+  `StaticQuarterPipe`s (one floor-side and one ceiling-side per wall, all 9
+  walls) instead of 8. `StaticQuarterPipe::between_planes` needed no code
+  changes — its real correctness requirement was never "axis-aligned
+  planes," only that the two bridged planes' normals are mutually
+  perpendicular, which holds for a corner wall meeting the floor/ceiling
+  regardless of the corner wall's own horizontal rotation. A corner wall's
+  fillet `axis_direction` is computed via a cross product
+  (`floor.normal.cross(&wall.normal)`, already unit length by construction)
+  rather than hand-picked, since it isn't a coordinate axis the way a
+  cardinal wall's is. A car actually being deflected by any fillet, a
+  fillet at a corner wall's own vertical edges (now implemented, see
+  FR-022), and goal cutouts remain not modeled.
+- `rb_physics_bullet::body`/`collision`/`arena` (`RB-PHYSICS-001-FR-022`) —
+  curved corner-wall vertical-edge fillets: rounds off the 8 remaining
+  sharp edges in the standard arena's octagonal footprint, where each of
+  the 4 diagonal corner walls meets its neighboring side or back wall.
+  `arena::standard_curves` now returns 24 `StaticQuarterPipe`s (the 16
+  floor/ceiling-seam fillets already built, plus 8 vertical-edge fillets).
+  Unlike every prior fillet, the two planes a vertical-edge fillet bridges
+  aren't perpendicular (a corner wall meets its neighbor at 135 degrees,
+  not 90) — `StaticQuarterPipe::between_planes` is now fully general to
+  handle this: it solves the axis point as a real 2x2 linear system rather
+  than assuming orthogonal normals, its own sector angle comes out to
+  exactly the angle between the two planes' normals (45 degrees here, 90
+  for a floor/ceiling seam), and it self-corrects a "backwards"
+  `axis_direction` internally so a caller can pass either of the two
+  opposite directions along the shared edge line. `sphere_vs_quarter_pipe`'s
+  sector-membership test is likewise generalized from a two-dot-products
+  shortcut (only correct for a 90-degree sector) to a signed-cross-product
+  test valid for any sector up to 180 degrees. `FILLET_RADIUS` is reused
+  as-is once again. A car actually being deflected by any fillet, the
+  compound corner where a vertical-edge fillet meets a floor/ceiling-seam
+  fillet (now implemented, see FR-023), and goal cutouts remain not
+  modeled.
+- `rb_physics_bullet::body`/`collision`/`arena` (`RB-PHYSICS-001-FR-023`) —
+  compound-corner fillets: rounds off the last 16 sharp vertices in the
+  standard arena's vertical boundary, where a corner wall's own
+  vertical-edge fillet (FR-022) meets a floor- or ceiling-seam fillet
+  (FR-020/FR-021). Introduces a new static shape, `body::StaticCornerFillet`
+  (an immovable sphere blending three flat planes at a vertex, since no
+  cylindrical `StaticQuarterPipe` can blend three planes at once), with
+  constructor `between_three_planes` solving the center as the common
+  intersection of the three planes' pairwise `StaticQuarterPipe::
+  between_planes` axis lines via the cross-product form of Cramer's rule.
+  New `collision::sphere_vs_corner_fillet` generalizes a
+  `StaticQuarterPipe`'s 2-sided sector test to a 3-bound "spherical
+  triangle" containment test, each bound a sign-corrected, non-normalized
+  cross product of a pair of the three normals. New `arena::
+  standard_corner_fillets` builds all 16 (4 per corner wall, times the 4
+  corner walls) directly from the same three flat planes `standard_walls`
+  already builds, reusing `FILLET_RADIUS` once again. `PhysicsWorld` gains
+  `corner_fillets`/`with_corner_fillet`, resolved for the ball and every
+  car exactly like `curves`. A car actually being deflected by any fillet
+  and goal cutouts (now implemented, see FR-024) remain not modeled.
+- `rb_physics_bullet::body`/`collision`/`arena` (`RB-PHYSICS-001-FR-024`) —
+  goal cutouts: opens an actual goal-mouth window in each back wall, where
+  every prior increment had a single solid, flat plane spanning the full
+  width. Introduces a new static shape, `body::StaticGoalWall` (a
+  `StaticPlane` plus a rectangular window in the plane's own local
+  `u_axis`/`v_axis` frame), with `contains_in_window` testing a point's
+  projection onto that frame directly. New
+  `collision::sphere_vs_goal_wall`/`contacts_vs_goal_wall`: a sphere (the
+  ball) gets no contact inside the window, letting it pass through; a box
+  (car) falls straight through to the ordinary `contacts_vs_plane` against
+  the wrapped plane, deliberately ignoring the window — a zero-regression
+  choice for a car. `arena::standard_walls` drops its 2 back-wall
+  `StaticPlane`s (now 7 planes instead of 9); new `arena::
+  standard_goal_walls` returns them instead as 2 `StaticGoalWall`s,
+  windowed at new constants `GOAL_HALF_WIDTH`/`GOAL_HEIGHT`. New `arena::
+  standard_goal_cutout_fillets` rounds each window's 3 edges (two posts
+  and a crossbar per goal, 6 `StaticQuarterPipe`s total, added to the same
+  `curves` list), built via `StaticQuarterPipe::between_planes` from the
+  real back-wall plane and a purely-geometric post/crossbar plane never
+  itself added as a real collision wall. `PhysicsWorld` gains
+  `goal_walls`/`with_goal_wall`, resolved for the ball *and* every car
+  (unlike `curves`/`corner_fillets`). A car actually being deflected by
+  any fillet or driving into a goal, and a modeled goal interior/net
+  beyond the cutout, remain not modeled.
+- `rb_physics_bullet::arena` (`RB-PHYSICS-001-FR-025`) — corner-wall
+  floor/ceiling arch radius: a diagonal corner wall's own floor-seam and
+  ceiling-seam fillets now use a new, distinctly larger
+  `arena::CORNER_ARCH_RADIUS` (750 uu) instead of the cardinal walls' own
+  `FILLET_RADIUS` (292 uu), matching real Rocket League's bigger, more
+  swept corner-boost curve. All 16 `standard_corner_fillets` switch to
+  `CORNER_ARCH_RADIUS` too, since `StaticCornerFillet::between_three_planes`
+  needs one shared radius across all three planes it blends to still meet
+  its adjoining edge fillets exactly where their axes cross. The 8
+  cardinal-wall floor/ceiling seams, 8 vertical corner-edge fillets
+  (FR-022), and 6 goal-cutout edge fillets (FR-024) are unaffected and
+  keep `FILLET_RADIUS`. A compile-time assertion enforces
+  `CORNER_ARCH_RADIUS > FILLET_RADIUS`.
+- `rb_physics_bullet::arena` (`RB-PHYSICS-001-FR-026`) — goal
+  post-crossbar corner fillets: new `arena::standard_goal_corner_fillets`
+  rounds off the two compound corners per goal where a post's own
+  vertical edge fillet meets the crossbar's own horizontal edge fillet (4
+  total), via `StaticCornerFillet::between_three_planes` on the real back
+  wall/post/crossbar planes — the same approach FR-023 used for the
+  arena's own compound corners, reusing `FILLET_RADIUS` unchanged since
+  both edge fillets meeting here already share one radius. The goal's
+  other two corners, where a post meets the floor, get no such treatment
+  (the window's bottom edge sits exactly at floor level already).
+  `PhysicsWorld::standard_arena` wires the 4 new fillets in, bringing
+  `corner_fillets` to 20 total.
+- `rb_physics_bullet::collision` (`RB-PHYSICS-001-FR-027`) — car deflection
+  by curved fillets: new `collision::box_vs_quarter_pipe`/
+  `box_vs_corner_fillet` test a box's own 8 corners against the curved
+  surface as zero-radius spheres, the same "test every corner" technique
+  `box_vs_plane` already used for a flat plane; `contacts_vs_quarter_pipe`/
+  `contacts_vs_corner_fillet` now dispatch a `Shape::Box` to these instead
+  of `Vec::new()`. Closes the Non-goal repeated since FR-020: a car is now
+  actually deflected by every curved fillet in this port, not just the
+  ball. No `PhysicsWorld::step` changes needed — the car-side resolve
+  calls already existed, just as silent no-ops. Documented as an
+  approximation (a flush box face against a shallow curve can under-detect
+  contact), not a full convex-vs-curved-surface narrow phase.
+  `StaticGoalWall`/`contacts_vs_goal_wall` is unaffected — a goal wall
+  isn't a curved fillet, so a car still can't drive into a goal.
+- `rb_physics_bullet::collision` (`RB-PHYSICS-001-FR-028`) — a car can
+  actually drive into a goal now: new `collision::box_vs_goal_wall` tests
+  each of a box's 8 corners against `StaticGoalWall`'s window (a corner
+  inside the window contributes no contact, mirroring
+  `sphere_vs_goal_wall`'s pass-through rule per corner instead of once for
+  the ball's single center point); `contacts_vs_goal_wall` now dispatches
+  a `Shape::Box` to it instead of falling straight through to an
+  unwindowed `contacts_vs_plane`. A car only partly lined up with the
+  window gets a real partial block — the corners still outside it still
+  register a contact. No `PhysicsWorld::step` changes needed, same as
+  FR-027 — `resolve_goal_wall_contact` already ran for every car. Goal
+  interior/net still not modeled — the goal opens onto open space for a
+  car too, not a bounded volume.
+- `rb_physics_bullet::body`/`collision`/`arena` (`RB-PHYSICS-001-FR-029`) —
+  a modeled goal interior: new `body::StaticBoundedWall` collides only
+  *within* a rectangular bound (the opposite gate from `StaticGoalWall`'s
+  window), with new `collision::sphere_vs_bounded_wall`/
+  `box_vs_bounded_wall`/`contacts_vs_bounded_wall`. New
+  `arena::standard_goal_back_walls` (2 plain, unbounded planes `GOAL_DEPTH`
+  behind each real back wall — reachable only through the window, so
+  unbounded is exact here), `standard_goal_side_walls` (4 bounded walls,
+  reusing `goal_post_plane` unchanged) and `standard_goal_roofs` (2 bounded
+  walls, reusing `goal_crossbar_plane` unchanged) close the "ball/car
+  passes into open space" gap FR-024 through FR-028 all flagged. New
+  `PhysicsWorld.bounded_walls`/`with_bounded_wall`, resolved for the ball
+  and every car. Models a solid bounding volume, not a net mesh — no
+  cloth/soft-body simulation added.
+- `rb_physics_bullet::solver`/`world` (`RB-PHYSICS-001-FR-030`) — a
+  combined multi-body solve: new `solver::resolve_dynamic_manifolds`
+  resolves every ball-vs-car and car-vs-car contact manifold in a step
+  together, sharing one `DeltaVelocity` accumulator per body index across
+  every manifold that body takes part in (via new helper `delta_pair_mut`),
+  instead of `PhysicsWorld::step` calling `resolve_contacts_between` once
+  per pair and fully applying each pair's own result before the next
+  pair's setup even read a body's velocity. Fixes the "3+ bodies mutually
+  touching in the same step" approximation (e.g. a car pinned between the
+  ball and another car) tracked since multi-car support was added. Static
+  contacts (ground/walls/curves/goal geometry) are unaffected — each
+  body's contact with static geometry never depended on another dynamic
+  body, so only the dynamic-vs-dynamic path needed the fix.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-031`) — a scoped
+  constant-calibration audit (does NOT close `FR-005`'s real-data
+  calibration, still blocked on `PHASE-0-EXIT`): sourced every
+  uncalibrated placeholder constant against RocketSim, RLUtilities, and
+  the RLBot community wiki. Corrected `JUMP_SPEED` (→ `875.0/3.0`) and
+  `JUMP_HOLD_ACCELERATION` (→ `4375.0/3.0`) to their precise real values;
+  added `UNBOOSTED_MAX_CAR_SPEED` (1410) as throttle's own speed cap,
+  separate from the boosted `MAX_CAR_SPEED` (2300) — a real fix, since
+  throttle alone previously could reach the boosted top speed. Confirmed
+  several more constants already correct (`JUMP_HOLD_MAX_DURATION`,
+  `BOOST_ACCELERATION`, `MAX_BOOST`, gravity, `GOAL_DEPTH`) and explicitly
+  flagged the rest as audited-but-still-uncalibrated in their own doc
+  comments, rather than silently leaving them ambiguous.
+- `rb_physics_bullet::collision` (`RB-PHYSICS-001-FR-032`) — investigated a
+  claimed corner-testing under-detection bug for `box_vs_quarter_pipe`/
+  `box_vs_corner_fillet` (a box face resting flush against a shallow curve
+  could have every corner clear while the face's middle already
+  overlapped it) by building a genuine GJK closest-points replacement.
+  Wiring it in broke two real end-to-end tests, because closest-point
+  answers the wrong question for this contact — it's a containment
+  question (is the box's farthest point from the axis/center at or beyond
+  radius), and distance-from-a-line/point's maximum over a convex
+  polytope is always at a corner, so the original per-corner technique is
+  exact for this question, not an approximation. Reverted to the original
+  `RB-PHYSICS-001-FR-027` implementation and deleted the GJK module
+  entirely; corrected every doc comment across the crate and its spec
+  that had inherited the unverified claim. No production-code change to
+  the narrow phase itself.
+- `rb_physics_bullet::net` (`RB-PHYSICS-001-FR-033`) — a genuine
+  mass-spring net panel per goal, catching the ball. New `net::NetMesh`: a
+  rectangular grid of point masses (`RigidBody::sphere`, tiny and light)
+  with every perimeter point anchored to the rigid goal frame and every
+  interior point free, connected by structural/shear springs (Hooke's law
+  plus damping). Ball contact against a free point goes through a new
+  `collision::sphere_vs_sphere` (this crate's first real sphere-vs-sphere
+  test) plus the existing `solver::resolve_contacts_between` path — no new
+  solver code. New `arena::standard_nets` builds one panel per goal,
+  `NET_DEPTH` behind the real back wall and well in front of
+  `RB-PHYSICS-001-FR-029`'s own rigid back-of-net plane (unchanged, still
+  a car's real backstop, since a car isn't tested against the net at all).
+  `PhysicsWorld` gains `nets`/`with_net`. Every new constant is an
+  uncalibrated placeholder.
+- `rb_physics_bullet::solver` (`RB-PHYSICS-001-FR-034`) — split impulse.
+  Every contact's normal row now also solves a second, entirely separate
+  "push" pseudo-velocity channel (`resolve_push_row`/
+  `resolve_two_body_push_row`), fed only by that contact's own positional
+  (penetration/ERP) error, never its velocity/restitution error.
+  `ConstraintRow`/`TwoBodyRow` gained `rhs_penetration`/
+  `applied_push_impulse` fields, splitting the old combined `rhs` term.
+  After each manifold's iterations, the real velocity delta is applied to
+  the body exactly as before, and the new push delta is applied directly
+  to the body's position/orientation via a new `apply_push_delta` (built
+  on the existing `integrate::integrate_transform`) — mirroring Bullet's
+  own `btSolverBody::writebackVelocity`. Wired into `resolve_contacts`,
+  `resolve_contacts_between`, and `resolve_dynamic_manifolds` with zero
+  call-site changes anywhere outside `solver.rs`.
+- `rb_physics_bullet::solver` (`RB-PHYSICS-001-FR-035`) — warm-starting,
+  scoped to `resolve_dynamic_manifolds` only. A new `solver::ContactCache`
+  carries a manifold's converged real-channel impulses from one call to
+  the next, matched by each contact's approximate world position. A new
+  `warm_start_two_body_row` applies each row's cached impulse directly to
+  the manifold's shared `DeltaVelocity` accumulators before iterating
+  (merely setting `applied_impulse` would do nothing on its own, since
+  `GLOBAL_CFM` is always `0.0`). `resolve_dynamic_manifolds` gained a new
+  `caches: &mut HashMap<(usize, usize), ContactCache>` parameter, rebuilt
+  from only that call's manifolds each time. `PhysicsWorld` gains one
+  persistent `dynamic_manifold_caches` field. Deliberately not wired into
+  `resolve_contacts`/`resolve_contacts_between` — see that FR's own
+  Non-goals.
+- `rb_physics_bullet::arena`/`collision`/`net`/`solver`/`world`
+  (`RB-PHYSICS-001-FR-036`) — a dedicated follow-up to `FR-031`'s own
+  audit, resolving the two ambiguities it surfaced but deliberately didn't
+  act on, using real source-level research (RocketSim's and RLUtilities'
+  own source, and the current RLBot wiki, read directly). Every `92.75`
+  ball-radius literal became `93.15`, not the previously-suspected `91.25`
+  — the real games split the ball into a smaller inertia radius (`91.25`)
+  and a distinctly larger collision radius (`93.15`, the mesh's own
+  collision margin), and since this port's single unified radius field has
+  no separate collision margin of its own, the collision radius is the
+  correct single-constant analog. `arena::CEILING_Z` changed from `2044.0`
+  to `2048.0`, confirmed to share the same reference point as RocketSim's
+  `ARENA_HEIGHT`. Also corrected two mis-documented claims:
+  `arena::CORNER_LENGTH` and `arena::GOAL_DEPTH` were wrongly described as
+  uncalibrated placeholders — both are confirmed exact, so only their doc
+  comments changed. `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` remain
+  untouched and still genuinely uncalibrated. No new tests; all 259
+  pre-existing tests pass unchanged.
+- `rb_physics_bullet::body`/`drive`/`world` (`RB-PHYSICS-001-FR-037`) —
+  sleeping, closing the "no sleeping" half of `solver`'s own documented
+  gap FR-035 left open. New `body::RigidBody` fields
+  `is_sleeping: bool`/`sleep_timer: f32` and methods
+  `update_sleep_state(&mut self, dt: f32)` (forcibly zeroes both
+  velocities once they've stayed below new
+  `LINEAR_SLEEP_VELOCITY_THRESHOLD`/`ANGULAR_SLEEP_VELOCITY_THRESHOLD`
+  constants for `SLEEP_TIME_THRESHOLD` seconds, the actual fix for a
+  bouncy resting contact never settling) and `wake(&mut self)` (the same
+  reset, unconditionally). `PhysicsWorld::step` calls
+  `update_sleep_state` for the ball and every car after every other
+  contact resolves but before the transform integrates.
+  `drive::apply_driven_forces` calls `car.wake()` unconditionally whenever
+  a new `input_is_active` helper finds the car's input genuinely active,
+  before that input's own force has had a chance to move it. 8 new tests
+  (5 in `body.rs`, 3 in `world.rs`); all pre-existing tests pass unchanged.
+- `rb_physics_bullet::net`/`world` (`RB-PHYSICS-001-FR-038`) — car-vs-net
+  contact, closing this port's own former Non-goal that a car passes
+  straight through a `net::NetMesh`'s spatial footprint untouched.
+  `net::NetMesh::step` changed from a single `&mut RigidBody` (the ball
+  alone) to `&mut [RigidBody]` (every body that can touch the net); its
+  inner contact-resolution loop now iterates every body in the slice
+  against each free point. No new collision code needed:
+  `collision::contacts_between` already dispatches to `sphere_vs_box` for
+  a car against a net point the same way it always has for ball-vs-car.
+  `PhysicsWorld::step` reuses the same ball-plus-cars snapshot
+  `solver::resolve_dynamic_manifolds` already resolved that step for the
+  net-step call too. All of `net.rs`'s pre-existing tests updated only
+  their call syntax (`std::slice::from_mut(&mut ball)`), not their own
+  assertions. 3 new tests (2 in `net.rs`, 1 in `world.rs`); all
+  pre-existing tests pass unchanged.
+- `rb_physics_bullet::world` (`RB-PHYSICS-001-FR-039`) — wall-jump corner
+  disambiguation, closing the "first wall in `self.walls`" simplification
+  documented since FR-013 and made reachable in the standard arena by
+  FR-019's diagonal corner walls. `PhysicsWorld::step`'s per-car
+  wall-normal computation now sums every wall a car is touching this step
+  and normalizes the result, instead of picking whichever wall comes
+  first — a car touching two walls at a corner now pushes off diagonally,
+  blending both, instead of firing along only one of them. A car touching
+  exactly one wall is unaffected. No new collision code needed. 1 new
+  `world.rs` test; all pre-existing tests pass unchanged.
+- `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` (`RB-PHYSICS-001-FR-040`) —
+  a dedicated research pass, matching FR-036's own real-source-research
+  method, looked for a real reference for both constants and found only
+  one uncited RLBot wiki value ("wall bottom ramp radius: approx. 256, not
+  circular") that doesn't distinguish the two constants, disclaims being
+  circular, and shares its numeral with RLGym's unrelated `RAMP_HEIGHT`
+  (a ramp's height, not a curve's radius) — deliberately not adopted. Both
+  constants remain unchanged and genuinely uncalibrated; closing this for
+  real needs actual extracted collision-mesh geometry. No new tests
+  (documentation-only); all pre-existing tests pass unchanged.
+- `solver::resolve_dynamic_manifolds` (`RB-PHYSICS-001-FR-041`) —
+  investigated whether anything short of real recorded data could narrow
+  FR-030's own documented extreme-mass-ratio "sandwiched"
+  under-convergence gap. A naive global over-relaxation factor was tried
+  and rejected (provably diverges for that exact case); each manifold's
+  velocity-row impulse now scales by a parameter-free `1 / k` instead
+  (`k` = the number of manifolds sharing a body this step) — narrowing
+  FR-030's own result from ~89.5 to ~32 units/s at zero added iteration
+  cost, with zero effect on the overwhelming majority single-manifold
+  case. 2 new tests; all pre-existing tests pass unchanged.
+- `collision::box_vs_box` (`RB-PHYSICS-001-FR-042`) — validated its
+  edge-edge contact point and face-clipping degenerate fallback directly
+  against Bullet's own `btBoxBoxDetector::dBoxBox` reference source.
+  Confirmed this port's finite-segment edge-edge contact point is more
+  rigorous than the reference's own unclamped-infinite-line one, and that
+  this port's synthesize-rather-than-drop face-clipping fallback is a
+  deliberate, favorable divergence from the reference's own drop-the-
+  collision behavior. A candidate fix for the edge-edge tangent
+  sign-selection heuristic was built and empirically tested but found
+  genuinely mixed against a brute-force ground truth, so not adopted. No
+  new tests (documentation-only); all pre-existing tests pass unchanged.
+- `solver::combine_restitution`/`combine_friction`
+  (`RB-PHYSICS-001-FR-043`) — this project's own spec claimed Bullet's
+  default combine mode is `max`, without ever having checked; fetched and
+  read `btManifoldResult`'s real source and found that wrong (the real
+  default for both is an unclamped product, `a * b`). This port's average
+  combine mode is kept, now for a correct reason: it preserves the
+  identity `combine(a, a) == a`, which the reference's real product does
+  not, and most bodies here currently share the same uncalibrated
+  placeholder coefficient. Corrected the wrong claim in the spec,
+  `solver.rs`, and `body.rs`. 2 new tests pin the identity-preserving
+  behavior directly; all pre-existing tests pass unchanged.
+- `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md`
+  (`RB-PHYSICS-001-FR-044`) — this spec's own top-level Non-goals section
+  still claimed split impulse wasn't implemented, contradicted by
+  `RB-PHYSICS-001-FR-034`'s own already-shipped implementation. Corrected
+  the stale bullet to a strikethrough-and-close note, matching the
+  convention this section already uses for two other resolved Non-goals
+  items. Zero production code changed; no new tests.
+- `integrate::integrate_transform` (`RB-PHYSICS-001-FR-045`) — fetched and
+  read Bullet's real `btRigidBody.cpp`/`.h`, `btTransformUtil.h`,
+  `btQuaternion.h`, and `btScalar.h` and confirmed `apply_damping`,
+  `integrate_velocities`, and `integrate_transform`'s reference claims all
+  byte-for-byte accurate. Found this port's degenerate-quaternion epsilon
+  (`1e-12`) numerically differs from Bullet's own `SIMD_EPSILON` (~5
+  orders of magnitude larger) but is behaviorally equivalent, so not
+  adopted. Found the check-then-normalize fallback branch matches Bullet's
+  real choice to preserve the prior orientation rather than reset to
+  identity on a degenerate result — a real distinction an unconditional
+  `Quat::normalize` call would have gotten wrong. 1 new test pins this;
+  all pre-existing tests pass unchanged.
+- `body::Shape::local_inertia`/`RigidBody::update_inertia_tensor`,
+  `mat3::Mat3::scaled_columns`/`Mat3::from_quat`
+  (`RB-PHYSICS-001-FR-046`) — fetched and read Bullet's real
+  `btSphereShape.cpp`, `btBoxShape.cpp`, `btRigidBody.cpp`/`.h`, and
+  `btMatrix3x3.h` and confirmed the local-inertia formulas,
+  `update_inertia_tensor`, and `scaled_columns` all byte-for-byte
+  accurate. Found `Mat3::from_quat` hardcodes `s = 2` assuming a
+  unit-length input, while the reference's own `setRotation`
+  self-corrects for a non-unit-length one via `s = 2 / q.length2()` — not
+  adopted, since this function's only production call site always
+  receives an already-renormalized orientation. 1 new test pins this;
+  all pre-existing tests pass unchanged.
+- `collision::sphere_vs_plane`/`box_vs_plane`/`sphere_vs_box`/
+  `sphere_vs_sphere` (`RB-PHYSICS-001-FR-047`) — fetched and read Bullet's
+  real `btConvexPlaneCollisionAlgorithm.cpp`/`.h`,
+  `btSphereBoxCollisionAlgorithm.cpp`,
+  `btSphereSphereCollisionAlgorithm.cpp`, and `btManifoldPoint.h` and
+  confirmed `sphere_vs_plane`/`sphere_vs_sphere` exact, and
+  `sphere_vs_box`'s deep-penetration face selection confirmed to
+  reproduce Bullet's own exact `+x, -x, +y, -y, +z, -z` face-check
+  tie-break order. Found `box_vs_plane` computes all 4 corners exactly in
+  one pass, where real Bullet's default configuration produces only one
+  contact point per frame via a single GJK support query, relying on
+  several frames of persistent-manifold accumulation to reach the same
+  4-corner manifold — a favorable divergence, not adopted, in the same
+  spirit as `box_vs_box`'s own FR-042 finding. 1 new test pins the exact
+  tie-break-order match; all pre-existing tests pass unchanged.
+- `solver::restitution_curve`/`plane_space`/`setup_rows`/`resolve_row`
+  (`RB-PHYSICS-001-FR-048`) — fetched and read Bullet's real
+  `btSequentialImpulseConstraintSolver.cpp`/`.h`, `btContactSolverInfo.h`,
+  and `btVector3.h` and confirmed `plane_space` byte-for-byte exact,
+  `restitution_curve` behaviorally exact (its `.max(0.0)` folds in a
+  clamp real Bullet applies at its own call site instead), `setup_rows`
+  exact against real `setupContactConstraint`/`setupFrictionConstraint`
+  (correcting a stale citation to an unrelated function), `resolve_row`'s
+  unified two-bound resolver behaviorally equivalent to Bullet's own two
+  separate resolvers, and all 6 of `btContactSolverInfo`'s cited defaults
+  exact. Found one genuine, significant divergence, not adopted: this
+  port always derives both friction directions from a fixed,
+  velocity-independent basis, where real Bullet's actual default aligns
+  one direction with the tangential component of the current relative
+  sliding velocity — flagged as open follow-up work for a dedicated
+  future FR rather than fixed here. 1 new test pins the
+  `restitution_curve`/call-site-clamp equivalence; all pre-existing tests
+  pass unchanged.
+- `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` reference confirmation
+  (`RB-PHYSICS-001-FR-055`) — fetched the current RLBot wiki's "Useful
+  Game Values" page directly (the same page `RB-PHYSICS-001-FR-036`'s own
+  research used for `GOAL_DEPTH`) and confirmed both values exact against
+  its own cited "Goal center-to-post"/"Goal height" numbers — no value
+  change, a sourcing-status upgrade from "commonly-cited, unconfirmed" to
+  "confirmed", the same non-behavioral outcome FR-036 reached for
+  `GOAL_DEPTH`/`CORNER_LENGTH`. Also found and fixed a stale spec passage
+  still describing `GOAL_DEPTH` as an unconfirmed "uncalibrated
+  invention", contradicting FR-036's own already-shipped Requirements
+  entry. No new tests; all pre-existing tests pass unchanged.
+- `body::RigidBody::ball` (`RB-PHYSICS-001-FR-062`) — a new, additive
+  constructor alongside the existing `sphere`/`car_box`, setting real
+  Rocket League's own confirmed ball material properties instead of
+  `sphere`'s generic `0.5`/`0.5`/`0.0` placeholders. Fetched RocketSim's
+  own `RLConst.h` (matching FR-057/FR-060/FR-061's own method) and
+  confirmed `BALL_RESTITUTION = 0.6f`, `BALL_FRICTION = 0.35f`, and
+  `BALL_DRAG = 0.03f` — the same `BALL_DRAG` `RB-PHYSICS-001-FR-061`'s own
+  Non-goals had deferred for lack of a dedicated ball-construction API.
+  `sphere` itself unchanged. `BALL_MASS_BT = CAR_MASS_BT / 6.f`
+  deliberately not adopted, since this project has no canonical "real"
+  car construction site yet to keep that ratio against. 3 new tests; all
+  pre-existing tests pass unchanged.
+- `solver::combine_restitution`/`combine_friction` real-Rocket-League
+  reference finding (`RB-PHYSICS-001-FR-063`) — `RB-PHYSICS-001-FR-043`
+  had left open which formula matches real Rocket League itself. Fetched
+  RocketSim's own `RLConst.h` (matching FR-057/FR-060/FR-061/FR-062's own
+  method) and found the real answer isn't a different formula: real
+  Rocket League hardcodes a distinct restitution/friction value per named
+  contact-pair type (`CARWORLD_COLLISION_FRICTION/RESTITUTION =
+  0.3f`/`0.3f`, `CARCAR_COLLISION_FRICTION/RESTITUTION = 0.09f`/`0.1f`,
+  `CARBALL_COLLISION_FRICTION/RESTITUTION = 2.0f`/`0.0f`), overriding
+  whatever a generic per-body combine would produce — most strikingly, a
+  car hitting the ball has zero restitution-driven bounce in real Rocket
+  League, and car-vs-ball friction exceeds `1.0`, a value no per-body
+  combine could produce. Corrected `combine_restitution`/
+  `combine_friction`'s own doc comments and this spec's stale Open
+  Questions bullet. Not adopted: real per-pair-type overrides, since
+  those functions' own signature can't know which kind of pair produced
+  their inputs — left for a future requirement. No new tests; all
+  pre-existing tests pass unchanged.
+- `drive::STEER_TORQUE` real-Rocket-League reference finding
+  (`RB-PHYSICS-001-FR-065`) — `STEER_TORQUE` had no public reference at
+  all. Fetched RocketSim's own `Car.cpp` (`_UpdateWheels`, matching
+  FR-058/FR-059/FR-064's own method) and found real Rocket League's
+  steering isn't a direct yaw-torque model: a wheel's steer angle (from a
+  confirmed `STEER_ANGLE_FROM_SPEED_CURVE`) feeds Bullet's own raycast
+  vehicle system (`btVehicleRL`), whose per-wheel lateral tire friction
+  is what actually turns the car — an architecture this port's
+  single-rigid-box car has no way to represent, the same category
+  FR-063 already established. The confirmed curve's own shape is also
+  the opposite of this port's own `speed_factor`: real turning ability is
+  highest at a standstill and decreases with speed, while this port's
+  `speed_factor` is zero at a standstill and scales up with speed.
+  Corrected `STEER_TORQUE`'s and `MAX_CAR_SPEED`'s own doc comments and
+  the `speed_factor` call site's comment; also fixed adjacent stale text
+  in the spec's own Open Questions section that still claimed
+  `AIR_CONTROL_TORQUE`/`JUMP_HOLD_MAX_DURATION`/`JUMP_HOLD_ACCELERATION`
+  had no public reference, contradicting FR-057's and FR-031's own
+  already-shipped findings. Not adopted as a fix: the real curve maps
+  speed to a wheel angle whose translation to yaw torque depends on
+  tire-slip friction this port doesn't model, leaving no principled way
+  to carry even the curve's shape onto this port's own direct-torque
+  model. No new tests; all pre-existing tests pass unchanged.
+- `drive::HANDBRAKE_FRICTION_MULTIPLIER` real-Rocket-League reference
+  finding (`RB-PHYSICS-001-FR-066`) — `HANDBRAKE_FRICTION_MULTIPLIER` had
+  no public reference at all. Fetched RocketSim's own `Car.cpp`
+  (`_UpdateWheels`, continuing FR-065's own investigation) and found real
+  Rocket League's handbrake applies two separate confirmed real curves,
+  `HANDBRAKE_LAT_FRICTION_FACTOR_CURVE` (a constant `0.1`) and
+  `HANDBRAKE_LONG_FRICTION_FACTOR_CURVE` (`0.5` at a standstill, `0.9` at
+  real driving speeds), to lateral and longitudinal tire friction
+  independently — not one shared multiplier. This port's own pre-existing
+  `HANDBRAKE_FRICTION_MULTIPLIER = 0.1` happens to match the real
+  lateral-only factor exactly, a striking coincidence, not a
+  confirmation: applied to this port's single isotropic friction scalar,
+  it also wrongly crushes longitudinal grip to a tenth, where real Rocket
+  League keeps it near `0.9`, understating real forward-momentum
+  retention during a drift. Corrected `HANDBRAKE_FRICTION_MULTIPLIER`'s
+  own doc comment and the module doc's "Handbrake" and "commonly-cited
+  constants" paragraphs; also fixed adjacent stale text in the spec's own
+  Open Questions section. Not adopted as a fix: `solver::friction_directions`'
+  own two tangent rows currently share one combined-friction scalar, and
+  giving handbrake a genuinely different lateral-vs-longitudinal factor
+  would mean threading a second friction coefficient through every one of
+  `solver.rs`'s several row-limit call sites plus a way to know which
+  body is handbraking — the same architecture-mismatch category
+  FR-063/FR-065 already established. No new tests; all pre-existing
+  tests pass unchanged.
+- `drive::WALL_JUMP_HORIZONTAL_SPEED` real-Rocket-League reference finding
+  (`RB-PHYSICS-001-FR-067`) — `WALL_JUMP_HORIZONTAL_SPEED` had no public
+  reference at all. Fetched RocketSim's own `Car.cpp` (`_UpdateJump`) and
+  found real Rocket League has no distinct wall-jump mechanic or constant
+  at all: `_UpdateJump` applies exactly one impulse, `GetUpDir() *
+  mutatorConfig.jumpImmediateForce` (the same real value this port's own
+  `JUMP_SPEED` already matches), gated only on `isOnGround`, itself
+  defined purely by wheel-contact count with no floor-vs-wall distinction;
+  no `WALL_JUMP`-named constant exists anywhere in `RLConst.h`. Since
+  FR-065 already confirmed real cars ride Bullet's own raycast vehicle
+  system, a car driving on a wall has its own orientation continuously
+  tipped by wheel/suspension contact forces to match that wall, so
+  `GetUpDir()` already points along the wall's outward normal by the time
+  a wall jump fires — real Rocket League's "wall jump" is the identical
+  single grounded-jump impulse, not a distinct horizontal-plus-vertical
+  composite. Corrected `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment, the
+  module doc's wall-jump section, and the "commonly-cited constants"
+  paragraph; also fixed adjacent stale text in the spec's own Open
+  Questions section. Not adopted as a fix: this port's car has no wheels,
+  raycasting, or surface-tracking orientation system at all (the same
+  architecture gap FR-065 found for steering) — applying only `JUMP_SPEED`
+  straight up on a wall touch would produce no push-off at all in this
+  port's own model, so its own two-component composite substitute remains
+  deliberate and necessary. No new tests; all pre-existing tests pass
+  unchanged.
+- `drive::DODGE_ANGULAR_SPEED` real-Rocket-League mechanism finding
+  (`RB-PHYSICS-001-FR-069`) — continuing the investigation FR-031's own
+  audit first opened (which already found real reference constants,
+  `FLIP_TORQUE_X=260`/`FLIP_TORQUE_Y=224`/`0.65`s, but not the mechanism
+  behind them). Fetched RocketSim's own `Car.cpp` and found a flip's spin
+  is a *continuous per-axis torque*, not an instantaneous angular-velocity
+  kick: `_UpdateDoubleJumpOrFlip` records a per-axis `flipRelTorque` once,
+  at flip start, and a separate, later step, `_UpdateAirTorque`, applies
+  `flipRelTorque * Vec(FLIP_TORQUE_X, FLIP_TORQUE_Y, 0)` every physics tick
+  for as long as `isFlipping = hasFlipped && flipTime < FLIP_TORQUE_TIME`
+  holds, with no decay or ramp before that hard `0.65`s cutoff. Corrected
+  `DODGE_ANGULAR_SPEED`'s own doc comment, the module doc's dodge section,
+  and the "commonly-cited constants" paragraph; also corrected the
+  adjacent stale Open Questions bullet. Not adopted as a fix: real
+  Rocket League's spin rate depends on its own specific hitbox inertia
+  tensor, which this port's placeholder car body doesn't match (the same
+  "false precision" reasoning FR-031 already applied), and reproducing the
+  real timed-torque shape (rather than just its magnitude) would need new
+  per-car elapsed-flip-time state threaded through `PhysicsWorld` — a
+  redesign FR-059's own Non-goals already flagged as out of scope. No new
+  tests; all 314 pre-existing tests pass unchanged.
+- Real flip-cancel mechanism finding (`RB-PHYSICS-001-FR-070`) —
+  `RB-PHYSICS-001-FR-069`'s own fetch of `_UpdateAirTorque` surfaced a
+  `pitchTorqueScale` factor scoped out as "an additional speed- or
+  state-dependent scale... didn't fully characterize." Fetched RocketSim's
+  own `Car.cpp` again and found real Rocket League's flip-cancel is driven
+  by continuously *holding* pitch in the same direction as the flip's own
+  pitch-torque component, scaling only that pitch-axis component by
+  `1 - abs(controls.pitch)` every tick — not this port's own jump-press
+  trigger that zeros every axis outright. A sideways (roll-only) dodge has
+  no pitch-torque component, so real Rocket League can't pitch-cancel it at
+  all. Corrected the `drive` module's flip-cancel doc comment, which had
+  inaccurately claimed to match real Rocket League, and added a forward
+  citation from `RB-PHYSICS-001-FR-016`'s own entry. Not adopted: this
+  port's dodge has no per-axis torque split to partially cancel (the same
+  architecture gap `FR-069` already found for the dodge's own spin), and
+  reproducing the real continuous-hold trigger and pitch-only scope would
+  need the same per-axis torque and elapsed-flip-time state `FR-059`'s own
+  Non-goals already flagged as out of scope. No new tests; all 314
+  pre-existing tests pass unchanged.
+- Real air-control damping mechanism finding (`RB-PHYSICS-001-FR-071`) —
+  `RB-PHYSICS-001-FR-068`'s own Non-goals had already found RocketSim's
+  `CAR_AIR_CONTROL_DAMPING = Vec(30, 20, 50)` exists but left it as "a
+  separate, independent addition left for a future requirement" without
+  examining the mechanism. Fetched RocketSim's own `Car.cpp` again (the
+  same fetch `FR-070` used for `pitchTorqueScale`) and found the full
+  mechanism: for each axis, real air control subtracts a damping torque
+  `(angular velocity along that axis) * CAR_AIR_CONTROL_DAMPING[axis] *
+  (1 - abs(analog input on that axis))` from the applied torque before
+  scaling by inertia — releasing the stick gives full damping strength,
+  continuously bleeding off spin; holding it fully zeroes the damping,
+  granting full torque authority. Corrected the `drive` module's
+  air-control doc comment and `AIR_CONTROL_ROLL_SCALE`'s own doc comment,
+  and added a forward citation from `FR-068`'s own Non-goals. Not adopted:
+  unlike `AIR_CONTROL_TORQUE`'s own pitch/yaw/roll ratio, this port has no
+  existing damping quantity to apply a ratio to — introducing one is a
+  genuinely new mechanism, not a multiplier transfer — and its absolute
+  coefficients are calibrated against real Rocket League's own specific
+  inertia tensor, the same "false precision" reasoning that already keeps
+  `AIR_CONTROL_TORQUE` a placeholder. No new tests; all 314 pre-existing
+  tests pass unchanged.
+- Confirmed `DODGE_DEADZONE` matches RocketSim's own real dodge-
+  cancellation threshold (`RB-PHYSICS-001-FR-075`) — this spec's own Open
+  Questions had claimed `DODGE_DEADZONE` "still has no public reference at
+  all... so it may be off by a large factor," and `RB-PHYSICS-001-FR-074`'s
+  own Non-goals (mirroring `FR-073`'s identical earlier claim) separately
+  framed RocketSim's all-or-nothing dodge-cancellation check as "a real but
+  separate architectural difference" from this port's own independent
+  per-axis trigger. Both were wrong: RocketSim's own confirmed check
+  (already quoted verbatim during `FR-072`/`FR-073`/`FR-074`'s own
+  investigations) fires iff `abs(yaw + roll) >= 0.1 || abs(pitch) >= 0.1`;
+  since `FR-073` already folds yaw into this port's own `dodge_roll`, this
+  port's own trigger is the identical boolean decision once
+  `DODGE_DEADZONE == 0.1` — the same real value, differing only in an
+  unobservable strict-vs-non-strict boundary comparison. Corrected
+  `DODGE_DEADZONE`'s own doc comment, the module doc's dodge paragraph,
+  this spec's stale Open Questions bullet, and `FR-073`'s/`FR-074`'s own
+  Non-goals framing. No code change: this port's dodge trigger already
+  matched real Rocket League exactly. No new tests; all 322 pre-existing
+  tests pass unchanged.
+### Changed
+- Steering (`RB-PHYSICS-001-FR-080`, ADR-0011): `STEER_TORQUE` replaced
+  by a yaw rate from RocketSim's real steer-angle curves (powerslide curve
+  on handbrake) through the bicycle model over the 85 uu Octane wheelbase.
+- `RELEASE_NOTES.md` slimmed from 222 KB to 44 KB: all 95 entries keep
+  their heading and date/PR/commit line; entries over ~900 characters are
+  trimmed to their first (summary) bullet. Full text up to `72494f4` stays
+  in git history.
+- `docs/traceability/TRACEABILITY.md` slimmed from 239 KB to 46 KB: every
+  requirement row is kept, but long cells now point to the spec (named
+  interfaces, a one-clause verification summary, a status plus its first
+  qualifier) instead of repeating its narrative. Stale `src/drive.rs`
+  paths now read `src/drive/`.
+- `docs/PROJECT-STATUS.md` trimmed to current state only (162 KB → 7 KB):
+  the long-form "Completed" log is replaced by a phase table and the last
+  five merges, with pointers to RELEASE_NOTES/CHANGELOG/ROADMAP for history.
+- `drive::apply_driven_forces` takes a single `&mut DriveState` instead
+  of six separate per-car values (boost, jump-held, double-jump, hold
+  window, dodge flip, base friction); signature drops from 11 to 6
+  parameters. `PhysicsWorld` stores one `Vec<DriveState>` instead of six
+  parallel `Vec`s, replacing a 10-way `zip` chain. Behavior unchanged.
+- `rb_physics_bullet::drive` split from one 4.2k-line `drive.rs` into a
+  `drive/` module: `ground`, `air`, `jump`, `boost` (one per mechanic) plus
+  `tests.rs`; `apply_driven_forces` now just orchestrates them. The
+  ground dodge and wall-jump dodge share one `apply_dodge` helper instead
+  of two copies. Public API and behavior unchanged (all 395 tests pass
+  unmodified).
+- `AGENTS.md` now lists `rb_physics_bullet` in its crate map;
+  `PROJECT-STATUS.md`'s last-verified commit updated to `978aa8f`.
+- `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
+  `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
+  raw `Debug` dump, now including car-divergence stats.
+- `rb_physics_bullet`'s `Sphere` type is replaced by `RigidBody` (with a
+  `Shape` enum for sphere/box); `RigidBody::sphere(...)` replaces
+  `Sphere::new(...)`.
+- `rb_physics_bullet::PhysicsWorld::step` is restructured into Bullet's
+  actual staged pipeline (integrate every body's velocity → resolve every
+  contact → integrate every body's transform) instead of stepping each
+  body fully in isolation, so ball-vs-car contact resolution sees the same
+  pre-integration state ground contacts do.
+- `rb_physics_bullet::collision::contact_between` is renamed
+  `contacts_between` and now returns `Vec<Contact>` (was
+  `Option<Contact>`), and `solver::resolve_contact_between` is renamed
+  `resolve_contacts_between` and now takes a manifold slice (was a single
+  `&Contact`) — needed to support box-vs-box's up-to-4-point case
+  uniformly with sphere-vs-box's single point.
+- `rb_physics_bullet::PhysicsWorld.car: Option<RigidBody>` is renamed
+  `cars: Vec<RigidBody>` (breaking); `with_car` now appends instead of
+  replacing, so it's callable any number of times to build a multi-car
+  scene.
+- `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
+  current `ControllerInput` as `Some(input)` instead of always `None`.
+### Fixed
+- Jumps push along the car's up axis, and the tires act after a ground
+  jump (`RB-PHYSICS-001-FR-101`, ADR-0019 amendment), per the owner's
+  captures of a jump on throttle and a jump from rest.
+- The car body uses RocketSim's car-vs-world friction and restitution
+  (0.3 / 0.3) against every static shape, floor included
+  (`RB-PHYSICS-001-FR-100`, ADR-0021, superseding FR-081's frictionless
+  floor); per the owner's front-flip body impact.
+- Wheels grip and brake whenever they touch (`RB-PHYSICS-001-FR-099`,
+  ADR-0020): per-wheel brake, engine quartered below three wheels, no air
+  control while any wheel touches; per the owner's front-flip landing.
+- The brake acts along the surface (`RB-PHYSICS-001-FR-098`), not the car's
+  slightly pitched forward axis, so a jump from rest no longer gains
+  3.3 uu/s forward, per the owner's `front.jsonl` capture.
+- Air-control damping reads the spin before the flip torque
+  (`RB-PHYSICS-001-FR-097`, ADR-0015 amendment), as Bullet integrates the
+  accumulated flip torque after RocketSim computes the damping; per the
+  owner's pure front flip capture.
+- No air throttle while boosting (`RB-PHYSICS-001-FR-096`, ADR-0019
+  amendment): the airborne boost constant already includes a full air
+  throttle, per the real capture's boost with throttle -1 at 4.99-5.18 s.
+- Air control waits one step after the wheels let go
+  (`RB-PHYSICS-001-FR-095`, ADR-0019 amendment), as the sticky force does,
+  per the real capture's takeoff after its 4.142 s jump.
+- The flip clock starts on the tick after the dodge press
+  (`RB-PHYSICS-001-FR-094`), so a flip's torque lasts 79 ticks (press tick
+  plus RocketSim's 78) as in the real capture, and is compared with its
+  limits within a 0.1 ms tolerance.
+- Air control stays on during a flip, with only its pitch torque locked
+  (`RB-PHYSICS-001-FR-093`, ADR-0015 amendment): the real capture's
+  diagonal flip carries the held roll stick and the dampings.
+- Wheel rays reach the fully extended wheel and the sticky force acts the
+  step after the wheels touch (`RB-PHYSICS-001-FR-092`, ADR-0019
+  amendment), matching every tick of the real capture's 4.142 s jump.
+- The ground jump's hold force applies at full strength from the press
+  tick (`RB-PHYSICS-001-FR-091`, ADR-0019), dropping RocketSim's 0.62
+  pre-min scale, and the suspension damper reads the post-jump velocity, as
+  the real capture shows (press tick 295.7 vs 295.9 recorded, then +4.0 per
+  tick).
+- Cars ride on RocketSim's raycast suspension with the Octane hitbox
+  offset (`RB-PHYSICS-001-FR-090`, ADR-0018): a standard car rests at the
+  recorded 17.0 uu instead of 19.3 on its box, landings are sprung, and
+  the ball meets the box where the real hitbox is.
+- Engine force acts at each wheel along its heading
+  (`RB-PHYSICS-001-FR-089`), as in RocketSim, so throttle through steered
+  front wheels tightens a turn (steady yaw at 950 uu/s 2.33 to 2.45 rad/s;
+  the real capture turns at 2.40).
+- A car is on the ground when three of its four wheel rays reach the
+  floor (`RB-PHYSICS-001-FR-088`, ADR-0017), as in RocketSim, not when its
+  box touches. A jump press while bouncing just off the floor now jumps
+  instead of dodging.
+- Car angular speed is clamped after the transform integrates
+  (`RB-PHYSICS-001-FR-087`), as RocketSim and the real capture do, so a
+  saturated flip turns at ~7.5 rad/s while reporting 5.5.
+- Steering (`RB-PHYSICS-001-FR-086`, ADR-0016): each wheel's side impulse
+  at its contact point turns the car, so the turn rate builds up and dies
+  away as recorded, instead of being set to the bicycle-model value.
+- A dodge's flip torque now acts on the press tick, as the real capture
+  shows (`RB-PHYSICS-001-FR-085`), one tick earlier than RocketSim's order.
+- Air control (`RB-PHYSICS-001-FR-084`, ADR-0015): RocketSim's torque,
+  damping and `CAR_TORQUE_SCALE` replace the placeholder air torque, and
+  air throttle is added. The invented airborne auto-upright
+  (`LANDING_AUTO_UPRIGHT_TORQUE`) is removed.
+- Flips (`RB-PHYSICS-001-FR-083`, ADR-0014): a dodge now spins the car
+  with RocketSim's flip torque over 0.65 s, damps its fall, locks air
+  pitch, and is cancelled by holding pitch against it. The instant spin
+  kick (`DODGE_ANGULAR_SPEED`) and the jump-press-again cancel, which
+  Rocket League does not have, are removed; `DriveState::dodge_flip_active`
+  is replaced by `DriveState::flip`.
+- Dodges and air control (`RB-PHYSICS-001-FR-082`, ADR-0013): pitch and
+  roll now follow RocketSim's signs, so stick forward dodges forward (it
+  dodged backward) and air pitch/roll spin the right way; `DODGE_SPEED`
+  is RocketSim's 500 (was 1400), backward dodges get the 16/15 scale, and
+  the push is along the heading flattened to the ground plane.
+- A driving car hopped off the floor and counted as grounded only one
+  tick in three (`RB-PHYSICS-001-FR-079`): `solver`'s restitution
+  velocity threshold was Bullet's 0.2 m/s copied as 0.2 uu/s; now
+  `0.2 * BULLET_TO_UU` = 10 uu/s (RocketSim's `BT_TO_UU = 50`).
+- Broken markdown tables: 61 requirement rows (`RB-PHYSICS-001-FR-015`
+  through `FR-075`) sat inside `TRACEABILITY.md`'s ADR table and are now
+  back in the requirements table; unescaped `|` inside code spans (`||`,
+  closures, `|x|`) split cells in `TRACEABILITY.md` and `ROADMAP.md`.
+- `rb_capture_ingest`'s synthetic test fixture had timestamps that didn't
+  overlap the vendored replay fixture's real timeline (off by ~11.78s) —
+  invisible under the old index-pairwise frame comparison, surfaced once
+  real timestamp alignment landed. Corrected.
+- `rb_physics_bullet::world`'s
+  `a_ball_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall`
+  test flew its ball for a fixed 3.0s regardless of when it actually
+  cleared the back wall — harmless with the old, smaller `FILLET_RADIUS`
+  (the ball drifted into `body::StaticQuarterPipe`'s documented
+  infinite-along-its-axis zone far past the goal and got only a mild
+  correction there), but `RB-PHYSICS-001-FR-025`'s bigger
+  `CORNER_ARCH_RADIUS` moved that same zone closer in and turned the brush
+  into a solver-destabilizing correction that threw the ball back past the
+  wall, failing the assertion. Shortened the test's flight duration to
+  1.8s — still comfortably past the wall, short of the infinite-fillet
+  zone.
+- `rb_physics_bullet::solver`'s friction-direction selection
+  (`RB-PHYSICS-001-FR-049`) — closes the divergence
+  `RB-PHYSICS-001-FR-048` found and left open: both friction directions
+  were always derived from a fixed, velocity-independent `plane_space`
+  basis, where real Bullet's actual default aligns friction direction 1
+  with the tangential component of the current relative sliding velocity.
+  A new `friction_directions` helper now does the latter, falling back to
+  `plane_space` both for negligible tangential velocity (matching real
+  Bullet's own `SIMD_EPSILON` threshold) and for a newly-found near-head-on
+  catastrophic-cancellation edge case this crate's own panic-free
+  `Vec3::normalize()` needed to handle but real Bullet's unguarded one
+  doesn't. Wired into both `setup_rows` and `setup_two_body_rows`. 3 new
+  tests, including a dedicated isotropic-friction regression test verified
+  to fail under the old fixed-basis behavior; all pre-existing tests pass
+  unchanged.
+- `net::NetMesh::step`'s body-vs-net-point contact resolution
+  (`RB-PHYSICS-001-FR-050`) — resolved every overlapping point
+  independently and sequentially, an untested "net-point mass is tiny
+  enough to not matter" assumption found false and, worse, genuinely
+  order-dependent for a symmetric double-point impact (confirmed by a
+  dedicated test), with a measured real-world residual of ~0.25 units/s
+  out of a 2000 units/s impact. Adopted `solver::resolve_dynamic_manifolds`'s
+  combined solve for every body-vs-point contact within a sub-step,
+  reducing that residual roughly 15-fold to ~0.016 units/s; warm-starting
+  deliberately left out of scope. 2 new tests; all pre-existing tests pass
+  unchanged.
+- `PhysicsWorld::step`'s static multi-surface contact resolution
+  (`RB-PHYSICS-001-FR-051`) — resolved a body's contact against each
+  static shape type (ground, wall, curve, corner fillet, goal wall,
+  bounded wall) independently and sequentially, the same
+  independent-pairwise gap `RB-PHYSICS-001-FR-030`/`RB-PHYSICS-001-FR-050`
+  already proved under-converges. A dedicated test confirmed a ball wedged
+  into a symmetric two-wall corner is genuinely order-dependent
+  (mirror-image results depending on which wall resolves first). A new
+  `solver::resolve_static_manifolds` generalizes `resolve_contacts` to
+  combine every static-shape manifold a body touches into one shared
+  solve; `step` was rewired to use it via a new `resolve_static_contacts`,
+  replacing the old five-function-per-body call sequence
+  (`resolve_plane_contact`/`resolve_curve_contact`/
+  `resolve_corner_fillet_contact`/`resolve_goal_wall_contact`/
+  `resolve_bounded_wall_contact`, all removed). 2 new tests, one confirmed
+  to fail under the old sequential loop; all pre-existing tests pass
+  unchanged.
+- `PhysicsWorld::step`'s static-vs-dynamic combined-solve ordering
+  (`RB-PHYSICS-001-FR-052`) — resolved a body's now-combined static
+  contacts and its combined dynamic manifolds as two separate solves, one
+  fully resolved and applied before the other's own setup for that same
+  body ever read the result, the same independent-pairwise gap
+  `RB-PHYSICS-001-FR-030`/`RB-PHYSICS-001-FR-050`/`RB-PHYSICS-001-FR-051`
+  already proved under-converges. A dedicated test reused FR-051's own
+  symmetric two-wall corner setup with one wall replaced by a very-heavy
+  dynamic body, confirming the old two-call order is genuinely
+  order-dependent. A new `solver::resolve_manifolds` folds a step's static
+  and dynamic manifolds into one shared solve; `step` was rewired to use
+  it, replacing the two separate calls with one. 2 new tests, one
+  confirmed to fail under the old two-call sequence; all pre-existing
+  tests pass unchanged.
+- `solver::combine_friction`'s missing defensive clamp
+  (`RB-PHYSICS-001-FR-053`) — `RB-PHYSICS-001-FR-043` fetched and read
+  real Bullet's own `btManifoldResult::calculateCombinedFriction`/
+  `calculateCombinedRestitution` source to correct this spec's wrong
+  claim about the reference's default combine mode, but never separately
+  examined one more detail in that same source: real Bullet's own
+  `calculateCombinedFriction` additionally clamps its product result to
+  `[-10.0, 10.0]`. Re-fetched and re-read `btManifoldResult.cpp` directly
+  to confirm the clamp's exact mechanics, found it currently inert for
+  every friction coefficient this crate itself ever sets (all positive
+  placeholders in `0.1..=0.9`), and adopted it anyway for reference
+  conformance since every static/dynamic body's own `friction` field is a
+  public, unvalidated `f32`. `combine_friction` now clamps its average
+  result to `[-10.0, 10.0]`, keeping the average formula FR-043 already
+  decided to keep; `combine_restitution` stays unclamped, matching the
+  reference's own choice. 1 new test; all pre-existing tests pass
+  unchanged.
+- `collision::box_vs_goal_wall`'s corner-testing overlap question
+  (`RB-PHYSICS-001-FR-054`) — `RB-PHYSICS-001-FR-028`'s own doc comment
+  left open whether a car's face resting flush against the goal window's
+  own edge, every corner just clear of it while the face's middle already
+  overlapped it, could be under-detected the way `RB-PHYSICS-001-FR-032`
+  once suspected for a curved fillet. Resolved via a convex-hull
+  argument: "every corner outside the (convex) window" is exactly
+  equivalent to "the face doesn't fully fit through it," the correct
+  block condition — no bug. The same investigation found the mirror image
+  for `collision::box_vs_bounded_wall` *is* a genuine, currently
+  unreachable under-detection gap (confirmed against this project's own
+  car/ball sizes vs. the standard arena's own bound sizes) and documented
+  it as a Non-goals item rather than fixing it. 2 new tests; all
+  pre-existing tests pass unchanged.
+- `drive::BOOST_ACCELERATION`'s missing ground/air split
+  (`RB-PHYSICS-001-FR-056`) — this port's own single flat boost
+  acceleration constant, and its own doc comments' explicit claim that
+  boost "works identically airborne", were both found wrong by fetching
+  RocketSim's own `RLConst.h` directly: the reference defines a
+  distinctly higher `BOOST_ACCEL_AIR` (`3175/3` ≈ 1058.333) than
+  `BOOST_ACCEL_GROUND` (`2975/3` ≈ 991.667, exactly matching this port's
+  prior value) — a genuine split this port didn't model, understating
+  every airborne boost by about 6.5%. Split into
+  `BOOST_ACCELERATION_GROUND`/`BOOST_ACCELERATION_AIR`, wired
+  `apply_driven_forces`'s existing `on_ground` parameter to select
+  between them, and corrected every doc comment claiming the two were
+  identical. 1 new test; all pre-existing tests pass unchanged.
+- Missing hard cap on a car's angular speed (`RB-PHYSICS-001-FR-057`) —
+  nothing previously bounded how fast sustained air control torque (or a
+  dodge's own kick, or the landing-orientation assist) could spin a car,
+  so holding full pitch/yaw/roll indefinitely spun it arbitrarily fast,
+  unlike real Rocket League. A second fetch of RocketSim's own
+  `RLConst.h`, targeting every `drive.rs` constant this port's own doc
+  comments flagged as having no public reference at all, surfaced
+  `CAR_MAX_ANG_SPEED = 5.5f` (rad/s), a hard "can never exceed" ceiling
+  this port had no equivalent for. Added `drive::MAX_CAR_ANGULAR_SPEED`
+  and `drive::clamp_angular_speed` (a genuine clamp, unlike
+  `MAX_CAR_SPEED`'s force-gating), wired in right after
+  `integrate::integrate_velocities` in both `world.rs`'s production path
+  and `drive.rs`'s own test helper. 3 new tests; all pre-existing tests
+  pass unchanged.
+- Missing real speed-dependent throttle taper (`RB-PHYSICS-001-FR-058`)
+  — `THROTTLE_ACCELERATION`'s own doc comment had named this exact gap
+  since it was introduced: full flat acceleration right up to a hard
+  cutoff at `UNBOOSTED_MAX_CAR_SPEED`, not a genuine taper. Fetching
+  RocketSim's own `Car.cpp` (not just `RLConst.h`'s constants) surfaced
+  the real mechanism: drive force is scaled by a confirmed 3-point
+  piecewise-linear curve (`{0, 1.0}, {1400, 0.1}, {1410, 0.0}`), not
+  applied flat. Added `drive::DRIVE_SPEED_TAPER_BREAKPOINTS`/
+  `drive_speed_taper` and replaced the hard cutoff with the real taper —
+  `THROTTLE_ACCELERATION`'s own peak magnitude remains an uncalibrated
+  placeholder, only the curve's shape is now confirmed and modeled. 2
+  new tests; all pre-existing tests pass unchanged.
+- Missing real forward-speed-dependent dodge impulse scaling
+  (`RB-PHYSICS-001-FR-059`) — a backward or side dodge applied a flat
+  `DODGE_SPEED` magnitude regardless of current speed or direction.
+  Fetching RocketSim's own `Car.cpp` (the same technique FR-058 used)
+  surfaced the real mechanism: a dodge's impulse scales per-axis by a
+  confirmed real ratio — `1.0` for a forward dodge (no change), `2.5` for
+  a backward dodge (opposing current velocity), or `1.9` for any side
+  dodge — as current speed rises toward `MAX_CAR_SPEED`. Added
+  `drive::dodge_speed_scale`/`dodge_pitch_is_backward` and wired the
+  scale into both the ground-dodge and wall-jump-dodge blocks —
+  `DODGE_SPEED`'s own base magnitude remains an uncalibrated placeholder
+  (RocketSim's real `500.0` base was deliberately not substituted, since
+  the confirmed forward-dodge scale is exactly `1.0`). 5 new tests; all
+  pre-existing tests pass unchanged.
+- `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md` and
+  `drive.rs`'s own doc comments (`RB-PHYSICS-001-FR-060`) — `FR-057`'s own
+  Non-goals had left open whether real Rocket League's auto-flip could map
+  onto `drive::LANDING_AUTO_UPRIGHT_TORQUE` "without further
+  investigation." Fetched and read RocketSim's real `Car.cpp` (the same
+  technique FR-058/FR-059 used) and resolved it: real Rocket League has no
+  mechanic matching "continuously nudge an airborne car upright with no
+  player input" at all — it has two distinct, real, grounded, input-gated
+  systems instead (auto-flip: a jump-triggered turtle-recovery flip past a
+  roll threshold; auto-roll: a throttle-triggered ground-alignment
+  torque), neither airborne nor input-free. Corrected the stale Open
+  Questions bullet, `FR-057`'s own Non-goals bullet, and the `drive`
+  module's doc comments accordingly. Zero production code changed; no new
+  tests.
+- Missing hard caps on the ball's linear/angular speed
+  (`RB-PHYSICS-001-FR-061`) — the ball had no speed cap of any kind,
+  unlike the car (`drive::MAX_CAR_ANGULAR_SPEED`, since FR-057). Fetched
+  RocketSim's own `RLConst.h`/`Ball.cpp` (matching FR-057/FR-060's own
+  method) and found two confirmed real hard caps: `BALL_MAX_SPEED =
+  6000.f` and `BALL_MAX_ANG_SPEED = 6.f`, enforced by a hard clamp after
+  collision resolution. Added `world::BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED`
+  and `world::clamp_ball_velocity`, wired into `PhysicsWorld::step` right
+  after this step's contact resolution — matching real RocketSim's own
+  placement more precisely than the car's own earlier-in-pipeline clamp.
+  `BALL_DRAG = 0.03f` deliberately not adopted, since real RocketSim sets
+  it as a per-match mutator-config default at ball construction, not a
+  hardcoded system invariant. 4 new tests; all pre-existing tests pass
+  unchanged.
+- Missing mandatory minimum-hold window for a ground jump's variable-height
+  acceleration (`RB-PHYSICS-001-FR-064`) — `drive::JUMP_HOLD_MAX_DURATION`'s
+  own doc comment had named this exact gap since `RB-PHYSICS-001-FR-031`'s
+  original audit: real Rocket League scales its jump-hold acceleration down
+  during a `JUMP_MIN_TIME` (0.025s) window rather than applying it flat, an
+  unmodeled "two-phase ramp". Fetching RocketSim's own `Car.cpp`
+  (`_UpdateJump`, the same technique FR-058/FR-059 used) surfaced the exact
+  mechanism: the hold force keeps applying, scaled by
+  `JUMP_PRE_MIN_ACCEL_SCALE = 0.62f`, for `JUMP_MIN_TIME` seconds
+  regardless of whether `jump` is still held — even an instantaneous tap
+  gets a small amount of extra height in real Rocket League, not just a
+  release-anytime cutoff. Added `drive::JUMP_MIN_TIME`/
+  `JUMP_PRE_MIN_ACCEL_SCALE` and reworked `apply_driven_forces`'s
+  hold-acceleration check to derive elapsed time since the press from the
+  existing `jump_hold_time_remaining` state instead of adding a second
+  field, so no caller needed to change. 3 new tests; all pre-existing tests
+  pass unchanged.
+- Missing real per-axis air-control torque ratio (`RB-PHYSICS-001-FR-068`)
+  — all three axes (pitch/yaw/roll) shared one flat `AIR_CONTROL_TORQUE`
+  magnitude. `RB-PHYSICS-001-FR-031`'s own audit had already found real
+  air-control torque coefficients exist but didn't adopt them (absolute
+  torques calibrated against real Rocket League's own specific
+  mass/inertia). Fetching RocketSim's own `Car.cpp` (`_UpdateAirTorque`,
+  the same technique FR-058/FR-059/FR-064 used) found the real mechanism
+  is structurally identical to this port's own — a direct per-axis torque
+  scaled by analog input — unlike steering or handbrake's own architecture
+  mismatches, with `RLConst.h` confirming `CAR_AIR_CONTROL_TORQUE =
+  Vec(130, 95, 400)` (pitch-yaw-roll order). Added
+  `drive::AIR_CONTROL_YAW_SCALE = 95.0/130.0` and
+  `AIR_CONTROL_ROLL_SCALE = 400.0/130.0`, wired into
+  `apply_driven_forces`'s yaw/roll torque application; `AIR_CONTROL_TORQUE`
+  itself (pitch's own magnitude) is unchanged, still uncalibrated. 2 new
+  tests pin the exact expected angular velocity in closed form; all
+  pre-existing tests pass unchanged.
+- Diagonal dodge faster than an axis-aligned one (`RB-PHYSICS-001-FR-072`)
+  — `RB-PHYSICS-001-FR-059`'s own Non-goals had already found and flagged
+  this gap: this port summed each dodge axis' own full-strength `(pitch,
+  roll)` contribution independently, so a diagonal dodge came out
+  `sqrt(2)`-ish times faster than an axis-aligned one, unlike real Rocket
+  League. Fetching RocketSim's own `Car.cpp` (`_UpdateDoubleJumpOrFlip`)
+  confirmed the real mechanism: `dodgeDir = btVector3(-pitch, yaw + roll,
+  0).safeNormalized()`, normalized to unit length before any further
+  speed-based scaling — a pure geometric operation this port's own model
+  represents exactly, unlike a wheeled-vehicle model or a continuous-
+  torque timing state. Added `drive::normalize_dodge_direction`, wired
+  into both the ground-dodge and wall-jump-dodge code paths — the
+  per-axis `DODGE_DEADZONE` trigger and `dodge_pitch_is_backward`'s sign
+  check still read raw stick values; only the scaled magnitude changes.
+  This port's own sign convention is kept and yaw isn't folded in, both
+  already-documented, separate simplifications. Updated the two existing
+  diagonal-dodge tests to assert the corrected magnitude and added 3 new
+  tests for `normalize_dodge_direction` directly; all pre-existing tests
+  pass unchanged, bringing the crate to 317.
+- Dodge/wall-jump-dodge direction never read yaw input
+  (`RB-PHYSICS-001-FR-073`) — `RB-PHYSICS-001-FR-059`'s own Non-goals (and
+  `FR-072`'s own doc comment) had already found and flagged this gap: real
+  Rocket League's own `dodgeDir` combines `yaw + roll` for its horizontal
+  component, but this port's dodge read `roll` alone. Fetching RocketSim's
+  own `Car.cpp` (`_UpdateDoubleJumpOrFlip`) confirmed `controls.yaw` feeds
+  nowhere else in the function — only `dodgeDir`'s own combined axis — and
+  that this port already reads `input.yaw` in the same function for air
+  control, so folding it into the dodge's roll-axis stick value
+  (`roll + yaw`, each clamped individually first) needed no new machinery,
+  the same "pure operation, no new architecture" transfer
+  `FR-058`/`FR-059`/`FR-068`/`FR-072`'s own adopted findings share.
+  Changed both dodge call sites in `apply_driven_forces`; the existing
+  `DODGE_DEADZONE` trigger, `normalize_dodge_direction`, and speed scaling
+  are otherwise unchanged. Added 3 new tests (a yaw-only dodge, a
+  yaw-and-roll cancellation, and a yaw-only wall-jump-dodge); all
+  pre-existing tests pass unchanged, bringing the crate to 320.
+- A near-axis-aligned diagonal dodge came out slightly off-axis instead of
+  a clean single-axis dodge (`RB-PHYSICS-001-FR-074`) —
+  `RB-PHYSICS-001-FR-073`'s own Non-goals had flagged RocketSim's
+  post-normalization small-component zeroing as "a separate, independent
+  simplification," a mis-scoping this fix corrects: it's a further pure
+  post-processing step on `normalize_dodge_direction`'s own
+  already-computed normalized pair, needing no new machinery, exactly
+  like normalization itself (`FR-072`). Re-confirmed via RocketSim's own
+  `Car.cpp`: after `dodgeDir.safeNormalized()`, any component whose
+  magnitude falls below `0.1` is zeroed, not re-normalized afterward.
+  Added `drive::DODGE_DIRECTION_SNAP_THRESHOLD = 0.1` (a distinct
+  constant from `DODGE_DEADZONE` despite sharing the same real value,
+  since they serve different real purposes) and wired the zeroing into
+  `normalize_dodge_direction`'s own return path — both dodge call sites
+  already route through it, so no call-site changes were needed. Added 2
+  new tests pinning the snap behavior at both sides of the threshold; all
+  pre-existing tests pass unchanged, bringing the crate to 322.
+### Security
+
+<!-- ## [0.1.0] - YYYY-MM-DD
+### Added
+- Initial release -->

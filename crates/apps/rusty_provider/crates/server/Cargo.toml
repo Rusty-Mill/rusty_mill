@@ -11,17 +11,14 @@ layer = "apps"
 rusty_oauth = { workspace = true }
 rp-core.workspace = true
 rp-mcp.workspace = true
-rp-providers.workspace = true
 rp-router.workspace = true
 rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty_mcp_axum.workspace = true
 tokio.workspace = true
 axum.workspace = true
-tower.workspace = true
 tower-http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-futures.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

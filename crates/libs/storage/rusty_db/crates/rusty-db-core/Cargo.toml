@@ -10,10 +10,6 @@ description = "Database-agnostic query builder and driver abstraction (the SQLAl
 layer = "libs"
 
 [dependencies]
-rusty_tokio = { workspace = true }
-rusty_wire = { workspace = true }
-rusty_json = { workspace = true }
-rusty_std = { workspace = true }
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

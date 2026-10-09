@@ -13,7 +13,6 @@ layer = "libs"
 [dependencies]
 cudarc = { version = "0.19", optional = true, default-features = false }
 rusty_simd = { workspace = true }
-rusty_std = { workspace = true }
 rusty_sync = { workspace = true }
 fancy-regex = "0.18.0"
 half = { version = "2", optional = true }
@@ -25,8 +24,8 @@ memmap2 = "0.9"
 # optional — so this is the fourth base dependency (was three).
 minijinja = "2"
 pollster = { version = "0.4.0", optional = true }
-rayon = "1"
-serde = { version = "1", optional = true, features = ["derive"] }
+rayon = { workspace = true }
+serde = { workspace = true, optional = true }
 serde_json = { version = "1", optional = true }
 # The workspace's one HTTP/1.1 parser (design review Tranche 4): the
 # server's request head and body framing, with its 3.4 framing rules.

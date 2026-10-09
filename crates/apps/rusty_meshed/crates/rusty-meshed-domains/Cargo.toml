@@ -13,7 +13,6 @@ layer = "apps"
 [dependencies]
 rusty_err = { workspace = true }
 rusty_uuid = { workspace = true }
-rusty_time = { workspace = true }
 rusty_json = { workspace = true }
 rusty_sqlite = { workspace = true }
 rusty_tokio = { workspace = true }

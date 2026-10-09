@@ -1,0 +1,78 @@
+{
+  "name": "probe_bump_head_on: two cars meet nose to nose at 1000 uu/s each",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -900,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      1000,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 150,
+      "throttle": 1
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          900,
+          17
+        ],
+        "rotation": [
+          0,
+          -1.5708,
+          0
+        ],
+        "velocity": [
+          0,
+          -1000,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 150,
+          "throttle": 1
+        }
+      ]
+    }
+  ]
+}

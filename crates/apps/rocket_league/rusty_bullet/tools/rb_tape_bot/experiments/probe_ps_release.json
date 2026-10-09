@@ -1,0 +1,51 @@
+{
+  "name": "probe_ps_release: handbrake right steer 60 ticks, then release with throttle",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -1500,
+      -4500,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      1400,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 60,
+      "throttle": 1,
+      "steer": 1,
+      "handbrake": true
+    },
+    {
+      "ticks": 150,
+      "throttle": 1
+    }
+  ]
+}

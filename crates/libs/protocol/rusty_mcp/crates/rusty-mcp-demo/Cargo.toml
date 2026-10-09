@@ -24,8 +24,8 @@ name = "rusty-mcp-demo"
 path = "src/main.rs"
 
 [dependencies]
-rusty_mcp_server = { path = "../../../rusty_mcp_server", features = ["http", "request-state"] }
-rusty_serve = { path = "../../../../net/rusty_serve" }
+rusty_mcp_server = { workspace = true, features = ["http", "request-state"] }
+rusty_serve = { workspace = true }
 
 [dev-dependencies]
 # The acceptance suite drives the server with the `rmcp` client, the oracle

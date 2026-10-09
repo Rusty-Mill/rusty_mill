@@ -1,0 +1,44 @@
+{
+  "name": "ceil_up: nose straight up at 1200 uu/s from z = 1500, no input",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      0,
+      1500
+    ],
+    "rotation": [
+      1.5,
+      1.5707963267948966,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      1200
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 240
+    }
+  ]
+}

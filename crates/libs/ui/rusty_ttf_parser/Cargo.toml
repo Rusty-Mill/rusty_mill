@@ -1,0 +1,16 @@
+[package]
+name = "rusty-ttf-parser"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std], allocation-free, zero-dependency TrueType/OpenType reader: cmap, GSUB lookups and PNG colour bitmaps"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+keywords = ["font", "truetype", "opentype", "gsub", "no-std"]
+categories = ["text-processing", "no-std", "parser-implementations"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]

@@ -1,0 +1,50 @@
+{
+  "name": "probe_ps_slow: 600 uu/s, handbrake and full right steer",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -500,
+      -4500,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      600,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 150,
+      "throttle": 1,
+      "steer": 1,
+      "handbrake": true
+    },
+    {
+      "ticks": 60
+    }
+  ]
+}

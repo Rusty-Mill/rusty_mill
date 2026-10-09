@@ -23,8 +23,6 @@ client = ["dep:rusty-mcp-client", "tokio/sync"]
 adk-core.workspace = true
 adk-tools.workspace = true
 async-trait.workspace = true
-futures.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 # The workspace's first-party MCP stack: the wire protocol, handshake and
@@ -46,5 +44,4 @@ required-features = ["stdio", "http", "client"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
-tokio-test.workspace = true
 adk-sessions.workspace = true

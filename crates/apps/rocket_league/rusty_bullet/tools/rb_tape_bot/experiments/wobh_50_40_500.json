@@ -1,0 +1,44 @@
+{
+  "name": "wobh_50_500: level car 50 uu off centre and 40 uu to the side falls onto a resting ball at 500 uu/s",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      50,
+      40,
+      224.4
+    ],
+    "rotation": [
+      0,
+      0,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      -500
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      0,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 180
+    }
+  ]
+}

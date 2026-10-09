@@ -1,0 +1,23 @@
+#:schema https://rlbot.org/schemas/agent.json
+# Generated: one bot entry per scenario, so the RLBot GUI can pick the tape
+# without editing bot.toml between runs. Same binary, same agent id; only
+# the environment differs. Regenerate with the snippet in README "Running".
+# run_command is a TOML literal string: cmd.exe needs backslashes and a
+# basic string would treat them as escapes.
+
+[settings]
+name = "RB Tape: corner_slide"
+agent_id = "rusty_bullet/tape_bot"
+root_dir = ".."
+run_command = 'target\release\rb_tape_bot.exe'
+run_command_linux = "target/release/rb_tape_bot"
+hivemind = false
+
+[settings.environment]
+RB_TAPE = "scenarios/corner_slide.json"
+
+[details]
+description = "corner_slide: test2.jsonl 8.95 s state and inputs, started 0.5 s earlier on its ballistic path so the corner contact is not the first thing after the state set (repeatable; the original start is not, O011)"
+developer = "rusty_bullet"
+language = "rust"
+tags = []

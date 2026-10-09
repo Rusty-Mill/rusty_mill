@@ -31,6 +31,19 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     core::hint::black_box(diff) == 0
 }
 
+/// Overwrites `buf` with `T::default()` using volatile writes, so the compiler
+/// cannot drop the wipe as a dead store. For stack and array secrets that
+/// [`SecretBytes`] (heap only) does not cover.
+pub fn wipe<T: Copy + Default>(buf: &mut [T]) {
+    for item in buf.iter_mut() {
+        // SAFETY: `item` is a valid, aligned, exclusive reference.
+        unsafe {
+            core::ptr::write_volatile(item, T::default());
+        }
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 /// Zero-on-drop secret byte vector wrapper.
 pub struct SecretBytes {
     buf: Vec<u8>,
@@ -133,6 +146,17 @@ mod file {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wipe_zeroes_bytes_and_words() {
+        let mut bytes = [0xffu8; 5];
+        super::wipe(&mut bytes);
+        assert_eq!(bytes, [0; 5]);
+        let mut words = [u64::MAX; 3];
+        super::wipe(&mut words);
+        assert_eq!(words, [0; 3]);
+        super::wipe::<u8>(&mut []);
+    }
+
     use super::*;
 
     #[test]

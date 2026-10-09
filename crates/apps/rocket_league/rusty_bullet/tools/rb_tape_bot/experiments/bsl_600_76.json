@@ -1,0 +1,60 @@
+{
+ "name": "bsl_600_76: ball at rest for a while, then a jumping car clips it",
+ "settle_ticks": 60,
+ "car": {
+  "location": [
+   0,
+   -1500,
+   17
+  ],
+  "rotation": [
+   -0.0096,
+   1.5707963,
+   0
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ],
+  "angular_velocity": [
+   0,
+   0,
+   0
+  ],
+  "boost": 100
+ },
+ "ball": {
+  "location": [
+   0,
+   0,
+   93.15
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ]
+ },
+ "steps": [
+  {
+   "ticks": 600,
+   "throttle": 0
+  },
+  {
+   "ticks": 76,
+   "throttle": 1,
+   "boost": true
+  },
+  {
+   "ticks": 8,
+   "throttle": 1,
+   "boost": true,
+   "jump": true
+  },
+  {
+   "ticks": 80,
+   "throttle": 1
+  }
+ ]
+}

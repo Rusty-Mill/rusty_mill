@@ -18,7 +18,6 @@ rusty_wire = { workspace = true }
 rusty_sqlite = { workspace = true }
 rusty_json = { workspace = true }
 rusty_uuid = { workspace = true }
-rusty_time = { workspace = true }
 rusty_request = { workspace = true }
 rusty-meshed-core = { path = "../rusty-meshed-core" }
 rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }

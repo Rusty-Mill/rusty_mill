@@ -1,0 +1,113 @@
+{
+  "name": "tri_double_demo: A boosts at 2300 uu/s through enemies B and C, 500 uu apart",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -808,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.5707963267948966,
+      0
+    ],
+    "velocity": [
+      0,
+      2300,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 150,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 150
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          0,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          1.5707963267948966,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 300
+        }
+      ],
+      "team": 1
+    },
+    {
+      "car": {
+        "location": [
+          0,
+          500,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          1.5707963267948966,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 300
+        }
+      ],
+      "team": 1
+    }
+  ]
+}

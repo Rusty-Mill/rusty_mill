@@ -40,12 +40,12 @@ rusty_crypto_key = { workspace = true }
 rusty_proxmox = { workspace = true }
 rusty_opnsense = { workspace = true }
 rusty_fedora = { workspace = true }
-schemars = "1.0"
-serde = { version = "1", features = ["derive"] }
+schemars = { workspace = true }
+serde = { workspace = true }
 serde_json = "1"
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
-tracing = "0.1"
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Parses hosts.toml, the Fedora host registry -- already a workspace
 # dependency (rusty_fedora_agent's own allowlist.toml loader).

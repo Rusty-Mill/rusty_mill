@@ -1,0 +1,78 @@
+{
+  "name": "bumpg_drift: attacker faces +y but slides diagonally at (700, 900)",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -300,
+      -420,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      700,
+      900,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 150,
+      "throttle": 1
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          0,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          1.5708,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 150
+        }
+      ],
+      "team": 0
+    }
+  ]
+}

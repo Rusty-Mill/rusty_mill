@@ -1,0 +1,79 @@
+{
+  "name": "bumpv_moving_side: victim moving across at 800 uu/s, attacker hits its flank at 1200",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -420,
+      0,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      0.0,
+      0
+    ],
+    "velocity": [
+      1200,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 150,
+      "throttle": 1
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          -400,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          1.5708,
+          0
+        ],
+        "velocity": [
+          0,
+          800,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 150,
+          "throttle": 1
+        }
+      ],
+      "team": 0
+    }
+  ]
+}

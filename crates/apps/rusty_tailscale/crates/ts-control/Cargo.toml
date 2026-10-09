@@ -13,9 +13,6 @@ layer = "apps"
 ts-types.workspace = true
 ts-key.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "rt", "macros", "time"] }
-hyper = { workspace = true, features = ["client", "http1"] }
-hyper-util = { workspace = true, features = ["tokio"] }
-http-body-util.workspace = true
 h2.workspace = true
 bytes.workspace = true
 http.workspace = true
@@ -29,7 +26,6 @@ rusty_base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "process"] }

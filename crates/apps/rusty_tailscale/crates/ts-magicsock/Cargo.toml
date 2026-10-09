@@ -17,7 +17,6 @@ ts-derp.workspace = true
 ts-stun.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 rand_core.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 # rustils' D16 Net surface (rustils#41/#42) — justified in DESIGN.md:
 platform = { workspace = true }

@@ -3,6 +3,7 @@
 Run from the repo root:
     python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 """
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -111,3 +112,26 @@ class ReverseDependencyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealWorkspaceEdgeTests(unittest.TestCase):
+    """Edges that exist only so CI re-runs a crate's tests, pinned to the real manifests."""
+
+    REPO = Path(__file__).resolve().parents[2]
+
+    def test_a_harness_only_change_selects_rsi_cli(self) -> None:
+        # rsi-cli never calls rsi-harness: its end-to-end tests compile the
+        # harness source with rustc. The dev-dependency is the only thing that
+        # makes the planner re-run them when the harness changes, and
+        # cargo-shear would remove it (see rsi-cli's cargo-shear ignore).
+        cli_dir = "crates/apps/rusty_rsi/crates/rsi-cli"
+        manifest = tomllib.loads((self.REPO / cli_dir / "Cargo.toml").read_text(encoding="utf-8"))
+        edge = manifest.get("dev-dependencies", {}).get("rsi-harness")
+        self.assertIsNotNone(edge, "rsi-cli must keep its rsi-harness dev-dependency")
+        self.assertIn("rsi-harness", manifest["package"]["metadata"]["cargo-shear"]["ignored"])
+        harness_dir = (self.REPO / cli_dir / edge["path"]).resolve().relative_to(self.REPO).as_posix()
+        md = metadata({"rsi-harness": (harness_dir, []), "rsi-cli": (cli_dir, ["rsi-harness"])})
+        self.assertEqual(
+            affected_packages(md, [f"{harness_dir}/src/lib.rs"]),
+            ["rsi-cli", "rsi-harness"],
+        )

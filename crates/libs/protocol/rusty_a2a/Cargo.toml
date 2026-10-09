@@ -14,28 +14,28 @@ layer = "libs"
 [dependencies]
 rusty_retry = { workspace = true }
 rusty_ip = { workspace = true, optional = true }
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 rusty_uuid = { workspace = true }
 rusty_base64 = { workspace = true }
-thiserror = "1"
+thiserror = { workspace = true }
 
 # client feature
 reqwest = { workspace = true, optional = true }
-futures-core = { version = "0.3", optional = true }
+futures-core = { workspace = true, optional = true }
 futures-util = { version = "0.3", optional = true }
-eventsource-stream = { version = "0.2", optional = true }
+eventsource-stream = { workspace = true, optional = true }
 
 # server feature
 axum = { workspace = true, optional = true }
-async-trait = { version = "0.1", optional = true }
+async-trait = { workspace = true, optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 tokio-util = { version = "0.7", optional = true }
-async-stream = { version = "0.3", optional = true }
+async-stream = { workspace = true, optional = true }
 
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"], optional = true }
-tracing = "0.1"
+tracing = { workspace = true }
 
 # signing feature (Agent Card JWS signing/verification)
 p256 = { version = "0.14", features = ["ecdsa"], optional = true }
@@ -45,9 +45,9 @@ signature = { version = "3", optional = true }
 
 # grpc feature
 tonic = { version = "0.14", optional = true }
-prost = { version = "0.14", optional = true }
-prost-types = { version = "0.14", optional = true }
-tonic-prost = { version = "0.14", optional = true }
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+tonic-prost = { workspace = true, optional = true }
 tonic-types = { version = "0.14.6", optional = true }
 
 [features]

@@ -51,7 +51,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       is_new: ${{ steps.version.outputs.is_new }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Every tag, not just this branch's history -- the existing-tag
           # check below needs every release ever published.
@@ -93,14 +93,14 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: remind-me-release-${{ matrix.target }}
 
@@ -141,7 +141,7 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
           echo "ASSET_PATH=$stage.zip" >> $env:GITHUB_ENV
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-asset-${{ matrix.target }}
           path: ${{ env.ASSET_PATH }}
@@ -155,9 +155,9 @@ jobs:
     if: needs.detect-version.outputs.is_new == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # remind-me-checks.yml should already have blocked a drifted PR, but a
+      # ci.yml's remind-me-plugin-version job should already have blocked a drifted PR, but a
       # release must never ship a plugin archive claiming the wrong version.
       - name: Verify plugin.json version matches this release
         run: '"$PRODUCT_DIR/scripts/check_plugin_version.sh"'
@@ -172,7 +172,7 @@ jobs:
           zip -rq "${stage}.zip" "$stage"
           echo "ASSET_PATH=${stage}.zip" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-asset-plugin
           path: ${{ env.ASSET_PATH }}
@@ -184,7 +184,7 @@ jobs:
     if: needs.detect-version.outputs.is_new == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           pattern: release-asset-*
@@ -198,7 +198,7 @@ jobs:
       # list every monorepo PR merged since the previous release of *any*
       # product.
       - name: Create the release and attach all archives
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ env.TAG_PREFIX }}${{ needs.detect-version.outputs.version }}
           name: rusty_remind_me v${{ needs.detect-version.outputs.version }}

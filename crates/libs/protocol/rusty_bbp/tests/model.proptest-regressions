@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2c1e64fc117290134d49529bc629d7e72055176e50d20f97c4a727ae31545bf5 # shrinks to steps = [Spec, Gate, ApprovePlan, Candidate, Report(0), Verdict(Tester, false), RejectToPlanning]
