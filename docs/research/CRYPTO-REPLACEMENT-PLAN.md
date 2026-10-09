@@ -6,7 +6,7 @@ Date: 2026-10-08. Scope: the primitives `rusty_tls`'s native engine takes from `
 was reported complete by the owner, with its scope, commit and findings unrecorded (section 11, row
 "Independent review"), so the stage rows below keep "review pending"; TLS integration is pending
 and the gap-closure plan is section 13. Gaps 1 (randomness) and 2 (ECDH P-256/P-384) are
-implemented with preliminary validation and not independently reviewed (section 13.4).** The set is partial: it covers hashes, HMAC, HKDF,
+implemented with preliminary validation and covered by the review the owner verified (section 0), whose commit, method and findings are not recorded (section 13.4).** The set is partial: it covers hashes, HMAC, HKDF,
 signature verification, X25519 and ChaCha20-Poly1305, and does not cover AES-GCM, P-256 or P-384
 key exchange, signing, or randomness (section 0, "Scope limits"). **Consumer status:** no
 consumer, `rusty_tls` file, gate or default was changed; nothing here is used by anything.
@@ -28,15 +28,21 @@ closed. The 2026-10-08 intrinsics approval was not reconfirmed and is not relied
 *Provenance:* this is the implementer's transcription of the owner's instruction in the
 implementing session on 2026-10-09, "go ahead with randomness and ECDH", given in answer to
 "Which gaps do you want me to start on?" after the implementer had explained what reopening the freeze
-means. **Owner confirmation reported by the implementer, 2026-10-09 (pending direct owner verification):** the implementer then listed three open confirmations
+means. **Owner confirmation, first reported by the implementer on 2026-10-09 and later received directly (below):** the implementer then listed three open confirmations
 (the freeze reopening for randomness and ECDH, accepting small-order Ed25519 public keys, and the actual scope of the
 owner's review) and the owner replied "Confirm them." This is the implementer's transcription of that reply in the
 implementing session, not a GitHub review; the PR carries a relay comment quoting it, which does not
-authenticate the approval to a reviewer. A direct confirmation from the owner's own GitHub account has been
-requested and is **not yet received**. The reported confirmation covers
-exactly the first two items as stated here. For the third it affirms that the owner's review stands as reported but
-names no components, commit or method, so **the scope of that review stays unrecorded** and nothing more is
-claimed for it. The scope above is exactly what the original instruction names.
+authenticate the approval to a reviewer. **Direct owner confirmation was then received on 2026-10-09 (23:44 to 23:46 UTC)**, recorded in
+PR #576 comment 6091204395 (written by the reviewer, relaying it) and confirmed accurate by the owner in the
+implementing session: the independent review is verified and covers both #572 and #576, including ECDH and
+`rusty_rand`; the owner also explicitly confirmed #576's weak-key policy reversal and the reopening of the crypto
+work. The reviewer states this clears the owner-confirmation and independent-review holds on #576, and that it
+does not pre-approve later new code (such as #587), alter technical findings or evidence qualifications, or waive
+exact-head CI. For the first two items the confirmation covers
+exactly what is stated here. For the third (the review), the recorded statement is the one above: verified, covering
+#572 and #576 including ECDH and `rusty_rand`. **The reviewed commit, the method and any findings are still not
+recorded here**, and the statement does not say whether the stage rows for #540 (stages 0 to 4) are covered, so those
+rows keep their "review pending" labels. The scope above is exactly what the original instruction names.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -48,8 +54,9 @@ not an adopted bar.
 **Scope limits (read before reading "implemented").**
 - No AES-GCM (stage 5, not done). RFC 8446 section 9.1 requires `TLS_AES_128_GCM_SHA256`
   for a compliant TLS 1.3 implementation, and `rusty_tls`'s ticket key is AES-256-GCM.
-- P-256 and P-384 key exchange: implemented 2026-10-09 (`rusty_pk::ecdh`, section 13.4); preliminary,
-  not independently reviewed. (ECDSA verification alone never provided it.)
+- P-256 and P-384 key exchange: implemented 2026-10-09 (`rusty_pk::ecdh`, section 13.4); preliminary;
+  covered by the owner-verified review (section 0) with its commit, method and findings unrecorded. (ECDSA
+  verification alone never provided it.)
 - No signing of any kind (server role, client certificates), and no randomness: the engine
   still draws all randomness from `ring::rand`.
 - Therefore this is a **partial primitive replacement**, not a complete TLS 1.3 backend, and
@@ -68,11 +75,13 @@ made for any stage. No stage is approved for TLS use.
 
 **Review status, reconciled (2026-10-09).** The owner reported that an independent review is complete,
 that the reviewer was the owner, and that both Ed25519 behaviours (small-order keys rejected, then accepted)
-were seen. The owner did not state which components, which commit, by what method, or with what findings, and
-nothing in this repository records it. This plan therefore does **not** treat any stage as reviewed:
-the "review pending" labels above and the statement in section 11 that no human review of the Montgomery
-invariants has happened stay until the owner records the scope. The owner's report is not contradicted; it is
-unscoped. The ECDH and `rusty_rand` work added on 2026-10-09 post-dates it and has had no independent review.
+were seen. The owner later verified directly (section 0; PR #576 comment 6091204395) that the review covers both
+#572 and #576, **including ECDH and `rusty_rand`**. The owner has not stated the reviewed commit, the method or any
+findings, and has not said that the review covers the #540 stage rows, so nothing in this repository records those.
+This plan therefore keeps the stage-row "review pending" labels above and the statement in section 11 that no
+recorded human review of the Montgomery invariants exists, until the owner records that scope. The ECDH and
+`rusty_rand` work is covered by the verified review as stated; the plan still treats an independent second reviewer
+for ECDH and AES (decision D4) as the owner's call.
 
 ### Stage 2 results (`rusty_pk`, 2026-10-08; preliminary)
 
@@ -103,7 +112,7 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   `crypto/curve25519/curve25519.c`) accepts both, and this implementation reproduces that
   on purpose so a swap does not change which keys verify. **Small-order public keys (the
   eight torsion points, including the identity) are accepted, as in `ring`; RFC 8032 does not
-  require rejecting them. Owner decision, with the owner's confirmation reported by the implementer on 2026-10-09 (pending direct owner verification), reversing the round 3 rejection.** For the identity,
+  require rejecting them. Owner decision, confirmed directly by the owner on 2026-10-09 (section 0), reversing the round 3 rejection.** For the identity,
   `[h]A` vanishes for every `h`, so `R = identity, S = 0` verifies every message under that key;
   for the other seven torsion points a secret-free forgery works for some messages (success rate
   not measured, no universal claim). **Consequence:** a caller that admits a verification key
@@ -616,7 +625,7 @@ the honest current position.
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
 | Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-09.txt`. **Review findings: none exist yet.** |
 | `ring` usage inventory including randomness and helper APIs. | Section 2.3. |
-| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Reported complete by the owner (baileyrd), 2026-10-09; scope unrecorded.** The reviewer was the owner, who saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. Which of the listed components were covered, the commit reviewed, the method and any findings are not recorded here and the implementer did not see them, so this row is **not** evidence that the Montgomery-core invariants (row above), the AEAD or the HMAC/HKDF paths were reviewed. One reviewer, who also owns the project. On 2026-10-09 the owner is reported by the implementer (pending direct owner verification) to have affirmed ("Confirm them.") that this review stands as reported, without stating components, commit or method. **Open: the owner states the reviewed scope; the ECDH and `rusty_rand` code has had no review.** |
+| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Verified by the owner (baileyrd), 2026-10-09 (23:44 to 23:46 UTC; PR #576 comment 6091204395, relayed by the reviewer and confirmed accurate by the owner in the implementing session): the independent review is verified and covers both #572 and #576, including ECDH and `rusty_rand`.** The reviewer was the owner, who saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. **Still not recorded here:** the reviewed commit, the method and any findings (the implementer did not see them), and whether the review covers the #540 components listed in this row (Montgomery-core invariants in the row above, the AEAD, the HMAC/HKDF paths), so this row is **not** evidence for those and the stage rows keep "review pending". One reviewer, who also owns the project. Plan decision D4 (a second reviewer for ECDH and AES) is the owner's call and unchanged. |
 
 ## 11a. Independent review, round 1 (Codex, PR #540, reviewed commit `25fcc18`)
 
@@ -711,11 +720,11 @@ Added after review (current as of the evidence record):
 
 ## 13. Plan for the gaps (proposal; every item is the owner's decision)
 
-Context: stages 0 to 4 are implemented; the owner reported an independent review, but its scope is
-unrecorded, so none of them is treated as reviewed (section 0, "Review status, reconciled", and section 11). The
-stage-4 freeze (section 0) covers *implementation*. It was reopened for gaps 1 and 2 only, on the
-implementer's transcription of the owner's instruction, whose confirmation is reported by the implementer and
-pending direct owner verification (section 0);
+Context: stages 0 to 4 are implemented. The owner has verified an independent review covering #572 and #576
+(including ECDH and `rusty_rand`); its reviewed commit, method and findings are not recorded, and it is not stated to
+cover the #540 stage rows, so those keep their "review pending" labels (section 0, "Review status, reconciled", and
+section 11). The stage-4 freeze (section 0) covers *implementation*. It was reopened for gaps 1 and 2 only, on the
+owner's instruction, which the owner confirmed directly (section 0);
 gaps 3 to 5 stay closed until the owner reopens them. Gaps are those in section 2.3. The goal of this plan is a **client-role native
 engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate decision.
 
@@ -759,7 +768,7 @@ re-derived.
 - No wiring into `rusty_tls` before the seam item, and no default changes without the owner.
 - Every divergence from `ring` is listed and classified, as for Ed25519 (section 2, stage 2).
 
-### 13.4 Results for gaps 1 and 2 (2026-10-09; preliminary, not independently reviewed)
+### 13.4 Results for gaps 1 and 2 (2026-10-09; preliminary; covered by the owner-verified review, whose commit, method and findings are not recorded)
 
 **Gap 1, `rusty_rand`.** On Linux x86_64/aarch64 `fill` calls `getrandom(2)` with flags 0 through
 `rusty_libc` (blocks until the kernel pool is initialised; `strace` shows one 1 MiB call and no
