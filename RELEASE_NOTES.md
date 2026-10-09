@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_tls: live-internet check, first wiring candidate chosen
+
+- **Added (test, ignored by default):** `handrolled_live.rs` runs the native engine against real hosts and the rustls-backed stream side by side. **Result here: not evidence about Google.** This sandbox's egress gateway terminates TLS and re-signs with its own CA, so all ten hosts tried showed the gateway's server (TLS 1.3, X25519, `rsa_pss_rsae_sha256`). The engine matched rustls on all ten, which shows it works against a production-grade TLS 1.3 stack, nothing more.
+- **Decision recorded:** the first consumer to wire is `rleval-app`'s OIDC transport (optional `oidc` feature, one call site, sync, system trust, no ALPN or client certificates). Runner-up: `rusty_channel` `bot`. Not started: the engine selector in `rusty_tls`, the ADR superseding ADR-0002, and the evidence bar are the owner's.
+- **Known limitations:** a run on a machine with direct internet is still needed.
+
 ## 2026-10-09 - CI: cargo-deny and cargo-shear fixed on #572
 
 - **Fixed (CI):** `cargo-deny` failed on RUSTSEC-2025-0141 (bincode 1.3.3 unmaintained, no upgrade); `main` approved the exception in #575 and this branch keeps that single entry. `cargo-shear` failed on `rk-observe`, a dev-only use in `rk-kernel`; moved to `[dev-dependencies]` (and the now-dangling intra-doc link in `rk-kernel` made plain text). Both pass locally; `Cargo.lock` unchanged.
