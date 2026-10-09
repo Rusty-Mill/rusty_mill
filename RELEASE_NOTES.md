@@ -19,6 +19,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_bbp_host: proving-run runbook, README status, protoc pin
+
+- **Added:** `crates/apps/rusty_bbp_host/docs/proving-run.md` and `docs/proving/{brief.md,profiles.json,agents.json}`: how to run the first live Blackboard Protocol task end to end (build, throwaway target crate, open and assign, `bbp mod` in one shell and `bbp human` in another) and what to record afterwards, so the spec's post-proving-run questions get data rather than opinion.
+- **Changed:** the host README's stale "Not here yet" section (stages 3b and 3c, long merged) becomes "Status". The Windows `protoc` 36.2 zip in `setup-build-env` is checked against a pinned SHA-256 before `Expand-Archive`; a mismatch fails the step loudly.
+- **Known limitation:** the runbook's paths assume `/tmp/bbp` and a `nano` user; the sandboxed profile must list the toolchain's directories as read roots, and the target crate must build offline. Docs and CI only; no runtime code changed.
+
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
 - **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
