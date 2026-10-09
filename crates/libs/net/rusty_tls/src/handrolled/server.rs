@@ -430,6 +430,9 @@ impl ServerError {
                 ..
             }) => AlertDescription::ILLEGAL_PARAMETER,
             Self::BadAlert(_) => AlertDescription::DECODE_ERROR,
+            Self::ClientCertificateVerify(err) if err.is_scheme_refusal() => {
+                AlertDescription::ILLEGAL_PARAMETER
+            }
             Self::BadFinished | Self::ClientCertificateVerify(_) | Self::BadBinder => {
                 AlertDescription::DECRYPT_ERROR
             }
@@ -704,6 +707,10 @@ struct Negotiated {
     alpn: Option<Vec<u8>>,
     /// The `host_name` the client sent, if any.
     server_name: Option<String>,
+    group: NamedGroup,
+    retried: bool,
+    /// The scheme the client signed its CertificateVerify with, if it did.
+    peer_scheme: Option<SignatureScheme>,
 }
 
 /// The message a server will accept next from the client.
@@ -787,6 +794,8 @@ pub struct ServerHandshake<'a> {
     server_name: Option<String>,
     /// Whether `server_name` chose an identity, so the extension is answered.
     name_matched: bool,
+    /// True once a HelloRetryRequest has been sent.
+    retried: bool,
 }
 
 impl<'a> ServerHandshake<'a> {
@@ -807,6 +816,7 @@ impl<'a> ServerHandshake<'a> {
             },
             server_name: None,
             name_matched: false,
+            retried: false,
         }
     }
 
@@ -1463,6 +1473,7 @@ impl ServerHandshake<'_> {
         // this one. The real ServerHello later must not send a second.
         out.extend_from_slice(&plaintext_record(ContentType::ChangeCipherSpec, &[0x01])?);
 
+        self.retried = true;
         self.state = State::AwaitRetriedClientHello(Box::new(Retrying {
             group,
             suite,
@@ -1807,6 +1818,9 @@ impl ServerHandshake<'_> {
                 .is_some_and(offers_psk_dhe_ke),
             alpn: alpn.map(<[u8]>::to_vec),
             server_name: self.server_name.clone(),
+            group,
+            retried: self.retried,
+            peer_scheme: None,
         }));
         Ok(out)
     }
@@ -1909,6 +1923,7 @@ impl ServerHandshake<'_> {
                     self.state = State::Failed;
                     return Err(ServerError::ClientCertificateVerify(err));
                 }
+                negotiated.peer_scheme = Some(SignatureScheme(verify.scheme));
                 negotiated.transcript.add_message(message);
                 negotiated.expect = ExpectFromClient::Finished;
                 Ok(Vec::new())
@@ -1976,6 +1991,7 @@ impl ServerHandshake<'_> {
                 negotiated.client_certificates,
             )
             .with_alpn(negotiated.alpn)
+            .with_negotiation(negotiated.group, negotiated.retried, negotiated.peer_scheme)
             .with_exporter_secret(negotiated.exporter_secret)
             .with_server_name(negotiated.server_name),
         ));

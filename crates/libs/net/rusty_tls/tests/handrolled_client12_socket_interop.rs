@@ -166,6 +166,8 @@ struct Server {
     child: Child,
     port: u16,
     _files: Files,
+    /// Held open so `s_server` never meets a closed pipe when it logs.
+    _stdout: std::io::BufReader<std::process::ChildStdout>,
 }
 
 impl Drop for Server {
@@ -208,31 +210,42 @@ fn try_serve(pki: &Pki, extra: &[&str]) -> Result<Server, String> {
         .args(["-cert", &files.path("leaf.pem")])
         .args(["-cert_chain", &files.path("root.pem")])
         .args(["-key", &files.path("key.pem")])
-        .args(["-tls1_2", "-no_ticket", "-www", "-quiet"])
+        .args(["-tls1_2", "-no_ticket", "-www"])
         .args(extra)
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::from(
             std::fs::File::create(files.0.join("stderr.txt")).expect("stderr file"),
         ))
         .spawn()
         .expect("openssl s_server starts");
 
-    let mut server = Server {
+    let mut child = child;
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    // Without `-quiet`, `s_server` prints `ACCEPT` once it is listening. That
+    // is the readiness signal: probing with a connection is a handshake that
+    // never completes, which `s_server` does not always survive, and it showed
+    // as "connection refused" and "reset by peer" in the tests that followed.
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = std::io::BufRead::read_line(&mut stdout, &mut line)
+            .map_err(|e| format!("s_server output: {e}"))?;
+        if n == 0 {
+            let why = std::fs::read_to_string(files.0.join("stderr.txt")).unwrap_or_default();
+            return Err(format!(
+                "openssl s_server exited before listening on port {port}: {extra:?}\n{why}"
+            ));
+        }
+        if line.starts_with("ACCEPT") {
+            break;
+        }
+    }
+    Ok(Server {
         child,
         port,
         _files: files,
-    };
-    for _ in 0..100 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return Ok(server);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let why = std::fs::read_to_string(server._files.0.join("stderr.txt")).unwrap_or_default();
-    let status = server.child.try_wait().ok().flatten();
-    Err(format!(
-        "openssl s_server did not start on port {port} (exit {status:?}): {extra:?}\n{why}"
-    ))
+        _stdout: stdout,
+    })
 }
 
 fn read_record(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {

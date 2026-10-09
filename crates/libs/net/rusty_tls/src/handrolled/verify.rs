@@ -177,6 +177,22 @@ pub enum VerifyError {
     BadSignature,
 }
 
+impl VerifyError {
+    /// True when the *scheme* was the problem rather than the signature: one
+    /// refused on strength, not implemented, or barred from a handshake
+    /// signature. RFC 8446 section 4.4.3 has the receiver abort with
+    /// `illegal_parameter` for these, since the sender chose a scheme it was not
+    /// offered; a signature that simply does not verify is `decrypt_error`.
+    pub const fn is_scheme_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::WeakSignatureAlgorithm(_)
+                | Self::UnsupportedSignatureAlgorithm
+                | Self::CertificateOnlyScheme
+        )
+    }
+}
+
 impl core::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {

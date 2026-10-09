@@ -248,6 +248,9 @@ struct Hs {
     alpn: Option<Vec<u8>>,
     /// Whether the server answered `server_name`.
     name_acknowledged: bool,
+    /// The curve of the key exchange and the scheme the server signed it with.
+    group: Option<NamedGroup>,
+    peer_scheme: Option<SignatureScheme>,
     /// Set once the client flight is sent.
     established: Option<Established>,
 }
@@ -382,6 +385,8 @@ impl<'a> ClientHandshake12<'a> {
                     certificate_request: None,
                     alpn: None,
                     name_acknowledged: false,
+                    group: None,
+                    peer_scheme: None,
                     established: None,
                 },
                 buffer: Vec::new(),
@@ -785,6 +790,8 @@ impl<'a> ClientHandshake12<'a> {
         )?;
 
         self.hs.server_key = Some((group, ske.public.to_vec()));
+        self.hs.group = Some(group);
+        self.hs.peer_scheme = Some(scheme);
         self.phase = Phase::Expecting(Expect::CertificateRequestOrDone);
         Ok(())
     }
@@ -919,7 +926,8 @@ impl<'a> ClientHandshake12<'a> {
                 client_random: self.hs.client_random,
                 server_random: self.hs.server_random,
             })
-            .with_name_acknowledged(self.hs.name_acknowledged),
+            .with_name_acknowledged(self.hs.name_acknowledged)
+            .with_negotiation(self.hs.group, self.hs.peer_scheme),
         );
         self.phase = Phase::Done;
         Ok(())
@@ -989,6 +997,8 @@ pub struct Connection12 {
     name_acknowledged: bool,
     /// What RFC 5705 needs to derive keying material.
     exporter: Option<Exporter12>,
+    group: Option<NamedGroup>,
+    peer_scheme: Option<SignatureScheme>,
     closed: bool,
     failed: bool,
     /// Records that carried nothing, so they cannot go on for ever.
@@ -1013,6 +1023,8 @@ impl Connection12 {
             server_name: None,
             name_acknowledged: false,
             exporter: None,
+            group: None,
+            peer_scheme: None,
             closed: false,
             failed: false,
             noise: Noise::default(),
@@ -1027,6 +1039,32 @@ impl Connection12 {
     /// The application protocol ALPN selected, or `None` if none was.
     pub fn alpn_protocol(&self) -> Option<&[u8]> {
         self.alpn.as_deref()
+    }
+
+    pub(super) fn with_negotiation(
+        mut self,
+        group: Option<NamedGroup>,
+        peer_scheme: Option<SignatureScheme>,
+    ) -> Self {
+        self.group = group;
+        self.peer_scheme = peer_scheme;
+        self
+    }
+
+    /// The group of the ECDHE exchange this connection used.
+    pub const fn key_exchange_group(&self) -> NamedGroup {
+        match self.group {
+            Some(group) => group,
+            // Every completed handshake set it; the exchange is not optional.
+            None => NamedGroup::X25519,
+        }
+    }
+
+    /// The signature scheme the peer proved its key with: the server's
+    /// ServerKeyExchange signature, or a client's CertificateVerify. `None` when
+    /// a server saw no client certificate.
+    pub const fn peer_signature_scheme(&self) -> Option<SignatureScheme> {
+        self.peer_scheme
     }
 
     pub(super) fn with_exporter(mut self, exporter: Exporter12) -> Self {

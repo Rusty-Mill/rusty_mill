@@ -15,6 +15,7 @@ use rusty_tls::handrolled::limits::Flood;
 use rusty_tls::handrolled::path::PathError;
 use rusty_tls::handrolled::record::{ContentType, RecordError};
 use rusty_tls::handrolled::server::ServerError;
+use rusty_tls::handrolled::verify::VerifyError;
 
 fn alert(level: AlertLevel, description: u8) -> Alert {
     Alert {
@@ -102,6 +103,24 @@ fn what_a_client_tells_a_server() {
         (ClientError::NotTls13, Some(A::PROTOCOL_VERSION)),
         (ClientError::NonEmptyRequestContext, Some(A::DECODE_ERROR)),
         (ClientError::UnofferedAlpn, Some(A::ILLEGAL_PARAMETER)),
+        // RFC 8446 section 4.4.3: a scheme the peer should not have used is an
+        // illegal parameter; a signature that does not verify is a decrypt error.
+        (
+            ClientError::Verify(VerifyError::WeakSignatureAlgorithm("ecdsa_sha1")),
+            Some(A::ILLEGAL_PARAMETER),
+        ),
+        (
+            ClientError::Verify(VerifyError::CertificateOnlyScheme),
+            Some(A::ILLEGAL_PARAMETER),
+        ),
+        (
+            ClientError::Verify(VerifyError::UnsupportedSignatureAlgorithm),
+            Some(A::ILLEGAL_PARAMETER),
+        ),
+        (
+            ClientError::Verify(VerifyError::BadSignature),
+            Some(A::DECRYPT_ERROR),
+        ),
         (ClientError::NotTls12(0x0301), Some(A::PROTOCOL_VERSION)),
         (ClientError::DowngradeDetected, Some(A::ILLEGAL_PARAMETER)),
         // Authentication.
@@ -171,6 +190,14 @@ fn what_a_server_tells_a_client() {
         (
             ServerError::Handshake(HandshakeError::DuplicateKeyShare(0x001d)),
             Some(A::ILLEGAL_PARAMETER),
+        ),
+        (
+            ServerError::ClientCertificateVerify(VerifyError::CertificateOnlyScheme),
+            Some(A::ILLEGAL_PARAMETER),
+        ),
+        (
+            ServerError::ClientCertificateVerify(VerifyError::BadSignature),
+            Some(A::DECRYPT_ERROR),
         ),
         (
             ServerError::NoApplicationProtocol,

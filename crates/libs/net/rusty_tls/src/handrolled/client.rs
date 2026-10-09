@@ -567,6 +567,9 @@ impl ClientError {
                 AlertDescription::UNSUPPORTED_EXTENSION
             }
             Self::NotTls13 | Self::NotTls12(_) => AlertDescription::PROTOCOL_VERSION,
+            // A scheme the client never offered (RFC 8446 section 4.4.3) is an
+            // illegal parameter; a signature that does not verify is not.
+            Self::Verify(err) if err.is_scheme_refusal() => AlertDescription::ILLEGAL_PARAMETER,
             Self::BadFinished | Self::Verify(_) => AlertDescription::DECRYPT_ERROR,
             Self::Path(err) => path_alert(err),
             Self::MissingExtendedMasterSecret
@@ -1003,6 +1006,11 @@ struct Negotiated {
     alpn: Option<Vec<u8>>,
     /// Whether the server answered `server_name` (RFC 6066 section 3).
     name_acknowledged: bool,
+    /// The group the key exchange used, and whether a HelloRetryRequest chose it.
+    group: NamedGroup,
+    retried: bool,
+    /// The scheme the server signed its CertificateVerify with.
+    peer_scheme: Option<SignatureScheme>,
 }
 
 enum State {
@@ -1726,6 +1734,7 @@ impl ClientHandshake<'_> {
         // why this one line is worth pointing at — it is the whole difference,
         // and a resumed handshake that took the `new` branch would fail its
         // Finished with no hint that a PSK was involved.
+        let used_group = kx.group();
         let schedule = kx.agree(peer_key, |secret| {
             match resumed {
                 Some(session) => KeySchedule::new_with_psk(hash, session.psk()),
@@ -1770,6 +1779,9 @@ impl ClientHandshake<'_> {
                 resumed: resumed.is_some(),
                 alpn: None,
                 name_acknowledged: false,
+                group: used_group,
+                retried,
+                peer_scheme: None,
             }),
         };
         Ok(Vec::new())
@@ -2099,6 +2111,7 @@ impl ClientHandshake<'_> {
                 let State::InFlight { expect, negotiated } = &mut self.state else {
                     return Err(ClientError::Failed);
                 };
+                negotiated.peer_scheme = Some(SignatureScheme(verify.scheme));
                 negotiated.transcript.add_message(message);
                 *expect = Expect::Finished;
                 Ok(Vec::new())
@@ -2281,6 +2294,9 @@ impl ClientHandshake<'_> {
             alpn: negotiated.alpn,
             server_name: None,
             name_acknowledged: negotiated.name_acknowledged,
+            group: negotiated.group,
+            retried: negotiated.retried,
+            peer_scheme: negotiated.peer_scheme,
             resumption_master,
             noise: Noise::default(),
         }));
@@ -2313,6 +2329,12 @@ pub struct Connection {
     server_name: Option<String>,
     /// On a client connection, whether the server answered its `server_name`.
     name_acknowledged: bool,
+    /// The group the key exchange used.
+    group: NamedGroup,
+    /// Whether a HelloRetryRequest chose that group.
+    retried: bool,
+    /// The scheme the peer signed its CertificateVerify with, if it sent one.
+    peer_scheme: Option<SignatureScheme>,
     /// `res master`, from which a ticket's PSK is derived.
     ///
     /// Empty for a connection built by the server half, which does not issue
@@ -2447,6 +2469,9 @@ impl Connection {
             alpn: None,
             server_name: None,
             name_acknowledged: false,
+            group: NamedGroup::X25519,
+            retried: false,
+            peer_scheme: None,
             // The server half does not issue tickets, so it has no resumption
             // secret to hand out. See the field's own docs.
             resumption_master: Vec::new(),
@@ -2482,6 +2507,25 @@ impl Connection {
         self.alpn.as_deref()
     }
 
+    /// The key exchange group this connection used.
+    pub const fn key_exchange_group(&self) -> NamedGroup {
+        self.group
+    }
+
+    /// True if a HelloRetryRequest was needed to agree the group, which costs a
+    /// round trip: a client that offered a share for a group the server does
+    /// not use, or a server that was offered none it could use.
+    pub const fn used_hello_retry_request(&self) -> bool {
+        self.retried
+    }
+
+    /// The signature scheme the peer proved its certificate with: a server's
+    /// CertificateVerify, or a client's if it authenticated. `None` on a
+    /// resumed connection or when the peer sent no certificate.
+    pub const fn peer_signature_scheme(&self) -> Option<SignatureScheme> {
+        self.peer_scheme
+    }
+
     /// Derive keying material both ends of this connection can compute and no
     /// one else can (RFC 8446 section 7.5), filling `out`.
     ///
@@ -2514,6 +2558,18 @@ impl Connection {
     /// whether or not a certificate was chosen by it. Always `None` on a client.
     pub fn server_name(&self) -> Option<&str> {
         self.server_name.as_deref()
+    }
+
+    pub(super) fn with_negotiation(
+        mut self,
+        group: NamedGroup,
+        retried: bool,
+        peer_scheme: Option<SignatureScheme>,
+    ) -> Self {
+        self.group = group;
+        self.retried = retried;
+        self.peer_scheme = peer_scheme;
+        self
     }
 
     pub(super) fn with_exporter_secret(mut self, secret: Vec<u8>) -> Self {

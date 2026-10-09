@@ -538,6 +538,37 @@ Not done: no early exporter (`ExportEarlyKeyingMaterial`, 0-RTT is refused); no 
 `tls-exporter` channel-binding wrappers on top (RFC 9266's `tls-exporter` is one call to this with label
 `EXPORTER-Channel-Binding` and an empty context, which an application can make today).
 
+## Stage 14: what a finished handshake reports, and one alert fixed
+
+`key_exchange_group()`, `used_hello_retry_request()` (TLS 1.3 only; always false in 1.2) and
+`peer_signature_scheme()` on `Connection`, `Connection12` and `Established`: the curve that protected the
+connection, whether the handshake paid for a HelloRetryRequest, and what the peer signed with (a server's
+CertificateVerify or ServerKeyExchange signature; a client's CertificateVerify when it authenticated). The
+scheme is `None` on a resumed connection and when no client certificate was sent: nothing was proved on this
+connection, and carrying the original scheme would add a field to the ticket format (a change to every
+ticket already issued), which this stage does not do.
+
+One alert was wrong, found by the newly runnable BoGo cases. When a peer signed its CertificateVerify with a
+scheme it should not have used (SHA-1, an implemented-but-handshake-barred `rsa_pkcs1_*`, an unsupported
+one), the engine answered `decrypt_error`. RFC 8446 section 4.4.3 says `illegal_parameter`: the peer chose a
+scheme it was not offered. `VerifyError::is_scheme_refusal` separates that from a signature that simply
+does not verify (still `decrypt_error`); applied on both roles.
+
+| Gate | Result |
+| --- | --- |
+| Live rustls, both versions | The group agrees with `negotiated_key_exchange_group()` for X25519, P-256 and P-384 in both roles; a HelloRetryRequest is reported by us and by rustls, from either end, and not at all in a handshake that did not need one or in TLS 1.2. |
+| Peer scheme | P-256, P-384 and Ed25519 keys report `ecdsa_secp256r1_sha256`, `ecdsa_secp384r1_sha384` and `ed25519`, as client and as server (with client authentication), in both versions; `None` with no client certificate. |
+| Mutation | 15 deliberate bugs (the group, the retry flag, the scheme and the connection's copy of them on each of the four handshake paths; and the four alert-mapping decisions): all caught. |
+| BoGo | **861 passed, 0 failed** (was 820), 455 disabled. `-expect-curve-id`, `-expect-hrr`, `-expect-no-hrr` and `-expect-peer-signature-algorithm` now run. |
+
+Disabled by name, with the reasons in `config.json`: resumed connections report no peer scheme (above);
+BoringSSL always selects its own preferred group and pays a retry for it, where this engine accepts a usable
+share it was sent (RFC 8446 section 4.2.8 allows both); BoringSSL leaves Ed25519 out of its default verify
+preferences; P-521, ML-DSA and SHA-1 are not implemented or are refused.
+
+Not done: the peer scheme is not kept across resumption (needs a ticket-format change and an owner decision);
+no accessor for the cipher suite's group list or the client's offered groups.
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could

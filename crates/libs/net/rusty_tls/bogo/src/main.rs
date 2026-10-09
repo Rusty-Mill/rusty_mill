@@ -144,6 +144,11 @@ struct Config {
     export_label: Vec<u8>,
     export_context: Vec<u8>,
     use_export_context: bool,
+    /// `-expect-curve-id`, `-expect-hrr` / `-expect-no-hrr`,
+    /// `-expect-peer-signature-algorithm`: facts the connection must report.
+    expect_curve: Option<u16>,
+    expect_hrr: Option<bool>,
+    expect_peer_scheme: Option<u16>,
 }
 
 const TLS12: u16 = 0x0303;
@@ -213,6 +218,12 @@ fn parse_args(index: usize) -> Config {
             "-export-label" => cfg.export_label = value("-export-label").into_bytes(),
             "-export-context" => cfg.export_context = value("-export-context").into_bytes(),
             "-use-export-context" => cfg.use_export_context = true,
+            "-expect-curve-id" => cfg.expect_curve = value("-expect-curve-id").parse().ok(),
+            "-expect-hrr" => cfg.expect_hrr = Some(true),
+            "-expect-no-hrr" => cfg.expect_hrr = Some(false),
+            "-expect-peer-signature-algorithm" => {
+                cfg.expect_peer_scheme = value("-expect-peer-signature-algorithm").parse().ok();
+            }
             "-expect-server-name" => cfg.expect_server_name = Some(value("-expect-server-name")),
             "-verify-peer" => cfg.verify_peer = true,
             "-require-any-client-certificate" => cfg.require_client_cert = true,
@@ -603,6 +614,25 @@ fn expect_version(config: &Config, connection: &Established) {
         if want != got {
             fail(format!(
                 "wrong version: expected {want:#06x}, negotiated {got:#06x}"
+            ));
+        }
+    }
+    if let Some(want) = config.expect_curve {
+        let got = connection.key_exchange_group().as_u16();
+        if want != got {
+            fail(format!("wrong curve: expected {want}, used {got}"));
+        }
+    }
+    if let Some(want) = config.expect_hrr {
+        if want != connection.used_hello_retry_request() {
+            fail(format!("expected a HelloRetryRequest: {want}"));
+        }
+    }
+    if let Some(want) = config.expect_peer_scheme {
+        let got = connection.peer_signature_scheme().map(|scheme| scheme.0);
+        if got != Some(want) {
+            fail(format!(
+                "wrong peer signature algorithm: expected {want:#06x}, got {got:x?}"
             ));
         }
     }

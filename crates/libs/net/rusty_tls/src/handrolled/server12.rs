@@ -168,6 +168,9 @@ struct Hs {
     alpn: Option<Vec<u8>>,
     /// The `host_name` the client sent, if any.
     server_name: Option<String>,
+    /// The curve chosen, and the scheme a client authenticated with.
+    group: Option<NamedGroup>,
+    peer_scheme: Option<SignatureScheme>,
     /// Set once `ClientKeyExchange` has been processed.
     established: Option<Established>,
 }
@@ -275,6 +278,8 @@ impl<'a> ServerHandshake12<'a> {
                 client_certificates: Vec::new(),
                 alpn: None,
                 server_name: None,
+                group: None,
+                peer_scheme: None,
                 established: None,
             },
             buffer: Vec::new(),
@@ -570,6 +575,7 @@ impl<'a> ServerHandshake12<'a> {
             .copied()
             .find(|g| client_groups.contains(&g.as_u16()))
             .ok_or(ServerError::NoSharedGroup)?;
+        self.hs.group = Some(group);
 
         // 4. The flight.
         let mut random = random_bytes(RANDOM_LEN)?;
@@ -755,6 +761,7 @@ impl<'a> ServerHandshake12<'a> {
         )
         .map_err(ServerError::ClientCertificateVerify)?;
 
+        self.hs.peer_scheme = Some(SignatureScheme(verify.scheme));
         self.hs.transcript.extend_from_slice(msg.encoded);
         self.phase = Phase::Expecting(Expect::ChangeCipherSpec);
         Ok(())
@@ -813,6 +820,7 @@ impl<'a> ServerHandshake12<'a> {
                 client_random: self.hs.client_random,
                 server_random: self.hs.server_random,
             })
+            .with_negotiation(self.hs.group, self.hs.peer_scheme)
             .with_server_name(self.hs.server_name.take()),
         );
         self.phase = Phase::Done;

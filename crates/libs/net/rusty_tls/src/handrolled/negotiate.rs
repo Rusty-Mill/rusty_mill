@@ -61,11 +61,13 @@ use super::client12::{
 };
 use super::handshake::{complete_prefix, extension, find, messages, HandshakeType};
 use super::handshake12::{ClientHello12, ServerHello12};
+use super::kx::NamedGroup;
 use super::limits::Noise;
 use super::record::ContentType;
 use super::record12::split;
 use super::server::{ServerConfig, ServerError, ServerHandshake};
 use super::server12::{ServerConfig12, ServerHandshake12};
+use super::verify::SignatureScheme;
 
 /// `TLS_FALLBACK_SCSV`, RFC 7507 §3.
 const FALLBACK_SCSV: u16 = 0x5600;
@@ -120,6 +122,30 @@ impl Established {
         match self {
             Self::Tls13(connection) => connection.export_keying_material(label, context, out),
             Self::Tls12(connection) => connection.export_keying_material(label, context, out),
+        }
+    }
+
+    /// The key exchange group this connection used, whichever version.
+    pub fn key_exchange_group(&self) -> NamedGroup {
+        match self {
+            Self::Tls13(connection) => connection.key_exchange_group(),
+            Self::Tls12(connection) => connection.key_exchange_group(),
+        }
+    }
+
+    /// True if a HelloRetryRequest was needed (TLS 1.3 only).
+    pub fn used_hello_retry_request(&self) -> bool {
+        match self {
+            Self::Tls13(connection) => connection.used_hello_retry_request(),
+            Self::Tls12(_) => false,
+        }
+    }
+
+    /// The signature scheme the peer proved its key with, whichever version.
+    pub fn peer_signature_scheme(&self) -> Option<SignatureScheme> {
+        match self {
+            Self::Tls13(connection) => connection.peer_signature_scheme(),
+            Self::Tls12(connection) => connection.peer_signature_scheme(),
         }
     }
 
