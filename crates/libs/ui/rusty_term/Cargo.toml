@@ -43,10 +43,10 @@ rusty_dirs = { workspace = true }
 rusty_hex = { workspace = true }
 rusty_base64 = { workspace = true }
 rusty_atomic_file = { workspace = true }
-libc = "0.2.186"
+libc = { workspace = true }
 parking_lot = "0.12"
-unicode-width = "0.2"
-unicode-segmentation = "1"
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "net",

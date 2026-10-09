@@ -17,11 +17,11 @@ layer = "libs"
 
 [dependencies]
 rusty_multimodal_db_engine = { workspace = true }
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 # Deterministic ids (`fair_play_id`): SHA-256 over a namespaced key, the
 # `entity_id` recipe rusty_multimodal_db uses (ADR-0042).
 sha2 = "0.10"
-thiserror = "1"
+thiserror = { workspace = true }
 uuid = { version = "1", default-features = false, features = ["std", "serde"] }
 
 # `tests/fair_play_crash.rs` spawns this and SIGKILLs it mid-split.
