@@ -19,5 +19,9 @@ panic = "warn"
 rb_domain = { path = "../rb_domain" }
 rb_physics_bullet = { path = "../rb_physics_bullet" }
 
+[dev-dependencies]
+# Only the match-log example reads JSON; serde_json is already in the workspace (rb_scenario).
+serde_json = "1"
+
 [package.metadata.rusty_mill]
 layer = "apps"

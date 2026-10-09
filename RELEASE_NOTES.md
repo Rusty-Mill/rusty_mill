@@ -20,6 +20,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_bullet: import `claude/funny-clarke-tef4d0` (pending review)
+
+- **Changed:** brings in the 4 commits of the source repo's `claude/funny-clarke-tef4d0` branch (docs on the hit-tick and landing investigations, the `bot-focus-and-automation` prompt, one `rb_env` characterisation test of an inverted car's wheels against a fast ball) through the same `git filter-repo` rewrite, merged with history. 4 new lines in the SHA map.
+- **Changed:** one conflict, in `rb_env/src/lib.rs`: both sides added tests after the same line; both kept.
+- **Known limitation:** `claude/rocket-league-server-clone-u74q45` (49 commits, +82k lines) is deliberately not imported: it forked on Sept 4, reuses FR-079 to FR-094 for different findings than `main`'s, has no counterpart for `main`'s wheel-ray grounding, and carries 35 MiB of raw capture fixtures. It stays readable in the source repo once archived.
+
+---
+
 ## 2026-10-09 - rusty_bbp stage 3c: moderator loop and master secret (pending review)
 
 - **Added:** `bbp mod`, the moderator loop: one agent harness per granted turn with a per-turn MCP config, the runner per selected run, deadlines, forfeit on early exit, until the task closes. One moderator per task; a restart aborts the turn it cannot see so the old invocation is fenced; harnesses die with their process group on every exit path; the runner runs on its own thread so cancellation is honoured mid-profile. Tokens and run secrets are keyed by a per-directory master secret that never enters the log and is created with a single winner.
@@ -47,6 +55,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 - **Added:** `rusty_bbp::codec` and two `Driver` boundary checks: a referenced blob must already be stored, and the claimed typed payload must equal what the bytes decode to. Closes the two compliance gaps found when ChatGPT's implementation-plan review was reassessed against the built code.
 - **Changed:** the `spec` artifact's on-disk shape is now JSON with `brief` and `markdown`, so its payload is derivable. Test fixtures encode through `codec`.
+
+---
+
+## 2026-10-08 - rusty_bullet catch-up: match flow (pending review)
+
+- **Changed:** brings in the 7 `baileyrd/rusty_bullet` commits (PRs #315-#317) pushed after the original import: `rb_env` match clock, overtime, match end and first-kickoff intro (FR-160), a whole-match check against game logs, scripted chasers and the `play_match` example, plus the matching ADR 0082 / parity-plan / spec updates and `rb_tape_bot` log tooling. Same `git filter-repo` rewrite, deterministic, so the already imported commits keep their SHAs and only these 7 come across; the new SHA map lines are appended to `docs/research/rl-migration/rusty_bullet-commit-map.txt`.
+- **Changed:** `rb_env` gains a `serde_json` dev-dependency (one `Cargo.lock` line, no new packages).
+- **Known limitation:** `claude/funny-clarke-tef4d0` and `claude/rocket-league-server-clone-u74q45` in the source repo are still not imported.
 
 ---
 
