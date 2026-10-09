@@ -28,7 +28,9 @@ use rusty_tls::handrolled::client::{
     CipherSuite, ClientConfig, ClientError, ClientHandshake, ClientIdentity, Incoming, Resumption,
     Session,
 };
-use rusty_tls::handrolled::client12::{CipherSuite12, ClientConfig12, ClientHandshake12, Incoming12};
+use rusty_tls::handrolled::client12::{
+    CipherSuite12, ClientConfig12, ClientHandshake12, Incoming12,
+};
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
 use rusty_tls::handrolled::negotiate::{
@@ -36,9 +38,9 @@ use rusty_tls::handrolled::negotiate::{
 };
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
 use rusty_tls::handrolled::server::{ClientAuth, ServerConfig, ServerHandshake, Tickets};
-use rusty_tls::handrolled::ticket::{TicketKey, TicketKeys};
 use rusty_tls::handrolled::server12::{ServerConfig12, ServerHandshake12};
 use rusty_tls::handrolled::sign::SigningKey;
+use rusty_tls::handrolled::ticket::{TicketKey, TicketKeys};
 use rusty_tls::handrolled::x509::Certificate;
 
 /// The exit status the runner reads as "this shim cannot do that".
@@ -64,7 +66,11 @@ fn unimplemented(why: &str) -> ! {
     // Which flags keep tests out of the run is the question that decides what
     // to build next, so a run can be asked to record it.
     if let Ok(path) = std::env::var("BOGO_UNIMPLEMENTED_LOG") {
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(file, "{why}");
         }
     }
@@ -183,7 +189,10 @@ fn parse_args(index: usize) -> Config {
 /// engine, so a scenario that needs it is skipped.
 fn versions(config: &Config) -> (bool, bool) {
     let allowed = |v: u16, off: bool| !off && config.min_version <= v && v <= config.max_version;
-    (allowed(TLS12, config.no_tls[2]), allowed(TLS13, config.no_tls[3]))
+    (
+        allowed(TLS12, config.no_tls[2]),
+        allowed(TLS13, config.no_tls[3]),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -217,8 +226,8 @@ fn base64(text: &str) -> Vec<u8> {
 fn pem_blocks(path: &str) -> Vec<(String, Vec<u8>)> {
     // A scenario whose credential has no file (a deliberately unparseable
     // certificate, say) cannot be expressed through the engine's API.
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| unimplemented(&format!("{path}: {e}")));
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| unimplemented(&format!("{path}: {e}")));
     let mut out = Vec::new();
     let mut label = None::<String>;
     let mut body = String::new();
@@ -247,7 +256,10 @@ fn signing_key(path: &str) -> SigningKey {
         fail("no key in the key file")
     };
     let head = &der[..der.len().min(64)];
-    let key = if contains(head, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01]) {
+    let key = if contains(
+        head,
+        &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01],
+    ) {
         SigningKey::rsa(&der)
     } else if contains(head, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]) {
         SigningKey::ecdsa_p256(&der)
@@ -294,7 +306,8 @@ fn connect(config: &Config) -> TcpStream {
     } else {
         format!("127.0.0.1:{}", config.port)
     };
-    let mut stream = TcpStream::connect(&address).unwrap_or_else(|e| fail(format!("connect {address}: {e}")));
+    let mut stream =
+        TcpStream::connect(&address).unwrap_or_else(|e| fail(format!("connect {address}: {e}")));
     stream
         .write_all(&config.shim_id.to_le_bytes())
         .unwrap_or_else(|e| fail(e));
@@ -365,12 +378,28 @@ macro_rules! machine {
     };
 }
 
-machine!(ServerSide, ServerHandshakeBoth, |m| m.into_connection().map_err(|e| e.to_string()));
-machine!(ClientSide, ClientHandshakeBoth, |m| m.into_connection().map_err(|e| e.to_string()));
-machine!(Server13, ServerHandshake, |m| m.into_connection().map(Established::Tls13).map_err(|e| e.to_string()));
-machine!(Server12, ServerHandshake12, |m| m.into_connection().map(Established::Tls12).map_err(|e| e.to_string()));
-machine!(Client13, ClientHandshake, |m| m.into_connection().map(Established::Tls13).map_err(|e| e.to_string()));
-machine!(Client12, ClientHandshake12, |m| m.into_connection().map(Established::Tls12).map_err(|e| e.to_string()));
+machine!(ServerSide, ServerHandshakeBoth, |m| m
+    .into_connection()
+    .map_err(|e| e.to_string()));
+machine!(ClientSide, ClientHandshakeBoth, |m| m
+    .into_connection()
+    .map_err(|e| e.to_string()));
+machine!(Server13, ServerHandshake, |m| m
+    .into_connection()
+    .map(Established::Tls13)
+    .map_err(|e| e.to_string()));
+machine!(Server12, ServerHandshake12, |m| m
+    .into_connection()
+    .map(Established::Tls12)
+    .map_err(|e| e.to_string()));
+machine!(Client13, ClientHandshake, |m| m
+    .into_connection()
+    .map(Established::Tls13)
+    .map_err(|e| e.to_string()));
+machine!(Client12, ClientHandshake12, |m| m
+    .into_connection()
+    .map(Established::Tls12)
+    .map_err(|e| e.to_string()));
 
 fn run_handshake(stream: &mut TcpStream, mut handshake: Box<dyn Handshake + '_>) -> Established {
     while !handshake.is_finished() {
@@ -510,7 +539,9 @@ fn expect_version(config: &Config, connection: &Established) {
     };
     if let Some(want) = config.expect_version {
         if want != got {
-            fail(format!("wrong version: expected {want:#06x}, negotiated {got:#06x}"));
+            fail(format!(
+                "wrong version: expected {want:#06x}, negotiated {got:#06x}"
+            ));
         }
     }
 }
@@ -520,7 +551,10 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
         .cert_file
         .as_deref()
         .unwrap_or_else(|| unimplemented("a server scenario without a certificate"));
-    let key_file = config.key_file.as_deref().unwrap_or_else(|| unimplemented("no key"));
+    let key_file = config
+        .key_file
+        .as_deref()
+        .unwrap_or_else(|| unimplemented("no key"));
     let chain = certificates(cert);
     let key = signing_key(key_file);
 
@@ -540,8 +574,10 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
         .iter()
         .map(|der| Certificate::parse(der).unwrap_or_else(|e| fail(format!("trust anchor: {e}"))))
         .collect();
-    let client_anchors: Vec<TrustAnchor<'_>> =
-        client_parsed.iter().map(TrustAnchor::from_certificate).collect();
+    let client_anchors: Vec<TrustAnchor<'_>> = client_parsed
+        .iter()
+        .map(TrustAnchor::from_certificate)
+        .collect();
     let auth = ClientAuth {
         anchors: &client_anchors,
         path: path_options(),
@@ -642,6 +678,7 @@ fn connect_client(
         path: path_options(),
         groups: groups(config),
         cipher_suites: CipherSuite12::SUPPORTED,
+        identity: identity.as_ref(),
     };
     let tls13_single = tls13_config();
     let both = ClientConfigBoth::new(tls13_config(), CipherSuite12::SUPPORTED);

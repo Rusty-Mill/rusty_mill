@@ -87,6 +87,10 @@ struct Pki {
     root_pem: String,
     leaf_pem: String,
     key_pem: String,
+    /// The leaf then the root, DER, and the leaf's key as PKCS#8: what a client
+    /// presenting this certificate needs.
+    chain: Vec<Vec<u8>>,
+    pkcs8: Vec<u8>,
 }
 
 fn pki(leaf: Leaf, name: &str) -> Pki {
@@ -123,6 +127,8 @@ fn pki(leaf: Leaf, name: &str) -> Pki {
         root_pem: root.pem(),
         leaf_pem: leaf_cert.pem(),
         key_pem: leaf_key.serialize_pem(),
+        chain: vec![leaf_cert.der().to_vec(), root.der().to_vec()],
+        pkcs8: leaf_key.serialize_der(),
     }
 }
 
@@ -301,6 +307,7 @@ fn run(
         path: options(),
         groups,
         cipher_suites: suites,
+        identity: None,
     };
     talk(server.port, &config)
 }
@@ -487,6 +494,8 @@ fn ed25519_via_openssl() -> (Pki, i64) {
             root_pem: pem.clone(),
             leaf_pem: pem,
             key_pem,
+            chain: Vec::new(),
+            pkcs8: Vec::new(),
         },
         now,
     )
@@ -515,6 +524,7 @@ fn ed25519_is_verified_against_openssl() {
         },
         groups: ALL_GROUPS,
         cipher_suites: CipherSuite12::SUPPORTED,
+        identity: None,
     };
     let reply = talk(server.port, &config).unwrap_or_else(|e| panic!("{e:?}"));
     assert!(reply.response.contains("TLSv1.2"), "{}", reply.response);
@@ -572,6 +582,60 @@ fn a_certificate_request_is_answered_with_none() {
     );
 }
 
+/// A required client certificate is satisfied: OpenSSL, run with `-Verify 1`
+/// against the client's own CA, completes the handshake only if it received a
+/// chain that verifies and a `CertificateVerify` that proves the key.
+#[test]
+#[ignore = "needs the openssl binary; CI runs it with --ignored"]
+fn a_required_client_certificate_is_presented_and_accepted() {
+    use rusty_tls::handrolled::client::ClientIdentity;
+    use rusty_tls::handrolled::sign::SigningKey;
+
+    for leaf in [Leaf::P256, Leaf::P384, Leaf::Rsa] {
+        let server_pki = pki(Leaf::P256, SERVER);
+        let client_pki = pki(leaf, "client.example");
+        let key = match leaf {
+            Leaf::P256 => SigningKey::ecdsa_p256(&client_pki.pkcs8),
+            Leaf::P384 => SigningKey::ecdsa_p384(&client_pki.pkcs8),
+            Leaf::Rsa => SigningKey::rsa(&client_pki.pkcs8),
+        }
+        .expect("the client key loads");
+        let identity = ClientIdentity {
+            certificates: &client_pki.chain,
+            key: &key,
+        };
+
+        let client_root = std::env::temp_dir().join(format!(
+            "rusty_tls_client12_clientca_{}_{}.pem",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&client_root, &client_pki.root_pem).expect("client CA");
+        let server = serve(
+            &server_pki,
+            &["-Verify", "1", "-CAfile", &client_root.to_string_lossy()],
+        );
+
+        let anchors = anchors(&server_pki);
+        let config = ClientConfig12 {
+            server_name: ServerName::Dns(SERVER),
+            anchors: &anchors,
+            path: options(),
+            groups: ALL_GROUPS,
+            cipher_suites: CipherSuite12::SUPPORTED,
+            identity: Some(&identity),
+        };
+        let reply = talk(server.port, &config);
+        let _ = std::fs::remove_file(&client_root);
+        let reply = reply.unwrap_or_else(|e| panic!("{leaf:?}: {e:?}"));
+        assert!(
+            reply.response.starts_with("HTTP/1.0 200 ok"),
+            "{leaf:?}: {}",
+            reply.response
+        );
+    }
+}
+
 #[test]
 #[ignore = "needs the openssl binary; CI runs it with --ignored"]
 fn a_tls13_only_openssl_refuses_with_a_protocol_version_alert() {
@@ -606,6 +670,7 @@ fn a_tls13_only_openssl_refuses_with_a_protocol_version_alert() {
             path: options(),
             groups: ALL_GROUPS,
             cipher_suites: CipherSuite12::SUPPORTED,
+            identity: None,
         };
         let outcome = talk(port, &config);
         let _ = child.kill();

@@ -236,6 +236,7 @@ fn config<'a>(
         path: options(),
         groups,
         cipher_suites: suites,
+        identity: None,
     }
 }
 
@@ -548,6 +549,70 @@ fn a_client_certificate_request_is_answered_with_an_empty_certificate() {
     );
 }
 
+/// A client identity is presented and proven: rustls, requiring a client
+/// certificate, accepts the chain and the `CertificateVerify` made over the
+/// 1.2 transcript, for each key type this client can sign with.
+///
+/// The server verifies the signature itself, so a wrong transcript, a wrong
+/// scheme or a wrong position of the message in the flight fails here and
+/// not in a comment.
+#[test]
+fn a_client_identity_is_presented_and_proven_to_rustls() {
+    use rusty_tls::handrolled::client::ClientIdentity;
+    use rusty_tls::handrolled::sign::SigningKey;
+
+    for leaf in [Leaf::P256, Leaf::P384, Leaf::Ed25519, Leaf::Rsa] {
+        let server_pki = pki(Leaf::P256, SERVER);
+        let client_pki = pki(leaf, "client.example");
+        let key = match leaf {
+            Leaf::P256 => SigningKey::ecdsa_p256(&client_pki.leaf_pkcs8),
+            Leaf::P384 => SigningKey::ecdsa_p384(&client_pki.leaf_pkcs8),
+            Leaf::Ed25519 => SigningKey::ed25519(&client_pki.leaf_pkcs8),
+            Leaf::Rsa => SigningKey::rsa(&client_pki.leaf_pkcs8),
+        }
+        .expect("the client key loads");
+        let chain: Vec<Vec<u8>> = client_pki.chain.iter().map(|c| c.to_vec()).collect();
+        let identity = ClientIdentity {
+            certificates: &chain,
+            key: &key,
+        };
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(client_pki.chain[1].clone()).expect("root");
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .expect("verifier");
+        let server_config =
+            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(server_pki.chain.clone(), server_pki.key.clone_key())
+                .expect("config");
+        let server = rustls::ServerConnection::new(Arc::new(server_config)).expect("server");
+
+        let anchors = [anchor(&server_pki.root_der)];
+        let mut cfg = config(
+            SERVER,
+            &anchors,
+            &[NamedGroup::X25519],
+            CipherSuite12::SUPPORTED,
+        );
+        cfg.identity = Some(&identity);
+
+        let mut established = handshake_against(server, &cfg, |_, r| Some(r))
+            .unwrap_or_else(|e| panic!("{leaf:?}: the handshake failed: {e}"));
+        assert_eq!(
+            established.server.peer_certificates().map(<[_]>::to_vec),
+            Some(client_pki.chain.clone()),
+            "{leaf:?}: rustls did not see the chain this client sent"
+        );
+        assert_eq!(
+            client_to_server(&mut established, b"authenticated"),
+            b"authenticated",
+            "{leaf:?}: no data after the handshake"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // What the client sends
 // ---------------------------------------------------------------------------
@@ -568,6 +633,7 @@ mod hello {
                 NamedGroup::SecP384R1,
             ],
             cipher_suites: CipherSuite12::SUPPORTED,
+            identity: None,
         };
         let (_, record) = ClientHandshake12::start(&cfg).expect("starts");
         assert_eq!(record[0], 22, "a handshake record");
@@ -653,6 +719,7 @@ mod hello {
             path: options(),
             groups: &[NamedGroup::X25519],
             cipher_suites: &[],
+            identity: None,
         };
         assert!(ClientHandshake12::start(&no_suites).is_err());
         let no_groups = ClientConfig12 {
@@ -661,6 +728,7 @@ mod hello {
             path: options(),
             groups: &[],
             cipher_suites: CipherSuite12::SUPPORTED,
+            identity: None,
         };
         assert!(ClientHandshake12::start(&no_groups).is_err());
         // A value that is not a suite this client implements cannot be offered.
@@ -669,7 +737,8 @@ mod hello {
             anchors: &anchors,
             path: options(),
             groups: &[NamedGroup::X25519],
-            cipher_suites: &[CipherSuite12(0x002f)], // TLS_RSA_WITH_AES_128_CBC_SHA
+            cipher_suites: &[CipherSuite12(0x002f)], // TLS_RSA_WITH_AES_128_CBC_SHA,
+            identity: None,
         };
         assert_eq!(
             ClientHandshake12::start(&bogus).err(),
@@ -850,6 +919,11 @@ mod fake {
         pub client_finished_ok: Option<bool>,
         /// The handshake message types in the client's second flight.
         pub client_types: Vec<HandshakeType>,
+        /// The certificate chain the client sent, if it sent a Certificate.
+        pub client_chain: Vec<Vec<u8>>,
+        /// Whether the client's CertificateVerify verified over the transcript
+        /// before it, under the leaf of the chain it sent; `None` if it sent none.
+        pub client_certificate_verified: Option<bool>,
     }
 
     pub fn signer_for(leaf: Leaf, pkcs8: &[u8]) -> (SigningKey, u16) {
@@ -893,6 +967,8 @@ mod fake {
                 opener: None,
                 client_finished_ok: None,
                 client_types: Vec::new(),
+                client_chain: Vec::new(),
+                client_certificate_verified: None,
             }
         }
 
@@ -1010,6 +1086,7 @@ mod fake {
                 self.transcript.extend_from_slice(m.encoded);
             }
             self.client_types = msgs.iter().map(|m| m.typ).collect();
+            self.check_client_identity(&msgs);
             let client_public = parse_client_key_exchange(cke.body)
                 .expect("parses")
                 .to_vec();
@@ -1020,7 +1097,17 @@ mod fake {
                 .expect("server key")
                 .agree(&client_public, |s| s.to_vec())
                 .expect("agrees");
-            let session_hash = self.hash.hash(&self.transcript);
+            // RFC 7627: the session hash ends at the ClientKeyExchange, so a
+            // CertificateVerify after it is not in it.
+            let after_cke: usize = msgs
+                .iter()
+                .skip_while(|m| m.typ != HandshakeType::ClientKeyExchange)
+                .skip(1)
+                .map(|m| m.encoded.len())
+                .sum();
+            let session_hash = self
+                .hash
+                .hash(&self.transcript[..self.transcript.len() - after_cke]);
             let master = extended_master_secret(self.hash, &pms, &session_hash).expect("ems");
             let kb = key_block(
                 self.hash,
@@ -1049,6 +1136,49 @@ mod fake {
             self.transcript.extend_from_slice(&opened.fragment);
             self.opener = Some(opener);
             self.master = Some(master);
+        }
+
+        /// Record the client's chain, and check its CertificateVerify against
+        /// the handshake messages that came before it (RFC 5246 7.4.8).
+        fn check_client_identity(&mut self, msgs: &[Message<'_>]) {
+            use rusty_tls::handrolled::handshake::CertificateVerify;
+            use rusty_tls::handrolled::verify::{verify_tls12_signature, SignatureScheme};
+
+            if let Some(certificate) = msgs.iter().find(|m| m.typ == HandshakeType::Certificate) {
+                self.client_chain = Certificate12::parse(certificate.body)
+                    .expect("the client's Certificate parses")
+                    .certificates
+                    .iter()
+                    .map(|c| c.to_vec())
+                    .collect();
+            }
+            let Some(at) = msgs
+                .iter()
+                .position(|m| m.typ == HandshakeType::CertificateVerify)
+            else {
+                return;
+            };
+            let signed: Vec<u8> = self
+                .transcript
+                .iter()
+                .copied()
+                .take(
+                    self.transcript.len()
+                        - msgs[at..].iter().map(|m| m.encoded.len()).sum::<usize>(),
+                )
+                .collect();
+            let verify = CertificateVerify::parse(msgs[at].body).expect("parses");
+            let leaf =
+                Certificate::parse(self.client_chain.first().expect("a chain")).expect("leaf");
+            self.client_certificate_verified = Some(
+                verify_tls12_signature(
+                    SignatureScheme(verify.scheme),
+                    &leaf.subject_public_key_info(),
+                    &signed,
+                    verify.signature,
+                )
+                .is_ok(),
+            );
         }
 
         /// The server's final flight, as records.
@@ -1215,6 +1345,7 @@ struct Script<'a> {
     suites: &'a [CipherSuite12],
     groups: &'a [NamedGroup],
     name: &'a str,
+    identity: Option<&'a rusty_tls::handrolled::client::ClientIdentity<'a>>,
 }
 
 impl<'a> Script<'a> {
@@ -1235,7 +1366,12 @@ impl<'a> Script<'a> {
                 NamedGroup::SecP384R1,
             ],
             name: SERVER,
+            identity: None,
         }
+    }
+    fn identity(mut self, i: &'a rusty_tls::handrolled::client::ClientIdentity<'a>) -> Self {
+        self.identity = Some(i);
+        self
     }
     fn flight(mut self, f: impl FnMut(&mut Flight1, &Fake) + 'a) -> Self {
         self.flight = Box::new(f);
@@ -1288,6 +1424,7 @@ fn converse(pki: &Pki, mut script: Script<'_>) -> (Result<Connection12, ClientEr
         path: options(),
         groups: script.groups,
         cipher_suites: script.suites,
+        identity: script.identity,
     };
     let mut fake = Fake::new(pki, script.leaf);
     let (mut client, hello) = ClientHandshake12::start(&cfg).expect("starts");
@@ -1333,6 +1470,11 @@ fn refused(pki: &Pki, script: Script<'_>) -> ClientError {
         Err(err) => err,
         Ok(_) => panic!("the client completed a handshake it should have refused"),
     }
+}
+
+/// A separate CA and client leaf of this key type.
+fn pki_with_key(leaf: Leaf) -> Pki {
+    pki(leaf, "client.example")
 }
 
 fn pki_p256() -> Pki {
@@ -2132,6 +2274,85 @@ mod refusals {
         assert_eq!(fake.client_types, vec![HandshakeType::ClientKeyExchange]);
     }
 
+    fn identity_for<'a>(
+        leaf: Leaf,
+        chain: &'a [Vec<u8>],
+        key: &'a rusty_tls::handrolled::sign::SigningKey,
+    ) -> rusty_tls::handrolled::client::ClientIdentity<'a> {
+        let _ = leaf;
+        rusty_tls::handrolled::client::ClientIdentity {
+            certificates: chain,
+            key,
+        }
+    }
+
+    /// With an identity the server's request can be answered, the flight is
+    /// Certificate, ClientKeyExchange, CertificateVerify, in that order, and
+    /// the signature verifies over the transcript before it. The Finished that
+    /// follows covers the CertificateVerify, so it only checks if that message
+    /// is in the transcript as sent.
+    #[test]
+    fn a_requested_identity_is_presented_and_proven() {
+        use rusty_tls::handrolled::sign::SigningKey;
+
+        let pki = pki_p256();
+        let client = pki_with_key(Leaf::P256);
+        let key = SigningKey::ecdsa_p256(&client.leaf_pkcs8).expect("key");
+        let chain: Vec<Vec<u8>> = client.chain.iter().map(|c| c.to_vec()).collect();
+        let identity = identity_for(Leaf::P256, &chain, &key);
+
+        let (result, fake) = converse(
+            &pki,
+            Script::new(Leaf::P256)
+                .flight(|f, _| f.certificate_request = true)
+                .identity(&identity),
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert_eq!(
+            fake.client_types,
+            vec![
+                HandshakeType::Certificate,
+                HandshakeType::ClientKeyExchange,
+                HandshakeType::CertificateVerify,
+            ]
+        );
+        assert_eq!(fake.client_chain, chain);
+        assert_eq!(fake.client_certificate_verified, Some(true));
+        assert_eq!(fake.client_finished_ok, Some(true));
+    }
+
+    /// A key that can sign none of the schemes the request named (the fake asks
+    /// for ECDSA P-256 and RSA-PSS; this is Ed25519) is answered with an empty
+    /// Certificate, not an abort and not a signature in a scheme nobody asked for.
+    #[test]
+    fn an_identity_that_cannot_sign_what_was_asked_is_not_presented() {
+        use rusty_tls::handrolled::sign::SigningKey;
+
+        let pki = pki_p256();
+        let client = pki_with_key(Leaf::Ed25519);
+        let key = SigningKey::ed25519(&client.leaf_pkcs8).expect("key");
+        let chain: Vec<Vec<u8>> = client.chain.iter().map(|c| c.to_vec()).collect();
+        let identity = identity_for(Leaf::Ed25519, &chain, &key);
+
+        let (result, fake) = converse(
+            &pki,
+            Script::new(Leaf::P256)
+                .flight(|f, _| f.certificate_request = true)
+                .identity(&identity),
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert_eq!(
+            fake.client_types,
+            vec![HandshakeType::Certificate, HandshakeType::ClientKeyExchange]
+        );
+        assert!(fake.client_chain.is_empty());
+        assert_eq!(fake.client_certificate_verified, None);
+
+        // And with no request at all, an identity is not volunteered.
+        let (_, fake) = converse(&pki, Script::new(Leaf::P256).identity(&identity));
+        assert_eq!(fake.client_types, vec![HandshakeType::ClientKeyExchange]);
+    }
+
     // ------------------------------------------------------------------ floods
 
     /// Warnings are ignored up to a limit, empty handshake records likewise:
@@ -2356,6 +2577,7 @@ mod refusals {
             path: options(),
             groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
             cipher_suites: CipherSuite12::SUPPORTED,
+            identity: None,
         };
         let (mut client, _) = ClientHandshake12::start(&cfg).expect("starts");
         then(&mut client);
@@ -2458,6 +2680,7 @@ mod refusals {
             path: options(),
             groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
             cipher_suites: CipherSuite12::SUPPORTED,
+            identity: None,
         };
         let (mut client, _) = ClientHandshake12::start(&cfg).expect("starts");
         assert!(client.read_record(&[21, 3, 3, 0, 2, 2, 40]).is_err());
@@ -2738,6 +2961,7 @@ fn random_records_never_panic_a_handshake_and_never_complete_one() {
             NamedGroup::SecP384R1,
         ],
         cipher_suites: CipherSuite12::SUPPORTED,
+        identity: None,
     };
     for round in 0..3000 {
         let (mut client, _) = ClientHandshake12::start(&cfg).expect("starts");

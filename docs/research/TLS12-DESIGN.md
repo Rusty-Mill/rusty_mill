@@ -436,10 +436,32 @@ to a server that requires a certificate, which a drop-in replacement for rustls 
 feature (Certificate, CertificateVerify over the 1.2 transcript, `ClientConfig12.identity`), not a shim
 flag, and is the proposed next stage.
 
+## Stage 10: TLS 1.2 client identity
+
+`ClientConfig12.identity: Option<&ClientIdentity>` (a breaking addition to a public struct, proposed to the owner
+before this stage was started; `ClientConfigBoth` passes the 1.3 config's identity through). On a `CertificateRequest`
+the client now sends its chain, the `ClientKeyExchange`, and a `CertificateVerify` over the handshake
+transcript (RFC 5246 sections 7.4.6 to 7.4.8). Two ordering rules the tests pin: the extended master
+secret's session hash ends at the `ClientKeyExchange`, so the `CertificateVerify` is not in it (RFC 7627),
+and the `Finished` that follows does cover it. A key that can sign none of the schemes the server named,
+or no identity, still gets an empty `Certificate` (section 7.4.6), so a server that insists decides.
+
+| Gate | Result |
+| --- | --- |
+| Live rustls, requiring a client certificate | P-256, P-384, Ed25519 and RSA identities complete; rustls sees the exact chain; data flows after. |
+| Live OpenSSL (`s_server -Verify 1`), run by CI | P-256, P-384 and RSA identities complete. |
+| Scripted server | Flight is Certificate, ClientKeyExchange, CertificateVerify; the signature verifies over the transcript before it; the Finished verifies. An Ed25519 key against a request for P-256 and RSA-PSS sends an empty Certificate; nothing is volunteered without a request. |
+| Mutation | 7 deliberate bugs (wrong message signed, hash signed instead of transcript, CertificateVerify left out of the transcript or not sent, chain empty, scheme ignoring the request, identity never used): all caught. |
+| BoGo | 20 of the 28 scenarios disabled for the missing identity now pass: **741 passed, 0 failed**, 301 disabled. The other 8 want RSA PKCS#1 v1.5 client signatures, which this engine does not make (PSS only). |
+
+Not done: RSA PKCS#1 v1.5 signing for TLS 1.2 clients. A server that offers only PKCS#1 v1.5 (some older
+ones do) gets an empty `Certificate` from an RSA identity. Adding it is a change to `sign.rs`, which
+ADR-0002 treats as the careful part of the engine, so it is a decision and not an increment.
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could
 produce (rustls and OpenSSL both directions, BoGo, mutation, fuzz, CI). Whether that meets the bar for
 the seam is theirs to set. If it does, stage 5 of the track is wiring (ALPN, SNI certificate selection,
 1.2 resumption are the known gaps) and an ADR superseding ADR-0002. If the bar includes more of BoGo,
-the next increment is a TLS 1.2 client identity, then credentials (`-new-x509-credential`) and verify callbacks (`-verify-fail`).
+the next increment is credentials (`-new-x509-credential`) and verify callbacks (`-verify-fail`); the engine gaps left are RSA PKCS#1 v1.5 signing, 1.2 resumption, ALPN and SNI-based certificate selection.

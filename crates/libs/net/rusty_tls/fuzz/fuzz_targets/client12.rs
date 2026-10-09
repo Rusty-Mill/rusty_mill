@@ -34,6 +34,7 @@ fuzz_target!(|data: &[u8]| {
         },
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1, NamedGroup::SecP384R1],
         cipher_suites: CipherSuite12::SUPPORTED,
+        identity: None,
     };
     let Ok((mut client, _hello)) = ClientHandshake12::start(&config) else {
         return;

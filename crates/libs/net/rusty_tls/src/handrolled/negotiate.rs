@@ -133,6 +133,7 @@ impl<'a> ClientConfigBoth<'a> {
             path: tls13.path,
             groups: tls13.groups,
             cipher_suites: suites12,
+            identity: tls13.identity,
         };
         Self { tls13, tls12 }
     }

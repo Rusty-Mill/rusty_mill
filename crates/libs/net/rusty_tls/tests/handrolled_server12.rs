@@ -663,6 +663,7 @@ fn client_config<'a>(
         path: options(),
         groups: ALL_GROUPS,
         cipher_suites: suites,
+        identity: None,
     }
 }
 

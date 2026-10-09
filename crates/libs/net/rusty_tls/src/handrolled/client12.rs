@@ -41,9 +41,11 @@
 //!   finite-field DHE are never offered, so a server cannot select them.
 //! - **Session resumption of either kind.** No session id and no ticket is
 //!   offered; resumption is a later stage.
-//! - **Client certificates.** A `CertificateRequest` is answered with an empty
-//!   `Certificate`, the conforming way to say "none". A server that insists
-//!   fails the handshake. An identity is a later stage.
+//! - **Client certificates, only if configured.** With no
+//!   [`ClientConfig12::identity`], or none whose key can sign a scheme the server
+//!   named, a `CertificateRequest` is answered with an empty `Certificate`, the
+//!   conforming way to say "none"; a server that insists fails the handshake.
+//!   With one, the chain is sent and a `CertificateVerify` proves the key.
 //! - **Unsolicited extensions** ([`ClientError::UnofferedExtension`]), as RFC
 //!   5246 §7.4.1.4 requires.
 //!
@@ -66,11 +68,11 @@
 
 use super::client::{
     is_downgrade_sentinel, plaintext_record, random_bytes, Alert, AlertDescription, AlertLevel,
-    ClientError,
+    ClientError, ClientIdentity,
 };
 use super::handshake::{
-    complete_prefix, extension, find, messages, ClientHello, Extension, HandshakeError,
-    HandshakeType, Message,
+    complete_prefix, extension, find, messages, CertificateVerify, ClientHello, Extension,
+    HandshakeError, HandshakeType, Message,
 };
 use super::handshake12::{
     self, message, parse_finished, parse_server_hello_done, Certificate12, CertificateRequest12,
@@ -177,6 +179,13 @@ pub struct ClientConfig12<'a> {
     pub groups: &'a [NamedGroup],
     /// The suites to offer, most preferred first.
     pub cipher_suites: &'a [CipherSuite12],
+    /// The certificate chain and key to present if the server asks for one.
+    ///
+    /// `None` answers every request with an empty `Certificate`. A key that can
+    /// sign none of the schemes the server listed is treated the same way,
+    /// which RFC 5246 section 7.4.6 allows and leaves the decision with the
+    /// server.
+    pub identity: Option<&'a ClientIdentity<'a>>,
 }
 
 /// The message the state machine will accept next, and nothing else.
@@ -229,7 +238,8 @@ struct Hs {
     certificates: Vec<Vec<u8>>,
     /// The curve and public key from `ServerKeyExchange`.
     server_key: Option<(NamedGroup, Vec<u8>)>,
-    certificate_requested: bool,
+    /// The schemes a `CertificateRequest` named, if the server sent one.
+    certificate_request: Option<Vec<u16>>,
     /// Set once the client flight is sent.
     established: Option<Established>,
 }
@@ -354,7 +364,7 @@ impl<'a> ClientHandshake12<'a> {
                     auth,
                     certificates: Vec::new(),
                     server_key: None,
-                    certificate_requested: false,
+                    certificate_request: None,
                     established: None,
                 },
                 buffer: Vec::new(),
@@ -585,8 +595,8 @@ impl<'a> ClientHandshake12<'a> {
             }
             (Expect::CertificateRequestOrDone, HandshakeType::CertificateRequest) => {
                 self.hs.transcript.extend_from_slice(msg.encoded);
-                CertificateRequest12::parse(msg.body)?;
-                self.hs.certificate_requested = true;
+                let request = CertificateRequest12::parse(msg.body)?;
+                self.hs.certificate_request = Some(request.signature_algorithms);
                 self.phase = Phase::Expecting(Expect::ServerHelloDone);
                 Ok(Vec::new())
             }
@@ -756,12 +766,25 @@ impl<'a> ClientHandshake12<'a> {
     fn client_flight(&mut self) -> Result<Vec<u8>> {
         let (group, server_public) = self.hs.server_key.take().ok_or(ClientError::Failed)?;
 
-        // 1. Optional empty Certificate, then ClientKeyExchange.
+        // 1. Optional Certificate, then ClientKeyExchange. A key that can sign
+        // none of the schemes named is as good as no key (RFC 5246 7.4.6).
+        let identity = self.hs.certificate_request.as_ref().and_then(|schemes| {
+            let identity = self.config.identity?;
+            let scheme = *identity
+                .key
+                .schemes()
+                .iter()
+                .find(|scheme| schemes.contains(&scheme.0))?;
+            Some((identity, scheme))
+        });
         let mut handshake = Vec::new();
-        if self.hs.certificate_requested {
+        if self.hs.certificate_request.is_some() {
+            let chain: Vec<&[u8]> = identity
+                .map(|(identity, _)| identity.certificates.iter().map(Vec::as_slice).collect())
+                .unwrap_or_default();
             handshake.extend_from_slice(&message(
                 HandshakeType::Certificate,
-                &Certificate12::encode(&[]),
+                &Certificate12::encode(&chain),
             ));
         }
         let kx = KeyExchange::generate(group)?;
@@ -772,7 +795,7 @@ impl<'a> ClientHandshake12<'a> {
         self.hs.transcript.extend_from_slice(&handshake);
 
         // 2. Keys: the session hash covers everything up to and including
-        // ClientKeyExchange.
+        // ClientKeyExchange, and not the CertificateVerify that follows (RFC 7627).
         let hash = self.hs.hash;
         let pre_master = kx.agree(&server_public, |shared| shared.to_vec())?;
         let session_hash = hash.hash(&self.hs.transcript);
@@ -786,6 +809,20 @@ impl<'a> ClientHandshake12<'a> {
         );
         let mut sealer = Sealer::new(self.hs.aead, &keys.client_write_key, &keys.client_write_iv)?;
         let opener = Opener::new(self.hs.aead, &keys.server_write_key, &keys.server_write_iv)?;
+
+        // RFC 5246 7.4.8: the signature is over every handshake message so far,
+        // as sent, so it is made here, after the Certificate and ClientKeyExchange
+        // are in the transcript and before the Finished that covers it.
+        if let Some((identity, scheme)) = identity {
+            let signature = identity.key.sign(scheme, &self.hs.transcript)?;
+            let verify = CertificateVerify {
+                scheme: scheme.0,
+                signature: &signature,
+            };
+            let verify = message(HandshakeType::CertificateVerify, &verify.encode());
+            self.hs.transcript.extend_from_slice(&verify);
+            handshake.extend_from_slice(&verify);
+        }
 
         // 3. Finished, over the same transcript, protected with the new key.
         let verify_data =

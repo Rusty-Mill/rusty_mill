@@ -744,6 +744,7 @@ fn the_sentinel_is_only_written_when_this_server_could_have_spoken_1_3() {
         path: options(),
         groups: ALL_GROUPS,
         cipher_suites: CipherSuite12::SUPPORTED,
+        identity: None,
     };
     let (_, hello) =
         rusty_tls::handrolled::client12::ClientHandshake12::start(&config).expect("hello");
@@ -797,6 +798,7 @@ fn hello_12(material: &Material) -> Vec<u8> {
         path: options(),
         groups: ALL_GROUPS,
         cipher_suites: CipherSuite12::SUPPORTED,
+        identity: None,
     };
     rusty_tls::handrolled::client12::ClientHandshake12::start(&config)
         .expect("hello")
@@ -1095,6 +1097,7 @@ fn a_tls12_only_client_completes_against_the_two_version_server_despite_the_sent
         path: options(),
         groups: ALL_GROUPS,
         cipher_suites: CipherSuite12::SUPPORTED,
+        identity: None,
     };
     let (mut client, hello) =
         rusty_tls::handrolled::client12::ClientHandshake12::start(&client_config).expect("hello");
