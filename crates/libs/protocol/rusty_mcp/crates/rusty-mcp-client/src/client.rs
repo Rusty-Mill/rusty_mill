@@ -1,30 +1,27 @@
-//! Protocol-only MCP client for stdio and Streamable HTTP servers.
+//! Protocol-only MCP client for stdio and Streamable HTTP servers, on
+//! `rusty_mcp_client_native`.
 //!
 //! [`McpServerSpec`] describes the connection and [`McpTransport`] selects
 //! its transport. Host applications own configuration files, policy checks,
 //! connection pooling, and tool dispatch.
 //!
-//! [`McpClient::connect`] resolves authentication and initializes a connection.
-//! [`McpClient::shutdown`] requests a bounded graceful close. Stdio child
-//! cleanup is delegated to rmcp's transport. WebSocket is a reserved schema
-//! value and returns an explicit unsupported-transport error.
+//! [`McpClient::connect`] resolves authentication and shakes hands (it asks
+//! for `server/discover` first and falls back to `initialize` for a classic
+//! server). [`McpClient::shutdown`] closes the connection without blocking the
+//! caller. WebSocket is a reserved schema value and returns an explicit
+//! unsupported-transport error.
 //!
-//! Enable the crate's `client` feature to use this module.
+//! The values it returns are `rusty_mcp_proto`'s (re-exported as
+//! [`crate::proto`]); they used to be `rmcp`'s.
 
-use std::collections::HashMap;
-use std::process::Stdio;
-use std::sync::Arc;
+use std::io;
 use std::time::Duration;
 
-use http::{HeaderName, HeaderValue};
-use rmcp::model::{CallToolRequestParams, CallToolResult, Prompt, Resource, Tool};
-use rmcp::service::RunningService;
-use rmcp::transport::TokioChildProcess;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-// `from_config` selects rmcp's reqwest-backed HTTP transport.
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::{RoleClient, serve_client};
-use tokio::process::Command;
+use rusty_mcp_client_native::proto::{CallToolResult, Message, Prompt, Resource, Tool};
+use rusty_mcp_client_native::{
+    AsyncClient, ClientConfig, ClientError, HttpConfig, HttpTransport, NoHandler, Recv,
+    StdioTransport, Transport,
+};
 
 use crate::client_auth::{self as auth, AuthError, McpAuth};
 
@@ -82,11 +79,10 @@ pub struct McpServerSpec {
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = DEFAULT_CONNECT_TIMEOUT;
 
-/// P2-06 — budget for graceful shutdown. Beyond this the transport
-/// will kill the child process forcibly (see
-/// `TokioChildProcess::graceful_shutdown`).
+/// P2-06 — nominal budget for graceful shutdown, kept as public API. The
+/// transport gives a stdio child 2 s to exit once its stdin is closed, then
+/// kills it, and bounds the HTTP session `DELETE` at 2 s.
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const SHUTDOWN_TIMEOUT: Duration = DEFAULT_SHUTDOWN_TIMEOUT;
 
 /// Errors from the MCP Host client.
 #[derive(Debug, thiserror::Error)]
@@ -118,8 +114,8 @@ pub enum McpClientError {
     },
 
     /// The transport listed in the spec is recognised but not currently
-    /// dispatchable in this build (e.g. `transport = "websocket"`, which
-    /// rmcp 1.5 does not implement).
+    /// dispatchable in this build (e.g. `transport = "websocket"`, which no
+    /// MCP client here implements).
     #[error("transport unsupported: {reason}")]
     Unsupported {
         /// Human-readable explanation including a migration hint.
@@ -132,7 +128,7 @@ pub enum McpClientError {
     #[error("auth: {0}")]
     Auth(#[from] AuthError),
 
-    /// Any runtime error from the underlying rmcp service (transport closed,
+    /// Any runtime error from the underlying client (transport closed,
     /// protocol violation, etc.).
     #[error("mcp service error: {0}")]
     Service(String),
@@ -149,25 +145,80 @@ impl McpClientError {
     }
 }
 
-/// A live connection to one external MCP server. Cheap to `Deref` through
-/// for advanced use (the rmcp `Peer<RoleClient>` is exposed via the field
-/// type), but the methods on this struct cover the common cases and are
-/// stable across compatible rmcp upgrades.
+/// The two ways to reach a server, behind one [`Transport`].
+enum Link {
+    Stdio(StdioTransport),
+    Http(Box<HttpTransport>),
+}
+
+impl Transport for Link {
+    fn send(&mut self, message: &Message) -> io::Result<()> {
+        match self {
+            Self::Stdio(t) => t.send(message),
+            Self::Http(t) => t.send(message),
+        }
+    }
+
+    fn recv(&mut self, timeout: Duration) -> io::Result<Recv> {
+        match self {
+            Self::Stdio(t) => t.recv(timeout),
+            Self::Http(t) => t.recv(timeout),
+        }
+    }
+
+    fn set_protocol_version(&mut self, version: &rusty_mcp_client_native::proto::ProtocolVersion) {
+        match self {
+            Self::Stdio(t) => t.set_protocol_version(version),
+            Self::Http(t) => t.set_protocol_version(version),
+        }
+    }
+}
+
+/// A live connection to one external MCP server.
 ///
-/// `McpClient` is `Send` but **not** `Sync`. Share via `Arc<Mutex<…>>` or
-/// (preferred) move it into a dedicated actor task owned by the Host.
-#[derive(Debug)]
+/// Calls from several tasks queue and run one at a time, in order. Dropping
+/// the client closes the transport (and stops a stdio child); [`shutdown`]
+/// does the same without blocking the caller.
+///
+/// [`shutdown`]: McpClient::shutdown
 pub struct McpClient {
     /// Human-readable name (the key from `mcp.toml`), used in logs and error
     /// messages.
     name: String,
-    /// Live rmcp service. Dropping closes the transport and kills the child.
-    service: RunningService<RoleClient, ()>,
+    client: AsyncClient<Link, NoHandler>,
+}
+
+impl std::fmt::Debug for McpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpClient")
+            .field("name", &self.name)
+            .field("protocol", &self.client.negotiated())
+            .finish_non_exhaustive()
+    }
+}
+
+fn service(e: ClientError) -> McpClientError {
+    McpClientError::Service(e.to_string())
+}
+
+/// RFC 9110 token characters: what a header name may be made of.
+fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// Visible ASCII, space and tab: no CR, LF, NUL or other control bytes.
+fn valid_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))
 }
 
 impl McpClient {
-    /// Spawn the configured external MCP server and perform the initialize
-    /// handshake. Returns once the server has reported its capabilities.
+    /// Spawn the configured external MCP server (or reach its URL) and shake
+    /// hands. Returns once the server has reported its capabilities.
     ///
     /// The child's stderr is inherited (not captured) so the operator sees
     /// server-side startup logs in their terminal — critical for diagnosing
@@ -175,8 +226,8 @@ impl McpClient {
     ///
     /// # Errors
     /// - [`McpClientError::Spawn`] if the executable cannot be started.
-    /// - [`McpClientError::Handshake`] if the initialize round-trip fails
-    ///   or exceeds [`DEFAULT_CONNECT_TIMEOUT`].
+    /// - [`McpClientError::Handshake`] if the handshake fails or a step
+    ///   exceeds [`DEFAULT_CONNECT_TIMEOUT`].
     pub async fn connect(name: &str, spec: &McpServerSpec) -> Result<Self, McpClientError> {
         match spec.transport {
             McpTransport::Stdio => Self::connect_stdio(name, spec).await,
@@ -184,44 +235,36 @@ impl McpClient {
             McpTransport::Websocket => Err(McpClientError::Unsupported {
                 reason: format!(
                     "server '{name}': WebSocket transport is reserved in the config schema \
-                     but not implemented (rmcp 2.1 ships no WebSocket transport; the MCP \
-                     2025-03-26 spec deprecates WebSocket in favour of `transport = \"http\"`). \
+                     but not implemented (the MCP 2025-03-26 spec deprecates WebSocket in \
+                     favour of `transport = \"http\"`). \
                      Switch to `transport = \"http\"` to connect to this server."
                 ),
             }),
         }
     }
 
-    /// Stdio path — spawn the configured command and run the MCP
-    /// handshake over the child's stdio. Pre-BL-023 behaviour, kept
-    /// byte-identical for forward compatibility with deployed
-    /// `mcp.toml` files.
+    /// Stdio path — spawn the configured command and run the MCP handshake
+    /// over the child's stdio.
     async fn connect_stdio(name: &str, spec: &McpServerSpec) -> Result<Self, McpClientError> {
         if spec.command.trim().is_empty() {
             return Err(McpClientError::Config {
                 reason: format!("server '{name}': stdio transport needs a non-empty `command`"),
             });
         }
-        let mut command = Command::new(&spec.command);
-        command
-            .args(&spec.args)
-            .envs(&spec.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-
-        let transport = TokioChildProcess::new(command).map_err(|e| McpClientError::Spawn {
+        let mut command = std::process::Command::new(&spec.command);
+        command.args(&spec.args).envs(&spec.env);
+        let transport = StdioTransport::spawn(command).map_err(|e| McpClientError::Spawn {
             command: spec.command.clone(),
             source: e,
         })?;
-
-        Self::run_handshake(name, serve_client((), transport)).await
+        Self::run_handshake(name, Link::Stdio(transport)).await
     }
 
     /// Streamable HTTP path — the modern remote MCP transport (single
     /// endpoint, POST for requests + SSE for the server stream). Auth
     /// headers and custom HTTP headers from the spec are forwarded on
-    /// every request.
+    /// every request. Redirects are not followed: they would carry those
+    /// headers to wherever the redirect points.
     async fn connect_http(name: &str, spec: &McpServerSpec) -> Result<Self, McpClientError> {
         let url = spec.url.as_deref().unwrap_or("").trim();
         if url.is_empty() {
@@ -230,100 +273,73 @@ impl McpClient {
             });
         }
 
-        // BL-025 — resolve the optional `auth` declaration up front so
-        // any missing env-var or OAuth endpoint failure surfaces with a
-        // clear `Auth` error before we construct the transport. The
-        // resolver returns a logical `Authorization` value plus
-        // additional headers; we then merge those into the per-request
-        // header map below. A static `auth_header` from the file still
-        // works (back-compat with pre-BL-025 installs) but a present
-        // `auth` block always wins on conflict — declarative beats
-        // legacy.
+        // BL-025 — resolve the optional `auth` declaration up front so any
+        // missing env-var or OAuth endpoint failure surfaces with a clear
+        // `Auth` error before we construct the transport. A static
+        // `auth_header` from the file still works (back-compat with
+        // pre-BL-025 installs) but a present `auth` block always wins on
+        // conflict — declarative beats legacy.
         let resolved_auth = if let Some(auth_decl) = spec.auth.as_ref() {
             Some(auth::resolve(auth_decl).await?)
         } else {
             None
         };
 
-        // Parse custom headers up front so a malformed entry surfaces as a
-        // clean Config error (rather than rmcp's typed-error stack at
-        // runtime). Header names get the same case-insensitive treatment
-        // browsers do; rmcp internally canonicalises again.
-        let mut custom_headers: HashMap<HeaderName, HeaderValue> = HashMap::with_capacity(
-            spec.headers.len() + resolved_auth.as_ref().map_or(0, |r| r.extra_headers.len()),
-        );
-        for (k, v) in spec.headers.iter().chain(
-            resolved_auth
-                .as_ref()
-                .map(|r| r.extra_headers.iter())
-                .into_iter()
-                .flatten(),
-        ) {
-            let header_name =
-                HeaderName::try_from(k.as_str()).map_err(|e| McpClientError::Config {
-                    reason: format!("server '{name}': invalid header name '{k}': {e}"),
-                })?;
-            let header_value =
-                HeaderValue::try_from(v.as_str()).map_err(|e| McpClientError::Config {
-                    reason: format!("server '{name}': invalid header value for '{k}': {e}"),
-                })?;
-            custom_headers.insert(header_name, header_value);
+        // Validate custom headers up front so a malformed entry surfaces as a
+        // clean Config error rather than a failure on the first request.
+        let extra = resolved_auth.iter().flat_map(|r| r.extra_headers.iter());
+        let mut headers: Vec<(String, String)> = Vec::new();
+        for (k, v) in spec.headers.iter().chain(extra) {
+            if !valid_header_name(k) {
+                return Err(McpClientError::Config {
+                    reason: format!("server '{name}': invalid header name '{k}'"),
+                });
+            }
+            if !valid_header_value(v) {
+                return Err(McpClientError::Config {
+                    reason: format!("server '{name}': invalid header value for '{k}'"),
+                });
+            }
+            headers.push((k.clone(), v.clone()));
         }
 
-        let mut http_cfg = StreamableHttpClientTransportConfig::with_uri(Arc::<str>::from(url));
-        http_cfg = http_cfg.custom_headers(custom_headers);
         // Resolved auth wins; otherwise fall back to the static
         // `auth_header` field (the BL-023 path).
-        let auth_header = resolved_auth
+        let authorization = resolved_auth
             .as_ref()
             .and_then(|r| r.authorization.clone())
             .or_else(|| spec.auth_header.clone());
-        if let Some(auth) = auth_header {
-            // Nexus accepts both `Bearer token` and bare `token` forms.
-            // Remove exactly one case-insensitive Bearer prefix before rmcp
-            // supplies the scheme, preserving that compatibility without
-            // producing `Bearer Bearer token`.
-            let token = auth
-                .split_once(' ')
+        let mut config = HttpConfig::new(url);
+        config.headers = headers;
+        // Nexus accepts both `Bearer token` and bare `token` forms. Remove
+        // exactly one case-insensitive Bearer prefix before the transport
+        // supplies the scheme, so we never send `Bearer Bearer token`.
+        config.bearer_token = authorization.map(|auth| {
+            auth.split_once(' ')
                 .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-                .map_or(auth.as_str(), |(_, token)| token);
-            http_cfg = http_cfg.auth_header(token.to_string());
-        }
-        // The reqwest-backed default client uses the version of reqwest
-        // that ships with rmcp's `transport-streamable-http-client-reqwest`
-        // feature; calling through `from_config` avoids naming the type
-        // here (see the import comment).
-        let transport = StreamableHttpClientTransport::from_config(http_cfg);
-
-        Self::run_handshake(name, serve_client((), transport)).await
+                .map_or(auth.as_str(), |(_, token)| token)
+                .to_owned()
+        });
+        let transport = HttpTransport::new(config).map_err(|e| McpClientError::Config {
+            reason: format!("server '{name}': {e}"),
+        })?;
+        Self::run_handshake(name, Link::Http(Box::new(transport))).await
     }
 
-    /// Shared handshake driver: race the rmcp `serve_client(...)` future
-    /// against [`CONNECT_TIMEOUT`] so a non-responsive transport doesn't
-    /// hang `connect` forever. Reused by every transport branch above so
-    /// the timeout policy stays uniform.
-    async fn run_handshake<F, E>(name: &str, fut: F) -> Result<Self, McpClientError>
-    where
-        F: std::future::Future<Output = Result<RunningService<RoleClient, ()>, E>>,
-        E: std::fmt::Display,
-    {
-        let service = match tokio::time::timeout(CONNECT_TIMEOUT, fut).await {
-            Ok(Ok(svc)) => svc,
-            Ok(Err(e)) => {
-                return Err(McpClientError::Handshake {
-                    reason: e.to_string(),
-                });
-            }
-            Err(_) => {
-                return Err(McpClientError::Handshake {
-                    reason: format!("initialize exceeded {CONNECT_TIMEOUT:?}"),
-                });
-            }
-        };
-
+    /// Shared handshake driver: every step is bounded by
+    /// [`DEFAULT_CONNECT_TIMEOUT`], so a non-responsive server doesn't hang
+    /// `connect` forever. Later calls are bounded by the client's call timeout
+    /// instead (ten minutes unless the config says otherwise).
+    async fn run_handshake(name: &str, link: Link) -> Result<Self, McpClientError> {
+        let config = ClientConfig::new("rusty-mcp-client", env!("CARGO_PKG_VERSION"));
+        let client = AsyncClient::connect(link, config, NoHandler, CONNECT_TIMEOUT)
+            .await
+            .map_err(|e| McpClientError::Handshake {
+                reason: e.to_string(),
+            })?;
         Ok(Self {
             name: name.to_string(),
-            service,
+            client,
         })
     }
 
@@ -339,10 +355,7 @@ impl McpClient {
     /// # Errors
     /// [`McpClientError::Service`] on transport failure or protocol error.
     pub async fn list_tools(&self) -> Result<Vec<Tool>, McpClientError> {
-        self.service
-            .list_all_tools()
-            .await
-            .map_err(|e| McpClientError::Service(e.to_string()))
+        self.client.list_tools().await.map_err(service)
     }
 
     /// Fetch every resource the server exposes.
@@ -350,10 +363,7 @@ impl McpClient {
     /// # Errors
     /// [`McpClientError::Service`] on transport failure or protocol error.
     pub async fn list_resources(&self) -> Result<Vec<Resource>, McpClientError> {
-        self.service
-            .list_all_resources()
-            .await
-            .map_err(|e| McpClientError::Service(e.to_string()))
+        self.client.list_resources().await.map_err(service)
     }
 
     /// Fetch every prompt template the server exposes.
@@ -361,52 +371,46 @@ impl McpClient {
     /// # Errors
     /// [`McpClientError::Service`] on transport failure or protocol error.
     pub async fn list_prompts(&self) -> Result<Vec<Prompt>, McpClientError> {
-        self.service
-            .list_all_prompts()
-            .await
-            .map_err(|e| McpClientError::Service(e.to_string()))
+        self.client.list_prompts().await.map_err(service)
     }
 
     /// Invoke a tool by name with the given JSON arguments.
     ///
     /// `arguments` is an optional `serde_json::Map` matching the tool's
     /// declared input schema. Pass `None` for tools that take no arguments.
+    /// A tool that *fails* comes back as `Ok` with `is_error` set, as the
+    /// protocol defines; a server that asks the user a question mid-call is
+    /// answered "declined".
     ///
     /// # Errors
-    /// [`McpClientError::Service`] on transport failure, protocol error, or
-    /// a tool error reported by the server.
+    /// [`McpClientError::Service`] on transport failure, a protocol error, or
+    /// an error the server reports for the call itself.
     pub async fn call_tool(
         &self,
         name: impl Into<String>,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<CallToolResult, McpClientError> {
-        // `CallToolRequestParams` is `#[non_exhaustive]` (added `_meta` and
-        // `task` fields in rmcp 1.4 for SEP-1319 task augmentation), so
-        // construct via the `new(...).with_arguments(...)` builder rather
-        // than a struct literal — keeps us compatible with future field
-        // additions without another compile break.
-        let mut params = CallToolRequestParams::new(name.into());
-        if let Some(args) = arguments {
-            params = params.with_arguments(args);
-        }
-        self.service
-            .call_tool(params)
+        let arguments = arguments
+            .map(|map| {
+                let text = serde_json::Value::Object(map).to_string();
+                rusty_mcp_client_native::json::Value::from_json_str(&text)
+            })
+            .transpose()
+            .map_err(|e| McpClientError::Service(format!("arguments: {e}")))?;
+        self.client
+            .call_tool(&name.into(), arguments)
             .await
-            .map_err(|e| McpClientError::Service(e.to_string()))
+            .map_err(service)
     }
 
-    /// Gracefully shut down the connection: cancels the service, waits for
-    /// the transport to flush and close, and kills the child process if it
-    /// doesn't exit within [`DEFAULT_SHUTDOWN_TIMEOUT`].
+    /// Close the connection: the call in flight (if any) finishes, the
+    /// transport is closed (a stdio child is stopped, an HTTP session
+    /// ended), and the caller is not blocked meanwhile.
     ///
     /// # Errors
-    /// Returns [`McpClientError::Service`] if the shutdown join failed. The
-    /// child is killed regardless.
-    pub async fn shutdown(mut self) -> Result<(), McpClientError> {
-        match self.service.close_with_timeout(SHUTDOWN_TIMEOUT).await {
-            Ok(_) => Ok(()),
-            Err(e) => Err(McpClientError::Service(e.to_string())),
-        }
+    /// [`McpClientError::Service`] if the close could not run.
+    pub async fn shutdown(self) -> Result<(), McpClientError> {
+        self.client.close().await.map_err(service)
     }
 }
 
@@ -621,31 +625,56 @@ mod tests {
                 listener.local_addr().expect("bound server address")
             );
             let server = tokio::spawn(async move {
-                let (mut initialize, _) = listener.accept().await.expect("accept client request");
-                let request = read_http_request(&mut initialize).await;
-                assert!(
-                    request
-                        .to_ascii_lowercase()
-                        .contains("x-nexus-test-key: synthetic-api-key"),
-                    "custom header missing from direct request: {request}"
-                );
-                assert!(
-                    request
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer synthetic-bearer"),
-                    "bearer header missing from direct request: {request}"
-                );
-                let id = serde_json::from_str::<serde_json::Value>(
-                    request
-                        .split_once("\r\n\r\n")
-                        .expect("HTTP header terminator")
-                        .1,
-                )
-                .expect("valid initialization JSON")["id"]
-                    .clone();
+                // The client asks `server/discover` first; this classic
+                // server does not know it, which sends the client on to
+                // `initialize`. Every request must carry the headers.
+                let check = |request: &str| {
+                    let lower = request.to_ascii_lowercase();
+                    assert!(
+                        lower.contains("x-nexus-test-key: synthetic-api-key"),
+                        "custom header missing from direct request: {request}"
+                    );
+                    assert!(
+                        lower.contains("authorization: bearer synthetic-bearer"),
+                        "bearer header missing from direct request: {request}"
+                    );
+                };
+                let id_of = |request: &str| {
+                    serde_json::from_str::<serde_json::Value>(
+                        request
+                            .split_once("\r\n\r\n")
+                            .expect("HTTP header terminator")
+                            .1,
+                    )
+                    .expect("valid request JSON")["id"]
+                        .clone()
+                };
+
+                let (mut discover, _) = listener.accept().await.expect("accept client request");
+                let request = read_http_request(&mut discover).await;
+                check(&request);
+                assert!(request.contains("server/discover"), "{request}");
                 let body = serde_json::json!({
                     "jsonrpc": "2.0",
-                    "id": id,
+                    "id": id_of(&request),
+                    "error": { "code": -32601, "message": "method not found" }
+                })
+                .to_string();
+                write_http_response(
+                    &mut discover,
+                    "200 OK",
+                    "Content-Type: application/json\r\n",
+                    &body,
+                )
+                .await;
+
+                let (mut initialize, _) = listener.accept().await.expect("accept client request");
+                let request = read_http_request(&mut initialize).await;
+                check(&request);
+                assert!(request.contains("\"initialize\""), "{request}");
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id_of(&request),
                     "result": {
                         "protocolVersion": "2025-03-26",
                         "capabilities": {},
@@ -663,6 +692,7 @@ mod tests {
 
                 let (mut initialized, _) = listener.accept().await.expect("accept client request");
                 let request = read_http_request(&mut initialized).await;
+                check(&request);
                 assert!(request.contains("notifications/initialized"));
                 write_http_response(&mut initialized, "202 Accepted", "", "").await;
             });

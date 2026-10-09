@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rusty_mcp_client::proto::ContentBlock;
 use rusty_mcp_client::{McpClient as Connection, McpServerSpec, McpTransport};
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -92,7 +93,8 @@ impl McpClient for RemoteMcpClient {
             .into_iter()
             .map(|t| McpToolInfo {
                 name: t.name.to_string(),
-                schema: Value::Object((*t.input_schema).clone()),
+                schema: serde_json::from_str(&t.input_schema.to_json_string())
+                    .unwrap_or(Value::Null),
             })
             .collect())
     }
@@ -121,7 +123,10 @@ impl McpClient for RemoteMcpClient {
         Ok(result
             .content
             .iter()
-            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .filter_map(|c| match c {
+                ContentBlock::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
             .collect::<Vec<_>>()
             .join("\n"))
     }

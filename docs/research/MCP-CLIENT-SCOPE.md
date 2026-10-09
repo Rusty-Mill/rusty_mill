@@ -81,8 +81,11 @@ transports:
    consumers wrap it in `spawn_blocking`.
 2. **New crate or grow `rusty_mcp_server`'s siblings?** Recommended: new crate,
    so a server-only binary pulls no client and `rusty_request`.
-3. **`rusty-mcp-client`'s public API** stays as is (a re-implementation, not a
-   change). Confirm, because it is shared by `rk-mcp` and others.
+3. **`rusty-mcp-client`'s public API.** Resolved 2026-10-09 (owner: "go"): it
+   changed in place. `McpClient` now returns `rusty_mcp_proto` types
+   (re-exported as `rusty_mcp_client::proto`) and runs on the native client;
+   its one consumer, `rk-mcp`, moved in the same commit. `rmcp` and `reqwest`
+   are gone from that crate.
 4. **Server gaps the clients' peers need. (Built 2026-10-08 at the owner's request: the sessions' `GET` push stream with resumption, and classic `resources/subscribe`. The gateway's raw-stream passthrough is not built.)** `remind_me_remote` needs
    server-side sessions with a `GET` push stream and resumption, which the A3
    HTTP transport answers `405`; `agentgateway` proxies streams. Decide

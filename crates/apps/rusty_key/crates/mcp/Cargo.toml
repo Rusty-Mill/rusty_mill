@@ -28,8 +28,8 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [features]
 # Expose the in-process FakeMcpClient for downstream offline tests.
 fake = []
-# The MCP transport adapter (ADR-0029), now over `rusty-mcp-client` (which
-# wraps rmcp). Off by default so the offline core builds without the SDK;
+# The MCP transport adapter (ADR-0029), over `rusty-mcp-client` (first-party
+# native client). Off by default so the offline core builds without the SDK;
 # CI/release builds enable it. The feature keeps its `rmcp` name.
 rmcp = ["dep:rusty-mcp-client"]
 

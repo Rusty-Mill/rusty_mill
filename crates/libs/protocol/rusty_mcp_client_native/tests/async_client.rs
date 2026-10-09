@@ -206,3 +206,13 @@ async fn notifications_arrive_while_no_call_is_running() {
     assert_eq!(got.0, "notifications/resources/updated");
     assert_eq!(got.1.unwrap()["uri"].as_str(), Some("mem://a"));
 }
+
+#[tokio::test]
+async fn close_resolves_and_ends_the_worker() {
+    let c = connect().await;
+    c.ping().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), c.close())
+        .await
+        .expect("close hung")
+        .unwrap();
+}

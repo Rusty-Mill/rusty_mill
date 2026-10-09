@@ -180,7 +180,9 @@ fn a_timeout_is_reported_and_a_late_answer_does_not_confuse_the_next_call() {
         );
     });
     let t = StdioTransport::new(client_in, client_out);
-    let mut c = Client::connect(t, config(), NoHandler, Duration::from_millis(150)).unwrap();
+    let mut cfg = config();
+    cfg.call_timeout = Duration::from_millis(150);
+    let mut c = Client::connect(t, cfg, NoHandler, SECS).unwrap();
     assert!(matches!(
         c.call_tool("slow", None).unwrap_err(),
         ClientError::Timeout

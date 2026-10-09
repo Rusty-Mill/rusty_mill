@@ -55,6 +55,10 @@ pub struct HttpConfig {
     pub headers: Vec<(String, String)>,
     /// Open the standalone `GET` stream on a classic session. Default on.
     pub push_stream: bool,
+    /// Follow HTTP redirects. Default off: an MCP endpoint that redirects is
+    /// misconfigured or hostile, and following it would carry the custom
+    /// headers (API keys) to wherever it points. A redirect fails the call.
+    pub follow_redirects: bool,
     /// Wait before reconnecting the push stream when the server gave no
     /// `retry`. Default one second.
     pub reconnect_delay: Duration,
@@ -68,6 +72,7 @@ impl HttpConfig {
             bearer_token: None,
             headers: Vec::new(),
             push_stream: true,
+            follow_redirects: false,
             reconnect_delay: Duration::from_secs(1),
         }
     }
@@ -107,12 +112,17 @@ pub struct HttpTransport {
     tx: Sender<Event>,
     inbox: Receiver<Event>,
     in_flight: HashMap<RequestId, JoinHandle<()>>,
+    /// Notification POSTs, which nobody waits for; closing waits for them.
+    notifications: Vec<JoinHandle<()>>,
 }
 
 fn build_client(config: &HttpConfig) -> io::Result<Client> {
     // No total timeout: a reply may be an event stream that stays open for as
     // long as the call runs. The client's own call timeout bounds the wait.
     let mut builder = Client::builder().no_timeout();
+    if !config.follow_redirects {
+        builder = builder.no_redirects();
+    }
     if let Some(token) = &config.bearer_token {
         builder = builder
             .bearer_auth(token)
@@ -141,6 +151,7 @@ impl HttpTransport {
             tx,
             inbox,
             in_flight: HashMap::new(),
+            notifications: Vec::new(),
         })
     }
 
@@ -452,8 +463,14 @@ impl Transport for HttpTransport {
             self.tx.clone(),
             message.clone(),
         ));
-        if let Some(id) = id {
-            self.in_flight.insert(id, handle);
+        match id {
+            Some(id) => {
+                self.in_flight.insert(id, handle);
+            }
+            None => {
+                self.notifications.retain(|h| !h.is_finished());
+                self.notifications.push(handle);
+            }
         }
         Ok(())
     }
@@ -472,11 +489,25 @@ impl Transport for HttpTransport {
 }
 
 impl Drop for HttpTransport {
-    /// End the session (best effort, bounded) and stop the background tasks.
+    /// Let notifications already sent finish (bounded), end the session (best
+    /// effort, bounded) and stop the background tasks. A notification such as
+    /// `notifications/initialized` sent just before closing must not be lost
+    /// to the runtime shutting down under it.
     fn drop(&mut self) {
         self.shared.closed.store(true, Ordering::SeqCst);
         for (_, handle) in self.in_flight.drain() {
             handle.abort();
+        }
+        let pending = std::mem::take(&mut self.notifications);
+        if !pending.is_empty() {
+            self.runtime.block_on(async move {
+                let wait = async {
+                    for handle in pending {
+                        let _ = handle.await;
+                    }
+                };
+                let _ = rusty_tokio::time::timeout(Duration::from_secs(2), wait).await;
+            });
         }
         let Some(session) = lock(&self.shared.session_id).take() else {
             return;

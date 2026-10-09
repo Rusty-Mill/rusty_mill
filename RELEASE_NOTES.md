@@ -13,10 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty-mcp-client on the native client, rk-mcp moved (pending review)
+
+- **Changed (breaking):** `rusty-mcp-client` returns `rusty_mcp_proto` types and runs on `rusty_mcp_client_native`; no `rmcp`/`reqwest` in that crate. `rk-mcp` updated. HTTP tries `server/discover` first and falls back to `initialize`; redirects are no longer followed; calls time out after 600 s.
+- **Fixed:** a notification sent just before the transport was dropped could be lost (now awaited, up to 2 s).
+- **Not done:** `rp-mcp`, `adk-mcp`, `remind_me_remote`, `rusty_homelab_mcp`, `agentgateway` still on `rmcp`; only ours and `rmcp`'s servers were tested.
+
+---
+
 ## 2026-10-09 - rusty_mcp_client_native, async face (pending review)
 
 - **Added:** `AsyncClient`, usable from tokio or any executor, over the stdio or HTTP transports; 7 tests.
-- **Not done:** no consumer uses the client yet. `rusty-mcp-client` cannot be rebuilt on it without changing its public API (it returns `rmcp`'s `Tool`, `Resource`, `Prompt` and `CallToolResult`); that needs an owner decision.
+- **Not done:** no consumer uses the client yet. `rusty-mcp-client` is rebuilt on it in the next entry.
 
 ---
 

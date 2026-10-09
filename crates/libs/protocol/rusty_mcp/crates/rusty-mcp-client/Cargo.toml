@@ -23,22 +23,18 @@ todo = "warn"
 unwrap_used = "warn"
 
 [dependencies]
-# TLS is whatever `reqwest` brings (rustls, not OpenSSL) until the native client
-# on `rusty_request`/`rusty_tls` replaces `rmcp`; see docs/research/MCP-NATIVE-PLAN.md.
-rmcp = { version = "3.1", default-features = false, features = [
-    "client",
-    "transport-child-process",
-    "transport-streamable-http-client",
-    "transport-streamable-http-client-reqwest",
-    "reqwest",
-] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
-http = "1"
+# The client is `rusty_mcp_client_native` (the HTTP transport is on `rusty_request`
+# and `rusty_tls`). `rusty_request` is also used here for the OAuth token fetch;
+# its `tokio` feature makes it run on the caller's tokio runtime.
+rusty_mcp_client_native = { workspace = true, features = ["http"] }
+rusty_request = { workspace = true, features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", default-features = false, features = ["process", "time", "io-util"] }
 
 [dev-dependencies]
 toml = "1.1"
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net"] }
+# The server the end-to-end tests talk to, in process.
+rusty_mcp_server = { workspace = true, features = ["http"] }
+rusty_serve = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }

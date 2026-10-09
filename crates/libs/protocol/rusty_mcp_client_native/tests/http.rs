@@ -162,13 +162,9 @@ fn a_timed_out_stateless_call_hangs_up_and_the_server_cancels_it() {
         },
     );
     let s = serve_with(b);
-    let mut c = Client::connect(
-        transport(&s.url),
-        ClientConfig::new("c", "1"),
-        NoHandler,
-        Duration::from_millis(400),
-    )
-    .unwrap();
+    let mut config = ClientConfig::new("c", "1");
+    config.call_timeout = Duration::from_millis(400);
+    let mut c = Client::connect(transport(&s.url), config, NoHandler, SECS).unwrap();
     assert!(matches!(
         c.call_tool("hang", None).unwrap_err(),
         ClientError::Timeout
@@ -204,13 +200,9 @@ fn a_classic_timeout_cancels_through_the_session() {
         },
     );
     let s = serve_with(b);
-    let mut c = Client::connect(
-        transport(&s.url),
-        classic(ClientConfig::new("c", "1")),
-        NoHandler,
-        Duration::from_millis(400),
-    )
-    .unwrap();
+    let mut config = classic(ClientConfig::new("c", "1"));
+    config.call_timeout = Duration::from_millis(400);
+    let mut c = Client::connect(transport(&s.url), config, NoHandler, SECS).unwrap();
     assert!(matches!(
         c.call_tool("hang", None).unwrap_err(),
         ClientError::Timeout
@@ -278,9 +270,17 @@ fn headers_are_what_a_server_expects() {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
+            // Headers and body may arrive in separate reads.
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+            let mut got = Vec::new();
             let mut buf = [0u8; 8192];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            while let Ok(n @ 1..) = stream.read(&mut buf) {
+                got.extend_from_slice(&buf[..n]);
+                if got.windows(26).any(|w| w == b"notifications/initialized\"") {
+                    break;
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&got).into_owned());
             let _ = stream.write_all(
                 b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             );
@@ -304,4 +304,104 @@ fn headers_are_what_a_server_expects() {
         head.contains("accept: application/json, text/event-stream"),
         "{head}"
     );
+}
+
+#[test]
+fn a_redirect_is_not_followed_and_nothing_is_sent_to_where_it_points() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    target.set_nonblocking(true).unwrap();
+    let target_url = format!("http://{}/capture", target.local_addr().unwrap());
+    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin_url = format!("http://{}/mcp", origin.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in origin.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    let mut config = HttpConfig::new(origin_url);
+    config
+        .headers
+        .push(("X-Api-Key".to_owned(), "secret".to_owned()));
+    let err = Client::connect(
+        HttpTransport::new(config).unwrap(),
+        ClientConfig::new("c", "1"),
+        NoHandler,
+        Duration::from_secs(5),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        matches!(&err, ClientError::Rpc(e) if e.message.contains("307")),
+        "{err}"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        target.accept().is_err(),
+        "the redirect target was contacted"
+    );
+}
+
+#[test]
+fn the_handshake_timeout_and_the_call_timeout_are_separate() {
+    let s = serve();
+    let mut config = ClientConfig::new("c", "1");
+    config.call_timeout = Duration::from_millis(150);
+    // A generous handshake budget, a short call budget: `slow` takes 400 ms.
+    let mut c = Client::connect(
+        transport(&s.url),
+        config,
+        NoHandler,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    assert!(matches!(
+        c.call_tool("slow", None).unwrap_err(),
+        ClientError::Timeout
+    ));
+}
+
+#[test]
+fn a_notification_sent_just_before_closing_is_not_lost() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            // Headers and body may arrive in separate reads.
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+            let mut got = Vec::new();
+            let mut buf = [0u8; 8192];
+            while let Ok(n @ 1..) = stream.read(&mut buf) {
+                got.extend_from_slice(&buf[..n]);
+                if got.windows(26).any(|w| w == b"notifications/initialized\"") {
+                    break;
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&got).into_owned());
+            let _ = stream.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    let mut t = HttpTransport::new(HttpConfig::new(format!("http://{addr}/mcp"))).unwrap();
+    use rusty_mcp_client_native::Transport;
+    t.send(&rusty_mcp_client_native::proto::Message::Notification {
+        method: "notifications/initialized".to_owned(),
+        params: None,
+    })
+    .unwrap();
+    drop(t); // closes at once: the POST must still go out
+    let got = rx
+        .recv_timeout(SECS)
+        .expect("the notification never arrived");
+    assert!(got.contains("notifications/initialized"), "{got}");
 }

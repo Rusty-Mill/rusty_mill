@@ -10,5 +10,9 @@
 pub mod client;
 pub mod client_auth;
 
+/// The wire types the client returns (`Tool`, `Resource`, `Prompt`,
+/// `CallToolResult`, ...), re-exported so callers need no dependency of their own.
+pub use rusty_mcp_client_native::proto;
+
 pub use client::{McpClient, McpClientError, McpServerSpec, McpTransport};
 pub use client_auth::{AuthError, McpAuth, McpAuthSecret};

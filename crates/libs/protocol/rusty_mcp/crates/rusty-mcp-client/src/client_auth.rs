@@ -2,7 +2,7 @@
 //!
 //! [`resolve`] converts [`McpAuth`] into authorization and custom headers.
 //! API keys and bearer tokens support inline values or environment indirection.
-//! OAuth client credentials fetch a token with reqwest 0.13 under
+//! OAuth client credentials fetch a token with `rusty_request` under
 //! [`DEFAULT_OAUTH_TIMEOUT`]. The resolver does not manage refresh tokens,
 //! interactive authorization, or application credential storage.
 //!
@@ -127,10 +127,10 @@ pub enum ClientSecretSecret {
 
 /// What the resolver hands back to [`crate::client::McpClient`]. The
 /// wire shape after resolve is "extra HTTP headers" — every flow
-/// reduces to one or more headers attached to the rmcp transport.
+/// reduces to one or more headers attached to the transport.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedAuth {
-    /// Goes into rmcp's `auth_header(...)` (the `Authorization` value,
+    /// Goes into the transport's bearer slot (the `Authorization` value,
     /// without the leading `Authorization:` name).
     pub authorization: Option<String>,
     /// Other custom headers (e.g. an API-key on `X-API-Key`).
@@ -215,7 +215,7 @@ struct TokenResponse {
 ///
 /// Pure for [`McpAuth::ApiKey`] / [`McpAuth::Bearer`] (no I/O). The
 /// OAuth flow makes one HTTP POST to the token endpoint using the
-/// crate's `reqwest` 0.13 client. A 30-second timeout caps the
+/// crate's `rusty_request` client. A 30-second timeout caps the
 /// fetch so a hung token endpoint can't stall MCP connect.
 ///
 /// # Errors
@@ -229,7 +229,7 @@ pub async fn resolve(auth: &McpAuth) -> Result<ResolvedAuth, AuthError> {
             let v = value.resolve("api_key")?;
             let mut out = ResolvedAuth::default();
             // Authorization is the canonical header — surface it on the
-            // dedicated rmcp slot so the transport applies the same
+            // dedicated slot so the transport applies the same
             // 401-handling it would for any other auth header.
             if header.eq_ignore_ascii_case("authorization") {
                 out.authorization = Some(v);
@@ -278,7 +278,7 @@ pub async fn resolve(auth: &McpAuth) -> Result<ResolvedAuth, AuthError> {
 
 /// P2-06 — wall-clock budget for the OAuth token POST. Picked at the
 /// same order of magnitude as `client::CONNECT_TIMEOUT` (15 s) so a
-/// stalled token endpoint doesn't outlive the rmcp handshake budget
+/// stalled token endpoint doesn't outlive the handshake budget
 /// by much. Override via a future `[mcp.timeouts] oauth_secs = N`
 /// block (deferred from P2-06).
 pub const DEFAULT_OAUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -301,34 +301,33 @@ async fn fetch_client_credentials_token(
     {
         form.push(("scope", s));
     }
-    let client = reqwest::Client::builder()
+    let oauth_error = |reason: String| AuthError::Oauth {
+        url: token_url.to_string(),
+        reason,
+    };
+    let client = rusty_request::Client::builder()
         .timeout(OAUTH_TIMEOUT)
-        .build()
-        .map_err(|e| AuthError::Oauth {
-            url: token_url.to_string(),
-            reason: format!("client build failed: {e}"),
-        })?;
+        .build();
     let resp = client
         .post(token_url)
-        .basic_auth(client_id, Some(client_secret))
-        .form(&form)
+        .and_then(|r| r.basic_auth(client_id, client_secret))
+        .and_then(|r| r.form(form))
+        .map_err(|e| oauth_error(e.to_string()))?
         .send()
         .await
-        .map_err(|e| AuthError::Oauth {
-            url: token_url.to_string(),
-            reason: e.to_string(),
-        })?;
+        .map_err(|e| oauth_error(e.to_string()))?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AuthError::Oauth {
-            url: token_url.to_string(),
-            reason: format!("HTTP {status}: {body}"),
-        });
+        let body = resp.text().unwrap_or_default();
+        return Err(oauth_error(format!("HTTP {status}: {body}")));
     }
-    let parsed: TokenResponse = resp.json().await.map_err(|e| AuthError::OauthResponse {
-        reason: format!("decode token response: {e}"),
-    })?;
+    let parsed: TokenResponse = resp
+        .text()
+        .map_err(|e| e.to_string())
+        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+        .map_err(|e| AuthError::OauthResponse {
+            reason: format!("decode token response: {e}"),
+        })?;
     if let Some(tt) = parsed.token_type.as_deref()
         && !tt.eq_ignore_ascii_case("bearer")
     {

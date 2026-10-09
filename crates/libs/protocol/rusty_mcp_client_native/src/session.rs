@@ -26,6 +26,10 @@ pub struct ClientConfig {
     pub capabilities: ClientCapabilities,
     /// Revisions in order of preference, newest first.
     pub versions: Vec<ProtocolVersion>,
+    /// How long one call may wait for its answer once connected. The timeout
+    /// given to `connect` bounds the handshake only: a tool call may
+    /// legitimately run far longer. Default ten minutes.
+    pub call_timeout: std::time::Duration,
 }
 
 impl ClientConfig {
@@ -43,6 +47,7 @@ impl ClientConfig {
             ]
             .map(ProtocolVersion::new)
             .to_vec(),
+            call_timeout: std::time::Duration::from_secs(600),
         }
     }
 }
@@ -128,6 +133,11 @@ impl ClientSession {
     /// The server's usage hints for a model.
     pub fn instructions(&self) -> Option<&str> {
         self.instructions.as_deref()
+    }
+
+    /// The configured per-call timeout.
+    pub fn call_timeout(&self) -> std::time::Duration {
+        self.config.call_timeout
     }
 
     /// Whether the config prefers a stateless revision, so the handshake

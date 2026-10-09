@@ -274,6 +274,25 @@ impl<T: Transport + Send + 'static, H: Handler + Send + 'static> AsyncClient<T, 
     }
 }
 
+impl<T: Transport + Send + 'static, H: Handler + Send + 'static> AsyncClient<T, H> {
+    /// Close the connection without blocking the caller: the worker finishes
+    /// the call it is in, then the transport is closed (child stopped, HTTP
+    /// session ended) on a helper thread, and the future resolves.
+    pub fn close(self) -> Reply<()> {
+        let (fill, answer) = reply();
+        // If the helper thread cannot start, the closure is dropped on this
+        // thread instead: the client closes (blocking) and the future fails
+        // with `Closed` rather than hanging.
+        let _ = std::thread::Builder::new()
+            .name("mcp-client-close".to_owned())
+            .spawn(move || {
+                drop(self);
+                fill.set(Ok(()));
+            });
+        answer
+    }
+}
+
 impl<T: Transport + Send + 'static, H: Handler + Send + 'static> Drop for AsyncClient<T, H> {
     /// End the worker (after the call it is in, if any) and close the
     /// transport.
