@@ -86,6 +86,23 @@ pub enum HandshakeError {
     /// while sitting somewhere else is exactly the case a binder would fail to
     /// cover.
     PskOffer(&'static str),
+    /// A `pre_shared_key` offer with a different number of binders than
+    /// identities. Well-formed, but a lie about what was offered, so RFC 8446
+    /// section 4.2.11 treats it as an illegal parameter, not a decode error.
+    PskBinderCountMismatch,
+    /// A TLS 1.2 `ServerKeyExchange` named a curve type other than
+    /// `named_curve(3)`.
+    ///
+    /// The other two (`explicit_prime`, `explicit_char2`) let a server supply
+    /// its own curve parameters, which is a documented attack surface and has
+    /// no use on the modern internet.
+    UnexpectedCurveType(u8),
+    /// A `key_share` offer named the same group twice (RFC 8446 §4.2.8).
+    DuplicateKeyShare(u16),
+    /// A field was present and well-formed on the wire but violated a rule of
+    /// its message, described by the string (a session id over 32 octets, an
+    /// empty certificate in a chain, a `Finished` of the wrong length).
+    Malformed(&'static str),
 }
 
 impl From<WireError> for HandshakeError {
@@ -118,6 +135,19 @@ impl core::fmt::Display for HandshakeError {
             Self::DuplicateExtension(id) => write!(f, "extension {id} appears more than once"),
             Self::Empty(what) => write!(f, "{what} is empty"),
             Self::PskOffer(why) => write!(f, "malformed pre_shared_key offer: {why}"),
+            Self::PskBinderCountMismatch => {
+                f.write_str("the binder count does not match the identity count")
+            }
+            Self::UnexpectedCurveType(typ) => {
+                write!(
+                    f,
+                    "ServerKeyExchange curve type {typ} is not named_curve(3)"
+                )
+            }
+            Self::DuplicateKeyShare(group) => {
+                write!(f, "key_share offers group 0x{group:04x} more than once")
+            }
+            Self::Malformed(why) => write!(f, "malformed message: {why}"),
         }
     }
 }
@@ -140,6 +170,8 @@ pub const LEGACY_VERSION: u16 = 0x0303;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HandshakeType {
+    /// `hello_request(0)`. TLS 1.2 only; a request to renegotiate.
+    HelloRequest,
     /// `client_hello(1)`.
     ClientHello,
     /// `server_hello(2)`, which also carries HelloRetryRequest.
@@ -150,10 +182,16 @@ pub enum HandshakeType {
     EncryptedExtensions,
     /// `certificate(11)`.
     Certificate,
+    /// `server_key_exchange(12)`. TLS 1.2 only.
+    ServerKeyExchange,
     /// `certificate_request(13)`.
     CertificateRequest,
+    /// `server_hello_done(14)`. TLS 1.2 only.
+    ServerHelloDone,
     /// `certificate_verify(15)`.
     CertificateVerify,
+    /// `client_key_exchange(16)`. TLS 1.2 only.
+    ClientKeyExchange,
     /// `finished(20)`.
     Finished,
     /// `key_update(24)`.
@@ -166,13 +204,17 @@ impl HandshakeType {
     /// The wire encoding.
     pub const fn as_u8(self) -> u8 {
         match self {
+            Self::HelloRequest => 0,
             Self::ClientHello => 1,
             Self::ServerHello => 2,
             Self::NewSessionTicket => 4,
             Self::EncryptedExtensions => 8,
             Self::Certificate => 11,
+            Self::ServerKeyExchange => 12,
             Self::CertificateRequest => 13,
+            Self::ServerHelloDone => 14,
             Self::CertificateVerify => 15,
+            Self::ClientKeyExchange => 16,
             Self::Finished => 20,
             Self::KeyUpdate => 24,
             Self::Unknown(other) => other,
@@ -183,13 +225,17 @@ impl HandshakeType {
     /// the state machine's decision, not this module's.
     pub const fn from_u8(value: u8) -> Self {
         match value {
+            0 => Self::HelloRequest,
             1 => Self::ClientHello,
             2 => Self::ServerHello,
             4 => Self::NewSessionTicket,
             8 => Self::EncryptedExtensions,
             11 => Self::Certificate,
+            12 => Self::ServerKeyExchange,
             13 => Self::CertificateRequest,
+            14 => Self::ServerHelloDone,
             15 => Self::CertificateVerify,
+            16 => Self::ClientKeyExchange,
             20 => Self::Finished,
             24 => Self::KeyUpdate,
             other => Self::Unknown(other),
@@ -319,10 +365,16 @@ pub mod extension {
     pub const SERVER_NAME: u16 = 0;
     /// `supported_groups(10)`.
     pub const SUPPORTED_GROUPS: u16 = 10;
+    /// `ec_point_formats(11)`, RFC 8422. TLS 1.2 only.
+    pub const EC_POINT_FORMATS: u16 = 11;
     /// `signature_algorithms(13)`.
     pub const SIGNATURE_ALGORITHMS: u16 = 13;
     /// `application_layer_protocol_negotiation(16)` — ALPN.
     pub const ALPN: u16 = 16;
+    /// `extended_master_secret(23)`, RFC 7627. TLS 1.2 only.
+    pub const EXTENDED_MASTER_SECRET: u16 = 23;
+    /// `renegotiation_info(65281)`, RFC 5746. TLS 1.2 only.
+    pub const RENEGOTIATION_INFO: u16 = 0xff01;
     /// `pre_shared_key(41)`.
     ///
     /// Must be the **last** extension in a ClientHello: its binders are
@@ -340,6 +392,10 @@ pub mod extension {
     pub const PSK_KEY_EXCHANGE_MODES: u16 = 45;
     /// `key_share(51)`.
     pub const KEY_SHARE: u16 = 51;
+    /// `cookie` — a HelloRetryRequest's token, echoed in the second hello.
+    pub const COOKIE: u16 = 44;
+    /// `certificate_authorities`.
+    pub const CERTIFICATE_AUTHORITIES: u16 = 47;
 }
 
 /// Parse an extensions block, rejecting duplicates.
@@ -348,7 +404,7 @@ pub mod extension {
 /// in a given extension block." A parser that takes the first, or the last,
 /// lets a peer say two things and lets two implementations disagree about
 /// which one it said.
-fn parse_extensions<'a>(reader: &mut Reader<'a>) -> Result<Vec<Extension<'a>>> {
+pub(super) fn parse_extensions<'a>(reader: &mut Reader<'a>) -> Result<Vec<Extension<'a>>> {
     let mut block = reader.sub_u16()?;
     let mut extensions: Vec<Extension<'_>> = Vec::new();
 
@@ -364,7 +420,184 @@ fn parse_extensions<'a>(reader: &mut Reader<'a>) -> Result<Vec<Extension<'a>>> {
     Ok(extensions)
 }
 
-fn write_extensions(writer: &mut Writer, extensions: &[Extension<'_>]) {
+/// Parse extensions that are not preceded by a length (a Certificate entry's,
+/// or a NewSessionTicket's once its own length has been taken).
+pub(super) fn parse_extension_list(data: &[u8]) -> Result<Vec<Extension<'_>>> {
+    let mut block = Reader::new(data);
+    let mut extensions: Vec<Extension<'_>> = Vec::new();
+    while !block.is_empty() {
+        let typ = block.u16()?;
+        let body = block.vector_u16()?;
+        if extensions.iter().any(|e| e.typ == typ) {
+            return Err(HandshakeError::DuplicateExtension(typ));
+        }
+        extensions.push(Extension { typ, data: body });
+    }
+    Ok(extensions)
+}
+
+/// Check the contents of the extensions a server reads and then ignores.
+///
+/// A server that skips an extension it does not act on still has to refuse one
+/// that is malformed (RFC 8446 §4.2, BoGo `ExtensionTrailingData-*`): "ignored"
+/// means the *meaning* is ignored, not that the bytes are unchecked.
+pub fn validate_client_extensions(extensions: &[Extension<'_>]) -> Result<()> {
+    for ext in extensions {
+        match ext.typ {
+            extension::SERVER_NAME => validate_server_name(ext.data)?,
+            extension::ALPN => {
+                parse_alpn_offer(ext.data)?;
+            }
+            extension::CERTIFICATE_AUTHORITIES => validate_certificate_authorities(ext.data)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The body of an ALPN extension offering `protocols`, RFC 7301 section 3.1.
+///
+/// Callers pass non-empty names of at most 255 octets; [`parse_alpn_offer`] is
+/// what refuses the others when they arrive.
+pub fn encode_alpn_offer(protocols: &[&[u8]]) -> Vec<u8> {
+    let mut writer = Writer::new();
+    writer.vector_u16(|w| {
+        for protocol in protocols {
+            w.vector_u8(|w| w.bytes(protocol));
+        }
+    });
+    writer.into_vec()
+}
+
+/// The body of a server's ALPN answer: a list of exactly one name.
+pub fn encode_alpn_selection(protocol: &[u8]) -> Vec<u8> {
+    encode_alpn_offer(&[protocol])
+}
+
+/// Parse a client's ALPN offer: `ProtocolName protocol_name_list<2..2^16-1>`,
+/// each name `<1..2^8-1>`, nothing after the list.
+pub fn parse_alpn_offer(data: &[u8]) -> Result<Vec<&[u8]>> {
+    let mut reader = Reader::new(data);
+    let mut list = reader.sub_u16()?;
+    reader.finish()?;
+    let mut names = Vec::new();
+    while !list.is_empty() {
+        let name = list.vector_u8()?;
+        if name.is_empty() {
+            return Err(HandshakeError::Empty("ALPN protocol name"));
+        }
+        names.push(name);
+    }
+    if names.is_empty() {
+        return Err(HandshakeError::Empty("ALPN protocol_name_list"));
+    }
+    Ok(names)
+}
+
+/// Parse a server's ALPN answer, which names exactly one protocol (RFC 7301
+/// section 3.1).
+pub fn parse_alpn_selection(data: &[u8]) -> Result<&[u8]> {
+    match parse_alpn_offer(data)?.as_slice() {
+        [one] => Ok(one),
+        _ => Err(HandshakeError::Malformed(
+            "an ALPN answer must name exactly one protocol",
+        )),
+    }
+}
+
+/// What a server's ALPN policy concluded about a client's hello.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlpnChoice<'s> {
+    /// ALPN is not in play: the client offered none, or this server has no
+    /// protocols configured. The handshake carries on without it.
+    Unused,
+    /// The first of the server's protocols that the client also offered.
+    Selected(&'s [u8]),
+    /// The client offered some and the server speaks none of them. RFC 7301
+    /// section 3.2: the server aborts with `no_application_protocol`.
+    NoOverlap,
+}
+
+/// Apply a server's ALPN preference list (`ours`, most preferred first) to the
+/// extensions of a ClientHello. The offer is parsed strictly even when `ours`
+/// is empty, because a malformed extension is malformed whoever reads it.
+pub fn choose_alpn<'s>(
+    ours: &'s [&'s [u8]],
+    extensions: &[Extension<'_>],
+) -> Result<AlpnChoice<'s>> {
+    let Some(offer) = find(extensions, extension::ALPN) else {
+        return Ok(AlpnChoice::Unused);
+    };
+    let offered = parse_alpn_offer(offer)?;
+    if ours.is_empty() {
+        return Ok(AlpnChoice::Unused);
+    }
+    Ok(ours
+        .iter()
+        .find(|ours| offered.contains(ours))
+        .map_or(AlpnChoice::NoOverlap, |ours| AlpnChoice::Selected(ours)))
+}
+
+/// The `host_name` a ClientHello's `server_name` extension carries, if any
+/// (RFC 6066 section 3). Only a name of type `host_name(0)` counts; an address
+/// or an unknown type is not a name to select a certificate by. The extension
+/// is parsed strictly whether or not a name is wanted.
+pub fn host_name_from<'a>(extensions: &[Extension<'a>]) -> Result<Option<&'a str>> {
+    let Some(data) = find(extensions, extension::SERVER_NAME) else {
+        return Ok(None);
+    };
+    validate_server_name(data)?;
+    let mut reader = Reader::new(data);
+    let mut list = reader.sub_u16()?;
+    while !list.is_empty() {
+        let name_type = list.u8()?;
+        let name = list.vector_u16()?;
+        if name_type == 0 {
+            return core::str::from_utf8(name)
+                .map(Some)
+                .map_err(|_| HandshakeError::Malformed("server_name is not valid UTF-8"));
+        }
+    }
+    Ok(None)
+}
+
+/// RFC 6066 §3: a list of `(name_type, name)`, no entry of a type twice.
+fn validate_server_name(data: &[u8]) -> Result<()> {
+    let mut reader = Reader::new(data);
+    let mut list = reader.sub_u16()?;
+    reader.finish()?;
+    let mut seen = Vec::new();
+    while !list.is_empty() {
+        let name_type = list.u8()?;
+        let name = list.vector_u16()?;
+        if name.is_empty() {
+            return Err(HandshakeError::Empty("server_name"));
+        }
+        if seen.contains(&name_type) {
+            return Err(HandshakeError::Malformed("server_name repeats a name type"));
+        }
+        seen.push(name_type);
+    }
+    Ok(())
+}
+
+/// RFC 8446 §4.2.4: a non-empty list of non-empty DER names.
+fn validate_certificate_authorities(data: &[u8]) -> Result<()> {
+    let mut reader = Reader::new(data);
+    let mut list = reader.sub_u16()?;
+    reader.finish()?;
+    if list.is_empty() {
+        return Err(HandshakeError::Empty("certificate_authorities"));
+    }
+    while !list.is_empty() {
+        if list.vector_u16()?.is_empty() {
+            return Err(HandshakeError::Empty("a certificate authority name"));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn write_extensions(writer: &mut Writer, extensions: &[Extension<'_>]) {
     writer.vector_u16(|w| {
         for extension in extensions {
             w.u16(extension.typ);
@@ -399,15 +632,35 @@ pub struct ClientHello<'a> {
 impl<'a> ClientHello<'a> {
     /// Parse a ClientHello body — the message with its four-octet header
     /// already removed.
+    ///
+    /// Strict about `legacy_version`: exactly the 0x0303 that
+    /// [`ClientHello::encode`] writes, so that parse and encode are inverses.
     pub fn parse(body: &'a [u8]) -> Result<Self> {
+        Self::parse_inner(body, true)
+    }
+
+    /// As [`ClientHello::parse`], for a server reading a hello from a peer it
+    /// does not control: RFC 8446 §4.1.2 has it accept any `legacy_version` of
+    /// 0x0303 or more, since a client from the future still negotiates in
+    /// `supported_versions`. The result does not round-trip through `encode`
+    /// for such a hello; nothing needs it to, because a transcript hashes the
+    /// bytes that arrived.
+    pub fn parse_lenient(body: &'a [u8]) -> Result<Self> {
+        Self::parse_inner(body, false)
+    }
+
+    fn parse_inner(body: &'a [u8], strict: bool) -> Result<Self> {
         let mut reader = Reader::new(body);
 
         let version = reader.u16()?;
-        if version != LEGACY_VERSION {
+        if version < LEGACY_VERSION || (strict && version != LEGACY_VERSION) {
             return Err(HandshakeError::UnexpectedLegacyVersion(version));
         }
         let random = reader.take(32)?;
         let session_id = reader.vector_u8()?;
+        if session_id.len() > 32 {
+            return Err(HandshakeError::Malformed("session_id is over 32 octets"));
+        }
 
         let mut suites = reader.sub_u16()?;
         let mut cipher_suites = Vec::new();
@@ -428,6 +681,7 @@ impl<'a> ClientHello<'a> {
 
         let extensions = parse_extensions(&mut reader)?;
         reader.finish()?;
+        validate_client_extensions(&extensions)?;
 
         Ok(Self {
             random,
@@ -528,10 +782,13 @@ impl<'a> PresharedKeyOffer<'a> {
         if identities.is_empty() {
             return Err(HandshakeError::PskOffer("no identities"));
         }
+        // An empty binder list is not a count mismatch but a list that cannot
+        // be encoded at all (it is `<33..2^16-1>`): a decode error.
+        if binders.is_empty() {
+            return Err(HandshakeError::PskOffer("no binders"));
+        }
         if identities.len() != binders.len() {
-            return Err(HandshakeError::PskOffer(
-                "the binder count does not match the identity count",
-            ));
+            return Err(HandshakeError::PskBinderCountMismatch);
         }
 
         Ok(Self {
@@ -749,6 +1006,9 @@ impl<'a> ServerHello<'a> {
         }
         let random = reader.take(32)?;
         let session_id = reader.vector_u8()?;
+        if session_id.len() > 32 {
+            return Err(HandshakeError::Malformed("session_id is over 32 octets"));
+        }
         let cipher_suite = reader.u16()?;
 
         let compression = reader.u8()?;
@@ -830,6 +1090,11 @@ impl<'a> CertificateRequestMessage<'a> {
         let context = reader.vector_u8()?;
         let extensions = parse_extensions(&mut reader)?;
         reader.finish()?;
+        // Contents the client does not act on are still checked (BoGo
+        // `ExtensionTrailingData-CertificateAuthorities-Client`).
+        if let Some(authorities) = find(&extensions, extension::CERTIFICATE_AUTHORITIES) {
+            validate_certificate_authorities(authorities)?;
+        }
 
         let offered = find(&extensions, extension::SIGNATURE_ALGORITHMS)
             .ok_or(HandshakeError::MissingSignatureAlgorithms)?;
@@ -840,6 +1105,12 @@ impl<'a> CertificateRequestMessage<'a> {
         let mut schemes = Vec::new();
         while !list.is_empty() {
             schemes.push(list.u16()?);
+        }
+        // `SignatureScheme supported_signature_algorithms<2..2^16-2>`: an empty
+        // list cannot be encoded, so it is a decode error and not "no scheme
+        // in common" (BoGo ClientAuth-NoFallback-TLS13).
+        if schemes.is_empty() {
+            return Err(HandshakeError::Empty("signature_algorithms"));
         }
         Ok(Self { context, schemes })
     }

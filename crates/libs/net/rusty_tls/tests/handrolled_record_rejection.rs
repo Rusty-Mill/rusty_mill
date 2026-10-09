@@ -359,16 +359,28 @@ fn an_oversize_fragment_is_refused() {
 
 #[test]
 fn padding_that_overflows_the_inner_plaintext_is_refused() {
-    let fragment = vec![0u8; MAX_FRAGMENT_LEN];
-    let max_padding = MAX_INNER_PLAINTEXT_LEN - MAX_FRAGMENT_LEN - 1;
+    // RFC 8446 §5.4: content, type and padding together are at most 2^14 + 1,
+    // so a full fragment leaves no room for padding at all.
+    let full = vec![0u8; MAX_FRAGMENT_LEN];
+    assert!(sealer()
+        .seal(ContentType::ApplicationData, &full, 0)
+        .is_ok());
+    assert_eq!(
+        sealer().seal(ContentType::ApplicationData, &full, 1),
+        Err(RecordError::FragmentTooLong {
+            len: MAX_INNER_PLAINTEXT_LEN + 1,
+            max: MAX_INNER_PLAINTEXT_LEN
+        })
+    );
 
+    let fragment = vec![0u8; 100];
+    let max_padding = MAX_INNER_PLAINTEXT_LEN - fragment.len() - 1;
     assert!(
         sealer()
             .seal(ContentType::ApplicationData, &fragment, max_padding)
             .is_ok(),
         "the largest legal padding must be allowed"
     );
-
     assert_eq!(
         sealer().seal(ContentType::ApplicationData, &fragment, max_padding + 1),
         Err(RecordError::FragmentTooLong {
@@ -382,6 +394,43 @@ fn padding_that_overflows_the_inner_plaintext_is_refused() {
     assert!(sealer()
         .seal(ContentType::ApplicationData, b"x", usize::MAX)
         .is_err());
+}
+
+/// Whatever the sealer produces, the opener accepts: the sealing and opening
+/// limits are one invariant, at the boundary, for every AEAD.
+#[test]
+fn everything_the_sealer_accepts_the_opener_accepts() {
+    for &(alg, key_len) in ALGS {
+        let key = vec![7u8; key_len];
+        for (content, padding) in [
+            (MAX_FRAGMENT_LEN, 0),
+            (1, MAX_FRAGMENT_LEN - 1),
+            (0, MAX_FRAGMENT_LEN),
+            (MAX_FRAGMENT_LEN - 1, 1),
+        ] {
+            let fragment = vec![b'x'; content];
+            let record = Sealer::new(alg, &key, &IV)
+                .expect("sealer")
+                .seal(ContentType::ApplicationData, &fragment, padding)
+                .expect("within the limit");
+            let opened = Opener::new(alg, &key, &IV)
+                .expect("opener")
+                .open(&record)
+                .unwrap_or_else(|e| panic!("{alg:?} {content}+{padding}: {e:?}"));
+            assert_eq!(opened.fragment, fragment, "{alg:?} {content}+{padding}");
+        }
+        // One past is refused at the sealer, before anything is sent.
+        for (content, padding) in [(MAX_FRAGMENT_LEN, 1), (1, MAX_FRAGMENT_LEN)] {
+            let fragment = vec![b'x'; content];
+            assert!(
+                Sealer::new(alg, &key, &IV)
+                    .expect("sealer")
+                    .seal(ContentType::ApplicationData, &fragment, padding)
+                    .is_err(),
+                "{alg:?} {content}+{padding}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -491,5 +540,70 @@ fn debug_output_does_not_contain_key_material() {
         assert!(!rendered.contains('7'), "key bytes appear in {rendered}");
         assert!(!rendered.contains('9'), "iv bytes appear in {rendered}");
         assert!(rendered.contains("sequence"), "{rendered}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Padding
+// ---------------------------------------------------------------------------
+
+/// A record carrying exactly this inner plaintext, sealed under the test key at
+/// sequence zero. The real [`Sealer`] will not build an oversize one, which is
+/// the point: this is what a hostile peer sends.
+fn forged_record(inner: &[u8]) -> Vec<u8> {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+
+    let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &KEY).expect("key"));
+    let len = inner.len() + TAG_LEN;
+    let header = [23u8, 3, 3, (len >> 8) as u8, len as u8];
+    let mut body = inner.to_vec();
+    key.seal_in_place_append_tag(
+        Nonce::assume_unique_for_key(IV),
+        Aad::from(header),
+        &mut body,
+    )
+    .expect("seals");
+    [header.to_vec(), body].concat()
+}
+
+/// RFC 8446 §5.4: content, type octet and padding together may not exceed
+/// 2^14 + 1. Padding is the one part of a record a sender chooses freely, so a
+/// small message with enormous padding is as much an overflow as a big one
+/// (BoGo `LargePlaintext-TLS13-Padded-*`).
+#[test]
+fn padding_that_takes_a_record_past_the_limit_is_refused() {
+    let inner = |content: usize, padding: usize| {
+        let mut v = vec![b'x'; content];
+        v.push(ContentType::ApplicationData.as_u8());
+        v.extend(std::iter::repeat_n(0u8, padding));
+        v
+    };
+
+    // At the limit, in each of the ways to reach it.
+    for (content, padding) in [
+        (MAX_FRAGMENT_LEN, 0),
+        (1, MAX_FRAGMENT_LEN - 1),
+        (0, MAX_FRAGMENT_LEN),
+    ] {
+        let record = forged_record(&inner(content, padding));
+        let opened = opener().open(&record).expect("exactly at the limit");
+        assert_eq!(opened.fragment.len(), content);
+    }
+
+    // One past, in each of them.
+    for (content, padding) in [
+        (MAX_FRAGMENT_LEN, 1),
+        (8193, 8192),
+        (1, MAX_FRAGMENT_LEN),
+        (0, MAX_FRAGMENT_LEN + 1),
+    ] {
+        let record = forged_record(&inner(content, padding));
+        assert!(
+            matches!(
+                opener().open(&record),
+                Err(RecordError::FragmentTooLong { .. })
+            ),
+            "{content} + {padding}"
+        );
     }
 }

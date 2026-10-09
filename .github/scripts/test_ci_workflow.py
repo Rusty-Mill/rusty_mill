@@ -36,6 +36,7 @@ PLAN_KEYS = {
     "win32",
     "multimodal_db",
     "rusty_config_no_std",
+    "tls_engine",
     "rleval_viewer",
     "rleval_app",
     "crypto_ct",
@@ -58,6 +59,68 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn('changed="$(python3 .github/scripts/ci_plan.py --changed-from "$base")"', self.workflow)
         self.assertIn('Event has no usable scoped base', self.workflow)
         self.assertIn('python3 .github/scripts/ci_plan.py --emit-full', self.workflow)
+
+    def test_rusty_tls_engine_job_cannot_pass_vacuously(self) -> None:
+        # The native engine is compiled only under a cfg that no other job sets,
+        # so this job is the only thing standing between a regression in it and
+        # a green CI. These pin the properties that keep it honest.
+        start = self.workflow.index("  rusty-tls-engine:\n")
+        end = self.workflow.find("\n  # ----", start)
+        job = self.workflow[start : end if end != -1 else None]
+        self.assertIn("needs: plan", job)
+        self.assertIn("if: needs.plan.outputs.tls_engine == 'true'", job)
+        # Both flags: rustdoc does not inherit RUSTFLAGS, so a missing
+        # RUSTDOCFLAGS silently skips the module's doctests.
+        self.assertIn("RUSTFLAGS: --cfg rusty_tls_handrolled", job)
+        self.assertIn("RUSTDOCFLAGS: --cfg rusty_tls_handrolled\n", job)
+        self.assertIn("--features handrolled-engine -- -D warnings", job)
+        # The OpenSSL leg asserts a non-zero count rather than trusting an exit
+        # code, because `--ignored` with nothing ignored runs zero tests.
+        self.assertIn("openssl version", job)
+        # All four OpenSSL suites run: the TLS 1.3 server, the TLS 1.2 client,
+        # the TLS 1.2 server and version negotiation.
+        self.assertIn("handrolled_socket_interop", job)
+        self.assertIn("handrolled_client12_socket_interop", job)
+        self.assertIn("handrolled_server12_socket_interop", job)
+        self.assertIn("handrolled_negotiate_socket_interop", job)
+        self.assertIn("[1-9][0-9]* passed", job)
+        # Suites are discovered from the directory so a new one is guarded
+        # automatically, and each must list at least one test.
+        self.assertIn("tests/handrolled_*.rs", job)
+        self.assertIn("compiled to zero tests", job)
+        # BoGo: the run script fails on any FAIL, and the floor catches a shim
+        # that skips every test and so "passes".
+        self.assertIn("bogo/run.sh", job)
+        self.assertIn("-lt 830", job)
+
+    def test_the_live_internet_step_can_inform_but_never_gate(self) -> None:
+        # A third party's server must not decide whether a PR merges, so the
+        # live step is continue-on-error. Its output and exit logic live in
+        # live_internet_check.sh (tested offline, including a failing command),
+        # so the step must go through that script and not inline its own.
+        start = self.workflow.index("  rusty-tls-engine:\n")
+        end = self.workflow.find("\n  # ----", start)
+        job = self.workflow[start : end if end != -1 else None]
+        marker = "      - name: live internet (non-blocking)"
+        step = job[job.index(marker) :]
+        self.assertIn("continue-on-error: true", step)
+        self.assertIn("bash .github/scripts/live_internet_check.sh", step)
+        self.assertIn("--test handrolled_live -- --ignored", step)
+        # No inline `out=$(cargo ...)`: under `set -e` that loses the output.
+        self.assertNotIn("out=$(", step)
+        # Last in the job, so nothing after it can be skipped by its failure.
+        self.assertNotIn("\n      - name:", step[len(marker) :])
+
+    def test_every_handrolled_suite_is_gated_on_the_cfg_the_job_sets(self) -> None:
+        # The guard above only works if each suite really is cfg-gated: an
+        # ungated file would run (and count) without the cfg, hiding a typo in
+        # the job's flag.
+        suites = sorted((WORKFLOW.parents[2] / "crates/libs/net/rusty_tls/tests").glob("handrolled_*.rs"))
+        self.assertGreaterEqual(len(suites), 10)
+        for suite in suites:
+            with self.subTest(suite=suite.name):
+                head = suite.read_text(encoding="utf-8")[:6000]
+                self.assertIn("rusty_tls_handrolled", head)
 
     def test_app_jobs_are_planned_not_unconditional(self) -> None:
         self.assertIn("fair_play: ${{ steps.plan.outputs.fair_play }}", self.workflow)
@@ -205,7 +268,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -309,11 +372,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "crypto_ct": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
@@ -323,11 +386,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_shared_and_specialized_package_rules(self) -> None:
         flags = specialized_job_flags(
-            [], ["rusty_win32", "rusty_multimodal_db", "rusty_config", "remind_me_hub"]
+            [], ["rusty_win32", "rusty_multimodal_db", "rusty_config", "rusty_tls", "remind_me_hub"]
         )
         self.assertTrue(flags["win32"])
         self.assertTrue(flags["multimodal_db"])
         self.assertTrue(flags["rusty_config_no_std"])
+        self.assertTrue(flags["tls_engine"])
         self.assertTrue(flags["remind_me"])
 
     def test_legacy_import_routes_sources_contracts_and_dependencies(self) -> None:
