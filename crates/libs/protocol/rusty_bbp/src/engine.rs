@@ -137,11 +137,14 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
                 role: *role,
                 principal: principal.clone(),
             });
-            schedule(w, now);
+            // No grant here: a turn needs a host ready to launch its harness,
+            // and assignment happens before any moderator runs. The first
+            // `Tick` grants it.
             Ok(Flow::Done(Response::Ok))
         }
         Command::Tick => {
             require_open(&w.st)?;
+            schedule(w, now);
             Ok(Flow::Done(Response::Ok))
         }
         Command::AbortTurn => {
@@ -483,7 +486,11 @@ fn put_artifact(
             candidate: id,
             spec,
         });
-        end_turn(w, TurnEnd::Candidate, now);
+        // End the turn without scheduling: the task leaves `build` on the
+        // next line, and scheduling here would grant a Coder turn only for
+        // the transition to revoke it (one turn of budget, a skipped id).
+        // `transition` runs the Test entry, which schedules once.
+        end_turn_only(w, TurnEnd::Candidate);
         transition(w, State::Test, now);
     }
     Ok(Response::Stored(id))

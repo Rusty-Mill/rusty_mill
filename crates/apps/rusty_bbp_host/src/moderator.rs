@@ -232,12 +232,16 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     let mut launched: HashSet<TurnId> = HashSet::new();
     let mut ran: HashSet<RunId> = HashSet::new();
 
-    // A turn granted before this loop started belongs to an invocation it
-    // cannot see or stop. Abort it so its token dies and the replacement
-    // turn is launched here. Gates have no turn and keep waiting.
+    // A turn that was live before this loop did anything belongs to an
+    // invocation it cannot see or stop. Abort it so its token dies and the
+    // replacement turn is launched here. The first tick fires deadlines and
+    // grants the first turn of a freshly assigned task; that turn is ours.
+    // Gates have no turn and keep waiting.
+    let inherited = d.state.turn.as_ref().map(|t| t.id);
     d.dispatch(&Command::Tick, now())
         .map_err(|e| format!("{e:?}"))?;
-    if let Some(turn) = d.state.turn.as_ref().map(|t| t.id) {
+    let live = d.state.turn.as_ref().map(|t| t.id);
+    if let (Some(turn), true) = (inherited, inherited == live) {
         if !d.state.state.terminal() {
             eprintln!(
                 "bbp mod: turn {} predates this moderator; aborting it",

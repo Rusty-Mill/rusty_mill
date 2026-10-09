@@ -120,6 +120,7 @@ fn reach_test_with(dir: &Path, base: &str, diffs: &[Vec<u8>], set: &ProfileSet) 
         )
         .expect("assign");
     }
+    admin::tick(dir, &t.id).expect("tick");
     let brief = t.state().brief.expect("brief");
     let spec = t.put(Role::Planner, ArtifactPayload::Spec { brief }, b"# Spec");
     let mut gate = Draft::new(MessageKind::RequestDecision, "Approve?")
