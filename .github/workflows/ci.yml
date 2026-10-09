@@ -162,11 +162,10 @@ jobs:
   cargo-deny:
     # Advisories, licences, sources (deny.toml, ADR-0009). Workspace-wide like
     # dependency-policy, so it runs for every event and the weekly sweep picks
-    # up new RustSec entries. Non-blocking until the first findings are
-    # triaged: then delete `continue-on-error`.
+    # up new RustSec entries. Blocking: accepted findings carry a reason in
+    # deny.toml.
     name: cargo-deny (advisories, licenses, sources)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
