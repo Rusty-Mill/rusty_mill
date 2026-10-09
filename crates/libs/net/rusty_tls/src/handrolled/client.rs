@@ -2175,6 +2175,9 @@ impl ClientHandshake<'_> {
         let master = negotiated.schedule.into_master();
         let client_application_secret = master.derive("c ap traffic", &after_server_finished);
         let server_application_secret = master.derive("s ap traffic", &after_server_finished);
+        // RFC 8446 section 7.5: bound to the same point as the application
+        // secrets, the server's Finished, and not to anything after it.
+        let exporter_secret = master.derive("exp master", &after_server_finished);
 
         // If the server asked this client to authenticate, the answer goes
         // here: after the server's Finished, before ours. Both messages are in
@@ -2272,6 +2275,7 @@ impl ClientHandshake<'_> {
             opener: Opener::new(negotiated.aead, &server_keys.key, &server_keys.iv)?,
             client_secret: client_application_secret,
             server_secret: server_application_secret,
+            exporter_secret,
             certificates: negotiated.certificates,
             resumed: negotiated.resumed,
             alpn: negotiated.alpn,
@@ -2297,6 +2301,9 @@ pub struct Connection {
     opener: Opener,
     client_secret: Vec<u8>,
     server_secret: Vec<u8>,
+    /// `exporter_master_secret` (RFC 8446 section 7.5), for
+    /// [`Connection::export_keying_material`].
+    exporter_secret: Vec<u8>,
     certificates: Vec<Vec<u8>>,
     /// True if this connection was established by resuming a session.
     resumed: bool,
@@ -2434,6 +2441,7 @@ impl Connection {
             opener,
             client_secret: send_secret,
             server_secret: receive_secret,
+            exporter_secret: Vec::new(),
             certificates,
             resumed: false,
             alpn: None,
@@ -2474,6 +2482,27 @@ impl Connection {
         self.alpn.as_deref()
     }
 
+    /// Derive keying material both ends of this connection can compute and no
+    /// one else can (RFC 8446 section 7.5), filling `out`.
+    ///
+    /// `label` names the purpose and `context` mixes in application data; here
+    /// `None` and an empty context are the same. See [`super::export`] for what
+    /// is refused.
+    pub fn export_keying_material(
+        &self,
+        label: &[u8],
+        context: Option<&[u8]>,
+        out: &mut [u8],
+    ) -> core::result::Result<(), super::export::ExportError> {
+        super::export::export13(
+            self.hash,
+            &self.exporter_secret,
+            label,
+            context.unwrap_or_default(),
+            out,
+        )
+    }
+
     /// Record the protocol the server half selected (the client half sets it
     /// from the EncryptedExtensions it read).
     pub(super) fn with_alpn(mut self, alpn: Option<Vec<u8>>) -> Self {
@@ -2485,6 +2514,11 @@ impl Connection {
     /// whether or not a certificate was chosen by it. Always `None` on a client.
     pub fn server_name(&self) -> Option<&str> {
         self.server_name.as_deref()
+    }
+
+    pub(super) fn with_exporter_secret(mut self, secret: Vec<u8>) -> Self {
+        self.exporter_secret = secret;
+        self
     }
 
     pub(super) fn with_server_name(mut self, name: Option<String>) -> Self {

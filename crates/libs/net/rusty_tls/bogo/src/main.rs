@@ -87,7 +87,11 @@ fn unimplemented(why: &str) -> ! {
             .append(true)
             .open(path)
         {
-            let _ = writeln!(file, "{why}");
+            // Tab-separated: the reason, then the whole command line, so the
+            // flags a test needs together can be counted, not just the first
+            // one that stopped it.
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            let _ = writeln!(file, "{why}\t{}", args.join(" "));
         }
     }
     exit(UNIMPLEMENTED)
@@ -135,6 +139,11 @@ struct Config {
     expect_alpn: Option<Vec<u8>>,
     /// `-expect-server-name`: the `host_name` a server must have been sent.
     expect_server_name: Option<String>,
+    /// `-export-keying-material N`: send N exported octets once connected.
+    export_length: usize,
+    export_label: Vec<u8>,
+    export_context: Vec<u8>,
+    use_export_context: bool,
 }
 
 const TLS12: u16 = 0x0303;
@@ -198,6 +207,12 @@ fn parse_args(index: usize) -> Config {
             "-decline-alpn" => cfg.decline_alpn = true,
             "-expect-alpn" => cfg.expect_alpn = Some(value("-expect-alpn").into_bytes()),
             "-expect-no-alpn" => cfg.expect_alpn = Some(Vec::new()),
+            "-export-keying-material" => {
+                cfg.export_length = value("-export-keying-material").parse().unwrap_or(0);
+            }
+            "-export-label" => cfg.export_label = value("-export-label").into_bytes(),
+            "-export-context" => cfg.export_context = value("-export-context").into_bytes(),
+            "-use-export-context" => cfg.use_export_context = true,
             "-expect-server-name" => cfg.expect_server_name = Some(value("-expect-server-name")),
             "-verify-peer" => cfg.verify_peer = true,
             "-require-any-client-certificate" => cfg.require_client_cert = true,
@@ -504,6 +519,21 @@ fn exchange(
     mut connection: Established,
     sessions: &mut Vec<(Session, Instant)>,
 ) {
+    // BoGo asks for exported keying material to be the first thing written, so
+    // the runner can compare it with its own.
+    if config.export_length > 0 {
+        let mut material = vec![0u8; config.export_length];
+        let context = config
+            .use_export_context
+            .then_some(config.export_context.as_slice());
+        connection
+            .export_keying_material(&config.export_label, context, &mut material)
+            .unwrap_or_else(|e| fail(format!("export: {e}")));
+        match write_app(&mut connection, &material) {
+            Ok(bytes) => send(stream, &bytes),
+            Err(error) => fail(error),
+        }
+    }
     let mut closed = false;
     while let Some(record) = read_record(stream) {
         match read_app(&mut connection, &record) {

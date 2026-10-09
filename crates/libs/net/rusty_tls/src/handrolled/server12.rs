@@ -61,7 +61,7 @@
 //! 1.2 half of one that speaks both, and writes it.
 
 use super::client::Alert;
-use super::client12::{CipherSuite12, Connection12, Role};
+use super::client12::{CipherSuite12, Connection12, Exporter12, Role};
 use super::handshake::{
     self, choose_alpn, complete_prefix, encode_alpn_selection, extension, find, messages,
     AlpnChoice, Extension, HandshakeError, HandshakeType, Message,
@@ -807,6 +807,12 @@ impl<'a> ServerHandshake12<'a> {
                 core::mem::take(&mut self.hs.client_certificates),
             )
             .with_alpn(self.hs.alpn.take())
+            .with_exporter(Exporter12 {
+                hash: self.hs.hash,
+                master: established.master,
+                client_random: self.hs.client_random,
+                server_random: self.hs.server_random,
+            })
             .with_server_name(self.hs.server_name.take()),
         );
         self.phase = Phase::Done;

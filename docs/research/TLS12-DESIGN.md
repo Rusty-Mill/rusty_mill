@@ -477,10 +477,10 @@ two, and one that answers an offer nobody made (`unsupported_extension`).
 | Mutation | 15 deliberate bugs (client preference instead of server's, overlap ignored, selections believed unchecked, answers not sent or not recorded on any of the four connections, empty list and two-name answer accepted): all caught. One survived at first and was a missing test (the standalone 1.2 client never offering); it has one now. |
 | BoGo | **754 passed, 0 failed** (was 741), 309 disabled. The 8 new failures were TLS 1.0/1.1 variants and 1.2 resumption, disabled by name. |
 
-Not done: ALPN is not bound to a resumed session. A ticket does not record the protocol it was issued under,
-so a resumed connection selects afresh instead of checking it still matches the original. Whether the
-specification requires that check was not verified here; it is a gap to close before relying on resumption
-with ALPN. `-expect-advertised-alpn` needs the client's raw list exposed to
+Not done, and corrected in stage 13: stage 11 listed "ALPN is not bound to a resumed session" as a gap.
+BoGo's only resumption-and-ALPN cases (`EarlyData-ALPN*`) are about 0-RTT, which this engine refuses
+(ADR-0003), and the ticket-bound ALPN rule in RFC 8446 concerns early data. Nothing found requires a
+resumed 1.3 connection to repeat the original protocol, so this is not a gap until early data is supported. `-expect-advertised-alpn` needs the client's raw list exposed to
 the application, which nothing asks for yet. BoringSSL lets a server's selection callback decline without
 failing; here "offered some, share none" always fails, as RFC 7301 says, and `-decline-alpn` is modelled as a
 server with no list.
@@ -514,10 +514,34 @@ is checkable; a callback that loads or mints certificates on demand is a larger 
 state) and nothing asks for it yet. A name that is not a valid DNS name is matched as written, never as a
 wildcard (`name::dns_name_matches` refuses malformed patterns).
 
+## Stage 13: keying material exporters
+
+`Connection::export_keying_material(label, context, out)` on `Connection`, `Connection12` and `Established`
+(new module `handrolled::export`). TLS 1.3 follows RFC 8446 section 7.5 from the `exporter_master_secret`
+(`exp master`, derived at the same point as the application secrets, the server's Finished); TLS 1.2 follows
+RFC 5705 over the master secret and both randoms (extended master secret changes nothing here, RFC 7627
+section 4). `None` and an empty context are the same in 1.3 and differ in 1.2, so the argument is
+`Option<&[u8]>`. Refused: a non-text or over-long label (1.3), RFC 5705's four reserved TLS 1.2 labels, a 1.2
+context past 65 535 octets, and output past what HKDF can produce (1.3).
+
+| Gate | Result |
+| --- | --- |
+| Live rustls, both roles, both versions | Our client and server export byte-for-byte what rustls does from the other end of the same connection, for no / empty / present contexts and 1, 32, 100 and 1024 octets. |
+| Live OpenSSL (`s_client -keymatexport`, CI) | Our server's 20 octets match what OpenSSL prints, in TLS 1.2 and 1.3. |
+| Mutation | 12 deliberate bugs (the 1.3 label, context hash and derivation context; the 1.2 randoms' order, the context treated as absent, the reserved labels, the length truncation; the 1.3 limits; the randoms swapped at both connection sites): all caught. |
+| BoGo | **820 passed, 0 failed** (was 755), 378 disabled. The shim writes exported material as the first application data, as the runner expects; the new failures were TLS 1.0/1.1, CBC / static-RSA suites and 1.2 resumption, disabled by name. |
+
+A connection with no exporter secret answers `ExportError::Unavailable` rather than deriving from an
+all-zero key. Every connection this crate completes has one; the guard is for the type, not a case seen.
+
+Not done: no early exporter (`ExportEarlyKeyingMaterial`, 0-RTT is refused); no `tls-unique` or
+`tls-exporter` channel-binding wrappers on top (RFC 9266's `tls-exporter` is one call to this with label
+`EXPORTER-Channel-Binding` and an empty context, which an application can make today).
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could
 produce (rustls and OpenSSL both directions, BoGo, mutation, fuzz, CI). Whether that meets the bar for
 the seam is theirs to set. If it does, stage 5 of the track is wiring (ALPN, SNI certificate selection,
 1.2 resumption are the known gaps) and an ADR superseding ADR-0002. If the bar includes more of BoGo,
-the next increment is credentials (`-new-x509-credential`) and verify callbacks (`-verify-fail`); the engine gaps left are RSA PKCS#1 v1.5 signing, 1.2 resumption, and ALPN-aware resumption.
+the next increment is credentials (`-new-x509-credential`) and verify callbacks (`-verify-fail`); the engine gaps left are RSA PKCS#1 v1.5 signing, 1.2 resumption, and (if early data is ever supported) ALPN-bound tickets.

@@ -109,6 +109,20 @@ impl Established {
         }
     }
 
+    /// Derive keying material from this connection (RFC 5705 or RFC 8446
+    /// section 7.5, by version), filling `out`.
+    pub fn export_keying_material(
+        &self,
+        label: &[u8],
+        context: Option<&[u8]>,
+        out: &mut [u8],
+    ) -> core::result::Result<(), super::export::ExportError> {
+        match self {
+            Self::Tls13(connection) => connection.export_keying_material(label, context, out),
+            Self::Tls12(connection) => connection.export_keying_material(label, context, out),
+        }
+    }
+
     /// The application protocol ALPN selected, whichever version was chosen.
     pub fn alpn_protocol(&self) -> Option<&[u8]> {
         match self {

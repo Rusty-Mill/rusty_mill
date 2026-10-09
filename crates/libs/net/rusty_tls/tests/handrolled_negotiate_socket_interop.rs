@@ -147,7 +147,12 @@ struct Served {
     version: Version,
     request: String,
     alpn: Option<Vec<u8>>,
+    /// 20 octets exported under [`EXPORT_LABEL`] with no context, which is
+    /// what `s_client -keymatexport` prints by default.
+    exported: Vec<u8>,
 }
+
+const EXPORT_LABEL: &str = "EXPERIMENTAL rusty_tls";
 
 #[derive(Debug)]
 enum Failure {
@@ -261,6 +266,10 @@ fn serve_one(listener: &TcpListener, config: &ServerConfigBoth<'_>) -> Result<Se
     let version = handshake.version().expect("finished");
     let mut connection = handshake.into_connection()?;
     let alpn = connection.alpn_protocol().map(<[u8]>::to_vec);
+    let mut exported = vec![0u8; 20];
+    connection
+        .export_keying_material(EXPORT_LABEL.as_bytes(), None, &mut exported)
+        .expect("export");
 
     let mut request = Vec::new();
     while !request.ends_with(b"hello\n") {
@@ -280,6 +289,7 @@ fn serve_one(listener: &TcpListener, config: &ServerConfigBoth<'_>) -> Result<Se
         version,
         request: String::from_utf8_lossy(&request).into_owned(),
         alpn,
+        exported,
     })
 }
 
@@ -743,6 +753,30 @@ fn openssl_is_shown_the_certificate_for_the_name_it_asked_for() {
         let said = the_client_said(&output);
         served.unwrap_or_else(|f| panic!("{version}: {f:?}\n{said}"));
         assert!(output.status.success(), "{version}: {said}");
+    }
+}
+
+/// OpenSSL's own exporter (`-keymatexport`) against ours, in both versions:
+/// `s_client` prints the keying material it derived, and our server must have
+/// derived the same bytes from the same connection.
+#[test]
+#[ignore = "needs the openssl binary; CI runs it with --ignored"]
+fn openssl_exports_the_same_keying_material() {
+    let material = Material::new();
+    for version in ["-tls1_3", "-tls1_2"] {
+        let (served, output) = s_client_alpn(
+            &material,
+            &[version, "-verbose_report", "-keymatexport", EXPORT_LABEL],
+            &[],
+        );
+        let said = the_client_said(&output);
+        let served = served.unwrap_or_else(|f| panic!("{version}: {f:?}\n{said}"));
+        let line = said
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Keying material:"))
+            .unwrap_or_else(|| panic!("{version}: OpenSSL printed no keying material:\n{said}"));
+        let ours: String = served.exported.iter().map(|b| format!("{b:02X}")).collect();
+        assert_eq!(line.trim().to_uppercase(), ours, "{version}");
     }
 }
 

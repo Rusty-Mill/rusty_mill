@@ -70,6 +70,7 @@ use super::client::{
     is_downgrade_sentinel, plaintext_record, random_bytes, Alert, AlertDescription, AlertLevel,
     ClientError, ClientIdentity,
 };
+use super::export::{export12, ExportError};
 use super::handshake::{
     complete_prefix, encode_alpn_offer, extension, find, messages, parse_alpn_selection,
     CertificateVerify, ClientHello, Extension, HandshakeError, HandshakeType, Message,
@@ -912,6 +913,12 @@ impl<'a> ClientHandshake12<'a> {
                 core::mem::take(&mut self.hs.certificates),
             )
             .with_alpn(self.hs.alpn.take())
+            .with_exporter(Exporter12 {
+                hash: self.hs.hash,
+                master: established.master,
+                client_random: self.hs.client_random,
+                server_random: self.hs.server_random,
+            })
             .with_name_acknowledged(self.hs.name_acknowledged),
         );
         self.phase = Phase::Done;
@@ -959,6 +966,14 @@ pub(super) enum Role {
     Server,
 }
 
+/// The secrets and randoms a TLS 1.2 exporter is a function of.
+pub(super) struct Exporter12 {
+    pub(super) hash: Hash,
+    pub(super) master: MasterSecret,
+    pub(super) client_random: [u8; RANDOM_LEN],
+    pub(super) server_random: [u8; RANDOM_LEN],
+}
+
 /// An established TLS 1.2 connection, of either role.
 ///
 /// Its error type is [`ClientError`] because this module was written first;
@@ -972,6 +987,8 @@ pub struct Connection12 {
     alpn: Option<Vec<u8>>,
     server_name: Option<String>,
     name_acknowledged: bool,
+    /// What RFC 5705 needs to derive keying material.
+    exporter: Option<Exporter12>,
     closed: bool,
     failed: bool,
     /// Records that carried nothing, so they cannot go on for ever.
@@ -995,6 +1012,7 @@ impl Connection12 {
             alpn: None,
             server_name: None,
             name_acknowledged: false,
+            exporter: None,
             closed: false,
             failed: false,
             noise: Noise::default(),
@@ -1009,6 +1027,33 @@ impl Connection12 {
     /// The application protocol ALPN selected, or `None` if none was.
     pub fn alpn_protocol(&self) -> Option<&[u8]> {
         self.alpn.as_deref()
+    }
+
+    pub(super) fn with_exporter(mut self, exporter: Exporter12) -> Self {
+        self.exporter = Some(exporter);
+        self
+    }
+
+    /// Derive keying material both ends of this connection can compute and no
+    /// one else can (RFC 5705), filling `out`. `None` and `Some(&[])` differ in
+    /// TLS 1.2: the second adds a length to the PRF seed. See
+    /// [`super::export`] for what is refused.
+    pub fn export_keying_material(
+        &self,
+        label: &[u8],
+        context: Option<&[u8]>,
+        out: &mut [u8],
+    ) -> core::result::Result<(), ExportError> {
+        let e = self.exporter.as_ref().ok_or(ExportError::Unavailable)?;
+        export12(
+            e.hash,
+            &e.master,
+            &e.client_random,
+            &e.server_random,
+            label,
+            context,
+            out,
+        )
     }
 
     pub(super) fn with_alpn(mut self, alpn: Option<Vec<u8>>) -> Self {

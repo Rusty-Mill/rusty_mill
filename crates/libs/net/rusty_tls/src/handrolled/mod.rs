@@ -103,6 +103,7 @@
 pub mod client;
 pub mod client12;
 pub mod der;
+pub mod export;
 pub mod handshake;
 pub mod handshake12;
 pub mod kx;

@@ -672,6 +672,7 @@ struct Negotiated {
     opener: Opener,
     client_application_secret: Vec<u8>,
     server_application_secret: Vec<u8>,
+    exporter_secret: Vec<u8>,
     /// The Master Secret, kept so `res master` can be derived once the
     /// client's Finished arrives.
     ///
@@ -1770,6 +1771,7 @@ impl ServerHandshake<'_> {
         let master = schedule.into_master();
         let client_application_secret = master.derive("c ap traffic", &after_server_finished);
         let server_application_secret = master.derive("s ap traffic", &after_server_finished);
+        let exporter_secret = master.derive("exp master", &after_server_finished);
 
         let client_keys = traffic_keys(hash, &client_handshake_secret, aead.key_len());
         let opener = Opener::new(aead, &client_keys.key, &client_keys.iv)?;
@@ -1791,6 +1793,7 @@ impl ServerHandshake<'_> {
             opener,
             client_application_secret,
             server_application_secret,
+            exporter_secret,
             master,
             expect,
             // A resumed handshake carries no Certificate from the client, so
@@ -1973,6 +1976,7 @@ impl ServerHandshake<'_> {
                 negotiated.client_certificates,
             )
             .with_alpn(negotiated.alpn)
+            .with_exporter_secret(negotiated.exporter_secret)
             .with_server_name(negotiated.server_name),
         ));
         Ok(out)
