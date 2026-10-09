@@ -653,6 +653,11 @@ impl HttpHandler {
         let pumped = Arc::clone(&shared);
         let pump = std::thread::Builder::new().spawn(move || {
             loop {
+                // Checked on every turn, so a handler that reports often
+                // cannot keep an abandoned request alive by never going quiet.
+                if pumped.abandoned_for().is_some_and(|gone| gone > grace) {
+                    cancel.cancel();
+                }
                 match events.recv_timeout(Duration::from_millis(250)) {
                     Ok(Event::Note(m)) => pumped.push(&m),
                     Ok(Event::Done(Some(m))) => {
@@ -660,11 +665,7 @@ impl HttpHandler {
                         break;
                     }
                     Ok(Event::Done(None)) | Err(RecvTimeoutError::Disconnected) => break,
-                    Err(RecvTimeoutError::Timeout) => {
-                        if pumped.abandoned_for().is_some_and(|gone| gone > grace) {
-                            cancel.cancel();
-                        }
-                    }
+                    Err(RecvTimeoutError::Timeout) => {}
                 }
             }
             pumped.finish();

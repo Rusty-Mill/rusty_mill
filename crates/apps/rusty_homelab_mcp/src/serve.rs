@@ -93,11 +93,15 @@ struct BearerGate {
 
 impl SharedHandler for BearerGate {
     fn handle(&self, request: &Request<'_>) -> Response {
+        // A missing, non-Bearer or empty credential is refused outright: it
+        // must never be compared as if it were an (empty) token.
         let presented = request
             .authorization
-            .and_then(rusty_oauth::bearer::token_from_authorization)
-            .unwrap_or("");
-        if constant_time_eq(presented.as_bytes(), self.token.as_bytes()) {
+            .and_then(rusty_oauth::bearer::token_from_authorization);
+        if let Some(presented) = presented
+            && !self.token.is_empty()
+            && constant_time_eq(presented.as_bytes(), self.token.as_bytes())
+        {
             return self.inner.handle(request);
         }
         let body =
@@ -146,6 +150,9 @@ fn bind(
         max_body_bytes: args.max_body_bytes,
         ..Limits::default()
     };
+    if token.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        return Err("the bearer token is empty".to_owned());
+    }
     let handler = HttpHandler::new(server, config);
     let bound = match token {
         Some(token) => rusty_serve::Server::bind_shared(
@@ -212,6 +219,37 @@ mod tests {
         assert_eq!(status_of(addr, Some("Basic s3cret")), 401);
         assert_eq!(status_of(addr, Some("Bearer s3cret")), 200);
         assert_eq!(status_of(addr, Some("bearer s3cret")), 200);
+        stop.shutdown();
+    }
+
+    #[test]
+    fn an_empty_secret_never_admits_anyone() {
+        // Refused when binding...
+        assert!(bind(empty_server(), &args(), Some(String::new())).is_err());
+        assert!(bind(empty_server(), &args(), Some("  ".to_owned())).is_err());
+        // ...and, if a gate with an empty secret is built anyway, it admits
+        // no request whatever it presents (missing, empty, wrong scheme,
+        // malformed).
+        let gate = BearerGate {
+            token: String::new(),
+            inner: HttpHandler::new(empty_server(), HttpConfig::default()),
+        };
+        let http = rusty_serve::Server::bind_shared("127.0.0.1:0".parse().unwrap(), gate).unwrap();
+        let addr = http.local_addr().unwrap();
+        let stop = http.shutdown_handle().unwrap();
+        std::thread::spawn(move || {
+            let _ = http.run();
+        });
+        for auth in [
+            None,
+            Some("Bearer "),
+            Some("Bearer"),
+            Some("Basic "),
+            Some("Basic abc"),
+            Some("garbage"),
+        ] {
+            assert_eq!(status_of(addr, auth), 401, "{auth:?} was admitted");
+        }
         stop.shutdown();
     }
 

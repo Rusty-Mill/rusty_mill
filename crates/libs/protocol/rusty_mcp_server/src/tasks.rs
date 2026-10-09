@@ -15,8 +15,9 @@ use rusty_mcp_proto::task::{DetailedTask, Task, TaskPayload, TaskStatus};
 use rusty_mcp_proto::{CallToolResult, ElicitParams, ElicitResult, ErrorData, InputRequest, Wire};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The most live tasks unless [`ServerBuilder::max_tasks`](crate::ServerBuilder::max_tasks) says otherwise.
 pub const DEFAULT_MAX_TASKS: usize = 1000;
@@ -82,6 +83,10 @@ pub(crate) struct Entry {
     id: String,
     created: i64,
     ttl: Duration,
+    /// When the task expires (`None` for a call that is not a task). Kept as
+    /// an `Instant` so expiry needs no clock arithmetic and no API traffic: a
+    /// handler waiting on this entry wakes at the deadline by itself.
+    deadline: Option<Instant>,
     state: Mutex<State>,
     changed: Condvar,
     cancel: CancelToken,
@@ -181,6 +186,7 @@ impl Entry {
             id: String::new(),
             created: now,
             ttl: Duration::ZERO,
+            deadline: None,
             state: Mutex::new(State {
                 payload: TaskPayload::Working,
                 message: None,
@@ -192,9 +198,8 @@ impl Entry {
         })
     }
 
-    fn expired(&self, now: i64) -> bool {
-        let ttl = i64::try_from(self.ttl.as_secs()).unwrap_or(i64::MAX);
-        now > self.created.saturating_add(ttl)
+    fn expired(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() >= d)
     }
 }
 
@@ -225,6 +230,10 @@ impl TaskContext {
     /// Whether the client cancelled the task (or it expired). Poll it in a
     /// long computation.
     pub fn is_cancelled(&self) -> bool {
+        if self.entry.expired() {
+            // Expiry cancels the task here, without waiting for a sweep.
+            self.entry.cancel();
+        }
         self.entry.cancel.is_cancelled()
     }
 
@@ -266,16 +275,37 @@ impl TaskContext {
                 s.updated = now_secs();
                 return ElicitResult::from_value(&raw).map_err(|_| ElicitError::Cancelled);
             }
-            s = e.changed.wait(s).unwrap_or_else(PoisonError::into_inner);
+            // Wait for an answer, but no longer than the task lives.
+            let wait = match e.deadline {
+                Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
+                    Some(left) if !left.is_zero() => left,
+                    _ => {
+                        s.payload = TaskPayload::Cancelled;
+                        s.updated = now_secs();
+                        e.cancel.cancel();
+                        e.changed.notify_all();
+                        return Err(ElicitError::Cancelled);
+                    }
+                },
+                None => Duration::from_secs(3600),
+            };
+            s = e
+                .changed
+                .wait_timeout(s, wait)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
     }
 }
 
 /// Every live task of a server.
 pub(crate) struct TaskStore {
-    tasks: Mutex<HashMap<String, Arc<Entry>>>,
+    tasks: Arc<Mutex<HashMap<String, Arc<Entry>>>>,
     max: usize,
     ttl: Duration,
+    /// Whether the background sweeper is running (started with the first
+    /// task, so a server without task tools never has one).
+    sweeping: AtomicBool,
 }
 
 /// Why a task could not be created.
@@ -288,17 +318,17 @@ pub(crate) enum CreateError {
 impl TaskStore {
     pub(crate) fn new(max: usize, ttl: Duration) -> Self {
         Self {
-            tasks: Mutex::new(HashMap::new()),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
             max,
             ttl,
+            sweeping: AtomicBool::new(false),
         }
     }
 
     /// Drop (and stop) tasks past their lifetime.
     fn sweep(map: &mut HashMap<String, Arc<Entry>>) {
-        let now = now_secs();
         map.retain(|_, e| {
-            let keep = !e.expired(now);
+            let keep = !e.expired();
             if !keep {
                 e.cancel();
             }
@@ -306,7 +336,32 @@ impl TaskStore {
         });
     }
 
+    /// Sweep expired tasks on a timer, so a task nobody asks about again still
+    /// expires (and a handler blocked on it is released). One thread per
+    /// store, started with its first task; it ends once the store is gone.
+    fn start_sweeper(&self) {
+        if self.sweeping.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let tasks: Weak<Mutex<HashMap<String, Arc<Entry>>>> = Arc::downgrade(&self.tasks);
+        let every = (self.ttl / 4).clamp(Duration::from_millis(100), Duration::from_secs(30));
+        let spawned = std::thread::Builder::new()
+            .name("mcp-task-sweeper".to_owned())
+            .spawn(move || {
+                while let Some(tasks) = tasks.upgrade() {
+                    Self::sweep(&mut lock(&tasks));
+                    drop(tasks);
+                    std::thread::sleep(every);
+                }
+            });
+        if spawned.is_err() {
+            // No thread: expiry falls back to the sweeps `create` and `get` do.
+            self.sweeping.store(false, Ordering::SeqCst);
+        }
+    }
+
     pub(crate) fn create(&self) -> Result<Arc<Entry>, CreateError> {
+        self.start_sweeper();
         let mut map = lock(&self.tasks);
         Self::sweep(&mut map);
         if map.len() >= self.max {
@@ -323,6 +378,7 @@ impl TaskStore {
             id: id.clone(),
             created: now,
             ttl: self.ttl,
+            deadline: Instant::now().checked_add(self.ttl),
             state: Mutex::new(State {
                 payload: TaskPayload::Working,
                 message: None,
@@ -396,5 +452,103 @@ mod tests {
             "boom",
         )));
         assert_eq!(e.status(), TaskStatus::Failed);
+    }
+
+    /// An entry no store (and so no sweeper) knows about: only its own
+    /// deadline can end it.
+    fn lone_entry(ttl: Duration) -> Arc<Entry> {
+        let now = now_secs();
+        Arc::new(Entry {
+            id: "lone".to_owned(),
+            created: now,
+            ttl,
+            deadline: Instant::now().checked_add(ttl),
+            state: Mutex::new(State {
+                payload: TaskPayload::Working,
+                message: None,
+                updated: now,
+                answers: BTreeMap::new(),
+            }),
+            changed: Condvar::new(),
+            cancel: CancelToken::default(),
+        })
+    }
+
+    fn form() -> ElicitParams {
+        ElicitParams::Form {
+            message: "?".to_owned(),
+            requested_schema: Value::object(),
+            meta: None,
+        }
+    }
+
+    /// Run `elicit` on a thread and wait for it for at most `limit`.
+    fn blocked_elicit(
+        ctx: TaskContext,
+        limit: Duration,
+    ) -> Option<Result<ElicitResult, ElicitError>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(ctx.elicit("k", &form()));
+        });
+        rx.recv_timeout(limit).ok()
+    }
+
+    #[test]
+    fn a_worker_blocked_on_a_question_is_released_at_the_deadline_with_no_api_traffic() {
+        let entry = lone_entry(Duration::from_secs(1));
+        let started = Instant::now();
+        // Nothing calls `get`, `create` or `tasks/update`, and no sweeper
+        // exists: the wait itself must end at the deadline.
+        let ended = blocked_elicit(TaskContext::new(Arc::clone(&entry)), Duration::from_secs(5));
+        assert_eq!(
+            ended.expect("the worker never woke"),
+            Err(ElicitError::Cancelled)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(entry.status(), TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn a_polling_handler_sees_cancellation_at_the_deadline_without_a_sweep() {
+        let entry = lone_entry(Duration::from_secs(1));
+        let ctx = TaskContext::new(Arc::clone(&entry));
+        assert!(!ctx.is_cancelled());
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(ctx.is_cancelled(), "still running past its deadline");
+        assert_eq!(entry.status(), TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn an_abandoned_task_is_swept_without_anyone_asking() {
+        let s = TaskStore::new(4, Duration::from_secs(1));
+        s.create().unwrap();
+        s.create().unwrap();
+        assert_eq!(lock(&s.tasks).len(), 2);
+        let end = Instant::now() + Duration::from_secs(5);
+        while !lock(&s.tasks).is_empty() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            lock(&s.tasks).is_empty(),
+            "expired tasks stayed in the store"
+        );
+    }
+
+    #[test]
+    fn the_sweeper_ends_with_its_store() {
+        let s = TaskStore::new(2, Duration::from_secs(1));
+        s.create().unwrap();
+        let weak = Arc::downgrade(&s.tasks);
+        drop(s);
+        let end = Instant::now() + Duration::from_secs(3);
+        while weak.upgrade().is_some() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(weak.upgrade().is_none(), "the store outlived its owner");
     }
 }

@@ -13,13 +13,16 @@
 //! The request keeps running when its connection drops; if no reader is
 //! attached for [`HttpConfig::resume_grace`](crate::HttpConfig) it is
 //! cancelled, which is how a client that hangs up on purpose still stops a
-//! stateless call. Streams share a byte budget: the oldest finished stream is
-//! dropped first, then the oldest running one (a resume of a dropped stream
-//! is then a `404`, never a wrong answer).
+//! stateless call. Streams share a byte budget, and it bounds memory even for
+//! streams still running: over budget, the oldest finished stream is released
+//! whole, then the oldest frames of running streams (always keeping each one's
+//! newest frame). A resume that needs a released frame is a `404`, and a
+//! reader that had not yet read a released frame is ended (with a comment
+//! line saying so), never skipped past silently.
 
 use rusty_mcp_proto::{Message, Wire};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -30,7 +33,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What a stream keeps: its frames, and who is reading.
 #[derive(Default)]
 struct State {
-    frames: Vec<Vec<u8>>,
+    /// The frames still held; `frames[0]` is frame number `base`.
+    frames: VecDeque<Vec<u8>>,
+    base: usize,
+    /// Bytes held in `frames`.
     bytes: usize,
     done: bool,
     readers: usize,
@@ -43,7 +49,9 @@ pub(crate) struct Shared {
     token: String,
     state: Mutex<State>,
     changed: Condvar,
-    core: Arc<Core>,
+    /// Weak, so a registry entry (which holds this) does not keep the
+    /// registry alive: dropping the [`Replay`] frees everything.
+    core: Weak<Core>,
 }
 
 #[derive(Default)]
@@ -85,7 +93,7 @@ impl Replay {
             token: token.clone(),
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
-            core: Arc::clone(&self.0),
+            core: Arc::downgrade(&self.0),
         });
         shared.append(format!("id: {}\ndata: \n\n", shared.event_id(0)).into_bytes());
         let mut registry = lock(&self.0.registry);
@@ -99,7 +107,10 @@ impl Replay {
         let (token, n) = id.strip_prefix('s')?.split_once('-')?;
         let n: usize = n.parse().ok()?;
         let shared = lock(&self.0.registry).streams.get(token).cloned()?;
-        Some((shared, n))
+        // The frames after `n` must still be held; if some were released to
+        // stay in budget, the resume cannot be honoured.
+        let held = n + 1 >= lock(&shared.state).base;
+        held.then_some((shared, n))
     }
 }
 
@@ -113,15 +124,20 @@ impl Shared {
         {
             let mut state = lock(&self.state);
             state.bytes += size;
-            state.frames.push(frame);
+            state.frames.push_back(frame);
         }
         self.changed.notify_all();
-        self.core.account(size, &self.token);
+        if let Some(core) = self.core.upgrade() {
+            core.account(size);
+        }
     }
 
     /// Add `message` as the next frame.
     pub(crate) fn push(&self, message: &Message) {
-        let n = lock(&self.state).frames.len();
+        let n = {
+            let state = lock(&self.state);
+            state.base + state.frames.len()
+        };
         self.append(
             format!(
                 "id: {}\nevent: message\ndata: {}\n\n",
@@ -158,35 +174,73 @@ impl Shared {
             shared: Arc::clone(self),
             next: from,
             keep_alive,
+            ended: false,
         }
     }
 }
 
 impl Core {
-    /// Count `size` new bytes and, over budget, drop the oldest streams: the
-    /// finished ones first, never the stream that just grew.
-    fn account(&self, size: usize, growing: &str) {
+    /// Count `size` new bytes and, over budget, release the oldest data: first
+    /// a whole finished stream, then the oldest frames of running ones (each
+    /// keeps its newest frame). Stops when nothing more can be released.
+    fn account(&self, size: usize) {
         let mut registry = lock(&self.registry);
         registry.bytes += size;
         while registry.bytes > self.budget {
-            let victim = registry
+            let finished = registry
                 .order
                 .iter()
-                .filter(|t| t.as_str() != growing)
                 .find(|t| {
                     registry
                         .streams
                         .get(*t)
                         .is_some_and(|s| lock(&s.state).done)
                 })
-                .or_else(|| registry.order.iter().find(|t| t.as_str() != growing))
                 .cloned();
-            let Some(token) = victim else { return };
-            registry.order.retain(|t| *t != token);
-            if let Some(gone) = registry.streams.remove(&token) {
-                registry.bytes = registry.bytes.saturating_sub(lock(&gone.state).bytes);
+            if let Some(token) = finished {
+                registry.order.retain(|t| *t != token);
+                if let Some(gone) = registry.streams.remove(&token) {
+                    registry.bytes = registry.bytes.saturating_sub(gone.release_all());
+                }
+                continue;
+            }
+            let trimmed = registry.order.iter().find_map(|t| {
+                registry
+                    .streams
+                    .get(t)
+                    .and_then(|s| s.release_oldest_frame())
+            });
+            match trimmed {
+                Some(freed) => registry.bytes = registry.bytes.saturating_sub(freed),
+                None => return,
             }
         }
+    }
+}
+
+impl Shared {
+    /// Drop every frame; readers behind see a gap. Returns the bytes freed.
+    fn release_all(&self) -> usize {
+        let mut state = lock(&self.state);
+        let freed = state.bytes;
+        state.base += state.frames.len();
+        state.frames.clear();
+        state.bytes = 0;
+        drop(state);
+        self.changed.notify_all();
+        freed
+    }
+
+    /// Drop the oldest frame if a newer one remains. Returns the bytes freed.
+    fn release_oldest_frame(&self) -> Option<usize> {
+        let mut state = lock(&self.state);
+        if state.frames.len() < 2 {
+            return None;
+        }
+        let frame = state.frames.pop_front()?;
+        state.base += 1;
+        state.bytes = state.bytes.saturating_sub(frame.len());
+        Some(frame.len())
     }
 }
 
@@ -196,15 +250,24 @@ pub(crate) struct ReplayStream {
     shared: Arc<Shared>,
     next: usize,
     keep_alive: Duration,
+    ended: bool,
 }
 
 impl Iterator for ReplayStream {
     type Item = Vec<u8>;
 
     fn next(&mut self) -> Option<Vec<u8>> {
+        if self.ended {
+            return None;
+        }
         let mut state = lock(&self.shared.state);
         loop {
-            if let Some(frame) = state.frames.get(self.next) {
+            if self.next < state.base {
+                // The frame this reader needs was released to stay in budget.
+                self.ended = true;
+                return Some(b": stream truncated (over the replay budget)\n\n".to_vec());
+            }
+            if let Some(frame) = state.frames.get(self.next - state.base) {
                 self.next += 1;
                 return Some(frame.clone());
             }
@@ -217,7 +280,11 @@ impl Iterator for ReplayStream {
                 .wait_timeout(state, self.keep_alive)
                 .unwrap_or_else(PoisonError::into_inner);
             state = guard;
-            if timeout.timed_out() && state.frames.get(self.next).is_none() && !state.done {
+            if timeout.timed_out()
+                && self.next >= state.base
+                && state.frames.get(self.next - state.base).is_none()
+                && !state.done
+            {
                 return Some(b": ping\n\n".to_vec());
             }
         }
@@ -231,5 +298,130 @@ impl Drop for ReplayStream {
         if state.readers == 0 {
             state.detached = Some(Instant::now());
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn note() -> Message {
+        Message::Notification {
+            method: "notifications/progress".to_owned(),
+            params: None,
+        }
+    }
+
+    fn held_bytes(shared: &Shared) -> usize {
+        lock(&shared.state).frames.iter().map(Vec::len).sum()
+    }
+
+    fn registry_bytes(replay: &Replay) -> usize {
+        lock(&replay.0.registry).bytes
+    }
+
+    #[test]
+    fn running_streams_stay_within_the_budget_with_readers_attached() {
+        let budget = 2_000;
+        let replay = Replay::new(budget, Duration::from_secs(30));
+        let streams: Vec<_> = (0..3).map(|_| replay.start().unwrap()).collect();
+        // Readers are attached and never read: the case that used to pin
+        // every frame in memory.
+        let readers: Vec<_> = streams
+            .iter()
+            .map(|s| s.reader(0, Duration::from_millis(50)))
+            .collect();
+        for _ in 0..500 {
+            for s in &streams {
+                s.push(&note());
+            }
+        }
+        let frame = format!("{}", 200); // a generous bound on one frame's size
+        let one_frame = frame.len() + 150;
+        let accounted = registry_bytes(&replay);
+        let actual: usize = streams.iter().map(|s| held_bytes(s)).sum();
+        assert_eq!(
+            accounted, actual,
+            "the budget count drifted from what is held"
+        );
+        assert!(
+            accounted <= budget + streams.len() * one_frame,
+            "{accounted} bytes held over a budget of {budget}"
+        );
+        assert!(
+            streams.iter().all(|s| !lock(&s.state).frames.is_empty()),
+            "a running stream lost its newest frame"
+        );
+        drop(readers);
+    }
+
+    #[test]
+    fn a_reader_behind_a_released_frame_is_ended_not_skipped_ahead() {
+        let replay = Replay::new(600, Duration::from_secs(30));
+        let stream = replay.start().unwrap();
+        let mut reader = stream.reader(0, Duration::from_millis(20));
+        for _ in 0..100 {
+            stream.push(&note());
+        }
+        let first = reader.next().unwrap();
+        assert!(
+            String::from_utf8_lossy(&first).starts_with(": stream truncated"),
+            "got {:?}",
+            String::from_utf8_lossy(&first)
+        );
+        assert!(reader.next().is_none(), "the stream went on after the gap");
+    }
+
+    #[test]
+    fn a_resume_that_needs_a_released_frame_is_not_found() {
+        let replay = Replay::new(600, Duration::from_secs(30));
+        let stream = replay.start().unwrap();
+        let early = stream.event_id(0);
+        for _ in 0..100 {
+            stream.push(&note());
+        }
+        assert!(
+            replay.find(&early).is_none(),
+            "an unservable resume was accepted"
+        );
+        let last = stream.event_id(lock(&stream.state).base + lock(&stream.state).frames.len() - 1);
+        assert!(
+            replay.find(&last).is_some(),
+            "the newest frame is still resumable"
+        );
+    }
+
+    #[test]
+    fn a_finished_stream_is_released_whole_and_its_readers_end() {
+        let replay = Replay::new(400, Duration::from_secs(30));
+        let old = replay.start().unwrap();
+        let mut old_reader = old.reader(0, Duration::from_millis(20));
+        old.push(&note());
+        old.finish();
+        let newer = replay.start().unwrap();
+        for _ in 0..50 {
+            newer.push(&note());
+        }
+        assert_eq!(held_bytes(&old), 0, "the finished stream kept its frames");
+        let first = old_reader.next().unwrap();
+        assert!(String::from_utf8_lossy(&first).starts_with(": stream truncated"));
+        assert!(replay.find(&old.event_id(0)).is_none());
+    }
+
+    #[test]
+    fn dropping_the_replay_releases_its_streams() {
+        let replay = Replay::new(1_000, Duration::from_secs(30));
+        let stream = replay.start().unwrap();
+        stream.push(&note());
+        let weak = Arc::downgrade(&stream);
+        drop(stream);
+        // Only the registry holds it now; dropping the replay must free it.
+        assert!(weak.upgrade().is_some());
+        drop(replay);
+        assert!(
+            weak.upgrade().is_none(),
+            "a stream outlived its replay (a reference cycle)"
+        );
     }
 }

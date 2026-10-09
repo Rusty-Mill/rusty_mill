@@ -47,7 +47,7 @@ async fn main() {
     let proxmox_config = cli.proxmox_config().unwrap_or_else(|msg| exit_with(&msg));
     let opnsense_config = cli.opnsense_config().unwrap_or_else(|msg| exit_with(&msg));
     let fedora_hosts = cli.fedora_hosts().unwrap_or_else(|msg| exit_with(&msg));
-    let token = cli.bearer_token();
+    let token = cli.bearer_token().unwrap_or_else(|msg| exit_with(&msg));
     if token.is_some() && cli.mcp.transport == serve::TransportArg::Stdio {
         exit_with("--auth-token/HOMELAB_MCP_AUTH_TOKEN requires --transport http");
     }

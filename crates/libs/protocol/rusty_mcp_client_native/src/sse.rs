@@ -28,6 +28,10 @@ pub struct SseParser {
     event: Option<String>,
     data: Vec<String>,
     has_data: bool,
+    /// The `id` field of the event being read (the spec's "last event ID
+    /// buffer"); it counts only once the event is dispatched.
+    id_buffer: Option<String>,
+    /// The id of the last event dispatched: what a reconnect resumes after.
     last_id: Option<String>,
     retry: Option<u64>,
 }
@@ -38,7 +42,22 @@ impl SseParser {
         Self::default()
     }
 
-    /// The last `id` seen: what `Last-Event-ID` should carry on reconnect.
+    /// A parser for the next connection of the same event source: framing
+    /// starts over (half an event from a dropped connection must not be glued
+    /// to the replay), while the last completed id and the `retry` value carry
+    /// on.
+    pub fn next_connection(&self) -> Self {
+        Self {
+            id_buffer: self.last_id.clone(),
+            last_id: self.last_id.clone(),
+            retry: self.retry,
+            ..Self::default()
+        }
+    }
+
+    /// The id of the last event that was completely received: what
+    /// `Last-Event-ID` should carry on reconnect. An `id` line whose event was
+    /// cut short does not count.
     pub fn last_event_id(&self) -> Option<&str> {
         self.last_id.as_deref()
     }
@@ -110,7 +129,7 @@ impl SseParser {
                 self.data.push(value.to_owned());
                 self.has_data = true;
             }
-            "id" if !value.contains('\0') => self.last_id = Some(value.to_owned()),
+            "id" if !value.contains('\0') => self.id_buffer = Some(value.to_owned()),
             "retry" if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) => {
                 self.retry = value.parse().ok();
             }
@@ -120,6 +139,11 @@ impl SseParser {
     }
 
     fn dispatch(&mut self) -> Option<SseEvent> {
+        // The event is complete: its id (if it had one) is now the one to
+        // resume after, even when the event carries no data (a priming event).
+        if self.id_buffer.is_some() {
+            self.last_id.clone_from(&self.id_buffer);
+        }
         let event = self.event.take();
         let has_data = std::mem::take(&mut self.has_data);
         let data = std::mem::take(&mut self.data).join("\n");
@@ -247,5 +271,136 @@ mod tests {
         let mut p = SseParser::new();
         assert_eq!(p.feed(b"data: partial\n"), []);
         assert_eq!(p.feed(b"\n"), [ev("partial")]);
+    }
+
+    #[test]
+    fn an_id_counts_only_once_its_event_is_complete() {
+        let mut p = SseParser::new();
+        assert_eq!(
+            p.feed(
+                b"id: 1
+data: a
+
+id: 2
+"
+            ),
+            [SseEvent {
+                data: "a".into(),
+                id: Some("1".into()),
+                ..SseEvent::default()
+            }]
+        );
+        assert_eq!(p.last_event_id(), Some("1"), "event 2 was never completed");
+        p.feed(
+            b"data: b
+
+",
+        );
+        assert_eq!(p.last_event_id(), Some("2"));
+    }
+
+    #[test]
+    fn a_priming_event_with_no_data_still_sets_the_resume_point() {
+        let mut p = SseParser::new();
+        assert_eq!(
+            p.feed(
+                b"id: s-0
+data: 
+
+"
+            ),
+            [ev("")].map(|mut e| {
+                e.id = Some("s-0".into());
+                e
+            })
+        );
+        assert_eq!(p.last_event_id(), Some("s-0"));
+        // A bare priming event with an empty `data` line dispatches; one with
+        // no `data` line at all does not, but its id still counts.
+        let mut q = SseParser::new();
+        assert!(q
+            .feed(
+                b"id: s-9
+
+"
+            )
+            .is_empty());
+        assert_eq!(q.last_event_id(), Some("s-9"));
+    }
+
+    #[test]
+    fn the_next_connection_starts_clean_but_keeps_the_resume_point() {
+        let mut p = SseParser::new();
+        p.feed(
+            b"id: 4
+data: whole
+
+id: 5
+event: message
+data: half an ev",
+        );
+        let mut q = p.next_connection();
+        assert_eq!(q.last_event_id(), Some("4"));
+        // The replay starts with event 5 in full; nothing of the old half
+        // is glued to it.
+        let got = q.feed(
+            b"id: 5
+event: message
+data: whole again
+
+",
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].data, "whole again");
+        assert_eq!(got[0].id.as_deref(), Some("5"));
+    }
+
+    /// Cut a stream at every byte, reconnect as the transport does (a fresh
+    /// framing, resuming after the last completed event), and check that the
+    /// two halves together are exactly the stream: nothing lost, repeated or
+    /// corrupted.
+    #[test]
+    fn a_cut_at_any_byte_loses_and_corrupts_nothing() {
+        let frames: Vec<(String, String)> = vec![
+            ("s-0".into(), String::new()),
+            ("s-1".into(), "{\"n\":1}".into()),
+            ("s-2".into(), "line one\nline two".into()),
+            ("s-3".into(), "caf\u{e9} \u{1f600}".into()),
+        ];
+        let render = |from: usize| -> Vec<u8> {
+            let mut out = Vec::new();
+            for (id, data) in &frames[from..] {
+                out.extend_from_slice(format!("id: {id}\n").as_bytes());
+                if id != "s-0" {
+                    out.extend_from_slice(b"event: message\n");
+                }
+                for line in data.split('\n') {
+                    out.extend_from_slice(format!("data: {line}\n").as_bytes());
+                }
+                out.push(b'\n');
+            }
+            out
+        };
+        let full = render(0);
+        let whole: Vec<SseEvent> = SseParser::new().feed(&full);
+        assert_eq!(whole.len(), frames.len());
+        for cut in 0..=full.len() {
+            let mut first = SseParser::new();
+            let mut got = first.feed(&full[..cut]);
+            // The server replays everything after the resume point.
+            let resume_at = match first.last_event_id() {
+                None => 0,
+                Some(id) => {
+                    frames
+                        .iter()
+                        .position(|(f, _)| f == id)
+                        .expect("a known id")
+                        + 1
+                }
+            };
+            let mut second = first.next_connection();
+            got.extend(second.feed(&render(resume_at)));
+            assert_eq!(got, whole, "cut at byte {cut}");
+        }
     }
 }

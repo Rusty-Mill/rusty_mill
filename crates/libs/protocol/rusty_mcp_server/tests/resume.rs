@@ -50,6 +50,22 @@ fn start(config: HttpConfig) -> Fixture {
                 std::thread::sleep(Duration::from_millis(500));
                 Ok(text("slow done"))
             })
+            // Reports every 50 ms and stops only when cancelled: the handler
+            // that never goes quiet.
+            .tool(Tool::new("chatty", schema()), {
+                let flag = cancelled.clone();
+                move |ctx, _p| {
+                    let until = Instant::now() + Duration::from_secs(10);
+                    let mut i = 0.0;
+                    while !ctx.is_cancelled() && Instant::now() < until {
+                        i += 1.0;
+                        ctx.progress(i, None, None);
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    flag.store(ctx.is_cancelled(), Ordering::SeqCst);
+                    Ok(text("stopped"))
+                }
+            })
             .tool(Tool::new("wait", schema()), move |ctx, _p| {
                 let until = Instant::now() + Duration::from_secs(10);
                 while !ctx.is_cancelled() && Instant::now() < until {
@@ -163,7 +179,7 @@ const ACCEPT: &str = "application/json, text/event-stream";
 
 fn call_body(tool: &str) -> String {
     format!(
-        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{tool}","_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{}}}}}}}}"#
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{tool}","_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{}},"progressToken":"p1"}}}}}}"#
     )
 }
 
@@ -365,5 +381,21 @@ fn a_classic_initialize_still_opens_a_session_when_replies_are_streams() {
         c.seen.to_ascii_lowercase().contains("mcp-session-id: "),
         "{:?}",
         c.seen
+    );
+}
+
+#[test]
+fn a_handler_that_reports_constantly_is_still_cancelled_after_the_grace() {
+    let f = start(resumable());
+    let mut c = call(&f, "chatty");
+    assert!(c.read_until(WAIT, |s| s.contains("notifications/progress")));
+    c.hang_up();
+    let end = Instant::now() + Duration::from_secs(5);
+    while !f.cancelled.load(Ordering::SeqCst) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        f.cancelled.load(Ordering::SeqCst),
+        "a call that never went quiet was never cancelled"
     );
 }

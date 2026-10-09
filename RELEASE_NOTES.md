@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - review fixes on #577 (pending review)
+
+- **Fixed (security):** an empty `--auth-token` no longer leaves `rusty_homelab_mcp`'s HTTP endpoint open; empty secrets are refused.
+- **Fixed:** resumable replies now bound memory for running streams, free themselves with their handler, and cancel abandoned chatty requests; the client's reconnect no longer glues half an event to the replay or resumes past an undelivered one; tasks expire on a timer instead of waiting for API traffic.
+- **Behaviour:** a running stream over the replay budget loses its oldest frames.
+
+---
+
 ## 2026-10-09 - rusty_homelab_mcp on the native MCP stack (pending review)
 
 - **Changed:** `rusty_homelab_mcp` no longer uses `rmcp` or the `rusty-mcp` scaffold; same 58 tools, schemas still from `schemars`. HTTP auth is a plain bearer check.

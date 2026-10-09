@@ -415,6 +415,9 @@ async fn push_loop(
         if let Some(v) = lock(&shared.version).as_ref() {
             headers.push(("MCP-Protocol-Version".into(), v.as_str().to_owned()));
         }
+        // Framing starts over on each connection; only the resume point and
+        // the server's `retry` value carry across.
+        parser = parser.next_connection();
         if let Some(id) = parser.last_event_id() {
             headers.push(("Last-Event-ID".into(), id.to_owned()));
         }

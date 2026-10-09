@@ -175,8 +175,19 @@ impl HomelabCli {
     /// `--auth-resource-url` no longer has an effect (it bound the token to an
     /// audience in the scaffold's OAuth resource model); a value is ignored
     /// with a warning at startup.
-    pub fn bearer_token(&self) -> Option<String> {
-        self.auth_token.clone()
+    ///
+    /// # Errors
+    /// If the token is set but empty (or only whitespace): an empty secret
+    /// would make the endpoint look protected while admitting anyone.
+    pub fn bearer_token(&self) -> Result<Option<String>, String> {
+        match &self.auth_token {
+            Some(token) if token.trim().is_empty() => Err(
+                "--auth-token/HOMELAB_MCP_AUTH_TOKEN is set but empty; set a real secret or \
+                 leave it unset"
+                    .to_owned(),
+            ),
+            other => Ok(other.clone()),
+        }
     }
 }
 
@@ -256,7 +267,7 @@ mod tests {
     #[test]
     fn no_auth_token_flag_leaves_the_http_endpoint_open() {
         let cli = HomelabCli::try_parse_from(["homelab", "--transport", "http"]).expect("parses");
-        assert!(cli.bearer_token().is_none());
+        assert!(cli.bearer_token().expect("a valid token setting").is_none());
     }
 
     #[test]
@@ -269,13 +280,27 @@ mod tests {
             "s3cr3t",
         ])
         .expect("parses");
-        assert_eq!(cli.bearer_token().as_deref(), Some("s3cr3t"));
+        assert_eq!(
+            cli.bearer_token()
+                .expect("a valid token setting")
+                .as_deref(),
+            Some("s3cr3t")
+        );
+    }
+
+    #[test]
+    fn an_empty_auth_token_is_refused_rather_than_leaving_the_endpoint_open() {
+        for empty in ["", "   "] {
+            let cli =
+                HomelabCli::try_parse_from(["homelab", "--auth-token", empty]).expect("parses");
+            assert!(cli.bearer_token().is_err(), "{empty:?} was accepted");
+        }
     }
 
     #[test]
     fn no_auth_token_leaves_the_endpoint_open() {
         let cli = HomelabCli::try_parse_from(["homelab", "--transport", "http"]).expect("parses");
-        assert_eq!(cli.bearer_token(), None);
+        assert_eq!(cli.bearer_token().expect("a valid token setting"), None);
     }
 
     #[test]
