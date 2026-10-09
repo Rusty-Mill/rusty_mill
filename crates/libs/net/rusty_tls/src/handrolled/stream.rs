@@ -25,7 +25,14 @@
 //!   authenticated `close_notify` is a clean end of stream.
 //! - Once the peer's `close_notify` has been read, nothing further is delivered
 //!   (RFC 8446 section 6.1, RFC 5246 section 7.2.1).
-//! - After any failure the stream stays failed.
+//! - Handshake and control flights (a HelloRetryRequest answer, a KeyUpdate
+//!   reply, `close_notify`) are flushed before the stream waits on the peer, so
+//!   a buffering transport cannot sit on them.
+//! - After any failure the stream stays failed. That includes a transport write
+//!   or flush error: the record layer's sequence number has already moved, so
+//!   lost ciphertext cannot be recovered, and later calls do no I/O. A
+//!   `shutdown` that did not deliver `close_notify` keeps reporting the error.
+//! - ALPN offers are checked before any I/O ([`NativeTlsStream::with_alpn`]).
 
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
@@ -51,6 +58,13 @@ const GROUPS: &[NamedGroup] = &[
 /// The largest record body accepted: a TLS 1.2 ciphertext (2^14 + 2048).
 /// Checked before allocating, so a hostile length cannot reserve 64 KiB at will.
 const MAX_RECORD_BODY: usize = (1 << 14) + 2048;
+
+/// The most ALPN data accepted: the sum over protocols of (1 + length).
+///
+/// RFC 7301 allows up to 2^16 - 1, but the ClientHello has to fit one record,
+/// and real offers are a few dozen bytes. This is a generous, safe bound, not
+/// the protocol's.
+const MAX_ALPN_LIST: usize = 4096;
 
 /// Where the stream is in its life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,10 +151,30 @@ impl<S: Read + Write> NativeTlsStream<S> {
 
     /// Offer these ALPN protocols, most preferred first. Has no effect once the
     /// handshake has started.
-    #[must_use]
-    pub fn with_alpn(mut self, protocols: Vec<Vec<u8>>) -> Self {
+    ///
+    /// Each name must be 1 to 255 bytes and the whole offer at most
+    /// [`MAX_ALPN_LIST`] bytes once framed (a length byte per name); otherwise
+    /// `InvalidInput`, before any I/O. The engine's encoder trusts its caller,
+    /// so this is where outside input is checked.
+    pub fn with_alpn(mut self, protocols: Vec<Vec<u8>>) -> io::Result<Self> {
+        let mut framed = 0usize;
+        for protocol in &protocols {
+            if protocol.is_empty() || protocol.len() > usize::from(u8::MAX) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "an ALPN protocol name must be 1 to 255 bytes",
+                ));
+            }
+            framed += 1 + protocol.len();
+        }
+        if framed > MAX_ALPN_LIST {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the ALPN offer is too large",
+            ));
+        }
         self.alpn = protocols;
-        self
+        Ok(self)
     }
 
     /// Whether the handshake has not yet completed.
@@ -201,20 +235,30 @@ impl<S: Read + Write> NativeTlsStream<S> {
 
     /// Send `close_notify`, the orderly end of this side's writing. The peer's
     /// own `close_notify` can still be read. Does nothing before the handshake
-    /// or after the first call.
+    /// or after it has been delivered once.
+    ///
+    /// If the close cannot be delivered the stream fails for good, and every
+    /// later call, this one included, reports it: a retry never claims success
+    /// for a `close_notify` that did not go out.
     pub fn shutdown(&mut self) -> io::Result<()> {
-        if self.sent_close || self.conn.is_none() || self.phase == Phase::Failed {
+        if self.conn.is_none() || self.sent_close {
             return Ok(());
+        }
+        if self.phase == Phase::Failed {
+            return Err(failed());
         }
         let sealed = match self.conn.as_mut() {
             Some(Established::Tls13(c)) => c.close(),
             Some(Established::Tls12(c)) => c.close(),
             _ => return Err(unsupported()),
-        }
-        .map_err(invalid)?;
+        };
+        let sealed = match sealed {
+            Ok(sealed) => sealed,
+            Err(err) => return Err(self.fail(&err)),
+        };
+        self.deliver(&sealed, true)?;
         self.sent_close = true;
-        self.sock.write_all(&sealed)?;
-        self.sock.flush()
+        Ok(())
     }
 
     /// The handshake proper, with every borrow it needs kept local so the
@@ -258,22 +302,21 @@ impl<S: Read + Write> NativeTlsStream<S> {
         let config = ClientConfigBoth::new(tls13, CipherSuite12::SUPPORTED);
 
         let (mut handshake, hello) = ClientHandshakeBoth::start(&config).map_err(invalid)?;
-        self.sock.write_all(&hello)?;
+        send(&mut self.sock, &hello)?;
         while !handshake.is_finished() {
             let record = read_record(&mut self.sock)?;
             match handshake.read_record(&record) {
                 Ok(reply) if reply.is_empty() => {}
-                Ok(reply) => self.sock.write_all(&reply)?,
+                Ok(reply) => send(&mut self.sock, &reply)?,
                 Err(err) => {
                     // Tell the peer why, best effort, then report it.
                     if let Some(alert) = handshake.alert_record(&err) {
-                        let _ = self.sock.write_all(&alert);
+                        let _ = send(&mut self.sock, &alert);
                     }
                     return Err(invalid(err));
                 }
             }
         }
-        self.sock.flush()?;
         handshake.into_connection().map_err(invalid)
     }
 
@@ -281,9 +324,26 @@ impl<S: Read + Write> NativeTlsStream<S> {
     fn fail(&mut self, err: &ClientError) -> io::Error {
         self.phase = Phase::Failed;
         if let Some(alert) = self.conn.as_mut().and_then(|c| c.alert_record(err)) {
-            let _ = self.sock.write_all(&alert);
+            let _ = send(&mut self.sock, &alert);
         }
         invalid(err)
+    }
+
+    /// Put sealed bytes on the wire. A failure is permanent: the record layer has
+    /// already advanced its sequence number, so ciphertext that did not all go out
+    /// cannot be recovered and anything sent after it would be out of step.
+    /// Control flights (`flush`) are pushed through any buffering so the peer can
+    /// answer before we block on it.
+    fn deliver(&mut self, bytes: &[u8], flush: bool) -> io::Result<()> {
+        let result = if flush {
+            send(&mut self.sock, bytes)
+        } else {
+            self.sock.write_all(bytes)
+        };
+        if result.is_err() {
+            self.phase = Phase::Failed;
+        }
+        result
     }
 }
 
@@ -320,7 +380,7 @@ impl<S: Read + Write> Read for NativeTlsStream<S> {
             let conn = self.conn.as_mut().ok_or_else(failed)?;
             match step(conn, &record) {
                 Ok(Step::Data(data)) => self.plain = data,
-                Ok(Step::Reply(reply)) => self.sock.write_all(&reply)?,
+                Ok(Step::Reply(reply)) => self.deliver(&reply, true)?,
                 Ok(Step::Closed) => self.phase = Phase::PeerClosed,
                 Ok(Step::Nothing) => {}
                 Err(StepError::Unsupported) => {
@@ -354,12 +414,20 @@ impl<S: Read + Write> Write for NativeTlsStream<S> {
             Ok(sealed) => sealed,
             Err(err) => return Err(self.fail(&err)),
         };
-        self.sock.write_all(&sealed)?;
+        self.deliver(&sealed, false)?;
         Ok(chunk.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.sock.flush()
+        if self.phase == Phase::Failed {
+            return Err(failed());
+        }
+        let result = self.sock.flush();
+        if result.is_err() {
+            // Whatever was buffered below us may be gone.
+            self.phase = Phase::Failed;
+        }
+        result
     }
 }
 
@@ -388,6 +456,13 @@ fn step(conn: &mut Established, record: &[u8]) -> Result<Step, StepError> {
         _ => return Err(StepError::Unsupported),
     };
     outcome.map_err(StepError::Engine)
+}
+
+/// Write all of `bytes` and flush, so a buffering transport cannot hold a
+/// handshake or control flight while we wait for the answer.
+fn send<S: Write>(sock: &mut S, bytes: &[u8]) -> io::Result<()> {
+    sock.write_all(bytes)?;
+    sock.flush()
 }
 
 /// Read one whole record, header included.

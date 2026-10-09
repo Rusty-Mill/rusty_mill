@@ -8,8 +8,9 @@
 
 #![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -56,6 +57,8 @@ enum Ending {
     GreetThenDrop,
     /// Send a greeting, then send `close_notify`.
     GreetThenCloseNotify,
+    /// Ask the client to roll keys, say "ping", wait for "pong", say "done".
+    KeyUpdateThenPingPong,
 }
 
 /// What the server saw of the client's end.
@@ -118,6 +121,18 @@ fn serve(config: Arc<rustls::ServerConfig>, ending: Ending) -> (u16, JoinHandle<
                 tls.conn.send_close_notify();
                 let _ = tls.flush();
             }
+            Ending::KeyUpdateThenPingPong => {
+                let mut pong = [0u8; 4];
+                let ok = tls.conn.complete_io(&mut tls.sock).is_ok()
+                    && tls.conn.refresh_traffic_keys().is_ok()
+                    && tls.write_all(b"ping").is_ok()
+                    && tls.flush().is_ok()
+                    && tls.read_exact(&mut pong).is_ok()
+                    && &pong == b"pong"
+                    && tls.write_all(b"done").is_ok()
+                    && tls.flush().is_ok();
+                seen.clean_close = ok;
+            }
         }
         seen
     });
@@ -155,7 +170,8 @@ fn it_echoes_on_each_tls_version_and_reports_what_was_negotiated() {
         );
         let mut stream = NativeTlsStream::new(connect(port), NAME, &trust(&pki))
             .expect("builds")
-            .with_alpn(vec![b"http/1.1".to_vec()]);
+            .with_alpn(vec![b"http/1.1".to_vec()])
+            .expect("a valid offer");
         assert!(stream.is_handshaking(), "{label}: no I/O at construction");
 
         stream.complete_handshake().expect("handshake");
@@ -343,4 +359,358 @@ fn the_debug_output_names_no_key_material() {
         !printed.contains("secret") && !printed.contains("key"),
         "{printed}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A transport that buffers like a `BufWriter` and fails on demand
+// ---------------------------------------------------------------------------
+
+/// What the stream did to its transport.
+#[derive(Default)]
+struct Wire {
+    /// Reads started while written bytes were still unflushed. A client that
+    /// does this waits for an answer to something it never sent.
+    unflushed_reads: AtomicUsize,
+    /// Calls made after the transport had already returned an error.
+    calls_after_failure: AtomicUsize,
+    /// Bytes still allowed through before writes fail; negative means no limit.
+    budget: AtomicIsize,
+    /// `flush` fails while set.
+    fail_flush: std::sync::atomic::AtomicBool,
+    /// Bytes handed to `write`, whether or not they were flushed on.
+    written: AtomicUsize,
+    failed: std::sync::atomic::AtomicBool,
+}
+
+impl Wire {
+    fn new() -> Arc<Self> {
+        let wire = Self::default();
+        wire.budget.store(-1, Ordering::SeqCst);
+        Arc::new(wire)
+    }
+
+    fn arm_write_failure_after(&self, bytes: isize) {
+        self.budget.store(bytes, Ordering::SeqCst);
+    }
+
+    fn note_call(&self) {
+        if self.failed.load(Ordering::SeqCst) {
+            self.calls_after_failure.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn fail(&self) -> io::Error {
+        self.failed.store(true, Ordering::SeqCst);
+        io::Error::new(ErrorKind::BrokenPipe, "injected transport failure")
+    }
+}
+
+/// Buffers every write until `flush`, like `BufWriter<TcpStream>`.
+struct BufferedWire {
+    inner: TcpStream,
+    buf: Vec<u8>,
+    wire: Arc<Wire>,
+}
+
+impl BufferedWire {
+    fn new(inner: TcpStream, wire: &Arc<Wire>) -> Self {
+        Self {
+            inner,
+            buf: Vec::new(),
+            wire: Arc::clone(wire),
+        }
+    }
+}
+
+impl Read for BufferedWire {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        self.wire.note_call();
+        if !self.buf.is_empty() {
+            self.wire.unflushed_reads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.read(out)
+    }
+}
+
+impl Write for BufferedWire {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.wire.note_call();
+        let budget = self.wire.budget.load(Ordering::SeqCst);
+        let n = if budget < 0 {
+            data.len()
+        } else if budget == 0 {
+            return Err(self.wire.fail());
+        } else {
+            data.len().min(budget as usize)
+        };
+        if budget >= 0 {
+            self.wire.budget.fetch_sub(n as isize, Ordering::SeqCst);
+        }
+        self.wire.written.fetch_add(n, Ordering::SeqCst);
+        self.buf.extend_from_slice(&data[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.wire.note_call();
+        if self.wire.fail_flush.load(Ordering::SeqCst) {
+            return Err(self.wire.fail());
+        }
+        self.inner.write_all(&self.buf)?;
+        self.buf.clear();
+        self.inner.flush()
+    }
+}
+
+fn buffered(port: u16, pki: &Pki, wire: &Arc<Wire>) -> NativeTlsStream<BufferedWire> {
+    let tcp = connect(port);
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    NativeTlsStream::new(BufferedWire::new(tcp, wire), NAME, &trust(pki)).expect("builds")
+}
+
+// ---------------------------------------------------------------------------
+// Flushing: a buffered transport must not hold a flight we are waiting on
+// ---------------------------------------------------------------------------
+
+fn retry_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    let mut provider = rustls::crypto::ring::default_provider();
+    // Only P-256: the client's first key share (X25519) is wrong, so the server
+    // answers with a HelloRetryRequest and the client sends a second flight.
+    provider.kx_groups = vec![rustls::crypto::ring::kx_group::SECP256R1];
+    Arc::new(provider)
+}
+
+#[test]
+fn handshake_flights_are_flushed_before_the_stream_waits_on_a_buffered_transport() {
+    for label in ["1.3", "1.2", "1.3 with a HelloRetryRequest"] {
+        let pki = pki(NAME);
+        let config = match label {
+            "1.3" => server_config(&pki, &[&rustls::version::TLS13], &[]),
+            "1.2" => server_config(&pki, &[&rustls::version::TLS12], &[]),
+            _ => Arc::new(
+                rustls::ServerConfig::builder_with_provider(retry_provider())
+                    .with_protocol_versions(&[&rustls::version::TLS13])
+                    .expect("versions")
+                    .with_no_client_auth()
+                    .with_single_cert(vec![pki.leaf.clone()], pki.key.clone_key())
+                    .expect("config"),
+            ),
+        };
+        let (port, server) = serve(config, Ending::EchoUntilClose);
+        let wire = Wire::new();
+        let mut stream = buffered(port, &pki, &wire);
+
+        stream
+            .complete_handshake()
+            .unwrap_or_else(|e| panic!("{label}: the handshake stalled on buffered writes: {e}"));
+        stream.write_all(b"hello").expect("writes");
+        stream.flush().expect("flushes");
+        assert_eq!(read_exactly(&mut stream, 5), b"hello", "{label}");
+        assert_eq!(
+            wire.unflushed_reads.load(Ordering::SeqCst),
+            0,
+            "{label}: the stream blocked on a read with its own bytes still buffered"
+        );
+        drop(stream);
+        let _ = server.join();
+    }
+}
+
+#[test]
+fn a_requested_key_update_is_answered_and_flushed_before_the_stream_waits() {
+    let pki = pki(NAME);
+    let (port, server) = serve(
+        server_config(&pki, &[&rustls::version::TLS13], &[]),
+        Ending::KeyUpdateThenPingPong,
+    );
+    let wire = Wire::new();
+    let mut stream = buffered(port, &pki, &wire);
+
+    assert_eq!(read_exactly(&mut stream, 4), b"ping");
+    stream
+        .write_all(b"pong")
+        .expect("writes under the new keys");
+    stream.flush().expect("flushes");
+    assert_eq!(read_exactly(&mut stream, 4), b"done");
+    assert_eq!(
+        wire.unflushed_reads.load(Ordering::SeqCst),
+        0,
+        "the KeyUpdate answer sat in the buffer while the stream waited"
+    );
+    drop(stream);
+    assert!(
+        server.join().expect("server").clean_close,
+        "server saw the exchange"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Failure is permanent, and nothing pretends otherwise
+// ---------------------------------------------------------------------------
+
+fn established_over_buffered_wire() -> (NativeTlsStream<BufferedWire>, Arc<Wire>, JoinHandle<Seen>)
+{
+    let pki = pki(NAME);
+    let (port, server) = serve(
+        server_config(&pki, &[&rustls::version::TLS13], &[]),
+        Ending::EchoUntilClose,
+    );
+    let wire = Wire::new();
+    let mut stream = buffered(port, &pki, &wire);
+    stream.complete_handshake().expect("handshake");
+    (stream, wire, server)
+}
+
+#[test]
+fn a_failed_data_write_fails_the_stream_for_good_and_later_calls_do_no_io() {
+    let (mut stream, wire, server) = established_over_buffered_wire();
+    // Let part of the sealed record through, then fail: the record layer has
+    // already moved its sequence number, so the rest cannot be re-sent.
+    wire.arm_write_failure_after(10);
+    assert!(stream.write_all(&[7u8; 100]).is_err());
+
+    let before = wire.calls_after_failure.load(Ordering::SeqCst);
+    let mut buf = [0u8; 8];
+    assert!(stream.write(b"x").is_err(), "later writes fail");
+    assert!(stream.flush().is_err(), "flush fails");
+    assert!(stream.read(&mut buf).is_err(), "reads fail");
+    assert!(
+        stream.shutdown().is_err(),
+        "shutdown does not claim success"
+    );
+    assert_eq!(
+        wire.calls_after_failure.load(Ordering::SeqCst),
+        before,
+        "the stream touched a transport that had failed"
+    );
+    drop(stream);
+    let _ = server.join();
+}
+
+#[test]
+fn a_failed_flush_fails_the_stream_for_good() {
+    let (mut stream, wire, server) = established_over_buffered_wire();
+    stream.write_all(b"data").expect("buffered");
+    wire.fail_flush.store(true, Ordering::SeqCst);
+    assert!(stream.flush().is_err());
+
+    let before = wire.calls_after_failure.load(Ordering::SeqCst);
+    assert!(stream.write(b"more").is_err());
+    assert!(stream.flush().is_err());
+    assert_eq!(wire.calls_after_failure.load(Ordering::SeqCst), before);
+    drop(stream);
+    let _ = server.join();
+}
+
+#[test]
+fn a_close_notify_that_cannot_be_delivered_is_never_reported_as_sent() {
+    let (mut stream, wire, server) = established_over_buffered_wire();
+    wire.arm_write_failure_after(0);
+    assert!(stream.shutdown().is_err(), "the close did not go out");
+
+    let before = wire.calls_after_failure.load(Ordering::SeqCst);
+    assert!(
+        stream.shutdown().is_err(),
+        "a retry must not turn a lost close_notify into success"
+    );
+    assert!(stream.write(b"x").is_err());
+    assert_eq!(wire.calls_after_failure.load(Ordering::SeqCst), before);
+    drop(stream);
+    let _ = server.join();
+}
+
+#[test]
+fn a_shutdown_that_was_delivered_stays_ok_when_repeated() {
+    let (mut stream, _wire, server) = established_over_buffered_wire();
+    stream.shutdown().expect("delivered");
+    stream.shutdown().expect("idempotent");
+    drop(stream);
+    let _ = server.join();
+}
+
+#[test]
+fn a_control_reply_that_cannot_be_sent_fails_the_stream() {
+    let pki = pki(NAME);
+    let (port, server) = serve(
+        server_config(&pki, &[&rustls::version::TLS13], &[]),
+        Ending::KeyUpdateThenPingPong,
+    );
+    let wire = Wire::new();
+    let mut stream = buffered(port, &pki, &wire);
+    stream.complete_handshake().expect("handshake");
+
+    // The server's KeyUpdate asks for an answer; make sending it fail.
+    wire.arm_write_failure_after(0);
+    let mut buf = [0u8; 8];
+    assert!(
+        stream.read(&mut buf).is_err(),
+        "the reply could not be sent"
+    );
+
+    let before = wire.calls_after_failure.load(Ordering::SeqCst);
+    assert!(stream.read(&mut buf).is_err());
+    assert!(stream.write(b"x").is_err());
+    assert_eq!(wire.calls_after_failure.load(Ordering::SeqCst), before);
+    drop(stream);
+    let _ = server.join();
+}
+
+// ---------------------------------------------------------------------------
+// ALPN offers are checked before any I/O
+// ---------------------------------------------------------------------------
+
+fn alpn_result(protocols: Vec<Vec<u8>>) -> (io::Result<()>, usize) {
+    let pki = pki(NAME);
+    let wire = Wire::new();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let tcp = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+    let stream = NativeTlsStream::new(BufferedWire::new(tcp, &wire), NAME, &trust(&pki))
+        .expect("builds")
+        .with_alpn(protocols);
+    (stream.map(|_| ()), wire.written.load(Ordering::SeqCst))
+}
+
+#[test]
+fn alpn_names_and_offers_outside_the_limits_are_refused_before_any_io() {
+    let name = |n: usize| vec![b'a'; n];
+    for (label, offer) in [
+        ("an empty name", vec![name(0)]),
+        ("a 256-byte name", vec![name(256)]),
+        ("a 1000-byte name", vec![name(1000)]),
+        (
+            "an empty name among good ones",
+            vec![name(2), name(0), name(3)],
+        ),
+        // 16 names of 255 bytes frame to exactly 4096; one more byte tips it over.
+        ("an offer one byte over the aggregate limit", {
+            let mut v = vec![name(255); 15];
+            v.push(name(254));
+            v.push(name(2));
+            v
+        }),
+        ("a huge offer", vec![name(255); 400]),
+    ] {
+        let (result, written) = alpn_result(offer);
+        let err = result.expect_err(label);
+        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{label}: {err}");
+        assert_eq!(written, 0, "{label}: no I/O before the offer is checked");
+    }
+}
+
+#[test]
+fn alpn_offers_at_the_limits_are_accepted() {
+    let name = |n: usize| vec![b'a'; n];
+    for (label, offer) in [
+        ("no offer", Vec::new()),
+        ("a 1-byte name", vec![name(1)]),
+        ("a 255-byte name", vec![name(255)]),
+        (
+            "h2 and http/1.1",
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+        ),
+        ("exactly the aggregate limit", vec![name(255); 16]),
+    ] {
+        let (result, _) = alpn_result(offer);
+        result.unwrap_or_else(|e| panic!("{label}: {e}"));
+    }
 }
