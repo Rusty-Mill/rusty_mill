@@ -1,0 +1,30 @@
+[package]
+name = "rusty_bbp_host"
+version = "0.1.0"
+edition = "2021"
+description = "Host for the Blackboard Protocol: the per-turn MCP server agents talk to, the human channel CLI, and task administration over a rusty_bbp file store"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+# First-party only (ADR-0002 Tier S).
+rusty_bbp = { workspace = true }
+rusty_serde = { workspace = true }
+# Operation ids for reads the agent did not name.
+rusty_rand = { workspace = true }
+
+[[bin]]
+name = "bbp"
+path = "src/bin/bbp.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
