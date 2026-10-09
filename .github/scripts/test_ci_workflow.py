@@ -33,6 +33,8 @@ PLAN_KEYS = {
     "win32",
     "multimodal_db",
     "rusty_config_no_std",
+    "rleval_viewer",
+    "rleval_app",
     "shards",
     "components",
 }
@@ -199,8 +201,34 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "rleval_viewer": False, "rleval_app": False, "remind_me": False, "remind_me_legacy_import": False},
         )
+
+    def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
+        # A change to a crate the viewer and the app both build on reaches both
+        # (affected_crates.py expands it to its reverse dependents first).
+        flags = specialized_job_flags([], ["replay-analyzer", "replay-viewer", "rleval-app"])
+        self.assertTrue(flags["rleval_viewer"])
+        self.assertTrue(flags["rleval_app"])
+        # The app alone does not need the headless-GL smoke test...
+        flags = specialized_job_flags([], ["rleval-app"])
+        self.assertTrue(flags["rleval_app"])
+        self.assertFalse(flags["rleval_viewer"])
+        # ...and the fixture the smoke test renders is a path-only trigger.
+        flags = specialized_job_flags(
+            ["crates/apps/rocket_league/rleval/assets/replays/42f2.replay"], []
+        )
+        self.assertTrue(flags["rleval_viewer"])
+        self.assertFalse(flags["rleval_app"])
+        # An unrelated change selects neither.
+        flags = specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"])
+        self.assertFalse(flags["rleval_viewer"])
+        self.assertFalse(flags["rleval_app"])
+
+    def test_rleval_jobs_are_planned_and_gated(self) -> None:
+        for key in ("rleval_viewer", "rleval_app"):
+            self.assertIn(f"{key}: ${{{{ steps.plan.outputs.{key} }}}}", self.workflow)
+            self.assertIn(f"if: needs.plan.outputs.{key} == 'true'", self.workflow)
 
     def test_fair_play_reverse_dependencies_select_its_specialized_jobs(self) -> None:
         # affected_crates.py expands a changed domain/shared crate to these
@@ -277,11 +305,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "rleval_viewer": False, "rleval_app": False, "remind_me": False, "remind_me_legacy_import": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "rleval_viewer": False, "rleval_app": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:

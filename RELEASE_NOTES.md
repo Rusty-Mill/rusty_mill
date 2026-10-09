@@ -13,6 +13,49 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_bbp driver boundary: payload derives from bytes (pending review)
+
+- **Added:** `rusty_bbp::codec` and two `Driver` boundary checks: a referenced blob must already be stored, and the claimed typed payload must equal what the bytes decode to. Closes the two compliance gaps found when ChatGPT's implementation-plan review was reassessed against the built code.
+- **Changed:** the `spec` artifact's on-disk shape is now JSON with `brief` and `markdown`, so its payload is derivable. Test fixtures encode through `codec`.
+
+---
+
+## 2026-10-08 - CI: replay-viewer GL smoke test and rleval-app feature sets (pending review)
+
+- **Added:** two planner-gated jobs ported from RLEvalSystem's own CI: `rleval-viewer-gl-smoke` (the offline viewer rendered under software WebGL with a `npm ci`-pinned puppeteer; fails on page errors or a stalled render loop) and `rleval-app-feature-sets` (clippy for default, `mmdb` and `oidc`, plus default-feature tests). New planner flags `rleval_viewer` and `rleval_app`, with tests.
+- **Not ported, by design:** the `mmdb,oidc` job (the workspace-wide clippy/nextest/doctest jobs already run `--all-features`, which includes that set on Linux and Windows) and the Python service job (the service was moved without CI, ADR-0008).
+- **Known limitation:** the smoke test was verified locally against the Playwright-installed Chromium; the first CI run on `ubuntu-latest` downloads puppeteer's own.
+
+---
+
+## 2026-10-08 - RLEvalSystem imported into crates/apps/rocket_league (pending review)
+
+- **Added:** `replay-analyzer`, `replay-scoring`, `replay-skills`, `replay-value`, `replay-viewer`, `replay-pacifist`, `bc-clone`, `recon-check`, `rleval-app` and the `rleval/` product dir (docs, Python `service/`, scripts). History preserved via `git filter-repo` (201 of 222 commits; the rest only touched private material). Stacked on the rusty_bullet import.
+- **Changed:** replays, corpus, player sessions and the Spire capture kit are excluded and live in the private repo `baileyrd/rocket_league_private`. `rleval-app`'s git-pinned rusty_mill dependencies became workspace dependencies. `replay-analyzer`'s golden records `boxcars-0.11.5` (was 0.11.3; no other change). `rleval-app`'s SHA-256 uses `as_chunks`, its upload-signing key comes from `rusty_rand` (the old `/dev/urandom` read made signed uploads return 501 on Windows, which the old Ubuntu-only CI never ran). `history_flow` skips without the corpus.
+- **Known limitation:** the Python service and Docker files are moved, not built or tested in CI; the viewer headless-GL smoke test and the `mmdb,oidc` feature job of the old CI are not ported yet.
+
+---
+
+## 2026-10-08 - rusty_bbp stage 2: durable store (pending review)
+
+- **Added:** `rusty_bbp::FsStore`, a file-backed store with one `fsync`ed JSON line per committed batch, crash truncation on open, revision-checked append and digest-verified blobs via `rusty_atomic_file`. Stage-2 exit criteria from the implementation plan are tests: reopen, crash mid-batch, conflict, blob consistency.
+- **Changed:** `Store::blob_get` returns `Vec<u8>`; `StoreError::Backend` added.
+- **Known limitation:** no directory lock; one writer per data directory is the host's job. Blob garbage collection and retention are not implemented.
+## 2026-10-08 - rusty_bullet imported as crates/apps/rocket_league (pending review)
+
+- **Added:** `crates/apps/rocket_league/` (ADR-0008) with `rb_domain`, `rb_env`, `rb_physics_bullet`, `rb_replay_ingest`, `rb_capture_ingest`, `rb_scenario`, `rb_verify_cli` and the product's docs, BakkesMod plugin and tape-bot tooling. Full history preserved via `git filter-repo` + merge (SHAs differ from `baileyrd/rusty_bullet`; map in the PR).
+- **Changed:** `Cargo.lock` gains 20 packages, no existing entry changes. `boxcars` is held on one 0.11.x so `subtr-actor ~1.2` and `rb_replay_ingest` share a `Replay` type.
+- **Known limitation:** `tools/rb_tape_bot` is excluded from the workspace (own lockfile, external `rlbot` client). RLEvalSystem is a separate follow-up import; replays and corpora stay out of git.
+
+---
+
+## 2026-10-08 - rusty_bbp: Blackboard Protocol core joins libs/protocol (pending review)
+
+- **Added:** `rusty_bbp` at `crates/libs/protocol/rusty_bbp`, Tier S (`rusty_serde`, `rusty_rsa`; `proptest` dev-only). Moved from `baileyrd/rusty_bbp` after its stage-1 tests passed, so its first-party dependencies are path dependencies under the workspace layer check instead of a git pin. No consumers yet; `rusty_orch` is the intended first one.
+- **Known limitation:** stage 1 only. The store is in-memory; the durable log, the MCP adapter and the runner supervisor are stages 2 and 3. Tokens and run secrets are deterministic hashes until `rusty_rand` is wired in at stage 3.
+
+---
+
 ## 2026-10-08 - rusty-mcp-client split (pending review)
 
 - **Added:** `rusty-mcp-client`; **Changed:** `rusty-mcp` loses its `client` feature; `rk-mcp` depends on the new crate. Stdio verified again against a real `rusty-mcp-demo` after the move. No OpenSSL in the MCP client path (the `native-tls` still in `rk-mcp`'s tree comes from `aisdk`/`rk-feed`, the LLM client).

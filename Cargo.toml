@@ -1,6 +1,22 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/apps/rocket_league/crates/bc-clone",
+    "crates/apps/rocket_league/crates/recon-check",
+    "crates/apps/rocket_league/crates/replay-analyzer",
+    "crates/apps/rocket_league/crates/replay-pacifist",
+    "crates/apps/rocket_league/crates/replay-scoring",
+    "crates/apps/rocket_league/crates/replay-skills",
+    "crates/apps/rocket_league/crates/replay-value",
+    "crates/apps/rocket_league/crates/replay-viewer",
+    "crates/apps/rocket_league/crates/rleval-app",
+    "crates/apps/rocket_league/crates/rb_capture_ingest",
+    "crates/apps/rocket_league/crates/rb_domain",
+    "crates/apps/rocket_league/crates/rb_env",
+    "crates/apps/rocket_league/crates/rb_physics_bullet",
+    "crates/apps/rocket_league/crates/rb_replay_ingest",
+    "crates/apps/rocket_league/crates/rb_scenario",
+    "crates/apps/rocket_league/crates/rb_verify_cli",
     "crates/libs/net/rusty_kafka",
     "crates/apps/rusty_meshed/crates/rusty-meshed-core",
     "crates/apps/rusty_meshed/crates/rusty-meshed-schema-registry",
@@ -51,6 +67,7 @@ members = [
     "crates/libs/net/rusty_oauth",
     "crates/libs/protocol/rusty_channel",
     "crates/libs/protocol/rusty_routine",
+    "crates/libs/protocol/rusty_bbp",
     "crates/libs/rusty_sandbox",
     "crates/libs/rusty_bot",
     "crates/libs/homelab/rusty_proxmox",
@@ -249,6 +266,8 @@ members = [
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
+    "crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot",
+    "crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot",
     "crates/libs/ui/rusty_term/fuzz",
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
@@ -443,6 +462,7 @@ rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }
 rusty_agui = { path = "crates/libs/protocol/rusty_agui" }
 rusty_channel = { path = "crates/libs/protocol/rusty_channel" }
 rusty_routine = { path = "crates/libs/protocol/rusty_routine" }
+rusty_bbp = { path = "crates/libs/protocol/rusty_bbp" }
 rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
 rusty_bot = { path = "crates/libs/rusty_bot" }
 rusty_oauth = { path = "crates/libs/net/rusty_oauth" }

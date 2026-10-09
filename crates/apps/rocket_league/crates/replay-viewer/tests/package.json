@@ -1,0 +1,9 @@
+{
+  "name": "replay-viewer-gl-smoke",
+  "private": true,
+  "description": "Headless-GL smoke test for the offline replay viewer (see gl_smoke.mjs). Not published; CI installs it with `npm ci`.",
+  "type": "module",
+  "devDependencies": {
+    "puppeteer": "^24.0.0"
+  }
+}
