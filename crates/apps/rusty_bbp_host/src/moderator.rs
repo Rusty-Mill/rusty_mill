@@ -433,9 +433,20 @@ mod tests {
             let l = agents
                 .for_role(role)
                 .ok_or_else(|| format!("{role:?} has no launcher"))?;
+            let joined = l.args.join(" ");
             assert!(
-                l.args.iter().any(|a| a.contains("{mcp_config}")),
+                joined.contains("{mcp_config}"),
                 "{role:?} gets the MCP config"
+            );
+            assert!(
+                joined.contains("--output-format stream-json --verbose"),
+                "{role:?} logs every tool call"
+            );
+            let mcp_only = l.args.windows(2).any(|w| w == ["--tools", ""]);
+            assert_eq!(
+                mcp_only,
+                role != Role::Coder,
+                "{role:?}: only the Coder keeps built-in tools"
             );
         }
         let set = crate::profiles::read_file(&proving("profiles.json"))?;

@@ -20,13 +20,20 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Verified:** 13 tests. Ten messages decode from payloads made by `rlbot_flat` 0.6.0 (schema rev c38374e) to the values they were built from, and round-trip through this crate; truncating or flipping any byte of the larger payloads never panics. Checked once outside CI: `planus` accepts what this crate encodes for all six client messages.
 - **Known limitation:** a subset by design (no loadouts, 37 of 38 mutators, scripts, hitboxes, scores, rendering, comms, ball prediction); omitted fields are written as schema defaults. String and vector fields are always written because the reference reader treats them as required.
 
+## 2026-10-09 - Design: Dots-style always-on agents (pending review)
+
+- **Added:** `docs/design/DOTS-AGENT.md`, a design for always-on agents with Slack and a pages workspace, composed from existing crates. Approved in-session by the owner on 2026-10-09, then revised after their review on #581 (all page routes behind owner auth, a change feed so edits from Slack reach an idle browser, prerequisites refreshed against current `main`). Documentation only; implementation is not authorized yet. Also carries a port of #582 (`rk-kernel`: `rk-observe` to dev-dependencies) to clear `cargo-shear`.
+- **Known limitations:** nothing was built or run; AG-UI 1.0 deltas for `rusty_agui` are listed, not fixed.
+
 ---
 
 ## 2026-10-09 - rusty_bbp_host: proving-run runbook, README status, protoc pin
 
-- **Added:** `crates/apps/rusty_bbp_host/docs/proving-run.md` and `docs/proving/{brief.md,profiles.json,agents.json}`: how to run the first live Blackboard Protocol task end to end (build, throwaway target crate, open and assign, `bbp mod` in one shell and `bbp human` in another) and what to record afterwards, so the spec's post-proving-run questions get data rather than opinion.
+- **Added:** `crates/apps/rusty_bbp_host/docs/proving-run.md` and `docs/proving/{brief.md,profiles.json,agents.json}`: how to run the first live Blackboard Protocol task end to end (build, throwaway target crate, open and assign, `bbp mod` in one shell and `bbp human` in another; MCP-only roles have their built-in tools removed, every harness logs structured tool events) and what to record afterwards, so the spec's post-proving-run questions get data rather than opinion.
 - **Changed:** the host README's stale "Not here yet" section (stages 3b and 3c, long merged) becomes "Status". The Windows `protoc` 36.2 zip in `setup-build-env` is checked against a pinned SHA-256 before `Expand-Archive`; a mismatch fails the step loudly.
 - **Known limitation:** the runbook's paths assume `/tmp/bbp` and a `nano` user; the sandboxed profile must list the toolchain's directories as read roots, and the target crate must build offline. Docs and CI only; no runtime code changed.
+
+---
 
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
