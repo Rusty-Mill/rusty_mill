@@ -15,14 +15,11 @@ layer = "libs"
 [dependencies]
 # rusty_wire/rusty_std are now siblings in this same workspace -- plain
 # path dependencies.
-rusty_wire = { workspace = true }
-rusty_std = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 rusty_win32 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rusty_libc = { workspace = true }
 
 [features]
 default = []

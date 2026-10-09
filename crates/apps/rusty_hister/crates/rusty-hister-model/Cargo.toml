@@ -12,7 +12,6 @@ publish = false
 layer = "apps"
 
 [dependencies]
-rusty-hister-core = { path = "../rusty-hister-core" }
 rusty_rand.workspace = true
 rusty-db = { workspace = true, features = [
     "derive",

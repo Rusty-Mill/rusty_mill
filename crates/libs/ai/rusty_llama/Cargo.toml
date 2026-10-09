@@ -13,7 +13,6 @@ layer = "libs"
 [dependencies]
 cudarc = { version = "0.19", optional = true, default-features = false }
 rusty_simd = { workspace = true }
-rusty_std = { workspace = true }
 rusty_sync = { workspace = true }
 fancy-regex = "0.18.0"
 half = { version = "2", optional = true }

@@ -9,6 +9,11 @@ repository = "https://github.com/baileyrd/rush"
 [package.metadata.rusty_mill]
 layer = "apps"
 
+[package.metadata.cargo-shear]
+# `rpath` is declared on purpose and "not yet wired into any call site" (see
+# the comment on the dependency): kept for the Windows path-translation work.
+ignored = ["rpath"]
+
 [dependencies]
 # `[[ $s =~ regex ]]` (C56). A minimal POSIX-ERE engine (parser + Pike VM,
 # linear-time, zero deps) built to replace the `regex` crate here; v1 keeps

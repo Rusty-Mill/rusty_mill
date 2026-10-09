@@ -28,7 +28,6 @@ rusty_url.workspace = true
 # `links = "sqlite3"` / stable-toolchain reasons this crate used to
 # explain here directly -- see crates/libs/storage/rusty_sqlite/Cargo.toml.
 rusty_sqlite.workspace = true
-schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror = "2"

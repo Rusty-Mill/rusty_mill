@@ -12,6 +12,29 @@ categories = ["no-std", "os"]
 [package.metadata.rusty_mill]
 layer = "tools"
 
+[package.metadata.cargo-shear]
+# rusty_boot is documented as the full-stack demonstration binary (see the
+# header of src/main.rs: levels 0 to 4, "the full software pipeline"), and its
+# manifest lists the stack it demonstrates. cargo-shear finds these unused in
+# code; whether the demo should keep claiming them is the owners' call, so they
+# are kept as they were (also as CI-propagation edges for affected-crate runs).
+ignored = [
+    "rusty_wire",
+    "rusty_regx",
+    "rusty_json",
+    "rusty_compress",
+    "rusty_std",
+    "rusty_tokio",
+    "rusty_http",
+    "rusty_lines",
+    "rusty_font",
+    "rusty_gui",
+    "rush",
+    "rusty_term",
+    "rusty_libc",
+    "rusty_win32",
+]
+
 [dependencies]
 rusty_wire = { workspace = true }
 rusty_regx = { workspace = true }
