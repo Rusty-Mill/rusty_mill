@@ -120,8 +120,9 @@ How CI supports it (this PR):
   gets a `run-<id>` key, so a push to an open PR cannot abort a queue entry.
   A test pins this.
 
-Status: the workflow side is in place; the queue is **active once the ruleset
-below is applied** (a repository setting, not code).
+Status: the workflow side is in place and the ruleset below was applied on
+2026-10-09 (a repository setting, not code); the first queued merge was this
+change.
 
 Ruleset to apply by hand (Settings > Rules > Rulesets > New branch ruleset).
 Order matters: merge the PR that adds `merge_group` first, otherwise the
