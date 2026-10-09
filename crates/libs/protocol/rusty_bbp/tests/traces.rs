@@ -18,18 +18,13 @@ fn tr_01_candidate_cannot_be_replaced_at_merge_gate() {
     let mut fx = Fx::new();
     let a = fx.reach_merge_gate();
     let diff = ArtId(2);
-    let r = fx.agent(
+    let r = fx.put(
         Role::Coder,
-        AgentAction::PutArtifact {
-            blob: BlobRef {
-                sha: Sha256([3; 32]),
-                len: 2,
-            },
-            payload: ArtifactPayload::Candidate(Candidate {
-                base: "b".repeat(40),
-                diffs: vec![diff],
-            }),
-        },
+        ArtifactPayload::Candidate(Candidate {
+            base: "b".repeat(40),
+            diffs: vec![diff],
+        }),
+        b"",
     );
     assert!(matches!(rejected(r), Code::StaleTurn | Code::TokenExpired));
     assert_eq!(fx.st().candidate, Some(a));
@@ -209,14 +204,14 @@ fn tr_10_replay_after_turn_ended_returns_original() {
     let diff = stored(fx.put(Role::Coder, ArtifactPayload::Diff, b"d"));
     let tok = fx.tok(Role::Coder);
     let op = fx.op();
-    let blob = fx.d.store.blob_put(b"{}");
-    let action = AgentAction::PutArtifact {
-        blob,
-        payload: ArtifactPayload::Candidate(Candidate {
-            base: "a".repeat(40),
-            diffs: vec![diff],
-        }),
-    };
+    let payload = ArtifactPayload::Candidate(Candidate {
+        base: "a".repeat(40),
+        diffs: vec![diff],
+    });
+    let blob =
+        fx.d.store
+            .blob_put(&encode_artifact(&payload, b"").expect("encode"));
+    let action = AgentAction::PutArtifact { blob, payload };
     let first = fx.agent_with(Role::Coder, Some(tok), op.clone(), action.clone());
     assert!(matches!(first, Response::Stored(_)));
     assert_eq!(fx.st().state, State::Test);

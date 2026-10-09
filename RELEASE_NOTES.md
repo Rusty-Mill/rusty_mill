@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - rusty_bbp driver boundary: payload derives from bytes (pending review)
+
+- **Added:** `rusty_bbp::codec` and two `Driver` boundary checks: a referenced blob must already be stored, and the claimed typed payload must equal what the bytes decode to. Closes the two compliance gaps found when ChatGPT's implementation-plan review was reassessed against the built code.
+- **Changed:** the `spec` artifact's on-disk shape is now JSON with `brief` and `markdown`, so its payload is derivable. Test fixtures encode through `codec`.
+
+---
+
 ## 2026-10-08 - CI: replay-viewer GL smoke test and rleval-app feature sets (pending review)
 
 - **Added:** two planner-gated jobs ported from RLEvalSystem's own CI: `rleval-viewer-gl-smoke` (the offline viewer rendered under software WebGL with a `npm ci`-pinned puppeteer; fails on page errors or a stalled render loop) and `rleval-app-feature-sets` (clippy for default, `mmdb` and `oidc`, plus default-feature tests). New planner flags `rleval_viewer` and `rleval_app`, with tests.
