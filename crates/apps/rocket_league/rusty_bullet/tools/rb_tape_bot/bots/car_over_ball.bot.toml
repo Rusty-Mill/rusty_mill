@@ -1,0 +1,23 @@
+#:schema https://rlbot.org/schemas/agent.json
+# Generated: one bot entry per scenario, so the RLBot GUI can pick the tape
+# without editing bot.toml between runs. Same binary, same agent id; only
+# the environment differs. Regenerate with the snippet in README "Running".
+# run_command is a TOML literal string: cmd.exe needs backslashes and a
+# basic string would treat them as escapes.
+
+[settings]
+name = "RB Tape: car_over_ball"
+agent_id = "rusty_bullet/tape_bot"
+root_dir = ".."
+run_command = 'target\release\rb_tape_bot.exe'
+run_command_linux = "target/release/rb_tape_bot"
+hivemind = false
+
+[settings.environment]
+RB_TAPE = "scenarios/car_over_ball.json"
+
+[details]
+description = "reproduces hitjump.jsonl 77.642 s without the held jump: a car at 2150 uu/s, throttle on, passing over a resting ball with its wheels (the 77.667 s ball residual; the original also had jump held from an earlier press, which a tape cannot start in the air)"
+developer = "rusty_bullet"
+language = "rust"
+tags = []

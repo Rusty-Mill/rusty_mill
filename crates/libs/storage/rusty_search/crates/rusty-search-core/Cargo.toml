@@ -33,4 +33,3 @@ default = []
 serde-json = ["dep:serde_json"]
 
 [dev-dependencies]
-tokio = { workspace = true }

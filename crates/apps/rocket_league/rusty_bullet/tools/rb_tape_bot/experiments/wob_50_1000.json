@@ -1,0 +1,44 @@
+{
+  "name": "wob_50_1000: level car 50 uu off centre falls onto a resting ball at 1000 uu/s",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      50,
+      0,
+      224.4
+    ],
+    "rotation": [
+      0,
+      0,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      -1000
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      0,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 180
+    }
+  ]
+}

@@ -13,8 +13,6 @@ categories = ["encoding", "no-std"]
 layer = "foundation"
 
 [dependencies]
-rusty_wire = { workspace = true }
-rusty_std = { workspace = true }
 
 [features]
 default = []

@@ -85,13 +85,9 @@ struct RememberedConfig {
 }
 
 fn config_path(kind: &str) -> std::path::PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
-                .join(".config")
-        });
-    base.join("rusty-croc").join(format!("{kind}.json"))
+    rusty_dirs::config_dir("rusty-croc")
+        .unwrap_or_else(|| std::path::PathBuf::from(".config/rusty-croc"))
+        .join(format!("{kind}.json"))
 }
 
 /// Resolve relay/pass/curve from flags > remembered config > defaults, and

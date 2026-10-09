@@ -68,6 +68,11 @@ pub enum AnsiToken<'a> {
         /// Payload string slice.
         payload: &'a str,
     },
+    /// Any other escape sequence, as the text after the `ESC`: a two-byte
+    /// sequence such as `"7"` (save cursor) or `"="`, a charset designation
+    /// such as `"(B"`, or a DCS/SOS/PM/APC string including its `ESC \`
+    /// terminator.
+    Escape(&'a str),
 }
 
 /// Zero-allocation, streaming ANSI escape sequence iterator over a string slice.
@@ -142,6 +147,13 @@ impl<'a> Iterator for AnsiParser<'a> {
             }
 
             // Fallback for isolated ESC
+            if let Some(len) = escape_len(rest) {
+                let (sequence, remainder) = rest.split_at(len);
+                self.input = remainder;
+                return Some(AnsiToken::Escape(sequence));
+            }
+
+            // A lone ESC, or an unterminated CSI/OSC/string: only the ESC goes.
             self.input = &self.input[1..];
             return Some(AnsiToken::Control('\x1B'));
         }
@@ -164,6 +176,34 @@ impl<'a> Iterator for AnsiParser<'a> {
         let text = &self.input[..end_idx];
         self.input = &self.input[end_idx..];
         Some(AnsiToken::Text(text))
+    }
+}
+
+/// Length in bytes of the escape sequence that follows an `ESC`, when `rest`
+/// starts one that is not CSI or OSC. `None` for anything unterminated or
+/// malformed, which leaves the `ESC` alone and lets the rest read as text.
+fn escape_len(rest: &str) -> Option<usize> {
+    let mut chars = rest.char_indices();
+    let (_, first) = chars.next()?;
+    match first {
+        // DCS, SOS, PM, APC: a string that ends with ST (`ESC \`).
+        'P' | 'X' | '^' | '_' => Some(1 + rest[1..].find("\x1B\\")? + 2),
+        // Intermediates, then a final byte (charset designation, `ESC # 8`).
+        ' '..='/' => {
+            for (i, c) in chars {
+                match c {
+                    ' '..='/' => {}
+                    '0'..='~' => return Some(i + c.len_utf8()),
+                    _ => return None,
+                }
+            }
+            None
+        }
+        // CSI and OSC introducers that did not terminate are not two-byte.
+        '[' | ']' => None,
+        // Fp, Fe and Fs: one final byte (`ESC 7`, `ESC =`, `ESC M`, `ESC c`).
+        '0'..='~' => Some(1),
+        _ => None,
     }
 }
 
@@ -223,6 +263,48 @@ mod tests {
             })
         );
         assert_eq!(p.next(), None);
+    }
+
+    #[test]
+    fn parses_two_byte_and_designation_sequences() {
+        let mut p = AnsiParser::new("\x1B7a\x1B(Bb\x1B#8c\x1B=d");
+        assert_eq!(p.next(), Some(AnsiToken::Escape("7")));
+        assert_eq!(p.next(), Some(AnsiToken::Text("a")));
+        assert_eq!(p.next(), Some(AnsiToken::Escape("(B")));
+        assert_eq!(p.next(), Some(AnsiToken::Text("b")));
+        assert_eq!(p.next(), Some(AnsiToken::Escape("#8")));
+        assert_eq!(p.next(), Some(AnsiToken::Text("c")));
+        assert_eq!(p.next(), Some(AnsiToken::Escape("=")));
+        assert_eq!(p.next(), Some(AnsiToken::Text("d")));
+        assert_eq!(p.next(), None);
+    }
+
+    #[test]
+    fn strips_string_sequences_up_to_st() {
+        // Kitty graphics (APC) and DCS both end with `ESC \`.
+        assert_eq!(strip_ansi("a\x1B_Gi=1;AAAA\x1B\\b"), "ab");
+        assert_eq!(strip_ansi("a\x1BPq#0;2\x1B\\b"), "ab");
+        // Unterminated: only the ESC goes, the rest is text.
+        assert_eq!(strip_ansi("a\x1B_Gi=1"), "a_Gi=1");
+    }
+
+    #[test]
+    fn strips_every_kind_of_sequence_in_one_line() {
+        let input = "\x1B[2K\x1B7\x1B]0;title\x07\x1B(Bprompt> \x1B[1mhi\x1B[0m\x1B8\r\n";
+        assert_eq!(strip_ansi(input), "prompt> hi\r\n");
+    }
+
+    #[test]
+    fn a_lone_or_malformed_esc_drops_only_the_esc() {
+        assert_eq!(strip_ansi("\x1B"), "");
+        assert_eq!(strip_ansi("a\x1Bé"), "aé");
+        assert_eq!(strip_ansi("a\x1B[31"), "a[31");
+        assert_eq!(strip_ansi("a\x1B("), "a(");
+    }
+
+    #[test]
+    fn two_byte_sequences_have_no_width() {
+        assert_eq!(visible_width("\x1B7ab\x1B8"), 2);
     }
 
     #[test]

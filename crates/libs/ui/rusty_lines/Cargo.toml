@@ -35,7 +35,7 @@ libc-backend = ["dep:libc"]
 # Linux: `rusty_libc` is the default backend; `libc` only when forced.
 [target.'cfg(target_os = "linux")'.dependencies]
 rusty_libc = { workspace = true, optional = true }
-libc = { version = "0.2", optional = true }
+libc = { workspace = true, optional = true }
 
 # Other Unix (macOS/BSD): the libc backend is the only option — `rusty_libc` is
 # Linux-only — so libc is a plain dependency there. Not CI-verified on a real
@@ -44,7 +44,7 @@ libc = { version = "0.2", optional = true }
 # exercised on Linux only, via that job's `--features libc-backend` escape
 # hatch.
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
-libc = "0.2"
+libc = { workspace = true }
 
 # Windows: GetConsoleMode/SetConsoleMode/ReadFile/WaitForSingleObject/
 # GetConsoleScreenBufferInfo via `rusty_win32` — the Windows counterpart of
@@ -55,5 +55,9 @@ rusty_win32 = { workspace = true, features = ["std"] }
 
 # The pty end-to-end tests (tests/pty.rs) drive examples/demo under a
 # pseudo-terminal.
+[dev-dependencies]
+# The PTY tests read the demo's raw output through the shared ANSI stripper.
+rusty_ansi = { workspace = true }
+
 [target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"
+libc = { workspace = true }

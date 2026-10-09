@@ -173,39 +173,7 @@ fn run_session_in(example: &str, prompt: &str, chunks: &[&[u8]]) -> String {
 /// Drop ESC-introduced sequences (CSI, OSC, two-byte) so assertions see
 /// only printable text and \r\n structure.
 fn strip_ansi(bytes: &[u8]) -> String {
-    let s = String::from_utf8_lossy(bytes);
-    let mut out = String::new();
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        if c != '\x1b' {
-            out.push(c);
-            continue;
-        }
-        match it.next() {
-            Some('[') => {
-                // CSI: parameters, then a final byte in @..~
-                for c in it.by_ref() {
-                    if ('@'..='~').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                // OSC: terminated by BEL or ST
-                while let Some(c) = it.next() {
-                    if c == '\x07' {
-                        break;
-                    }
-                    if c == '\x1b' && it.peek() == Some(&'\\') {
-                        it.next();
-                        break;
-                    }
-                }
-            }
-            _ => {} // two-byte sequence: drop the introducer + one char
-        }
-    }
-    out
+    rusty_ansi::strip_ansi(&String::from_utf8_lossy(bytes))
 }
 
 /// An executed line is echoed by the demo at column 0, right after the

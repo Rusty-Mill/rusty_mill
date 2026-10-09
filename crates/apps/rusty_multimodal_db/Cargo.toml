@@ -416,6 +416,8 @@ name = "fair_play_server"
 required-features = ["server"]
 
 [dependencies]
+# PEM bodies (`src/server/pem.rs`), part of the `client` feature.
+rusty_base64 = { workspace = true, optional = true }
 # UUID type + deterministic construction from seeded random bytes (Builder::from_random_bytes
 # needs no extra feature — Uuid::new_v4()'s OS-randomness feature is deliberately not enabled,
 # since dataset generation must be reproducible from a seed, not OS-random). The "serde" feature
@@ -588,7 +590,7 @@ research = ["rusty_multimodal_db_engine/research"]
 # for the client side of TLS. A consumer that only talks to a server
 # depends on this and compiles no `serve`, no domain adapter, no journal
 # (`ECO-FR-001`, ADR-0043). `server` implies it.
-client = ["dep:rusty_tls"]
+client = ["dep:rusty_tls", "dep:rusty_base64"]
 server = ["client", "dep:rusty_http", "dep:rusty_libc"]
 perf-events = ["dep:criterion-perf-events", "dep:perfcnt"]
 # The external-database comparison benchmark (benches/external_db.rs, ADR-0015) — SQLite/DuckDB

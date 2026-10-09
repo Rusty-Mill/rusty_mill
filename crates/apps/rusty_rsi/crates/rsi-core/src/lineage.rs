@@ -91,14 +91,7 @@ where
 /// Lowercase hex encoding of a digest.
 #[must_use]
 pub fn to_hex(digest: &Digest) -> String {
-    use fmt::Write as _;
-    digest
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
-            // Writing to a String cannot fail.
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
+    rusty_hex::encode(digest)
 }
 
 /// Parses 64 lowercase hex characters into a digest.
@@ -113,26 +106,12 @@ pub fn from_hex(text: &str) -> Result<Digest, CoreError> {
     if text.len() != 64 || !is_lower_hex(text) {
         return Err(invalid());
     }
-    let bytes = text.as_bytes();
-    let pairs = bytes.iter().step_by(2).zip(bytes.iter().skip(1).step_by(2));
-    let mut digest = [0u8; 32];
-    for (byte, (&high, &low)) in digest.iter_mut().zip(pairs) {
-        *byte = (nibble(high) << 4) | nibble(low);
-    }
-    Ok(digest)
+    rusty_hex::decode_array::<32>(text).map_err(|_| invalid())
 }
 
 fn is_lower_hex(text: &str) -> bool {
     text.bytes()
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-/// The value of one lowercase hex digit; callers check [`is_lower_hex`] first.
-const fn nibble(digit: u8) -> u8 {
-    match digit {
-        b'0'..=b'9' => digit - b'0',
-        _ => digit - b'a' + 10,
-    }
 }
 
 /// The content address of a stored artefact: the SHA-256 of its bytes.

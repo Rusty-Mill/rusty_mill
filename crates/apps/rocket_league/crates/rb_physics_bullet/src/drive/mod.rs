@@ -1,0 +1,744 @@
+//! Driven car input: couples `rb_domain::ControllerInput` into forces and
+//! torques on a car `RigidBody`. Ground-driving (throttle, steering),
+//! boost, handbrake/drift, a single ground jump, and air control in this
+//! increment. Throttle, steering, handbrake, and jump are gated on the car
+//! actually touching the ground (a free-floating box has no wheels to
+//! grip, lock, or push off of, so airborne input does nothing for any of
+//! them here); boost is not gated the same way — it's a rocket, not an
+//! engine, so it still fires with no ground contact at all, unlike every
+//! grounded-only input above. It isn't identical airborne, though: since
+//! `RB-PHYSICS-001-FR-056`, its own acceleration magnitude is higher
+//! airborne than grounded (`BOOST_ACCELERATION_AIR` vs
+//! `BOOST_ACCELERATION_GROUND`), matching real Rocket League's own real
+//! split — a claim this doc comment used to get wrong by rounding "not
+//! gated on ground contact" up to "identical everywhere". Air control is
+//! the mirror image of the *gating*, not the magnitude question above:
+//! gated on the car *not* touching the ground (real air control needs no
+//! wheels at all — it's pure torque, so it would be redundant with
+//! steering while grounded).
+//!
+//! Tire grip and the handbrake (`RB-PHYSICS-001-FR-081`, ADR-0012): a
+//! grounded car's box has no floor friction of its own. `ground`'s tire
+//! model grips per axis instead, as RocketSim's wheels do: sideways grip
+//! from `LAT_FRICTION_CURVE` by slip ratio, free rolling forward and
+//! backward (coast-braking with no throttle). The handbrake cuts sideways
+//! grip to a tenth and forward/backward grip to `0.5..0.9`, RocketSim's
+//! own anisotropic factors, replacing the old isotropic friction
+//! multiplier `RB-PHYSICS-001-FR-066` found had the wrong shape.
+//!
+//! Jump is a single, fixed-height vertical impulse fired on the *rising
+//! edge* of `ControllerInput.jump` (a fresh press, not merely "held") while
+//! grounded — holding the button through the resulting airborne period
+//! doesn't re-fire it, and releasing then re-pressing while still airborne
+//! doesn't fire it either (this increment has no double jump to grant).
+//! Edge detection needs one bit of state to remember "was jump held as of
+//! last step," carried by the caller in `DriveState::jump_held`, the same
+//! pattern `DriveState::boost_amount` already uses for a resource that must
+//! persist across calls.
+//!
+//! Air control (`RB-PHYSICS-001-FR-084`) is RocketSim's `_UpdateAirTorque`:
+//! pitch, yaw and roll each give an angular acceleration of
+//! `CAR_AIR_CONTROL_TORQUE * CAR_TORQUE_SCALE` per unit stick about the
+//! car's -right, up and -forward axes, minus a per-axis damping of the
+//! current spin (`CAR_AIR_CONTROL_DAMPING`, faded out for pitch and yaw as
+//! their stick is held). A `None` analog value (replay-derived input, see
+//! `rb_domain`) counts as a centered stick. Throttle adds a small forward
+//! push in the air (`THROTTLE_AIR_ACCELERATION`). Air control is gated by
+//! the flip (see **Flip** below). Since `RB-PHYSICS-001-FR-057`, spin is
+//! capped at
+//! `MAX_CAR_ANGULAR_SPEED`, a real confirmed Rocket League limit, once per
+//! step, the same way `MAX_CAR_SPEED` already bounds linear speed.
+//!
+//! Double jump reuses the ground jump's own rising-edge detection
+//! (`jump_pressed`) rather than a second edge-detector: the same fresh
+//! press, while airborne, fires one more instantaneous impulse — gated on a
+//! per-car `double_jump_available` flag instead of on `on_ground`. Landing
+//! (any step where `on_ground` is true) unconditionally restores
+//! availability; an airborne fresh press consumes it, so it can fire at
+//! most once per airborne period no matter how many times jump is released
+//! and re-pressed after that. That impulse is either a plain vertical
+//! `JUMP_SPEED` kick, or a directional **dodge**, depending on the car's
+//! `pitch`/`yaw`/`roll` stick input at the moment of the press: past
+//! `FLIP_INPUT_DEADZONE`, a dodge fires instead — a purely horizontal
+//! `DODGE_SPEED` impulse (along `forward_axis` for pitch, `right_axis` for
+//! roll), followed by a flip (see **Flip** below), with RocketSim's signs:
+//! stick forward (pitch -1) dodges forward and noses down
+//! (`RB-PHYSICS-001-FR-082`). Since `RB-PHYSICS-001-FR-073`, the roll axis's own
+//! stick value also includes `yaw` input (`roll + yaw`, each clamped to
+//! `[-1.0, 1.0]` individually first) — matching RocketSim's own confirmed
+//! `dodgeDir = (-pitch, yaw + roll, 0)`, so a yaw-only press (no roll held)
+//! now fires a sideways dodge too, the same as a real Rocket League player
+//! nudging the right stick purely left/right. Since `RB-PHYSICS-001-FR-104`
+//! the press flips once `|yaw| + |pitch| + |roll|` reaches
+//! `FLIP_INPUT_DEADZONE` (0.5), as in RocketSim; a flip whose direction
+//! cancels under `DODGE_DEADZONE` is a stall, a flip with no impulse or
+//! torque that still damps vertical speed. Both pitch
+//! and the combined roll/yaw can contribute at once (a diagonal dodge): since
+//! `RB-PHYSICS-001-FR-072`, their combined
+//! `(pitch, roll)` direction is normalized to unit length before scaling —
+//! matching RocketSim's own confirmed real `dodgeDir.safeNormalized()`
+//! step — so a diagonal dodge has the same total magnitude as an
+//! axis-aligned one, not the larger, independently-summed magnitude a flat
+//! per-axis sum would give; since `RB-PHYSICS-001-FR-074`, a near-axis-
+//! aligned diagonal input additionally snaps to a pure single-axis dodge
+//! (matching RocketSim's own post-normalization small-component zeroing)
+//! instead of leaving a tiny, likely-unintentional perpendicular
+//! component — see `normalize_dodge_direction`'s own doc
+//! comment for the full finding. Since
+//! `RB-PHYSICS-001-FR-059`, though, `DODGE_SPEED`'s own magnitude is no
+//! longer flat regardless of direction or current speed: a pitch dodge
+//! opposing the car's current forward-velocity direction, or any side
+//! (roll) dodge, scales up as current speed rises toward `MAX_CAR_SPEED`
+//! — see `dodge_speed_scale`'s own doc comment for the confirmed real
+//! ratios and `dodge_pitch_is_backward`'s for the backward classification.
+//! A dodge is purely horizontal (no vertical component, unlike the plain double
+//! jump) — real Rocket League's dodge impulse does have a small upward
+//! component too, not modeled here. Below `DODGE_DEADZONE` on both axes,
+//! the plain vertical double jump fires exactly as before dodge existed.
+//! Either way, the press still spends the one `double_jump_available` per
+//! airborne period — a dodge and a plain double jump share the same
+//! resource, matching real Rocket League. A dodge also starts a per-car
+//! `DriveState::flip`.
+//!
+//! Wall jump is a *third* jump variant, alongside the ground jump and the
+//! double jump: a fresh press while airborne *and* touching an arena wall
+//! (`wall_normal: Some(normal)`, computed by the caller the same way
+//! `on_ground` is — see `PhysicsWorld`) fires an impulse combining
+//! `WALL_JUMP_HORIZONTAL_SPEED` outward along the wall's normal with
+//! `JUMP_SPEED` upward (the same vertical speed the ground jump and double
+//! jump use). Touching a wall — whether or not jump is pressed that step —
+//! unconditionally restores `double_jump_available`, the same way landing
+//! does, matching real Rocket League's "any surface contact refills your
+//! second jump" rule; wall jump itself doesn't separately consume or
+//! restore it, since contact already did. On a fresh press, wall contact
+//! takes priority over consulting `double_jump_available` at all (checked
+//! first in the airborne branch), so a player can wall-jump and still have
+//! a double jump left afterward.
+//! Wall jump has no per-wall-contact limit of its own: touching a (new or
+//! the same) wall again always allows another wall jump, unlike the
+//! double jump's once-per-airborne-period limit. Since
+//! `RB-PHYSICS-001-FR-067`, real Rocket League is confirmed to have no
+//! distinct wall-jump mechanic or constant at all — it's the identical
+//! grounded-jump impulse applied along the car's own up axis, which tips
+//! to match a touched wall via the wheel/suspension system this port's box
+//! car doesn't have; see `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment for
+//! the full finding and why this port's two-component substitute isn't
+//! adopted away.
+//!
+//! Wall jump can itself be dodged off of: the same `pitch`/`roll`-vs-
+//! `DODGE_DEADZONE` check the ground double jump uses is applied on a wall
+//! jump's own fresh press too. Below the deadzone, the plain fixed
+//! outward-plus-upward impulse fires exactly as before this existed. At or
+//! above it, a **wall-jump dodge** fires instead: the same
+//! outward-plus-upward push combined with a horizontal `DODGE_SPEED`
+//! impulse and the same flip as a ground dodge. Unlike the plain
+//! wall jump, a wall-jump dodge *does* consume `double_jump_available` —
+//! the same resource a ground dodge spends — a deliberate simplification:
+//! this port has no way to separately account for "a wall touch refilled
+//! it, then the wall-jump dodge spent it" versus a genuinely independent
+//! wall-dash resource, and real Rocket League's precise accounting here
+//! isn't public to the precision this project would need to model that
+//! distinction. Since touching a wall unconditionally restores
+//! `double_jump_available` first (see above), a wall-jump dodge is never
+//! blocked by an already-spent double jump — only its *stick input*, not
+//! prior double-jump state, decides whether a wall-jump press dodges.
+//!
+//! The ground jump has variable height: continuing to hold `jump` after the
+//! fresh press that fires it adds a continuous `JUMP_HOLD_ACCELERATION`
+//! upward force, for up to `JUMP_HOLD_MAX_DURATION` seconds, on top of the
+//! fixed `JUMP_SPEED` impulse — releasing early (or the window simply
+//! running out) stops the extra acceleration, matching real Rocket League's
+//! held-vs-tapped jump height difference. Since `RB-PHYSICS-001-FR-064`,
+//! that release isn't *always* immediate: for the first `JUMP_MIN_TIME`
+//! seconds after the press, the acceleration keeps applying regardless of
+//! whether `jump` is still held — real Rocket League's own `_UpdateJump` has this same mandatory
+//! minimum-hold quirk, so even an instantaneous tap gets a small amount of
+//! extra height. Only past that mandatory window does releasing `jump` end
+//! it right away. This is scoped to the ground jump alone: the double jump,
+//! a dodge, and the wall jump are still each a single fixed instantaneous
+//! impulse, completely unaffected by how long jump is held, since firing
+//! any of them requires releasing jump first (a fresh press), which itself
+//! unconditionally ends the ground jump's hold window (see
+//! `apply_driven_forces`'s own doc comment for the exact ordering). Tracked
+//! per car via `jump_hold_time_remaining`, the same kind of caller-owned
+//! persisted state `jump_held`/`double_jump_available` already are.
+//!
+//! **Flip** (`RB-PHYSICS-001-FR-083`, ported from RocketSim's
+//! `_UpdateAirTorque` and `_UpdateDoubleJumpOrFlip`): a dodge records its
+//! direction and starts a flip clock (`DriveState::flip`). From the press
+//! tick itself (`RB-PHYSICS-001-FR-085`, one tick earlier than RocketSim's
+//! order, per the owner's capture) until `FLIP_TORQUE_TIME` (0.65 s) the flip spins the car at
+//! `FLIP_TORQUE_FORWARD`/`FLIP_TORQUE_SIDE` (nose down for forward, right
+//! side down for right), air control's pitch torque is locked while its
+//! roll and yaw torque and all three dampings still act
+//! (`RB-PHYSICS-001-FR-093`, per the owner's capture; RocketSim turns air
+//! control off), and from 0.15 s the car's fall is damped
+//! (`FLIP_Z_DAMP_*`). Holding pitch against the flip's forward direction
+//! scales its pitch spin down by the stick amount: the flip cancel. A side
+//! flip has no pitch spin to cancel. Air control's pitch stays locked until
+//! `FLIP_PITCHLOCK_EXTRA_TIME` after the torque ends. Landing clears the flip. This replaces the port's earlier
+//! instant spin kick and its jump-press-again cancel, which Rocket League
+//! does not have (FR-069, FR-070).
+//!
+//! There is no airborne auto-upright: the port's earlier
+//! `LANDING_AUTO_UPRIGHT_TORQUE` nudge was removed in
+//! `RB-PHYSICS-001-FR-084`, since `RB-PHYSICS-001-FR-060` found Rocket
+//! League has no such mechanic (its auto-flip and auto-roll are grounded
+//! and input-gated, not modeled yet).
+//!
+//! A car with no input set (or all-neutral `ControllerInput::default()`)
+//! behaves as a free rigid box except for tire grip while grounded (see
+//! above) — this module only ever adds force/torque/impulse or a velocity
+//! change, never removes physics outright.
+//!
+//! This is not a Bullet3 port (Bullet has no concept of "a car's engine")
+//! — it's this project's own model of Rocket League's driving mechanics,
+//! since the real numbers are not public, sourced instead from the
+//! community reverse-engineering effort (RocketSim, RLUtilities, and the
+//! RLBot wiki's independently-converging "Useful Game Values" — see
+//! `RB-PHYSICS-001-FR-031`'s audit for the full source-by-source
+//! breakdown). `MAX_CAR_SPEED`, `UNBOOSTED_MAX_CAR_SPEED`, `MAX_BOOST`,
+//! `BOOST_ACCELERATION_GROUND`/`BOOST_ACCELERATION_AIR` (since
+//! `RB-PHYSICS-001-FR-056` split the single flat `BOOST_ACCELERATION` this
+//! bullet used to name into the two distinct values the same sources
+//! actually cite), `JUMP_SPEED`, `JUMP_HOLD_MAX_DURATION`,
+//! `JUMP_HOLD_ACCELERATION`, (since `RB-PHYSICS-001-FR-057`)
+//! `MAX_CAR_ANGULAR_SPEED`, and (since `RB-PHYSICS-001-FR-064`)
+//! `JUMP_MIN_TIME` are commonly-cited,
+//! multi-source-confirmed community-reverse-engineered approximations (the
+//! same body of public research `PhysicsWorld::new`'s gravity constant
+//! comes from);
+//! `BOOST_USED_PER_SECOND` is RocketSim's default boost-drain rate; `THROTTLE_ACCELERATION`'s own peak
+//! magnitude is likewise a simplified, uncalibrated placeholder, but since
+//! `RB-PHYSICS-001-FR-058` it's no longer applied flat — `drive_speed_taper`
+//! scales it by RocketSim's own confirmed real curve shape as speed rises,
+//! tapering smoothly to zero at `UNBOOSTED_MAX_CAR_SPEED` instead of a hard
+//! cutoff (see that function's own doc comment for why the curve's shape,
+//! unlike its peak magnitude, transfers cleanly). `DODGE_SPEED`'s own base
+//! magnitude is likewise still an uncalibrated placeholder, but since
+//! `RB-PHYSICS-001-FR-059` its per-direction scaling (a backward dodge
+//! opposing current motion, or any side dodge, growing stronger as current
+//! speed rises) matches RocketSim's own confirmed real ratios via
+//! `dodge_speed_scale` — the same "shape confirmed, magnitude not" split
+//! `THROTTLE_ACCELERATION` already has. Steering no longer uses a
+//! placeholder torque: since `RB-PHYSICS-001-FR-086` the front wheels turn
+//! by RocketSim's real steer-angle curves (`ground::steer_angle`) and each
+//! wheel's side impulse yaws the car (ADR-0016, superseding FR-080's
+//! kinematic yaw rate), resolving the wrong-shape finding
+//! `RB-PHYSICS-001-FR-065` recorded.
+//! The handbrake no longer uses a placeholder friction multiplier: since
+//! `RB-PHYSICS-001-FR-081` it scales the tire model's per-axis grip by
+//! RocketSim's real factors, resolving `RB-PHYSICS-001-FR-066`'s
+//! wrong-shape finding. `WALL_JUMP_HORIZONTAL_SPEED` remains an uncalibrated
+//! placeholder too, but since `RB-PHYSICS-001-FR-067` real Rocket League is
+//! confirmed to have no distinct wall-jump mechanic or constant to
+//! calibrate against at all — see that requirement's own entry and
+//! `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment for the full finding.
+//! Air control's magnitudes are RocketSim's own since
+//! `RB-PHYSICS-001-FR-084` (FR-068 had adopted only their ratios).
+//! (Historical, before `RB-PHYSICS-001-FR-083` replaced it with the real
+//! flip torque:) `DODGE_ANGULAR_SPEED` remained an uncalibrated placeholder too,
+//! but since `RB-PHYSICS-001-FR-069` real Rocket League's own dodge spin
+//! is confirmed to be a continuous per-axis torque over a fixed 0.65s
+//! window, not this port's own single instantaneous shared kick — a
+//! confirmed-but-not-adopted finding in the same category as
+//! `WALL_JUMP_HORIZONTAL_SPEED`,
+//! since adopting the real shape would mean new per-car elapsed-flip-time
+//! state, a substantially larger redesign `RB-PHYSICS-001-FR-059`'s own
+//! Non-goals already flagged as out of scope — see that requirement's own
+//! entry and `DODGE_ANGULAR_SPEED`'s own doc comment for the full finding.
+//! `RB-PHYSICS-001-FR-031`'s audit
+//! found real reference numbers for some of these (a dodge's real ~500
+//! uu/s base impulse; a wall jump reusing the plain jump impulse rather
+//! than its own faster speed, confirmed exact by `RB-PHYSICS-001-FR-067`;
+//! real air-control torque/damping coefficients, whose per-axis ratio
+//! `RB-PHYSICS-001-FR-068` later confirmed and adopted; a dodge's real
+//! spin torque and duration, whose exact mechanism `RB-PHYSICS-001-FR-069`
+//! later confirmed), but none of the
+//! remaining raw absolute values port directly: they're expressed as
+//! torques or velocity-dependent curves calibrated against real Rocket
+//! League's own specific car mass/inertia tensor and mechanic shape,
+//! neither of which this port's own placeholder car body or simplified
+//! single-impulse mechanics are calibrated to match, so adopting the raw
+//! numbers here would be false precision, not a real fix — see the
+//! audit's own findings for detail. `MAX_CAR_ANGULAR_SPEED` (and, since
+//! `RB-PHYSICS-001-FR-059`, `DODGE_SPEED`'s own per-direction scale
+//! ratios) don't have that problem even though they also bound
+//! rotation/velocity: they cap or scale the *result* (a rad/s or uu/s
+//! quantity) rather than prescribing the torque or force that produces
+//! it, so they transfer cleanly regardless of this port's own car
+//! body/inertia tensor not matching real Rocket League's — see
+//! `RB-PHYSICS-001-FR-057`'s own findings for why that distinction let
+//! these constants clear the bar the torque-based placeholders above
+//! couldn't. Aside from those exceptions, none of these are independently
+//! confirmed by this project — see `RB-PHYSICS-001-FR-005`/`FR-031`.
+
+mod air;
+mod boost;
+mod ground;
+mod jump;
+mod roll;
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;
+mod wheels;
+
+pub use boost::{BOOST_USED_PER_SECOND, MAX_BOOST};
+pub use wheels::{cast_wheels, is_on_ground, WheelContact, WheelContacts, NO_WHEEL_CONTACTS};
+
+/// The no-slip bicycle-model yaw rate for `ground::steer_angle` over the
+/// Octane wheelbase: the turn rate grip-limited steering approaches, for
+/// sibling modules' tests only.
+#[cfg(test)]
+pub(crate) fn bicycle_yaw_rate_for_tests(
+    forward_speed: f32,
+    steer: f32,
+    handbrake_amount: f32,
+) -> f32 {
+    let wheelbase = ground::FRONT_AXLE_X - ground::REAR_AXLE_X;
+    forward_speed * ground::steer_angle(forward_speed, steer, handbrake_amount).tan() / wheelbase
+}
+pub use jump::{
+    AutoFlip, FlipState, JumpClock, AUTO_FLIP_SPEED, DODGE_SPEED, JUMP_SPEED,
+    WALL_JUMP_HORIZONTAL_SPEED,
+};
+
+use crate::body::RigidBody;
+use rb_domain::{ControllerInput, Vec3};
+
+/// Commonly-cited boosted top speed (uu/s), boost's own speed cap here —
+/// confirmed against real Rocket League's own reverse-engineered constants
+/// during `RB-PHYSICS-001-FR-031`'s audit (`CAR_MAX_SPEED = 2300.f` in the
+/// RocketSim project's `RLConst.h`; matched independently by RLUtilities'
+/// `Car::v_max` and the RLBot community wiki's "Useful Game Values" page).
+pub const MAX_CAR_SPEED: f32 = 2300.0;
+
+/// Hard cap (rad/s) on a car's angular speed, enforced by
+/// `clamp_velocity` once per step, right after
+/// `integrate::integrate_velocities` — a genuine clamp that scales
+/// `angular_velocity` back down if it's exceeded, unlike `MAX_CAR_SPEED`/
+/// `UNBOOSTED_MAX_CAR_SPEED` above (which only gate *new* throttle/boost
+/// force, never reduce velocity already past the cap). Confirmed exact
+/// against RocketSim's own `RLConst.h` during `RB-PHYSICS-001-FR-057`'s
+/// audit: `CAR_MAX_ANG_SPEED = 5.5f, // Car can never exceed this angular
+/// velocity (radians/s)`.
+///
+/// A flip's torque (`jump::FLIP_TORQUE_*`, `RB-PHYSICS-001-FR-083`)
+/// reaches this cap within a few ticks, as in RocketSim.
+///
+/// Only covers this port's own driven-forces sources (continuous air
+/// control torque integrated this step, plus any single-step direct
+/// `angular_velocity` write like the flip torque or the wheels' side
+/// impulses) — a same-step contact-solver impulse (e.g. a hard collision
+/// imparting spin) isn't re-clamped until the *next* step's call, so it
+/// could in principle transiently exceed this for one step, unlike
+/// RocketSim's own "can never exceed" phrasing suggests for its engine.
+/// Since `RB-PHYSICS-001-FR-087` the clamp runs at the end of the step,
+/// after the solver, closing that gap.
+pub const MAX_CAR_ANGULAR_SPEED: f32 = 5.5;
+
+/// Commonly-cited *unboosted* top speed (uu/s) — throttle's own speed cap,
+/// distinct from `MAX_CAR_SPEED`. Before `RB-PHYSICS-001-FR-031`'s audit,
+/// throttle alone could push a car all the way to `MAX_CAR_SPEED` (2300),
+/// which is real Rocket League's *boosted* cap, not its unboosted one; the
+/// audit found a consistent, independently-corroborated real value (1410)
+/// across RocketSim's `RLConst.h` — whose `DRIVE_SPEED_TORQUE_FACTOR_CURVE`
+/// drives available drive torque to exactly zero at 1410 uu/s — and the
+/// RLBot community wiki's "Useful Game Values" page, so throttle now caps
+/// here instead.
+pub const UNBOOSTED_MAX_CAR_SPEED: f32 = 1410.0;
+
+pub(crate) fn forward_axis(car: &RigidBody) -> Vec3 {
+    car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0))
+}
+
+pub(crate) fn up_axis(car: &RigidBody) -> Vec3 {
+    car.orientation.rotate(&Vec3::new(0.0, 0.0, 1.0))
+}
+
+/// The car's local "right" axis (local +Y) — completes the right-handed
+/// (forward, right, up) basis `up_axis × forward_axis` gives: the wheels'
+/// axles, air-control pitch, and the flip's pitch torque.
+fn right_axis(car: &RigidBody) -> Vec3 {
+    car.orientation.rotate(&Vec3::new(0.0, 1.0, 0.0))
+}
+
+/// `RB-PHYSICS-001-FR-037` — whether `input` represents genuine driving
+/// intent, for waking a sleeping car (see `apply_driven_forces`'s own doc
+/// comment). Treats an unrecovered analog channel (`None`, from a replay
+/// that never had one) the same as a recovered-but-literally-neutral one
+/// (`Some(0.0)`, from a capture) — both mean "no analog input this tick" —
+/// rather than the simpler `*input != ControllerInput::default()` (which
+/// would treat any `Some(0.0)` as active purely because it's not `None`,
+/// keeping a car receiving a real recorded input stream that always
+/// resolves every channel — even at rest — from ever sleeping at all).
+fn input_is_active(input: &ControllerInput) -> bool {
+    input.throttle != 0.0
+        || input.steer != 0.0
+        || input.pitch.unwrap_or(0.0) != 0.0
+        || input.yaw.unwrap_or(0.0) != 0.0
+        || input.roll.unwrap_or(0.0) != 0.0
+        || input.jump
+        || input.boost
+        || input.handbrake
+}
+
+/// Per-car state `apply_driven_forces` carries from one step to the next.
+/// `PhysicsWorld` keeps one per car; `DriveState::new` gives the defaults
+/// for a freshly added car (full boost, jump released, double jump
+/// available, no hold window, no dodge flip).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DriveState {
+    /// Remaining boost fuel, `0.0..=MAX_BOOST`. Drained while boost is held,
+    /// even when the force itself doesn't apply.
+    pub boost_amount: f32,
+    /// Boost is burning (`RB-PHYSICS-001-FR-133`), and for how long (s):
+    /// a burn lasts at least `boost::BOOST_MIN_TIME`.
+    pub boosting: bool,
+    pub boosting_time: f32,
+    /// The car's `input.jump` as of the *previous* call. Every jump variant
+    /// fires only on a rising edge (`input.jump && !jump_held`), so a
+    /// continued press doesn't re-fire every step; updated on every call,
+    /// including while airborne, so a fresh press is still required for a
+    /// double or wall jump even if the button was never released after the
+    /// ground jump.
+    pub jump_held: bool,
+    /// Whether the car still has a double jump (plain or dodge) to spend
+    /// this airborne period. Landing or merely touching a wall (no jump
+    /// press required) both set it back to `true`; only an airborne fresh
+    /// press that fires the double jump or a dodge (including a wall-jump
+    /// dodge, not a plain wall jump) sets it to `false`.
+    pub double_jump_available: bool,
+    /// How much longer, in seconds, continuing to hold `jump` keeps adding
+    /// extra upward acceleration to a ground jump. Checked and decremented
+    /// *before* this call's own ground-jump press can re-arm it; the press
+    /// re-arms it to `JUMP_HOLD_MAX_DURATION` and spends its first tick
+    /// (`RB-PHYSICS-001-FR-091`). Since `RB-PHYSICS-001-FR-064`, releasing
+    /// `jump` inside the first `JUMP_MIN_TIME` seconds doesn't zero it: that
+    /// mandatory window keeps applying the full acceleration.
+    /// Untouched by the double jump, a dodge, or the wall jump.
+    pub jump_hold_time_remaining: f32,
+    /// Timers for the second jump's 1.25 s window (`RB-PHYSICS-001-FR-136`).
+    pub jump_clock: jump::JumpClock,
+    /// The dodge flip since the last dodge press, until landing
+    /// (`RB-PHYSICS-001-FR-083`): drives the flip torque, vertical damping,
+    /// and air-control lock. `None` on the ground and before any dodge.
+    pub flip: Option<FlipState>,
+    /// How engaged the handbrake is, `0.0..=1.0`: ramps up while held and
+    /// down once released (`ground::POWERSLIDE_RISE_RATE`/`FALL_RATE`),
+    /// scaling the tire grip reduction and the powerslide steer blend.
+    pub handbrake_amount: f32,
+    /// The previous step's average wheel contact normal, `None` if no wheel
+    /// touched: the sticky force acts along it one step late
+    /// (`RB-PHYSICS-001-FR-092`).
+    pub sticky_surface_up: Option<Vec3>,
+    /// Whether the car was on the ground last step. Air control waits one
+    /// step after the wheels let go (`RB-PHYSICS-001-FR-095`).
+    pub was_on_ground: bool,
+    /// Fuel drained per second of held boost: `BOOST_USED_PER_SECOND`, or
+    /// 0 with unlimited boost (`RB-PHYSICS-001-FR-111`).
+    pub boost_used_per_second: f32,
+    /// Whether a dodge with the pitch stick centred goes forward as the
+    /// throttle says, as the owner's keyboard captures show
+    /// (`RB-PHYSICS-001-FR-103`). Off by default: RocketSim's dodge
+    /// direction is `(-pitch, yaw + roll)` and a bot's throttle does not
+    /// change it (`RB-PHYSICS-001-FR-147`).
+    pub dodge_forward_from_throttle: bool,
+    /// The normal of the last surface the car's body (not its wheels)
+    /// touched in the previous step, RocketSim's `worldContact`; `None`
+    /// when it touched nothing. Set by the world (`RB-PHYSICS-001-FR-123`).
+    pub world_contact_normal: Option<Vec3>,
+    /// The auto-flip in progress, if any (`RB-PHYSICS-001-FR-123`).
+    pub auto_flip: Option<AutoFlip>,
+}
+
+impl DriveState {
+    /// Defaults for a freshly added car.
+    pub fn new() -> DriveState {
+        DriveState {
+            boost_amount: MAX_BOOST,
+            boosting: false,
+            boosting_time: 0.0,
+            jump_held: false,
+            double_jump_available: true,
+            jump_hold_time_remaining: 0.0,
+            jump_clock: jump::JumpClock::default(),
+            flip: None,
+            handbrake_amount: 0.0,
+            sticky_surface_up: None,
+            was_on_ground: false,
+            boost_used_per_second: BOOST_USED_PER_SECOND,
+            dodge_forward_from_throttle: false,
+            world_contact_normal: None,
+            auto_flip: None,
+        }
+    }
+}
+
+impl Default for DriveState {
+    fn default() -> DriveState {
+        DriveState::new()
+    }
+}
+
+/// Applies throttle, steering, boost, handbrake, jump, double jump, wall
+/// jump, and air control as forces/torques/impulses (or, for tire grip,
+/// direct velocity changes) on `car`, reading and updating `state`
+/// (see each `DriveState` field for its rules). `wheels` are the wheel
+/// rays' hits cast at the start of the step (`cast_wheels`); the car is on
+/// the ground when at least three touch (`is_on_ground`); their suspension
+/// is `apply_wheel_forces`, called separately. Throttle, steering,
+/// handbrake, and the ground jump are a no-op unless `on_ground`; air
+/// control, double jump, and wall jump are the reverse — a no-op unless
+/// *not* `on_ground`; boost isn't gated on ground contact at all, but is a
+/// no-op once `state.boost_amount` reaches zero. `wall_normal` is the
+/// outward normal of the wall the car is currently touching, if any
+/// (computed by the caller the same way `on_ground` is — see
+/// `PhysicsWorld`); a fresh press while airborne and touching a wall fires
+/// a wall jump instead of consulting `double_jump_available` at all. Since
+/// `RB-PHYSICS-001-FR-037`, any genuinely active `input` (see
+/// `input_is_active`) wakes `car` unconditionally before anything else in
+/// this call runs, regardless of whether `car` was already asleep or what
+/// velocity results this step — see this crate's own
+/// `body::RigidBody::wake` doc comment for why a velocity-only wake check
+/// isn't enough here. Call once per step, before
+/// `integrate::integrate_velocities`, alongside `apply_gravity`; follow it
+/// with `clamp_velocity` right *after* that same
+/// `integrate_velocities` call, so `MAX_CAR_ANGULAR_SPEED` sees this step's
+/// fully-integrated angular velocity, torque contributions included.
+pub fn apply_driven_forces(
+    car: &mut RigidBody,
+    input: &ControllerInput,
+    wheels: &WheelContacts,
+    wall_normal: Option<Vec3>,
+    state: &mut DriveState,
+    dt: f32,
+) {
+    let on_ground = is_on_ground(wheels);
+    // RB-PHYSICS-001-FR-037: any genuinely active input wakes the car
+    // unconditionally, before that input's own force/impulse has a chance
+    // to move it — a resultant-velocity-only wake check would zero right
+    // back out a driving force whose one-frame delta is itself smaller
+    // than `body::LINEAR_SLEEP_VELOCITY_THRESHOLD` (e.g. one frame of
+    // throttle from a dead stop at a very small `dt`), permanently
+    // stranding an asleep car that should be free to start moving.
+    if input_is_active(input) {
+        car.wake();
+    }
+
+    let forward = forward_axis(car);
+    let jump_pressed = input.jump && !state.jump_held;
+    state.jump_held = input.jump;
+
+    jump::apply_jump_hold(car, input.jump, &mut state.jump_hold_time_remaining, dt);
+    // RB-PHYSICS-001-FR-123: a car on its roof pops up and rolls over on a
+    // jump press, as RocketSim's `_UpdateAutoFlip` after `_UpdateJump`.
+    jump::auto_flip(
+        car,
+        jump_pressed,
+        state.world_contact_normal,
+        &mut state.auto_flip,
+        dt,
+    );
+    state
+        .jump_clock
+        .update(state.jump_hold_time_remaining > 0.0, on_ground, dt);
+    state.handbrake_amount = ground::ramp_handbrake(state.handbrake_amount, input.handbrake, dt);
+
+    let throttle = effective_throttle(input, state);
+    if on_ground {
+        // Landing (or simply resting) always restores the double jump,
+        // regardless of this step's input.
+        state.double_jump_available = true;
+        state.flip = None;
+        // RB-PHYSICS-001-FR-101: the jump first, so the tires already see
+        // its velocity: the jump pushes along the car's up axis, and the
+        // owner's captures show the brake cancelling that push's in-plane
+        // part on the press tick (a jump from rest stays put), while a car
+        // on throttle keeps it (`test2.jsonl`, 4.133 s: +2.9 uu/s forward).
+        // RB-PHYSICS-001-FR-139: not while the jump record is still held. A
+        // press in the few ticks after a jump, while the wheels still touch,
+        // does nothing in the game (28 `jumpgap` captures: presses 1 to 6
+        // ticks after the first press are ignored, no second jump).
+        if jump_pressed && !state.jump_clock.has_jumped() {
+            jump::ground_jump(car, &mut state.jump_hold_time_remaining, dt);
+        }
+        ground::apply_ground_control(
+            car,
+            wheels,
+            input,
+            throttle,
+            forward,
+            state.handbrake_amount,
+            dt,
+        );
+    } else {
+        // RB-PHYSICS-001-FR-099: one or two wheels still grip and brake,
+        // and keep air control off (RocketSim's `_UpdateAirTorque` with
+        // `numWheelsInContact == 0` false); flip torque still acts.
+        let touching = wheels.iter().any(Option::is_some);
+        if touching {
+            // With fewer than three wheels down a held boost does not force the wheels'
+            // throttle to 1 (`RB-PHYSICS-001-FR-154`): the car lands on its front wheels
+            // coasting at half the brake, not driven.
+            ground::apply_ground_control(
+                car,
+                wheels,
+                input,
+                input.throttle.clamp(-1.0, 1.0),
+                forward,
+                state.handbrake_amount,
+                dt,
+            );
+        }
+        if wall_normal.is_some() {
+            // Touching a wall restores the double jump unconditionally —
+            // the same "any surface contact refills your second jump"
+            // rule landing uses — regardless of whether jump is pressed.
+            state.double_jump_available = true;
+            state.jump_clock.refill();
+        }
+        // RB-PHYSICS-001-FR-136: the second jump expires 1.25 s after the
+        // first jump's hold ends.
+        if !state.jump_clock.window_open() {
+            state.double_jump_available = false;
+        }
+        // The jump press first, so a dodge's flip torque acts on the press
+        // tick itself: the owner's capture shows the real game's spin jump
+        // by one tick of flip torque on that tick (RB-PHYSICS-001-FR-085),
+        // one tick earlier than RocketSim's order. Then air control, flip
+        // torque, and the flip clock and damping. The press tick's torque
+        // is extra: the clock starts on the tick after it, as RocketSim's
+        // does, so the torque, damping and pitch lock end on RocketSim's
+        // ticks (RB-PHYSICS-001-FR-094: the capture's 4.317 s flip torque
+        // lasts 79 ticks, one past the press-tick clock's 78).
+        let flip_before_press = state.flip;
+        // RB-PHYSICS-001-FR-139: the step after the wheels let go still
+        // counts as grounded for the press as well (the `jumpgap` captures:
+        // a press 6 ticks after the first is ignored, 7 flips).
+        if jump_pressed && !state.was_on_ground {
+            jump::airborne_jump_press(
+                car,
+                input,
+                forward,
+                wall_normal,
+                &mut state.double_jump_available,
+                &mut state.flip,
+                state.dodge_forward_from_throttle,
+            );
+        }
+        // RB-PHYSICS-001-FR-095: the step after the wheels let go still
+        // counts as grounded for air control, as the sticky force does
+        // (FR-092): the capture's car neither grips nor air-controls in the
+        // step from 4.183 s, after its 4.142 s jump.
+        // RB-PHYSICS-001-FR-156: the air throttle goes with air control, off while any wheel
+        // touches (the touching wheels drive the car).
+        if !state.was_on_ground && !touching {
+            let pitch_scale = jump::flip_pitch_scale(state.flip);
+            air::apply_air_control(car, input, pitch_scale, dt);
+            air::apply_air_throttle(car, air_throttle(input, state), forward);
+        }
+        // RB-PHYSICS-001-FR-097: after air control, whose damping reads the
+        // spin before this tick's flip torque, as Bullet integrates the
+        // accumulated torque after RocketSim computes the damping.
+        jump::apply_flip_torque(car, input, state.flip);
+        if state.flip == flip_before_press {
+            jump::advance_flip(car, &mut state.flip, dt);
+        }
+    }
+
+    // RB-PHYSICS-001-FR-131: after the jump and flip logic, as RocketSim.
+    roll::auto_roll(car, wheels, state, input.throttle.clamp(-1.0, 1.0), dt);
+
+    state.was_on_ground = on_ground;
+
+    let boosting = boost::update_boosting(
+        input.boost,
+        state.boost_amount > 0.0,
+        &mut state.boosting,
+        &mut state.boosting_time,
+        dt,
+    );
+    boost::apply_boost(
+        car,
+        boosting,
+        wheels.iter().any(Option::is_some),
+        forward,
+        &mut state.boost_amount,
+        state.boost_used_per_second,
+        dt,
+    );
+}
+
+/// Whether the car boosts this tick, as `boost::update_boosting` will set it
+/// at the end of the step: held (with fuel), or still inside the burn's
+/// `BOOST_MIN_TIME` after a short press (`RB-PHYSICS-001-FR-145`: no air
+/// throttle on top of the boost for those ticks).
+fn is_boosting(input: &ControllerInput, state: &DriveState) -> bool {
+    state.boost_amount > 0.0
+        && (input.boost || (state.boosting && state.boosting_time < boost::BOOST_MIN_TIME))
+}
+
+/// Throttle for `air::apply_air_throttle` (`RB-PHYSICS-001-FR-096`):
+/// none while boosting. `BOOST_ACCEL_AIR` (3175/3) is the grounded boost
+/// (2975/3) plus a full `THROTTLE_AIR_ACCEL` (200/3), so boost already
+/// carries the throttle it forces to 1; RocketSim adds the raw stick on
+/// top, but the capture's car boosting with throttle -1 (4.99-5.18 s)
+/// gains the full 3175/3.
+fn air_throttle(input: &ControllerInput, state: &DriveState) -> f32 {
+    if is_boosting(input, state) {
+        0.0
+    } else {
+        input.throttle.clamp(-1.0, 1.0)
+    }
+}
+
+/// Throttle for the wheels: a held boost button (with fuel) forces it to 1,
+/// but the minimum burn after a short tap does not
+/// (`RB-PHYSICS-001-FR-148`: a reverse press 5 ticks into a boost tap brakes
+/// the car for a tick while the boost keeps pushing, `fuzz_103`).
+fn effective_throttle(input: &ControllerInput, state: &DriveState) -> f32 {
+    if input.boost && state.boost_amount > 0.0 {
+        1.0
+    } else {
+        input.throttle.clamp(-1.0, 1.0)
+    }
+}
+
+/// Every touching wheel's suspension and the sticky force for one step
+/// (`RB-PHYSICS-001-FR-090`, `wheels::apply_wheel_forces`), from `wheels`
+/// cast at the start of the step. Call after `apply_driven_forces`, as
+/// RocketSim's `updateVehicleSecond` follows its drive logic.
+pub fn apply_wheel_forces(
+    car: &mut RigidBody,
+    input: &ControllerInput,
+    wheels: &WheelContacts,
+    state: &mut DriveState,
+    dt: f32,
+) {
+    let throttle_engaged = effective_throttle(input, state) != 0.0;
+    state.sticky_surface_up =
+        wheels::apply_wheel_forces(car, wheels, state.sticky_surface_up, throttle_engaged, dt);
+}
+
+/// Scales `car.angular_velocity` back down to `MAX_CAR_ANGULAR_SPEED`, and
+/// since `RB-PHYSICS-001-FR-103` `car.linear_velocity` to `MAX_CAR_SPEED`,
+/// if either length exceeds its cap, preserving direction. RocketSim caps
+/// both in the same place; the owner's captures peak at exactly 2300 uu/s
+/// and 5.5 rad/s, and at `test2.jsonl` 12.55 s a dodge that would reach
+/// 2465 uu/s comes out at 2300 along the same direction. Call
+/// once per step at its very end, after the transform has integrated
+/// (`RB-PHYSICS-001-FR-087`): RocketSim clamps in `Car::_PostTickUpdate`,
+/// after Bullet's step, so a step's orientation moves with the unclamped
+/// spin. The real capture confirms it: a flipping car turns at ~7.6 rad/s
+/// (5.5 plus one tick of flip torque) while reporting 5.5.
+pub fn clamp_velocity(car: &mut RigidBody) {
+    let linear_speed = car.linear_velocity.length();
+    if linear_speed > MAX_CAR_SPEED {
+        car.linear_velocity *= MAX_CAR_SPEED / linear_speed;
+    }
+    let speed = car.angular_velocity.length();
+    if speed > MAX_CAR_ANGULAR_SPEED {
+        car.angular_velocity *= MAX_CAR_ANGULAR_SPEED / speed;
+    }
+}

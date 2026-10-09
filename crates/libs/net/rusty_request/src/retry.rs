@@ -7,7 +7,6 @@
 //! [`RetryPolicy::retry_non_idempotent`]).
 
 use crate::error::Error;
-use rusty_http::cookie::parse_http_date;
 use rusty_http::{HeaderMap, Method};
 use std::time::{Duration, SystemTime};
 
@@ -186,18 +185,10 @@ impl RetryPolicy {
 
 /// Parses a `Retry-After` value: either delta-seconds (`Retry-After: 120`)
 /// or an HTTP-date (`Retry-After: Fri, 31 Dec 1999 23:59:59 GMT`), per RFC
-/// 9110 §10.2.3. Reuses the same IMF-fixdate parser `Set-Cookie`'s
-/// `Expires` attribute needs rather than hand-rolling a second one.
+/// 9110 §10.2.3; a date already in the past is `None`, so the policy's own
+/// backoff applies.
 fn parse_retry_after(value: &str) -> Option<Duration> {
-    if let Some(delay) = rusty_retry::retry_after_seconds(value) {
-        return Some(delay);
-    }
-    let deadline = parse_http_date(value.trim())?;
-    Some(
-        deadline
-            .duration_since(SystemTime::now())
-            .unwrap_or(Duration::ZERO),
-    )
+    rusty_retry::retry_after(value, SystemTime::now())
 }
 
 #[cfg(test)]
@@ -281,11 +272,8 @@ mod tests {
     }
 
     #[test]
-    fn past_http_date_retry_after_is_zero_not_negative() {
-        assert_eq!(
-            parse_retry_after("Thu, 01 Jan 1970 00:00:00 GMT"),
-            Some(Duration::ZERO)
-        );
+    fn past_http_date_retry_after_falls_back_to_backoff() {
+        assert_eq!(parse_retry_after("Thu, 01 Jan 1970 00:00:00 GMT"), None);
     }
 
     #[test]

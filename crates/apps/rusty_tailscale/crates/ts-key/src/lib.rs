@@ -64,7 +64,7 @@ macro_rules! private_key {
 
             /// Serializes as `privkey:<64 hex>` for state files.
             pub fn to_state_string(&self) -> String {
-                format!("{PRIVKEY_PREFIX}{}", hex_encode(&self.to_bytes()))
+                format!("{PRIVKEY_PREFIX}{}", rusty_hex::encode(&self.to_bytes()))
             }
 
             /// Wrap key bytes in a zeroize-on-drop SecretBytes container.
@@ -80,7 +80,7 @@ macro_rules! private_key {
                 let hex_part = s
                     .strip_prefix(PRIVKEY_PREFIX)
                     .ok_or(PrivateKeyParseError::WrongPrefix)?;
-                let bytes = hex_decode32(hex_part).ok_or(PrivateKeyParseError::BadHex)?;
+                let bytes = rusty_hex::decode_array::<32>(hex_part).map_err(|_| PrivateKeyParseError::BadHex)?;
                 Ok(Self::from_bytes(bytes))
             }
         }
@@ -109,36 +109,6 @@ private_key! {
     DiscoPrivate, DiscoPublic
 }
 
-fn hex_encode(bytes: &[u8; 32]) -> String {
-    const ALPHABET: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(64);
-    for &b in bytes {
-        out.push(ALPHABET[usize::from(b >> 4)] as char);
-        out.push(ALPHABET[usize::from(b & 0x0f)] as char);
-    }
-    out
-}
-
-fn hex_decode32(s: &str) -> Option<[u8; 32]> {
-    let s = s.as_bytes();
-    if s.len() != 64 {
-        return None;
-    }
-    let nibble = |c: u8| -> Option<u8> {
-        match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            b'A'..=b'F' => Some(c - b'A' + 10),
-            _ => None,
-        }
-    };
-    let mut out = [0u8; 32];
-    for (i, chunk) in s.as_chunks::<2>().0.iter().enumerate() {
-        out[i] = (nibble(chunk[0])? << 4) | nibble(chunk[1])?;
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,7 +127,7 @@ mod tests {
     fn debug_hides_private_material() {
         let k = NodePrivate::generate();
         let dbg = format!("{k:?}");
-        assert!(!dbg.contains(&hex_encode(&k.to_bytes())));
+        assert!(!dbg.contains(&rusty_hex::encode(&k.to_bytes())));
         assert!(dbg.contains("nodekey:"));
     }
 
@@ -165,15 +135,18 @@ mod tests {
     #[test]
     fn x25519_rfc7748_vector() {
         let alice = MachinePrivate::from_bytes(
-            hex_decode32("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
-                .unwrap(),
+            rusty_hex::decode_array::<32>(
+                "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+            )
+            .unwrap(),
         );
-        let bob_pub =
-            hex_decode32("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
-                .unwrap();
+        let bob_pub = rusty_hex::decode_array::<32>(
+            "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+        )
+        .unwrap();
         let shared = alice.shared_secret(&bob_pub);
         assert_eq!(
-            hex_encode(&shared),
+            rusty_hex::encode(&shared),
             "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
         );
     }

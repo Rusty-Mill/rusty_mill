@@ -43,8 +43,6 @@ mod png;
 mod sixel;
 mod webp;
 
-#[cfg(any(feature = "gui", feature = "web-bridge"))]
-pub(crate) use base64::encode as base64_encode;
 #[cfg(feature = "gui")]
 pub(crate) use bidi::mirrored as bidi_mirrored;
 pub use cell::{
@@ -66,6 +64,8 @@ pub use grid::{MouseModes, Selection};
 pub use parser::AnsiParser;
 #[cfg(feature = "gui")]
 pub(crate) use png::decode as png_decode;
+#[cfg(any(feature = "gui", feature = "web-bridge"))]
+pub(crate) use rusty_base64::encode_standard as base64_encode;
 
 #[cfg(test)]
 mod tests;

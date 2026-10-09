@@ -643,7 +643,11 @@ mod real_world_tests {
             doc.get("package").unwrap().get("name").unwrap().as_str(),
             Some("rusty_codec")
         );
-        assert!(doc.get("dependencies").unwrap().get("rusty_wire").is_some());
+        // The real manifest has a `[dependencies]` table (possibly empty:
+        // this crate is a no_std leaf). Asserting a specific dependency here
+        // broke when an unused one was removed; fixed fixtures above cover
+        // the contents of dependency tables.
+        assert!(doc.get("dependencies").unwrap().as_table().is_some());
     }
 
     #[test]

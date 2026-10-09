@@ -44,16 +44,12 @@ impl Agent for Echo {
         if let Some(tool) = input.tools.first() {
             let tool_call_id = out.next_id();
             let message_id = out.next_id();
-            out.emit(EventKind::ToolCallStart {
-                tool_call_id: tool_call_id.clone(),
-                tool_call_name: tool.name.clone(),
-                parent_message_id: Some(message_id),
-            })?;
-            out.emit(EventKind::ToolCallArgs {
-                tool_call_id: tool_call_id.clone(),
-                delta: json!({"text": last.as_str()}).to_json_string(),
-            })?;
-            out.emit(EventKind::ToolCallEnd { tool_call_id })?;
+            out.tool_call(
+                &tool_call_id,
+                &tool.name,
+                &json!({"text": last.as_str()}).to_json_string(),
+                Some(message_id),
+            )?;
         }
 
         out.emit(EventKind::StateDelta {

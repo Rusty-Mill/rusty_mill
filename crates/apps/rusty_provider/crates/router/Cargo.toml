@@ -23,6 +23,8 @@ rusty_sqlite.workspace = true
 # rusty_acp's own retry policies -- `jitter: 0.0` reproduces the plain
 # doubling-capped-at-max formula webhook.rs's retry loop used to hand-roll.
 rusty_retry.workspace = true
+# ANSI stripping (the RTK pipeline's first stage): CSI, OSC and two-byte escapes.
+rusty_ansi.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true

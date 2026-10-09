@@ -16,7 +16,7 @@ rk-config.workspace = true
 rk-constrain.workspace = true
 rk-observe.workspace = true
 aisdk.workspace = true
-anyhow = "1"
+anyhow = { workspace = true }
 # The protocol: the `Agent` trait this crate implements, the event types,
 # and the `serve` feature's handler a consumer mounts on `rusty_serve`.
 rusty_agui = { workspace = true, features = ["serve"] }

@@ -1,0 +1,84 @@
+{
+  "name": "speed flip (kickoff): boost from the start, jump, nose up, diagonal flip, cancel the pitch and air roll; checks flip torque, cancel and boost together",
+  "settle_ticks": 180,
+  "car": {
+    "location": [
+      -2047.9,
+      -2559.9,
+      17.01
+    ],
+    "rotation": [
+      -0.0096,
+      0.7854,
+      0.0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      0,
+      0,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 30,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 3,
+      "throttle": 1,
+      "boost": true,
+      "jump": true
+    },
+    {
+      "ticks": 3,
+      "throttle": 1,
+      "boost": true,
+      "pitch": 1
+    },
+    {
+      "ticks": 1,
+      "throttle": 1,
+      "boost": true,
+      "jump": true,
+      "pitch": -1,
+      "roll": -1
+    },
+    {
+      "ticks": 10,
+      "throttle": 1,
+      "boost": true,
+      "pitch": 1,
+      "roll": -1
+    },
+    {
+      "ticks": 25,
+      "throttle": 1,
+      "boost": true,
+      "roll": -1
+    },
+    {
+      "ticks": 120,
+      "throttle": 1,
+      "boost": true
+    }
+  ]
+}

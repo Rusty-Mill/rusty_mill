@@ -1,0 +1,78 @@
+{
+  "name": "bumps_1800: attacker at 1800 uu/s hits a stopped car's side",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -658.0,
+      0,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      0.0,
+      0
+    ],
+    "velocity": [
+      1800,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 120,
+      "throttle": 1,
+      "boost": true
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          0,
+          0,
+          17
+        ],
+        "rotation": [
+          -0.0096,
+          1.5708,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 0
+      },
+      "steps": [
+        {
+          "ticks": 120
+        }
+      ]
+    }
+  ]
+}

@@ -10,6 +10,7 @@ repository = "https://github.com/baileyrd/rusty_tailscale"
 layer = "apps"
 
 [dependencies]
+rusty_hex = { workspace = true }
 serde.workspace = true
 # Regular (not dev) dependency: CapMap values are arbitrary JSON.
 serde_json.workspace = true

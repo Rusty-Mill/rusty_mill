@@ -73,7 +73,7 @@ use rk_constrain::{
 };
 use rk_observe::{ToolEvent, ToolStatus};
 use rusty_agui::serve::{Agent, Emitter};
-use rusty_agui::{Error, EventKind, Message, Role, RunAgentInput};
+use rusty_agui::{Error, Message, RunAgentInput};
 use rusty_json::Value;
 use serde_json::json;
 use tokio::runtime::Handle;
@@ -334,8 +334,6 @@ fn plan_decision_of(text: &str) -> PlanDecision {
 /// Turns the turn's output into AG-UI events as it arrives.
 struct Relay<'e, 'a> {
     out: &'e mut Emitter<'a>,
-    /// The message token deltas are streaming into, if one is open.
-    open: Option<String>,
     /// Whether any text was streamed, so the reply is not repeated.
     streamed: bool,
 }
@@ -344,7 +342,6 @@ impl<'e, 'a> Relay<'e, 'a> {
     fn new(out: &'e mut Emitter<'a>) -> Self {
         Self {
             out,
-            open: None,
             streamed: false,
         }
     }
@@ -354,60 +351,27 @@ impl<'e, 'a> Relay<'e, 'a> {
         if delta.is_empty() {
             return Ok(());
         }
-        let message_id = if let Some(id) = &self.open {
-            id.clone()
-        } else {
-            let id = self.out.next_id();
-            self.out.emit(EventKind::TextMessageStart {
-                message_id: id.clone(),
-                role: Role::Assistant,
-            })?;
-            self.open = Some(id.clone());
-            id
-        };
         self.streamed = true;
-        self.out.emit(EventKind::TextMessageContent {
-            message_id,
-            delta: delta.into(),
-        })
+        self.out.text_delta(delta)
     }
 
     /// Closes the streamed message, if one is open.
     fn close_open(&mut self) -> Result<(), Error> {
-        if let Some(message_id) = self.open.take() {
-            self.out.emit(EventKind::TextMessageEnd { message_id })?;
-        }
-        Ok(())
+        self.out.end_text().map(|_| ())
     }
 
     /// One of the turn's tool events: the call and its outcome.
     fn tool_event(&mut self, event: &ToolEvent) -> Result<(), Error> {
         let call_id = self.out.next_id();
-        self.out.emit(EventKind::ToolCallStart {
-            tool_call_id: call_id.clone(),
-            tool_call_name: event.name.clone(),
-            parent_message_id: None,
-        })?;
-        self.out.emit(EventKind::ToolCallArgs {
-            tool_call_id: call_id.clone(),
-            delta: event.args.to_string(),
-        })?;
-        self.out.emit(EventKind::ToolCallEnd {
-            tool_call_id: call_id.clone(),
-        })?;
+        self.out
+            .tool_call(&call_id, &event.name, &event.args.to_string(), None)?;
         let content = match event.outcome.status {
             ToolStatus::Ok => event.outcome.payload.clone(),
             status => {
                 json!({ "status": status.as_str(), "payload": event.outcome.payload }).to_string()
             }
         };
-        let message_id = self.out.next_id();
-        self.out.emit(EventKind::ToolCallResult {
-            message_id,
-            tool_call_id: call_id,
-            content,
-            role: Some(Role::Tool),
-        })
+        self.out.tool_result(&call_id, content)
     }
 
     /// A frontend tool call the client renders and answers.
@@ -417,18 +381,7 @@ impl<'e, 'a> Relay<'e, 'a> {
         name: &str,
         args: &serde_json::Value,
     ) -> Result<(), Error> {
-        self.out.emit(EventKind::ToolCallStart {
-            tool_call_id: call_id.into(),
-            tool_call_name: name.into(),
-            parent_message_id: None,
-        })?;
-        self.out.emit(EventKind::ToolCallArgs {
-            tool_call_id: call_id.into(),
-            delta: args.to_string(),
-        })?;
-        self.out.emit(EventKind::ToolCallEnd {
-            tool_call_id: call_id.into(),
-        })
+        self.out.tool_call(call_id, name, &args.to_string(), None)
     }
 }
 

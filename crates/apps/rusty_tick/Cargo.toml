@@ -11,6 +11,8 @@ publish = false
 layer = "apps"
 
 [dependencies]
+rusty_oauth = { workspace = true }
+rusty_crypto_key = { workspace = true }
 rusty_atomic_file = { workspace = true }
 rusty_multimodal_db_engine = { workspace = true }
 # HTTP/1.1 framing, JSON and query-string decoding come from the monorepo's
@@ -28,11 +30,11 @@ rusty_url = { workspace = true }
 rusty_rand = { workspace = true }
 rusty_base64 = { workspace = true }
 rusty_rsa = { workspace = true }
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 thiserror = "2.0"
 uuid = { version = "1", features = ["v7", "v5", "serde"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 rusty_agui = { workspace = true, features = ["serve", "client"] }
 rusty_multimodal_db_engine = { workspace = true, features = ["test-support"] }

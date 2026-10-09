@@ -7,8 +7,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::hex;
-
 /// Error parsing a prefixed public key string.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyParseError {
@@ -40,14 +38,14 @@ macro_rules! public_key {
                 let hex_part = s
                     .strip_prefix($prefix)
                     .ok_or(KeyParseError::WrongPrefix { expected: $prefix })?;
-                let bytes = hex::decode32(hex_part).ok_or(KeyParseError::BadHex)?;
+                let bytes = rusty_hex::decode_array::<32>(hex_part).map_err(|_| KeyParseError::BadHex)?;
                 Ok(Self(bytes))
             }
         }
 
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}{}", $prefix, hex::encode(&self.0))
+                write!(f, "{}{}", $prefix, rusty_hex::encode(&self.0))
             }
         }
 

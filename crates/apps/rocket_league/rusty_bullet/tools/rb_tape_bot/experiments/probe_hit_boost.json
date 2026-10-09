@@ -1,0 +1,46 @@
+{
+  "name": "probe_hit_boost: car drives into a resting ball, boosting",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      0,
+      -4500,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      0,
+      -1000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 300,
+      "throttle": 1,
+      "boost": true
+    }
+  ]
+}

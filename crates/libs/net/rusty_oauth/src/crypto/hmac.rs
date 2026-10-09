@@ -33,18 +33,9 @@ pub fn hmac_sha256(key: &[u8], message: &[u8]) -> Digest {
     outer.finish()
 }
 
-/// Constant-time comparison, to avoid leaking equality via timing side channels
-/// when verifying MACs or comparing secrets (e.g. `state`, PKCE verifiers).
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
+/// Constant-time comparison for MACs and secrets (`state`, PKCE verifiers).
+/// Re-exported from `rusty_crypto_key`, the one copy in the workspace.
+pub use rusty_crypto_key::constant_time_eq;
 
 #[cfg(test)]
 mod tests {

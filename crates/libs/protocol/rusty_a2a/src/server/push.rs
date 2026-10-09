@@ -12,6 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use reqwest::Client;
+use rusty_retry::Backoff;
 
 use crate::types::{AuthenticationInfo, StreamResponse, Task, TaskPushNotificationConfig};
 
@@ -27,6 +28,11 @@ const MAX_DELIVERY_ATTEMPTS: u32 = 4;
 /// failed deliveries"): attempts are spaced `BASE_RETRY_DELAY * 2^n`
 /// apart.
 const BASE_RETRY_DELAY: Duration = Duration::from_millis(200);
+const RETRY_BACKOFF: Backoff = Backoff::Exponential {
+    base: BASE_RETRY_DELAY,
+    max: Duration::from_secs(60),
+    jitter: 0.0,
+};
 
 #[derive(Clone)]
 pub(crate) struct PushNotifier {
@@ -137,7 +143,7 @@ impl PushNotifier {
                         );
                         return;
                     }
-                    tokio::time::sleep(BASE_RETRY_DELAY * 2u32.pow(attempt - 1)).await;
+                    tokio::time::sleep(RETRY_BACKOFF.delay_for(attempt - 1)).await;
                 }
             }
         }

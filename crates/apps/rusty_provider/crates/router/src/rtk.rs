@@ -11,6 +11,8 @@
 //! lookup -- good enough to route to the right filter for typical
 //! coding-agent tool output, not a byte-for-byte port.
 
+use rusty_ansi::strip_ansi;
+
 /// Which built-in filter a piece of tool output was classified into.
 /// `Generic` is the always-available fallback -- every input classifies
 /// as *something*.
@@ -21,28 +23,6 @@ enum Category {
     Build,
     Package,
     Generic,
-}
-
-/// Strip ANSI CSI escape sequences (colors, cursor movement) -- the same
-/// first stage OmniRoute's RTK pipeline runs before any other filtering,
-/// since raw escape codes are pure noise for a model reading the text and
-/// would otherwise pollute every pattern match below.
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next(); // consume '['
-            for c2 in chars.by_ref() {
-                if c2.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 fn classify(text: &str) -> Category {

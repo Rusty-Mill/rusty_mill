@@ -30,7 +30,6 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 regex = { workspace = true }
 thiserror = "2"
-http = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -21,6 +21,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rk_config::Config;
+use rusty_crypto_key::constant_time_eq;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
@@ -140,11 +141,11 @@ where
         let presented = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
+            .and_then(rusty_oauth::bearer::token_from_authorization)
             .map(str::to_string);
         match &self.secret {
             Some(expected) => match &presented {
-                Some(tok) if constant_time_eq(tok, expected) => Ok(presented),
+                Some(tok) if constant_time_eq(tok.as_bytes(), expected.as_bytes()) => Ok(presented),
                 _ => Err(StatusCode::UNAUTHORIZED),
             },
             None => Ok(presented),
@@ -482,18 +483,6 @@ where
     Json(json!(session.metrics_snapshot())).into_response()
 }
 
-/// Constant-time byte comparison for the bearer secret: `a == b` on `&str` is
-/// a short-circuiting, non-constant-time comparison for a security secret
-/// (round-4 finding 4) — this compares every byte regardless of where the
-/// first mismatch falls.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (&x, &y)| acc | (x ^ y)) == 0
-}
-
 fn now_tag() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -522,21 +511,4 @@ where
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn constant_time_eq_accepts_matching_and_rejects_mismatched_tokens() {
-        // A full timing-side-channel test isn't practical in a unit test; this
-        // proves the comparison remains correct (matching accepted, any
-        // mismatch rejected) after switching off the short-circuiting `==`.
-        assert!(constant_time_eq("s3cr3t-token", "s3cr3t-token"));
-        assert!(!constant_time_eq("s3cr3t-token", "s3cr3t-tokeX"));
-        assert!(!constant_time_eq("s3cr3t-token", "shorter"));
-        assert!(!constant_time_eq("", "nonempty"));
-        assert!(constant_time_eq("", ""));
-    }
 }

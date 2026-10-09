@@ -1570,27 +1570,10 @@ fn lookup_cap(name: &[u8]) -> Option<Cap> {
 /// Decode an even-length ASCII-hex slice into bytes; `None` on odd length or a
 /// non-hex digit.
 fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    let nibble = |b: u8| match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    };
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.as_chunks::<2>().0 {
-        out.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
-    }
-    Some(out)
+    rusty_hex::decode(hex).ok()
 }
 
 /// Append `data` to `out` as lowercase ASCII hex (two digits per byte).
 fn push_hex(out: &mut Vec<u8>, data: &[u8]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for &b in data {
-        out.push(HEX[(b >> 4) as usize]);
-        out.push(HEX[(b & 0xf) as usize]);
-    }
+    out.extend_from_slice(rusty_hex::encode(data).as_bytes());
 }

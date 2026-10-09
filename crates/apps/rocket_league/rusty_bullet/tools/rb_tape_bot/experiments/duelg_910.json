@@ -1,0 +1,126 @@
+{
+  "name": "duelg_910: first 130 ticks of duel_910 (golden gate)",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      7,
+      -30,
+      17
+    ],
+    "rotation": [
+      0,
+      7.0088,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 52,
+      "throttle": 1,
+      "boost": true
+    },
+    {
+      "ticks": 4,
+      "throttle": -1,
+      "boost": true,
+      "jump": true
+    },
+    {
+      "ticks": 31,
+      "throttle": 1,
+      "steer": 1,
+      "handbrake": true,
+      "pitch": -0.5,
+      "yaw": -0.5,
+      "roll": -1
+    },
+    {
+      "ticks": 2,
+      "throttle": 1,
+      "jump": true,
+      "pitch": -1,
+      "roll": -1
+    },
+    {
+      "ticks": 41,
+      "throttle": 1,
+      "steer": 0.5,
+      "handbrake": true,
+      "pitch": 0.5,
+      "yaw": -1
+    }
+  ],
+  "others": [
+    {
+      "car": {
+        "location": [
+          431,
+          407,
+          17
+        ],
+        "rotation": [
+          0,
+          4.0344,
+          0
+        ],
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "angular_velocity": [
+          0,
+          0,
+          0
+        ],
+        "boost": 100
+      },
+      "steps": [
+        {
+          "ticks": 52,
+          "throttle": 1,
+          "boost": true
+        },
+        {
+          "ticks": 30,
+          "throttle": 1,
+          "steer": 0,
+          "boost": true
+        },
+        {
+          "ticks": 26,
+          "throttle": 1
+        },
+        {
+          "ticks": 22,
+          "throttle": 0,
+          "boost": true
+        }
+      ],
+      "team": 0
+    }
+  ]
+}

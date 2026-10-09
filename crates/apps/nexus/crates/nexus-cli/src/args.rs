@@ -8,7 +8,7 @@
 //
 // Imports mirror what `main.rs` had before the split:
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, Subcommand};
 
@@ -908,15 +908,8 @@ pub(crate) struct McpArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum McpCommand {
-    /// Start Nexus MCP server (exposes forge ops to external MCP clients)
-    Serve {
-        /// Transport to serve on.
-        #[arg(long, value_enum, default_value = "stdio")]
-        transport: rusty_mcp::TransportArg,
-        /// Address to bind when using the HTTP transport.
-        #[arg(long, default_value = rusty_mcp::config::DEFAULT_BIND)]
-        bind: SocketAddr,
-    },
+    /// Start Nexus MCP server over stdio (exposes forge ops to external MCP clients)
+    Serve,
     /// List external MCP servers configured in `.forge/mcp.toml`
     Servers,
     /// List tools exposed by one external MCP server

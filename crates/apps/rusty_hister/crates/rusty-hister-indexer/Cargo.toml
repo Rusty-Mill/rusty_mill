@@ -12,4 +12,3 @@ publish = false
 layer = "apps"
 
 [dependencies]
-rusty-hister-core = { path = "../rusty-hister-core" }

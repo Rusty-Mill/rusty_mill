@@ -1,0 +1,45 @@
+{
+  "name": "wallg_30_700: wall approach at 30 degrees, 700 uu/s",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      3641.0,
+      -3000,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      1.0471975511965976,
+      0
+    ],
+    "velocity": [
+      349.99999999999994,
+      606.2177826491071,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 420,
+      "throttle": 1
+    }
+  ]
+}

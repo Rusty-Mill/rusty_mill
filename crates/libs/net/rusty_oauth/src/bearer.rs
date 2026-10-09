@@ -13,6 +13,21 @@ pub fn authorization_header(access_token: &str) -> String {
     format!("Bearer {access_token}")
 }
 
+/// Extracts the access token from an `Authorization` header value: the
+/// receiving side of [`authorization_header`] (RFC 6750 §2.1).
+///
+/// The scheme is matched case-insensitively (RFC 7235 §2.1) and may be followed
+/// by more than one space. A different scheme, a missing token or an empty
+/// token yields `None`, so callers can deny without a separate emptiness check.
+pub fn token_from_authorization(header_value: &str) -> Option<&str> {
+    let (scheme, rest) = header_value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let token = rest.trim_start_matches(' ');
+    (!token.is_empty()).then_some(token)
+}
+
 /// The parsed fields of a `WWW-Authenticate: Bearer ...` challenge
 /// returned by a resource server on a failed request (RFC 6750 §3).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -114,6 +129,23 @@ impl fmt::Display for BearerChallenge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_token_from_authorization() {
+        assert_eq!(token_from_authorization("Bearer abc"), Some("abc"));
+        assert_eq!(token_from_authorization("bearer abc"), Some("abc"));
+        assert_eq!(token_from_authorization("BEARER   abc"), Some("abc"));
+        assert_eq!(token_from_authorization("Bearer a.b-c"), Some("a.b-c"));
+    }
+
+    #[test]
+    fn rejects_other_schemes_and_empty_tokens() {
+        assert_eq!(token_from_authorization("Basic abc"), None);
+        assert_eq!(token_from_authorization("Bearerabc"), None);
+        assert_eq!(token_from_authorization("Bearer"), None);
+        assert_eq!(token_from_authorization("Bearer "), None);
+        assert_eq!(token_from_authorization(""), None);
+    }
 
     #[test]
     fn builds_authorization_header() {

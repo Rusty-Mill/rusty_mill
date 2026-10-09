@@ -13,5 +13,4 @@ layer = "apps"
 ts-types.workspace = true
 ts-key.workspace = true
 boringtun.workspace = true
-thiserror.workspace = true
 tracing.workspace = true

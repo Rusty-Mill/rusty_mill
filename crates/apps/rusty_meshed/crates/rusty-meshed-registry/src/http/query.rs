@@ -32,23 +32,7 @@ pub fn parse_query(query: &str) -> Vec<(String, String)> {
 /// than rejected -- there's no error channel a query-string parser
 /// needs for "the client sent a slightly malformed query string".
 pub fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 3 <= bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    out.push(byte);
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    rusty_percent::decode(input).into_owned()
 }
 
 /// Splits a request target (`RequestHead::target`, origin-form e.g.

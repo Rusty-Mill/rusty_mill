@@ -1,0 +1,12 @@
+# Python service local artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Dev data: SQLite DBs and stored replay blobs
+*.db
+*.db-journal
+blobs/

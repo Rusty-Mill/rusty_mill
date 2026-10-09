@@ -1,0 +1,51 @@
+{
+  "name": "probe_ps_left_slow_release: 900 uu/s left handbrake 40 ticks then straight",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      1500,
+      -4500,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      900,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 40,
+      "throttle": 1,
+      "steer": -1,
+      "handbrake": true
+    },
+    {
+      "ticks": 120,
+      "throttle": 1
+    }
+  ]
+}

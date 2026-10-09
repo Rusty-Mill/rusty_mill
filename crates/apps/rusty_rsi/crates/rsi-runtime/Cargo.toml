@@ -12,6 +12,7 @@ description = "Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed ex
 layer = "apps"
 
 [dependencies]
+rusty_atomic_file = { workspace = true }
 rsi-core = { path = "../rsi-core" }
 # The sandboxed executor and helper, hoisted from here (ADR-0007 step 7).
 rusty_sandbox = { workspace = true }

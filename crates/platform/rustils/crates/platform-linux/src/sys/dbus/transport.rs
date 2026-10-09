@@ -180,14 +180,6 @@ fn connect_session_bus() -> Result<OwnedFd> {
     }))
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
 /// Read from `fd` until `buf` contains a `\r\n`-terminated line, capped
 /// at a generous size so a misbehaving peer can't grow this unboundedly.
 /// Returns the line (without the `\r\n`) and any bytes read past it —
@@ -247,7 +239,7 @@ fn sasl_external_handshake(fd: &OwnedFd) -> Result<Vec<u8>> {
 
     // SAFETY: `getuid` takes no arguments and has no preconditions.
     let uid = unsafe { c::getuid() };
-    let uid_hex = hex_encode(uid.to_string().as_bytes());
+    let uid_hex = rusty_hex::encode(uid.to_string().as_bytes());
     write_all(fd, format!("AUTH EXTERNAL {uid_hex}\r\n").as_bytes())?;
 
     let (line, leftover) = read_sasl_line(fd)?;
@@ -428,6 +420,6 @@ mod tests {
 
     #[test]
     fn hex_encode_matches_known_values() {
-        assert_eq!(hex_encode(b"1000"), "31303030");
+        assert_eq!(rusty_hex::encode(b"1000"), "31303030");
     }
 }

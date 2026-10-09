@@ -31,7 +31,7 @@ pub use manager::McpManager;
 pub use policy::McpPolicy;
 pub use tool::{McpToolDescriptor, McpToolFn};
 #[cfg(feature = "rmcp")]
-pub use transport::{client_from_spec, HttpMcpClient, StdioMcpClient};
+pub use transport::{client_from_spec, RemoteMcpClient};
 
 use async_trait::async_trait;
 use serde_json::Value;

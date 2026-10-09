@@ -8,6 +8,7 @@ license = "MIT"
 layer = "apps"
 
 [dependencies]
+rusty_retry = { workspace = true }
 rp-core.workspace = true
 rp-router.workspace = true
 rusty-mcp.workspace = true

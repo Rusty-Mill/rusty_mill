@@ -1,0 +1,23 @@
+#:schema https://rlbot.org/schemas/agent.json
+# Generated: one bot entry per scenario, so the RLBot GUI can pick the tape
+# without editing bot.toml between runs. Same binary, same agent id; only
+# the environment differs. Regenerate with the snippet in README "Running".
+# run_command is a TOML literal string: cmd.exe needs backslashes and a
+# basic string would treat them as escapes.
+
+[settings]
+name = "RB Tape: late_dodge"
+agent_id = "rusty_bullet/tape_bot"
+root_dir = ".."
+run_command = 'target\release\rb_tape_bot.exe'
+run_command_linux = "target/release/rb_tape_bot"
+hivemind = false
+
+[settings.environment]
+RB_TAPE = "scenarios/late_dodge.json"
+
+[details]
+description = "late dodge: full-height jump, dodge 1.6 s after the press (1.4 s after the hold ends); expect no dodge past the 1.25 s window"
+developer = "rusty_bullet"
+language = "rust"
+tags = []

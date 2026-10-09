@@ -17,6 +17,8 @@ repository = "https://github.com/baileyrd/rusty_http"
 layer = "libs"
 
 [dependencies]
+rusty_retry = { workspace = true }
+rusty_percent = { workspace = true }
 # Optional (see the `rusty-tokio` feature below): the async adapter drives
 # the sans-IO core over `rusty_tokio`'s own `AsyncRead`/`AsyncWrite` traits
 # and reactor, mirroring rusty_tls' layout -- the async adapter belongs

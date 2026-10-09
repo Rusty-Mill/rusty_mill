@@ -1,0 +1,56 @@
+{
+  "name": "probe_dodge_side: 800 uu/s, jump, side dodge after 20 ticks",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -4500,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      800,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 10,
+      "jump": true
+    },
+    {
+      "ticks": 10
+    },
+    {
+      "ticks": 1,
+      "jump": true,
+      "roll": 1
+    },
+    {
+      "ticks": 150
+    }
+  ]
+}

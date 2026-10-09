@@ -1,0 +1,6221 @@
+//! The simulation loop, porting the shape of
+//! `btDiscreteDynamicsWorld::stepSimulation` (predict → collide → solve →
+//! integrate) at fixed timestep — no substepping/interpolation yet, since
+//! nothing in this scope needs it (no CCD-worthy speeds).
+
+use crate::body::{
+    RigidBody, StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane,
+    StaticQuarterPipe,
+};
+use crate::collision;
+use crate::mesh::{self, StaticMesh};
+use crate::net::NetMesh;
+use crate::pads::BoostPads;
+use crate::respawn;
+use crate::solver::ContactCache;
+use crate::{drive, integrate, solver};
+use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
+use std::collections::HashMap;
+
+/// Hard cap (uu/s) on the ball's linear speed — confirmed exact against
+/// RocketSim's own `RLConst.h` during `RB-PHYSICS-001-FR-061`'s audit:
+/// `BALL_MAX_SPEED = 6000.f`. A pure velocity cap, not a torque or force
+/// constant, so — like `drive::MAX_CAR_ANGULAR_SPEED` before it (see
+/// `RB-PHYSICS-001-FR-057`'s own findings) — it transfers cleanly
+/// regardless of this port's ball not being calibrated to real Rocket
+/// League's own mass/inertia. Enforced by `clamp_ball_velocity`, called
+/// once per step in `PhysicsWorld::step`.
+pub const BALL_MAX_SPEED: f32 = 6000.0;
+
+/// Hard cap (rad/s) on the ball's angular speed — confirmed exact against
+/// RocketSim's own `RLConst.h` during `RB-PHYSICS-001-FR-061`'s audit:
+/// `BALL_MAX_ANG_SPEED = 6.f, // Ball can never exceed this angular
+/// velocity (radians/s)`. Enforced by `clamp_ball_velocity`, the same way
+/// `BALL_MAX_SPEED` is.
+pub const BALL_MAX_ANG_SPEED: f32 = 6.0;
+
+/// A car body's contact with any static shape: RocketSim's fixed
+/// `CARWORLD_COLLISION_FRICTION = 0.3` and `CARWORLD_COLLISION_RESTITUTION =
+/// 0.3`, which override the two surfaces' own coefficients
+/// (`RB-PHYSICS-001-FR-100`, ADR-0021). Only the body touches here: a car
+/// on its wheels rides above the floor on its suspension, and its tires
+/// grip through `drive`.
+const CAR_WORLD_MATERIAL: solver::StaticMaterial = solver::StaticMaterial::Pair {
+    restitution: 0.3,
+    friction: 0.3,
+};
+
+/// RocketSim's arena surface material (`ARENA_COLLISION_BASE_*`).
+const ARENA_RESTITUTION: f32 = 0.3;
+const ARENA_FRICTION: f32 = 0.6;
+
+/// The ball's material against the arena (`RB-PHYSICS-001-FR-108`):
+/// RocketSim's Bullet combines a body with a static object by the larger
+/// restitution and the smaller friction (`calculateCombinedRestitution`/
+/// `Friction`), so 0.6 and 0.35 for the standard ball.
+fn ball_world_material(ball: &RigidBody) -> solver::StaticMaterial {
+    solver::StaticMaterial::Pair {
+        restitution: ball.restitution.max(ARENA_RESTITUTION),
+        friction: ball.friction.min(ARENA_FRICTION),
+    }
+}
+
+/// RocketSim's "special" ball-world resolution (`RB-PHYSICS-001-FR-108`,
+/// `convertContactSpecial`): every ball-world contact this tick is folded
+/// into one, at the average normal (renormalized since FR-119, ADR-0039)
+/// and the average distance from the ball's centre, solved for velocity
+/// only (position correction runs per raw point, FR-118). A ball on two
+/// ramp facets, or a ramp and the floor, then bounces once instead of once
+/// per contact: `test2.jsonl` 13.892 s went from 1072 uu/s to under 20.
+fn combined_ball_world_contact(
+    ball: &RigidBody,
+    manifolds: Vec<(solver::StaticMaterial, Vec<collision::Contact>)>,
+) -> Option<collision::Contact> {
+    let contacts: Vec<collision::Contact> = manifolds
+        .into_iter()
+        .flat_map(|(_, contacts)| contacts)
+        .collect();
+    if contacts.is_empty() {
+        return None;
+    }
+    let share = 1.0 / contacts.len() as f32;
+    let mut normal = Vec3::ZERO;
+    let mut distance = 0.0;
+    for contact in &contacts {
+        normal += contact.normal * share;
+        // Bullet's `rel_pos1`: from the centre to the ball's own contact point.
+        let on_ball = contact.point - contact.normal * contact.penetration_depth;
+        distance += (on_ball - ball.position).length() * share;
+    }
+    // Opposite contacts cancel: no direction left to push along. The
+    // average is renormalized (RB-PHYSICS-001-FR-119): left short of unit
+    // length, the friction direction is no longer orthogonal to the normal
+    // row, and the bounce impulse bleeds into friction.
+    let normal = normal.normalize()?;
+    Some(collision::Contact {
+        normal,
+        point: ball.position - normal * distance,
+        penetration_depth: 0.0,
+    })
+}
+
+/// RocketSim's car-ball contact material (`CARBALL_COLLISION_*`,
+/// `Ball::_OnHit`), used as is (`RB-PHYSICS-001-FR-107`): `test2.jsonl`'s
+/// kickoff hit (5.758 s) and 12.267 s hit lose the car 155 and 107 uu/s
+/// less error with it.
+const CAR_BALL_MATERIAL: solver::PairMaterial = solver::PairMaterial {
+    restitution: 0.0,
+    friction: 2.0,
+};
+
+/// RocketSim's car-car contact material (`CARCAR_COLLISION_*`). Demolitions
+/// are not modeled; bumps are (`RB-PHYSICS-001-FR-140`).
+const CAR_CAR_MATERIAL: solver::PairMaterial = solver::PairMaterial {
+    restitution: 0.1,
+    friction: 0.09,
+};
+
+/// `BUMP_MIN_FORWARD_DIST` (uu): a car bumps another only when the other car's
+/// origin is at least this far ahead of its own, along its forward axis
+/// (`RB-PHYSICS-001-FR-140`, `FR-158`).
+const BUMP_MIN_FORWARD_DIST: f32 = 64.5;
+/// Largest `|forward.z|` of a bumping car's nose: sin 45 degrees. A nose pitched past it
+/// gives no bump (`RB-PHYSICS-001-FR-152`): the flipping car of `bumpf_flip` hit with its
+/// nose straight down (-85 to -77 degrees), while a car thrown up by a bump and hitting a
+/// third is level (-2 to -7); the threshold between them is an assumption.
+const BUMP_MAX_FORWARD_Z: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// `BUMP_COOLDOWN_TIME`, 0.25 s in 120 Hz ticks: one bump per pair of cars.
+const BUMP_COOLDOWN_TICKS: u64 = 30;
+/// `BUMP_VEL_AMOUNT_GROUND_CURVE`: (bumper speed, extra speed given to the
+/// bumped car along the bumper's heading), measured on 2026-10-07 against the
+/// game's rear hits at 540 to 1287 uu/s (433, 635, 835, 1021 uu/s extra).
+const BUMP_VELOCITY_CURVE: [(f32, f32); 3] = [(0.0, 5.0 / 6.0), (1400.0, 1100.0), (2200.0, 1530.0)];
+/// The extra upward speed per uu/s of bumper speed (measured 0.20 on the same
+/// hits: 109, 162, 213, 259 uu/s at 540, 804, 1054, 1287).
+const BUMP_UPWARD_SCALE: f32 = 0.2;
+/// A bumper in the air (`RB-PHYSICS-001-FR-143`): both cars airborne at 1000
+/// and 1400 uu/s gave the victim 990 and 1382 uu/s more forward speed (about
+/// 0.99 of the bumper's, against 0.79 on the ground) and a downward kick of
+/// about 180 uu/s either time instead of the ground's upward 0.2. Only the
+/// both-airborne case was measured.
+const BUMP_AIR_VELOCITY_CURVE: [(f32, f32); 3] =
+    [(0.0, 5.0 / 6.0), (1400.0, 1390.0), (2200.0, 1850.0)];
+const BUMP_AIR_DOWNWARD_SPEED: f32 = 178.0;
+
+/// `SUPERSONIC_START_SPEED` and `SUPERSONIC_MAINTAIN_MIN_SPEED` (uu/s): a car
+/// is supersonic from 2200 until it falls under 2100. A supersonic car
+/// bumping an enemy with its nose demolishes it (`RB-PHYSICS-001-FR-142`).
+const SUPERSONIC_START_SPEED: f32 = 2200.0;
+const SUPERSONIC_MAINTAIN_MIN_SPEED: f32 = 2100.0;
+
+/// `BALL_CAR_EXTRA_IMPULSE_*` (`RLConst.h`).
+const BALL_HIT_Z_SCALE: f32 = 0.35;
+const BALL_HIT_FORWARD_SCALE: f32 = 0.65;
+const BALL_HIT_MAX_RELATIVE_SPEED: f32 = 4600.0;
+/// `BALL_CAR_EXTRA_IMPULSE_FACTOR_CURVE`: (relative speed, factor).
+const BALL_HIT_FACTOR_CURVE: [(f32, f32); 4] =
+    [(0.0, 0.65), (500.0, 0.65), (2300.0, 0.55), (4600.0, 0.30)];
+
+/// The car-ball hit's adjustable numbers, RocketSim's by default: the contact
+/// material and the shape and size of Psyonix's extra ball-hit velocity.
+/// `PhysicsWorld::car_ball` holds them so a sweep (`rb-verify --sweep-hit`)
+/// can vary them without rebuilding the world; nothing else changes them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CarBallTuning {
+    pub material: solver::PairMaterial,
+    /// Multiplies the extra velocity (1.0 is RocketSim's).
+    pub hit_scale: f32,
+    /// `BALL_CAR_EXTRA_IMPULSE_Z_SCALE`.
+    pub hit_z_scale: f32,
+    /// `BALL_CAR_EXTRA_IMPULSE_FORWARD_SCALE`.
+    pub hit_forward_scale: f32,
+}
+
+impl Default for CarBallTuning {
+    fn default() -> CarBallTuning {
+        CarBallTuning {
+            material: CAR_BALL_MATERIAL,
+            hit_scale: 1.0,
+            hit_z_scale: BALL_HIT_Z_SCALE,
+            hit_forward_scale: BALL_HIT_FORWARD_SCALE,
+        }
+    }
+}
+
+/// Psyonix's extra ball-hit velocity, `Ball::_OnHit` (`RB-PHYSICS-001-FR-107`):
+/// along the car-to-ball direction with its height scaled by 0.35 and its
+/// part along the car's forward axis by 0.65, sized by the relative speed
+/// times `BALL_HIT_FACTOR_CURVE`. Computed from the states at contact
+/// detection and added after the solve.
+fn extra_ball_hit_velocity(ball: &RigidBody, car: &RigidBody, tuning: &CarBallTuning) -> Vec3 {
+    let relative_speed = (ball.linear_velocity - car.linear_velocity)
+        .length()
+        .min(BALL_HIT_MAX_RELATIVE_SPEED);
+    let offset = ball.position - car.position;
+    let Some(direction) = Vec3::new(offset.x, offset.y, offset.z * tuning.hit_z_scale).normalize()
+    else {
+        return Vec3::ZERO;
+    };
+    let forward = car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+    let adjusted =
+        direction - forward * (direction.dot(&forward) * (1.0 - tuning.hit_forward_scale));
+    let Some(direction) = adjusted.normalize() else {
+        return Vec3::ZERO;
+    };
+    direction
+        * (relative_speed
+            * piecewise_linear(&BALL_HIT_FACTOR_CURVE, relative_speed)
+            * tuning.hit_scale)
+}
+
+/// The extra velocity a bump gives the car bumped by `bumper`
+/// (`RB-PHYSICS-001-FR-140`, `FR-159`). Two airborne cars: along the bumper's
+/// horizontal heading, 0.99 of its speed along it, and a fixed kick down.
+/// Otherwise along the bumper's heading (its nose, horizontally, tilted up or
+/// down by its own vertical speed over its speed along the nose, so a rising
+/// bumper pushes up), by the curve of its speed, plus a share of that speed
+/// upward. Not the line between the two cars (an off-centre clip pushes
+/// straight ahead).
+fn bump_velocity_of(bumper: &RigidBody, bumper_airborne: bool) -> Vec3 {
+    let forward = drive::forward_axis(bumper);
+    let flat = Vec3::new(forward.x, forward.y, 0.0).normalize();
+    if bumper_airborne {
+        let Some(heading) = flat else {
+            return Vec3::ZERO;
+        };
+        let speed = bumper.linear_velocity.dot(&heading).max(0.0);
+        return heading * piecewise_linear(&BUMP_AIR_VELOCITY_CURVE, speed)
+            - Vec3::new(0.0, 0.0, BUMP_AIR_DOWNWARD_SPEED);
+    }
+    let Some(flat) = flat else {
+        return Vec3::ZERO;
+    };
+    // The horizontal heading is the car's nose; it climbs or dives with the car's own vertical
+    // speed over its speed along the nose.
+    let along = bumper.linear_velocity.dot(&flat).max(0.0);
+    let heading = if along > 1.0 {
+        (flat + Vec3::new(0.0, 0.0, bumper.linear_velocity.z / along))
+            .normalize()
+            .unwrap_or(flat)
+    } else {
+        flat
+    };
+    let speed = bumper.linear_velocity.dot(&heading).max(0.0);
+    heading * piecewise_linear(&BUMP_VELOCITY_CURVE, speed)
+        + Vec3::new(0.0, 0.0, speed * BUMP_UPWARD_SCALE)
+}
+
+/// RocketSim's `LinearPieceCurve::GetOutput`: linear between points,
+/// clamped to the end values.
+fn piecewise_linear(curve: &[(f32, f32)], input: f32) -> f32 {
+    let Some(&(first_x, first_y)) = curve.first() else {
+        return 0.0;
+    };
+    if input <= first_x {
+        return first_y;
+    }
+    for pair in curve.windows(2) {
+        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+        if input <= x1 {
+            return y0 + (y1 - y0) * (input - x0) / (x1 - x0);
+        }
+    }
+    curve.last().map_or(first_y, |&(_, y)| y)
+}
+
+/// Scales `ball.linear_velocity`/`ball.angular_velocity` back down to
+/// `BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED` (preserving direction) if either is
+/// exceeded — a genuine clamp, the same kind `drive::clamp_velocity`
+/// already applies to a car's own angular speed, generalized here to both
+/// linear and angular speed since the ball has no drive-input-gated
+/// mechanic of its own to house a car-specific version of this in
+/// `drive.rs`. Called once per step in `PhysicsWorld::step`, right after
+/// this step's contact resolution (including any net) but before the
+/// transform integrates — matching real RocketSim's own `_FinishPhysicsTick`
+/// placement (fetched and confirmed during `RB-PHYSICS-001-FR-061`'s
+/// audit: enforced after collision resolution, at the end of the physics
+/// tick) more precisely than `drive::clamp_velocity`'s own placement
+/// managed for the car (mid-pipeline, before this step's own contact
+/// resolution — see that function's own doc comment for why). Like that
+/// function, a same-step contact-solver impulse is clamped this same call
+/// (not deferred to next step), but a later force/impulse applied after
+/// this call within the same step (none currently exists for the ball)
+/// wouldn't be re-clamped until the next step's call.
+fn clamp_ball_velocity(ball: &mut RigidBody) {
+    let speed = ball.linear_velocity.length();
+    if speed > BALL_MAX_SPEED {
+        ball.linear_velocity *= BALL_MAX_SPEED / speed;
+    }
+    let angular_speed = ball.angular_velocity.length();
+    if angular_speed > BALL_MAX_ANG_SPEED {
+        ball.angular_velocity *= BALL_MAX_ANG_SPEED / angular_speed;
+    }
+}
+
+/// The whole simulated scene: one ball-like sphere, zero or more car-like
+/// boxes, one ground plane, zero or more arena walls (`walls`, added via
+/// `with_wall` — a plain flat `StaticPlane` each, typically with a
+/// horizontal normal), and zero or more curved wall-to-floor/wall-to-ceiling
+/// fillets (`curves`, added via `with_curve` — see `RB-PHYSICS-001-FR-020`
+/// and `curves`' own doc comment; since `RB-PHYSICS-001-FR-027`, a car is
+/// deflected by one too, not just the ball). Every body collides with the
+/// ground, every wall, every curve, every compound-corner fillet, every
+/// goal wall, and every bounded wall (a wall is just a `StaticPlane` whose
+/// normal isn't "up," so the same machinery serves both); every car also
+/// collides with the ball and with every other car
+/// (`collision::contacts_between`, dispatching to `sphere_vs_box` or
+/// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
+/// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped. Since
+/// `RB-PHYSICS-001-FR-052`, every body's own static-surface contacts and
+/// every ball-vs-car/car-vs-car manifold detected in a step are all
+/// resolved together via `solver::resolve_manifolds`, one shared iteration
+/// budget per body, rather than a body's static contacts (themselves
+/// already combined since `RB-PHYSICS-001-FR-051`, and every dynamic
+/// manifold already combined since `RB-PHYSICS-001-FR-030`) being two
+/// separate solves, one fully resolved and applied before the other's own
+/// setup ever reads the shared body's velocity (see `step`'s own doc
+/// comment). Each car also has a
+/// current `ControllerInput` (`car_inputs`, set via `set_car_input`,
+/// `ControllerInput::default()` — neutral — until set) and a
+/// `drive::DriveState` (`car_drive`, starting at `DriveState::new`): boost
+/// fuel (settable via `set_car_boost`), jump-held edge tracking, the double
+/// jump, the jump-hold window, and the cancelable dodge flip — all driving
+/// the car via
+/// `drive::apply_driven_forces`. Since `RB-PHYSICS-001-FR-033`, `nets`
+/// (added via `with_net`) gives the ball a real mass-spring net to be
+/// caught by, resolved after every other contact each step, and since
+/// `RB-PHYSICS-001-FR-038`, every car too — see `nets`' own doc comment.
+#[derive(Clone)]
+pub struct PhysicsWorld {
+    pub ball: RigidBody,
+    pub cars: Vec<RigidBody>,
+    car_inputs: Vec<ControllerInput>,
+    car_drive: Vec<drive::DriveState>,
+    /// Fuel every car drains per second of held boost
+    /// (`set_boost_used_per_second`).
+    boost_used_per_second: f32,
+    /// Every car's dodge forward part follows the throttle when the pitch
+    /// stick is centred (`set_dodge_forward_from_throttle`).
+    dodge_forward_from_throttle: bool,
+    pub ground: StaticPlane,
+    pub walls: Vec<StaticPlane>,
+    /// Curved wall-to-floor/wall-to-ceiling fillets (`RB-PHYSICS-001-FR-020`),
+    /// added via `with_curve` — empty by default, same as `walls`. Both the
+    /// ball and a car are deflected by a curve since `RB-PHYSICS-001-FR-027`
+    /// — a car's own box is approximated by testing its 8 corners against
+    /// the curve (see `collision::box_vs_quarter_pipe`'s own doc comment
+    /// for what that does and doesn't catch), not a full convex-vs-curve
+    /// narrow phase.
+    pub curves: Vec<StaticQuarterPipe>,
+    /// Compound-corner fillets (`RB-PHYSICS-001-FR-023`) — the small
+    /// spherical patches blending a vertical-edge fillet (`curves`) into a
+    /// floor- or ceiling-seam fillet (also `curves`) at each corner wall's
+    /// own top/bottom endpoint, added via `with_corner_fillet`. Same
+    /// corner-testing deflection convention `curves` uses for a car, since
+    /// `RB-PHYSICS-001-FR-027` (`collision::box_vs_corner_fillet`), and
+    /// empty by default.
+    pub corner_fillets: Vec<StaticCornerFillet>,
+    /// Static triangle meshes (`RB-PHYSICS-001-FR-106`): in the standard
+    /// arena, the real side ramps and corners. Added via `with_mesh`;
+    /// empty by default. Deflect the ball and every car, and wheel rays
+    /// hit them.
+    pub meshes: Vec<StaticMesh>,
+    /// Windowed back walls with an actual goal-mouth opening
+    /// (`RB-PHYSICS-001-FR-024`), added via `with_goal_wall` — empty by
+    /// default. Both the ball and every car are resolved against these;
+    /// since `RB-PHYSICS-001-FR-028`, a car passes through the window
+    /// exactly like the ball does (`collision::contacts_vs_goal_wall`'s box
+    /// path tests each corner against the window, same as the sphere's
+    /// single center-point test — see its own doc comment), so a car can
+    /// now actually drive into a goal.
+    pub goal_walls: Vec<StaticGoalWall>,
+    /// The goal box's own side walls and roof (`RB-PHYSICS-001-FR-029`),
+    /// added via `with_bounded_wall` — empty by default. Each only
+    /// collides within its own rectangular bound (see
+    /// `body::StaticBoundedWall`'s own doc comment for why an unbounded
+    /// plane there would be wrong); resolved for the ball and every car,
+    /// same as `goal_walls`.
+    pub bounded_walls: Vec<StaticBoundedWall>,
+    /// Real mass-spring net panels (`RB-PHYSICS-001-FR-033`), added via
+    /// `with_net` — empty by default. Catches the ball and, since
+    /// `RB-PHYSICS-001-FR-038`, every car too (see `net::NetMesh`'s own doc
+    /// comment); resolved after every other contact this step, reusing the
+    /// same ball-plus-cars snapshot `solver::resolve_manifolds` just
+    /// resolved rather than going through that function's own shared solve
+    /// (a net's own points aren't part of that scene-wide `bodies` list at
+    /// all).
+    pub nets: Vec<NetMesh>,
+    pub gravity: Vec3,
+    elapsed_secs: f32,
+    /// Steps taken, for the ball-hit cooldown (`RB-PHYSICS-001-FR-107`).
+    tick_count: u64,
+    /// Per car, the step its last extra ball-hit impulse was applied.
+    ball_hit_ticks: Vec<Option<u64>>,
+    /// Per (bumper, victim) pair of cars, the step of the bumper's last bump
+    /// (`RB-PHYSICS-001-FR-140`).
+    bump_ticks: Vec<Vec<Option<u64>>>,
+    /// Each car's team (0 for all unless set; cars of one team never
+    /// demolish each other).
+    car_teams: Vec<u32>,
+    /// Cars demolished and out of the simulation: not driven, not in contact,
+    /// not in `frame()` (the game's capture drops them too). They respawn
+    /// after three seconds (`respawn`, `RB-PHYSICS-001-FR-151`).
+    demolished: Vec<bool>,
+    /// Seconds before demolished car `i` is back, `None` when it is in play.
+    respawn_in: Vec<Option<f32>>,
+    /// The spawn point car `i` takes at its next respawn (`set_respawn_point`);
+    /// `None` takes `respawn::default_pick`.
+    respawn_pick: Vec<Option<usize>>,
+    /// Car `i` came back last tick and is still at the spawn's raw state: the next
+    /// tick starts it at its respawn height with its boost.
+    respawn_settling: Vec<bool>,
+    /// Where each car was put by the last `kickoff` (x, y, heading degrees), for
+    /// `hold_cars_on_their_spots`.
+    kickoff_spots: Vec<Option<(f32, f32, f32)>>,
+    /// Each car's supersonic state.
+    supersonic: Vec<bool>,
+    /// The boost pads, if the scene has them (`RB-PHYSICS-001-FR-149`): none
+    /// by default, so a world built without them behaves as it always did.
+    boost_pads: Option<BoostPads>,
+    /// The car-ball hit's adjustable numbers (RocketSim's by default).
+    pub car_ball: CarBallTuning,
+    /// Warm-starting's own persistent state (`RB-PHYSICS-001-FR-035`) for
+    /// `solver::resolve_manifolds`'s own dynamic-manifold channel, keyed by
+    /// (normalized) ball-vs-car/car-vs-car body-index pair — see
+    /// `solver::ContactCache`'s own doc comment for what it does and why
+    /// only a body's dynamic manifolds (not its static-shape contacts) are
+    /// warm-started.
+    dynamic_manifold_caches: HashMap<(usize, usize), ContactCache>,
+    /// Each car's persistent contact with the ground (index 0), each of
+    /// `walls` (index `i + 1`) and each of `meshes` (after the walls),
+    /// Bullet's one-point-a-tick manifold (`RB-PHYSICS-001-FR-105`,
+    /// ADR-0024; meshes since FR-106). Sized in `step`.
+    car_static_manifolds: Vec<Vec<collision::ContactManifold>>,
+    /// The ball's persistent contact with each of `meshes`, Bullet's
+    /// `btPersistentManifold` kept across ticks (`RB-PHYSICS-001-FR-121`,
+    /// ADR-0041). Sized in `step`, cleared by `snap_to_frame`.
+    ball_mesh_manifolds: Vec<mesh::BallManifold>,
+}
+
+/// Borrowed references to every static-shape collection in a `PhysicsWorld`
+/// (`RB-PHYSICS-001-FR-051`) — exists purely so `static_contact_manifolds`
+/// takes one bundled parameter instead of six separate slice/reference
+/// arguments (clippy's `too_many_arguments` threshold), not as a genuine
+/// new abstraction; every field here is still borrowed directly from the
+/// same `PhysicsWorld` fields it always was.
+struct StaticScene<'a> {
+    ground: &'a StaticPlane,
+    walls: &'a [StaticPlane],
+    curves: &'a [StaticQuarterPipe],
+    corner_fillets: &'a [StaticCornerFillet],
+    meshes: &'a [StaticMesh],
+    goal_walls: &'a [StaticGoalWall],
+    bounded_walls: &'a [StaticBoundedWall],
+}
+
+impl StaticScene<'_> {
+    /// A wheel ray's first hit on any static surface
+    /// (`RB-PHYSICS-001-FR-102`, meshes since FR-106): the analytic shapes
+    /// by `collision::raycast` over `point_contact`, the meshes by their
+    /// triangles, the nearer of the two.
+    fn raycast(&self, origin: Vec3, direction: Vec3, length: f32) -> Option<collision::RayHit> {
+        let analytic =
+            collision::raycast(|point| self.point_contact(point), origin, direction, length);
+        self.meshes
+            .iter()
+            .filter_map(|mesh| mesh.raycast(origin, direction, length))
+            .chain(analytic)
+            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+
+    /// The deepest contact a zero-radius probe at `point` makes with any
+    /// static shape (`RB-PHYSICS-001-FR-102`): what a wheel ray tests each
+    /// sample against (`collision::raycast`). The net is soft and not a
+    /// drivable surface, so it is left out.
+    fn point_contact(&self, point: Vec3) -> Option<collision::Contact> {
+        let planes = std::iter::once(self.ground)
+            .chain(self.walls)
+            .map(|plane| collision::sphere_vs_plane(point, 0.0, plane));
+        let curves = self
+            .curves
+            .iter()
+            .map(|curve| collision::sphere_vs_quarter_pipe(point, 0.0, curve));
+        let corners = self
+            .corner_fillets
+            .iter()
+            .map(|fillet| collision::sphere_vs_corner_fillet(point, 0.0, fillet));
+        let goal_walls = self
+            .goal_walls
+            .iter()
+            .map(|wall| collision::sphere_vs_goal_wall(point, 0.0, wall));
+        let bounded_walls = self
+            .bounded_walls
+            .iter()
+            .map(|wall| collision::sphere_vs_bounded_wall(point, 0.0, wall));
+        planes
+            .chain(curves)
+            .chain(corners)
+            .chain(goal_walls)
+            .chain(bounded_walls)
+            .flatten()
+            .max_by(|a, b| a.penetration_depth.total_cmp(&b.penetration_depth))
+    }
+}
+
+impl PhysicsWorld {
+    /// A wheel ray's first hit, against the arena or the ball
+    /// (`RB-PHYSICS-001-FR-129`). The game's wheels meet the ball as they
+    /// meet the floor: suspension and its bottomed-out pushback act on the
+    /// car, which `hitjump.jsonl` 77.667 s shows (a car passing over a
+    /// resting ball is pushed up 95 uu/s, 45 more than the sphere-box
+    /// contact alone gives). The ball is solid at its own 91.25 uu radius here,
+    /// without the 1.9 uu contact band its world contacts stand off by, and
+    /// as a still surface: its velocity does not enter the pushback.
+    fn wheel_ray(&self, origin: Vec3, direction: Vec3, length: f32) -> Option<collision::RayHit> {
+        let ground = self.static_scene().raycast(origin, direction, length);
+        let ball = collision::raycast_sphere(
+            self.ball.position,
+            crate::body::BALL_COLLISION_RADIUS,
+            origin,
+            direction,
+            length,
+        );
+        // The ball's own velocity at the hit, which a wheel's pushback reads
+        // (`RB-PHYSICS-001-FR-150`).
+        let ball = ball.map(|mut hit| {
+            let point = origin + direction * hit.distance;
+            hit.velocity = self.ball.velocity_at_point(&(point - self.ball.position));
+            hit
+        });
+        match (ground, ball) {
+            (Some(ground), Some(ball)) if ball.distance < ground.distance => Some(ball),
+            (None, ball) => ball,
+            (ground, _) => ground,
+        }
+    }
+
+    /// Where car `index`'s four wheel rays hit right now, as `step` casts them at
+    /// the start of a tick (`drive::cast_wheels` against the arena and the ball):
+    /// an instrument for the wall and ramp work (PARITY-PLAN workstream A), it
+    /// changes nothing. Panics if `index` is out of bounds (see `set_car_input`).
+    pub fn wheel_contacts(&self, index: usize, dt: f32) -> drive::WheelContacts {
+        drive::cast_wheels(&self.cars[index], |o, d, l| self.wheel_ray(o, d, l), dt)
+    }
+
+    /// The deepest penetration (uu) between car `index`'s box and the ball, measured as
+    /// `step` does (the ball as its 91.25 uu hit sphere), or `None` when they do not
+    /// touch: an instrument for the ball-contact work (PARITY-PLAN workstream B).
+    /// Panics if `index` is out of bounds (see `set_car_input`).
+    pub fn car_ball_penetration(&self, index: usize) -> Option<f32> {
+        let mut hit_sphere = self.ball;
+        hit_sphere.shape = crate::body::Shape::Sphere {
+            radius: crate::body::BALL_COLLISION_RADIUS,
+        };
+        collision::contacts_between(&hit_sphere, &self.cars[index])
+            .iter()
+            .map(|contact| contact.penetration_depth)
+            .reduce(f32::max)
+    }
+
+    fn static_scene(&self) -> StaticScene<'_> {
+        StaticScene {
+            ground: &self.ground,
+            walls: &self.walls,
+            curves: &self.curves,
+            corner_fillets: &self.corner_fillets,
+            meshes: &self.meshes,
+            goal_walls: &self.goal_walls,
+            bounded_walls: &self.bounded_walls,
+        }
+    }
+
+    /// `gravity` defaults to -650 Unreal units/s^2 on Z, a commonly-cited
+    /// community-measured approximation of Rocket League's ball gravity —
+    /// not a value this project has independently confirmed, and not
+    /// Earth gravity (the two diverge enough to matter for a divergence
+    /// metric scored against real matches). Treat this default as a
+    /// placeholder to calibrate, not settled fact: `RB-VERIFY-001`/`002`
+    /// data should be used to fit the real constant once available (see
+    /// `RB-PHYSICS-001` open questions). Overridable via the `gravity`
+    /// field in the meantime.
+    pub fn new(ball: RigidBody, ground: StaticPlane) -> PhysicsWorld {
+        PhysicsWorld {
+            ball,
+            cars: Vec::new(),
+            car_inputs: Vec::new(),
+            car_drive: Vec::new(),
+            boost_used_per_second: drive::BOOST_USED_PER_SECOND,
+            dodge_forward_from_throttle: false,
+            ground,
+            walls: Vec::new(),
+            curves: Vec::new(),
+            corner_fillets: Vec::new(),
+            meshes: Vec::new(),
+            goal_walls: Vec::new(),
+            bounded_walls: Vec::new(),
+            nets: Vec::new(),
+            gravity: Vec3::new(0.0, 0.0, -650.0),
+            elapsed_secs: 0.0,
+            tick_count: 0,
+            ball_hit_ticks: Vec::new(),
+            bump_ticks: Vec::new(),
+            car_teams: Vec::new(),
+            demolished: Vec::new(),
+            respawn_in: Vec::new(),
+            respawn_pick: Vec::new(),
+            respawn_settling: Vec::new(),
+            kickoff_spots: Vec::new(),
+            supersonic: Vec::new(),
+            boost_pads: None,
+            car_ball: CarBallTuning::default(),
+            dynamic_manifold_caches: HashMap::new(),
+            car_static_manifolds: Vec::new(),
+            ball_mesh_manifolds: Vec::new(),
+        }
+    }
+
+    /// Builds a scene bounded by Rocket League's real standard-arena
+    /// footprint (`RB-PHYSICS-001-FR-019`/`FR-020`) instead of an empty
+    /// `walls`/`curves`/`corner_fillets`/`goal_walls` list a caller
+    /// populates itself: the octagonal boundary plus a ceiling from
+    /// `arena::standard_walls`, the curved wall-to-floor/wall-to-ceiling,
+    /// corner-wall vertical-edge, and goal-cutout-edge fillets from
+    /// `arena::standard_curves`/`standard_goal_cutout_fillets`, the
+    /// goal compound-corner fillets from `arena::standard_goal_corner_fillets`,
+    /// the real side-ramp and corner meshes from `arena::standard_meshes`
+    /// (`RB-PHYSICS-001-FR-106`), the windowed goal walls from
+    /// `arena::standard_goal_walls`, and the same flat ground
+    /// (`arena::standard_ground`) every scene already used.
+    /// Equivalent to `PhysicsWorld::new(ball, arena::standard_ground())`
+    /// followed by a `with_wall` call for each of `arena::standard_walls()`'s
+    /// 3 planes, a `with_curve` call for each of `arena::standard_curves()`'s
+    /// 4 back-wall seams and `arena::standard_goal_cutout_fillets()`'s 6, a
+    /// `with_corner_fillet` call for each of
+    /// `arena::standard_goal_corner_fillets()`'s 4, a `with_mesh` call for
+    /// each of `arena::standard_meshes()`'s 8, a `with_goal_wall`
+    /// call for each of `arena::standard_goal_walls()`'s 2 windowed walls,
+    /// and, since `RB-PHYSICS-001-FR-029`, a modeled goal interior behind
+    /// each window: a `with_wall` call for each of
+    /// `arena::standard_goal_back_walls()`'s 2 plain back-of-net planes,
+    /// and a `with_bounded_wall` call for each of
+    /// `arena::standard_goal_side_walls()`'s 4 and
+    /// `arena::standard_goal_roofs()`'s 2 bounded side/roof walls, and,
+    /// since `RB-PHYSICS-001-FR-033`, a `with_net` call for each of
+    /// `arena::standard_nets()`'s 2 goal net panels. Cars are
+    /// added afterward with `with_car`, exactly as with `PhysicsWorld::new`.
+    pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
+        // RocketSim's `Arena::_SetupArenaCollisionShapes` (RB-PHYSICS-001-
+        // FR-113, FR-117): floor, ceiling and side walls as planes,
+        // everything else as the game's collision mesh, goals included.
+        let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+        for wall in crate::arena::standard_walls() {
+            world = world.with_wall(wall);
+        }
+        for mesh in crate::arena::standard_meshes() {
+            world = world.with_mesh(mesh);
+        }
+        world
+    }
+
+    /// Seeds a `standard_arena` `PhysicsWorld` from a recorded
+    /// `PhysicsFrame` — the ball's and every car's position/rotation/
+    /// velocity/angular_velocity come directly from the frame (a direct
+    /// 1:1 field match with `BallState`/`CarState`), combined with
+    /// `RigidBody::standard_ball`/`standard_car`'s confirmed real
+    /// shape/mass for what a `PhysicsFrame` doesn't carry at all. Added
+    /// for `RB-PHYSICS-001-FR-076`'s candidate-engine plumbing:
+    /// `FR-077` uses this to seed a simulation from one of a real
+    /// capture's own recorded frames, then drives it forward with
+    /// `simulate_recorded` using that same capture's remaining frames.
+    ///
+    /// The returned world's own `frame().timestamp_secs` starts at
+    /// `frame.timestamp_secs` (not `0.0`) — deliberately, so the
+    /// candidate trajectory `simulate_recorded` produces lands on the
+    /// *same* absolute clock the recorded capture used, letting
+    /// `rb_domain::divergence::score`'s nearest-timestamp alignment
+    /// actually match frames up; seeding at `0.0` instead would put every
+    /// candidate frame outside any real capture's own alignment tolerance.
+    ///
+    /// Each car's `boost_amount` is seeded from the frame's own recorded
+    /// value via `set_car_boost`. Every other `DriveState` field a
+    /// `PhysicsFrame` doesn't carry at all (`jump_held`,
+    /// `double_jump_available`, `jump_hold_time_remaining`,
+    /// `flip`) is left at
+    /// `with_car`'s own fixed defaults (not held, double-jump available,
+    /// zero hold time, no dodge in progress) — accurate only if `frame`
+    /// captures a genuinely neutral, grounded moment. Choosing such a
+    /// frame is the caller's responsibility (see `RB-PHYSICS-001-FR-077`'s
+    /// own seed-frame heuristic), not this function's — `PhysicsWorld` has
+    /// no public way to seed those four fields directly at all yet.
+    ///
+    /// Cars are seeded in `frame.cars`'s own order, so a car's resulting
+    /// index in `self.cars` (and thus what `set_car_input` expects) always
+    /// matches that car's own `player_id` in `frame` — a real capture's
+    /// own `player_id` is already a per-session ordinal assigned in
+    /// exactly this order (see `RB-VERIFY-002-FR-001`'s plugin), so this
+    /// isn't a coincidence to maintain, just a fact to preserve.
+    pub fn from_frame(frame: &PhysicsFrame) -> PhysicsWorld {
+        let arena = PhysicsWorld::standard_arena(RigidBody::standard_ball(frame.ball.position));
+        PhysicsWorld::from_frame_in(&arena, frame)
+    }
+
+    /// `from_frame` over an arena the caller already built (a
+    /// `standard_arena` with no cars), cloned instead of rebuilt: the
+    /// arena's collision meshes cost far more to build than to copy, which
+    /// matters to a caller that resets many times (`rb_env`, ADR-0060).
+    /// The arena's own ball is replaced by the frame's.
+    pub fn from_frame_in(arena: &PhysicsWorld, frame: &PhysicsFrame) -> PhysicsWorld {
+        let mut world = arena.clone();
+        let mut ball = RigidBody::standard_ball(frame.ball.position);
+        ball.orientation = frame.ball.rotation;
+        ball.linear_velocity = frame.ball.velocity;
+        ball.angular_velocity = frame.ball.angular_velocity;
+        ball.update_inertia_tensor();
+        world.ball = ball;
+        world.elapsed_secs = frame.timestamp_secs;
+
+        for car_state in &frame.cars {
+            let mut car = RigidBody::standard_car(car_state.position);
+            car.orientation = car_state.rotation;
+            car.linear_velocity = car_state.velocity;
+            car.angular_velocity = car_state.angular_velocity;
+            car.update_inertia_tensor();
+            world = world.with_car(car);
+            let index = world.cars.len() - 1;
+            world.set_car_boost(index, car_state.boost_amount);
+        }
+
+        world
+    }
+
+    /// Adds one arena wall to the scene — a flat `StaticPlane`, typically
+    /// with a horizontal normal (e.g. `Vec3::new(1.0, 0.0, 0.0)`), though
+    /// nothing here actually requires that. Callable more than once to
+    /// build a multi-wall arena; a scene with no walls added (the default)
+    /// behaves exactly as before walls existed — every body's ground
+    /// contact and driven-input behavior is unaffected by an empty
+    /// `walls`. Doesn't model a full arena footprint (corners, curvature,
+    /// a ceiling) — just the generic per-wall collision and wall-jump
+    /// capability; see `RB-PHYSICS-001-FR-013`'s Non-goals.
+    pub fn with_wall(mut self, wall: StaticPlane) -> PhysicsWorld {
+        self.walls.push(wall);
+        self
+    }
+
+    /// Adds one curved wall-to-floor/wall-to-ceiling fillet to the scene
+    /// (`RB-PHYSICS-001-FR-020`) — callable more than once, same pattern as
+    /// `with_wall`; a scene with no curves added (the default) behaves
+    /// exactly as before curves existed. Deflects both the ball and a car —
+    /// see `curves`' own doc comment.
+    pub fn with_curve(mut self, curve: StaticQuarterPipe) -> PhysicsWorld {
+        self.curves.push(curve);
+        self
+    }
+
+    /// Adds one compound-corner fillet to the scene
+    /// (`RB-PHYSICS-001-FR-023`) — callable more than once, same pattern as
+    /// `with_curve`; a scene with no corner fillets added (the default)
+    /// behaves exactly as before they existed. Deflects both the ball and a
+    /// car — see `corner_fillets`' own doc comment.
+    pub fn with_corner_fillet(mut self, corner_fillet: StaticCornerFillet) -> PhysicsWorld {
+        self.corner_fillets.push(corner_fillet);
+        self
+    }
+
+    /// Adds one static triangle mesh to the scene (`RB-PHYSICS-001-FR-106`),
+    /// same pattern as `with_wall`.
+    pub fn with_mesh(mut self, mesh: StaticMesh) -> PhysicsWorld {
+        self.meshes.push(mesh);
+        self
+    }
+
+    /// Adds one windowed back wall to the scene (`RB-PHYSICS-001-FR-024`) —
+    /// callable more than once, same pattern as `with_wall`; a scene with
+    /// no goal walls added (the default) behaves exactly as before they
+    /// existed. Deflects both the ball and, since `RB-PHYSICS-001-FR-028`,
+    /// a car too.
+    pub fn with_goal_wall(mut self, goal_wall: StaticGoalWall) -> PhysicsWorld {
+        self.goal_walls.push(goal_wall);
+        self
+    }
+
+    /// Adds one bounded wall to the scene (`RB-PHYSICS-001-FR-029`) —
+    /// callable more than once, same pattern as `with_wall`; a scene with
+    /// no bounded walls added (the default) behaves exactly as before
+    /// they existed. Deflects both the ball and every car, same as
+    /// `goal_walls`.
+    pub fn with_bounded_wall(mut self, bounded_wall: StaticBoundedWall) -> PhysicsWorld {
+        self.bounded_walls.push(bounded_wall);
+        self
+    }
+
+    /// Adds one net panel to the scene (`RB-PHYSICS-001-FR-033`) — callable
+    /// more than once, same pattern as `with_bounded_wall`; a scene with no
+    /// nets added (the default) behaves exactly as before nets existed.
+    /// Catches the ball and every car — see `nets`' own doc comment.
+    pub fn with_net(mut self, net: NetMesh) -> PhysicsWorld {
+        self.nets.push(net);
+        self
+    }
+
+    /// Adds one car-shaped body to the scene, with a neutral
+    /// (`ControllerInput::default()`) input and a full boost tank
+    /// (`drive::MAX_BOOST`) — set a real input afterward with
+    /// `set_car_input` if the car should actually drive. Its jump-held
+    /// state starts `false`, so an
+    /// already-`jump: true` initial input still counts as a fresh press; its
+    /// double jump starts available (`true`), matching a car that's
+    /// effectively "just landed" before its first step; its jump-hold
+    /// window starts at `0.0` (no ground jump in flight yet); its
+    /// cancelable-flip flag starts `false` (no dodge in flight yet).
+    /// Callable more than once —
+    /// `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)` builds a
+    /// two-car scene — since a car's `player_id` in `frame()` is just its
+    /// index in `cars`, added cars are always appended, never inserted.
+    pub fn with_car(mut self, car: RigidBody) -> PhysicsWorld {
+        self.car_drive.push(drive::DriveState {
+            boost_used_per_second: self.boost_used_per_second,
+            dodge_forward_from_throttle: self.dodge_forward_from_throttle,
+            ..drive::DriveState::new()
+        });
+        self.cars.push(car);
+        self.car_inputs.push(ControllerInput::default());
+        self.car_teams.push(0);
+        self.demolished.push(false);
+        self.respawn_in.push(None);
+        self.respawn_pick.push(None);
+        self.respawn_settling.push(false);
+        self.supersonic.push(false);
+        self
+    }
+
+    /// Puts car `index` on `team`. Cars on different teams can demolish each
+    /// other (`RB-PHYSICS-001-FR-142`); every car starts on team 0.
+    pub fn set_car_team(&mut self, index: usize, team: u32) {
+        if let Some(slot) = self.car_teams.get_mut(index) {
+            *slot = team;
+        }
+    }
+
+    /// Chooses the spawn point (an index into `respawn::SPAWN_POINTS`) car `index` takes
+    /// the next time it respawns after a demolition; `None` takes
+    /// `respawn::default_pick`. The game's pick is random, so a replay of a recording
+    /// passes the one it shows (`respawn::nearest_spawn_point`).
+    pub fn set_respawn_point(&mut self, index: usize, point: Option<usize>) {
+        if let Some(slot) = self.respawn_pick.get_mut(index) {
+            *slot = point;
+        }
+    }
+
+    /// Sets up a kickoff (`RB-PHYSICS-001-FR-160`): every car takes its team's spawn slot
+    /// (`slots[i] % 5`, blue slots are `SPAWN_POINTS[0..5]`, orange `[5..10]`) as after a
+    /// respawn, with a third of a tank; the ball goes to the centre at rest, 100.49 uu up
+    /// (it falls and is held at 92.75 by the caller); every boost pad is active again.
+    /// Cars and ball keep falling from here, so a countdown settles them.
+    pub fn kickoff(&mut self, slots: &[usize]) {
+        for index in 0..self.cars.len() {
+            let slot = slots.get(index).copied().unwrap_or(0) % 5;
+            let pick = if self.car_teams[index] == 0 {
+                slot
+            } else {
+                5 + slot
+            };
+            self.respawn_pick[index] = Some(pick);
+            self.respawn_car(index);
+            let spot = respawn::SPAWN_POINTS[pick];
+            self.kickoff_spots.resize(self.cars.len(), None);
+            self.kickoff_spots[index] = Some((spot.x, spot.y, spot.yaw_degrees));
+        }
+        self.ball.position = Vec3::new(0.0, 0.0, respawn::KICKOFF_BALL_HEIGHT);
+        self.ball.linear_velocity = Vec3::ZERO;
+        self.ball.angular_velocity = Vec3::ZERO;
+        self.ball.wake();
+        if self.boost_pads.is_some() {
+            self.boost_pads = Some(BoostPads::standard());
+        }
+    }
+
+    /// Holds every car on its kickoff spot in the plane and not turning: the game keeps them
+    /// there through the countdown, letting them only fall and settle on their suspension.
+    pub fn hold_cars_on_their_spots(&mut self) {
+        for (car, anchor) in self.cars.iter_mut().zip(&self.kickoff_spots) {
+            let Some((x, y, yaw)) = *anchor else {
+                continue;
+            };
+            car.position.x = x;
+            car.position.y = y;
+            car.linear_velocity.x = 0.0;
+            car.linear_velocity.y = 0.0;
+            car.angular_velocity = Vec3::ZERO;
+            let half = yaw.to_radians() * 0.5;
+            car.orientation = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        }
+    }
+
+    /// Holds the ball still at the centre spot, `respawn::KICKOFF_BALL_REST_HEIGHT` up: the
+    /// game keeps it there through the countdown and until the first touch.
+    pub fn pin_ball_to_centre_spot(&mut self) {
+        self.ball.position = Vec3::new(0.0, 0.0, respawn::KICKOFF_BALL_REST_HEIGHT);
+        self.ball.linear_velocity = Vec3::ZERO;
+        self.ball.angular_velocity = Vec3::ZERO;
+    }
+
+    /// Whether car `index` is out of the match after a demolition.
+    pub fn is_demolished(&self, index: usize) -> bool {
+        self.demolished.get(index).copied().unwrap_or(false)
+    }
+
+    /// Sets car `index`'s current controller input, which persists across
+    /// steps until changed again (matching how a real controller's state
+    /// holds between frames). Panics if `index` is out of bounds — an
+    /// invalid index is a programming error, not a recoverable runtime
+    /// condition (see the crate's "trust internal callers" convention).
+    pub fn set_car_input(&mut self, index: usize, input: ControllerInput) {
+        self.car_inputs[index] = input;
+    }
+
+    /// Sets how much fuel every car, present and later, drains per second
+    /// of held boost: RocketSim's `MutatorConfig::boostUsedPerSecond`
+    /// (`RB-PHYSICS-001-FR-111`). `drive::BOOST_USED_PER_SECOND` by default;
+    /// 0 is unlimited boost, as in freeplay. Negative rates count as 0.
+    pub fn set_boost_used_per_second(&mut self, rate: f32) {
+        self.boost_used_per_second = rate.max(0.0);
+        for drive in &mut self.car_drive {
+            drive.boost_used_per_second = self.boost_used_per_second;
+        }
+    }
+
+    /// Whether every car, present and later, dodges forward by the throttle
+    /// when the pitch stick is centred (`RB-PHYSICS-001-FR-103`,
+    /// `RB-PHYSICS-001-FR-147`). Off by default, as RocketSim; the owner's
+    /// keyboard captures (which do not record the dodge input) need it on.
+    pub fn set_dodge_forward_from_throttle(&mut self, on: bool) {
+        self.dodge_forward_from_throttle = on;
+        for drive in &mut self.car_drive {
+            drive.dodge_forward_from_throttle = on;
+        }
+    }
+
+    /// Sets car `index`'s current boost amount, clamped to
+    /// `[0, drive::MAX_BOOST]`. Panics if `index` is out of bounds (see
+    /// `set_car_input`).
+    pub fn set_car_boost(&mut self, index: usize, amount: f32) {
+        self.car_drive[index].boost_amount = amount.clamp(0.0, drive::MAX_BOOST);
+    }
+
+    /// Puts Soccar's 34 boost pads in the scene, all active, or takes them out
+    /// (`RB-PHYSICS-001-FR-149`). Off by default.
+    pub fn set_boost_pads(&mut self, on: bool) {
+        self.boost_pads = on.then(BoostPads::standard);
+    }
+
+    /// The scene's boost pads and their cooldowns, if it has any.
+    pub fn boost_pads(&self) -> Option<&BoostPads> {
+        self.boost_pads.as_ref()
+    }
+
+    /// Applies forces and integrates velocities for one body — the first
+    /// phase of `btDiscreteDynamicsWorld::stepSimulation`
+    /// (`predictUnconstrainedMotion`, run for every body before any
+    /// collision detection happens).
+    fn apply_forces_and_integrate_velocities(body: &mut RigidBody, gravity: Vec3, dt: f32) {
+        body.clear_forces();
+        integrate::apply_gravity(body, gravity);
+        integrate::apply_damping(body, dt);
+        integrate::integrate_velocities(body, dt);
+    }
+
+    /// Like `apply_forces_and_integrate_velocities`, but for a car: also
+    /// applies `drive::apply_driven_forces` (throttle/steer/handbrake/jump
+    /// gated on `wheels` touching, cast from the car's position at the start
+    /// of this step, before anything moves; boost not gated on it, but
+    /// draining `drive_state.boost_amount`; tire grip, cut by the
+    /// handbrake; jump firing an
+    /// instantaneous upward velocity change on a fresh press, tracked via
+    /// `drive_state.jump_held`;
+    /// double jump firing the same kind of impulse on a fresh airborne
+    /// press, gated on and consuming `double_jump_available`, restored on
+    /// landing; wall jump firing an outward-plus-upward impulse instead,
+    /// gated on `wall_normal` — also computed up front from the car's
+    /// position at the start of this step, like `on_ground`; the ground
+    /// jump's variable height, driven by `jump_hold_time_remaining`; a
+    /// dodge's flip torque and vertical damping, driven by `flip`)
+    /// alongside gravity, then `drive::apply_wheel_forces` (suspension and
+    /// sticky force, `RB-PHYSICS-001-FR-090`), so `input`'s forces/impulses,
+    /// tire grip and suspension are part of the same velocity-prediction
+    /// phase. The car's angular speed is not clamped here: `step` clamps it
+    /// after the transform integrates (`RB-PHYSICS-001-FR-087`).
+    fn drive_and_integrate_velocities(
+        car: &mut RigidBody,
+        input: &ControllerInput,
+        wheels: &drive::WheelContacts,
+        wall_normal: Option<Vec3>,
+        drive_state: &mut drive::DriveState,
+        gravity: Vec3,
+        dt: f32,
+    ) {
+        car.clear_forces();
+        integrate::apply_gravity(car, gravity);
+        drive::apply_driven_forces(car, input, wheels, wall_normal, drive_state, dt);
+        drive::apply_wheel_forces(car, input, wheels, drive_state, dt);
+        integrate::apply_damping(car, dt);
+        integrate::integrate_velocities(car, dt);
+    }
+
+    /// Detects every one of `body`'s contacts against every static surface
+    /// in the scene — the ground, every wall, every curve
+    /// (`RB-PHYSICS-001-FR-020`), every compound-corner fillet
+    /// (`RB-PHYSICS-001-FR-023`), every goal wall (`RB-PHYSICS-001-FR-024`),
+    /// and every bounded wall (`RB-PHYSICS-001-FR-029`) — returning every
+    /// `(restitution, friction, contacts)` group found, rather than
+    /// resolving them itself. `step` folds every body's own groups together
+    /// with every ball-vs-car/car-vs-car manifold into one combined call to
+    /// `solver::resolve_manifolds` (`RB-PHYSICS-001-FR-052`), instead of
+    /// this function resolving a body's static contacts on its own via
+    /// `solver::resolve_static_manifolds` (`RB-PHYSICS-001-FR-051`) before
+    /// `step`'s own separate dynamic-manifold solve ever reads that body's
+    /// updated velocity.
+    ///
+    /// Before `RB-PHYSICS-001-FR-051`, `step` called one dedicated
+    /// `resolve_*_contact` helper per static shape type in sequence (ground,
+    /// then every wall, then every curve, and so on) — each one fully
+    /// resolving and applying its own `SOLVER_ITERATIONS` pass before the
+    /// next shape's setup even read `body`'s updated velocity. FR-051 fixed
+    /// that for a body touching two different *static* surfaces at once (a
+    /// car driving along a wall near the floor, or wedged into a corner)
+    /// via `solver::resolve_static_manifolds`'s own combined solve — but
+    /// left the exact same gap one level up: a body's now-combined static
+    /// resolve was still its own separate call, fully resolved and applied
+    /// before `resolve_dynamic_manifolds`'s own setup for that same body
+    /// (touching another car, say) ever read the result. `RB-PHYSICS-001-FR-052`
+    /// closes that remaining gap by folding this function's own gathered
+    /// groups into `solver::resolve_manifolds`'s shared solve instead — see
+    /// that function's own doc comment for the exact mechanism and its
+    /// dedicated test. `scene` bundles every static-shape slice into one
+    /// borrow (clippy's `too_many_arguments` threshold is the only reason
+    /// this isn't just six separate parameters — every caller still borrows
+    /// the same six `PhysicsWorld` fields directly, same as before
+    /// `RB-PHYSICS-001-FR-051`).
+    ///
+    /// `is_car` gives every manifold RocketSim's fixed car-vs-world
+    /// coefficients (`CAR_WORLD_MATERIAL`, `RB-PHYSICS-001-FR-100`); every
+    /// other body's manifolds carry the shape's own coefficients.
+    /// `persistent` (cars only) holds the body's persistent contact with
+    /// the ground, each wall and each mesh (`RB-PHYSICS-001-FR-105`,
+    /// FR-106); without it (the ball) they are tested statelessly.
+    fn static_contact_manifolds(
+        body: &RigidBody,
+        scene: &StaticScene,
+        is_car: bool,
+        mut persistent: Option<&mut [collision::ContactManifold]>,
+        mut ball_manifolds: Option<&mut [mesh::BallManifold]>,
+    ) -> Vec<(solver::StaticMaterial, Vec<collision::Contact>)> {
+        let mut stateful = |index: usize,
+                            update: &dyn Fn(
+            &mut collision::ContactManifold,
+        ) -> Vec<collision::Contact>| {
+            match persistent.as_deref_mut().and_then(|all| all.get_mut(index)) {
+                Some(manifold) => update(manifold),
+                None => update(&mut collision::ContactManifold::default()),
+            }
+        };
+        let material = |restitution: f32, friction: f32| {
+            if is_car {
+                CAR_WORLD_MATERIAL
+            } else {
+                solver::StaticMaterial::Surface {
+                    restitution,
+                    friction,
+                }
+            }
+        };
+        let mut manifolds = Vec::new();
+        let mut push = |restitution: f32, friction: f32, contacts: Vec<collision::Contact>| {
+            if !contacts.is_empty() {
+                manifolds.push((material(restitution, friction), contacts));
+            }
+        };
+        let ground = scene.ground;
+        push(
+            ground.restitution,
+            ground.friction,
+            stateful(0, &|manifold| manifold.update_plane(body, ground)),
+        );
+        for (index, wall) in scene.walls.iter().enumerate() {
+            push(
+                wall.restitution,
+                wall.friction,
+                stateful(index + 1, &|manifold| manifold.update_plane(body, wall)),
+            );
+        }
+        for curve in scene.curves {
+            push(
+                curve.restitution,
+                curve.friction,
+                collision::contacts_vs_quarter_pipe(body, curve),
+            );
+        }
+        for fillet in scene.corner_fillets {
+            push(
+                fillet.restitution,
+                fillet.friction,
+                collision::contacts_vs_corner_fillet(body, fillet),
+            );
+        }
+        for (index, mesh) in scene.meshes.iter().enumerate() {
+            // The ball keeps its own persistent manifold per mesh
+            // (RB-PHYSICS-001-FR-121) when the caller carries one.
+            let ball_manifold = ball_manifolds
+                .as_deref_mut()
+                .and_then(|all| all.get_mut(index));
+            let contacts = match (body.shape, ball_manifold) {
+                (crate::body::Shape::Sphere { radius }, Some(manifold)) if !is_car => mesh
+                    .sphere_manifold(
+                        body.position,
+                        &body.orientation,
+                        radius,
+                        &mesh::SphereLimits::BALL,
+                        manifold,
+                    ),
+                _ => stateful(1 + scene.walls.len() + index, &|manifold| {
+                    manifold.update_mesh(body, mesh)
+                }),
+            };
+            push(mesh.restitution, mesh.friction, contacts);
+        }
+        for goal_wall in scene.goal_walls {
+            push(
+                goal_wall.plane.restitution,
+                goal_wall.plane.friction,
+                collision::contacts_vs_goal_wall(body, goal_wall),
+            );
+        }
+        for bounded_wall in scene.bounded_walls {
+            push(
+                bounded_wall.plane.restitution,
+                bounded_wall.plane.friction,
+                collision::contacts_vs_bounded_wall(body, bounded_wall),
+            );
+        }
+        manifolds
+    }
+
+    /// Integrates `body`'s transform from its (already-resolved) velocity,
+    /// then refreshes its world-space inertia tensor for the new
+    /// orientation — the last phase of `stepSimulation`
+    /// (`integrateTransforms`), run once every contact this step has been
+    /// resolved.
+    fn integrate_transform_and_refresh_inertia(body: &mut RigidBody, dt: f32) {
+        let (position, orientation) = integrate::integrate_transform(
+            body.position,
+            body.orientation,
+            body.linear_velocity,
+            body.angular_velocity,
+            dt,
+        );
+        body.position = position;
+        body.orientation = orientation;
+        body.update_inertia_tensor();
+    }
+
+    /// Advances the whole scene by `dt` seconds, matching
+    /// `btDiscreteDynamicsWorld::stepSimulation`'s staged pipeline: predict
+    /// every body's unconstrained velocity (for cars, including
+    /// `drive::apply_driven_forces` from that car's current input), then
+    /// detect and resolve every contact — every body's own static-surface
+    /// contacts (`static_contact_manifolds`) and every ball-vs-car/car-vs-car
+    /// manifold, all resolved together in one combined solve
+    /// (`solver::resolve_manifolds`, since `RB-PHYSICS-001-FR-052`) — then
+    /// integrate every body's transform, never resolving one body's
+    /// transform before another body's contacts have had a chance to affect
+    /// it.
+    ///
+    /// Before `RB-PHYSICS-001-FR-030`, car-vs-car and ball-vs-car pairs
+    /// were each resolved with their own independent call to
+    /// `solver::resolve_contacts_between`, fully converged and applied
+    /// before the next pair's setup even read a body's velocity — an
+    /// approximation once 3+ bodies were mutually touching in the same
+    /// step (e.g. a car pinned between the ball and another car), since
+    /// the shared body in two pairs never had both contacts reasoned about
+    /// together. `solver::resolve_dynamic_manifolds` fixed that by sharing
+    /// one `DeltaVelocity` accumulator per body index across every dynamic
+    /// manifold that body takes part in. `RB-PHYSICS-001-FR-051` then made
+    /// the same fix one level down, for a body's own multiple static-shape
+    /// contacts (`solver::resolve_static_manifolds`). But each of those two
+    /// combined solves was still its own separate call — a body's static
+    /// contacts fully resolved and applied before the dynamic solve's own
+    /// setup for that same body (touching another car, say) ever read the
+    /// result — the identical order-dependent gap one level up.
+    /// `RB-PHYSICS-001-FR-052` closes that: `solver::resolve_manifolds`
+    /// folds a step's static and dynamic manifolds into one shared solve,
+    /// still simpler than Bullet's actual interleaved-across-islands solver
+    /// architecture (no persistent islands), but a genuine combined solve
+    /// for everything touching a body this step, not a sequence of
+    /// independent ones. Since `RB-PHYSICS-001-FR-035`,
+    /// `dynamic_manifold_caches` also carries each dynamic manifold's
+    /// converged impulses across steps, so `solver::resolve_manifolds`
+    /// warm-starts that channel from last step's answer instead of zero
+    /// (a body's static contacts still cold-start every call) — see that
+    /// function's and `solver::ContactCache`'s own doc comments. Since
+    /// `RB-PHYSICS-001-FR-037`, the ball and every car have their sleep
+    /// state (`body::RigidBody::update_sleep_state`) re-evaluated once
+    /// every contact above (including the net panels) is resolved but
+    /// before the transform integrates, so a body newly asleep this step
+    /// freezes in place this same step. Since `RB-PHYSICS-001-FR-061`, the
+    /// ball's own linear and angular speed are hard-capped
+    /// (`clamp_ball_velocity`) at that same point — after contact
+    /// resolution, before sleep evaluation and transform integration —
+    /// matching real RocketSim's own placement for this same clamp.
+    pub fn step(&mut self, dt: f32) {
+        // A car that came back last tick drops to its respawn height with its boost.
+        for index in 0..self.cars.len() {
+            if std::mem::take(&mut self.respawn_settling[index]) {
+                self.cars[index].position.z = respawn::RESPAWN_HEIGHT;
+                self.car_drive[index].boost_amount = respawn::RESPAWN_BOOST;
+            }
+        }
+        // Where each car starts the tick, for the boost pad test at its end.
+        let pad_starts: Vec<Vec3> = if self.boost_pads.is_some() {
+            self.cars.iter().map(|car| car.position).collect()
+        } else {
+            Vec::new()
+        };
+        // Ground contact for driving purposes is checked up front, against
+        // each car's position at the start of this step (before gravity or
+        // driven forces move anything). Since RB-PHYSICS-001-FR-088 it's
+        // RocketSim's wheel-ray rule (three of four wheels reach the
+        // floor), not box contact: a car bouncing a few uu off the floor
+        // after a landing is still grounded, so a jump press there jumps
+        // instead of dodging. The same hits drive the suspension
+        // (RB-PHYSICS-001-FR-090), as RocketSim casts once per tick.
+        let car_wheels: Vec<drive::WheelContacts> = self
+            .cars
+            .iter()
+            .map(|car| drive::cast_wheels(car, |o, d, l| self.wheel_ray(o, d, l), dt))
+            .collect();
+        // Same idea as car_wheels, but for walls: the outward push-off
+        // direction for a wall jump. Since `RB-PHYSICS-001-FR-039`, a car
+        // touching two walls at once (a corner — reachable at a diagonal
+        // corner wall's own two seams, where it meets a side or back wall)
+        // sums every touched wall's normal and normalizes the result,
+        // instead of the old "whichever wall comes first in `self.walls`"
+        // simplification (RB-PHYSICS-001-FR-013's original Non-goal) — so a
+        // corner wall jump pushes diagonally away from the corner, blending
+        // both walls, rather than firing along only one of them depending
+        // on iteration order. A car touching exactly one wall gets that
+        // wall's own normal back unchanged (summing a single unit vector
+        // and normalizing is a no-op), so the common single-wall case is
+        // unaffected. The only case `normalize` can fail is two touched
+        // walls with exactly opposite normals (summing to zero) —
+        // geometrically impossible for a convex arena interior, but falls
+        // back to the first touched wall's normal rather than panicking if
+        // it ever happened.
+        let car_wall_normal: Vec<Option<Vec3>> = self
+            .cars
+            .iter()
+            .map(|car| {
+                let touched_normals: Vec<Vec3> = self
+                    .walls
+                    .iter()
+                    .filter(|wall| !collision::contacts_vs_plane(car, wall).is_empty())
+                    .map(|wall| wall.normal)
+                    .collect();
+                let mut summed_normal = Vec3::ZERO;
+                for normal in &touched_normals {
+                    summed_normal += *normal;
+                }
+                summed_normal
+                    .normalize()
+                    .or_else(|| touched_normals.first().copied())
+            })
+            .collect();
+
+        Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
+        for (((((car, input), wheels), wall_normal), drive_state), gone) in self
+            .cars
+            .iter_mut()
+            .zip(self.car_inputs.iter())
+            .zip(car_wheels.iter())
+            .zip(car_wall_normal.iter())
+            .zip(self.car_drive.iter_mut())
+            .zip(self.demolished.iter())
+        {
+            if *gone {
+                continue;
+            }
+            Self::drive_and_integrate_velocities(
+                car,
+                input,
+                wheels,
+                *wall_normal,
+                drive_state,
+                self.gravity,
+                dt,
+            );
+        }
+
+        // Field by field rather than `static_scene()`, so the cars' plane
+        // manifolds can be borrowed mutably alongside it.
+        let static_scene = StaticScene {
+            ground: &self.ground,
+            walls: &self.walls,
+            curves: &self.curves,
+            corner_fillets: &self.corner_fillets,
+            meshes: &self.meshes,
+            goal_walls: &self.goal_walls,
+            bounded_walls: &self.bounded_walls,
+        };
+        // Combined static-and-dynamic solve (RB-PHYSICS-001-FR-052): every
+        // body's own static-shape contacts (`static_manifolds`) and every
+        // ball-vs-car/car-vs-car manifold (`dynamic_manifolds`) are gathered
+        // first and resolved together in one `solver::resolve_manifolds`
+        // call, sharing one iteration budget per body — instead of this
+        // body's static contacts being fully resolved and applied by their
+        // own separate call before the dynamic solve's own setup for that
+        // same body ever read the result (see that function's own doc
+        // comment). Index 0 is the ball, index `i + 1` is `self.cars[i]`.
+        let mut bodies: Vec<RigidBody> = Vec::with_capacity(1 + self.cars.len());
+        bodies.push(self.ball);
+        bodies.extend(self.cars.iter().copied());
+
+        let static_count = 1 + self.walls.len() + self.meshes.len();
+        self.car_static_manifolds
+            .resize_with(self.cars.len(), Vec::new);
+        self.ball_mesh_manifolds
+            .resize_with(self.meshes.len(), Default::default);
+        for manifolds in &mut self.car_static_manifolds {
+            manifolds.resize_with(static_count, Default::default);
+        }
+        let mut static_manifolds: Vec<(usize, solver::StaticMaterial, Vec<collision::Contact>)> =
+            Vec::new();
+        for (body_index, body) in bodies.iter().enumerate() {
+            if body_index > 0 && self.demolished[body_index - 1] {
+                continue;
+            }
+            let plane_manifolds = body_index
+                .checked_sub(1)
+                .and_then(|car_index| self.car_static_manifolds.get_mut(car_index))
+                .map(Vec::as_mut_slice);
+            let found = Self::static_contact_manifolds(
+                body,
+                &static_scene,
+                body_index > 0,
+                plane_manifolds,
+                (body_index == 0).then_some(self.ball_mesh_manifolds.as_mut_slice()),
+            );
+            if body_index == 0 {
+                // RocketSim keeps every raw point's split-impulse push
+                // (RB-PHYSICS-001-FR-118) beside the one combined bounce,
+                // measuring penetration from its 91.25 uu sphere.
+                let band = crate::body::BALL_RADIUS - crate::body::BALL_COLLISION_RADIUS;
+                for (_, contacts) in &found {
+                    let pushes: Vec<collision::Contact> = contacts
+                        .iter()
+                        .map(|c| collision::Contact {
+                            penetration_depth: c.penetration_depth - band,
+                            ..*c
+                        })
+                        .collect();
+                    static_manifolds.push((0, solver::StaticMaterial::PushOnly, pushes));
+                }
+                if let Some(contact) = combined_ball_world_contact(body, found) {
+                    static_manifolds.push((0, ball_world_material(body), vec![contact]));
+                }
+            } else {
+                // RocketSim's `worldContact`: the last static contact the
+                // car's body made this step, read by the next step's drive
+                // (`RB-PHYSICS-001-FR-123`).
+                let last_normal = found
+                    .last()
+                    .and_then(|(_, contacts)| contacts.last())
+                    .map(|contact| contact.normal);
+                if let Some(drive_state) = self.car_drive.get_mut(body_index - 1) {
+                    drive_state.world_contact_normal = last_normal;
+                }
+                for (material, contacts) in found {
+                    static_manifolds.push((body_index, material, contacts));
+                }
+            }
+        }
+
+        let mut dynamic_manifolds: Vec<(
+            usize,
+            usize,
+            Option<solver::PairMaterial>,
+            Vec<collision::Contact>,
+        )> = Vec::new();
+        self.ball_hit_ticks.resize(self.cars.len(), None);
+        let mut ball_hit_velocity = Vec3::ZERO;
+        // Car-ball contacts use RocketSim's 91.25 sphere against the
+        // margin-rounded hitbox, admitted up to the pair's breaking
+        // threshold (RB-PHYSICS-001-FR-125); the world radius stays
+        // `BALL_RADIUS`.
+        let mut hit_sphere = self.ball;
+        hit_sphere.shape = crate::body::Shape::Sphere {
+            radius: crate::body::BALL_COLLISION_RADIUS,
+        };
+        for (car_index, car) in self.cars.iter().enumerate() {
+            if self.demolished[car_index] {
+                continue;
+            }
+            let contacts = collision::contacts_between(&hit_sphere, car);
+            if contacts.is_empty() {
+                continue;
+            }
+            dynamic_manifolds.push((0, car_index + 1, Some(self.car_ball.material), contacts));
+            let last = &mut self.ball_hit_ticks[car_index];
+            if last.is_none_or(|tick| self.tick_count > tick + 1) {
+                *last = Some(self.tick_count);
+                ball_hit_velocity += extra_ball_hit_velocity(&self.ball, car, &self.car_ball);
+            }
+        }
+        let car_count = self.cars.len();
+        self.bump_ticks.resize(car_count, Vec::new());
+        for row in &mut self.bump_ticks {
+            row.resize(car_count, None);
+        }
+        let mut bump_velocity = vec![Vec3::ZERO; car_count];
+        let mut newly_demolished: Vec<usize> = Vec::new();
+        for (state, car) in self.supersonic.iter_mut().zip(&self.cars) {
+            let speed = car.linear_velocity.length();
+            *state = speed >= SUPERSONIC_START_SPEED
+                || (*state && speed >= SUPERSONIC_MAINTAIN_MIN_SPEED);
+        }
+        for i in 0..car_count {
+            for j in (i + 1)..car_count {
+                if self.demolished[i] || self.demolished[j] {
+                    continue;
+                }
+                let contacts = collision::contacts_between(&self.cars[i], &self.cars[j]);
+                if contacts.is_empty() {
+                    continue;
+                }
+                // Either car bumps the other when its own nose is what touched
+                // (RB-PHYSICS-001-FR-140); both do in a head-on.
+                for (bumper, victim) in [(i, j), (j, i)] {
+                    let forward = drive::forward_axis(&self.cars[bumper]);
+                    // How far ahead of the bumper's origin the other car's origin lies
+                    // (`RB-PHYSICS-001-FR-158`): two cars driving at each other 100 uu
+                    // off line bump each other although one's nose lands on the other's
+                    // front corner, not nose to nose.
+                    let front = (self.cars[victim].position - self.cars[bumper].position)
+                        .dot(&forward)
+                        > BUMP_MIN_FORWARD_DIST;
+                    let last = &mut self.bump_ticks[bumper][victim];
+                    // A nose pitched far off the horizontal (a front flip's, straight down
+                    // at the hit) bumps nobody (`RB-PHYSICS-001-FR-152`): the two push on in
+                    // the ordinary collision.
+                    let level = forward.z.abs() <= BUMP_MAX_FORWARD_Z;
+                    if front
+                        && level
+                        && last.is_none_or(|tick| self.tick_count >= tick + BUMP_COOLDOWN_TICKS)
+                    {
+                        *last = Some(self.tick_count);
+                        if self.supersonic[bumper]
+                            && self.car_teams[bumper] != self.car_teams[victim]
+                        {
+                            // A supersonic nose on an enemy: demolished (the
+                            // collision itself still happens this tick).
+                            newly_demolished.push(victim);
+                        } else {
+                            // The air bump (down, 0.99 of the speed) is for two airborne
+                            // cars; an airborne bumper on a grounded victim bumps like a
+                            // ground one (`RB-PHYSICS-001-FR-153`).
+                            bump_velocity[victim] += bump_velocity_of(
+                                &self.cars[bumper],
+                                !drive::is_on_ground(&car_wheels[bumper])
+                                    && !drive::is_on_ground(&car_wheels[victim]),
+                            );
+                        }
+                    }
+                }
+                dynamic_manifolds.push((i + 1, j + 1, Some(CAR_CAR_MATERIAL), contacts));
+            }
+        }
+
+        solver::resolve_manifolds(
+            &mut bodies,
+            &static_manifolds,
+            &dynamic_manifolds,
+            dt,
+            &mut self.dynamic_manifold_caches,
+        );
+
+        // Net panels (RB-PHYSICS-001-FR-033, and since RB-PHYSICS-001-FR-038,
+        // a car too): each net's own internal physics (spring forces, its own
+        // sub-stepped integration) plus every body's contact against it,
+        // resolved after every other contact this step so each body's
+        // velocity going in already reflects gravity, driven forces, and
+        // every static/dynamic contact above — see `nets`' own doc comment
+        // for why this isn't part of `resolve_manifolds`' shared solve.
+        // Reuses the same `bodies` snapshot `resolve_manifolds` just
+        // resolved (index 0 the ball, index `i + 1` `self.cars[i]`,
+        // exactly as above) rather than syncing back to `self.ball`/`self.cars`
+        // and rebuilding a fresh one, deferring that sync until every net has
+        // had its turn.
+        for net in &mut self.nets {
+            net.step(&mut bodies, self.gravity, dt);
+        }
+
+        self.ball = bodies[0];
+        for (car, resolved) in self.cars.iter_mut().zip(bodies.iter().skip(1)) {
+            *car = *resolved;
+        }
+
+        // Hard ball speed/angular-speed caps (RB-PHYSICS-001-FR-061):
+        // applied right after this step's contact resolution (including
+        // any net, just above), matching real RocketSim's own placement —
+        // see `clamp_ball_velocity`'s own doc comment.
+        // Sleeping (RB-PHYSICS-001-FR-037): evaluated once every other
+        // contact this step has already been resolved (including the net
+        // panels just above) but before the transform integrates, so a
+        // body that goes to sleep this step also freezes in place this
+        // same step instead of drifting one more frame first — see
+        // `body::RigidBody::update_sleep_state`'s own doc comment.
+        self.ball.update_sleep_state(dt);
+        for car in &mut self.cars {
+            car.update_sleep_state(dt);
+        }
+
+        Self::integrate_transform_and_refresh_inertia(&mut self.ball, dt);
+        // RocketSim adds the extra hit velocity at the end of the tick
+        // (`Ball::_FinishPhysicsTick`), after Bullet has moved the ball, and
+        // then applies the speed caps.
+        self.ball.linear_velocity += ball_hit_velocity;
+        clamp_ball_velocity(&mut self.ball);
+        for ((car, bump), gone) in self
+            .cars
+            .iter_mut()
+            .zip(&bump_velocity)
+            .zip(&self.demolished)
+        {
+            if *gone {
+                continue;
+            }
+            Self::integrate_transform_and_refresh_inertia(car, dt);
+            // The bump's extra velocity goes on after Bullet has moved the car,
+            // as the ball's does, then the speed cap below applies.
+            car.linear_velocity += *bump;
+            // RB-PHYSICS-001-FR-087: clamp after the orientation has moved
+            // with this step's unclamped spin, as RocketSim's
+            // `Car::_PostTickUpdate` does after Bullet's step. The owner's
+            // capture shows a flipping car turning at ~7.6 rad/s while its
+            // reported spin stays at the 5.5 cap.
+            drive::clamp_velocity(car);
+        }
+
+        if let Some(pads) = self.boost_pads.as_mut() {
+            // A pad taken last tick counts down first, so the tick it is taken
+            // on is not one of its 480 (or 1200).
+            pads.tick(dt);
+            for (index, start) in pad_starts.iter().enumerate() {
+                if self.demolished[index] {
+                    continue;
+                }
+                let drive = &mut self.car_drive[index];
+                drive.boost_amount =
+                    pads.collect(*start, self.cars[index].position, drive.boost_amount);
+            }
+        }
+
+        // Cars out since an earlier tick count down; the tick a car is demolished on is
+        // not one of its 360.
+        for index in 0..self.cars.len() {
+            let Some(left) = self.respawn_in[index] else {
+                continue;
+            };
+            let left = left - dt;
+            if left <= 1.0e-3 {
+                self.respawn_car(index);
+            } else {
+                self.respawn_in[index] = Some(left);
+            }
+        }
+        for victim in newly_demolished {
+            self.demolished[victim] = true;
+            self.respawn_in[victim] = Some(respawn::RESPAWN_DELAY_SECS);
+            self.cars[victim].linear_velocity = Vec3::ZERO;
+            self.cars[victim].angular_velocity = Vec3::ZERO;
+        }
+
+        self.elapsed_secs += dt;
+        self.tick_count += 1;
+    }
+
+    /// Brings demolished car `index` back at a spawn point, at rest, as the game's first
+    /// frame back shows it (`respawn`): a fresh drive state with no boost, a level body
+    /// turned to the point's heading. The next tick lowers it to its respawn height
+    /// and gives it its boost.
+    fn respawn_car(&mut self, index: usize) {
+        let pick = self.respawn_pick[index]
+            .take()
+            .unwrap_or_else(|| respawn::default_pick(self.tick_count, index));
+        let point = respawn::SPAWN_POINTS[pick % respawn::SPAWN_POINTS.len()];
+        let car = &mut self.cars[index];
+        car.position = point.position(respawn::SPAWN_RAW_HEIGHT);
+        car.orientation = point.rotation();
+        car.linear_velocity = Vec3::ZERO;
+        car.angular_velocity = Vec3::ZERO;
+        car.wake();
+        self.car_drive[index] = drive::DriveState {
+            boost_amount: 0.0,
+            boost_used_per_second: self.boost_used_per_second,
+            dodge_forward_from_throttle: self.dodge_forward_from_throttle,
+            ..drive::DriveState::new()
+        };
+        self.supersonic[index] = false;
+        self.demolished[index] = false;
+        self.respawn_in[index] = None;
+        self.respawn_settling[index] = true;
+    }
+
+    /// Sets the ball's and every car's position, orientation, velocities
+    /// and boost fuel to `frame`'s (cars by `player_id`), keeping the rest
+    /// of each car's drive state (jump and flip timers): the per-step reset
+    /// of a one-step prediction run (`simulate_recorded_one_step`). Cars
+    /// `frame` doesn't mention keep their state. Fuel is recorded state
+    /// like the rest (`RB-VERIFY-003-FR-009`): an unlimited-boost freeplay
+    /// capture holds it at 100 while the candidate's own tank would run dry.
+    pub fn snap_to_frame(&mut self, frame: &PhysicsFrame) {
+        // A ball that stays within its own radius of where the world left
+        // it keeps its contact history; one that jumped (a reset) has none
+        // (RB-PHYSICS-001-FR-128).
+        let teleported =
+            (frame.ball.position - self.ball.position).length() > crate::body::BALL_RADIUS;
+        snap_body(
+            &mut self.ball,
+            frame.ball.position,
+            frame.ball.rotation,
+            frame.ball.velocity,
+            frame.ball.angular_velocity,
+        );
+        for car_state in &frame.cars {
+            if let Some(car) = self.cars.get_mut(car_state.player_id as usize) {
+                snap_body(
+                    car,
+                    car_state.position,
+                    car_state.rotation,
+                    car_state.velocity,
+                    car_state.angular_velocity,
+                );
+            }
+            if let Some(drive) = self.car_drive.get_mut(car_state.player_id as usize) {
+                drive.boost_amount = car_state.boost_amount.clamp(0.0, drive::MAX_BOOST);
+            }
+        }
+        if teleported {
+            self.ball_mesh_manifolds.clear();
+        }
+    }
+
+    /// The scene's current state as a `PhysicsFrame`, for consumption by
+    /// `RB-VERIFY-003`'s divergence scorer. One `CarState` per car in
+    /// `self.cars`, `player_id` set to each car's index, `input` set to
+    /// that car's current `ControllerInput` (the one actually driving it
+    /// — not "recovered" the way `rb_replay_ingest`/`rb_capture_ingest`
+    /// use the field, but the same data), `boost_amount` its current fuel.
+    pub fn frame(&self) -> PhysicsFrame {
+        let cars = self
+            .cars
+            .iter()
+            .zip(self.car_inputs.iter())
+            .zip(self.car_drive.iter())
+            .enumerate()
+            .filter(|(i, _)| !self.demolished[*i])
+            .map(|(i, ((car, input), drive_state))| CarState {
+                player_id: i as u32,
+                position: car.position,
+                rotation: car.orientation,
+                velocity: car.linear_velocity,
+                angular_velocity: car.angular_velocity,
+                boost_amount: drive_state.boost_amount,
+                input: Some(*input),
+            })
+            .collect();
+        PhysicsFrame {
+            timestamp_secs: self.elapsed_secs,
+            ball: BallState {
+                position: self.ball.position,
+                rotation: self.ball.orientation,
+                velocity: self.ball.linear_velocity,
+                angular_velocity: self.ball.angular_velocity,
+            },
+            cars,
+        }
+    }
+}
+
+/// Runs `PhysicsWorld` for `duration_secs` at fixed `dt`, recording one
+/// `PhysicsFrame` per step. This is `RB-PHYSICS-001-FR-001`'s "produce a
+/// `Vec<PhysicsFrame>` the divergence scorer can consume" — the candidate
+/// trajectory `rb_verify_cli` compares against recorded ground truth.
+///
+/// Doesn't yet consume a recorded input sequence (no throttle/steer/boost
+/// coupling exists — a car body here is a free rigid box, not a driven
+/// vehicle) — it simulates the scene in isolation from its initial state.
+/// Once `RB-VERIFY-002` capture data exists, this signature grows an
+/// `inputs` parameter rather than staying input-free.
+pub fn simulate(mut world: PhysicsWorld, duration_secs: f32, dt: f32) -> Vec<PhysicsFrame> {
+    let steps = (duration_secs / dt).round() as u32;
+    let mut frames = Vec::with_capacity(steps as usize + 1);
+    frames.push(world.frame());
+    for _ in 0..steps {
+        world.step(dt);
+        frames.push(world.frame());
+    }
+    frames
+}
+
+/// `simulate`'s own doc comment named this exact next step: "once
+/// `RB-VERIFY-002` capture data exists, this signature grows an `inputs`
+/// parameter rather than staying input-free." That data now exists
+/// (`RB-PHYSICS-001-FR-076`) — this is that grown signature, as a sibling
+/// function rather than a breaking change to `simulate` itself (every
+/// existing input-free call site — this crate's own tests included — has
+/// no recorded input to supply and shouldn't need to fabricate one).
+///
+/// Drives `world` (typically freshly built by `PhysicsWorld::from_frame`
+/// applied to `recorded[0]`) forward using `recorded`'s own per-tick
+/// controller input and timestamp spacing: for each consecutive pair of
+/// recorded frames, every car's `input` from the *earlier* frame (the
+/// input that was actually held going into that tick, matching how
+/// `RB-VERIFY-002-FR-001`'s plugin captured it) is applied via
+/// `set_car_input`, then `world` steps forward by that pair's own
+/// `timestamp_secs` delta — deliberately not a fixed/hardcoded rate,
+/// since no confirmed real Rocket League physics-tick-rate constant
+/// exists anywhere in this crate (only the empirical ~120Hz implied by a
+/// real capture's own line count over its own duration, never a sourced
+/// citation) and driving by the recording's own actual spacing sidesteps
+/// needing that number at all. A car whose `player_id` doesn't index into
+/// `world.cars` (more recorded cars than `world` was seeded with) is
+/// silently left undriven that tick rather than panicking — real
+/// mid-capture car joins/leaves are unexercised territory this plumbing
+/// doesn't need to solve yet (see `RB-PHYSICS-001-FR-077`'s own
+/// Non-goals).
+///
+/// Returns one `PhysicsFrame` per element of `recorded` (the first is
+/// `world`'s own starting `frame()`, before any step) — this is the
+/// candidate trajectory `rb_domain::divergence::score` compares against
+/// `recorded` itself for `RB-PHYSICS-001-FR-077`'s real fidelity number.
+pub fn simulate_recorded(mut world: PhysicsWorld, recorded: &[PhysicsFrame]) -> Vec<PhysicsFrame> {
+    let mut frames = Vec::with_capacity(recorded.len());
+    frames.push(world.frame());
+    for pair in recorded.windows(2) {
+        step_recorded(&mut world, &pair[0], &pair[1]);
+        frames.push(world.frame());
+    }
+    frames
+}
+
+fn snap_body(body: &mut RigidBody, position: Vec3, rotation: Quat, velocity: Vec3, spin: Vec3) {
+    body.position = position;
+    body.orientation = rotation;
+    body.linear_velocity = velocity;
+    body.angular_velocity = spin;
+    body.update_inertia_tensor();
+    body.wake();
+}
+
+/// One-step predictions of `recorded` (`RB-VERIFY-003-FR-006`): before each
+/// step `world`'s bodies are snapped to the recorded frame
+/// (`PhysicsWorld::snap_to_frame`), so frame `i` of the result is the
+/// candidate's prediction of `recorded[i]` from `recorded[i - 1]` alone,
+/// free of the divergence earlier steps would otherwise carry forward.
+/// Each car's drive state (boost, jump, flip, ...) still runs on across
+/// steps. Frame `0` is `world`'s own starting frame.
+pub fn simulate_recorded_one_step(
+    mut world: PhysicsWorld,
+    recorded: &[PhysicsFrame],
+) -> Vec<PhysicsFrame> {
+    let mut frames = Vec::with_capacity(recorded.len());
+    frames.push(world.frame());
+    for pair in recorded.windows(2) {
+        world.snap_to_frame(&pair[0]);
+        step_recorded(&mut world, &pair[0], &pair[1]);
+        frames.push(world.frame());
+    }
+    frames
+}
+
+/// The first car's wheel hits at each recorded frame, as `step` would cast them
+/// from that state (frame `i` of the result is the cast at `recorded[i]`, the
+/// state `simulate_recorded_one_step` steps from to predict `recorded[i + 1]`),
+/// for lining a tick's one-step error up with what the wheels touched. The
+/// world is snapped to each frame as in `simulate_recorded_one_step`.
+pub fn wheel_contacts_along(
+    mut world: PhysicsWorld,
+    recorded: &[PhysicsFrame],
+) -> Vec<drive::WheelContacts> {
+    let mut hits = Vec::with_capacity(recorded.len());
+    for pair in recorded.windows(2) {
+        world.snap_to_frame(&pair[0]);
+        hits.push(world.wheel_contacts(0, pair[1].timestamp_secs - pair[0].timestamp_secs));
+        step_recorded(&mut world, &pair[0], &pair[1]);
+    }
+    hits
+}
+
+/// The first car's box-to-ball penetration at each recorded frame, as the engine would
+/// measure it from that state (`PhysicsWorld::car_ball_penetration`), one entry per step
+/// like `wheel_contacts_along`.
+pub fn car_ball_penetration_along(
+    mut world: PhysicsWorld,
+    recorded: &[PhysicsFrame],
+) -> Vec<Option<f32>> {
+    let mut depths = Vec::with_capacity(recorded.len());
+    for pair in recorded.windows(2) {
+        world.snap_to_frame(&pair[0]);
+        depths.push(world.car_ball_penetration(0));
+        step_recorded(&mut world, &pair[0], &pair[1]);
+    }
+    depths
+}
+
+/// k-step predictions of a recording (`RB-VERIFY-003-FR-008`): frame `i`
+/// of the result is the candidate's prediction of `recorded[i]` from
+/// `recorded[i - k]` (from `recorded[0]` for `i < k`), stepping the
+/// recorded inputs in between. Each prediction starts from a copy of a
+/// world kept on the recording by `simulate_recorded_one_step`'s per-step
+/// snapping, so drive state runs on as there. `k = 1` is one-step
+/// prediction; a larger `k` shows how error compounds over `k` ticks
+/// without the chaos of one free run. `k = 0` counts as 1.
+pub fn simulate_recorded_k_step(
+    mut world: PhysicsWorld,
+    recorded: &[PhysicsFrame],
+    k: usize,
+) -> Vec<PhysicsFrame> {
+    let k = k.max(1);
+    let last = recorded.len().saturating_sub(1);
+    let mut frames = Vec::with_capacity(recorded.len());
+    frames.push(world.frame());
+    for start in 0..last {
+        world.snap_to_frame(&recorded[start]);
+        let first_target = if start == 0 { 1 } else { start + k };
+        if first_target <= last {
+            let mut ahead = world.clone();
+            for step in start..(start + k).min(last) {
+                step_recorded(&mut ahead, &recorded[step], &recorded[step + 1]);
+                if step + 1 >= first_target {
+                    frames.push(ahead.frame());
+                }
+            }
+        }
+        step_recorded(&mut world, &recorded[start], &recorded[start + 1]);
+    }
+    frames
+}
+
+/// Applies `prev`'s recorded inputs and steps `world` to `next`'s time.
+fn step_recorded(world: &mut PhysicsWorld, prev: &PhysicsFrame, next: &PhysicsFrame) {
+    for car_state in &prev.cars {
+        let Some(input) = car_state.input else {
+            continue;
+        };
+        let index = car_state.player_id as usize;
+        if index < world.cars.len() {
+            world.set_car_input(index, input);
+        }
+    }
+    world.step(next.timestamp_secs - prev.timestamp_secs);
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::body::CAR_HALF_EXTENTS;
+    use rb_domain::Quat;
+
+    fn flat_ground() -> StaticPlane {
+        StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
+    }
+
+    /// `RB-VERIFY-003-FR-006`: predicting each frame of the candidate's
+    /// own run from the frame before it reproduces that run, since
+    /// snapping a body to its own state changes nothing.
+    #[test]
+    fn one_step_predictions_of_a_candidate_run_reproduce_it() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                steer: 0.5,
+                ..ControllerInput::default()
+            },
+        );
+        let mut recorded = vec![world.frame()];
+        for _ in 0..60 {
+            world.step(1.0 / 120.0);
+            recorded.push(world.frame());
+        }
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let fresh = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let predicted = simulate_recorded_one_step(fresh, &recorded);
+        assert_eq!(predicted.len(), recorded.len());
+        for (rec, pred) in recorded.iter().zip(&predicted).skip(1) {
+            let error = rec.cars[0].velocity.distance(&pred.cars[0].velocity);
+            assert!(error < 1e-2, "t={}: {error}", rec.timestamp_secs);
+            let ball_error = rec.ball.position.distance(&pred.ball.position);
+            assert!(ball_error < 1e-3, "ball t={}", rec.timestamp_secs);
+        }
+    }
+
+    #[test]
+    fn a_car_box_overlapping_the_ball_reports_a_penetration_and_a_distant_one_none() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let touching = RigidBody::standard_car(Vec3::new(0.0, 0.0, 150.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(touching);
+        let depth = world
+            .car_ball_penetration(0)
+            .expect("the box is inside the ball");
+        assert!(depth > 0.0, "{depth}");
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let far = RigidBody::standard_car(Vec3::new(2000.0, 0.0, 17.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(far);
+        assert!(world.car_ball_penetration(0).is_none());
+    }
+
+    /// The wheel instrument (PARITY-PLAN A.1): a car on flat ground has all four
+    /// wheels on the floor, normal up, and the instrument changes nothing.
+    #[test]
+    fn a_car_on_the_floor_reports_four_wheel_hits_with_the_floor_normal() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let before = world.frame();
+        let hits = world.wheel_contacts(0, 1.0 / 120.0);
+        assert_eq!(world.frame(), before, "casting rays moves nothing");
+        for hit in hits {
+            let hit = hit.expect("every wheel reaches the floor");
+            assert!((hit.normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
+            assert!(hit.suspension_length() > 0.0);
+        }
+    }
+
+    #[test]
+    fn a_car_in_the_air_reports_no_wheel_hits() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 400.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        assert!(world
+            .wheel_contacts(0, 1.0 / 120.0)
+            .iter()
+            .all(Option::is_none));
+    }
+
+    #[test]
+    fn wheel_hits_along_a_recording_are_one_per_step_and_follow_the_car_off_the_floor() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        let mut recorded = vec![world.frame()];
+        for _ in 0..30 {
+            world.step(1.0 / 120.0);
+            recorded.push(world.frame());
+        }
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let fresh = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let hits = wheel_contacts_along(fresh, &recorded);
+        assert_eq!(hits.len(), recorded.len() - 1);
+        assert!(
+            hits[0].iter().all(Option::is_some),
+            "on the floor at the start"
+        );
+        assert!(
+            hits[29].iter().all(Option::is_none),
+            "in the air after the jump"
+        );
+    }
+
+    /// A driven car on flat ground and a falling ball, 60 ticks, and a
+    /// fresh world to predict that run from.
+    fn candidate_run() -> (Vec<PhysicsFrame>, PhysicsWorld) {
+        let fresh = || {
+            let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+            let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+            PhysicsWorld::new(ball, flat_ground()).with_car(car)
+        };
+        let mut world = fresh();
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                steer: 0.5,
+                ..ControllerInput::default()
+            },
+        );
+        let mut recorded = vec![world.frame()];
+        for _ in 0..60 {
+            world.step(1.0 / 120.0);
+            recorded.push(world.frame());
+        }
+        (recorded, fresh())
+    }
+
+    /// `RB-VERIFY-003-FR-008`: k-step predictions of the candidate's own
+    /// run reproduce it, and `k = 1` (or 0) is one-step prediction.
+    #[test]
+    fn k_step_predictions_of_a_candidate_run_reproduce_it() {
+        let (recorded, fresh) = candidate_run();
+        let predicted = simulate_recorded_k_step(fresh.clone(), &recorded, 10);
+        assert_eq!(predicted.len(), recorded.len());
+        for (rec, pred) in recorded.iter().zip(&predicted).skip(1) {
+            let error = rec.cars[0].velocity.distance(&pred.cars[0].velocity);
+            assert!(error < 1e-2, "t={}: {error}", rec.timestamp_secs);
+        }
+        let one_step = simulate_recorded_one_step(fresh.clone(), &recorded);
+        assert_eq!(
+            simulate_recorded_k_step(fresh.clone(), &recorded, 1),
+            one_step
+        );
+        assert_eq!(simulate_recorded_k_step(fresh, &recorded, 0), one_step);
+    }
+
+    /// `RB-VERIFY-003-FR-009`: snapping takes the recorded boost fuel too,
+    /// clamped to the tank, so an unlimited-boost capture keeps boosting.
+    #[test]
+    fn snapping_to_a_frame_takes_its_boost_fuel() {
+        let (recorded, mut world) = candidate_run();
+        world.set_car_boost(0, 0.0);
+        let mut frame = recorded[0].clone();
+        frame.cars[0].boost_amount = 42.0;
+        world.snap_to_frame(&frame);
+        assert_eq!(world.frame().cars[0].boost_amount, 42.0);
+        frame.cars[0].boost_amount = 250.0;
+        world.snap_to_frame(&frame);
+        assert_eq!(world.frame().cars[0].boost_amount, drive::MAX_BOOST);
+    }
+
+    /// Frame `i` comes from recorded frame `i - k`: moving the recorded
+    /// ball at frame 5 moves the prediction of frame 15 (k = 10), not 14.
+    #[test]
+    fn a_k_step_prediction_starts_k_frames_back() {
+        let (mut recorded, fresh) = candidate_run();
+        recorded[5].ball.position.x += 100.0;
+        let predicted = simulate_recorded_k_step(fresh, &recorded, 10);
+        let off = |i: usize| {
+            recorded[i]
+                .ball
+                .position
+                .distance(&predicted[i].ball.position)
+        };
+        assert!(off(14) < 1e-3, "frame 14 is from frame 4: {}", off(14));
+        assert!(
+            (off(15) - 100.0).abs() < 1.0,
+            "frame 15 is from frame 5: {}",
+            off(15)
+        );
+    }
+
+    #[test]
+    fn ball_in_free_fall_matches_kinematics_before_impact() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground());
+        let dt: f32 = 1.0 / 240.0; // fine timestep to keep semi-implicit Euler error small
+        let t: f32 = 0.2;
+        let steps = (t / dt).round() as u32;
+        for _ in 0..steps {
+            world.step(dt);
+        }
+        // Semi-implicit Euler's known one-step lag vs. exact kinematics:
+        // expected velocity is exact, position is off by ~0.5*g*dt*t.
+        let expected_vz = world.gravity.z * t;
+        assert!(
+            (world.ball.linear_velocity.z - expected_vz).abs() < 1.0,
+            "expected vz ~= {expected_vz}, got {}",
+            world.ball.linear_velocity.z
+        );
+        assert!(world.ball.position.z < 1000.0, "ball should have fallen");
+    }
+
+    #[test]
+    fn resting_ball_stays_at_rest() {
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        // Inelastic on purpose, on *both* surfaces (combined restitution is
+        // an average of the two — see solver.rs): before sleeping
+        // (`RB-PHYSICS-001-FR-037`) existed, a *bouncy* resting contact
+        // legitimately never settled under a naive per-frame sequential
+        // impulse solve — each frame's gravity-induced velocity was a fresh
+        // "impact" that restitution bounced back up, forever (that's now
+        // fixed — see `a_bouncy_resting_ball_actually_settles_once_asleep`).
+        // This test only ever needed the inelastic case to settle, which it
+        // should regardless of sleeping.
+        ball.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground);
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+        assert!(
+            (world.ball.position.z - 1.0).abs() < 0.05,
+            "z drifted to {}",
+            world.ball.position.z
+        );
+        assert!(world.ball.linear_velocity.length() < 1.0);
+    }
+
+    #[test]
+    fn piecewise_linear_interpolates_and_clamps() {
+        assert_eq!(piecewise_linear(&BALL_HIT_FACTOR_CURVE, -5.0), 0.65);
+        assert_eq!(piecewise_linear(&BALL_HIT_FACTOR_CURVE, 500.0), 0.65);
+        assert!((piecewise_linear(&BALL_HIT_FACTOR_CURVE, 1400.0) - 0.60).abs() < 1e-6);
+        assert!((piecewise_linear(&BALL_HIT_FACTOR_CURVE, 3450.0) - 0.425).abs() < 1e-6);
+        assert_eq!(piecewise_linear(&BALL_HIT_FACTOR_CURVE, 9000.0), 0.30);
+    }
+
+    #[test]
+    fn a_car_driving_into_the_ball_adds_psyonixs_extra_hit_velocity() {
+        // RB-PHYSICS-001-FR-107: a car at 1000 uu/s straight at a resting
+        // ball level with it: the hit direction is straight ahead, so the
+        // forward scale and the z scale cancel out of the normalized
+        // direction, and the size is 1000 * 0.65 * (curve at 1000 uu/s).
+        let car = RigidBody::standard_car(Vec3::new(-100.0, 0.0, 93.15));
+        let mut moving = car;
+        moving.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let added = extra_ball_hit_velocity(&ball, &moving, &CarBallTuning::default());
+        let factor = 0.65 + (0.55 - 0.65) * (500.0 / 1800.0);
+        assert!(
+            (added - Vec3::new(1000.0 * factor, 0.0, 0.0)).length() < 1e-2,
+            "{added:?}"
+        );
+        // From above, the height is scaled down before normalizing.
+        let high = RigidBody::standard_ball(Vec3::new(-100.0, 0.0, 293.15));
+        let added = extra_ball_hit_velocity(&high, &moving, &CarBallTuning::default());
+        assert!(added.z > 0.0 && added.x.abs() < 1e-3);
+        // No relative speed, no extra velocity.
+        assert_eq!(
+            extra_ball_hit_velocity(&ball, &car, &CarBallTuning::default()),
+            Vec3::ZERO
+        );
+    }
+
+    #[test]
+    fn the_hit_scale_scales_the_extra_ball_velocity_and_zero_removes_it() {
+        let mut car = RigidBody::standard_car(Vec3::ZERO);
+        car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        let ball = RigidBody::standard_ball(Vec3::new(120.0, 0.0, 0.0));
+        let default = CarBallTuning::default();
+        let full = extra_ball_hit_velocity(&ball, &car, &default);
+        let half = extra_ball_hit_velocity(
+            &ball,
+            &car,
+            &CarBallTuning {
+                hit_scale: 0.5,
+                ..default
+            },
+        );
+        let none = extra_ball_hit_velocity(
+            &ball,
+            &car,
+            &CarBallTuning {
+                hit_scale: 0.0,
+                ..default
+            },
+        );
+        assert!(full.length() > 0.0);
+        assert!((half.length() - full.length() * 0.5).abs() < 1e-3);
+        assert_eq!(none, Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_default_world_uses_rocketsims_car_ball_numbers() {
+        let world = PhysicsWorld::new(
+            RigidBody::standard_ball(Vec3::ZERO),
+            StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0),
+        );
+        assert_eq!(world.car_ball.material, CAR_BALL_MATERIAL);
+        assert_eq!(world.car_ball.hit_scale, 1.0);
+        assert_eq!(world.car_ball.hit_z_scale, BALL_HIT_Z_SCALE);
+        assert_eq!(world.car_ball.hit_forward_scale, BALL_HIT_FORWARD_SCALE);
+    }
+
+    #[test]
+    fn the_extra_ball_hit_velocity_applies_at_most_every_other_tick() {
+        // Resting car pressed against the ball, both weightless: the ball
+        // gets the extra velocity on the first contact tick, then waits a
+        // tick before the next, as RocketSim's tickCountWhenExtraImpulseApplied.
+        let mut car = RigidBody::standard_car(Vec3::ZERO);
+        car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        let front = CAR_HALF_EXTENTS.x + crate::body::CAR_HITBOX_OFFSET.x;
+        let ball_center = Vec3::new(
+            front + crate::body::BALL_RADIUS - 1.0,
+            0.0,
+            crate::body::CAR_HITBOX_OFFSET.z,
+        );
+        let mut world =
+            PhysicsWorld::new(RigidBody::standard_ball(ball_center), flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.step(1.0 / 120.0);
+        assert_eq!(world.ball_hit_ticks, vec![Some(0)]);
+        world.ball.position = ball_center + Vec3::new(world.cars[0].position.x, 0.0, 0.0);
+        world.step(1.0 / 120.0);
+        assert_eq!(world.ball_hit_ticks, vec![Some(0)], "tick 1 is in cooldown");
+    }
+
+    #[test]
+    fn the_extra_hit_velocity_changes_the_ball_after_it_has_moved_not_before() {
+        // RocketSim adds it after Bullet integrated the step, so the tick
+        // of the hit moves the ball with the solved velocity only
+        // (RB-PHYSICS-001-FR-137): same position, different velocity.
+        let hit = |hit_scale: f32| {
+            let mut car = RigidBody::standard_car(Vec3::ZERO);
+            car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+            let front = CAR_HALF_EXTENTS.x + crate::body::CAR_HITBOX_OFFSET.x;
+            let ball = Vec3::new(
+                front + crate::body::BALL_RADIUS - 1.0,
+                0.0,
+                crate::body::CAR_HITBOX_OFFSET.z,
+            );
+            let mut world =
+                PhysicsWorld::new(RigidBody::standard_ball(ball), flat_ground()).with_car(car);
+            world.gravity = Vec3::ZERO;
+            world.car_ball.hit_scale = hit_scale;
+            world.step(1.0 / 120.0);
+            world.ball
+        };
+        let with = hit(1.0);
+        let without = hit(0.0);
+        assert!(
+            (with.linear_velocity - without.linear_velocity).length() > 100.0,
+            "the extra velocity is added"
+        );
+        assert_eq!(with.position, without.position, "but after the move");
+    }
+
+    #[test]
+    fn clamp_ball_velocity_is_a_no_op_below_both_caps() {
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        ball.linear_velocity = Vec3::new(100.0, 200.0, 0.0);
+        ball.angular_velocity = Vec3::new(1.0, 2.0, 0.0);
+        clamp_ball_velocity(&mut ball);
+        assert_eq!(
+            ball.linear_velocity,
+            Vec3::new(100.0, 200.0, 0.0),
+            "expected an already-under-cap linear velocity to pass through unchanged, got {:?}",
+            ball.linear_velocity
+        );
+        assert_eq!(
+            ball.angular_velocity,
+            Vec3::new(1.0, 2.0, 0.0),
+            "expected an already-under-cap angular velocity to pass through unchanged, got {:?}",
+            ball.angular_velocity
+        );
+    }
+
+    #[test]
+    fn clamp_ball_velocity_scales_an_over_cap_linear_velocity_down_to_the_cap_preserving_direction()
+    {
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        ball.linear_velocity = Vec3::new(20_000.0, 0.0, 0.0);
+        clamp_ball_velocity(&mut ball);
+        assert!(
+            (ball.linear_velocity.length() - BALL_MAX_SPEED).abs() < 1e-3,
+            "expected the clamp to scale magnitude down to exactly BALL_MAX_SPEED, got {:?}",
+            ball.linear_velocity
+        );
+        assert!(
+            ball.linear_velocity.y == 0.0 && ball.linear_velocity.z == 0.0,
+            "expected the clamp to preserve direction, got {:?}",
+            ball.linear_velocity
+        );
+    }
+
+    #[test]
+    fn clamp_ball_velocity_scales_an_over_cap_angular_velocity_down_to_the_cap_preserving_direction(
+    ) {
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        ball.angular_velocity = Vec3::new(0.0, 0.0, 50.0);
+        clamp_ball_velocity(&mut ball);
+        assert!(
+            (ball.angular_velocity.length() - BALL_MAX_ANG_SPEED).abs() < 1e-4,
+            "expected the clamp to scale magnitude down to exactly BALL_MAX_ANG_SPEED, got {:?}",
+            ball.angular_velocity
+        );
+        assert!(
+            ball.angular_velocity.x == 0.0 && ball.angular_velocity.y == 0.0,
+            "expected the clamp to preserve direction, got {:?}",
+            ball.angular_velocity
+        );
+    }
+
+    #[test]
+    fn a_ball_launched_far_past_ball_max_speed_never_exceeds_it_after_a_step() {
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1000.0));
+        ball.linear_velocity = Vec3::new(50_000.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground());
+        world.step(1.0 / 60.0);
+        assert!(
+            world.ball.linear_velocity.length() <= BALL_MAX_SPEED + 1e-3,
+            "expected the ball's speed to never exceed BALL_MAX_SPEED after a step, got {}",
+            world.ball.linear_velocity.length()
+        );
+    }
+
+    #[test]
+    fn a_bouncy_resting_ball_actually_settles_once_asleep() {
+        // RB-PHYSICS-001-FR-037: this is the actual "bouncy resting contact
+        // never settles" limitation `resting_ball_stays_at_rest`'s own
+        // comment (and this module's/solver's own doc comments) describe —
+        // demonstrated directly here with a nonzero-restitution ball/ground
+        // pair, instead of only being documented as a known gap.
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        ball.restitution = 0.5;
+        let ground = StaticPlane {
+            restitution: 0.5,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground);
+        let dt = 1.0 / 60.0;
+        // SLEEP_TIME_THRESHOLD (0.5s) plus a generous margin for the
+        // per-frame gravity/restitution bounce to actually decay under the
+        // sleep velocity thresholds before the timer can start counting.
+        for _ in 0..300 {
+            world.step(dt);
+        }
+        assert!(
+            world.ball.is_sleeping,
+            "expected the ball to fall asleep once its bounce settled below threshold"
+        );
+        assert_eq!(
+            world.ball.linear_velocity,
+            Vec3::ZERO,
+            "a sleeping body's velocity should be forced to exactly zero"
+        );
+        assert_eq!(world.ball.angular_velocity, Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_sleeping_car_wakes_up_the_instant_throttle_is_applied() {
+        // RB-PHYSICS-001-FR-037: guards against the specific bug this
+        // requirement's own design had to avoid — a velocity-only wake
+        // check would zero right back out a driving force whose one-frame
+        // delta is itself smaller than the sleep threshold, permanently
+        // stranding an asleep car. `drive::apply_driven_forces` instead
+        // wakes a car unconditionally on any genuinely active input, before
+        // that input's own force has had a chance to move it.
+        // Seeded already asleep, at rest exactly on the ground, rather than
+        // simulated into that state — this test's own claim is about the
+        // wake response to input, not about how long settling itself takes
+        // (see `dropped_car_settles_flat_on_the_ground_without_tipping_over`
+        // and the sleeping tests above for that).
+        let mut car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(0.0, 0.0, 1.0));
+        car.is_sleeping = true;
+        let mut world = PhysicsWorld::new(
+            RigidBody::sphere(1.0, 1.0, Vec3::new(10_000.0, 0.0, 1.0)),
+            flat_ground(),
+        )
+        .with_car(car);
+        let dt = 1.0 / 60.0;
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        assert!(
+            !world.cars[0].is_sleeping,
+            "throttle should wake the car immediately"
+        );
+        assert!(
+            world.cars[0].linear_velocity.length() > 0.0,
+            "a woken car should actually accelerate under throttle this same step"
+        );
+    }
+
+    #[test]
+    fn a_sleeping_ball_wakes_up_when_a_moving_car_hits_it() {
+        // RB-PHYSICS-001-FR-037: no special-case wake logic exists for a
+        // contact-driven wake — the ball's own resultant velocity after
+        // the collision naturally exceeds the sleep threshold, which
+        // `update_sleep_state` reads the same as any other frame.
+        let ball = RigidBody::sphere(50.0, 1.0, Vec3::new(0.0, 0.0, 50.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground());
+        let dt = 1.0 / 60.0;
+        // Let the ball (already resting) go to sleep before the car exists
+        // at all, so the car's own approach can't be mistaken for having
+        // contributed to it.
+        for _ in 0..90 {
+            world.step(dt);
+        }
+        assert!(
+            world.ball.is_sleeping,
+            "expected the ball to be asleep before the car arrives"
+        );
+
+        // A real car on its wheels: since RB-PHYSICS-001-FR-105 a bare box
+        // sliding flat at speed rides on one corner a tick (Bullet's
+        // manifold) and trips, which a car on its suspension never does.
+        let mut car = RigidBody::standard_car(Vec3::new(-300.0, 0.0, 17.0));
+        car.linear_velocity = Vec3::new(2000.0, 0.0, 0.0);
+        world = world.with_car(car);
+        for _ in 0..60 {
+            world.step(dt);
+            if !world.ball.is_sleeping {
+                break;
+            }
+        }
+        assert!(
+            !world.ball.is_sleeping,
+            "a moving car's impact should wake the sleeping ball"
+        );
+    }
+
+    #[test]
+    fn dropped_ball_eventually_settles_on_the_ground() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 50.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground());
+        world.ball.restitution = 0.3;
+        let dt = 1.0 / 120.0;
+        for _ in 0..(6.0 / dt) as u32 {
+            world.step(dt);
+        }
+        assert!(
+            (world.ball.position.z - 1.0).abs() < 0.2,
+            "expected to settle near z=1.0, got {}",
+            world.ball.position.z
+        );
+    }
+
+    #[test]
+    fn simulate_returns_one_frame_per_step_plus_the_initial_frame() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 100.0));
+        let world = PhysicsWorld::new(ball, flat_ground());
+        let frames = simulate(world, 1.0, 1.0 / 60.0);
+        assert_eq!(frames.len(), 61);
+        assert_eq!(frames[0].timestamp_secs, 0.0);
+    }
+
+    fn ball_state_at(position: Vec3) -> BallState {
+        BallState {
+            position,
+            rotation: Quat::IDENTITY,
+            velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        }
+    }
+
+    #[test]
+    fn simulate_recorded_returns_one_frame_per_recorded_frame() {
+        let recorded = vec![
+            PhysicsFrame {
+                timestamp_secs: 10.0,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 1000.0)),
+                cars: vec![],
+            },
+            PhysicsFrame {
+                timestamp_secs: 10.05,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 900.0)),
+                cars: vec![],
+            },
+            PhysicsFrame {
+                timestamp_secs: 10.10,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 800.0)),
+                cars: vec![],
+            },
+        ];
+        let world = PhysicsWorld::from_frame(&recorded[0]);
+        let frames = simulate_recorded(world, &recorded);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].timestamp_secs, 10.0);
+        assert!((frames[2].timestamp_secs - 10.10).abs() < 1e-4);
+    }
+
+    #[test]
+    fn simulate_recorded_derives_dt_from_each_pairs_own_timestamps_not_a_fixed_rate() {
+        // Two consecutive pairs with different spacing (0.05s, then 0.10s),
+        // high enough above the ground to stay in free fall throughout:
+        // the ball should fall further during the longer second interval,
+        // which only happens if dt is actually read per-pair rather than
+        // reused from the first. Bypasses from_frame/standard_arena here
+        // (a plain flat ground instead) so this is a pure kinematics check,
+        // not entangled with any arena-geometry collision.
+        let recorded = vec![
+            PhysicsFrame {
+                timestamp_secs: 0.0,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 1000.0)),
+                cars: vec![],
+            },
+            PhysicsFrame {
+                timestamp_secs: 0.05,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 1000.0)),
+                cars: vec![],
+            },
+            PhysicsFrame {
+                timestamp_secs: 0.15,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 1000.0)),
+                cars: vec![],
+            },
+        ];
+        let world = PhysicsWorld::new(
+            RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1000.0)),
+            flat_ground(),
+        );
+        let frames = simulate_recorded(world, &recorded);
+        let fall_1 = frames[0].ball.position.z - frames[1].ball.position.z;
+        let fall_2 = frames[1].ball.position.z - frames[2].ball.position.z;
+        assert!(
+            fall_2 > fall_1 * 1.5,
+            "expected the 0.10s second interval to fall further than the \
+             0.05s first one, got fall_1={fall_1} fall_2={fall_2}"
+        );
+    }
+
+    #[test]
+    fn simulate_recorded_actually_applies_each_cars_own_recorded_input() {
+        let driving_input = ControllerInput {
+            throttle: 1.0,
+            ..ControllerInput::default()
+        };
+
+        let recorded = vec![
+            PhysicsFrame {
+                timestamp_secs: 0.0,
+                ball: ball_state_at(Vec3::new(1000.0, 0.0, 1000.0)),
+                cars: vec![CarState {
+                    player_id: 0,
+                    position: Vec3::new(0.0, 0.0, 17.0),
+                    rotation: Quat::IDENTITY,
+                    velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                    boost_amount: 0.0,
+                    input: Some(driving_input),
+                }],
+            },
+            PhysicsFrame {
+                timestamp_secs: 1.0,
+                ball: ball_state_at(Vec3::new(1000.0, 0.0, 1000.0)),
+                cars: vec![CarState {
+                    player_id: 0,
+                    position: Vec3::new(0.0, 0.0, 17.0),
+                    rotation: Quat::IDENTITY,
+                    velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                    boost_amount: 0.0,
+                    input: Some(ControllerInput::default()),
+                }],
+            },
+        ];
+        let world = PhysicsWorld::from_frame(&recorded[0]);
+        let frames = simulate_recorded(world, &recorded);
+        assert_eq!(frames.len(), 2);
+        assert!(
+            frames[1].cars[0].velocity.x.abs() > 1.0,
+            "expected recorded throttle input to actually drive the car, got velocity {:?}",
+            frames[1].cars[0].velocity
+        );
+    }
+
+    #[test]
+    fn simulate_recorded_skips_a_recorded_car_the_world_was_not_seeded_with() {
+        // A car present in the recorded frame but beyond what the seeded
+        // world has (e.g. more cars than the seed frame carried) must not
+        // panic -- see simulate_recorded's own doc comment.
+        let recorded = vec![
+            PhysicsFrame {
+                timestamp_secs: 0.0,
+                ball: ball_state_at(Vec3::ZERO),
+                cars: vec![identity_car_state(0, Vec3::new(0.0, 0.0, 17.0), 0.0)],
+            },
+            PhysicsFrame {
+                timestamp_secs: 0.05,
+                ball: ball_state_at(Vec3::ZERO),
+                cars: vec![
+                    identity_car_state(0, Vec3::new(0.0, 0.0, 17.0), 0.0),
+                    identity_car_state(1, Vec3::new(100.0, 0.0, 17.0), 0.0),
+                ],
+            },
+        ];
+        // Seed from only the first (one-car) frame on purpose.
+        let world = PhysicsWorld::from_frame(&recorded[0]);
+        let frames = simulate_recorded(world, &recorded);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[1].cars.len(), 1);
+    }
+
+    fn identity_car_state(player_id: u32, position: Vec3, boost_amount: f32) -> CarState {
+        CarState {
+            player_id,
+            position,
+            rotation: Quat::IDENTITY,
+            velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            boost_amount,
+            input: Some(ControllerInput::default()),
+        }
+    }
+
+    #[test]
+    fn from_frame_seeds_ball_state_directly_from_the_frame() {
+        let frame = PhysicsFrame {
+            timestamp_secs: 11.78,
+            ball: BallState {
+                position: Vec3::new(100.0, 200.0, 300.0),
+                rotation: Quat::new(0.5, 0.5, 0.5, 0.5),
+                velocity: Vec3::new(10.0, 20.0, 30.0),
+                angular_velocity: Vec3::new(1.0, 2.0, 3.0),
+            },
+            cars: vec![],
+        };
+        let world = PhysicsWorld::from_frame(&frame);
+        assert_eq!(world.ball.position, frame.ball.position);
+        assert_eq!(world.ball.orientation, frame.ball.rotation);
+        assert_eq!(world.ball.linear_velocity, frame.ball.velocity);
+        assert_eq!(world.ball.angular_velocity, frame.ball.angular_velocity);
+        assert!(world.cars.is_empty());
+    }
+
+    #[test]
+    fn from_frame_seeds_the_worlds_own_clock_from_the_frames_own_timestamp() {
+        // Critical for rb_domain::divergence::score's nearest-timestamp
+        // alignment to actually match candidate frames up against a real
+        // capture's own absolute clock -- see from_frame's own doc comment.
+        let frame = PhysicsFrame {
+            timestamp_secs: 11.78,
+            ball: BallState {
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            cars: vec![],
+        };
+        let world = PhysicsWorld::from_frame(&frame);
+        assert_eq!(world.frame().timestamp_secs, 11.78);
+    }
+
+    #[test]
+    fn from_frame_seeds_every_car_in_order_with_its_own_recorded_state() {
+        let frame = PhysicsFrame {
+            timestamp_secs: 0.0,
+            ball: BallState {
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            cars: vec![
+                identity_car_state(0, Vec3::new(1.0, 0.0, 17.0), 33.0),
+                identity_car_state(1, Vec3::new(-1.0, 0.0, 17.0), 100.0),
+            ],
+        };
+        let world = PhysicsWorld::from_frame(&frame);
+        assert_eq!(world.cars.len(), 2);
+        assert_eq!(world.cars[0].position, Vec3::new(1.0, 0.0, 17.0));
+        assert_eq!(world.cars[1].position, Vec3::new(-1.0, 0.0, 17.0));
+        let seeded = world.frame();
+        assert_eq!(seeded.cars[0].boost_amount, 33.0);
+        assert_eq!(seeded.cars[1].boost_amount, 100.0);
+    }
+
+    #[test]
+    fn frame_has_no_cars_when_no_car_is_present() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 100.0));
+        let world = PhysicsWorld::new(ball, flat_ground());
+        assert!(world.frame().cars.is_empty());
+    }
+
+    #[test]
+    fn car_in_free_fall_matches_kinematics_before_impact() {
+        // The general-inertia box path should integrate translationally
+        // identically to the sphere path — same semi-implicit Euler
+        // kinematics, independent of shape.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 1000.0));
+        let car = RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, Vec3::new(0.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt: f32 = 1.0 / 240.0;
+        let t: f32 = 0.2;
+        let steps = (t / dt).round() as u32;
+        for _ in 0..steps {
+            world.step(dt);
+        }
+        let expected_vz = world.gravity.z * t;
+        let car_after = *world.cars.first().expect("car should still be present");
+        assert!(
+            (car_after.linear_velocity.z - expected_vz).abs() < 1.0,
+            "expected vz ~= {expected_vz}, got {}",
+            car_after.linear_velocity.z
+        );
+        assert!(car_after.position.z < 1000.0, "car should have fallen");
+    }
+
+    #[test]
+    fn dropped_car_settles_flat_on_the_ground_without_tipping_over() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, Vec3::new(0.0, 0.0, 100.0));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..(6.0 / dt) as u32 {
+            world.step(dt);
+        }
+        let car_after = *world.cars.first().expect("car should still be present");
+        // Without Bullet's speculative term (RB-PHYSICS-001-FR-108) a
+        // manifold point inside the contact threshold already stops the
+        // approach, so the box may rest up to ~1 uu above touching.
+        assert!(
+            (car_after.position.z - CAR_HALF_EXTENTS.z).abs() < 1.0,
+            "expected the car to settle resting on its own half-height ({}), got z={}",
+            CAR_HALF_EXTENTS.z,
+            car_after.position.z
+        );
+        assert!(
+            car_after.linear_velocity.length() < 1.0,
+            "expected the car to have settled, got velocity {:?}",
+            car_after.linear_velocity
+        );
+        // A car dropped flat, with no sideways forces, shouldn't tip onto
+        // an edge or corner — its orientation should stay close to level.
+        let up_after_rotation = car_after.orientation.rotate(&Vec3::new(0.0, 0.0, 1.0));
+        assert!(
+            (up_after_rotation - Vec3::new(0.0, 0.0, 1.0)).length() < 0.1,
+            "expected the car to stay level, got local +Z pointing toward {up_after_rotation:?}"
+        );
+    }
+
+    #[test]
+    fn car_frame_reports_player_id_zero() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, Vec3::new(0.0, 0.0, 18.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let frame = world.frame();
+        assert_eq!(frame.cars.len(), 1);
+        assert_eq!(frame.cars[0].player_id, 0);
+    }
+
+    #[test]
+    fn ball_bounces_off_a_stationary_car_instead_of_passing_through() {
+        // Both bodies float well above the ground and gravity is zeroed,
+        // isolating the ball-vs-car collision this test actually checks
+        // from ground contact — a real end-to-end proof that
+        // `PhysicsWorld::step` now resolves the two dynamic bodies against
+        // each other, not just each against the ground.
+        let car_position = Vec3::new(300.0, 0.0, 100.0);
+        let car_half_extents = CAR_HALF_EXTENTS;
+        let mut car = RigidBody::car_box(car_half_extents, 180.0, car_position);
+        car.restitution = 0.5;
+
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(
+                car_position.x - car_half_extents.x - ball_radius - 100.0,
+                0.0,
+                100.0,
+            ),
+        );
+        ball.restitution = 0.5;
+        ball.linear_velocity = Vec3::new(300.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let car_after = *world.cars.first().expect("car should still be present");
+        let contact_surface_x = car_after.position.x - car_half_extents.x - ball_radius;
+        assert!(
+            world.ball.position.x < contact_surface_x + 1.0,
+            "expected the ball to stop at the car's surface rather than tunnel through, \
+             ball x={}, car surface x={}",
+            world.ball.position.x,
+            contact_surface_x
+        );
+        assert!(
+            world.ball.linear_velocity.x < 0.0,
+            "expected the ball to bounce back, got vx={}",
+            world.ball.linear_velocity.x
+        );
+    }
+
+    fn some_car(position: Vec3) -> RigidBody {
+        RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, position)
+    }
+
+    #[test]
+    fn with_car_called_twice_builds_a_two_car_scene() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z)))
+            .with_car(some_car(Vec3::new(500.0, 0.0, 18.0)));
+        assert_eq!(world.cars.len(), 2);
+    }
+
+    #[test]
+    fn frame_assigns_sequential_player_ids_across_multiple_cars() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z)))
+            .with_car(some_car(Vec3::new(500.0, 0.0, 18.0)))
+            .with_car(some_car(Vec3::new(1000.0, 0.0, 18.0)));
+        let frame = world.frame();
+        assert_eq!(frame.cars.len(), 3);
+        let ids: Vec<u32> = frame.cars.iter().map(|c| c.player_id).collect();
+        assert_eq!(ids, vec![0, 1, 2]);
+    }
+
+    /// Two standard cars floating clear of everything (gravity off), so only
+    /// their collision acts. `heading` is a yaw in radians (0 faces +x).
+    fn bump_world(cars: [(Vec3, f32, Vec3); 2]) -> PhysicsWorld {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground());
+        for (position, heading, velocity) in cars {
+            let mut car = RigidBody::standard_car(position);
+            let half = 0.5 * heading;
+            car.orientation = Quat::new(0.0, 0.0, half.sin(), half.cos());
+            car.linear_velocity = velocity;
+            world = world.with_car(car);
+        }
+        // Floating cars (z above the wheels' reach) are airborne with gravity
+        // off, so only their collision acts; cars at rest height stand on the
+        // ground.
+        if cars.iter().all(|(position, _, _)| position.z > 100.0) {
+            world.gravity = Vec3::ZERO;
+        }
+        world
+    }
+
+    const FACING_PLUS_Y: f32 = std::f32::consts::FRAC_PI_2;
+    const FACING_MINUS_Y: f32 = -std::f32::consts::FRAC_PI_2;
+
+    /// `RB-PHYSICS-001-FR-140`, measured on the game: a car at 540 to 1287
+    /// uu/s hitting a stopped car's rear sends it away at 1.35 times its speed
+    /// and up at 0.2 times (731 / 109 at 540), not the 55% a plain collision
+    /// gives.
+    #[test]
+    fn a_rear_hit_bumps_the_stopped_car_forward_and_up() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 17.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 1000.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        let victim = world.cars[1].linear_velocity;
+        assert!(
+            victim.y > 1200.0,
+            "a plain collision gives about 550: {victim:?}"
+        );
+        assert!(
+            (victim.z - 200.0).abs() < 30.0,
+            "up at 0.2 of 1000: {victim:?}"
+        );
+        // The attacker keeps what a plain collision leaves it.
+        assert!(world.cars[0].linear_velocity.y < 600.0);
+    }
+
+    /// A head-on is two noses: both cars bump each other (the game: each
+    /// reverses and rises, vz +150 at 751 uu/s).
+    #[test]
+    fn a_head_on_bumps_both_cars() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -100.0, 17.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 500.0, 0.0),
+            ),
+            (
+                Vec3::new(0.0, 100.0, 17.0),
+                FACING_MINUS_Y,
+                Vec3::new(0.0, -500.0, 0.0),
+            ),
+        ]);
+        for _ in 0..12 {
+            world.step(1.0 / 120.0);
+        }
+        // Not asserting an exact figure: both go up, and both are thrown back.
+        assert!(
+            world.cars[0].linear_velocity.z > 40.0,
+            "{:?}",
+            world.cars[0].linear_velocity
+        );
+        assert!(
+            world.cars[1].linear_velocity.z > 40.0,
+            "{:?}",
+            world.cars[1].linear_velocity
+        );
+        assert!(world.cars[0].linear_velocity.y < 0.0);
+        assert!(world.cars[1].linear_velocity.y > 0.0);
+    }
+
+    /// `RB-PHYSICS-001-FR-159`, `duel_910` and `bumpag_*`: a bumper that is rising
+    /// when it hits a grounded car pushes it up by its share of the heading too (the
+    /// game gave 445 uu/s up where the horizontal-only rule gave 205).
+    #[test]
+    fn a_rising_bumper_pushes_the_victim_up_along_its_velocity() {
+        let mut level = RigidBody::standard_car(Vec3::new(0.0, 0.0, 300.0));
+        level.linear_velocity = Vec3::new(900.0, 0.0, 0.0);
+        let mut rising = level;
+        rising.linear_velocity = Vec3::new(900.0, 0.0, 300.0);
+        let flat = bump_velocity_of(&level, false);
+        let up = bump_velocity_of(&rising, false);
+        assert!(up.z > flat.z + 150.0, "{flat:?} {up:?}");
+        // Two airborne cars keep the horizontal heading and the fixed downward kick.
+        assert_eq!(
+            bump_velocity_of(&rising, true).z,
+            bump_velocity_of(&level, true).z
+        );
+    }
+
+    /// `RB-PHYSICS-001-FR-158`, `duel_865`: two cars at 1000 uu/s driving at each
+    /// other 100 uu off line touch with one car's nose on the other's front corner;
+    /// the game bumped both (each ahead of the other), the contact-point rule only one.
+    #[test]
+    fn an_off_centre_head_on_bumps_both_cars() {
+        let mut world = bump_world([
+            (
+                Vec3::new(-35.0, -120.0, 17.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 700.0, 0.0),
+            ),
+            (
+                Vec3::new(35.0, 120.0, 17.0),
+                FACING_MINUS_Y,
+                Vec3::new(0.0, -700.0, 0.0),
+            ),
+        ]);
+        for _ in 0..12 {
+            world.step(1.0 / 120.0);
+        }
+        for car in &world.cars {
+            assert!(car.linear_velocity.z > 40.0, "{:?}", car.linear_velocity);
+        }
+    }
+
+    /// Only the car whose nose touched bumps: a car hit on its side does not
+    /// bump the one that hit it.
+    #[test]
+    fn a_side_hit_bumps_only_the_car_that_hit_with_its_nose() {
+        let mut world = bump_world([
+            (
+                Vec3::new(-130.0, 0.0, 17.0),
+                0.0,
+                Vec3::new(800.0, 0.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        for _ in 0..6 {
+            world.step(1.0 / 120.0);
+        }
+        assert!(
+            world.cars[1].linear_velocity.x > 900.0,
+            "{:?}",
+            world.cars[1].linear_velocity
+        );
+        assert!(
+            world.cars[0].linear_velocity.z.abs() < 20.0,
+            "{:?}",
+            world.cars[0].linear_velocity
+        );
+    }
+
+    /// `RB-PHYSICS-001-FR-142`: a supersonic nose on an enemy demolishes it:
+    /// the game's capture drops the car from that tick on, and the attacker
+    /// still takes the ordinary collision (2300 -> 1042 uu/s).
+    #[test]
+    fn a_supersonic_nose_demolishes_an_enemy() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 500.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 2300.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        world.set_car_team(1, 1);
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        let frame = world.frame();
+        assert_eq!(frame.cars.len(), 1, "the enemy is gone: {:?}", frame.cars);
+        assert_eq!(frame.cars[0].player_id, 0);
+        assert!(
+            frame.cars[0].velocity.y < 1500.0,
+            "the collision still slowed the attacker"
+        );
+        // Gone for good: the attacker drives through where it was.
+        for _ in 0..60 {
+            world.step(1.0 / 120.0);
+        }
+        assert!(world.frame().cars[0].position.y > 100.0);
+    }
+
+    /// A world where car 0 demolishes car 1 on the first step, and the number of steps
+    /// until the victim is out of `frame()`.
+    fn demolition_world() -> PhysicsWorld {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 500.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 2300.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        world.set_car_team(1, 1);
+        world
+    }
+
+    fn steps_until_the_victim_is_out(world: &mut PhysicsWorld) -> u32 {
+        for step in 1..=20 {
+            world.step(1.0 / 120.0);
+            if world.frame().cars.len() == 1 {
+                return step;
+            }
+        }
+        unreachable!("the enemy was never demolished");
+    }
+
+    /// `RB-PHYSICS-001-FR-151`: a demolished car is out for exactly 360 ticks, then
+    /// back at the chosen spawn point, at rest and level, in the raw spawn state.
+    #[test]
+    fn a_demolished_car_is_back_after_exactly_three_seconds_at_the_chosen_spawn_point() {
+        let mut world = demolition_world();
+        world.set_respawn_point(1, Some(3));
+        steps_until_the_victim_is_out(&mut world);
+        assert!(world.is_demolished(1));
+        for tick in 1..360 {
+            world.step(1.0 / 120.0);
+            assert_eq!(world.frame().cars.len(), 1, "still out at tick {tick}");
+        }
+        world.step(1.0 / 120.0);
+        let frame = world.frame();
+        assert_eq!(frame.cars.len(), 2, "back on the 360th tick");
+        let car = frame.cars.iter().find(|c| c.player_id == 1).expect("car 1");
+        let spawn = crate::respawn::SPAWN_POINTS[3];
+        assert_eq!(
+            car.position,
+            Vec3::new(spawn.x, spawn.y, crate::respawn::SPAWN_RAW_HEIGHT)
+        );
+        assert_eq!(car.velocity, Vec3::ZERO);
+        assert_eq!(car.boost_amount, 0.0, "the raw spawn has no boost");
+        let nose = car.rotation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+        assert!(nose.y > 0.999, "faces +y like the point: {nose:?}");
+        assert!(!world.is_demolished(1));
+    }
+
+    #[test]
+    fn a_respawned_car_drops_to_its_respawn_height_with_a_third_of_a_tank_next_tick() {
+        let mut world = demolition_world();
+        // The bump world has no gravity; the respawned car falls from rest.
+        world.gravity = Vec3::new(0.0, 0.0, -650.0);
+        world.set_respawn_point(1, Some(0));
+        steps_until_the_victim_is_out(&mut world);
+        for _ in 0..360 {
+            world.step(1.0 / 120.0);
+        }
+        world.step(1.0 / 120.0);
+        let car = world
+            .frame()
+            .cars
+            .into_iter()
+            .find(|c| c.player_id == 1)
+            .expect("car 1");
+        assert!(
+            (car.position.z - crate::respawn::RESPAWN_HEIGHT).abs() < 0.5,
+            "{:?}",
+            car.position
+        );
+        assert!((car.boost_amount - crate::respawn::RESPAWN_BOOST).abs() < 0.01);
+        // It falls from rest: one tick of gravity (5.4 uu/s).
+        assert!((car.velocity.z + 5.4).abs() < 0.5, "{:?}", car.velocity);
+    }
+
+    #[test]
+    fn without_a_chosen_point_the_respawn_is_deterministic_and_on_a_spawn_point() {
+        let place = |world: &mut PhysicsWorld| {
+            steps_until_the_victim_is_out(world);
+            for _ in 0..360 {
+                world.step(1.0 / 120.0);
+            }
+            let frame = world.frame();
+            let car = frame
+                .cars
+                .iter()
+                .find(|c| c.player_id == 1)
+                .expect("car 1")
+                .position;
+            (car.x, car.y)
+        };
+        let first = place(&mut demolition_world());
+        let second = place(&mut demolition_world());
+        assert_eq!(first, second);
+        assert!(crate::respawn::SPAWN_POINTS
+            .iter()
+            .any(|p| (p.x, p.y) == first));
+    }
+
+    /// The same hit on a teammate, or below supersonic on an enemy, is only a
+    /// bump: both cars stay.
+    #[test]
+    fn a_teammate_or_a_slower_nose_is_bumped_not_demolished() {
+        let hit = |speed: f32, enemy: bool| {
+            let mut world = bump_world([
+                (
+                    Vec3::new(0.0, -130.0, 500.0),
+                    FACING_PLUS_Y,
+                    Vec3::new(0.0, speed, 0.0),
+                ),
+                (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+            ]);
+            world.set_car_team(1, u32::from(enemy));
+            for _ in 0..6 {
+                world.step(1.0 / 120.0);
+            }
+            world.frame().cars.len()
+        };
+        assert_eq!(hit(2300.0, false), 2, "a teammate is never demolished");
+        assert_eq!(hit(1800.0, true), 2, "1800 uu/s is not supersonic");
+        assert_eq!(hit(2300.0, true), 1);
+    }
+
+    /// `RB-PHYSICS-001-FR-143`: with both cars in the air the game threw the
+    /// victim 990 uu/s forward (not the ground's 786) and 180 down (not up) at
+    /// 1000 uu/s.
+    #[test]
+    fn a_bumper_in_the_air_pushes_harder_and_down() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 500.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 1000.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        // The floating cars are airborne (no wheel touches anything).
+        let victim = world.cars[1].linear_velocity;
+        assert!(
+            victim.y > 1400.0,
+            "a ground bump gives about 1330: {victim:?}"
+        );
+        assert!(victim.z < -100.0, "thrown down, not up: {victim:?}");
+    }
+
+    /// `RB-PHYSICS-001-FR-153`, measured on the game (`bumpag_*`): a level bumper in the air
+    /// (wheels off) on a grounded victim bumps like a ground bumper: the victim leaves at
+    /// 1.25 times its speed and up, not at 0.99 times and down (the two-airborne bump).
+    #[test]
+    fn an_airborne_bumper_bumps_a_grounded_victim_like_a_ground_bumper() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 40.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 1000.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        let victim = world.cars[1].linear_velocity;
+        assert!(
+            victim.y > 1100.0,
+            "about 1250, not the air bump's 1000: {victim:?}"
+        );
+        assert!(victim.z > 50.0, "thrown up, not down: {victim:?}");
+    }
+
+    /// `RB-PHYSICS-001-FR-152`, measured on the game (`bumpf_flip`): a car whose nose points
+    /// straight down at the hit (a front flip's) gives no bump; the two push on together and
+    /// settle at half the attacker's speed (equal masses, inelastic: 1540 -> 770 uu/s both).
+    #[test]
+    fn a_nose_pitched_far_off_the_horizontal_bumps_nobody() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 40.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 1000.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        // Pitch the attacker 60 degrees nose down about its own right (local y) axis.
+        let half = 30.0_f32.to_radians();
+        let pitch = Quat::new(0.0, half.sin(), 0.0, half.cos());
+        let heading = world.cars[0].orientation;
+        world.cars[0].orientation = heading.mul(&pitch).normalize();
+        assert!(
+            drive::forward_axis(&world.cars[0]).z < -0.8,
+            "nose well down"
+        );
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        let victim = world.cars[1].linear_velocity;
+        assert!(
+            victim.y > 50.0 && victim.y < 800.0,
+            "a plain collision gives the victim about half, a bump about 1300: {victim:?}"
+        );
+    }
+
+    /// A car reversing into another with its tail does not bump it.
+    #[test]
+    fn a_car_that_hits_with_its_tail_bumps_nobody() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 17.0),
+                FACING_MINUS_Y,
+                Vec3::new(0.0, 1000.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        for _ in 0..6 {
+            world.step(1.0 / 120.0);
+        }
+        let victim = world.cars[1].linear_velocity;
+        assert!(victim.y < 800.0 && victim.z.abs() < 20.0, "{victim:?}");
+    }
+
+    /// One bump per pair per 0.25 s: the cars stay in contact for several ticks
+    /// and the extra velocity goes on once.
+    #[test]
+    fn the_bump_goes_on_once_per_cooldown() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 17.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 1000.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 17.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        let after_one = world.cars[1].linear_velocity.z;
+        for _ in 0..12 {
+            world.step(1.0 / 120.0);
+        }
+        assert!(
+            world.cars[1].linear_velocity.z < after_one + 20.0,
+            "up {after_one} then {}",
+            world.cars[1].linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn cars_bounce_off_each_other_instead_of_passing_through() {
+        // The real end-to-end proof of multi-car support: two cars,
+        // floating well clear of the ground with gravity zeroed (isolating
+        // the car-vs-car collision this test checks), closing head-on.
+        // Before multi-car PhysicsWorld support, box_vs_box had no live
+        // caller at all — this exercises it for real for the first time.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, 0.0, 1000.0));
+
+        let mut car_a = some_car(Vec3::new(-100.0, 0.0, 500.0));
+        car_a.restitution = 0.5;
+        car_a.linear_velocity = Vec3::new(200.0, 0.0, 0.0);
+
+        let mut car_b = some_car(Vec3::new(100.0, 0.0, 500.0));
+        car_b.restitution = 0.5;
+        car_b.linear_velocity = Vec3::new(-200.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car_a)
+            .with_car(car_b);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        // The bounce: shortly after contact (the cars then drift apart and,
+        // slow and alone, fall asleep, which zeroes their velocity).
+        for _ in 0..40 {
+            world.step(dt);
+        }
+        let (a_bounce, b_bounce) = (world.cars[0], world.cars[1]);
+        for _ in 40..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let a_after = world.cars[0];
+        let b_after = world.cars[1];
+        assert!(
+            a_after.position.x < b_after.position.x,
+            "expected car a to stay left of car b (no tunnelling), a.x={}, b.x={}",
+            a_after.position.x,
+            b_after.position.x
+        );
+        assert!(
+            a_bounce.linear_velocity.x < 0.0,
+            "expected car a to bounce back (negative x velocity), got {}",
+            a_bounce.linear_velocity.x
+        );
+        assert!(
+            b_bounce.linear_velocity.x > 0.0,
+            "expected car b to bounce back (positive x velocity), got {}",
+            b_bounce.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn a_ball_pinched_between_two_closing_cars_is_resolved_by_a_shared_multi_body_solve() {
+        // RB-PHYSICS-001-FR-030: two cars closing symmetrically on a ball
+        // squeezed directly between them is the exact "3+ bodies mutually
+        // touching in the same step" scenario `step`'s own doc comment
+        // calls out. Before the combined solve existed, `step` resolved
+        // ball-vs-left to its own full convergence and applied it, then
+        // resolved ball-vs-right using the ball's already-updated
+        // velocity — which, for this symmetric setup, left the ball at
+        // ~99% of the closing speed of whichever car was resolved *last*,
+        // as if the first car's contact had barely happened at all (see
+        // `solver::tests::resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`
+        // for the isolated before/after numbers this test's threshold is
+        // drawn from). All three bodies float clear of the ground with
+        // gravity zeroed, isolating the three-body contact this test
+        // checks.
+        let car_half_extents = CAR_HALF_EXTENTS;
+        let ball_radius = 93.15;
+        let gap = car_half_extents.x + ball_radius;
+
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(0.0, 0.0, 500.0));
+        ball.restitution = 0.0;
+
+        let mut left = RigidBody::car_box(car_half_extents, 180.0, Vec3::new(-gap, 0.0, 500.0));
+        left.restitution = 0.0;
+        left.linear_velocity = Vec3::new(100.0, 0.0, 0.0);
+
+        let mut right = RigidBody::car_box(car_half_extents, 180.0, Vec3::new(gap, 0.0, 500.0));
+        right.restitution = 0.0;
+        right.linear_velocity = Vec3::new(-100.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(left)
+            .with_car(right);
+        world.gravity = Vec3::ZERO;
+
+        world.step(1.0 / 60.0);
+
+        // A perfectly symmetric pinch's true simultaneous-solve answer is
+        // the ball (and both cars) ending near zero net velocity — total
+        // momentum is exactly zero and every body is mutually constrained
+        // to the others. This port's 10-iteration Gauss-Seidel solve
+        // doesn't fully converge to that in one step for such an extreme
+        // mass ratio (ball mass 1 vs. car mass 180) — a known, common
+        // limitation of projected Gauss-Seidel contact solvers for
+        // "sandwiched" configurations, not unique to this port — but it
+        // must land meaningfully closer to it than resolving each pair to
+        // full, independent convergence would (~99% of a single car's own
+        // closing speed, i.e. > 98 units/s, matching the isolated
+        // solver-level test).
+        assert!(
+            world.ball.linear_velocity.x.abs() < 95.0,
+            "expected the combined solve to leave the pinched ball noticeably slower than a \
+             single car's own closing speed, got vx={}",
+            world.ball.linear_velocity.x
+        );
+        assert!(
+            world.ball.position.x.abs() < 10.0,
+            "expected the symmetrically pinched ball to stay near-centered rather than being \
+             flung toward whichever car happened to be resolved last, got x={}",
+            world.ball.position.x
+        );
+    }
+
+    #[test]
+    fn a_car_with_throttle_input_drives_forward_across_the_ground() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                throttle: 1.0,
+                ..Default::default()
+            },
+        );
+
+        let start_x = world.cars[0].position.x;
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.x > start_x + 1.0,
+            "expected the car to drive forward under throttle, start={start_x}, end={}",
+            world.cars[0].position.x
+        );
+        assert_eq!(
+            world.frame().cars[0].input,
+            Some(rb_domain::ControllerInput {
+                throttle: 1.0,
+                ..Default::default()
+            }),
+            "expected frame() to report the car's actual driving input"
+        );
+    }
+
+    #[test]
+    fn a_car_with_no_input_set_drives_exactly_like_before_driven_input_existed() {
+        // Regression guard: with_car's default (neutral) input must not
+        // change any existing free-rigid-box behavior.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, 100.0));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..(6.0 / dt) as u32 {
+            world.step(dt);
+        }
+        let settled = world.cars[0];
+        // Up to ~1 uu above touching: see
+        // dropped_car_settles_flat_on_the_ground_without_tipping_over.
+        assert!((settled.position.z - CAR_HALF_EXTENTS.z).abs() < 1.0);
+        assert!(settled.linear_velocity.length() < 1.0);
+    }
+
+    #[test]
+    fn a_car_with_boost_input_drives_forward_while_airborne() {
+        // Unlike throttle, boost must work with no ground contact at all
+        // — this is the real end-to-end proof that PhysicsWorld actually
+        // threads a car's boost resource through drive::apply_driven_forces.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate the boost force from gravity's fall
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                boost: true,
+                ..Default::default()
+            },
+        );
+
+        let start_x = world.cars[0].position.x;
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.x > start_x + 1.0,
+            "expected boost to drive the airborne car forward, start={start_x}, end={}",
+            world.cars[0].position.x
+        );
+        let boost_after = world.frame().cars[0].boost_amount;
+        assert!(
+            boost_after < crate::drive::MAX_BOOST,
+            "expected a held boost to have drained some fuel, got {boost_after}"
+        );
+    }
+
+    /// `RB-PHYSICS-001-FR-111`: with unlimited boost (a drain of 0) a held
+    /// boost still pushes the car but never empties the tank, for cars
+    /// added before and after the setting.
+    #[test]
+    fn unlimited_boost_pushes_without_draining_any_car() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut world =
+            PhysicsWorld::new(ball, flat_ground()).with_car(some_car(Vec3::new(0.0, 0.0, 1000.0)));
+        world.set_boost_used_per_second(0.0);
+        world = world.with_car(some_car(Vec3::new(0.0, 500.0, 1000.0)));
+        world.gravity = Vec3::ZERO;
+        let boost = rb_domain::ControllerInput {
+            boost: true,
+            ..Default::default()
+        };
+        world.set_car_input(0, boost);
+        world.set_car_input(1, boost);
+        for _ in 0..240 {
+            world.step(1.0 / 120.0);
+        }
+        for (car, state) in world.cars.iter().zip(&world.frame().cars) {
+            assert!(
+                car.position.x > 100.0,
+                "boost should still push: {}",
+                car.position.x
+            );
+            assert_eq!(state.boost_amount, crate::drive::MAX_BOOST);
+        }
+    }
+
+    #[test]
+    fn a_negative_boost_drain_counts_as_unlimited() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut world =
+            PhysicsWorld::new(ball, flat_ground()).with_car(some_car(Vec3::new(0.0, 0.0, 1000.0)));
+        world.set_boost_used_per_second(-5.0);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                boost: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, crate::drive::MAX_BOOST);
+    }
+
+    /// A world with a car resting on the floor on small pad 14 at (0, -1024)
+    /// and `boost` in its tank; pads on or off.
+    fn car_on_pad_14(boost: f32, pads: bool) -> PhysicsWorld {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(3000.0, 3000.0, 93.0));
+        let car = some_car(Vec3::new(0.0, -1024.0, CAR_HALF_EXTENTS.z));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_boost(0, boost);
+        world.set_boost_pads(pads);
+        world
+    }
+
+    #[test]
+    fn a_world_has_no_boost_pads_unless_asked() {
+        let mut world = car_on_pad_14(20.0, false);
+        assert!(world.boost_pads().is_none());
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, 20.0);
+    }
+
+    #[test]
+    fn a_car_on_a_small_pad_gets_twelve_in_that_step_and_the_pad_is_used() {
+        let mut world = car_on_pad_14(20.0, true);
+        assert_eq!(world.boost_pads().map(|p| p.len()), Some(34));
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, 32.0);
+        assert_eq!(world.boost_pads().map(|p| p.is_active(14)), Some(false));
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, 32.0, "used up");
+    }
+
+    #[test]
+    fn the_pickup_adds_to_the_boost_the_tick_burned() {
+        // 26.2 -> 37.9 in the recordings: the pad's 12 on top of that tick's burn.
+        let mut world = car_on_pad_14(50.0, true);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                boost: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+        let burn = crate::drive::BOOST_USED_PER_SECOND / 120.0;
+        let boost = world.frame().cars[0].boost_amount;
+        assert!((boost - (50.0 - burn + 12.0)).abs() < 1e-3, "{boost}");
+    }
+
+    #[test]
+    fn a_full_tank_does_not_use_the_pad() {
+        let mut world = car_on_pad_14(crate::drive::MAX_BOOST, true);
+        world.step(1.0 / 120.0);
+        assert_eq!(world.boost_pads().map(|p| p.is_active(14)), Some(true));
+    }
+
+    #[test]
+    fn a_used_pad_gives_again_after_four_seconds() {
+        let mut world = car_on_pad_14(0.0, true);
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, 12.0);
+        for _ in 0..478 {
+            world.step(1.0 / 120.0);
+        }
+        assert_eq!(world.frame().cars[0].boost_amount, 12.0, "not yet");
+        world.step(1.0 / 120.0);
+        world.step(1.0 / 120.0);
+        assert_eq!(
+            world.frame().cars[0].boost_amount,
+            24.0,
+            "back after 480 ticks"
+        );
+    }
+
+    #[test]
+    fn a_demolished_car_takes_no_pad() {
+        let mut world = car_on_pad_14(0.0, true);
+        world.demolished[0] = true;
+        world.step(1.0 / 120.0);
+        assert_eq!(world.boost_pads().map(|p| p.is_active(14)), Some(true));
+    }
+
+    #[test]
+    fn a_new_car_starts_with_a_full_boost_tank() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        assert_eq!(world.frame().cars[0].boost_amount, crate::drive::MAX_BOOST);
+    }
+
+    /// `RB-PHYSICS-001-FR-100`: a car body sliding on the floor (here
+    /// upside down, no wheel touching) slows under RocketSim's car-vs-world
+    /// friction, 0.3 g; it used to slide frictionlessly.
+    #[test]
+    fn an_upside_down_car_slides_to_a_stop_under_car_world_friction() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 1000.0, 93.0));
+        let height = crate::body::CAR_HITBOX_OFFSET.z + CAR_HALF_EXTENTS.z;
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, 0.0, height));
+        car.orientation = rb_domain::Quat::new(1.0, 0.0, 0.0, 0.0);
+        car.update_inertia_tensor();
+        car.linear_velocity = Vec3::new(500.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+        let expected = 500.0 - 0.3 * 650.0 * 0.5;
+        let got = world.cars[0].linear_velocity.x;
+        assert!(
+            (got - expected).abs() < 15.0,
+            "expected about {expected} uu/s after 0.5 s of sliding, got {got}"
+        );
+    }
+
+    #[test]
+    fn a_coasting_car_loses_only_the_tires_coasting_speed_not_box_friction() {
+        // RB-PHYSICS-001-FR-081/FR-100: a car on its wheels rides above the
+        // floor on its suspension, so its body's car-vs-world friction never
+        // touches and a car rolling straight with no input slows at
+        // COASTING_DECELERATION (525 uu/s^2) alone.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 1000.0, 93.0));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+        world.cars[0].linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        for _ in 0..60 {
+            world.step(dt);
+        }
+        let expected = 1000.0 - 525.0 * 0.5;
+        let got = world.cars[0].linear_velocity.x;
+        assert!(
+            (got - expected).abs() < 10.0,
+            "expected about {expected} uu/s after 0.5 s of coasting, got {got}"
+        );
+    }
+
+    #[test]
+    fn a_handbraking_car_retains_more_sideways_slide_than_a_gripping_car() {
+        // The real end-to-end proof: ground friction decelerates a body's
+        // tangential (sliding) velocity — the same mechanism
+        // `solver::tests::sliding_sphere_decelerates_due_to_friction`
+        // already proves works for the ball. A car already sliding
+        // sideways (as if mid-drift) should keep more of that sideways
+        // speed under handbrake's reduced friction than it would under
+        // normal grip — this is the actual mechanism `drive.rs` implements
+        // handbrake with, exercised here through a live `PhysicsWorld`
+        // rather than in isolation.
+        let run = |handbrake: bool| -> f32 {
+            let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+            let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+            car.linear_velocity = Vec3::new(0.0, 1000.0, 0.0);
+            // Zeroed so the car stays in continuous ground contact frame to
+            // frame — a bouncy resting contact (this port's known
+            // no-warm-starting limitation, see `resting_ball_stays_at_rest`)
+            // would otherwise flicker `on_ground` off for a step, silently
+            // skipping that step's handbrake input entirely.
+            car.restitution = 0.0;
+            let ground = StaticPlane {
+                restitution: 0.0,
+                ..flat_ground()
+            };
+            let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+            world.set_car_input(
+                0,
+                rb_domain::ControllerInput {
+                    handbrake,
+                    ..Default::default()
+                },
+            );
+            let dt = 1.0 / 120.0;
+            for _ in 0..(0.5 / dt) as u32 {
+                world.step(dt);
+            }
+            world.cars[0].linear_velocity.y.abs()
+        };
+
+        let gripping_remaining_slide = run(false);
+        let handbraking_remaining_slide = run(true);
+        assert!(
+            handbraking_remaining_slide > gripping_remaining_slide,
+            "expected handbrake's reduced friction to decelerate a sideways slide less than \
+             normal grip, gripping={gripping_remaining_slide}, \
+             handbrake={handbraking_remaining_slide}"
+        );
+    }
+
+    #[test]
+    fn a_car_with_jump_input_leaves_the_ground() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+
+        let start_z = world.cars[0].position.z;
+        let dt = 1.0 / 120.0;
+        for _ in 0..12 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.z > start_z + 1.0,
+            "expected jump input to lift the car off the ground, start={start_z}, end={}",
+            world.cars[0].position.z
+        );
+    }
+
+    #[test]
+    fn a_jump_press_while_bouncing_just_off_the_floor_jumps_instead_of_dodging() {
+        // RB-PHYSICS-001-FR-088: the owner's capture at 5.758 s. The box
+        // hovers ~5 uu off the floor after a landing, but the wheel rays
+        // still reach it, so a press with the stick held sideways is a
+        // ground jump (straight up), not a side dodge.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z + 5.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                steer: 1.0,
+                yaw: Some(1.0),
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+
+        let velocity = world.cars[0].linear_velocity;
+        assert!(
+            (velocity.z - crate::drive::JUMP_SPEED).abs() < 50.0,
+            "expected a ground jump's ~JUMP_SPEED upward, got {velocity:?}"
+        );
+        assert!(
+            velocity.x.hypot(velocity.y) < 1.0,
+            "expected no dodge push sideways, got {velocity:?}"
+        );
+    }
+
+    #[test]
+    fn holding_jump_does_not_repeatedly_relaunch_the_car() {
+        // The real end-to-end proof that PhysicsWorld's car_jump_held
+        // wiring actually prevents re-firing: hold jump for the whole
+        // flight (never released), let the car arc up and land again, and
+        // confirm it settles instead of being relaunched every time it
+        // touches back down.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+
+        // Holding jump the whole time now also earns the ground jump's
+        // variable-height bonus (extra upward accel for
+        // drive::JUMP_HOLD_MAX_DURATION), so the car climbs higher and its
+        // round trip takes noticeably longer than a bare JUMP_SPEED
+        // impulse's ~2*JUMP_SPEED/650 ≈ 0.9s; run well past that with jump
+        // still held the entire time.
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let settled = world.cars[0];
+        assert!(
+            (settled.position.z - CAR_HALF_EXTENTS.z).abs() < 1.0,
+            "expected the car to land and settle near its resting height instead of being \
+             relaunched, got z={}",
+            settled.position.z
+        );
+        assert!(
+            settled.linear_velocity.length() < 5.0,
+            "expected the car to have settled, got velocity {:?}",
+            settled.linear_velocity
+        );
+    }
+
+    #[test]
+    fn a_car_with_air_control_input_reorients_itself_midair() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate air control from falling
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                yaw: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..30 {
+            world.step(dt);
+        }
+
+        let forward_after = world.cars[0].orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+        assert!(
+            (forward_after - Vec3::new(1.0, 0.0, 0.0)).length() > 0.1,
+            "expected air control yaw input to visibly reorient the car mid-air, forward={forward_after:?}"
+        );
+    }
+
+    #[test]
+    fn air_control_does_not_reorient_a_grounded_car() {
+        // Regression guard: on the ground, steering already owns yaw —
+        // air control must stay a no-op there, or a car resting with
+        // stray pitch/yaw/roll input would spuriously spin in place.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                pitch: Some(-1.0),
+                yaw: Some(1.0),
+                roll: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(1.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let up_after = world.cars[0].orientation.rotate(&Vec3::new(0.0, 0.0, 1.0));
+        assert!(
+            (up_after - Vec3::new(0.0, 0.0, 1.0)).length() < 0.1,
+            "expected a grounded car to stay level despite air control input, up={up_after:?}"
+        );
+    }
+
+    #[test]
+    fn double_jump_after_a_ground_jump_gives_a_second_upward_kick() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate the jump impulses from falling back down
+        let dt = 1.0 / 120.0;
+
+        // Ground jump: a fresh press while grounded.
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        // Plus the press tick's own hold force (1458.33 uu/s^2,
+        // RB-PHYSICS-001-FR-091). No sticky force yet: it acts the step
+        // after the wheels touch (RB-PHYSICS-001-FR-092), and this is the
+        // world's first step.
+        let velocity_after_ground_jump = world.cars[0].linear_velocity.z;
+        let expected = crate::drive::JUMP_SPEED + 4375.0 / 3.0 * dt;
+        assert!(
+            (velocity_after_ground_jump - expected).abs() < 1.0,
+            "expected the ground jump to give ~JUMP_SPEED upward velocity, got {velocity_after_ground_jump}"
+        );
+
+        // Release, then let the car actually leave the ground before
+        // pressing jump again — a double jump only fires while airborne.
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        for _ in 0..12 {
+            world.step(dt);
+        }
+        assert!(
+            world.cars[0].position.z > 18.0 + 1.0,
+            "expected the car to have left the ground before the double jump, got z={}",
+            world.cars[0].position.z
+        );
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        let velocity_after_double_jump = world.cars[0].linear_velocity.z;
+        assert!(
+            velocity_after_double_jump > velocity_after_ground_jump + crate::drive::JUMP_SPEED - 1.0,
+            "expected the double jump to add a second JUMP_SPEED kick on top of the ground jump, \
+             velocity after ground jump={velocity_after_ground_jump}, after double jump={velocity_after_double_jump}"
+        );
+    }
+
+    #[test]
+    fn double_jump_is_not_available_again_mid_air_after_being_used() {
+        // Regression guard: once the double jump is spent, releasing and
+        // re-pressing jump again while still airborne must not fire a third
+        // impulse — it should only become available again after landing.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate the jump impulses from falling back down
+        let dt = 1.0 / 120.0;
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        for _ in 0..12 {
+            world.step(dt);
+        }
+
+        // First airborne press: the double jump fires.
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        let velocity_after_double_jump = world.cars[0].linear_velocity.z;
+
+        // Release, then press again mid-air — should have no further effect.
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        world.step(dt);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+
+        assert!(
+            (world.cars[0].linear_velocity.z - velocity_after_double_jump).abs() < 1.0,
+            "expected a second airborne jump press to have no effect once the double jump is \
+             spent, velocity after double jump={velocity_after_double_jump}, after third press={}",
+            world.cars[0].linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn a_car_touching_a_wall_wall_jumps_outward_and_upward() {
+        // Wall at x=100, normal (1,0,0): the same convention flat_ground()
+        // uses (normal points away from the solid side, into where dynamic
+        // bodies live) — free space is x>100, solid x<100.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-1000.0, 0.0, 1000.0));
+        let wall = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
+        // 60-unit half-extent touching the wall with zero gap: car center
+        // at x=160 puts its -x face exactly on the wall's x=100 plane.
+        let car = some_car(Vec3::new(160.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car)
+            .with_wall(wall);
+        world.gravity = Vec3::ZERO; // isolate the wall jump from falling
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 60.0);
+
+        assert!(
+            world.cars[0].linear_velocity.x > 0.0,
+            "expected the wall jump to push the car away from the wall (positive x), got {:?}",
+            world.cars[0].linear_velocity
+        );
+        assert!(
+            (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
+            "expected roughly JUMP_SPEED upward velocity from the wall jump, got {}",
+            world.cars[0].linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn a_car_touching_two_walls_at_a_corner_wall_jumps_diagonally_outward() {
+        // RB-PHYSICS-001-FR-039: a car wedged into a corner (touching both
+        // walls at once) should push off diagonally, blending both walls'
+        // normals, not fire along only one of them depending on which wall
+        // happens to come first in `self.walls`. Two perpendicular walls,
+        // normals (1,0,0) and (0,1,0): the old "first wall wins" picker
+        // would give a wall jump with zero y-velocity (or zero x-velocity,
+        // depending on push order); the fix should give roughly equal,
+        // both-positive x and y components instead.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-1000.0, 0.0, 1000.0));
+        let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
+        let wall_y = StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), 100.0);
+        // Same zero-gap-contact convention as the single-wall test above:
+        // 60-unit x half-extent and 30-unit y half-extent, so a car
+        // centered at (160, 130, ...) touches both walls exactly.
+        let car = some_car(Vec3::new(160.0, 130.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car)
+            .with_wall(wall_x)
+            .with_wall(wall_y);
+        world.gravity = Vec3::ZERO; // isolate the wall jump from falling
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 60.0);
+
+        let vx = world.cars[0].linear_velocity.x;
+        let vy = world.cars[0].linear_velocity.y;
+        assert!(
+            vx > 0.0 && vy > 0.0,
+            "expected the corner wall jump to push the car away from both walls \
+             (positive x and y), got {:?}",
+            world.cars[0].linear_velocity
+        );
+        assert!(
+            (vx - vy).abs() < 1.0,
+            "expected a symmetric corner (equal-normal walls) to push off with roughly \
+             equal x and y components, got vx={vx}, vy={vy}"
+        );
+        assert!(
+            (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
+            "expected roughly JUMP_SPEED upward velocity from the wall jump, got {}",
+            world.cars[0].linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn a_ball_wedged_into_a_two_wall_corner_settles_symmetrically_instead_of_favoring_one_wall() {
+        // RB-PHYSICS-001-FR-051: the real proof at `PhysicsWorld::step`'s own
+        // public level. A ball moving diagonally into a perfectly symmetric
+        // two-wall corner (equal restitution/friction, perpendicular
+        // normals) has no physical reason to favor either wall — the true
+        // answer's x and y velocity components should come out equal.
+        // Before this requirement, `step`'s own per-static-shape sequential
+        // contact loop (ground, then each wall in `self.walls`' own
+        // iteration order) instead left the ball measurably biased toward
+        // whichever wall was resolved last, an arbitrary artifact with no
+        // physical basis; this test was confirmed to fail under that old
+        // sequential loop before `step` was changed to use
+        // `solver::resolve_static_manifolds` instead (folded, since
+        // `RB-PHYSICS-001-FR-052`, into `solver::resolve_manifolds`'s own
+        // wider combined solve — see that function's own doc comment).
+        let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+        let wall_y = StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), 0.0);
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(ball_radius, ball_radius, 1000.0),
+        );
+        ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall_x)
+            .with_wall(wall_y);
+        world.gravity = Vec3::ZERO; // isolate the corner impact from falling
+
+        world.step(1.0 / 60.0);
+
+        let vx = world.ball.linear_velocity.x;
+        let vy = world.ball.linear_velocity.y;
+        assert!(
+            (vx - vy).abs() < 5.0,
+            "expected a squarely-symmetric two-wall corner impact to leave the ball's x/y \
+             velocity components nearly equal, got vx={vx}, vy={vy}"
+        );
+    }
+
+    #[test]
+    fn a_ball_wedged_between_a_wall_and_a_heavy_car_gets_each_sides_own_material_response() {
+        // RB-PHYSICS-001-FR-052: the real proof at `PhysicsWorld::step`'s
+        // own public level, one level up from
+        // `a_ball_wedged_into_a_two_wall_corner_settles_symmetrically_instead_of_favoring_one_wall`
+        // above. Same symmetric corner setup, except `wall_y` is replaced by
+        // a real car in the scene — a very-heavy box (`mass = 1e9`)
+        // positioned so its own face is exactly where `wall_y`'s own plane
+        // would be, making it a real ball-vs-car dynamic-manifold contact
+        // instead of a static one, but as immovable as a real wall for all
+        // practical purposes. Before this requirement, `step` resolved the
+        // ball's static wall contact fully via `resolve_static_contacts`
+        // before ever building the `bodies` array `resolve_dynamic_manifolds`
+        // used for the ball-vs-car contact, the same order-dependent gap
+        // `RB-PHYSICS-001-FR-030`/`FR-051` already found and fixed
+        // elsewhere; this test was confirmed to fail under that old
+        // two-call sequence (measurably biased, same as the two-static-wall
+        // test's own pre-fix failure) before `step` was changed to route
+        // both channels through one `solver::resolve_manifolds` call.
+        //
+        // Since RB-PHYSICS-001-FR-107/FR-108 the two sides no longer share
+        // a material: car-ball is RocketSim's restitution 0 / friction 2,
+        // ball-world the arena's restitution 0.3 / friction 0.6. Still one
+        // combined solve, so the outcome is each side's own: the car side
+        // absorbs the ball's approach, the wall side bounces it back.
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(ball_radius, ball_radius, 1000.0),
+        );
+        let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+        ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
+        // Face 1 uu inside the ball's reach: within the car-contact band
+        // (RB-PHYSICS-001-FR-125).
+        let reach = 1.0;
+        let heavy_car = RigidBody::car_box(
+            Vec3::new(1000.0, 1000.0, 1000.0),
+            1.0e9,
+            Vec3::new(ball_radius, -1000.0 + reach, 1000.0),
+        );
+        let extra = extra_ball_hit_velocity(&ball, &heavy_car, &CarBallTuning::default());
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall_x)
+            .with_car(heavy_car);
+        world.gravity = Vec3::ZERO; // isolate the corner impact from falling
+
+        world.step(1.0 / 60.0);
+
+        let vx = world.ball.linear_velocity.x - extra.x;
+        let vy = world.ball.linear_velocity.y - extra.y;
+        assert!(
+            vy.abs() < 1.0,
+            "expected the car side (restitution 0) to stop the ball's approach, got vy={vy}"
+        );
+        assert!(
+            vx > 0.0,
+            "expected the wall side (arena restitution 0.3) to bounce the ball back, got vx={vx}"
+        );
+    }
+
+    #[test]
+    fn a_ball_bounces_off_a_wall_instead_of_passing_through() {
+        // The real end-to-end proof that arena walls are actual physical
+        // geometry, not just an input-detection hack: a ball shot at a
+        // wall should bounce off it the same way it already does off a
+        // car (`ball_bounces_off_a_stationary_car_instead_of_passing_through`),
+        // via the same generic `static_contact_manifolds` machinery the
+        // ground already uses.
+        let wall_x = 100.0;
+        let wall = StaticPlane {
+            restitution: 0.5,
+            ..StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), wall_x)
+        };
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(wall_x + ball_radius + 100.0, 0.0, 1000.0),
+        );
+        ball.restitution = 0.5;
+        ball.linear_velocity = Vec3::new(-300.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_wall(wall);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let contact_surface_x = wall_x + ball_radius;
+        assert!(
+            world.ball.position.x > contact_surface_x - 1.0,
+            "expected the ball to stop at the wall's surface rather than tunnel through, \
+             ball x={}, wall surface x={}",
+            world.ball.position.x,
+            contact_surface_x
+        );
+        assert!(
+            world.ball.linear_velocity.x > 0.0,
+            "expected the ball to bounce back, got vx={}",
+            world.ball.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn double_jump_still_fires_when_a_wall_exists_but_is_not_touched() {
+        // Regression guard: a wall existing in the scene must not affect a
+        // car that isn't actually touching it — car_wall_normal has to be
+        // gated on real contact, not just on `walls` being non-empty.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, 0.0, 1000.0));
+        let wall = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
+        let car = some_car(Vec3::new(5000.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car)
+            .with_wall(wall);
+        world.gravity = Vec3::ZERO;
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 60.0);
+
+        assert!(
+            (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
+            "expected a plain double jump (not a wall jump) when not touching any wall, got {:?}",
+            world.cars[0].linear_velocity
+        );
+        assert_eq!(
+            world.cars[0].linear_velocity.x, 0.0,
+            "expected no wall-jump horizontal push-off when not touching a wall"
+        );
+    }
+
+    #[test]
+    fn a_car_dodges_forward_after_a_ground_jump_when_pitched_in_the_air() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate the jump/dodge impulses from falling back down
+        let dt = 1.0 / 120.0;
+
+        // Ground jump: a fresh press while grounded.
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+
+        // Release, then let the car actually leave the ground before
+        // dodging — a dodge, like the plain double jump, only fires while
+        // airborne.
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        for _ in 0..12 {
+            world.step(dt);
+        }
+        assert!(
+            world.cars[0].position.z > 18.0 + 1.0,
+            "expected the car to have left the ground before dodging, got z={}",
+            world.cars[0].position.z
+        );
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                pitch: Some(-1.0),
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+
+        assert!(
+            (world.cars[0].linear_velocity.x - crate::drive::DODGE_SPEED).abs() < 1.0,
+            "expected the dodge to give ~DODGE_SPEED forward velocity, got {}",
+            world.cars[0].linear_velocity.x
+        );
+        assert!(
+            world.cars[0].angular_velocity.y.abs() > 0.0,
+            "expected the dodge to give the car a visible flip, got {:?}",
+            world.cars[0].angular_velocity
+        );
+    }
+
+    #[test]
+    fn a_wall_jump_dodges_outward_and_upward_with_a_flip_in_a_live_world() {
+        // Regression guard for the *reversed* premise: a wall jump used to
+        // always ignore stick input; now directional stick input at or
+        // above DODGE_DEADZONE fires a wall-jump dodge — the real
+        // end-to-end proof that it fires in a live `PhysicsWorld::step`
+        // loop, not just in `drive.rs` isolation.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-1000.0, 0.0, 1000.0));
+        let wall = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
+        let car = some_car(Vec3::new(160.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car)
+            .with_wall(wall);
+        world.gravity = Vec3::ZERO;
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                pitch: Some(-1.0),
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 60.0);
+
+        assert!(
+            (world.cars[0].linear_velocity.x
+                - (crate::drive::WALL_JUMP_HORIZONTAL_SPEED + crate::drive::DODGE_SPEED))
+                .abs()
+                < 1.0,
+            "expected the wall push-off plus the forward dodge component, got {}",
+            world.cars[0].linear_velocity.x
+        );
+        assert!(
+            (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
+            "expected the wall jump's upward component, got {}",
+            world.cars[0].linear_velocity.z
+        );
+        assert!(
+            world.cars[0].angular_velocity.length() > 0.0,
+            "expected the wall-jump dodge to give the car a visible flip, got {:?}",
+            world.cars[0].angular_velocity
+        );
+    }
+
+    #[test]
+    fn a_held_ground_jump_reaches_greater_height_than_a_tapped_one() {
+        let peak_height = |held: bool| -> f32 {
+            let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+            let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+            car.restitution = 0.0;
+            let ground = StaticPlane {
+                restitution: 0.0,
+                ..flat_ground()
+            };
+            let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+            world.set_car_input(
+                0,
+                rb_domain::ControllerInput {
+                    jump: true,
+                    ..Default::default()
+                },
+            );
+            let dt = 1.0 / 120.0;
+            world.step(dt); // fresh press: fires the base impulse
+            if !held {
+                world.set_car_input(0, rb_domain::ControllerInput::default());
+            }
+            let mut peak = world.cars[0].position.z;
+            for _ in 0..(2.0 / dt) as u32 {
+                world.step(dt);
+                peak = peak.max(world.cars[0].position.z);
+            }
+            peak
+        };
+
+        let tapped_peak = peak_height(false);
+        let held_peak = peak_height(true);
+        assert!(
+            held_peak > tapped_peak + 1.0,
+            "expected holding jump to reach a greater peak height than tapping it, \
+             tapped={tapped_peak}, held={held_peak}"
+        );
+    }
+
+    #[test]
+    fn double_jump_after_a_held_ground_jump_still_gives_exactly_one_more_jump_speed_kick() {
+        // Regression guard: holding the ground jump (earning extra height
+        // via the new variable-height hold window) must not leak any extra
+        // acceleration into a later double jump — variable height is
+        // scoped to the ground jump only.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate the jump impulses from falling back down
+        let dt = 1.0 / 120.0;
+
+        // Ground jump, held well past drive::JUMP_HOLD_MAX_DURATION so the
+        // extra acceleration has fully accrued before releasing.
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        for _ in 0..24 {
+            world.step(dt);
+        }
+        let velocity_after_held_ground_jump = world.cars[0].linear_velocity.z;
+
+        // Release, then press again once airborne — a plain double jump.
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        world.step(dt);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+
+        let velocity_after_double_jump = world.cars[0].linear_velocity.z;
+        assert!(
+            (velocity_after_double_jump
+                - (velocity_after_held_ground_jump + crate::drive::JUMP_SPEED))
+                .abs()
+                < 1.0,
+            "expected the double jump to add exactly one more JUMP_SPEED kick on top of \
+             whatever the held ground jump had already accrued, not an extra variable-height \
+             boost, after held ground jump={velocity_after_held_ground_jump}, after double \
+             jump={velocity_after_double_jump}"
+        );
+    }
+
+    #[test]
+    fn landing_clears_a_dodges_flip_before_a_later_double_jump_in_a_live_world() {
+        // Regression guard: a dodge's flip state doesn't leak past landing
+        // into a later, unrelated plain double jump.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate every jump/dodge impulse from falling back down
+        let dt = 1.0 / 120.0;
+
+        // Ground jump, leave the ground, dodge.
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        for _ in 0..12 {
+            world.step(dt);
+        }
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                pitch: Some(-1.0),
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        assert!(world.cars[0].angular_velocity.length() > 0.0);
+
+        // Release jump (so the next ground-jump press is a real fresh
+        // press), then land: zero out the spin and velocity by hand and
+        // put the car back at its resting height, as if it had settled
+        // flat — this test only cares about the *later* double jump, not
+        // about actually simulating the fall back down. Landing clears the
+        // flip (`DriveState::flip`, RB-PHYSICS-001-FR-083).
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        world.step(dt);
+        world.cars[0].angular_velocity = Vec3::ZERO;
+        world.cars[0].position = Vec3::new(0.0, 0.0, 18.0);
+        world.cars[0].linear_velocity = Vec3::ZERO;
+        world.step(dt); // on_ground computed fresh from the reset position
+
+        // Ground jump again, leave the ground, then a plain double jump
+        // (no stick input).
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        for _ in 0..12 {
+            world.step(dt);
+        }
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        let angular_velocity_after_plain_double_jump = world.cars[0].angular_velocity;
+
+        // Release, then press again: no flip is left to change the spin.
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        world.step(dt);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+
+        // A tolerance rather than exact equality: air-control damping
+        // (RB-PHYSICS-001-FR-084) acts on the neutral release step in
+        // between, on the small pitch the suspension gives the jump; a
+        // leftover flip torque (~1.9 rad/s per tick) would dwarf it.
+        assert!(
+            (world.cars[0].angular_velocity - angular_velocity_after_plain_double_jump).length()
+                < 0.05,
+            "expected no leftover flip spin after an unrelated plain double jump, before \
+             release/re-press={angular_velocity_after_plain_double_jump:?}, after={:?}",
+            world.cars[0].angular_velocity
+        );
+    }
+
+    #[test]
+    fn standard_arena_is_planes_plus_the_game_meshes() {
+        // RocketSim's `Arena::_SetupArenaCollisionShapes` (RB-PHYSICS-001-
+        // FR-113, FR-117): the ground, both side walls and the ceiling as
+        // planes; its 16 soccar meshes. The analytic back-wall seams, goal
+        // walls, goal boxes and nets are out.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        let world = PhysicsWorld::standard_arena(ball);
+        assert_eq!(world.ground, crate::arena::standard_ground());
+        assert_eq!(world.walls.len(), 3);
+        assert_eq!(world.meshes.len(), 16);
+        assert!(world.curves.is_empty());
+        assert!(world.corner_fillets.is_empty());
+        assert!(world.goal_walls.is_empty());
+        assert!(world.bounded_walls.is_empty());
+        assert!(world.nets.is_empty());
+    }
+
+    #[test]
+    fn a_ball_rolling_into_a_curved_transition_is_deflected_up_off_the_flat_floor_height() {
+        // Wall at x=1000, fillet radius 292: resting at flat-floor height
+        // (z=ball_radius) at x=900 already overlaps the curve's own
+        // material (it's within the fillet's footprint, closer to the wall
+        // than the fillet's floor-side tangent point at x=708) -- the curve
+        // should deflect the ball up onto its own surface instead of leaving
+        // it embedded, the real end-to-end proof that
+        // RB-PHYSICS-001-FR-020's curved transition is real physical
+        // geometry, not just a detection hack.
+        let floor = flat_ground();
+        let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let curve = crate::body::StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            292.0,
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(900.0, 0.0, ball_radius));
+        ball.restitution = 0.0;
+        // Rolling into the curve: ball-world contacts are velocity-only
+        // (RB-PHYSICS-001-FR-108), so the curve deflects it rather than
+        // pushing a resting ball out.
+        ball.linear_velocity = Vec3::new(300.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(wall)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.z > ball_radius + 10.0,
+            "expected the curve to deflect the ball up off flat-floor height, got z={}",
+            world.ball.position.z
+        );
+    }
+
+    #[test]
+    fn a_car_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height()
+    {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-027: a car sitting
+        // at the exact same overlapping position the ball test above uses
+        // (well within the curve's own footprint, closer to the wall than
+        // the fillet's floor-side tangent point) should get pushed up onto
+        // the curve's own surface instead of staying embedded, the same
+        // live-physics proof already given for the ball, now for a car's
+        // own box via `collision::box_vs_quarter_pipe`'s corner-testing
+        // approximation.
+        let floor = flat_ground();
+        let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let curve = crate::body::StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            292.0,
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, 0.0, 1000.0));
+        let car_half_extents = CAR_HALF_EXTENTS;
+        let car = some_car(Vec3::new(900.0, 0.0, car_half_extents.z));
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_car(car)
+            .with_wall(wall)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.z > car_half_extents.z + 5.0,
+            "expected the curve to push the car up off flat-floor height, got z={}",
+            world.cars[0].position.z
+        );
+    }
+
+    #[test]
+    fn a_car_embedded_in_a_compound_corner_fillets_footprint_has_its_penetration_reduced() {
+        // The same live-physics proof
+        // `a_compound_corner_fillet_stops_a_ball_moving_into_its_corner`
+        // gives for the ball (RB-PHYSICS-001-FR-023), adapted for a car's
+        // own box via `collision::box_vs_corner_fillet`'s corner-testing
+        // approximation (RB-PHYSICS-001-FR-027). Unlike a sphere (a single
+        // point, so "distance to the fillet's center shrinks" is exactly
+        // "penetration shrinks"), an axis-aligned box's corners sit at
+        // different depths into the fillet at once -- resolving one
+        // corner's contact can rotate the box in a way that moves its
+        // *center* away from the fillet even as every individual
+        // corner's own overlap is being corrected. So this checks the
+        // real invariant that generalizes: the worst (deepest) corner
+        // penetration this fillet reports should be smaller once the
+        // solver has run than it was at the deeply-embedded starting
+        // position, not that the box's own center approaches the
+        // fillet's.
+        let floor = flat_ground();
+        let wall_x = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let wall_y = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
+        let radius = 292.0;
+        let fillet =
+            crate::body::StaticCornerFillet::between_three_planes(&floor, &wall_x, &wall_y, radius);
+
+        let toward_corner = Vec3::new(1.0, 1.0, -1.0)
+            .normalize()
+            .expect("(1, 1, -1) is nonzero");
+        let starting_distance = fillet.radius;
+        let car = some_car(fillet.center + toward_corner * starting_distance);
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, -5000.0, 5000.0));
+
+        let max_penetration = |body: &RigidBody| -> f32 {
+            collision::contacts_vs_corner_fillet(body, &fillet)
+                .iter()
+                .map(|c| c.penetration_depth)
+                .fold(0.0f32, f32::max)
+        };
+        let starting_penetration = max_penetration(&car);
+        assert!(
+            starting_penetration > 0.0,
+            "expected the starting position to actually overlap the fillet"
+        );
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_car(car)
+            .with_wall(wall_x)
+            .with_wall(wall_y)
+            .with_corner_fillet(fillet);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_penetration = max_penetration(&world.cars[0]);
+        assert!(
+            final_penetration < starting_penetration - 5.0,
+            "expected the compound-corner fillet to meaningfully reduce the car's worst \
+             corner penetration, started at {starting_penetration}, got {final_penetration}"
+        );
+    }
+
+    #[test]
+    fn a_ball_rolling_into_a_diagonal_walls_curved_transition_is_deflected_up() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-021: `between_planes`
+        // generalizes to a wall whose normal isn't a coordinate axis (like
+        // one of the standard arena's diagonal corner walls) as long as it's
+        // still perpendicular to the floor -- this test builds its own
+        // diagonal (non-axis-aligned) wall rather than going through
+        // `arena::standard_curves` so the fillet's own geometric correctness
+        // is checked directly, independent of the arena module's specific
+        // corner placement. Same structure as
+        // `a_ball_rolling_into_a_curved_transition_is_deflected_up_off_the_flat_floor_height`,
+        // just with a diagonal wall normal instead of an axis-aligned one.
+        let floor = flat_ground();
+        let wall_normal = Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2;
+        let wall = StaticPlane::new(wall_normal, -1000.0);
+        let axis_direction = floor.normal.cross(&wall.normal);
+        let curve =
+            crate::body::StaticQuarterPipe::between_planes(&floor, &wall, 292.0, axis_direction);
+
+        let ball_radius = 93.15;
+        // 900 units from the origin toward the wall, along the wall's
+        // inward direction -- the diagonal analogue of the cardinal test's
+        // ball at x=900 for a wall at x=1000.
+        let toward_wall = -wall.normal;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            toward_wall * 900.0 + Vec3::new(0.0, 0.0, ball_radius),
+        );
+        ball.restitution = 0.0;
+        // Rolling into the curve: ball-world contacts are velocity-only
+        // (RB-PHYSICS-001-FR-108), so the curve deflects it rather than
+        // pushing a resting ball out.
+        ball.linear_velocity = toward_wall * 300.0;
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(wall)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.z > ball_radius + 10.0,
+            "expected the diagonal wall's curve to deflect the ball up off flat-floor height, got z={}",
+            world.ball.position.z
+        );
+    }
+
+    #[test]
+    fn a_ball_embedded_in_a_corner_walls_floor_arch_footprint_is_pushed_toward_the_axis() {
+        // A corner wall's own floor-seam arch (RB-PHYSICS-001-FR-025, at
+        // the real mesh's 256 uu since FR-102): a
+        // ball embedded past it is pushed back toward the axis. Same
+        // diagonal, non-axis-aligned wall setup as
+        // `a_ball_rolling_into_a_curved_transition_is_deflected_up_off_the_flat_floor_height`'s
+        // corner-wall variant, and the same weaker "moved meaningfully"
+        // assertion as
+        // `a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner`,
+        // for the same residual-velocity reason.
+        let floor = flat_ground();
+        let wall_normal = Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2;
+        let wall = StaticPlane::new(wall_normal, -1000.0);
+        let axis_direction = floor.normal.cross(&wall.normal);
+        let radius = 256.0;
+        let curve =
+            crate::body::StaticQuarterPipe::between_planes(&floor, &wall, radius, axis_direction);
+
+        let ball_radius = 93.15;
+        let bisector = ((curve.sector_start + curve.sector_end) * 0.5)
+            .normalize()
+            .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
+        // Overlapping the arch's own material by 10 units (further from the
+        // axis than the resting distance, toward the sharp corner the arch
+        // replaces).
+        let embedded_distance = radius - ball_radius + 10.0;
+        let embedded_position = curve.axis_point + bisector * embedded_distance;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(wall)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_horizontal_rel = Vec3::new(
+            world.ball.position.x - curve.axis_point.x,
+            world.ball.position.y - curve.axis_point.y,
+            0.0,
+        );
+        let final_dist = final_horizontal_rel.length();
+        assert!(
+            final_dist < embedded_distance - 10.0,
+            "expected the corner wall's floor arch to push the ball meaningfully toward the \
+             axis, started {embedded_distance} units out, got {final_dist}"
+        );
+    }
+
+    #[test]
+    fn a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-022: two vertical
+        // walls meeting at a shallow (non-perpendicular, 45-degree-normal)
+        // angle, exactly like a diagonal corner wall's own vertical edge
+        // where it meets its neighboring side/back wall -- a ball embedded
+        // past the fillet's own radius (deep in what would otherwise be the
+        // sharp, unrounded corner sliver) should be pushed back toward the
+        // axis, the same live-physics proof already given for the
+        // floor/wall and diagonal-wall fillets, now for a wall-to-wall
+        // corner whose two planes aren't perpendicular. Checks the ball
+        // settles at (not past) the fillet's own resting distance: since
+        // `RB-PHYSICS-001-FR-034`, penetration correction runs entirely on
+        // the split-impulse push channel rather than leaking into the
+        // ball's real velocity, so once the overlap resolves there's no
+        // residual velocity left to coast onward with (unlike before
+        // FR-034, when this same test asserted only "moved meaningfully",
+        // since the ball would overshoot the resting distance and keep
+        // going).
+        let wall_a = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), 0.0);
+        let wall_b = StaticPlane::new(
+            Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        );
+        let radius = 292.0;
+        let curve = crate::body::StaticQuarterPipe::between_planes(
+            &wall_a,
+            &wall_b,
+            radius,
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+
+        let ball_radius = 93.15;
+        let bisector = ((curve.sector_start + curve.sector_end) * 0.5)
+            .normalize()
+            .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
+        // Overlapping the fillet's own material by 10 units (further from
+        // the axis than the resting distance, toward the sharp corner the
+        // fillet replaces), well clear of the ground so gravity/floor
+        // contact can't interfere.
+        let embedded_distance = curve.radius - ball_radius + 10.0;
+        let embedded_position =
+            curve.axis_point + bisector * embedded_distance + Vec3::new(0.0, 0.0, 500.0);
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+        // Moving further into the fillet: RocketSim resolves ball-world
+        // contacts for velocity only (RB-PHYSICS-001-FR-108), so the
+        // fillet stops the ball rather than pushing it back out.
+        ball.linear_velocity = bisector * 300.0;
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall_a)
+            .with_wall(wall_b)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_horizontal_rel = Vec3::new(
+            world.ball.position.x - curve.axis_point.x,
+            world.ball.position.y - curve.axis_point.y,
+            0.0,
+        );
+        let final_dist = final_horizontal_rel.length();
+        assert!(
+            final_dist < embedded_distance + 1.0,
+            "expected the corner-edge fillet to stop a ball moving into it at {embedded_distance}, got {final_dist}"
+        );
+    }
+
+    /// A standard car with its up axis along `normal`, its origin 17 uu
+    /// off `surface_point`: resting on its wheels there.
+    fn car_resting_on(surface_point: Vec3, normal: Vec3) -> RigidBody {
+        let up = Vec3::new(0.0, 0.0, 1.0);
+        let half_angle = 0.5 * up.dot(&normal).clamp(-1.0, 1.0).acos();
+        let axis = up
+            .cross(&normal)
+            .normalize()
+            .unwrap_or(Vec3::new(1.0, 0.0, 0.0));
+        let sin = half_angle.sin();
+        let mut car = RigidBody::standard_car(surface_point + normal * 17.0);
+        car.orientation = Quat::new(axis.x * sin, axis.y * sin, axis.z * sin, half_angle.cos());
+        car.update_inertia_tensor();
+        car
+    }
+
+    fn arena_wheels(car: &RigidBody) -> drive::WheelContacts {
+        let world = PhysicsWorld::standard_arena(RigidBody::standard_ball(Vec3::ZERO));
+        drive::cast_wheels(
+            car,
+            |o, d, l| world.static_scene().raycast(o, d, l),
+            1.0 / 120.0,
+        )
+    }
+
+    #[test]
+    fn a_car_on_the_side_wall_has_all_four_wheels_on_it() {
+        // RB-PHYSICS-001-FR-102: wheel rays hit walls, not just the floor.
+        let normal = Vec3::new(-1.0, 0.0, 0.0);
+        let car = car_resting_on(Vec3::new(crate::arena::SIDE_WALL_X, 0.0, 1000.0), normal);
+        let wheels = arena_wheels(&car);
+        assert!(wheels.iter().all(Option::is_some), "{wheels:?}");
+        for contact in wheels.iter().flatten() {
+            assert!((contact.normal - normal).length() < 1e-4);
+            assert!((contact.point.x - crate::arena::SIDE_WALL_X).abs() < 1e-2);
+        }
+    }
+
+    #[test]
+    fn a_car_on_a_side_floor_ramp_has_its_wheels_on_the_mesh() {
+        // RB-PHYSICS-001-FR-106: halfway up the +X floor ramp, now the real
+        // triangles. A wheel 60 uu up or down the ramp sits on a facet up
+        // to ~18 degrees from the 45-degree normal under the car's center
+        // (60 uu of arc on 256 uu plus half a facet).
+        let radius = 256.0;
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let normal = Vec3::new(-half, 0.0, half);
+        let center = Vec3::new(crate::arena::SIDE_WALL_X - radius, 0.0, radius);
+        let car = car_resting_on(center - normal * radius, normal);
+        let wheels = arena_wheels(&car);
+        assert!(drive::is_on_ground(&wheels), "{wheels:?}");
+        for contact in wheels.iter().flatten() {
+            assert!(contact.normal.dot(&normal) > 0.95, "{contact:?}");
+        }
+    }
+
+    #[test]
+    fn a_car_on_a_corner_wall_has_all_four_wheels_on_its_flat_facets() {
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let normal = Vec3::new(-half, -half, 0.0);
+        let along = crate::arena::CORNER_LENGTH * 0.5;
+        let on_wall = Vec3::new(
+            crate::arena::SIDE_WALL_X - along,
+            crate::arena::BACK_WALL_Y - along,
+            1000.0,
+        );
+        let wheels = arena_wheels(&car_resting_on(on_wall, normal));
+        assert!(wheels.iter().all(Option::is_some), "{wheels:?}");
+        for contact in wheels.iter().flatten() {
+            assert!((contact.normal - normal).length() < 1e-3, "{contact:?}");
+        }
+    }
+
+    /// A car at the origin facing +x driving at 1000 uu/s into a resting
+    /// ball whose centre is `overlap` uu inside a `BALL_RADIUS` sphere's
+    /// reach of the hitbox's front face; the ball's speed after one tick.
+    fn ball_speed_after_a_tick_at_overlap(overlap: f32) -> f32 {
+        let car_z = 17.0;
+        let front = crate::body::CAR_HITBOX_OFFSET.x + CAR_HALF_EXTENTS.x;
+        let hitbox_z = car_z + crate::body::CAR_HITBOX_OFFSET.z;
+        let ball_x = front + crate::body::BALL_RADIUS - overlap;
+        let mut ball = RigidBody::standard_ball(Vec3::new(ball_x, 0.0, hitbox_z));
+        ball.linear_velocity = Vec3::ZERO;
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, 0.0, car_z));
+        car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.step(1.0 / 120.0);
+        world.ball.linear_velocity.length()
+    }
+
+    /// RB-PHYSICS-001-FR-125: face-on, a car hits the ball once RocketSim's
+    /// 91.25 sphere is within the pair's 1.825 uu breaking threshold of the
+    /// hitbox, 0.075 uu inside a `BALL_RADIUS` sphere's reach; half a uu
+    /// clear of that reach is no hit.
+    #[test]
+    fn a_car_hits_the_ball_only_inside_the_car_contact_radius() {
+        assert!(ball_speed_after_a_tick_at_overlap(-0.5) < 1e-3);
+        assert!(ball_speed_after_a_tick_at_overlap(0.5) > 100.0);
+    }
+
+    /// Like `ball_speed_after_a_tick_at_overlap`, with the ball centred on
+    /// the diagonal off the hitbox's front-top-right corner, `overlap` uu
+    /// inside a `BALL_RADIUS` sphere's reach of the sharp corner.
+    fn ball_speed_after_a_tick_at_corner_overlap(overlap: f32) -> f32 {
+        let car_z = 17.0;
+        let corner = crate::body::CAR_HITBOX_OFFSET + CAR_HALF_EXTENTS + Vec3::new(0.0, 0.0, car_z);
+        let diagonal = Vec3::new(1.0, 1.0, 1.0) * (1.0 / 3.0f32.sqrt());
+        let mut ball =
+            RigidBody::standard_ball(corner + diagonal * (crate::body::BALL_RADIUS - overlap));
+        ball.linear_velocity = Vec3::ZERO;
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, 0.0, car_z));
+        car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.step(1.0 / 120.0);
+        world.ball.linear_velocity.length()
+    }
+
+    /// RB-PHYSICS-001-FR-125: at a hitbox corner the box is rounded by
+    /// Bullet's 2 uu margin, so a ball 1 uu inside the sharp corner's reach
+    /// is not hit (`hitjump.jsonl` 83.19 s, 0.57 uu, is such a corner);
+    /// 2.5 uu inside, it is.
+    #[test]
+    fn a_ball_at_a_hitbox_corner_meets_it_rounded() {
+        assert!(ball_speed_after_a_tick_at_corner_overlap(1.0) < 1e-3);
+        assert!(ball_speed_after_a_tick_at_corner_overlap(2.5) > 100.0);
+    }
+
+    /// RB-PHYSICS-001-FR-112, from `hitjump.jsonl` 56.3 s: a ball shot into
+    /// the goal mouth at half the crossbar's height goes in, instead of
+    /// bouncing off a fillet filling the mouth.
+    #[test]
+    fn a_ball_shot_into_the_goal_mouth_goes_in() {
+        let mut ball = RigidBody::standard_ball(Vec3::new(0.0, 5065.0, 355.0));
+        ball.linear_velocity = Vec3::new(0.0, 2919.0, -391.0);
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        assert!(
+            world.ball.linear_velocity.y > 2900.0,
+            "expected the ball to keep going in, got {:?}",
+            world.ball.linear_velocity
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-112, from `hitjump.jsonl` 277.0 s: a car driving
+    /// inside the goal meets no back-wall floor seam.
+    #[test]
+    fn a_car_inside_the_goal_meets_no_back_wall_seam() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 5325.0, 17.0));
+        let world = PhysicsWorld::standard_arena(ball).with_car(car);
+        let scene = world.static_scene();
+        let deep = PhysicsWorld::static_contact_manifolds(&world.cars[0], &scene, true, None, None)
+            .into_iter()
+            .flat_map(|(_, contacts)| contacts)
+            .any(|contact| contact.penetration_depth > 5.0);
+        assert!(
+            !deep,
+            "the car should rest on the goal floor, not be buried in a seam"
+        );
+    }
+
+    #[test]
+    fn a_compound_corner_fillet_stops_a_ball_moving_into_its_corner() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-023: three planes
+        // meeting at a single vertex (here, a floor and two vertical walls
+        // meeting at 90 degrees each, like a corner wall's own floor-side
+        // endpoint) -- a ball embedded past the fillet's own radius (deep
+        // in what would otherwise be the sharp, unrounded corner) should be
+        // pushed back toward the fillet's center, the same live-physics
+        // proof already given for the edge fillets, now for a compound
+        // 3-plane corner. Checks the ball settles at (not past) the
+        // fillet's own resting distance, same reasoning as
+        // `a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner`.
+        let floor = flat_ground();
+        let wall_x = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let wall_y = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
+        let radius = 292.0;
+        let fillet =
+            crate::body::StaticCornerFillet::between_three_planes(&floor, &wall_x, &wall_y, radius);
+
+        let ball_radius = 93.15;
+        let toward_corner = Vec3::new(1.0, 1.0, -1.0)
+            .normalize()
+            .expect("(1, 1, -1) is nonzero");
+        // Overlapping the fillet's own material by 10 units (further from
+        // the center than the resting distance, toward the sharp corner
+        // the fillet replaces).
+        let embedded_distance = fillet.radius - ball_radius + 10.0;
+        let embedded_position = fillet.center + toward_corner * embedded_distance;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+        // Moving further into the fillet: RocketSim resolves ball-world
+        // contacts for velocity only (RB-PHYSICS-001-FR-108), so the
+        // fillet stops the ball rather than pushing it back out.
+        ball.linear_velocity = toward_corner * 300.0;
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(wall_x)
+            .with_wall(wall_y)
+            .with_corner_fillet(fillet);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_dist = (world.ball.position - fillet.center).length();
+        assert!(
+            final_dist < embedded_distance + 1.0,
+            "expected the compound-corner fillet to stop a ball moving into it at {embedded_distance}, got {final_dist}"
+        );
+    }
+
+    #[test]
+    fn a_ball_bounces_off_the_standard_arenas_side_wall_in_a_live_world() {
+        // The same physical proof as a_ball_bounces_off_a_wall_instead_of_
+        // passing_through, but against PhysicsWorld::standard_arena's real
+        // field-dimension side wall instead of a hand-placed test wall.
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(0.0, 0.0, 1000.0));
+        ball.restitution = 0.5;
+        ball.linear_velocity = Vec3::new(2000.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(5.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let side_wall_surface_x = crate::arena::SIDE_WALL_X - ball_radius;
+        assert!(
+            world.ball.position.x < side_wall_surface_x + 1.0,
+            "expected the ball to stop at the standard arena's side wall rather than escape \
+             it, ball x={}, wall surface x={}",
+            world.ball.position.x,
+            side_wall_surface_x
+        );
+        assert!(
+            world.ball.linear_velocity.x <= 0.0,
+            "expected the ball to have bounced back off the side wall, got vx={}",
+            world.ball.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn a_ball_is_stopped_by_the_corner_wall_before_reaching_the_true_rectangular_corner() {
+        // Fired straight along the diagonal toward the arena's true
+        // (uncut) rectangular corner (SIDE_WALL_X, BACK_WALL_Y): if the
+        // octagon's corner wall is real physical geometry rather than
+        // decoration, the ball must be stopped well before its x or y
+        // individually reaches either the side or back wall's own
+        // position — proof it's the diagonal corner plane doing the work,
+        // not the two cardinal walls.
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(0.0, 0.0, 1000.0));
+        ball.restitution = 0.5;
+        let diag = std::f32::consts::FRAC_1_SQRT_2;
+        ball.linear_velocity = Vec3::new(3000.0 * diag, 3000.0 * diag, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(5.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.x < crate::arena::SIDE_WALL_X - 1.0,
+            "expected the corner wall to stop the ball before its x reached the side wall's \
+             own position, got x={}",
+            world.ball.position.x
+        );
+        assert!(
+            world.ball.position.y < crate::arena::BACK_WALL_Y - 1.0,
+            "expected the corner wall to stop the ball before its y reached the back wall's \
+             own position, got y={}",
+            world.ball.position.y
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-024: a ball fired
+        // straight through the center of the goal-mouth window, well clear
+        // of the window's own rounded edges, keeps going past the back
+        // wall's own y position instead of bouncing off it -- proof the
+        // cutout is a genuine opening, not decoration.
+        //
+        // Only flown for 1.8s (y=5400 unobstructed), comfortably past the
+        // back wall at BACK_WALL_Y=5120 but well short of y=~6300: a
+        // corner-wall floor-seam arch's own axis (`standard_curves`) is a
+        // line that's `StaticQuarterPipe`-documented as infinite along its
+        // own length, not clipped to the corner wall's real, finite span, so
+        // a ball flying dead down the arena's own center line eventually
+        // re-enters *some* corner arch's resting shell far past the goal,
+        // unrelated to the goal cutout this test exercises; this test
+        // stops well before reaching it instead of relying on outrunning
+        // it (the zone's position has moved with every arch radius, last
+        // in RB-PHYSICS-001-FR-102).
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(0.0, 0.0, crate::arena::GOAL_HEIGHT * 0.5),
+        );
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(0.0, 3000.0, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(1.8 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.y > crate::arena::BACK_WALL_Y + 1.0,
+            "expected the ball to pass through the goal mouth rather than bounce off the back \
+             wall, got y={}",
+            world.ball.position.y
+        );
+    }
+
+    #[test]
+    fn a_car_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-028: a car aimed
+        // straight through the same goal-mouth center position the ball
+        // test above uses, well clear of the window's own rounded edges,
+        // keeps going past the back wall's own y position instead of being
+        // stopped by it -- proof `box_vs_goal_wall`'s per-corner window
+        // treatment is live physical geometry for a car, not just a
+        // detection hack. Same 1.8s flight-duration bound as the ball's own
+        // equivalent test, for the same reason (see that test's own doc
+        // comment) -- a car's own small half-extents relative to the goal's
+        // real dimensions (`GOAL_HALF_WIDTH`/`GOAL_HEIGHT`) mean it clears
+        // the window with room to spare either way.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, -3000.0, 1000.0));
+        // Started 2000 uu out at the 2300 uu/s cap (RB-PHYSICS-001-FR-103).
+        let mut car = some_car(Vec3::new(0.0, 2000.0, crate::arena::GOAL_HEIGHT * 0.5));
+        car.linear_velocity = Vec3::new(0.0, crate::drive::MAX_CAR_SPEED, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(1.8 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.y > crate::arena::BACK_WALL_Y + 1.0,
+            "expected the car to pass through the goal mouth rather than be stopped by the back \
+             wall, got y={}",
+            world.cars[0].position.y
+        );
+    }
+
+    #[test]
+    fn a_car_aimed_away_from_the_goal_mouth_is_still_stopped_by_the_back_wall() {
+        // Regression guard alongside the pass-through proof above: a car
+        // aimed at the solid part of the back wall, well outside the
+        // goal-mouth window's own half-width, is still stopped by it --
+        // `RB-PHYSICS-001-FR-028` only opens the window itself, it doesn't
+        // make the rest of the back wall driveable-through.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, -3000.0, 1000.0));
+        let solid_x = crate::arena::GOAL_HALF_WIDTH + 500.0;
+        let mut car = some_car(Vec3::new(solid_x, 0.0, 18.0));
+        car.linear_velocity = Vec3::new(0.0, 3000.0, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.y < crate::arena::BACK_WALL_Y - 1.0,
+            "expected the car to be stopped by the solid part of the back wall, got y={}",
+            world.cars[0].position.y
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_into_the_goal_is_stopped_by_the_goal_back_wall() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-029's own
+        // back-of-net wall: a ball fired straight toward the back of the
+        // goal box settles there instead of flying forever into unbounded
+        // open space the way it did before this requirement -- proof the
+        // goal box's own interior is bounded, not just the cutout itself.
+        //
+        // Isolated to just this one new wall via `PhysicsWorld::new` plus
+        // `with_wall`, rather than the full `PhysicsWorld::standard_arena`
+        // -- the standard arena's own goal-cutout fillets sit right at the
+        // window's edge, close enough to this scene's own path that the
+        // pre-existing "quarter-pipe sector membership is angle-only, not
+        // radially bounded" limitation (the same category noted in
+        // `StaticQuarterPipe`'s own doc comment and the FR-025 test-writing
+        // notes) can fire spuriously; a synthetic, single-wall scene proves
+        // this wall's own behavior without that unrelated interaction.
+        let mut ball = RigidBody::sphere(
+            93.15,
+            1.0,
+            Vec3::new(
+                0.0,
+                crate::arena::BACK_WALL_Y + 10.0,
+                crate::arena::GOAL_HEIGHT * 0.5,
+            ),
+        );
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(0.0, 400.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+        for mut wall in crate::arena::standard_goal_back_walls() {
+            wall.restitution = 0.0;
+            world = world.with_wall(wall);
+        }
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let goal_back_wall_y = crate::arena::BACK_WALL_Y + crate::arena::GOAL_DEPTH;
+        assert!(
+            world.ball.position.y > crate::arena::BACK_WALL_Y
+                && world.ball.position.y < goal_back_wall_y + 5.0,
+            "expected the ball to settle inside the goal box against its own back wall, got y={}",
+            world.ball.position.y
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_sideways_inside_the_goal_is_stopped_by_a_goal_side_wall() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-029's own side
+        // walls: a ball fired sideways across the goal's own width (not
+        // through the front window) settles against a goal side wall
+        // instead of flying through the main field's own much-wider side
+        // wall position. Isolated to just the 4 side walls via
+        // `with_bounded_wall`, for the same reason the back-wall test
+        // above is isolated -- see its own doc comment.
+        let mut ball = RigidBody::sphere(
+            93.15,
+            1.0,
+            Vec3::new(
+                0.0,
+                crate::arena::BACK_WALL_Y + crate::arena::GOAL_DEPTH * 0.5,
+                crate::arena::GOAL_HEIGHT * 0.5,
+            ),
+        );
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(400.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+        for mut wall in crate::arena::standard_goal_side_walls() {
+            wall.plane.restitution = 0.0;
+            world = world.with_bounded_wall(wall);
+        }
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.x > 0.0
+                && world.ball.position.x < crate::arena::GOAL_HALF_WIDTH + 5.0,
+            "expected the ball to settle inside the goal box against its own side wall, got x={}",
+            world.ball.position.x
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_upward_inside_the_goal_is_stopped_by_the_goal_roof() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-029's own roof: a
+        // ball fired straight up settles against the goal's own roof
+        // instead of flying up to the main arena's much higher real
+        // ceiling. Isolated to just the 2 roofs via `with_bounded_wall`,
+        // for the same reason the back-wall test above is isolated -- see
+        // its own doc comment. Ball-world contacts take the arena's
+        // restitution 0.3 (RB-PHYSICS-001-FR-108), so the roof bounces the
+        // ball back down: check its peak, not where it ends up.
+        let mut ball = RigidBody::sphere(
+            93.15,
+            1.0,
+            Vec3::new(
+                0.0,
+                crate::arena::BACK_WALL_Y + crate::arena::GOAL_DEPTH * 0.5,
+                crate::arena::GOAL_HEIGHT * 0.5,
+            ),
+        );
+        ball.linear_velocity = Vec3::new(0.0, 0.0, 400.0);
+
+        let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+        for wall in crate::arena::standard_goal_roofs() {
+            world = world.with_bounded_wall(wall);
+        }
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        let mut peak = world.ball.position.z;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+            peak = peak.max(world.ball.position.z);
+        }
+
+        assert!(
+            peak < crate::arena::GOAL_HEIGHT + 5.0,
+            "expected the goal roof to stop the ball, got peak z={peak}"
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_at_a_goal_net_is_caught_instead_of_passing_through_untouched() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-033's own net: a
+        // ball fired straight at a lone net panel loses most of its speed,
+        // unlike firing it through the exact same empty space with no net
+        // present at all. Isolated to just the one net (`PhysicsWorld::new`
+        // plus `with_net`, not `standard_arena`) for the same
+        // full-arena-interference reason FR-029's own isolated proofs above
+        // are isolated.
+        let net_y = crate::arena::BACK_WALL_Y + crate::arena::NET_DEPTH;
+
+        let run = |with_net: bool| -> f32 {
+            let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, net_y - 800.0, 300.0));
+            let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+            world.ball.linear_velocity = Vec3::new(0.0, 1500.0, 0.0);
+            world.gravity = Vec3::ZERO;
+            if with_net {
+                world = world.with_net(crate::arena::standard_nets().remove(0));
+            }
+            let dt = 1.0 / 120.0;
+            for _ in 0..(1.0 / dt) as u32 {
+                world.step(dt);
+            }
+            world.ball.linear_velocity.y
+        };
+
+        let caught_speed = run(true);
+        let free_flight_speed = run(false);
+        assert!(
+            caught_speed.abs() < free_flight_speed.abs() * 0.5,
+            "expected the net to catch the ball, losing at least half its speed compared to \
+             free flight, caught vy={caught_speed}, free-flight vy={free_flight_speed}"
+        );
+    }
+
+    #[test]
+    fn a_car_shot_at_a_goal_net_is_caught_instead_of_passing_through_untouched() {
+        // RB-PHYSICS-001-FR-038: the same "caught vs. free flight" proof as
+        // `a_ball_shot_at_a_goal_net_is_caught_instead_of_passing_through_untouched`,
+        // but for a car — closing this port's own former Non-goal that "a
+        // car still passes straight through a NetMesh's spatial footprint
+        // untouched." Uses a car (`with_car`) instead of the scene's own
+        // ball, with the ball placed far away so it can't also contact the
+        // net and confound the measurement.
+        let net_y = crate::arena::BACK_WALL_Y + crate::arena::NET_DEPTH;
+
+        let run = |with_net: bool| -> f32 {
+            let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(10_000.0, 10_000.0, 10_000.0));
+            let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+            // z = 300, not resting on the ground: the net panel is centered
+            // at `GOAL_HEIGHT * 0.5` (~321), so a car floating near the
+            // panel's own vertical middle (matching the equivalent ball
+            // test's own z=300 above) actually overlaps its free interior
+            // points — a car resting flat on the ground at car-height would
+            // only ever reach the panel's anchored bottom row, which
+            // `NetMesh::step`'s own contact-resolution loop deliberately
+            // skips (see its own doc comment), passing through untouched
+            // for a reason unrelated to this requirement.
+            let car = RigidBody::car_box(
+                Vec3::new(60.0, 40.0, 20.0),
+                1.0,
+                Vec3::new(0.0, net_y - 800.0, 300.0),
+            );
+            world = world.with_car(car);
+            world.cars[0].linear_velocity = Vec3::new(0.0, 1500.0, 0.0);
+            world.gravity = Vec3::ZERO;
+            if with_net {
+                world = world.with_net(crate::arena::standard_nets().remove(0));
+            }
+            let dt = 1.0 / 120.0;
+            for _ in 0..(1.0 / dt) as u32 {
+                world.step(dt);
+            }
+            world.cars[0].linear_velocity.y
+        };
+
+        let caught_speed = run(true);
+        let free_flight_speed = run(false);
+        assert!(
+            caught_speed.abs() < free_flight_speed.abs() * 0.5,
+            "expected the net to catch the car, losing at least half its speed compared to \
+             free flight, caught vy={caught_speed}, free-flight vy={free_flight_speed}"
+        );
+    }
+
+    #[test]
+    fn a_goal_posts_fillet_stops_a_ball_moving_into_its_corner() {
+        // The real end-to-end proof that a goal-cutout edge fillet
+        // (RB-PHYSICS-001-FR-024) is live physical geometry, not just a
+        // detection hack: a ball embedded past a post fillet's own radius
+        // (deep in what would otherwise be the sharp, unrounded corner
+        // between the flat back wall and the post's own inward-facing
+        // plane) gets pushed back toward the axis -- the same live-physics
+        // proof already given for every other fillet in this port. Checks
+        // the ball settles at (not past) the fillet's own resting distance,
+        // same reasoning as
+        // `a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner`.
+        let wall = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
+        let post = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -200.0);
+        let radius = 292.0;
+        let curve = crate::body::StaticQuarterPipe::between_planes(
+            &wall,
+            &post,
+            radius,
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+
+        let ball_radius = 93.15;
+        let bisector = ((curve.sector_start + curve.sector_end) * 0.5)
+            .normalize()
+            .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
+        // Overlapping the fillet's own material by 10 units (further from
+        // the axis than the resting distance, toward the sharp corner the
+        // fillet replaces), well clear of the ground so its contact isn't
+        // folded in with the fillet's (RB-PHYSICS-001-FR-108).
+        let embedded_distance = curve.radius - ball_radius + 10.0;
+        let embedded_position =
+            curve.axis_point + bisector * embedded_distance + Vec3::new(0.0, 0.0, 500.0);
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+        // Moving further into the fillet: RocketSim resolves ball-world
+        // contacts for velocity only (RB-PHYSICS-001-FR-108), so the
+        // fillet stops the ball rather than pushing it back out.
+        ball.linear_velocity = bisector * 300.0;
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall)
+            .with_wall(post)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_horizontal_rel = Vec3::new(
+            world.ball.position.x - curve.axis_point.x,
+            world.ball.position.y - curve.axis_point.y,
+            0.0,
+        );
+        let final_dist = final_horizontal_rel.length();
+        assert!(
+            final_dist < embedded_distance + 1.0,
+            "expected the goal-post fillet to stop a ball moving into it at {embedded_distance}, got {final_dist}"
+        );
+    }
+
+    #[test]
+    fn a_goal_corner_fillet_stops_a_ball_moving_into_its_corner() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-026: three planes
+        // meeting at a single vertex -- here a back wall, a post plane, and
+        // a crossbar plane, exactly like the compound corner where a goal
+        // post's own fillet meets the crossbar's -- a ball embedded past
+        // the fillet's own radius (deep in what would otherwise be the
+        // sharp, unrounded corner) should be pushed back toward the
+        // fillet's center, the same live-physics proof
+        // `a_compound_corner_fillet_stops_a_ball_moving_into_its_corner`
+        // already gives for the arena's own compound corners, now for a
+        // goal's. Checks the ball settles at (not past) the fillet's own
+        // resting distance, same reasoning as that test.
+        let wall = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
+        let post = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -200.0);
+        let crossbar = StaticPlane::new(Vec3::new(0.0, 0.0, -1.0), -600.0);
+        let radius = 292.0;
+        let fillet =
+            crate::body::StaticCornerFillet::between_three_planes(&wall, &post, &crossbar, radius);
+
+        let ball_radius = 93.15;
+        let toward_corner = Vec3::new(1.0, 1.0, 1.0)
+            .normalize()
+            .expect("(1, 1, 1) is nonzero");
+        // Overlapping the fillet's own material by 10 units (further from
+        // the center than the resting distance, toward the sharp corner
+        // the fillet replaces).
+        let embedded_distance = fillet.radius - ball_radius + 10.0;
+        let embedded_position = fillet.center + toward_corner * embedded_distance;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+        // Moving further into the fillet: RocketSim resolves ball-world
+        // contacts for velocity only (RB-PHYSICS-001-FR-108), so the
+        // fillet stops the ball rather than pushing it back out.
+        ball.linear_velocity = toward_corner * 300.0;
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall)
+            .with_wall(post)
+            .with_wall(crossbar)
+            .with_corner_fillet(fillet);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_dist = (world.ball.position - fillet.center).length();
+        assert!(
+            final_dist < embedded_distance + 1.0,
+            "expected the goal corner fillet to stop a ball moving into it at {embedded_distance}, got {final_dist}"
+        );
+    }
+
+    #[test]
+    fn a_car_driving_on_flat_ground_stays_grounded_every_tick() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                ..ControllerInput::default()
+            },
+        );
+        let dt = 1.0 / 120.0;
+        for tick in 0..36 {
+            world.step(dt);
+            let car = &world.cars[0];
+            assert!(
+                drive::is_on_ground(&drive::cast_wheels(
+                    car,
+                    |o, d, l| world.static_scene().raycast(o, d, l),
+                    dt
+                )),
+                "car left the ground on tick {tick}: z={}, vz={}",
+                car.position.z,
+                car.linear_velocity.z
+            );
+        }
+        // 0.3 s of full throttle from rest: ~413 uu/s with `drive`'s speed
+        // taper, now that the car rides its wheels (RB-PHYSICS-001-FR-090)
+        // instead of sliding its box. The hopping car reached ~69, grounded
+        // only 12 of these 36 ticks.
+        let speed = world.cars[0].linear_velocity.length();
+        assert!(
+            speed > 400.0,
+            "throttle should apply every tick; got {speed} uu/s after 0.3 s"
+        );
+    }
+
+    /// `RB-PHYSICS-001-FR-090`: a standard car dropped onto the floor
+    /// settles on its suspension at RocketSim's ride height, which is the
+    /// real capture's resting 17.0 uu, with its box clear of the floor.
+    #[test]
+    fn a_standard_car_settles_on_its_suspension_at_the_real_ride_height() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 60.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..240 {
+            world.step(dt);
+        }
+        let car = &world.cars[0];
+        assert!(
+            (car.position.z - 17.0).abs() < 0.1,
+            "rest height {}",
+            car.position.z
+        );
+        assert!(
+            car.linear_velocity.length() < 1.0,
+            "still moving: {:?}",
+            car.linear_velocity
+        );
+        assert!(
+            car.angular_velocity.length() < 0.01,
+            "still turning: {:?}",
+            car.angular_velocity
+        );
+        assert!(
+            collision::contacts_vs_plane(car, &world.ground).is_empty(),
+            "the box should ride clear of the floor"
+        );
+    }
+
+    /// `RB-PHYSICS-001-FR-091`: a ground jump from a car resting on its
+    /// suspension follows the owner's capture tick by tick: the press tick
+    /// gives `JUMP_SPEED` plus 4.0 uu/s, the next six ticks give 4.0 (hold
+    /// force less gravity less the sticky force: five while the wheels still
+    /// touch, one for the sticky force's step of delay, FR-092), and each
+    /// tick after gives 6.7 (hold force less gravity).
+    #[test]
+    fn a_held_ground_jump_gains_speed_as_the_real_capture_does() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        let mut speeds = vec![world.cars[0].linear_velocity.z];
+        for _ in 0..10 {
+            world.step(dt);
+            speeds.push(world.cars[0].linear_velocity.z);
+        }
+        let gains: Vec<f32> = speeds.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            (gains[0] - (crate::drive::JUMP_SPEED + 4.0)).abs() < 0.5,
+            "press tick: {gains:?}"
+        );
+        // FR-092: then six more ticks of +4.0, as recorded, and +6.7 after.
+        for (tick, gain) in gains[1..7].iter().enumerate() {
+            assert!((gain - 4.0).abs() < 0.2, "tick {}: {gains:?}", tick + 1);
+        }
+        for gain in &gains[7..] {
+            assert!((gain - 6.7).abs() < 0.2, "airborne: {gains:?}");
+        }
+    }
+
+    /// `RB-PHYSICS-001-FR-098`/`FR-101`: a jump from rest goes (nearly)
+    /// straight up. The owner's capture (`front.jsonl`, 12.008 s) gains
+    /// under 1 uu/s of horizontal speed over the jump's first ten ticks:
+    /// the brake, acting along the floor after the jump, cancels the
+    /// in-plane part of the push along the car's slightly pitched up axis.
+    #[test]
+    fn a_jump_from_rest_goes_straight_up() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        for tick in 0..10 {
+            world.step(dt);
+            let velocity = world.cars[0].linear_velocity;
+            let horizontal = (velocity.x * velocity.x + velocity.y * velocity.y).sqrt();
+            assert!(horizontal < 1.5, "tick {tick}: {velocity:?}");
+        }
+    }
+
+    /// `RB-PHYSICS-001-FR-080`: full steer on flat ground turns the car at
+    /// the bicycle-model rate for its current speed, through the full step
+    /// (contacts and friction included), not just in `drive` isolation.
+    #[test]
+    fn a_car_steering_on_flat_ground_turns_at_the_steer_curve_rate() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.linear_velocity = Vec3::new(500.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                steer: 1.0,
+                ..ControllerInput::default()
+            },
+        );
+        let dt = 1.0 / 120.0;
+        // RB-PHYSICS-001-FR-086: the turn builds up from the wheels' side
+        // impulses, well short of the target after one tick.
+        world.step(dt);
+        let first_tick = world.cars[0].angular_velocity.z;
+        let target = crate::drive::bicycle_yaw_rate_for_tests(500.0, 1.0, 0.0);
+        assert!(
+            first_tick > 0.0 && first_tick < 0.25 * target,
+            "yaw after one tick {first_tick}, target {target}"
+        );
+        for _ in 1..30 {
+            world.step(dt);
+        }
+        let car = &world.cars[0];
+        let forward = car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+        let forward_speed = car.linear_velocity.dot(&forward);
+        let expected = crate::drive::bicycle_yaw_rate_for_tests(forward_speed, 1.0, 0.0);
+        let yaw_rate = car.angular_velocity.z;
+        assert!(
+            (yaw_rate - expected).abs() <= 0.1 * expected.abs(),
+            "yaw rate {yaw_rate} rad/s, expected ~{expected} at {forward_speed} uu/s"
+        );
+    }
+
+    #[test]
+    fn a_flipping_cars_orientation_turns_faster_than_its_clamped_spin() {
+        // RB-PHYSICS-001-FR-087: the clamp runs after the transform
+        // integrates, so once a flip saturates the 5.5 rad/s cap each step
+        // still turns the car by the cap plus that step's flip torque, as
+        // the owner's capture shows (~7.6 rad/s turned, 5.5 reported).
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                pitch: Some(-1.0),
+                ..ControllerInput::default()
+            },
+        );
+        let dt = 1.0 / 120.0;
+        for _ in 0..10 {
+            world.step(dt);
+        }
+        let before = world.cars[0].orientation;
+        world.step(dt);
+        let after = world.cars[0].orientation;
+        let turned_per_second = before.angle_to(&after) / dt;
+        let spin = world.cars[0].angular_velocity.length();
+        assert!(
+            (spin - crate::drive::MAX_CAR_ANGULAR_SPEED).abs() < 1e-3,
+            "spin {spin}"
+        );
+        assert!(
+            turned_per_second > spin + 1.0,
+            "turned {turned_per_second} rad/s at a reported {spin}"
+        );
+    }
+
+    fn ball_contact(normal: Vec3, point: Vec3) -> collision::Contact {
+        collision::Contact {
+            normal,
+            point,
+            penetration_depth: 5.0,
+        }
+    }
+
+    #[test]
+    fn ball_world_contacts_fold_into_one_at_the_average_normal_and_distance() {
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, 0.0, 100.0));
+        let floor = solver::StaticMaterial::Surface {
+            restitution: 0.0,
+            friction: 0.0,
+        };
+        let up = Vec3::new(0.0, 0.0, 1.0);
+        let side = Vec3::new(1.0, 0.0, 0.0);
+        let manifolds = vec![
+            (floor, vec![ball_contact(up, Vec3::new(0.0, 0.0, 10.0))]),
+            (
+                floor,
+                vec![ball_contact(side, Vec3::new(-80.0, 0.0, 100.0))],
+            ),
+        ];
+        let combined =
+            combined_ball_world_contact(&ball, manifolds).expect("two contacts fold into one");
+        // The average normal, renormalized (RB-PHYSICS-001-FR-119).
+        let diagonal = Vec3::new(1.0, 0.0, 1.0).normalize().expect("nonzero");
+        assert!((combined.normal - diagonal).length() < 1e-6);
+        // Average distance from the centre to the ball's own contact points
+        // (each `point - normal * depth`: 95 and 85) = 90, back along it.
+        assert!((combined.point - (ball.position - diagonal * 90.0)).length() < 1e-4);
+        // Velocity only: no position correction.
+        assert_eq!(combined.penetration_depth, 0.0);
+    }
+
+    #[test]
+    fn opposite_ball_world_contacts_cancel_into_none() {
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::ZERO);
+        let wall = solver::StaticMaterial::Surface {
+            restitution: 0.0,
+            friction: 0.0,
+        };
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let manifolds = vec![
+            (wall, vec![ball_contact(x, Vec3::new(-90.0, 0.0, 0.0))]),
+            (wall, vec![ball_contact(-x, Vec3::new(90.0, 0.0, 0.0))]),
+        ];
+        assert!(combined_ball_world_contact(&ball, manifolds).is_none());
+    }
+
+    #[test]
+    fn no_ball_world_contacts_fold_into_none() {
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, 0.0, 500.0));
+        assert!(combined_ball_world_contact(&ball, vec![]).is_none());
+        let empty = solver::StaticMaterial::Surface {
+            restitution: 0.0,
+            friction: 0.0,
+        };
+        assert!(combined_ball_world_contact(&ball, vec![(empty, vec![])]).is_none());
+    }
+
+    #[test]
+    fn ball_world_material_takes_the_bouncier_restitution_and_the_lower_friction() {
+        let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::ZERO);
+        ball.restitution = 0.6;
+        ball.friction = 0.35;
+        assert_eq!(
+            ball_world_material(&ball),
+            solver::StaticMaterial::Pair {
+                restitution: 0.6,
+                friction: 0.35
+            }
+        );
+        ball.restitution = 0.1;
+        ball.friction = 2.0;
+        assert_eq!(
+            ball_world_material(&ball),
+            solver::StaticMaterial::Pair {
+                restitution: ARENA_RESTITUTION,
+                friction: ARENA_FRICTION
+            }
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-108's motivating case: a ball dropped into a
+    /// 90-degree V touches both faces at once; folded into one contact it
+    /// rebounds once at the arena's restitution, straight back up, instead
+    /// of once per face.
+    #[test]
+    fn a_ball_dropped_into_a_v_rebounds_once_straight_up() {
+        let r = 93.15;
+        let left = StaticPlane::new(
+            Vec3::new(1.0, 0.0, 1.0) * std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        );
+        let right = StaticPlane::new(
+            Vec3::new(-1.0, 0.0, 1.0) * std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        );
+        let mut ball = RigidBody::sphere(r, 1.0, Vec3::new(0.0, 0.0, r * std::f32::consts::SQRT_2));
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(0.0, 0.0, -1000.0);
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), -10_000.0);
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(left)
+            .with_wall(right);
+        world.gravity = Vec3::ZERO;
+        world.step(1.0 / 120.0);
+        let v = world.ball.linear_velocity;
+        assert!(v.x.abs() < 1e-3, "expected no sideways kick, got {v:?}");
+        assert!(
+            (v.z - 1000.0 * ARENA_RESTITUTION).abs() < 30.0,
+            "expected one rebound at the arena's 0.3, got {v:?}"
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-118: a ball sunk into the floor is pushed out by
+    /// 0.8 of what passes RocketSim's 91.25 uu sphere, through position
+    /// alone; the one combined contact still decides its velocity.
+    #[test]
+    fn a_sunk_ball_is_pushed_out_of_the_floor_without_gaining_velocity() {
+        use crate::body::{BALL_COLLISION_RADIUS, BALL_RADIUS};
+        let depth = 5.0;
+        let start = BALL_RADIUS - depth;
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, start));
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        let pushed = world.ball.position.z - start;
+        let expected = 0.8 * (depth - (BALL_RADIUS - BALL_COLLISION_RADIUS));
+        assert!(
+            (pushed - expected).abs() < 0.1,
+            "expected {expected:.2} uu of push, got {pushed:.2}"
+        );
+        assert!(
+            world.ball.linear_velocity.z.abs() < 1.0,
+            "push must not become velocity: {:?}",
+            world.ball.linear_velocity
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-118: inside the 1.9 uu band above RocketSim's
+    /// sphere the ball rests, with nothing to push.
+    #[test]
+    fn a_ball_within_the_contact_band_is_not_pushed() {
+        let start = crate::body::BALL_RADIUS - 1.0;
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, start));
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        assert!(
+            (world.ball.position.z - start).abs() < 0.05,
+            "moved by {}",
+            world.ball.position.z - start
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-119, `hitjump.jsonl` 56.617 s: a ball hitting a
+    /// goal's sloped back while its contact point slides up the slope. The
+    /// game's friction pushes it back down the slope (spin -1.31 to -2.72
+    /// about x, velocity to (0, -1608, 757)). With the averaged normal left
+    /// short of unit length the normal impulse bled into the friction row
+    /// and the ball came out spinning +1.66.
+    #[test]
+    fn friction_on_a_goal_slope_opposes_the_contact_points_slide() {
+        let mut ball = RigidBody::standard_ball(Vec3::new(0.0, 5912.49, 213.35));
+        ball.linear_velocity = Vec3::new(0.0, 2892.8, -576.4);
+        ball.angular_velocity = Vec3::new(-1.31, 0.0, 0.0);
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        let v = world.ball.linear_velocity;
+        let w = world.ball.angular_velocity;
+        assert!(
+            (v - Vec3::new(0.0, -1607.8, 757.4)).length() < 10.0,
+            "bounce off: {v:?}"
+        );
+        assert!((w.x + 2.72).abs() < 0.1, "spin off: {w:?}");
+    }
+
+    /// RB-PHYSICS-001-FR-121/FR-128: a stepped world carries one ball
+    /// manifold per mesh; snapping to a frame the ball is still near keeps
+    /// them, and a snap that teleports the ball forgets them all.
+    #[test]
+    fn snapping_the_ball_keeps_its_history_unless_it_teleports() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 5912.49, 213.35));
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        assert_eq!(world.ball_mesh_manifolds.len(), world.meshes.len());
+        assert!(
+            world.ball_mesh_manifolds.iter().any(|m| !m.is_empty()),
+            "the ball on the goal slope keeps a point"
+        );
+        let mut frame = world.frame();
+        frame.ball.position.x += 1.0;
+        world.snap_to_frame(&frame);
+        assert!(
+            world.ball_mesh_manifolds.iter().any(|m| !m.is_empty()),
+            "a snap within the ball's radius keeps the history"
+        );
+        frame.ball.position = Vec3::new(0.0, 0.0, 93.15);
+        world.snap_to_frame(&frame);
+        assert!(world.ball_mesh_manifolds.is_empty());
+    }
+
+    /// RB-PHYSICS-001-FR-122, `test2.jsonl` 18.358 s: a car landing
+    /// nose-first at 231 uu/s down, its suspension bottomed out, gains
+    /// 168 uu/s upward in the next tick. With the wheel pushback's ERP at
+    /// Bullet's default 0.2 it gained 195; at the calibrated 0.1 it matches.
+    #[test]
+    fn a_bottomed_out_landing_rebounds_as_recorded() {
+        let ball = RigidBody::standard_ball(Vec3::new(1000.0, 1000.0, 93.15));
+        let mut car = RigidBody::standard_car(Vec3::new(-2110.1, -504.9, 9.4));
+        car.orientation = Quat::new(-0.023, 0.055, -0.463, 0.884).normalize();
+        car.linear_velocity = Vec3::new(662.8, -1425.3, -231.2);
+        car.angular_velocity = Vec3::new(-0.37, -5.48, 0.2);
+        car.update_inertia_tensor();
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.step(1.0 / 120.0);
+        let v = world.cars[0].linear_velocity;
+        assert!(
+            (v - Vec3::new(692.4, -1399.3, -63.2)).length() < 8.0,
+            "landing rebound off: {v:?}"
+        );
+    }
+
+    /// A car lying on its roof (`hitjump.jsonl` 279.742 s), sliding, with
+    /// `jump` held from `press_tick` on.
+    fn roof_jump_world(z: f32) -> PhysicsWorld {
+        let ball = RigidBody::standard_ball(Vec3::new(1000.0, 1000.0, 93.15));
+        let mut car = RigidBody::standard_car(Vec3::new(3.8, 4597.6, z));
+        // The recorded orientation: rolled 3.10 rad in RocketSim's sense,
+        // so the flip torque runs along +forward, as the recorded spin does.
+        car.orientation = Quat::new(0.759, -0.65, 0.012, -0.017).normalize();
+        car.linear_velocity = Vec3::new(18.7, -513.5, -12.4);
+        car.update_inertia_tensor();
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        // The recorded car had spent its flip before ending up on its roof;
+        // a fresh press would otherwise also fire the double jump.
+        world.car_drive[0].double_jump_available = false;
+        world
+    }
+
+    /// RB-PHYSICS-001-FR-123: a jump press on the roof pops the car away
+    /// from its own up axis (200 uu/s) and starts a roll about its forward
+    /// axis toward upright.
+    #[test]
+    fn a_jump_press_on_the_roof_pops_the_car_up_and_starts_a_roll() {
+        let mut world = roof_jump_world(39.4);
+        world.step(1.0 / 120.0);
+        let before = world.cars[0].linear_velocity;
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+        let car = world.cars[0];
+        let dv = car.linear_velocity - before;
+        assert!(
+            (dv.z - drive::AUTO_FLIP_SPEED).abs() < 25.0,
+            "expected a 200 uu/s pop, got {dv:?}"
+        );
+        let forward = car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+        // One tick of 50 rad/s^2 less what the ground contact and air
+        // damping take back the same tick.
+        assert!(
+            car.angular_velocity.dot(&forward) > 0.15,
+            "expected a roll toward upright, got {:?}",
+            car.angular_velocity
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-123: the same press upside down in the air, with
+    /// nothing touched last tick, pops nothing.
+    #[test]
+    fn a_jump_press_upside_down_in_the_air_does_not_pop() {
+        let mut world = roof_jump_world(400.0);
+        world.step(1.0 / 120.0);
+        let before = world.cars[0].linear_velocity;
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+        let dv = world.cars[0].linear_velocity - before;
+        assert!(dv.z < 50.0, "popped in the air: {dv:?}");
+    }
+
+    /// RB-PHYSICS-001-FR-129: a wheel ray meets the ball like the floor,
+    /// whichever is nearer.
+    #[test]
+    fn a_wheel_ray_meets_the_ball_or_the_floor_whichever_is_nearer() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let world = PhysicsWorld::standard_arena(ball);
+        let down = Vec3::new(0.0, 0.0, -1.0);
+        let top = 93.15 + crate::body::BALL_COLLISION_RADIUS;
+        let on_ball = world
+            .wheel_ray(Vec3::new(0.0, 0.0, top + 20.0), down, 52.0)
+            .expect("the ball's top is 20 uu below the ray's start");
+        assert!(
+            (on_ball.distance - 20.0).abs() < 1e-3,
+            "got {}",
+            on_ball.distance
+        );
+        assert!((on_ball.normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
+        let beside = world
+            .wheel_ray(Vec3::new(400.0, 0.0, 30.0), down, 52.0)
+            .expect("the floor is 30 uu below the ray's start");
+        assert!(
+            (beside.distance - 30.0).abs() < 1e-2,
+            "the floor, got {}",
+            beside.distance
+        );
+        assert!(world
+            .wheel_ray(Vec3::new(400.0, 0.0, 90.0), down, 52.0)
+            .is_none());
+    }
+
+    /// RB-PHYSICS-001-FR-129, `hitjump.jsonl` 77.658 s: a car whose front
+    /// wheels pass 40 uu over a resting ball's top edge, 2158 uu/s fast, is
+    /// pushed up 95 uu/s in the next tick. The sphere-box contact alone
+    /// gives 50; the wheels' bottomed-out suspension gives the rest (92).
+    #[test]
+    fn a_car_passing_over_the_ball_is_pushed_up_by_its_wheels() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.14));
+        let mut car = RigidBody::standard_car(Vec3::new(53.9, 124.0, 159.7));
+        car.orientation = Quat::new(-0.004, -0.002, 0.904, -0.428).normalize();
+        car.linear_velocity = Vec3::new(-1359.3, -1660.2, 309.6);
+        car.update_inertia_tensor();
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.step(1.0 / 120.0);
+        let dv_z = world.cars[0].linear_velocity.z - 309.6;
+        assert!((80.0..110.0).contains(&dv_z), "pushed up {dv_z:.1} uu/s");
+    }
+
+    /// RB-PHYSICS-001-FR-130, `hitjump.jsonl` 274.208 s: a car at 2300 uu/s
+    /// meets a resting ball with its top-front edge 12 uu inside it, and
+    /// the ball leaves at (0, 2863, 959) uu/s. The ball's lever arm runs to
+    /// its own surface (91 uu), not the 79 uu to the point on the box, so
+    /// sticking friction drags it less: (2887, 908) before, (2871, 939) now
+    /// in this bare world.
+    #[test]
+    fn a_deep_edge_hit_uses_the_balls_own_lever_arm() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.1));
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, -144.4, 17.0));
+        car.orientation = Quat::new(0.0, 0.0, 0.5f32.sqrt(), 0.5f32.sqrt());
+        car.linear_velocity = Vec3::new(0.0, 2300.0, 0.3);
+        car.update_inertia_tensor();
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.step(1.0 / 120.0);
+        let v = world.ball.linear_velocity;
+        assert!(
+            (v.y - 2862.8).abs() < 20.0 && (v.z - 958.7).abs() < 25.0,
+            "{v:?}"
+        );
+    }
+}

@@ -11,4 +11,3 @@ layer = "apps"
 
 [dependencies]
 ts-types.workspace = true
-tracing.workspace = true

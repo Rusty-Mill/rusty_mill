@@ -593,55 +593,7 @@ impl Query {
 /// Comparing an encoded value against a config-file literal would make
 /// `?tenant=a%20b` fail to match `exact: "a b"`, so decoding is not optional.
 fn percent_decode(raw: &str) -> String {
-    if !raw.contains('%') && !raw.contains('+') {
-        return raw.to_string();
-    }
-
-    let bytes = raw.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' => {
-                let hi = bytes.get(i + 1).copied().and_then(hex_digit);
-                let lo = bytes.get(i + 2).copied().and_then(hex_digit);
-                match (hi, lo) {
-                    (Some(hi), Some(lo)) => {
-                        out.push((hi << 4) | lo);
-                        i += 3;
-                    }
-                    // Not a real escape -- including a raw, non-percent-encoded
-                    // multi-byte UTF-8 byte sitting right after a literal `%`,
-                    // which `httparse`/`http` accept in a request target --
-                    // keep the `%` verbatim rather than guessing.
-                    _ => {
-                        out.push(b'%');
-                        i += 1;
-                    }
-                }
-            }
-            byte => {
-                out.push(byte);
-                i += 1;
-            }
-        }
-    }
-
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The value of one ASCII hex digit, or `None` if `byte` is not one.
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    rusty_percent::decode_form(raw).into_owned()
 }
 
 #[cfg(test)]

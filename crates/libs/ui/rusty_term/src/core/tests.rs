@@ -1517,7 +1517,7 @@ fn osc_52_set_is_not_truncated_at_the_old_4kb_cap() {
     // ~3 KiB of decoded text; OSC 52 needs its own, much larger cap so a
     // real (not just a title-sized) copy survives intact.
     let text = "x".repeat(10_000); // well past the old 4096-byte OSC_MAX
-    let b64 = base64::encode(text.as_bytes());
+    let b64 = rusty_base64::encode_standard(text.as_bytes());
     let mut g = Grid::new(80, 24);
     let mut p = AnsiParser::new();
     let osc = [b"\x1b]52;c;".as_slice(), b64.as_bytes(), b"\x07"].concat();
@@ -3254,14 +3254,14 @@ fn base64_decodes_standard_and_padding() {
 
 #[test]
 fn base64_encodes_with_padding_and_round_trips() {
-    assert_eq!(base64::encode(b"Man"), "TWFu");
-    assert_eq!(base64::encode(b"Hello"), "SGVsbG8=");
-    assert_eq!(base64::encode(b"Hello!"), "SGVsbG8h");
-    assert_eq!(base64::encode(b""), "");
+    assert_eq!(rusty_base64::encode_standard(b"Man"), "TWFu");
+    assert_eq!(rusty_base64::encode_standard(b"Hello"), "SGVsbG8=");
+    assert_eq!(rusty_base64::encode_standard(b"Hello!"), "SGVsbG8h");
+    assert_eq!(rusty_base64::encode_standard(b""), "");
     // Round-trips with decode across every byte value.
     let data: Vec<u8> = (0u8..=255).collect();
     assert_eq!(
-        base64::decode(base64::encode(&data).as_bytes()).unwrap(),
+        base64::decode(rusty_base64::encode_standard(&data).as_bytes()).unwrap(),
         data
     );
 }

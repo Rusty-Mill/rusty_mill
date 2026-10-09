@@ -1,0 +1,44 @@
+{
+  "name": "wobh_75_750: level car 75 uu off centre falls onto a resting ball at 750 uu/s",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      75,
+      0,
+      224.4
+    ],
+    "rotation": [
+      0,
+      0,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      -750
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      0,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 180
+    }
+  ]
+}

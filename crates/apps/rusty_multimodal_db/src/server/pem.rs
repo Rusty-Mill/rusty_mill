@@ -84,44 +84,14 @@ pub fn decode_blocks(pem: &str) -> Result<Vec<Vec<u8>>, PemError> {
 
 /// Standard base64 (RFC 4648 §4) decode, tolerant of embedded
 /// whitespace/newlines (PEM wraps its base64 body at a fixed line
-/// length) — the only variant PEM ever uses.
+/// length) — the only variant PEM ever uses. PEM bodies are padded to a
+/// whole number of 4-character groups, so anything else is refused.
 fn base64_decode(input: &str) -> Result<Vec<u8>, PemError> {
-    fn value(byte: u8) -> Option<u8> {
-        match byte {
-            b'A'..=b'Z' => Some(byte - b'A'),
-            b'a'..=b'z' => Some(byte - b'a' + 26),
-            b'0'..=b'9' => Some(byte - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-
-    let cleaned: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let cleaned: String = input.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     if cleaned.is_empty() || !cleaned.len().is_multiple_of(4) {
         return Err(PemError::InvalidBase64);
     }
-    let pad = cleaned.iter().rev().take_while(|&&b| b == b'=').count();
-    if pad > 2 || cleaned[..cleaned.len() - pad].contains(&b'=') {
-        return Err(PemError::InvalidBase64);
-    }
-
-    let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
-    for chunk in cleaned.as_chunks::<4>().0 {
-        let mut vals = [0u8; 4];
-        for (slot, &byte) in vals.iter_mut().zip(chunk) {
-            *slot = if byte == b'=' {
-                0
-            } else {
-                value(byte).ok_or(PemError::InvalidBase64)?
-            };
-        }
-        out.push((vals[0] << 2) | (vals[1] >> 4));
-        out.push((vals[1] << 4) | (vals[2] >> 2));
-        out.push((vals[2] << 6) | vals[3]);
-    }
-    out.truncate(out.len() - pad);
-    Ok(out)
+    rusty_base64::decode_standard(&cleaned).map_err(|_| PemError::InvalidBase64)
 }
 
 #[cfg(test)]

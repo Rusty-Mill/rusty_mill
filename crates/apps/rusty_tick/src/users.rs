@@ -20,7 +20,7 @@
 //! token and a wrong secret, so a caller learns nothing about which users
 //! exist.
 
-use crate::api::constant_time_eq;
+use rusty_crypto_key::constant_time_eq;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

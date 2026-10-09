@@ -16,9 +16,7 @@ adk-agents.workspace = true
 adk-graph.workspace = true
 async-stream.workspace = true
 futures.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

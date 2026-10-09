@@ -1,0 +1,31 @@
+{
+  "replay_id": "42f2",
+  "hz": 30.0,
+  "duration_s": 441.66,
+  "num_frames": 12560,
+  "players": [
+    [
+      14,
+      "xFaceMcMurphyx",
+      0
+    ],
+    [
+      17,
+      "Schutzein",
+      0
+    ],
+    [
+      6,
+      "Unlucky Odd",
+      1
+    ]
+  ],
+  "events_by_kind": {
+    "demo": 73,
+    "goal": 7,
+    "kickoff": 7,
+    "skill": 288,
+    "stat": 23,
+    "touch": 219
+  }
+}
