@@ -29,6 +29,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Fixed (rusty_tls, P2 x4, engine is double-gated and not wired):** TLS 1.2 client flight fragmented at 2^14 (a long client chain made an oversized record); `CertificateRequest.certificate_types` honoured (an RSA identity is no longer offered for an `ecdsa_sign`-only request); nothing delivered after the peer's `close_notify` in TLS 1.2 or 1.3 (local `close()` still reads the reply); TLS 1.3 sealer and opener share one inner-plaintext limit (2^14 + 1). Each finding has a test, and each test was checked to fail with its fix reverted.
 - **Verified:** 669 `rusty_tls` tests, clippy (`-D warnings`, with and without the cfg), docs, the four OpenSSL suites, and BoGo (861 passed, 0 failed) all pass. CI on GitHub for this head has not been seen.
 - **Known limitations:** unchanged; the review was source-only and is not a substitute for independent human crypto review.
+## 2026-10-09 - rusty_bbp_host: proving-run runbook, README status, protoc pin
+
+- **Added:** `crates/apps/rusty_bbp_host/docs/proving-run.md` and `docs/proving/{brief.md,profiles.json,agents.json}`: how to run the first live Blackboard Protocol task end to end (build, throwaway target crate, open and assign, `bbp mod` in one shell and `bbp human` in another) and what to record afterwards, so the spec's post-proving-run questions get data rather than opinion.
+- **Changed:** the host README's stale "Not here yet" section (stages 3b and 3c, long merged) becomes "Status". The Windows `protoc` 36.2 zip in `setup-build-env` is checked against a pinned SHA-256 before `Expand-Archive`; a mismatch fails the step loudly.
+- **Known limitation:** the runbook's paths assume `/tmp/bbp` and a `nano` user; the sandboxed profile must list the toolchain's directories as read roots, and the target crate must build offline. Docs and CI only; no runtime code changed.
 
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
