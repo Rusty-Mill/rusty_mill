@@ -87,13 +87,38 @@ fn mount(
 /// rewrites or strips paths itself before the request reaches the mount, such
 /// as one that carries a secret in the path.
 pub fn router_at(handler: Arc<HttpHandler>, max_body_bytes: usize, path: &str) -> Router {
+    mount_at(handler, max_body_bytes, path, None)
+}
+
+/// [`router_at`] with [`router_with_principal`]'s principal extraction.
+pub fn router_at_with_principal(
+    handler: Arc<HttpHandler>,
+    max_body_bytes: usize,
+    path: &str,
+    principal_of: impl Fn(&Parts) -> Option<Value> + Send + Sync + 'static,
+) -> Router {
+    mount_at(handler, max_body_bytes, path, Some(Arc::new(principal_of)))
+}
+
+fn mount_at(
+    handler: Arc<HttpHandler>,
+    max_body_bytes: usize,
+    path: &str,
+    principal_of: Option<Arc<PrincipalOf>>,
+) -> Router {
     let path = path.to_owned();
     Router::new().fallback(move |request: axum::extract::Request| {
         let target = request
             .uri()
             .query()
             .map_or_else(|| path.clone(), |q| format!("{path}?{q}"));
-        serve(Arc::clone(&handler), target, request, max_body_bytes, None)
+        serve(
+            Arc::clone(&handler),
+            target,
+            request,
+            max_body_bytes,
+            principal_of.clone(),
+        )
     })
 }
 

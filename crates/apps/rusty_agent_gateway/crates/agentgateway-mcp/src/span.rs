@@ -36,7 +36,7 @@
 //! installed, which it is only when `config.tracing` names a collector. The
 //! span itself still exists, so log lines inside it are still correlated.
 
-use rmcp::service::{RequestContext, RoleServer};
+use rusty_mcp_server::CallContext;
 use tracing::Span;
 
 use crate::guardrails::Annotations;
@@ -53,8 +53,12 @@ const PREFIX: &str = "mcpGuardrails.";
 /// When the client propagated a W3C trace context in `_meta`, the span carries
 /// its ids so this request joins the caller's trace rather than starting a new
 /// one. A malformed context is treated as absent, which is what W3C requires.
-pub fn request(method: &'static str, context: &RequestContext<RoleServer>) -> Span {
-    match rusty_mcp::trace::TraceContext::from_request(context) {
+pub fn request(method: &'static str, context: &CallContext) -> Span {
+    let meta = &context.meta().extra;
+    let text = |key: &str| meta.get(key).and_then(rusty_mcp_server::json::Value::as_str);
+    match text("traceparent")
+        .and_then(|parent| rusty_mcp::trace::TraceContext::from_parts(parent, text("tracestate"), text("baggage")))
+    {
         Some(trace) => trace.span(method),
         None => tracing::info_span!("mcp.request", otel.name = method),
     }
