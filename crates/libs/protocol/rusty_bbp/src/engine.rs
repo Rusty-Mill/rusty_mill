@@ -483,7 +483,11 @@ fn put_artifact(
             candidate: id,
             spec,
         });
-        end_turn(w, TurnEnd::Candidate, now);
+        // End the turn without scheduling: the task leaves `build` on the
+        // next line, and scheduling here would grant a Coder turn only for
+        // the transition to revoke it (one turn of budget, a skipped id).
+        // `transition` runs the Test entry, which schedules once.
+        end_turn_only(w, TurnEnd::Candidate);
         transition(w, State::Test, now);
     }
     Ok(Response::Stored(id))

@@ -537,3 +537,30 @@ fn tokens_are_keyed_by_the_master_secret_not_the_log() {
     assert_eq!(rejected(r), Code::StaleTurn);
     assert_ne!(other.secret_for(RunId(1)), fx.st().secret_for(RunId(1)));
 }
+
+/// Submitting a candidate ends the Coder turn and moves the task to `test`.
+/// Nothing is granted in between: a turn the transition would only revoke
+/// costs a turn of budget and skips an id.
+#[test]
+fn candidate_submission_grants_no_turn_for_the_transition_to_revoke() {
+    let mut fx = Fx::new();
+    fx.reach_build();
+    let (next_turn, turns_spent) = (fx.st().next_turn, fx.st().spent.turns);
+    fx.candidate();
+    assert_eq!(fx.st().state, State::Test);
+    assert!(fx.st().turn.is_none(), "test waits for the runner");
+    assert_eq!(fx.st().next_turn, next_turn, "no turn was granted");
+    assert_eq!(fx.st().spent.turns, turns_spent, "no budget spent");
+    let task = fx.st().task.clone();
+    let events = fx.d.store.events(&task, 0).expect("events");
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            Event::TurnEnded {
+                cause: rusty_bbp::event::TurnEnd::Revoked,
+                ..
+            }
+        )),
+        "no turn was revoked on the way to test"
+    );
+}

@@ -229,9 +229,20 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
     let d = open_driver(&dir, &task).expect("driver");
     let run = d.state.selected_run().expect("run");
     assert_eq!(run.status, Some(RunStatus::Passed));
-    // One harness log and one MCP config per launched turn. Turn ids are not
-    // 1..=4: the core grants and immediately revokes a Coder turn when the
-    // candidate submission moves the task to Test, so ids skip one.
+    // One harness log and one MCP config per launched turn, with contiguous
+    // ids: the candidate submission grants nothing for the transition to
+    // revoke. Turn 1 was granted by `assign` before this moderator started,
+    // so the loop aborted it and launched from turn 2.
+    for turn in 2..=5 {
+        assert!(
+            moderator::log_path(&dir, &task, TurnId(turn)).exists(),
+            "log for turn {turn}"
+        );
+        assert!(
+            moderator::mcp_config_path(&dir, &task, TurnId(turn)).exists(),
+            "mcp config for turn {turn}"
+        );
+    }
     let count = |p: PathBuf| {
         std::fs::read_dir(p.parent().expect("dir"))
             .expect("dir")
