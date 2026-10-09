@@ -3,7 +3,8 @@
 Date: 2026-10-08. Scope: the primitives `rusty_tls`'s native engine takes from `ring`.
 
 **Status.** Stages 0 to 4 are implemented with preliminary validation. **Independent review
-and TLS integration remain pending.** The set is partial: it covers hashes, HMAC, HKDF,
+was completed by the owner (section 11, row "Independent review"); TLS integration is pending
+and the gap-closure plan is section 13.** The set is partial: it covers hashes, HMAC, HKDF,
 signature verification, X25519 and ChaCha20-Poly1305, and does not cover AES-GCM, P-256 or P-384
 key exchange, signing, or randomness (section 0, "Scope limits"). **Consumer status:** no
 consumer, `rusty_tls` file, gate or default was changed; nothing here is used by anything.
@@ -589,7 +590,7 @@ the honest current position.
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
 | Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-09.txt`. **Review findings: none exist yet.** |
 | `ring` usage inventory including randomness and helper APIs. | Section 2.3. |
-| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Not done. Required.** |
+| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Done by the owner (baileyrd), reported 2026-10-09.** The owner saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. The depth, method and any findings of that review are not recorded here; the implementer did not see them. It is one reviewer, who also owns the project. |
 
 ## 11a. Independent review, round 1 (Codex, PR #540, reviewed commit `25fcc18`)
 
@@ -681,3 +682,50 @@ Added after review (current as of the evidence record):
   in full for the files used; fiat-crypto was never evaluated and its licence terms never
   checked. Licence statements other than Wycheproof's (read) come from general knowledge.
 - `rusty_tls#25` remains unread (see the TLS assessment).
+
+## 13. Plan for the gaps (proposal; every item is the owner's decision)
+
+Context: stages 0 to 4 are reviewed (section 11). The stage-4 freeze (section 0) covers
+*implementation*; this section is a plan only, and no gap work starts until the owner reopens
+the freeze. Gaps are those in section 2.3. The goal of this plan is a **client-role native
+engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate decision.
+
+### 13.1 Gaps, in the order I would close them
+
+| # | Gap | Why this order | Scope | Evidence bar | Effort (days, +-50%) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **Randomness** | Smallest; every key generation (X25519, ECDHE, nonces, ticket keys) needs it, so it blocks the rest. | Evaluate `rusty_rand` first (section 3): `getrandom(2)` instead of `/dev/urandom` (blocks until the pool is initialised), no global `Mutex<File>`, fork/short-read behaviour, Windows `BCryptGenRandom`. Prefer fixing `rusty_rand` over a new crate. OS entropy only, no home-made DRBG. | Short-read, failure-path and fork tests; the failure must propagate, never return zeros. Not provable by tests: entropy quality (OS's job). | 2 to 4 |
+| 2 | **ECDH P-256 / P-384** (stage 6a) | RFC 8446 requires secp256r1 key exchange; the Montgomery core is reusable. | Secret scalar multiplication with complete formulas, constant-time table selection, on-curve and infinity checks, uncompressed SEC1 points. Today's scalar multiplication in `rusty_pk` is `_vartime` and **must not be reused for secrets**. | Wycheproof ECDH (invalid-curve and twist cases), differential vs `ring`, methods 1 to 4 of section 4.4 clean (valgrind taint, exact disassembly counts, timing with A/A baseline, planted-leak control), review. | 8 to 10 |
+| 3 | **AES-128/256-GCM** (stage 5) | Hardest and slowest; RFC 8446 mandates AES-128-GCM and the engine prefers AES-256-GCM, so most real handshakes need it. Also the ticket cipher. | Decision needed first (13.2 D1): portable fixsliced AES plus table-free GHASH, or AES-NI/PCLMUL in one reviewed `unsafe` module behind a runtime feature check. | Wycheproof GCM + CAVP + differential; no table lookup indexed by a secret (disassembly script); methods 1 to 4; review. Portable throughput is 60 to 150x below `ring`; measure before wiring. | 8 to 12 (+5 to 8 with intrinsics) |
+| 4 | **`rusty_tls` backend seam** | Only after 1 to 3 exist; the TLS-engine session owns `rusty_tls`. | Same signatures as the `ring` call sites (section 2.3), selected by an extra cfg beside `rusty_tls_handrolled`; adapters for `Nonce`/`Aad`/`LessSafeKey`/`hmac::Context`; default stays `ring`. | Differential at the seam (same handshakes, both backends), interop with `ring`-backed peers, the whole section 11 table re-checked at the integration commit. | 5 to 8 |
+| 5 | **Signing** (stage 6b) | Only if a server role or client certificates must go native. | ECDSA P-256/P-384 (RFC 6979 or hedged nonce), Ed25519 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays "recommend not doing". | Wycheproof, differential both directions, nonce-bias test, methods 1 to 4, review. | 6 to 8 |
+
+Sum for the client role (1 to 4): about 23 to 34 days plus intrinsics if chosen, before
+review wait. With signing: about 29 to 42. Estimates are reused from section 7.2, not
+re-derived.
+
+### 13.2 Decisions needed
+
+- **D1 AES implementation:** portable only, or intrinsics. The 2026-10-08 intrinsics approval
+  predates "stop after stage 4" and was never exercised; please confirm it still stands. A
+  portable-only AES-GCM is only acceptable if the engine's suite order puts ChaCha20-Poly1305
+  first (today it is AES-256-GCM, AES-128-GCM, then ChaCha20-Poly1305).
+- **D2 Reopen the freeze** for gaps 1 to 3 (and which of 4 and 5).
+- **D3 Client-only or also server role** (gap 5).
+- **D4 Review process per stage:** this plan assumes each of gaps 2, 3 and 5 gets the same
+  evidence package and an independent review before it is wired; the previous review was by
+  the owner alone. A second reviewer for the AES and ECDH secret-handling code is cheap
+  relative to the risk; the owner decides.
+- **D5 Where `ring` is allowed to remain:** it stays in the lockfile for `rustls`,
+  `boringtun`, `jsonwebtoken`, `quinn` (section 2.2). Completion of this plan is "the native
+  `rusty_tls` engine no longer needs `ring`", not "ring-free".
+
+### 13.3 Standing rules for every gap
+
+- New crates or modules: Tier S, no new third-party dependencies, `ring` as a dev-dependency
+  oracle only, `unsafe` only in the single reviewed module (and the valgrind helper).
+- The `crypto-constant-time` CI job and `collect.sh` gain each new secret-handling function
+  (exact disassembly counts, taint, timing with A/A baseline); constant-time claims stay
+  "no leak found by these methods", never proof.
+- No wiring into `rusty_tls` before the seam item, and no default changes without the owner.
+- Every divergence from `ring` is listed and classified, as for Ed25519 (section 2, stage 2).
