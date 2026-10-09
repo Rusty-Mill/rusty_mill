@@ -3,6 +3,8 @@
 //! - [`mcp`]: the per-turn MCP server an agent harness talks to over stdio.
 //!   One process serves one turn; when that turn ends every call is refused.
 //! - [`human`]: the human channel as CLI actions.
+//! - [`moderator`]: the loop that launches one agent harness per granted
+//!   turn and the runner per selected run, until the task closes.
 //! - [`runner`]: the test supervisor. Applies a candidate in a fresh checkout,
 //!   runs the frozen profile set under a sandbox, stores log and report.
 //! - [`profiles`]: the profile set a task freezes at open.
@@ -15,6 +17,7 @@ pub mod admin;
 pub mod args;
 pub mod human;
 pub mod mcp;
+pub mod moderator;
 pub mod profiles;
 pub mod runner;
 

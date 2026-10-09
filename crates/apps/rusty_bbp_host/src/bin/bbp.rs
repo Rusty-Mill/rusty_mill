@@ -8,11 +8,12 @@
 //! bbp tick    --dir D --task T
 //! bbp human   --dir D --task T VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
+//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N]
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
 use rusty_bbp::*;
-use rusty_bbp_host::{admin, args::Args, human, mcp, profiles, response_json, runner};
+use rusty_bbp_host::{admin, args::Args, human, mcp, moderator, profiles, response_json, runner};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,7 +23,7 @@ fn run() -> Result<String, String> {
     let sub = argv
         .first()
         .cloned()
-        .ok_or("usage: bbp <mcp|open|assign|card|tick|human|runner> ...")?;
+        .ok_or("usage: bbp <mcp|open|assign|card|tick|human|runner|mod> ...")?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
         let err = rusty_sandbox::run_helper(&rest);
@@ -53,6 +54,35 @@ fn run() -> Result<String, String> {
                 None => profiles::ProfileSet::shell("test", "cargo test"),
             };
             admin::open_task(&dir, &task, a.flag("repo")?, &brief, &human, &set)?
+        }
+        "mod" => {
+            let confinement = match a.flags.get("confine").map(String::as_str) {
+                Some("none") => runner::Confinement::Unconfined,
+                None | Some("sandbox") => runner::Confinement::Sandboxed,
+                Some(other) => return Err(format!("unknown confinement {other}")),
+            };
+            let num = |k: &str, d: u64| -> Result<u64, String> {
+                match a.flags.get(k) {
+                    Some(v) => v.parse().map_err(|_| format!("--{k} must be a number")),
+                    None => Ok(d),
+                }
+            };
+            let cfg = moderator::Config {
+                dir: dir.clone(),
+                task: task.clone(),
+                bbp: std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?,
+                repo: PathBuf::from(a.flag("repo-path")?),
+                work: PathBuf::from(a.flag("work")?),
+                launchers: moderator::Launchers::read_file(&PathBuf::from(a.flag("agents")?))?,
+                confinement,
+                poll: std::time::Duration::from_millis(num("poll-ms", 500)?),
+                max_wall: std::time::Duration::from_secs(num("max-wall-secs", u64::MAX / 1000)?),
+            };
+            let out = moderator::run(&cfg)?;
+            return Ok(format!(
+                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{}}}",
+                out.state, out.turns_launched, out.runs
+            ));
         }
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
