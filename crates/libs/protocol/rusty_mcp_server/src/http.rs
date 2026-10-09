@@ -96,8 +96,9 @@ pub struct HttpConfig {
     /// default) keeps nothing. When set, every answer to a request is an
     /// event stream opening with a priming event, and `GET` with
     /// `Last-Event-ID` and no session replays the missed frames (see
-    /// `replay.rs`). Memory use is bounded by this, except that one reply
-    /// larger than it is still kept whole.
+    /// `replay.rs`). Memory use is bounded by this plus the newest frame of
+    /// each running reply, which is never released (so a reply larger than
+    /// the buffer is still delivered whole, but cannot be resumed).
     pub resume_buffer: usize,
     /// With resumption on: how long a running request whose connection
     /// dropped waits for a resume before it is cancelled. Default 30 s.
@@ -634,7 +635,7 @@ impl HttpHandler {
     fn replay_response(&self, shared: &Arc<Shared>) -> Response {
         Response::stream(
             "text/event-stream",
-            shared.reader(0, self.config.keep_alive),
+            shared.first_reader(self.config.keep_alive),
         )
     }
 

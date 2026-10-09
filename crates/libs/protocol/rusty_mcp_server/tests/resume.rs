@@ -232,6 +232,21 @@ fn an_answer_is_a_stream_with_a_priming_event_and_ids() {
 }
 
 #[test]
+fn a_reply_larger_than_the_buffer_is_still_delivered_on_the_first_post() {
+    let f = start(HttpConfig {
+        resume_buffer: 10,
+        ..resumable()
+    });
+    let mut c = call(&f, "quick");
+    assert!(
+        c.read_until(WAIT, |s| s.contains("quick done")),
+        "the answer never arrived: {:?}",
+        c.seen
+    );
+    assert_eq!(c.status(), 200);
+}
+
+#[test]
 fn a_dropped_connection_is_resumed_and_gets_the_result() {
     let f = start(resumable());
     let mut c = call(&f, "slow");
@@ -355,6 +370,30 @@ fn the_oldest_streams_are_dropped_when_the_buffer_is_full() {
         kept.read_until(WAIT, |s| s.contains("quick done")),
         "{:?}",
         kept.seen
+    );
+}
+
+#[test]
+fn an_immediate_reply_larger_than_the_buffer_is_still_delivered() {
+    let f = start(HttpConfig {
+        resume_buffer: 10,
+        ..resumable()
+    });
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}"#;
+    let mut c = Conn::send(
+        f.addr,
+        "POST",
+        &[
+            ("Accept", ACCEPT),
+            ("Content-Type", "application/json"),
+            ("Connection", "close"),
+        ],
+        body,
+    );
+    assert!(
+        c.read_until(WAIT, |s| s.contains("protocolVersion")),
+        "the answer never arrived: {:?}",
+        c.seen
     );
 }
 

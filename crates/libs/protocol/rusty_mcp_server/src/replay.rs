@@ -163,8 +163,25 @@ impl Shared {
         state.detached.map(|since| since.elapsed())
     }
 
-    /// A reader starting at frame `from`.
+    /// A reader starting at frame `from`; frames released before it gets to
+    /// them end its stream with a truncation notice.
     pub(crate) fn reader(self: &Arc<Self>, from: usize, keep_alive: Duration) -> ReplayStream {
+        self.attach(from, keep_alive, false)
+    }
+
+    /// The reader of the original reply. Frames released before it reads them
+    /// (the priming event, old progress) are skipped with a notice and it
+    /// carries on, so the answer, always the newest frame, still arrives.
+    pub(crate) fn first_reader(self: &Arc<Self>, keep_alive: Duration) -> ReplayStream {
+        self.attach(0, keep_alive, true)
+    }
+
+    fn attach(
+        self: &Arc<Self>,
+        from: usize,
+        keep_alive: Duration,
+        skip_gaps: bool,
+    ) -> ReplayStream {
         {
             let mut state = lock(&self.state);
             state.readers += 1;
@@ -174,6 +191,7 @@ impl Shared {
             shared: Arc::clone(self),
             next: from,
             keep_alive,
+            skip_gaps,
             ended: false,
         }
     }
@@ -250,6 +268,7 @@ pub(crate) struct ReplayStream {
     shared: Arc<Shared>,
     next: usize,
     keep_alive: Duration,
+    skip_gaps: bool,
     ended: bool,
 }
 
@@ -264,7 +283,8 @@ impl Iterator for ReplayStream {
         loop {
             if self.next < state.base {
                 // The frame this reader needs was released to stay in budget.
-                self.ended = true;
+                self.ended = !self.skip_gaps;
+                self.next = state.base;
                 return Some(b": stream truncated (over the replay budget)\n\n".to_vec());
             }
             if let Some(frame) = state.frames.get(self.next - state.base) {
@@ -371,6 +391,23 @@ mod tests {
             String::from_utf8_lossy(&first)
         );
         assert!(reader.next().is_none(), "the stream went on after the gap");
+    }
+
+    #[test]
+    fn the_first_reader_skips_released_frames_and_reaches_the_newest() {
+        let replay = Replay::new(600, Duration::from_secs(30));
+        let stream = replay.start().unwrap();
+        let mut reader = stream.first_reader(Duration::from_millis(20));
+        for _ in 0..100 {
+            stream.push(&note());
+        }
+        stream.finish();
+        let first = reader.next().unwrap();
+        assert!(String::from_utf8_lossy(&first).starts_with(": stream truncated"));
+        let rest: Vec<_> = reader.collect();
+        assert!(!rest.is_empty(), "the reader ended at the gap");
+        let last = String::from_utf8_lossy(rest.last().unwrap()).into_owned();
+        assert!(last.contains(&stream.event_id(99 + 1)), "{last}");
     }
 
     #[test]
