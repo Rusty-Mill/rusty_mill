@@ -227,6 +227,12 @@ enum Phase {
     Failed,
 }
 
+/// What a `CertificateRequest` asked for: key types and signature algorithms.
+struct CertRequest {
+    types: Vec<u8>,
+    schemes: Vec<u16>,
+}
+
 /// What the handshake has learned so far.
 struct Hs {
     client_random: [u8; RANDOM_LEN],
@@ -242,8 +248,8 @@ struct Hs {
     certificates: Vec<Vec<u8>>,
     /// The curve and public key from `ServerKeyExchange`.
     server_key: Option<(NamedGroup, Vec<u8>)>,
-    /// The schemes a `CertificateRequest` named, if the server sent one.
-    certificate_request: Option<Vec<u16>>,
+    /// What a `CertificateRequest` asked for, if the server sent one.
+    certificate_request: Option<CertRequest>,
     /// The application protocol the server selected, if any.
     alpn: Option<Vec<u8>>,
     /// Whether the server answered `server_name`.
@@ -618,7 +624,10 @@ impl<'a> ClientHandshake12<'a> {
             (Expect::CertificateRequestOrDone, HandshakeType::CertificateRequest) => {
                 self.hs.transcript.extend_from_slice(msg.encoded);
                 let request = CertificateRequest12::parse(msg.body)?;
-                self.hs.certificate_request = Some(request.signature_algorithms);
+                self.hs.certificate_request = Some(CertRequest {
+                    types: request.certificate_types.to_vec(),
+                    schemes: request.signature_algorithms,
+                });
                 self.phase = Phase::Expecting(Expect::ServerHelloDone);
                 Ok(Vec::new())
             }
@@ -802,13 +811,20 @@ impl<'a> ClientHandshake12<'a> {
 
         // 1. Optional Certificate, then ClientKeyExchange. A key that can sign
         // none of the schemes named is as good as no key (RFC 5246 7.4.6).
-        let identity = self.hs.certificate_request.as_ref().and_then(|schemes| {
+        let identity = self.hs.certificate_request.as_ref().and_then(|request| {
             let identity = self.config.identity?;
+            // RFC 5246 7.4.4: the server names the key types it takes and,
+            // separately, the algorithms it verifies. An RSA key is not asked
+            // for by a request for `ecdsa_sign`, however many RSA schemes the
+            // algorithm list holds (they are there for the chain).
+            if !request.types.contains(&identity.key.certificate_type()) {
+                return None;
+            }
             let scheme = *identity
                 .key
                 .schemes()
                 .iter()
-                .find(|scheme| schemes.contains(&scheme.0))?;
+                .find(|scheme| request.schemes.contains(&scheme.0))?;
             Some((identity, scheme))
         });
         let mut handshake = Vec::new();
@@ -865,8 +881,16 @@ impl<'a> ClientHandshake12<'a> {
         self.hs.transcript.extend_from_slice(&finished);
         let finished_record = sealer.seal(ContentType::Handshake, &finished)?;
 
-        // 4. The flight: handshake record, ChangeCipherSpec, Finished.
-        let mut flight = plaintext_record(ContentType::Handshake, RECORD_VERSION, &handshake)?;
+        // 4. The flight: handshake records, ChangeCipherSpec, Finished. A long
+        // client chain does not fit one record (RFC 5246 6.2.1).
+        let mut flight = Vec::new();
+        for chunk in handshake.chunks(MAX_FRAGMENT_LEN) {
+            flight.extend(plaintext_record(
+                ContentType::Handshake,
+                RECORD_VERSION,
+                chunk,
+            )?);
+        }
         flight.extend(plaintext_record(
             ContentType::ChangeCipherSpec,
             RECORD_VERSION,
@@ -999,7 +1023,11 @@ pub struct Connection12 {
     exporter: Option<Exporter12>,
     group: Option<NamedGroup>,
     peer_scheme: Option<SignatureScheme>,
-    closed: bool,
+    /// This side sent `close_notify`: it writes no more, and still reads.
+    sent_close: bool,
+    /// The peer's `close_notify` has been read. Whatever follows it is ignored
+    /// (RFC 5246 section 7.2.1), however well it authenticates.
+    peer_closed: bool,
     failed: bool,
     /// Records that carried nothing, so they cannot go on for ever.
     noise: Noise,
@@ -1025,7 +1053,8 @@ impl Connection12 {
             exporter: None,
             group: None,
             peer_scheme: None,
-            closed: false,
+            sent_close: false,
+            peer_closed: false,
             failed: false,
             noise: Noise::default(),
         }
@@ -1130,7 +1159,7 @@ impl Connection12 {
     /// Protect application data, splitting it into records of at most 2^14.
     /// Empty input produces no records.
     pub fn write(&mut self, data: &[u8]) -> Result<Vec<u8>> {
-        if self.closed || self.failed {
+        if self.sent_close || self.peer_closed || self.failed {
             return Err(ClientError::Failed);
         }
         let mut out = Vec::new();
@@ -1154,7 +1183,7 @@ impl Connection12 {
         if self.failed {
             return Err(ClientError::Failed);
         }
-        self.closed = true;
+        self.sent_close = true;
         Ok(self
             .sealer
             .seal(ContentType::Alert, &[1, AlertDescription::CLOSE_NOTIFY.0])?)
@@ -1168,6 +1197,9 @@ impl Connection12 {
     pub fn read(&mut self, record: &[u8]) -> Result<Incoming12> {
         if self.failed {
             return Err(ClientError::Failed);
+        }
+        if self.peer_closed {
+            return Ok(Incoming12::Closed);
         }
         match self.read_inner(record) {
             Ok(incoming) => Ok(incoming),
@@ -1191,7 +1223,7 @@ impl Connection12 {
             }
             ContentType::Alert => match Alert::parse(&opened.fragment) {
                 Some(alert) if alert.description == AlertDescription::CLOSE_NOTIFY => {
-                    self.closed = true;
+                    self.peer_closed = true;
                     Ok(Incoming12::Closed)
                 }
                 Some(alert) if alert.level == AlertLevel::Warning => {
@@ -1250,7 +1282,8 @@ impl core::fmt::Debug for Connection12 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Connection12")
             .field("suite", &self.suite)
-            .field("closed", &self.closed)
+            .field("sent_close", &self.sent_close)
+            .field("peer_closed", &self.peer_closed)
             .finish_non_exhaustive()
     }
 }

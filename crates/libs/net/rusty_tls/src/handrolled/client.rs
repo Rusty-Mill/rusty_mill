@@ -2298,6 +2298,7 @@ impl ClientHandshake<'_> {
             retried: negotiated.retried,
             peer_scheme: negotiated.peer_scheme,
             resumption_master,
+            peer_closed: false,
             noise: Noise::default(),
         }));
         Ok(reply)
@@ -2343,6 +2344,9 @@ pub struct Connection {
     /// old behaviour and the safe one: a PSK derived from nothing would be a
     /// key that looks usable and is not.
     resumption_master: Vec<u8>,
+    /// The peer's `close_notify` has been read. Whatever follows it is ignored
+    /// (RFC 8446 section 6.1), however well it authenticates.
+    peer_closed: bool,
     /// Records that carried nothing, so they cannot go on for ever.
     noise: Noise,
 }
@@ -2475,6 +2479,7 @@ impl Connection {
             // The server half does not issue tickets, so it has no resumption
             // secret to hand out. See the field's own docs.
             resumption_master: Vec::new(),
+            peer_closed: false,
             noise: Noise::default(),
         }
     }
@@ -2630,6 +2635,11 @@ impl Connection {
             ));
         }
 
+        // RFC 8446 section 6.1: anything after the peer's close_notify is ignored.
+        if self.peer_closed {
+            return Ok(Incoming::Closed);
+        }
+
         let opened = self.opener.open(record)?;
         match opened.typ {
             ContentType::ApplicationData => {
@@ -2648,6 +2658,7 @@ impl Connection {
                 // as "the correct place to stop" — a missing feature described
                 // as correct behaviour.
                 Some(alert) if alert.description == AlertDescription::CLOSE_NOTIFY => {
+                    self.peer_closed = true;
                     Ok(Incoming::Closed)
                 }
                 // RFC 8446 §6.1: the one warning TLS 1.3 still has, a peer

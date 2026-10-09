@@ -359,16 +359,28 @@ fn an_oversize_fragment_is_refused() {
 
 #[test]
 fn padding_that_overflows_the_inner_plaintext_is_refused() {
-    let fragment = vec![0u8; MAX_FRAGMENT_LEN];
-    let max_padding = MAX_INNER_PLAINTEXT_LEN - MAX_FRAGMENT_LEN - 1;
+    // RFC 8446 §5.4: content, type and padding together are at most 2^14 + 1,
+    // so a full fragment leaves no room for padding at all.
+    let full = vec![0u8; MAX_FRAGMENT_LEN];
+    assert!(sealer()
+        .seal(ContentType::ApplicationData, &full, 0)
+        .is_ok());
+    assert_eq!(
+        sealer().seal(ContentType::ApplicationData, &full, 1),
+        Err(RecordError::FragmentTooLong {
+            len: MAX_INNER_PLAINTEXT_LEN + 1,
+            max: MAX_INNER_PLAINTEXT_LEN
+        })
+    );
 
+    let fragment = vec![0u8; 100];
+    let max_padding = MAX_INNER_PLAINTEXT_LEN - fragment.len() - 1;
     assert!(
         sealer()
             .seal(ContentType::ApplicationData, &fragment, max_padding)
             .is_ok(),
         "the largest legal padding must be allowed"
     );
-
     assert_eq!(
         sealer().seal(ContentType::ApplicationData, &fragment, max_padding + 1),
         Err(RecordError::FragmentTooLong {
@@ -382,6 +394,43 @@ fn padding_that_overflows_the_inner_plaintext_is_refused() {
     assert!(sealer()
         .seal(ContentType::ApplicationData, b"x", usize::MAX)
         .is_err());
+}
+
+/// Whatever the sealer produces, the opener accepts: the sealing and opening
+/// limits are one invariant, at the boundary, for every AEAD.
+#[test]
+fn everything_the_sealer_accepts_the_opener_accepts() {
+    for &(alg, key_len) in ALGS {
+        let key = vec![7u8; key_len];
+        for (content, padding) in [
+            (MAX_FRAGMENT_LEN, 0),
+            (1, MAX_FRAGMENT_LEN - 1),
+            (0, MAX_FRAGMENT_LEN),
+            (MAX_FRAGMENT_LEN - 1, 1),
+        ] {
+            let fragment = vec![b'x'; content];
+            let record = Sealer::new(alg, &key, &IV)
+                .expect("sealer")
+                .seal(ContentType::ApplicationData, &fragment, padding)
+                .expect("within the limit");
+            let opened = Opener::new(alg, &key, &IV)
+                .expect("opener")
+                .open(&record)
+                .unwrap_or_else(|e| panic!("{alg:?} {content}+{padding}: {e:?}"));
+            assert_eq!(opened.fragment, fragment, "{alg:?} {content}+{padding}");
+        }
+        // One past is refused at the sealer, before anything is sent.
+        for (content, padding) in [(MAX_FRAGMENT_LEN, 1), (1, MAX_FRAGMENT_LEN)] {
+            let fragment = vec![b'x'; content];
+            assert!(
+                Sealer::new(alg, &key, &IV)
+                    .expect("sealer")
+                    .seal(ContentType::ApplicationData, &fragment, padding)
+                    .is_err(),
+                "{alg:?} {content}+{padding}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

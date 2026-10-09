@@ -2169,6 +2169,31 @@ fn a_close_notify_is_reported_as_a_close_not_an_error() {
     );
 }
 
+/// RFC 8446 section 6.1: data after the peer's close_notify is ignored, however
+/// well it authenticates. Before this was enforced, the reader handed over
+/// authenticated application data from a peer that had said it was done.
+#[test]
+fn nothing_is_delivered_after_the_peers_close_notify() {
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    let close = server.seal(ContentType::Alert, &[0x01, 0x00]);
+    assert_eq!(connection.read(&close).expect("closes"), Incoming::Closed);
+    for _ in 0..3 {
+        let late = server.seal(ContentType::ApplicationData, b"after the close");
+        assert_eq!(
+            connection.read(&late).expect("ignored"),
+            Incoming::Closed,
+            "application data after close_notify must not be delivered"
+        );
+    }
+    // The reply to the close is still ours to send.
+    assert!(connection.close().is_ok());
+}
+
 /// The alert level is read from the wire, not assumed.
 ///
 /// `close_notify` is a warning and a `decrypt_error` is fatal; a client that

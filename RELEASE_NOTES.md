@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_tls native engine: four review findings on #572
+
+- **Fixed (rusty_tls, P2 x4, engine is double-gated and not wired):** TLS 1.2 client flight fragmented at 2^14 (a long client chain made an oversized record); `CertificateRequest.certificate_types` honoured (an RSA identity is no longer offered for an `ecdsa_sign`-only request); nothing delivered after the peer's `close_notify` in TLS 1.2 or 1.3 (local `close()` still reads the reply); TLS 1.3 sealer and opener share one inner-plaintext limit (2^14 + 1). Each finding has a test, and each test was checked to fail with its fix reverted.
+- **Verified:** 669 `rusty_tls` tests, clippy (`-D warnings`, with and without the cfg), docs, the four OpenSSL suites, and BoGo (861 passed, 0 failed) all pass. CI on GitHub for this head has not been seen.
+- **Known limitations:** unchanged; the review was source-only and is not a substitute for independent human crypto review.
+
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
 - **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).

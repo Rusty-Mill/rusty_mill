@@ -569,6 +569,27 @@ preferences; P-521, ML-DSA and SHA-1 are not implemented or are refused.
 Not done: the peer scheme is not kept across resumption (needs a ticket-format change and an owner decision);
 no accessor for the cipher suite's group list or the client's offered groups.
 
+## Review corrections (PR #572)
+
+Source review of `d38efa61` found four defects, all confirmed against the code:
+
+- **Client flight fragmentation.** `client_flight` wrote Certificate, ClientKeyExchange and CertificateVerify as one
+  record; `plaintext_record` only checks the `u16`. It now splits at `MAX_FRAGMENT_LEN`, as `server12` does. Tested
+  against rustls with a chain over 20,000 bytes (rustls refuses an oversized record).
+- **`certificate_types`.** The request's key types were parsed and dropped. A server asking for `ecdsa_sign` lists
+  RSA-PSS for its own chain, so scheme overlap alone offered an RSA key it had not asked for. The key type
+  (`SigningKey::certificate_type`: RSA is 1, ECDSA and Ed25519 are 64) is now checked first; no match sends the empty
+  Certificate. Tested both directions with the scripted server.
+- **Data after `close_notify`.** `closed` meant both "I sent one" and "they sent one", and `read` ignored it. Split
+  into `sent_close` and `peer_closed` (TLS 1.2); TLS 1.3's `Connection` had no state at all and gets `peer_closed`.
+  After the peer closes, `read` returns `Closed` without opening the record. Writes still stop; `close()` still works.
+- **Sealer/opener limit.** The opener was tightened to 2^14 + 1 for BoGo's `LargePlaintext-*-Padded-*`, but the
+  sealer kept the wire-derived 16,624. `MAX_INNER_PLAINTEXT_LEN` is now `MAX_FRAGMENT_LEN + 1` and both use it. A full
+  fragment takes no padding; boundary round trips cover all three AEADs.
+
+Each test was run against the code with its fix reverted and fails there. Not covered: TLS 1.3 servers' own
+`close_notify` handling beyond the shared `Connection`, and 0-RTT (not implemented).
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could

@@ -71,13 +71,13 @@ pub const MAX_FRAGMENT_LEN: usize = 1 << 14;
 /// Maximum `TLSCiphertext.encrypted_record` length — 2^14 + 256, per §5.2.
 pub const MAX_ENCRYPTED_FRAGMENT_LEN: usize = MAX_FRAGMENT_LEN + 256;
 
-/// Maximum `TLSInnerPlaintext` length, derived rather than quoted.
+/// Maximum `TLSInnerPlaintext` length: content, type octet and padding together
+/// may not exceed 2^14 + 1 (RFC 8446 §5.4). The sealer and the opener both
+/// enforce exactly this, so nothing this engine seals is refused by this engine.
 ///
-/// §5.2 bounds what goes on the wire (`MAX_ENCRYPTED_FRAGMENT_LEN`) and that
-/// is inner plaintext plus tag, so the inner plaintext itself is bounded by
-/// the difference. Deriving it from the wire limit avoids depending on a
-/// reading of §5.4's padding language.
-pub const MAX_INNER_PLAINTEXT_LEN: usize = MAX_ENCRYPTED_FRAGMENT_LEN - TAG_LEN;
+/// The wire bound (`MAX_ENCRYPTED_FRAGMENT_LEN`, §5.2) is looser: it also leaves
+/// room for a ciphertext expansion that no suite here uses.
+pub const MAX_INNER_PLAINTEXT_LEN: usize = MAX_FRAGMENT_LEN + 1;
 
 /// The only outer type a TLS 1.3 protected record may carry (§5.2).
 const OUTER_TYPE: u8 = 23;
@@ -607,7 +607,7 @@ impl Opener {
         // 2^14 + 1. A record whose padding alone takes it over is an overflow
         // even when the content is small (BoGo `LargePlaintext-*-Padded-*`):
         // padding is the one part of a record a sender chooses freely.
-        if buf.len() > MAX_FRAGMENT_LEN + 1 {
+        if buf.len() > MAX_INNER_PLAINTEXT_LEN {
             return Err(RecordError::FragmentTooLong {
                 len: buf.len() - 1,
                 max: MAX_FRAGMENT_LEN,

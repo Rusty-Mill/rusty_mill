@@ -647,6 +647,64 @@ fn a_client_identity_is_presented_and_proven_to_rustls() {
     }
 }
 
+/// A client chain too long for one record: Certificate and ClientKeyExchange
+/// are one handshake flight that exceeds 2^14 bytes, so it must be split into
+/// several records (RFC 5246 6.2.1). rustls refuses an oversized record, so
+/// the handshake completing is the proof, and so is every record being in
+/// bounds.
+#[test]
+fn a_client_chain_longer_than_one_record_is_fragmented() {
+    use rusty_tls::handrolled::client::ClientIdentity;
+    use rusty_tls::handrolled::sign::SigningKey;
+
+    let server_pki = pki(Leaf::P256, SERVER);
+    let client_pki = pki(Leaf::P256, "client.example");
+    let key = SigningKey::ecdsa_p256(&client_pki.leaf_pkcs8).expect("the client key loads");
+    // The leaf, then the root repeated until the chain is well past 2^14: a
+    // path builder skips certificates it does not need.
+    let mut chain: Vec<Vec<u8>> = client_pki.chain.iter().map(|c| c.to_vec()).collect();
+    while chain.iter().map(Vec::len).sum::<usize>() <= 20_000 {
+        chain.push(client_pki.chain[1].to_vec());
+    }
+    let identity = ClientIdentity {
+        certificates: &chain,
+        key: &key,
+    };
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(client_pki.chain[1].clone()).expect("root");
+    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .expect("verifier");
+    let server_config =
+        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(server_pki.chain.clone(), server_pki.key.clone_key())
+            .expect("config");
+    let server = rustls::ServerConnection::new(Arc::new(server_config)).expect("server");
+
+    let anchors = [anchor(&server_pki.root_der)];
+    let mut cfg = config(
+        SERVER,
+        &anchors,
+        &[NamedGroup::X25519],
+        CipherSuite12::SUPPORTED,
+    );
+    cfg.identity = Some(&identity);
+
+    let mut established = handshake_against(server, &cfg, |_, r| Some(r))
+        .unwrap_or_else(|e| panic!("the handshake failed: {e}"));
+    assert_eq!(
+        established.server.peer_certificates().map(<[_]>::to_vec),
+        Some(chain.iter().map(|c| c.clone().into()).collect()),
+        "rustls did not see the whole chain"
+    );
+    assert_eq!(
+        client_to_server(&mut established, b"authenticated"),
+        b"authenticated"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // What the client sends
 // ---------------------------------------------------------------------------
@@ -841,6 +899,8 @@ mod fake {
         pub certificates: Vec<Vec<u8>>,
         pub ske: Option<Ske>,
         pub certificate_request: bool,
+        /// `certificate_types` of that request.
+        pub certificate_types: Vec<u8>,
         pub hello_done_body: Vec<u8>,
         pub client_random: [u8; 32],
     }
@@ -888,7 +948,7 @@ mod fake {
             }
             if self.certificate_request {
                 let request = CertificateRequest12 {
-                    certificate_types: &[64, 1],
+                    certificate_types: &self.certificate_types,
                     signature_algorithms: vec![0x0403, 0x0804],
                     authorities: &[],
                 };
@@ -1076,6 +1136,7 @@ mod fake {
                 certificates: self.chain.iter().take(1).cloned().collect(),
                 ske: Some(ske),
                 certificate_request: false,
+                certificate_types: vec![64, 1],
                 hello_done_body: Vec::new(),
                 client_random: self.client_random,
             }
@@ -2398,6 +2459,56 @@ mod refusals {
         assert_eq!(fake.client_types, vec![HandshakeType::ClientKeyExchange]);
     }
 
+    /// RFC 5246 7.4.4: the request names key types as well as signature
+    /// algorithms. A server asking for `ecdsa_sign` may list RSA-PSS because
+    /// its own chain uses it; that does not ask for an RSA client key, and the
+    /// converse holds. The key type is checked, not just the schemes.
+    #[test]
+    fn an_identity_of_a_type_the_request_did_not_name_is_not_presented() {
+        use rusty_tls::handrolled::sign::SigningKey;
+
+        let pki = pki_p256();
+        let ecdsa = pki_with_key(Leaf::P256);
+        let ecdsa_key = SigningKey::ecdsa_p256(&ecdsa.leaf_pkcs8).expect("key");
+        let ecdsa_chain: Vec<Vec<u8>> = ecdsa.chain.iter().map(|c| c.to_vec()).collect();
+        let rsa = pki_with_key(Leaf::Rsa);
+        let rsa_key = SigningKey::rsa(&rsa.leaf_pkcs8).expect("key");
+        let rsa_chain: Vec<Vec<u8>> = rsa.chain.iter().map(|c| c.to_vec()).collect();
+
+        // (identity, types the request names, whether it is presented)
+        let ecdsa_identity = identity_for(Leaf::P256, &ecdsa_chain, &ecdsa_key);
+        let rsa_identity = identity_for(Leaf::Rsa, &rsa_chain, &rsa_key);
+        for (name, identity, types, presented) in [
+            ("rsa vs ecdsa_sign", &rsa_identity, vec![64u8], false),
+            ("ecdsa vs rsa_sign", &ecdsa_identity, vec![1u8], false),
+            ("rsa vs rsa_sign", &rsa_identity, vec![1u8], true),
+            ("ecdsa vs ecdsa_sign", &ecdsa_identity, vec![64u8], true),
+            ("rsa vs both", &rsa_identity, vec![64u8, 1], true),
+        ] {
+            let (result, fake) = converse(
+                &pki,
+                Script::new(Leaf::P256)
+                    .flight(move |f, _| {
+                        f.certificate_request = true;
+                        f.certificate_types = types.clone();
+                    })
+                    .identity(identity),
+            );
+            assert!(result.is_ok(), "{name}: {:?}", result.err());
+            assert_eq!(
+                !fake.client_chain.is_empty(),
+                presented,
+                "{name}: presented or not"
+            );
+            assert_eq!(
+                fake.client_certificate_verified,
+                presented.then_some(true),
+                "{name}"
+            );
+            assert_eq!(fake.client_finished_ok, Some(true), "{name}");
+        }
+    }
+
     // -------------------------------------------------------------------- ALPN
 
     /// Append an ALPN answer naming `protocol` to the ServerHello.
@@ -2999,6 +3110,40 @@ mod connection {
             conn.read(&fake.send_as(ContentType::Alert, &[1, 0]))
                 .expect("reads"),
             Incoming12::Closed
+        );
+    }
+
+    /// RFC 5246 7.2.1: data received after a close_notify is ignored, however
+    /// well it authenticates. Closing locally, by contrast, does not stop the
+    /// peer's reply from being read.
+    #[test]
+    fn nothing_is_delivered_after_the_peers_close_notify() {
+        let (mut conn, mut fake) = established(Leaf::P256);
+        assert_eq!(
+            conn.read(&fake.send_as(ContentType::Alert, &[1, 0]))
+                .expect("closes"),
+            Incoming12::Closed
+        );
+        // A correctly encrypted record under the live keys, after the close.
+        for _ in 0..3 {
+            assert_eq!(
+                conn.read(&fake.send(b"after the close")).expect("ignored"),
+                Incoming12::Closed,
+                "application data after close_notify must not be delivered"
+            );
+        }
+        assert!(conn.write(b"x").is_err());
+        // The reply to the peer's close is still ours to send.
+        let reply = conn.close().expect("close_notify in reply");
+        assert_eq!(fake.open(&reply), (ContentType::Alert, vec![1, 0]));
+
+        // And closing locally first leaves the peer's data readable until its
+        // own close_notify: only the peer's closure ends the reading.
+        let (mut conn, mut fake) = established(Leaf::P256);
+        conn.close().expect("close");
+        assert_eq!(
+            conn.read(&fake.send(b"in flight")).expect("reads"),
+            Incoming12::Application(b"in flight".to_vec())
         );
     }
 
