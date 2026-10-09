@@ -34,7 +34,7 @@ agentgateway-core = { workspace = true }
 rusty_tls = { workspace = true, features = ["rusty-tokio"] }
 rusty_tokio = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "time"] }
-rustls-pki-types = { version = "1", features = ["std"] }
+rustls-pki-types = { workspace = true, features = ["std"] }
 # A direct rustls dependency, against this ecosystem's "consumers import
 # rusty_tls, never rustls" rule -- and the one place it has to be broken.
 # rusty_tls does not install a CryptoProvider, so rustls falls back to
