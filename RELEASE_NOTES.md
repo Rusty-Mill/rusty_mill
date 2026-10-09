@@ -42,6 +42,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-08 - CI: replay-viewer GL smoke test and rleval-app feature sets (pending review)
+
+- **Added:** two planner-gated jobs ported from RLEvalSystem's own CI: `rleval-viewer-gl-smoke` (the offline viewer rendered under software WebGL with a `npm ci`-pinned puppeteer; fails on page errors or a stalled render loop) and `rleval-app-feature-sets` (clippy for default, `mmdb` and `oidc`, plus default-feature tests). New planner flags `rleval_viewer` and `rleval_app`, with tests.
+- **Not ported, by design:** the `mmdb,oidc` job (the workspace-wide clippy/nextest/doctest jobs already run `--all-features`, which includes that set on Linux and Windows) and the Python service job (the service was moved without CI, ADR-0008).
+- **Known limitation:** the smoke test was verified locally against the Playwright-installed Chromium; the first CI run on `ubuntu-latest` downloads puppeteer's own.
+
+---
+
 ## 2026-10-08 - RLEvalSystem imported into crates/apps/rocket_league (pending review)
 
 - **Added:** `replay-analyzer`, `replay-scoring`, `replay-skills`, `replay-value`, `replay-viewer`, `replay-pacifist`, `bc-clone`, `recon-check`, `rleval-app` and the `rleval/` product dir (docs, Python `service/`, scripts). History preserved via `git filter-repo` (201 of 222 commits; the rest only touched private material). Stacked on the rusty_bullet import.

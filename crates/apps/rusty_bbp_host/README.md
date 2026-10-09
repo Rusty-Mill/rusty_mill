@@ -4,7 +4,7 @@ Host commands for the Blackboard Protocol over a `rusty_bbp` file store. Stage 3
 
 ## The process is the invocation
 
-`bbp mcp` serves exactly one turn. It reads `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL` and `BBP_TURN` from its environment, derives that turn's execution token, and once the turn has ended refuses every tool call except the free `task_card`. The model never sees the token and cannot change which turn the process speaks for; a late call from a stale inference reaches a server that answers "turn has ended". That is the invocation-bound token from the design reviews, realised by process lifetime rather than in-process cancellation. The host launches one `bbp mcp` per granted turn and lets it die with the turn.
+`bbp mcp` serves exactly one turn. It reads `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL` and `BBP_TURN` from its environment, derives that turn's execution token, and once the turn has ended refuses every tool call except the free `task_card` and the exact replay of an operation the turn already accepted (R15: a retry after a lost response gets the original answer; a different payload under the same op or any fresh op is refused). The model never sees the token and cannot change which turn the process speaks for; a late call from a stale inference reaches a server that answers "turn has ended". That is the invocation-bound token from the design reviews, realised by process lifetime rather than in-process cancellation. The host launches one `bbp mcp` per granted turn and lets it die with the turn.
 
 Transport is newline-delimited JSON-RPC 2.0 on stdio: `initialize`, `ping`, `tools/list`, `tools/call`. Five tools: `task_card`, `read`, `get_artifact`, `post`, `put_artifact`. Artifact bytes are encoded by the server from the typed fields the agent sends (`rusty_bbp::codec`), so the stored payload derives from the stored bytes by construction, and the driver's boundary check confirms it.
 
@@ -25,13 +25,13 @@ bbp card    --dir D --task T
 bbp tick    --dir D --task T
 bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N]
-bbp human   --dir D --task T VERB ARGS...
+bbp human   --dir D --task T [--rev N] VERB ARGS...
   approve-plan ART | approve-merge ART RUN | reject STATE REASON... | decision MSG accept|reject NOTE...
   ask ROLE TEXT... | answer MSG TEXT... | rerun ART | receipt ART REVISION | resume STATE
   extend FIELD LIMIT | cancel REASON...
 ```
 
-`--dir` and `--task` fall back to `BBP_DIR` and `BBP_TASK`. Human actions that change state carry the card revision the human saw, so a stale command is refused rather than applied to newer work.
+`--dir` and `--task` fall back to `BBP_DIR` and `BBP_TASK`. `reject`, `rerun`, `resume` and `cancel` take `--rev N`, the card revision the human saw (`bbp card` prints it), and refuse to run without it; the core answers `stale_rev` when the card has moved on, so a delayed command is refused rather than applied to newer work.
 
 ## Not here yet
 
@@ -45,7 +45,9 @@ Tier S: `rusty_bbp`, `rusty_serde`, `rusty_rand`.
 
 The profile set is frozen when the task opens (`--profiles FILE`, else one shell profile running `cargo test`) at `<dir>/profiles/<task>.json`, and its SHA-256 is the task's `profile_digest`. The runner re-reads and re-hashes that file before every run and refuses to run on a mismatch, so a report can only ever describe the commands the task was opened with. The file holds the profiles (program and arguments), the absolute directories the workload may read beyond the checkout, its complete environment, and its limits (CPU, wall, memory, file size, open files, processes).
 
-The workload runs under `rusty_sandbox`: Landlock restricts the filesystem to the read roots plus the checkout (the only writable root), seccomp forbids sockets, rlimits bound the rest, and the process group is killed at the wall limit. The helper is this same binary re-invoked as `bbp __sandbox`. A sandbox the kernel cannot set up means nothing runs and the run is `error`, never a silent unconfined pass. `--confine none` runs the workload through plain `std::process` for trusted local use; the report's `sandbox` field then says `unconfined`, so a reviewer can see it.
+The workload runs under `rusty_sandbox`: Landlock restricts the filesystem to the read roots plus the checkout (the only writable root), seccomp refuses `socket(2)` outright (no network, Unix or abstract socket; anonymous socketpairs, which rustc needs to start its linker, still work), rlimits bound the rest, and the process group is killed at the wall limit. The report records the policy as `landlock+seccomp:no-endpoints`. The helper is this same binary re-invoked as `bbp __sandbox`. A sandbox the kernel cannot set up means nothing runs and the run is `error`, never a silent unconfined pass. `--confine none` runs the workload through plain `std::process` for trusted local use; the report's `sandbox` field then says `unconfined`, so a reviewer can see it.
+
+Diffs reach `git apply --index` on standard input; the supervisor writes no file into the checkout, so a symlink the base tree or an earlier diff plants cannot redirect a trusted write outside it. If a runner stored the log and died before the report, the next runner does not execute again: the result that log described died with it, so the run is reported `error` against the log on record and the human decides whether to `rerun`.
 
 The runner is Unix-shaped: profile sets take Unix absolute read roots and the default profile is `/bin/sh`. On Windows `bbp runner` compiles and reports every run as `error` before anything executes; its end-to-end tests are compiled on Unix only.
 
