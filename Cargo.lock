@@ -12331,6 +12331,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_aead"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "rusty_crypto_key",
+ "rusty_ct_check",
+ "rusty_hex",
+]
+
+[[package]]
 name = "rusty_agui"
 version = "0.1.0"
 dependencies = [
@@ -12481,6 +12491,14 @@ name = "rusty_crypto_key"
 version = "0.1.0"
 dependencies = [
  "rusty_atomic_file",
+]
+
+[[package]]
+name = "rusty_ct_check"
+version = "0.1.0"
+dependencies = [
+ "rusty_hex",
+ "rusty_json",
 ]
 
 [[package]]
@@ -12820,6 +12838,18 @@ name = "rusty_percent"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_pk"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "rusty_crypto_key",
+ "rusty_ct_check",
+ "rusty_hex",
+ "rusty_rsa",
+ "rusty_sha2",
+]
+
+[[package]]
 name = "rusty_proxmox"
 version = "0.1.0"
 dependencies = [
@@ -12934,6 +12964,16 @@ dependencies = [
 [[package]]
 name = "rusty_sha1"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_sha2"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "rusty_crypto_key",
+ "rusty_ct_check",
+ "rusty_hex",
+]
 
 [[package]]
 name = "rusty_simd"

@@ -39,6 +39,12 @@ PACKAGE_JOB_NAMES = {
     "rleval_viewer": frozenset({"replay-viewer"}),
     "rleval_app": frozenset({"rleval-app"}),
     "rusty_config_no_std": frozenset({"rusty_config"}),
+    # The constant-time evidence for the native crypto crates (valgrind taint
+    # runs and pinned disassembly budgets). Selected when any of them, or a
+    # dependency that makes one of them affected, changes.
+    "crypto_ct": frozenset(
+        {"rusty_ct_check", "rusty_sha2", "rusty_pk", "rusty_aead", "rusty_crypto_key"}
+    ),
 }
 
 SPECIALIZED_JOB_NAMES = tuple(

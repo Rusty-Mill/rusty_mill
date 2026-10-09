@@ -1,0 +1,8 @@
+Source: https://github.com/C2SP/wycheproof @ 12fd3aaf33eb5fa1f52e026912ee00c054f9d984, testvectors_v1/
+Licence: Apache-2.0 (LICENSE-wycheproof). Fetched 2026-10-08. Do not edit; refetch and compare.
+bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e  hkdf_sha256_test.json
+69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678  hkdf_sha384_test.json
+bb9a21f4e86041caf5d7792b030349f8ff289087f195b2fbc0fc0afc39deca6f  hkdf_sha512_test.json
+2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f  hmac_sha256_test.json
+28b9776e979dd755d852ca471043ea6cedce8b15f7a28abdf6ea9efd982b43c0  hmac_sha384_test.json
+b6c90477bdb4a6fc8ee3d1f7b2c0b69a8dfffab34718abaa6cabd71cc2ba1207  hmac_sha512_test.json

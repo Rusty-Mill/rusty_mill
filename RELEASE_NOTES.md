@@ -13,6 +13,88 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
+
+- **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
+- **Fixed (evidence tooling, 4 x P2):** taint scripts check the example's exit status (shared `taint_lib.sh`, fake-valgrind regression test); `collect.sh` runs the ignored planted timing leak test and checks every vector file against its `MANIFEST.txt` (found `x25519_test.json` unlisted; 27 vendored files compared byte for byte with upstream); disassembly jump counts are matched exactly, as drift detection only (it does not catch a same-count substitution; the disassembly still needs a human read).
+- **Added to CI:** the `crypto-constant-time` job runs the manifest check and the evidence-tooling self-tests.
+- **Known limitations:** unchanged. Still only evidence, not proof; the human independent review remains required before any `rusty_tls` seam.
+
+## 2026-10-09 - Codex review round 2 on #540: timing-evidence collector corrected
+
+- **Fixed (evidence collector):** `collect.sh` picked one `target/release/deps/timing-*` binary for all three crates' same-named A/A tests, ignored build and discovery failures, and counted baseline alarms from exit codes the calibration tests never produce. Replaced by `timing_series.py`: executable from Cargo's artifact JSON per package (identity recorded), every failure fails the record, alarms counted from printed `|t|` (>= 4.5). Covered by 12 deterministic tests (`test_timing_series.py`, also run in `crypto-constant-time`), including custom target directories, stale binaries after a failed build, zero repetitions and above-threshold A/A output.
+- **Changed:** the evidence record is regenerated with the new collector (final run at `e3266f2e`, after the round 3 fixes and their follow-ups) and renamed `EVIDENCE-2026-10-09.txt`; the `ea0e234` record used the old collector and is removed. No primitive code changed; the review states these findings concern evidence correctness, not a leak or forgery.
+- **Known limitations:** unchanged from round 1. Statistical timing tests are still not a CI gate; the human independent review is still required before any `rusty_tls` seam.
+
+## 2026-10-08 - Codex review round 1 on #540: three findings fixed
+
+- **Fixed (rusty_aead):** `MAX_LEN` was one 64-byte block short of RFC 8439 section 2.8; now `u32::MAX * 64`, pinned by a test. Behaviour change only for a message of exactly 2^38 - 64 bytes.
+- **Fixed (evidence script):** failures in tests, lint, constant-time checks and timing now fail the run; constant-time checks run on every named compiler, including CI's 1.98.1 (identical results).
+- **Added (CI):** `crypto-constant-time` job (valgrind taint + pinned disassembly budgets for `rusty_sha2`, `rusty_aead`, `rusty_pk`, plus the harness self-test) on the pinned toolchain, selected by a new `crypto_ct` plan output when any of the five crypto crates is affected. Planner rule, workflow and tests updated; `actionlint` passes. First runner run passed (valgrind 3.22.0, rustc 1.98.1, identical counts to local).
+- **Changed:** the four new crates (`rusty_ct_check`, `rusty_sha2`, `rusty_pk`, `rusty_aead`) now declare `rust-version = "1.98.1"` instead of an untested 1.75, matching the compiler their checks run on. Behaviour change only for anyone building them with an older toolchain (Cargo now refuses).
+- **Fixed (CI):** the version raise activated a Clippy lint gated on `rust-version` (`chunks_exact_to_as_chunks`) that failed the 1.98.1 clippy job; ten call sites moved to `as_chunks`. The evidence script now lints on CI's compiler too.
+- **Open:** the timing tests are not in CI.
+
+---
+
+## 2026-10-08 - Crypto claims corrected, evidence record, boundary tests (docs and tests only)
+
+- **Changed (docs):** `CRYPTO-REPLACEMENT-PLAN.md` no longer says "Done" or "exactly what ring accepts": stages are "implemented; independent review pending", ring parity is "on the recorded corpus", the Ed25519 leniency is a documented compatibility exception, provisional implementer choices are separated from owner decisions, scope limits (no AES-GCM, no P-256/P-384 key exchange, no signing, no randomness) and a call-site coverage table are stated. Added `docs/research/crypto-evidence/` (script and record).
+- **Added (tests):** adversarial boundary tests for the shared Montgomery core. No defect found.
+- **Found (test method, not a primitive):** repeated timing runs exposed two harness artifacts (|t| = 7.9 and 25 on code with no leak). Fixed by timing only the operation on a shared buffer; added A/A baselines (2 of 120 no-leak runs exceed 4.5) and a 40-repetition evidence record (`docs/research/crypto-evidence/`, produced at commit `c4bbb66`).
+- **Not changed:** any primitive's behaviour, `rusty_tls`, consumers, gates. Stages 0 to 4 are frozen.
+
+---
+
+## 2026-10-08 - Crypto stage 4: X25519 (pending review)
+
+- **Added:** `rusty_pk::x25519`. **Not changed:** `rusty_tls`, consumers, gates. Work stops after this stage by owner decision.
+- **Verified:** tests, clippy `-D warnings`, RFC 7748, 518 Wycheproof cases, differential against `ring`, 14 mutants (2 equivalent survivors), valgrind taint (0 errors on the ladder), pinned disassembly counts, timing runs, policy scripts.
+- **Found and fixed:** the compiler turned a branch-free select into a branch on the secret scalar (caught by the taint run, invisible to all functional tests).
+- **Known limitations:** x86-64 only; `black_box` is best effort; 7.7x slower than `ring`; intermediates not wiped; no independent review, which the plan requires before use in `rusty_tls`.
+
+---
+
+## 2026-10-08 - Crypto stage 3: rusty_aead ChaCha20-Poly1305 (pending review)
+
+- **Added:** `rusty_aead`. **Not changed:** `rusty_tls`, consumers, gates. Local toolchain moved to Rust 1.99.0; stages 1 to 3 re-verified on it.
+- **Verified:** tests, clippy `-D warnings` (1.99), differential against `ring`, 22 hand-made mutants (one real test gap found and closed), valgrind taint (seal clean; open shows exactly the public accept/reject branch), pinned disassembly budget, timing tests, policy scripts.
+- **Known limitations:** x86-64 only; `open` cannot be fully taint-clean because the verdict branch is public by design; 4 to 5.5x slower than `ring`; nothing independently reviewed.
+
+---
+
+## 2026-10-08 - Crypto stage 2: rusty_pk signature verification (pending review)
+
+- **Added:** `rusty_pk` (RSA, ECDSA P-256/P-384, Ed25519 verify). `ring` is a dev-dependency oracle only. **Not changed:** `rusty_tls`, consumers, gates.
+- **Verified:** tests, clippy `-D warnings`, differential against `ring` on every Wycheproof case in 19 files and several thousand mutated or `ring`-signed inputs, more than 20 hand-made mutants (all caught after fixing two test gaps), workspace policy scripts.
+- **Known limitations:** deliberately as lenient as `ring` where `ring` is looser than RFC 8032 (non-canonical Ed25519 `y`, `x = 0` with sign bit); mutation fuzzing is deterministic, not coverage-guided; speed is 1.7x to 9x slower than `ring`; nothing is independently reviewed.
+
+---
+
+## 2026-10-08 - Crypto stages 0 and 1: rusty_ct_check, rusty_sha2 (pending review)
+
+- **Added:** `rusty_ct_check` (harness), `rusty_sha2` (SHA-2, HMAC, HKDF), `rusty_crypto_key::wipe`. `ring` is a dev-dependency oracle only. **Not changed:** `rusty_tls`, any consumer, any gate.
+- **Decision recorded:** `unsafe` intrinsics approved, work stops after stage 4 (`docs/research/CRYPTO-REPLACEMENT-PLAN.md` section 0).
+- **Verified:** tests, clippy `-D warnings`, differential against `ring`, mutation by hand (9 of 9 caught), valgrind taint and disassembly gates on the planted-leak controls, workspace policy scripts.
+- **Known limitations:** constant-time evidence covers x86-64 and rustc 1.97 only; the timing results are single runs on a noisy VM; nothing here is independently reviewed; the HMAC/HKDF functions other than `compress` are inlined, so the disassembly audit covers only the compression functions.
+
+---
+
+## 2026-10-08 - Crypto replacement plan (docs only)
+
+- **Added:** `docs/research/CRYPTO-REPLACEMENT-PLAN.md`. **Not changed:** any crate, dependency, `rusty_tls`, or gate. No primitive was written.
+- **Findings:** the safe stages (SHA-2/HMAC/HKDF, signature verify) are worth doing; portable AES-GCM would be roughly 60 to 150x slower than `ring` unless `unsafe` intrinsics are approved; `ring` stays in the lockfile via nine other packages.
+- **Known limitations:** native performance figures are estimates; only `ring` and `rusty_rsa` were measured (one run, noisy VM). The constant-time probe tested the tools on toy code only. Decisions in section 9 are the owner's.
+
+---
+
+## 2026-10-08 - TLS engine assessment (docs only)
+
+- **Added:** `docs/research/TLS-ENGINE-ASSESSMENT.md` and a repro for one engine bug. **Finding:** a wildcard certificate bypasses an excluded name constraint in the native engine; rustls rejects it. **Not changed:** the default engine, either gate, or any code.
+- **Added:** `docs/research/TLS12-DESIGN.md`, the TLS 1.2 scope and stage plan. Design only; no code.
+- **Added:** `docs/research/prompts/ring-track.md`, a session prompt for assessing a native `ring` replacement. Prompt only; no code.
+- **Known limitations:** rusty_tls#25 lives in an archived repo outside this session's scope and was not read, so its acceptance criteria are taken from ADR-0002 section 5. Interop tests were not run, and about 6.5k lines of the engine (record, schedule, handshake, kx, ticket, client and server state machines) were not reviewed.
+
 ## 2026-10-09 - rusty_flatbuffers: FlatBuffers runtime (RLBot port stage 1) (pending review)
 
 - **Added:** `crates/libs/protocol/rusty_flatbuffers` (Tier S, no dependencies): a bounds-checked reader (`Table`, `Vector`; every access returns `Error`, none panics) and a back-to-front `Builder`/`TableBuilder` (strings, scalar/offset/struct vectors, inline structs, unions as type+offset slots, optional file identifier). No code generation; schemas are hand-written on top.
@@ -138,6 +220,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `rusty_bbp::FsStore`, a file-backed store with one `fsync`ed JSON line per committed batch, crash truncation on open, revision-checked append and digest-verified blobs via `rusty_atomic_file`. Stage-2 exit criteria from the implementation plan are tests: reopen, crash mid-batch, conflict, blob consistency.
 - **Changed:** `Store::blob_get` returns `Vec<u8>`; `StoreError::Backend` added.
 - **Known limitation:** no directory lock; one writer per data directory is the host's job. Blob garbage collection and retention are not implemented.
+
 ## 2026-10-08 - rusty_bullet imported as crates/apps/rocket_league (pending review)
 
 - **Added:** `crates/apps/rocket_league/` (ADR-0008) with `rb_domain`, `rb_env`, `rb_physics_bullet`, `rb_replay_ingest`, `rb_capture_ingest`, `rb_scenario`, `rb_verify_cli` and the product's docs, BakkesMod plugin and tape-bot tooling. Full history preserved via `git filter-repo` + merge (SHAs differ from `baileyrd/rusty_bullet`; map in the PR).

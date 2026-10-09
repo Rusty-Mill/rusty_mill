@@ -192,6 +192,7 @@ jobs:
       rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
       rleval_viewer: ${{ steps.plan.outputs.rleval_viewer }}
       rleval_app: ${{ steps.plan.outputs.rleval_app }}
+      crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
     steps:
@@ -1364,6 +1365,66 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub --all-targets -- -D warnings
 
+  # ---------------------------------------------------------------------------
+  # Constant-time evidence for the native crypto crates (rusty_ct_check,
+  # rusty_sha2, rusty_pk, rusty_aead). Compiler-sensitive: LLVM can turn a
+  # branch-free masked select into a branch on a secret, which no functional
+  # test sees (it happened once in rusty_pk::mont::reduce_once and was caught
+  # only by the valgrind taint run below). The jump-count budgets in each
+  # crate's scripts/disasm_limits.txt are tied to a compiler version, so this
+  # job runs on the pinned RUST_TOOLCHAIN every other job ships with; moving
+  # that toolchain is a global change that reruns this job, and a changed count
+  # fails it until someone re-reviews the budget. Evidence, not proof: see
+  # docs/research/CRYPTO-REPLACEMENT-PLAN.md section 4.5. The statistical
+  # timing tests are deliberately NOT run here (noisy shared runners); they run
+  # from docs/research/crypto-evidence/collect.sh.
+  # ---------------------------------------------------------------------------
+  crypto-constant-time:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-crypto-constant-time
+      queue: max
+      cancel-in-progress: false
+    name: crypto constant-time checks (valgrind taint, disassembly budget)
+    needs: plan
+    if: needs.plan.outputs.crypto_ct == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: crypto-constant-time
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version
+          objdump --version | head -1
+      - name: Harness self-test (planted leaks must be caught)
+        run: sh crates/foundation/rusty_ct_check/scripts/valgrind_selftest.sh
+      - name: rusty_sha2 (HMAC / HKDF keys)
+        run: sh crates/foundation/rusty_sha2/scripts/ct_check.sh
+      - name: rusty_aead (ChaCha20-Poly1305)
+        run: sh crates/foundation/rusty_aead/scripts/ct_check.sh
+      - name: rusty_pk (X25519, shared Montgomery core)
+        run: sh crates/foundation/rusty_pk/scripts/ct_check.sh
+      - name: Vector manifests (hashes, missing and unlisted files)
+        run: >
+          python3 -I docs/research/crypto-evidence/check_manifests.py
+          crates/foundation/rusty_sha2/tests/vectors
+          crates/foundation/rusty_pk/tests/vectors
+          crates/foundation/rusty_aead/tests/vectors
+      - name: Evidence tooling self-tests (collector, manifests, taint exit status, disassembly counts)
+        run: |
+          python3 -I docs/research/crypto-evidence/test_timing_series.py
+          python3 -I docs/research/crypto-evidence/test_check_manifests.py
+          python3 -I docs/research/crypto-evidence/test_planted_leak.py
+          python3 -I crates/foundation/rusty_ct_check/scripts/test_disasm_audit.py
+          sh crates/foundation/rusty_ct_check/scripts/test_taint_lib.sh
+
+  # ---------------------------------------------------------------------------
   required-gate:
     # The one check branch protection requires (ADR-0009). Planned-out jobs
     # are `skipped`, which passes; a failed or cancelled job fails the gate.
@@ -1392,6 +1453,7 @@ jobs:
       - multimodal-db-feature-sets
       - multimodal-db-msrv
       - rusty-config-no-std-check
+      - crypto-constant-time
       - rleval-viewer-gl-smoke
       - rleval-app-feature-sets
       - remind-me
