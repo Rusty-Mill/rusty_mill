@@ -101,12 +101,47 @@ fn system_anchors_der() -> Vec<Vec<u8>> {
         .expect("the OS trust store is readable")
 }
 
-fn status_line(response: &[u8]) -> String {
-    String::from_utf8_lossy(response)
+/// The status line of a response whose headers are complete.
+///
+/// A short read, an EOF or a timeout before the blank line is an error and not
+/// an empty status: two connections that both said nothing must not look alike.
+fn response_status(response: &[u8], ended: &str) -> Result<String, String> {
+    if !response.windows(4).any(|w| w == b"\r\n\r\n") {
+        return Err(format!(
+            "the response ended before complete headers ({} bytes; {ended})",
+            response.len()
+        ));
+    }
+    let line = String::from_utf8_lossy(response)
         .lines()
         .next()
         .unwrap_or_default()
-        .to_string()
+        .to_string();
+    if !line.starts_with("HTTP/1.") {
+        return Err(format!("not an HTTP response: {line:?}"));
+    }
+    Ok(line)
+}
+
+/// Whether the native result and the rustls reference agree on a real response.
+///
+/// Two failures, or two empty answers, are not parity.
+fn differential(
+    native: &Result<String, String>,
+    reference: &Result<String, String>,
+) -> Result<(), String> {
+    match (native, reference) {
+        (Ok(n), Ok(r)) if n == r && n.starts_with("HTTP/1.") => Ok(()),
+        (Ok(n), Ok(r)) if n == r => Err(format!("equal but not an HTTP response: {n:?}")),
+        (Ok(n), Ok(r)) => Err(format!("native got {n:?}, rustls got {r:?}")),
+        (Ok(n), Err(r)) => Err(format!(
+            "no reference (rustls failed: {r}); native got {n:?}"
+        )),
+        (Err(n), Ok(_)) => Err(format!("native engine failed ({n}); rustls ok")),
+        (Err(n), Err(r)) => Err(format!(
+            "failed on both, which is not parity (native: {n}; rustls: {r})"
+        )),
+    }
 }
 
 /// One full conversation with `host` on the native engine.
@@ -184,16 +219,30 @@ fn native(host: &str) -> Result<Outcome, String> {
     socket.write_all(&sealed).map_err(|e| e.to_string())?;
 
     let mut response = Vec::new();
-    while let Ok(record) = read_record(&mut socket) {
+    let mut ended = String::from("headers complete");
+    while !response.windows(4).any(|w| w == b"\r\n\r\n") {
+        let record = match read_record(&mut socket) {
+            Ok(record) => record,
+            Err(e) => {
+                ended = format!("transport: {e}");
+                break;
+            }
+        };
         let data = match &mut connection {
             Established::Tls13(c) => match c.read(&record).map_err(|e| format!("read: {e}"))? {
                 Incoming::Application(d) => Some(d),
-                Incoming::Closed => break,
+                Incoming::Closed => {
+                    ended = "close_notify".into();
+                    break;
+                }
                 _ => None,
             },
             Established::Tls12(c) => match c.read(&record).map_err(|e| format!("read: {e}"))? {
                 Incoming12::Application(d) => Some(d),
-                Incoming12::Closed => break,
+                Incoming12::Closed => {
+                    ended = "close_notify".into();
+                    break;
+                }
                 _ => None,
             },
             _ => return Err("a connection kind this test does not know".into()),
@@ -201,15 +250,13 @@ fn native(host: &str) -> Result<Outcome, String> {
         if let Some(data) = data {
             response.extend_from_slice(&data);
         }
-        if response.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
     }
+    let status_line = response_status(&response, &ended)?;
     Ok(Outcome {
         version,
         group,
         scheme,
-        status_line: status_line(&response),
+        status_line,
         intercepted,
     })
 }
@@ -225,13 +272,21 @@ fn through_rustls(host: &str) -> Result<String, String> {
     tls.write_all(&request(host)).map_err(|e| e.to_string())?;
     let mut response = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut ended = String::from("headers complete");
     while !response.windows(4).any(|w| w == b"\r\n\r\n") {
         match tls.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => {
+                ended = "eof".into();
+                break;
+            }
+            Err(e) => {
+                ended = format!("transport: {e}");
+                break;
+            }
             Ok(n) => response.extend_from_slice(&chunk[..n]),
         }
     }
-    Ok(status_line(&response))
+    response_status(&response, &ended)
 }
 
 #[test]
@@ -240,46 +295,70 @@ fn the_native_engine_completes_with_googles_sign_in_endpoints() {
     let mut failures = Vec::new();
     for host in hosts() {
         let reference = through_rustls(&host);
-        match (native(&host), &reference) {
-            (Ok(outcome), Ok(expected)) => {
+        let outcome = native(&host);
+        if let Ok(outcome) = &outcome {
+            println!(
+                "{host}: native {:?}, group {:?}, peer scheme {:?}, {:?}; rustls {reference:?}",
+                outcome.version, outcome.group, outcome.scheme, outcome.status_line
+            );
+            if outcome.intercepted {
                 println!(
-                    "{host}: native {:?}, group {:?}, peer scheme {:?}, {:?}; rustls {expected:?}",
-                    outcome.version, outcome.group, outcome.scheme, outcome.status_line
+                    "{host}: NOTE the certificate came from an intercepting proxy; \
+                     this is not evidence about {host} itself"
                 );
-                if outcome.intercepted {
-                    println!(
-                        "{host}: NOTE the certificate came from an intercepting proxy; \
-                         this is not evidence about {host} itself"
-                    );
-                }
-                // The differential: the same request must get the same answer.
-                if outcome.status_line != *expected {
-                    failures.push(format!(
-                        "{host}: native got {:?}, rustls got {expected:?}",
-                        outcome.status_line
-                    ));
-                }
             }
-            (Ok(outcome), Err(rustls)) => {
-                // Without a reference there is no differential, so this does not
-                // pass: a native success alone is smoke coverage, not parity.
-                failures.push(format!(
-                    "{host}: no reference (rustls failed: {rustls}); native got {:?}",
-                    outcome.status_line
-                ));
-            }
-            (Err(native), Ok(_)) => {
-                // rustls got through and the engine did not: an engine finding.
-                failures.push(format!(
-                    "{host}: native engine failed ({native}); rustls ok"
-                ));
-            }
-            (Err(native), Err(rustls)) => {
-                failures.push(format!(
-                    "{host}: unreachable either way (native: {native}; rustls: {rustls})"
-                ));
-            }
+        }
+        let status = outcome
+            .as_ref()
+            .map(|o| o.status_line.clone())
+            .map_err(String::clone);
+        if let Err(why) = differential(&status, &reference) {
+            failures.push(format!("{host}: {why}"));
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+// ---------------------------------------------------------------------------
+// The harness itself. These run without a network: a live check that can pass
+// on two empty answers proves nothing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_response_without_complete_headers_is_an_error_not_an_empty_status() {
+    for partial in [
+        &b""[..],
+        b"HTTP/1.1 200 OK\r\nHost: x",
+        b"HTTP/1.1 200 OK\r\n",
+    ] {
+        assert!(
+            response_status(partial, "eof").is_err(),
+            "{:?} must not yield a status",
+            String::from_utf8_lossy(partial)
+        );
+    }
+    assert!(response_status(b"SSH-2.0-x\r\n\r\n", "headers complete").is_err());
+    assert_eq!(
+        response_status(b"HTTP/1.1 200 OK\r\nA: b\r\n\r\nbody", "headers complete"),
+        Ok("HTTP/1.1 200 OK".to_string())
+    );
+}
+
+#[test]
+fn equal_empty_answers_and_matching_failures_are_not_parity() {
+    let ok = |s: &str| -> Result<String, String> { Ok(s.to_string()) };
+    let err = |s: &str| -> Result<String, String> { Err(s.to_string()) };
+    assert!(differential(&ok(""), &ok("")).is_err(), "empty == empty");
+    assert!(differential(&ok("junk"), &ok("junk")).is_err(), "not HTTP");
+    assert!(
+        differential(&err("eof"), &err("eof")).is_err(),
+        "both failed"
+    );
+    assert!(differential(&ok("HTTP/1.1 200 OK"), &err("eof")).is_err());
+    assert!(differential(&err("eof"), &ok("HTTP/1.1 200 OK")).is_err());
+    assert!(differential(&ok("HTTP/1.1 200 OK"), &ok("HTTP/1.1 404 Not Found")).is_err());
+    assert_eq!(
+        differential(&ok("HTTP/1.1 200 OK"), &ok("HTTP/1.1 200 OK")),
+        Ok(())
+    );
 }
