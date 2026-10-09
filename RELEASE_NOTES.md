@@ -270,6 +270,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rk-app on rusty_mcp_server (pending review)
+
+- **Changed:** `rusty-keys --mcp` uses the first-party server; `rmcp` is gone from `rk-app`'s server path (it remains through `rk-mcp`'s client until A4).
+- **Known limitation:** not run end to end (needs a live model). A long `chat` turn blocks other requests; cancellation reaches the handler's `Context`, but `Session::send` does not poll it yet.
+
+---
+
 ## 2026-10-09 - rusty_mcp_server, stdio (pending review)
 
 - **Added:** `rusty_mcp_server` with the `rusty-mcp-echo` fixture binary. A real `rmcp` client completes initialize, tools/list, tools/call (success, tool failure, unknown tool) against it.
