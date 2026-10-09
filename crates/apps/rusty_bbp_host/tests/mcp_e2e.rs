@@ -174,7 +174,7 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     assert!(read["Read"]["messages"].as_str().is_none());
 
     // The human ends this turn from outside; the server now refuses.
-    let r = human::perform(&dir, &task, "extend", &["reads_per_turn", "1"]).expect("extend");
+    let r = human::perform(&dir, &task, "extend", &["reads_per_turn", "1"], None).expect("extend");
     assert_eq!(r, Response::Ok);
     let mut d = open_driver(&dir, &task).expect("driver");
     d.dispatch(&Command::AbortTurn, rusty_bbp_host::now())
@@ -274,5 +274,225 @@ fn human_cli_drives_a_gate() {
     let card = admin::card(&dir, &task).expect("card");
     assert_eq!(card.state, State::Build);
     assert_eq!(card.turn.map(|t| t.0), Some(Role::Coder));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn turn_of(dir: &Path, task: &TaskId) -> u64 {
+    open_driver(dir, task)
+        .expect("driver")
+        .state
+        .turn
+        .as_ref()
+        .expect("turn")
+        .id
+        .0
+}
+
+fn stored(resp: &Value) -> u64 {
+    resp["Stored"].as_u64().unwrap_or_else(|| panic!("{resp}"))
+}
+
+const DIFF: &str = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-x\n+y\n";
+
+/// Planner: spec and gate. Human: approve. Coder: diff and candidate. The
+/// task is then in `test` with run 1 selected. Returns (spec, diff, candidate).
+fn drive_to_test(dir: &Path, task: &TaskId) -> (u64, u64, u64) {
+    let mut planner = Mcp::spawn(dir, "T1", "planner", turn_of(dir, task));
+    let (spec, _) = planner.call(
+        "put_artifact",
+        r##"{"op":"s","kind":"spec","brief":1,"body":"# Spec\nAC1 retries on 429."}"##,
+    );
+    let spec = stored(&spec);
+    let (_, err) = planner.call("post", &format!(r#"{{"op":"g","kind":"request_decision","to":["human"],"refs":["art:{spec}"],"body":"Approve?","gate":true}}"#));
+    assert!(!err);
+    drop(planner);
+    human::perform(dir, task, "approve-plan", &[&spec.to_string()], None).expect("approve");
+    let mut coder = Mcp::spawn(dir, "T1", "coder", turn_of(dir, task));
+    let body = DIFF.replace('\n', "\\n");
+    let (diff, err) = coder.call(
+        "put_artifact",
+        &format!(r#"{{"op":"d","kind":"diff","body":"{body}"}}"#),
+    );
+    assert!(!err, "{diff}");
+    let diff = stored(&diff);
+    let (cand, err) = coder.call(
+        "put_artifact",
+        &format!(
+            r#"{{"op":"c","kind":"candidate","base":"{}","diffs":[{diff}]}}"#,
+            "a".repeat(40)
+        ),
+    );
+    assert!(!err, "{cand}");
+    let card = admin::card(dir, task).expect("card");
+    assert_eq!(card.state, State::Test);
+    (spec, diff, stored(&cand))
+}
+
+/// The runner stores a log then a passing report for the selected run.
+/// Returns (log, report).
+fn runner_passes(dir: &Path, task: &TaskId, log: &[u8]) -> (ArtId, ArtId) {
+    let mut d = open_driver(dir, task).expect("driver");
+    let run = d.state.run.clone().expect("selected run");
+    let blob = d.store.blob_put(log);
+    let store_as = |d: &mut Driver<FsStore>, blob, payload, op: &str| match d
+        .dispatch(
+            &Command::Runner {
+                op: OpId(op.into()),
+                run: run.id,
+                secret: run.secret,
+                blob,
+                payload,
+            },
+            rusty_bbp_host::now(),
+        )
+        .expect("dispatch")
+    {
+        Response::Stored(id) => id,
+        other => panic!("{other:?}"),
+    };
+    let log_id = store_as(&mut d, blob, ArtifactPayload::Log, "log");
+    let report = ArtifactPayload::TestReport(Report {
+        candidate: run.candidate,
+        run: run.id,
+        profile_digest: d.state.profile_digest,
+        status: RunStatus::Passed,
+        profiles: vec![ProfileResult {
+            name: "test".into(),
+            exit_code: 0,
+            failed: 0,
+        }],
+        tree: Some(Sha256([9; 32])),
+        log: log_id,
+    });
+    let bytes = encode_artifact(&report, b"").expect("encode");
+    let blob = d.store.blob_put(&bytes);
+    let report_id = store_as(&mut d, blob, report, "report");
+    (log_id, report_id)
+}
+
+#[test]
+fn get_artifact_returns_content_but_never_a_log_to_the_reviewer() {
+    let dir = tempdir("content");
+    let task = setup(&dir);
+    let mut planner = Mcp::spawn(&dir, "T1", "planner", turn_of(&dir, &task));
+    let (brief, err) = planner.call("get_artifact", r#"{"op":"b","id":1}"#);
+    assert!(!err, "{brief}");
+    assert_eq!(brief["content"].as_str(), Some("Add retry with backoff."));
+    assert_eq!(brief["Artifact"]["kind"].as_str(), Some("Brief"));
+    drop(planner);
+
+    let (spec, diff, cand) = drive_to_test(&dir, &task);
+    let (log, report) = runner_passes(&dir, &task, b"SECRET-LOG-LINE ok");
+    // The Tester may read the log; its approval moves the task to review.
+    let mut tester = Mcp::spawn(&dir, "T1", "tester", turn_of(&dir, &task));
+    let (seen, err) = tester.call("get_artifact", &format!(r#"{{"op":"tl","id":{}}}"#, log.0));
+    assert!(!err, "{seen}");
+    assert_eq!(seen["content"].as_str(), Some("SECRET-LOG-LINE ok"));
+    let (v, err) = tester.call("post", &format!(r#"{{"op":"tv","kind":"verdict","to":["*"],"refs":["art:{cand}"],"evidence":["art:{}"],"verdict":{{"subject":{cand},"run":1,"verdict":"approve"}}}}"#, report.0));
+    assert!(!err, "{v}");
+    drop(tester);
+    assert_eq!(admin::card(&dir, &task).expect("card").state, State::Review);
+    let mut reviewer = Mcp::spawn(&dir, "T1", "reviewer", turn_of(&dir, &task));
+    let (spec, err) = reviewer.call("get_artifact", &format!(r#"{{"op":"rs","id":{spec}}}"#));
+    assert!(!err, "{spec}");
+    assert_eq!(
+        spec["content"].as_str(),
+        Some("# Spec\nAC1 retries on 429.")
+    );
+    let (diff, err) = reviewer.call("get_artifact", &format!(r#"{{"op":"rd","id":{diff}}}"#));
+    assert!(!err, "{diff}");
+    assert_eq!(diff["content"].as_str(), Some(DIFF));
+    let (denied, err) = reviewer.call("get_artifact", &format!(r#"{{"op":"rl","id":{}}}"#, log.0));
+    assert!(err, "{denied}");
+    assert!(denied.get("Rejected").is_some(), "{denied}");
+    assert!(!denied.to_string().contains("SECRET-LOG-LINE"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn accepted_op_replays_after_the_turn_it_ended() {
+    let dir = tempdir("replay");
+    let task = setup(&dir);
+    let mut planner = Mcp::spawn(&dir, "T1", "planner", turn_of(&dir, &task));
+    let (spec, _) = planner.call(
+        "put_artifact",
+        r##"{"op":"s","kind":"spec","brief":1,"body":"# Spec"}"##,
+    );
+    let gate = format!(
+        r#"{{"op":"g","kind":"request_decision","to":["human"],"refs":["art:{}"],"body":"Approve?","gate":true}}"#,
+        stored(&spec)
+    );
+    let (first, err) = planner.call("post", &gate);
+    assert!(!err, "{first}");
+    assert_eq!(
+        admin::card(&dir, &task).expect("card").state,
+        State::PlanGate
+    );
+    let rev = admin::card(&dir, &task).expect("card").rev;
+    // The response was lost; the identical retry gets the identical answer
+    // and changes nothing.
+    let (again, err) = planner.call("post", &gate);
+    assert!(!err, "{again}");
+    assert_eq!(first, again);
+    assert_eq!(admin::card(&dir, &task).expect("card").rev, rev);
+    // The same op with another payload, and any fresh op, are refused.
+    let (conflict, err) = planner.call("post", &gate.replace("Approve?", "Changed"));
+    assert!(err, "{conflict}");
+    assert!(conflict.get("Rejected").is_some(), "{conflict}");
+    let (fresh, err) = planner.call(
+        "post",
+        r#"{"op":"g2","kind":"ask","to":["coder"],"body":"late"}"#,
+    );
+    assert!(err);
+    assert!(
+        fresh.as_str().unwrap_or("").contains("has ended"),
+        "{fresh}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_delayed_rerun_meets_stale_rev_and_the_newer_run_survives() {
+    let dir = tempdir("rerun");
+    let task = setup(&dir);
+    let (_, _, cand) = drive_to_test(&dir, &task);
+    let cand = cand.to_string();
+    let seen = admin::card(&dir, &task).expect("card").rev;
+    assert_eq!(
+        human::perform(&dir, &task, "rerun", &[&cand], None)
+            .unwrap_err()
+            .contains("--rev"),
+        true
+    );
+    let r = human::perform(&dir, &task, "rerun", &[&cand], Some(seen)).expect("rerun");
+    assert_eq!(r, Response::Ok);
+    let run2 = open_driver(&dir, &task)
+        .expect("driver")
+        .state
+        .run
+        .expect("run")
+        .id;
+    assert_eq!(run2, RunId(2));
+    // A rerun the human decided on before run 2 existed is refused, not applied.
+    let stale = human::perform(&dir, &task, "rerun", &[&cand], Some(seen)).expect("dispatch");
+    assert!(
+        matches!(
+            stale,
+            Response::Rejected(Rejection {
+                code: Code::StaleRev,
+                ..
+            })
+        ),
+        "{stale:?}"
+    );
+    assert_eq!(
+        open_driver(&dir, &task)
+            .expect("driver")
+            .state
+            .run
+            .expect("run")
+            .id,
+        run2
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -3,8 +3,9 @@
 //!
 //! The process is the invocation. It learns its task, principal and turn id
 //! from the environment, derives the execution token for that turn, and once
-//! the turn has ended every tool call is refused. Nothing the model sends can
-//! change which turn this process speaks for.
+//! the turn has ended every tool call is refused, except the free card and
+//! the exact replay of an operation the turn already accepted. Nothing the
+//! model sends can change which turn this process speaks for.
 
 use crate::{fresh_op, now, open_driver, response_json};
 use rusty_bbp::*;
@@ -102,7 +103,7 @@ pub fn tools() -> Value {
         ),
         tool(
             "get_artifact",
-            "An artifact record and its content by id. One charge per artifact per turn.",
+            "An artifact record and its content by id (`content`: brief, diff or log text, spec Markdown, candidate or report JSON). One charge per artifact per turn.",
             schema(vec![("id", "integer", "Artifact id"), ("op", "string", "Operation id")], &["id"]),
         ),
         tool(
@@ -397,6 +398,56 @@ impl Server {
         self.driver.state.turn.as_ref().map(|t| t.id) == Some(self.binding.turn)
     }
 
+    /// True when this principal already had `op` accepted. Its exact replay
+    /// stays answerable after the turn ends (R15); the core refuses a
+    /// different payload under the same op.
+    fn accepted(&self, op: &OpId) -> bool {
+        self.driver
+            .state
+            .ops
+            .contains_key(&(self.binding.principal.clone(), op.clone()))
+    }
+
+    /// The content of an artifact the core let this principal read: raw
+    /// bytes as text for brief, diff and log; the Markdown for a spec; the
+    /// JSON for a candidate or test report.
+    fn content(&self, rec: &ArtifactRecord) -> Result<String, String> {
+        let bytes = self
+            .driver
+            .store
+            .blob_get(&rec.blob.sha)
+            .map_err(|e| format!("{e:?}"))?;
+        if rec.kind != ArtifactKind::Spec {
+            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+        rusty_serde::json::from_str::<SpecFile>(text)
+            .map(|f| f.markdown)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Render a response for the model, attaching the artifact content a
+    /// successful `get_artifact` promises.
+    fn render(&self, resp: &Response) -> Value {
+        let is_error = matches!(resp, Response::Rejected(_));
+        let text = response_json(resp);
+        let Response::Artifact(rec) = resp else {
+            return text_result(text, is_error);
+        };
+        let content = match self.content(rec) {
+            Ok(c) => c,
+            Err(e) => return text_result(format!("artifact content unreadable: {e}"), true),
+        };
+        match rusty_serde::json::from_str::<Value>(&text) {
+            Ok(Value::Map(mut m)) => {
+                m.push(("content".to_owned(), content.into()));
+                text_result(Value::Map(m).to_string(), false)
+            }
+            Ok(other) => text_result(other.to_string(), true),
+            Err(e) => text_result(e.to_string(), true),
+        }
+    }
+
     /// Run one tool call end to end.
     pub fn call(&mut self, name: &str, args: &Value) -> Result<Response, String> {
         self.driver.sync().map_err(|e| format!("{e:?}"))?;
@@ -405,7 +456,8 @@ impl Server {
             action: mut act,
             bytes,
         } = action(name, args)?;
-        if !matches!(act, AgentAction::TaskCard) && !self.turn_live() {
+        let free = matches!(act, AgentAction::TaskCard);
+        if !free && !self.turn_live() && !self.accepted(&op) {
             return Err(format!(
                 "turn {} has ended; this server speaks for no later turn",
                 self.binding.turn.0
@@ -464,9 +516,7 @@ impl Server {
                     .cloned()
                     .unwrap_or_else(|| Value::Map(vec![]));
                 Ok(match self.call(name, &args) {
-                    Ok(resp) => {
-                        text_result(response_json(&resp), matches!(resp, Response::Rejected(_)))
-                    }
+                    Ok(resp) => self.render(&resp),
                     Err(e) => text_result(e, true),
                 })
             }
