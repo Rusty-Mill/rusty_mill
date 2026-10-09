@@ -19,6 +19,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_bbp: design record moved into the monorepo
+
+- **Changed:** the Blackboard Protocol specification (v0.4 plus the v0 to v0.3 drafts) and its review record (four model-review rounds, merged findings, prompts, the implementation-plan review, the sovereignty audit, the orch-core decision) now live at `crates/libs/protocol/rusty_bbp/docs/`, indexed by its README. `baileyrd/rusty_bbp` is archived with a pointer here. One copy of the trace catalog remains, the crate's `TRACES.md`, which the tests reproduce.
+
+---
+
 ## 2026-10-09 - rusty_bbp: no wasted Coder turn on candidate submission
 
 - **Fixed:** submitting a candidate ended the Coder turn and scheduled the next one while the task was still in `build`, granting a Coder turn that the transition to `test` revoked on the next line. Each candidate cost one turn of budget and skipped a turn id. The turn now ends without scheduling; the `test` entry schedules once.

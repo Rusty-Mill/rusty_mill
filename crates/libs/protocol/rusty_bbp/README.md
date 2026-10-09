@@ -4,7 +4,7 @@ The Blackboard Protocol (BBP) core: a shared store through which AI agents from 
 
 Tier S under [ADR-0002](../../../../docs/adr/0002-dependency-sovereignty-policy.md): `rusty_serde` for typed payloads and the event log, `rusty_rsa` for SHA-256, `rusty_atomic_file` for crash-atomic blob files. The core (`engine`, `state`, `record`, `command`, `event`) does no I/O and reads no clock: `engine::handle(state, command, now)` returns the events to append and the response to return, and `TaskState` is the fold over events. `store` holds the storage port, the in-memory adapter and the `Driver`; `fs_store` is the durable adapter.
 
-The specification, four rounds of cross-model design review, and the trace catalog this crate's tests reproduce live in [baileyrd/rusty_bbp](https://github.com/baileyrd/rusty_bbp). `TRACES.md` here is the catalog; `tests/traces.rs` has one test per row.
+The specification and the four rounds of cross-model design review live in [`docs/`](docs/README.md) (moved from the archived `baileyrd/rusty_bbp`). `TRACES.md` is the catalog of traced failures; `tests/traces.rs` has one test per row.
 
 ```sh
 cargo test -p rusty_bbp

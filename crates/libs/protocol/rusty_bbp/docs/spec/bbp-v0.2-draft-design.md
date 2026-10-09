@@ -1,0 +1,421 @@
+# Blackboard Protocol (BBP) v0.2: Draft Design
+
+Oct 8, 2026 · revision of v0.1 after a second round of three independent reviews (`review/v0.1-merged.md`)
+
+## Summary
+
+**Status:** draft v0.2, protocol only. Nothing is built. This document defines records, rules, visibility and lifecycle. Implementation choices are deferred until the protocol survives the proving run.
+
+BBP lets several AI agents collaborate on one software task through a shared store without a human or script relaying messages. It defines the records the store holds, who may write which record and when, what each role may read, how a task moves between states, and which transitions need a human. It defines no transport, discovery, authentication or encryption.
+
+**Why it exists.** [MCP](https://modelcontextprotocol.io/specification/2025-11-25/server/resources) offers tools and resources, [A2A](https://a2a-protocol.org/latest/specification/) offers tasks and artifacts between agents, [AG-UI](https://docs.ag-ui.com/concepts/architecture) connects an agent to a user interface. None defines shared-task policy: per-role visibility, evidence rules, budgets, revision-bound approvals and human gates. BBP is that policy layer, exposed first through MCP.
+
+**The main idea.** Agents annotate a shared store and refer to things by id. Large content is stored once as an immutable blob. Every mutation an agent makes is authorized by a short-lived execution token, and every approval is bound to an exact revision: a spec at the plan gate, a candidate at the merge gate.
+
+**Context.** Claude, ChatGPT/Codex, Gemini, Ollama and Hermes agents work on one repository. A human approves the plan and the merge. Retries are bounded, verdicts carry evidence from a sandboxed runner, review contexts are fresh, and no agent or workload holds push or deploy credentials.
+
+### Changes from v0.1
+
+- **Two bound approvals.** Plan approval names a `spec` revision; merge approval names a `candidate`. Each candidate references the approved spec (reviews: Claude F2, ChatGPT F1).
+- **Every artifact write is gated** by state, role and execution token, so a candidate cannot be replaced after review (Claude F1, ChatGPT F2).
+- **Execution token** replaces the role-based turn. It is bound to task, principal, attempt, turn and deadline, and dies when the turn ends. `pass` may `yield_to` another role (ChatGPT F3, Gemini F1, Claude F6).
+- **Runner writes bind to the candidate**, not a turn, and the runner is a supervisor outside the workload sandbox (all three).
+- **Test reports are discoverable**: a `test_report_stored` event and a card field; the Tester's turn starts after it (Claude F4, ChatGPT F4).
+- **Decisions are human-only in v0.2.** Cross-vendor decisions move to Appendix B, deferred until the proving run passes (Nano, Oct 8).
+- **`planning → plan_gate`** triggers on a Planner `request_decision` naming the spec, not on a `propose` (all three).
+- **Nested references validated**, fragments capped at 128 characters, manifest pins repository, full base, ordered diffs; report carries the tree hash (Claude F7, ChatGPT F8, Gemini F4, F5).
+- **Accounting events**; control events never consume agent budget; read budget is per turn (Claude F8, ChatGPT F6).
+- **`approved` and `cancelled` states.** `closed` requires a merge receipt. An `approve` verdict requires a passed report (ChatGPT F10, E).
+- **Cut:** `supersedes`, read `scope`, "drop unexercised rules" (Nano, Oct 8; ChatGPT F).
+- **Delta moved to Appendix A**, non-normative (ChatGPT F, Gemini F6).
+
+## Goals, non-goals and principles
+
+### Goals
+
+1. Agent-to-agent collaboration without a relay.
+2. Reduce repeated context transfer. Measured, not assumed.
+3. Evidence-backed claims: findings and verdicts cite artifacts; a verdict on a candidate cites the runner's report for that candidate.
+4. Fresh reviews by construction: a role's read capability decides what it sees.
+5. Human authority at the gates, bound to an exact revision.
+6. Bounded work: messages, bytes, reads and iterations have limits.
+7. Vendor neutrality: any agent that can call an MCP tool can participate.
+
+### Non-goals for v0.2
+
+- Transport, discovery, authentication, encryption. The host handles these.
+- Free-form chat. Every message has a kind.
+- Long-term memory.
+- Replacing MCP, A2A or AG-UI.
+- Autonomous merge or deploy. The human merges after the merge gate and records a receipt.
+- Agent-recorded decisions. See Appendix B.
+
+### Design principles
+
+- **Records over conversation.**
+- **Pull over push.** Agents fetch; the moderator grants turns and never forwards content.
+- **Enforce in the store, not in the prompt.** Every rule is checkable from data the store holds. Anything else is labeled advisory.
+- **Make illegal states unrepresentable.** Typed bodies, a closed state machine, one capability matrix, one gating table.
+- **Small surface.** Eight kinds, five records, one state machine, eighteen rules. Each rule has an adversarial test, not a usage count.
+- **Protocol before implementation.**
+
+## Principals and roles
+
+A **principal** is anything that writes to the store. The host issues principal identity. Each principal record carries `id`, `kind` (`human`, `moderator`, `runner`, `agent`) and for agents a `role` and a `vendor`.
+
+| Principal | Writes | Through |
+| --- | --- | --- |
+| Human | human events, `decision`, `ask`, `answer` | Human channel only |
+| Moderator | events, accounting | Internal |
+| Runner | `test_report`, `log` | Runner API, bound to a candidate |
+| Planner, Coder, Tester, Reviewer | messages and artifacts per the matrices | Agent API, with a live execution token |
+
+### Host requirements
+
+The store cannot verify these. They are stated so the host can be audited.
+
+- **Fresh sessions.** One agent session per role per task, started with no other role's context. The Reviewer's session is new for each candidate it judges.
+- **Role fixed at launch.** One Agent API process per role per task. There is no field an agent can set to change role, task or principal.
+- **Runner is a supervisor outside the sandbox.** The supervisor holds the runner credential and writes reports. The workload that applies diffs and runs tests has no BBP, repository-push or deploy credentials, no network egress, a read-only mount of the base, and a time and resource limit. The supervisor captures exit status and output; the workload cannot reach supervisor state.
+- **Adapters never re-stamp.** An adapter forwards the token a process presented and never substitutes the current one.
+
+## Data model
+
+Five record types. Blobs, artifacts, messages and events are append-only. The task card is a fold over events and is never written.
+
+### Blob
+
+Content addressed by the full SHA-256 of its bytes. No metadata, no access policy.
+
+### Artifact record
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | `art:<ulid>` | Record id |
+| `task` | task id | Owning task |
+| `author` | principal id | Who stored it |
+| `kind` | enum | `spec`, `diff`, `candidate`, `test_report`, `log` |
+| `blob` | sha256 | Content |
+| `candidate` | `art:` or null | For `test_report` and `log`: the candidate they describe |
+
+A reference may carry a fragment, `art:01H...#L40-L52`, at most 128 characters, opaque to the store.
+
+#### Artifact kinds and who writes them where
+
+This is the gating table for `put_artifact` (R16).
+
+| Kind | Content | Writer | State | Needs token |
+| --- | --- | --- | --- | --- |
+| `spec` | Specification, Markdown | Planner | `planning` | yes |
+| `diff` | Unified diff against the candidate base | Coder | `build` | yes |
+| `candidate` | Manifest, JSON below; storing it is submission | Coder | `build` | yes |
+| `test_report` | Typed result, JSON below | Runner | `test`, `review`, `merge_gate` | no, bound to candidate |
+| `log` | Raw runner output | Runner | same as `test_report` | no, bound to candidate |
+
+#### Candidate manifest
+
+```json
+{
+  "repo": "github.com/baileyrd/example",
+  "spec": "art:01HSPEC",
+  "base": "a1b2c3d4e5f6...40 hex",
+  "diffs": ["art:01HDIFF1", "art:01HDIFF2"]
+}
+```
+
+`spec` must equal the spec approved at `plan_gate` (R17). `base` is a full commit id. `diffs` apply in index order. The task has one **current** candidate, the most recently stored. Storing a candidate records `candidate_submitted` and stales every verdict and approval on earlier candidates.
+
+#### Test report
+
+```json
+{
+  "candidate": "art:01HCAND",
+  "profile": "default",
+  "status": "passed",
+  "command": "cargo test --workspace",
+  "exit_code": 0,
+  "tree": "9f8e7d...sha256 of the resulting tree",
+  "sandbox": {"network": "none", "timeout_s": 900},
+  "log": "art:01HLOG"
+}
+```
+
+`status` is `passed`, `failed` or `error` (diffs did not apply, timeout, resource limit). The latest report for a candidate is its current report.
+
+### Message
+
+```json
+{
+  "v": 2,
+  "id": 41,
+  "task": "T06",
+  "from": "tester",
+  "to": ["coder"],
+  "kind": "finding",
+  "reply_to": 39,
+  "body": "AC2 has no failing case for HTTP 429.",
+  "refs": ["art:01HSPEC#L12-L18", "art:01HDIFF1#L40-L52"],
+  "evidence": ["art:01HREP"]
+}
+```
+
+`id` is a per-task monotonic integer assigned by the store: the ordering and the read offset. `to` holds assigned roles, `human`, or `*`. `refs` and `evidence` hold `art:` or `msg:<id>` ids on the same task. There is no edit, delete or supersede. A correction is a `finding` with `reply_to`.
+
+### Message kinds
+
+| Kind | Purpose | `refs` | `evidence` | `reply_to` | Agents may post |
+| --- | --- | --- | --- | --- | --- |
+| `ask` | Request information | optional | no | optional | yes |
+| `answer` | Reply to an `ask` | optional | optional | required, names an `ask` | yes |
+| `propose` | Suggest a change or approach | required | optional | optional | yes |
+| `finding` | Defect, fact or objection | required | required | optional | yes |
+| `verdict` | Judge the current candidate | required | required | no | Tester, Reviewer |
+| `request_decision` | Ask the human to decide | required | optional | optional | yes |
+| `decision` | Record a decision | required | optional | optional | no, human only |
+| `pass` | End the turn; may `yield_to` a role | no | no | no | yes |
+
+#### Verdict body
+
+```json
+{
+  "subject": "art:01HCAND",
+  "verdict": "approve",
+  "blocking": [],
+  "non_blocking": [{"id": "N1", "ref": "art:01HDIFF1#L40-L52", "issue": "...", "fix": "..."}]
+}
+```
+
+`subject` is the current candidate. `verdict` is `approve`, `revise` or `escalate`. `evidence` must include that candidate's current report; `approve` requires `status: passed` (R3).
+
+#### Decision body
+
+```json
+{"subject": "msg:37", "outcome": "accept", "changes_spec": null}
+```
+
+Human-only. `subject` is the `request_decision` or `propose` settled. A decision with `changes_spec` after plan approval returns the task to `plan_gate`.
+
+### Event
+
+Control and accounting records. Only the moderator and the human channel write them.
+
+| Event | Writer | Payload |
+| --- | --- | --- |
+| `task_opened` | moderator | repo, budget |
+| `assigned` | moderator | role, principal |
+| `attempt_started` / `attempt_cancelled` | moderator | attempt, reason |
+| `turn_granted` | moderator | role, attempt, token id, deadline |
+| `turn_ended` | moderator | token id, cause (`pass`, `yield`, `verdict`, `candidate`, `deadline`, `budget`, `revoked`) |
+| `candidate_submitted` | moderator | candidate id |
+| `test_report_stored` | moderator | candidate id, report id, status |
+| `state_changed` | moderator | from, to, cause id |
+| `human_approval` | human | gate, subject (`spec` id at `plan_gate`, `candidate` id at `merge_gate`) |
+| `human_rejection` | human | gate, subject, reason, return state |
+| `merge_receipt` | human | candidate id, merged revision |
+| `cancelled` | human | reason |
+| `escalated` | moderator | reason |
+| `resumed` | human | target state |
+| `charged` | moderator | principal, messages, bytes, reads |
+| `rejected` | moderator | principal, code |
+| `usage` | moderator | host-reported tokens, advisory |
+
+### Task card
+
+```json
+{
+  "id": "T06",
+  "state": "test",
+  "attempt": 2,
+  "turn": {"role": "tester", "token": "tok_7Q", "deadline": "2026-10-08T16:10:00Z"},
+  "iteration": 2,
+  "spec": "art:01HSPEC",
+  "candidate": "art:01HCAND",
+  "test_report": {"id": "art:01HREP", "status": "passed"},
+  "budget": {"messages": 50, "bytes": 5000000, "reads_per_turn": 40, "iterations": 4},
+  "spent": {"messages": 11, "bytes": 318000, "reads_this_turn": 3},
+  "rejections": 3,
+  "advisory": {"tokens": 31800}
+}
+```
+
+Reading the card is free.
+
+## Rules
+
+Every write is checked; a violation is rejected with one code and a `rejected` event, and changes nothing else. Error text names what was missing.
+
+| ID | Rule | Rejects with |
+| --- | --- | --- |
+| R1 | `kind` is one of the eight kinds; `v` is a known integer. | `unknown_kind`, `unknown_version` |
+| R2 | `propose`, `finding`, `verdict`, `request_decision`, `decision` carry at least one `refs` entry. | `refs_required` |
+| R3 | `finding` and `verdict` carry `evidence`. A `verdict` cites its subject's current `test_report`; `approve` requires `status: passed`. | `evidence_required`, `evidence_unbound`, `not_passed` |
+| R4 | Every id in `refs`, `evidence`, `reply_to`, `subject`, `candidate.spec`, `candidate.diffs`, `report.candidate`, `report.log` resolves to a record on the same task of the expected kind. Fragments are opaque and at most 128 characters. | `ref_unresolved`, `wrong_kind`, `fragment_too_long` |
+| R5 | The author is assigned, the role may post the kind, and the state accepts the kind (matrices below). | `not_assigned`, `role_forbidden`, `wrong_state` |
+| R6 | `verdict` comes from Tester or Reviewer; its `subject` is the current candidate and appears in `refs`. | `role_forbidden`, `stale_candidate`, `subject_missing` |
+| R7 | `decision` comes only from the human channel. | `decision_forbidden` |
+| R8 | Prose `body`, and each `issue` and `fix`, is at most 1,200 characters. | `body_too_long` |
+| R9 | `to` lists assigned roles, `human`, or `*`. | `bad_recipient` |
+| R10 | `reply_to` names an earlier message on the task; an `answer` replies to an `ask`. | `bad_reply_to` |
+| R11 | Accepted agent writes charge `messages` and `bytes` per task; `get_artifact` and `read` charge `reads` per turn. Exceeding `messages` or `bytes` rejects and records `escalated`; exceeding `reads` rejects and ends the turn. Human, moderator and runner writes are never charged. | `budget_exhausted`, `turn_budget_exhausted` |
+| R12 | Records are never edited or deleted. | `immutable` |
+| R13 | Human events arrive only through the human channel. The Agent API has no operation that creates one. | `approval_forbidden` |
+| R14 | Every Agent API mutation, `pass` included, carries a live execution token: issued by `turn_granted` for this task and principal, in the current attempt, before its deadline, not yet ended. | `bad_token`, `token_expired` |
+| R15 | Every mutation carries an `op` id scoped to (principal, task). A repeat of an accepted `op` with the same payload returns the original result and is not charged; a different payload rejects. Rejected ops are not recorded. | `op_conflict` |
+| R16 | An artifact write matches the gating table: kind, writer role, state, and token requirement. Runner writes name a candidate on this task. | `kind_forbidden`, `wrong_state`, `candidate_required` |
+| R17 | `human_approval` at `plan_gate` names the `spec` in the triggering `request_decision`; at `merge_gate` it names the current candidate, and a Reviewer `approve` on that candidate exists. `candidate.spec` equals the approved spec. | `stale_subject`, `not_reviewed`, `spec_mismatch` |
+| R18 | No write of any kind is accepted in `closed` or `cancelled`. | `terminal` |
+
+## Reads and visibility
+
+- `read(task, after, limit)` returns messages with `id > after` visible to the caller's role, at most 20, with `next` and `more`. The store keeps no cursor. Delivery is at-least-once; clients dedupe on `id`.
+- `get_artifact(id, range)` returns the artifact record and bytes within an optional range, with `more`. Requests above a host-set size require a range. Only artifact ids are accepted; there is no raw blob read.
+- `task_card(task)` returns the card. Free.
+
+### Capability matrix
+
+| Role | Messages readable | Artifact kinds readable | Kinds postable |
+| --- | --- | --- | --- |
+| Planner | all on the task | all | `ask`, `answer`, `propose`, `finding`, `request_decision`, `pass` |
+| Coder | all on the task | all | `ask`, `answer`, `propose`, `finding`, `request_decision`, `pass` |
+| Tester | all on the task | all | `ask`, `answer`, `finding`, `verdict`, `request_decision`, `pass` |
+| Reviewer | none | `spec`, `diff`, `candidate`, `test_report` | `finding`, `verdict`, `request_decision`, `pass` |
+| Runner | none | `candidate`, `diff` | none |
+
+Artifact writes are governed by the gating table above, not this matrix.
+
+## Task lifecycle
+
+Ten states, two human gates, one deterministic transition function owned by the moderator.
+
+| State | Meaning | Leaves on |
+| --- | --- | --- |
+| `planning` | Planner writes the spec | Planner `request_decision` to `human` with `refs[0]` a `spec` → `plan_gate` |
+| `plan_gate` | Waits for the human | `human_approval(spec)` → `build`; `human_rejection` → `planning` |
+| `build` | Coder writes diffs and stores a candidate | `candidate_submitted` → `test` |
+| `test` | Runner reports; Tester judges | `test_report_stored` grants the Tester's turn. Tester `approve` → `review`; `revise` → `build`; `escalate` → `escalated` |
+| `review` | Reviewer judges | `approve` → `merge_gate`; `revise` → `build`; `escalate` → `escalated` |
+| `merge_gate` | Waits for the human | `human_approval(candidate)` → `approved`; `human_rejection` → `build` |
+| `approved` | Human merges outside BBP | `merge_receipt` → `closed`; `human_rejection(reason: base_drift)` → `build` |
+| `escalated` | Waits for the human | `resumed(target)` → `planning`, `build`, `test` or `review` |
+| `closed` | Terminal | none |
+| `cancelled` | Terminal; `cancelled` event from any non-terminal state | none |
+
+Every return to `build` increments `iteration` and spends that budget. Exhausting `messages`, `bytes` or `iterations`, an `escalate` verdict, or a `request_decision` past its own deadline moves any non-terminal state to `escalated`. A decision with `changes_spec` after plan approval moves the task to `plan_gate`. Base drift is detected at merge time by the human or the merge tool and recorded as a `human_rejection` with reason `base_drift`; the Coder submits a new candidate on the new base.
+
+### State × kind matrix for agent messages
+
+| State | `ask` | `answer` | `propose` | `finding` | `verdict` | `request_decision` | `pass` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `planning` | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ |
+| `plan_gate` | ✓ | ✓ | | | | | ✓ |
+| `build` | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ |
+| `test` | ✓ | ✓ | | ✓ | ✓ | ✓ | ✓ |
+| `review` | | | | ✓ | ✓ | ✓ | ✓ |
+| `merge_gate`, `approved`, `escalated` | ✓ | ✓ | | | | | ✓ |
+| `closed`, `cancelled` | | | | | | | |
+
+Human `decision`, `ask` and `answer` are accepted in any non-terminal state.
+
+### Turns and tokens
+
+- The moderator grants one turn at a time with `turn_granted`, which carries a fresh token id and deadline. The token is delivered to that role's Agent API process by the host.
+- A turn ends on `pass`, on a `verdict`, on a candidate submission, at the deadline, on read-budget exhaustion, or on moderator restart (`revoked`). `turn_ended` is recorded and the token is dead.
+- `pass` may carry `yield_to: role`. The moderator grants that role one turn; when it ends, the turn returns to the yielding role in the same attempt. Yields do not nest.
+- Default schedule: `planning` Planner; `build` Coder; `test` Tester after `test_report_stored`; `review` Reviewer. Gate and escalated states grant turns only to answer a human `ask`.
+- **Attempts.** A deadline rolls the attempt: `attempt_cancelled`, `attempt_started`. Tokens from earlier attempts are dead by R14. Runner writes are bound to a candidate and unaffected.
+- **`request_decision`** carries its own deadline, set by the moderator from task configuration. Waiting on the human ends the agent's turn and does not spend an attempt.
+
+### Recovery
+
+The moderator rebuilds the card from the event log on restart and records `turn_ended(revoked)` for any token outstanding. A runner crash yields no report; the moderator re-triggers the run for the current candidate after a host-set timeout, and a second failure stores a report with `status: error`. The human channel can `cancel` or `resume` from any state.
+
+## Interfaces
+
+### Agent API (MCP)
+
+One process per role per task. Role, task and principal are fixed at launch.
+
+| Tool | Signature | Rules |
+| --- | --- | --- |
+| `post` | `(token, op, kind, to, body, refs?, evidence?, reply_to?, yield_to?)` | R1–R15, R18 |
+| `put_artifact` | `(token, op, kind, bytes)` | R4, R11, R14–R16, R18 |
+| `read` | `(after, limit?)` | R11, capability |
+| `get_artifact` | `(id, range?)` | R4, R11, capability |
+| `task_card` | `()` | capability |
+
+There is no tool to approve, assign, grant a turn, change state or create a human event.
+
+### Runner API
+
+`runner_put(candidate, kind, bytes, op)`, accepted only from the runner principal for `test_report` and `log` naming a candidate on its task (R16). Triggered by `candidate_submitted`. The supervisor checks out `base`, applies `diffs` in order in a sandboxed workload, runs the configured profile, stores `log` then `test_report`, and the moderator records `test_report_stored`.
+
+### Human channel
+
+Provided by the host to the human principal only. Operations: approve or reject a gate for a named subject, `decision`, `ask`, `answer`, `merge_receipt`, `resume`, `cancel`. Each is verified as `kind: human` before any event is written (R13).
+
+### Moderator
+
+Owns the transition function, the turn schedule, accounting and recovery. Never posts messages, never forwards content.
+
+## Implementation notes
+
+Deferred by decision. The store is any single-writer, transactional, append-only log; an embedded database is the obvious first adapter. The core is a pure library; storage, MCP, runner supervisor and human channel are adapters. Whether an existing crate hosts the core is decided against this document after the proving run.
+
+### Test strategy
+
+- One passing and at least one adversarial failing case per rule, asserting the error code. Rules are kept on the strength of their tests, not their usage.
+- Properties: append-only log; a rejected write changes only `rejections`; the card equals the fold of events after any crash point; spent budget never decreases or exceeds its limit; no reachable state is outside the machine.
+- Visibility: for each role, no read returns a record the matrix denies, including artifacts referenced from visible messages.
+- Gates: no Agent API call path creates a human event. No path stores a candidate outside `build` or without a live Coder token.
+- Binding: a verdict or approval on a non-current candidate is rejected; a new candidate stales prior approvals; a candidate whose `spec` is not the approved spec is rejected.
+- Tokens: a write with a token from an ended turn, an earlier attempt or another principal is rejected; a late write after the same role's next `turn_granted` is rejected.
+- Recovery: a lost `post` response replayed with the same `op` creates one record and one charge; a reader that crashes mid-slice loses nothing; a runner report after an attempt roll is accepted.
+
+## Measurement
+
+On the same 16 tasks, record for BBP and the relay loop: total tokens, dollars, wall-clock, task success, human interventions, rejected writes per task, iterations. BBP is adopted only if it wins on cost without losing on success.
+
+## Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| Rule count (18) | Each rule has an adversarial test and a cited failure scenario. |
+| Weak models loop on rejections | Specific codes, `rejections` on the card, moderator escalates past a cap. Fragments are unchecked so the commonest loop cannot occur. |
+| Reviewer isolation hides settled context | Measure first. |
+| Serial turns slow work | Accepted. `yield_to` covers the ask/answer case. Optimistic concurrency is the fallback if measurement shows idle time. |
+| Sandbox escape in the runner workload | Host requirement, audited. The report records the sandbox profile. |
+| Prompt injection via artifacts | Reviewer reads spec, diff, candidate and report only. Residual. |
+| External wrong-revision merge | `merge_receipt` names the merged revision; a mismatch with the approved candidate is visible, not prevented. |
+
+## Open questions for v0.3
+
+- **Q1.** Run profiles: one `command` per task, or a set (lint, unit, integration) with per-profile status?
+- **Q2.** Flaky tests: may the human waive a `failed` report at `merge_gate`, and how is the waiver recorded?
+- **Q3.** Budget numbers. Current card values are placeholders.
+- **Q4.** Should the Reviewer's fresh session per candidate be relaxed to per task after measurement?
+- **Q5.** Appendix B: evaluator set for cross-vendor decisions.
+
+## Proving run before v0.3
+
+Coder, Tester, runner, moderator, and a deterministic human stub. It must demonstrate: a lost `post` response replayed safely; a reader crash mid-slice; a human approval against a candidate that is then replaced, rejected by R17; a late write with a dead token, rejected by R14; a runner report landing after an attempt roll, accepted. Only after that do Planner, Reviewer and live human gates join.
+
+---
+
+## Appendix A: Delta (non-normative)
+
+[Delta](https://delta.dev) is Zed's multiplayer coding environment on DeltaDB. From its public docs (Oct 2026): isolated worktrees per thread, subagent profiles whose isolated copies merge back only on success, review subthreads with `Approve` or `Request Changes` bound to a snapshot at submission, a Land flow, and agent-to-agent thread messages. There is no public API or SDK beyond `delta cli thread` commands, subthreads inherit the parent conversation, and the agentic-safety page states agents run without a permission system or sandbox.
+
+Possible edges, each an adapter hypothesis until an automation contract exists:
+
+- **Runner host.** A fresh Delta thread, never a subthread, per candidate, as the sandbox the runner supervisor drives. The sandbox host requirements still apply.
+- **Human channel.** Delta review verdicts map to `human_approval` and `human_rejection` only after the adapter verifies the author is the human principal; a thread comment or an agent's `/approve` is never an approval.
+- **Store.** A freely writable replicated log alone cannot enforce BBP's admission rules; one transactional authority is required. A replicated log behind the moderator is possible later. BBP does not need to settle more than that.
+
+## Appendix B: Cross-vendor decisions (deferred)
+
+Nano's rusty_orch policy (2026-10-01) lets an agent record a decision when a second model agrees. v0.2 defers it. If added:
+
+- An agent posts a `propose` whose body is an immutable proposed-decision object: exact `subject`, `outcome` and `changes_spec`.
+- A designated evaluator from a different `vendor` than the proposer and the decider, able to read the proposal, posts a `finding` with `reply_to` the proposal and a typed `endorse: true` body.
+- A `decision` by an agent must equal the proposed-decision object and ref the endorsement. It never carries `changes_spec` after plan approval and never satisfies a gate.
+- Open: who the evaluators are (Q5), and whether a human can revoke an agent decision.
