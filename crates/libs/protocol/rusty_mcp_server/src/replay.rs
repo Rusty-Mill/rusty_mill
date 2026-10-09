@@ -42,6 +42,10 @@ struct State {
     readers: usize,
     /// When the last reader left, if none is attached now.
     detached: Option<Instant>,
+    /// The reply's original reader has not finished with it yet. A finished
+    /// stream is not released until it has, so the answer cannot be evicted
+    /// before it is delivered (bounded: one per open connection).
+    first_open: bool,
 }
 
 /// One stream's shared record.
@@ -91,7 +95,10 @@ impl Replay {
         let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
         let shared = Arc::new(Shared {
             token: token.clone(),
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State {
+                first_open: true,
+                ..State::default()
+            }),
             changed: Condvar::new(),
             core: Arc::downgrade(&self.0),
         });
@@ -209,10 +216,10 @@ impl Core {
                 .order
                 .iter()
                 .find(|t| {
-                    registry
-                        .streams
-                        .get(*t)
-                        .is_some_and(|s| lock(&s.state).done)
+                    registry.streams.get(*t).is_some_and(|s| {
+                        let state = lock(&s.state);
+                        state.done && !state.first_open
+                    })
                 })
                 .cloned();
             if let Some(token) = finished {
@@ -268,6 +275,7 @@ pub(crate) struct ReplayStream {
     shared: Arc<Shared>,
     next: usize,
     keep_alive: Duration,
+    /// This is the original reader (see [`Shared::first_reader`]).
     skip_gaps: bool,
     ended: bool,
 }
@@ -315,6 +323,9 @@ impl Drop for ReplayStream {
     fn drop(&mut self) {
         let mut state = lock(&self.shared.state);
         state.readers = state.readers.saturating_sub(1);
+        if self.skip_gaps {
+            state.first_open = false;
+        }
         if state.readers == 0 {
             state.detached = Some(Instant::now());
         }
@@ -411,6 +422,25 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_reply_is_kept_until_its_first_reader_is_done() {
+        let replay = Replay::new(400, Duration::from_secs(30));
+        let a = replay.start().unwrap();
+        let mut first = a.first_reader(Duration::from_millis(20));
+        a.push(&note());
+        a.finish();
+        let b = replay.start().unwrap();
+        for _ in 0..50 {
+            b.push(&note());
+        }
+        assert!(held_bytes(&a) > 0, "A was released before it was read");
+        let frames: Vec<_> = first.by_ref().collect();
+        assert_eq!(frames.len(), 2, "A lost frames: {frames:?}");
+        drop(first);
+        b.push(&note());
+        assert_eq!(held_bytes(&a), 0, "A was kept after delivery");
+    }
+
+    #[test]
     fn a_resume_that_needs_a_released_frame_is_not_found() {
         let replay = Replay::new(600, Duration::from_secs(30));
         let stream = replay.start().unwrap();
@@ -437,6 +467,7 @@ mod tests {
     fn a_finished_stream_is_released_whole_and_its_readers_end() {
         let replay = Replay::new(400, Duration::from_secs(30));
         let old = replay.start().unwrap();
+        drop(old.first_reader(Duration::from_millis(20)));
         let mut old_reader = old.reader(0, Duration::from_millis(20));
         old.push(&note());
         old.finish();
