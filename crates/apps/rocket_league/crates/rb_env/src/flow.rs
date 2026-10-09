@@ -28,9 +28,10 @@ pub const COUNTDOWN_TICKS: u32 = 480;
 pub const FIRST_COUNTDOWN_TICKS: u32 = 850;
 /// Ticks of a five-minute match's clock.
 pub const FIVE_MINUTES: i64 = 36_000;
-/// With the clock at zero, play ends when the ball's centre is this low (uu): it has met the
-/// floor (the game ended matches at 92.2 and 97.3, the latter on the curve).
-pub const MATCH_END_BALL_HEIGHT: f32 = 97.5;
+/// Height of the ball's centre where it touches the floor (uu).
+pub const BALL_FLOOR_CONTACT_HEIGHT: f32 = 93.2;
+/// Reach (uu) a ball may still be short of the floor at the start of the tick it bounces on.
+const BOUNCE_SLACK: f32 = 1.0;
 /// The ball scores when its centre is past this |y|: the goal line (5120) and the ball's reach.
 /// The game scored at 5215.55 and not at 5214.02 (`log2.jsonl`, 16 goals).
 pub const GOAL_LINE_Y: f32 = 5215.0;
@@ -41,6 +42,18 @@ pub const KICKOFF_TIMEOUT_TICKS: u32 = 600;
 pub const TOUCH_DISTANCE: f32 = 0.05;
 /// A ball faster than this (uu/s) in the plane has been touched.
 pub const TOUCH_SPEED: f32 = 0.5;
+
+/// Whether the ball met the floor during a tick, from where it was before and after it. Physics
+/// resolves contact before it integrates position, so a bounce can end the tick well above the
+/// floor: this counts that (it came down onto the floor and left upward) as well as resting on it.
+/// The curve is not the floor: a ball met there reads as in the air until it reaches the floor.
+pub fn ball_met_floor(before: (Vec3, Vec3), after: (Vec3, Vec3)) -> bool {
+    let ((z0, vz0), (z1, vz1)) = ((before.0.z, before.1.z), (after.0.z, after.1.z));
+    let bounced = vz0 < 0.0
+        && vz1 > 0.0
+        && z0 <= BALL_FLOOR_CONTACT_HEIGHT + BOUNCE_SLACK - vz0 * crate::TICK_SECS;
+    z1 <= BALL_FLOOR_CONTACT_HEIGHT || bounced
+}
 
 /// Where a match is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,9 +180,10 @@ impl Flow {
         self.state.ticks_in_phase = 0;
     }
 
-    /// Advances one tick given where the ball is after it. A phase's `ticks_in_phase` counts
-    /// the ticks since it began; the tick that ends one is the first of the next.
-    pub fn after_step(&mut self, ball: Vec3, ball_velocity: Vec3) -> Transition {
+    /// Advances one tick given where the ball is after it and whether it met the floor during it
+    /// ([`ball_met_floor`]). A phase's `ticks_in_phase` counts the ticks since it began; the tick
+    /// that ends one is the first of the next.
+    pub fn after_step(&mut self, ball: Vec3, ball_velocity: Vec3, on_floor: bool) -> Transition {
         self.state.ticks_in_phase += 1;
         match self.state.phase {
             Phase::Active => {
@@ -186,7 +200,7 @@ impl Flow {
                 }
                 let time_up =
                     self.state.clock_ticks.is_some_and(|c| c <= 0) && !self.state.overtime;
-                if time_up && ball.z <= MATCH_END_BALL_HEIGHT {
+                if time_up && on_floor {
                     if self.state.score[0] == self.state.score[1] {
                         self.state.overtime = true;
                         self.enter(Phase::Countdown);
@@ -241,7 +255,7 @@ mod tests {
 
     fn run(flow: &mut Flow, ticks: u32, ball: Vec3) -> Vec<Transition> {
         (0..ticks)
-            .map(|_| flow.after_step(ball, Vec3::ZERO))
+            .map(|_| flow.after_step(ball, Vec3::ZERO, false))
             .filter(|t| *t != Transition::None)
             .collect()
     }
@@ -250,11 +264,11 @@ mod tests {
     fn a_ball_just_inside_the_goal_line_is_not_a_goal_and_one_past_it_is() {
         let mut flow = Flow::new(Phase::Active);
         assert_eq!(
-            flow.after_step(Vec3::new(0.0, 5214.02, 390.0), Vec3::ZERO),
+            flow.after_step(Vec3::new(0.0, 5214.02, 390.0), Vec3::ZERO, false),
             Transition::None
         );
         assert_eq!(
-            flow.after_step(Vec3::new(0.0, 5215.55, 390.0), Vec3::ZERO),
+            flow.after_step(Vec3::new(0.0, 5215.55, 390.0), Vec3::ZERO, false),
             Transition::Goal { team: 0 }
         );
         assert_eq!(flow.state().score, [1, 0]);
@@ -264,7 +278,7 @@ mod tests {
     fn the_negative_goal_scores_for_orange() {
         let mut flow = Flow::new(Phase::Active);
         assert_eq!(
-            flow.after_step(Vec3::new(100.0, -5300.0, 100.0), Vec3::ZERO),
+            flow.after_step(Vec3::new(100.0, -5300.0, 100.0), Vec3::ZERO, false),
             Transition::Goal { team: 1 }
         );
         assert_eq!(flow.state().score, [0, 1]);
@@ -273,7 +287,7 @@ mod tests {
     #[test]
     fn a_goal_runs_through_the_phases_for_the_measured_times() {
         let mut flow = Flow::new(Phase::Active);
-        flow.after_step(Vec3::new(0.0, 5300.0, 100.0), Vec3::ZERO);
+        flow.after_step(Vec3::new(0.0, 5300.0, 100.0), Vec3::ZERO, false);
         let away = Vec3::new(0.0, 5300.0, 100.0);
         assert_eq!(run(&mut flow, GOAL_SCORED_TICKS - 1, away), vec![]);
         assert_eq!(flow.state().phase, Phase::GoalScored);
@@ -292,6 +306,7 @@ mod tests {
         let touched = flow.after_step(
             Vec3::new(-0.69, -7.45, 95.36),
             Vec3::new(-326.0, -1275.0, 375.0),
+            false,
         );
         assert_eq!(touched, Transition::PlayStarted);
         assert_eq!(flow.state().phase, Phase::Active);
@@ -315,7 +330,7 @@ mod tests {
         run(&mut flow, 120, high);
         assert_eq!(flow.state().seconds_remaining(), Some(299.0));
         // A goal stops it through the goal, the replay and the countdown.
-        flow.after_step(goal_ball(), Vec3::ZERO);
+        flow.after_step(goal_ball(), Vec3::ZERO, false);
         let stopped = flow.state().clock_ticks;
         run(
             &mut flow,
@@ -332,14 +347,14 @@ mod tests {
     #[test]
     fn a_lead_at_zero_ends_the_match_once_the_ball_is_low() {
         let mut flow = Flow::new(Phase::Active).with_clock(3);
-        flow.after_step(goal_ball(), Vec3::ZERO);
+        flow.after_step(goal_ball(), Vec3::ZERO, false);
         let mut flow = flow.restarted(Phase::Active).with_clock(3);
         let high = Vec3::new(0.0, 0.0, 400.0);
         // Three ticks of clock, then play goes on below zero while the ball is up.
         assert_eq!(run(&mut flow, 50, high), vec![]);
         assert!(flow.state().clock_ticks.is_some_and(|c| c < 0));
         assert_eq!(
-            flow.after_step(Vec3::new(0.0, 0.0, 92.2), Vec3::ZERO),
+            flow.after_step(Vec3::new(0.0, 0.0, 92.2), Vec3::ZERO, true),
             Transition::MatchEnded
         );
         assert_eq!(flow.state().phase, Phase::Ended);
@@ -352,7 +367,7 @@ mod tests {
         run(&mut flow, 10, high);
         // Level: no replay, straight to a countdown with the overtime clock running on.
         assert_eq!(
-            flow.after_step(Vec3::new(0.0, 0.0, 92.2), Vec3::ZERO),
+            flow.after_step(Vec3::new(0.0, 0.0, 92.2), Vec3::ZERO, true),
             Transition::OvertimeStarted
         );
         let state = flow.state();
@@ -362,9 +377,9 @@ mod tests {
         run(&mut flow, COUNTDOWN_TICKS, centre);
         assert_eq!(flow.state().phase, Phase::Kickoff);
         assert_eq!(flow.state().clock_ticks, clock, "the clock waits for play");
-        flow.after_step(Vec3::new(1.0, 5.0, 95.0), Vec3::new(10.0, 50.0, 0.0));
+        flow.after_step(Vec3::new(1.0, 5.0, 95.0), Vec3::new(10.0, 50.0, 0.0), false);
         assert_eq!(flow.state().phase, Phase::Active);
-        flow.after_step(goal_ball(), Vec3::ZERO);
+        flow.after_step(goal_ball(), Vec3::ZERO, false);
         assert_eq!(flow.state().phase, Phase::GoalScored);
         assert_eq!(
             run(&mut flow, GOAL_SCORED_TICKS + REPLAY_TICKS, goal_ball()),
@@ -394,5 +409,45 @@ mod tests {
         let centre = Vec3::new(0.0, 0.0, 92.75);
         assert_eq!(run(&mut flow, KICKOFF_TIMEOUT_TICKS - 1, centre), vec![]);
         assert_eq!(run(&mut flow, 1, centre), vec![Transition::PlayStarted]);
+    }
+
+    fn after(z: f32, vz: f32) -> (Vec3, Vec3) {
+        (Vec3::new(0.0, 0.0, z), Vec3::new(0.0, 0.0, vz))
+    }
+
+    #[test]
+    fn a_bounce_on_the_tick_is_a_floor_contact_and_a_low_ball_in_the_air_is_not() {
+        // Resting on it, or just reaching it.
+        assert!(ball_met_floor(after(93.15, 0.0), after(93.15, 0.0)));
+        // Came down onto the floor and left upward: it ends the tick well above the threshold.
+        assert!(ball_met_floor(after(95.0, -300.0), after(99.0, 280.0)));
+        // 97 is low but not touching: in flight above the floor, falling or rising.
+        assert!(!ball_met_floor(after(98.0, -100.0), after(97.0, -105.0)));
+        assert!(!ball_met_floor(after(96.0, 200.0), after(97.0, 200.0)));
+        // A rise from far above the floor is not a bounce on this tick.
+        assert!(!ball_met_floor(after(120.0, -50.0), after(118.0, 60.0)));
+    }
+
+    #[test]
+    fn regulation_waits_for_the_floor_for_a_tie_and_for_a_lead() {
+        for lead in [false, true] {
+            let mut flow = Flow::new(Phase::Active).with_clock(2);
+            if lead {
+                flow.after_step(goal_ball(), Vec3::ZERO, false);
+                flow = flow.restarted(Phase::Active).with_clock(2);
+            }
+            let low = Vec3::new(0.0, 0.0, 97.0);
+            // Clock out with the ball low but off the floor: play goes on.
+            assert_eq!(run(&mut flow, 10, low), vec![]);
+            assert_eq!(flow.state().phase, Phase::Active);
+            // The tick it meets the floor decides it, wherever the ball ends the tick.
+            let decided = flow.after_step(Vec3::new(0.0, 0.0, 130.0), Vec3::ZERO, true);
+            let expected = if lead {
+                Transition::MatchEnded
+            } else {
+                Transition::OvertimeStarted
+            };
+            assert_eq!(decided, expected);
+        }
     }
 }

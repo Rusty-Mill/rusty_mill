@@ -1,6 +1,7 @@
 //! Replays a game match log (`rb_match_log`, one JSON line per packet) through the match-flow
 //! phase machine and compares it with what the game did: the phase on every frame, the clock,
-//! the score. The ball and the frame numbers are the log's; everything else (goals, the end of
+//! the score and whether it is overtime (each frame, against the log's `blue`, `orange` and
+//! `overtime`). The ball and the frame numbers are the log's; everything else (goals, the end of
 //! the replay, the countdown, touches, the clock running out, overtime, the end) is `Flow`'s call.
 //!
 //! `cargo run -p rb_env --example match_log_check -- replays/match/log6.jsonl [five]`
@@ -9,7 +10,9 @@
 use std::{error::Error, fs};
 
 use rb_domain::Vec3;
-use rb_env::flow::{Flow, Phase, Transition, FIRST_COUNTDOWN_TICKS, FIVE_MINUTES};
+use rb_env::flow::{
+    ball_met_floor, Flow, MatchState, Phase, Transition, FIRST_COUNTDOWN_TICKS, FIVE_MINUTES,
+};
 
 /// Seconds the clock may differ by: the game's started up to 12 ticks before its first `Active`.
 const CLOCK_TOLERANCE: f32 = 0.15;
@@ -28,6 +31,20 @@ fn phase_of(name: &str) -> Phase {
 fn vec3(value: &serde_json::Value) -> Vec3 {
     let at = |i: usize| value[i].as_f64().unwrap_or(0.0) as f32;
     Vec3::new(at(0), at(1), at(2))
+}
+
+/// How a frame's score and overtime flag differ from the log's: `(score, overtime)`. A field
+/// the row lacks is not compared.
+fn score_misses(state: MatchState, row: &serde_json::Value) -> (bool, bool) {
+    let recorded = |key: &str| row[key].as_u64();
+    let score = [recorded("blue"), recorded("orange")]
+        .iter()
+        .zip(state.score)
+        .any(|(recorded, port)| recorded.is_some_and(|r| r != u64::from(port)));
+    let overtime = row["overtime"]
+        .as_bool()
+        .is_some_and(|recorded| recorded != state.overtime);
+    (score, overtime)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -70,6 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mut replays_seen = 0usize;
     let (mut ball, mut velocity) = (Vec3::ZERO, Vec3::ZERO);
+    let (mut score_misses_n, mut overtime_misses) = (0u64, 0u64);
     let mut index = 0;
     let last_frame = rows.last().map_or(0, |r| r["frame"].as_u64().unwrap_or(0));
     let (mut compared, mut phase_misses, mut clock_misses) = (0u64, 0u64, 0u64);
@@ -88,6 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let row = rows
             .get(index)
             .filter(|r| r["frame"].as_u64() == Some(frame));
+        let (floor_before, velocity_before) = (ball, velocity);
         if let Some(row) = row {
             if let (Some(p), Some(v)) = (row["ball"].get("p"), row["ball"].get("v")) {
                 ball = vec3(p);
@@ -98,7 +117,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             ball += velocity * (1.0 / 120.0);
         }
-        if frame > frame0 && flow.after_step(ball, velocity) == Transition::ReplayStarted {
+        let on_floor = ball_met_floor((floor_before, velocity_before), (ball, velocity));
+        if frame > frame0 && flow.after_step(ball, velocity, on_floor) == Transition::ReplayStarted
+        {
             if let Some(&ticks) = replay_lengths.get(replays_seen) {
                 flow = flow.with_replay(ticks);
             }
@@ -129,6 +150,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             phase_misses += 1;
         }
+        let (score_off, overtime_off) = score_misses(state, row);
+        if score_off || overtime_off {
+            if score_misses_n + overtime_misses < 3 {
+                println!(
+                    "score: frame {frame}: port {:?} overtime {}, game {}-{} overtime {}",
+                    state.score, state.overtime, row["blue"], row["orange"], row["overtime"]
+                );
+            }
+            score_misses_n += u64::from(score_off);
+            overtime_misses += u64::from(overtime_off);
+        }
         if let (Some(seconds), Some(recorded)) =
             (state.seconds_remaining(), row["remaining"].as_f64())
         {
@@ -149,6 +181,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "{compared} frames compared: phase differs on {phase_misses}, clock off by over {CLOCK_TOLERANCE} s on {clock_misses} (max {max_clock:.3} s)"
     );
+    println!("score differs on {score_misses_n} frames, overtime flag on {overtime_misses}");
     println!(
         "final score {:?}, overtime {}",
         flow.state().score,
@@ -170,4 +203,62 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn state(score: [u32; 2], overtime: bool) -> MatchState {
+        let mut flow = Flow::new(Phase::Active);
+        for team in 0..2 {
+            for _ in 0..score[team] {
+                let y = if team == 0 { 6000.0 } else { -6000.0 };
+                flow.after_step(Vec3::new(0.0, y, 100.0), Vec3::ZERO, false);
+                flow = flow.restarted(Phase::Active);
+            }
+        }
+        MatchState {
+            overtime,
+            ..flow.state()
+        }
+    }
+
+    fn row(blue: u64, orange: u64, overtime: bool) -> serde_json::Value {
+        json!({"blue": blue, "orange": orange, "overtime": overtime})
+    }
+
+    #[test]
+    fn a_matching_row_is_clean() {
+        assert_eq!(
+            score_misses(state([2, 1], true), &row(2, 1, true)),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn each_corrupted_field_is_caught_on_its_own() {
+        let port = state([2, 1], false);
+        assert_eq!(score_misses(port, &row(3, 1, false)), (true, false), "blue");
+        assert_eq!(
+            score_misses(port, &row(2, 0, false)),
+            (true, false),
+            "orange"
+        );
+        assert_eq!(
+            score_misses(port, &row(2, 1, true)),
+            (false, true),
+            "overtime"
+        );
+    }
+
+    #[test]
+    fn a_row_without_the_fields_is_not_compared() {
+        assert_eq!(
+            score_misses(state([2, 1], false), &json!({})),
+            (false, false)
+        );
+    }
 }
