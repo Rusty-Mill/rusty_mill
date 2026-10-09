@@ -12280,6 +12280,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-ttf-parser"
+version = "0.1.0"
+
+[[package]]
 name = "rusty-whisper"
 version = "0.8.0"
 dependencies = [
@@ -12973,6 +12977,7 @@ dependencies = [
  "libc 0.2.189",
  "parking_lot",
  "pollster 0.3.0",
+ "rusty-ttf-parser",
  "rusty_atomic_file",
  "rusty_base64",
  "rusty_dirs",
@@ -12986,7 +12991,6 @@ dependencies = [
  "rusty_win32",
  "softbuffer",
  "tokio",
- "ttf-parser",
  "unicode-segmentation",
  "unicode-width 0.2.2",
  "wgpu 22.1.0",
