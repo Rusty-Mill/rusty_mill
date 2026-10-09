@@ -13,12 +13,20 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rk-kernel: rk-observe is a dev-dependency (pending review)
+
+- **Fixed:** `cargo-shear` failed on `main` with `misplaced dependency rk-observe`. `rk-kernel` only names `rk_observe::ToolOutcome` in a doc comment and in `tests/loop_test.rs`, so the dependency moves to `[dev-dependencies]` and the doc comment's intra-doc link becomes plain code (a link would not resolve without the dependency). No code change; `Cargo.lock` unchanged.
+
+---
+
 ## 2026-10-09 - rb_rlbot_wire: RLBot protocol messages (RLBot port stage 2) (pending review)
 
 - **Added:** `crates/apps/rocket_league/crates/rb_rlbot_wire`: `u16` framing (blocking reader and an incremental `FrameDecoder`), `InterfaceMessage` (connection settings, init complete, stop, player input, state setting, match configuration) and `CoreMessage` (game packet, field info, controllable team info, match configuration, `Other(tag)` for the rest), each encodable and decodable so a stand-in core can use them. Depends only on `rusty_flatbuffers`.
 - **Strict decoding:** schema-required fields (strings, vectors, structs, tables, unions) are required on read (`Error::Missing`); optional ones may be absent. Encoders write valid placeholders for required fields they do not model, checked by `tests/verified.rs` (bytes accepted by `planus`) and `tests/required.rs`. `rusty_flatbuffers` `Table::has_field` added.
 - **Verified:** 13 tests. Ten messages decode from payloads made by `rlbot_flat` 0.6.0 (schema rev c38374e) to the values they were built from, and round-trip through this crate; truncating or flipping any byte of the larger payloads never panics. Checked once outside CI: `planus` accepts what this crate encodes for all six client messages.
 - **Known limitation:** a subset by design (no loadouts, 37 of 38 mutators, scripts, hitboxes, scores, rendering, comms, ball prediction); omitted fields are written as schema defaults. String and vector fields are always written because the reference reader treats them as required.
+
+---
 
 ## 2026-10-09 - Design: Dots-style always-on agents (pending review)
 
@@ -42,11 +50,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added to CI:** the `crypto-constant-time` job runs the manifest check and the evidence-tooling self-tests.
 - **Known limitations:** unchanged. Still only evidence, not proof; the human independent review remains required before any `rusty_tls` seam.
 
+---
+
 ## 2026-10-09 - Codex review round 2 on #540: timing-evidence collector corrected
 
 - **Fixed (evidence collector):** `collect.sh` picked one `target/release/deps/timing-*` binary for all three crates' same-named A/A tests, ignored build and discovery failures, and counted baseline alarms from exit codes the calibration tests never produce. Replaced by `timing_series.py`: executable from Cargo's artifact JSON per package (identity recorded), every failure fails the record, alarms counted from printed `|t|` (>= 4.5). Covered by 12 deterministic tests (`test_timing_series.py`, also run in `crypto-constant-time`), including custom target directories, stale binaries after a failed build, zero repetitions and above-threshold A/A output.
 - **Changed:** the evidence record is regenerated with the new collector (final run at `e3266f2e`, after the round 3 fixes and their follow-ups) and renamed `EVIDENCE-2026-10-09.txt`; the `ea0e234` record used the old collector and is removed. No primitive code changed; the review states these findings concern evidence correctness, not a leak or forgery.
 - **Known limitations:** unchanged from round 1. Statistical timing tests are still not a CI gate; the human independent review is still required before any `rusty_tls` seam.
+
+---
 
 ## 2026-10-08 - Codex review round 1 on #540: three findings fixed
 
