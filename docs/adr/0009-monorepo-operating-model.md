@@ -147,9 +147,8 @@ queue waits for a check that never starts.
         Each speculative build sits on top of the entries queued ahead of it,
         so a later entry's CI also covers the earlier PRs' changes.
   - [ ] Minimum group size: **1**; Maximum group size: **1**. This sets how
-        many PRs are merged together at the end (no batching: one flaky test
-        would eject the whole batch). It does **not** isolate what a queue
-        run tests: with build concurrency above 1, a run's changed-file list
+        many PRs are merged together at the end (no batching). It does **not**
+        isolate what a queue run tests: with build concurrency above 1, a run's changed-file list
         spans everything between its event base and its head.
   - [ ] Wait time to meet minimum group size: leave the default (unused at 1).
   - [ ] Status check timeout: **120 minutes** (the default 60 is inside the
