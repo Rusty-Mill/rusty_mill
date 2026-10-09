@@ -239,6 +239,9 @@ fn environment_prefers_the_full_address_and_falls_back_field_by_field() {
     assert_eq!(env(&[("RLBOT_AGENT_ID", "")]).agent_id, None);
 }
 
+/// End to end over a real socket. The deterministic regression for the deadline fix (reads that
+/// keep succeeding, scripted clock) is the unit tests in `src/connection.rs`; with bytes this far
+/// apart the original logic would also have returned in time.
 #[test]
 fn bytes_trickling_in_cannot_hold_a_timeout_past_its_deadline() {
     let core = FakeCore::start();
@@ -326,20 +329,46 @@ fn a_zero_timeout_returns_what_is_buffered_or_already_on_the_socket_and_never_wa
 
 #[test]
 fn an_agent_handshake_without_an_id_is_refused_before_anything_is_sent() {
+    // Core trims the id, so an id of only whitespace is anonymous to it too and would never be
+    // sent team information. Includes CR/LF and a non-breaking space.
+    for blank in ["", " ", "\t", "\r\n", " \u{a0}\n "] {
+        let core = FakeCore::start();
+        let mut client = Connection::connect(core.addr()).unwrap();
+        let mut peer = core.accept();
+
+        let anonymous = ConnectionSettings {
+            agent_id: blank.into(),
+            ..settings()
+        };
+        assert!(
+            matches!(client.handshake(anonymous), Err(Error::EmptyAgentId)),
+            "{blank:?}"
+        );
+        drop(client);
+        assert!(peer.is_closed(), "bytes were sent for {blank:?}");
+    }
+}
+
+#[test]
+fn a_named_agent_is_accepted_even_with_whitespace_around_the_name() {
     let core = FakeCore::start();
     let mut client = Connection::connect(core.addr()).unwrap();
     let mut peer = core.accept();
 
-    let anonymous = ConnectionSettings {
-        agent_id: String::new(),
+    let padded = ConnectionSettings {
+        agent_id: " rb/test\n".into(),
         ..settings()
     };
-    assert!(matches!(
-        client.handshake(anonymous),
-        Err(Error::EmptyAgentId)
-    ));
-    drop(client);
-    assert!(peer.is_closed(), "nothing was sent");
+    let expected = padded.clone();
+    let core_side = thread::spawn(move || {
+        // The id goes out as given; core does its own trimming.
+        assert_eq!(peer.recv(), InterfaceMessage::ConnectionSettings(expected));
+        peer.send_starting_info(0, &[1]);
+        peer
+    });
+    let info = client.handshake(padded).unwrap();
+    assert_eq!(info.controllable_team_info, common::team_info(0, &[1]));
+    core_side.join().unwrap();
 }
 
 #[test]
