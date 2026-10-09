@@ -5,7 +5,7 @@
 mod common;
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{packet, FakeCore};
 use rb_rlbot_client::{Connection, CoreMessage, Environment, Error, InterfaceMessage};
@@ -237,4 +237,130 @@ fn environment_prefers_the_full_address_and_falls_back_field_by_field() {
     assert_eq!(full.agent_id.as_deref(), Some("me"));
     // An empty id is unset, as RLBot launches processes with the variable present but empty.
     assert_eq!(env(&[("RLBOT_AGENT_ID", "")]).agent_id, None);
+}
+
+#[test]
+fn bytes_trickling_in_cannot_hold_a_timeout_past_its_deadline() {
+    let core = FakeCore::start();
+    let mut client = Connection::connect(core.addr()).unwrap();
+    let mut peer = core.accept();
+
+    let expected = packet(11);
+    let bytes = frame(&expected.to_payload().unwrap()).unwrap();
+    assert!(bytes.len() > 60, "enough bytes to trickle for a while");
+    let sender = thread::spawn(move || {
+        for byte in bytes {
+            peer.send_bytes(&[byte]);
+            thread::sleep(Duration::from_millis(10));
+        }
+        peer
+    });
+
+    // Every read succeeds (a byte every 10 ms), none completes the frame by the deadline.
+    let started = Instant::now();
+    assert_eq!(
+        client.recv_timeout(Duration::from_millis(100)).unwrap(),
+        None
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "returned after {:?}",
+        started.elapsed()
+    );
+    // What had arrived is kept: the rest completes the same frame.
+    assert_eq!(client.recv().unwrap(), expected);
+    sender.join().unwrap();
+}
+
+#[test]
+fn a_zero_timeout_returns_what_is_buffered_or_already_on_the_socket_and_never_waits() {
+    let core = FakeCore::start();
+    let mut client = Connection::connect(core.addr()).unwrap();
+    let mut peer = core.accept();
+    let poll = |client: &mut Connection| {
+        let started = Instant::now();
+        let got = client.recv_timeout(Duration::ZERO).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "a poll waited"
+        );
+        got
+    };
+
+    // Nothing there: None, repeatedly, and the connection is still good afterwards.
+    for _ in 0..3 {
+        assert_eq!(poll(&mut client), None);
+    }
+
+    // Two messages in one write: the first poll reads the socket, the second is already buffered.
+    let (a, b) = (packet(1), packet(2));
+    let mut bytes = frame(&a.to_payload().unwrap()).unwrap();
+    bytes.extend(frame(&b.to_payload().unwrap()).unwrap());
+    peer.send_bytes(&bytes);
+    // Loopback delivery is not instant: poll until the bytes show up, within a second.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let first = loop {
+        if let Some(message) = poll(&mut client) {
+            break message;
+        }
+        assert!(Instant::now() < deadline, "the message never arrived");
+    };
+    assert_eq!(first, a);
+    assert_eq!(
+        poll(&mut client),
+        Some(b),
+        "second one came from the buffer"
+    );
+    assert_eq!(poll(&mut client), None);
+
+    // Half a frame is not a message, and is not lost either.
+    let c = packet(3);
+    let bytes = frame(&c.to_payload().unwrap()).unwrap();
+    let (head, tail) = bytes.split_at(5);
+    peer.send_bytes(head);
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(poll(&mut client), None);
+    peer.send_bytes(tail);
+    assert_eq!(client.recv().unwrap(), c);
+}
+
+#[test]
+fn an_agent_handshake_without_an_id_is_refused_before_anything_is_sent() {
+    let core = FakeCore::start();
+    let mut client = Connection::connect(core.addr()).unwrap();
+    let mut peer = core.accept();
+
+    let anonymous = ConnectionSettings {
+        agent_id: String::new(),
+        ..settings()
+    };
+    assert!(matches!(
+        client.handshake(anonymous),
+        Err(Error::EmptyAgentId)
+    ));
+    drop(client);
+    assert!(peer.is_closed(), "nothing was sent");
+}
+
+#[test]
+fn a_match_runner_without_an_id_reads_the_two_messages_core_sends_it() {
+    // Core sends an anonymous connection the match and field information but no team
+    // information; the runner sends its settings and reads for itself (`rb_match_log`).
+    let core = FakeCore::start();
+    let mut client = Connection::connect(core.addr()).unwrap();
+    let mut peer = core.accept();
+
+    let anonymous = ConnectionSettings {
+        agent_id: String::new(),
+        ..settings()
+    };
+    client.send(anonymous.clone()).unwrap();
+    assert_eq!(peer.recv(), InterfaceMessage::ConnectionSettings(anonymous));
+    peer.send(&CoreMessage::MatchConfiguration(Default::default()));
+    peer.send(&CoreMessage::FieldInfo(Default::default()));
+    assert!(matches!(
+        client.recv().unwrap(),
+        CoreMessage::MatchConfiguration(_)
+    ));
+    assert!(matches!(client.recv().unwrap(), CoreMessage::FieldInfo(_)));
 }

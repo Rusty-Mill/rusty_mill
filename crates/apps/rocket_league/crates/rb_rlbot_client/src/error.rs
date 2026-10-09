@@ -12,6 +12,8 @@ pub enum Error {
     Closed,
     /// Core sent a disconnect signal before the handshake finished.
     Disconnected,
+    /// A handshake needs a named agent: core sends no team information to an empty id.
+    EmptyAgentId,
 }
 
 impl fmt::Display for Error {
@@ -21,6 +23,9 @@ impl fmt::Display for Error {
             Error::Wire(e) => write!(f, "protocol: {e}"),
             Error::Closed => f.write_str("core closed the connection"),
             Error::Disconnected => f.write_str("core asked the client to disconnect"),
+            Error::EmptyAgentId => {
+                f.write_str("an agent needs a non-empty agent id to shake hands")
+            }
         }
     }
 }
@@ -30,7 +35,7 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Wire(e) => Some(e),
-            Error::Closed | Error::Disconnected => None,
+            Error::Closed | Error::Disconnected | Error::EmptyAgentId => None,
         }
     }
 }

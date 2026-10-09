@@ -122,12 +122,10 @@ impl CoreMessage {
     pub fn from_payload(payload: &[u8]) -> R<CoreMessage> {
         let root = Table::root(payload)?;
         let tag = root.scalar(0, 0u8)?;
-        if tag == C_DISCONNECT_SIGNAL {
-            return Ok(CoreMessage::DisconnectSignal);
-        }
         if !matches!(
             tag,
-            C_GAME_PACKET
+            C_DISCONNECT_SIGNAL
+                | C_GAME_PACKET
                 | C_FIELD_INFO
                 | C_MATCH_CONFIGURATION
                 | C_CONTROLLABLE_TEAM_INFO
@@ -135,8 +133,16 @@ impl CoreMessage {
         ) {
             return Ok(CoreMessage::Other(tag));
         }
+        // The message table is required for every modelled member, an empty one included: a
+        // disconnect whose table is missing or damaged is a bad payload, not a clean exit.
         let (_, t) = open(payload)?;
         Ok(match tag {
+            C_DISCONNECT_SIGNAL => {
+                // No field is read from an empty table, so look up one: that checks its vtable,
+                // which a writer may place after the table and a cut-off buffer may be missing.
+                t.has_field(0)?;
+                CoreMessage::DisconnectSignal
+            }
             C_GAME_PACKET => CoreMessage::GamePacket(GamePacket::read(&t)?),
             C_FIELD_INFO => CoreMessage::FieldInfo(FieldInfo::read(&t)?),
             C_MATCH_CONFIGURATION => CoreMessage::MatchConfiguration(MatchConfiguration::read(&t)?),

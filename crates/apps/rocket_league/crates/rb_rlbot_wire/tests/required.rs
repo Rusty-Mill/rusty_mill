@@ -412,3 +412,41 @@ fn encoded_client_messages_carry_every_required_field() {
         .unwrap();
     all_present(&buf, message(&buf), &[1], "PlayerInput");
 }
+
+#[test]
+fn a_disconnect_signal_needs_its_message_table_like_any_modelled_member() {
+    // A valid, empty table is a clean disconnect.
+    assert_eq!(
+        CoreMessage::from_payload(&unhex(fixtures::C_DISCONNECT)),
+        Ok(CoreMessage::DisconnectSignal)
+    );
+
+    // The union value (packet slot 1) removed: not a disconnect, a bad payload.
+    let mut buf = unhex(fixtures::C_DISCONNECT);
+    let packet = root(&buf);
+    clear(&mut buf, packet, 1);
+    assert_eq!(
+        CoreMessage::from_payload(&buf),
+        Err(Error::Missing("message"))
+    );
+
+    // The union value pointing outside the buffer.
+    let mut buf = unhex(fixtures::C_DISCONNECT);
+    let at = field(&buf, root(&buf), 1).unwrap();
+    buf[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(matches!(
+        CoreMessage::from_payload(&buf),
+        Err(Error::Flatbuffers(_))
+    ));
+
+    // Cut short anywhere, it never reads as a disconnect.
+    let whole = unhex(fixtures::C_DISCONNECT);
+    for len in 0..whole.len() {
+        assert_ne!(
+            CoreMessage::from_payload(&whole[..len]),
+            Ok(CoreMessage::DisconnectSignal),
+            "{len} of {} bytes",
+            whole.len()
+        );
+    }
+}
