@@ -451,9 +451,6 @@ jobs:
       - uses: ./.github/actions/setup-build-env
         with:
           cache-shared-key: test-${{ matrix.scope.component }}-${{ matrix.os }}
-          # Trial (ADR-0009): sccache instead of a cached target/ on Windows,
-          # whose shards are the slowest jobs. Linux keeps rust-cache as is.
-          sccache: ${{ runner.os == 'Windows' && 'true' || 'false' }}
 
       - uses: ./.github/actions/select-packages
         id: scope
@@ -623,18 +620,6 @@ jobs:
               echo "No affected package declares a library target -- nothing to doc-test."
             fi
           fi
-
-      # Hit rate for the sccache trial, in the job summary (Windows only).
-      - name: sccache statistics
-        if: always() && runner.os == 'Windows'
-        shell: bash
-        run: |
-          {
-            echo "### sccache (${{ matrix.scope.component }}, shard ${{ matrix.shard }})"
-            echo '```'
-            sccache --show-stats || echo "sccache not available"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
 
   # rusty_meshed's data-mesh-monitor dashboard: a vendored Vite/React app
   # (not a Cargo crate, so none of the cargo jobs above see it). Builds
