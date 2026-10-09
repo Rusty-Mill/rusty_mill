@@ -580,7 +580,7 @@ dependencies = [
  "agentgateway-core",
  "rcgen",
  "rustls",
- "rustls-pemfile",
+ "rustls-pki-types",
  "rusty_tls",
  "rusty_tokio",
  "thiserror 2.0.20",
@@ -11600,15 +11600,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
 name = "rustls-pki-types"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12287,6 +12278,10 @@ dependencies = [
  "tempfile",
  "tokio",
 ]
+
+[[package]]
+name = "rusty-ttf-parser"
+version = "0.1.0"
 
 [[package]]
 name = "rusty-whisper"
@@ -12982,6 +12977,7 @@ dependencies = [
  "libc 0.2.189",
  "parking_lot",
  "pollster 0.3.0",
+ "rusty-ttf-parser",
  "rusty_atomic_file",
  "rusty_base64",
  "rusty_dirs",
@@ -12995,7 +12991,6 @@ dependencies = [
  "rusty_win32",
  "softbuffer",
  "tokio",
- "ttf-parser",
  "unicode-segmentation",
  "unicode-width 0.2.2",
  "wgpu 22.1.0",
