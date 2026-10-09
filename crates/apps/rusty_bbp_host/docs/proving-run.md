@@ -8,8 +8,11 @@ Files in `docs/proving/`: `brief.md` (the task), `profiles.json` (the frozen tes
 
 ```sh
 cargo build --release -p rusty_bbp_host
-export PATH="$PWD/target/release:$PATH"   # `bbp` on PATH: agents.json launches it by name through {mcp_config}
+export MILL="$PWD" P="$PWD/crates/apps/rusty_bbp_host/docs/proving"
+export PATH="$MILL/target/release:$PATH"   # `bbp` on PATH: agents.json launches it by name through {mcp_config}
 ```
+
+`MILL` and `P` are absolute so the later steps work from any directory; step 2 leaves the shell in `/tmp/bbp/target`.
 
 ## 2. Target repository
 
@@ -33,7 +36,6 @@ cargo fetch   # warms ~/.cargo so the sandboxed `cargo test --offline` needs not
 
 ```sh
 export BBP_DIR=/tmp/bbp/store BBP_TASK=slug-1
-P=crates/apps/rusty_bbp_host/docs/proving
 bbp open   --repo /tmp/bbp/target --brief $P/brief.md --human nano --profiles $P/profiles.json
 bbp assign --role planner  --principal planner  --vendor anthropic
 bbp assign --role coder    --principal coder    --vendor anthropic
@@ -51,9 +53,10 @@ Shell A, the moderator (returns at `closed` or `cancelled`):
 bbp mod --repo-path /tmp/bbp/target --work /tmp/bbp/work --agents $P/agents.json --max-wall-secs 7200
 ```
 
-Shell B, the human:
+Shell B, the human (a fresh shell: set the same variables first):
 
 ```sh
+export MILL=/path/to/rusty_mill BBP_DIR=/tmp/bbp/store BBP_TASK=slug-1 PATH="$MILL/target/release:$PATH"
 watch -n 5 'bbp card | python3 -m json.tool | head -40'
 bbp human approve-plan  ART                 # at plan_gate: ART is the spec's artifact id from the card
 bbp human approve-merge ART RUN             # at merge_gate: the candidate and its selected run
@@ -68,15 +71,32 @@ Destructive verbs (`reject`, `rerun`, `resume`, `cancel`) take `--rev N`, the ca
 
 Logs: `$BBP_DIR/agents/<sha256(task)>/turn-N.log` per harness, `$BBP_DIR/mcp/<sha256(task)>/turn-N.json` the config each saw, `/tmp/bbp/work/run-N` the runner's checkouts.
 
+### What the harness can do, and what the log shows
+
+`agents.json` restricts each harness two ways. `--tools ""` removes every built-in tool from the Planner, Tester and Reviewer, so their only actions are the five bbp tools (`--allowedTools` alone would pre-approve those calls without removing Read, Bash and the rest). The Coder keeps `Bash,Edit,Read,Write` for its own clone. This is the model's tool surface, not an OS sandbox: the process still runs as your user, which is the harness-isolation question the record is meant to answer.
+
+Every launcher runs with `--output-format stream-json --verbose`, so `turn-N.log` is one JSON object per line: `system/init` (tools and MCP servers the model saw), `assistant` messages with their `tool_use` blocks, `user` messages with the `tool_result` each call returned (a bbp refusal is the `isError` result with its code), and a final `result`. Each line is written as it happens. When the harness ends its own turn with a terminal bbp call (candidate, verdict, gated request), the moderator kills the process group, so the `result` line and any text after that call may be missing; everything up to and including that call is on disk.
+
+Validate this once, after turn 1 ends, before trusting the run:
+
+```sh
+L=$BBP_DIR/agents/$(printf %s "$BBP_TASK" | sha256sum | cut -c1-64)/turn-1.log
+jq -r 'select(.type=="assistant") | .message.content[] | select(.type=="tool_use") | .name' "$L"   # the calls, in order
+jq -r 'select(.type=="user") | .message.content[] | select(.type=="tool_result" and .is_error==true) | .content' "$L"   # refusals
+jq -r 'select(.type=="system" and .subtype=="init") | .tools[]' "$L"   # must list only mcp__bbp__* for an MCP-only role
+```
+
+If the first command shows no `mcp__bbp__post` or `mcp__bbp__put_artifact` for a turn the card says ended on one, the log is losing events and the run is not evidence; stop and fix the launcher before continuing.
+
 ## 5. Record
 
 Write `docs/proving/<date>-slug-1.md` with, in this order:
 
 1. Outcome: `closed`, `cancelled` or `escalated`, wall time, number of turns, iterations, candidates, runs.
 2. The card's final `budget` block next to the limits, and `rejections` by code. For every limit hit: which role, on which turn, doing what. This is Q1's input.
-3. Each role's turns: did it finish its job in one turn, what did it read first, what did it get refused, where did it stall or loop. Quote the log line, not a paraphrase.
+3. Each role's turns: did it finish its job in one turn, what did it read first, what did it get refused, where did it stall or loop. Quote the `tool_use` and `tool_result` lines from `turn-N.log`, not a paraphrase.
 4. Human interventions: every `bbp human` command with its reason.
 5. The Reviewer's verdict on each candidate, next to the Tester's. Agreement or not is Q3's first data point.
-6. Anything the harness did that the protocol did not see (shell use, repository writes outside the diff). This decides whether harness isolation comes next.
+6. Anything the Coder's harness did that the protocol did not see: every `Bash` call in its logs, any write outside its clone. The other three roles have no built-in tools, so for them the question is whether `system/init` ever listed one. This decides whether harness isolation comes next.
 
 Out of scope for this run: the 16-task comparison against the relay loop (spec, "Measurement"). That needs a published task set and rubric, and comes after the first record exists.
