@@ -1201,6 +1201,31 @@ jobs:
             echo "::error::BoGo passed only ${passed:-0} tests (expected 830+) -- is the shim skipping everything?"
             exit 1
           fi
+      # Evidence, not a gate: the native engine against real servers (Google's
+      # sign-in endpoints, the first candidate consumer's peers), compared with
+      # the rustls-backed stream. A third party's server must not decide whether
+      # a PR merges, so a failure here is a visible warning, not a red job; read
+      # the step summary. The runner reaches the internet directly, which the
+      # sandboxes this was developed in do not (they re-sign TLS with their own
+      # CA, and the test says so when it sees that).
+      - name: live internet (non-blocking)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$(cargo test -p rusty_tls --features handrolled-engine \
+            --test handrolled_live -- --ignored --nocapture --color never)
+          echo "$out"
+          {
+            echo '### rusty_tls native engine, live internet'
+            echo '```'
+            echo "$out" | grep -E '^(accounts|oauth2|www)[a-z0-9.]*:|test result' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$out" | grep -qE 'test result: ok\. 1 passed' || {
+            echo "::warning::the live internet check did not pass; see the step output"
+            exit 1
+          }
 
   # ---------------------------------------------------------------------------
   # Rocket League family: RLEvalSystem's two product-specific checks, ported from

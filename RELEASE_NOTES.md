@@ -13,6 +13,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - CI: live-internet check added to rusty-tls-engine (non-blocking)
+
+- **Added (CI):** a last step in `rusty-tls-engine` runs `handrolled_live` on the runner and writes its results to the step summary. It is `continue-on-error`: the first real evidence about Google's endpoints comes from this run, and it cannot block a merge. A guard in `test_ci_workflow` keeps it non-blocking and requires `1 passed`.
+- **Known limitations:** it depends on a third party's servers and on the runner's network. Until a run is read, the claim that the engine works with Google's real endpoints is unproven; the sandbox runs only reached an intercepting proxy.
+
 ## 2026-10-09 - rusty_tls: live-internet check, first wiring candidate proposed
 
 - **Added (test, ignored by default):** `handrolled_live.rs` runs the native engine against real hosts and the rustls-backed stream side by side and fails when the two disagree, when the reference fails, or when both fail or answer nothing (two empty answers are not parity; its own helpers are tested offline). **Result here: not evidence about Google.** This sandbox's egress gateway terminates TLS and re-signs with its own CA, so all ten hosts tried showed the gateway's server (TLS 1.3, X25519, `rsa_pss_rsae_sha256`). The engine matched rustls on all ten, which shows it works against a production-grade TLS 1.3 stack, nothing more.

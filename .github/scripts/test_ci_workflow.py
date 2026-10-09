@@ -93,6 +93,20 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("bogo/run.sh", job)
         self.assertIn("-lt 830", job)
 
+    def test_the_live_internet_step_can_inform_but_never_gate(self) -> None:
+        # A third party's server must not decide whether a PR merges, so the
+        # live step is continue-on-error; it still has to run the ignored test
+        # and insist on a real pass, so it cannot report success on zero tests.
+        start = self.workflow.index("  rusty-tls-engine:\n")
+        end = self.workflow.find("\n  # ----", start)
+        job = self.workflow[start : end if end != -1 else None]
+        step = job[job.index("      - name: live internet (non-blocking)") :]
+        self.assertIn("continue-on-error: true", step)
+        self.assertIn("--test handrolled_live -- --ignored", step)
+        self.assertIn("test result: ok\\. 1 passed", step)
+        # Last in the job, so nothing after it can be skipped by its failure.
+        self.assertNotIn("\n      - name:", step[len("      - name: live internet (non-blocking)") :])
+
     def test_every_handrolled_suite_is_gated_on_the_cfg_the_job_sets(self) -> None:
         # The guard above only works if each suite really is cfg-gated: an
         # ungated file would run (and count) without the cfg, hiding a typo in
