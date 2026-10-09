@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - RLBot native port: plan (pending review)
+
+- **Added:** `crates/apps/rocket_league/rlbot/PLAN.md`: five stages (FlatBuffers runtime, wire subset, client, port `rb_tape_bot`, `rb_env` bridge), measured from rlbot 0.6.0, risks and rollback. Docs only; three decisions listed for the owner before stage 1.
+
+---
+
 ## 2026-10-09 - rusty_bullet source repo frozen (pending review)
 
 - **Changed:** ADR-0008 and the migration plan record that `baileyrd/rusty_bullet` is frozen and archived (README notice `7d5a07f`; read-only, reversible, not deleted). `baileyrd/RLEvalSystem` is unchanged. Docs only.
@@ -22,6 +28,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-09 - rusty_bbp: design record moved into the monorepo
 
 - **Changed:** the Blackboard Protocol specification (v0.4 plus the v0 to v0.3 drafts) and its review record (four model-review rounds, merged findings, prompts, the implementation-plan review, the sovereignty audit, the orch-core decision) now live at `crates/libs/protocol/rusty_bbp/docs/`, indexed by its README. `baileyrd/rusty_bbp` is archived with a pointer here. One copy of the trace catalog remains, the crate's `TRACES.md`, which the tests reproduce.
+
+---
+
+## 2026-10-09 - rusty_bbp: task logs named by digest
+
+- **Fixed:** `FsStore` named each task log after a lossy sanitisation of the task id and read the id back from the filename, so `a/b` and `a_b` shared one log and a reopened store misnamed them. Logs are now `tasks/<sha256(task id)>.log`, and the id comes from the log's opening event. Two tests: six colliding and awkward ids keep separate logs and reopen verbatim; an empty log is skipped and reused.
+- **Migration:** none. A directory holding a pre-digest log (or any log off its canonical path) refuses to open with `Corrupt` naming the file; move it to `fs_store::log_path_for(dir, task)` or remove it. Nothing is loaded that a later refresh or append could not address. No deployed data predates this.
 
 ---
 
