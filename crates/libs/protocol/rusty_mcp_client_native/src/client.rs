@@ -72,8 +72,8 @@ fn rpc(e: ErrorData) -> ClientError {
 impl<T: Transport, H: Handler> Client<T, H> {
     /// Shake hands with the server: `server/discover` first when the config
     /// allows a stateless revision, falling back to `initialize` when the
-    /// server turns out to be classic. `timeout` bounds each step of the
-    /// handshake; afterwards calls wait up to `ClientConfig::call_timeout`.
+    /// server turns out to be classic. `timeout` bounds the whole handshake, both
+    /// steps together; afterwards calls wait up to `ClientConfig::call_timeout`.
     ///
     /// # Errors
     /// The transport failed, the server did not answer within `timeout`, or
