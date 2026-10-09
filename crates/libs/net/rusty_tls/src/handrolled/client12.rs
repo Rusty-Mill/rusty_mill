@@ -71,8 +71,8 @@ use super::client::{
     ClientError, ClientIdentity,
 };
 use super::handshake::{
-    complete_prefix, extension, find, messages, CertificateVerify, ClientHello, Extension,
-    HandshakeError, HandshakeType, Message,
+    complete_prefix, encode_alpn_offer, extension, find, messages, parse_alpn_selection,
+    CertificateVerify, ClientHello, Extension, HandshakeError, HandshakeType, Message,
 };
 use super::handshake12::{
     self, message, parse_finished, parse_server_hello_done, Certificate12, CertificateRequest12,
@@ -186,6 +186,9 @@ pub struct ClientConfig12<'a> {
     /// which RFC 5246 section 7.4.6 allows and leaves the decision with the
     /// server.
     pub identity: Option<&'a ClientIdentity<'a>>,
+    /// Application protocols to offer (RFC 7301), most preferred first; empty
+    /// offers none. The server's choice is [`Connection12::alpn_protocol`].
+    pub alpn: &'a [&'a [u8]],
 }
 
 /// The message the state machine will accept next, and nothing else.
@@ -240,6 +243,8 @@ struct Hs {
     server_key: Option<(NamedGroup, Vec<u8>)>,
     /// The schemes a `CertificateRequest` named, if the server sent one.
     certificate_request: Option<Vec<u16>>,
+    /// The application protocol the server selected, if any.
+    alpn: Option<Vec<u8>>,
     /// Set once the client flight is sent.
     established: Option<Established>,
 }
@@ -299,11 +304,18 @@ fn encode_client_hello(config: &ClientConfig12<'_>, random: &[u8]) -> Result<Vec
             .for_each(|s| w.u16(s.0))
     });
 
+    let alpn = (!config.alpn.is_empty()).then(|| encode_alpn_offer(config.alpn));
     let mut extensions = Vec::new();
     if !names.is_empty() {
         extensions.push(Extension {
             typ: extension::SERVER_NAME,
             data: names.as_slice(),
+        });
+    }
+    if let Some(alpn) = &alpn {
+        extensions.push(Extension {
+            typ: extension::ALPN,
+            data: alpn.as_slice(),
         });
     }
     // RFC 8422: uncompressed only.
@@ -365,6 +377,7 @@ impl<'a> ClientHandshake12<'a> {
                     certificates: Vec::new(),
                     server_key: None,
                     certificate_request: None,
+                    alpn: None,
                     established: None,
                 },
                 buffer: Vec::new(),
@@ -658,11 +671,20 @@ impl<'a> ClientHandshake12<'a> {
                 extension::EC_POINT_FORMATS
                 | extension::EXTENDED_MASTER_SECRET
                 | extension::RENEGOTIATION_INFO => true,
+                // Only as an answer to a list that was sent.
+                extension::ALPN => !self.config.alpn.is_empty(),
                 _ => false,
             };
             if !allowed {
                 return Err(ClientError::UnofferedExtension(ext.typ));
             }
+        }
+        if let Some(data) = find(&hello.extensions, extension::ALPN) {
+            let selected = parse_alpn_selection(data)?;
+            if !self.config.alpn.contains(&selected) {
+                return Err(ClientError::UnofferedAlpn);
+            }
+            self.hs.alpn = Some(selected.to_vec());
         }
         if find(&hello.extensions, extension::SERVER_NAME).is_some_and(|data| !data.is_empty()) {
             return Err(ClientError::Handshake(HandshakeError::Malformed(
@@ -877,13 +899,16 @@ impl<'a> ClientHandshake12<'a> {
         }
         let established = self.hs.established.take().ok_or(ClientError::Failed)?;
 
-        self.connection = Some(Connection12::new(
-            Role::Client,
-            established.sealer,
-            established.opener,
-            self.hs.suite,
-            core::mem::take(&mut self.hs.certificates),
-        ));
+        self.connection = Some(
+            Connection12::new(
+                Role::Client,
+                established.sealer,
+                established.opener,
+                self.hs.suite,
+                core::mem::take(&mut self.hs.certificates),
+            )
+            .with_alpn(self.hs.alpn.take()),
+        );
         self.phase = Phase::Done;
         Ok(())
     }
@@ -939,6 +964,7 @@ pub struct Connection12 {
     opener: Opener,
     suite: CipherSuite12,
     certificates: Vec<Vec<u8>>,
+    alpn: Option<Vec<u8>>,
     closed: bool,
     failed: bool,
     /// Records that carried nothing, so they cannot go on for ever.
@@ -959,6 +985,7 @@ impl Connection12 {
             opener,
             suite,
             certificates,
+            alpn: None,
             closed: false,
             failed: false,
             noise: Noise::default(),
@@ -968,6 +995,16 @@ impl Connection12 {
     /// The negotiated cipher suite.
     pub fn suite(&self) -> CipherSuite12 {
         self.suite
+    }
+
+    /// The application protocol ALPN selected, or `None` if none was.
+    pub fn alpn_protocol(&self) -> Option<&[u8]> {
+        self.alpn.as_deref()
+    }
+
+    pub(super) fn with_alpn(mut self, alpn: Option<Vec<u8>>) -> Self {
+        self.alpn = alpn;
+        self
     }
 
     /// The peer's certificate chain as DER, end-entity first: the server's, on

@@ -308,6 +308,7 @@ fn run(
         groups,
         cipher_suites: suites,
         identity: None,
+        alpn: &[],
     };
     talk(server.port, &config)
 }
@@ -525,6 +526,7 @@ fn ed25519_is_verified_against_openssl() {
         groups: ALL_GROUPS,
         cipher_suites: CipherSuite12::SUPPORTED,
         identity: None,
+        alpn: &[],
     };
     let reply = talk(server.port, &config).unwrap_or_else(|e| panic!("{e:?}"));
     assert!(reply.response.contains("TLSv1.2"), "{}", reply.response);
@@ -624,6 +626,7 @@ fn a_required_client_certificate_is_presented_and_accepted() {
             groups: ALL_GROUPS,
             cipher_suites: CipherSuite12::SUPPORTED,
             identity: Some(&identity),
+            alpn: &[],
         };
         let reply = talk(server.port, &config);
         let _ = std::fs::remove_file(&client_root);
@@ -671,6 +674,7 @@ fn a_tls13_only_openssl_refuses_with_a_protocol_version_alert() {
             groups: ALL_GROUPS,
             cipher_suites: CipherSuite12::SUPPORTED,
             identity: None,
+            alpn: &[],
         };
         let outcome = talk(port, &config);
         let _ = child.kill();

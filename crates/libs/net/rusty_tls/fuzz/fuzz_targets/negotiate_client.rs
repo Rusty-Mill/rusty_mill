@@ -30,6 +30,7 @@ fuzz_target!(|data: &[u8]| {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
     let config = ClientConfigBoth::new(tls13, CipherSuite12::SUPPORTED);
     let Ok((mut client, _hello)) = ClientHandshakeBoth::start(&config) else {

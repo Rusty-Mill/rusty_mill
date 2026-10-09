@@ -105,11 +105,11 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 use super::client12::CipherSuite12;
 use super::handshake::{
-    certificate_verify_content, complete_prefix, extension, find, messages,
-    parse_encrypted_extensions, parse_extension_list, parse_finished, pre_shared_key_placeholder,
-    BinderHello, CertificateMessage, CertificateRequestMessage, CertificateVerify, ClientHello,
-    Extension, HandshakeError, HandshakeType, Message, PskIdentity, ServerHello, Transcript,
-    CLIENT_CERTIFICATE_VERIFY_CONTEXT, HELLO_RETRY_REQUEST_RANDOM,
+    certificate_verify_content, complete_prefix, encode_alpn_offer, extension, find, messages,
+    parse_alpn_selection, parse_encrypted_extensions, parse_extension_list, parse_finished,
+    pre_shared_key_placeholder, BinderHello, CertificateMessage, CertificateRequestMessage,
+    CertificateVerify, ClientHello, Extension, HandshakeError, HandshakeType, Message, PskIdentity,
+    ServerHello, Transcript, CLIENT_CERTIFICATE_VERIFY_CONTEXT, HELLO_RETRY_REQUEST_RANDOM,
     SERVER_CERTIFICATE_VERIFY_CONTEXT,
 };
 use super::kx::{KeyExchange, KxError, NamedGroup};
@@ -428,6 +428,9 @@ pub enum ClientError {
     /// non-empty context for post-handshake requests; in the handshake it is
     /// zero length.
     NonEmptyRequestContext,
+    /// The server selected an application protocol this client did not offer.
+    /// RFC 7301 section 3.1: the answer is one of the offered names.
+    UnofferedAlpn,
     /// The server selected a protocol version other than TLS 1.2.
     ///
     /// Reported by [`super::client12`], which offers TLS 1.2 and nothing else.
@@ -538,6 +541,7 @@ impl ClientError {
                 level: AlertLevel::Unknown(_),
                 ..
             }) => AlertDescription::ILLEGAL_PARAMETER,
+            Self::UnofferedAlpn => AlertDescription::ILLEGAL_PARAMETER,
             Self::BadAlert(_) | Self::MalformedCertificate(_) | Self::NonEmptyRequestContext => {
                 AlertDescription::DECODE_ERROR
             }
@@ -625,6 +629,9 @@ impl core::fmt::Display for ClientError {
                 f.write_str("the server did not echo the session id that was sent")
             }
             Self::NotTls13 => f.write_str("the server did not select TLS 1.3"),
+            Self::UnofferedAlpn => {
+                f.write_str("the server selected an application protocol that was not offered")
+            }
             Self::NonEmptyRequestContext => {
                 f.write_str("a handshake CertificateRequest carried a non-empty context")
             }
@@ -812,6 +819,11 @@ pub struct ClientConfig<'a> {
     /// ClientHello; the server is free to ignore it, and the handshake then
     /// proceeds in full exactly as it would have.
     pub resumption: Option<Resumption<'a>>,
+    /// Application protocols to offer (RFC 7301), most preferred first. Empty
+    /// offers none, which is what this client did before ALPN. Each name is
+    /// 1 to 255 octets. The server's choice is
+    /// [`Connection::alpn_protocol`].
+    pub alpn: &'a [&'a [u8]],
 }
 
 /// A session to offer for resumption, and how old its ticket is.
@@ -987,6 +999,8 @@ struct Negotiated {
     /// open with — which is why it is a field set from the ServerHello rather
     /// than inferred from what turns up.
     resumed: bool,
+    /// The application protocol the server selected, if any.
+    alpn: Option<Vec<u8>>,
 }
 
 enum State {
@@ -1404,6 +1418,7 @@ fn build_client_hello(
         psk_modes.into_vec(),
     );
 
+    let alpn = (!config.alpn.is_empty()).then(|| encode_alpn_offer(config.alpn));
     let mut extensions = Vec::new();
     // RFC 6066 §3: an IP address is never sent as a server_name, so the
     // extension is absent entirely rather than present and empty.
@@ -1411,6 +1426,12 @@ fn build_client_hello(
         extensions.push(Extension {
             typ: extension::SERVER_NAME,
             data: &server_name,
+        });
+    }
+    if let Some(alpn) = &alpn {
+        extensions.push(Extension {
+            typ: extension::ALPN,
+            data: alpn,
         });
     }
     extensions.push(Extension {
@@ -1745,6 +1766,7 @@ impl ClientHandshake<'_> {
                 certificate_transcript: Vec::new(),
                 certificate_request: None,
                 resumed: resumed.is_some(),
+                alpn: None,
             }),
         };
         Ok(Vec::new())
@@ -2003,7 +2025,16 @@ impl ClientHandshake<'_> {
                 // including the TLS 1.2 extensions a combined hello carried —
                 // is not a TLS 1.3 EncryptedExtensions extension at all.
                 let offered_name = matches!(self.config.server_name, ServerName::Dns(_));
+                let offered_alpn = !self.config.alpn.is_empty();
                 for ext in &extensions {
+                    if ext.typ == extension::ALPN && offered_alpn {
+                        let selected = parse_alpn_selection(ext.data)?;
+                        if !self.config.alpn.contains(&selected) {
+                            return Err(ClientError::UnofferedAlpn);
+                        }
+                        negotiated.alpn = Some(selected.to_vec());
+                        continue;
+                    }
                     if ext.typ == extension::SERVER_NAME && !ext.data.is_empty() {
                         return Err(ClientError::Handshake(HandshakeError::Malformed(
                             "a server_name acknowledgement is not empty",
@@ -2237,6 +2268,7 @@ impl ClientHandshake<'_> {
             server_secret: server_application_secret,
             certificates: negotiated.certificates,
             resumed: negotiated.resumed,
+            alpn: negotiated.alpn,
             resumption_master,
             noise: Noise::default(),
         }));
@@ -2260,6 +2292,8 @@ pub struct Connection {
     certificates: Vec<Vec<u8>>,
     /// True if this connection was established by resuming a session.
     resumed: bool,
+    /// The application protocol selected by ALPN, if one was.
+    alpn: Option<Vec<u8>>,
     /// `res master`, from which a ticket's PSK is derived.
     ///
     /// Empty for a connection built by the server half, which does not issue
@@ -2390,6 +2424,7 @@ impl Connection {
             server_secret: receive_secret,
             certificates,
             resumed: false,
+            alpn: None,
             // The server half does not issue tickets, so it has no resumption
             // secret to hand out. See the field's own docs.
             resumption_master: Vec::new(),
@@ -2418,6 +2453,18 @@ impl Connection {
     /// The peer's certificate chain, DER-encoded, end-entity first.
     pub fn peer_certificates(&self) -> &[Vec<u8>] {
         &self.certificates
+    }
+
+    /// The application protocol ALPN selected, or `None` if none was.
+    pub fn alpn_protocol(&self) -> Option<&[u8]> {
+        self.alpn.as_deref()
+    }
+
+    /// Record the protocol the server half selected (the client half sets it
+    /// from the EncryptedExtensions it read).
+    pub(super) fn with_alpn(mut self, alpn: Option<Vec<u8>>) -> Self {
+        self.alpn = alpn;
+        self
     }
 
     /// Protect application data as one record.

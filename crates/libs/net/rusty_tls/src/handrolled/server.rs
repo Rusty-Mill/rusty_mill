@@ -136,10 +136,11 @@
 //!   without the share it was asked for is refused rather than asked again.
 
 use super::handshake::{
-    certificate_verify_content, complete_prefix, extension, find, messages, parse_finished,
-    CertificateMessage, CertificateVerify, ClientHello, Extension, HandshakeError, HandshakeType,
-    Message, PresharedKeyOffer, ServerHello, Transcript, CLIENT_CERTIFICATE_VERIFY_CONTEXT,
-    HELLO_RETRY_REQUEST_RANDOM, SERVER_CERTIFICATE_VERIFY_CONTEXT,
+    certificate_verify_content, choose_alpn, complete_prefix, encode_alpn_selection, extension,
+    find, messages, parse_finished, AlpnChoice, CertificateMessage, CertificateVerify, ClientHello,
+    Extension, HandshakeError, HandshakeType, Message, PresharedKeyOffer, ServerHello, Transcript,
+    CLIENT_CERTIFICATE_VERIFY_CONTEXT, HELLO_RETRY_REQUEST_RANDOM,
+    SERVER_CERTIFICATE_VERIFY_CONTEXT,
 };
 use super::kx::{KeyExchange, KxError, NamedGroup};
 use super::limits::{Flood, Noise};
@@ -286,6 +287,9 @@ pub enum ServerError {
     Flood(Flood),
     /// A required extension was absent (RFC 8446 §9.2); carries its type.
     MissingExtension(u16),
+    /// The client offered ALPN protocols and this server speaks none of them
+    /// (RFC 7301 section 3.2).
+    NoApplicationProtocol,
     /// A warning alert that TLS 1.3 does not permit (RFC 8446 §6).
     BadAlert(Alert),
     /// The client signalled `TLS_FALLBACK_SCSV` (RFC 7507) while offering
@@ -360,6 +364,9 @@ impl core::fmt::Display for ServerError {
             Self::Schedule(err) => write!(f, "key derivation: {err}"),
             Self::Flood(flood) => write!(f, "{flood}"),
             Self::MissingExtension(typ) => write!(f, "the client did not send extension {typ}"),
+            Self::NoApplicationProtocol => {
+                f.write_str("no application protocol in common with the client")
+            }
             Self::BadAlert(alert) => write!(f, "an alert TLS 1.3 does not allow: {alert:?}"),
             Self::InappropriateFallback => {
                 f.write_str("the client is falling back to a lower version than this server speaks")
@@ -433,6 +440,7 @@ impl ServerError {
             Self::Kx(KxError::BadPeerKey) => AlertDescription::ILLEGAL_PARAMETER,
             Self::Kx(_) => AlertDescription::HANDSHAKE_FAILURE,
             Self::MissingExtension(_) => AlertDescription::MISSING_EXTENSION,
+            Self::NoApplicationProtocol => AlertDescription::NO_APPLICATION_PROTOCOL,
             Self::ClientCertificate(_) | Self::MalformedClientCertificate(_) => {
                 AlertDescription::BAD_CERTIFICATE
             }
@@ -490,6 +498,11 @@ pub struct ServerConfig<'a> {
     /// confused about what it stored, and that remains a legitimate thing to
     /// choose.
     pub tickets: Option<&'a Tickets<'a>>,
+    /// Application protocols this server speaks (RFC 7301), most preferred
+    /// first. The first one the client also offered is selected. Empty ignores
+    /// ALPN, which is what this server did before. A client that offers ALPN
+    /// and shares none of these is refused with `no_application_protocol`.
+    pub alpn: &'a [&'a [u8]],
 }
 
 /// How a server handles resumption.
@@ -621,6 +634,8 @@ struct Negotiated {
     /// resumes with. A ticket it could never redeem is not sent (RFC 8446
     /// section 4.2.9; BoGo `TLS13-ExpectNoSessionTicketOnBadKEMode-Server`).
     can_resume: bool,
+    /// The ALPN protocol this server selected, if any.
+    alpn: Option<Vec<u8>>,
 }
 
 /// The message a server will accept next from the client.
@@ -1564,10 +1579,20 @@ impl ServerHandshake<'_> {
 
         // The flight.
         let mut flight = Vec::new();
-        let mut empty = Writer::new();
-        empty.vector_u16(|_| {});
+        let alpn = match choose_alpn(self.config.alpn, &hello.extensions)? {
+            AlpnChoice::Unused => None,
+            AlpnChoice::Selected(protocol) => Some(protocol),
+            AlpnChoice::NoOverlap => return Err(ServerError::NoApplicationProtocol),
+        };
+        let mut extensions = Writer::new();
+        extensions.vector_u16(|w| {
+            if let Some(protocol) = alpn {
+                w.u16(extension::ALPN);
+                w.vector_u16(|w| w.bytes(&encode_alpn_selection(protocol)));
+            }
+        });
         let encrypted_extensions =
-            Message::encode(HandshakeType::EncryptedExtensions, &empty.into_vec());
+            Message::encode(HandshakeType::EncryptedExtensions, &extensions.into_vec());
         transcript.add(&encrypted_extensions);
         flight.extend_from_slice(&encrypted_extensions);
 
@@ -1674,6 +1699,7 @@ impl ServerHandshake<'_> {
             client_certificate_transcript: Vec::new(),
             can_resume: find(&hello.extensions, extension::PSK_KEY_EXCHANGE_MODES)
                 .is_some_and(offers_psk_dhe_ke),
+            alpn: alpn.map(<[u8]>::to_vec),
         }));
         Ok(out)
     }
@@ -1831,16 +1857,19 @@ impl ServerHandshake<'_> {
         negotiated.transcript.add_message(message);
         let out = self.issue_tickets(&negotiated, &mut sealer)?;
 
-        self.state = State::Done(Box::new(Connection::from_parts(
-            negotiated.aead,
-            negotiated.hash,
-            negotiated.suite,
-            sealer,
-            Opener::new(negotiated.aead, &client_keys.key, &client_keys.iv)?,
-            negotiated.server_application_secret,
-            negotiated.client_application_secret,
-            negotiated.client_certificates,
-        )));
+        self.state = State::Done(Box::new(
+            Connection::from_parts(
+                negotiated.aead,
+                negotiated.hash,
+                negotiated.suite,
+                sealer,
+                Opener::new(negotiated.aead, &client_keys.key, &client_keys.iv)?,
+                negotiated.server_application_secret,
+                negotiated.client_application_secret,
+                negotiated.client_certificates,
+            )
+            .with_alpn(negotiated.alpn),
+        ));
         Ok(out)
     }
 

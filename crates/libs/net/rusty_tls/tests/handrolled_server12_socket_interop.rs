@@ -343,6 +343,7 @@ fn config<'a>(
         cipher_suites: suites,
         groups,
         client_auth,
+        alpn: &[],
     }
 }
 

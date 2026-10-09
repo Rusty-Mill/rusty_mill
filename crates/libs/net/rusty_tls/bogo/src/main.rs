@@ -52,6 +52,22 @@ const GROUPS: &[NamedGroup] = &[
     NamedGroup::SecP384R1,
 ];
 
+/// BoGo passes an ALPN list in wire format: each name behind a length octet.
+fn alpn_wire(text: &str) -> Vec<Vec<u8>> {
+    let mut rest = text.as_bytes();
+    let mut names = Vec::new();
+    while let Some((&len, tail)) = rest.split_first() {
+        let len = usize::from(len);
+        if tail.len() < len {
+            unimplemented("a malformed -advertise-alpn list");
+        }
+        let (name, tail) = tail.split_at(len);
+        names.push(name.to_vec());
+        rest = tail;
+    }
+    names
+}
+
 /// The groups to offer or accept: the scenario's `-curves`, else all three.
 fn groups(config: &Config) -> &[NamedGroup] {
     if config.curves.is_empty() {
@@ -109,6 +125,14 @@ struct Config {
     verify_peer: bool,
     /// `-require-any-client-certificate`: ...and refuses a client without one.
     require_client_cert: bool,
+    /// `-advertise-alpn`: the protocols a client offers.
+    advertise_alpn: Vec<Vec<u8>>,
+    /// `-select-alpn`: the protocol a server will pick if it is offered.
+    select_alpn: Option<Vec<u8>>,
+    /// `-decline-alpn`: the server's callback picks nothing.
+    decline_alpn: bool,
+    /// `-expect-alpn` / `-expect-no-alpn`: what the handshake must have selected.
+    expect_alpn: Option<Vec<u8>>,
 }
 
 const TLS12: u16 = 0x0303;
@@ -167,6 +191,11 @@ fn parse_args(index: usize) -> Config {
             "-async" => {}
             "-resume-count" => cfg.resume_count = value("-resume-count").parse().unwrap_or(0),
             "-no-ticket" => cfg.no_ticket = true,
+            "-advertise-alpn" => cfg.advertise_alpn = alpn_wire(&value("-advertise-alpn")),
+            "-select-alpn" => cfg.select_alpn = Some(value("-select-alpn").into_bytes()),
+            "-decline-alpn" => cfg.decline_alpn = true,
+            "-expect-alpn" => cfg.expect_alpn = Some(value("-expect-alpn").into_bytes()),
+            "-expect-no-alpn" => cfg.expect_alpn = Some(Vec::new()),
             "-verify-peer" => cfg.verify_peer = true,
             "-require-any-client-certificate" => cfg.require_client_cert = true,
             "-check-close-notify" => cfg.check_close_notify = true,
@@ -544,6 +573,16 @@ fn expect_version(config: &Config, connection: &Established) {
             ));
         }
     }
+    if let Some(want) = &config.expect_alpn {
+        let got = connection.alpn_protocol().unwrap_or_default();
+        if want != got {
+            fail(format!(
+                "wrong ALPN: expected {:?}, negotiated {:?}",
+                String::from_utf8_lossy(want),
+                String::from_utf8_lossy(got)
+            ));
+        }
+    }
 }
 
 fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
@@ -585,6 +624,11 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
     };
     let client_auth = (config.verify_peer || config.require_client_cert).then_some(&auth);
 
+    let server_alpn_list: Vec<&[u8]> = match (&config.select_alpn, config.decline_alpn) {
+        (Some(protocol), false) => vec![protocol.as_slice()],
+        _ => Vec::new(),
+    };
+    let server_alpn = server_alpn_list;
     let tickets = Tickets {
         keys: TicketKeys {
             current: ticket_key,
@@ -602,6 +646,7 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
         groups: groups(config),
         client_auth,
         tickets: (!config.no_ticket).then_some(&tickets),
+        alpn: &server_alpn,
     };
     let server_12 = ServerConfig12 {
         certificates: &chain,
@@ -609,6 +654,7 @@ fn serve(config: &Config, tls12: bool, tls13: bool, ticket_key: &TicketKey) {
         cipher_suites: CipherSuite12::SUPPORTED,
         groups: groups(config),
         client_auth,
+        alpn: &server_alpn,
     };
     let both = ServerConfigBoth {
         tls13: &server_13,
@@ -660,6 +706,8 @@ fn connect_client(
     // A ticket is single-use (RFC 8446 section 4.6.1): take the oldest, so the
     // next connection is offered a different one.
     let offer = (!sessions.is_empty()).then(|| sessions.remove(0));
+    let client_alpn_list: Vec<&[u8]> = config.advertise_alpn.iter().map(Vec::as_slice).collect();
+    let client_alpn = client_alpn_list;
     let tls13_config = || ClientConfig {
         server_name: ServerName::Dns(name),
         anchors: &anchors,
@@ -671,6 +719,7 @@ fn connect_client(
             session,
             age_ms: u32::try_from(at.elapsed().as_millis()).unwrap_or(u32::MAX),
         }),
+        alpn: &client_alpn,
     };
     let tls12_config = ClientConfig12 {
         server_name: ServerName::Dns(name),
@@ -679,6 +728,7 @@ fn connect_client(
         groups: groups(config),
         cipher_suites: CipherSuite12::SUPPORTED,
         identity: identity.as_ref(),
+        alpn: &client_alpn,
     };
     let tls13_single = tls13_config();
     let both = ClientConfigBoth::new(tls13_config(), CipherSuite12::SUPPORTED);

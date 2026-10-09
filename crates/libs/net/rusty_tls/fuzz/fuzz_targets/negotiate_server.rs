@@ -44,6 +44,7 @@ fuzz_target!(|data: &[u8]| {
         groups: &groups,
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let tls12 = ServerConfig12 {
         certificates: &certificates,
@@ -51,6 +52,7 @@ fuzz_target!(|data: &[u8]| {
         cipher_suites: CipherSuite12::SUPPORTED,
         groups: &groups,
         client_auth: None,
+        alpn: &[],
     };
     let config = ServerConfigBoth {
         tls13: &tls13,

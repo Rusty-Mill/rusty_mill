@@ -177,6 +177,7 @@ fn interop_with_groups(
         groups,
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let mut client = rustls_client(&pki);
@@ -275,6 +276,7 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&server_config);
 
@@ -292,6 +294,7 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (mut client, hello) = ClientHandshake::start(&client_config).expect("start");
@@ -384,6 +387,7 @@ fn client_hello(edit: Edit) -> Vec<u8> {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
     let (_, record) = ClientHandshake::start(&config).expect("start");
     let parsed = messages(&record[5..]).expect("parses");
@@ -435,6 +439,7 @@ fn feed(records: &[&[u8]]) -> Result<Vec<u8>, ServerError> {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let mut reply = Ok(Vec::new());
@@ -609,6 +614,7 @@ fn a_truncated_client_hello_is_waited_for_rather_than_refused() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
 
     let whole = client_hello(Edit::default());
@@ -659,6 +665,7 @@ fn a_peer_cannot_drive_the_server_with_incomplete_messages() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -843,6 +850,7 @@ fn against_test_client(corrupt_finished: bool) -> Result<(), ServerError> {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -898,6 +906,7 @@ fn a_corrupted_protected_record_fails_at_the_record_layer() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -1038,6 +1047,7 @@ fn first_reply(record: &[u8]) -> Vec<u8> {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&config);
     server
@@ -1092,6 +1102,7 @@ fn after_a_retry(first: &[u8], second: &[u8]) -> Result<Vec<u8>, ServerError> {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&config);
     let retry = server
@@ -1196,6 +1207,7 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
     let server_config = ServerConfig {
         certificates: &pki.chain,
@@ -1204,6 +1216,7 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
         groups: &[NamedGroup::SecP256R1],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
 
     let mut server = ServerHandshake::new(&server_config);
@@ -1557,6 +1570,7 @@ fn client_auth_interop(client: Option<&Pki>, required: bool) -> Result<Vec<Vec<u
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: None,
+        alpn: &[],
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1674,6 +1688,7 @@ fn a_client_certificate_from_an_unrelated_ca_is_refused() {
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: None,
+        alpn: &[],
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1852,6 +1867,7 @@ fn against_certificate_client(corrupt_signature: bool) -> Result<(), ServerError
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: None,
+        alpn: &[],
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -2027,6 +2043,7 @@ fn a_rustls_client_resumes_against_this_server() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
 
@@ -2085,6 +2102,7 @@ fn a_corrupted_binder_is_refused_rather_than_ignored() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
 
@@ -2132,6 +2150,7 @@ fn an_unopenable_ticket_falls_back_to_a_full_handshake() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&issuing_tickets),
+        alpn: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
     serve_rustls(&config, &client_config, |_, record| record).expect("first");
@@ -2202,6 +2221,7 @@ fn an_expired_ticket_falls_back_to_a_full_handshake() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&issuing),
+        alpn: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
     serve_rustls(&config, &client_config, |_, record| record).expect("first");
@@ -2257,6 +2277,7 @@ fn a_ticket_does_not_resume_under_a_different_certificate() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let client_config = resumable_rustls_client_config(&first_pki);
     serve_rustls(&config, &client_config, |_, record| record).expect("first");
@@ -2288,6 +2309,7 @@ fn a_ticket_does_not_resume_under_a_different_certificate() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let resumed = serve_rustls(&other, &both, |_, record| record)
         .expect("a server presenting a different chain refused instead of falling back");
@@ -2316,6 +2338,7 @@ fn an_early_data_extension_is_refused() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -2347,6 +2370,7 @@ fn a_pre_shared_key_that_is_not_last_is_refused() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: None,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -2403,6 +2427,7 @@ fn this_client_resumes_against_this_server() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
     };
 
     let root = Certificate::parse(&pki.root_der).expect("root parses");
@@ -2472,6 +2497,7 @@ fn run_both(
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption,
+        alpn: &[],
     };
     let mut server = ServerHandshake::new(server_config);
     let (client, hello) = ClientHandshake::start(&client_config).map_err(|e| e.to_string())?;
@@ -2556,6 +2582,7 @@ fn a_ticket_does_not_resume_under_a_suite_with_a_different_hash() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let client_config = resumable_rustls_client_config(&pki);
     serve_rustls(&sha256, &client_config, |_, record| record).expect("first");
@@ -2694,6 +2721,7 @@ fn a_resumed_handshake_still_knows_which_client_it_is_talking_to() {
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
 
@@ -2751,6 +2779,7 @@ fn a_ticket_with_no_client_chain_does_not_resume_where_one_is_required() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
     serve_rustls_recording_peer(&anonymous, &client_config).expect("the first handshake");
@@ -2822,6 +2851,7 @@ fn a_ticket_with_a_client_chain_does_not_resume_where_client_auth_is_off() {
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
     serve_rustls_recording_peer(&authenticating, &client_config).expect("the first handshake");
@@ -2882,6 +2912,7 @@ fn a_client_certificate_that_expired_since_issuance_does_not_resume() {
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
     serve_rustls_recording_peer(&config, &client_config).expect("the first handshake");
@@ -2957,6 +2988,7 @@ fn an_implausible_ticket_age_falls_back_to_a_full_handshake() {
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
     };
     let root = Certificate::parse(&pki.root_der).expect("root parses");
     let anchors = [TrustAnchor {
@@ -3036,6 +3068,7 @@ fn with_ticketing_server<T>(f: impl FnOnce(&mut ServerHandshake<'_>) -> T) -> T 
         groups: &[NamedGroup::X25519],
         client_auth: None,
         tickets: Some(&tickets),
+        alpn: &[],
     };
     f(&mut ServerHandshake::new(&config))
 }

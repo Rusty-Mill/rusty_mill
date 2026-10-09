@@ -244,6 +244,7 @@ fn handshake_with(
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(pki);
@@ -368,6 +369,7 @@ fn every_offered_suite_and_group_completes_against_rustls() {
                 cipher_suites: core::slice::from_ref(suite),
                 identity: None,
                 resumption: None,
+                alpn: &[],
             };
 
             let mut server = rustls_server(&pki);
@@ -420,6 +422,7 @@ fn the_client_hello_offers_what_it_should_and_nothing_it_should_not() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (_, record) = ClientHandshake::start(&config).expect("start");
@@ -472,6 +475,7 @@ fn an_ip_address_is_not_sent_as_a_server_name() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (_, record) = ClientHandshake::start(&config).expect("start");
@@ -617,6 +621,27 @@ fn a_certificate_request_without_signature_algorithms_is_refused() {
     );
 }
 
+/// RFC 7301 section 3.1: the server's answer is one of the names the client
+/// offered. Selecting another is the server's lie about what was agreed, and
+/// the connection is not trusted to carry the protocol the application will
+/// then speak. An answer nobody asked for is an unsolicited extension.
+#[test]
+fn an_alpn_answer_must_be_one_the_client_offered() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+
+    let (connection, _) = established_with_test_server(&pki, Shape::AlpnAnswer(b"h2"))
+        .expect("an offered protocol is accepted");
+    assert_eq!(connection.alpn_protocol(), Some(&b"h2"[..]));
+
+    let error = against_test_server(&pki, Shape::AlpnAnswer(b"h3"))
+        .expect_err("a protocol that was never offered was accepted");
+    assert_eq!(error, ClientError::UnofferedAlpn);
+
+    let error = against_test_server(&pki, Shape::AlpnUnsolicited(b"h2"))
+        .expect_err("an ALPN answer to no offer was accepted");
+    assert_eq!(error, ClientError::UnofferedExtension(16));
+}
+
 /// RFC 8446 section 4.3.2: inside the handshake the request context is empty
 /// (BoGo RequestContextInHandshake-TLS13); a server that sets one is confused
 /// or probing, and the client says decode_error.
@@ -672,6 +697,11 @@ enum Shape {
     /// A well-formed CertificateRequest whose context is not empty, which only
     /// a post-handshake request may carry.
     RequestWithContext,
+    /// EncryptedExtensions carries an ALPN answer naming this protocol, to a
+    /// client that offered `h2` and `http/1.1`.
+    AlpnAnswer(&'static [u8]),
+    /// ...and the same answer to a client that offered nothing.
+    AlpnUnsolicited(&'static [u8]),
     /// A `key_share` naming a group other than the one the client sent.
     WrongKeyShareGroup,
     /// A fatal alert where the encrypted flight should be — a server changing
@@ -769,7 +799,12 @@ impl TestServer<'_> {
         };
 
         let mut empty_extensions = Writer::new();
-        empty_extensions.vector_u16(|_| {});
+        empty_extensions.vector_u16(|w| {
+            if let Shape::AlpnAnswer(protocol) | Shape::AlpnUnsolicited(protocol) = self.shape {
+                w.u16(16); // application_layer_protocol_negotiation
+                w.vector_u16(|w| w.vector_u16(|w| w.vector_u8(|w| w.bytes(protocol))));
+            }
+        });
         let encrypted_extensions = Message::encode(
             HandshakeType::EncryptedExtensions,
             &empty_extensions.into_vec(),
@@ -978,6 +1013,11 @@ fn established_with_test_server(
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         identity: None,
         resumption: None,
+        alpn: if matches!(shape, Shape::AlpnAnswer(_)) {
+            &[b"h2", b"http/1.1"]
+        } else {
+            &[]
+        },
     };
 
     let (mut client, hello) = ClientHandshake::start(&config)?;
@@ -1034,6 +1074,7 @@ fn the_shared_rejection_table_holds_for_the_handrolled_engine() {
             cipher_suites: CipherSuite::SUPPORTED,
             identity: None,
             resumption: None,
+            alpn: &[],
         };
 
         match (run_table_case(&fixture, &config), case.handrolled) {
@@ -1116,6 +1157,7 @@ fn a_tampered_record_fails_the_connection_permanently() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -1168,6 +1210,7 @@ fn a_cipher_suite_that_was_not_offered_is_refused() {
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -1213,6 +1256,7 @@ fn a_server_that_does_not_select_tls13_is_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -1265,6 +1309,7 @@ fn protected_data_before_the_server_hello_is_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (mut client, _) = ClientHandshake::start(&config).expect("start");
@@ -1347,6 +1392,7 @@ fn a_hello_retry_request_completes_against_rustls() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = x25519_only_server(&pki);
@@ -1401,6 +1447,7 @@ fn a_second_hello_retry_request_is_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = x25519_only_server(&pki);
@@ -1791,6 +1838,7 @@ fn random_records_never_panic() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut rng = Rng::new(0x5eed_0101);
@@ -1858,6 +1906,7 @@ fn a_flight_split_across_records_is_reassembled() {
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     for fragment in [1usize, 2, 3, 5, 17, 64, 100, 255, 256, 511, 1024] {
@@ -1912,6 +1961,7 @@ fn a_peer_cannot_drive_the_handshake_with_incomplete_messages() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (mut client, _) = ClientHandshake::start(&config).expect("start");
@@ -1982,6 +2032,7 @@ fn a_server_that_cannot_speak_tls13_is_refused_in_its_own_words() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = tls12_only_server(&pki);
@@ -2043,6 +2094,7 @@ fn the_downgrade_sentinel_is_told_apart_from_an_old_server() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     // Take a genuine ServerHello and strip `supported_versions`, with and
@@ -2233,6 +2285,7 @@ fn a_malformed_alert_is_refused_rather_than_interpreted() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     for body in [vec![], vec![0x02], vec![0x02, 0x46, 0x00]] {
@@ -2274,6 +2327,7 @@ fn a_server_hello_that_does_not_echo_the_session_id_is_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -2330,6 +2384,7 @@ fn a_retried_client_hello_keeps_its_identity() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = x25519_only_server(&pki);
@@ -2421,6 +2476,7 @@ fn against_client_auth(
         cipher_suites: CipherSuite::SUPPORTED,
         identity,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server_requiring_client_auth(pki, &client_pki.root_der);
@@ -2547,6 +2603,7 @@ fn a_rustls_server_now_sends_session_tickets() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -2711,6 +2768,7 @@ fn resumption_config<'a>(
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption,
+        alpn: &[],
     }
 }
 
@@ -3210,6 +3268,7 @@ fn a_flood_of_change_cipher_specs_before_the_server_hello_is_cut_off() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
     let (mut client, _) = ClientHandshake::start(&config).expect("start");
     let ccs = [20u8, 3, 3, 0, 1, 1];

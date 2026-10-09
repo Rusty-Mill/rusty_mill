@@ -91,6 +91,14 @@ pub enum Established {
 }
 
 impl Established {
+    /// The application protocol ALPN selected, whichever version was chosen.
+    pub fn alpn_protocol(&self) -> Option<&[u8]> {
+        match self {
+            Self::Tls13(connection) => connection.alpn_protocol(),
+            Self::Tls12(connection) => connection.alpn_protocol(),
+        }
+    }
+
     /// The fatal alert record to send for `error`, protected by this
     /// connection's keys.
     pub fn alert_record(&mut self, error: &ClientError) -> Option<Vec<u8>> {
@@ -134,6 +142,7 @@ impl<'a> ClientConfigBoth<'a> {
             groups: tls13.groups,
             cipher_suites: suites12,
             identity: tls13.identity,
+            alpn: tls13.alpn,
         };
         Self { tls13, tls12 }
     }

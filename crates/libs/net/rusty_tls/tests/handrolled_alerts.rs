@@ -101,6 +101,7 @@ fn what_a_client_tells_a_server() {
         // Versions and the downgrade sentinel.
         (ClientError::NotTls13, Some(A::PROTOCOL_VERSION)),
         (ClientError::NonEmptyRequestContext, Some(A::DECODE_ERROR)),
+        (ClientError::UnofferedAlpn, Some(A::ILLEGAL_PARAMETER)),
         (ClientError::NotTls12(0x0301), Some(A::PROTOCOL_VERSION)),
         (ClientError::DowngradeDetected, Some(A::ILLEGAL_PARAMETER)),
         // Authentication.
@@ -170,6 +171,10 @@ fn what_a_server_tells_a_client() {
         (
             ServerError::Handshake(HandshakeError::DuplicateKeyShare(0x001d)),
             Some(A::ILLEGAL_PARAMETER),
+        ),
+        (
+            ServerError::NoApplicationProtocol,
+            Some(A::NO_APPLICATION_PROTOCOL),
         ),
         (
             ServerError::Handshake(HandshakeError::PskBinderCountMismatch),

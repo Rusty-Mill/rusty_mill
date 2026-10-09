@@ -458,10 +458,37 @@ Not done: RSA PKCS#1 v1.5 signing for TLS 1.2 clients. A server that offers only
 ones do) gets an empty `Certificate` from an RSA identity. Adding it is a change to `sign.rs`, which
 ADR-0002 treats as the careful part of the engine, so it is a decision and not an increment.
 
+## Stage 11: ALPN (RFC 7301)
+
+`ClientConfig.alpn`, `ClientConfig12.alpn`, `ServerConfig.alpn` and `ServerConfig12.alpn` (public fields,
+empty by default meaning "no ALPN"), and `alpn_protocol()` on `Connection`, `Connection12` and
+`Established`. The client offers its list; the server picks the first of *its own* list that the client also
+offered (RFC 7301 leaves the choice to the server), in EncryptedExtensions for 1.3 and in the ServerHello for
+1.2. A client that offers some and shares none gets `no_application_protocol` (120). A server with no list
+ignores the extension but still parses it strictly: a malformed offer is `decode_error` whoever reads it.
+The client refuses an answer that names a protocol it never offered (`illegal_parameter`), one that names
+two, and one that answers an offer nobody made (`unsupported_extension`).
+
+| Gate | Result |
+| --- | --- |
+| Live rustls, both directions, TLS 1.2 and 1.3 | Our client gets the protocol rustls picks (its preference) and our server's pick matches what rustls reports; no overlap yields alert 120 both ways; no offer yields no ALPN. |
+| Live OpenSSL, both directions, both versions (CI) | Our client reads `s_server -alpn`'s choice; `s_client`'s own summary shows our server's choice; no overlap shows alert 120. |
+| Scripted servers | An answer naming an unoffered protocol, or answering no offer, is refused in 1.3 and in 1.2. |
+| Mutation | 15 deliberate bugs (client preference instead of server's, overlap ignored, selections believed unchecked, answers not sent or not recorded on any of the four connections, empty list and two-name answer accepted): all caught. One survived at first and was a missing test (the standalone 1.2 client never offering); it has one now. |
+| BoGo | **754 passed, 0 failed** (was 741), 309 disabled. The 8 new failures were TLS 1.0/1.1 variants and 1.2 resumption, disabled by name. |
+
+Not done: ALPN is not bound to a resumed session. A ticket does not record the protocol it was issued under,
+so a resumed connection selects afresh instead of checking it still matches the original. Whether the
+specification requires that check was not verified here; it is a gap to close before relying on resumption
+with ALPN. `-expect-advertised-alpn` needs the client's raw list exposed to
+the application, which nothing asks for yet. BoringSSL lets a server's selection callback decline without
+failing; here "offered some, share none" always fails, as RFC 7301 says, and `-decline-alpn` is modelled as a
+server with no list.
+
 ## Next action
 
 Decision for the owner, not another stage: the engine now has the evidence the earlier stages could
 produce (rustls and OpenSSL both directions, BoGo, mutation, fuzz, CI). Whether that meets the bar for
 the seam is theirs to set. If it does, stage 5 of the track is wiring (ALPN, SNI certificate selection,
 1.2 resumption are the known gaps) and an ADR superseding ADR-0002. If the bar includes more of BoGo,
-the next increment is credentials (`-new-x509-credential`) and verify callbacks (`-verify-fail`); the engine gaps left are RSA PKCS#1 v1.5 signing, 1.2 resumption, ALPN and SNI-based certificate selection.
+the next increment is credentials (`-new-x509-credential`) and verify callbacks (`-verify-fail`); the engine gaps left are RSA PKCS#1 v1.5 signing, 1.2 resumption, ALPN-aware resumption and SNI-based certificate selection.

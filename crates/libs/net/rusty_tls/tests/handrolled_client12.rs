@@ -237,6 +237,7 @@ fn config<'a>(
         groups,
         cipher_suites: suites,
         identity: None,
+        alpn: &[],
     }
 }
 
@@ -549,6 +550,39 @@ fn a_client_certificate_request_is_answered_with_an_empty_certificate() {
     );
 }
 
+/// The standalone 1.2 client offers ALPN and reports what a live rustls server
+/// picked: the server's preference decides, and a client that offered nothing
+/// ends with nothing.
+#[test]
+fn the_standalone_client_negotiates_alpn_with_rustls() {
+    let pki = pki(Leaf::P256, SERVER);
+    let anchors = [anchor(&pki.root_der)];
+    let run = |client_alpn: &'static [&'static [u8]]| {
+        let mut server_config =
+            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+                .with_no_client_auth()
+                .with_single_cert(pki.chain.clone(), pki.key.clone_key())
+                .expect("config");
+        server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let server = rustls::ServerConnection::new(Arc::new(server_config)).expect("server");
+        let mut cfg = config(
+            SERVER,
+            &anchors,
+            &[NamedGroup::X25519],
+            CipherSuite12::SUPPORTED,
+        );
+        cfg.alpn = client_alpn;
+        handshake_against(server, &cfg, |_, r| Some(r))
+            .expect("the handshake completes")
+            .connection
+            .alpn_protocol()
+            .map(<[u8]>::to_vec)
+    };
+    assert_eq!(run(&[b"http/1.1", b"h2"]), Some(b"h2".to_vec()));
+    assert_eq!(run(&[b"http/1.1"]), Some(b"http/1.1".to_vec()));
+    assert_eq!(run(&[]), None);
+}
+
 /// A client identity is presented and proven: rustls, requiring a client
 /// certificate, accepts the chain and the `CertificateVerify` made over the
 /// 1.2 transcript, for each key type this client can sign with.
@@ -634,6 +668,7 @@ mod hello {
             ],
             cipher_suites: CipherSuite12::SUPPORTED,
             identity: None,
+            alpn: &[],
         };
         let (_, record) = ClientHandshake12::start(&cfg).expect("starts");
         assert_eq!(record[0], 22, "a handshake record");
@@ -720,6 +755,7 @@ mod hello {
             groups: &[NamedGroup::X25519],
             cipher_suites: &[],
             identity: None,
+            alpn: &[],
         };
         assert!(ClientHandshake12::start(&no_suites).is_err());
         let no_groups = ClientConfig12 {
@@ -729,6 +765,7 @@ mod hello {
             groups: &[],
             cipher_suites: CipherSuite12::SUPPORTED,
             identity: None,
+            alpn: &[],
         };
         assert!(ClientHandshake12::start(&no_groups).is_err());
         // A value that is not a suite this client implements cannot be offered.
@@ -739,6 +776,7 @@ mod hello {
             groups: &[NamedGroup::X25519],
             cipher_suites: &[CipherSuite12(0x002f)], // TLS_RSA_WITH_AES_128_CBC_SHA,
             identity: None,
+            alpn: &[],
         };
         assert_eq!(
             ClientHandshake12::start(&bogus).err(),
@@ -1346,6 +1384,7 @@ struct Script<'a> {
     groups: &'a [NamedGroup],
     name: &'a str,
     identity: Option<&'a rusty_tls::handrolled::client::ClientIdentity<'a>>,
+    alpn: &'a [&'a [u8]],
 }
 
 impl<'a> Script<'a> {
@@ -1367,7 +1406,12 @@ impl<'a> Script<'a> {
             ],
             name: SERVER,
             identity: None,
+            alpn: &[],
         }
+    }
+    fn alpn(mut self, alpn: &'a [&'a [u8]]) -> Self {
+        self.alpn = alpn;
+        self
     }
     fn identity(mut self, i: &'a rusty_tls::handrolled::client::ClientIdentity<'a>) -> Self {
         self.identity = Some(i);
@@ -1425,6 +1469,7 @@ fn converse(pki: &Pki, mut script: Script<'_>) -> (Result<Connection12, ClientEr
         groups: script.groups,
         cipher_suites: script.suites,
         identity: script.identity,
+        alpn: script.alpn,
     };
     let mut fake = Fake::new(pki, script.leaf);
     let (mut client, hello) = ClientHandshake12::start(&cfg).expect("starts");
@@ -2353,6 +2398,55 @@ mod refusals {
         assert_eq!(fake.client_types, vec![HandshakeType::ClientKeyExchange]);
     }
 
+    // -------------------------------------------------------------------- ALPN
+
+    /// Append an ALPN answer naming `protocol` to the ServerHello.
+    fn answer_alpn(protocol: &'static [u8]) -> impl FnMut(&mut Vec<Vec<u8>>) {
+        move |sent| {
+            use rusty_tls::handrolled::handshake12::{message, ServerHello12};
+            let parsed = rusty_tls::handrolled::handshake::messages(&sent[0])
+                .expect("the ServerHello frames");
+            let mut hello = ServerHello12::parse(parsed[0].body).expect("parses");
+            let body = rusty_tls::handrolled::handshake::encode_alpn_selection(protocol);
+            hello
+                .extensions
+                .push(rusty_tls::handrolled::handshake::Extension {
+                    typ: rusty_tls::handrolled::handshake::extension::ALPN,
+                    data: &body,
+                });
+            sent[0] = message(HandshakeType::ServerHello, &hello.encode());
+        }
+    }
+
+    /// RFC 7301 section 3.1 in a TLS 1.2 ServerHello: an offered name is
+    /// accepted and reported; one never offered, or an answer to no offer, is
+    /// refused.
+    #[test]
+    fn an_alpn_answer_must_be_one_the_client_offered() {
+        let pki = pki_p256();
+        let offered: &[&[u8]] = &[b"h2", b"http/1.1"];
+
+        let (result, _) = converse(
+            &pki,
+            Script::new(Leaf::P256)
+                .alpn(offered)
+                .messages(answer_alpn(b"http/1.1")),
+        );
+        let connection = result.expect("an offered protocol is accepted");
+        assert_eq!(connection.alpn_protocol(), Some(&b"http/1.1"[..]));
+
+        let (result, _) = converse(
+            &pki,
+            Script::new(Leaf::P256)
+                .alpn(offered)
+                .messages(answer_alpn(b"h3")),
+        );
+        assert_eq!(result.err(), Some(ClientError::UnofferedAlpn));
+
+        let (result, _) = converse(&pki, Script::new(Leaf::P256).messages(answer_alpn(b"h2")));
+        assert_eq!(result.err(), Some(ClientError::UnofferedExtension(16)));
+    }
+
     // ------------------------------------------------------------------ floods
 
     /// Warnings are ignored up to a limit, empty handshake records likewise:
@@ -2578,6 +2672,7 @@ mod refusals {
             groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
             cipher_suites: CipherSuite12::SUPPORTED,
             identity: None,
+            alpn: &[],
         };
         let (mut client, _) = ClientHandshake12::start(&cfg).expect("starts");
         then(&mut client);
@@ -2681,6 +2776,7 @@ mod refusals {
             groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
             cipher_suites: CipherSuite12::SUPPORTED,
             identity: None,
+            alpn: &[],
         };
         let (mut client, _) = ClientHandshake12::start(&cfg).expect("starts");
         assert!(client.read_record(&[21, 3, 3, 0, 2, 2, 40]).is_err());
@@ -2962,6 +3058,7 @@ fn random_records_never_panic_a_handshake_and_never_complete_one() {
         ],
         cipher_suites: CipherSuite12::SUPPORTED,
         identity: None,
+        alpn: &[],
     };
     for round in 0..3000 {
         let (mut client, _) = ClientHandshake12::start(&cfg).expect("starts");

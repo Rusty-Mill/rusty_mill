@@ -212,6 +212,7 @@ impl Server {
             cipher_suites: suites,
             groups,
             client_auth,
+            alpn: &[],
         }
     }
 }
@@ -664,6 +665,7 @@ fn client_config<'a>(
         groups: ALL_GROUPS,
         cipher_suites: suites,
         identity: None,
+        alpn: &[],
     }
 }
 

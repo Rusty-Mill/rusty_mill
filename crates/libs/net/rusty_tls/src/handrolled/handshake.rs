@@ -445,11 +445,97 @@ pub fn validate_client_extensions(extensions: &[Extension<'_>]) -> Result<()> {
     for ext in extensions {
         match ext.typ {
             extension::SERVER_NAME => validate_server_name(ext.data)?,
+            extension::ALPN => {
+                parse_alpn_offer(ext.data)?;
+            }
             extension::CERTIFICATE_AUTHORITIES => validate_certificate_authorities(ext.data)?,
             _ => {}
         }
     }
     Ok(())
+}
+
+/// The body of an ALPN extension offering `protocols`, RFC 7301 section 3.1.
+///
+/// Callers pass non-empty names of at most 255 octets; [`parse_alpn_offer`] is
+/// what refuses the others when they arrive.
+pub fn encode_alpn_offer(protocols: &[&[u8]]) -> Vec<u8> {
+    let mut writer = Writer::new();
+    writer.vector_u16(|w| {
+        for protocol in protocols {
+            w.vector_u8(|w| w.bytes(protocol));
+        }
+    });
+    writer.into_vec()
+}
+
+/// The body of a server's ALPN answer: a list of exactly one name.
+pub fn encode_alpn_selection(protocol: &[u8]) -> Vec<u8> {
+    encode_alpn_offer(&[protocol])
+}
+
+/// Parse a client's ALPN offer: `ProtocolName protocol_name_list<2..2^16-1>`,
+/// each name `<1..2^8-1>`, nothing after the list.
+pub fn parse_alpn_offer(data: &[u8]) -> Result<Vec<&[u8]>> {
+    let mut reader = Reader::new(data);
+    let mut list = reader.sub_u16()?;
+    reader.finish()?;
+    let mut names = Vec::new();
+    while !list.is_empty() {
+        let name = list.vector_u8()?;
+        if name.is_empty() {
+            return Err(HandshakeError::Empty("ALPN protocol name"));
+        }
+        names.push(name);
+    }
+    if names.is_empty() {
+        return Err(HandshakeError::Empty("ALPN protocol_name_list"));
+    }
+    Ok(names)
+}
+
+/// Parse a server's ALPN answer, which names exactly one protocol (RFC 7301
+/// section 3.1).
+pub fn parse_alpn_selection(data: &[u8]) -> Result<&[u8]> {
+    match parse_alpn_offer(data)?.as_slice() {
+        [one] => Ok(one),
+        _ => Err(HandshakeError::Malformed(
+            "an ALPN answer must name exactly one protocol",
+        )),
+    }
+}
+
+/// What a server's ALPN policy concluded about a client's hello.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlpnChoice<'s> {
+    /// ALPN is not in play: the client offered none, or this server has no
+    /// protocols configured. The handshake carries on without it.
+    Unused,
+    /// The first of the server's protocols that the client also offered.
+    Selected(&'s [u8]),
+    /// The client offered some and the server speaks none of them. RFC 7301
+    /// section 3.2: the server aborts with `no_application_protocol`.
+    NoOverlap,
+}
+
+/// Apply a server's ALPN preference list (`ours`, most preferred first) to the
+/// extensions of a ClientHello. The offer is parsed strictly even when `ours`
+/// is empty, because a malformed extension is malformed whoever reads it.
+pub fn choose_alpn<'s>(
+    ours: &'s [&'s [u8]],
+    extensions: &[Extension<'_>],
+) -> Result<AlpnChoice<'s>> {
+    let Some(offer) = find(extensions, extension::ALPN) else {
+        return Ok(AlpnChoice::Unused);
+    };
+    let offered = parse_alpn_offer(offer)?;
+    if ours.is_empty() {
+        return Ok(AlpnChoice::Unused);
+    }
+    Ok(ours
+        .iter()
+        .find(|ours| offered.contains(ours))
+        .map_or(AlpnChoice::NoOverlap, |ours| AlpnChoice::Selected(ours)))
 }
 
 /// RFC 6066 §3: a list of `(name_type, name)`, no entry of a type twice.

@@ -146,6 +146,7 @@ fn read_record(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 struct Served {
     version: Version,
     request: String,
+    alpn: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -259,6 +260,7 @@ fn serve_one(listener: &TcpListener, config: &ServerConfigBoth<'_>) -> Result<Se
     }
     let version = handshake.version().expect("finished");
     let mut connection = handshake.into_connection()?;
+    let alpn = connection.alpn_protocol().map(<[u8]>::to_vec);
 
     let mut request = Vec::new();
     while !request.ends_with(b"hello\n") {
@@ -277,6 +279,7 @@ fn serve_one(listener: &TcpListener, config: &ServerConfigBoth<'_>) -> Result<Se
     Ok(Served {
         version,
         request: String::from_utf8_lossy(&request).into_owned(),
+        alpn,
     })
 }
 
@@ -290,6 +293,15 @@ fn the_client_said(output: &Output) -> String {
 
 /// Run `openssl s_client` against our server.
 fn s_client(material: &Material, args: &[&str]) -> (Result<Served, Failure>, Output) {
+    s_client_alpn(material, args, &[])
+}
+
+/// As [`s_client`], with the server speaking these ALPN protocols.
+fn s_client_alpn(
+    material: &Material,
+    args: &[&str],
+    alpn: &[&[u8]],
+) -> (Result<Served, Failure>, Output) {
     let files = Files::new(&[("root.pem", material.pki.root_pem.as_str())]);
     let tls13 = ServerConfig {
         certificates: &material.certificates,
@@ -298,6 +310,7 @@ fn s_client(material: &Material, args: &[&str]) -> (Result<Served, Failure>, Out
         groups: ALL_GROUPS,
         client_auth: None,
         tickets: None,
+        alpn,
     };
     let tls12 = ServerConfig12 {
         certificates: &material.certificates,
@@ -305,6 +318,7 @@ fn s_client(material: &Material, args: &[&str]) -> (Result<Served, Failure>, Out
         cipher_suites: CipherSuite12::SUPPORTED,
         groups: ALL_GROUPS,
         client_auth: None,
+        alpn,
     };
     let config = ServerConfigBoth {
         tls13: &tls13,
@@ -315,9 +329,16 @@ fn s_client(material: &Material, args: &[&str]) -> (Result<Served, Failure>, Out
     let mut child = Command::new("openssl")
         .args(["s_client", "-connect", &format!("127.0.0.1:{port}")])
         .args(["-servername", SERVER, "-verify_hostname", SERVER])
-        .args(["-verify_return_error", "-quiet", "-no_ticket"])
+        .args(["-verify_return_error", "-no_ticket"])
+        // `-quiet` hides the session summary, ALPN line included; a caller that
+        // wants OpenSSL's own account of the connection passes `-verbose_report`.
+        .args(if args.contains(&"-verbose_report") {
+            None
+        } else {
+            Some("-quiet")
+        })
         .args(["-CAfile", &files.path("root.pem")])
-        .args(args)
+        .args(args.iter().filter(|a| **a != "-verbose_report"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -528,6 +549,15 @@ fn strip_tls13(record: &[u8]) -> Vec<u8> {
 /// Handshake with the server at `port`, send a request, read the response to
 /// the close.
 fn talk(material: &Material, port: u16) -> Result<(Version, String), Failure> {
+    talk_alpn(material, port, &[]).map(|(version, response, _)| (version, response))
+}
+
+/// As [`talk`], offering these ALPN protocols and reporting the one selected.
+fn talk_alpn(
+    material: &Material,
+    port: u16,
+    alpn: &[&[u8]],
+) -> Result<(Version, String, Option<Vec<u8>>), Failure> {
     let anchors = [TrustAnchor::from_certificate(
         &Certificate::parse(&material.pki.root_der).expect("root parses"),
     )];
@@ -539,6 +569,7 @@ fn talk(material: &Material, port: u16) -> Result<(Version, String), Failure> {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn,
     };
     let config = ClientConfigBoth::new(tls13, CipherSuite12::SUPPORTED);
     let mut socket = TcpStream::connect(("127.0.0.1", port))?;
@@ -554,6 +585,7 @@ fn talk(material: &Material, port: u16) -> Result<(Version, String), Failure> {
     }
     let version = handshake.version().expect("finished");
     let mut connection = handshake.into_connection()?;
+    let selected = connection.alpn_protocol().map(<[u8]>::to_vec);
     socket.write_all(&write_app(&mut connection, b"GET / HTTP/1.0\r\n\r\n")?)?;
 
     let mut body = Vec::new();
@@ -563,7 +595,11 @@ fn talk(material: &Material, port: u16) -> Result<(Version, String), Failure> {
             None => break,
         }
     }
-    Ok((version, String::from_utf8_lossy(&body).into_owned()))
+    Ok((
+        version,
+        String::from_utf8_lossy(&body).into_owned(),
+        selected,
+    ))
 }
 
 #[test]
@@ -584,6 +620,64 @@ fn our_client_gets_the_best_version_openssl_offers() {
         assert!(
             response.starts_with("HTTP/1.0 200 ok"),
             "{extra:?}: {response}"
+        );
+    }
+}
+
+/// ALPN against OpenSSL in both directions and both versions: our client
+/// reads the protocol `s_server` picks, and `s_client` reports the one our
+/// server picked (OpenSSL's own `-brief` summary is the second opinion).
+#[test]
+#[ignore = "needs the openssl binary; CI runs it with --ignored"]
+fn alpn_agrees_with_openssl_in_both_directions_and_both_versions() {
+    let material = Material::new();
+    for version in ["-tls1_3", "-tls1_2"] {
+        // Our client offers h2 first; s_server prefers http/1.1 and says so.
+        let server = s_server(&material, &[version, "-alpn", "http/1.1,h2"]);
+        let (_, response, selected) = talk_alpn(&material, server.port, &[b"h2", b"http/1.1"])
+            .unwrap_or_else(|f| panic!("{version}: {f:?}"));
+        assert!(
+            response.starts_with("HTTP/1.0 200 ok"),
+            "{version}: {response}"
+        );
+        assert_eq!(
+            selected,
+            Some(b"http/1.1".to_vec()),
+            "{version}: client side"
+        );
+
+        // OpenSSL as the client offering both; our server prefers http/1.1.
+        let (served, output) = s_client_alpn(
+            &material,
+            &[version, "-verbose_report", "-alpn", "h2,http/1.1"],
+            &[b"http/1.1", b"h2"],
+        );
+        let said = the_client_said(&output);
+        let served = served.unwrap_or_else(|f| panic!("{version}: {f:?}\n{said}"));
+        assert_eq!(
+            served.alpn,
+            Some(b"http/1.1".to_vec()),
+            "{version}: server side"
+        );
+        assert!(
+            said.contains("ALPN protocol: http/1.1"),
+            "{version}: OpenSSL did not see the selection:\n{said}"
+        );
+
+        // Nothing in common: our server says no_application_protocol, and
+        // OpenSSL reports that alert.
+        let (served, output) = s_client_alpn(&material, &[version, "-alpn", "h2"], &[b"h3"]);
+        let said = the_client_said(&output);
+        assert!(
+            matches!(
+                served,
+                Err(Failure::Refused(ServerError::NoApplicationProtocol))
+            ),
+            "{version}: {served:?}"
+        );
+        assert!(
+            said.contains("alert number 120"),
+            "{version}: OpenSSL did not report alert 120 (no_application_protocol):\n{said}"
         );
     }
 }

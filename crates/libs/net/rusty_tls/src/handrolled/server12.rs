@@ -63,8 +63,8 @@
 use super::client::Alert;
 use super::client12::{CipherSuite12, Connection12, Role};
 use super::handshake::{
-    self, complete_prefix, extension, find, messages, Extension, HandshakeError, HandshakeType,
-    Message,
+    self, choose_alpn, complete_prefix, encode_alpn_selection, extension, find, messages,
+    AlpnChoice, Extension, HandshakeError, HandshakeType, Message,
 };
 use super::handshake12::{
     self, message, parse_client_key_exchange, parse_finished, Certificate12, CertificateRequest12,
@@ -109,6 +109,11 @@ pub struct ServerConfig12<'a> {
     /// Whether, and how, to ask the client to authenticate. `None` sends no
     /// `CertificateRequest`.
     pub client_auth: Option<&'a ClientAuth<'a>>,
+    /// Application protocols this server speaks (RFC 7301), most preferred
+    /// first; the first the client also offered is selected. Empty ignores
+    /// ALPN. A client offering some and sharing none gets
+    /// `no_application_protocol`.
+    pub alpn: &'a [&'a [u8]],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +158,8 @@ struct Hs {
     /// The server's ephemeral key, consumed by `ClientKeyExchange`.
     kx: Option<KeyExchange>,
     client_certificates: Vec<Vec<u8>>,
+    /// The application protocol selected by ALPN, if any.
+    alpn: Option<Vec<u8>>,
     /// Set once `ClientKeyExchange` has been processed.
     established: Option<Established>,
 }
@@ -258,6 +265,7 @@ impl<'a> ServerHandshake12<'a> {
                 hash,
                 kx: None,
                 client_certificates: Vec::new(),
+                alpn: None,
                 established: None,
             },
             buffer: Vec::new(),
@@ -571,6 +579,19 @@ impl<'a> ServerHandshake12<'a> {
                 data: &[1, 0],
             });
         }
+        let alpn_answer;
+        match choose_alpn(config.alpn, &hello.extensions)? {
+            AlpnChoice::Unused => {}
+            AlpnChoice::NoOverlap => return Err(ServerError::NoApplicationProtocol),
+            AlpnChoice::Selected(protocol) => {
+                alpn_answer = encode_alpn_selection(protocol);
+                extensions.push(Extension {
+                    typ: extension::ALPN,
+                    data: &alpn_answer,
+                });
+                self.hs.alpn = Some(protocol.to_vec());
+            }
+        }
         let server_hello = ServerHello12 {
             version: TLS12,
             random: &random,
@@ -750,13 +771,16 @@ impl<'a> ServerHandshake12<'a> {
         let mut reply = plaintext_record(ContentType::ChangeCipherSpec, &[1])?;
         reply.extend(finished);
 
-        self.connection = Some(Connection12::new(
-            Role::Server,
-            sealer,
-            established.opener,
-            self.hs.suite,
-            core::mem::take(&mut self.hs.client_certificates),
-        ));
+        self.connection = Some(
+            Connection12::new(
+                Role::Server,
+                sealer,
+                established.opener,
+                self.hs.suite,
+                core::mem::take(&mut self.hs.client_certificates),
+            )
+            .with_alpn(self.hs.alpn.take()),
+        );
         self.phase = Phase::Done;
         Ok(reply)
     }

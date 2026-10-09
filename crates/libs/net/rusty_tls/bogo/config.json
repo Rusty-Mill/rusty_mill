@@ -1,5 +1,13 @@
 {
   "DisabledTests": {
+    "ALPNClient-RejectUnknown-TLS-TLS1": "TLS 1.0, 1.1 and SSL 3 are outside the engine by design (TLS12-DESIGN.md, 'Refused, with a test each'): the scenario negotiates, or needs a peer that offers, a version this engine will not speak.",
+    "ALPNClient-RejectUnknown-TLS-TLS11": "TLS 1.0, 1.1 and SSL 3 are outside the engine by design (TLS12-DESIGN.md, 'Refused, with a test each'): the scenario negotiates, or needs a peer that offers, a version this engine will not speak.",
+    "ALPNClient-TLS-TLS1": "TLS 1.0, 1.1 and SSL 3 are outside the engine by design (TLS12-DESIGN.md, 'Refused, with a test each'): the scenario negotiates, or needs a peer that offers, a version this engine will not speak.",
+    "ALPNClient-TLS-TLS11": "TLS 1.0, 1.1 and SSL 3 are outside the engine by design (TLS12-DESIGN.md, 'Refused, with a test each'): the scenario negotiates, or needs a peer that offers, a version this engine will not speak.",
+    "ALPNClient-TLS-TLS12": "TLS 1.2 resumption (session IDs and tickets) is not implemented by design (TLS12-DESIGN.md: no 1.2 resumption); the test expects the second connection to resume.",
+    "ALPNServer-Decline-TLS-TLS1": "TLS 1.0, 1.1 and SSL 3 are outside the engine by design (TLS12-DESIGN.md, 'Refused, with a test each'): the scenario negotiates, or needs a peer that offers, a version this engine will not speak.",
+    "ALPNServer-Decline-TLS-TLS11": "TLS 1.0, 1.1 and SSL 3 are outside the engine by design (TLS12-DESIGN.md, 'Refused, with a test each'): the scenario negotiates, or needs a peer that offers, a version this engine will not speak.",
+    "ALPNServer-Decline-TLS-TLS12": "TLS 1.2 resumption (session IDs and tickets) is not implemented by design (TLS12-DESIGN.md: no 1.2 resumption); the test expects the second connection to resume.",
     "Agree-Digest-Default": "The engine signs RSA with PSS only (sign.rs); a client that offers only PKCS#1 v1.5 is refused rather than answered with a signature it did not offer.",
     "Basic-Client-NoTicket-TLS-Async": "TLS 1.2 resumption (session IDs and tickets) is not implemented by design (TLS12-DESIGN.md: no 1.2 resumption); the test expects the second connection to resume.",
     "Basic-Client-NoTicket-TLS-Async-PackHandshake": "TLS 1.2 resumption (session IDs and tickets) is not implemented by design (TLS12-DESIGN.md: no 1.2 resumption); the test expects the second connection to resume.",

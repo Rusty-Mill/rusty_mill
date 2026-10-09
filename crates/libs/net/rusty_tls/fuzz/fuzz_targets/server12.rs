@@ -59,6 +59,7 @@ fuzz_target!(|data: &[u8]| {
         cipher_suites: CipherSuite12::SUPPORTED,
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1, NamedGroup::SecP384R1],
         client_auth: (flag & 1 == 1).then_some(&auth),
+        alpn: &[],
     };
     let Ok(mut server) = ServerHandshake12::new(&config) else {
         return;

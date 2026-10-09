@@ -15,13 +15,13 @@ so treat it like a dependency bump. Output lands in `target/` (`run.log`,
 
 ## What the counts mean
 
-At the pinned commit: 741 pass, 0 fail, the rest skipped.
+At the pinned commit: 754 pass, 0 fail, the rest skipped.
 
 | Skipped | Why |
 |---|---|
-| ~4300 | need a shim flag it does not implement (credentials, verify callbacks, OCSP, ALPN, ...) — the shim exits 89; `BOGO_UNIMPLEMENTED_LOG=file` records which, to rank the next one |
+| ~4300 | need a shim flag it does not implement (credentials, verify callbacks, OCSP, ...) — the shim exits 89; `BOGO_UNIMPLEMENTED_LOG=file` records which, to rank the next one |
 | ~2000 / ~700 | DTLS / QUIC: out of scope |
-| 301 | listed in `config.json` with a reason each |
+| 309 | listed in `config.json` with a reason each |
 
 `config.json` holds exact test names, never globs: a glob hides tests that
 pass. Every entry is a finding or a documented difference, not a convenience.

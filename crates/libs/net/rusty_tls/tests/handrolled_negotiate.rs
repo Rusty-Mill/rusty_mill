@@ -168,6 +168,7 @@ impl Material {
             groups: ALL_GROUPS,
             client_auth: None,
             tickets: None,
+            alpn: &[],
         }
     }
 
@@ -178,6 +179,7 @@ impl Material {
             cipher_suites: CipherSuite12::SUPPORTED,
             groups: ALL_GROUPS,
             client_auth: None,
+            alpn: &[],
         }
     }
 }
@@ -191,6 +193,7 @@ fn client_13<'a>(anchors: &'a [TrustAnchor<'a>]) -> ClientConfig<'a> {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     }
 }
 
@@ -745,6 +748,7 @@ fn the_sentinel_is_only_written_when_this_server_could_have_spoken_1_3() {
         groups: ALL_GROUPS,
         cipher_suites: CipherSuite12::SUPPORTED,
         identity: None,
+        alpn: &[],
     };
     let (_, hello) =
         rusty_tls::handrolled::client12::ClientHandshake12::start(&config).expect("hello");
@@ -799,6 +803,7 @@ fn hello_12(material: &Material) -> Vec<u8> {
         groups: ALL_GROUPS,
         cipher_suites: CipherSuite12::SUPPORTED,
         identity: None,
+        alpn: &[],
     };
     rusty_tls::handrolled::client12::ClientHandshake12::start(&config)
         .expect("hello")
@@ -1098,6 +1103,7 @@ fn a_tls12_only_client_completes_against_the_two_version_server_despite_the_sent
         groups: ALL_GROUPS,
         cipher_suites: CipherSuite12::SUPPORTED,
         identity: None,
+        alpn: &[],
     };
     let (mut client, hello) =
         rusty_tls::handrolled::client12::ClientHandshake12::start(&client_config).expect("hello");
