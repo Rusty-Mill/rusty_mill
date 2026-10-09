@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rk-kernel: rk-observe is a dev-dependency (pending review)
+
+- **Fixed:** `cargo-shear` failed on `main` with `misplaced dependency rk-observe`. `rk-kernel` only names `rk_observe::ToolOutcome` in a doc comment and in `tests/loop_test.rs`, so the dependency moves to `[dev-dependencies]` and the doc comment's intra-doc link becomes plain code (a link would not resolve without the dependency). No code change; `Cargo.lock` unchanged.
+
+---
+
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
 - **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
