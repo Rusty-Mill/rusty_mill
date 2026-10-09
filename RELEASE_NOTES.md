@@ -15,7 +15,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ## 2026-10-09 - rusty_bbp stage 3c: moderator loop and master secret (pending review)
 
-- **Added:** `bbp mod`, the moderator loop: one agent harness per granted turn with a per-turn MCP config, the runner per selected run, deadlines, forfeit on early exit, until the task closes. Tokens and run secrets are keyed by a per-directory master secret that never enters the log.
+- **Added:** `bbp mod`, the moderator loop: one agent harness per granted turn with a per-turn MCP config, the runner per selected run, deadlines, forfeit on early exit, until the task closes. One moderator per task; a restart aborts the turn it cannot see so the old invocation is fenced; harnesses die with their process group on every exit path; the runner runs on its own thread so cancellation is honoured mid-profile. Tokens and run secrets are keyed by a per-directory master secret that never enters the log and is created with a single winner.
+- **Boundary:** the harness runs as the moderator's user and is trusted with the task directory; `bbp mcp` fences the model's tool calls, not the harness process. An untrusted harness needs its own sandbox or user.
 - **Changed:** `TurnGranted` and `RunStarted` no longer carry the token or secret; no stored data predates this.
 - **Verified by hand:** one live Claude Code planner turn through `bbp mod` and `bbp mcp` stored a spec and reached the plan gate (recorded in the crate README); the scripted agents in `tests/moderator_e2e.rs` cover the full path in CI. The core grants and immediately revokes a Coder turn when a candidate submission moves the task to `test`, which costs one turn of budget per candidate; to be tightened in the core.
 

@@ -55,6 +55,12 @@ The runner is Unix-shaped: profile sets take Unix absolute read roots and the de
 
 `bbp mod` is the loop that makes the core's decisions happen. Every poll it re-reads the store, fires deadlines (`Tick`), starts the runner once for a selected run with no report, launches one agent harness for a newly granted turn, and reaps a harness whose turn has ended. Human gates are states with no turn, so the loop waits through them; `bbp human` from another shell moves the task on. It returns when the task is `closed` or `cancelled`, or fails after `--max-wall-secs`.
 
+One moderator per task: the loop holds an exclusive lock on `<dir>/mod/<task>.lock` for its lifetime and a second `bbp mod` on the same task is refused. A turn that is live when the loop starts belongs to an invocation this moderator cannot see or stop (a harness an earlier moderator launched), so after firing deadlines it aborts that turn: the old `bbp mcp` answers "turn has ended" to anything but the free card and an exact replay, and the replacement turn is launched here with a fresh token. Gates have no turn and keep waiting.
+
+Every harness runs in its own process group and is killed, group and all, when its turn ends, when the task closes or is cancelled, at the wall limit, and on any error the loop returns, so an inference CLI's children do not outlive the moderator; a kill that fails is reported, not ignored. The runner works on its own thread, so cancellation and the wall limit are honoured while a profile is still executing (the profile itself is bounded by its sandbox wall limit).
+
+The harness is trusted with the directory. It runs as the moderator's user, so a harness with shell or file tools can read `<dir>/master` or call `bbp human`; `bbp mcp` is the fence for the model's tool calls, not for the harness process. Run a harness you do not trust under its own sandbox or user, with the task directory unreadable to it except through the MCP server.
+
 `--agents FILE` names one launcher per role:
 
 ```json
@@ -64,7 +70,7 @@ The runner is Unix-shaped: profile sets take Unix absolute read roots and the de
  "reviewer":{"program": "claude", "args": ["-p", "You are the reviewer.","--mcp-config", "{mcp_config}"]}}
 ```
 
-Arguments may use `{dir}`, `{task}`, `{principal}`, `{turn}`, `{role}`, `{bbp}` (this binary) and `{mcp_config}`: a Claude Code MCP config written per turn at `<dir>/mcp/turn-N.json` that starts `bbp mcp` bound to that turn. The harness also gets `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL`, `BBP_TURN`, `BBP_ROLE`, `BBP_BIN` and `BBP_MCP_CONFIG` in its environment; its output goes to `<dir>/agents/turn-N.log`. A harness that exits without ending its turn forfeits it: the moderator aborts the turn so the protocol moves on. A role without a launcher is left to its deadline.
+Arguments may use `{dir}`, `{task}`, `{principal}`, `{turn}`, `{role}`, `{bbp}` (this binary) and `{mcp_config}`: a Claude Code MCP config written whole-or-nothing per turn at `<dir>/mcp/<sha256(task)>/turn-N.json` that starts `bbp mcp` bound to that turn. The harness also gets `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL`, `BBP_TURN`, `BBP_ROLE`, `BBP_BIN` and `BBP_MCP_CONFIG` in its environment; its output goes to `<dir>/agents/<sha256(task)>/turn-N.log`. A harness that exits without ending its turn forfeits it: the moderator aborts the turn so the protocol moves on. A role without a launcher is left to its deadline.
 
 ### Live smoke
 
@@ -72,4 +78,4 @@ Run once by hand with Claude Code 2.1.295 as the planner (`claude -p … --mcp-c
 
 ## The master secret
 
-`bbp open` creates `<dir>/master`, 32 random bytes from `rusty_rand`, owner-readable only. Every execution token and run secret is a digest keyed by it, and neither ever enters the log. A process that can read the log but not the master cannot forge a token; the agent harness sees neither, only the per-turn `bbp mcp` server, which derives the token for its own turn.
+`bbp open` creates `<dir>/master`, 32 random bytes from `rusty_rand`, owner-readable only, published with a no-clobber link so two first opens racing each other both come back with the key on disk and no later process overwrites a key an earlier one already uses. Every execution token and run secret is a digest keyed by it, and neither ever enters the log. A process that can read the log but not the master cannot forge a token; the agent harness sees neither, only the per-turn `bbp mcp` server, which derives the token for its own turn.

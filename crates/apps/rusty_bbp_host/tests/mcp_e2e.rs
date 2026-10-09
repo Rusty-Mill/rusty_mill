@@ -334,13 +334,14 @@ fn drive_to_test(dir: &Path, task: &TaskId) -> (u64, u64, u64) {
 fn runner_passes(dir: &Path, task: &TaskId, log: &[u8]) -> (ArtId, ArtId) {
     let mut d = open_driver(dir, task).expect("driver");
     let run = d.state.run.clone().expect("selected run");
+    let secret = d.state.secret_for(run.id);
     let blob = d.store.blob_put(log);
     let store_as = |d: &mut Driver<FsStore>, blob, payload, op: &str| match d
         .dispatch(
             &Command::Runner {
                 op: OpId(op.into()),
                 run: run.id,
-                secret: run.secret,
+                secret,
                 blob,
                 payload,
             },
@@ -460,12 +461,8 @@ fn a_delayed_rerun_meets_stale_rev_and_the_newer_run_survives() {
     let (_, _, cand) = drive_to_test(&dir, &task);
     let cand = cand.to_string();
     let seen = admin::card(&dir, &task).expect("card").rev;
-    assert_eq!(
-        human::perform(&dir, &task, "rerun", &[&cand], None)
-            .unwrap_err()
-            .contains("--rev"),
-        true
-    );
+    let refused = human::perform(&dir, &task, "rerun", &[&cand], None).unwrap_err();
+    assert!(refused.contains("--rev"), "{refused}");
     let r = human::perform(&dir, &task, "rerun", &[&cand], Some(seen)).expect("rerun");
     assert_eq!(r, Response::Ok);
     let run2 = open_driver(&dir, &task)
@@ -495,6 +492,39 @@ fn a_delayed_rerun_meets_stale_rev_and_the_newer_run_survives() {
             .expect("run")
             .id,
         run2
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Racing first opens agree on one master: the key on disk.
+#[test]
+fn master_initialisation_has_one_winner() {
+    use rusty_bbp_host::master;
+    use std::sync::{Arc, Barrier};
+    let dir = tempdir("master");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let n = 4;
+    let barrier = Arc::new(Barrier::new(n));
+    let keys: Vec<[u8; 32]> = (0..n)
+        .map(|_| {
+            let (dir, barrier) = (dir.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                master::ensure(&dir).expect("ensure")
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|h| h.join().expect("join"))
+        .collect();
+    let on_disk = master::load(&dir).expect("load");
+    assert!(
+        keys.iter().all(|k| *k == on_disk),
+        "every initialiser returned the published key"
+    );
+    assert!(
+        std::fs::read_dir(&dir).expect("dir").count() == 1,
+        "no candidate file left behind"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -55,18 +55,29 @@ pub mod master {
     }
 
     /// Create the master if the directory has none, from `rusty_rand`.
+    ///
+    /// Single winner: the candidate is written whole to a private temporary
+    /// file and published with a no-clobber `hard_link`, so two first opens
+    /// racing each other both come back with the key on disk and no later
+    /// process ever overwrites a key an earlier one is already using.
     pub fn ensure(dir: &Path) -> Result<[u8; 32], String> {
         if path(dir).exists() {
             return load(dir);
         }
         let bytes = rusty_rand::bytes(32).map_err(|e| format!("rusty_rand: {e}"))?;
-        let mut master = [0u8; 32];
-        master.copy_from_slice(&bytes);
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let hex = Sha256(master).hex();
-        rusty_atomic_file::write_private(&path(dir), hex.as_bytes())
+        let mut candidate = [0u8; 32];
+        candidate.copy_from_slice(&bytes);
+        let tmp = dir.join(format!("master.{}", Sha256::of(&bytes).hex()));
+        rusty_atomic_file::write_private(&tmp, Sha256(candidate).hex().as_bytes())
             .map_err(|e| format!("master: {e}"))?;
-        Ok(master)
+        let published = std::fs::hard_link(&tmp, path(dir));
+        let _ = std::fs::remove_file(&tmp);
+        match published {
+            Ok(()) => Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => load(dir),
+            Err(e) => Err(format!("master: {e}")),
+        }
     }
 
     /// Read the master; a directory without one was never opened.
