@@ -137,11 +137,14 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
                 role: *role,
                 principal: principal.clone(),
             });
-            schedule(w, now);
+            // No grant here: a turn needs a host ready to launch its harness,
+            // and assignment happens before any moderator runs. The first
+            // `Tick` grants it.
             Ok(Flow::Done(Response::Ok))
         }
         Command::Tick => {
             require_open(&w.st)?;
+            schedule(w, now);
             Ok(Flow::Done(Response::Ok))
         }
         Command::AbortTurn => {

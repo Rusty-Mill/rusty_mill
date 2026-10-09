@@ -15,7 +15,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ## 2026-10-09 - rusty_bbp: no wasted Coder turn on candidate submission
 
-- **Fixed:** submitting a candidate ended the Coder turn and scheduled the next one while the task was still in `build`, granting a Coder turn that the transition to `test` revoked on the next line. Each candidate cost one turn of budget and skipped a turn id. The turn now ends without scheduling; the `test` entry schedules once. Regression test in `tests/rules.rs`; the moderator test asserts turns 1 to 4 exactly.
+- **Fixed:** submitting a candidate ended the Coder turn and scheduled the next one while the task was still in `build`, granting a Coder turn that the transition to `test` revoked on the next line. Each candidate cost one turn of budget and skipped a turn id. The turn now ends without scheduling; the `test` entry schedules once.
+- **Changed:** `Assign` no longer grants a turn; the first `Tick` does. A turn needs a host ready to launch its harness, and roles are assigned before any moderator runs, so the turn `assign` granted was always aborted by the moderator's restart fence (another wasted turn and skipped id). `bbp mod` ticks first thing; a hand-driven flow runs `bbp tick` after assigning. Regression tests in `tests/rules.rs`; the moderator test asserts turns 1 to 4 exactly.
 
 ---
 

@@ -229,11 +229,11 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
     let d = open_driver(&dir, &task).expect("driver");
     let run = d.state.selected_run().expect("run");
     assert_eq!(run.status, Some(RunStatus::Passed));
-    // One harness log and one MCP config per launched turn, with contiguous
-    // ids: the candidate submission grants nothing for the transition to
-    // revoke. Turn 1 was granted by `assign` before this moderator started,
-    // so the loop aborted it and launched from turn 2.
-    for turn in 2..=5 {
+    // One harness log and one MCP config per launched turn, and the turns
+    // are exactly 1..=4: assignment grants nothing (the moderator's first
+    // tick does) and the candidate submission grants nothing for the
+    // transition to revoke.
+    for turn in 1..=4 {
         assert!(
             moderator::log_path(&dir, &task, TurnId(turn)).exists(),
             "log for turn {turn}"
@@ -437,6 +437,8 @@ fn a_restarted_moderator_fences_the_invocation_it_cannot_see() {
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
     open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    // An earlier moderator's first tick granted turn 1 and launched for it.
+    admin::tick(&dir, &task).expect("tick");
     let turn = open_driver(&dir, &task)
         .expect("driver")
         .state
@@ -497,13 +499,14 @@ fn two_moderators_cannot_hold_one_task() {
     holder.lock().expect("lock");
     let err = moderator::run(&config(&dir, &task, repo, Launchers::default(), 2)).unwrap_err();
     assert!(err.contains("another moderator"), "{err}");
-    let first = open_driver(&dir, &task)
-        .expect("driver")
-        .state
-        .turn
-        .expect("turn")
-        .id;
-    assert_eq!(first, TurnId(1), "the refused moderator touched nothing");
+    assert!(
+        open_driver(&dir, &task)
+            .expect("driver")
+            .state
+            .turn
+            .is_none(),
+        "the refused moderator touched nothing"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

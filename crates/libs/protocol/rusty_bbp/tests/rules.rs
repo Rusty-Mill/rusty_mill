@@ -564,3 +564,56 @@ fn candidate_submission_grants_no_turn_for_the_transition_to_revoke() {
         "no turn was revoked on the way to test"
     );
 }
+
+/// Assignment grants no turn: nothing is ready to serve it. The first `Tick`
+/// grants the Planner's turn, and a second `Tick` grants nothing more.
+#[test]
+fn assignment_grants_nothing_until_the_first_tick() {
+    let mut store = MemStore::new();
+    let brief = store.blob_put(b"brief");
+    let task = TaskId("T2".into());
+    let mut d = Driver::new(store, task.clone());
+    let open = Command::Open(OpenTask {
+        task,
+        repo: "r".into(),
+        profile_digest: DIGEST,
+        budget: Budget {
+            messages: 40,
+            bytes: 5_000_000,
+            reads: 150,
+            reads_per_turn: 30,
+            turns: 60,
+            iterations: 4,
+        },
+        turn_ms: 60_000,
+        request_ms: 3_600_000,
+        brief,
+        human: PrincipalId("human".into()),
+    });
+    assert!(matches!(
+        d.dispatch(&open, Time(1)).expect("open"),
+        Response::Stored(_)
+    ));
+    for role in Role::ALL {
+        let principal = Principal {
+            id: pid(role),
+            kind: PrincipalKind::Agent {
+                role,
+                vendor: vendor(role).into(),
+            },
+        };
+        ok(d.dispatch(&Command::Assign { role, principal }, Time(2))
+            .expect("assign"));
+    }
+    assert!(d.state.turn.is_none(), "assignment granted a turn");
+    assert_eq!(d.state.next_turn, 1);
+    ok(d.dispatch(&Command::Tick, Time(3)).expect("tick"));
+    let turn = d.state.turn.clone().expect("the first tick grants");
+    assert_eq!((turn.id, turn.role), (TurnId(1), Role::Planner));
+    ok(d.dispatch(&Command::Tick, Time(4)).expect("tick"));
+    assert_eq!(d.state.turn.as_ref().map(|t| t.id), Some(TurnId(1)));
+    assert_eq!(
+        d.state.next_turn, 2,
+        "a tick with a live turn grants nothing"
+    );
+}
