@@ -1,6 +1,6 @@
 # Dots-style always-on agents, composed from rusty_mill
 
-Date: 2026-10-07 · Status: **design only, awaiting approval** (no code, no PR) · Base: `main` @ 4506e96
+Date: 2026-10-07 · Status: **design approved 2026-10-09 with the recommendations in §9; implementation not started** · Base: `main` @ 4506e96
 
 ## 0. Verdict
 
@@ -202,7 +202,7 @@ Scope: Scribe reads and edits pages, recalls and stores memory (remind_me over M
 
 | # | Task | Output / test gate | Effort | Depends |
 |---|---|---|---|---|
-| 0 | **You approve this design** and answer §9 | decision record | - | - |
+| 0 | Design approved, §9 answered (2026-10-09) | this PR | - | - |
 | 1 | D0: run `rusty-agui-conformance` on 1.0.2; schema-validate fixtures | green CI or a concrete delta list | S | 0 |
 | 2 | Land audit steps 1-3 (bearer helper, `constant_time_eq`, `Emitter` helpers) or confirm we call current locations | no duplicate helper added | S | 0 |
 | 3 | `dots-core`: `Page`/`PagePatch`/conflict rules, `Router`, `Pause`, ports | unit tests: stale revision => Conflict; size cap; cycle; unknown identity unrouted; paused refuses | M | 0 |
@@ -236,9 +236,11 @@ Post-MVP (unordered): D1+D2 interrupts; routines with persistence + channel deli
 | R12 | CopilotKit React SDK not in CI, only `@ag-ui/client` | FOLLOW-ONS:110-117 | Keep `copilotkit-demo` as manual check |
 | R13 | This design overlaps the homelab **Agent OS / Hermes** stack (LXC 107) | remind-me | Q5 |
 
-## 9. Open questions (need your decision)
+## 9. Decisions
 
-| Q | Decision | Recommendation |
+Approved 2026-10-09 with each recommendation below. Q2 stays conditional on its spike (task 4); Q1-Q10 otherwise settled.
+
+| Q | Decision | Approved |
 |---|---|---|
 | Q1 | Agent runtime: `rusty_adk` or `rusty_key`? | **adk**: libs-layer, graph + HITL suspension, SQLite sessions, `adk-mcp`, no external `aisdk`. `rusty_key` is an app; its approval gate is richer but app-to-app dependency is illegal |
 | Q2 | App store: `rusty_sqlite` or `rusty_multimodal_db_engine`? (FOLLOW-ONS open Q2) | `rusty_sqlite` for relational page tree and revisions, **after** a half-day spike confirming it covers transactions + the tree query; engine if you want one store across `rusty_tick`, remind_me |

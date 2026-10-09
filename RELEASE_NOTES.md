@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - Design: Dots-style always-on agents (pending review)
+
+- **Added:** `docs/design/DOTS-AGENT.md`, an approved design for always-on agents with Slack and a pages workspace, composed from existing crates. Documentation only; no code, no new dependencies.
+- **Known limitations:** nothing was built or run; AG-UI 1.0 deltas for `rusty_agui` are listed, not fixed; the consolidation audit it cites is still on `claude/peaceful-dirac-200syz`.
+
+---
+
 ## 2026-10-07 - Term and Tick Tailwind 4 CI repair (pending review)
 
 - **Fixed:** both web builds use `@tailwindcss/vite` 4.3.3, import Tailwind's v4 CSS, and explicitly load their existing theme configurations. Existing dependency versions, React integration, aliases, chunking, proxies, and CI gates are unchanged.
