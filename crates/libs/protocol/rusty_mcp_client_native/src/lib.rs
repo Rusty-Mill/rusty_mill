@@ -14,10 +14,12 @@
 //!   JSON and event-stream replies, sessions, the standalone push stream with
 //!   resumption, and hang-up cancellation.
 //!
-//! The async facade is the next slice.
+//! - [`AsyncClient`]: the blocking client on a worker thread behind futures,
+//!   usable from any executor.
 
 #![forbid(unsafe_code)]
 
+pub mod asynchronous;
 pub mod client;
 pub mod error;
 #[cfg(feature = "http")]
@@ -27,6 +29,7 @@ pub mod sse;
 pub mod stdio;
 pub mod transport;
 
+pub use asynchronous::{AsyncClient, Reply};
 pub use client::{Client, Handler, NoHandler};
 pub use error::ClientError;
 #[cfg(feature = "http")]

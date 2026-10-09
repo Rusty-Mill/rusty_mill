@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_mcp_client_native, async face (pending review)
+
+- **Added:** `AsyncClient`, usable from tokio or any executor, over the stdio or HTTP transports; 7 tests.
+- **Not done:** no consumer uses the client yet. `rusty-mcp-client` cannot be rebuilt on it without changing its public API (it returns `rmcp`'s `Tool`, `Resource`, `Prompt` and `CallToolResult`); that needs an owner decision.
+
+---
+
 ## 2026-10-08 - rusty_mcp_client_native, Streamable HTTP (pending review)
 
 - **Added:** the HTTP transport (feature `http`) on `rusty_request`, verified against `rusty_mcp_server` and against `rmcp`'s own HTTP server (with and without sessions).

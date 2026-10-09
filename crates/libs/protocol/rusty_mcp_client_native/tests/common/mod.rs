@@ -11,6 +11,7 @@ use rusty_mcp_client_native::proto::{
 use rusty_mcp_client_native::proto::{ClientCapabilities, ElicitResult, Wire};
 use rusty_mcp_client_native::{ClientConfig, Handler};
 use rusty_mcp_server::{answer, Ask, Server, ServerBuilder, ToolOutcome, Turn};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const SECS: Duration = Duration::from_secs(5);
@@ -190,4 +191,44 @@ impl Handler for Asker {
             meta: None,
         }
     }
+}
+
+pub struct Running {
+    pub url: String,
+    pub stop: rusty_serve::ShutdownHandle,
+    pub changes: rusty_mcp_server::ChangeBroadcaster,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop.shutdown();
+    }
+}
+
+pub fn serve_with(builder: ServerBuilder) -> Running {
+    let changes = rusty_mcp_server::ChangeBroadcaster::new();
+    let server = builder
+        .notify_changes(&changes, rusty_mcp_server::ChangeKinds::all())
+        .build()
+        .unwrap();
+    let config = rusty_mcp_server::HttpConfig {
+        sse_after: Duration::from_millis(100),
+        keep_alive: Duration::from_millis(100),
+        ..rusty_mcp_server::HttpConfig::default()
+    };
+    let http = rusty_mcp_server::bind_http(
+        Arc::new(server),
+        "127.0.0.1:0".parse().unwrap(),
+        config,
+        rusty_serve::Limits::default(),
+    )
+    .unwrap();
+    let url = format!("http://{}/mcp", http.local_addr().unwrap());
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    Running { url, stop, changes }
+}
+
+pub fn serve() -> Running {
+    serve_with(builder())
 }

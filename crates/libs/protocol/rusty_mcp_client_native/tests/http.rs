@@ -4,57 +4,15 @@
 
 mod common;
 
-use common::{builder, eliciting, first_text, with_tasks, Asker, SECS};
+use common::{builder, eliciting, first_text, serve, serve_with, with_tasks, Asker, SECS};
 use rusty_mcp_client_native::json::Value;
 use rusty_mcp_client_native::{
     Client, ClientConfig, ClientError, Handler, HttpConfig, HttpTransport, NoHandler,
 };
-use rusty_mcp_server::{bind_http, ChangeBroadcaster, ChangeKinds, HttpConfig as ServerHttp};
-use rusty_serve::{Limits, ShutdownHandle};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-struct Running {
-    url: String,
-    stop: ShutdownHandle,
-    changes: ChangeBroadcaster,
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.stop.shutdown();
-    }
-}
-
-fn serve_with(builder: rusty_mcp_server::ServerBuilder) -> Running {
-    let changes = ChangeBroadcaster::new();
-    let server = builder
-        .notify_changes(&changes, ChangeKinds::all())
-        .build()
-        .unwrap();
-    let config = ServerHttp {
-        sse_after: Duration::from_millis(100),
-        keep_alive: Duration::from_millis(100),
-        ..ServerHttp::default()
-    };
-    let http = bind_http(
-        Arc::new(server),
-        "127.0.0.1:0".parse().unwrap(),
-        config,
-        Limits::default(),
-    )
-    .unwrap();
-    let url = format!("http://{}/mcp", http.local_addr().unwrap());
-    let stop = http.shutdown_handle().unwrap();
-    std::thread::spawn(move || http.run().unwrap());
-    Running { url, stop, changes }
-}
-
-fn serve() -> Running {
-    serve_with(builder())
-}
 
 fn transport(url: &str) -> HttpTransport {
     HttpTransport::new(HttpConfig::new(url)).unwrap()

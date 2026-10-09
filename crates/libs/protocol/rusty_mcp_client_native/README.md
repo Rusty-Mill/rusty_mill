@@ -4,7 +4,7 @@ A first-party MCP client core on [`rusty_mcp_proto`](../rusty_mcp_proto), step
 A4 of `docs/research/MCP-NATIVE-PLAN.md`. Depends on `rusty_json` and
 `rusty_mcp_proto` only (HTTP, behind the `http` feature, adds `rusty_request`,
 `rusty_tokio` and `rusty_base64`). **Second slice:** the pure parts, a blocking
-client over a child process or Streamable HTTP. The async facade is next; until
+client over a child process or Streamable HTTP, and an async face for it. Until
 then the consumers that use `rmcp`'s client (`rusty-mcp-client`, `rp-mcp`,
 `adk-mcp`, the gateway) are not moved. Scope and open decisions: `docs/research/MCP-CLIENT-SCOPE.md`.
 
@@ -14,6 +14,7 @@ then the consumers that use `rmcp`'s client (`rusty-mcp-client`, `rp-mcp`,
 | `ClientSession` | Sans-IO protocol state: request ids and matching, `server/discover` and `initialize`, the stateless per-request `_meta` (revision, client info, capabilities; the caller's own `_meta` such as a progress token is kept), `notifications/cancelled`. |
 | `Transport`, `StdioTransport` | JSON-RPC messages with a receive timeout. `StdioTransport` is newline-delimited JSON over any reader and writer, or a spawned child process (stdin closed, then a 2 s grace, then killed, on drop). Lines that are not messages, and lines over 8 MiB, are skipped. |
 | `HttpTransport` (feature `http`) | Streamable HTTP on `rusty_request`, on a private `rusty_tokio` runtime so the blocking client works unchanged. See below. |
+| `AsyncClient` | The blocking client on a worker thread behind futures; no runtime of its own, so it works on tokio or any executor. Calls queue and run one at a time, in order; many tasks may share one (`Arc`). A dropped future does not stop its call (the answer is discarded). The worker also polls the transport between calls, so the `Handler` gets notifications while idle. If the connection dies, calls fail with `Closed` instead of hanging. Dropping it closes the transport. |
 | `Client` | A blocking client: the handshake, `call` / `notify` / `ping`, typed `list_tools` (all pages), `list_prompts`, `list_resources`, `list_resource_templates`, `get_prompt`, `read_resource`, `complete`, and `call_tool`, which drives multi-round-trip input and tasks to a result. A `Handler` receives notifications and server requests and answers elicitations. |
 
 ## Streamable HTTP
@@ -70,8 +71,11 @@ then the consumers that use `rmcp`'s client (`rusty-mcp-client`, `rp-mcp`,
 over pipes, 4 against it as a child process, and with `http`: 10 against its
 HTTP transport over sockets (both revisions, sessions, event-stream replies,
 questions and tasks across POSTs, pushed updates, hang-up and classic
-cancellation, refused connections, the exact headers) and 2 against **`rmcp`'s own
-Streamable HTTP server**, with and without sessions, the one independent peer
-so far. Mutation checks (no `_meta`, state not echoed, cancel not aborting the
-POST, session id or `Mcp-Name` not sent, no push stream) fail the intended
-tests. Not tested: any other server, HTTPS, an authenticating server.
+cancellation, refused connections, the exact headers), 2 against **`rmcp`'s own
+Streamable HTTP server** (with and without sessions; the one independent peer so
+far) and 7 for the async face on a tokio runtime (shared by 16 tasks, dropped
+futures, a dead connection, questions and tasks, idle notifications).
+Mutation checks (no `_meta`, state not echoed, cancel not aborting the POST,
+session id or `Mcp-Name` not sent, no push stream, idle polling off, a dropped
+reply left hanging) fail the intended tests. Not tested: any other server, HTTPS,
+an authenticating server.

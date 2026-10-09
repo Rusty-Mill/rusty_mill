@@ -51,5 +51,9 @@ name = "http"
 required-features = ["http"]
 
 [[test]]
+name = "async_client"
+required-features = ["http"]
+
+[[test]]
 name = "rmcp_server"
 required-features = ["http"]
