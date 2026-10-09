@@ -16,8 +16,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-09 - Crypto gaps 1 and 2: `rusty_rand` hardened, ECDH P-256/P-384
 
 - **Changed (rusty_rand):** `getrandom(2)` on Linux x86_64/aarch64 (`/dev/random` fallback, never `/dev/urandom`), `/dev/random` on other Linux, lock-free `/dev/urandom` on other Unix with no initialised-pool claim, a tested read loop and backend selection; `rust-version` 1.75 to 1.88.
-- **Added (rusty_pk::ecdh):** ECDH on P-256 and P-384, validated against Wycheproof, RFC 5903 and `ring`; constant-time evidence added (taint, exact jump counts, timing). Moved a pinned jump count (`Modulus::add` inlined into `Field::add`, re-read).
-- **Known limitations:** slower than `ring` (14x P-256, 5x P-384); constant-time results are x86-64, one VM, preliminary; the new 40-repetition timing series and a new evidence record have not been produced; not independently reviewed; not wired into `rusty_tls`.
+- **Added (rusty_pk::ecdh):** ECDH on P-256 and P-384, validated against Wycheproof, RFC 5903 and `ring`; constant-time evidence added (taint, exact jump counts, timing). Adding this code changed LLVM's inlining of `Modulus::add` twice, so it is now `#[inline(never)]` and its previously reviewed jump count of 6 is pinned as a separate symbol (counts were re-read each time).
+- **Known limitations:** slower than `ring` (14x P-256, 5x P-384); constant-time results are x86-64, one VM, preliminary; two 40-repetition evidence records are kept: `EVIDENCE-2026-10-09-ecdh-run1-FAILED.txt` (exit 1: HMAC-SHA512 fixed-vs-other-key alarmed 2 of 40, allowance 1; **the cause is unexplained**, other jobs were running on the machine) and `EVIDENCE-2026-10-09-ecdh-run2.txt` (idle machine, exit 0). Neither threshold nor allowance rule was changed; a passing rerun does not establish why run 1 failed, and neither record proves constant time; not independently reviewed; not wired into `rusty_tls`.
 
 ## 2026-10-09 - Ed25519 accepts small-order public keys again
 
