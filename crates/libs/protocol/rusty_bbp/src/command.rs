@@ -182,4 +182,8 @@ pub enum Code {
     NotOpen,
     AlreadyOpen,
     YieldNested,
+    /// Driver boundary: the referenced blob is not in the store.
+    BlobMissing,
+    /// Driver boundary: the claimed payload is not what the stored bytes decode to.
+    PayloadMismatch,
 }
