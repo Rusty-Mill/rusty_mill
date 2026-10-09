@@ -13,7 +13,7 @@
 //! enforce policy from *inside* each tool's (synchronous) `execute` closure: it
 //! bridges to our async [`ToolDispatch`] via the current runtime handle and
 //! always returns `Ok(outcome.render())`, keeping the structural
-//! [`rk_observe::ToolOutcome`] ours rather than aisdk's re-stringified error.
+//! `rk_observe::ToolOutcome` ours rather than aisdk's re-stringified error.
 
 #[cfg(feature = "fake")]
 pub mod fake;
