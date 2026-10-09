@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_mcp_server: cancelled-before-run and dead-stdout fixes (pending review)
+
+- **Fixed:** a request cancelled between `start` and `Job::run` no longer runs its tool (it could mutate state with no reply); and a reply that fails to write while stdin is open and silent now ends the stdio session with `BrokenPipe` and cancels the work left, instead of waiting for stdin to close.
+- **Changed:** `serve_lines` now needs `R: BufRead + Send + 'static` (stdin is read on its own thread so a failed write can wake the loop); every caller in the repo already satisfies it.
+- **Verified:** one test for each, each failing with its fix reverted; `rusty_mcp_server` (all features), `rusty_mcp_client_native`, `adk-mcp`, `rk-app` tests; clippy `-D warnings`.
+- **Known limitations:** after a write failure the stdin thread is abandoned until its next line or process exit.
+
 ## 2026-10-09 - agentgateway moved off rmcp (pending review)
 
 - **Changed:** `agentgateway-mcp`/`agentgateway` serve MCP with `rusty_mcp_server` (mounted by `rusty_mcp_axum`) and reach upstreams with `rusty_mcp_client_native`; `rmcp`, `reqwest` and `process-wrap` are no longer production dependencies of the MCP crates. The gateway's federation, rules, guardrails, prompts/resources and span suites pass unchanged.

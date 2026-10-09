@@ -627,6 +627,11 @@ impl Job {
     /// answer). A panicking tool becomes an internal error rather than a
     /// request that never answers.
     pub fn run(self) -> Option<Message> {
+        // Cancelled before it started: run nothing. Returning drops the
+        // guard, which frees the id.
+        if self.token.is_cancelled() {
+            return None;
+        }
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             self.guard
                 .conn

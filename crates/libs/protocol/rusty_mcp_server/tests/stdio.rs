@@ -710,3 +710,96 @@ fn a_classic_only_server_has_no_discover() {
     );
     assert_eq!(code(reply(&out, 1)), -32601);
 }
+
+struct Nowhere;
+impl rusty_mcp_server::Notifier for Nowhere {
+    fn notify(&self, _message: rusty_mcp_proto::Message) {}
+}
+
+/// A request cancelled between `start` and `run` must not run its tool or
+/// answer, and must free its id.
+#[test]
+fn a_request_cancelled_before_it_runs_runs_nothing_and_frees_its_id() {
+    use rusty_mcp_proto::{Message, Wire};
+    use rusty_mcp_server::{Connection, Started};
+    use std::sync::atomic::AtomicUsize;
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counted = runs.clone();
+    let srv = Arc::new(
+        Server::builder("d", "1")
+            .tool(Tool::new("mutate", schema()), move |_c, _p| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(text("changed"))
+            })
+            .build()
+            .unwrap(),
+    );
+    let conn = Arc::new(Connection::new(srv, Arc::new(Nowhere)));
+    let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
+    let call = format!(
+        r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"mutate",{meta}}}}}"#
+    );
+    let start = |json: &str| conn.start(Message::from_json(json).unwrap());
+    let Started::Run(job) = start(&call) else {
+        panic!("the call should be admitted");
+    };
+    start(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#);
+    assert!(job.run().is_none(), "a cancelled request gets no answer");
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "its tool never ran");
+    let Started::Run(again) = start(&call) else {
+        panic!("the id should be free for reuse");
+    };
+    assert!(again.run().is_some());
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+/// A reply that fails to write while stdin stays open and silent must end
+/// the session: BrokenPipe, with the work still running cancelled.
+#[test]
+fn a_write_failing_while_input_stays_open_ends_the_session() {
+    struct Dead;
+    impl Write for Dead {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let flags = Flags::default();
+    let srv = server(&flags);
+    let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
+    let call = |id: u8, name: &str| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}",{meta}}}}}"#
+        )
+    };
+    let (tx, rx) = channel();
+    let (done_tx, done_rx) = channel();
+    std::thread::spawn(move || {
+        let ended = serve_lines(
+            srv,
+            BufReader::new(Feed(rx, Vec::new())),
+            Dead,
+            StdioConfig {
+                drain_timeout: Duration::from_millis(300),
+                ..StdioConfig::default()
+            },
+        );
+        let _ = done_tx.send(ended);
+    });
+    // `wait` keeps running; `slow` answers 300 ms later and its write fails.
+    tx.send(format!("{}\n{}\n", call(1, "wait"), call(2, "slow")).into_bytes())
+        .unwrap();
+    // `tx` stays alive: input is open and silent for the whole test.
+    let ended = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the session ended without waiting for more input");
+    assert_eq!(ended.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    assert!(
+        flags.saw_cancel.load(Ordering::SeqCst),
+        "the request still running was cancelled"
+    );
+    drop(tx);
+}

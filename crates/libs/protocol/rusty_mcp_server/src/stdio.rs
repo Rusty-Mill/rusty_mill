@@ -8,6 +8,7 @@ use crate::server::Server;
 use rusty_mcp_proto::{Error as ProtoError, ErrorCode, ErrorData, Message, Wire};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -42,10 +43,23 @@ impl Default for StdioConfig {
     }
 }
 
+/// What the reader thread tells the serving loop.
+enum Input {
+    Line(Vec<u8>),
+    TooLong,
+    End,
+    Failed(io::Error),
+    /// A write failed: look at [`LineSink::failed`].
+    Wake,
+}
+
 /// Writes one message per line; once a write fails it stops trying.
 struct LineSink<W> {
     out: Mutex<W>,
     failed: AtomicBool,
+    /// Wakes the serving loop out of its wait for input when a write fails,
+    /// since a blocking read on stdin cannot be interrupted.
+    wake: SyncSender<Input>,
     /// Requests whose reply has not been written yet.
     pending: Arc<Pending>,
 }
@@ -104,6 +118,8 @@ impl<W: Write> LineSink<W> {
             .is_err()
         {
             self.failed.store(true, Ordering::SeqCst);
+            // A full channel means the loop has input to wake for anyway.
+            let _ = self.wake.try_send(Input::Wake);
         }
     }
 }
@@ -157,21 +173,29 @@ fn skip_line<R: BufRead>(reader: &mut R) -> io::Result<()> {
 /// As [`serve_stdio`].
 pub fn serve_lines<R, W>(
     server: Arc<Server>,
-    mut reader: R,
+    reader: R,
     writer: W,
     config: StdioConfig,
 ) -> io::Result<()>
 where
-    R: BufRead,
+    R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
+    let (tx, rx) = sync_channel(1);
     let sink = Arc::new(LineSink {
         out: Mutex::new(writer),
         failed: AtomicBool::new(false),
+        wake: tx.clone(),
         pending: Arc::new(Pending::default()),
     });
     let conn = Arc::new(Connection::new(server, sink.clone()));
-    let read = read_loop(&conn, &sink, &mut reader, config.max_line_bytes);
+    // Reading happens off this thread so a failed write can end the session
+    // while stdin stays open and silent; that thread is then abandoned and
+    // ends with its next line or with the process.
+    std::thread::Builder::new()
+        .name("mcp-stdin".into())
+        .spawn(move || read_input(reader, config.max_line_bytes, &tx))?;
+    let read = read_loop(&conn, &sink, &rx);
     // End of input: let running requests finish, then cancel what is left. A
     // tool that still ignores the flag is abandoned; its thread dies with
     // the process.
@@ -188,33 +212,54 @@ where
     Ok(())
 }
 
-fn read_loop<R: BufRead, W: Write + Send + 'static>(
+/// Read lines until end of input or an error, handing each to `tx`.
+fn read_input<R: BufRead>(mut reader: R, max_line_bytes: usize, tx: &SyncSender<Input>) {
+    loop {
+        let mut line = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(max_line_bytes as u64 + 1)
+            .read_until(b'\n', &mut line);
+        let input = match read {
+            Err(e) => Input::Failed(e),
+            Ok(0) => Input::End,
+            Ok(n) if line.last() != Some(&b'\n') && n > max_line_bytes => {
+                match skip_line(&mut reader) {
+                    Ok(()) => Input::TooLong,
+                    Err(e) => Input::Failed(e),
+                }
+            }
+            Ok(_) => Input::Line(line),
+        };
+        let last = matches!(input, Input::End | Input::Failed(_));
+        if tx.send(input).is_err() || last {
+            return;
+        }
+    }
+}
+
+fn read_loop<W: Write + Send + 'static>(
     conn: &Arc<Connection>,
     sink: &Arc<LineSink<W>>,
-    reader: &mut R,
-    max_line_bytes: usize,
+    rx: &Receiver<Input>,
 ) -> io::Result<()> {
-    let mut line = Vec::new();
     loop {
         if sink.failed.load(Ordering::SeqCst) {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
-        line.clear();
-        let n = reader
-            .by_ref()
-            .take(max_line_bytes as u64 + 1)
-            .read_until(b'\n', &mut line)?;
-        if n == 0 {
-            return Ok(());
-        }
-        if line.last() != Some(&b'\n') && n > max_line_bytes {
-            skip_line(reader)?;
-            sink.send(&Message::error(
-                None,
-                ErrorData::new(ErrorCode::INVALID_REQUEST, "line too long"),
-            ));
-            continue;
-        }
+        let line = match rx.recv() {
+            Ok(Input::Line(line)) => line,
+            Ok(Input::Wake) => continue,
+            Ok(Input::TooLong) => {
+                sink.send(&Message::error(
+                    None,
+                    ErrorData::new(ErrorCode::INVALID_REQUEST, "line too long"),
+                ));
+                continue;
+            }
+            Ok(Input::Failed(e)) => return Err(e),
+            Ok(Input::End) | Err(_) => return Ok(()),
+        };
         let text = line.trim_ascii();
         if text.is_empty() {
             continue;
