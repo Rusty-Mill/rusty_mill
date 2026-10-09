@@ -4,8 +4,8 @@ A blocking RLBot v5 client on `std::net`, on top of [`rb_rlbot_wire`](../rb_rlbo
 Stage 3 of the native RLBot port (`../../rlbot/PLAN.md`). No dependencies beyond the wire crate.
 
 - **`Connection`:** `connect`, `send` / `send_all` (one write), `recv`, `recv_timeout`,
-  `handshake`. Incoming bytes are buffered, so a timeout in the middle of a frame loses nothing,
-  and a zero timeout polls. The match runners (`rb_match_log`, `rb_run_tapes`) use this
+  `handshake` (for named agents; an empty `agent_id` is `Error::EmptyAgentId`, since core sends it no team information, so an id-less match runner sends and reads for itself). Incoming bytes are buffered, so a timeout in the middle of a frame loses nothing,
+  and a zero timeout is a true poll (a message already buffered or readable now, never a wait). The match runners (`rb_match_log`, `rb_run_tapes`) use this
   directly: start a match with `MatchConfiguration`, set state with `DesiredGameState`, end it
   with `StopCommand`.
 - **`run_bots` / `run_hivemind`:** the handshake, `InitComplete`, then the packet loop for an

@@ -62,7 +62,9 @@ impl Connection {
         }
     }
 
-    /// Waits up to `timeout` for the next message; `None` if none arrived in time.
+    /// Waits up to `timeout` for the next message; `None` if none arrived in time. Bytes of a
+    /// half-received message are kept for the next call. A zero timeout is a poll: a message
+    /// already buffered or readable right now is returned, and nothing is waited for.
     pub fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<CoreMessage>> {
         self.read_message(Some(Instant::now() + timeout))
     }
@@ -70,7 +72,16 @@ impl Connection {
     /// Introduces this client: sends `settings`, then waits for core's team, match and field
     /// information, answering pings meanwhile. Other messages are dropped. Send
     /// [`rb_rlbot_wire::InitComplete`] once ready.
+    ///
+    /// For agents (bots, hiveminds, scripts), which must have a non-empty `agent_id`: core
+    /// sends the team information only to a named agent, so for an empty id the wait would never
+    /// end. That is [`Error::EmptyAgentId`], returned before anything is sent. A match runner
+    /// with no id sends its settings with [`Connection::send`] and reads what it wants with
+    /// [`Connection::recv`], as `rb_match_log` does.
     pub fn handshake(&mut self, settings: ConnectionSettings) -> Result<StartingInfo> {
+        if settings.agent_id.is_empty() {
+            return Err(Error::EmptyAgentId);
+        }
         self.send(settings)?;
         let (mut team, mut config, mut field) = (None, None, None);
         loop {
@@ -95,31 +106,42 @@ impl Connection {
     }
 
     /// The next decoded message, reading the socket until a whole frame is buffered.
-    /// With a deadline, `None` once it passes.
+    ///
+    /// With a deadline: `None` once it has passed. The deadline is checked on every pass, so
+    /// bytes that keep arriving in small pieces cannot hold the call past it; the pieces stay
+    /// buffered for the next call. Once it has passed (a zero timeout included) the socket is
+    /// drained without waiting, so data that is already there still counts.
     fn read_message(&mut self, deadline: Option<Instant>) -> Result<Option<CoreMessage>> {
         let mut chunk = [0u8; 8192];
         loop {
             if let Some(payload) = self.decoder.next_frame() {
                 return Ok(Some(CoreMessage::from_payload(&payload)?));
             }
-            if let Some(deadline) = deadline {
-                let left = deadline.saturating_duration_since(Instant::now());
-                // A zero timeout means "block forever" to the OS, so ask for at least 1 ms.
-                self.stream
-                    .set_read_timeout(Some(left.max(Duration::from_millis(1))))?;
-            }
-            match self.stream.read(&mut chunk) {
+            let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            let polling = left.is_some_and(|l| l.is_zero());
+            let read = if polling {
+                self.read_ready(&mut chunk)
+            } else {
+                // `None` waits for ever; a zero timeout is an error to the OS, hence the branch.
+                self.stream.set_read_timeout(left)?;
+                self.stream.read(&mut chunk)
+            };
+            match read {
                 Ok(0) => return Err(Error::Closed),
                 Ok(n) => self.decoder.push(&chunk[..n]),
-                Err(e) if is_timeout(&e) => {
-                    if deadline.is_some_and(|d| Instant::now() >= d) {
-                        return Ok(None);
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if is_timeout(&e) && polling => return Ok(None),
+                Err(e) if is_timeout(&e) || e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e.into()),
             }
         }
+    }
+
+    /// One read of whatever is already on the socket; `WouldBlock` when nothing is.
+    fn read_ready(&mut self, chunk: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_nonblocking(true)?;
+        let read = self.stream.read(chunk);
+        self.stream.set_nonblocking(false)?;
+        read
     }
 }
 
