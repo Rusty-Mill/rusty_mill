@@ -10566,14 +10566,16 @@ dependencies = [
  "remind_me_core",
  "remind_me_mcp",
  "reqwest 0.13.4",
- "rmcp",
  "rusty_base64",
  "rusty_hex",
+ "rusty_mcp_axum",
+ "rusty_mcp_server",
  "rusty_oauth",
  "rusty_percent",
  "serde",
  "serde_json",
  "sha256",
+ "thiserror 2.0.20",
  "tokio",
 ]
 

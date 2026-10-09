@@ -161,3 +161,35 @@ async fn a_body_over_the_limit_is_refused() {
     .unwrap();
     assert!(outcome.starts_with("HTTP/1.1 413"), "{outcome}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pinned_mount_serves_whatever_path_it_is_reached_on() {
+    let handler = Arc::new(HttpHandler::new(
+        Arc::new(server()),
+        HttpConfig {
+            path: "/mcp".to_owned(),
+            ..HttpConfig::default()
+        },
+    ));
+    let app = Router::new().nest_service(
+        "/secret",
+        rusty_mcp_axum::router_at(handler, 1 << 20, "/mcp"),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::task::spawn_blocking(move || {
+        let transport =
+            HttpTransport::new(ClientHttp::new(format!("http://{addr}/secret/abc123"))).unwrap();
+        let mut c = Client::connect(
+            transport,
+            ClientConfig::new("t", "1"),
+            NoHandler,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(first_text(&c.call_tool("quick", None).unwrap()), "quick");
+    })
+    .await
+    .unwrap();
+}

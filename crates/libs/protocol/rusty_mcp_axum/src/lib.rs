@@ -49,6 +49,21 @@ pub fn router(handler: Arc<HttpHandler>, max_body_bytes: usize) -> Router {
     )
 }
 
+/// Like [`router`], but every request is treated as addressed to `path`
+/// (its query string kept), whatever path it arrived on. For an app that
+/// rewrites or strips paths itself before the request reaches the mount, such
+/// as one that carries a secret in the path.
+pub fn router_at(handler: Arc<HttpHandler>, max_body_bytes: usize, path: &str) -> Router {
+    let path = path.to_owned();
+    Router::new().fallback(move |request: axum::extract::Request| {
+        let target = request
+            .uri()
+            .query()
+            .map_or_else(|| path.clone(), |q| format!("{path}?{q}"));
+        serve(Arc::clone(&handler), target, request, max_body_bytes)
+    })
+}
+
 /// Answer `request` (whose path was `target` before any mount prefix was
 /// stripped) with `handler`. `max_body_bytes` bounds the request body.
 async fn serve(

@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - remind_me_remote on the native MCP stack (pending review)
+
+- **Changed:** `remind_me_remote` no longer uses `rmcp`; tools, resource and prompt are forwarded from `remind_me_mcp::Handler`; resumption now comes from `rusty_mcp_server`. `build_router` returns `BuildError`; `RemindMeHandler` and `InProcessEventStore` removed.
+- **Added:** `rusty_mcp_axum::router_at`.
+- **Not done:** no real connector tested; no standalone `GET` stream.
+
+---
+
 ## 2026-10-09 - rusty_mcp_server resumable replies (pending review)
 
 - **Added:** `HttpConfig::resume_buffer` / `resume_grace`: replies become resumable event streams (`GET` + `Last-Event-ID`, no session). Off by default. 9 tests.
