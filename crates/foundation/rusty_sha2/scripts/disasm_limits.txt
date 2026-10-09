@@ -1,6 +1,7 @@
 # Reviewed 2026-10-09 on rustc 1.98.1 and 1.99.0 (identical counts), x86_64, --release. The 2 conditional jumps
 # per function are the loop back-edges (message schedule, rounds), both with
-# public trip counts. The count is matched exactly: a third jump OR a missing one
-# means the compiler or the code changed, so re-review.
+# public trip counts. The count is matched exactly (drift detection only): a third
+# jump OR a missing one means the compiler or the code changed, so re-review. A
+# same-count substitution is NOT detected; read the disassembly after relevant changes.
 rusty_sha2::sha256::compress 2
 rusty_sha2::sha512::compress 2

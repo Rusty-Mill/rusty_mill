@@ -309,6 +309,34 @@ mod tests {
         out
     }
 
+    /// Non-canonical aliases of torsion points (`y` in `[p, 2^255)` is read mod `p`):
+    /// `y = p` is `y = 0` (order 4), `y = p + 1` is the identity; each with the sign bit
+    /// clear and set. Decoded small-order rejection must cover them; a byte blacklist
+    /// of the canonical encodings would not.
+    fn aliases() -> [[u8; 32]; 4] {
+        let mut out = [[0xffu8; 32]; 4];
+        for (k, (low, sign)) in
+            out.iter_mut()
+                .zip([(0xedu8, 0u8), (0xed, 0x80), (0xee, 0), (0xee, 0x80)])
+        {
+            k[0] = low; // p = 2^255 - 19 is ed ff .. ff 7f; p + 1 is ee ff .. ff 7f
+            k[31] = 0x7f | sign;
+        }
+        out
+    }
+
+    #[test]
+    fn non_canonical_aliases_of_torsion_points_are_rejected_too() {
+        let c = Edwards::new().unwrap();
+        let mut forged = [0u8; 64];
+        forged[0] = 1;
+        for k in aliases() {
+            let p = c.decode(&k).expect("aliases decode, as in ring");
+            assert!(c.is_small_order(&p), "{k:02x?}");
+            assert!(verify(&k, b"msg", &forged).is_err(), "{k:02x?}");
+        }
+    }
+
     #[test]
     fn every_torsion_point_is_small_order_and_the_base_point_is_not() {
         let c = Edwards::new().unwrap();

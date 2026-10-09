@@ -49,6 +49,26 @@ class Manifests(unittest.TestCase):
         self.write("c.json", b"{}")
         self.assertTrue(any("c.json is not listed" in p for p in check(self.dir)[1]))
 
+    def test_whitespace_only_drift_in_a_json_vector_fails(self):
+        # Same JSON value, one extra trailing newline: still a different file.
+        self.write("a.json", b'{"a":1}\n')
+        self.assertTrue(any("a.json hash" in p for p in check(self.dir)[1]))
+
+    def test_a_changed_generated_text_corpus_fails(self):
+        self.write("b.txt", b"b\n")
+        self.assertTrue(any("b.txt hash" in p for p in check(self.dir)[1]))
+
+    def test_a_file_listed_twice_fails(self):
+        with open(os.path.join(self.dir, "MANIFEST.txt"), "a") as f:
+            f.write(f"{sha(b'b')}  b.txt\n")
+        self.assertTrue(any("b.txt is listed twice" in p for p in check(self.dir)[1]))
+
+    def test_a_malformed_pin_line_fails_instead_of_reading_as_prose(self):
+        with open(os.path.join(self.dir, "MANIFEST.txt"), "a") as f:
+            f.write(f"{sha(b'x')} c.json\n")  # one space, not two
+        n, problems = check(self.dir)
+        self.assertTrue(any("malformed" in p for p in problems))
+
     def test_a_missing_or_empty_manifest_fails(self):
         self.write("MANIFEST.txt", b"only prose\n")
         self.assertTrue(any("pins no files" in p for p in check(self.dir)[1]))

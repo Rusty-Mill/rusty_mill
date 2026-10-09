@@ -2,11 +2,17 @@
 """Checks every vectors directory against its MANIFEST.txt; used by collect.sh.
 
 usage: check_manifests.py VECTORS_DIR...
-A manifest line is `<sha256>  <file>`; other lines are prose. Fails (exit 1) on a
-file whose hash differs from the manifest, a listed file that is missing, and a
-`*.json`/`*.txt` file (other than MANIFEST.txt) that the manifest does not list,
-so a replaced, edited, deleted or smuggled-in vector cannot yield a record that
-says "all checks passed" (Codex round 3 on #540).
+A manifest line is `<sha256>  <file>`; other lines are prose, except a line that
+starts with a hex run but is not well formed, which is an error (a typo must not
+turn a pin into silently ignored prose). Fails (exit 1) on a file whose hash
+differs from the manifest (any byte, including whitespace-only changes), a
+listed file that is missing, a file listed twice, and a `*.json`/`*.txt` file
+(other than MANIFEST.txt) that the manifest does not list, so a replaced, edited,
+deleted or smuggled-in vector cannot yield a record that says "all checks
+passed" (Codex round 3 on #540).
+Limit: the manifest sits next to the vectors, so this detects drift and accidents,
+not a deliberate change of corpus AND manifest together; provenance comes from
+the pinned upstream commit and human review.
 """
 import hashlib
 import os
@@ -14,6 +20,7 @@ import re
 import sys
 
 LINE = re.compile(r"^([0-9a-f]{64})  (\S+)$")
+LOOKS_LIKE_A_PIN = re.compile(r"^[0-9a-fA-F]{32,}\b")
 
 
 def check(directory):
@@ -22,12 +29,17 @@ def check(directory):
     if not os.path.isfile(manifest):
         return 0, [f"{directory}: no MANIFEST.txt"]
     pinned = {}
-    with open(manifest) as f:
-        for line in f:
-            m = LINE.match(line.rstrip("\n"))
-            if m:
-                pinned[m.group(2)] = m.group(1)
     problems = []
+    with open(manifest) as f:
+        for number, line in enumerate(f, 1):
+            line = line.rstrip("\n")
+            m = LINE.match(line)
+            if m:
+                if m.group(2) in pinned:
+                    problems.append(f"{directory}: {m.group(2)} is listed twice in MANIFEST.txt")
+                pinned[m.group(2)] = m.group(1)
+            elif LOOKS_LIKE_A_PIN.match(line):
+                problems.append(f"{directory}: MANIFEST.txt line {number} looks like a pin but is malformed")
     if not pinned:
         problems.append(f"{directory}: MANIFEST.txt pins no files")
     present = {n for n in os.listdir(directory) if n.endswith((".json", ".txt")) and n != "MANIFEST.txt"}

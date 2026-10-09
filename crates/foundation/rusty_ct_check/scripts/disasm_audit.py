@@ -5,11 +5,12 @@ usage: disasm_audit.py BINARY LIMITS
 LIMITS lines: `<symbol-substring> <jcc-count>`; `div`/`idiv` are always zero.
 Every function whose demangled name contains the substring is checked, and a
 substring that matches nothing is an error (a renamed function must not pass
-silently). The count must match EXACTLY, in both directions: a count that rises
-is a new branch, and one that falls can hide a new secret-dependent jump behind
-a removed bounds check or loop (a total hides what moved), so every change
-forces a re-review of the listed count. 0 means straight-line code; a non-zero
-count pins a reviewed loop-back/bounds-check count.
+silently). The count must match EXACTLY, in both directions, so any change in a
+function's jump total forces a re-review of the listed count. This is drift
+detection only: it does not establish which jumps exist or that none depends on
+a secret. Replacing one public branch with a secret-dependent one keeps the total
+and still passes, so the disassembly of the listed functions still needs a human
+read after relevant source or compiler changes. 0 means straight-line code.
 Valid for this binary only: rerun after any rustc, flag or target change.
 """
 import re

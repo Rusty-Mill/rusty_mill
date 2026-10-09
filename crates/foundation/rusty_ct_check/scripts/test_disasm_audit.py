@@ -19,7 +19,8 @@ class Verdict(unittest.TestCase):
         self.assertFalse(verdict(11, 0, 10))
 
     def test_a_lower_count_fails_too(self):
-        # A removed bounds check or loop could be masking an added secret-dependent jump.
+        # Drift detection: fewer jumps is as much a change to review as more. (A same-count
+        # substitution is NOT caught by any count rule; see the module docstring.)
         self.assertFalse(verdict(9, 0, 10))
         self.assertFalse(verdict(0, 0, 1))
 

@@ -1,5 +1,6 @@
 # Reviewed 2026-10-09 on rustc 1.98.1 and 1.99.0 (identical counts), x86_64, --release. ChaCha20::block's one
-# Counts are matched EXACTLY (fewer is as much a change as more: a removed check can hide a new jump).
+# Counts are matched EXACTLY, as drift detection only (fewer is as much a change as more). A same-count
+# substitution is NOT detected: after relevant source or compiler changes, read these functions' disassembly.
 # conditional jump is the round-loop back-edge (public trip count); the
 # Poly1305 block function is straight-line. Poly1305::finalize and update
 # branch on the (public) message length and are not audited here.
