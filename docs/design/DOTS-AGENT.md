@@ -58,7 +58,7 @@ Effort S/M/L. "Crate" paths are under `crates/`. Rows marked **gap** drive §4.
 | 11 | Spaces/pages domain | `pages.ts` | none | **New**: `dots-core` | M |
 | 12 | Page editor UI | TipTap | React 18/Vite/zustand/Tailwind stack in `apps/rusty_tick/web`; `agui-react` | **New**: `web/` (textarea/markdown first) | M |
 | 13 | State sync agent<->human | REST + polling | In-run: `rusty_agui` STATE_SNAPSHOT/DELTA, `rusty_json_patch`, `useSharedState`. Cross-channel: none, so a change-feed poll (§4.2) | Wire pages onto shared state; add change `seq` + feed | S |
-| 14 | Conversation store | CopilotKit Intelligence (hard dep) | `adk-sessions` SQLite; thread history is also replayed by client in AG-UI (`RunAgentInput.messages`) | Choose source of truth (Q3) | S |
+| 14 | Conversation store | CopilotKit Intelligence (hard dep) | `adk-sessions` SQLite; `AdkAgent` takes the last message as the turn and keeps history in ADK sessions; a client replaying `messages` is harmless | None: `adk-sessions` is the authority (Q3) | S |
 | 15 | App store (pages, Dots, bindings, routines) | `node:sqlite` | `libs/storage/rusty_sqlite` (1.1k LOC, 21 tests) or `rusty_multimodal_db_engine` (backs `rusty_tick`, FOLLOW-ONS Q2) | Decide (Q2) | S |
 | 16 | Memory | per-Dot memories + "Automatic Learning" | `apps/rusty_remind_me` (MCP: `remind_me_mcp` stdio, `remind_me_remote` Streamable HTTP + bearer/OAuth) via MCP only | None: adapter | S |
 | 17 | Tools / MCP | `@modelcontextprotocol/sdk` | `adk-mcp` (client toolset), `libs/protocol/rusty_mcp`; gateway `agentgateway-mcp` allow/deny + CEL | Audit row 11: MCP client is converging on `rusty_mcp`; use `adk-mcp` now, follow later | S |
@@ -231,7 +231,7 @@ Post-MVP (unordered): D1+D2 interrupts; routines with persistence + channel deli
 | R6 | Slack retries dropped, run lost between 200 and reply | FOLLOW-ONS "Step 5 ignores Slack's retries" | Task 10 |
 | R7 | No auth/CORS on `AgentHandler`; exposing it equals an open agent with tools | grep: `rusty_serve` exposes `authorization` header only | Task 5; bind loopback + tunnel only |
 | R8 | Prompt injection through page content and Slack text, with write tools | OpenDots treats page content as untrusted; same | Wrap as data; page-create/edit approval for non-owner-origin runs; MCP tools read-only by default |
-| R9 | Thread-history source of truth unclear (client replay vs `adk-sessions`) | row 14 | Q3 |
+| R9 | ~~Thread-history source of truth unclear~~ Resolved: `adk-sessions` is the authority; no duplicate-history bug found (owner review of #581) | row 14 | Q3 |
 | R10 | Linux-only isolation; user also develops on Windows (`mem_f7dd69ff`) | `rusty_sandbox` | Not on MVP path |
 | R11 | Gateway README stale ("A2A/LLM not built") | inventory | ignore, fix in docs-loop |
 | R12 | CopilotKit React SDK not in CI, only `@ag-ui/client` | FOLLOW-ONS:110-117 | Keep `copilotkit-demo` as manual check |
