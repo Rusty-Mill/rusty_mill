@@ -47,3 +47,18 @@ async fn stdio_connects_calls_and_shuts_down() {
         .expect("shutdown hung")
         .unwrap();
 }
+
+#[tokio::test]
+async fn connect_with_bounds_the_handshake_too() {
+    use std::time::{Duration, Instant};
+    // `cat` never speaks MCP; with a short budget the connect fails fast.
+    let spec = McpServerSpec {
+        transport: McpTransport::Stdio,
+        command: "cat".to_owned(),
+        ..McpServerSpec::default()
+    };
+    let t = Instant::now();
+    let result = McpClient::connect_with("cat", &spec, Duration::from_millis(400)).await;
+    assert!(result.is_err());
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+}

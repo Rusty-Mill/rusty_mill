@@ -13,11 +13,11 @@ layer = "libs"
 [features]
 default = ["stdio", "http", "client"]
 # Serve tools over stdio (newline-delimited JSON-RPC).
-stdio = ["dep:tokio", "tokio/io-std", "tokio/io-util"]
+stdio = ["tokio/io-std", "tokio/io-util", "tokio/sync"]
 # Serve tools over streamable HTTP.
-http = ["dep:axum", "dep:tokio", "tokio/net", "rmcp/transport-streamable-http-server"]
+http = ["dep:axum", "dep:rusty_mcp_axum", "tokio/net", "rusty_mcp_server/http"]
 # Consume tools from an external MCP server launched as a subprocess.
-client = ["dep:tokio", "tokio/process", "rmcp/client"]
+client = ["dep:rusty-mcp-client", "tokio/sync"]
 
 [dependencies]
 adk-core.workspace = true
@@ -27,11 +27,14 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-# The workspace's shared MCP stack (design review Tranche 4): the wire
-# protocol, handshake and transports. This crate keeps only the ADK mapping.
-rmcp = { workspace = true, features = ["server"] }
+# The workspace's first-party MCP stack: the wire protocol, handshake and
+# transports. This crate keeps only the ADK mapping.
+rusty_mcp_server = { workspace = true }
+rusty-mcp-client = { workspace = true, optional = true }
+rusty_mcp_axum = { workspace = true, optional = true }
 axum = { version = "0.8", optional = true }
-tokio = { workspace = true, optional = true }
+# Always needed: tool calls run on the runtime the transport was started on.
+tokio = { workspace = true, features = ["rt"] }
 
 # Wire-level MCP conformance suite (design review Tranche 4). Its own
 # runner, because the binary doubles as the MCP server the client cases

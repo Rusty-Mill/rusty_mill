@@ -232,10 +232,11 @@ impl McpClient {
         Self::connect_inner(name, spec, None).await
     }
 
-    /// [`connect`](Self::connect), with every later call bounded by
-    /// `call_timeout` instead of the ten-minute default. Calls on one client
-    /// run one at a time, so this also bounds how long a hung call can hold
-    /// up the ones queued behind it.
+    /// [`connect`](Self::connect), with the handshake and every later call
+    /// bounded by `call_timeout` (instead of [`DEFAULT_CONNECT_TIMEOUT`] and
+    /// the ten-minute call default). Calls on one client run one at a time,
+    /// so this also bounds how long a hung call can hold up the ones queued
+    /// behind it.
     ///
     /// # Errors
     /// As for [`connect`](Self::connect).
@@ -370,11 +371,16 @@ impl McpClient {
         if let Some(timeout) = call_timeout {
             config.call_timeout = timeout;
         }
-        let client = AsyncClient::connect(link, config, NoHandler, CONNECT_TIMEOUT)
-            .await
-            .map_err(|e| McpClientError::Handshake {
-                reason: e.to_string(),
-            })?;
+        let client = AsyncClient::connect(
+            link,
+            config,
+            NoHandler,
+            call_timeout.unwrap_or(CONNECT_TIMEOUT),
+        )
+        .await
+        .map_err(|e| McpClientError::Handshake {
+            reason: e.to_string(),
+        })?;
         Ok(Self {
             name: name.to_string(),
             client,

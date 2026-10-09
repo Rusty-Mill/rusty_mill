@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - adk-mcp on the native MCP stack (pending review)
+
+- **Changed:** `adk-mcp` no longer uses `rmcp`; same public functions and types, but `McpServer` is no longer an `rmcp` handler. Conformance suite (17 cases) passes unchanged.
+- **Behaviour:** `tools/list` pages at 100; browsers' `Origin` is refused; the client skips (rather than ends on) over-long lines.
+- **Not done:** no other-language ADK client tested against it.
+
+---
+
 ## 2026-10-09 - rusty_mcp_axum (pending review)
 
 - **Added:** `rusty_mcp_axum::router`: mount a `rusty_mcp_server` handler in an axum app. Used by `rp-server`; `adk-mcp` is next.
