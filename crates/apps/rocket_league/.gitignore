@@ -14,3 +14,5 @@
 /rleval/assets/modes/
 /rleval/assets/case-studies/
 /rleval/data/local/
+# puppeteer for the replay-viewer headless-GL smoke test
+node_modules/

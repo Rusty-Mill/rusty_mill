@@ -20,6 +20,8 @@ PATH_JOB_PREFIXES = {
     "tick": "crates/apps/rusty_tick/",
     "fair_play": "crates/apps/rusty_fair_play/",
     "agui": "crates/libs/protocol/rusty_agui/",
+    # The viewer's smoke test renders this fixture; Cargo impact alone would miss a change to it.
+    "rleval_viewer": "crates/apps/rocket_league/rleval/assets/replays/",
 }
 
 PACKAGE_JOB_PREFIXES = {
@@ -34,6 +36,8 @@ PACKAGE_JOB_NAMES = {
     "agui": frozenset({"rusty_agui"}),
     "win32": frozenset({"rusty_win32"}),
     "multimodal_db": frozenset({"rusty_multimodal_db"}),
+    "rleval_viewer": frozenset({"replay-viewer"}),
+    "rleval_app": frozenset({"rleval-app"}),
     "rusty_config_no_std": frozenset({"rusty_config"}),
 }
 

@@ -93,6 +93,10 @@ impl Task {
 
 /// Open a task, approve a plan, submit a candidate of `diffs`: state `Test`.
 fn reach_test(dir: &Path, base: &str, diffs: &[Vec<u8>]) -> Task {
+    reach_test_with(dir, base, diffs, &ProfileSet::shell("test", "sh ./test.sh"))
+}
+
+fn reach_test_with(dir: &Path, base: &str, diffs: &[Vec<u8>], set: &ProfileSet) -> Task {
     let t = Task {
         dir: dir.to_path_buf(),
         id: TaskId("T1".into()),
@@ -103,7 +107,7 @@ fn reach_test(dir: &Path, base: &str, diffs: &[Vec<u8>]) -> Task {
         "local",
         b"Make the flag say ok.",
         &PrincipalId("human".into()),
-        &ProfileSet::shell("test", "sh ./test.sh"),
+        set,
     )
     .expect("open");
     for role in Role::ALL {
@@ -123,7 +127,7 @@ fn reach_test(dir: &Path, base: &str, diffs: &[Vec<u8>]) -> Task {
         .refs(vec![Ref::art(spec)]);
     gate.gate = true;
     t.agent(Role::Planner, AgentAction::Post(gate));
-    human::perform(dir, &t.id, "approve-plan", &[&spec.0.to_string()]).expect("approve");
+    human::perform(dir, &t.id, "approve-plan", &[&spec.0.to_string()], None).expect("approve");
     let ids: Vec<ArtId> = diffs
         .iter()
         .map(|d| t.put(Role::Coder, ArtifactPayload::Diff, d))
@@ -325,7 +329,7 @@ fn empty_profile_set_is_refused_at_open() {
 }
 
 #[test]
-fn a_run_whose_log_is_already_stored_is_completed_on_retry() {
+fn a_run_whose_log_is_already_stored_is_reported_as_error_without_rerunning() {
     let dir = tempdir("resume");
     let (repo, base) = repo(&dir);
     let t = reach_test(&dir, &base, &[flag_diff("ok")]);
@@ -357,23 +361,84 @@ fn a_run_whose_log_is_already_stored_is_completed_on_retry() {
     .expect("run");
     assert!(matches!(r, Response::Stored(_)), "{r:?}");
     let (rep, log) = report_of(&t);
-    assert_eq!(rep.status, RunStatus::Passed);
+    // The result that log described died with the earlier invocation; a
+    // fresh execution would be reported against evidence it did not produce.
+    assert_eq!(rep.status, RunStatus::Error);
+    assert!(rep.profiles.is_empty() && rep.tree.is_none(), "{rep:?}");
     assert_eq!(log, "partial log\n", "report points at the log on record");
+    assert!(
+        !dir.join("work").join("run-1").exists(),
+        "nothing was checked out or executed"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The sandboxed executor through the real `bbp __sandbox` helper. Where the
-/// kernel refuses Landlock or seccomp the run is reported as `error`, never
-/// as an unconfined pass.
+/// The first diff plants a symlink where a supervisor might write its
+/// patch file; the second diff is invalid. Nothing outside the checkout
+/// may change, whatever the candidate names.
 #[test]
-fn sandboxed_run_passes_or_fails_closed() {
-    let dir = tempdir("sandbox");
+fn patches_never_touch_a_candidate_controlled_path() {
+    use std::os::unix::fs::symlink;
+    let dir = tempdir("symlink");
     let (repo, base) = repo(&dir);
-    let t = reach_test(&dir, &base, &[flag_diff("ok")]);
-    let exec = rusty_sandbox::ProcessExecutor::new(
+    let sentinel = dir.join("sentinel");
+    std::fs::write(&sentinel, "untouched\n").expect("write");
+    // The base tree already carries a symlink to the sentinel too.
+    symlink(&sentinel, repo.join(".bbp-diff-0.patch")).expect("symlink");
+    git(&repo, &["add", ".bbp-diff-0.patch"]);
+    git(&repo, &["commit", "--quiet", "-m", "tracked symlink"]);
+    let base2 = git(&repo, &["rev-parse", "HEAD"]);
+    assert_ne!(base, base2);
+    let link = format!(
+        "diff --git a/.bbp-diff-1.patch b/.bbp-diff-1.patch\nnew file mode 120000\n--- /dev/null\n+++ b/.bbp-diff-1.patch\n@@ -0,0 +1 @@\n+{}\n\\ No newline at end of file\n",
+        sentinel.display()
+    );
+    let bad = b"--- a/missing.txt\n+++ b/missing.txt\n@@ -1 +1 @@\n-x\n+CLOBBERED\n".to_vec();
+    let t = reach_test(&dir, &base2, &[link.into_bytes(), bad]);
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Error, "{log}");
+    assert!(log.contains("git apply") && log.contains("missing.txt"), "{log}");
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).expect("read"),
+        "untouched\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A listener the host owns; a confined workload must not reach it, while a
+/// plain command still runs. Needs python3 for the probe and a kernel that
+/// grants the sandbox; otherwise the test only checks fail-closed.
+#[test]
+fn sandboxed_workload_reaches_no_socket_endpoint() {
+    use std::os::unix::net::UnixListener;
+    let dir = tempdir("endpoint");
+    let (repo, base) = repo(&dir);
+    let sock = dir.join("probe.sock");
+    let listener = UnixListener::bind(&sock).expect("bind");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let mut set = ProfileSet::shell("plain", "echo plain-ok");
+    set.profiles.push(rusty_bbp_host::profiles::Profile {
+        name: "probe".into(),
+        program: "/usr/bin/python3".into(),
+        args: vec![
+            "-c".into(),
+            "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print('CONNE'+'CTED')".into(),
+            sock.display().to_string(),
+        ],
+    });
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let exec = runner::Sandboxed::new(
         PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
-        vec!["__sandbox".into()],
-        dir.join("sandbox-state"),
+        &dir.join("sandbox-state"),
     );
     runner::run_once(
         &dir,
@@ -385,7 +450,50 @@ fn sandboxed_run_passes_or_fails_closed() {
     )
     .expect("run");
     let (rep, log) = report_of(&t);
-    assert_eq!(rep.sandbox, "landlock+seccomp:no-sockets");
+    assert_eq!(rep.sandbox, runner::Sandboxed::LABEL);
+    assert!(!log.contains("CONNECTED"), "{log}");
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the host listener saw a connection"
+    );
+    match rep.status {
+        RunStatus::Failed => {
+            assert_eq!(rep.profiles[0].exit_code, 0, "{log}");
+            assert_ne!(rep.profiles[1].exit_code, 0, "{log}");
+            assert!(log.contains("plain-ok"), "{log}");
+        }
+        RunStatus::Error => {
+            eprintln!("sandbox unavailable here: {log}");
+            assert!(log.contains("not run") || log.contains("sandbox"), "{log}");
+        }
+        RunStatus::Passed => panic!("the probe connected: {log}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The sandboxed executor through the real `bbp __sandbox` helper. Where the
+/// kernel refuses Landlock or seccomp the run is reported as `error`, never
+/// as an unconfined pass.
+#[test]
+fn sandboxed_run_passes_or_fails_closed() {
+    let dir = tempdir("sandbox");
+    let (repo, base) = repo(&dir);
+    let t = reach_test(&dir, &base, &[flag_diff("ok")]);
+    let exec = runner::Sandboxed::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
+        &dir.join("sandbox-state"),
+    );
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &exec,
+        Confinement::Sandboxed,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.sandbox, runner::Sandboxed::LABEL);
     match rep.status {
         RunStatus::Passed => assert_eq!(rep.profiles[0].exit_code, 0),
         RunStatus::Error => {

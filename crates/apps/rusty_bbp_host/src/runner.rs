@@ -9,29 +9,70 @@
 use crate::profiles::{self, ProfileSet};
 use crate::{fresh_op, now, open_driver};
 use rusty_bbp::*;
-use rusty_sandbox::{ExecOutcome, Executor, Limits, ProcessExecutor, SandboxSpec, Termination};
+use rusty_sandbox::{
+    ExecOutcome, Executor, Limits, ProcessExecutor, SandboxSpec, Sockets, Termination,
+};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command as Proc;
+use std::process::{Command as Proc, Stdio};
 use std::time::Duration;
 
 /// How the workload is confined, as recorded in the report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Confinement {
-    /// `rusty_sandbox`: Landlock, seccomp with no sockets, rlimits.
+    /// `rusty_sandbox`: Landlock, seccomp refusing `socket(2)`, rlimits.
     Sandboxed,
     /// Plain `std::process`, for trusted local runs and tests. Recorded as such.
     Unconfined,
 }
 
-/// The sandboxed executor: this binary re-invoked as `bbp __sandbox` is the
-/// helper. `state_dir` must lie outside every workload's reach.
-pub fn sandboxed(state_dir: &Path) -> Result<ProcessExecutor, String> {
+impl Confinement {
+    /// The policy name written into `Report.sandbox`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Confinement::Sandboxed => Sandboxed::LABEL,
+            Confinement::Unconfined => "unconfined",
+        }
+    }
+}
+
+/// The sandboxed executor. `rusty_sandbox`'s default socket rule only bars
+/// the internet; a test workload gets [`Sockets::NoEndpoints`], so it can
+/// reach no network, Unix or abstract socket at all (anonymous socketpairs,
+/// which rustc needs to start its linker, still work).
+pub struct Sandboxed(ProcessExecutor);
+
+impl Sandboxed {
+    pub const LABEL: &'static str = "landlock+seccomp:no-endpoints";
+
+    /// `helper` is the `bbp` binary, re-invoked as `bbp __sandbox`.
+    /// `state_dir` must lie outside every workload's reach.
+    pub fn new(helper: PathBuf, state_dir: &Path) -> Sandboxed {
+        Sandboxed(ProcessExecutor::new(
+            helper,
+            vec!["__sandbox".into()],
+            state_dir.to_path_buf(),
+        ))
+    }
+}
+
+impl Executor for Sandboxed {
+    type Error = rusty_sandbox::Error;
+    fn exec(
+        &self,
+        spec: &SandboxSpec,
+        program: &str,
+        args: &[String],
+    ) -> Result<ExecOutcome, rusty_sandbox::Error> {
+        self.0
+            .exec_with(spec, program, args, Stdio::null(), Sockets::NoEndpoints)
+    }
+}
+
+/// The sandboxed executor with this binary as the helper.
+pub fn sandboxed(state_dir: &Path) -> Result<Sandboxed, String> {
     let me = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    Ok(ProcessExecutor::new(
-        me,
-        vec!["__sandbox".into()],
-        state_dir.to_path_buf(),
-    ))
+    Ok(Sandboxed::new(me, state_dir))
 }
 
 /// An executor that confines nothing. Only for trusted local use; the report
@@ -68,12 +109,27 @@ impl Executor for Unconfined {
 }
 
 fn git(work: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Proc::new("git")
+    git_with_stdin(work, args, &[])
+}
+
+/// Run git in `work` with `stdin` as its standard input. A patch travels this
+/// way so the supervisor never writes a file into the candidate's checkout,
+/// where a tracked or candidate-created symlink could redirect the write.
+fn git_with_stdin(work: &Path, args: &[&str], stdin: &[u8]) -> Result<String, String> {
+    let mut child = Proc::new("git")
         .arg("-C")
         .arg(work)
         .args(args)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("git: {e}"))?;
+    if let Some(mut pipe) = child.stdin.take() {
+        // A git that stops reading early reports its own reason below.
+        let _ = pipe.write_all(stdin);
+    }
+    let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "git {}: {}",
@@ -103,13 +159,8 @@ pub fn prepare(repo: &Path, work: &Path, base: &str, diffs: &[Vec<u8>]) -> Resul
         ));
     }
     git(work, &["checkout", "--quiet", base])?;
-    for (i, diff) in diffs.iter().enumerate() {
-        let patch = work.join(format!(".bbp-diff-{i}.patch"));
-        std::fs::write(&patch, diff).map_err(|e| e.to_string())?;
-        let name = format!(".bbp-diff-{i}.patch");
-        let applied = git(work, &["apply", "--index", &name]);
-        let _ = std::fs::remove_file(&patch);
-        applied?;
+    for diff in diffs {
+        git_with_stdin(work, &["apply", "--index", "-"], diff)?;
     }
     git(work, &["write-tree"])
 }
@@ -270,24 +321,38 @@ where
         );
     }
     let work = work_root.join(format!("run-{}", run.id.0));
-    let (tree, outcome) = match prepare(repo, &work, &manifest.base, &diffs) {
-        Ok(tree) => (
-            Some(Sha256::of(tree.as_bytes())),
-            execute(exec, &set, &work),
-        ),
-        Err(e) => (
+    let secret = d.state.secret_for(run.id);
+    // A previous invocation stored the log and died before the report (A4:
+    // log first, report second). The core accepts one log per run, and the
+    // result that log describes died with that invocation, so a fresh
+    // execution could only be reported against evidence it did not produce.
+    // Report `error` against the log on record and let the human rerun.
+    let interrupted = run.log.is_some();
+    let (tree, outcome) = if interrupted {
+        (
             None,
             Outcome {
                 status: RunStatus::Error,
                 profiles: vec![],
-                log: format!("prepare: {e}\n"),
+                log: String::new(),
             },
-        ),
+        )
+    } else {
+        match prepare(repo, &work, &manifest.base, &diffs) {
+            Ok(tree) => (
+                Some(Sha256::of(tree.as_bytes())),
+                execute(exec, &set, &work),
+            ),
+            Err(e) => (
+                None,
+                Outcome {
+                    status: RunStatus::Error,
+                    profiles: vec![],
+                    log: format!("prepare: {e}\n"),
+                },
+            ),
+        }
     };
-    let secret = d.state.secret_for(run.id);
-    // A previous invocation may have stored the log and died before the
-    // report (A4: log first, report second). The core accepts one log per
-    // run, so resume by reporting against the log already on record.
     let log_id = match run.log {
         Some(id) => id,
         None => {
@@ -317,10 +382,7 @@ where
         status: outcome.status,
         profiles: outcome.profiles,
         tree,
-        sandbox: match confinement {
-            Confinement::Sandboxed => "landlock+seccomp:no-sockets".into(),
-            Confinement::Unconfined => "unconfined".into(),
-        },
+        sandbox: confinement.label().into(),
         log: log_id,
     };
     let payload = ArtifactPayload::TestReport(report);

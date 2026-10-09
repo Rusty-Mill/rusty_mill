@@ -1,5 +1,7 @@
 //! The human channel as CLI actions. Every action carries a fresh `op`;
-//! destructive ones carry the card revision the human saw.
+//! destructive ones (`reject`, `rerun`, `resume`, `cancel`) carry the card
+//! revision the human saw (`--rev`, R15), never the one the CLI happens to
+//! load, so a delayed command meets newer work with `stale_rev`.
 
 use crate::admin::parse_role;
 use crate::{fresh_op, now, open_driver};
@@ -54,8 +56,10 @@ fn field(s: &str) -> Result<BudgetField, String> {
 }
 
 /// Build the action from `verb` and its arguments. `rev` is the card revision
-/// the human is acting on, for the actions that need it.
-pub fn action(verb: &str, args: &[&str], rev: Rev) -> Result<HumanAction, String> {
+/// the human saw; the actions that fence on it refuse to run without one.
+pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction, String> {
+    let rev =
+        || rev.ok_or_else(|| format!("{verb}: --rev REV (the card revision you saw) required"));
     let a = |i: usize| {
         args.get(i)
             .copied()
@@ -74,7 +78,7 @@ pub fn action(verb: &str, args: &[&str], rev: Rev) -> Result<HumanAction, String
             run: Some(run(a(1)?)?),
         },
         "reject" => HumanAction::Reject {
-            expected_rev: rev,
+            expected_rev: rev()?,
             target: parse_state(a(0)?)?,
             reason: rest(1),
         },
@@ -106,7 +110,7 @@ pub fn action(verb: &str, args: &[&str], rev: Rev) -> Result<HumanAction, String
         }
         "rerun" => HumanAction::Rerun {
             candidate: art(a(0)?)?,
-            expected_rev: rev,
+            expected_rev: rev()?,
         },
         "receipt" => HumanAction::MergeReceipt {
             candidate: art(a(0)?)?,
@@ -114,7 +118,7 @@ pub fn action(verb: &str, args: &[&str], rev: Rev) -> Result<HumanAction, String
         },
         "resume" => HumanAction::Resume {
             target: parse_state(a(0)?)?,
-            expected_rev: rev,
+            expected_rev: rev()?,
         },
         "extend" => HumanAction::BudgetExtended {
             field: field(a(0)?)?,
@@ -123,17 +127,24 @@ pub fn action(verb: &str, args: &[&str], rev: Rev) -> Result<HumanAction, String
                 .map_err(|_| "limit must be a number".to_owned())?,
         },
         "cancel" => HumanAction::Cancel {
-            expected_rev: rev,
+            expected_rev: rev()?,
             reason: rest(0),
         },
         other => return Err(format!("unknown human action {other}")),
     })
 }
 
-/// Run one human action against the store.
-pub fn perform(dir: &Path, task: &TaskId, verb: &str, args: &[&str]) -> Result<Response, String> {
+/// Run one human action against the store. `rev` is the card revision the
+/// human saw, required by the actions that fence on it.
+pub fn perform(
+    dir: &Path,
+    task: &TaskId,
+    verb: &str,
+    args: &[&str],
+    rev: Option<Rev>,
+) -> Result<Response, String> {
+    let act = action(verb, args, rev)?;
     let mut d = open_driver(dir, task)?;
-    let act = action(verb, args, d.state.rev)?;
     d.dispatch(
         &Command::Human {
             op: fresh_op(),

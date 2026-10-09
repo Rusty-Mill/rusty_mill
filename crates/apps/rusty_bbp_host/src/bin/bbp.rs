@@ -6,7 +6,8 @@
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
-//! bbp human   --dir D --task T VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
+//! bbp human   --dir D --task T [--rev N] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
+//!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
@@ -95,7 +96,16 @@ fn run() -> Result<String, String> {
         "human" => {
             let verb = a.pos(0)?;
             let rest: Vec<&str> = a.positional.iter().skip(1).map(String::as_str).collect();
-            human::perform(&dir, &task, verb, &rest)?
+            let rev = a
+                .flags
+                .get("rev")
+                .map(|r| {
+                    r.parse()
+                        .map(Rev)
+                        .map_err(|_| "--rev must be a number".to_owned())
+                })
+                .transpose()?;
+            human::perform(&dir, &task, verb, &rest, rev)?
         }
         other => return Err(format!("unknown subcommand {other}")),
     };
