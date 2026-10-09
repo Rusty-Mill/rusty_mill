@@ -29,12 +29,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue (ADR-0009) validates each queued entry on a temporary
+  # branch; `required-gate` must run here or the queue waits forever for a
+  # check that never starts. `ci_plan.py` scopes it against the entry's base.
+  merge_group:
+    types: [checks_requested]
   # A manual run deliberately uses the same full-sweep plan as a main push.
   # It is useful for re-running the whole workspace after runner or cache
   # incidents without creating a no-op commit.
   workflow_dispatch:
   # Weekly full-workspace sweep: catches drift that scoped PR runs cannot see
-  # (ADR-0009). `ci_plan.py` treats any event other than push/PR as full.
+  # (ADR-0009). `ci_plan.py` treats any event other than push, PR and merge_group as full.
   schedule:
     - cron: "17 3 * * 1"
 
@@ -227,7 +232,8 @@ jobs:
           mapfile -t event_plan < <(python3 .github/scripts/ci_plan.py \
             --event "${{ github.event_name }}" \
             --pr-base "${{ github.event.pull_request.base.sha }}" \
-            --push-before "${{ github.event.before }}")
+            --push-before "${{ github.event.before }}" \
+            --merge-base "${{ github.event.merge_group.base_sha }}")
           mode="${event_plan[0]#mode=}"
           base="${event_plan[1]#base=}"
           if [ "$mode" = "full" ]; then

@@ -45,3 +45,6 @@ How the repo is organised, validated and released:
   unexplained non-obvious decisions.
 - Merge with a **merge commit** ("Create a merge commit" — merge and sync). Do **not**
   squash-merge or rebase-merge: full commit history is preserved deliberately.
+- Merging goes through the **merge queue** (ADR-0009 §8): use "Merge when ready"
+  and let the `required-gate` check pass on the queued entry. Do not merge around
+  a red or stuck check; fix or re-run it. The queue's merge method is merge commit.

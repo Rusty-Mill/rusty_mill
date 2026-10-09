@@ -96,11 +96,79 @@ Median and p90 required-CI time; share of PRs that took the full sweep;
 flaky retries reported by nextest; open Dependabot alerts. A regression in
 the first three is the trigger for the deferred items below.
 
+### 8. Merge queue — adopted (supersedes the earlier deferral)
+
+Decision: `main` is protected by a ruleset that requires `required-gate` and
+the **GitHub merge queue**. Nobody force-merges around a red or stuck check;
+a red check is fixed, or its flake is fixed (see `rp-server`'s usage-history
+test), or the entry is re-queued.
+
+Why now: the deferral's trigger, "PRs repeatedly rebased for staleness", was
+met. Branches kept having `main` merged into them, each push cancelled the
+run and restarted the 30-45 minute Windows jobs, and the pressure to merge
+around CI was the symptom.
+
+How CI supports it (this PR):
+- `ci.yml` triggers on `merge_group` (`checks_requested`). It is the only
+  workflow that feeds the gate, so it is the only one that needs the trigger;
+  a test enforces both.
+- `ci_plan.py` scopes a `merge_group` run against `merge_group.base_sha`
+  (`--merge-base`), so a queue entry runs the affected closure, not the full
+  sweep. No usable base falls back to the full sweep.
+- Concurrency is event-isolated already: only `pull_request` runs share a
+  per-PR key and cancel in progress; `merge_group` (like every other event)
+  gets a `run-<id>` key, so a push to an open PR cannot abort a queue entry.
+  A test pins this.
+
+Status: the workflow side is in place; the queue is **active once the ruleset
+below is applied** (a repository setting, not code).
+
+Ruleset to apply by hand (Settings > Rules > Rulesets > New branch ruleset).
+Order matters: merge the PR that adds `merge_group` first, otherwise the
+queue waits for a check that never starts.
+
+- [ ] Name `main`; Enforcement **Active**; Target: default branch (`main`).
+- [ ] **Bypass list: empty.** A break-glass is editing the ruleset, which
+      leaves an audit trail; it is not a standing bypass.
+- [ ] Restrict deletions; Block force pushes.
+- [ ] Require linear history: **off** (merge commits are the policy).
+- [ ] Require a pull request before merging; required approvals **0**
+      (CONTRIBUTING allows self-review when no independent reviewer exists,
+      and PRs opened from the maintainer's own account cannot be approved by
+      it); Require review from Code Owners **off** for now; Allowed merge
+      methods: **Merge** only.
+- [ ] Require status checks to pass: add **`required-gate`** (GitHub Actions)
+      and nothing else (matrix jobs are never required checks).
+      "Require branches to be up to date before merging": **off** (the queue
+      builds each entry on the latest `main` itself).
+- [ ] **Require merge queue**, with:
+  - [ ] Merge method: **Merge commit**.
+  - [ ] Build concurrency: **3** (entries build speculatively in parallel).
+  - [ ] Minimum group size: **1**; Maximum group size: **1** (no batching:
+        one flaky test would eject a whole batch).
+  - [ ] Wait time to meet minimum group size: leave the default (unused at 1).
+  - [ ] Status check timeout: **120 minutes** (the default 60 is inside the
+        full-sweep Windows runtime).
+  - [ ] "Only merge non-failing pull requests".
+- [ ] Repository Settings > General > Pull Requests: Allow merge commits
+      **on**; squash and rebase **off** (matches CONTRIBUTING).
+
+Check after applying: open a trivial docs PR, "Merge when ready", and confirm
+a `ci.yml` run for `merge_group` appears, the `plan` job lists only that PR's
+files, `required-gate` passes, and the result is a merge commit on `main`.
+Rollback: turn off "Require merge queue" in the ruleset (queued entries are
+dropped, nothing merges), or set the ruleset to Disabled temporarily.
+
+Known limits, revisit on evidence: the push-to-`main` run after each queue
+merge repeats work the queue already validated (trim only if p90 CI time or
+queue length regresses); batching above 1 only once Windows flakes are gone
+and queue wait is the bottleneck; availability depends on the repository being
+public in an organisation (the option must appear in the ruleset).
+
 ## Deliberately not adopted (revisit on the stated trigger)
 
 | Item | Why not now | Trigger |
 | --- | --- | --- |
-| Merge queue | Single maintainer, per-component main queues already exist | Second regular maintainer, or PRs repeatedly rebased for staleness |
 | `cargo-hakari` workspace-hack | Few shared external deps; adds a crate every manifest must reference | Measured feature-thrash rebuilds, or external deps grow |
 | `sccache`/`mold` in CI | Swatinem cache works; no measured link/cache bottleneck | p90 CI time regresses |
 | Resolver 3 / edition 2024 workspace-wide | Members carry mixed editions on purpose (see root `Cargo.toml` notes) | Own PR with broad validation, per crate family |
