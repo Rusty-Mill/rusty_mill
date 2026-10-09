@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - agentgateway moved off rmcp (pending review)
+
+- **Changed:** `agentgateway-mcp`/`agentgateway` serve MCP with `rusty_mcp_server` (mounted by `rusty_mcp_axum`) and reach upstreams with `rusty_mcp_client_native`; `rmcp`, `reqwest` and `process-wrap` are no longer production dependencies of the MCP crates. The gateway's federation, rules, guardrails, prompts/resources and span suites pass unchanged.
+- **Added:** `CallContext::caller()` (headers and authenticated principal), `PromptSource`, `ResourceSource`, `ToolSource::tools_for` on `rusty_mcp_server`; per-call header overrides on `rusty_mcp_client_native`.
+- **Fixed:** the native client could not connect to an `rmcp` server (bare `server/discover`); it now sends `_meta` and the revision header.
+- **Behaviour:** a `stdio` upstream is serialised; upstream input requests and tasks are errors; only the trace context of `_meta` goes upstream.
+- **Known limitations:** `rusty-mcp` still depends on `rmcp` (A6); not run against a real client or Windows; the pool size of 8 is a constant, not configuration.
+
+---
+
 ## 2026-10-09 - review fixes on #577 (pending review)
 
 - **Fixed (security):** an empty `--auth-token` no longer leaves `rusty_homelab_mcp`'s HTTP endpoint open; empty secrets are refused.
