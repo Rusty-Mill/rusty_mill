@@ -41,6 +41,7 @@ Removed / Fixed / Security, newest first.
 - **Nexus frozen**: its 41 crates move from `[workspace] members` to `exclude` (not deleted; `crates/apps/nexus/FROZEN.md` explains how to unfreeze). `Cargo.lock` loses 162 packages, 41 of them `nexus-*`, and no package is added or upgraded. `docs/WORKSPACE-MAP.md` regenerated. Nothing outside Nexus depended on it.
 
 ### Fixed
+- **`wnaf` 0.14.0 was yanked** (via `p256` -> `rusty_a2a`), failing `cargo-deny` on every PR that touches `Cargo.lock`; locked at 0.14.1.
 - **`rusty_bbp`: no wasted Coder turn on candidate submission.** Submitting a candidate ended the Coder turn and scheduled the next one while the task was still in `build`, so a Coder turn was granted only for the transition to `test` to revoke it: one turn of budget per candidate and a skipped turn id. The turn now ends without scheduling and the `test` entry schedules once. `Assign` no longer grants a turn either; the first `Tick` does, because a turn needs a host ready to launch its harness and roles are assigned before any moderator runs (the moderator's restart fence aborted that turn every time). `bbp mod` ticks first; a hand-driven flow runs `bbp tick` after assigning. Regression tests in `tests/rules.rs`; the moderator test asserts turn ids 1 to 4 exactly.
 
 ### Added

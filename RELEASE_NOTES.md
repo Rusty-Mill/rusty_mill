@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - Cargo.lock: bump yanked wnaf 0.14.0 to 0.14.1 (pending review)
+
+- **Fixed:** `cargo-deny` (advisories) fails on any PR that changes `Cargo.lock` because `wnaf 0.14.0` (via `p256` -> `rusty_a2a`) was yanked. `cargo update -p wnaf` moves it to 0.14.1: one package, plus its new `primefield` edge (already in the lock). No source changes.
+
+---
+
 ## 2026-10-09 - RLBot native port: plan (pending review)
 
 - **Added:** `crates/apps/rocket_league/rlbot/PLAN.md`: five stages (FlatBuffers runtime, wire subset, client, port `rb_tape_bot`, `rb_env` bridge), measured from rlbot 0.6.0, risks and rollback. Docs only; three decisions listed for the owner before stage 1.
