@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use axum::extract::OriginalUri;
-use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, request::Parts, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::Router;
 use rusty_http::{HeaderMap, Method};
+use rusty_mcp_server::json::Value;
 use rusty_mcp_server::HttpHandler;
 use rusty_serve::{Body as ServeBody, Request, SharedHandler};
 use tokio::sync::{mpsc, oneshot};
@@ -35,16 +36,48 @@ enum Payload {
     Stream(mpsc::Receiver<Bytes>),
 }
 
+/// Tells the handler who made a request, from what an earlier layer left on
+/// it (token claims in the request's extensions, say). See
+/// [`router_with_principal`].
+pub type PrincipalOf = dyn Fn(&Parts) -> Option<Value> + Send + Sync;
+
 /// A router answering every request with `handler`, whose request bodies may
 /// be at most `max_body_bytes`. Put layers on it, then nest it at the path
 /// `handler` serves (see the crate docs).
 pub fn router(handler: Arc<HttpHandler>, max_body_bytes: usize) -> Router {
+    mount(handler, max_body_bytes, None)
+}
+
+/// Like [`router`], and each request's `principal` is read from it by
+/// `principal_of` and given to the handlers as
+/// [`Caller::principal`](rusty_mcp_server::Caller::principal), next to the
+/// request's headers. Authorization in front of the mount stays the
+/// application's business; this only carries its outcome through.
+pub fn router_with_principal(
+    handler: Arc<HttpHandler>,
+    max_body_bytes: usize,
+    principal_of: impl Fn(&Parts) -> Option<Value> + Send + Sync + 'static,
+) -> Router {
+    mount(handler, max_body_bytes, Some(Arc::new(principal_of)))
+}
+
+fn mount(
+    handler: Arc<HttpHandler>,
+    max_body_bytes: usize,
+    principal_of: Option<Arc<PrincipalOf>>,
+) -> Router {
     Router::new().fallback(
         move |OriginalUri(uri): OriginalUri, request: axum::extract::Request| {
             let target = uri
                 .path_and_query()
                 .map_or_else(|| uri.path().to_owned(), |pq| pq.as_str().to_owned());
-            serve(Arc::clone(&handler), target, request, max_body_bytes)
+            serve(
+                Arc::clone(&handler),
+                target,
+                request,
+                max_body_bytes,
+                principal_of.clone(),
+            )
         },
     )
 }
@@ -60,7 +93,7 @@ pub fn router_at(handler: Arc<HttpHandler>, max_body_bytes: usize, path: &str) -
             .uri()
             .query()
             .map_or_else(|| path.clone(), |q| format!("{path}?{q}"));
-        serve(Arc::clone(&handler), target, request, max_body_bytes)
+        serve(Arc::clone(&handler), target, request, max_body_bytes, None)
     })
 }
 
@@ -71,8 +104,10 @@ async fn serve(
     target: String,
     request: axum::extract::Request,
     max_body_bytes: usize,
+    principal_of: Option<Arc<PrincipalOf>>,
 ) -> Response {
     let (parts, body) = request.into_parts();
+    let principal = principal_of.and_then(|of| of(&parts));
     let Ok(body) = axum::body::to_bytes(body, max_body_bytes).await else {
         return plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     };
@@ -94,7 +129,7 @@ async fn serve(
             headers: &headers,
             body: &body,
         };
-        run(&handler, &request, head_tx);
+        run(&handler, &request, principal, head_tx);
     });
     match head_rx.await {
         Ok(head) => respond(head),
@@ -104,8 +139,13 @@ async fn serve(
 
 /// Run the handler and deliver its reply: whole replies at once, a stream
 /// as head first and chunks after.
-fn run(handler: &HttpHandler, request: &Request<'_>, head_tx: oneshot::Sender<Head>) {
-    let response = handler.handle(request);
+fn run(
+    handler: &HttpHandler,
+    request: &Request<'_>,
+    principal: Option<Value>,
+    head_tx: oneshot::Sender<Head>,
+) {
+    let response = handler.handle_with(request, principal);
     let mut head = Head {
         status: response.status.as_u16(),
         headers: response.headers,

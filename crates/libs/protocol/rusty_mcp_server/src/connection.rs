@@ -32,6 +32,27 @@ pub trait Notifier: Send + Sync {
     fn notify(&self, message: Message);
 }
 
+/// Who sent the HTTP request that carries a call, as far as the transport
+/// knows. Empty over stdio.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Caller {
+    /// The request's headers, names lowercased, in arrival order.
+    pub headers: Vec<(String, String)>,
+    /// What the host's own authentication established about the caller
+    /// (token claims), as JSON; `None` when it ran none.
+    pub principal: Option<Value>,
+}
+
+impl Caller {
+    /// The first header called `name` (case-insensitive).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
 /// A flag a client raises with `notifications/cancelled`. A long-running tool
 /// should poll it and stop early; its response is dropped once it is set.
 #[derive(Clone, Debug, Default)]
@@ -70,6 +91,7 @@ pub struct CallContext {
     meta: RequestMeta,
     cancel: CancelToken,
     notifier: Arc<dyn Notifier>,
+    caller: Arc<Caller>,
     #[cfg(feature = "request-state")]
     pub(crate) state: Option<Vec<u8>>,
     /// How many times this request has already been sent back for input.
@@ -103,6 +125,11 @@ impl CallContext {
                 "inputResponses arrived without the matching requestState",
             )),
         }
+    }
+
+    /// The HTTP request this call arrived in (empty over stdio).
+    pub fn caller(&self) -> &Caller {
+        &self.caller
     }
 
     /// The id of the `tools/call` request.
@@ -180,6 +207,7 @@ pub struct Connection {
     inflight: Mutex<HashMap<RequestId, CancelToken>>,
     /// Raised by [`Connection::close_streams`]: long-lived requests wind down.
     closing: AtomicBool,
+    caller: Arc<Caller>,
 }
 
 /// What [`Connection::start`] decided about a message.
@@ -241,7 +269,16 @@ impl Connection {
             state: Mutex::new(State::default()),
             inflight: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
+            caller: Arc::new(Caller::default()),
         }
+    }
+
+    /// This connection serves `caller`; handlers see it as
+    /// [`CallContext::caller`].
+    #[must_use]
+    pub fn with_caller(mut self, caller: Caller) -> Self {
+        self.caller = Arc::new(caller);
+        self
     }
 
     /// A connection whose protocol revision is already known, for a
@@ -440,6 +477,7 @@ impl Connection {
             meta,
             cancel: token.clone(),
             notifier: Arc::clone(&self.notifier),
+            caller: Arc::clone(&self.caller),
             #[cfg(feature = "request-state")]
             state: None,
             #[cfg(feature = "request-state")]

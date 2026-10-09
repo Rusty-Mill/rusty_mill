@@ -193,3 +193,62 @@ async fn a_pinned_mount_serves_whatever_path_it_is_reached_on() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_sees_the_headers_and_the_principal_of_its_request() {
+    let server = Server::builder("who", "1")
+        .tool(Tool::new("whoami", schema()), |ctx, _p| {
+            let caller = ctx.caller();
+            let who = caller
+                .principal
+                .as_ref()
+                .and_then(|p| p.get("sub"))
+                .and_then(Value::as_str)
+                .unwrap_or("nobody");
+            let trace = caller.header("X-Trace").unwrap_or("none");
+            Ok(text(&format!("{who}/{trace}")))
+        })
+        .build()
+        .unwrap();
+    let handler = Arc::new(HttpHandler::new(Arc::new(server), HttpConfig::default()));
+    let mcp = rusty_mcp_axum::router_with_principal(handler, 1 << 20, |parts| {
+        parts.extensions.get::<Claims>().map(|c| {
+            let mut v = Value::object();
+            v.insert("sub", Value::from(c.0.as_str()));
+            v
+        })
+    })
+    .layer(from_fn(
+        |mut request: Request<axum::body::Body>, next: Next| async move {
+            request.extensions_mut().insert(Claims("alice".to_owned()));
+            next.run(request).await
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, Router::new().nest_service("/mcp", mcp))
+            .await
+            .unwrap()
+    });
+    let mut config = ClientHttp::new(format!("http://{addr}/mcp"));
+    config
+        .headers
+        .push(("X-Trace".to_owned(), "t-9".to_owned()));
+    let result = tokio::task::spawn_blocking(move || {
+        let mut c = Client::connect(
+            HttpTransport::new(config).unwrap(),
+            ClientConfig::new("t", "1"),
+            NoHandler,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        c.call_tool("whoami", None).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(first_text(&result), "alice/t-9");
+}
+
+#[derive(Clone)]
+struct Claims(String);

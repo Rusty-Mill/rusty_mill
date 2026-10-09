@@ -40,7 +40,7 @@
 //! announces no changes.
 
 use crate::changes::ChangeKinds;
-use crate::connection::{CancelToken, Connection, Notifier, Started};
+use crate::connection::{Caller, CancelToken, Connection, Notifier, Started};
 use crate::push::Push;
 use crate::replay::{Replay, Shared};
 use crate::server::Server;
@@ -165,9 +165,28 @@ impl HttpHandler {
     }
 }
 
+impl HttpHandler {
+    /// Answer `request`, telling handlers who sent it: `principal` is what
+    /// the host's own authentication established (token claims), as JSON.
+    /// Handlers read it, with the request's headers, from
+    /// [`CallContext::caller`](crate::CallContext::caller).
+    pub fn handle_with(&self, request: &Request<'_>, principal: Option<Value>) -> Response {
+        let caller = Caller {
+            headers: request
+                .headers
+                .iter()
+                .map(|(n, v)| (n.to_ascii_lowercase(), v.to_owned()))
+                .collect(),
+            principal,
+        };
+        self.respond(request, caller)
+            .unwrap_or_else(|rejection| rejection)
+    }
+}
+
 impl SharedHandler for HttpHandler {
     fn handle(&self, request: &Request<'_>) -> Response {
-        self.respond(request).unwrap_or_else(|rejection| rejection)
+        self.handle_with(request, None)
     }
 }
 
@@ -460,7 +479,7 @@ impl Drop for SseStream {
 }
 
 impl HttpHandler {
-    fn respond(&self, request: &Request<'_>) -> Result<Response, Response> {
+    fn respond(&self, request: &Request<'_>, caller: Caller) -> Result<Response, Response> {
         let path = request.target.split('?').next().unwrap_or("");
         if path != self.config.path {
             return Err(reject(
@@ -514,7 +533,7 @@ impl HttpHandler {
             self.check_version_rules(headers, header_version.as_ref(), &message, has_session)?;
         // 2026-07-28 `_meta` requests are stateless: any session id is ignored.
         let session = if modern { None } else { looked_up? };
-        self.dispatch(message, header_version, modern, session)
+        self.dispatch(message, header_version, modern, session, caller)
     }
 
     /// The session a request names, refused with `404` when it is unknown or
@@ -931,6 +950,7 @@ impl HttpHandler {
         header_version: Option<ProtocolVersion>,
         modern: bool,
         session: Option<Arc<Session>>,
+        caller: Caller,
     ) -> Result<Response, Response> {
         // What a request without `_meta` is taken to speak: its header, else
         // its session's revision, else the oldest revision that has no header.
@@ -969,13 +989,16 @@ impl HttpHandler {
         let (info, caps) = session.as_ref().map_or((None, None), |s| {
             (s.client_info.clone(), s.client_capabilities.clone())
         });
-        let conn = Arc::new(Connection::resumed(
-            Arc::clone(&self.server),
-            Arc::new(EventNotifier(tx.clone())),
-            assumed,
-            info,
-            caps,
-        ));
+        let conn = Arc::new(
+            Connection::resumed(
+                Arc::clone(&self.server),
+                Arc::new(EventNotifier(tx.clone())),
+                assumed,
+                info,
+                caps,
+            )
+            .with_caller(caller),
+        );
         match conn.start(message) {
             Started::Done(None) => Ok(Response::json(StatusCode::ACCEPTED, Vec::new())),
             Started::Done(Some(reply)) => {

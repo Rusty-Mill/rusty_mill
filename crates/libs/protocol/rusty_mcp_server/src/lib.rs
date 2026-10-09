@@ -67,7 +67,7 @@ pub use ask::{answer, Ask, ToolOutcome};
 pub use changes::{ChangeBroadcaster, ChangeEvent, ChangeKinds};
 #[cfg(feature = "request-state")]
 pub use connection::Turn;
-pub use connection::{CallContext, CancelToken, Connection, Job, Notifier, Started};
+pub use connection::{CallContext, Caller, CancelToken, Connection, Job, Notifier, Started};
 #[cfg(feature = "http")]
 pub use http::{bind_http, HttpConfig, HttpHandler};
 pub use server::{
