@@ -10360,6 +10360,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rb_rlbot_wire"
+version = "0.1.0"
+dependencies = [
+ "rusty_flatbuffers",
+]
+
+[[package]]
 name = "rb_scenario"
 version = "0.1.0"
 dependencies = [
