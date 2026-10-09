@@ -3,8 +3,9 @@
 An MCP server for controlling a homelab: [Proxmox VE](https://www.proxmox.com/en/proxmox-virtual-environment),
 [OPNsense](https://opnsense.org/), and Fedora/systemd hosts (via
 [`rusty_fedora_agent`](../rusty_fedora_agent)) today, more backends welcome.
-Built on [`rusty-mcp`](../rusty_mcp/crates/rusty-mcp), this workspace's own
-scaffold for MCP servers, targeting spec 2026-07-28.
+Built on [`rusty_mcp_server`](../../libs/protocol/rusty_mcp_server), this
+workspace's own MCP server core (it speaks the classic revisions and
+2026-07-28).
 
 The Proxmox, OPNsense, and Fedora API clients themselves live in their own
 reusable crates, [`rusty_proxmox`](../rusty_proxmox),
@@ -162,14 +163,16 @@ raw `config.xml`, which isn't JSON at all.
 
 1. Add (or reuse) a client crate for it, shaped like `rusty_proxmox`/
    `rusty_opnsense`: a small async client returning the backend's own JSON,
-   with no dependency on MCP/`rmcp`.
-2. Add a `src/tools/<backend>.rs` module: argument structs, a
-   `#[tool_router(router = <backend>_tools, vis = "pub(crate)")]` block on
-   `impl HomelabServer`, one method per tool.
+   with no dependency on MCP.
+2. Add a `src/tools/<backend>.rs` module: argument structs (`Deserialize` +
+   `JsonSchema`; the advertised schema comes from them), an `impl
+   HomelabServer` block with one plain async method per tool, and a
+   `register_tools` function listing each tool's name, description and
+   argument type (copy one from `proxmox.rs`).
 3. Register the module in `src/tools/mod.rs`, add the client as a field on
    [`HomelabServer`](src/server.rs) alongside a `pub(crate) fn <backend>(&self)`
-   accessor (mirrors `proxmox`/`opnsense`), and add `+ Self::<backend>_tools()`
-   in `HomelabServer::new`.
+   accessor (mirrors `proxmox`/`opnsense`), and add a `register_tools` call in
+   `HomelabServer::wire_server`.
 4. Add the backend's URL/credential flags to [`Cli`](src/config.rs) and a
    `<backend>_config()` builder, following `proxmox_config`/`opnsense_config`.
 
@@ -179,12 +182,18 @@ raw `config.xml`, which isn't JSON at all.
 cargo test -p rusty_homelab_mcp
 ```
 
-`tests/tools.rs` connects a real client over an in-memory pipe -- the same
-code path the stdio transport takes -- against `HomelabServer` instances
+`tests/tools.rs` connects a real client (`rusty-mcp-client`) over HTTP on a
+loopback port against `HomelabServer` instances
 backed by either real (but unconfigured) or mock-HTTP-backed clients, so it
 covers dispatch, schema generation, serialization, and the unconfigured-
 backend error path, not just the tool functions in isolation.
 
-See the [`rusty-mcp` README](../rusty_mcp/README.md) for what else the
-scaffold gives you (resources, prompts, completions, authorization, tasks,
-tracing/metrics, load shedding) that isn't wired up here yet.
+## Flags that went away
+
+When this server left the `rusty-mcp` scaffold, `--sse-response` and
+`--request-timeout-secs` (and their `MCP_*` variables) were dropped: replies
+are plain JSON unless a call runs long, and there is no per-request deadline.
+`--max-concurrent` now limits open connections (default 256, it was
+unlimited). `--auth-resource-url` is accepted and ignored with a warning: the
+bearer token is a plain shared secret and no longer bound to an audience.
+Metrics and tracing export are not wired up.

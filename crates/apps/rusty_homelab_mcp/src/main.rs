@@ -25,7 +25,9 @@
 mod config;
 mod hosts;
 mod json_result;
+mod serve;
 mod server;
+mod tool_support;
 mod tools;
 
 use clap::Parser as _;
@@ -35,41 +37,24 @@ use rusty_proxmox::ProxmoxClient;
 use server::HomelabServer;
 
 #[tokio::main]
-async fn main() -> Result<(), rusty_mcp::ServeError> {
+async fn main() {
     let cli = HomelabCli::parse();
 
     // A URL set without its matching credentials is much more likely a
     // typo'd flag than an intentionally half-configured backend -- fail
     // fast with a plain message rather than starting a server whose tools
     // for that backend can never work.
-    let proxmox_config = cli.proxmox_config().unwrap_or_else(|msg| {
-        eprintln!("error: {msg}");
-        std::process::exit(2);
-    });
-    let opnsense_config = cli.opnsense_config().unwrap_or_else(|msg| {
-        eprintln!("error: {msg}");
-        std::process::exit(2);
-    });
-    let fedora_hosts = cli.fedora_hosts().unwrap_or_else(|msg| {
-        eprintln!("error: {msg}");
-        std::process::exit(2);
-    });
-    let auth_config = cli.auth_config().unwrap_or_else(|msg| {
-        eprintln!("error: {msg}");
-        std::process::exit(2);
-    });
-
-    let mut server_config: rusty_mcp::ServerConfig = cli.mcp.into();
-    if let Some(auth) = auth_config {
-        match &mut server_config.transport {
-            rusty_mcp::Transport::Http(http_config) => http_config.auth = Some(auth),
-            rusty_mcp::Transport::Stdio => {
-                eprintln!("error: --auth-token/HOMELAB_MCP_AUTH_TOKEN requires --transport http");
-                std::process::exit(2);
-            }
-        }
+    let proxmox_config = cli.proxmox_config().unwrap_or_else(|msg| exit_with(&msg));
+    let opnsense_config = cli.opnsense_config().unwrap_or_else(|msg| exit_with(&msg));
+    let fedora_hosts = cli.fedora_hosts().unwrap_or_else(|msg| exit_with(&msg));
+    let token = cli.bearer_token();
+    if token.is_some() && cli.mcp.transport == serve::TransportArg::Stdio {
+        exit_with("--auth-token/HOMELAB_MCP_AUTH_TOKEN requires --transport http");
     }
-    rusty_mcp::telemetry::init(&server_config.log_filter);
+    serve::init_logging(&cli.mcp.log);
+    if cli.auth_resource_url.is_some() {
+        tracing::warn!("--auth-resource-url has no effect any more and is ignored");
+    }
 
     if proxmox_config.is_none() && opnsense_config.is_none() && fedora_hosts.is_empty() {
         tracing::warn!(
@@ -79,21 +64,28 @@ async fn main() -> Result<(), rusty_mcp::ServeError> {
         );
     }
 
-    // Built once, cloned into each handler: Streamable HTTP constructs a
-    // fresh handler per request, but every client (and its connection
-    // pool) should be shared across every call, not rebuilt each time.
+    // Built once and shared by every call, so each client's connection pool
+    // is reused, not rebuilt per request.
     let proxmox = proxmox_config.map(ProxmoxClient::new);
     let opnsense = opnsense_config.map(OpnsenseClient::new);
+    let homelab = HomelabServer::new(proxmox, opnsense, fedora_hosts);
 
-    rusty_mcp::serve(
-        move || {
-            Ok(HomelabServer::new(
-                proxmox.clone(),
-                opnsense.clone(),
-                fedora_hosts.clone(),
-            ))
-        },
-        server_config,
-    )
-    .await
+    let runtime = tokio::runtime::Handle::current();
+    let server = homelab
+        .wire_server(&runtime)
+        .unwrap_or_else(|e| exit_with(&format!("invalid server description: {e}")));
+    let args = cli.mcp.clone();
+    // The server's handlers block, so serve from a thread of its own and keep
+    // the runtime free to run the tools.
+    let served = tokio::task::spawn_blocking(move || serve::serve(server, &args, token)).await;
+    match served {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => exit_with(&msg),
+        Err(e) => exit_with(&format!("server task failed: {e}")),
+    }
+}
+
+fn exit_with(message: &str) -> ! {
+    eprintln!("error: {message}");
+    std::process::exit(2);
 }

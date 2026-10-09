@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_homelab_mcp on the native MCP stack (pending review)
+
+- **Changed:** `rusty_homelab_mcp` no longer uses `rmcp` or the `rusty-mcp` scaffold; same 58 tools, schemas still from `schemars`. HTTP auth is a plain bearer check.
+- **Removed flags:** `--sse-response`, `--request-timeout-secs`; `--auth-resource-url` is ignored.
+- **Not done:** no real backend tested; no metrics.
+
+---
+
 ## 2026-10-09 - remind_me_remote on the native MCP stack (pending review)
 
 - **Changed:** `remind_me_remote` no longer uses `rmcp`; tools, resource and prompt are forwarded from `remind_me_mcp::Handler`; resumption now comes from `rusty_mcp_server`. `build_router` returns `BuildError`; `RemindMeHandler` and `InProcessEventStore` removed.
