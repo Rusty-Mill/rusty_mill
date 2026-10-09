@@ -82,6 +82,9 @@ runs:
       shell: pwsh
       env:
         PROTOC_VERSION: "36.2"
+        # sha256 of protoc-36.2-win64.zip from the protobuf release page.
+        # Bump both together: a mismatch fails the step before anything runs.
+        PROTOC_SHA256: "f0c128dc0d8492eceece83bb459a4c0e316764b929ffbf1aa416357fd644edd3"
       run: |
         $ErrorActionPreference = "Stop"
         $v = $env:PROTOC_VERSION
@@ -89,6 +92,8 @@ runs:
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
         $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-win64.zip"
         Invoke-WebRequest -Uri $url -OutFile "$dest\protoc.zip" -MaximumRetryCount 3 -RetryIntervalSec 5
+        $got = (Get-FileHash -Algorithm SHA256 "$dest\protoc.zip").Hash.ToLower()
+        if ($got -ne $env:PROTOC_SHA256) { throw "protoc.zip sha256 $got, expected $env:PROTOC_SHA256" }
         Expand-Archive -Force -Path "$dest\protoc.zip" -DestinationPath $dest
         Add-Content -Path $env:GITHUB_PATH -Value "$dest\bin"
         & "$dest\bin\protoc.exe" --version

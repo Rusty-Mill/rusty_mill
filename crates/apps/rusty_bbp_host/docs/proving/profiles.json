@@ -1,0 +1,22 @@
+{
+  "profiles": [
+    {"name": "test", "program": "/bin/sh", "args": ["-c", "cargo test --offline 2>&1"]}
+  ],
+  "read_roots": ["/bin", "/usr", "/lib", "/lib64", "/home/nano/.cargo", "/home/nano/.rustup"],
+  "env": [
+    ["PATH", "/home/nano/.cargo/bin:/usr/bin:/bin"],
+    ["HOME", "/home/nano"],
+    ["CARGO_HOME", "/home/nano/.cargo"],
+    ["RUSTUP_HOME", "/home/nano/.rustup"],
+    ["CARGO_NET_OFFLINE", "true"]
+  ],
+  "limits": {
+    "cpu_secs": 300,
+    "wall_secs": 600,
+    "memory_bytes": 4294967296,
+    "file_bytes": 1073741824,
+    "open_files": 1024,
+    "processes": 4096
+  },
+  "tree": "sha256(git write-tree id)"
+}

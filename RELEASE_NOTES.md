@@ -214,6 +214,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added (third slice):** the classic and stateless handshakes, capabilities, typed per-request `_meta`, and the version-negotiation and fallback rules.
 - **Added (fourth slice):** subscriptions, tasks and multi-round-trip input. The A2 type list is now complete.
 - **Known limitations:** nothing uses the crate yet, so no consumer behaviour changed. There is no session or dispatch layer, SSE framing or transport yet (A3/A4). `RequestMeta` refuses a mistyped known key where `rmcp`'s accessors silently return `None`, so a server can answer `-32602` instead of ignoring bad metadata. Completion's 100-value cap is not enforced by the codec (server policy). Annotation `priority` is forwarded as raw JSON, so a value like `0.2` survives exactly where `rmcp` (which stores `f32`) would re-encode it as `0.20000000298`. Unknown members of known types are dropped on decode. Verified by tests only, not against a live server.
+
+## 2026-10-09 - rusty_bbp_host: proving-run runbook, README status, protoc pin
+
+- **Added:** `crates/apps/rusty_bbp_host/docs/proving-run.md` and `docs/proving/{brief.md,profiles.json,agents.json}`: how to run the first live Blackboard Protocol task end to end (build, throwaway target crate, open and assign, `bbp mod` in one shell and `bbp human` in another; MCP-only roles have their built-in tools removed, every harness logs structured tool events) and what to record afterwards, so the spec's post-proving-run questions get data rather than opinion.
+- **Changed:** the host README's stale "Not here yet" section (stages 3b and 3c, long merged) becomes "Status". The Windows `protoc` 36.2 zip in `setup-build-env` is checked against a pinned SHA-256 before `Expand-Archive`; a mismatch fails the step loudly.
+- **Known limitation:** the runbook's paths assume `/tmp/bbp` and a `nano` user; the sandboxed profile must list the toolchain's directories as read roots, and the target crate must build offline. Docs and CI only; no runtime code changed.
+
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
 - **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
