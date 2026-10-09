@@ -7,10 +7,13 @@
 //!
 //! `#[ignore]`d: it needs outbound network and a readable OS trust store, and
 //! a third party's server is not something a required CI job should depend on.
-//! Run by hand:
+//! Run by hand. The cfg is required: without it the crate-level gate removes
+//! every test and cargo reports a successful run of zero tests, so check that
+//! the output says `1 passed`:
 //!
 //! ```text
-//! cargo test --features handrolled-engine --test handrolled_live -- --ignored --nocapture
+//! RUSTFLAGS='--cfg rusty_tls_handrolled' cargo test -p rusty_tls \
+//!     --features handrolled-engine --test handrolled_live -- --ignored --nocapture
 //! ```
 //!
 //! `RUSTY_TLS_LIVE_HOSTS` (comma-separated) replaces the default host list.
@@ -238,9 +241,9 @@ fn the_native_engine_completes_with_googles_sign_in_endpoints() {
     for host in hosts() {
         let reference = through_rustls(&host);
         match (native(&host), &reference) {
-            (Ok(outcome), _) => {
+            (Ok(outcome), Ok(expected)) => {
                 println!(
-                    "{host}: native {:?}, group {:?}, peer scheme {:?}, {:?}; rustls {reference:?}",
+                    "{host}: native {:?}, group {:?}, peer scheme {:?}, {:?}; rustls {expected:?}",
                     outcome.version, outcome.group, outcome.scheme, outcome.status_line
                 );
                 if outcome.intercepted {
@@ -249,9 +252,21 @@ fn the_native_engine_completes_with_googles_sign_in_endpoints() {
                          this is not evidence about {host} itself"
                     );
                 }
-                if !outcome.status_line.starts_with("HTTP/1.") {
-                    failures.push(format!("{host}: no HTTP response: {outcome:?}"));
+                // The differential: the same request must get the same answer.
+                if outcome.status_line != *expected {
+                    failures.push(format!(
+                        "{host}: native got {:?}, rustls got {expected:?}",
+                        outcome.status_line
+                    ));
                 }
+            }
+            (Ok(outcome), Err(rustls)) => {
+                // Without a reference there is no differential, so this does not
+                // pass: a native success alone is smoke coverage, not parity.
+                failures.push(format!(
+                    "{host}: no reference (rustls failed: {rustls}); native got {:?}",
+                    outcome.status_line
+                ));
             }
             (Err(native), Ok(_)) => {
                 // rustls got through and the engine did not: an engine finding.
@@ -260,8 +275,9 @@ fn the_native_engine_completes_with_googles_sign_in_endpoints() {
                 ));
             }
             (Err(native), Err(rustls)) => {
-                println!("{host}: unreachable either way (native: {native}; rustls: {rustls})");
-                failures.push(format!("{host}: unreachable ({rustls})"));
+                failures.push(format!(
+                    "{host}: unreachable either way (native: {native}; rustls: {rustls})"
+                ));
             }
         }
     }

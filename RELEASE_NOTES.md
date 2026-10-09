@@ -13,10 +13,10 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
-## 2026-10-09 - rusty_tls: live-internet check, first wiring candidate chosen
+## 2026-10-09 - rusty_tls: live-internet check, first wiring candidate proposed
 
-- **Added (test, ignored by default):** `handrolled_live.rs` runs the native engine against real hosts and the rustls-backed stream side by side. **Result here: not evidence about Google.** This sandbox's egress gateway terminates TLS and re-signs with its own CA, so all ten hosts tried showed the gateway's server (TLS 1.3, X25519, `rsa_pss_rsae_sha256`). The engine matched rustls on all ten, which shows it works against a production-grade TLS 1.3 stack, nothing more.
-- **Decision recorded:** the first consumer to wire is `rleval-app`'s OIDC transport (optional `oidc` feature, one call site, sync, system trust, no ALPN or client certificates). Runner-up: `rusty_channel` `bot`. Not started: the engine selector in `rusty_tls`, the ADR superseding ADR-0002, and the evidence bar are the owner's.
+- **Added (test, ignored by default):** `handrolled_live.rs` runs the native engine against real hosts and the rustls-backed stream side by side and fails when the two disagree or the reference fails. **Result here: not evidence about Google.** This sandbox's egress gateway terminates TLS and re-signs with its own CA, so all ten hosts tried showed the gateway's server (TLS 1.3, X25519, `rsa_pss_rsae_sha256`). The engine matched rustls on all ten, which shows it works against a production-grade TLS 1.3 stack, nothing more.
+- **Proposed candidate (not an integration decision):** the first consumer to wire would be `rleval-app`'s OIDC transport (optional `oidc` feature, one call site, sync, system trust, no ALPN or client certificates). Runner-up: `rusty_channel` `bot`. The candidate was accepted as the one to evaluate; no integration is authorized. Not started: the engine selector in `rusty_tls`, the ADR superseding ADR-0002, and the evidence bar are the owner's.
 - **Known limitations:** a run on a machine with direct internet is still needed.
 
 ## 2026-10-09 - CI: cargo-deny and cargo-shear fixed on #572
