@@ -459,10 +459,17 @@ mod pem_tests {
     }
 
     #[test]
-    fn loads_a_chain_and_a_key() {
-        let (cert, key) = pair();
-        let chain = write("chain.pem", &format!("{cert}{cert}"));
-        assert_eq!(load_certs(&chain, "t").expect("certs").len(), 2);
+    fn loads_a_chain_in_file_order_and_a_key() {
+        let (first, key) = pair();
+        let (second, _) = pair();
+        let chain = write("chain.pem", &format!("{first}{second}"));
+        let loaded = load_certs(&chain, "t").expect("certs");
+        let der = |pem: &str| {
+            CertificateDer::from_pem_slice(pem.as_bytes())
+                .expect("der")
+                .to_vec()
+        };
+        assert_eq!(loaded, vec![der(&first), der(&second)]);
         let key = write("key.pem", &key);
         assert!(!load_key(&key, "t").expect("key").is_empty());
     }
@@ -472,6 +479,12 @@ mod pem_tests {
         // PKCS#1 header around arbitrary base64: the parser only classifies.
         let pem = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n";
         assert!(load_key(&write("pkcs1.pem", pem), "t").is_ok());
+    }
+
+    #[test]
+    fn a_sec1_key_is_accepted() {
+        let pem = "-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n";
+        assert!(load_key(&write("sec1.pem", pem), "t").is_ok());
     }
 
     #[test]
@@ -505,6 +518,16 @@ mod pem_tests {
         let (cert, _) = pair();
         let bad = "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n";
         let path = write("bad.pem", &format!("{cert}{bad}"));
-        assert!(matches!(load_certs(&path, "t"), Err(TlsError::Io { .. })));
+        match load_certs(&path, "t") {
+            Err(TlsError::Io {
+                at,
+                path: p,
+                source,
+            }) => {
+                assert_eq!((at.as_str(), p), ("t", path));
+                assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected an InvalidData Io error, got {other:?}"),
+        }
     }
 }
