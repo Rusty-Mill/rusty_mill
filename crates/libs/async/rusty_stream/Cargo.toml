@@ -2,6 +2,7 @@
 name = "rusty_stream"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio."
 publish = false
 
