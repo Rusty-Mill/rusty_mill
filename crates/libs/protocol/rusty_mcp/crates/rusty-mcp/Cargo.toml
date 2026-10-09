@@ -40,14 +40,14 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 rusty_base64 = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "signal", "net", "process", "time"] }
 tokio-util = { version = "0.7", default-features = false }
-clap = { version = "4", features = ["derive", "env"] }
-http = "1"
-serde = { version = "1", features = ["derive"] }
+clap = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true }
 serde_json = "1"
 thiserror = "2"
 tower-service = "0.3"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 rusty_url = { workspace = true }
 tower-layer = "0.3"
 # `rust_crypto` keeps the build pure-Rust; `aws_lc_rs` would need a C toolchain.
@@ -60,7 +60,7 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]
-rand = "0.8"
+rand = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rmcp = { version = "3.1", default-features = false, features = [
     "server",
@@ -73,8 +73,8 @@ rmcp = { version = "3.1", default-features = false, features = [
     "transport-streamable-http-client-reqwest",
 ] }
 rsa = "0.9"
-schemars = "1.0"
-serde = { version = "1", features = ["derive"] }
+schemars = { workspace = true }
+serde = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util"] }
 
 [features]

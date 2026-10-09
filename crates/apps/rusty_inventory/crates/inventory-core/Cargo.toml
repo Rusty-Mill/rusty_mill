@@ -20,9 +20,9 @@ aes-gcm = "0.10"
 directories = "5"
 walkdir = "2"
 sha2 = "0.10"
-rand = "0.8"
+rand = { workspace = true }
 rand_chacha = "0.3"
-tempfile = "3"
+tempfile = { workspace = true }
 # Cross-process lock around a seal (review 2.9): `flock`/`LockFileEx`; std's
 # `File::lock` needs Rust 1.89, above this crate's rust-version. Already in
 # the workspace (nexus-storage).
@@ -30,18 +30,18 @@ fs4 = "1"
 
 # The keychain backend is per-platform.
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"] }
+keyring = { workspace = true, features = ["apple-native"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3", features = ["windows-native"] }
+keyring = { workspace = true, features = ["windows-native"] }
 
 # Secret Service, not the kernel keyring. `linux-native` (keyutils) does not
 # survive a reboot, which would silently regenerate the key and leave the
 # existing index permanently unopenable. Costs a `libdbus-1-dev` build
 # dependency; a headless machine can supply INVENTORY_INDEX_KEY instead.
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["sync-secret-service"] }
+keyring = { workspace = true, features = ["sync-secret-service"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 serde_json = { workspace = true }

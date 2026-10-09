@@ -34,12 +34,12 @@ rusty_lines = { path = "../../libs/ui/rusty_lines", version = "0.4.0", default-f
 # Linux: rusty_libc is the default backend; libc only when forced.
 [target.'cfg(target_os = "linux")'.dependencies]
 rusty_libc = { workspace = true, optional = true }
-libc = { version = "0.2", optional = true }
+libc = { workspace = true, optional = true }
 
 # Other Unix (macOS/BSD): the libc backend is the only option (rusty_libc is
 # Linux-only), so libc is a plain dependency there.
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
-libc = "0.2"
+libc = { workspace = true }
 
 # Windows: `winjob`'s background-job support (`docs/WINDOWS_JOB_CONTROL.md`)
 # is built directly on rusty_win32's Job Object / suspended-spawn
@@ -52,7 +52,7 @@ rusty_win32 = { workspace = true, features = ["std"] }
 # The integration tests drive the built binary and also make a few syscalls of
 # their own, so they always need libc.
 [target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"
+libc = { workspace = true }
 
 [dev-dependencies]
 # benches/shell_bench.rs — throughput for the lexer/parser, arithmetic

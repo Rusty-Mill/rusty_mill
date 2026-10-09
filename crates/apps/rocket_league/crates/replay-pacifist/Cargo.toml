@@ -40,7 +40,7 @@ corpus-validate = ["dep:replay-scoring", "dep:serde", "dep:serde_json"]
 [dependencies]
 replay-analyzer = { path = "../replay-analyzer" }
 replay-scoring = { path = "../replay-scoring", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
+serde = { workspace = true, optional = true }
 serde_json = { version = "1", optional = true }
 
 [package.metadata.rusty_mill]

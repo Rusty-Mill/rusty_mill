@@ -24,8 +24,8 @@ memmap2 = "0.9"
 # optional — so this is the fourth base dependency (was three).
 minijinja = "2"
 pollster = { version = "0.4.0", optional = true }
-rayon = "1"
-serde = { version = "1", optional = true, features = ["derive"] }
+rayon = { workspace = true }
+serde = { workspace = true, optional = true }
 serde_json = { version = "1", optional = true }
 # The workspace's one HTTP/1.1 parser (design review Tranche 4): the
 # server's request head and body framing, with its 3.4 framing rules.
