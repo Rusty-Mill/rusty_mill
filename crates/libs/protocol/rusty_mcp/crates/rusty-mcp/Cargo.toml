@@ -60,7 +60,6 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]
-toml = "1.1"
 rand = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rmcp = { version = "3.1", default-features = false, features = [

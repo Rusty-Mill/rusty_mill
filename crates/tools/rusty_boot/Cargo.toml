@@ -13,32 +13,18 @@ categories = ["no-std", "os"]
 layer = "tools"
 
 [dependencies]
-rusty_wire = { workspace = true }
-rusty_regx = { workspace = true }
-rusty_json = { workspace = true }
-rusty_compress = { workspace = true }
-rusty_std = { workspace = true }
 rusty_sync = { workspace = true }
 rusty_time = { workspace = true }
 rusty_err = { workspace = true }
 rusty_codec = { workspace = true }
 rusty_audio = { workspace = true }
 rusty_jinja = { workspace = true }
-rusty_tokio = { workspace = true }
-rusty_http = { workspace = true }
-rusty_lines = { workspace = true }
-rusty_font = { workspace = true }
-rusty_gui = { workspace = true }
 rusty_gpu = { workspace = true }
 rusty_vulkan = { workspace = true }
-rush = { workspace = true }
-rusty_term = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rusty_libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-rusty_win32 = { workspace = true }
 
 [features]
 default = []

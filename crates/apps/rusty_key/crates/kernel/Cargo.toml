@@ -10,7 +10,6 @@ publish = false
 layer = "apps"
 
 [dependencies]
-rk-config.workspace = true
 rk-observe.workspace = true
 rk-constrain.workspace = true
 aisdk.workspace = true

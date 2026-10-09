@@ -30,7 +30,6 @@ agentgateway-config = { workspace = true }
 http = { workspace = true }
 regex = { workspace = true }
 thiserror = "2"
-tracing = { workspace = true }
 # Shared exponential-backoff delay math, also used by rusty_request's and
 # rusty_acp's own retry policies (see retry.rs) -- `jitter: 0.0` reproduces
 # this crate's plain-doubling-capped formula exactly, since the retry

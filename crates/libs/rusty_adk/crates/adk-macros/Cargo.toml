@@ -22,6 +22,5 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 adk-core.workspace = true
 adk-tools.workspace = true
 adk-sessions.workspace = true
-async-trait.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }

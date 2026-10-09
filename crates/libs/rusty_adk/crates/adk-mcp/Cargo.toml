@@ -23,8 +23,6 @@ client = ["dep:tokio", "tokio/process", "rmcp/client"]
 adk-core.workspace = true
 adk-tools.workspace = true
 async-trait.workspace = true
-futures.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 # The workspace's shared MCP stack (design review Tranche 4): the wire
@@ -43,5 +41,4 @@ required-features = ["stdio", "http", "client"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
-tokio-test.workspace = true
 adk-sessions.workspace = true

@@ -17,4 +17,3 @@ async-stream.workspace = true
 sqlx = { workspace = true, features = ["postgres", "chrono", "bigdecimal", "json", "uuid"] }
 
 [dev-dependencies]
-tokio.workspace = true
