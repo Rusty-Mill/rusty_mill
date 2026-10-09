@@ -34,14 +34,16 @@ pub enum RequestId {
 }
 
 impl RequestId {
-    fn to_value(&self) -> Value {
+    /// This id as a JSON value.
+    pub fn to_value(&self) -> Value {
         match self {
             RequestId::Number(n) => Value::from(*n),
             RequestId::String(s) => Value::from(s.as_str()),
         }
     }
 
-    fn from_value(v: &Value) -> Result<Self> {
+    /// Decode an id from a JSON value (a string or an integer).
+    pub fn from_value(v: &Value) -> Result<Self> {
         if let Some(s) = v.as_str() {
             return Ok(RequestId::String(s.to_string()));
         }

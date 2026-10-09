@@ -270,6 +270,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_mcp_server, stdio (pending review)
+
+- **Added:** `rusty_mcp_server` with the `rusty-mcp-echo` fixture binary. A real `rmcp` client completes initialize, tools/list, tools/call (success, tool failure, unknown tool) against it.
+- **Known limitations:** stdio only; handlers run one at a time, so a slow tool delays the next request (cancellation works, concurrency does not); no progress notifications (needs `_meta` support in the proto crate); no resources/prompts handlers yet.
+
+---
+
 ## 2026-10-09 - rusty_mcp_proto slice 1 and ADR-0002 Amendment 1 (pending review)
 
 - **Added:** `rusty_mcp_proto` (P0: JSON-RPC, initialize, tools, schema builder); **Changed:** workspace ADR-0002 reclassifies the MCP crates as Tier T. No consumer uses the new crate yet.

@@ -1,0 +1,40 @@
+[package]
+name = "rusty_mcp_server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Blocking MCP server scaffold on rusty_mcp_proto: a sans-IO dispatcher, a tool registry, and newline-delimited JSON over stdio with cancellation"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+keywords = ["mcp", "model-context-protocol", "server", "stdio"]
+categories = ["network-programming"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "warn"
+unwrap_used = "warn"
+
+[dependencies]
+# First-party only (ADR-0002 Tier S after Amendment 1).
+rusty_mcp_proto = { workspace = true }
+rusty_json = { path = "../../../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
+
+# The conformance fixture the acceptance tests drive from an `rmcp` client.
+[[bin]]
+name = "rusty-mcp-echo"
+path = "src/bin/echo.rs"
+test = false
+
+[dev-dependencies]
+# Independent oracle client only (ADR-0002: dev-only external dependencies are
+# allowed as test oracles and must not ship).
+rmcp = { version = "3.1", default-features = false, features = ["client", "transport-child-process"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+serde_json = "1"
