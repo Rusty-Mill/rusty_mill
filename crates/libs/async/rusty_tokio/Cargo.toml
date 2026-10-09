@@ -12,10 +12,6 @@ layer = "libs"
 [dependencies]
 # See "Why a separate crate" in rusty_tokio-macros' own docs.
 rusty_tokio-macros = { path = "rusty_tokio-macros", version = "0.1.0" }
-# rusty_std is now a sibling in this same workspace -- plain path
-# dependency. (Was pinned to rev 3ab2361e, content-identical to the
-# merge commit that landed it on rusty_std's own main -- no behavior
-# change from this swap.)
 libc = { workspace = true }
 # `platform` is pure portable trait/type definitions (no I/O, no OS
 # dependency), so it's used on every target. `platform-linux`/

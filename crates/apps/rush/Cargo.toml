@@ -9,6 +9,11 @@ repository = "https://github.com/baileyrd/rush"
 [package.metadata.rusty_mill]
 layer = "apps"
 
+[package.metadata.cargo-shear]
+# `rpath` is declared on purpose and "not yet wired into any call site" (see
+# the comment on the dependency): kept for the Windows path-translation work.
+ignored = ["rpath"]
+
 [dependencies]
 # `[[ $s =~ regex ]]` (C56). A minimal POSIX-ERE engine (parser + Pike VM,
 # linear-time, zero deps) built to replace the `regex` crate here; v1 keeps
@@ -23,6 +28,7 @@ rusty_regx = { workspace = true }
 rusty_lines = { path = "../../libs/ui/rusty_lines", version = "0.4.0", default-features = false }
 # Path translation/normalization for MSYS2/Git Bash/POSIX-style paths on
 # Windows. Not yet wired into any call site.
+rpath = { workspace = true }
 
 # Unix job control (signals, wait, process groups, fds, rlimit) goes through
 # the `sys` facade. The backend is target-driven (see the cfgs in

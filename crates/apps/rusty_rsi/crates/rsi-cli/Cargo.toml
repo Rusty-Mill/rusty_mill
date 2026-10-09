@@ -18,9 +18,17 @@ path = "src/main.rs"
 rsi-core = { path = "../rsi-core" }
 rsi-runtime = { path = "../rsi-runtime" }
 
+[package.metadata.cargo-shear]
+# `rsi-harness` is a dev-dependency on purpose, never called from code: it
+# makes CI's affected-crate analysis (.github/scripts/affected_crates.py walks
+# Cargo's reverse dependency graph) re-run this crate's end-to-end tests when
+# the harness changes. test_ci_workflow pins this edge.
+ignored = ["rsi-harness"]
+
 [dev-dependencies]
 # The executor's own error type, matched in the invariants tests.
 rusty_sandbox = { workspace = true }
 # Never called: the tests compile the harness from its source with plain
 # rustc, as the runtime does. The edge exists so that CI's affected-crate
 # analysis re-runs these end-to-end tests whenever a0 changes.
+rsi-harness = { path = "../../harness" }

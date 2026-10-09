@@ -355,8 +355,9 @@ exclude = [
 # Workspace dependencies no root member uses today, on purpose (ADR-0009):
 # the frozen nexus crates (crates/apps/nexus/FROZEN.md) inherit them when
 # they are moved back into `members`, and the crypto, RLBot and ADR-0007
-# plans pre-register their crates. `rush` is a false positive (rusty_boot
-# inherits it). Remove a name from this list when its reason is gone.
+# plans pre-register their crates. `rush` is inherited only by rusty_boot,
+# which does not call it (see rusty_boot's own cargo-shear ignore). Remove a
+# name from this list when its reason is gone.
 ignored = [
     "base64",
     "clap_complete",
