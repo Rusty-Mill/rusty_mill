@@ -95,10 +95,14 @@ impl<T: Transport, H: Handler> Client<T, H> {
         Ok(client)
     }
 
+    /// The whole handshake, discovery and `initialize` together, gets the
+    /// timeout `connect` was given: one deadline, not one per step.
     fn handshake(&mut self) -> Result<(), ClientError> {
-        if self.session.prefers_stateless() && self.discover()? {
+        let deadline = Instant::now() + self.timeout;
+        if self.session.prefers_stateless() && self.discover(deadline)? {
             return Ok(());
         }
+        self.within(deadline)?;
         let (id, message) = self.session.initialize_request()?;
         let result = self.exchange(id, &message, &HeaderOverride::default())?;
         self.session.on_initialize(&result)?;
@@ -112,10 +116,11 @@ impl<T: Transport, H: Handler> Client<T, H> {
     /// server may refuse a bare one, and a stdio server may then hang up).
     /// Whether it settled a stateless revision; `false` leaves the transport
     /// as it was, for `initialize`.
-    fn discover(&mut self) -> Result<bool, ClientError> {
+    fn discover(&mut self, deadline: Instant) -> Result<bool, ClientError> {
         let Some(tried) = self.session.discovery_version() else {
             return Ok(false);
         };
+        self.within(deadline)?;
         // An HTTP server checks the revision header against `_meta`.
         self.transport.set_protocol_version(&tried);
         let (id, message) = self.session.discover_request_with_meta(&tried);
@@ -138,6 +143,17 @@ impl<T: Transport, H: Handler> Client<T, H> {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Let the next exchange take what is left of `deadline`, or fail if
+    /// nothing is.
+    fn within(&mut self, deadline: Instant) -> Result<(), ClientError> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ClientError::Timeout);
+        }
+        self.timeout = left;
+        Ok(())
     }
 
     fn announce_version(&mut self) {

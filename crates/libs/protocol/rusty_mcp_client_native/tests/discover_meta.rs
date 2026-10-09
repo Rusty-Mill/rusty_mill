@@ -9,7 +9,7 @@ use rusty_mcp_client_native::{Client, ClientConfig, NoHandler, Recv, Transport};
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A scripted server: answers only a discovery that carries `_meta`.
 #[derive(Default)]
@@ -124,5 +124,77 @@ fn when_there_is_no_discovery_the_client_falls_back_and_unsets_the_revision() {
             None,
             Some("2025-11-25".to_owned())
         ]
+    );
+}
+
+/// A server that takes 600 ms to answer anything, and has no discovery.
+struct Sluggish {
+    ready: VecDeque<(Instant, Message)>,
+}
+
+impl Transport for Sluggish {
+    fn send(&mut self, message: &Message) -> io::Result<()> {
+        let Message::Request { id, method, .. } = message else {
+            return Ok(());
+        };
+        let reply = match method.as_str() {
+            "server/discover" => Message::error(
+                Some(id.clone()),
+                ErrorData::new(ErrorCode::METHOD_NOT_FOUND, "no discovery here"),
+            ),
+            _ => Message::Response {
+                id: id.clone(),
+                result: Value::from_json_str(
+                    r#"{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"s","version":"1"}}"#,
+                )
+                .unwrap(),
+            },
+        };
+        self.ready
+            .push_back((Instant::now() + Duration::from_millis(600), reply));
+        Ok(())
+    }
+
+    fn recv(&mut self, timeout: Duration) -> io::Result<Recv> {
+        let Some((at, _)) = self.ready.front() else {
+            std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            return Ok(Recv::Timeout);
+        };
+        let wait = at.saturating_duration_since(Instant::now());
+        if wait > timeout {
+            std::thread::sleep(timeout);
+            return Ok(Recv::Timeout);
+        }
+        std::thread::sleep(wait);
+        Ok(self
+            .ready
+            .pop_front()
+            .map_or(Recv::Timeout, |(_, m)| Recv::Message(m)))
+    }
+}
+
+#[test]
+fn the_whole_handshake_shares_one_timeout() {
+    // 600 ms to discover (refused), 600 ms to initialize: 1.2 s in all, so a
+    // one-second budget must run out, and at one second, not after the second
+    // step has had a second of its own.
+    let started = Instant::now();
+    let result = Client::connect(
+        Sluggish {
+            ready: VecDeque::new(),
+        },
+        ClientConfig::new("c", "1"),
+        NoHandler,
+        Duration::from_secs(1),
+    );
+    let took = started.elapsed();
+    assert!(
+        matches!(result, Err(rusty_mcp_client_native::ClientError::Timeout)),
+        "{:?}",
+        result.err()
+    );
+    assert!(
+        took < Duration::from_millis(1_150),
+        "the handshake ran past its budget: {took:?}"
     );
 }
