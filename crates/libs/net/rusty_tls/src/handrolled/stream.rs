@@ -153,7 +153,7 @@ impl<S: Read + Write> NativeTlsStream<S> {
     /// handshake has started.
     ///
     /// Each name must be 1 to 255 bytes and the whole offer at most
-    /// [`MAX_ALPN_LIST`] bytes once framed (a length byte per name); otherwise
+    /// 4096 bytes once framed (a length byte per name); otherwise
     /// `InvalidInput`, before any I/O. The engine's encoder trusts its caller,
     /// so this is where outside input is checked.
     pub fn with_alpn(mut self, protocols: Vec<Vec<u8>>) -> io::Result<Self> {
@@ -213,7 +213,6 @@ impl<S: Read + Write> NativeTlsStream<S> {
         match self.conn.as_ref()? {
             Established::Tls13(c) => c.peer_certificates().first().map(Vec::as_slice),
             Established::Tls12(c) => c.peer_certificates().first().map(Vec::as_slice),
-            _ => None,
         }
     }
 
@@ -383,11 +382,7 @@ impl<S: Read + Write> Read for NativeTlsStream<S> {
                 Ok(Step::Reply(reply)) => self.deliver(&reply, true)?,
                 Ok(Step::Closed) => self.phase = Phase::PeerClosed,
                 Ok(Step::Nothing) => {}
-                Err(StepError::Unsupported) => {
-                    self.phase = Phase::Failed;
-                    return Err(unsupported());
-                }
-                Err(StepError::Engine(err)) => return Err(self.fail(&err)),
+                Err(err) => return Err(self.fail(&err)),
             }
         }
     }
@@ -431,15 +426,9 @@ impl<S: Read + Write> Write for NativeTlsStream<S> {
     }
 }
 
-/// Why one record could not be handled.
-enum StepError {
-    Engine(ClientError),
-    Unsupported,
-}
-
 /// Unprotect one record and say what it was.
-fn step(conn: &mut Established, record: &[u8]) -> Result<Step, StepError> {
-    let outcome = match conn {
+fn step(conn: &mut Established, record: &[u8]) -> Result<Step, ClientError> {
+    match conn {
         Established::Tls13(c) => c.read(record).map(|incoming| match incoming {
             Incoming::Application(data) => Step::Data(data),
             Incoming::Reply(reply) => Step::Reply(reply),
@@ -453,9 +442,7 @@ fn step(conn: &mut Established, record: &[u8]) -> Result<Step, StepError> {
             Incoming12::Closed => Step::Closed,
             _ => Step::Nothing,
         }),
-        _ => return Err(StepError::Unsupported),
-    };
-    outcome.map_err(StepError::Engine)
+    }
 }
 
 /// Write all of `bytes` and flush, so a buffering transport cannot hold a
