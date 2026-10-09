@@ -1,6 +1,6 @@
 # rusty_bbp design record
 
-The Blackboard Protocol's specification and the review rounds that shaped it, moved here from `baileyrd/rusty_bbp` when that repository was archived. The code that implements the spec is the crate one level up; the trace catalog its tests reproduce is [`../TRACES.md`](../TRACES.md).
+The Blackboard Protocol's specification and the review rounds that shaped it, moved here from `baileyrd/rusty_bbp` ahead of that repository being archived. The code that implements the spec is the crate one level up; the trace catalog its tests reproduce is [`../TRACES.md`](../TRACES.md).
 
 ## Specification
 

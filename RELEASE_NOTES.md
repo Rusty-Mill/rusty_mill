@@ -34,7 +34,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ## 2026-10-09 - rusty_bbp: design record moved into the monorepo
 
-- **Changed:** the Blackboard Protocol specification (v0.4 plus the v0 to v0.3 drafts) and its review record (four model-review rounds, merged findings, prompts, the implementation-plan review, the sovereignty audit, the orch-core decision) now live at `crates/libs/protocol/rusty_bbp/docs/`, indexed by its README. `baileyrd/rusty_bbp` is archived with a pointer here. One copy of the trace catalog remains, the crate's `TRACES.md`, which the tests reproduce.
+- **Changed:** the Blackboard Protocol specification (v0.4 plus the v0 to v0.3 drafts) and its review record (four model-review rounds, merged findings, prompts, the implementation-plan review, the sovereignty audit, the orch-core decision) now live at `crates/libs/protocol/rusty_bbp/docs/`, indexed by its README. `baileyrd/rusty_bbp` carries a pointer here and is to be archived. One copy of the trace catalog remains, the crate's `TRACES.md`, which the tests reproduce.
 
 ---
 
