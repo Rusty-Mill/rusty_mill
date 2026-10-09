@@ -270,6 +270,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-10 - rusty_mcp_server resources, prompts, completion (pending review)
+
+- **Added:** the three method families, tested by 4 dispatcher tests and a second `rmcp`-client acceptance test.
+- **Known limitations:** lists are not paginated (the whole set in one page); a server with no resources answers `resources/list` with an empty list rather than "method not found"; `rusty-mcp-demo` was **not** ported (it is built on `rmcp`'s macros across 14 files), so the echo fixture is the acceptance server instead.
+
+---
+
 ## 2026-10-09 - rk-app on rusty_mcp_server (pending review)
 
 - **Changed:** `rusty-keys --mcp` uses the first-party server; `rmcp` is gone from `rk-app`'s server path (it remains through `rk-mcp`'s client until A4).

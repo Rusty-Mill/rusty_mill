@@ -2,8 +2,12 @@
 //! independent client. Tools: `echo`, `add`, `fail`, `slow`.
 
 use rusty_json::Value;
+use rusty_mcp_proto::prompts::{GetPromptResult, PromptMessage, Role};
 use rusty_mcp_proto::schema::Kind;
-use rusty_mcp_proto::{CallToolResult, Schema, Tool};
+use rusty_mcp_proto::{
+    CallToolResult, Completion, Prompt, PromptArgument, Reference, Resource, ResourceContents,
+    ResourceTemplate, Schema, Tool,
+};
 use rusty_mcp_server::stdio::{serve_stdio, Options};
 use rusty_mcp_server::{Dispatcher, Server, ToolError};
 use std::time::{Duration, Instant};
@@ -66,5 +70,47 @@ fn main() -> std::io::Result<()> {
                 Ok(CallToolResult::text("finished"))
             },
         );
-    serve_stdio(Dispatcher::new(server), Options::default())
+    serve_stdio(Dispatcher::new(with_content(server)), Options::default())
+}
+
+/// Resources, a template, a prompt and a completer for the acceptance tests.
+fn with_content(server: Server) -> Server {
+    let mut greet = Prompt::new("greet");
+    greet.description = Some("Greet someone.".into());
+    let mut name = PromptArgument::new("name");
+    name.required = Some(true);
+    greet.arguments.push(name);
+    let mut greeting = Resource::new("mem://greeting", "greeting");
+    greeting.mime_type = Some("text/plain".into());
+    server
+        .resource(greeting, |_, uri| {
+            Ok(vec![ResourceContents::text(uri, "hello")])
+        })
+        .resource_template(ResourceTemplate::new("mem://notes/{id}", "notes"))
+        .read_other(|_, uri| {
+            uri.strip_prefix("mem://notes/")
+                .map(|id| Ok(vec![ResourceContents::text(uri, format!("note {id}"))]))
+        })
+        .prompt(greet, |_, args| {
+            let who = args.get("name").map_or("there", String::as_str);
+            Ok(GetPromptResult {
+                description: Some("A greeting".into()),
+                messages: vec![PromptMessage::text(Role::User, format!("Hello, {who}!"))],
+            })
+        })
+        .completer(|_, params| match &params.reference {
+            Reference::Prompt { name } if name == "greet" => {
+                let values: Vec<String> = ["alice", "alex", "bob"]
+                    .iter()
+                    .filter(|v| v.starts_with(params.argument.value.as_str()))
+                    .map(|v| (*v).to_string())
+                    .collect();
+                Completion {
+                    total: u32::try_from(values.len()).ok(),
+                    has_more: Some(false),
+                    values,
+                }
+            }
+            _ => Completion::default(),
+        })
 }

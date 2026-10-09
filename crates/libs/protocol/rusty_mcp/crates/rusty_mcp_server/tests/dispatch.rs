@@ -162,7 +162,7 @@ fn malformed_params_and_unknown_methods_are_refused() {
         request(1, "tools/call", Some(r#"{"arguments":{}}"#)),
     ));
     assert_eq!(bad.code, code::INVALID_PARAMS);
-    let unknown = err(d.handle(&Context::new(), request(2, "resources/list", None)));
+    let unknown = err(d.handle(&Context::new(), request(2, "bogus/method", None)));
     assert_eq!(unknown.code, code::METHOD_NOT_FOUND);
 }
 
@@ -179,4 +179,151 @@ fn notifications_and_responses_get_no_reply() {
         result: Value::object(),
     };
     assert!(d.handle(&Context::new(), stray).is_none());
+}
+
+// ------------------------------------------------- resources, prompts, completion
+
+mod content {
+    use super::*;
+    use rusty_mcp_proto::prompts::{GetPromptResult as GetResult, PromptMessage, Role};
+    use rusty_mcp_proto::{
+        CompleteResult, Completion, ListPromptsResult, ListResourceTemplatesResult,
+        ListResourcesResult, Prompt, PromptArgument, ReadResourceResult, Resource,
+        ResourceContents, ResourceTemplate,
+    };
+
+    fn rich() -> Dispatcher<Server> {
+        let mut greet = Prompt::new("greet");
+        let mut name = PromptArgument::new("name");
+        name.required = Some(true);
+        greet.arguments.push(name);
+        Dispatcher::new(
+            Server::new("rich", "1")
+                .resource(Resource::new("mem://a", "a"), |_, uri| {
+                    Ok(vec![ResourceContents::text(uri, "A")])
+                })
+                .resource(Resource::new("mem://bad", "bad"), |_, _| {
+                    Err(ToolError::from("disk on fire"))
+                })
+                .resource_template(ResourceTemplate::new("mem://n/{id}", "n"))
+                .read_other(|_, uri| {
+                    uri.strip_prefix("mem://n/")
+                        .map(|id| Ok(vec![ResourceContents::text(uri, id)]))
+                })
+                .prompt(greet, |_, args| {
+                    Ok(GetResult {
+                        description: None,
+                        messages: vec![PromptMessage::text(Role::User, args["name"].clone())],
+                    })
+                })
+                .completer(|_, _| Completion {
+                    values: vec!["x".into()],
+                    total: Some(1),
+                    has_more: Some(false),
+                }),
+        )
+    }
+
+    #[test]
+    fn capabilities_follow_what_is_registered() {
+        let params = r#"{"protocolVersion":"2025-06-18","clientInfo":{"name":"c","version":"1"}}"#;
+        let init = InitializeResult::from_value(&ok(
+            rich().handle(&Context::new(), request(1, "initialize", Some(params)))
+        ))
+        .expect("valid");
+        assert!(init.capabilities.resources.is_some());
+        assert!(init.capabilities.prompts.is_some());
+        assert!(init.capabilities.completions);
+        assert!(init.capabilities.tools.is_none());
+    }
+
+    #[test]
+    fn resources_list_templates_and_read() {
+        let d = rich();
+        let c = Context::new();
+        let list =
+            ListResourcesResult::from_value(&ok(d.handle(&c, request(1, "resources/list", None))))
+                .expect("valid");
+        assert_eq!(list.resources.len(), 2);
+        let templates = ListResourceTemplatesResult::from_value(&ok(
+            d.handle(&c, request(2, "resources/templates/list", None))
+        ))
+        .expect("valid");
+        assert_eq!(templates.resource_templates[0].uri_template, "mem://n/{id}");
+        let read = |uri: &str| {
+            d.handle(
+                &c,
+                request(3, "resources/read", Some(&format!(r#"{{"uri":"{uri}"}}"#))),
+            )
+        };
+        let fixed = ReadResourceResult::from_value(&ok(read("mem://a"))).expect("valid");
+        assert_eq!(fixed.contents, vec![ResourceContents::text("mem://a", "A")]);
+        let templated = ReadResourceResult::from_value(&ok(read("mem://n/42"))).expect("valid");
+        assert_eq!(
+            templated.contents,
+            vec![ResourceContents::text("mem://n/42", "42")]
+        );
+        assert_eq!(err(read("mem://missing")).code, code::RESOURCE_NOT_FOUND);
+        assert_eq!(err(read("mem://bad")).code, code::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn prompts_check_required_arguments() {
+        let d = rich();
+        let c = Context::new();
+        let list =
+            ListPromptsResult::from_value(&ok(d.handle(&c, request(1, "prompts/list", None))))
+                .expect("valid");
+        assert_eq!(list.prompts[0].name, "greet");
+        let got = GetResult::from_value(&ok(d.handle(
+            &c,
+            request(
+                2,
+                "prompts/get",
+                Some(r#"{"name":"greet","arguments":{"name":"Ada"}}"#),
+            ),
+        )))
+        .expect("valid");
+        assert_eq!(got.messages[0], PromptMessage::text(Role::User, "Ada"));
+        let missing = err(d.handle(&c, request(3, "prompts/get", Some(r#"{"name":"greet"}"#))));
+        assert_eq!(missing.code, code::INVALID_PARAMS);
+        assert!(
+            missing.message.contains("Missing required argument: name"),
+            "{}",
+            missing.message
+        );
+        let unknown = err(d.handle(&c, request(4, "prompts/get", Some(r#"{"name":"nope"}"#))));
+        assert!(
+            unknown.message.contains("Unknown prompt"),
+            "{}",
+            unknown.message
+        );
+    }
+
+    #[test]
+    fn completion_and_the_absent_case() {
+        let params = r#"{"ref":{"type":"ref/prompt","name":"greet"},"argument":{"name":"name","value":"a"}}"#;
+        let done = CompleteResult::from_value(&ok(rich().handle(
+            &Context::new(),
+            request(1, "completion/complete", Some(params)),
+        )))
+        .expect("valid");
+        assert_eq!(done.completion.values, ["x"]);
+        // A server with no completer does not offer the method.
+        let bare = Dispatcher::new(Server::new("bare", "1"));
+        assert_eq!(
+            err(bare.handle(
+                &Context::new(),
+                request(2, "completion/complete", Some(params))
+            ))
+            .code,
+            code::METHOD_NOT_FOUND
+        );
+        // And empty lists, not errors, for the list methods it does not use.
+        let empty = ListResourcesResult::from_value(&ok(
+            bare.handle(&Context::new(), request(3, "resources/list", None))
+        ))
+        .expect("valid");
+        assert!(empty.resources.is_empty());
+    }
 }

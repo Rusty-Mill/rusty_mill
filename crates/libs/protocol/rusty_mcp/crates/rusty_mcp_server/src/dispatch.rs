@@ -4,8 +4,10 @@ use crate::Context;
 use rusty_json::Value;
 use rusty_mcp_proto::jsonrpc::code;
 use rusty_mcp_proto::{
-    CallToolParams, CallToolResult, ErrorObject, Implementation, InitializeParams,
-    InitializeResult, ListParams, ListToolsResult, Message, RequestId, ServerCapabilities,
+    CallToolParams, CallToolResult, CompleteParams, CompleteResult, ErrorObject, GetPromptParams,
+    GetPromptResult, Implementation, InitializeParams, InitializeResult, ListParams,
+    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, Message,
+    ReadResourceParams, ReadResourceResult, RequestId, ServerCapabilities,
 };
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -39,6 +41,60 @@ pub trait Service: Send + Sync {
         Err(ErrorObject::new(
             code::INVALID_PARAMS,
             format!("Unknown tool: {}", params.name),
+        ))
+    }
+
+    /// `resources/list`.
+    fn list_resources(&self, _params: &ListParams) -> Result<ListResourcesResult, ErrorObject> {
+        Ok(ListResourcesResult::default())
+    }
+
+    /// `resources/templates/list`.
+    fn list_resource_templates(
+        &self,
+        _params: &ListParams,
+    ) -> Result<ListResourceTemplatesResult, ErrorObject> {
+        Ok(ListResourceTemplatesResult::default())
+    }
+
+    /// `resources/read`. Answer an unknown URI with `code::RESOURCE_NOT_FOUND`.
+    fn read_resource(
+        &self,
+        _ctx: &Context,
+        params: &ReadResourceParams,
+    ) -> Result<ReadResourceResult, ErrorObject> {
+        Err(ErrorObject::new(
+            code::RESOURCE_NOT_FOUND,
+            format!("Resource not found: {}", params.uri),
+        ))
+    }
+
+    /// `prompts/list`.
+    fn list_prompts(&self, _params: &ListParams) -> Result<ListPromptsResult, ErrorObject> {
+        Ok(ListPromptsResult::default())
+    }
+
+    /// `prompts/get`.
+    fn get_prompt(
+        &self,
+        _ctx: &Context,
+        params: &GetPromptParams,
+    ) -> Result<GetPromptResult, ErrorObject> {
+        Err(ErrorObject::new(
+            code::INVALID_PARAMS,
+            format!("Unknown prompt: {}", params.name),
+        ))
+    }
+
+    /// `completion/complete`.
+    fn complete(
+        &self,
+        _ctx: &Context,
+        _params: &CompleteParams,
+    ) -> Result<CompleteResult, ErrorObject> {
+        Err(ErrorObject::new(
+            code::METHOD_NOT_FOUND,
+            "Method not found: completion/complete",
         ))
     }
 }
@@ -98,14 +154,43 @@ impl<S: Service> Dispatcher<S> {
             }
             "tools/call" => {
                 let call = CallToolParams::from_value(params_or_empty).map_err(invalid_params)?;
-                // A panicking handler must not take the server down.
-                match catch_unwind(AssertUnwindSafe(|| self.service.call_tool(ctx, &call))) {
-                    Ok(result) => result.map(|r| r.to_value()),
-                    Err(_) => Err(ErrorObject::new(
-                        code::INTERNAL_ERROR,
-                        format!("tool {:?} panicked", call.name),
-                    )),
-                }
+                guarded("tool", &call.name, || self.service.call_tool(ctx, &call))
+                    .map(|r| r.to_value())
+            }
+            "resources/list" => {
+                let list = ListParams::from_value(params_or_empty).map_err(invalid_params)?;
+                self.service.list_resources(&list).map(|r| r.to_value())
+            }
+            "resources/templates/list" => {
+                let list = ListParams::from_value(params_or_empty).map_err(invalid_params)?;
+                self.service
+                    .list_resource_templates(&list)
+                    .map(|r| r.to_value())
+            }
+            "resources/read" => {
+                let read =
+                    ReadResourceParams::from_value(params_or_empty).map_err(invalid_params)?;
+                guarded("resource", &read.uri, || {
+                    self.service.read_resource(ctx, &read)
+                })
+                .map(|r| r.to_value())
+            }
+            "prompts/list" => {
+                let list = ListParams::from_value(params_or_empty).map_err(invalid_params)?;
+                self.service.list_prompts(&list).map(|r| r.to_value())
+            }
+            "prompts/get" => {
+                let get = GetPromptParams::from_value(params_or_empty).map_err(invalid_params)?;
+                guarded("prompt", &get.name, || self.service.get_prompt(ctx, &get))
+                    .map(|r| r.to_value())
+            }
+            "completion/complete" => {
+                let complete =
+                    CompleteParams::from_value(params_or_empty).map_err(invalid_params)?;
+                guarded("completion", &complete.argument.name, || {
+                    self.service.complete(ctx, &complete)
+                })
+                .map(|r| r.to_value())
             }
             other => Err(ErrorObject::new(
                 code::METHOD_NOT_FOUND,
@@ -127,6 +212,21 @@ impl<S: Service> Dispatcher<S> {
             instructions,
         }
     }
+}
+
+/// Run a handler so that a panic in it becomes an internal error instead of
+/// taking the server down.
+fn guarded<T>(
+    kind: &str,
+    name: &str,
+    run: impl FnOnce() -> Result<T, ErrorObject>,
+) -> Result<T, ErrorObject> {
+    catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|_| {
+        Err(ErrorObject::new(
+            code::INTERNAL_ERROR,
+            format!("{kind} {name:?} panicked"),
+        ))
+    })
 }
 
 fn invalid_params(error: rusty_mcp_proto::Error) -> ErrorObject {

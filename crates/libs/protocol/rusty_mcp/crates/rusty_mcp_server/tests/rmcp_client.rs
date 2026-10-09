@@ -1,7 +1,10 @@
 //! Acceptance: an independent client (`rmcp`, a dev-dependency used only as an
 //! oracle) drives the `rusty-mcp-echo` fixture over a real child process.
 
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{
+    ArgumentInfo, CallToolRequestParams, CompleteRequestParams, GetPromptRequestParams,
+    ReadResourceRequestParams, Reference, ResourceContents,
+};
 use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceExt;
 use tokio::process::Command;
@@ -63,6 +66,74 @@ async fn rmcp_client_initializes_lists_and_calls() {
 
     let unknown = client.call_tool(CallToolRequestParams::new("nope")).await;
     assert!(unknown.is_err(), "unknown tool is a protocol error");
+
+    client.cancel().await.expect("clean shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rmcp_client_reads_resources_prompts_and_completions() {
+    let command = Command::new(env!("CARGO_BIN_EXE_rusty-mcp-echo"));
+    let transport = TokioChildProcess::new(command).expect("spawns the fixture");
+    let client = ().serve(transport).await.expect("initialize handshake");
+
+    let caps = client
+        .peer_info()
+        .expect("server info")
+        .capabilities
+        .clone();
+    assert!(caps.resources.is_some() && caps.prompts.is_some() && caps.completions.is_some());
+
+    let resources = client.list_all_resources().await.expect("resources/list");
+    assert_eq!(resources[0].uri, "mem://greeting");
+    let templates = client
+        .list_all_resource_templates()
+        .await
+        .expect("templates");
+    assert_eq!(templates[0].uri_template, "mem://notes/{id}");
+
+    let read = |uri: &str| ReadResourceRequestParams::new(uri);
+    let fixed = client
+        .read_resource(read("mem://greeting"))
+        .await
+        .expect("read");
+    assert!(
+        matches!(&fixed.contents[0], ResourceContents::TextResourceContents { text, .. } if text == "hello")
+    );
+    let templated = client
+        .read_resource(read("mem://notes/7"))
+        .await
+        .expect("read");
+    assert!(
+        matches!(&templated.contents[0], ResourceContents::TextResourceContents { text, .. } if text == "note 7")
+    );
+    assert!(client.read_resource(read("mem://nope")).await.is_err());
+
+    let prompts = client.list_all_prompts().await.expect("prompts/list");
+    assert_eq!(prompts[0].name, "greet");
+    let got = client
+        .get_prompt(
+            GetPromptRequestParams::new("greet").with_arguments(args(&[("name", "Ada".into())])),
+        )
+        .await
+        .expect("prompts/get");
+    assert_eq!(got.messages.len(), 1);
+    assert!(
+        client
+            .get_prompt(GetPromptRequestParams::new("greet"))
+            .await
+            .is_err(),
+        "required argument missing"
+    );
+
+    let completed = client
+        .complete(CompleteRequestParams::new(
+            Reference::for_prompt("greet"),
+            ArgumentInfo::new("name", "al"),
+        ))
+        .await
+        .expect("completion/complete");
+    assert_eq!(completed.completion.values, ["alice", "alex"]);
+    assert_eq!(completed.completion.total, Some(2));
 
     client.cancel().await.expect("clean shutdown");
 }
