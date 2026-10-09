@@ -179,7 +179,7 @@ fn builder_vectors_structs_and_identifiers_round_trip() {
         b.create_string("bcd").unwrap(),
     ];
     let strings = b.create_offset_vector(&names).unwrap();
-    let mut xyz = |x: f32, y: f32, z: f32| {
+    let xyz = |x: f32, y: f32, z: f32| {
         let mut v = Vec::new();
         for f in [x, y, z] {
             v.extend(f.to_le_bytes());
