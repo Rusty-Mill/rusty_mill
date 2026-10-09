@@ -126,3 +126,126 @@ fn initialize_result_agrees() {
     assert!(decoded.capabilities.tools.is_some());
     assert_eq!(decoded.to_value(), wire);
 }
+
+// ---------------------------------------------------------------- P1 methods
+
+mod p1 {
+    use super::theirs;
+    use rmcp::model::{
+        ArgumentInfo as RArg, CompleteRequestParams, CompleteResult as RCompleteResult,
+        CompletionInfo, GetPromptResult as RGetPromptResult, ListPromptsResult as RListPrompts,
+        ListResourceTemplatesResult as RListTemplates, ListResourcesResult as RListResources,
+        Prompt as RPrompt, PromptArgument as RPromptArgument, PromptMessage as RPromptMessage,
+        ReadResourceResult as RReadResult, Reference as RReference, Resource as RResource,
+        ResourceContents as RContents, ResourceTemplate as RTemplate, Role as RRole,
+        ServerCapabilities as RCaps,
+    };
+    use rusty_mcp_proto::{
+        CompleteParams, CompleteResult, GetPromptResult, ListPromptsResult,
+        ListResourceTemplatesResult, ListResourcesResult, ReadResourceResult, ServerCapabilities,
+    };
+
+    #[test]
+    fn resource_lists_agree() {
+        let resource = RResource::new("file:///a.rs", "a.rs")
+            .with_title("A")
+            .with_description("first")
+            .with_mime_type("text/x-rust")
+            .with_size(12);
+        let wire = theirs(&RListResources::with_all_items(vec![resource]));
+        let decoded = ListResourcesResult::from_value(&wire).expect("decode");
+        assert_eq!(decoded.resources[0].size, Some(12));
+        assert_eq!(decoded.to_value(), wire);
+
+        let template = RTemplate::new("file:///{path}", "files").with_mime_type("text/plain");
+        let wire = theirs(&RListTemplates::with_all_items(vec![template]));
+        let decoded = ListResourceTemplatesResult::from_value(&wire).expect("decode");
+        assert_eq!(
+            decoded.resource_templates[0].mime_type.as_deref(),
+            Some("text/plain")
+        );
+        assert_eq!(decoded.to_value(), wire);
+    }
+
+    #[test]
+    fn read_results_agree() {
+        let result = RReadResult::new(vec![
+            RContents::text("fn main() {}", "file:///a.rs").with_mime_type("text/x-rust"),
+            RContents::blob("AAEC", "file:///b.bin"),
+        ]);
+        let wire = theirs(&result);
+        let decoded = ReadResourceResult::from_value(&wire).expect("decode");
+        assert_eq!(decoded.contents.len(), 2);
+        assert_eq!(decoded.to_value(), wire);
+    }
+
+    #[test]
+    fn prompts_agree() {
+        let args = vec![RPromptArgument::new("code")
+            .with_description("The code")
+            .with_required(true)];
+        let wire = theirs(&RListPrompts::with_all_items(vec![RPrompt::new(
+            "review",
+            Some("Reviews code"),
+            Some(args),
+        )]));
+        let decoded = ListPromptsResult::from_value(&wire).expect("decode");
+        assert_eq!(decoded.prompts[0].arguments.len(), 1);
+        assert_eq!(decoded.to_value(), wire);
+
+        let got = RGetPromptResult::new(vec![
+            RPromptMessage::new_text(RRole::User, "Please review"),
+            RPromptMessage::new_text(RRole::Assistant, "Sure"),
+        ])
+        .with_description("A review");
+        let wire = theirs(&got);
+        let decoded = GetPromptResult::from_value(&wire).expect("decode");
+        assert_eq!(decoded.messages.len(), 2);
+        assert_eq!(decoded.to_value(), wire);
+    }
+
+    #[test]
+    fn completion_agrees() {
+        let params = CompleteRequestParams::new(
+            RReference::for_prompt("review"),
+            RArg::new("language", "py"),
+        );
+        let wire = theirs(&params);
+        let decoded = CompleteParams::from_value(&wire).expect("decode");
+        assert_eq!(decoded.argument.value, "py");
+        assert_eq!(decoded.to_value(), wire);
+
+        let info = CompletionInfo::with_pagination(
+            vec!["python".into(), "pytorch".into()],
+            Some(10),
+            true,
+        )
+        .expect("valid completion");
+        let wire = theirs(&RCompleteResult::new(info));
+        let decoded = CompleteResult::from_value(&wire).expect("decode");
+        assert_eq!(decoded.completion.total, Some(10));
+        assert_eq!(decoded.completion.has_more, Some(true));
+        assert_eq!(decoded.to_value(), wire);
+    }
+
+    // `logging` is deprecated by SEP-2577 in the newest spec; it is still on
+    // the wire for older peers, so the differential check keeps covering it.
+    #[test]
+    #[allow(deprecated)]
+    fn capabilities_agree() {
+        let caps = RCaps::builder()
+            .enable_logging()
+            .enable_prompts()
+            .enable_prompts_list_changed()
+            .enable_resources()
+            .enable_resources_subscribe()
+            .enable_resources_list_changed()
+            .enable_tools()
+            .build();
+        let wire = theirs(&caps);
+        let decoded = ServerCapabilities::from_value(&wire).expect("decode");
+        assert!(decoded.logging);
+        assert!(decoded.resources.expect("resources").subscribe);
+        assert_eq!(decoded.to_value(), wire);
+    }
+}

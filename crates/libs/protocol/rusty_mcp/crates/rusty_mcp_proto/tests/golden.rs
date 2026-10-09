@@ -199,3 +199,106 @@ fn unknown_members_are_ignored() {
     .expect("decodes");
     assert_eq!(tool.name, "t");
 }
+
+// ---------------------------------------------------------------- P1 methods
+
+mod p1 {
+    use super::parse;
+    use rusty_mcp_proto::{
+        CompleteParams, CompleteResult, GetPromptParams, GetPromptResult, ListPromptsResult,
+        ListResourceTemplatesResult, ListResourcesResult, ReadResourceResult, Reference,
+        ResourceContents, ServerCapabilities,
+    };
+
+    #[test]
+    fn resources_list_round_trips() {
+        let text = r#"{"resources":[{"uri":"file:///project/src/main.rs","name":"main.rs","title":"Rust Software Application Main File","description":"Primary application entry point","mimeType":"text/x-rust","size":1024}],"nextCursor":"next-page-cursor"}"#;
+        let result = ListResourcesResult::from_value(&parse(text)).expect("decodes");
+        assert_eq!(result.resources[0].size, Some(1024));
+        assert_eq!(result.to_value(), parse(text));
+    }
+
+    #[test]
+    fn resource_templates_round_trip() {
+        let text = r#"{"resourceTemplates":[{"uriTemplate":"file:///{path}","name":"Project Files","title":"Project Files","description":"Access files in the project directory","mimeType":"application/octet-stream"}]}"#;
+        let result = ListResourceTemplatesResult::from_value(&parse(text)).expect("decodes");
+        assert_eq!(result.resource_templates[0].uri_template, "file:///{path}");
+        assert_eq!(result.to_value(), parse(text));
+    }
+
+    #[test]
+    fn read_result_distinguishes_text_from_blob() {
+        let text = r#"{"contents":[{"uri":"file:///a.rs","mimeType":"text/x-rust","text":"fn main() {}"},{"uri":"file:///b.bin","blob":"AAEC"}]}"#;
+        let result = ReadResourceResult::from_value(&parse(text)).expect("decodes");
+        assert!(matches!(result.contents[0], ResourceContents::Text { .. }));
+        assert!(matches!(result.contents[1], ResourceContents::Blob { .. }));
+        assert_eq!(result.to_value(), parse(text));
+        let err = ReadResourceResult::from_value(&parse(r#"{"contents":[{"uri":"x"}]}"#))
+            .expect_err("neither text nor blob");
+        assert!(err.to_string().contains("neither"), "{err}");
+    }
+
+    #[test]
+    fn prompts_round_trip() {
+        let list = r#"{"prompts":[{"name":"code_review","title":"Request Code Review","description":"Asks the LLM to analyze code quality","arguments":[{"name":"code","description":"The code to review","required":true}]}]}"#;
+        let result = ListPromptsResult::from_value(&parse(list)).expect("decodes");
+        assert_eq!(result.prompts[0].arguments[0].required, Some(true));
+        assert_eq!(result.to_value(), parse(list));
+
+        let params = GetPromptParams::from_value(&parse(
+            r#"{"name":"code_review","arguments":{"code":"def hello():\n    print('world')"}}"#,
+        ))
+        .expect("decodes");
+        assert_eq!(params.arguments["code"], "def hello():\n    print('world')");
+        assert_eq!(
+            params.to_value(),
+            parse(
+                r#"{"name":"code_review","arguments":{"code":"def hello():\n    print('world')"}}"#
+            )
+        );
+
+        let got = r#"{"description":"Code review prompt","messages":[{"role":"user","content":{"type":"text","text":"Please review this code"}}]}"#;
+        let result = GetPromptResult::from_value(&parse(got)).expect("decodes");
+        assert_eq!(result.to_value(), parse(got));
+        let err = GetPromptResult::from_value(&parse(
+            r#"{"messages":[{"role":"system","content":{"type":"text","text":"x"}}]}"#,
+        ))
+        .expect_err("bad role");
+        assert!(err.to_string().contains("unknown role"), "{err}");
+    }
+
+    #[test]
+    fn completion_round_trips() {
+        let req = r#"{"ref":{"type":"ref/prompt","name":"code_review"},"argument":{"name":"language","value":"py"},"context":{"arguments":{"framework":"flask"}}}"#;
+        let params = CompleteParams::from_value(&parse(req)).expect("decodes");
+        assert_eq!(
+            params.reference,
+            Reference::Prompt {
+                name: "code_review".into()
+            }
+        );
+        assert_eq!(params.context["framework"], "flask");
+        assert_eq!(params.to_value(), parse(req));
+
+        let res =
+            r#"{"completion":{"values":["python","pytorch","pyside"],"total":10,"hasMore":true}}"#;
+        let result = CompleteResult::from_value(&parse(res)).expect("decodes");
+        assert_eq!(result.completion.total, Some(10));
+        assert_eq!(result.to_value(), parse(res));
+
+        let err = CompleteParams::from_value(&parse(
+            r#"{"ref":{"type":"ref/other"},"argument":{"name":"a","value":"b"}}"#,
+        ))
+        .expect_err("unknown ref");
+        assert!(err.to_string().contains("unknown type"), "{err}");
+    }
+
+    #[test]
+    fn resources_capability_carries_subscribe() {
+        let text = r#"{"resources":{"subscribe":true,"listChanged":true}}"#;
+        let caps = ServerCapabilities::from_value(&parse(text)).expect("decodes");
+        let resources = caps.resources.expect("resources");
+        assert!(resources.subscribe && resources.list_changed);
+        assert_eq!(caps.to_value(), parse(text));
+    }
+}

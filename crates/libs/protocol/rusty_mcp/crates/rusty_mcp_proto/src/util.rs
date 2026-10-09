@@ -86,3 +86,46 @@ pub(crate) fn expect_object<'a>(v: &'a Value, what: &'static str) -> Result<&'a 
         Err(Error::decode(what, "not an object"))
     }
 }
+
+pub(crate) fn opt_u64(v: &Value, what: &'static str, name: &'static str) -> Result<Option<u64>> {
+    match v.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(n) => n
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| Error::decode(what, format!("{name:?} is not a non-negative integer"))),
+    }
+}
+
+/// A string-to-string map as a JSON object.
+pub(crate) fn map_to_value(map: &std::collections::BTreeMap<String, String>) -> Value {
+    let mut out = Value::object();
+    for (k, v) in map {
+        out.insert(k, v.as_str());
+    }
+    out
+}
+
+/// A JSON object whose values are all strings; absent or null is empty.
+pub(crate) fn opt_string_map(
+    v: &Value,
+    what: &'static str,
+    name: &'static str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    match v.get(name) {
+        None | Some(Value::Null) => {}
+        Some(obj) => {
+            let map = obj
+                .as_object()
+                .ok_or_else(|| Error::decode(what, format!("{name:?} is not an object")))?;
+            for (k, val) in map.iter() {
+                let text = val.as_str().ok_or_else(|| {
+                    Error::decode(what, format!("{name:?} member {k:?} is not a string"))
+                })?;
+                out.insert(k.clone(), text.to_string());
+            }
+        }
+    }
+    Ok(out)
+}

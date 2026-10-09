@@ -78,16 +78,47 @@ impl ListCapability {
     }
 }
 
+/// The resources capability: list changes plus subscriptions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResourcesCapability {
+    /// The server sends `notifications/resources/list_changed`.
+    pub list_changed: bool,
+    /// Clients may subscribe to changes of one resource.
+    pub subscribe: bool,
+}
+
+impl ResourcesCapability {
+    fn to_value(self) -> Value {
+        let mut obj = Obj::new();
+        if self.subscribe {
+            obj = obj.set("subscribe", true);
+        }
+        if self.list_changed {
+            obj = obj.set("listChanged", true);
+        }
+        obj.finish()
+    }
+
+    fn from_value(v: &Value) -> Result<Self> {
+        let what = "ServerCapabilities.resources";
+        expect_object(v, what)?;
+        Ok(ResourcesCapability {
+            list_changed: opt_bool(v, what, "listChanged")?.unwrap_or(false),
+            subscribe: opt_bool(v, what, "subscribe")?.unwrap_or(false),
+        })
+    }
+}
+
 /// What a server offers. A `None` capability is not offered.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerCapabilities {
     /// `tools/list` and `tools/call`.
     pub tools: Option<ListCapability>,
-    /// `resources/*`; `subscribe` is carried separately because it is not a list change.
-    pub resources: Option<ListCapability>,
+    /// `resources/*`.
+    pub resources: Option<ResourcesCapability>,
     /// `prompts/*`.
     pub prompts: Option<ListCapability>,
-    /// `logging/setLevel`.
+    /// `logging/setLevel`. Deprecated by SEP-2577 in the newest spec; still read and written for older peers.
     pub logging: bool,
     /// `completion/complete`.
     pub completions: bool,
@@ -134,7 +165,10 @@ impl ServerCapabilities {
         };
         Ok(ServerCapabilities {
             tools: list("tools", "ServerCapabilities.tools")?,
-            resources: list("resources", "ServerCapabilities.resources")?,
+            resources: match v.get("resources") {
+                None | Some(Value::Null) => None,
+                Some(c) => Some(ResourcesCapability::from_value(c)?),
+            },
             prompts: list("prompts", "ServerCapabilities.prompts")?,
             logging: v.get("logging").is_some_and(|x| !x.is_null()),
             completions: v.get("completions").is_some_and(|x| !x.is_null()),
