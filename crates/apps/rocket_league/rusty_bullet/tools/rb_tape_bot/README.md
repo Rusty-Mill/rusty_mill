@@ -426,16 +426,23 @@ the in-repo client's bytes. With the game and core set up as above:
 1. `cargo build --release` in this directory.
 2. `target\release\rb_probe.exe 6`: packets flow at about 120 per second, phase
    and car 0 print (this alone proves the handshake and `GamePacket` decoding).
-3. `target\release\rb_match_log.exe --out match_log.jsonl --seconds 60 --goal-after 10`
-   and the same with `--tie-up` / `--overtime-goal`: the four match-log scenarios
-   (a real match, state setting, goal, replay, kickoff) end with `N packets written`.
+3. `target\release\rb_match_log.exe --out C:\abs\match_log.jsonl --seconds 60 --goal-after 10`
+   (an unlimited match: a real match, state setting, goal, replay, kickoff) ends with
+   `N packets written`. The tie-up and overtime paths need a finite match, so
+   pass `--length five` and enough `--seconds` for regulation to end (a longer
+   one for overtime): `--length five --seconds 330 --tie-up`, then
+   `--length five --seconds 420 --tie-up --overtime-goal`. Exit 0 is not a pass:
+   the run must print `tie-up goal sent at remaining ...` (when the score was
+   not already tied) and, for overtime, `overtime goal sent ...`, and the log
+   must show `"overtime":true` rows.
 4. `target\release\rb_run_tapes.exe --repeat 1 pogo` (one car), then a two-car hivemind
    scenario and one with a car on each team: each capture exists and scores as before.
 
 Record the outcome in the stage 4 PR.
 
-Result (2026-10-10, RLBot v5.0.0-rc17): steps 2 to 4 passed except the tie-up
-and overtime paths of step 3, which the 60 s window never reached (use
-`--seconds 300` or more to exercise them). Pass an absolute path to
-`rb_run_tapes --out`: the capture plugin resolves a relative path against the
-game's working directory, not yours.
+Result (2026-10-10, RLBot v5.0.0-rc17, commit 4ad92466): steps 2 and 3 (the
+unlimited-match scenarios) and the one-car, hivemind and two-team captures of
+step 4 passed; scoring the captures was not run. The tie-up and overtime
+commands of step 3 were run without `--length five`, so those paths were not
+exercised. Pass an absolute path to `rb_run_tapes --out`: the capture plugin
+resolves a relative path against the game's working directory, not yours.

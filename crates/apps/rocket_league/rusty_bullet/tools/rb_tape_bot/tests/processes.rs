@@ -255,19 +255,9 @@ fn the_hive_drives_every_car_from_one_clock() {
     assert_eq!(run.input(), neutral(0));
     assert_eq!(run.input(), neutral(1));
 
+    // Frame 203 never arrives: the tape is indexed by physics frame, not by packet count,
+    // so the second packet is tick 2 (the pitch step), not tick 1.
     for (tick, frame_num) in [(0, 202), (2, 204)] {
-        // Frame 203 is skipped between them: the tape is indexed by frame, not by packet count.
-        if tick == 2 {
-            run.packet(203);
-            assert_eq!(
-                run.input().controller_state,
-                controller(run.scenario.input_at_car(0, 1))
-            );
-            assert_eq!(
-                run.input().controller_state,
-                controller(run.scenario.input_at_car(1, 1))
-            );
-        }
         run.packet(frame_num);
         for car in 0..2usize {
             let input = run.input();
