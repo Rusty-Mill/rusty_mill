@@ -44,6 +44,19 @@ fn confine_filesystem_accepts_file_roots() {
 }
 
 #[test]
+fn confine_filesystem_allows_rename_across_directories_in_a_writable_root() {
+    if env::var(REEXEC_ENV).as_deref() == Ok("refer") {
+        run_refer_child();
+        return;
+    }
+    let status = reexec(
+        "confine_filesystem_allows_rename_across_directories_in_a_writable_root",
+        "refer",
+    );
+    assert!(status.success(), "child exited with {status:?}");
+}
+
+#[test]
 fn block_inet_sockets_blocks_inet_allows_unix() {
     if env::var(REEXEC_ENV).as_deref() == Ok("network") {
         run_network_child();
@@ -109,6 +122,41 @@ fn run_filesystem_child() {
     assert!(
         fs::read(excluded.join("e.txt")).is_err(),
         "excluded root must not be reachable at all"
+    );
+}
+
+/// On an ABI v2+ kernel a ruleset that does not handle `REFER` turns every
+/// cross-directory rename into `EXDEV`, even inside a writable root. The
+/// ruleset handles it and grants it on writable roots, so a build tool
+/// moving an output from a temp directory into place still works, while a
+/// rename into an unreachable directory stays refused.
+fn run_refer_child() {
+    let base = env::temp_dir().join(format!("rustils-sandbox-refer-{}", std::process::id()));
+    let writable = base.join("writable");
+    let excluded = base.join("excluded");
+    fs::create_dir_all(writable.join("a")).unwrap();
+    fs::create_dir_all(writable.join("b")).unwrap();
+    fs::create_dir_all(&excluded).unwrap();
+    fs::write(writable.join("a/f"), b"moved").unwrap();
+    fs::write(writable.join("a/g"), b"stays").unwrap();
+
+    let sandbox = platform_linux::LinuxSandbox;
+    let writable_root: &Path = &writable;
+    let status = sandbox.confine_filesystem(&[], &[writable_root]).unwrap();
+    if status == SandboxStatus::NotEnforced {
+        eprintln!("Landlock unavailable in this environment; degrade path only");
+        return;
+    }
+    assert_eq!(status, SandboxStatus::Enforced);
+
+    fs::rename(writable.join("a/f"), writable.join("b/f"))
+        .expect("rename across directories inside the writable root");
+    assert_eq!(fs::read(writable.join("b/f")).unwrap(), b"moved");
+    fs::hard_link(writable.join("a/g"), writable.join("b/g"))
+        .expect("link across directories inside the writable root");
+    assert!(
+        fs::rename(writable.join("a/g"), excluded.join("g")).is_err(),
+        "rename into an unreachable directory must be refused"
     );
 }
 

@@ -422,6 +422,44 @@ fn patches_never_touch_a_candidate_controlled_path() {
 /// plain command still runs. Needs python3 for the probe and a kernel that
 /// grants the sandbox; otherwise the test only checks fail-closed.
 #[test]
+fn sandboxed_workload_can_spawn_with_null_stdio_rename_across_dirs_and_use_tmpdir() {
+    // What a toolchain does that a plain `sh -c true` does not: std opens
+    // /dev/null when a child is spawned with null stdio (cargo starting
+    // rustc), rustc renames an .rmeta across directories, the linker writes
+    // under TMPDIR. The first proving run failed on all three.
+    let dir = tempdir("toolchain-shape");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell(
+        "shape",
+        "true </dev/null >/dev/null 2>/dev/null \
+         && mkdir -p a b && : > a/f && mv a/f b/f && test -f b/f \
+         && test -n \"$TMPDIR\" && : > \"$TMPDIR/x\" && test -f \"$TMPDIR/x\" \
+         && echo shape-ok",
+    );
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let exec = runner::Sandboxed::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
+        &dir.join("sandbox-state"),
+    );
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &exec,
+        Confinement::Sandboxed,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    match rep.status {
+        RunStatus::Passed => assert!(log.contains("shape-ok"), "{log}"),
+        RunStatus::Error => eprintln!("sandbox unavailable here: {log}"),
+        RunStatus::Failed => panic!("{log}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn sandboxed_workload_reaches_no_socket_endpoint() {
     use std::os::unix::net::UnixListener;
     let dir = tempdir("endpoint");

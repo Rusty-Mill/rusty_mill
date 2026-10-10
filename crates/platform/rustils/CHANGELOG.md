@@ -20,6 +20,22 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.27.3
+
+- **`Sandbox::confine_filesystem` handles Landlock `REFER` on ABI v2+
+  kernels (`platform-linux`).** The ruleset was created with the ABI v1
+  access set only. On any kernel with Landlock ABI 2 or later, a ruleset
+  that does not handle `LANDLOCK_ACCESS_FS_REFER` makes every
+  cross-directory `rename(2)` and `link(2)` fail with `EXDEV`, even
+  between two directories of the same writable root; rustc hit it moving
+  an `.rmeta` into `deps/` in the first `rusty_bbp` proving run. The
+  kernel's ABI is now queried (`LANDLOCK_CREATE_RULESET_VERSION`), the
+  ruleset handles `REFER` when the kernel has it, and writable roots are
+  granted it; readable roots are unchanged and a rename into an
+  unreachable directory stays refused. ABI v1 kernels behave as before.
+  New re-exec test in `tests/security_sandbox.rs`. No public item changes
+  shape, hence the patch-level bump.
+
 ### 0.27.2
 
 - **`Sandbox::confine_filesystem` accepts file roots (`platform-linux`).**

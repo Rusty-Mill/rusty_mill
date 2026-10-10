@@ -171,6 +171,9 @@ struct Outcome {
     log: String,
 }
 
+/// Granted read-write to every run: std's null stdio opens it.
+const DEV_NULL: &str = "/dev/null";
+
 fn execute<E: Executor>(exec: &E, set: &ProfileSet, work: &Path) -> Outcome
 where
     E::Error: std::fmt::Display,
@@ -205,11 +208,29 @@ where
     };
     let mut read_roots: Vec<PathBuf> = set.read_roots.iter().map(PathBuf::from).collect();
     read_roots.push(work.to_path_buf());
+    // What every toolchain needs beyond the profile's roots, and what the
+    // profile cannot name because it is per run: a scratch directory beside
+    // the checkout as `TMPDIR` (a linker writes its temp files there; `/tmp`
+    // is unreachable), and `/dev/null` read-write, which std opens in the
+    // child whenever a process is spawned with a null stdio (cargo starting
+    // rustc), so without it no child can be started at all.
+    let tmp = work.with_extension("tmp");
+    if let Err(e) = std::fs::create_dir_all(&tmp) {
+        return Outcome {
+            status: RunStatus::Error,
+            profiles: vec![],
+            log: format!("creating {}: {e}\n", tmp.display()),
+        };
+    }
+    let mut env = set.env.clone();
+    if !env.iter().any(|(k, _)| k == "TMPDIR") {
+        env.push(("TMPDIR".into(), tmp.to_string_lossy().into_owned()));
+    }
     let spec = match SandboxSpec::new(
         read_roots,
-        vec![work.to_path_buf()],
+        vec![work.to_path_buf(), tmp, PathBuf::from(DEV_NULL)],
         work.to_path_buf(),
-        set.env.clone(),
+        env,
         limits,
     ) {
         Ok(s) => s,
