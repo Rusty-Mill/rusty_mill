@@ -10363,6 +10363,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rb_rlbot_bridge"
+version = "0.1.0"
+dependencies = [
+ "rb_domain",
+ "rb_env",
+ "rb_rlbot_client",
+ "rb_rlbot_wire",
+ "rb_scenario",
+]
+
+[[package]]
 name = "rb_rlbot_client"
 version = "0.1.0"
 dependencies = [
