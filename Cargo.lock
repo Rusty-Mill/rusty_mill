@@ -11090,7 +11090,6 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
- "hmac 0.13.0",
  "http",
  "http-body",
  "http-body-util",
@@ -11100,11 +11099,9 @@ dependencies = [
  "process-wrap",
  "rand 0.10.2",
  "reqwest 0.13.4",
- "rmcp-macros",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "sse-stream",
  "thiserror 2.0.20",
  "tokio",
@@ -11114,20 +11111,6 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "rmcp-macros"
-version = "3.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a85d45508e9b4ba024fe996c2638799635d75b6dd0ba8f32ccf08f8026f0c780"
-dependencies = [
- "darling 0.24.1",
- "proc-macro2",
- "quote",
- "serde_json",
- "syn 3.0.4",
 ]
 
 [[package]]
@@ -11887,10 +11870,9 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum 0.8.9",
- "clap",
  "http",
  "jsonwebtoken 11.0.0",
  "opentelemetry",
@@ -11899,17 +11881,15 @@ dependencies = [
  "percent-encoding",
  "rand 0.8.8",
  "reqwest 0.13.4",
- "rmcp",
  "rsa",
  "rusty_base64",
- "rusty_percent",
+ "rusty_mcp_axum",
+ "rusty_mcp_server",
  "rusty_url",
- "schemars 1.2.2",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

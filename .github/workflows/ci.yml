@@ -216,6 +216,7 @@ jobs:
       rleval_viewer: ${{ steps.plan.outputs.rleval_viewer }}
       rleval_app: ${{ steps.plan.outputs.rleval_app }}
       crypto_ct: ${{ steps.plan.outputs.crypto_ct }}
+      rand_platforms: ${{ steps.plan.outputs.rand_platforms }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
     steps:
@@ -245,7 +246,7 @@ jobs:
           }
           emit_ci_smoke() {
             echo "CI-only change -- running planner, workflow lint, and representative smoke tests. Full workspace coverage is not implied."
-            python3 .github/scripts/ci_plan.py --emit-ci-smoke >> "$GITHUB_OUTPUT"
+            printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --emit-ci-smoke >> "$GITHUB_OUTPUT"
           }
           mapfile -t event_plan < <(python3 .github/scripts/ci_plan.py \
             --event "${{ github.event_name }}" \
@@ -958,6 +959,45 @@ jobs:
       - name: cargo clippy --target x86_64-pc-windows-gnu
         run: cargo clippy -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std -- -D warnings
 
+  # rusty_rand picks its OS source per target (getrandom(2) through rusty_libc on Linux
+  # x86_64/aarch64, /dev/random on other Linux, /dev/urandom on other Unix, BCryptGenRandom
+  # on Windows). The Linux x86_64 runners run the tests; Windows is covered by the workspace
+  # test shards. This job adds what nothing else builds: it RUNS the tests on macOS (the
+  # other-Unix path, where nothing is syscall-specific) and COMPILES, without running, the
+  # aarch64 Linux path (rusty_libc's second arch) and the "other Linux" path (riscv64).
+  # Compiling is not testing: the cross targets prove the cfg arms build, not that they work.
+  rusty-rand-platforms:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-rand-platforms
+      queue: max
+      cancel-in-progress: false
+    name: rusty_rand per-OS backends (macOS tests, Linux cross-checks)
+    needs: plan
+    if: needs.plan.outputs.rand_platforms == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.os == 'ubuntu-latest' && 'aarch64-unknown-linux-gnu,riscv64gc-unknown-linux-gnu' || '' }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: rand-platforms-${{ matrix.os }}
+      - name: cargo test -p rusty_rand (macOS)
+        if: matrix.os == 'macos-latest'
+        run: cargo test -p rusty_rand
+      - name: cargo check --target aarch64-unknown-linux-gnu (getrandom + rusty_libc arm)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo check -p rusty_rand --target aarch64-unknown-linux-gnu --all-targets
+      - name: cargo check --target riscv64gc-unknown-linux-gnu (other-Linux /dev/random arm)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo check -p rusty_rand --target riscv64gc-unknown-linux-gnu --all-targets
+
   # Every other Rust job above passes --all-features, and rusty_config's
   # own `default = ["std"]` (see crates/foundation/rusty_config/Cargo.toml) means
   # --all-features never disables it -- so CI has never actually compiled
@@ -1664,6 +1704,7 @@ jobs:
       - rusty-tls-engine
       - rusty-tls-fuzz
       - crypto-constant-time
+      - rusty-rand-platforms
       - rleval-viewer-gl-smoke
       - rleval-app-feature-sets
       - remind-me

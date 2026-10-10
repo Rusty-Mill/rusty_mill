@@ -1,7 +1,7 @@
 [package]
 name = "rusty-mcp"
-version = "0.5.0"
-description = "Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28)"
+version = "0.6.0"
+description = "Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry"
 keywords = ["mcp", "model-context-protocol", "ai", "llm"]
 categories = ["network-programming", "development-tools"]
 readme = "../../README.md"
@@ -25,22 +25,10 @@ todo = "warn"
 unwrap_used = "warn"
 
 [dependencies]
-rusty_percent = { workspace = true }
-rmcp = { version = "3.1", default-features = false, features = [
-    "server",
-    "macros",
-    "schemars",
-    "transport-io",
-    "transport-streamable-http-server",
-    "request-state",
-    "elicitation",
-] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Pagination cursors are base64 so clients treat them as opaque.
 rusty_base64 = { workspace = true }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "signal", "net", "process", "time"] }
-tokio-util = { version = "0.7", default-features = false }
-clap = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 http = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
@@ -61,21 +49,12 @@ tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]
 rand = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-rmcp = { version = "3.1", default-features = false, features = [
-    "server",
-    "client",
-    "macros",
-    "schemars",
-    "transport-io",
-    "transport-streamable-http-server",
-    "transport-streamable-http-client",
-    "transport-streamable-http-client-reqwest",
-] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+rusty_mcp_server = { workspace = true, features = ["http"] }
+rusty_mcp_axum = { workspace = true }
 rsa = "0.9"
-schemars = { workspace = true }
 serde = { workspace = true }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 
 [features]
 default = []

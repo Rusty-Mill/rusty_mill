@@ -17,8 +17,9 @@
 //! # let _ = limits;
 //! ```
 //!
-//! Set it on [`crate::HttpConfig::limits`] and [`crate::serve`] mounts it in
-//! the right place.
+//! Apply it with `Router::layer` (or `ServiceBuilder::layer`) on the MCP
+//! route. Put it outside [`crate::auth::RequireAuthLayer`] so that shed
+//! requests never reach token validation.
 //!
 //! # Shedding, not queueing
 //!
@@ -47,7 +48,8 @@
 //!
 //! A tool running **inline** — no tasks extension — does hold the response
 //! open for its whole duration, and will be cut off. That is the point; it is
-//! also the reason to reach for [`crate::tasks`] for anything slow.
+//! also the reason to hand anything slow off as a task (the tasks extension)
+//! instead of holding the response open.
 
 use std::{
     convert::Infallible,
@@ -87,9 +89,9 @@ impl LimitsLayer {
 
     /// At most `max` requests in flight; the rest get `503`.
     ///
-    /// Counts **requests**, not work. A tool handed off to
-    /// [`crate::tasks::TaskSupport`] releases its permit as soon as the task
-    /// handle goes back to the client, which is correct: the point of a task
+    /// Counts **requests**, not work. A tool handed off as a task releases its
+    /// permit as soon as the task handle goes back to the client, which is
+    /// correct: the point of a task
     /// is that the work outlives the request, and counting it here would let
     /// a handful of long tasks close the server to everyone.
     ///

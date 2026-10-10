@@ -97,6 +97,14 @@ fn reach_test(dir: &Path, base: &str, diffs: &[Vec<u8>]) -> Task {
 }
 
 fn reach_test_with(dir: &Path, base: &str, diffs: &[Vec<u8>], set: &ProfileSet) -> Task {
+    let t = reach_build_with(dir, set);
+    submit_candidate(&t, base, diffs);
+    assert_eq!(t.state().state, State::Test);
+    t
+}
+
+/// Open a task, approve a plan: state `Build`, the Coder holds the turn.
+fn reach_build_with(dir: &Path, set: &ProfileSet) -> Task {
     let t = Task {
         dir: dir.to_path_buf(),
         id: TaskId("T1".into()),
@@ -129,6 +137,11 @@ fn reach_test_with(dir: &Path, base: &str, diffs: &[Vec<u8>], set: &ProfileSet) 
     gate.gate = true;
     t.agent(Role::Planner, AgentAction::Post(gate));
     human::perform(dir, &t.id, "approve-plan", &[&spec.0.to_string()], None).expect("approve");
+    assert_eq!(t.state().state, State::Build);
+    t
+}
+
+fn submit_candidate(t: &Task, base: &str, diffs: &[Vec<u8>]) {
     let ids: Vec<ArtId> = diffs
         .iter()
         .map(|d| t.put(Role::Coder, ArtifactPayload::Diff, d))
@@ -141,8 +154,6 @@ fn reach_test_with(dir: &Path, base: &str, diffs: &[Vec<u8>], set: &ProfileSet) 
         }),
         b"",
     );
-    assert_eq!(t.state().state, State::Test);
-    t
 }
 
 fn report_of(t: &Task) -> (Report, String) {
@@ -421,6 +432,347 @@ fn patches_never_touch_a_candidate_controlled_path() {
 /// A listener the host owns; a confined workload must not reach it, while a
 /// plain command still runs. Needs python3 for the probe and a kernel that
 /// grants the sandbox; otherwise the test only checks fail-closed.
+/// The recovery route the first proving run never took: the Tester posts a
+/// non-gate request about an environment fault, the human fixes the
+/// environment and reruns the current candidate while the request is
+/// pending (revision-fenced), the runner stores a fresh report, and only
+/// then the human settles the request. Nothing is granted while the request
+/// is open; settlement regrants the Tester, who judges the fresh run.
+#[test]
+fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
+    let dir = tempdir("recover");
+    let (repo, base) = repo(&dir);
+    let fixed = dir.join("env-fixed");
+    let set = ProfileSet::shell("test", &format!("test -f {}", fixed.display()));
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let work = dir.join("work");
+    let run_runner = || {
+        runner::run_once(
+            &dir,
+            &t.id,
+            &repo,
+            &work,
+            &Unconfined,
+            Confinement::Unconfined,
+        )
+        .expect("run")
+    };
+    run_runner();
+    let (rep, _) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Failed, "the environment is broken");
+    let st = t.state();
+    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    let cand = st.candidate.expect("candidate");
+    let old_run = st.selected_run().expect("run").id;
+    let log = st.selected_run().expect("run").log.expect("log");
+
+    // The Tester asks the human instead of posting revise.
+    let ask = Draft::new(
+        MessageKind::RequestDecision,
+        "rustc cannot run in the sandbox",
+    )
+    .to(Recipient::Human)
+    .refs(vec![Ref::art(log)]);
+    let req = match t.agent(Role::Tester, AgentAction::Post(ask)) {
+        Response::Posted(m) => m,
+        other => panic!("expected Posted, got {other:?}"),
+    };
+    let st = t.state();
+    assert!(st.turn.is_none(), "the request ended the turn");
+    assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
+    assert_eq!(st.iteration, 0, "no iteration spent");
+
+    // A stale revision is refused; the current one reruns the candidate.
+    let stale = Rev(st.rev.0 - 1);
+    let r =
+        human::perform(&dir, &t.id, "rerun", &[&cand.0.to_string()], Some(stale)).expect("call");
+    assert!(
+        matches!(r, Response::Rejected(ref rej) if rej.code == Code::StaleRev),
+        "{r:?}"
+    );
+    std::fs::write(&fixed, b"").expect("fix the environment");
+    let r = human::perform(
+        &dir,
+        &t.id,
+        "rerun",
+        &[&cand.0.to_string()],
+        Some(t.state().rev),
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Ok), "{r:?}");
+    let st = t.state();
+    let new_run = st.selected_run().expect("run");
+    assert_ne!(new_run.id, old_run);
+    assert!(new_run.report.is_none(), "fresh run, no report yet");
+    assert!(
+        st.pending_request.is_some(),
+        "the request survives the rerun"
+    );
+
+    run_runner();
+    let (rep, _) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Passed);
+    assert!(
+        t.state().turn.is_none(),
+        "a fresh report grants nobody while the request is pending"
+    );
+
+    // Settlement regrants the Tester, who approves on the fresh run.
+    let r = human::perform(
+        &dir,
+        &t.id,
+        "answer",
+        &[&req.0.to_string(), "toolchain", "fixed;", "rerun", "passed"],
+        None,
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Posted(_)), "{r:?}");
+    let st = t.state();
+    assert!(st.pending_request.is_none());
+    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    let run = st.selected_run().expect("run");
+    let report = run.report.expect("report");
+    let approve = Draft {
+        kind: MessageKind::Verdict,
+        to: vec![Recipient::All],
+        body: Body::Verdict(Verdict {
+            subject: cand,
+            run: run.id,
+            verdict: VerdictKind::Approve,
+            blocking: vec![],
+            non_blocking: vec![],
+        }),
+        refs: vec![Ref::art(cand)],
+        evidence: vec![Ref::art(report)],
+        reply_to: None,
+        yield_to: None,
+        gate: false,
+    };
+    assert!(matches!(
+        t.agent(Role::Tester, AgentAction::Post(approve)),
+        Response::Posted(_)
+    ));
+    assert_eq!(t.state().state, State::Review);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A request to the human referencing what it is about: the selected run's
+/// log when there is one, else the approved spec.
+fn request_human(t: &Task, role: Role, body: &str) -> MsgId {
+    let st = t.state();
+    let about = st
+        .selected_run()
+        .and_then(|r| r.log)
+        .or(st.approved_spec)
+        .expect("something to reference");
+    let ask = Draft::new(MessageKind::RequestDecision, body)
+        .to(Recipient::Human)
+        .refs(vec![Ref::art(about)]);
+    match t.agent(role, AgentAction::Post(ask)) {
+        Response::Posted(m) => m,
+        other => panic!("expected Posted, got {other:?}"),
+    }
+}
+
+fn human_answer(t: &Task, req: MsgId, text: &str) {
+    let r =
+        human::perform(&t.dir, &t.id, "answer", &[&req.0.to_string(), text], None).expect("call");
+    assert!(matches!(r, Response::Posted(_)), "{r:?}");
+}
+
+fn human_rerun(t: &Task, cand: ArtId) {
+    let r = human::perform(
+        &t.dir,
+        &t.id,
+        "rerun",
+        &[&cand.0.to_string()],
+        Some(t.state().rev),
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Ok), "{r:?}");
+}
+
+/// The Coder's recovery path: a request from `build` has no run to redo;
+/// the human answers and the regranted Coder submits.
+#[test]
+fn a_coder_request_is_settled_by_an_answer_and_the_coder_resubmits() {
+    let dir = tempdir("recover-coder");
+    let (_repo, base) = repo(&dir);
+    let t = reach_build_with(&dir, &ProfileSet::shell("test", "sh ./test.sh"));
+    let req = request_human(&t, Role::Coder, "the sandbox cannot run rustc");
+    let st = t.state();
+    assert!(st.turn.is_none());
+    assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
+    assert_eq!(st.state, State::Build);
+    human_answer(&t, req, "toolchain readable now; resubmit your candidate");
+    let st = t.state();
+    assert!(st.pending_request.is_none());
+    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Coder));
+    submit_candidate(&t, &base, &[flag_diff("ok")]);
+    assert_eq!(t.state().state, State::Test);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A rerun that fails again is not a resolution: the request stays open,
+/// nobody is granted, and the human reruns once more after a real fix.
+#[test]
+fn a_failed_rerun_keeps_the_request_open_until_a_run_passes() {
+    let dir = tempdir("recover-twice");
+    let (repo, base) = repo(&dir);
+    let fixed = dir.join("env-fixed");
+    let set = ProfileSet::shell("test", &format!("test -f {}", fixed.display()));
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let work = dir.join("work");
+    let run_runner = || {
+        runner::run_once(
+            &dir,
+            &t.id,
+            &repo,
+            &work,
+            &Unconfined,
+            Confinement::Unconfined,
+        )
+        .expect("run")
+    };
+    run_runner();
+    assert_eq!(report_of(&t).0.status, RunStatus::Failed);
+    let cand = t.state().candidate.expect("candidate");
+    let req = request_human(&t, Role::Tester, "rustc cannot run");
+
+    // The human reruns without fixing anything: failed again, still pending.
+    human_rerun(&t, cand);
+    run_runner();
+    let st = t.state();
+    assert_eq!(report_of(&t).0.status, RunStatus::Failed);
+    assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
+    assert!(st.turn.is_none(), "a failed rerun grants nobody");
+    assert_eq!(st.iteration, 0);
+
+    // A real fix, another rerun, then settlement.
+    std::fs::write(&fixed, b"").expect("fix");
+    human_rerun(&t, cand);
+    run_runner();
+    assert_eq!(report_of(&t).0.status, RunStatus::Passed);
+    assert!(t.state().turn.is_none());
+    human_answer(&t, req, "fixed, rerun passed");
+    assert_eq!(t.state().turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A settlement that does not resolve the fault: the human rejects the
+/// request; the regranted Tester may open a new one, because settlement
+/// clears the pending slot. An answer to anything else settles nothing.
+#[test]
+fn a_rejected_request_regrants_the_tester_who_may_ask_again() {
+    let dir = tempdir("recover-reject");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell("test", "false");
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let req = request_human(&t, Role::Tester, "please look at the sandbox");
+    let r = human::perform(
+        &t.dir,
+        &t.id,
+        "decision",
+        &[
+            &req.0.to_string(),
+            "reject",
+            "not",
+            "an",
+            "environment",
+            "problem",
+        ],
+        None,
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Posted(_)), "{r:?}");
+    let st = t.state();
+    assert!(st.pending_request.is_none());
+    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    let again = request_human(&t, Role::Tester, "then the log is wrong: see art:5");
+    let st = t.state();
+    assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(again));
+    assert!(st.turn.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A rerun whose report is `error` (here: the sandbox wall limit) escalates
+/// the task with the request still pending. Settlement alone cannot bring
+/// the Tester back: the human resumes into `test`, which starts a fresh run,
+/// and settles only once that run has a real report.
+#[test]
+fn an_error_rerun_escalates_and_resume_then_settlement_recovers() {
+    let dir = tempdir("recover-escalate");
+    let (repo, base) = repo(&dir);
+    let fixed = dir.join("env-fixed");
+    let hang = dir.join("env-hang");
+    let mut set = ProfileSet::shell(
+        "test",
+        &format!(
+            "test -f {} && exit 0; test -f {} && sleep 3; exit 1",
+            fixed.display(),
+            hang.display()
+        ),
+    );
+    set.limits.cpu_secs = 1;
+    set.limits.wall_secs = 1;
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let exec = runner::Sandboxed::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
+        &dir.join("sandbox-state"),
+    );
+    let work = dir.join("work");
+    let run_runner =
+        || runner::run_once(&dir, &t.id, &repo, &work, &exec, Confinement::Sandboxed).expect("run");
+    run_runner();
+    let (rep, log) = report_of(&t);
+    if log.contains("Landlock filesystem confinement is NotEnforced") {
+        eprintln!("kernel without Landlock; skipping: {log}");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(rep.status, RunStatus::Failed, "{log}");
+    let cand = t.state().candidate.expect("candidate");
+    let req = request_human(&t, Role::Tester, "rustc cannot run");
+
+    // A "fix" that makes the run hang: the rerun times out, error, escalated.
+    std::fs::write(&hang, b"").expect("hang");
+    human_rerun(&t, cand);
+    run_runner();
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Error, "{log}");
+    let st = t.state();
+    assert_eq!(st.state, State::Escalated);
+    assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
+    assert!(st.turn.is_none());
+
+    // The real fix; resume into test starts a fresh run; settle after it passes.
+    std::fs::remove_file(&hang).expect("unhang");
+    std::fs::write(&fixed, b"").expect("fix");
+    let r = human::perform(&t.dir, &t.id, "resume", &["test"], Some(t.state().rev)).expect("call");
+    assert!(matches!(r, Response::Ok), "{r:?}");
+    let st = t.state();
+    assert_eq!(st.state, State::Test);
+    assert!(
+        st.selected_run().expect("run").report.is_none(),
+        "a fresh run"
+    );
+    run_runner();
+    assert_eq!(report_of(&t).0.status, RunStatus::Passed);
+    assert!(t.state().turn.is_none(), "still pending");
+    human_answer(&t, req, "fixed, rerun passed");
+    assert_eq!(t.state().turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn sandboxed_workload_reaches_no_socket_endpoint() {
     use std::os::unix::net::UnixListener;

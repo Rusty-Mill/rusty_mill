@@ -269,3 +269,5 @@ Orphaned first-party crates (built, zero dependents): `rusty_config`, `rusty_ans
 - `rusty_tick/src/assistant.rs` third `Relay` instance, `rusty_meshed` async constraint, and `rusty_atomic_file` directory-fsync not verified.
 - `rusty-hister-mcp` is an 18-line stub with no `rusty-mcp` dependency yet: a future call site, not a duplicate.
 - Re-run repo-inspector after any extraction; it flags only same-name clusters and missed most rows above (found by pattern grep instead).
+
+**Update 2026-10-10:** MCP track A2 to A5 are on `main` (#577). A6, the `rmcp` half, is done: `rmcp` is in no production dependency graph of the workspace, only in dev-dependency oracles (Nexus, frozen and outside the workspace, keeps its own). `rusty-mcp` shrank to the gateway-support modules (`auth`, `limits`, `otel`, `trace`); its dead server scaffold was deleted. The stack under it (`axum`, `jsonwebtoken`, `reqwest`, `tracing-subscriber`, OpenTelemetry) is open. TLS evidence bar (decision 5) still open.

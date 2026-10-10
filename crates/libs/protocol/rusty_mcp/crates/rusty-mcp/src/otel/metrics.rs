@@ -186,8 +186,7 @@ impl TaskOutcome {
 
 /// The instruments this crate records to.
 ///
-/// Build one per process and share it — `Arc` it into the layer and into
-/// [`crate::tasks::TaskSupport`].
+/// Build one per process and share it — `Arc` it into the layer.
 #[derive(Debug, Clone)]
 pub struct Instruments {
     requests: Counter<u64>,

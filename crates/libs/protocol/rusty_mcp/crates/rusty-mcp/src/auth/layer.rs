@@ -25,8 +25,7 @@ use super::{
 ///
 /// Mount it on the MCP endpoint only. The Protected Resource Metadata document
 /// must stay reachable without a token, or a client that gets a `401` can never
-/// discover where to authenticate — [`crate::runtime::serve`] wires both up
-/// correctly when [`crate::HttpConfig::auth`] is set.
+/// discover where to authenticate — see the wiring example in [`crate::auth`].
 ///
 /// ```
 /// use std::sync::Arc;

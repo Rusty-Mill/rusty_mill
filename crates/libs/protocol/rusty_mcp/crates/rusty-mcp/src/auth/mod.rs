@@ -21,13 +21,17 @@
 //!
 //! # Wiring it up
 //!
-//! Set [`crate::HttpConfig::auth`] and [`crate::runtime::serve`] mounts both the
-//! guarded MCP endpoint and the unauthenticated metadata document:
+//! Guard the MCP route with [`RequireAuthLayer`] and mount the metadata
+//! document beside it, unguarded, so a client that gets a `401` can still
+//! discover where to authenticate:
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use rusty_mcp::{HttpConfig, ServerConfig, Transport};
-//! use rusty_mcp::auth::{AuthConfig, StaticTokenValidator, VerifiedToken};
+//! use axum::{Json, Router, routing::{get, post}};
+//! use rusty_mcp::auth::{
+//!     AuthConfig, ProtectedResourceMetadata, RequireAuthLayer, StaticTokenValidator,
+//!     VerifiedToken,
+//! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let validator = StaticTokenValidator::new().with_token(
@@ -40,50 +44,34 @@
 //!     .with_scopes_supported(["mcp:read"])
 //!     .with_required_scopes(["mcp:read"]);
 //!
-//! let config = ServerConfig {
-//!     transport: Transport::Http(HttpConfig {
-//!         auth: Some(Arc::new(auth)),
-//!         ..Default::default()
-//!     }),
-//!     ..Default::default()
-//! };
-//! # let _ = config;
+//! let metadata = ProtectedResourceMetadata::from_config(&auth);
+//! let metadata_path = auth.metadata_path();
+//!
+//! let app: Router = Router::new()
+//!     .route("/mcp", post(|| async { "your MCP handler" }).layer(RequireAuthLayer::new(auth)))
+//!     .route(&metadata_path, get(move || async move { Json(metadata.clone()) }));
+//! # let _ = app;
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! Or apply [`RequireAuthLayer`] yourself if you build your own router.
 //!
 //! # Per-tool scopes
 //!
 //! [`AuthConfig::required_scopes`] guards the whole endpoint. For finer grain,
 //! leave it empty and read the token inside a tool — the layer puts it in the
-//! request extensions, which the transport forwards as `http::request::Parts`:
+//! request extensions (`CallContext::caller()` hands a handler the principal
+//! when the server is mounted through `rusty_mcp_axum`):
 //!
 //! ```no_run
-//! use rmcp::model::ErrorData;
-//! use rmcp::service::RequestContext;
-//! use rmcp::RoleServer;
 //! use rusty_mcp::auth::VerifiedToken;
 //!
-//! fn require_scope(ctx: &RequestContext<RoleServer>, scope: &str) -> Result<(), ErrorData> {
-//!     let token = ctx
-//!         .extensions
-//!         .get::<http::request::Parts>()
-//!         .and_then(|parts| parts.extensions.get::<VerifiedToken>());
-//!
-//!     match token {
+//! fn require_scope<B>(request: &http::Request<B>, scope: &str) -> Result<(), String> {
+//!     match request.extensions().get::<VerifiedToken>() {
 //!         Some(token) if token.scopes.contains(scope) => Ok(()),
-//!         Some(_) => Err(ErrorData::invalid_request(
-//!             format!("this tool requires the `{scope}` scope"),
-//!             None,
-//!         )),
-//!         // No token in extensions means the server is running unprotected
-//!         // (stdio, or HTTP without `auth`). Fail closed for a guarded tool.
-//!         None => Err(ErrorData::invalid_request(
-//!             "this tool requires an authenticated session",
-//!             None,
-//!         )),
+//!         Some(_) => Err(format!("this tool requires the `{scope}` scope")),
+//!         // No token in extensions means the route is running unprotected.
+//!         // Fail closed for a guarded tool.
+//!         None => Err("this tool requires an authenticated session".to_owned()),
 //!     }
 //! }
 //! ```
