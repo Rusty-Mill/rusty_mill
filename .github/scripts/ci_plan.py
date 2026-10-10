@@ -46,6 +46,9 @@ PACKAGE_JOB_NAMES = {
     "crypto_ct": frozenset(
         {"rusty_ct_check", "rusty_sha2", "rusty_pk", "rusty_aead", "rusty_crypto_key"}
     ),
+    # rusty_rand's per-OS backends that no other job compiles or runs: macOS (the
+    # Unix /dev/urandom path) and the Linux targets the default runner is not.
+    "rand_platforms": frozenset({"rusty_rand"}),
 }
 
 SPECIALIZED_JOB_NAMES = tuple(
@@ -65,13 +68,13 @@ def full_plan_outputs() -> dict[str, str]:
     }
 
 
-def ci_smoke_plan_outputs() -> dict[str, str]:
-    """Return the complete output set for CI-only smoke validation."""
+def ci_smoke_plan_outputs(changed_paths: Iterable[str] = ()) -> dict[str, str]:
+    """Return CI-only smoke outputs, retaining checks selected by CI paths."""
     return {
         "full": "false",
         "packages": "",
         "ci_only": "true",
-        **{job: "false" for job in SPECIALIZED_JOB_NAMES},
+        **{job: str(enabled).lower() for job, enabled in specialized_job_flags(changed_paths, ()).items()},
         "shards": "[1]",
         "components": '[]',
     }
@@ -165,6 +168,17 @@ def specialized_job_flags(
     }
     for job, matching_packages in PACKAGE_JOB_NAMES.items():
         flags[job] = flags.get(job, False) or bool(package_set & matching_packages)
+    # Exercise the platform commands when their workflow or selection logic
+    # changes, even when Cargo reports no affected crates (including CI-only).
+    flags["rand_platforms"] |= any(
+        path in {
+            ".github/workflows/ci.yml",
+            ".github/scripts/ci_plan.py",
+            ".github/scripts/affected_crates.py",
+            ".github/scripts/test_ci_workflow.py",
+        }
+        for path in paths
+    )
     for job, prefixes in PACKAGE_JOB_PREFIXES.items():
         flags[job] = flags.get(job, False) or any(
             package.startswith(prefix) for package in package_set for prefix in prefixes
@@ -228,7 +242,8 @@ def main() -> None:
             print(f"{key}={value}")
         return
     if args.emit_ci_smoke:
-        for key, value in ci_smoke_plan_outputs().items():
+        paths = [line.strip() for line in sys.stdin if line.strip()]
+        for key, value in ci_smoke_plan_outputs(paths).items():
             print(f"{key}={value}")
         return
     if args.event:
