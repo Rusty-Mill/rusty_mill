@@ -17,6 +17,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_tls: a blocking stream on the native engine (opt-in, not the seam)
+
+- **Added:** `handrolled::stream::NativeTlsStream`, a `Read + Write` client stream shaped like `TlsStream`, inside the double-gated `handrolled` module. It is the piece a consumer such as `rleval-app`'s Google sign-in would opt into locally. It was built there, and not as a change to `TlsStream`, because ADR-0002 keeps rustls behind every type this crate exports at the root; adding it at the root would have needed that ADR superseded.
+- **Behaviour worth knowing:** only `System` and `PinnedAnchors` trust are supported (the rest are refused at construction); a TCP close without `close_notify` is `UnexpectedEof`; nothing is delivered after the peer's `close_notify`; one record is written per `write` call. Testing it found a real bug first: a 100 KB write failed because the TLS 1.3 connection seals one record at a time.
+- **Not done, and not mine to do:** nothing selects this stream for any caller, `rleval-app` is untouched, and the evidence bar and the ADR superseding ADR-0002 are the owner's.
 ## 2026-10-09 - rusty_mcp_server: cancelled-before-run and dead-stdout fixes (pending review)
 
 - **Fixed:** a request cancelled between `start` and `Job::run` no longer runs its tool (it could mutate state with no reply); and a reply that fails to write while stdin is open and silent now ends the stdio session with `BrokenPipe` and cancels the work left, instead of waiting for stdin to close.
@@ -248,6 +253,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-09 - Ed25519 accepts small-order public keys again
 
 - **Changed (rusty_pk):** reverses the rejection added after Codex round 3 on #540, by owner decision. Behaviour now matches `ring` and RFC 8032 (which does not require rejecting small-order keys). **Known limitation:** the identity key verifies `R = identity, S = 0` for every message; callers must screen untrusted keys themselves. The evidence record `EVIDENCE-2026-10-09.txt` predates this change; Ed25519 verify is variable time and outside the constant-time budgets, so its counts are unaffected, but the vector run was not regenerated.
+
 ## 2026-10-09 - rb_rlbot_client: blocking RLBot client (RLBot port stage 3) (pending review)
 
 - **Added:** `crates/apps/rocket_league/crates/rb_rlbot_client`: `Connection` (connect, send, receive with or without a timeout, handshake), `run_bots` and `run_hivemind` (handshake, `InitComplete`, packet loop, ping replies, clean exit on disconnect), and `Environment` for the `RLBOT_*` variables. `std::net` only, one thread; depends on `rb_rlbot_wire` alone.
@@ -266,7 +272,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-09 - CI: live-internet check added to rusty-tls-engine (non-blocking)
 
 - **Added (CI):** a last step in `rusty-tls-engine` runs `handrolled_live` on the runner and writes its results to the step summary. It is `continue-on-error`: the first real evidence about Google's endpoints comes from this run, and it cannot block a merge. The logic is a tested script (`live_internet_check.sh`): output and summary are written even when cargo fails, and a failure or zero-test run fails the step. A guard in `test_ci_workflow` keeps the step non-blocking.
-- **Known limitations:** it depends on a third party's servers and on the runner's network. Until a run is read, the claim that the engine works with Google's real endpoints is unproven; the sandbox runs only reached an intercepting proxy.
+- **First real result (runner, run 37997454486, #572):** the native engine completed TLS 1.3 (X25519, `ecdsa_secp256r1_sha256`) with `accounts.google.com`, `oauth2.googleapis.com` and `www.googleapis.com` using the OS trust anchors, and got the same HTTP status as the rustls-backed stream on all three (302, 404, 404). The sandbox runs before it only reached an intercepting proxy and are not evidence about Google.
+- **Known limitations:** one run, three hosts, TLS 1.3 only, one network. It depends on a third party's servers and on the runner's network, which is why the step is non-blocking. Not the evidence bar, which is the owner's to set.
 
 ## 2026-10-09 - rusty_tls: live-internet check, first wiring candidate proposed
 

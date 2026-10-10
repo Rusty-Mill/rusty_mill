@@ -118,6 +118,7 @@ pub mod schedule12;
 pub mod server;
 pub mod server12;
 pub mod sign;
+pub mod stream;
 pub mod ticket;
 pub mod verify;
 pub mod wire;
