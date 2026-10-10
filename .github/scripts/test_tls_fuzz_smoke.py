@@ -18,7 +18,7 @@ case "$1" in
   run)
     case " $FAKE_CRASH " in *" $2 "*) echo "SUMMARY: crash in $2"; exit 77 ;; esac
     case " $FAKE_SILENT " in *" $2 "*) echo "no runs here"; exit 0 ;; esac
-    echo "Done 1234 runs in 1 second(s)" ;;
+    echo "args: $*"; echo "Done 1234 runs in 1 second(s)" ;;
 esac
 """
 
@@ -49,6 +49,10 @@ class TlsFuzzSmokeTests(unittest.TestCase):
         r = run("a b c")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("3 targets, 0 failed", r.stdout)
+
+    def test_the_target_triple_is_passed_only_when_set(self) -> None:
+        self.assertIn("run a --target x86_64-unknown-linux-gnu", run("a b", FUZZ_TARGET_TRIPLE="x86_64-unknown-linux-gnu").stdout)
+        self.assertNotIn("--target", run("a b").stdout)
 
     def test_a_crash_fails_but_the_other_targets_still_run(self) -> None:
         r = run("a b c", FAKE_CRASH="b")

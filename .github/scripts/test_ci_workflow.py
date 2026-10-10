@@ -105,6 +105,9 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertRegex(job, r"toolchain: nightly-\d{4}-\d{2}-\d{2}\n")
         # Through the tested script, with a floor on the target count.
         self.assertRegex(job, r"bash \.github/scripts/tls_fuzz_smoke\.sh \d+ [1-9]\d*")
+        # The prebuilt cargo-fuzz is musl and defaults to building for musl;
+        # the runner has no musl std, so the host triple must be explicit.
+        self.assertIn("FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu", job)
         # Blocking: no continue-on-error on a finding.
         self.assertNotIn("continue-on-error", job)
         self.assertIn("      - rusty-tls-fuzz\n", self.workflow[self.workflow.index("required-gate:") :])

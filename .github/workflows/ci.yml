@@ -1301,6 +1301,10 @@ jobs:
           shared-key: rusty-tls-fuzz
           workspaces: crates/libs/net/rusty_tls/fuzz
       - name: fuzz smoke (30 s per target)
+        env:
+          # The installed cargo-fuzz is a musl binary and would otherwise build
+          # the targets for musl, whose std the runner lacks.
+          FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
         run: bash .github/scripts/tls_fuzz_smoke.sh 30 8
       - name: Upload crashing inputs
         if: failure()

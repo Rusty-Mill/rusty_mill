@@ -9,7 +9,10 @@
 # error (a renamed directory would otherwise fuzz nothing and pass).
 #
 # `CARGO_FUZZ` overrides the tool (tests use a fake); `FUZZ_ROOT` is the
-# directory holding the fuzz package. Deliberately no `set -e`: one failing
+# directory holding the fuzz package; `FUZZ_TARGET_TRIPLE`, when set, is passed
+# as `--target`. cargo-fuzz otherwise builds for the target it was itself
+# compiled for, and the prebuilt binary CI installs is musl, whose std the
+# runner does not have. Deliberately no `set -e`: one failing
 # target must not hide the others.
 set -uo pipefail
 
@@ -30,7 +33,7 @@ fi
 failed=0
 for t in $targets; do
   # shellcheck disable=SC2086
-  out="$($fuzz run "$t" -- "-max_total_time=$secs" 2>&1)"
+  out="$($fuzz run "$t" ${FUZZ_TARGET_TRIPLE:+--target "$FUZZ_TARGET_TRIPLE"} -- "-max_total_time=$secs" 2>&1)"
   status=$?
   printf '%s\n' "$out" | tail -n 25
   if [ "$status" -ne 0 ]; then
