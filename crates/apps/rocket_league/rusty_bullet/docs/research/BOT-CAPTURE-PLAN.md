@@ -150,6 +150,10 @@ where the port disagrees. A stepping API for policies is a separate step:
 
 ## Where the code would live
 
+*Superseded 2026-10-09: the package joined the workspace and the `rlbot` crate was replaced by
+the in-repo `rb_rlbot_client` / `rb_rlbot_wire` (`crates/apps/rocket_league/rlbot/PLAN.md`,
+stage 4). What follows is the original reasoning, kept as written.*
+
 A standalone Cargo package outside the workspace (for example
 `tools/rb_tape_bot`), so the `rlbot` dependency and its transitive crates
 stay out of the workspace build, CI and `rb_domain`. Dependency

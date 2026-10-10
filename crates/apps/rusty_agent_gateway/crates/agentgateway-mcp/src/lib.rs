@@ -13,7 +13,7 @@
 mod federation;
 mod gate;
 mod guardrails;
-mod mutating_client;
+mod header_override;
 mod naming;
 mod rules;
 mod span;
@@ -27,7 +27,7 @@ pub use guardrails::{
     McpRequest, McpRequestResult, McpResponse, McpResponseResult, Outcome, authorization_error,
     request_result, response_result, to_proto_value,
 };
-pub use mutating_client::{HeaderOverride, MutatingClient};
+pub use header_override::HeaderOverride;
 pub use naming::{Resolution, ToolNamer};
 pub use rules::{Call, RuleError, RuleSet, Subject};
 pub use target::{Override, Target, TargetError};

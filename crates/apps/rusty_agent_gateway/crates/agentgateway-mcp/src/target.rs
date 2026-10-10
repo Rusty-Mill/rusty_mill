@@ -1,30 +1,47 @@
 //! Connections to upstream MCP servers.
 //!
-//! A target is dialled once at startup and the connection is shared by every
-//! request the gateway serves. That matters most for `stdio` targets: spawning
-//! `npx @modelcontextprotocol/server-everything` per request would cost far
-//! more than the call itself, and each spawn would lose whatever state the
-//! server had built up.
+//! A target is dialled once at startup and its connections are shared by every
+//! request the gateway serves. That matters most for `stdio` targets:
+//! spawning `npx @modelcontextprotocol/server-everything` per request would
+//! cost far more than the call itself, and each spawn would lose whatever
+//! state the server had built up.
+//!
+//! A native client runs one call at a time, so a target keeps a small pool of
+//! them ([`HTTP_CONNECTIONS`] for an HTTP server, one for a child process,
+//! which has a single stdin) and a call takes whichever is free, waiting for
+//! one when all are busy. The first is dialled when the target comes up, so a
+//! target that cannot be reached is reported at startup; the others are dialled
+//! as calls need them.
+
+use std::io;
+use std::process::Command;
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use agentgateway_config::{McpTarget, McpTargetKind};
-use rmcp::{
-    RoleClient, ServiceExt,
-    model::{
-        CallToolRequest, ClientRequest, GetExtensions, GetPromptRequest, GetPromptRequestParams,
-        ListPromptsRequest, ListResourceTemplatesRequest, ListResourcesRequest, ListToolsRequest,
-        ReadResourceRequest, ReadResourceRequestParams, ServerResult,
-    },
-    service::RunningService,
-    transport::{
-        StreamableHttpClientTransport, TokioChildProcess,
-        streamable_http_client::StreamableHttpClientTransportConfig,
-    },
+use rusty_mcp_client_native::json::Value;
+use rusty_mcp_client_native::proto::{
+    CallToolParams, CallToolResponse, CallToolResult, GetPromptParams, GetPromptResult,
+    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
+    PaginatedParams, Prompt, ReadResourceParams, ReadResourceResult, Resource, ResourceTemplate,
+    ServerCapabilities, Tool, Wire,
+};
+use rusty_mcp_client_native::{
+    Client, ClientConfig, ClientError, HttpConfig, HttpTransport, NoHandler, Recv, StdioTransport,
+    Transport,
 };
 
 use crate::{
     gate::{GateError, TargetFilter},
-    mutating_client::{HeaderOverride, MutatingClient},
+    header_override::HeaderOverride,
 };
+
+/// How many connections a target that speaks HTTP may have open at once.
+pub const HTTP_CONNECTIONS: usize = 8;
+
+/// How long a call may wait for its answer when the route sets no backend
+/// budget.
+const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Failure to bring up a target.
 #[derive(Debug, thiserror::Error)]
@@ -42,7 +59,7 @@ pub enum TargetError {
         cmd: String,
         /// Underlying failure.
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
 
     /// The MCP handshake failed.
@@ -80,6 +97,170 @@ pub struct Override {
     pub authority: Option<http::uri::Authority>,
 }
 
+/// The two ways to reach a server, as one transport type.
+enum Link {
+    Http(Box<HttpTransport>),
+    Stdio(StdioTransport),
+}
+
+impl Transport for Link {
+    fn send(&mut self, message: &rusty_mcp_client_native::proto::Message) -> io::Result<()> {
+        match self {
+            Self::Http(t) => t.send(message),
+            Self::Stdio(t) => t.send(message),
+        }
+    }
+
+    fn send_with(
+        &mut self,
+        message: &rusty_mcp_client_native::proto::Message,
+        overrides: &rusty_mcp_client_native::HeaderOverride,
+    ) -> io::Result<()> {
+        match self {
+            Self::Http(t) => t.send_with(message, overrides),
+            Self::Stdio(t) => t.send(message),
+        }
+    }
+
+    fn recv(&mut self, timeout: Duration) -> io::Result<Recv> {
+        match self {
+            Self::Http(t) => t.recv(timeout),
+            Self::Stdio(t) => t.recv(timeout),
+        }
+    }
+
+    fn set_protocol_version(&mut self, version: &rusty_mcp_client_native::proto::ProtocolVersion) {
+        match self {
+            Self::Http(t) => t.set_protocol_version(version),
+            Self::Stdio(t) => t.set_protocol_version(version),
+        }
+    }
+
+    fn clear_protocol_version(&mut self) {
+        match self {
+            Self::Http(t) => t.clear_protocol_version(),
+            Self::Stdio(t) => t.clear_protocol_version(),
+        }
+    }
+}
+
+type Conn = Client<Link, NoHandler>;
+/// Opens a connection, giving the handshake at most the time it is handed.
+type Dial = dyn Fn(Duration) -> Result<Conn, ClientError> + Send + Sync;
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The open connections of one target.
+struct Pool {
+    state: Mutex<Slots>,
+    freed: Condvar,
+    dial: Box<Dial>,
+    max: usize,
+    /// How many times a connection has been taken.
+    leases: std::sync::atomic::AtomicUsize,
+}
+
+struct Slots {
+    idle: Vec<Conn>,
+    /// Connections that exist: idle, leased, or being dialled.
+    open: usize,
+}
+
+/// A connection on loan; it goes back to the pool when dropped.
+struct Lease<'a> {
+    pool: &'a Pool,
+    conn: Option<Conn>,
+}
+
+impl Lease<'_> {
+    /// Run `f` on the connection.
+    fn with<T>(
+        &mut self,
+        f: impl FnOnce(&mut Conn) -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        // Held from the lease until it is dropped, so never `None` here.
+        self.conn.as_mut().map_or(Err(ClientError::Closed), f)
+    }
+}
+
+impl Lease<'_> {
+    /// One request, given what is left of `deadline` to complete.
+    fn call(
+        &mut self,
+        deadline: Instant,
+        method: &str,
+        params: Option<Value>,
+        headers: &rusty_mcp_client_native::HeaderOverride,
+    ) -> Result<Value, ClientError> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ClientError::Timeout);
+        }
+        self.with(|conn| {
+            conn.set_call_timeout(left);
+            conn.call_with(method, params, headers)
+        })
+    }
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            lock(&self.pool.state).idle.push(conn);
+            self.pool.freed.notify_one();
+        }
+    }
+}
+
+impl Pool {
+    /// A connection, waiting for one (or dialling one) until `deadline`.
+    fn lease(&self, deadline: Instant) -> Result<Lease<'_>, ClientError> {
+        self.leases
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut slots = lock(&self.state);
+        loop {
+            if let Some(conn) = slots.idle.pop() {
+                return Ok(Lease {
+                    pool: self,
+                    conn: Some(conn),
+                });
+            }
+            if slots.open < self.max {
+                slots.open += 1;
+                drop(slots);
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    lock(&self.state).open -= 1;
+                    self.freed.notify_one();
+                    return Err(ClientError::Timeout);
+                }
+                return match (self.dial)(left) {
+                    Ok(conn) => Ok(Lease {
+                        pool: self,
+                        conn: Some(conn),
+                    }),
+                    Err(e) => {
+                        lock(&self.state).open -= 1;
+                        self.freed.notify_one();
+                        Err(e)
+                    }
+                };
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(ClientError::Timeout);
+            }
+            slots = self
+                .freed
+                .wait_timeout(slots, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
 /// A live connection to one upstream MCP server.
 pub struct Target {
     /// Name used to qualify this target's tools.
@@ -92,13 +273,16 @@ pub struct Target {
     /// aimed at one has nowhere to land, and is dropped rather than quietly
     /// appearing somewhere else.
     pub http: bool,
-    service: RunningService<RoleClient, ()>,
+    capabilities: ServerCapabilities,
+    pool: Pool,
+    /// What one operation (a call, or a whole paged listing) may take, from
+    /// asking for a connection to the last answer.
+    timeout: Duration,
 }
 
 impl std::fmt::Debug for Target {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // RunningService is not Debug, and dumping a live transport into a log
-        // line would not help anyone anyway.
+        // Dumping live transports into a log line would not help anyone.
         f.debug_struct("Target")
             .field("name", &self.name)
             .field("filter", &self.filter)
@@ -109,40 +293,45 @@ impl std::fmt::Debug for Target {
 impl Target {
     /// Dial a target and complete the MCP handshake.
     ///
-    /// `over` replaces parts of a Streamable HTTP target's address. It comes
-    /// from the route's `urlRewrite`, and the federation only resolves one
-    /// when there is a single target to be unambiguous about.
-    pub async fn connect(
+    /// Blocks while it does. `over` replaces parts of a Streamable HTTP
+    /// target's address. It comes from the route's `urlRewrite`, and the
+    /// federation only resolves one when there is a single target to be
+    /// unambiguous about. `call_timeout` bounds each upstream call.
+    pub fn connect(
         config: &McpTarget,
         over: &Override,
+        call_timeout: Option<Duration>,
+        at: &str,
+    ) -> Result<Self, TargetError> {
+        Self::connect_with(config, over, call_timeout, HTTP_CONNECTIONS, at)
+    }
+
+    /// [`Target::connect`] with at most `connections` open to an HTTP target
+    /// (a child process always has one).
+    pub fn connect_with(
+        config: &McpTarget,
+        over: &Override,
+        call_timeout: Option<Duration>,
+        connections: usize,
         at: &str,
     ) -> Result<Self, TargetError> {
         let filter = TargetFilter::new(&config.filters, at)?;
         let name = config.name.clone();
+        let timeout = call_timeout.unwrap_or(DEFAULT_CALL_TIMEOUT);
 
-        let service = match &config.kind {
+        let (dial, max): (Box<Dial>, usize) = match &config.kind {
             McpTargetKind::Stdio(stdio) => {
-                let cmd = stdio.cmd.clone();
-                let args = stdio.args.clone();
-                let env = stdio.env.clone();
-                let command = process_wrap::tokio::CommandWrap::with_new(&cmd, move |command| {
+                let (cmd, args, env) = (stdio.cmd.clone(), stdio.args.clone(), stdio.env.clone());
+                let dial = move |left: Duration| {
+                    let mut command = Command::new(&cmd);
                     command.args(&args);
                     for (key, value) in &env {
                         command.env(key, value);
                     }
-                });
-                let transport =
-                    TokioChildProcess::new(command).map_err(|source| TargetError::Spawn {
-                        name: name.clone(),
-                        cmd: stdio.cmd.clone(),
-                        source,
-                    })?;
-                ().serve(transport)
-                    .await
-                    .map_err(|source| TargetError::Handshake {
-                        name: name.clone(),
-                        source: Box::new(source),
-                    })?
+                    let transport = StdioTransport::spawn(command)?;
+                    handshake(Link::Stdio(transport), left, timeout)
+                };
+                (Box::new(dial), 1)
             }
             McpTargetKind::Mcp(http) => {
                 let path = over.path.as_deref().unwrap_or(&http.path);
@@ -156,52 +345,118 @@ impl Target {
                     }
                     None => (http.host.as_str(), http.port),
                 };
-                let uri = format!("http://{host}:{port}{path}");
-                // `MutatingClient` rather than a bare `reqwest::Client`, so a
-                // guardrail's `headerMutation` can reach the outgoing request.
-                let transport = StreamableHttpClientTransport::with_client(
-                    MutatingClient::default(),
-                    StreamableHttpClientTransportConfig::with_uri(uri),
-                );
-                ().serve(transport)
-                    .await
-                    .map_err(|source| TargetError::Handshake {
-                        name: name.clone(),
-                        source: Box::new(source),
-                    })?
+                let url = format!("http://{host}:{port}{path}");
+                let dial = move |left: Duration| {
+                    let transport = HttpTransport::new(HttpConfig::new(url.as_str()))?;
+                    handshake(Link::Http(Box::new(transport)), left, timeout)
+                };
+                (Box::new(dial), connections.max(1))
             }
             McpTargetKind::Sse(_) => {
                 return Err(TargetError::UnsupportedTransport { name });
             }
         };
 
+        let first = dial(timeout).map_err(|source| match (&config.kind, source) {
+            (McpTargetKind::Stdio(stdio), ClientError::Io(source)) => TargetError::Spawn {
+                name: name.clone(),
+                cmd: stdio.cmd.clone(),
+                source,
+            },
+            (_, source) => TargetError::Handshake {
+                name: name.clone(),
+                source: Box::new(source),
+            },
+        })?;
+        let capabilities = first
+            .session()
+            .server_capabilities()
+            .cloned()
+            .unwrap_or_default();
+
         Ok(Target {
             name,
             filter,
             http: matches!(config.kind, McpTargetKind::Mcp(_)),
-            service,
+            capabilities,
+            pool: Pool {
+                state: Mutex::new(Slots {
+                    idle: vec![first],
+                    open: 1,
+                }),
+                freed: Condvar::new(),
+                dial,
+                max,
+                leases: std::sync::atomic::AtomicUsize::new(0),
+            },
+            timeout,
         })
+    }
+
+    /// The headers for one request: `headers` (a guardrail's changes to the
+    /// upstream HTTP request) if the target speaks HTTP.
+    fn native(&self, headers: &HeaderOverride) -> rusty_mcp_client_native::HeaderOverride {
+        if self.http {
+            return headers.to_native();
+        }
+        if !headers.is_empty() {
+            tracing::debug!(
+                target = %self.name,
+                "a guardrail asked to change headers on a stdio target; there are none"
+            );
+        }
+        rusty_mcp_client_native::HeaderOverride::default()
+    }
+
+    /// One request to the target, within one operation budget.
+    fn request(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        headers: &HeaderOverride,
+    ) -> Result<Value, ClientError> {
+        let deadline = Instant::now() + self.timeout;
+        self.pool
+            .lease(deadline)?
+            .call(deadline, method, params, &self.native(headers))
+    }
+
+    /// Every page of a list, on one connection (a cursor belongs to the
+    /// session that issued it) and within one budget for the whole listing.
+    fn pages<R: Wire, T>(
+        &self,
+        method: &str,
+        headers: &HeaderOverride,
+        split: impl Fn(R) -> (Vec<T>, Option<String>),
+    ) -> Result<Vec<T>, ClientError> {
+        let deadline = Instant::now() + self.timeout;
+        let native = self.native(headers);
+        let mut lease = self.pool.lease(deadline)?;
+        let mut all = Vec::new();
+        let mut cursor = None;
+        loop {
+            let params = PaginatedParams {
+                cursor: cursor.take(),
+                meta: None,
+            };
+            let page = lease.call(deadline, method, Some(params.to_value()), &native)?;
+            let (items, next) = split(R::from_value(&page)?);
+            all.extend(items);
+            match next {
+                Some(c) => cursor = Some(c),
+                None => return Ok(all),
+            }
+        }
     }
 
     /// The tools this target exports, after its filters.
     ///
     /// `headers` are a guardrail's changes to the upstream HTTP request, and
     /// are ignored for a `stdio` target.
-    pub async fn tools(
-        &self,
-        headers: &HeaderOverride,
-    ) -> Result<Vec<rmcp::model::Tool>, rmcp::service::ServiceError> {
-        let mut request = ClientRequest::ListToolsRequest(ListToolsRequest::default());
-        self.attach(&mut request, headers);
-
-        let tools = match self.service.send_request(request).await? {
-            ServerResult::ListToolsResult(result) => result.tools,
-            other => {
-                tracing::warn!(target = %self.name, ?other, "unexpected result for tools/list");
-                Vec::new()
-            }
-        };
-
+    pub fn tools(&self, headers: &HeaderOverride) -> Result<Vec<Tool>, ClientError> {
+        let tools = self.pages("tools/list", headers, |r: ListToolsResult| {
+            (r.tools, r.paging.next_cursor)
+        })?;
         Ok(tools
             .into_iter()
             .filter(|tool| self.filter.permits(&tool.name))
@@ -211,22 +466,30 @@ impl Target {
     /// Forward a tool call upstream.
     ///
     /// `headers` are a guardrail's changes to the upstream HTTP request, and
-    /// are ignored for a `stdio` target.
-    pub async fn call(
+    /// are ignored for a `stdio` target. An upstream that answers with a
+    /// request for input or a task is an error: the gateway has no client to
+    /// put the question to.
+    pub fn call(
         &self,
-        params: rmcp::model::CallToolRequestParams,
+        params: &CallToolParams,
         headers: &HeaderOverride,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::service::ServiceError> {
-        let mut request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
-        self.attach(&mut request, headers);
-
-        match self.service.send_request(request).await? {
-            ServerResult::CallToolResult(result) => Ok(result),
-            other => {
-                tracing::warn!(target = %self.name, ?other, "unexpected result for tools/call");
-                Err(rmcp::service::ServiceError::UnexpectedResponse)
+    ) -> Result<CallToolResult, ClientError> {
+        let answer = self.request("tools/call", Some(params.to_value()), headers)?;
+        match CallToolResponse::from_value(&answer)? {
+            CallToolResponse::Complete(result) => Ok(result),
+            CallToolResponse::InputRequired(_) | CallToolResponse::Task(_) => {
+                Err(ClientError::Protocol(
+                    "the upstream asked for input or started a task, which the gateway does not relay"
+                        .to_owned(),
+                ))
             }
         }
+    }
+
+    /// How many times a connection has been taken from the pool so far: one per
+    /// call, and one per whole paged listing. For metrics and tests.
+    pub fn leases(&self) -> usize {
+        self.pool.leases.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether this target advertised prompts in its handshake.
@@ -236,16 +499,12 @@ impl Target {
     /// them: `prompts/list` against such a server is a method-not-found error,
     /// and one target's missing capability should not read as a fault.
     pub fn serves_prompts(&self) -> bool {
-        self.service
-            .peer_info()
-            .is_some_and(|info| info.capabilities.prompts.is_some())
+        self.capabilities.prompts.is_some()
     }
 
     /// Whether this target advertised resources in its handshake.
     pub fn serves_resources(&self) -> bool {
-        self.service
-            .peer_info()
-            .is_some_and(|info| info.capabilities.resources.is_some())
+        self.capabilities.resources.is_some()
     }
 
     /// The prompts this target exports.
@@ -253,120 +512,55 @@ impl Target {
     /// Prompts carry no per-target `filters`: `filters` names tools, and
     /// widening it silently to prompts would change what existing configs mean.
     /// `mcpAuthorization.rules` is what gates prompts.
-    pub async fn prompts(
-        &self,
-        headers: &HeaderOverride,
-    ) -> Result<Vec<rmcp::model::Prompt>, rmcp::service::ServiceError> {
-        let mut request = ClientRequest::ListPromptsRequest(ListPromptsRequest::default());
-        self.attach(&mut request, headers);
-
-        Ok(match self.service.send_request(request).await? {
-            ServerResult::ListPromptsResult(result) => result.prompts,
-            other => {
-                tracing::warn!(target = %self.name, ?other, "unexpected result for prompts/list");
-                Vec::new()
-            }
+    pub fn prompts(&self, headers: &HeaderOverride) -> Result<Vec<Prompt>, ClientError> {
+        self.pages("prompts/list", headers, |r: ListPromptsResult| {
+            (r.prompts, r.paging.next_cursor)
         })
     }
 
     /// Fetch one prompt.
-    pub async fn get_prompt(
+    pub fn get_prompt(
         &self,
-        params: GetPromptRequestParams,
+        params: &GetPromptParams,
         headers: &HeaderOverride,
-    ) -> Result<rmcp::model::GetPromptResult, rmcp::service::ServiceError> {
-        let mut request = ClientRequest::GetPromptRequest(GetPromptRequest::new(params));
-        self.attach(&mut request, headers);
-
-        match self.service.send_request(request).await? {
-            ServerResult::GetPromptResult(result) => Ok(result),
-            other => {
-                tracing::warn!(target = %self.name, ?other, "unexpected result for prompts/get");
-                Err(rmcp::service::ServiceError::UnexpectedResponse)
-            }
-        }
+    ) -> Result<GetPromptResult, ClientError> {
+        let answer = self.request("prompts/get", Some(params.to_value()), headers)?;
+        Ok(GetPromptResult::from_value(&answer)?)
     }
 
     /// The resources this target exports.
-    pub async fn resources(
-        &self,
-        headers: &HeaderOverride,
-    ) -> Result<Vec<rmcp::model::Resource>, rmcp::service::ServiceError> {
-        let mut request = ClientRequest::ListResourcesRequest(ListResourcesRequest::default());
-        self.attach(&mut request, headers);
-
-        Ok(match self.service.send_request(request).await? {
-            ServerResult::ListResourcesResult(result) => result.resources,
-            other => {
-                tracing::warn!(target = %self.name, ?other, "unexpected result for resources/list");
-                Vec::new()
-            }
+    pub fn resources(&self, headers: &HeaderOverride) -> Result<Vec<Resource>, ClientError> {
+        self.pages("resources/list", headers, |r: ListResourcesResult| {
+            (r.resources, r.paging.next_cursor)
         })
     }
 
     /// The resource templates this target exports.
-    pub async fn resource_templates(
+    pub fn resource_templates(
         &self,
         headers: &HeaderOverride,
-    ) -> Result<Vec<rmcp::model::ResourceTemplate>, rmcp::service::ServiceError> {
-        let mut request =
-            ClientRequest::ListResourceTemplatesRequest(ListResourceTemplatesRequest::default());
-        self.attach(&mut request, headers);
-
-        Ok(match self.service.send_request(request).await? {
-            ServerResult::ListResourceTemplatesResult(result) => result.resource_templates,
-            other => {
-                tracing::warn!(
-                    target = %self.name,
-                    ?other,
-                    "unexpected result for resources/templates/list"
-                );
-                Vec::new()
-            }
-        })
+    ) -> Result<Vec<ResourceTemplate>, ClientError> {
+        self.pages(
+            "resources/templates/list",
+            headers,
+            |r: ListResourceTemplatesResult| (r.resource_templates, r.paging.next_cursor),
+        )
     }
 
     /// Read one resource.
-    pub async fn read_resource(
+    pub fn read_resource(
         &self,
-        params: ReadResourceRequestParams,
+        params: &ReadResourceParams,
         headers: &HeaderOverride,
-    ) -> Result<rmcp::model::ReadResourceResult, rmcp::service::ServiceError> {
-        let mut request = ClientRequest::ReadResourceRequest(ReadResourceRequest::new(params));
-        self.attach(&mut request, headers);
-
-        match self.service.send_request(request).await? {
-            ServerResult::ReadResourceResult(result) => Ok(result),
-            other => {
-                tracing::warn!(target = %self.name, ?other, "unexpected result for resources/read");
-                Err(rmcp::service::ServiceError::UnexpectedResponse)
-            }
-        }
+    ) -> Result<ReadResourceResult, ClientError> {
+        let answer = self.request("resources/read", Some(params.to_value()), headers)?;
+        Ok(ReadResourceResult::from_value(&answer)?)
     }
+}
 
-    /// Put a guardrail's header changes where the transport will find them.
-    ///
-    /// `rmcp` carries request extensions in memory down to the transport, so
-    /// this is how a per-call header reaches a connection whose own headers
-    /// were fixed when it was dialled.
-    fn attach(&self, request: &mut ClientRequest, headers: &HeaderOverride) {
-        if headers.is_empty() {
-            return;
-        }
-        if !self.http {
-            tracing::debug!(
-                target = %self.name,
-                "a guardrail asked to change headers on a stdio target; there are none"
-            );
-            return;
-        }
-        request.extensions_mut().insert(headers.clone());
-    }
-
-    /// Close the connection, terminating the subprocess for stdio targets.
-    pub async fn shutdown(self) {
-        if let Err(err) = self.service.cancel().await {
-            tracing::warn!(target = %self.name, %err, "error shutting down MCP target");
-        }
-    }
+/// Run the MCP handshake over `link`, which may take `handshake` at most.
+fn handshake(link: Link, handshake: Duration, call_timeout: Duration) -> Result<Conn, ClientError> {
+    let mut config = ClientConfig::new("rusty-agent-gateway", env!("CARGO_PKG_VERSION"));
+    config.call_timeout = call_timeout;
+    Client::connect(link, config, NoHandler, handshake)
 }

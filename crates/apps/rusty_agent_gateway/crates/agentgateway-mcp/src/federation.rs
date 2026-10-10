@@ -11,32 +11,41 @@
 //! not the trade a gateway should make. Failures are logged loudly at startup
 //! and the federation reports them through [`Federation::degraded`].
 
+//!
+//! # How it is served
+//!
+//! The federation is the three request-time sources of a `rusty_mcp_server`
+//! ([`ToolSource`], [`PromptSource`], [`ResourceSource`]): the server asks it
+//! for each listing and hands it each call, on a worker thread of its own. The
+//! guardrail chain is async (it speaks gRPC), so the sources run it with
+//! [`Handle::block_on`]; they must not be called from async code.
+
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use agentgateway_config::{HeaderModifier, McpAuthorization, McpBackend, McpGuardrails};
-use rmcp::{
-    ErrorData as McpError, ServerHandler,
-    model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-        GetPromptRequestParams, GetPromptResponse, ListPromptsResult, ListResourceTemplatesResult,
-        ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt,
-        ReadResourceRequestParams, ReadResourceResponse, Resource, ResourceContents,
-        ResourceTemplate, ServerCapabilities, ServerInfo, Tool,
-    },
-    service::{RequestContext, RoleServer},
+use rusty_mcp_client_native::ClientError;
+use rusty_mcp_server::json::Value;
+use rusty_mcp_server::proto::{
+    CallToolParams, CallToolResult, ContentBlock, ErrorCode, ErrorData, GetPromptParams,
+    GetPromptResult, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
+    ListToolsResult, Prompt, ReadResourceParams, ReadResourceResult, Resource, ResourceContents,
+    ResourceTemplate, Tool, Wire,
 };
-use tokio::sync::RwLock;
+use rusty_mcp_server::{
+    BuildError, CallContext as Call_, PromptSource, ResourceSource, Server, ToolSource,
+};
+use tokio::runtime::Handle;
 
 use crate::{
     gate::{Authorization, GateError},
     guardrails::{Annotations, CallContext, Guardrails, GuardrailsError, Outcome},
-    mutating_client::HeaderOverride,
+    header_override::HeaderOverride,
     naming::{Resolution, ToolNamer},
     rules::{Call, RuleError, RuleSet, Subject},
     span,
-    target::{Override, Target},
+    target::{Override, Target, TargetError},
     transform::{Transform, TransformError},
 };
 
@@ -77,8 +86,12 @@ pub enum FederationError {
     Transform(#[from] TransformError),
 
     /// Every target failed to come up, so there is nothing to serve.
-    #[error("no MCP target could be reached; the federation would serve nothing")]
-    NoTargets,
+    #[error("no MCP target could be reached; the federation would serve nothing: {0}")]
+    NoTargets(String),
+
+    /// The server could not be assembled from the federation.
+    #[error("assembling the MCP server: {0}")]
+    Build(#[from] BuildError),
 }
 
 /// A set of upstream MCP servers presented as one.
@@ -103,6 +116,8 @@ struct Inner {
     backend_timeout: Option<Duration>,
     targets: Vec<Target>,
     degraded: Vec<String>,
+    /// Runs the async guardrail chain for the worker threads that call us.
+    runtime: Handle,
     /// Federated name to target name. Only consulted in passthrough mode,
     /// where the name carries no target to resolve from.
     index: RwLock<HashMap<String, String>>,
@@ -123,11 +138,22 @@ impl std::fmt::Debug for Federation {
     }
 }
 
+fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl Federation {
     /// Connect every target and build the federation.
     ///
     /// Returns an error only when no target at all could be reached; partial
-    /// failures are recorded in [`Federation::degraded`].
+    /// failures are recorded in [`Federation::degraded`]. Must be called from a
+    /// tokio runtime, which the federation keeps to run its guardrail chain.
     #[allow(
         clippy::too_many_arguments,
         reason = "every one is a distinct piece of a route's configuration, and grouping them \
@@ -162,26 +188,50 @@ impl Federation {
             None => (Authorization::default(), RuleSet::default()),
         };
 
+        // Dialling blocks (a handshake, or spawning a child), so it happens
+        // off the async threads.
+        let dials: Vec<_> = backend
+            .targets
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, config)| {
+                // One override per target, in order: a path rewrite transforms
+                // each target's own path, so they are not interchangeable.
+                let over = overrides.get(i).cloned().unwrap_or_default();
+                let place = format!("{at}.targets[{i}]");
+                tokio::task::spawn_blocking(move || {
+                    let result = Target::connect(&config, &over, backend_timeout, &place);
+                    (config.name, result)
+                })
+            })
+            .collect();
+
         let mut targets = Vec::new();
         let mut degraded = Vec::new();
-        for (i, config) in backend.targets.iter().enumerate() {
-            // One override per target, in order: a path rewrite transforms
-            // each target's own path, so they are not interchangeable.
-            let over = overrides.get(i).cloned().unwrap_or_default();
-            match Target::connect(config, &over, &format!("{at}.targets[{i}]")).await {
-                Ok(target) => {
-                    tracing::info!(target = %target.name, "MCP target connected");
+        for dial in dials {
+            match dial.await {
+                Ok((name, Ok(target))) => {
+                    tracing::info!(target = %name, "MCP target connected");
                     targets.push(target);
                 }
+                Ok((name, Err(err))) => {
+                    tracing::error!(target = %name, %err, "MCP target unavailable");
+                    degraded.push(err.to_string());
+                }
                 Err(err) => {
-                    tracing::error!(target = %config.name, %err, "MCP target unavailable");
+                    let err = TargetError::Handshake {
+                        name: "?".to_owned(),
+                        source: Box::new(err),
+                    };
+                    tracing::error!(%err, "MCP target unavailable");
                     degraded.push(err.to_string());
                 }
             }
         }
 
         if targets.is_empty() {
-            return Err(FederationError::NoTargets);
+            return Err(FederationError::NoTargets(degraded.join("; ")));
         }
 
         let namer = ToolNamer::new(
@@ -199,6 +249,7 @@ impl Federation {
                 backend_timeout,
                 targets,
                 degraded,
+                runtime: Handle::current(),
                 index: RwLock::new(HashMap::new()),
                 prompt_index: RwLock::new(HashMap::new()),
                 resource_index: RwLock::new(HashMap::new()),
@@ -208,11 +259,35 @@ impl Federation {
         // Warm the index so a passthrough-mode `tools/call` works before any
         // client has called `tools/list`, and so name collisions surface at
         // startup rather than on whichever request happens to hit them.
-        for warning in federation.refresh_index().await {
+        let warm = federation.clone();
+        let warnings = tokio::task::spawn_blocking(move || warm.refresh_index())
+            .await
+            .unwrap_or_default();
+        for warning in warnings {
             tracing::warn!("{warning}");
         }
 
         Ok(federation)
+    }
+
+    /// The MCP server to mount: this federation as the source of every tool,
+    /// and of prompts and resources when a target has them.
+    ///
+    /// # Errors
+    /// [`FederationError::Build`] if the server cannot be assembled.
+    pub fn server(&self) -> Result<Server, FederationError> {
+        // Advertise a capability only when some target actually has it.
+        // Claiming prompts the federation cannot serve would have clients
+        // calling `prompts/list` to be told the method does not exist.
+        let mut builder = Server::builder("rusty-agent-gateway", env!("CARGO_PKG_VERSION"))
+            .tool_source(self.clone());
+        if self.inner.targets.iter().any(Target::serves_prompts) {
+            builder = builder.prompt_source(self.clone());
+        }
+        if self.inner.targets.iter().any(Target::serves_resources) {
+            builder = builder.resource_source(self.clone());
+        }
+        Ok(builder.build()?)
     }
 
     /// Targets that failed to come up, as human-readable reasons.
@@ -239,7 +314,7 @@ impl Federation {
     }
 
     /// Rebuild the federated-name index, returning any collision warnings.
-    async fn refresh_index(&self) -> Vec<String> {
+    fn refresh_index(&self) -> Vec<String> {
         let mut index = HashMap::new();
         let mut per_target: Vec<(String, Vec<String>)> = Vec::new();
 
@@ -254,7 +329,7 @@ impl Federation {
                 .transformed::<()>(HeaderOverride::default(), Annotations::default())
                 .headers;
 
-            if let Some(tools) = self.list_with_timeout(target, &headers).await {
+            if let Some(tools) = self.list_with_timeout(target, &headers) {
                 let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
                 for name in &names {
                     index.insert(
@@ -266,7 +341,7 @@ impl Federation {
             }
         }
 
-        *self.inner.index.write().await = index;
+        *write(&self.inner.index) = index;
 
         self.inner.namer.collisions(
             per_target
@@ -275,38 +350,11 @@ impl Federation {
         )
     }
 
-    /// List a target's tools, giving up if it exceeds the backend budget.
-    ///
-    /// A target that hangs would otherwise hold up every `tools/list`, turning
-    /// one sick server into a broken catalogue for all of them.
-    async fn list_with_timeout(
-        &self,
-        target: &Target,
-        headers: &HeaderOverride,
-    ) -> Option<Vec<Tool>> {
-        let listing = target.tools(headers);
-        let result = match self.inner.backend_timeout {
-            Some(budget) => match tokio::time::timeout(budget, listing).await {
-                Ok(result) => result,
-                Err(_) => {
-                    tracing::warn!(
-                        target = %target.name,
-                        timeout_ms = budget.as_millis() as u64,
-                        "listing tools exceeded the backend budget"
-                    );
-                    return None;
-                }
-            },
-            None => listing.await,
-        };
-
-        match result {
-            Ok(tools) => Some(tools),
-            Err(err) => {
-                tracing::warn!(target = %target.name, %err, "listing tools failed");
-                None
-            }
-        }
+    /// List a target's tools. A target that fails, or exceeds the backend
+    /// budget, would otherwise turn one sick server into a broken catalogue
+    /// for all of them, so it contributes nothing instead.
+    fn list_with_timeout(&self, target: &Target, headers: &HeaderOverride) -> Option<Vec<Tool>> {
+        self.upstream(target, "tools", || target.tools(headers))
     }
 
     fn target(&self, name: &str) -> Option<&Target> {
@@ -314,69 +362,101 @@ impl Federation {
     }
 
     /// Resolve a federated tool name to the target that owns it.
-    async fn route(&self, federated: &str) -> Option<(&Target, String)> {
+    fn route(&self, federated: &str) -> Option<(&Target, String)> {
         match self.inner.namer.resolve(federated) {
             Resolution::Qualified { target, tool } => {
                 let tool = tool.to_string();
                 self.target(target).map(|t| (t, tool))
             }
             Resolution::Unqualified(name) => {
-                let owner = self.inner.index.read().await.get(name).cloned()?;
+                let owner = read(&self.inner.index).get(name).cloned()?;
                 self.target(&owner).map(|t| (t, name.to_string()))
             }
         }
     }
 }
 
-/// The verified token's claims for this request, if the route validated one.
-///
-/// `rmcp` puts the HTTP request's [`http::request::Parts`] into the request
-/// context, which is where the gateway leaves them.
-fn claims(context: &RequestContext<RoleServer>) -> Option<&serde_json::Value> {
-    context
-        .extensions
-        .get::<http::request::Parts>()?
-        .extensions
-        .get::<TokenClaims>()
-        .map(|claims| &claims.0)
+fn error(code: ErrorCode, message: impl Into<String>) -> ErrorData {
+    ErrorData::new(code, message)
 }
 
-impl ServerHandler for Federation {
-    fn get_info(&self) -> ServerInfo {
-        // Advertise a capability only when some target actually has it.
-        // Claiming prompts the federation cannot serve would have clients
-        // calling `prompts/list` to be told the method does not exist.
-        // Filled in field by field rather than through the typestate builder,
-        // whose chained methods cannot be applied conditionally.
-        let mut capabilities = ServerCapabilities::default();
-        capabilities.tools = Some(Default::default());
-        capabilities.prompts = self
-            .inner
-            .targets
-            .iter()
-            .any(Target::serves_prompts)
-            .then(Default::default);
-        capabilities.resources = self
-            .inner
-            .targets
-            .iter()
-            .any(Target::serves_resources)
-            .then(Default::default);
+/// What the call being served knows about its caller, in the forms the gate,
+/// rules and guardrails take.
+struct Who {
+    headers: http::HeaderMap,
+    claims: Option<serde_json::Value>,
+}
 
-        ServerInfo::new(capabilities).with_server_info(rmcp::model::Implementation::new(
-            "rusty-agent-gateway",
-            env!("CARGO_PKG_VERSION"),
-        ))
+impl Who {
+    fn of(ctx: &Call_) -> Self {
+        let caller = ctx.caller();
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in &caller.headers {
+            if let (Ok(name), Ok(value)) = (
+                http::HeaderName::from_bytes(name.as_bytes()),
+                http::HeaderValue::from_str(value),
+            ) {
+                headers.append(name, value);
+            }
+        }
+        // The verified token's claims, as the route's auth left them.
+        let claims = caller
+            .principal
+            .as_ref()
+            .and_then(|p| serde_json::from_str(&p.to_json_string()).ok());
+        Who { headers, claims }
     }
 
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
-        let span = span::request(TOOLS_LIST, &context);
+    fn claims(&self) -> Option<&serde_json::Value> {
+        self.claims.as_ref()
+    }
+}
 
-        let claims = claims(&context);
+/// `_meta` as forwarded upstream: only the trace context. The client's own
+/// revision, capabilities and progress token describe the downstream
+/// connection and mean nothing to the upstream one.
+fn forward_meta(meta: &Option<Value>) -> Option<Value> {
+    let meta = meta.as_ref()?;
+    let mut kept = Value::object();
+    for key in ["traceparent", "tracestate", "baggage"] {
+        if let Some(value) = meta.get(key) {
+            kept.insert(key, value.clone());
+        }
+    }
+    kept.as_object()
+        .is_some_and(|o| !o.is_empty())
+        .then_some(kept)
+}
+
+/// A guardrail's JSON-RPC refusal.
+fn refusal(code: i32, message: String, data: Option<serde_json::Value>) -> ErrorData {
+    ErrorData {
+        code: ErrorCode(code),
+        message,
+        data: data.and_then(|d| Value::from_json_str(&d.to_string()).ok()),
+    }
+}
+
+/// `value` as the JSON bytes a guardrail is shown.
+fn encode(value: &impl Wire) -> Vec<u8> {
+    value.to_value().to_json_string().into_bytes()
+}
+
+/// A guardrail's rewrite, decoded.
+fn decode<T: Wire>(body: &[u8]) -> Option<T> {
+    let text = std::str::from_utf8(body).ok()?;
+    T::from_value(&Value::from_json_str(text).ok()?).ok()
+}
+
+impl ToolSource for Federation {
+    fn tools(&self) -> Vec<Tool> {
+        Vec::new()
+    }
+
+    fn tools_for(&self, ctx: &Call_) -> Result<Vec<Tool>, ErrorData> {
+        let span = span::request(TOOLS_LIST, ctx);
+        let who = Who::of(ctx);
+        let claims = who.claims();
         let backends: Vec<String> = self
             .inner
             .targets
@@ -392,22 +472,18 @@ impl ServerHandler for Federation {
             .transformed::<()>(HeaderOverride::default(), Annotations::default())
             .headers;
         if self.inner.guardrails.runs_request(TOOLS_LIST) {
-            let decision = self
-                .inner
-                .guardrails
-                .check_request(
-                    CallContext {
-                        method: TOOLS_LIST,
-                        headers: request_headers(&context),
-                        claims,
-                        // A fanout has no single subject to name.
-                        subject: None,
-                        target: None,
-                    },
-                    &backends,
-                    None,
-                )
-                .await;
+            let decision = self.block(self.inner.guardrails.check_request(
+                CallContext {
+                    method: TOOLS_LIST,
+                    headers: &who.headers,
+                    claims,
+                    // A fanout has no single subject to name.
+                    subject: None,
+                    target: None,
+                },
+                &backends,
+                None,
+            ));
 
             if let Outcome::Reject {
                 code,
@@ -415,7 +491,7 @@ impl ServerHandler for Federation {
                 data,
             } = decision.outcome
             {
-                return Err(mcp_error(code, message, data));
+                return Err(refusal(code, message, data));
             }
 
             span::annotate(&span, &decision.annotations);
@@ -432,10 +508,9 @@ impl ServerHandler for Federation {
         let mut index = HashMap::new();
 
         for target in &self.inner.targets {
-            let upstream = match self.list_with_timeout(target, &upstream_headers).await {
-                Some(tools) => tools,
+            let Some(upstream) = self.list_with_timeout(target, &upstream_headers) else {
                 // One unhealthy target must not blank the whole catalogue.
-                None => continue,
+                continue;
             };
 
             for mut tool in upstream {
@@ -459,12 +534,12 @@ impl ServerHandler for Federation {
                     continue;
                 }
 
-                tool.name = federated.into();
+                tool.name = federated;
                 tools.push(tool);
             }
         }
 
-        *self.inner.index.write().await = index;
+        *write(&self.inner.index) = index;
 
         // The response phase sees the merged catalogue, after the gates have
         // had their say -- so a processor filtering the listing is refining
@@ -473,33 +548,43 @@ impl ServerHandler for Federation {
             tools,
             ..Default::default()
         };
-        self.guard_response(TOOLS_LIST, &backends, &listing, None, &context)
-            .await
+        self.guard_response(TOOLS_LIST, &backends, &listing, None, &who)
+            .map(|l| l.tools)
     }
 
-    async fn call_tool(
+    fn call(
         &self,
-        request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, McpError> {
-        let federated = request.name.to_string();
+        ctx: &Call_,
+        request: &CallToolParams,
+    ) -> Option<Result<CallToolResult, ErrorData>> {
+        Some(self.call_tool(ctx, request))
+    }
+}
 
-        let span = span::request(TOOLS_CALL, &context);
+impl Federation {
+    fn call_tool(
+        &self,
+        ctx: &Call_,
+        request: &CallToolParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let federated = request.name.clone();
+        let span = span::request(TOOLS_CALL, ctx);
+        let who = Who::of(ctx);
 
         // Authorization is checked here, not only in list_tools. Nothing stops
         // a client from calling a name it was never shown, so filtering the
         // catalogue alone would leave every hidden tool callable.
         if !self.inner.authorization.permits(&federated) {
-            return Err(McpError::invalid_request(
+            return Err(error(
+                ErrorCode::INVALID_REQUEST,
                 format!("tool `{federated}` is not permitted on this route"),
-                None,
             ));
         }
 
-        let Some((target, tool)) = self.route(&federated).await else {
-            return Err(McpError::invalid_params(
+        let Some((target, tool)) = self.route(&federated) else {
+            return Err(error(
+                ErrorCode::INVALID_PARAMS,
                 format!("unknown tool `{federated}`"),
-                None,
             ));
         };
 
@@ -510,24 +595,25 @@ impl ServerHandler for Federation {
         if !self.inner.rules.permits(Call {
             target: &target.name,
             subject: Subject::Tool(&tool),
-            claims: claims(&context),
+            claims: who.claims(),
         }) {
-            return Err(McpError::invalid_request(
+            return Err(error(
+                ErrorCode::INVALID_REQUEST,
                 format!("tool `{federated}` is not permitted on this route"),
-                None,
             ));
         }
 
         // The target's own filters gate the call too, for the same reason.
         if !target.filter.permits(&tool) {
-            return Err(McpError::invalid_request(
+            return Err(error(
+                ErrorCode::INVALID_REQUEST,
                 format!("tool `{federated}` is not exposed by this gateway"),
-                None,
             ));
         }
 
-        let mut params = request;
-        params.name = tool.clone().into();
+        let mut params = request.clone();
+        params.name = tool.clone();
+        params.meta = forward_meta(&params.meta);
 
         // Guardrails run last of the gates: a processor is consulted only
         // about calls that were otherwise going to happen, and it sees the
@@ -537,35 +623,31 @@ impl ServerHandler for Federation {
             .transformed::<()>(HeaderOverride::default(), Annotations::default())
             .headers;
         if self.inner.guardrails.runs_request(TOOLS_CALL) {
-            let encoded = serde_json::to_vec(&params).unwrap_or_default();
-            let decision = self
-                .inner
-                .guardrails
-                .check_request(
-                    CallContext {
-                        method: TOOLS_CALL,
-                        headers: request_headers(&context),
-                        claims: claims(&context),
-                        subject: Some(Subject::Tool(&tool)),
-                        target: Some(&target.name),
-                    },
-                    &backends,
-                    Some(&encoded),
-                )
-                .await;
+            let encoded = encode(&params);
+            let decision = self.block(self.inner.guardrails.check_request(
+                CallContext {
+                    method: TOOLS_CALL,
+                    headers: &who.headers,
+                    claims: who.claims(),
+                    subject: Some(Subject::Tool(&tool)),
+                    target: Some(&target.name),
+                },
+                &backends,
+                Some(&encoded),
+            ));
 
             match decision.outcome {
                 Outcome::Pass => {}
-                Outcome::Mutated(body) => match serde_json::from_slice(&body) {
-                    Ok(rewritten) => params = rewritten,
+                Outcome::Mutated(body) => match decode(&body) {
+                    Some(rewritten) => params = rewritten,
                     // A processor that returns something unusable is a
                     // processor that failed, so it takes the same path as one
                     // that could not be reached rather than being ignored.
-                    Err(err) => {
-                        tracing::warn!(%err, "a guardrail rewrote tools/call into something unusable");
-                        return Err(McpError::internal_error(
-                            "mcpGuardrails returned an unusable request".to_string(),
-                            None,
+                    None => {
+                        tracing::warn!("a guardrail rewrote tools/call into something unusable");
+                        return Err(error(
+                            ErrorCode::INTERNAL_ERROR,
+                            "mcpGuardrails returned an unusable request",
                         ));
                     }
                 },
@@ -573,7 +655,7 @@ impl ServerHandler for Federation {
                     code,
                     message,
                     data,
-                } => return Err(mcp_error(code, message, data)),
+                } => return Err(refusal(code, message, data)),
             }
 
             span::annotate(&span, &decision.annotations);
@@ -582,69 +664,56 @@ impl ServerHandler for Federation {
                 .headers;
         }
 
-        let call = target.call(params, &upstream_headers);
-        let result = match self.inner.backend_timeout {
-            Some(budget) => match tokio::time::timeout(budget, call).await {
-                Ok(result) => result,
-                Err(_) => {
-                    tracing::warn!(
-                        target = %target.name,
-                        tool = %federated,
-                        timeout_ms = budget.as_millis() as u64,
-                        "tool call exceeded the backend budget"
-                    );
-                    // An error the caller can read, not a protocol error: the
-                    // request was well-formed and the model deserves to be
-                    // told the tool timed out rather than shown an opaque
-                    // internal failure.
-                    return Ok(CallToolResponse::Complete(CallToolResult::error(vec![
-                        ContentBlock::text(format!(
-                            "`{federated}` timed out after {}ms",
-                            budget.as_millis()
-                        )),
-                    ])));
-                }
-            },
-            None => call.await,
-        };
-
         // An upstream failure skips the response phase. There is no result to
         // inspect, and asking a guardrail to approve a failure is not a
         // question it can answer.
-        let result = match result {
+        let result = match target.call(&params, &upstream_headers) {
             Ok(result) => result,
+            Err(ClientError::Timeout) => {
+                tracing::warn!(
+                    target = %target.name,
+                    tool = %federated,
+                    "tool call exceeded the backend budget"
+                );
+                // An error the caller can read, not a protocol error: the
+                // request was well-formed and the model deserves to be told
+                // the tool timed out rather than shown an opaque internal
+                // failure.
+                let waited = self
+                    .inner
+                    .backend_timeout
+                    .map_or_else(String::new, |b| format!(" after {}ms", b.as_millis()));
+                return Ok(CallToolResult {
+                    content: vec![ContentBlock::text(format!(
+                        "`{federated}` timed out{waited}"
+                    ))],
+                    is_error: Some(true),
+                    ..CallToolResult::default()
+                });
+            }
             Err(err) => {
                 tracing::warn!(target = %target.name, tool = %federated, %err, "tool call failed");
-                return Err(McpError::internal_error(
+                return Err(error(
+                    ErrorCode::INTERNAL_ERROR,
                     format!("calling `{federated}` failed: {err}"),
-                    None,
                 ));
             }
         };
 
-        let result = match self
-            .guard_response(
-                TOOLS_CALL,
-                &backends,
-                &result,
-                Some((Subject::Tool(&tool), &target.name)),
-                &context,
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(err) => return Err(err),
-        };
-
-        Ok(CallToolResponse::Complete(result))
+        self.guard_response(
+            TOOLS_CALL,
+            &backends,
+            &result,
+            Some((Subject::Tool(&tool), &target.name)),
+            &who,
+        )
     }
+}
 
-    async fn list_prompts(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListPromptsResult, McpError> {
-        let claims = claims(&context);
+impl PromptSource for Federation {
+    fn prompts(&self, ctx: &Call_) -> Result<Vec<Prompt>, ErrorData> {
+        let who = Who::of(ctx);
+        let claims = who.claims();
         let targets: Vec<&Target> = self
             .inner
             .targets
@@ -653,11 +722,9 @@ impl ServerHandler for Federation {
             .collect();
         let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
-        let span = span::request(PROMPTS_LIST, &context);
+        let span = span::request(PROMPTS_LIST, ctx);
 
-        let guarded = self
-            .guard_request(PROMPTS_LIST, &backends, None, None, &context)
-            .await?;
+        let guarded = self.guard_request(PROMPTS_LIST, &backends, None, None, &who)?;
         span::annotate(&span, &guarded.annotations);
         let headers = guarded.headers;
 
@@ -665,9 +732,7 @@ impl ServerHandler for Federation {
         let mut index = HashMap::new();
 
         for target in targets {
-            let Some(upstream) = self
-                .with_timeout(target.prompts(&headers), target, "prompts")
-                .await
+            let Some(upstream) = self.upstream(target, "prompts", || target.prompts(&headers))
             else {
                 continue;
             };
@@ -694,82 +759,90 @@ impl ServerHandler for Federation {
             }
         }
 
-        *self.inner.prompt_index.write().await = index;
+        *write(&self.inner.prompt_index) = index;
 
         let listing = ListPromptsResult {
             prompts,
             ..Default::default()
         };
-        self.guard_response(PROMPTS_LIST, &backends, &listing, None, &context)
-            .await
+        self.guard_response(PROMPTS_LIST, &backends, &listing, None, &who)
+            .map(|l| l.prompts)
     }
 
-    async fn get_prompt(
+    fn get(
         &self,
-        request: GetPromptRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<GetPromptResponse, McpError> {
+        ctx: &Call_,
+        request: &GetPromptParams,
+    ) -> Option<Result<GetPromptResult, ErrorData>> {
+        Some(self.get_prompt(ctx, request))
+    }
+}
+
+impl Federation {
+    fn get_prompt(
+        &self,
+        ctx: &Call_,
+        request: &GetPromptParams,
+    ) -> Result<GetPromptResult, ErrorData> {
         let federated = request.name.clone();
+        let span = span::request(PROMPTS_GET, ctx);
+        let who = Who::of(ctx);
 
-        let span = span::request(PROMPTS_GET, &context);
-
-        let Some((target, name)) = self.route_prompt(&federated).await else {
-            return Err(McpError::invalid_params(
+        let Some((target, name)) = self.route_prompt(&federated) else {
+            return Err(error(
+                ErrorCode::INVALID_PARAMS,
                 format!("unknown prompt `{federated}`"),
-                None,
             ));
         };
 
         // Checked on the fetch, not only on the listing. Nothing stops a
         // client asking for a name it was never shown.
-        self.permit(&target.name, Subject::Prompt(&name), &federated, &context)?;
+        self.permit(&target.name, Subject::Prompt(&name), &federated, &who)?;
 
-        let mut params = request;
+        let mut params = request.clone();
         params.name = name.clone();
+        params.meta = forward_meta(&params.meta);
 
         let backends = vec![target.name.clone()];
-        let headers = self
-            .guard_request_json(
-                PROMPTS_GET,
-                &backends,
-                &params,
-                Some((Subject::Prompt(&params.name), &target.name)),
-                &context,
-            )
-            .await?;
-        span::annotate(&span, &headers.annotations);
-        let (params, headers) = (headers.body.unwrap_or(params), headers.headers);
+        let guarded = self.guard_request_json(
+            PROMPTS_GET,
+            &backends,
+            &params,
+            Some((Subject::Prompt(&params.name), &target.name)),
+            &who,
+        )?;
+        span::annotate(&span, &guarded.annotations);
+        let (params, headers) = (guarded.body.unwrap_or(params), guarded.headers);
         // What was actually fetched, which a request-phase rewrite may have
         // changed. The response phase should describe the result it is looking
         // at, not the name the client happened to ask for.
         let fetched = params.name.clone();
 
         let result = self
-            .with_timeout(target.get_prompt(params, &headers), target, "prompts/get")
-            .await
+            .upstream(target, "prompts/get", || {
+                target.get_prompt(&params, &headers)
+            })
             .ok_or_else(|| {
-                McpError::internal_error(format!("fetching `{federated}` failed"), None)
+                error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("fetching `{federated}` failed"),
+                )
             })?;
 
-        let result = self
-            .guard_response(
-                PROMPTS_GET,
-                &backends,
-                &result,
-                Some((Subject::Prompt(&fetched), &target.name)),
-                &context,
-            )
-            .await?;
-
-        Ok(GetPromptResponse::Complete(result))
+        self.guard_response(
+            PROMPTS_GET,
+            &backends,
+            &result,
+            Some((Subject::Prompt(&fetched), &target.name)),
+            &who,
+        )
     }
+}
 
-    async fn list_resources(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListResourcesResult, McpError> {
-        let claims = claims(&context);
+impl ResourceSource for Federation {
+    fn resources(&self, ctx: &Call_) -> Result<Vec<Resource>, ErrorData> {
+        let who = Who::of(ctx);
+        let claims = who.claims();
         let targets: Vec<&Target> = self
             .inner
             .targets
@@ -778,11 +851,9 @@ impl ServerHandler for Federation {
             .collect();
         let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
-        let span = span::request(RESOURCES_LIST, &context);
+        let span = span::request(RESOURCES_LIST, ctx);
 
-        let guarded = self
-            .guard_request(RESOURCES_LIST, &backends, None, None, &context)
-            .await?;
+        let guarded = self.guard_request(RESOURCES_LIST, &backends, None, None, &who)?;
         span::annotate(&span, &guarded.annotations);
         let headers = guarded.headers;
 
@@ -790,9 +861,7 @@ impl ServerHandler for Federation {
         let mut index = HashMap::new();
 
         for target in targets {
-            let Some(upstream) = self
-                .with_timeout(target.resources(&headers), target, "resources")
-                .await
+            let Some(upstream) = self.upstream(target, "resources", || target.resources(&headers))
             else {
                 continue;
             };
@@ -814,22 +883,19 @@ impl ServerHandler for Federation {
             }
         }
 
-        *self.inner.resource_index.write().await = index;
+        *write(&self.inner.resource_index) = index;
 
         let listing = ListResourcesResult {
             resources,
             ..Default::default()
         };
-        self.guard_response(RESOURCES_LIST, &backends, &listing, None, &context)
-            .await
+        self.guard_response(RESOURCES_LIST, &backends, &listing, None, &who)
+            .map(|l| l.resources)
     }
 
-    async fn list_resource_templates(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListResourceTemplatesResult, McpError> {
-        let claims = claims(&context);
+    fn templates(&self, ctx: &Call_) -> Result<Vec<ResourceTemplate>, ErrorData> {
+        let who = Who::of(ctx);
+        let claims = who.claims();
         let targets: Vec<&Target> = self
             .inner
             .targets
@@ -838,25 +904,18 @@ impl ServerHandler for Federation {
             .collect();
         let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
-        let span = span::request(RESOURCES_TEMPLATES_LIST, &context);
+        let span = span::request(RESOURCES_TEMPLATES_LIST, ctx);
 
-        let guarded = self
-            .guard_request(RESOURCES_TEMPLATES_LIST, &backends, None, None, &context)
-            .await?;
+        let guarded = self.guard_request(RESOURCES_TEMPLATES_LIST, &backends, None, None, &who)?;
         span::annotate(&span, &guarded.annotations);
         let headers = guarded.headers;
 
         let mut templates: Vec<ResourceTemplate> = Vec::new();
 
         for target in targets {
-            let Some(upstream) = self
-                .with_timeout(
-                    target.resource_templates(&headers),
-                    target,
-                    "resources/templates",
-                )
-                .await
-            else {
+            let Some(upstream) = self.upstream(target, "resources/templates", || {
+                target.resource_templates(&headers)
+            }) else {
                 continue;
             };
 
@@ -885,49 +944,52 @@ impl ServerHandler for Federation {
             resource_templates: templates,
             ..Default::default()
         };
-        self.guard_response(
-            RESOURCES_TEMPLATES_LIST,
-            &backends,
-            &listing,
-            None,
-            &context,
-        )
-        .await
+        self.guard_response(RESOURCES_TEMPLATES_LIST, &backends, &listing, None, &who)
+            .map(|l| l.resource_templates)
     }
 
-    async fn read_resource(
+    fn read(
         &self,
-        request: ReadResourceRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResponse, McpError> {
+        ctx: &Call_,
+        request: &ReadResourceParams,
+    ) -> Option<Result<ReadResourceResult, ErrorData>> {
+        Some(self.read_resource(ctx, request))
+    }
+}
+
+impl Federation {
+    fn read_resource(
+        &self,
+        ctx: &Call_,
+        request: &ReadResourceParams,
+    ) -> Result<ReadResourceResult, ErrorData> {
         let federated = request.uri.clone();
+        let span = span::request(RESOURCES_READ, ctx);
+        let who = Who::of(ctx);
 
-        let span = span::request(RESOURCES_READ, &context);
-
-        let Some((target, uri)) = self.route_resource(&federated).await else {
-            return Err(McpError::invalid_params(
+        let Some((target, uri)) = self.route_resource(&federated) else {
+            return Err(error(
+                ErrorCode::INVALID_PARAMS,
                 format!("unknown resource `{federated}`"),
-                None,
             ));
         };
 
-        self.permit(&target.name, Subject::Resource(&uri), &federated, &context)?;
+        self.permit(&target.name, Subject::Resource(&uri), &federated, &who)?;
 
-        let mut params = request;
+        let mut params = request.clone();
         params.uri = uri.clone();
+        params.meta = forward_meta(&params.meta);
 
         let backends = vec![target.name.clone()];
-        let headers = self
-            .guard_request_json(
-                RESOURCES_READ,
-                &backends,
-                &params,
-                Some((Subject::Resource(&params.uri), &target.name)),
-                &context,
-            )
-            .await?;
-        span::annotate(&span, &headers.annotations);
-        let (mut params, headers) = (headers.body.unwrap_or(params), headers.headers);
+        let guarded = self.guard_request_json(
+            RESOURCES_READ,
+            &backends,
+            &params,
+            Some((Subject::Resource(&params.uri), &target.name)),
+            &who,
+        )?;
+        span::annotate(&span, &guarded.annotations);
+        let (mut params, headers) = (guarded.body.unwrap_or(params), guarded.headers);
 
         // The upstream knows its own URI, never the federated one. A guardrail
         // that rewrote the params could have put the federated form back.
@@ -937,40 +999,30 @@ impl ServerHandler for Federation {
         let read = params.uri.clone();
 
         let mut result = self
-            .with_timeout(
-                target.read_resource(params, &headers),
-                target,
-                "resources/read",
-            )
-            .await
+            .upstream(target, "resources/read", || {
+                target.read_resource(&params, &headers)
+            })
             .ok_or_else(|| {
-                McpError::internal_error(format!("reading `{federated}` failed"), None)
+                error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("reading `{federated}` failed"),
+                )
             })?;
 
         // Contents come back carrying the target's own URIs, which no client
         // could read back to us. Re-qualify them so the round trip closes.
         for content in &mut result.contents {
-            let uri = match content {
-                ResourceContents::TextResourceContents { uri, .. }
-                | ResourceContents::BlobResourceContents { uri, .. } => uri,
-                // `ResourceContents` is non-exhaustive upstream. A variant this
-                // build has not seen is passed through rather than guessed at.
-                _ => continue,
-            };
+            let (ResourceContents::Text { uri, .. } | ResourceContents::Blob { uri, .. }) = content;
             *uri = self.inner.namer.qualify_uri(&target.name, uri);
         }
 
-        let result = self
-            .guard_response(
-                RESOURCES_READ,
-                &backends,
-                &result,
-                Some((Subject::Resource(&read), &target.name)),
-                &context,
-            )
-            .await?;
-
-        Ok(ReadResourceResponse::Complete(result))
+        self.guard_response(
+            RESOURCES_READ,
+            &backends,
+            &result,
+            Some((Subject::Resource(&read), &target.name)),
+            &who,
+        )
     }
 }
 
@@ -996,29 +1048,34 @@ struct Guarded<T> {
 }
 
 impl Federation {
+    /// Run the async guardrail chain from a worker thread.
+    fn block<F: std::future::Future>(&self, future: F) -> F::Output {
+        self.inner.runtime.block_on(future)
+    }
+
     /// Route a federated prompt name to its target and the target's own name.
-    async fn route_prompt(&self, federated: &str) -> Option<(&Target, String)> {
+    fn route_prompt(&self, federated: &str) -> Option<(&Target, String)> {
         match self.inner.namer.resolve(federated) {
             Resolution::Qualified { target, tool } => {
                 let name = tool.to_string();
                 self.target(target).map(|t| (t, name))
             }
             Resolution::Unqualified(name) => {
-                let owner = self.inner.prompt_index.read().await.get(name).cloned()?;
+                let owner = read(&self.inner.prompt_index).get(name).cloned()?;
                 self.target(&owner).map(|t| (t, name.to_string()))
             }
         }
     }
 
     /// Route a federated resource URI to its target and the target's own URI.
-    async fn route_resource(&self, federated: &str) -> Option<(&Target, String)> {
+    fn route_resource(&self, federated: &str) -> Option<(&Target, String)> {
         match self.inner.namer.resolve_uri(federated) {
             Resolution::Qualified { target, tool } => {
                 let uri = tool.to_string();
                 self.target(target).map(|t| (t, uri))
             }
             Resolution::Unqualified(uri) => {
-                let owner = self.inner.resource_index.read().await.get(uri).cloned()?;
+                let owner = read(&self.inner.resource_index).get(uri).cloned()?;
                 self.target(&owner).map(|t| (t, uri.to_string()))
             }
         }
@@ -1030,51 +1087,48 @@ impl Federation {
         target: &str,
         subject: Subject<'_>,
         federated: &str,
-        context: &RequestContext<RoleServer>,
-    ) -> Result<(), McpError> {
+        who: &Who,
+    ) -> Result<(), ErrorData> {
         if self.inner.rules.permits(Call {
             target,
             subject,
-            claims: claims(context),
+            claims: who.claims(),
         }) {
             return Ok(());
         }
-        Err(McpError::invalid_request(
+        Err(error(
+            ErrorCode::INVALID_REQUEST,
             format!(
                 "{} `{federated}` is not permitted on this route",
                 subject.noun()
             ),
-            None,
         ))
     }
 
-    /// Bound an upstream call by the backend budget, logging what gave out.
-    async fn with_timeout<T, E: std::fmt::Display>(
+    /// An upstream call, logging (and swallowing) what gave out: one unhealthy
+    /// target must not blank the whole listing. The call is bounded by the
+    /// backend budget, which the target's connections enforce.
+    fn upstream<T>(
         &self,
-        call: impl std::future::Future<Output = Result<T, E>>,
         target: &Target,
         what: &str,
+        call: impl FnOnce() -> Result<T, ClientError>,
     ) -> Option<T> {
-        let result = match self.inner.backend_timeout {
-            Some(budget) => match tokio::time::timeout(budget, call).await {
-                Ok(result) => result,
-                Err(_) => {
-                    tracing::warn!(
-                        target = %target.name,
-                        what,
-                        timeout_ms = budget.as_millis() as u64,
-                        "an upstream call exceeded the backend budget"
-                    );
-                    return None;
-                }
-            },
-            None => call.await,
-        };
-
-        match result {
+        match call() {
             Ok(value) => Some(value),
+            Err(ClientError::Timeout) => {
+                tracing::warn!(
+                    target = %target.name,
+                    what,
+                    timeout_ms = self
+                        .inner
+                        .backend_timeout
+                        .map_or(0, |b| b.as_millis() as u64),
+                    "an upstream call exceeded the backend budget"
+                );
+                None
+            }
             Err(err) => {
-                // One unhealthy target must not blank the whole listing.
                 tracing::warn!(target = %target.name, what, %err, "an upstream call failed");
                 None
             }
@@ -1082,93 +1136,85 @@ impl Federation {
     }
 
     /// Run the request phase for a method that carries no params.
-    async fn guard_request(
+    fn guard_request(
         &self,
         method: &str,
         backends: &[String],
         params: Option<&[u8]>,
         about: Option<(Subject<'_>, &str)>,
-        context: &RequestContext<RoleServer>,
-    ) -> Result<Guarded<()>, McpError> {
+        who: &Who,
+    ) -> Result<Guarded<()>, ErrorData> {
         // Still runs when no processor is keyed on this method: a route may
         // set a static header without any guardrail at all.
         if !self.inner.guardrails.runs_request(method) {
             return Ok(self.transformed(HeaderOverride::default(), Annotations::default()));
         }
 
-        let decision = self
-            .inner
-            .guardrails
-            .check_request(
-                CallContext {
-                    method,
-                    headers: request_headers(context),
-                    claims: claims(context),
-                    subject: about.map(|(subject, _)| subject),
-                    target: about.map(|(_, target)| target),
-                },
-                backends,
-                params,
-            )
-            .await;
+        let decision = self.block(self.inner.guardrails.check_request(
+            CallContext {
+                method,
+                headers: &who.headers,
+                claims: who.claims(),
+                subject: about.map(|(subject, _)| subject),
+                target: about.map(|(_, target)| target),
+            },
+            backends,
+            params,
+        ));
 
         match decision.outcome {
             Outcome::Reject {
                 code,
                 message,
                 data,
-            } => Err(mcp_error(code, message, data)),
+            } => Err(refusal(code, message, data)),
             _ => Ok(self.transformed(decision.headers.into(), decision.annotations)),
         }
     }
 
     /// The same, for a method whose params a processor may rewrite.
-    async fn guard_request_json<T>(
+    fn guard_request_json<T: Wire>(
         &self,
         method: &str,
         backends: &[String],
         params: &T,
         about: Option<(Subject<'_>, &str)>,
-        context: &RequestContext<RoleServer>,
-    ) -> Result<Guarded<T>, McpError>
-    where
-        T: serde::Serialize + serde::de::DeserializeOwned,
-    {
+        who: &Who,
+    ) -> Result<Guarded<T>, ErrorData> {
         // Still runs when no processor is keyed on this method: a route may
         // set a static header without any guardrail at all.
         if !self.inner.guardrails.runs_request(method) {
             return Ok(self.transformed(HeaderOverride::default(), Annotations::default()));
         }
 
-        let encoded = serde_json::to_vec(params).unwrap_or_default();
-        let decision = self
-            .inner
-            .guardrails
-            .check_request(
-                CallContext {
-                    method,
-                    headers: request_headers(context),
-                    claims: claims(context),
-                    subject: about.map(|(subject, _)| subject),
-                    target: about.map(|(_, target)| target),
-                },
-                backends,
-                Some(&encoded),
-            )
-            .await;
+        let encoded = encode(params);
+        let decision = self.block(self.inner.guardrails.check_request(
+            CallContext {
+                method,
+                headers: &who.headers,
+                claims: who.claims(),
+                subject: about.map(|(subject, _)| subject),
+                target: about.map(|(_, target)| target),
+            },
+            backends,
+            Some(&encoded),
+        ));
 
         let body = match decision.outcome {
             Outcome::Pass => None,
-            Outcome::Mutated(raw) => match serde_json::from_slice(&raw) {
-                Ok(rewritten) => Some(rewritten),
+            Outcome::Mutated(raw) => match decode(&raw) {
+                Some(rewritten) => Some(rewritten),
                 // A processor that returns something unusable is a processor
                 // that failed, so it takes the same path as one that could not
                 // be reached rather than being ignored.
-                Err(err) => {
-                    tracing::warn!(method, %err, "a guardrail rewrote a request into something unusable");
-                    return Err(McpError::internal_error(
-                        "mcpGuardrails returned an unusable request".to_string(),
-                        None,
+                None => {
+                    tracing::warn!(
+                        method,
+                        "a guardrail rewrote a request into something unusable"
+                    );
+                    return Err(error(
+                        ErrorCode::INTERNAL_ERROR,
+                        "mcpGuardrails returned an unusable request",
                     ));
                 }
             },
@@ -1176,7 +1222,7 @@ impl Federation {
                 code,
                 message,
                 data,
-            } => return Err(mcp_error(code, message, data)),
+            } => return Err(refusal(code, message, data)),
         };
 
         let mut guarded = self.transformed(decision.headers.into(), decision.annotations);
@@ -1198,75 +1244,48 @@ impl Federation {
             annotations,
         }
     }
-}
 
-/// Run the response phase over a value, returning it possibly rewritten.
-impl Federation {
-    async fn guard_response<T>(
+    /// Run the response phase over a value, returning it possibly rewritten.
+    fn guard_response<T: Wire + Clone>(
         &self,
         method: &str,
         backends: &[String],
         value: &T,
         about: Option<(Subject<'_>, &str)>,
-        context: &RequestContext<RoleServer>,
-    ) -> Result<T, McpError>
-    where
-        T: serde::Serialize + serde::de::DeserializeOwned + Clone,
-    {
+        who: &Who,
+    ) -> Result<T, ErrorData> {
         if !self.inner.guardrails.runs_response(method) {
             return Ok(value.clone());
         }
 
-        let encoded = serde_json::to_vec(value).unwrap_or_default();
-        match self
-            .inner
-            .guardrails
-            .check_response(
-                CallContext {
-                    method,
-                    headers: request_headers(context),
-                    claims: claims(context),
-                    subject: about.map(|(subject, _)| subject),
-                    target: about.map(|(_, target)| target),
-                },
-                backends,
-                &encoded,
-            )
-            .await
-        {
+        let encoded = encode(value);
+        match self.block(self.inner.guardrails.check_response(
+            CallContext {
+                method,
+                headers: &who.headers,
+                claims: who.claims(),
+                subject: about.map(|(subject, _)| subject),
+                target: about.map(|(_, target)| target),
+            },
+            backends,
+            &encoded,
+        )) {
             Outcome::Pass => Ok(value.clone()),
-            Outcome::Mutated(body) => serde_json::from_slice(&body).map_err(|err| {
-                tracing::warn!(method, %err, "a guardrail rewrote a result into something unusable");
-                McpError::internal_error(
-                    "mcpGuardrails returned an unusable result".to_string(),
-                    None,
+            Outcome::Mutated(body) => decode(&body).ok_or_else(|| {
+                tracing::warn!(
+                    method,
+                    "a guardrail rewrote a result into something unusable"
+                );
+                error(
+                    ErrorCode::INTERNAL_ERROR,
+                    "mcpGuardrails returned an unusable result",
                 )
             }),
             Outcome::Reject {
                 code,
                 message,
                 data,
-            } => Err(mcp_error(code, message, data)),
+            } => Err(refusal(code, message, data)),
         }
-    }
-}
-
-/// The HTTP headers carrying this MCP call, or an empty map for stdio.
-fn request_headers(context: &RequestContext<RoleServer>) -> &http::HeaderMap {
-    static EMPTY: std::sync::LazyLock<http::HeaderMap> =
-        std::sync::LazyLock::new(http::HeaderMap::new);
-    context
-        .extensions
-        .get::<http::request::Parts>()
-        .map(|parts| &parts.headers)
-        .unwrap_or(&EMPTY)
-}
-
-/// Build a JSON-RPC error from a guardrail's refusal.
-fn mcp_error(code: i32, message: String, data: Option<serde_json::Value>) -> McpError {
-    McpError {
-        code: rmcp::model::ErrorCode(code),
-        message: message.into(),
-        data,
     }
 }

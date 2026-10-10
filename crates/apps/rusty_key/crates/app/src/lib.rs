@@ -9,6 +9,8 @@ mod embedder;
 pub mod eval;
 #[cfg(feature = "gateway")]
 pub mod gateway;
+#[cfg(feature = "mcp-server")]
+pub mod mcp_server;
 mod session;
 mod shims;
 

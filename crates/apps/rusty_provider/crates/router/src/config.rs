@@ -508,6 +508,12 @@ pub struct McpConfig {
     /// client-facing request forever.
     #[serde(default = "default_mcp_timeout_secs")]
     pub timeout_secs: u64,
+    /// Connections kept to each HTTP upstream, so that calls to it can run at
+    /// once (each connection runs one call at a time; a call goes to the
+    /// connection with the fewest in flight). A stdio upstream is a child
+    /// process and always gets one. `0` counts as `1`.
+    #[serde(default = "default_mcp_connections")]
+    pub connections: usize,
 }
 
 fn default_mcp_path() -> String {
@@ -524,6 +530,10 @@ fn default_mcp_reconnect_backoff_max_secs() -> u64 {
 
 fn default_mcp_timeout_secs() -> u64 {
     30
+}
+
+fn default_mcp_connections() -> usize {
+    4
 }
 
 /// One upstream MCP server to proxy. Its tools appear in this router's own

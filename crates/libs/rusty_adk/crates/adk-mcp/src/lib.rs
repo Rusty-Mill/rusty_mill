@@ -48,7 +48,7 @@
 pub mod protocol;
 pub mod server;
 
-#[cfg(any(feature = "stdio", feature = "client"))]
+#[cfg(feature = "stdio")]
 mod line_cap;
 
 #[cfg(feature = "client")]

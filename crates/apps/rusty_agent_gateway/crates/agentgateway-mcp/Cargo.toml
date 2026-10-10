@@ -27,16 +27,9 @@ unwrap_used = "warn"
 [dependencies]
 agentgateway-config = { workspace = true }
 agentgateway-core = { workspace = true }
-rmcp = { workspace = true, features = [
-    "client",
-    "server",
-    "transport-child-process",
-    "transport-streamable-http-client",
-    "transport-streamable-http-client-reqwest",
-    "transport-streamable-http-server",
-] }
-tokio = { workspace = true, features = ["rt", "macros", "process", "sync"] }
-serde = { workspace = true }
+rusty_mcp_server = { workspace = true }
+rusty_mcp_client_native = { workspace = true, features = ["http"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 serde_json = { workspace = true }
 regex = { workspace = true }
 cel = { workspace = true }
@@ -51,14 +44,12 @@ prost-types = { workspace = true }
 rusty-mcp = { workspace = true, default-features = false, features = ["otel"] }
 opentelemetry = { workspace = true }
 tracing-opentelemetry = { workspace = true }
-# The transport under `mutating_client`, which applies a guardrail's
-# `headerMutation` to the upstream call.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 thiserror = "2"
 tracing = { workspace = true }
-process-wrap = { version = "9", features = ["tokio1"] }
 
 [dev-dependencies]
+rusty_mcp_server = { workspace = true, features = ["http"] }
+rusty_serve = { workspace = true }
 # `http2` is dev-only on purpose: the gateway speaks gRPC as a *client*, and
 # the scripted processor in the tests is the only thing here that serves it.
 axum = { workspace = true, features = ["http2"] }

@@ -196,9 +196,9 @@ fn join(first: &HeaderValue, second: &HeaderValue) -> HeaderValue {
     HeaderValue::from_bytes(&bytes).unwrap_or_else(|_| second.clone())
 }
 
-impl From<HeaderChanges> for crate::mutating_client::HeaderOverride {
+impl From<HeaderChanges> for crate::header_override::HeaderOverride {
     fn from(changes: HeaderChanges) -> Self {
-        crate::mutating_client::HeaderOverride {
+        crate::header_override::HeaderOverride {
             set: changes.set,
             remove: changes.remove,
         }

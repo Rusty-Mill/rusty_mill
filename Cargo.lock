@@ -255,7 +255,9 @@ dependencies = [
  "adk-tools",
  "async-trait",
  "axum 0.8.9",
- "rmcp",
+ "rusty-mcp-client",
+ "rusty_mcp_axum",
+ "rusty_mcp_server",
  "serde_json",
  "tokio",
  "tracing",
@@ -397,6 +399,8 @@ dependencies = [
  "rsa",
  "rusty-mcp",
  "rusty_base64",
+ "rusty_mcp_axum",
+ "rusty_mcp_server",
  "serde_json",
  "tempfile",
  "tokio",
@@ -516,14 +520,13 @@ dependencies = [
  "http",
  "http-body-util",
  "opentelemetry",
- "process-wrap",
  "prost",
  "prost-types",
  "regex",
- "reqwest 0.13.4",
- "rmcp",
  "rusty-mcp",
- "serde",
+ "rusty_mcp_client_native",
+ "rusty_mcp_server",
+ "rusty_serve",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -10383,6 +10386,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rb_tape_bot"
+version = "0.1.0"
+dependencies = [
+ "rb_rlbot_client",
+ "rb_rlbot_wire",
+ "rb_scenario",
+]
+
+[[package]]
 name = "rb_verify_cli"
 version = "0.1.0"
 dependencies = [
@@ -10661,20 +10673,20 @@ dependencies = [
 name = "remind_me_remote"
 version = "0.3.0"
 dependencies = [
- "async-trait",
  "axum 0.8.9",
- "futures",
  "remind_me_core",
  "remind_me_mcp",
  "reqwest 0.13.4",
- "rmcp",
  "rusty_base64",
  "rusty_hex",
+ "rusty_mcp_axum",
+ "rusty_mcp_server",
  "rusty_oauth",
  "rusty_percent",
  "serde",
  "serde_json",
  "sha256",
+ "thiserror 2.0.20",
  "tokio",
 ]
 
@@ -10930,9 +10942,8 @@ dependencies = [
  "rk-kernel",
  "rk-mcp",
  "rk-observe",
- "rmcp",
- "rusty-mcp",
  "rusty_crypto_key",
+ "rusty_mcp_server",
  "rusty_oauth",
  "serde",
  "serde_json",
@@ -11135,12 +11146,12 @@ name = "rp-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "rmcp",
  "rp-core",
  "rp-router",
- "rusty-mcp",
+ "rusty-mcp-client",
+ "rusty_mcp_server",
  "rusty_retry",
- "schemars 1.2.2",
+ "rusty_serve",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -11208,7 +11219,8 @@ dependencies = [
  "rp-core",
  "rp-mcp",
  "rp-router",
- "rusty-mcp",
+ "rusty_mcp_axum",
+ "rusty_mcp_server",
  "rusty_oauth",
  "serde",
  "serde_json",
@@ -11898,9 +11910,10 @@ dependencies = [
 name = "rusty-mcp-client"
 version = "0.1.0"
 dependencies = [
- "http",
- "reqwest 0.13.4",
- "rmcp",
+ "rusty_mcp_client_native",
+ "rusty_mcp_server",
+ "rusty_request",
+ "rusty_serve",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -11912,14 +11925,11 @@ dependencies = [
 name = "rusty-mcp-demo"
 version = "0.5.0"
 dependencies = [
- "clap",
  "rmcp",
- "rusty-mcp",
- "schemars 1.2.2",
- "serde",
+ "rusty_mcp_server",
+ "rusty_serve",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -12561,11 +12571,15 @@ name = "rusty_homelab_mcp"
 version = "0.1.0"
 dependencies = [
  "clap",
- "rmcp",
- "rusty-mcp",
+ "rusty-mcp-client",
+ "rusty_crypto_key",
  "rusty_fedora",
+ "rusty_http",
+ "rusty_mcp_server",
+ "rusty_oauth",
  "rusty_opnsense",
  "rusty_proxmox",
+ "rusty_serve",
  "rusty_wiremock",
  "schemars 1.2.2",
  "serde",
@@ -12573,6 +12587,7 @@ dependencies = [
  "tokio",
  "toml 0.8.2",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -12671,6 +12686,65 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rusty_mcp_axum"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "futures",
+ "rusty_http",
+ "rusty_mcp_client_native",
+ "rusty_mcp_server",
+ "rusty_serve",
+ "tokio",
+]
+
+[[package]]
+name = "rusty_mcp_client_native"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "rmcp",
+ "rusty_base64",
+ "rusty_json",
+ "rusty_mcp_proto",
+ "rusty_mcp_server",
+ "rusty_request",
+ "rusty_serve",
+ "rusty_tokio",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rusty_mcp_proto"
+version = "0.1.0"
+dependencies = [
+ "rmcp",
+ "rusty_json",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rusty_mcp_server"
+version = "0.1.0"
+dependencies = [
+ "rmcp",
+ "rusty_base64",
+ "rusty_crypto_key",
+ "rusty_http",
+ "rusty_json",
+ "rusty_mcp_proto",
+ "rusty_oauth",
+ "rusty_rand",
+ "rusty_serve",
+ "rusty_time",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

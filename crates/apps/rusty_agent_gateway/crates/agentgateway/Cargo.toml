@@ -39,10 +39,8 @@ agentgateway-mcp = { workspace = true }
 agentgateway-proxy = { workspace = true }
 agentgateway-tls = { workspace = true }
 
-rmcp = { workspace = true, features = [
-    "server",
-    "transport-streamable-http-server",
-] }
+rusty_mcp_axum = { workspace = true }
+rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty-mcp = { workspace = true, default-features = false, features = ["otel"] }
 axum = { workspace = true, features = ["json"] }
 tower-layer = "0.3"

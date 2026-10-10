@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use rp_core::RateLimiter;
-use rp_mcp::RustyMcpServer;
 use rp_router::{ClientConfig, Router};
+use rusty_mcp_server::Server as McpServer;
 use tokio::sync::Semaphore;
 
 use crate::jwt::JwtVerifier;
@@ -63,7 +63,7 @@ pub struct AppState {
     /// `[mcp].enabled = true`. `None` means the MCP endpoint isn't mounted
     /// at all -- `build_app` skips it entirely rather than mounting a
     /// disabled stub.
-    pub mcp: Option<Arc<RustyMcpServer>>,
+    pub mcp: Option<Arc<McpServer>>,
     /// Path the MCP endpoint is mounted at when `mcp` is `Some`
     /// (`[mcp].path`, default `/mcp`). Unused otherwise.
     pub mcp_path: String,
