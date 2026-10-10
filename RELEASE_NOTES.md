@@ -17,16 +17,6 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
-## 2026-10-09 - rb_tape_bot on the in-repo RLBot client; `rlbot` removed (RLBot port stage 4) (pending review)
-
-- **Changed:** `rb_tape_bot` (`crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot`: `rb_tape_bot`, `rb_tape_hive`, `rb_probe`, `rb_match_log`, `rb_run_tapes`) now uses `rb_rlbot_client` and `rb_rlbot_wire` instead of the external `rlbot` 0.6.0 crate. Same behaviour by construction: the frame gate, start state and tape indexing are unchanged; the non-blocking poll loops became `recv_timeout(2 ms)`.
-- **Changed:** the package is a workspace member (it was in `exclude` with its own `[workspace]`). Its standalone `Cargo.lock` (which carried `rlbot`, `rlbot_flat`, `planus`, `mio` and `kanal`) is deleted; the root `Cargo.lock` only gains the package itself. It now builds and tests (and lints, `clippy -D warnings`) in CI. One clippy finding that was latent in `rb_match_log` is fixed (`is_multiple_of`).
-- **Added:** `tests/processes.rs` runs the real bot and hive processes against a stand-in core: handshake, start state on the first physics-advancing packet, one input per frame (not per packet), car index other than 0 stays neutral, hivemind drives both cars from one clock. Plus unit tests for the controller mapping and the start state, which the process tests alone did not pin (a deliberate throttle/steer swap passed them until the unit test existed).
-- **Added:** `.cargo/config.toml` in the package keeps its build output in `tools/rb_tape_bot/target`, where `bot.toml`, `bots/*.bot.toml` and `rb_run_tapes` start the bots (`target\release\rb_tape_bot.exe`). A build from the repository root goes to the workspace `target/`, which core does not look in; the README says so.
-- **Known limitation:** **not yet run against the real game.** CI cannot run Rocket League. The checklist at the end of the tool's README (probe, the four match-log scenarios, one-car / hivemind / two-team tape runs) is the manual check; its result belongs in this PR before merge. Recorded inputs, plugin and scenario files are untouched.
-
----
-
 ## 2026-10-09 - rb_rlbot_client: blocking RLBot client (RLBot port stage 3) (pending review)
 
 - **Added:** `crates/apps/rocket_league/crates/rb_rlbot_client`: `Connection` (connect, send, receive with or without a timeout, handshake), `run_bots` and `run_hivemind` (handshake, `InitComplete`, packet loop, ping replies, clean exit on disconnect), and `Environment` for the `RLBOT_*` variables. `std::net` only, one thread; depends on `rb_rlbot_wire` alone.

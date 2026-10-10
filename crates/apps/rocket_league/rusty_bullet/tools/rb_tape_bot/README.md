@@ -433,3 +433,9 @@ the in-repo client's bytes. With the game and core set up as above:
    scenario and one with a car on each team: each capture exists and scores as before.
 
 Record the outcome in the stage 4 PR.
+
+Result (2026-10-10, RLBot v5.0.0-rc17): steps 2 to 4 passed except the tie-up
+and overtime paths of step 3, which the 60 s window never reached (use
+`--seconds 300` or more to exercise them). Pass an absolute path to
+`rb_run_tapes --out`: the capture plugin resolves a relative path against the
+game's working directory, not yours.
