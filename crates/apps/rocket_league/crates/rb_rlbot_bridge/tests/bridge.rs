@@ -262,7 +262,7 @@ fn a_packet_that_could_not_be_acted_on_does_not_use_up_its_frame() {
 fn a_repeated_frame_that_lost_its_ball_or_car_gets_nothing_and_no_policy_call() {
     let mut bot = PolicyBot::new(counting(), 1);
     let warm = at_frame(40, MatchPhase::Active);
-    assert_eq!(throttles(&mut bot, &[warm.clone()]), [1.0]);
+    assert_eq!(throttles(&mut bot, std::slice::from_ref(&warm)), [1.0]);
 
     let mut no_ball = warm.clone();
     no_ball.balls.clear();
