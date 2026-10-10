@@ -29,8 +29,8 @@
 //! Spans are batched, so whatever is still in the buffer is lost if the process
 //! exits without shutting the provider down. That is the single most common way
 //! to end up staring at an empty collector while insisting the code is
-//! instrumented. [`OtelGuard::shutdown_hook`] wires the flush into
-//! [`crate::ServerConfig::with_shutdown_hook`] so it happens on SIGTERM.
+//! instrumented. [`OtelGuard::shutdown_hook`] gives a closure to run
+//! from your graceful-shutdown path so it happens on SIGTERM.
 //!
 //! # Sampling follows the caller
 //!
@@ -198,8 +198,7 @@ impl OtelGuard {
     /// The instruments this crate records to, when metrics are enabled.
     ///
     /// Share this: `Arc` it into [`metrics::McpMetricsLayer`] for request
-    /// metrics and into [`crate::tasks::TaskSupport::with_metrics`] for task
-    /// metrics. Both are no-ops if you never wire them up — an instrument that
+    /// metrics. It is a no-op if you never wire it up — an instrument that
     /// nothing records to exports nothing.
     pub fn instruments(&self) -> Option<&Arc<Instruments>> {
         self.instruments.as_ref()
@@ -211,15 +210,17 @@ impl OtelGuard {
         self.meters.as_ref()
     }
 
-    /// A shutdown hook for [`crate::ServerConfig::with_shutdown_hook`].
+    /// A closure that flushes and shuts the pipeline down, for the process's
+    /// graceful-shutdown path.
     ///
     /// ```no_run
     /// # use std::sync::Arc;
-    /// # use rusty_mcp::{ServerConfig, otel::{OtelConfig, self}};
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use rusty_mcp::otel::{OtelConfig, self};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let guard = Arc::new(otel::init(OtelConfig::new("my-server"), "info")?);
-    /// let config = ServerConfig::stdio().with_shutdown_hook(guard.shutdown_hook());
-    /// # let _ = config;
+    /// let hook = guard.shutdown_hook();
+    /// // ... serve until SIGTERM, then:
+    /// hook().await;
     /// # Ok(())
     /// # }
     /// ```
@@ -335,8 +336,7 @@ pub fn pipeline(
 
 /// Start an OTLP pipeline and install a subscriber that feeds it.
 ///
-/// Replaces [`crate::telemetry::init`] rather than complementing it: this
-/// installs the global subscriber, with both a stderr layer (so stdio servers
+/// Installs the global subscriber, with both a stderr layer (so stdio servers
 /// still log where they should) and the OpenTelemetry layer.
 ///
 /// `filter` is the fallback log directive; `RUST_LOG` wins when set.

@@ -1,79 +1,59 @@
-//! Trace context travelling over a real MCP connection.
+#![allow(clippy::unwrap_used)]
+//! Trace context carried by MCP `_meta`.
 //!
-//! The unit tests cover parsing; these check the piece that only shows up on
-//! the wire — that `_meta` actually carries the values across, and that the
-//! server sees what the client sent.
+//! The unit tests cover parsing. These check the piece that only shows up on
+//! the wire: that `_meta` actually carries the values across a real MCP
+//! connection, and that a context survives being written back onto an
+//! outbound request.
+
+mod support;
 
 use std::sync::{Arc, Mutex};
 
-use rmcp::{
-    ClientHandler, ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{
-        CallToolRequestParams, ClientInfo, ProtocolVersion, RequestParamsMeta, ServerCapabilities,
-        ServerInfo,
-    },
-    service::{RequestContext, RoleServer},
-    tool, tool_handler, tool_router,
-};
 use rusty_mcp::trace::TraceContext;
-use schemars::JsonSchema;
-use serde::Deserialize;
+use rusty_mcp_server::json::Value;
+use rusty_mcp_server::proto::{CallToolResult, ContentBlock, Tool};
+use rusty_mcp_server::{HttpConfig, HttpHandler, Server};
+use serde_json::{Map, json};
 
 const TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01";
 const TRACESTATE: &str = "vendor=opaque";
 const BAGGAGE: &str = "userId=alice,tier=gold";
 
-/// Empty arguments.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct NoArgs {}
-
-/// What the server observed, so the test can assert on it.
 type Observed = Arc<Mutex<Option<Option<TraceContext>>>>;
 
-/// A server that records the trace context of each call.
-#[derive(Clone)]
-struct TracingServer {
-    observed: Observed,
-    tool_router: ToolRouter<Self>,
-}
-
-#[tool_router(router = tool_router)]
-impl TracingServer {
-    #[tool(description = "Record the caller's trace context.")]
-    async fn observe(
-        &self,
-        Parameters(_): Parameters<NoArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> String {
-        let seen = TraceContext::from_request(&ctx);
-        *self.observed.lock().expect("lock") = Some(seen.clone());
-
-        seen.map(|tc| tc.trace_id().to_string())
-            .unwrap_or_else(|| "none".to_string())
-    }
-}
-
-#[tool_handler(router = self.tool_router)]
-impl ServerHandler for TracingServer {
-    fn get_info(&self) -> ServerInfo {
-        rusty_mcp::server_info(
-            "tracing-server",
-            "0.1.0",
-            ServerCapabilities::builder().enable_tools().build(),
-        )
-    }
-}
-
-#[derive(Clone)]
-struct Client;
-
-impl ClientHandler for Client {
-    fn get_info(&self) -> ClientInfo {
-        let mut info = ClientInfo::default();
-        info.protocol_version = ProtocolVersion::V_2026_07_28;
-        info
-    }
+/// A server whose `observe` tool records the trace context of each call, read
+/// from the request's `_meta` the way a gateway reads it.
+async fn server(observed: Observed) -> std::net::SocketAddr {
+    let mut schema = Value::object();
+    schema.insert("type", "object");
+    let server = Server::builder("tracing", "1")
+        .tool(Tool::new("observe", schema), move |ctx, _call| {
+            let extra = &ctx.meta().extra;
+            let text = |k: &str| extra.get(k).and_then(Value::as_str);
+            let seen = text("traceparent")
+                .and_then(|tp| TraceContext::from_parts(tp, text("tracestate"), text("baggage")));
+            *observed.lock().unwrap() = Some(seen.clone());
+            Ok(CallToolResult {
+                content: vec![ContentBlock::text(
+                    seen.map_or_else(|| "none".to_owned(), |tc| tc.trace_id().to_owned()),
+                )],
+                ..CallToolResult::default()
+            })
+        })
+        .build()
+        .unwrap();
+    let handler = Arc::new(HttpHandler::new(
+        Arc::new(server),
+        HttpConfig {
+            path: support::PATH.to_owned(),
+            ..HttpConfig::default()
+        },
+    ));
+    support::serve(
+        axum::Router::new().nest_service(support::PATH, rusty_mcp_axum::router(handler, 1 << 20)),
+    )
+    .await
 }
 
 /// Call `observe` with the given `_meta` trace values and return what the
@@ -84,42 +64,31 @@ async fn round_trip(
     baggage: Option<&str>,
 ) -> Option<TraceContext> {
     let observed: Observed = Arc::new(Mutex::new(None));
+    let addr = server(Arc::clone(&observed)).await;
 
-    let (server_transport, client_transport) = tokio::io::duplex(4096);
-    tokio::spawn({
-        let observed = Arc::clone(&observed);
-        async move {
-            let running = TracingServer {
-                observed,
-                tool_router: TracingServer::tool_router(),
-            }
-            .serve(server_transport)
-            .await
-            .expect("server starts");
-            let _ = running.waiting().await;
-        }
+    let mut meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
     });
-
-    let client = Client
-        .serve(client_transport)
-        .await
-        .expect("client connects");
-
-    let mut params = CallToolRequestParams::new("observe");
-    if let Some(traceparent) = traceparent {
-        params.set_traceparent(traceparent);
+    for (key, value) in [
+        ("traceparent", traceparent),
+        ("tracestate", tracestate),
+        ("baggage", baggage),
+    ] {
+        if let Some(value) = value {
+            meta[key] = json!(value);
+        }
     }
-    if let Some(tracestate) = tracestate {
-        params.set_tracestate(tracestate);
-    }
-    if let Some(baggage) = baggage {
-        params.set_baggage(baggage);
-    }
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "observe", "arguments": {}, "_meta": meta }
+    })
+    .to_string();
 
-    client.call_tool(params).await.expect("call observe");
-    client.cancel().await.expect("cancel");
+    let response = support::post(addr, "tools/call", Some("observe"), body, None).await;
+    assert!(response.status().is_success());
 
-    let seen = observed.lock().expect("lock").clone();
+    let seen = observed.lock().unwrap().clone();
     seen.expect("the tool should have run")
 }
 
@@ -165,25 +134,35 @@ async fn tracestate_without_a_valid_traceparent_is_ignored() {
     );
 }
 
-#[tokio::test]
-async fn a_context_round_trips_back_onto_an_outbound_request() {
-    let seen = round_trip(Some(TRACEPARENT), Some(TRACESTATE), Some(BAGGAGE))
-        .await
-        .expect("context");
+#[test]
+fn a_context_round_trips_back_onto_an_outbound_request() {
+    let meta: Map<String, serde_json::Value> = json!({
+        "traceparent": TRACEPARENT, "tracestate": TRACESTATE, "baggage": BAGGAGE
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let seen = TraceContext::from_meta(&meta).expect("context");
 
     // Simulate propagating onward: new span id, same trace.
     let child = seen.child("1111111111111111").expect("valid span id");
-    let mut outbound = CallToolRequestParams::new("downstream");
+    let mut outbound = Map::new();
     child.apply_to(&mut outbound);
 
     assert_eq!(
-        outbound.traceparent(),
-        Some("00-0af7651916cd43dd8448eb211c80319c-1111111111111111-01")
+        outbound["traceparent"],
+        "00-0af7651916cd43dd8448eb211c80319c-1111111111111111-01"
     );
-    assert_eq!(outbound.tracestate(), Some(TRACESTATE));
+    assert_eq!(outbound["tracestate"], TRACESTATE);
 
     // Baggage survives the trip, whatever order it was written in.
     let reparsed = TraceContext::from_meta(&outbound).expect("reparses");
     assert_eq!(reparsed.baggage().get("userId"), Some("alice"));
     assert_eq!(reparsed.trace_id(), seen.trace_id());
+}
+
+#[test]
+fn non_string_trace_fields_are_ignored() {
+    let meta = json!({ "traceparent": 7 }).as_object().unwrap().clone();
+    assert!(TraceContext::from_meta(&meta).is_none());
 }

@@ -34,8 +34,7 @@ pub enum AuthConfigError {
 ///
 /// Authorization applies to Streamable HTTP only. The spec is explicit that
 /// stdio servers **SHOULD NOT** use it and should take credentials from the
-/// environment instead, so [`crate::config::Transport::Stdio`] has no hook for
-/// this.
+/// environment instead, so there is no stdio hook for this.
 #[derive(Clone)]
 pub struct AuthConfig {
     resource: Url,

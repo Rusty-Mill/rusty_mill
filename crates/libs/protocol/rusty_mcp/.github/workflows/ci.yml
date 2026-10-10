@@ -53,13 +53,6 @@ jobs:
           ./scripts/check-versions.sh --self-test
           ./scripts/check-versions.sh
 
-      # A template is a second copy of the API surface, and second copies rot.
-      # Building what it generates is what keeps it honest: a library change
-      # that breaks the template fails here rather than at the next person to
-      # run `cargo generate`.
-      - name: Build the generated project
-        run: ./scripts/check-template.sh
-
   msrv:
     name: msrv (1.88)
     runs-on: ubuntu-latest

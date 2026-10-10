@@ -14,6 +14,15 @@ be called out here.
 
 Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
+## [0.6.0] - 2026-10-10
+
+### Removed
+- **The `rmcp` server scaffold**, and with it the `rmcp`, `clap`, `rusty_percent` and `tokio-util` dependencies: `run`, `serve`, `ServerConfig`, `HttpConfig`, `Transport`, the CLI, `resources`, `tasks`, `subscriptions`, `completion`, `pagination`, `mrtr`, `routers`, `telemetry`, `shutdown`, `ServeError`, `ToolError`, and the `cargo generate` template. No consumer used them any more (all moved to `rusty_mcp_server`); they stay in git history.
+
+### Changed
+- `trace::TraceContext::from_meta` and `apply_to` now take the `_meta` object (`serde_json::Map`) instead of an `rmcp` request type; `from_request` is gone.
+- `auth`, `limits`, `otel` and `trace` are unchanged otherwise. Their tests now run against a real `rusty_mcp_server` mounted with `rusty_mcp_axum`.
+
 ## [Unreleased]
 
 ### Added
