@@ -6,13 +6,13 @@ All notable changes to this project are recorded here. The format follows
 Neither crate is published to crates.io — consume `rusty-mcp` by git tag:
 
 ```toml
-rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.5.0" }
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.6.0" }
 ```
 
 Being `0.x`, the API may still break in a minor release. Breaking changes will
 be called out here.
 
-Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
+Since 0.6.0 the crate is middleware only (`auth`, `limits`, `otel`, `trace`) and no longer depends on [`rmcp`][rmcp]; the MCP server and client live in `rusty_mcp_server` and `rusty-mcp-client`. Entries below 0.6.0 describe the removed `rmcp` scaffold and are kept as history. The scaffold targeted MCP specification [2026-07-28][spec].
 
 ## [0.6.0] - 2026-10-10
 
