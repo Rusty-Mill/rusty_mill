@@ -475,20 +475,20 @@ fn sandboxed_workload_can_spawn_with_null_stdio_rename_across_dirs_and_use_tmpdi
         return;
     }
     assert_eq!(rep.status, RunStatus::Passed, "{log}");
+    // The runner echoes each command line into the log, so only a whole
+    // line is evidence of what the workload printed.
+    let printed = |want: &str| log.lines().any(|l| l.trim() == want);
     let abi: u32 = log
         .lines()
-        .find_map(|l| l.strip_prefix("ABI="))
-        .and_then(|n| n.trim().parse().ok())
+        .find_map(|l| l.trim().strip_prefix("ABI="))
+        .and_then(|n| n.parse().ok())
         .expect("the probe printed the Landlock ABI");
     assert!(abi >= 1, "{log}");
-    assert!(log.contains("shape-ok"), "{log}");
+    assert!(printed("shape-ok"), "{log}");
     if abi >= 2 {
-        assert!(
-            log.contains("REFER-OK"),
-            "REFER granted on ABI {abi}: {log}"
-        );
+        assert!(printed("REFER-OK"), "REFER granted on ABI {abi}: {log}");
     } else {
-        assert!(log.contains("REFER-EXDEV"), "no REFER on ABI 1: {log}");
+        assert!(printed("REFER-EXDEV"), "no REFER on ABI 1: {log}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
