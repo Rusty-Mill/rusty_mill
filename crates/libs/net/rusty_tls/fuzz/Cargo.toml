@@ -43,6 +43,48 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "record12_open"
+path = "fuzz_targets/record12_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "schedule12"
+path = "fuzz_targets/schedule12.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client12"
+path = "fuzz_targets/client12.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "negotiate_server"
+path = "fuzz_targets/negotiate_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "negotiate_client"
+path = "fuzz_targets/negotiate_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server12"
+path = "fuzz_targets/server12.rs"
+test = false
+doc = false
+bench = false
+
 # Standalone: this is not a member of the parent, which is a single crate with
 # no workspace of its own.
 [workspace]

@@ -244,6 +244,7 @@ fn handshake_with(
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(pki);
@@ -368,6 +369,7 @@ fn every_offered_suite_and_group_completes_against_rustls() {
                 cipher_suites: core::slice::from_ref(suite),
                 identity: None,
                 resumption: None,
+                alpn: &[],
             };
 
             let mut server = rustls_server(&pki);
@@ -420,6 +422,7 @@ fn the_client_hello_offers_what_it_should_and_nothing_it_should_not() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (_, record) = ClientHandshake::start(&config).expect("start");
@@ -472,6 +475,7 @@ fn an_ip_address_is_not_sent_as_a_server_name() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (_, record) = ClientHandshake::start(&config).expect("start");
@@ -617,6 +621,38 @@ fn a_certificate_request_without_signature_algorithms_is_refused() {
     );
 }
 
+/// RFC 7301 section 3.1: the server's answer is one of the names the client
+/// offered. Selecting another is the server's lie about what was agreed, and
+/// the connection is not trusted to carry the protocol the application will
+/// then speak. An answer nobody asked for is an unsolicited extension.
+#[test]
+fn an_alpn_answer_must_be_one_the_client_offered() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+
+    let (connection, _) = established_with_test_server(&pki, Shape::AlpnAnswer(b"h2"))
+        .expect("an offered protocol is accepted");
+    assert_eq!(connection.alpn_protocol(), Some(&b"h2"[..]));
+
+    let error = against_test_server(&pki, Shape::AlpnAnswer(b"h3"))
+        .expect_err("a protocol that was never offered was accepted");
+    assert_eq!(error, ClientError::UnofferedAlpn);
+
+    let error = against_test_server(&pki, Shape::AlpnUnsolicited(b"h2"))
+        .expect_err("an ALPN answer to no offer was accepted");
+    assert_eq!(error, ClientError::UnofferedExtension(16));
+}
+
+/// RFC 8446 section 4.3.2: inside the handshake the request context is empty
+/// (BoGo RequestContextInHandshake-TLS13); a server that sets one is confused
+/// or probing, and the client says decode_error.
+#[test]
+fn a_handshake_certificate_request_with_a_context_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let error = against_test_server(&pki, Shape::RequestWithContext)
+        .expect_err("a CertificateRequest with a context was answered");
+    assert_eq!(error, ClientError::NonEmptyRequestContext);
+}
+
 /// A minimal TLS 1.3 server, built from this crate's own primitives.
 ///
 /// It exists because the server's flight arrives inside one AEAD-protected
@@ -658,12 +694,23 @@ enum Shape {
     CorruptFinished,
     /// A CertificateRequest, which this client refuses.
     RequestClientCertificate,
+    /// A well-formed CertificateRequest whose context is not empty, which only
+    /// a post-handshake request may carry.
+    RequestWithContext,
+    /// EncryptedExtensions carries an ALPN answer naming this protocol, to a
+    /// client that offered `h2` and `http/1.1`.
+    AlpnAnswer(&'static [u8]),
+    /// ...and the same answer to a client that offered nothing.
+    AlpnUnsolicited(&'static [u8]),
     /// A `key_share` naming a group other than the one the client sent.
     WrongKeyShareGroup,
     /// A fatal alert where the encrypted flight should be — a server changing
     /// its mind after the ServerHello, which is where a real one would report
     /// that it disliked something about the client.
     AlertInsteadOfFlight,
+    /// This many empty protected records ahead of the flight: padding that
+    /// carries nothing, which a peer can send for free.
+    EmptyRecordsFirst(usize),
 }
 
 impl TestServer<'_> {
@@ -752,7 +799,12 @@ impl TestServer<'_> {
         };
 
         let mut empty_extensions = Writer::new();
-        empty_extensions.vector_u16(|_| {});
+        empty_extensions.vector_u16(|w| {
+            if let Shape::AlpnAnswer(protocol) | Shape::AlpnUnsolicited(protocol) = self.shape {
+                w.u16(16); // application_layer_protocol_negotiation
+                w.vector_u16(|w| w.vector_u16(|w| w.vector_u8(|w| w.bytes(protocol))));
+            }
+        });
         let encrypted_extensions = Message::encode(
             HandshakeType::EncryptedExtensions,
             &empty_extensions.into_vec(),
@@ -780,6 +832,17 @@ impl TestServer<'_> {
             let mut body = Writer::new();
             body.vector_u8(|_| {}); // certificate_request_context
             body.vector_u16(|_| {}); // extensions
+            let request = Message::encode(HandshakeType::CertificateRequest, &body.into_vec());
+            add(&mut transcript, &mut flight, &request);
+        }
+
+        if self.shape == Shape::RequestWithContext {
+            let mut body = Writer::new();
+            body.vector_u8(|w| w.bytes(&[0x01])); // certificate_request_context
+            body.vector_u16(|w| {
+                w.u16(13); // signature_algorithms
+                w.vector_u16(|w| w.vector_u16(|w| w.u16(0x0403)));
+            });
             let request = Message::encode(HandshakeType::CertificateRequest, &body.into_vec());
             add(&mut transcript, &mut flight, &request);
         }
@@ -859,6 +922,12 @@ impl TestServer<'_> {
                     sealer: Sealer::new(aead, &keys.key, &keys.iv).expect("app sealer"),
                 },
             );
+        }
+
+        if let Shape::EmptyRecordsFirst(count) = self.shape {
+            for _ in 0..count {
+                out.extend_from_slice(&sealer.seal(ContentType::Handshake, &[], 0).expect("seal"));
+            }
         }
 
         match self.fragment {
@@ -944,6 +1013,11 @@ fn established_with_test_server(
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         identity: None,
         resumption: None,
+        alpn: if matches!(shape, Shape::AlpnAnswer(_)) {
+            &[b"h2", b"http/1.1"]
+        } else {
+            &[]
+        },
     };
 
     let (mut client, hello) = ClientHandshake::start(&config)?;
@@ -1000,6 +1074,7 @@ fn the_shared_rejection_table_holds_for_the_handrolled_engine() {
             cipher_suites: CipherSuite::SUPPORTED,
             identity: None,
             resumption: None,
+            alpn: &[],
         };
 
         match (run_table_case(&fixture, &config), case.handrolled) {
@@ -1082,6 +1157,7 @@ fn a_tampered_record_fails_the_connection_permanently() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -1134,6 +1210,7 @@ fn a_cipher_suite_that_was_not_offered_is_refused() {
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -1179,6 +1256,7 @@ fn a_server_that_does_not_select_tls13_is_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -1198,6 +1276,17 @@ fn a_server_that_does_not_select_tls13_is_refused() {
     record.extend_from_slice(&(encoded.len() as u16).to_be_bytes());
     record.extend_from_slice(&encoded);
 
+    assert_eq!(client.read_record(&record), Err(ClientError::NotTls13));
+
+    // A TLS 1.2 server names suites this client never offered (BoGo
+    // MinimumVersion-Client-TLS13-TLS12). Its fault is its version, and that
+    // is what the alert must say, not `illegal_parameter` for the suite.
+    rewritten.cipher_suite = 0x009c; // TLS_RSA_WITH_AES_128_GCM_SHA256
+    let encoded = Message::encode(HandshakeType::ServerHello, &rewritten.encode());
+    let mut record = vec![22u8, 0x03, 0x03];
+    record.extend_from_slice(&(encoded.len() as u16).to_be_bytes());
+    record.extend_from_slice(&encoded);
+    let (mut client, _) = ClientHandshake::start(&config).expect("start");
     assert_eq!(client.read_record(&record), Err(ClientError::NotTls13));
 }
 
@@ -1220,6 +1309,7 @@ fn protected_data_before_the_server_hello_is_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (mut client, _) = ClientHandshake::start(&config).expect("start");
@@ -1302,6 +1392,7 @@ fn a_hello_retry_request_completes_against_rustls() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = x25519_only_server(&pki);
@@ -1356,6 +1447,7 @@ fn a_second_hello_retry_request_is_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = x25519_only_server(&pki);
@@ -1530,6 +1622,103 @@ fn a_key_update_that_asks_for_no_reply_gets_none() {
 }
 
 // ---------------------------------------------------------------------------
+// Floods (BoGo: SendEmptyRecords, SendWarningAlerts-TooMany, TooManyKeyUpdates)
+// ---------------------------------------------------------------------------
+
+/// A run of records that carry nothing is cut off after a fixed number, and a
+/// real record in between starts the count again.
+#[test]
+fn a_flood_of_empty_records_is_cut_off_and_data_resets_the_count() {
+    use rusty_tls::handrolled::limits::{Flood, MAX_EMPTY_RECORDS};
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    let empty = |server: &mut ServerPost| server.seal(ContentType::ApplicationData, &[]);
+    for _ in 0..MAX_EMPTY_RECORDS {
+        let record = empty(&mut server);
+        assert_eq!(
+            connection.read(&record).expect("within the limit"),
+            Incoming::Application(Vec::new())
+        );
+    }
+    // Real data, then the run starts over.
+    let record = server.seal(ContentType::ApplicationData, b"x");
+    connection.read(&record).expect("data");
+    for _ in 0..MAX_EMPTY_RECORDS {
+        let record = empty(&mut server);
+        connection.read(&record).expect("a fresh run is allowed");
+    }
+    let record = empty(&mut server);
+    assert!(matches!(
+        connection.read(&record),
+        Err(ClientError::Flood(Flood::EmptyRecords))
+    ));
+}
+
+#[test]
+fn a_flood_of_user_canceled_warnings_is_cut_off() {
+    use rusty_tls::handrolled::limits::{Flood, MAX_WARNING_ALERTS};
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    for _ in 0..MAX_WARNING_ALERTS {
+        let record = server.seal(ContentType::Alert, &[0x01, 0x5a]);
+        assert_eq!(
+            connection.read(&record).expect("advisory"),
+            Incoming::Handled
+        );
+    }
+    let record = server.seal(ContentType::Alert, &[0x01, 0x5a]);
+    assert!(matches!(
+        connection.read(&record),
+        Err(ClientError::Flood(Flood::WarningAlerts))
+    ));
+}
+
+#[test]
+fn a_flood_of_key_updates_is_cut_off() {
+    use rusty_tls::handrolled::limits::{Flood, MAX_KEY_UPDATES};
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    let update = Message::encode(HandshakeType::KeyUpdate, &[0x00]);
+    for i in 0..=MAX_KEY_UPDATES {
+        let record = server.seal(ContentType::Handshake, &update);
+        server.rekey();
+        let result = connection.read(&record);
+        if i < MAX_KEY_UPDATES {
+            assert_eq!(result.expect("within the limit"), Incoming::Handled);
+        } else {
+            assert!(matches!(result, Err(ClientError::Flood(Flood::KeyUpdates))));
+        }
+    }
+}
+
+/// RFC 8446 §5: a ChangeCipherSpec exists only to get through middleboxes
+/// during the handshake. After it, one is a protocol error (BoGo
+/// SendPostHandshakeChangeCipherSpec-TLS13).
+#[test]
+fn a_change_cipher_spec_after_the_handshake_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, _server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+    let ccs = [20u8, 3, 3, 0, 1, 1];
+    assert!(matches!(
+        connection.read(&ccs),
+        Err(ClientError::UnexpectedContentType(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
 // Hostile input
 // ---------------------------------------------------------------------------
 
@@ -1649,6 +1838,7 @@ fn random_records_never_panic() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut rng = Rng::new(0x5eed_0101);
@@ -1716,6 +1906,7 @@ fn a_flight_split_across_records_is_reassembled() {
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     for fragment in [1usize, 2, 3, 5, 17, 64, 100, 255, 256, 511, 1024] {
@@ -1770,6 +1961,7 @@ fn a_peer_cannot_drive_the_handshake_with_incomplete_messages() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let (mut client, _) = ClientHandshake::start(&config).expect("start");
@@ -1840,6 +2032,7 @@ fn a_server_that_cannot_speak_tls13_is_refused_in_its_own_words() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = tls12_only_server(&pki);
@@ -1901,6 +2094,7 @@ fn the_downgrade_sentinel_is_told_apart_from_an_old_server() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     // Take a genuine ServerHello and strip `supported_versions`, with and
@@ -1975,6 +2169,36 @@ fn a_close_notify_is_reported_as_a_close_not_an_error() {
     );
 }
 
+/// RFC 8446 section 6.1: data after the peer's close_notify is ignored, however
+/// well it authenticates. Before this was enforced, the reader handed over
+/// authenticated application data from a peer that had said it was done.
+#[test]
+fn nothing_is_delivered_after_the_peers_close_notify() {
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    let close = server.seal(ContentType::Alert, &[0x01, 0x00]);
+    assert_eq!(connection.read(&close).expect("closes"), Incoming::Closed);
+    for _ in 0..3 {
+        let late = server.seal(ContentType::ApplicationData, b"after the close");
+        assert_eq!(
+            connection.read(&late).expect("ignored"),
+            Incoming::Closed,
+            "application data after close_notify must not be delivered"
+        );
+    }
+    // Not even a plaintext change_cipher_spec is an error after the close.
+    assert_eq!(
+        connection.read(&[20, 3, 3, 0, 1, 1]).expect("ignored"),
+        Incoming::Closed
+    );
+    // The reply to the close is still ours to send.
+    assert!(connection.close().is_ok());
+}
+
 /// The alert level is read from the wire, not assumed.
 ///
 /// `close_notify` is a warning and a `decrypt_error` is fatal; a client that
@@ -1988,27 +2212,44 @@ fn an_alerts_level_is_the_one_the_peer_sent() {
     let (mut connection, mut server) =
         established_with_test_server(&pki, Shape::Correct).expect("completes");
 
-    // warning(1), user_canceled(90) — a warning that is not a close.
-    let record = server.seal(ContentType::Alert, &[0x01, 0x5a]);
+    // warning(1), handshake_failure(40) — a warning that is not a close, and
+    // one TLS 1.3 does not allow (RFC 8446 §6). The level survives into the
+    // error so the caller can see what was claimed.
+    let record = server.seal(ContentType::Alert, &[0x01, 0x28]);
     match connection.read(&record) {
-        Err(ClientError::PeerAlert(alert)) => {
+        Err(ClientError::BadAlert(alert)) => {
             assert_eq!(
                 alert.level,
                 AlertLevel::Warning,
                 "a warning was reported as something else"
             );
-            assert_eq!(alert.description, AlertDescription(90));
+            assert_eq!(alert.description, AlertDescription(40));
         }
-        other => panic!("expected a warning alert, got {other:?}"),
+        other => panic!("expected an illegal warning alert, got {other:?}"),
     }
+
+    // warning(1), user_canceled(90) is the one TLS 1.3 warning besides
+    // close_notify: advisory, so the connection carries on (BoGo
+    // SendUserCanceledAlerts-TLS13).
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+    let record = server.seal(ContentType::Alert, &[0x01, 0x5a]);
+    assert_eq!(
+        connection.read(&record).expect("user_canceled is advisory"),
+        Incoming::Handled
+    );
 
     // An unrecognised level is preserved rather than collapsed.
     let (mut connection, mut server) =
         established_with_test_server(&pki, Shape::Correct).expect("completes");
     let record = server.seal(ContentType::Alert, &[0x07, 0x28]);
     match connection.read(&record) {
-        Err(ClientError::PeerAlert(alert)) => {
+        Err(ClientError::BadAlert(alert)) => {
             assert_eq!(alert.level, AlertLevel::Unknown(7));
+            assert_eq!(
+                ClientError::BadAlert(alert).alert(),
+                Some(AlertDescription::ILLEGAL_PARAMETER)
+            );
         }
         other => panic!("expected an unknown level, got {other:?}"),
     }
@@ -2074,6 +2315,7 @@ fn a_malformed_alert_is_refused_rather_than_interpreted() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     for body in [vec![], vec![0x02], vec![0x02, 0x46, 0x00]] {
@@ -2115,6 +2357,7 @@ fn a_server_hello_that_does_not_echo_the_session_id_is_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -2171,6 +2414,7 @@ fn a_retried_client_hello_keeps_its_identity() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = x25519_only_server(&pki);
@@ -2186,8 +2430,12 @@ fn a_retried_client_hello_keeps_its_identity() {
         .find(|r| r[0] == 22)
         .expect("a HelloRetryRequest");
 
-    let second = client.read_record(&retry).expect("the retry is accepted");
-    assert!(!second.is_empty(), "no second ClientHello was produced");
+    let reply = client.read_record(&retry).expect("the retry is accepted");
+    assert!(!reply.is_empty(), "no second ClientHello was produced");
+    // RFC 8446 §D.4: the compatibility change_cipher_spec goes first, once.
+    let mut records = take_records(&mut reply.clone());
+    assert_eq!(records.remove(0), [20, 3, 3, 0, 1, 1]);
+    let second = records.remove(0);
 
     let parsed = messages(&second[5..]).expect("parses");
     let after = ClientHello::parse(parsed[0].body).expect("parses");
@@ -2258,6 +2506,7 @@ fn against_client_auth(
         cipher_suites: CipherSuite::SUPPORTED,
         identity,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server_requiring_client_auth(pki, &client_pki.root_der);
@@ -2384,6 +2633,7 @@ fn a_rustls_server_now_sends_session_tickets() {
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut server = rustls_server(&pki);
@@ -2548,6 +2798,7 @@ fn resumption_config<'a>(
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
         resumption,
+        alpn: &[],
     }
 }
 
@@ -3006,5 +3257,56 @@ fn a_psk_accepted_under_the_wrong_hash_is_refused() {
         client.read_record(&reply),
         Err(ClientError::PskHashMismatch),
         "a PSK established under {established:?} was accepted under a suite on another hash"
+    );
+}
+
+/// The same flood limit holds while the handshake is still running: a server
+/// that pads its flight with empty protected records is cut off, but a run
+/// within the limit is just padding.
+#[test]
+fn empty_records_in_the_middle_of_the_handshake_are_counted() {
+    use rusty_tls::handrolled::limits::{Flood, MAX_EMPTY_RECORDS};
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let run = |count: usize| {
+        established_with_test_server(&pki, Shape::EmptyRecordsFirst(count)).map(|_| ())
+    };
+    run(MAX_EMPTY_RECORDS as usize).expect("padding within the limit completes");
+    assert!(matches!(
+        run(MAX_EMPTY_RECORDS as usize + 1),
+        Err(ClientError::Flood(Flood::EmptyRecords))
+    ));
+}
+
+/// A middlebox-compatibility `ChangeCipherSpec` is dropped, but not for free.
+#[test]
+fn a_flood_of_change_cipher_specs_before_the_server_hello_is_cut_off() {
+    use rusty_tls::handrolled::limits::{Flood, MAX_EMPTY_RECORDS};
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
+        resumption: None,
+        alpn: &[],
+    };
+    let (mut client, _) = ClientHandshake::start(&config).expect("start");
+    let ccs = [20u8, 3, 3, 0, 1, 1];
+    for _ in 0..MAX_EMPTY_RECORDS {
+        assert_eq!(client.read_record(&ccs), Ok(Vec::new()));
+    }
+    assert_eq!(
+        client.read_record(&ccs),
+        Err(ClientError::Flood(Flood::EmptyRecords))
     );
 }

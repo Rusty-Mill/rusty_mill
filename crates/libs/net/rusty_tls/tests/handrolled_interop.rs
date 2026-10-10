@@ -266,6 +266,7 @@ fn fetch(host: &str) -> Result<Report, InteropError> {
         // ever did, an empty Certificate is the conforming answer.
         identity: None,
         resumption: None,
+        alpn: &[],
     };
 
     let mut transport = Transport::connect(host).map_err(InteropError::Network)?;
