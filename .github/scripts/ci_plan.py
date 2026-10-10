@@ -46,6 +46,9 @@ PACKAGE_JOB_NAMES = {
     "crypto_ct": frozenset(
         {"rusty_ct_check", "rusty_sha2", "rusty_pk", "rusty_aead", "rusty_crypto_key"}
     ),
+    # rusty_rand's per-OS backends that no other job compiles or runs: macOS (the
+    # Unix /dev/urandom path) and the Linux targets the default runner is not.
+    "rand_platforms": frozenset({"rusty_rand"}),
 }
 
 SPECIALIZED_JOB_NAMES = tuple(

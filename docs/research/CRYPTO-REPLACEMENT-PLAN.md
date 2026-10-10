@@ -826,8 +826,12 @@ deliberately simple (no window table); that costs speed.
   different tests (run 1: HMAC-SHA512 2, HMAC-SHA256 1, ChaCha20-Poly1305 open 1, X25519 A/A 1; run 2: ECDH P-256
   sparse-vs-dense 1, at |t| 4.83), which is what noise looks like and is **not** proof of it. The ECDH P-256
   sparse-vs-dense series is the one to watch: its maxima were 3.54 (an earlier single run), 4.31 (run 1) and 4.83 (run 2)
-  against matched P-256 A/A maxima of 2.67 (run 1) and 3.31 (run 2); a second reading of that test on a quiet machine, and a look at what differs
-  between the classes beyond the scalar (the key slot is rewritten in `prepare`), would be the next step. A first
+  against matched P-256 A/A maxima of 2.67 (run 1) and 3.31 (run 2). A targeted rerun on an idle machine
+  (`EVIDENCE-2026-10-10-ecdh-p256-quiet-rerun.txt`, two 40-repetition series, both reported) gave 0 of 40 alarms in each, leak-test
+  maxima 4.43 and 3.12 against A/A maxima 3.05 and 3.50. That removes the sign that the tail was getting worse on a quiet machine;
+  it does not explain the earlier 4.31 and 4.83, does not retire the watch item (run 1's 4.43 is close to the threshold and the
+  leak test's median sits slightly above its baseline in both series) and does not prove constant time. What differs between the
+  classes beyond the scalar bits (cache or multiplier effects) is still unchecked. A first
   version of the ECDH test chose between two separately stored keys inside the timed closure (review finding on
   #576) and its numbers are discarded.
 - *Side effect on earlier evidence:* adding this code twice changed LLVM's inlining of `Modulus::add` (once into
