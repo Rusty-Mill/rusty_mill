@@ -4,21 +4,24 @@
 //! `tracestate` and `baggage` — as an explicit exception to the reverse-DNS
 //! prefix rule, so MCP interoperates with existing OpenTelemetry tooling.
 //!
-//! `rmcp` carries those strings; this module gives them meaning: strict
-//! parsing, a `tracing` span whose fields carry the ids, and serialization
-//! back out for onward calls.
+//! The `_meta` object carries those strings; this module gives them meaning:
+//! strict parsing, a `tracing` span whose fields carry the ids, and
+//! serialization back out for onward calls.
 //!
-//! ```no_run
-//! # use rmcp::service::{RequestContext, RoleServer};
+//! ```
 //! use rusty_mcp::trace::TraceContext;
+//! use serde_json::json;
 //!
-//! # fn example(ctx: &RequestContext<RoleServer>) {
-//! let span = TraceContext::from_request(ctx)
+//! let meta = json!({
+//!     "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+//! });
+//! let span = meta
+//!     .as_object()
+//!     .and_then(TraceContext::from_meta)
 //!     .map(|tc| tc.span("tools/call"))
 //!     .unwrap_or_else(|| tracing::info_span!("tools/call"));
 //! let _guard = span.enter();
 //! tracing::info!("handling the call");
-//! # }
 //! ```
 //!
 //! Every log line inside that span carries `trace_id` and `parent_span_id`, so
@@ -42,10 +45,7 @@
 
 use std::collections::BTreeMap;
 
-use rmcp::{
-    model::RequestParamsMeta,
-    service::{RequestContext, RoleServer},
-};
+use serde_json::{Map, Value};
 
 /// Maximum baggage entries (W3C Baggage §3.2.1).
 const MAX_BAGGAGE_ENTRIES: usize = 180;
@@ -69,24 +69,16 @@ pub struct TraceContext {
 }
 
 impl TraceContext {
-    /// Parse the trace context out of a request's `_meta`.
+    /// Parse the trace context out of a request's `_meta` object.
     ///
-    /// `None` when there is no `traceparent`, or when it is malformed — the
-    /// caller should start a fresh trace in both cases.
-    pub fn from_request(context: &RequestContext<RoleServer>) -> Option<Self> {
+    /// `None` when there is no `traceparent` string, or when it is malformed;
+    /// the caller should start a fresh trace in both cases. `tracestate` and
+    /// `baggage` that are not strings are ignored.
+    pub fn from_meta(meta: &Map<String, Value>) -> Option<Self> {
         Self::from_parts(
-            context.meta.get_traceparent()?,
-            context.meta.get_tracestate(),
-            context.meta.get_baggage(),
-        )
-    }
-
-    /// Parse from anything carrying `_meta`, such as a request params struct.
-    pub fn from_meta<M: RequestParamsMeta>(carrier: &M) -> Option<Self> {
-        Self::from_parts(
-            carrier.traceparent()?,
-            carrier.tracestate(),
-            carrier.baggage(),
+            meta.get("traceparent")?.as_str()?,
+            meta.get("tracestate").and_then(Value::as_str),
+            meta.get("baggage").and_then(Value::as_str),
         )
     }
 
@@ -164,14 +156,17 @@ impl TraceContext {
         })
     }
 
-    /// Write this context into a `_meta` carrier, for an outbound request.
-    pub fn apply_to<M: RequestParamsMeta>(&self, carrier: &mut M) {
-        carrier.set_traceparent(&self.to_traceparent());
+    /// Write this context into a `_meta` object, for an outbound request.
+    pub fn apply_to(&self, meta: &mut Map<String, Value>) {
+        meta.insert("traceparent".into(), Value::String(self.to_traceparent()));
         if let Some(tracestate) = &self.tracestate {
-            carrier.set_tracestate(tracestate);
+            meta.insert("tracestate".into(), Value::String(tracestate.clone()));
         }
         if !self.baggage.is_empty() {
-            carrier.set_baggage(&self.baggage.to_header_value());
+            meta.insert(
+                "baggage".into(),
+                Value::String(self.baggage.to_header_value()),
+            );
         }
     }
 

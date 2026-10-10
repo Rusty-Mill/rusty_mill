@@ -1,63 +1,25 @@
+#![allow(clippy::unwrap_used)]
 //! End-to-end resource-server tests over a real socket.
 //!
 //! These drive the wire contract a client actually depends on: the challenge
-//! headers, the discovery document, and which tokens get in.
+//! headers, the discovery document, and which tokens get in. The MCP server
+//! behind the layer is the real one (`rusty_mcp_server` through
+//! `rusty_mcp_axum`), mounted the way a gateway mounts it.
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+mod support;
 
-use rmcp::{
-    ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
-    tool, tool_handler, tool_router,
+use std::{net::SocketAddr, sync::Arc};
+
+use axum::{Json, Router, routing::get};
+use rusty_mcp::auth::{
+    AuthConfig, ProtectedResourceMetadata, RequireAuthLayer, StaticTokenValidator, TokenError,
+    TokenValidator, VerifiedToken,
 };
-use rusty_mcp::{
-    HttpConfig, ServerConfig, Transport,
-    auth::{AuthConfig, StaticTokenValidator, TokenError, TokenValidator, VerifiedToken},
-};
-use schemars::JsonSchema;
-use serde::Deserialize;
+use rusty_mcp_server::ChangeBroadcaster;
+use support::{PATH, call, mcp_router, post, serve, tools_list};
 
 const RESOURCE: &str = "https://mcp.example.com/mcp";
 const METADATA_PATH: &str = "/.well-known/oauth-protected-resource/mcp";
-
-/// Arguments for the `echo` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct EchoArgs {
-    /// Text to echo back.
-    message: String,
-}
-
-/// Minimal protected server.
-#[derive(Clone)]
-struct EchoServer {
-    tool_router: ToolRouter<Self>,
-}
-
-#[tool_router(router = tool_router)]
-impl EchoServer {
-    fn new() -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-        }
-    }
-
-    #[tool(description = "Echo the message back.")]
-    async fn echo(&self, Parameters(EchoArgs { message }): Parameters<EchoArgs>) -> String {
-        message
-    }
-}
-
-#[tool_handler(router = self.tool_router)]
-impl ServerHandler for EchoServer {
-    fn get_info(&self) -> ServerInfo {
-        rusty_mcp::server_info(
-            "echo-server",
-            "0.1.0",
-            ServerCapabilities::builder().enable_tools().build(),
-        )
-    }
-}
 
 /// A validator whose backing store is always down.
 struct BrokenValidator;
@@ -90,34 +52,23 @@ fn default_validator() -> StaticTokenValidator {
         )
 }
 
+/// The guarded MCP route with the metadata document beside it, unguarded.
 async fn spawn(auth: AuthConfig) -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    drop(listener);
-
-    let config = ServerConfig {
-        transport: Transport::Http(HttpConfig {
-            bind: addr,
-            sse_keep_alive: None,
-            auth: Some(Arc::new(auth)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    tokio::spawn(async move {
-        let _ = rusty_mcp::serve(|| Ok(EchoServer::new()), config).await;
-    });
-
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            return addr;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("server never became ready");
+    let metadata = ProtectedResourceMetadata::from_config(&auth);
+    let metadata_path = auth.metadata_path();
+    let app = Router::new()
+        .route(
+            &metadata_path,
+            get(move || {
+                let metadata = metadata.clone();
+                async move { Json(metadata) }
+            }),
+        )
+        .nest_service(
+            PATH,
+            mcp_router(&ChangeBroadcaster::new()).layer(RequireAuthLayer::new(auth)),
+        );
+    serve(app).await
 }
 
 async fn spawn_default() -> SocketAddr {
@@ -127,27 +78,6 @@ async fn spawn_default() -> SocketAddr {
         .with_scopes_supported(["mcp:read"])
         .with_required_scopes(["mcp:read"]);
     spawn(auth).await
-}
-
-/// POST a `tools/list` with the given bearer token, if any.
-async fn tools_list(addr: SocketAddr, token: Option<&str>) -> reqwest::Response {
-    let mut request = reqwest::Client::new()
-        .post(format!("http://{addr}/mcp"))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
-        .header("MCP-Protocol-Version", "2026-07-28")
-        .header("Mcp-Method", "tools/list")
-        .body(
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{
-                 "io.modelcontextprotocol/protocolVersion":"2026-07-28",
-                 "io.modelcontextprotocol/clientCapabilities":{}}}}"#,
-        );
-
-    if let Some(token) = token {
-        request = request.header("Authorization", format!("Bearer {token}"));
-    }
-
-    request.send().await.expect("request reaches the server")
 }
 
 fn www_authenticate(response: &reqwest::Response) -> String {
@@ -163,7 +93,7 @@ fn www_authenticate(response: &reqwest::Response) -> String {
 #[tokio::test]
 async fn unauthenticated_requests_get_a_challenge_pointing_at_the_metadata() {
     let addr = spawn_default().await;
-    let response = tools_list(addr, None).await;
+    let response = post(addr, "tools/list", None, tools_list(), None).await;
 
     assert_eq!(response.status(), 401);
 
@@ -186,11 +116,17 @@ async fn unauthenticated_requests_get_a_challenge_pointing_at_the_metadata() {
 #[tokio::test]
 async fn a_valid_token_reaches_the_handler() {
     let addr = spawn_default().await;
-    let response = tools_list(addr, Some("good")).await;
+    let response = post(addr, "tools/list", None, tools_list(), Some("good")).await;
 
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.expect("json");
-    assert_eq!(body["result"]["tools"][0]["name"], "echo");
+    let names: Vec<_> = body["result"]["tools"]
+        .as_array()
+        .expect("a tool list")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(names.iter().any(|n| n == "echo"), "{names:?}");
 }
 
 #[tokio::test]
@@ -198,7 +134,7 @@ async fn a_token_for_another_resource_is_rejected() {
     // The confused-deputy case the spec's "MUST NOT accept or transit any
     // other tokens" is aimed at: a genuine token, just not ours.
     let addr = spawn_default().await;
-    let response = tools_list(addr, Some("foreign")).await;
+    let response = post(addr, "tools/list", None, tools_list(), Some("foreign")).await;
 
     assert_eq!(response.status(), 401);
     let challenge = www_authenticate(&response);
@@ -208,7 +144,7 @@ async fn a_token_for_another_resource_is_rejected() {
 #[tokio::test]
 async fn an_unknown_token_is_rejected() {
     let addr = spawn_default().await;
-    let response = tools_list(addr, Some("nonsense")).await;
+    let response = post(addr, "tools/list", None, tools_list(), Some("nonsense")).await;
 
     assert_eq!(response.status(), 401);
     assert!(www_authenticate(&response).contains("error=\"invalid_token\""));
@@ -217,7 +153,7 @@ async fn an_unknown_token_is_rejected() {
 #[tokio::test]
 async fn insufficient_scope_is_403_not_401() {
     let addr = spawn_default().await;
-    let response = tools_list(addr, Some("thin")).await;
+    let response = post(addr, "tools/list", None, tools_list(), Some("thin")).await;
 
     // 403, because re-authenticating would not help — the client needs a
     // *broader* token, not a new one.
@@ -237,7 +173,7 @@ async fn a_malformed_authorization_header_is_400() {
     let addr = spawn_default().await;
 
     let response = reqwest::Client::new()
-        .post(format!("http://{addr}/mcp"))
+        .post(format!("http://{addr}{PATH}"))
         .header("Content-Type", "application/json")
         .header("Authorization", "Basic dXNlcjpwdw==")
         .body("{}")
@@ -278,7 +214,7 @@ async fn a_validator_outage_is_503_not_401() {
         .with_required_scopes(["mcp:read"]);
     let addr = spawn(auth).await;
 
-    let response = tools_list(addr, Some("good")).await;
+    let response = post(addr, "tools/list", None, tools_list(), Some("good")).await;
 
     assert_eq!(response.status(), 503);
     assert!(response.headers().get("www-authenticate").is_none());
@@ -286,98 +222,18 @@ async fn a_validator_outage_is_503_not_401() {
 
 #[tokio::test]
 async fn tools_can_read_the_verified_token() {
-    // The layer puts the token in the request extensions, which the transport
-    // forwards to handlers as `http::request::Parts` — this is what makes
-    // per-tool scope checks possible.
-    #[derive(Clone)]
-    struct WhoAmIServer {
-        tool_router: ToolRouter<Self>,
-    }
-
-    #[tool_router(router = tool_router)]
-    impl WhoAmIServer {
-        #[tool(description = "Return the authenticated subject.")]
-        async fn whoami(
-            &self,
-            ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
-        ) -> Result<String, rmcp::model::ErrorData> {
-            let subject = ctx
-                .extensions
-                .get::<http::request::Parts>()
-                .and_then(|parts| parts.extensions.get::<VerifiedToken>())
-                .and_then(|token| token.subject.clone())
-                .ok_or_else(|| {
-                    rmcp::model::ErrorData::invalid_request("no authenticated subject", None)
-                })?;
-            Ok(subject)
-        }
-    }
-
-    #[tool_handler(router = self.tool_router)]
-    impl ServerHandler for WhoAmIServer {
-        fn get_info(&self) -> ServerInfo {
-            rusty_mcp::server_info(
-                "whoami-server",
-                "0.1.0",
-                ServerCapabilities::builder().enable_tools().build(),
-            )
-        }
-    }
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    drop(listener);
-
-    let auth = AuthConfig::new(RESOURCE, Arc::new(default_validator()))
-        .expect("valid resource")
-        .with_required_scopes(["mcp:read"]);
-
-    let config = ServerConfig {
-        transport: Transport::Http(HttpConfig {
-            bind: addr,
-            sse_keep_alive: None,
-            auth: Some(Arc::new(auth)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    tokio::spawn(async move {
-        let _ = rusty_mcp::serve(
-            || {
-                Ok(WhoAmIServer {
-                    tool_router: WhoAmIServer::tool_router(),
-                })
-            },
-            config,
-        )
-        .await;
-    });
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    let response = reqwest::Client::new()
-        .post(format!("http://{addr}/mcp"))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
-        .header("MCP-Protocol-Version", "2026-07-28")
-        .header("Mcp-Method", "tools/call")
-        .header("Mcp-Name", "whoami")
-        .header("Authorization", "Bearer good")
-        .body(
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                 "name":"whoami","arguments":{},"_meta":{
-                 "io.modelcontextprotocol/protocolVersion":"2026-07-28",
-                 "io.modelcontextprotocol/clientCapabilities":{}}}}"#,
-        )
-        .send()
-        .await
-        .expect("request");
+    // The layer puts the token in the request extensions; the application's
+    // `principal_of` hands its subject to the handlers as `Caller::principal`
+    // — this is what makes per-tool checks possible.
+    let addr = spawn_default().await;
+    let response = post(
+        addr,
+        "tools/call",
+        Some("whoami"),
+        call("whoami", "{}"),
+        Some("good"),
+    )
+    .await;
 
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.expect("json");

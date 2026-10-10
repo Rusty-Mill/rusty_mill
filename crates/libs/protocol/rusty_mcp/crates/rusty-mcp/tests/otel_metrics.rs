@@ -7,6 +7,8 @@
 
 #![cfg(feature = "otel")]
 
+mod support;
+
 use std::{
     convert::Infallible,
     net::SocketAddr,
@@ -307,120 +309,9 @@ async fn metrics_can_be_turned_off() {
     guard.shutdown();
 }
 
-/// A trivial MCP server, for the runtime-wiring tests below.
-mod server {
-    use rmcp::{
-        ServerHandler,
-        handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-        model::{ServerCapabilities, ServerInfo},
-        tool, tool_handler, tool_router,
-    };
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    #[derive(Debug, Deserialize, JsonSchema)]
-    pub struct EchoArgs {
-        /// Text to echo back.
-        pub message: String,
-    }
-
-    #[derive(Clone)]
-    pub struct EchoServer {
-        tool_router: ToolRouter<Self>,
-    }
-
-    #[tool_router(router = tool_router)]
-    impl EchoServer {
-        pub fn new() -> Self {
-            Self {
-                tool_router: Self::tool_router(),
-            }
-        }
-
-        #[tool(description = "Echo the message back.")]
-        async fn echo(&self, Parameters(EchoArgs { message }): Parameters<EchoArgs>) -> String {
-            message
-        }
-    }
-
-    #[tool_handler(router = self.tool_router)]
-    impl ServerHandler for EchoServer {
-        fn get_info(&self) -> ServerInfo {
-            rusty_mcp::server_info(
-                "echo-server",
-                "0.1.0",
-                ServerCapabilities::builder().enable_tools().build(),
-            )
-        }
-    }
-}
-
-/// Start a server through `serve`, with metrics and optional authorization.
-async fn spawn_server(
-    layer: McpMetricsLayer,
-    auth: Option<Arc<rusty_mcp::auth::AuthConfig>>,
-) -> SocketAddr {
-    use rusty_mcp::{HttpConfig, ServerConfig, Transport};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    drop(listener);
-
-    let config = ServerConfig {
-        transport: Transport::Http(HttpConfig {
-            bind: addr,
-            sse_keep_alive: None,
-            auth,
-            metrics: Some(layer),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    tokio::spawn(async move {
-        let _ = rusty_mcp::serve(|| Ok(server::EchoServer::new()), config).await;
-    });
-
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            return addr;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("server never became ready");
-}
-
-/// POST a `tools/list`, with a bearer token if one is given.
-async fn tools_list(addr: SocketAddr, token: Option<&str>) -> reqwest::StatusCode {
-    let mut request = reqwest::Client::new()
-        .post(format!("http://{addr}/mcp"))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
-        .header("MCP-Protocol-Version", "2026-07-28")
-        .header("Mcp-Method", "tools/list")
-        .body(
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{
-                 "io.modelcontextprotocol/protocolVersion":"2026-07-28",
-                 "io.modelcontextprotocol/clientCapabilities":{}}}}"#,
-        );
-
-    if let Some(token) = token {
-        request = request.header("Authorization", format!("Bearer {token}"));
-    }
-
-    request
-        .send()
-        .await
-        .expect("request reaches the server")
-        .status()
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn serve_mounts_the_layer_on_the_endpoint() {
-    // Proves the runtime wiring, not just the layer: `HttpConfig::metrics` has
-    // to actually reach the mounted service.
+async fn the_layer_counts_requests_to_a_mounted_server() {
+    // The layer on a real mounted MCP server, not just driven directly.
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received)).await;
 
@@ -429,8 +320,13 @@ async fn serve_mounts_the_layer_on_the_endpoint() {
         guard.instruments().expect("metrics are enabled"),
     ));
 
-    let server = spawn_server(layer, None).await;
-    assert!(tools_list(server, None).await.is_success());
+    let (server, _) = support::spawn(|mcp| mcp.layer(layer)).await;
+    assert!(
+        support::post(server, "tools/list", None, support::tools_list(), None)
+            .await
+            .status()
+            .is_success()
+    );
 
     guard.shutdown();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -444,7 +340,7 @@ async fn a_request_rejected_by_the_auth_layer_is_still_counted() {
     // The ordering claim, end to end: metrics mount *outside* authorization, so
     // a request that never reaches the handler is still counted. Mounted the
     // other way round, a flood of bad tokens would look like no traffic at all.
-    use rusty_mcp::auth::{AuthConfig, StaticTokenValidator, VerifiedToken};
+    use rusty_mcp::auth::{AuthConfig, RequireAuthLayer, StaticTokenValidator, VerifiedToken};
 
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received)).await;
@@ -462,9 +358,13 @@ async fn a_request_rejected_by_the_auth_layer_is_still_counted() {
         .expect("valid resource")
         .with_authorization_servers(["https://auth.example.com"]);
 
-    let server = spawn_server(layer, Some(Arc::new(auth))).await;
+    // Metrics are the later (outer) layer, so they see what auth rejects.
+    let (server, _) =
+        support::spawn(|mcp| mcp.layer(RequireAuthLayer::new(auth)).layer(layer)).await;
 
-    let status = tools_list(server, None).await;
+    let status = support::post(server, "tools/list", None, support::tools_list(), None)
+        .await
+        .status();
     assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
 
     guard.shutdown();
