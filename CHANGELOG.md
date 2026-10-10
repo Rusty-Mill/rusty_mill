@@ -8,6 +8,8 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- **ADR-0002 Amendment 1 (owner decision 2026-10-09): the MCP crates move from Tier A to Tier T.** `rmcp` and the stack under it (`axum`, `tokio`, `reqwest`, `clap`, `tracing-subscriber`, `jsonwebtoken`) are to be replaced by first-party crates, with `docs/research/MCP-NATIVE-PLAN.md` as the milestone list and `rmcp` allowed as a dev-only oracle. The implementation is #577. Docs only; no code or manifest changes.
 ### Security
 - **`rusty_tls` native engine: a wildcard certificate no longer bypasses an excluded name constraint.** `handrolled::name` compared the literal SAN `*.example.com` against the excluded subtree `bad.example.com`, found it outside, and accepted a certificate that authenticates `bad.example.com`; webpki refused it. A wildcard is now excluded when any host it can match is inside the subtree. Only the opt-in engine (`handrolled-engine` plus `--cfg rusty_tls_handrolled`) was affected; the rustls default never was. New differential test (seven cases, both engines agree) and two unit tests. Also fixes two `needless_question_mark` lints in the engine that failed clippy on Rust 1.97.
 

@@ -18,6 +18,10 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `handrolled::stream::NativeTlsStream`, a `Read + Write` client stream shaped like `TlsStream`, inside the double-gated `handrolled` module. It is the piece a consumer such as `rleval-app`'s Google sign-in would opt into locally. It was built there, and not as a change to `TlsStream`, because ADR-0002 keeps rustls behind every type this crate exports at the root; adding it at the root would have needed that ADR superseded.
 - **Behaviour worth knowing:** only `System` and `PinnedAnchors` trust are supported (the rest are refused at construction); a TCP close without `close_notify` is `UnexpectedEof`; nothing is delivered after the peer's `close_notify`; one record is written per `write` call. Testing it found a real bug first: a 100 KB write failed because the TLS 1.3 connection seals one record at a time.
 - **Not done, and not mine to do:** nothing selects this stream for any caller, `rleval-app` is untouched, and the evidence bar and the ADR superseding ADR-0002 are the owner's.
+## 2026-10-10 - ADR-0002 Amendment 1: MCP crates to Tier T (docs only)
+
+- **Changed:** the MCP crates are Tier T (transitional), with `docs/research/MCP-NATIVE-PLAN.md` as the milestone list. Records the owner decisions of 2026-10-09 (schema builder first, blocking servers on `rusty_serve`, scope is `rmcp` and its whole stack) and a three-point checklist for any MCP server (advertise only implemented revisions, check cancellation before running a queued handler, bounded shutdown on a failed write).
+- **Known limitation:** documentation only. The implementation is #577; this PR deliberately carries none of it.
 
 ## 2026-10-09 - CI: live-internet check added to rusty-tls-engine (non-blocking)
 
