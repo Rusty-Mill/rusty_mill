@@ -49,13 +49,17 @@ impl Connection {
         for message in messages {
             bytes.extend_from_slice(&frame(&message.to_payload()?)?);
         }
-        self.stream.write_all(&bytes)?;
+        self.stream
+            .write_all(&bytes)
+            .map_err(|e| during("write", e))?;
         Ok(())
     }
 
     /// Waits for the next message from core.
     pub fn recv(&mut self) -> Result<CoreMessage> {
-        self.stream.set_read_timeout(None)?;
+        self.stream
+            .set_read_timeout(None)
+            .map_err(|e| during("set_read_timeout", e))?;
         match read_message(&mut self.stream, &mut self.decoder, None)? {
             Some(message) => Ok(message),
             None => Err(Error::Io(io::ErrorKind::TimedOut.into())),
@@ -111,6 +115,16 @@ impl Connection {
     }
 }
 
+/// Names the socket call that failed, so a bare OS error (Windows 997, say) says where it came
+/// from. The kind is kept; a timeout or interruption is passed through untouched (it is the
+/// normal outcome of a poll, and this runs every few milliseconds).
+fn during(op: &str, e: io::Error) -> io::Error {
+    if is_timeout(&e) || e.kind() == io::ErrorKind::Interrupted {
+        return e;
+    }
+    io::Error::new(e.kind(), format!("{op}: {e}"))
+}
+
 fn is_timeout(e: &io::Error) -> bool {
     matches!(
         e.kind(),
@@ -144,17 +158,21 @@ impl Transport for TcpStream {
     fn read_within(&mut self, buf: &mut [u8], wait: Wait) -> io::Result<usize> {
         match wait {
             Wait::Forever => {
-                self.set_read_timeout(None)?;
-                self.read(buf)
+                self.set_read_timeout(None)
+                    .map_err(|e| during("set_read_timeout(None)", e))?;
+                self.read(buf).map_err(|e| during("read (blocking)", e))
             }
             Wait::UpTo(limit) => {
-                self.set_read_timeout(Some(limit))?;
-                self.read(buf)
+                self.set_read_timeout(Some(limit))
+                    .map_err(|e| during("set_read_timeout(limit)", e))?;
+                self.read(buf).map_err(|e| during("read (timeout)", e))
             }
             Wait::Poll => {
-                self.set_nonblocking(true)?;
-                let read = self.read(buf);
-                self.set_nonblocking(false)?;
+                self.set_nonblocking(true)
+                    .map_err(|e| during("set_nonblocking(true)", e))?;
+                let read = self.read(buf).map_err(|e| during("read (poll)", e));
+                self.set_nonblocking(false)
+                    .map_err(|e| during("set_nonblocking(false)", e))?;
                 read
             }
         }
@@ -250,6 +268,18 @@ mod tests {
         let mut bytes = 60_000u16.to_be_bytes().to_vec();
         bytes.resize(60_002, 7);
         bytes
+    }
+
+    #[test]
+    fn a_failing_socket_call_is_named_and_a_timeout_is_not() {
+        let named = during("set_nonblocking(false)", io::Error::from_raw_os_error(997));
+        assert!(named.to_string().starts_with("set_nonblocking(false): "));
+        assert!(named.to_string().contains("997"));
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            let plain = during("read (poll)", kind.into());
+            assert_eq!(plain.kind(), kind);
+            assert!(!plain.to_string().contains("read (poll)"));
+        }
     }
 
     #[test]
