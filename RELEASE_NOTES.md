@@ -17,11 +17,6 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
-## 2026-10-10 - rusty_bbp_host: prompt and runbook corrections from the first proving run
-
-- **Changed:** the `post` tool description carries the verdict item schema, the op-id uniqueness rule (per role, per task) and the non-gate `request_decision` route for environment faults; the proving launchers prefix op ids with `t{turn}-` and send Coder and Tester to that route instead of revise/resubmit. Runbook: Linux/WSL note, `claude -p` login smoke test before the run, `escalated` keeps the moderator polling until `resume`/`cancel`, how to answer a pending request, `LSP` under `--tools ""` on Claude Code 2.1.296. Runbook defects 1, 3, 4, 5 and 6 from `docs/proving/2026-10-09-slug-1.md`; defect 2 is covered by the sandbox fix (#595).
-- **Known limitation:** prompts are text; whether the roles take the route is the next run's data.
-
 ## 2026-10-09 - rusty_tls: a blocking stream on the native engine (opt-in, not the seam)
 
 - **Added:** `handrolled::stream::NativeTlsStream`, a `Read + Write` client stream shaped like `TlsStream`, inside the double-gated `handrolled` module. It is the piece a consumer such as `rleval-app`'s Google sign-in would opt into locally. It was built there, and not as a change to `TlsStream`, because ADR-0002 keeps rustls behind every type this crate exports at the root; adding it at the root would have needed that ADR superseded.

@@ -421,6 +421,130 @@ fn patches_never_touch_a_candidate_controlled_path() {
 /// A listener the host owns; a confined workload must not reach it, while a
 /// plain command still runs. Needs python3 for the probe and a kernel that
 /// grants the sandbox; otherwise the test only checks fail-closed.
+/// The recovery route the first proving run never took: the Tester posts a
+/// non-gate request about an environment fault, the human fixes the
+/// environment and reruns the current candidate while the request is
+/// pending (revision-fenced), the runner stores a fresh report, and only
+/// then the human settles the request. Nothing is granted while the request
+/// is open; settlement regrants the Tester, who judges the fresh run.
+#[test]
+fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
+    let dir = tempdir("recover");
+    let (repo, base) = repo(&dir);
+    let fixed = dir.join("env-fixed");
+    let set = ProfileSet::shell("test", &format!("test -f {}", fixed.display()));
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let work = dir.join("work");
+    let run_runner = || {
+        runner::run_once(
+            &dir,
+            &t.id,
+            &repo,
+            &work,
+            &Unconfined,
+            Confinement::Unconfined,
+        )
+        .expect("run")
+    };
+    run_runner();
+    let (rep, _) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Failed, "the environment is broken");
+    let st = t.state();
+    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    let cand = st.candidate.expect("candidate");
+    let old_run = st.selected_run().expect("run").id;
+    let log = st.selected_run().expect("run").log.expect("log");
+
+    // The Tester asks the human instead of posting revise.
+    let ask = Draft::new(
+        MessageKind::RequestDecision,
+        "rustc cannot run in the sandbox",
+    )
+    .to(Recipient::Human)
+    .refs(vec![Ref::art(log)]);
+    let req = match t.agent(Role::Tester, AgentAction::Post(ask)) {
+        Response::Posted(m) => m,
+        other => panic!("expected Posted, got {other:?}"),
+    };
+    let st = t.state();
+    assert!(st.turn.is_none(), "the request ended the turn");
+    assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
+    assert_eq!(st.iteration, 0, "no iteration spent");
+
+    // A stale revision is refused; the current one reruns the candidate.
+    let stale = Rev(st.rev.0 - 1);
+    let r =
+        human::perform(&dir, &t.id, "rerun", &[&cand.0.to_string()], Some(stale)).expect("call");
+    assert!(
+        matches!(r, Response::Rejected(ref rej) if rej.code == Code::StaleRev),
+        "{r:?}"
+    );
+    std::fs::write(&fixed, b"").expect("fix the environment");
+    let r = human::perform(
+        &dir,
+        &t.id,
+        "rerun",
+        &[&cand.0.to_string()],
+        Some(t.state().rev),
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Ok), "{r:?}");
+    let st = t.state();
+    let new_run = st.selected_run().expect("run");
+    assert_ne!(new_run.id, old_run);
+    assert!(new_run.report.is_none(), "fresh run, no report yet");
+    assert!(
+        st.pending_request.is_some(),
+        "the request survives the rerun"
+    );
+
+    run_runner();
+    let (rep, _) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Passed);
+    assert!(
+        t.state().turn.is_none(),
+        "a fresh report grants nobody while the request is pending"
+    );
+
+    // Settlement regrants the Tester, who approves on the fresh run.
+    let r = human::perform(
+        &dir,
+        &t.id,
+        "answer",
+        &[&req.0.to_string(), "toolchain", "fixed;", "rerun", "passed"],
+        None,
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Posted(_)), "{r:?}");
+    let st = t.state();
+    assert!(st.pending_request.is_none());
+    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    let run = st.selected_run().expect("run");
+    let report = run.report.expect("report");
+    let approve = Draft {
+        kind: MessageKind::Verdict,
+        to: vec![Recipient::All],
+        body: Body::Verdict(Verdict {
+            subject: cand,
+            run: run.id,
+            verdict: VerdictKind::Approve,
+            blocking: vec![],
+            non_blocking: vec![],
+        }),
+        refs: vec![Ref::art(cand)],
+        evidence: vec![Ref::art(report)],
+        reply_to: None,
+        yield_to: None,
+        gate: false,
+    };
+    assert!(matches!(
+        t.agent(Role::Tester, AgentAction::Post(approve)),
+        Response::Posted(_)
+    ));
+    assert_eq!(t.state().state, State::Review);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn sandboxed_workload_reaches_no_socket_endpoint() {
     use std::os::unix::net::UnixListener;

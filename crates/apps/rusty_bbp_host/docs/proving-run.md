@@ -51,7 +51,7 @@ bbp assign --role reviewer --principal reviewer --vendor anthropic
 
 ## 4. Run
 
-Shell A, the moderator (returns at `closed` or `cancelled`; at `escalated` it keeps running and waits for `bbp human resume` or `cancel`, so decide, do not just wait):
+Shell A, the moderator (returns at `closed` or `cancelled`; at `escalated` it keeps running until a human command moves the task on, usually `bbp human resume` or `cancel`, so decide, do not just wait):
 
 ```sh
 bbp mod --repo-path /tmp/bbp/target --work /tmp/bbp/work --agents $P/agents.json --max-wall-secs 7200
@@ -77,7 +77,15 @@ States in `bbp human` are lower snake case (`planning`, `plan_gate`, `build`, `t
 
 Destructive verbs (`reject`, `rerun`, `resume`, `cancel`) take `--rev N`, the card revision you are looking at. A stale revision is refused; re-read the card and decide again.
 
-A non-gate `request_decision` from the Coder or Tester (the launcher prompts tell them to post one when a run fails for a reason no code change can fix) shows on the card as `pending_request` with no turn. Answer it with `bbp human answer MSG TEXT...` (fix the environment first if that is what it names) or `decision MSG accept|reject NOTE...`; the requester is regranted and no iteration was spent. The first run's roles did not have this route in their prompts and spent the whole iteration budget on revise/resubmit instead.
+### Recovering from an environment fault
+
+A non-gate `request_decision` from the Coder or Tester (the launcher prompts tell them to post one when a run fails for a reason no code change can fix) shows on the card as `pending_request` with no turn, and nothing is granted while it is open. Settling it regrants the requester; it does not refresh anything else, so the order matters:
+
+1. Fix the environment outside the store (install the toolchain file, fix a permission, point a symlink at a readable target). If the fix needs a change to the frozen profile, read roots, environment or limits, stop: the digest is frozen at open, so `cancel --rev N` this task and open a new one with the corrected `profiles.json`.
+2. If the requester is the Tester (state `test`, the failed run is still the selected one): `bbp human rerun CAND --rev N` with the candidate id from the card. The core revokes the failed run and selects a fresh one; the moderator runs it; wait until the card's `run` shows a terminal status. A stale `--rev` is refused; re-read the card and repeat. Do not answer the request first: a Tester regranted before the rerun reads the same failed report and asks again.
+3. Settle the request: `bbp human answer MSG fixed, rerun passed` (or `decision MSG accept NOTE`), where `MSG` is the card's `pending_request`. The requester is regranted; the Tester judges the fresh report, a Coder (state `build`, no run to redo) resubmits.
+
+No iteration is spent on any of this. The first run's roles did not have the route in their prompts and spent the whole iteration budget on revise/resubmit instead. `tests/runner_e2e.rs` (`an_environment_fault_is_recovered_by_rerun_then_settlement`) is the sequence end to end: failed run, request, stale rerun refused, rerun, fresh report with no grant, settlement, Tester approves.
 
 Logs: `$BBP_DIR/agents/<sha256(task)>/turn-N.log` per harness, `$BBP_DIR/mcp/<sha256(task)>/turn-N.json` the config each saw, `/tmp/bbp/work/run-N` the runner's checkouts.
 
