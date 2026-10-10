@@ -2,29 +2,22 @@
 //!
 //! This is the mirror of [`crate::McpServer`]: where that exposes Rust tools to
 //! other ADK SDKs, this lets a Rust agent use tools from any MCP server, the
-//! way ADK's `McpToolset` does in the other languages.
+//! way ADK's `McpToolset` does in the other languages. The connection is a
+//! `rusty-mcp-client` one over the server's stdio.
 
 use adk_core::{AdkError, Args, FunctionDeclaration, InvocationContext, Result, Schema};
 use adk_tools::{SharedTool, Tool, ToolContext, Toolset};
 use async_trait::async_trait;
-use rmcp::model::{
-    CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, Tool as McpToolEntry,
-};
-use rmcp::service::{Peer, RunningService, ServiceError};
-use rmcp::{RoleClient, ServiceExt};
+use rusty_mcp_client::proto::{CallToolResult, ContentBlock, Tool as McpToolEntry};
+use rusty_mcp_client::{McpClient, McpClientError, McpServerSpec, McpTransport};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::future::Future;
-use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tokio::time::timeout;
 
-use crate::line_cap::{cap_error, LineCapped};
-use crate::protocol::{protocol_version, uppercase_types};
+use crate::protocol::{from_wire, uppercase_types};
 
 /// Default deadline for one MCP request/response round trip — including
 /// the `initialize` handshake, `tools/list`, and every `tools/call` —
@@ -72,138 +65,60 @@ impl ConnectionParams {
         env.push((key.into(), value.into()));
         self
     }
-}
 
-/// A live MCP session with a server subprocess, run by `rmcp`.
-struct StdioConnection {
-    service: RunningService<RoleClient, ClientInfo>,
-    /// Killed when the connection is dropped (`kill_on_drop`).
-    child: Child,
-    handle: Handle,
-}
-
-/// What a request needs from its connection, owned so a request future
-/// does not borrow the connection slot.
-#[derive(Clone)]
-struct Handle {
-    peer: Peer<RoleClient>,
-    timeout: Duration,
-    /// Set when the server sent a line past the 16 MiB cap.
-    exceeded: Arc<AtomicBool>,
-}
-
-impl Handle {
-    /// Runs one request under the connection's deadline.
-    async fn request<T>(
-        &self,
-        method: &str,
-        request: impl Future<Output = std::result::Result<T, ServiceError>>,
-    ) -> Result<T> {
-        deadline(method, self.timeout, &self.exceeded, async {
-            request.await.map_err(|e| request_error(method, e))
-        })
-        .await
+    /// The `rusty-mcp-client` spec for these parameters.
+    fn spec(&self) -> McpServerSpec {
+        let ConnectionParams::Stdio { command, args, env } = self;
+        McpServerSpec {
+            transport: McpTransport::Stdio,
+            command: command.clone(),
+            args: args.clone(),
+            env: env.iter().cloned().collect(),
+            ..McpServerSpec::default()
+        }
     }
 }
 
-impl StdioConnection {
+/// A live MCP session with a server subprocess.
+struct Connection {
+    client: Arc<McpClient>,
+}
+
+impl Connection {
     /// Launches the server and completes the MCP handshake, all within
-    /// `timeout`. A server that stalls or fails the handshake is killed
-    /// rather than leaked.
+    /// `timeout` (which also bounds every later request). A server that
+    /// stalls or fails the handshake is stopped rather than leaked.
     async fn spawn(params: &ConnectionParams, timeout: Duration) -> Result<Self> {
-        let ConnectionParams::Stdio { command, args, env } = params;
-
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            // Leave stderr attached so the server's diagnostics stay visible.
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        for (key, value) in env {
-            cmd.env(key, value);
+        let ConnectionParams::Stdio { command, .. } = params;
+        match McpClient::connect_with("rusty-adk", &params.spec(), timeout).await {
+            Ok(client) => Ok(Self {
+                client: Arc::new(client),
+            }),
+            Err(McpClientError::Spawn { source, .. }) => Err(AdkError::Config(format!(
+                "cannot launch MCP server '{command}': {source}"
+            ))),
+            Err(e) => Err(AdkError::Other(format!(
+                "MCP handshake with '{command}' failed: {e}"
+            ))),
         }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| AdkError::Config(format!("cannot launch MCP server '{command}': {e}")))?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| AdkError::Other("MCP server stdin unavailable".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AdkError::Other("MCP server stdout unavailable".into()))?;
-
-        let exceeded = Arc::new(AtomicBool::new(false));
-        let stdout = LineCapped::new(stdout, Arc::clone(&exceeded));
-        let info = ClientInfo::new(
-            ClientCapabilities::default(),
-            Implementation::new("rusty-adk", env!("CARGO_PKG_VERSION")),
-        )
-        .with_protocol_version(protocol_version());
-
-        let service = match deadline("initialize", timeout, &exceeded, async {
-            info.serve((stdout, stdin))
-                .await
-                .map_err(|e| AdkError::Other(format!("MCP handshake with '{command}' failed: {e}")))
-        })
-        .await
-        {
-            Ok(service) => service,
-            Err(err) => {
-                let _ = child.kill().await;
-                return Err(err);
-            }
-        };
-
-        let handle = Handle {
-            peer: service.peer().clone(),
-            timeout,
-            exceeded,
-        };
-        Ok(Self {
-            service,
-            child,
-            handle,
-        })
     }
 
-    async fn shutdown(mut self) {
-        let _ = self.service.cancel().await;
-        let _ = self.child.kill().await;
+    async fn shutdown(self) {
+        // Anything else holding the client (a request that just failed) is
+        // gone by now; if not, dropping it stops the server anyway.
+        if let Ok(client) = Arc::try_unwrap(self.client) {
+            let _ = client.shutdown().await;
+        }
     }
 }
 
-/// Bounds `work` by `limit` (design review 3.7, N16), and reports a capped
-/// line from the server as the cause when that is what ended it.
-async fn deadline<T>(
+/// Runs one request, naming `method` in its failure.
+async fn request<T>(
     method: &str,
-    limit: Duration,
-    exceeded: &AtomicBool,
-    work: impl Future<Output = Result<T>>,
+    call: impl Future<Output = std::result::Result<T, McpClientError>>,
 ) -> Result<T> {
-    let outcome = match timeout(limit, work).await {
-        Ok(result) => result,
-        Err(_) => Err(AdkError::Other(format!(
-            "MCP server did not respond to '{method}' within {limit:?}"
-        ))),
-    };
-    match outcome {
-        Err(_) if exceeded.load(Ordering::Acquire) => Err(AdkError::Other(cap_error())),
-        other => other,
-    }
-}
-
-fn request_error(method: &str, err: ServiceError) -> AdkError {
-    match err {
-        ServiceError::McpError(data) => {
-            AdkError::Other(format!("MCP error on {method}: {}", data.message))
-        }
-        other => AdkError::Other(format!("MCP request '{method}' failed: {other}")),
-    }
+    call.await
+        .map_err(|e| AdkError::Other(format!("MCP request '{method}' failed: {e}")))
 }
 
 /// Tools discovered from an external MCP server.
@@ -211,7 +126,7 @@ pub struct McpToolset {
     params: ConnectionParams,
     filter: Option<HashSet<String>>,
     timeout: Duration,
-    connection: Mutex<Option<StdioConnection>>,
+    connection: Mutex<Option<Connection>>,
     cached: Mutex<Option<Vec<SharedTool>>>,
 }
 
@@ -260,18 +175,18 @@ impl McpToolset {
     /// the same broken one.
     async fn with_connection<T, F, Fut>(&self, op: F) -> Result<T>
     where
-        F: FnOnce(Handle) -> Fut,
+        F: FnOnce(Arc<McpClient>) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
         let mut guard = self.connection.lock().await;
         if guard.is_none() {
-            *guard = Some(StdioConnection::spawn(&self.params, self.timeout).await?);
+            *guard = Some(Connection::spawn(&self.params, self.timeout).await?);
         }
-        let handle = guard
+        let client = guard
             .as_ref()
-            .map(|c| c.handle.clone())
+            .map(|c| Arc::clone(&c.client))
             .ok_or_else(|| AdkError::Other("MCP connection unavailable".into()))?;
-        let result = op(handle).await;
+        let result = op(client).await;
         if result.is_err() {
             if let Some(broken) = guard.take() {
                 broken.shutdown().await;
@@ -284,7 +199,7 @@ impl McpToolset {
     async fn discover(&self) -> Result<Vec<SharedTool>> {
         let entries = self
             .with_connection(
-                |h| async move { h.request("tools/list", h.peer.list_all_tools()).await },
+                |client| async move { request("tools/list", client.list_tools()).await },
             )
             .await?;
         Ok(entries
@@ -294,7 +209,7 @@ impl McpToolset {
                     && self
                         .filter
                         .as_ref()
-                        .is_none_or(|names| names.contains(entry.name.as_ref()))
+                        .is_none_or(|names| names.contains(entry.name.as_str()))
             })
             .map(|entry| Arc::new(McpTool::from_entry(entry)) as SharedTool)
             .collect())
@@ -302,14 +217,27 @@ impl McpToolset {
 
     /// Calls a tool on the connected server.
     async fn call(&self, name: &str, args: Args) -> Result<Value> {
-        let params = CallToolRequestParams::new(name.to_string()).with_arguments(args);
         let result = self
-            .with_connection(
-                |h| async move { h.request("tools/call", h.peer.call_tool(params)).await },
-            )
+            .with_connection(|client| async move {
+                request("tools/call", client.call_tool(name, Some(args))).await
+            })
             .await?;
-        Ok(decode_tool_result(&serde_json::to_value(result)?))
+        Ok(decode_tool_result(&result_json(&result)))
     }
+}
+
+/// An MCP tool result in the JSON shape [`decode_tool_result`] reads: its
+/// text blocks and its error flag.
+fn result_json(result: &CallToolResult) -> Value {
+    let content: Vec<Value> = result
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(json!({"type": "text", "text": text})),
+            _ => None,
+        })
+        .collect();
+    json!({"content": content, "isError": result.is_error.unwrap_or(false)})
 }
 
 /// Converts an MCP tool result back into an ADK tool result.
@@ -358,13 +286,10 @@ struct McpTool {
 
 impl McpTool {
     fn from_entry(entry: McpToolEntry) -> Self {
-        let schema = Value::Object(entry.input_schema.as_ref().clone());
+        let schema = from_wire(&entry.input_schema);
         Self {
-            name: entry.name.into_owned(),
-            description: entry
-                .description
-                .map(|d| d.into_owned())
-                .unwrap_or_default(),
+            name: entry.name,
+            description: entry.description.unwrap_or_default(),
             parameters: serde_json::from_value::<Schema>(uppercase_types(&schema)).ok(),
         }
     }

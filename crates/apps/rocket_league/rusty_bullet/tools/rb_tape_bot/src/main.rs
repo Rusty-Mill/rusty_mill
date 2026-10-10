@@ -5,16 +5,10 @@
 //!
 //! Set `RB_TAPE` to the scenario JSON path before RLBot starts the bot.
 
-use std::sync::Arc;
-
+use rb_rlbot_client::{run_bots, Agent, Connection, Environment, Outbox};
+use rb_rlbot_wire::{ConnectionSettings, GamePacket, MatchPhase, PlayerInput};
 use rb_scenario::{Input, Scenario};
 use rb_tape_bot::{controller, start_state};
-use rlbot::{
-    agents::{run_bot_agents, BotAgent},
-    flat::{ControllableInfo, FieldInfo, GamePacket, MatchConfiguration, MatchPhase, PlayerInput},
-    util::{AgentEnvironment, PacketQueue},
-    RLBotConnection,
-};
 
 struct TapeBot {
     index: u32,
@@ -26,14 +20,8 @@ struct TapeBot {
     start_frame: Option<u32>,
 }
 
-impl BotAgent for TapeBot {
-    fn new(
-        _team: u32,
-        controllable_info: ControllableInfo,
-        _match_config: Arc<MatchConfiguration>,
-        _field_info: Arc<FieldInfo>,
-        _packet_queue: &mut PacketQueue,
-    ) -> Self {
+impl TapeBot {
+    fn new(index: u32) -> Self {
         let path = std::env::var("RB_TAPE").expect("set RB_TAPE to the scenario JSON path");
         let text = std::fs::read_to_string(&path).expect("read the scenario file");
         let scenario = Scenario::from_json(&text).expect("parse the scenario");
@@ -43,14 +31,16 @@ impl BotAgent for TapeBot {
             scenario.total_ticks()
         );
         Self {
-            index: controllable_info.index,
+            index,
             scenario,
             last_frame: None,
             start_frame: None,
         }
     }
+}
 
-    fn tick(&mut self, game_packet: &GamePacket, packet_queue: &mut PacketQueue) {
+impl Agent for TapeBot {
+    fn tick(&mut self, game_packet: &GamePacket, packet_queue: &mut Outbox) {
         // Only the first car plays the tape; any other stays neutral.
         if self.index != 0 {
             return;
@@ -101,13 +91,21 @@ impl BotAgent for TapeBot {
 }
 
 fn main() {
-    let AgentEnvironment {
+    let Environment {
         server_addr,
         agent_id,
-    } = AgentEnvironment::from_env();
+    } = Environment::from_env();
     let agent_id = agent_id.unwrap_or_else(|| "rusty_bullet/tape_bot".into());
-    let connection = RLBotConnection::new(&server_addr).expect("connect to RLBot core");
-    run_bot_agents::<TapeBot>(agent_id.clone(), false, false, connection)
-        .expect("run_bot_agents crashed");
+    let mut connection = Connection::connect(&server_addr).expect("connect to RLBot core");
+    let settings = ConnectionSettings {
+        agent_id: agent_id.clone(),
+        wants_ball_predictions: false,
+        wants_comms: false,
+        close_between_matches: true,
+    };
+    run_bots(&mut connection, settings, |init, _| {
+        TapeBot::new(init.controllable.index)
+    })
+    .expect("run_bots crashed");
     println!("tape bot `{agent_id}` exited");
 }

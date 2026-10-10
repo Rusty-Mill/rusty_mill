@@ -2,7 +2,7 @@
 name = "rusty_rand"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"  # rusty_libc's floor; used on x86_64/aarch64 Linux only
 description = "OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of."
 license = "MIT OR Apache-2.0"
 
@@ -10,5 +10,10 @@ license = "MIT OR Apache-2.0"
 layer = "foundation"
 
 [dependencies]
+
+# Linux getrandom(2) via the first-party raw-syscall crate (precedent: rusty_lines). Only
+# x86_64 and aarch64 are supported by rusty_libc; other targets keep /dev/urandom.
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+rusty_libc = { workspace = true }
 
 [dev-dependencies]

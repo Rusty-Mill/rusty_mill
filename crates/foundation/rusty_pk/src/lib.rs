@@ -1,5 +1,5 @@
 //! Public-key primitives: signature verification (RSA, ECDSA, Ed25519) and
-//! key agreement (X25519).
+//! key agreement (X25519, ECDH on P-256 and P-384).
 //!
 //! # Verification handles public data only
 //!
@@ -23,6 +23,7 @@ mod mont;
 mod params;
 mod weierstrass;
 
+pub mod ecdh;
 pub mod ecdsa;
 pub mod ed25519;
 pub mod rsa;

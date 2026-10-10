@@ -18,9 +18,6 @@ use rk_app::Session;
 use rk_config::Config;
 use rk_constrain::PlanDecision;
 
-#[cfg(feature = "mcp-server")]
-mod mcp_server;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::from_env().context("resolving configuration")?;
@@ -72,7 +69,7 @@ async fn main() -> Result<()> {
         #[cfg(feature = "mcp-server")]
         {
             let session = Session::new(&config, model).context("building session")?;
-            return mcp_server::serve(session).await;
+            return rk_app::mcp_server::serve(session).await;
         }
         #[cfg(not(feature = "mcp-server"))]
         {

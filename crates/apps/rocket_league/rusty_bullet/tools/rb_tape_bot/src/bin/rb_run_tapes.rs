@@ -20,16 +20,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use rb_scenario::Scenario;
-use rlbot::{
-    flat::{
-        ConnectionSettings, CoreMessage, CustomBot, DebugRendering, EnvironmentVariable,
-        ExistingMatchBehavior, FieldInfo, GameMode, GamePacket, InitComplete, Launcher,
-        MatchConfiguration, MatchLengthMutator, MutatorSettings, PlayerClass, PlayerConfiguration,
-        StopCommand,
-    },
-    RLBotConnection,
+use rb_rlbot_client::{Connection, CoreMessage};
+use rb_rlbot_wire::{
+    ConnectionSettings, CustomBot, DebugRendering, EnvironmentVariable, ExistingMatchBehavior,
+    FieldInfo, GameMode, GamePacket, InitComplete, Launcher, MatchConfiguration,
+    MatchLengthMutator, MutatorSettings, PlayerClass, PlayerConfiguration, StopCommand,
 };
+use rb_scenario::Scenario;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -169,24 +166,23 @@ fn list_scenarios(names: &[String]) -> Result<Vec<(String, PathBuf)>> {
 }
 
 /// A fresh connection that also receives game packets.
-fn connect() -> Result<RLBotConnection> {
-    let mut conn = RLBotConnection::new(CORE_ADDR)?;
-    conn.send_packet(ConnectionSettings {
+fn connect() -> Result<Connection> {
+    let mut conn = Connection::connect(CORE_ADDR)?;
+    conn.send(ConnectionSettings {
         wants_ball_predictions: false,
         wants_comms: false,
         close_between_matches: false,
         agent_id: String::new(),
     })?;
     // Core only distributes game packets to a session after InitComplete.
-    conn.send_packet(InitComplete {})?;
-    conn.set_nonblocking(true)?;
+    conn.send(InitComplete)?;
     Ok(conn)
 }
 
 /// Connects to core, starting `RLBotServer.exe` (stdout to `core.log`) when
 /// nothing listens yet.
 fn ensure_core(out: &Path) -> Result<()> {
-    if RLBotConnection::new(CORE_ADDR).is_ok() {
+    if Connection::connect(CORE_ADDR).is_ok() {
         return Ok(());
     }
     let exe = env_dir("LOCALAPPDATA")?
@@ -203,7 +199,7 @@ fn ensure_core(out: &Path) -> Result<()> {
         .map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
-        if RLBotConnection::new(CORE_ADDR).is_ok() {
+        if Connection::connect(CORE_ADDR).is_ok() {
             return Ok(());
         }
         sleep(Duration::from_secs(1));
@@ -230,7 +226,7 @@ fn match_configuration(
         .to_owned();
     let hive = teams.len() > 1 && teams.iter().all(|team| *team == teams[0]);
     let player = |index: usize, team: u32| PlayerConfiguration {
-        variety: PlayerClass::CustomBot(Box::new(CustomBot {
+        variety: PlayerClass::CustomBot(CustomBot {
             name: format!("RB Tape: {name}"),
             root_dir: root_dir.clone(),
             // cmd.exe needs backslashes here (see bots/*.bot.toml).
@@ -249,8 +245,7 @@ fn match_configuration(
                 name: "RB_TAPE".into(),
                 value: tape.clone(),
             }]),
-            ..Default::default()
-        })),
+        }),
         team,
         player_id: 0,
     };
@@ -271,10 +266,9 @@ fn match_configuration(
         player_configurations: players,
         game_mode: GameMode::Soccar,
         // Core crashes on a missing mutator table.
-        mutators: Some(Box::new(MutatorSettings {
+        mutators: Some(MutatorSettings {
             match_length: MatchLengthMutator::Unlimited,
-            ..Default::default()
-        })),
+        }),
         existing_match_behavior: ExistingMatchBehavior::Restart,
         enable_rendering: DebugRendering::OffByDefault,
         enable_state_setting: true,
@@ -318,7 +312,7 @@ fn json_escape(path: &Path) -> Result<String> {
 
 /// Reads packets until `done` returns true or `timeout` passes.
 fn pump(
-    conn: &mut RLBotConnection,
+    conn: &mut Connection,
     timeout: Duration,
     what: &str,
     mut observe: impl FnMut(&CoreMessage),
@@ -326,8 +320,8 @@ fn pump(
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        match conn.recv_packet() {
-            Ok(message) => {
+        match conn.recv_timeout(Duration::from_millis(2)) {
+            Ok(Some(message)) => {
                 observe(&message);
                 if let CoreMessage::GamePacket(packet) = &message {
                     if done(packet) {
@@ -335,9 +329,7 @@ fn pump(
                     }
                 }
             }
-            Err(rlbot::RLBotError::Connection(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                sleep(Duration::from_millis(2));
-            }
+            Ok(None) => {}
             Err(e) => return Err(format!("core connection failed while {what}: {e}").into()),
         }
     }
@@ -449,7 +441,7 @@ fn ensure_game_up(dir: &Path, config: &MatchConfiguration) -> Result<()> {
     }
     println!("no plugin heartbeat; launching the game through core");
     let mut conn = connect()?;
-    conn.send_packet(config.clone())?;
+    conn.send(config.clone())?;
     // Keep reading while waiting: core drops a session whose outbound
     // queue fills, and a game launch takes tens of seconds.
     pump(
@@ -459,7 +451,7 @@ fn ensure_game_up(dir: &Path, config: &MatchConfiguration) -> Result<()> {
         |_| {},
         |_| heartbeat_fresh(dir),
     )?;
-    conn.send_packet(StopCommand {
+    conn.send(StopCommand {
         shutdown_server: false,
     })?;
     // Let the stop land before the real run restarts the match.
@@ -494,7 +486,7 @@ fn run_one(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<()> {
 
 fn abort_run(dir: &Path) -> Result<()> {
     send_job(dir, r#"{"stop": true}"#)?;
-    connect()?.send_packet(StopCommand {
+    connect()?.send(StopCommand {
         shutdown_server: false,
     })?;
     Ok(())
@@ -517,7 +509,7 @@ fn run_one_inner(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<
 
     let mut pads = PadLog::create(&pad_log_path(capture))?;
     let mut conn = connect()?;
-    conn.send_packet(config)?;
+    conn.send(config)?;
     let mut first_frame = 0u32;
     pump(
         &mut conn,
@@ -569,7 +561,7 @@ fn run_one_inner(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<
     )?;
 
     send_job(dir, r#"{"stop": true}"#)?;
-    conn.send_packet(StopCommand {
+    conn.send(StopCommand {
         shutdown_server: false,
     })?;
     Ok(())
@@ -615,6 +607,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rb_rlbot_wire::{BoostPad, BoostPadState, MatchInfo, MatchPhase, Vec3};
 
     #[test]
     fn distance_is_euclidean() {
@@ -622,16 +615,26 @@ mod tests {
     }
 
     fn packet_with_pads(frame: u32, active: &[bool]) -> GamePacket {
-        let mut packet = GamePacket::default();
-        packet.match_info.frame_num = frame;
-        packet.boost_pads = active
-            .iter()
-            .map(|&is_active| rlbot::flat::BoostPadState {
-                is_active,
-                timer: if is_active { 0.0 } else { 1.5 },
-            })
-            .collect();
-        packet
+        GamePacket {
+            players: Vec::new(),
+            boost_pads: active
+                .iter()
+                .map(|&is_active| BoostPadState {
+                    is_active,
+                    timer: if is_active { 0.0 } else { 1.5 },
+                })
+                .collect(),
+            balls: Vec::new(),
+            match_info: MatchInfo {
+                seconds_elapsed: 0.0,
+                game_time_remaining: 300.0,
+                is_overtime: false,
+                is_unlimited_time: false,
+                match_phase: MatchPhase::Active,
+                frame_num: frame,
+            },
+            teams: Vec::new(),
+        }
     }
 
     fn read_lines(path: &Path) -> Vec<String> {
@@ -686,8 +689,8 @@ mod tests {
         let mut log = PadLog::create(&path).expect("create");
         log.field(&FieldInfo::default()).expect("empty");
         let mut info = FieldInfo::default();
-        info.boost_pads.push(rlbot::flat::BoostPad {
-            location: rlbot::flat::Vector3 {
+        info.boost_pads.push(BoostPad {
+            location: Vec3 {
                 x: 1.0,
                 y: 2.0,
                 z: 3.0,

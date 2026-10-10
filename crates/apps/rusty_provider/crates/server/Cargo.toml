@@ -12,8 +12,8 @@ rusty_oauth = { workspace = true }
 rp-core.workspace = true
 rp-mcp.workspace = true
 rp-router.workspace = true
-rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
-rusty-mcp.workspace = true
+rusty_mcp_server = { workspace = true, features = ["http"] }
+rusty_mcp_axum.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tower-http.workspace = true

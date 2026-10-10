@@ -1,0 +1,58 @@
+[package]
+name = "rusty_mcp_server"
+version = "0.1.0"
+edition = "2021"
+description = "Sovereign MCP server core on rusty_mcp_proto: a tool registry, a sans-IO connection dispatcher for the classic and stateless handshakes, cancellation and progress, pagination, and a stdio transport"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["mcp", "server", "json-rpc"]
+categories = ["network-programming"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[features]
+default = []
+# `http`: the Streamable HTTP transport on `rusty_serve`. Off by default so a
+# stdio-only server pulls in no HTTP stack.
+http = ["dep:rusty_serve", "dep:rusty_http"]
+# `request-state`: seal the `requestState` of multi-round-trip input with an
+# HMAC, so a client cannot forge or alter what it echoes back.
+request-state = ["dep:rusty_oauth", "dep:rusty_crypto_key"]
+
+[dependencies]
+# First-party only (ADR-0002 Tier S).
+rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
+rusty_mcp_proto = { workspace = true }
+rusty_base64 = { workspace = true }
+rusty_rand = { workspace = true }
+rusty_time = { workspace = true }
+rusty_serve = { workspace = true, optional = true }
+rusty_http = { workspace = true, optional = true }
+rusty_oauth = { workspace = true, optional = true }
+rusty_crypto_key = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Interop oracle only (never shipped): the `rmcp` client, which the MCP crates
+# use today, drives this server over real stdio in `tests/interop.rs`.
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "process", "time"] }
+serde = "1"
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"
+
+[[test]]
+name = "http"
+required-features = ["http"]
+
+[[test]]
+name = "http_interop"
+required-features = ["http"]

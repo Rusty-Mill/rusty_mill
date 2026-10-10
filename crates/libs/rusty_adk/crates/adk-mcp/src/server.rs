@@ -1,28 +1,30 @@
 //! The MCP server: exposes ADK tools to any MCP client.
 //!
-//! [`McpServer`] is an `rmcp` server handler: the stdio and HTTP transports
-//! hand it to `rmcp`, which owns the wire protocol. This module owns only
-//! what is ADK-specific, running ADK tools against a session.
+//! [`McpServer`] holds the ADK tools; the transports in this crate turn it
+//! into a `rusty_mcp_server` server, which owns the wire protocol. This module
+//! owns only what is ADK-specific, running ADK tools against a session.
+//!
+//! `rusty_mcp_server`'s handlers block, while ADK tools are async, so each
+//! call runs the tool on the tokio runtime the transport was started on
+//! (stdio, HTTP and [`router`](crate::router) record it).
 
-use std::borrow::Cow;
+use std::sync::{Arc, OnceLock};
 
 use adk_core::{InvocationContext, RunConfig, Services, Session};
 use adk_tools::{invoke_tool, SharedTool, ToolContext};
-use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, ErrorCode, Implementation, ListToolsResult,
-    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
+use rusty_mcp_server::proto::{
+    CallToolParams, CallToolResult, ErrorCode, ErrorData, Tool as McpTool,
 };
-use rmcp::service::RequestContext;
-use rmcp::{ErrorData, RoleServer, ServerHandler};
-use std::sync::Arc;
+use rusty_mcp_server::{BuildError, CallContext, Server, ToolSource};
+use serde_json::{Map, Value};
+use tokio::runtime::Handle;
 
-use crate::protocol::{protocol_version, tool_entry, tool_result, SUPPORTED_VERSIONS};
+use crate::protocol::{from_wire, supported_versions, tool_entry, tool_result};
 
 /// Serves a set of ADK tools over the Model Context Protocol.
 ///
-/// An [`rmcp`] server handler: the transports in this crate hand it to
-/// `rmcp`, which owns the wire protocol. Cloning is cheap (the tools are
-/// shared), and each connection serves its own clone.
+/// Cloning is cheap (the tools are shared), and each connection serves its
+/// own clone.
 #[derive(Clone)]
 pub struct McpServer {
     name: String,
@@ -30,6 +32,8 @@ pub struct McpServer {
     tools: Vec<SharedTool>,
     services: Services,
     app_name: String,
+    /// The runtime tool calls run on; set by the first transport started.
+    runtime: Arc<OnceLock<Handle>>,
 }
 
 impl McpServer {
@@ -44,6 +48,7 @@ impl McpServer {
             tools,
             services,
             app_name: "mcp".to_string(),
+            runtime: Arc::new(OnceLock::new()),
         }
     }
 
@@ -69,10 +74,31 @@ impl McpServer {
         &self.tools
     }
 
+    /// Records the current tokio runtime as the one tool calls run on (the
+    /// first one recorded wins). Does nothing outside a runtime.
+    #[cfg_attr(not(any(feature = "stdio", feature = "http")), allow(dead_code))]
+    pub(crate) fn bind_runtime(&self) {
+        if let Ok(handle) = Handle::try_current() {
+            let _ = self.runtime.set(handle);
+        }
+    }
+
+    /// The `rusty_mcp_server` description of this server, speaking the
+    /// revisions up to [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION).
+    #[cfg_attr(not(any(feature = "stdio", feature = "http")), allow(dead_code))]
+    pub(crate) fn wire_server(&self) -> Result<Server, BuildError> {
+        Server::builder(self.name.clone(), self.version.clone())
+            .versions(supported_versions())
+            .tool_source(self.clone())
+            .build()
+    }
+
     /// Runs `tools/call` for the named tool.
-    async fn call(&self, request: CallToolRequestParams) -> Result<CallToolResponse, ErrorData> {
-        let name = request.name.as_ref();
-        let args = request.arguments.unwrap_or_default();
+    async fn call(
+        &self,
+        name: &str,
+        args: Map<String, Value>,
+    ) -> Result<CallToolResult, ErrorData> {
         let tool = self
             .tools
             .iter()
@@ -81,7 +107,6 @@ impl McpServer {
                 ErrorData::new(
                     ErrorCode::METHOD_NOT_FOUND,
                     format!("unknown tool '{name}'"),
-                    None,
                 )
             })?;
 
@@ -94,13 +119,13 @@ impl McpServer {
         // error branch below, indistinguishable from a real tool failure.
         // Fail fast instead, with a message that names the actual limitation.
         if let Some(hint) = tool.confirmation_hint(&args) {
-            return Err(ErrorData::internal_error(
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
                 format!(
                     "tool '{name}' requires user confirmation ('{hint}') before it can run, \
                      but the MCP stdio/http transport does not support confirmation-gated \
                      tools: there is no channel to carry an approval back to a suspended call"
                 ),
-                None,
             ));
         }
 
@@ -118,41 +143,48 @@ impl McpServer {
             Ok(value) => value,
             Err(err) => adk_tools::error(err.to_string()),
         };
-        Ok(tool_result(&value).into())
+        Ok(tool_result(&value))
     }
 }
 
-impl ServerHandler for McpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(self.name.clone(), self.version.clone()))
-            .with_protocol_version(protocol_version())
-    }
-
-    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Borrowed(SUPPORTED_VERSIONS)
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, ErrorData> {
-        let tools = self
-            .tools
+impl ToolSource for McpServer {
+    fn tools(&self) -> Vec<McpTool> {
+        self.tools
             .iter()
             .filter_map(|t| t.declaration())
             .map(|d| tool_entry(&d))
-            .collect();
-        Ok(ListToolsResult::with_all_items(tools))
+            .collect()
     }
 
-    async fn call_tool(
+    fn call(
         &self,
-        request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, ErrorData> {
-        self.call(request).await
+        _ctx: &CallContext,
+        call: &CallToolParams,
+    ) -> Option<Result<CallToolResult, ErrorData>> {
+        // Every name is this source's to answer (an unknown one with an
+        // error of its own), so the server's generic one is never used.
+        let args = match call.arguments.as_ref().map(from_wire) {
+            None => Map::new(),
+            Some(Value::Object(map)) => map,
+            Some(_) => {
+                return Some(Err(ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "tool arguments must be a JSON object",
+                )))
+            }
+        };
+        let Some(handle) = self
+            .runtime
+            .get()
+            .cloned()
+            .or_else(|| Handle::try_current().ok())
+        else {
+            return Some(Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "no tokio runtime to run the tool on",
+            )));
+        };
+        Some(handle.block_on(self.call(&call.name, args)))
     }
 }
 

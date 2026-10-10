@@ -1,5 +1,7 @@
 # rusty_mcp
 
+> **Note (2026-10-08):** `crates/rusty-mcp-demo` now runs on `rusty_mcp_server`, not on this scaffold, so it no longer exercises the scaffold. Parts of this README that point at the demo describe how it *used to* show the scaffold; the scaffold's own code and `template` are unchanged. The demo's current flags are `--transport`, `--bind`, `--path`, `--allowed-host`, `--allowed-origin`, `--max-body-bytes` (see `rusty-mcp-demo --help`); auth, concurrency and timeout limits, telemetry and legacy sessions are not part of it.
+
 A reusable Rust scaffold for building [Model Context Protocol][mcp] servers
 against the **2026-07-28** specification.
 
@@ -42,7 +44,7 @@ Two sharp edges this scaffold handles for you:
 | Path | What it is |
 | --- | --- |
 | `crates/rusty-mcp` | The reusable scaffold. Depend on this. |
-| `crates/rusty-mcp-demo` | An example server exercising every feature. Read this. |
+| `crates/rusty-mcp-demo` | An example server on `rusty_mcp_server` (formerly the scaffold's reference example; see the note above). |
 | `template` | A minimal starting point (see [Starting a server](#starting-a-server)) |
 
 Inside the scaffold:
@@ -408,7 +410,7 @@ cargo run -p rusty-mcp-demo -- --transport http --bind 127.0.0.1:8080
 ```
 
 Every flag has an environment fallback (`MCP_TRANSPORT`, `MCP_BIND`,
-`MCP_PATH`, `MCP_ALLOWED_HOSTS`, …). `RUST_LOG` overrides `--log`.
+`MCP_PATH`, `MCP_ALLOWED_HOSTS`, …). The demo has no `--log` or `RUST_LOG`.
 
 ### Talking to it directly
 
@@ -457,7 +459,8 @@ enforced incrementally per body frame, so an oversized request gets `413`
 without ever being fully read into memory.
 
 Concurrency and timeouts are **off** by default and worth turning on for
-anything public:
+anything public. (These flags belong to servers built on this scaffold's `Cli`;
+`rusty-mcp-demo` no longer takes them.)
 
 ```bash
 rusty-mcp-demo --transport http --bind 0.0.0.0:8080 \

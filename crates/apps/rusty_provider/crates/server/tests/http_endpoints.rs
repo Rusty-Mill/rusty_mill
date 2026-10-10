@@ -61,9 +61,11 @@ async fn spawn_app(config_toml: &str) -> String {
     });
 
     let mcp = match &config.mcp {
-        Some(mcp_config) if mcp_config.enabled => {
-            Some(rp_mcp::build(mcp_config, Arc::clone(&router)).await)
-        }
+        Some(mcp_config) if mcp_config.enabled => Some(
+            rp_mcp::build(mcp_config, Arc::clone(&router))
+                .await
+                .unwrap(),
+        ),
         _ => None,
     };
     let mcp_path = config
@@ -3439,7 +3441,7 @@ async fn mcp_endpoint_rejects_unauthenticated_requests_when_a_key_is_configured(
 /// Exercises the mounted MCP endpoint with a real `rmcp` client -- the same
 /// wire protocol a desktop client would use -- covering the whole path:
 /// `check_auth` guarding the nest, the Streamable HTTP transport, and
-/// `RustyMcpServer`'s merged `tools/list`/`tools/call`.
+/// the merged `tools/list`/`tools/call` of `rp_mcp::build`'s server.
 #[tokio::test]
 async fn mcp_endpoint_serves_native_tools_to_a_real_mcp_client() {
     use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -3474,6 +3476,83 @@ async fn mcp_endpoint_serves_native_tools_to_a_real_mcp_client() {
     let mut names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
     names.sort();
     assert_eq!(names, vec!["chat_completion", "embeddings", "list_models"]);
+
+    let _ = client.cancel().await;
+}
+
+/// A tool call slower than the handler's plain-JSON window is answered as a
+/// server-sent event stream, which the bridge pumps from a blocking thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_chat_completion_streams_a_slow_reply_through_the_mounted_endpoint() {
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::ServiceExt;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(700))
+                .set_body_json(json!({
+                    "id": "chatcmpl-slow",
+                    "object": "chat.completion",
+                    "created": 1700000000,
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "slow hello"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let key_var = unique_env_var("OPENAI_KEY");
+    std::env::set_var(&key_var, "test-key");
+    let config = format!(
+        r#"
+        [providers.openai]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{key_var}"
+
+        [mcp]
+        enabled = true
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!("{base_url}/mcp")),
+    );
+    let client = tokio::time::timeout(std::time::Duration::from_secs(5), ().serve(transport))
+        .await
+        .expect("handshake timed out")
+        .expect("client handshake failed");
+
+    let arguments = json!({
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.peer().call_tool(
+            CallToolRequestParams::new("chat_completion")
+                .with_arguments(arguments.as_object().cloned().unwrap()),
+        ),
+    )
+    .await
+    .expect("call timed out")
+    .expect("call failed");
+
+    assert_ne!(result.is_error, Some(true));
+    let reply = serde_json::to_string(&result).unwrap();
+    assert!(reply.contains("slow hello"), "{reply}");
 
     let _ = client.cancel().await;
 }

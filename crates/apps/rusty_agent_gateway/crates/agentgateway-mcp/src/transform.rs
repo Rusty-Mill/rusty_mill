@@ -44,7 +44,7 @@
 use agentgateway_config::HeaderModifier;
 use http::{HeaderName, HeaderValue};
 
-use crate::{guardrails::Annotations, mutating_client::HeaderOverride};
+use crate::{guardrails::Annotations, header_override::HeaderOverride};
 
 /// A header modifier value that could not be turned into a header.
 #[derive(Debug, thiserror::Error)]

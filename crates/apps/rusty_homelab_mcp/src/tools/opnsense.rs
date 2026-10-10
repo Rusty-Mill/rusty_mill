@@ -2,8 +2,7 @@
 //! aliases/rules, gateways, DHCP leases, VLANs, ARP/routing diagnostics,
 //! and config backup/restore.
 
-use rmcp::{Json, handler::server::wrapper::Parameters, model::ErrorData, tool, tool_router};
-use rusty_mcp::ToolError;
+use crate::tool_support::{ErrorData, Json, NoArgs, Parameters, ToolError, register};
 use rusty_opnsense::ServiceAction;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -143,12 +142,8 @@ pub struct RestoreBackupArgs {
     pub backup: String,
 }
 
-#[tool_router(router = opnsense_tools, vis = "pub(crate)")]
 impl HomelabServer {
     /// Firmware version, running kernel, pending updates, service health.
-    #[tool(
-        description = "Get the OPNsense firewall's overall system status: firmware version, running kernel, pending updates, and per-service health."
-    )]
     pub async fn opnsense_system_status(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -160,9 +155,6 @@ impl HomelabServer {
     }
 
     /// Every known service and its running state.
-    #[tool(
-        description = "List every service OPNsense's service supervisor knows about, with its running state and short id (used by opnsense_service_control)."
-    )]
     pub async fn opnsense_list_services(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -174,9 +166,6 @@ impl HomelabServer {
     }
 
     /// Start, stop, or restart a service.
-    #[tool(
-        description = "Start, stop, or restart a named OPNsense service. Call opnsense_list_services first to find valid service ids."
-    )]
     pub async fn opnsense_service_control(
         &self,
         Parameters(ServiceControlArgs { name, action }): Parameters<ServiceControlArgs>,
@@ -191,9 +180,6 @@ impl HomelabServer {
     }
 
     /// Every network interface OPNsense knows about.
-    #[tool(
-        description = "List every network interface OPNsense knows about, keyed by device name."
-    )]
     pub async fn opnsense_list_interfaces(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -205,9 +191,6 @@ impl HomelabServer {
     }
 
     /// Every configured firewall alias.
-    #[tool(
-        description = "List every firewall alias currently configured on OPNsense (name, type, and contents)."
-    )]
     pub async fn opnsense_list_firewall_aliases(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -219,9 +202,6 @@ impl HomelabServer {
     }
 
     /// Every configured gateway and its monitor status.
-    #[tool(
-        description = "List every configured gateway on OPNsense with its monitor status (none/loss/down) and ping latency."
-    )]
     pub async fn opnsense_list_gateways(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -233,9 +213,6 @@ impl HomelabServer {
     }
 
     /// Every configured firewall rule.
-    #[tool(
-        description = "List every firewall rule currently configured on OPNsense, with its UUID, enabled state, action, interface, direction, protocol, and source/destination. Call this to find a rule's UUID before getting, updating, deleting, or toggling it."
-    )]
     pub async fn opnsense_list_firewall_rules(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -247,9 +224,6 @@ impl HomelabServer {
     }
 
     /// One firewall rule's full field set.
-    #[tool(
-        description = "Get one OPNsense firewall rule's full field set by UUID. Call opnsense_list_firewall_rules first to find UUIDs."
-    )]
     pub async fn opnsense_get_firewall_rule(
         &self,
         Parameters(FirewallRuleUuidArgs { uuid }): Parameters<FirewallRuleUuidArgs>,
@@ -264,9 +238,6 @@ impl HomelabServer {
     }
 
     /// Create a firewall rule.
-    #[tool(
-        description = "Create a new OPNsense firewall rule. Does not take effect until opnsense_apply_firewall_changes is called."
-    )]
     pub async fn opnsense_create_firewall_rule(
         &self,
         Parameters(CreateFirewallRuleArgs { rule }): Parameters<CreateFirewallRuleArgs>,
@@ -281,9 +252,6 @@ impl HomelabServer {
     }
 
     /// Update a firewall rule.
-    #[tool(
-        description = "Update an existing OPNsense firewall rule by UUID. Does not take effect until opnsense_apply_firewall_changes is called."
-    )]
     pub async fn opnsense_update_firewall_rule(
         &self,
         Parameters(UpdateFirewallRuleArgs { uuid, rule }): Parameters<UpdateFirewallRuleArgs>,
@@ -298,9 +266,6 @@ impl HomelabServer {
     }
 
     /// Delete a firewall rule.
-    #[tool(
-        description = "Delete an OPNsense firewall rule by UUID. Does not take effect until opnsense_apply_firewall_changes is called."
-    )]
     pub async fn opnsense_delete_firewall_rule(
         &self,
         Parameters(FirewallRuleUuidArgs { uuid }): Parameters<FirewallRuleUuidArgs>,
@@ -315,9 +280,6 @@ impl HomelabServer {
     }
 
     /// Enable or disable a firewall rule.
-    #[tool(
-        description = "Enable or disable an OPNsense firewall rule by UUID, without deleting it. Pass enabled to set it explicitly, or omit it to just flip the current state. Does not take effect until opnsense_apply_firewall_changes is called."
-    )]
     pub async fn opnsense_toggle_firewall_rule(
         &self,
         Parameters(ToggleFirewallRuleArgs { uuid, enabled }): Parameters<ToggleFirewallRuleArgs>,
@@ -332,9 +294,6 @@ impl HomelabServer {
     }
 
     /// Apply pending firewall changes.
-    #[tool(
-        description = "Apply pending OPNsense firewall changes (reloads the live ruleset). Call this after opnsense_create_firewall_rule, opnsense_update_firewall_rule, opnsense_delete_firewall_rule, or opnsense_toggle_firewall_rule -- none of those take effect on their own."
-    )]
     pub async fn opnsense_apply_firewall_changes(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -346,9 +305,6 @@ impl HomelabServer {
     }
 
     /// Every current DHCP lease.
-    #[tool(
-        description = "List every current DHCP lease on OPNsense: IP address, MAC address, hostname, and lease state. Answers \"what's on my network right now\"."
-    )]
     pub async fn opnsense_list_dhcp_leases(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -360,9 +316,6 @@ impl HomelabServer {
     }
 
     /// Every configured VLAN.
-    #[tool(
-        description = "List every VLAN interface currently configured on OPNsense, with its UUID, parent interface, and tag. Call this to find a VLAN's UUID before getting, updating, or deleting it."
-    )]
     pub async fn opnsense_list_vlans(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -374,9 +327,6 @@ impl HomelabServer {
     }
 
     /// One VLAN's full field set.
-    #[tool(
-        description = "Get one OPNsense VLAN's full field set by UUID. Call opnsense_list_vlans first to find UUIDs."
-    )]
     pub async fn opnsense_get_vlan(
         &self,
         Parameters(VlanUuidArgs { uuid }): Parameters<VlanUuidArgs>,
@@ -391,9 +341,6 @@ impl HomelabServer {
     }
 
     /// Create a VLAN.
-    #[tool(
-        description = "Create a new VLAN interface on OPNsense. Does not take effect until opnsense_apply_vlan_changes is called."
-    )]
     pub async fn opnsense_create_vlan(
         &self,
         Parameters(CreateVlanArgs { vlan }): Parameters<CreateVlanArgs>,
@@ -408,9 +355,6 @@ impl HomelabServer {
     }
 
     /// Update a VLAN.
-    #[tool(
-        description = "Update an existing OPNsense VLAN by UUID. Does not take effect until opnsense_apply_vlan_changes is called."
-    )]
     pub async fn opnsense_update_vlan(
         &self,
         Parameters(UpdateVlanArgs { uuid, vlan }): Parameters<UpdateVlanArgs>,
@@ -425,9 +369,6 @@ impl HomelabServer {
     }
 
     /// Delete a VLAN.
-    #[tool(
-        description = "Delete an OPNsense VLAN by UUID. Does not take effect until opnsense_apply_vlan_changes is called."
-    )]
     pub async fn opnsense_delete_vlan(
         &self,
         Parameters(VlanUuidArgs { uuid }): Parameters<VlanUuidArgs>,
@@ -442,9 +383,6 @@ impl HomelabServer {
     }
 
     /// Apply pending VLAN changes.
-    #[tool(
-        description = "Apply pending OPNsense VLAN changes. Call this after opnsense_create_vlan, opnsense_update_vlan, or opnsense_delete_vlan -- none of those take effect on their own."
-    )]
     pub async fn opnsense_apply_vlan_changes(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -456,9 +394,6 @@ impl HomelabServer {
     }
 
     /// The current ARP table.
-    #[tool(
-        description = "List OPNsense's current ARP table: IP address, MAC address, hostname (if known), and interface for every neighbor it has resolved."
-    )]
     pub async fn opnsense_list_arp_entries(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -470,9 +405,6 @@ impl HomelabServer {
     }
 
     /// The system routing table.
-    #[tool(
-        description = "List OPNsense's system routing table (the same information `netstat -rn` shows on the firewall itself)."
-    )]
     pub async fn opnsense_list_routes(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -484,9 +416,6 @@ impl HomelabServer {
     }
 
     /// Every configured backup provider.
-    #[tool(
-        description = "List every configured OPNsense backup provider. Every install has at least `this` (the firewall's own local config history); more appear if a remote provider (Nextcloud, Google Drive, ...) is configured."
-    )]
     pub async fn opnsense_list_backup_providers(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
@@ -498,9 +427,6 @@ impl HomelabServer {
     }
 
     /// Every backup available from one provider.
-    #[tool(
-        description = "List every backup available from one OPNsense backup provider (host). Call opnsense_list_backup_providers first to find provider ids."
-    )]
     pub async fn opnsense_list_backups(
         &self,
         Parameters(BackupHostArgs { host }): Parameters<BackupHostArgs>,
@@ -515,9 +441,6 @@ impl HomelabServer {
     }
 
     /// One backup's raw config.xml content.
-    #[tool(
-        description = "Download one OPNsense backup's raw config.xml content, or the current running config if no backup is named. Call opnsense_list_backups first to find backup names."
-    )]
     pub async fn opnsense_download_backup(
         &self,
         Parameters(DownloadBackupArgs { host, backup }): Parameters<DownloadBackupArgs>,
@@ -529,9 +452,6 @@ impl HomelabServer {
     }
 
     /// Revert to a previous backup.
-    #[tool(
-        description = "Revert OPNsense's running configuration to a previous backup. Takes effect immediately -- OPNsense reloads its configuration as part of this call, there's no separate apply step. Call opnsense_list_backups first to find backup names."
-    )]
     pub async fn opnsense_restore_backup(
         &self,
         Parameters(RestoreBackupArgs { backup }): Parameters<RestoreBackupArgs>,
@@ -550,4 +470,220 @@ impl HomelabServer {
 /// reason about (bad service name, expired key, unreachable host, ...).
 fn opnsense_error(err: rusty_opnsense::Error) -> ErrorData {
     ToolError::failed(err.to_string()).into()
+}
+
+/// Offer every tool of this module on `builder`.
+pub(crate) fn register_tools(
+    builder: rusty_mcp_server::ServerBuilder,
+    server: &HomelabServer,
+    rt: &tokio::runtime::Handle,
+) -> rusty_mcp_server::ServerBuilder {
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_system_status",
+        "Get the OPNsense firewall's overall system status: firmware version, running kernel, pending updates, and per-service health.",
+        |s, _a| async move { s.opnsense_system_status().await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_services",
+        "List every service OPNsense's service supervisor knows about, with its running state and short id (used by opnsense_service_control).",
+        |s, _a| async move { s.opnsense_list_services().await },
+    );
+    let builder = register::<ServiceControlArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_service_control",
+        "Start, stop, or restart a named OPNsense service. Call opnsense_list_services first to find valid service ids.",
+        |s, a| async move { s.opnsense_service_control(Parameters(a)).await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_interfaces",
+        "List every network interface OPNsense knows about, keyed by device name.",
+        |s, _a| async move { s.opnsense_list_interfaces().await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_firewall_aliases",
+        "List every firewall alias currently configured on OPNsense (name, type, and contents).",
+        |s, _a| async move { s.opnsense_list_firewall_aliases().await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_gateways",
+        "List every configured gateway on OPNsense with its monitor status (none/loss/down) and ping latency.",
+        |s, _a| async move { s.opnsense_list_gateways().await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_firewall_rules",
+        "List every firewall rule currently configured on OPNsense, with its UUID, enabled state, action, interface, direction, protocol, and source/destination. Call this to find a rule's UUID before getting, updating, deleting, or toggling it.",
+        |s, _a| async move { s.opnsense_list_firewall_rules().await },
+    );
+    let builder = register::<FirewallRuleUuidArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_get_firewall_rule",
+        "Get one OPNsense firewall rule's full field set by UUID. Call opnsense_list_firewall_rules first to find UUIDs.",
+        |s, a| async move { s.opnsense_get_firewall_rule(Parameters(a)).await },
+    );
+    let builder = register::<CreateFirewallRuleArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_create_firewall_rule",
+        "Create a new OPNsense firewall rule. Does not take effect until opnsense_apply_firewall_changes is called.",
+        |s, a| async move { s.opnsense_create_firewall_rule(Parameters(a)).await },
+    );
+    let builder = register::<UpdateFirewallRuleArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_update_firewall_rule",
+        "Update an existing OPNsense firewall rule by UUID. Does not take effect until opnsense_apply_firewall_changes is called.",
+        |s, a| async move { s.opnsense_update_firewall_rule(Parameters(a)).await },
+    );
+    let builder = register::<FirewallRuleUuidArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_delete_firewall_rule",
+        "Delete an OPNsense firewall rule by UUID. Does not take effect until opnsense_apply_firewall_changes is called.",
+        |s, a| async move { s.opnsense_delete_firewall_rule(Parameters(a)).await },
+    );
+    let builder = register::<ToggleFirewallRuleArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_toggle_firewall_rule",
+        "Enable or disable an OPNsense firewall rule by UUID, without deleting it. Pass enabled to set it explicitly, or omit it to just flip the current state. Does not take effect until opnsense_apply_firewall_changes is called.",
+        |s, a| async move { s.opnsense_toggle_firewall_rule(Parameters(a)).await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_apply_firewall_changes",
+        "Apply pending OPNsense firewall changes (reloads the live ruleset). Call this after opnsense_create_firewall_rule, opnsense_update_firewall_rule, opnsense_delete_firewall_rule, or opnsense_toggle_firewall_rule -- none of those take effect on their own.",
+        |s, _a| async move { s.opnsense_apply_firewall_changes().await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_dhcp_leases",
+        "List every current DHCP lease on OPNsense: IP address, MAC address, hostname, and lease state. Answers \"what's on my network right now\".",
+        |s, _a| async move { s.opnsense_list_dhcp_leases().await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_vlans",
+        "List every VLAN interface currently configured on OPNsense, with its UUID, parent interface, and tag. Call this to find a VLAN's UUID before getting, updating, or deleting it.",
+        |s, _a| async move { s.opnsense_list_vlans().await },
+    );
+    let builder = register::<VlanUuidArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_get_vlan",
+        "Get one OPNsense VLAN's full field set by UUID. Call opnsense_list_vlans first to find UUIDs.",
+        |s, a| async move { s.opnsense_get_vlan(Parameters(a)).await },
+    );
+    let builder = register::<CreateVlanArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_create_vlan",
+        "Create a new VLAN interface on OPNsense. Does not take effect until opnsense_apply_vlan_changes is called.",
+        |s, a| async move { s.opnsense_create_vlan(Parameters(a)).await },
+    );
+    let builder = register::<UpdateVlanArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_update_vlan",
+        "Update an existing OPNsense VLAN by UUID. Does not take effect until opnsense_apply_vlan_changes is called.",
+        |s, a| async move { s.opnsense_update_vlan(Parameters(a)).await },
+    );
+    let builder = register::<VlanUuidArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_delete_vlan",
+        "Delete an OPNsense VLAN by UUID. Does not take effect until opnsense_apply_vlan_changes is called.",
+        |s, a| async move { s.opnsense_delete_vlan(Parameters(a)).await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_apply_vlan_changes",
+        "Apply pending OPNsense VLAN changes. Call this after opnsense_create_vlan, opnsense_update_vlan, or opnsense_delete_vlan -- none of those take effect on their own.",
+        |s, _a| async move { s.opnsense_apply_vlan_changes().await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_arp_entries",
+        "List OPNsense's current ARP table: IP address, MAC address, hostname (if known), and interface for every neighbor it has resolved.",
+        |s, _a| async move { s.opnsense_list_arp_entries().await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_routes",
+        "List OPNsense's system routing table (the same information `netstat -rn` shows on the firewall itself).",
+        |s, _a| async move { s.opnsense_list_routes().await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_backup_providers",
+        "List every configured OPNsense backup provider. Every install has at least `this` (the firewall's own local config history); more appear if a remote provider (Nextcloud, Google Drive, ...) is configured.",
+        |s, _a| async move { s.opnsense_list_backup_providers().await },
+    );
+    let builder = register::<BackupHostArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_list_backups",
+        "List every backup available from one OPNsense backup provider (host). Call opnsense_list_backup_providers first to find provider ids.",
+        |s, a| async move { s.opnsense_list_backups(Parameters(a)).await },
+    );
+    let builder = register::<DownloadBackupArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_download_backup",
+        "Download one OPNsense backup's raw config.xml content, or the current running config if no backup is named. Call opnsense_list_backups first to find backup names.",
+        |s, a| async move { s.opnsense_download_backup(Parameters(a)).await },
+    );
+    register::<RestoreBackupArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "opnsense_restore_backup",
+        "Revert OPNsense's running configuration to a previous backup. Takes effect immediately -- OPNsense reloads its configuration as part of this call, there's no separate apply step. Call opnsense_list_backups first to find backup names.",
+        |s, a| async move { s.opnsense_restore_backup(Parameters(a)).await },
+    )
 }

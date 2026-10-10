@@ -1,33 +1,30 @@
-//! The server handler: the two backend clients plus the composed tool
-//! router.
+//! The server: the three backend clients, registered as MCP tools.
 
-use rmcp::{
-    ServerHandler,
-    handler::server::router::tool::ToolRouter,
-    model::{ErrorData, ServerCapabilities, ServerInfo},
-    tool_handler,
-};
+use std::sync::Arc;
+
 use rusty_fedora::FedoraAgentClient;
-use rusty_mcp::ToolError;
+use rusty_mcp_server::{BuildError, Server};
 use rusty_opnsense::OpnsenseClient;
 use rusty_proxmox::ProxmoxClient;
+use tokio::runtime::Handle;
 
 use crate::hosts::FedoraHosts;
+use crate::tool_support::{ErrorData, ToolError};
+use crate::tools;
 
-/// The MCP server handler for `rusty_homelab_mcp`.
+/// The MCP server for `rusty_homelab_mcp`.
 ///
 /// Holds the three backends: Proxmox and OPNsense are each `None` if
 /// their flags weren't set at startup, and Fedora is a
 /// [`FedoraHosts`] registry that's empty in the same case (see
 /// [`crate::config::HomelabCli`]). Cheap to clone: every client shares
 /// its own connection pool underneath, so cloning this only clones the
-/// `Option`/registry wrappers and the tool router.
+/// `Option`/registry wrappers.
 #[derive(Clone)]
 pub struct HomelabServer {
     proxmox: Option<ProxmoxClient>,
     opnsense: Option<OpnsenseClient>,
     fedora: FedoraHosts,
-    tool_router: ToolRouter<Self>,
 }
 
 impl HomelabServer {
@@ -42,11 +39,24 @@ impl HomelabServer {
             proxmox,
             opnsense,
             fedora,
-            // Each backend contributes its own router; `+` merges them.
-            // Adding a fourth backend (Home Assistant, UniFi, ...) is one
-            // more module and one more term here.
-            tool_router: Self::proxmox_tools() + Self::opnsense_tools() + Self::fedora_tools(),
         }
+    }
+
+    /// The `rusty_mcp_server` description of this server: every tool of every
+    /// backend, run on `rt`. Every tool is always listed regardless of what is
+    /// configured.
+    ///
+    /// # Errors
+    /// If the assembled description is invalid (a duplicate tool name).
+    pub fn wire_server(&self, rt: &Handle) -> Result<Arc<Server>, BuildError> {
+        let builder = Server::builder(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+            .instructions(self.instructions());
+        // Each backend registers its own tools; a fourth backend is one more
+        // module and one more call here.
+        let builder = tools::proxmox::register_tools(builder, self, rt);
+        let builder = tools::opnsense::register_tools(builder, self, rt);
+        let builder = tools::fedora::register_tools(builder, self, rt);
+        Ok(Arc::new(builder.build()?))
     }
 
     /// The configured Proxmox client, or a protocol error naming the flags
@@ -127,19 +137,5 @@ impl HomelabServer {
              host ids are known, rather than failing silently or omitting the \
              tool."
         )
-    }
-}
-
-#[tool_handler(router = self.tool_router)]
-impl ServerHandler for HomelabServer {
-    fn get_info(&self) -> ServerInfo {
-        // `rusty_mcp::server_info` pins the advertised revision to 2026-07-28;
-        // `ServerInfo::new` alone would still advertise 2025-11-25.
-        rusty_mcp::server_info(
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION"),
-            ServerCapabilities::builder().enable_tools().build(),
-        )
-        .with_instructions(self.instructions())
     }
 }

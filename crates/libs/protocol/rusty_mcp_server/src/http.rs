@@ -1,0 +1,1108 @@
+//! The Streamable HTTP transport on `rusty_serve`, stateless: no session
+//! ids, nothing kept between POSTs. Every `POST` carries one JSON-RPC
+//! message and is served by a connection of its own, so any number of
+//! server instances can sit behind a plain load balancer.
+//!
+//! Which protocol revision a request speaks comes from, in order: its
+//! `_meta` (2026-07-28), the `MCP-Protocol-Version` header (2025-06-18 and
+//! later, so classic clients that `initialize` once and then send the header
+//! work without sessions), and `2025-03-26` when neither is present.
+//!
+//! A reply is plain JSON when the tool answers within
+//! [`HttpConfig::sse_after`] and sent no progress; otherwise it is a
+//! `text/event-stream` carrying the progress notifications and the final
+//! response, with a keep-alive comment every [`HttpConfig::keep_alive`]. A
+//! client that hangs up mid-stream cancels the request.
+//!
+//! **Sessions** (classic `initialize` only). The reply to `initialize`
+//! carries an `Mcp-Session-Id`; a client that echoes it can cancel with a
+//! `notifications/cancelled` POST, which is matched to the request running
+//! under that session, and can end the session with `DELETE`. An unknown or
+//! ended id is answered `404`, as the spec requires. A session holds only the
+//! negotiated revision and the cancel flags of its running requests, so
+//! nothing else is kept between POSTs, and a client that never sends the id
+//! is served exactly as before (it just cannot cancel by notification).
+//! 2026-07-28 requests are stateless and never get or use a session.
+//! [`HttpConfig::max_sessions`] of `0` turns sessions off.
+//!
+//! **Resumable replies** (off unless [`HttpConfig::resume_buffer`] is set; see
+//! `replay.rs`). Every answer to a request is an event stream opening with a
+//! priming event, each frame has an id, and `GET` with `Last-Event-ID` and no
+//! session replays what the client missed and follows the stream live. The
+//! request keeps running when the connection drops and is cancelled only if
+//! no reader returns within [`HttpConfig::resume_grace`].
+//!
+//! **Push.** A classic session can open the standalone server-to-client stream
+//! with `GET` (`Accept: text/event-stream`, `Mcp-Session-Id`): list changes and
+//! updates to resources followed with `resources/subscribe` arrive on it, with
+//! event ids and `Last-Event-ID` resumption (details in `push.rs`). `GET` is
+//! `405` where there is nothing to push: sessions off, or a server that
+//! announces no changes.
+
+use crate::changes::ChangeKinds;
+use crate::connection::{Caller, CancelToken, Connection, Notifier, Started};
+use crate::push::Push;
+use crate::replay::{Replay, Shared};
+use crate::server::Server;
+use rusty_base64::decode_standard;
+use rusty_http::{Method, StatusCode};
+use rusty_json::Value;
+use rusty_mcp_proto::lifecycle::InitializeParams;
+use rusty_mcp_proto::{
+    CancelledParams, ClientCapabilities, ErrorCode, ErrorData, Implementation, Message,
+    ProtocolVersion, RequestId, RequestMeta, Wire,
+};
+use rusty_serve::{HeaderMap, Limits, Request, Response, SharedHandler};
+use std::collections::{HashMap, VecDeque};
+use std::io;
+use std::net::SocketAddr;
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+/// The revision assumed when a request names none, per the 2025-06-18 spec.
+const FALLBACK_VERSION: &str = ProtocolVersion::V_2025_03_26;
+
+/// The `Mcp-Name` sentinel for a value that is not safe as a header.
+const BASE64_PREFIX: &str = "=?base64?";
+const BASE64_SUFFIX: &str = "?=";
+
+/// What the transport accepts and how it answers.
+#[derive(Clone, Debug)]
+pub struct HttpConfig {
+    /// The one path that serves MCP. Default `/mcp`.
+    pub path: String,
+    /// `Host` values accepted, with or without a port; empty accepts any.
+    /// The default is loopback only, which with the `Origin` rule below is
+    /// what keeps a web page from reaching a local server (DNS rebinding).
+    /// An empty list accepts any `Host`, for a host that routes by name
+    /// itself.
+    pub allowed_hosts: Vec<String>,
+    /// `Origin` values accepted, or `"*"` for any (a host that decides who may
+    /// call from a browser in front of this, with CORS, say). A request with
+    /// no `Origin` (every non-browser client) is accepted; one with an
+    /// `Origin` that is not listed here is refused, so the default of none
+    /// refuses all browsers.
+    pub allowed_origins: Vec<String>,
+    /// How long a call may run before its reply switches from plain JSON to
+    /// an event stream. Default 250 ms.
+    pub sse_after: Duration,
+    /// Interval of the keep-alive comment on an event stream, which is also
+    /// how a vanished client is noticed. Default 15 s.
+    pub keep_alive: Duration,
+    /// Most classic sessions open at once; `0` issues no session ids. When
+    /// full, `initialize` is refused with `503` until one ends or goes idle.
+    /// Default 1024.
+    pub max_sessions: usize,
+    /// A session unused for this long is forgotten. Default one hour.
+    pub session_idle: Duration,
+    /// Bytes of reply kept so a dropped connection can be resumed; `0` (the
+    /// default) keeps nothing. When set, every answer to a request is an
+    /// event stream opening with a priming event, and `GET` with
+    /// `Last-Event-ID` and no session replays the missed frames (see
+    /// `replay.rs`). Memory use is bounded by this plus the newest frame of
+    /// each running reply, which is never released (so a reply larger than
+    /// the buffer is still delivered whole, but cannot be resumed).
+    pub resume_buffer: usize,
+    /// With resumption on: how long a running request whose connection
+    /// dropped waits for a resume before it is cancelled. Default 30 s.
+    pub resume_grace: Duration,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            path: "/mcp".to_owned(),
+            allowed_hosts: ["localhost", "127.0.0.1", "::1"].map(String::from).to_vec(),
+            allowed_origins: Vec::new(),
+            sse_after: Duration::from_millis(250),
+            keep_alive: Duration::from_secs(15),
+            max_sessions: 1024,
+            session_idle: Duration::from_secs(3600),
+            resume_buffer: 0,
+            resume_grace: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Bind `server` to `addr` over Streamable HTTP; run the result with
+/// `.run()`. Each open event stream and each running call holds a
+/// connection thread, so size `limits.max_connections` for the concurrency
+/// wanted. TLS is not terminated here: front it with a proxy for anything
+/// beyond loopback.
+///
+/// # Errors
+/// The bind error, if the address is taken or not allowed.
+pub fn bind_http(
+    server: Arc<Server>,
+    addr: SocketAddr,
+    config: HttpConfig,
+    limits: Limits,
+) -> io::Result<rusty_serve::Server> {
+    Ok(
+        rusty_serve::Server::bind_shared(addr, HttpHandler::new(server, config))?
+            .with_limits(limits),
+    )
+}
+
+/// The HTTP face of a [`Server`], as a `rusty_serve` handler. Use it to mount
+/// MCP in a server that also serves other routes; [`bind_http`] covers the
+/// usual case.
+pub struct HttpHandler {
+    server: Arc<Server>,
+    config: HttpConfig,
+    sessions: Sessions,
+    replay: Option<Replay>,
+}
+
+impl HttpHandler {
+    /// Serve `server` per `config`.
+    pub fn new(server: Arc<Server>, config: HttpConfig) -> Self {
+        let replay = (config.resume_buffer > 0)
+            .then(|| Replay::new(config.resume_buffer, config.resume_grace));
+        Self {
+            server,
+            config,
+            sessions: Sessions::default(),
+            replay,
+        }
+    }
+}
+
+impl HttpHandler {
+    /// Answer `request`, telling handlers who sent it: `principal` is what
+    /// the host's own authentication established (token claims), as JSON.
+    /// Handlers read it, with the request's headers, from
+    /// [`CallContext::caller`](crate::CallContext::caller).
+    pub fn handle_with(&self, request: &Request<'_>, principal: Option<Value>) -> Response {
+        let caller = Caller {
+            headers: request
+                .headers
+                .iter()
+                .map(|(n, v)| (n.to_ascii_lowercase(), v.to_owned()))
+                .collect(),
+            principal,
+        };
+        self.respond(request, caller)
+            .unwrap_or_else(|rejection| rejection)
+    }
+}
+
+impl SharedHandler for HttpHandler {
+    fn handle(&self, request: &Request<'_>) -> Response {
+        self.handle_with(request, None)
+    }
+}
+
+/// A plain-JSON reply under a status.
+fn json_reply(status: StatusCode, message: &Message) -> Response {
+    Response::json(status, message.to_json().into_bytes())
+}
+
+/// An HTTP-level refusal, shaped as a JSON-RPC error with no id.
+fn reject(status: StatusCode, code: ErrorCode, why: impl Into<String>) -> Response {
+    json_reply(status, &Message::error(None, ErrorData::new(code, why)))
+}
+
+fn reject_for(
+    id: Option<rusty_mcp_proto::RequestId>,
+    status: StatusCode,
+    code: ErrorCode,
+    why: impl Into<String>,
+) -> Response {
+    json_reply(status, &Message::error(id, ErrorData::new(code, why)))
+}
+
+/// `host` or `[v6]` plus an optional `:port`, reduced to the bare host.
+fn host_only(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) && !name.contains(':') => {
+            name
+        }
+        _ => host,
+    }
+}
+
+fn host_allowed(host: &str, allowed: &[String]) -> bool {
+    allowed.is_empty()
+        || allowed
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(host) || a.eq_ignore_ascii_case(host_only(host)))
+}
+
+/// An `Mcp-Name` value, undoing the `=?base64?...?=` wrapper.
+fn decode_header_value(raw: &str) -> Option<String> {
+    match raw
+        .strip_prefix(BASE64_PREFIX)
+        .and_then(|r| r.strip_suffix(BASE64_SUFFIX))
+    {
+        Some(encoded) => String::from_utf8(decode_standard(encoded).ok()?).ok(),
+        None => Some(raw.to_owned()),
+    }
+}
+
+/// The value `Mcp-Name` must carry for `method`, from its parameters.
+fn expected_name(method: &str, params: Option<&Value>) -> Option<String> {
+    let key = match method {
+        "tools/call" | "prompts/get" => "name",
+        "resources/read" | "resources/subscribe" | "resources/unsubscribe" => "uri",
+        "tasks/get" | "tasks/update" | "tasks/cancel" => "taskId",
+        _ => return None,
+    };
+    params?.get(key)?.as_str().map(str::to_owned)
+}
+
+/// 2026-07-28 requires `Mcp-Method` (and `Mcp-Name` where the method has
+/// one) to agree with the body, so a proxy can route without parsing it.
+fn check_standard_headers(
+    headers: &HeaderMap,
+    method: &str,
+    params: Option<&Value>,
+) -> Result<(), String> {
+    match headers.get("mcp-method") {
+        None => return Err("missing required Mcp-Method header".to_owned()),
+        Some(h) if h != method => {
+            return Err(format!(
+                "Mcp-Method header `{h}` does not match body method `{method}`"
+            ));
+        }
+        Some(_) => {}
+    }
+    let Some(expected) = expected_name(method, params) else {
+        return Ok(());
+    };
+    let raw = headers
+        .get("mcp-name")
+        .ok_or_else(|| format!("missing required Mcp-Name header for `{method}`"))?;
+    let decoded = decode_header_value(raw).ok_or("Mcp-Name header is not valid Base64")?;
+    if decoded == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "Mcp-Name header `{decoded}` does not match body value `{expected}`"
+        ))
+    }
+}
+
+/// Modern (stateless) requests get HTTP statuses that mirror the error;
+/// classic ones keep HTTP 200 for every JSON-RPC answer.
+fn status_of(modern: bool, reply: &Message) -> StatusCode {
+    let Message::Error { error, .. } = reply else {
+        return StatusCode::OK;
+    };
+    if !modern {
+        return StatusCode::OK;
+    }
+    match error.code {
+        ErrorCode::UNSUPPORTED_PROTOCOL_VERSION
+        | ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY
+        | ErrorCode::INVALID_PARAMS => StatusCode::BAD_REQUEST,
+        ErrorCode::METHOD_NOT_FOUND => StatusCode::NOT_FOUND,
+        _ => StatusCode::OK,
+    }
+}
+
+/// The `Mcp-Session-Id` header.
+const SESSION_HEADER: &str = "Mcp-Session-Id";
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    // The guarded maps stay valid if a holder panicked.
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What a classic session remembers: its revision and the cancel flags of
+/// the requests running under it.
+struct Session {
+    version: ProtocolVersion,
+    client_info: Option<Implementation>,
+    client_capabilities: Option<ClientCapabilities>,
+    push: Arc<Push>,
+    inflight: Mutex<HashMap<RequestId, CancelToken>>,
+    last_used: Mutex<Instant>,
+}
+
+impl Session {
+    fn touch(&self) {
+        *lock(&self.last_used) = Instant::now();
+    }
+
+    fn idle_for(&self) -> Duration {
+        lock(&self.last_used).elapsed()
+    }
+
+    fn cancel(&self, id: &RequestId) {
+        if let Some(token) = lock(&self.inflight).get(id) {
+            token.cancel();
+        }
+    }
+
+    fn cancel_all(&self) {
+        for token in lock(&self.inflight).values() {
+            token.cancel();
+        }
+    }
+}
+
+/// Removes a request from its session when the request ends, however it ends.
+struct Registered {
+    session: Arc<Session>,
+    id: RequestId,
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        lock(&self.session.inflight).remove(&self.id);
+    }
+}
+
+#[derive(Default)]
+struct Sessions(Mutex<HashMap<String, Arc<Session>>>);
+
+/// Why a session could not be opened.
+enum OpenError {
+    Full,
+    NoRandom,
+}
+
+impl Sessions {
+    /// The live session `id`, refreshed; `None` if unknown or idle too long.
+    fn get(&self, id: &str, idle: Duration) -> Option<Arc<Session>> {
+        let mut map = lock(&self.0);
+        let session = map.get(id)?;
+        if session.idle_for() > idle {
+            map.remove(id);
+            return None;
+        }
+        session.touch();
+        Some(Arc::clone(session))
+    }
+
+    fn open(
+        &self,
+        version: ProtocolVersion,
+        client: Option<InitializeParams>,
+        push: Arc<Push>,
+        max: usize,
+        idle: Duration,
+    ) -> Result<(String, Arc<Session>), OpenError> {
+        let mut map = lock(&self.0);
+        if map.len() >= max {
+            map.retain(|_, s| s.idle_for() <= idle);
+        }
+        if map.len() >= max {
+            return Err(OpenError::Full);
+        }
+        let mut raw = [0u8; 16];
+        rusty_rand::fill(&mut raw).map_err(|_| OpenError::NoRandom)?;
+        let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let (client_info, client_capabilities) = match client {
+            Some(p) => (Some(p.client_info), Some(p.capabilities)),
+            None => (None, None),
+        };
+        let session = Arc::new(Session {
+            version,
+            client_info,
+            client_capabilities,
+            push,
+            inflight: Mutex::new(HashMap::new()),
+            last_used: Mutex::new(Instant::now()),
+        });
+        map.insert(id.clone(), Arc::clone(&session));
+        Ok((id, session))
+    }
+
+    fn end(&self, id: &str) -> Option<Arc<Session>> {
+        lock(&self.0).remove(id)
+    }
+}
+
+/// What the worker thread reports back to the thread holding the socket.
+enum Event {
+    Note(Message),
+    Done(Option<Message>),
+}
+
+struct EventNotifier(Sender<Event>);
+
+impl Notifier for EventNotifier {
+    fn notify(&self, message: Message) {
+        // The receiver is gone once the response ended; nothing to tell.
+        let _ = self.0.send(Event::Note(message));
+    }
+}
+
+fn frame(message: &Message) -> Vec<u8> {
+    format!("event: message\ndata: {}\n\n", message.to_json()).into_bytes()
+}
+
+/// The body of an event-stream reply. Ends after the final response, or
+/// when the worker has nothing more to say; cancels the request if it is
+/// dropped first, which is what a client hanging up looks like.
+struct SseStream {
+    ready: VecDeque<Vec<u8>>,
+    events: Receiver<Event>,
+    keep_alive: Duration,
+    cancel: CancelToken,
+    finished: bool,
+}
+
+impl Iterator for SseStream {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        if let Some(chunk) = self.ready.pop_front() {
+            return Some(chunk);
+        }
+        if self.finished {
+            return None;
+        }
+        match self.events.recv_timeout(self.keep_alive) {
+            Ok(Event::Note(m)) => Some(frame(&m)),
+            Ok(Event::Done(Some(m))) => {
+                self.finished = true;
+                Some(frame(&m))
+            }
+            Ok(Event::Done(None)) | Err(RecvTimeoutError::Disconnected) => {
+                self.finished = true;
+                None
+            }
+            Err(RecvTimeoutError::Timeout) => Some(b": ping\n\n".to_vec()),
+        }
+    }
+}
+
+impl Drop for SseStream {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancel.cancel();
+        }
+    }
+}
+
+impl HttpHandler {
+    fn respond(&self, request: &Request<'_>, caller: Caller) -> Result<Response, Response> {
+        let path = request.target.split('?').next().unwrap_or("");
+        if path != self.config.path {
+            return Err(reject(
+                StatusCode::NOT_FOUND,
+                ErrorCode::INVALID_REQUEST,
+                "not found",
+            ));
+        }
+        if request.method == &Method::Delete {
+            self.check_origin(request.headers)?;
+            return self.end_session(request.headers);
+        }
+        if request.method == &Method::Get {
+            self.check_origin(request.headers)?;
+            return self.open_push_stream(request.headers);
+        }
+        if request.method != &Method::Post {
+            let mut refusal = reject(
+                StatusCode::METHOD_NOT_ALLOWED,
+                ErrorCode::INVALID_REQUEST,
+                "this server accepts GET, POST and DELETE only",
+            );
+            let _ = refusal.headers.insert("Allow", "GET, POST, DELETE");
+            return Err(refusal);
+        }
+        self.check_origin(request.headers)?;
+        let headers = request.headers;
+        let accept = headers.get("accept").unwrap_or("");
+        if !(accept.contains("application/json") && accept.contains("text/event-stream")) {
+            return Err(reject(
+                StatusCode::NOT_ACCEPTABLE,
+                ErrorCode::INVALID_REQUEST,
+                "the client must accept both application/json and text/event-stream",
+            ));
+        }
+        if !headers
+            .get("content-type")
+            .is_some_and(|c| c.starts_with("application/json"))
+        {
+            return Err(reject(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                ErrorCode::INVALID_REQUEST,
+                "Content-Type must be application/json",
+            ));
+        }
+        let header_version = self.header_version(headers)?;
+        let message = parse_body(request.body)?;
+        let looked_up = self.session_of(headers);
+        let has_session = matches!(looked_up, Ok(Some(_)));
+        let modern =
+            self.check_version_rules(headers, header_version.as_ref(), &message, has_session)?;
+        // 2026-07-28 `_meta` requests are stateless: any session id is ignored.
+        let session = if modern { None } else { looked_up? };
+        self.dispatch(message, header_version, modern, session, caller)
+    }
+
+    /// The session a request names, refused with `404` when it is unknown or
+    /// ended (the spec's cue for a client to start over).
+    fn session_of(&self, headers: &HeaderMap) -> Result<Option<Arc<Session>>, Response> {
+        let Some(id) = headers.get("mcp-session-id") else {
+            return Ok(None);
+        };
+        self.sessions
+            .get(id, self.config.session_idle)
+            .map(Some)
+            .ok_or_else(|| {
+                reject(
+                    StatusCode::NOT_FOUND,
+                    ErrorCode::INVALID_REQUEST,
+                    "unknown or ended session",
+                )
+            })
+    }
+
+    /// `GET`: the standalone stream of the session's own notifications.
+    /// `405` where there is nothing to push (no sessions, or a server that
+    /// announces no changes), as the spec allows.
+    fn open_push_stream(&self, headers: &HeaderMap) -> Result<Response, Response> {
+        if let (Some(replay), Some(id)) = (&self.replay, headers.get("last-event-id")) {
+            if id.starts_with('s') {
+                return self.resume(replay, headers, id);
+            }
+        }
+        let not_offered = || {
+            let mut r = reject(
+                StatusCode::METHOD_NOT_ALLOWED,
+                ErrorCode::INVALID_REQUEST,
+                "this server has no standalone stream",
+            );
+            let _ = r.headers.insert("Allow", "POST, DELETE");
+            r
+        };
+        if self.config.max_sessions == 0 || self.server.changes.is_none() {
+            return Err(not_offered());
+        }
+        if !headers
+            .get("accept")
+            .is_some_and(|a| a.contains("text/event-stream"))
+        {
+            return Err(reject(
+                StatusCode::NOT_ACCEPTABLE,
+                ErrorCode::INVALID_REQUEST,
+                "the client must accept text/event-stream",
+            ));
+        }
+        if headers.get("mcp-session-id").is_none() {
+            return Err(reject(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                "the stream needs an Mcp-Session-Id header",
+            ));
+        }
+        let Some(session) = self.session_of(headers)? else {
+            return Err(not_offered());
+        };
+        let last = headers
+            .get("last-event-id")
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let touched = Arc::clone(&session);
+        let stream = session.push.attach(
+            last,
+            self.config.keep_alive,
+            Box::new(move || touched.touch()),
+        );
+        Ok(Response::stream("text/event-stream", stream))
+    }
+
+    /// `GET` with the id of an event of a resumable reply: the frames after
+    /// it, then the rest of the stream as it happens.
+    fn resume(&self, replay: &Replay, headers: &HeaderMap, id: &str) -> Result<Response, Response> {
+        if !headers
+            .get("accept")
+            .is_some_and(|a| a.contains("text/event-stream"))
+        {
+            return Err(reject(
+                StatusCode::NOT_ACCEPTABLE,
+                ErrorCode::INVALID_REQUEST,
+                "the client must accept text/event-stream",
+            ));
+        }
+        let Some((shared, n)) = replay.find(id) else {
+            return Err(reject(
+                StatusCode::NOT_FOUND,
+                ErrorCode::INVALID_REQUEST,
+                "unknown or expired stream",
+            ));
+        };
+        Ok(Response::stream(
+            "text/event-stream",
+            shared.reader(n + 1, self.config.keep_alive),
+        ))
+    }
+
+    /// An answer that is already known, as a resumable event stream.
+    fn replayed(&self, replay: &Replay, reply: &Message) -> Result<Response, Response> {
+        let shared = self.start_replay(replay)?;
+        shared.push(reply);
+        shared.finish();
+        Ok(self.replay_response(&shared))
+    }
+
+    fn start_replay(&self, replay: &Replay) -> Result<Arc<Shared>, Response> {
+        replay.start().ok_or_else(|| {
+            reject(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::INTERNAL_ERROR,
+                "could not make a stream id",
+            )
+        })
+    }
+
+    fn replay_response(&self, shared: &Arc<Shared>) -> Response {
+        Response::stream(
+            "text/event-stream",
+            shared.first_reader(self.config.keep_alive),
+        )
+    }
+
+    /// A running request as a resumable stream: a pump thread files what the
+    /// worker reports, so the work goes on after the connection drops, and
+    /// cancels it if nobody comes back within the grace period.
+    fn replayed_run(
+        &self,
+        replay: &Replay,
+        events: Receiver<Event>,
+        cancel: CancelToken,
+    ) -> Result<Response, Response> {
+        let shared = self.start_replay(replay)?;
+        let response = self.replay_response(&shared);
+        let grace = replay.grace();
+        let pumped = Arc::clone(&shared);
+        let pump = std::thread::Builder::new().spawn(move || {
+            loop {
+                // Checked on every turn, so a handler that reports often
+                // cannot keep an abandoned request alive by never going quiet.
+                if pumped.abandoned_for().is_some_and(|gone| gone > grace) {
+                    cancel.cancel();
+                }
+                match events.recv_timeout(Duration::from_millis(250)) {
+                    Ok(Event::Note(m)) => pumped.push(&m),
+                    Ok(Event::Done(Some(m))) => {
+                        pumped.push(&m);
+                        break;
+                    }
+                    Ok(Event::Done(None)) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
+            }
+            pumped.finish();
+        });
+        if pump.is_err() {
+            return Err(reject(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::INTERNAL_ERROR,
+                "could not start a worker thread",
+            ));
+        }
+        Ok(response)
+    }
+
+    /// `resources/subscribe` and `resources/unsubscribe` of a classic
+    /// session: remember the URI, so the session's stream carries its updates.
+    fn session_subscription(
+        &self,
+        session: &Session,
+        id: &RequestId,
+        method: &str,
+        params: &Option<Value>,
+        caller: &Caller,
+    ) -> Message {
+        let fail = |code: ErrorCode, why: String| {
+            Message::error(Some(id.clone()), ErrorData::new(code, why))
+        };
+        let announced = self
+            .server
+            .changes
+            .as_ref()
+            .is_some_and(|(_, k)| k.resource_updates);
+        if !announced {
+            return fail(
+                ErrorCode::METHOD_NOT_FOUND,
+                "this server announces no resource updates".to_owned(),
+            );
+        }
+        let parsed: rusty_mcp_proto::subscribe::SubscribeParams =
+            match rusty_mcp_proto::rpc::params(params) {
+                Ok(p) => p,
+                Err(e) => return fail(ErrorCode::INVALID_PARAMS, e.to_string()),
+            };
+        if method == "resources/subscribe" {
+            if !self.server.can_read(caller, &parsed.uri) {
+                return fail(
+                    ErrorCode::RESOURCE_NOT_FOUND,
+                    format!("resource not found: {}", parsed.uri),
+                );
+            }
+            session.push.subscribe(&parsed.uri);
+        } else {
+            session.push.unsubscribe(&parsed.uri);
+        }
+        Message::Response {
+            id: id.clone(),
+            result: Value::object(),
+        }
+    }
+
+    /// `DELETE`: the client ends its session; whatever it still had running
+    /// is cancelled.
+    fn end_session(&self, headers: &HeaderMap) -> Result<Response, Response> {
+        let Some(id) = headers.get("mcp-session-id") else {
+            return Err(reject(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                "DELETE needs an Mcp-Session-Id header",
+            ));
+        };
+        let Some(session) = self.sessions.end(id) else {
+            return Err(reject(
+                StatusCode::NOT_FOUND,
+                ErrorCode::INVALID_REQUEST,
+                "unknown or ended session",
+            ));
+        };
+        session.cancel_all();
+        session.push.close();
+        Ok(Response::json(StatusCode::OK, Vec::new()))
+    }
+
+    /// Start a session for a successful classic `initialize` reply and name
+    /// it in the response. Without room or randomness, the client is told
+    /// plainly rather than handed a session that cannot work.
+    fn open_session(
+        &self,
+        reply: &Message,
+        client: Option<InitializeParams>,
+    ) -> Result<Option<String>, Response> {
+        let Message::Response { result, .. } = reply else {
+            return Ok(None);
+        };
+        let Some(version) = result.get("protocolVersion").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        if self.config.max_sessions == 0 {
+            return Ok(None);
+        }
+        // Collect the server's change events for this session from now on.
+        let push = match &self.server.changes {
+            Some((changes, kinds)) => Push::new(Some(changes.subscribe()), *kinds),
+            None => Push::new(None, ChangeKinds::default()),
+        };
+        let opened = self.sessions.open(
+            ProtocolVersion::new(version),
+            client,
+            push,
+            self.config.max_sessions,
+            self.config.session_idle,
+        );
+        match opened {
+            Ok((id, _)) => Ok(Some(id)),
+            Err(OpenError::Full) => Err(reject(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::INTERNAL_ERROR,
+                "too many open sessions",
+            )),
+            Err(OpenError::NoRandom) => Err(reject(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::INTERNAL_ERROR,
+                "could not make a session id",
+            )),
+        }
+    }
+
+    fn check_origin(&self, headers: &HeaderMap) -> Result<(), Response> {
+        let forbid = |why: &str| {
+            Err(reject(
+                StatusCode::FORBIDDEN,
+                ErrorCode::INVALID_REQUEST,
+                why,
+            ))
+        };
+        if !host_allowed(
+            headers.get("host").unwrap_or(""),
+            &self.config.allowed_hosts,
+        ) {
+            return forbid("Host header is not allowed");
+        }
+        match headers.get("origin") {
+            Some(origin)
+                if !self
+                    .config
+                    .allowed_origins
+                    .iter()
+                    .any(|o| o == "*" || o.eq_ignore_ascii_case(origin)) =>
+            {
+                forbid("Origin header is not allowed")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The `MCP-Protocol-Version` header, refused when it names a revision
+    /// this server does not speak.
+    fn header_version(&self, headers: &HeaderMap) -> Result<Option<ProtocolVersion>, Response> {
+        let Some(raw) = headers.get("mcp-protocol-version") else {
+            return Ok(None);
+        };
+        let version = ProtocolVersion::new(raw);
+        if self.server.supports(&version) {
+            Ok(Some(version))
+        } else {
+            Err(reject(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::UNSUPPORTED_PROTOCOL_VERSION,
+                format!("unsupported MCP-Protocol-Version: {raw}"),
+            ))
+        }
+    }
+
+    /// The cross-checks between header and body. Returns whether the
+    /// request is a modern (2026-07-28) one, which decides how errors map
+    /// to HTTP statuses.
+    fn check_version_rules(
+        &self,
+        headers: &HeaderMap,
+        header: Option<&ProtocolVersion>,
+        message: &Message,
+        has_session: bool,
+    ) -> Result<bool, Response> {
+        let (id, method, params) = match message {
+            Message::Request { id, method, params } => (Some(id.clone()), method, params),
+            Message::Notification { method, params } => (None, method, params),
+            Message::Response { .. } | Message::Error { .. } => return Ok(false),
+        };
+        let mismatch = |why: String| {
+            Err(reject_for(
+                id.clone(),
+                StatusCode::BAD_REQUEST,
+                ErrorCode::HEADER_MISMATCH,
+                why,
+            ))
+        };
+        if method == "initialize" {
+            // The one request that names its version in the body, not `_meta`.
+            let body_version = params
+                .as_ref()
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(Value::as_str);
+            return match (header, body_version) {
+                (Some(h), Some(b)) if h.as_str() != b => Err(reject_for(
+                    id,
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::INVALID_REQUEST,
+                    format!("MCP-Protocol-Version header ({h}) does not match params.protocolVersion ({b})", h = h.as_str()),
+                )),
+                _ => Ok(false),
+            };
+        }
+        let meta = match params.as_ref().and_then(|p| p.get("_meta")) {
+            Some(m) => RequestMeta::from_value(m).map_err(|e| {
+                reject_for(
+                    id.clone(),
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::INVALID_PARAMS,
+                    e.to_string(),
+                )
+            })?,
+            None => RequestMeta::new(),
+        };
+        let modern = match (&meta.protocol_version, header) {
+            (Some(m), Some(h)) if m != h => {
+                return mismatch(format!(
+                    "MCP-Protocol-Version header ({}) does not match request _meta protocolVersion ({})",
+                    h.as_str(),
+                    m.as_str()
+                ));
+            }
+            (Some(_), None) => {
+                return mismatch(
+                    "request _meta protocolVersion requires the MCP-Protocol-Version header"
+                        .to_owned(),
+                );
+            }
+            (Some(m), Some(_)) => m.is_stateless(),
+            // A client that opened a session with `initialize` at a
+            // stateless revision names it in the header alone; the session
+            // remembers the rest.
+            (None, Some(h)) if h.is_stateless() && has_session => false,
+            (None, Some(h)) if h.is_stateless() => {
+                return Err(reject_for(
+                    id,
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::INVALID_PARAMS,
+                    "request _meta must carry io.modelcontextprotocol/protocolVersion",
+                ));
+            }
+            (None, _) => false,
+        };
+        if modern {
+            if let Err(why) = check_standard_headers(headers, method, params.as_ref()) {
+                return mismatch(why);
+            }
+        }
+        Ok(modern)
+    }
+
+    fn dispatch(
+        &self,
+        message: Message,
+        header_version: Option<ProtocolVersion>,
+        modern: bool,
+        session: Option<Arc<Session>>,
+        caller: Caller,
+    ) -> Result<Response, Response> {
+        // What a request without `_meta` is taken to speak: its header, else
+        // its session's revision, else the oldest revision that has no header.
+        let assumed = header_version
+            .or_else(|| session.as_ref().map(|s| s.version.clone()))
+            .or_else(|| {
+                let fallback = ProtocolVersion::new(FALLBACK_VERSION);
+                self.server.supports(&fallback).then_some(fallback)
+            });
+        let is_initialize =
+            matches!(&message, Message::Request { method, .. } if method == "initialize");
+        if let (Some(session), Message::Notification { method, params }) = (&session, &message) {
+            if method == "notifications/cancelled" {
+                let id = params
+                    .as_ref()
+                    .and_then(|p| CancelledParams::from_value(p).ok())
+                    .and_then(|c| c.request_id);
+                if let Some(id) = id {
+                    session.cancel(&id);
+                }
+            }
+        }
+        if let (Some(session), Message::Request { id, method, params }) = (&session, &message) {
+            if method == "resources/subscribe" || method == "resources/unsubscribe" {
+                let reply = self.session_subscription(session, id, method, params, &caller);
+                return Ok(json_reply(StatusCode::OK, &reply));
+            }
+        }
+        let (tx, events) = channel();
+        let init_params = match &message {
+            Message::Request { method, params, .. } if method == "initialize" => params
+                .as_ref()
+                .and_then(|p| InitializeParams::from_value(p).ok()),
+            _ => None,
+        };
+        let (info, caps) = session.as_ref().map_or((None, None), |s| {
+            (s.client_info.clone(), s.client_capabilities.clone())
+        });
+        let conn = Arc::new(
+            Connection::resumed(
+                Arc::clone(&self.server),
+                Arc::new(EventNotifier(tx.clone())),
+                assumed,
+                info,
+                caps,
+            )
+            .with_caller(caller),
+        );
+        match conn.start(message) {
+            Started::Done(None) => Ok(Response::json(StatusCode::ACCEPTED, Vec::new())),
+            Started::Done(Some(reply)) => {
+                let status = status_of(modern, &reply);
+                let mut response = match &self.replay {
+                    Some(replay) if status == StatusCode::OK => self.replayed(replay, &reply)?,
+                    _ => json_reply(status, &reply),
+                };
+                if is_initialize && !modern {
+                    if let Some(id) = self.open_session(&reply, init_params)? {
+                        response = response.with_header(SESSION_HEADER, &id).map_err(|_| {
+                            reject(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                ErrorCode::INTERNAL_ERROR,
+                                "could not name the session",
+                            )
+                        })?;
+                    }
+                }
+                Ok(response)
+            }
+            Started::Run(job) => {
+                let cancel = job.cancel_token();
+                let registered = session.map(|session| {
+                    lock(&session.inflight).insert(job.id().clone(), cancel.clone());
+                    Registered {
+                        session,
+                        id: job.id().clone(),
+                    }
+                });
+                let worker = std::thread::Builder::new().spawn(move || {
+                    // A send fails only when the client is gone.
+                    let _ = tx.send(Event::Done(job.run()));
+                    drop(registered);
+                });
+                if worker.is_err() {
+                    return Err(reject(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        ErrorCode::INTERNAL_ERROR,
+                        "could not start a worker thread",
+                    ));
+                }
+                match &self.replay {
+                    Some(replay) => self.replayed_run(replay, events, cancel),
+                    None => Ok(self.await_reply(events, cancel, modern)),
+                }
+            }
+        }
+    }
+
+    /// Wait briefly: a quick, silent call is answered in plain JSON; a call
+    /// that reports progress, or that is still running when the wait ends,
+    /// becomes an event stream.
+    fn await_reply(&self, events: Receiver<Event>, cancel: CancelToken, modern: bool) -> Response {
+        let wait = self.config.sse_after;
+        match events.recv_timeout(wait) {
+            Ok(Event::Done(None)) => Response::json(StatusCode::ACCEPTED, Vec::new()),
+            Ok(Event::Done(Some(reply))) => json_reply(status_of(modern, &reply), &reply),
+            Ok(Event::Note(note)) => self.stream(VecDeque::from([frame(&note)]), events, cancel),
+            Err(RecvTimeoutError::Timeout) => self.stream(VecDeque::new(), events, cancel),
+            Err(RecvTimeoutError::Disconnected) => reject(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::INTERNAL_ERROR,
+                "the request ended without an answer",
+            ),
+        }
+    }
+
+    fn stream(
+        &self,
+        ready: VecDeque<Vec<u8>>,
+        events: Receiver<Event>,
+        cancel: CancelToken,
+    ) -> Response {
+        Response::stream(
+            "text/event-stream",
+            SseStream {
+                ready,
+                events,
+                keep_alive: self.config.keep_alive,
+                cancel,
+                finished: false,
+            },
+        )
+    }
+}
+
+/// The one JSON-RPC message in a POST body, or the refusal to send.
+fn parse_body(body: &[u8]) -> Result<Message, Response> {
+    let text = std::str::from_utf8(body)
+        .map_err(|_| reject(StatusCode::BAD_REQUEST, ErrorCode::PARSE_ERROR, "not UTF-8"))?;
+    Message::from_json(text).map_err(|e| match e {
+        rusty_mcp_proto::Error::Json(_) => {
+            reject(StatusCode::BAD_REQUEST, ErrorCode::PARSE_ERROR, "not JSON")
+        }
+        rusty_mcp_proto::Error::Decode { .. } => reject(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::INVALID_REQUEST,
+            e.to_string(),
+        ),
+    })
+}

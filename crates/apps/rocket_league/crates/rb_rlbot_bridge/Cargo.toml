@@ -1,0 +1,29 @@
+[package]
+name = "rb_rlbot_bridge"
+description = "Plays a rb_env policy in the real game: turns RLBot game packets into the PhysicsFrame observation rb_env speaks and a ControllerInput back into a PlayerInput (RLBot port stage 5, see rlbot/PLAN.md)."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+rb_domain = { path = "../rb_domain" }
+rb_rlbot_client = { path = "../rb_rlbot_client" }
+rb_rlbot_wire = { path = "../rb_rlbot_wire" }
+# `rotator_to_quat`, checked against a recorded quaternion: the one RLBot-rotator convention.
+rb_scenario = { path = "../rb_scenario" }
+
+[dev-dependencies]
+rb_env = { path = "../rb_env" }
+
+[package.metadata.rusty_mill]
+layer = "apps"

@@ -7,16 +7,256 @@ own internal changes, which are logged in that crate's own
 from before the merge; see ADR-0001 for why root and per-crate logs are
 separate rather than one superseding the other).
 
+**Archive.** New entries are no longer added here: each PR adds a fragment
+under `changes/` instead (`changes/README.md`), so concurrent PRs do not
+collide. This file holds the history up to 2026-10-10.
+
 One entry per merged PR against `main`, reverse chronological, each linking
 to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 `**Fixed:**`), known limitations stated plainly.
 
 ---
 
-## 2026-10-09 - rusty_bbp_host: first proving run record
+## 2026-10-09 - rusty_mcp_server: cancelled-before-run and dead-stdout fixes (pending review)
 
-- **Added (docs):** `crates/apps/rusty_bbp_host/docs/proving/2026-10-09-slug-1.md`, the record of the first live run of the Blackboard Protocol under `bbp mod` (Claude Code as Planner, Coder, Tester; Reviewer never reached). Outcome: `escalated`, `Budget(Iterations)`, 5 candidates, 5 failed runs.
-- **Known limitations:** not a pass and not an answer to Q3. Ran in WSL2 (the runner is Unix-only) after two aborted attempts (expired harness login; a symlinked `~/.cargo/config.toml` outside the read roots). Every sandboxed run failed with `rustc` "Permission denied" and the cause is not established; the record lists six runbook defects and notes that `LSP` appears in `system/init` for roles launched with `--tools ""`. The machine-specific path edits to `profiles.json` are described in the record and not committed.
+- **Fixed:** a request cancelled between `start` and `Job::run` no longer runs its tool (it could mutate state with no reply); and a reply that fails to write while stdin is open and silent now ends the stdio session with `BrokenPipe` and cancels the work left, instead of waiting for stdin to close.
+- **Changed:** `serve_lines` now needs `R: BufRead + Send + 'static` (stdin is read on its own thread so a failed write can wake the loop); every caller in the repo already satisfies it.
+- **Verified:** one test for each, each failing with its fix reverted; `rusty_mcp_server` (all features), `rusty_mcp_client_native`, `adk-mcp`, `rk-app` tests; clippy `-D warnings`.
+- **Known limitations:** after a write failure the stdin thread is abandoned until its next line or process exit.
+
+## 2026-10-09 - agentgateway moved off rmcp (pending review)
+
+- **Changed:** `agentgateway-mcp`/`agentgateway` serve MCP with `rusty_mcp_server` (mounted by `rusty_mcp_axum`) and reach upstreams with `rusty_mcp_client_native`; `rmcp`, `reqwest` and `process-wrap` are no longer production dependencies of the MCP crates. The gateway's federation, rules, guardrails, prompts/resources and span suites pass unchanged.
+- **Added:** `CallContext::caller()` (headers and authenticated principal), `PromptSource`, `ResourceSource`, `ToolSource::tools_for` on `rusty_mcp_server`; per-call header overrides on `rusty_mcp_client_native`.
+- **Fixed:** the native client could not connect to an `rmcp` server (bare `server/discover`); it now sends `_meta` and the revision header.
+- **Behaviour:** a `stdio` upstream is serialised; upstream input requests and tasks are errors; only the trace context of `_meta` goes upstream.
+- **Known limitations:** `rusty-mcp` still depends on `rmcp` (A6); not run against a real client or Windows; the pool size of 8 is a constant, not configuration.
+
+---
+
+## 2026-10-09 - review fixes on #577 (pending review)
+
+- **Fixed (security):** an empty `--auth-token` no longer leaves `rusty_homelab_mcp`'s HTTP endpoint open; empty secrets are refused.
+- **Fixed:** resumable replies now bound memory for running streams, free themselves with their handler, and cancel abandoned chatty requests; the client's reconnect no longer glues half an event to the replay or resumes past an undelivered one; tasks expire on a timer instead of waiting for API traffic.
+- **Behaviour:** a running stream over the replay budget loses its oldest frames.
+
+---
+
+## 2026-10-09 - rusty_homelab_mcp on the native MCP stack (pending review)
+
+- **Changed:** `rusty_homelab_mcp` no longer uses `rmcp` or the `rusty-mcp` scaffold; same 58 tools, schemas still from `schemars`. HTTP auth is a plain bearer check.
+- **Removed flags:** `--sse-response`, `--request-timeout-secs`; `--auth-resource-url` is ignored.
+- **Not done:** no real backend tested; no metrics.
+
+---
+
+## 2026-10-09 - remind_me_remote on the native MCP stack (pending review)
+
+- **Changed:** `remind_me_remote` no longer uses `rmcp`; tools, resource and prompt are forwarded from `remind_me_mcp::Handler`; resumption now comes from `rusty_mcp_server`. `build_router` returns `BuildError`; `RemindMeHandler` and `InProcessEventStore` removed.
+- **Added:** `rusty_mcp_axum::router_at`.
+- **Not done:** no real connector tested; no standalone `GET` stream.
+
+---
+
+## 2026-10-09 - rusty_mcp_server resumable replies (pending review)
+
+- **Added:** `HttpConfig::resume_buffer` / `resume_grace`: replies become resumable event streams (`GET` + `Last-Event-ID`, no session). Off by default. 9 tests.
+- **Not done:** untested behind axum; `remind_me_remote` is next.
+
+---
+
+## 2026-10-09 - adk-mcp on the native MCP stack (pending review)
+
+- **Changed:** `adk-mcp` no longer uses `rmcp`; same public functions and types, but `McpServer` is no longer an `rmcp` handler. Conformance suite (17 cases) passes unchanged.
+- **Behaviour:** `tools/list` pages at 100; browsers' `Origin` is refused; the client skips (rather than ends on) over-long lines.
+- **Not done:** no other-language ADK client tested against it.
+
+---
+
+## 2026-10-09 - rusty_mcp_axum (pending review)
+
+- **Added:** `rusty_mcp_axum::router`: mount a `rusty_mcp_server` handler in an axum app. Used by `rp-server`; `adk-mcp` is next.
+- **Not done:** resumption and hang-up behaviour through axum are untested.
+
+---
+
+## 2026-10-09 - rp-mcp connection pool (pending review)
+
+- **Added:** `[mcp].connections` (default 4): connections per HTTP upstream, least-busy first, so calls to one upstream run in parallel again.
+- **Note:** a stateful upstream no longer sees all calls on one connection.
+
+---
+
+## 2026-10-09 - rp-mcp and rp-server on the native MCP stack (pending review)
+
+- **Changed (breaking for `rp-mcp`'s API):** `rp_mcp::build` returns a `rusty_mcp_server::Server`; no `rmcp`, `rusty-mcp` or `schemars` in `rp-mcp` / `rp-server` (non-dev). Gateway on `rusty-mcp-client`; mounted through a small axum bridge.
+- **Behaviour:** upstream calls run one at a time per upstream; the tool list is not sorted across native and proxied tools.
+- **Added:** `McpClient::connect_with`, `McpClient::is_alive`.
+- **Fixed:** the native client took a `404` on an ended session for an ordinary answer.
+- **Not done:** `MCP_STDIO=1` untested; `adk-mcp`, `remind_me_remote`, `rusty_homelab_mcp`, `agentgateway` still on `rmcp`.
+
+---
+
+## 2026-10-09 - rusty_mcp_server ToolSource (pending review)
+
+- **Added:** `ServerBuilder::tool_source`: tools supplied at request time (for proxying another server). 6 tests.
+- **Used by:** `rp-mcp`'s gateway (entry above).
+
+---
+
+## 2026-10-09 - rusty-mcp-client on the native client, rk-mcp moved (pending review)
+
+- **Changed (breaking):** `rusty-mcp-client` returns `rusty_mcp_proto` types and runs on `rusty_mcp_client_native`; no `rmcp`/`reqwest` in that crate. `rk-mcp` updated. HTTP tries `server/discover` first and falls back to `initialize`; redirects are no longer followed; calls time out after 600 s.
+- **Fixed:** a notification sent just before the transport was dropped could be lost (now awaited, up to 2 s).
+- **Not done:** `rp-mcp`, `adk-mcp`, `remind_me_remote`, `rusty_homelab_mcp`, `agentgateway` still on `rmcp`; only ours and `rmcp`'s servers were tested.
+
+---
+
+## 2026-10-09 - rusty_mcp_client_native, async face (pending review)
+
+- **Added:** `AsyncClient`, usable from tokio or any executor, over the stdio or HTTP transports; 7 tests.
+- **Not done:** no consumer uses the client yet. `rusty-mcp-client` is rebuilt on it in the next entry.
+
+---
+
+## 2026-10-08 - rusty_mcp_client_native, Streamable HTTP (pending review)
+
+- **Added:** the HTTP transport (feature `http`) on `rusty_request`, verified against `rusty_mcp_server` and against `rmcp`'s own HTTP server (with and without sessions).
+- **Not verified:** HTTPS and authenticated servers; servers other than those two; resuming an interrupted reply stream. The async facade and the gateway passthrough are not built, and no consumer has moved off `rmcp`'s client.
+
+---
+
+## 2026-10-08 - rusty_mcp_client_native, first slice (pending review)
+
+- **Added:** the client core: SSE parser, sans-IO session, blocking client over a child process (35 tests against `rusty_mcp_server`). New workspace crate; no consumer uses it yet.
+- **Fixed in `rusty_mcp_server`:** a classic-only server now answers `server/discover` with method-not-found.
+- **Not verified:** any server other than `rusty_mcp_server`; HTTP is not built, so nothing here can replace `rmcp`'s client yet.
+
+---
+
+## 2026-10-08 - rusty_mcp_server push streams (pending review)
+
+- **Added:** the `GET` push stream for classic HTTP sessions, with event ids and `Last-Event-ID` resumption, and classic `resources/subscribe`. Verified against raw sockets and the `rmcp` classic HTTP client.
+- **Not verified:** `remind_me_remote` (the consumer this is for) was not moved or run against it; no client other than `rmcp`. Sessions are in memory (not shared between instances), delivery is at most once without resumption, and the server cannot send requests to the client over the stream.
+
+---
+
+## 2026-10-08 - rusty-mcp-demo moved onto rusty_mcp_server (pending review)
+
+- **Changed:** the demo crate now runs on `rusty_mcp_server`; its old `rusty-mcp`/`rmcp`-macro code and tests are removed, its acceptance suite (43 tests) now lives in the demo and passes over real HTTP.
+- **Breaking for demo users:** the command line shrank to `--transport`, `--bind`, `--path`, `--allowed-host`, `--allowed-origin`, `--max-body-bytes`; no logging flags, auth, limits, telemetry or graceful shutdown. The `rusty-mcp` scaffold no longer has a reference example (its README says so).
+- **Not verified:** other MCP clients, or the binary under a real IDE.
+
+---
+
+## 2026-10-08 - rusty-mcp-demo acceptance port (pending review)
+
+- **Added:** the demo's five test files, ported to run against a copy of the demo built on `rusty_mcp_server`; 43 of 43 pass over real HTTP with the `rmcp` client. Three server fixes came out of the first run (30 of 43): `initialize` at 2026-07-28, client capabilities kept in the HTTP session, cache hints on resource reads.
+- **Not verified:** the demo crate itself still runs on `rusty-mcp` and was not changed; the port covers the tests, not its binary, flags, logging or graceful shutdown. One test deviation (the MRTR client declares `elicitation`). Decision pending: swap the demo crate over, or keep the copy.
+
+---
+
+## 2026-10-08 - rusty_mcp_server acceptance fixes (pending review)
+
+- **Changed:** task tools fall back to an inline result for clients without the extension; interactive tools get a `turn` gate and a round limit. Both came from reading `rusty-mcp-demo`'s acceptance suite.
+- **Not verified:** the demo's own suite has not been run against this server yet (it is written against `rmcp` and `rusty-mcp`); only my reading of it drove these changes. Clippy for `--features request-state` was red on the two previous commits (see CHANGELOG) and is clean now.
+
+---
+
+## 2026-10-08 - rusty_mcp_server tasks (pending review)
+
+- **Added:** `task_tool` and the task methods (`tasks/get`, `tasks/update`, `tasks/cancel`) of the 2026-07-28 tasks extension, with an in-memory store.
+- **Not verified:** no real MCP client has run a task (tests drive the server directly and over raw HTTP); `rusty-mcp-demo` was not run. The store is lost on restart and not shared between instances; ids are the only credential; no `notifications/tasks`.
+
+---
+
+## 2026-10-08 - rusty_mcp_server multi-round-trip input (pending review)
+
+- **Added:** tools can ask the user mid-call (2026-07-28) with `interactive_tool`; `requestState` is HMAC-sealed under the new `request-state` feature.
+- **Not verified:** no real MCP client has driven an `input_required` round (tests play the client over the stdio loop); `rusty-mcp-demo` was not run. State is authenticated but not encrypted, and replayable until it expires. Prompts, resources and tasks take no input yet.
+
+---
+
+## 2026-10-08 - rusty_mcp_server HTTP sessions (pending review)
+
+- **Added:** `Mcp-Session-Id` for the classic handshake over Streamable HTTP, so `notifications/cancelled` and `DELETE` work as the spec describes. Verified with the `rmcp` classic HTTP client (mid-call cancel) and socket tests.
+- **Not verified:** only the `rmcp` client; no other MCP HTTP client. Sessions are in memory, so they do not survive a restart or span several server instances behind a load balancer (clients get `404` and re-initialize, per spec). `clientInfo` is not kept between POSTs.
+
+---
+
+## 2026-10-08 - rusty_mcp_server subscriptions (pending review)
+
+- **Added:** `subscriptions/listen` with a `ChangeBroadcaster`, verified against the `rmcp` client's `listen` over stdio and HTTP.
+- **Known limitations:** 2026-07-28 clients only (no classic `resources/subscribe`); the tool, prompt and resource lists are fixed once a server is built, so list-changed signals are for applications that rebuild or otherwise know better, while resource-updated signals are the common case; template variables and the subscription URIs are matched exactly as sent. `rusty-mcp-demo` was not run against this server.
+
+---
+
+## 2026-10-08 - rusty_mcp_server prompts, resources, completion (pending review)
+
+- **Added:** prompts, resources (exact and templated) and completion on `rusty_mcp_server`, verified against the `rmcp` client over stdio and HTTP in both handshake modes. 49 tests with the `http` feature.
+- **Known limitations:** no resource subscriptions (`resources/subscribe`, `subscriptions/listen`), no tasks, no multi-round-trip input; resource templates support only `{name}` and `{+name}`; template variables are not percent-decoded; the 100-value completion cap and the page size are the only limits on those lists. `rusty-mcp-demo`, `agentgateway` and `remind_me_remote` still use `rmcp` and were not run against this server.
+
+---
+
+## 2026-10-08 - rk-app MCP server on rusty_mcp_server (pending review)
+
+- **Changed:** `rusty-keys --mcp` (feature `mcp-server`) now serves through `rusty_mcp_server` instead of `rmcp` and `rusty-mcp`. Verified offline with a scripted fake model: a `chat` call runs a full turn through the real registry, policy, verifier and evidence journal; all 17 unit and the other `rk-app` test suites still pass, clippy is clean with and without the feature.
+- **Behaviour differences:** unknown tool is `-32602` (was `-32601`); shutdown signals return from `serve` without awaiting an in-flight turn; new bounds (32 in flight, 4 MiB lines).
+- **Known limitations:** not run against a real IDE or a real model (the `chat` tool needs one), only against the scripted fake and in-memory pipes; the generic server is checked against the `rmcp` client in its own crate, not through `rk-app`'s binary. The binary itself (`rusty-keys --mcp`) was not launched.
+
+---
+
+## 2026-10-08 - rusty_mcp_server over Streamable HTTP (pending review)
+
+- **Added:** feature `http` on `rusty_mcp_server`: a stateless Streamable HTTP transport, verified over real sockets and against the `rmcp` HTTP client in both handshake modes.
+- **Known limitations:** no sessions, no stream resumption, no authentication, no TLS. A classic-handshake client's `notifications/cancelled` cannot reach a running call (cancellation works by hanging up, which the stateless mode does). Each running call or open stream holds a `rusty_serve` connection thread. Not run against the `rusty-mcp-demo` acceptance suite, `adk-mcp`'s or `remind_me_remote`'s clients, or any HTTP client other than `rmcp`'s.
+
+---
+
+## 2026-10-08 - rusty_mcp_server first slice (pending review)
+
+- **Added:** `rusty_mcp_server`, a tools-only MCP server core with a stdio transport, serving both protocol generations. Nothing consumes it yet.
+- **Verified:** against the `rmcp` 3.1 client over a real child process and stdio, in both handshake modes, as well as through in-memory pipes.
+- **Known limitations:** it has not been run against the `rusty-mcp-demo` acceptance suite or any other client, and the HTTP transport does not exist. Tool input schemas are not validated. There is no authentication layer (the existing `rusty-mcp` has OAuth, limits and telemetry that are not ported). The decision on how tool schemas are produced (builder or derive) is still open: callers pass a schema as raw JSON.
+
+---
+
+## 2026-10-08 - rusty_serve: headers, limits, shared handler (pending review)
+
+- **Added:** `Response::with_header`, `Limits`/`Server::with_limits`, `SharedHandler`/`Server::bind_shared`. Existing behaviour and defaults are unchanged; `rusty_agui`, `rusty_routine`, `rusty_channel`, `adk-agui`, `rk-agui`, `agui-agent-server`, `rusty_tick` and `rusty_fair_play` were rebuilt, and the tests of `rusty_agui`, `rusty_routine` and `rusty_channel` were run.
+- **Known limitations:** still one thread per connection, so each open `subscriptions/listen` stream holds a thread (bounded by `Limits::max_connections`). A dead client is noticed only on the next write, so streams need keep-alive chunks. Request bodies are still buffered whole and chunked request bodies are still refused. `adk-agui`, `rk-agui`, `agui-agent-server`, `rusty_tick` and `rusty_fair_play` were only compiled, not tested.
+
+---
+
+## 2026-10-08 - rusty_mcp_proto first slice (pending review)
+
+- **Added:** `rusty_mcp_proto`, the envelope and tools path of the MCP wire types on `rusty_json`, checked field by field against `rmcp` 3.1.4. Also `docs/research/MCP-PROTO-SCOPE.md` (A2 inventory and the three owner decisions: support both handshakes, tasks and multi-round-trip types now, opaque elicitation schema).
+- **Added (second slice):** prompts, resource methods, completion and cancel/progress types, checked against `rmcp` the same way.
+- **Added (third slice):** the classic and stateless handshakes, capabilities, typed per-request `_meta`, and the version-negotiation and fallback rules.
+- **Added (fourth slice):** subscriptions, tasks and multi-round-trip input. The A2 type list is now complete.
+- **Known limitations:** nothing uses the crate yet, so no consumer behaviour changed. There is no session or dispatch layer, SSE framing or transport yet (A3/A4). `RequestMeta` refuses a mistyped known key where `rmcp`'s accessors silently return `None`, so a server can answer `-32602` instead of ignoring bad metadata. Completion's 100-value cap is not enforced by the codec (server policy). Annotation `priority` is forwarded as raw JSON, so a value like `0.2` survives exactly where `rmcp` (which stores `f32`) would re-encode it as `0.20000000298`. Unknown members of known types are dropped on decode. Verified by tests only, not against a live server.
+
+
+
+
+## 2026-10-09 - Crypto gaps 1 and 2: `rusty_rand` hardened, ECDH P-256/P-384
+
+- **Changed (rusty_rand):** `getrandom(2)` on Linux x86_64/aarch64 (`/dev/random` fallback, never `/dev/urandom`), `/dev/random` on other Linux, lock-free `/dev/urandom` on other Unix with no initialised-pool claim, a tested read loop and backend selection; `rust-version` 1.75 to 1.88.
+- **Added (rusty_pk::ecdh):** ECDH on P-256 and P-384, validated against Wycheproof, RFC 5903 and `ring`; constant-time evidence added (taint, exact jump counts, timing). Adding this code changed LLVM's inlining of `Modulus::add` twice, so it is now `#[inline(never)]` and its previously reviewed jump count of 6 is pinned as a separate symbol (counts were re-read each time).
+- **Known limitations:** slower than `ring` (14x P-256, 5x P-384); constant-time results are x86-64, one VM, preliminary; two 40-repetition evidence records are kept: `EVIDENCE-2026-10-09-ecdh-run1-FAILED.txt` (exit 1: HMAC-SHA512 fixed-vs-other-key alarmed 2 of 40, allowance 1; **the cause is unexplained**, other jobs were running on the machine) and `EVIDENCE-2026-10-09-ecdh-run2.txt` (idle machine, exit 0). Neither threshold nor allowance rule was changed; a passing rerun does not establish why run 1 failed, and neither record proves constant time; not independently reviewed; not wired into `rusty_tls`.
+
+## 2026-10-09 - Ed25519 accepts small-order public keys again
+
+- **Changed (rusty_pk):** reverses the rejection added after Codex round 3 on #540, by owner decision. Behaviour now matches `ring` and RFC 8032 (which does not require rejecting small-order keys). **Known limitation:** the identity key verifies `R = identity, S = 0` for every message; callers must screen untrusted keys themselves. The evidence record `EVIDENCE-2026-10-09.txt` predates this change; Ed25519 verify is variable time and outside the constant-time budgets, so its counts are unaffected, but the vector run was not regenerated.
+## 2026-10-09 - rb_rlbot_client: blocking RLBot client (RLBot port stage 3) (pending review)
+
+- **Added:** `crates/apps/rocket_league/crates/rb_rlbot_client`: `Connection` (connect, send, receive with or without a timeout, handshake), `run_bots` and `run_hivemind` (handshake, `InitComplete`, packet loop, ping replies, clean exit on disconnect), and `Environment` for the `RLBOT_*` variables. `std::net` only, one thread; depends on `rb_rlbot_wire` alone.
+- **Added (`rb_rlbot_wire`):** `CoreMessage::DisconnectSignal`, `CoreMessage::PingRequest` and `InterfaceMessage::PingResponse` (a shared `Ping { cookie }`), with `From` conversions into `InterfaceMessage`. The ping and disconnect bytes are pinned against `rlbot_flat` fixtures and by `planus` reading what this crate encodes. Core pings used to arrive as `CoreMessage::Other(9)`; they are now `PingRequest`, so `Other(9)` is gone.
+- **Tested:** 20 tests against an in-process fake core (split and coalesced frames, timeouts that keep a half frame, handshake in any order, ping replies, garbage frames, every way a connection ends, car-order of replies), 25 repeated runs without a failure.
+- **Fixed (review):** `recv_timeout` checks its deadline on every pass (the read loop is generic over a scripted transport and clock, so the regression is deterministic: against the original logic four of its five unit tests fail), so bytes trickling in can no longer hold it past the deadline, and a zero timeout is a true poll (buffered message or what is already on the socket, never a wait). `CoreMessage::DisconnectSignal` is validated like any modelled member (message table required, its vtable checked) instead of being accepted from the tag alone. `Connection::handshake` refuses an empty or whitespace-only `agent_id` (core trims it first) with `Error::EmptyAgentId` before sending anything, because core sends team information only to a named agent; a match runner with no id sends its settings with `send` and reads with `recv`, as `rb_match_log` does.
+- **Known limitation:** nothing here has talked to the real core; stage 4 does that once. Comms, ball prediction and rendering callbacks of the `rlbot` crate are not carried over (nothing in `rb_tape_bot` uses them).
+
+---
 
 ## 2026-10-10 - ADR-0002 Amendment 1: MCP crates to Tier T (docs only)
 
@@ -83,7 +323,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
-- **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
+- **Fixed (rusty_pk, P1):** Ed25519 verification rejected small-order public keys (the eight torsion points, including the identity); **reversed 2026-10-09, see the entry above.** With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
 - **Fixed (evidence tooling, 4 x P2):** taint scripts check the example's exit status (shared `taint_lib.sh`, fake-valgrind regression test); `collect.sh` runs the ignored planted timing leak test and checks every vector file against its `MANIFEST.txt` (found `x25519_test.json` unlisted; 27 vendored files compared byte for byte with upstream); disassembly jump counts are matched exactly, as drift detection only (it does not catch a same-count substitution; the disassembly still needs a human read).
 - **Added to CI:** the `crypto-constant-time` job runs the manifest check and the evidence-tooling self-tests.
 - **Known limitations:** unchanged. Still only evidence, not proof; the human independent review remains required before any `rusty_tls` seam.

@@ -1,0 +1,59 @@
+[package]
+name = "rusty_mcp_client_native"
+version = "0.1.0"
+edition = "2021"
+description = "Sovereign MCP client core on rusty_mcp_proto: a sans-IO session for the classic and stateless handshakes, a server-sent-events parser, and a blocking client over a child-process transport"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["mcp", "client", "json-rpc"]
+categories = ["network-programming"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[features]
+default = []
+# `http`: the Streamable HTTP transport, on `rusty_request` (and a private
+# `rusty_tokio` runtime thread). Off by default so a stdio-only client pulls in
+# no HTTP or TLS stack.
+http = ["dep:rusty_request", "dep:rusty_tokio", "dep:rusty_base64"]
+
+[dependencies]
+# First-party only (ADR-0002 Tier S).
+rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
+rusty_mcp_proto = { workspace = true }
+rusty_request = { workspace = true, optional = true }
+rusty_tokio = { workspace = true, optional = true }
+rusty_base64 = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The server this client is tested against, in process and as a child process.
+rusty_mcp_server = { workspace = true, features = ["request-state", "http"] }
+rusty_serve = { workspace = true }
+# An independent MCP server to test against (never shipped): the `rmcp`
+# Streamable HTTP server, hosted by axum on a tokio runtime.
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
+axum = { workspace = true }
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"
+
+[[test]]
+name = "http"
+required-features = ["http"]
+
+[[test]]
+name = "async_client"
+required-features = ["http"]
+
+[[test]]
+name = "rmcp_server"
+required-features = ["http"]
