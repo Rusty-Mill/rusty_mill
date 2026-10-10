@@ -744,6 +744,21 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 self.assertEqual(outputs["rand_platforms"], "true")
         self.assertEqual(self._planner_map(input="docs/README.md\n")["rand_platforms"], "false")
 
+    def test_tls_engine_jobs_run_when_their_own_ci_changes(self) -> None:
+        # A skipped job reports success, so a PR that edits these jobs or the
+        # scripts they run must also run them, or the edit is never tested.
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/scripts/ci_plan.py",
+            ".github/scripts/tls_fuzz_smoke.sh",
+            ".github/scripts/live_internet_check.sh",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self._planner_map("--packages", "", input=f"{path}\n")["tls_engine"], "true")
+        for path in (".github/scripts/test_ci_workflow.py", "docs/README.md", ".github/workflows/unrelated.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(self._planner_map("--packages", "", input=f"{path}\n")["tls_engine"], "false")
+
     def test_rand_platforms_survive_ci_only_shortcut(self) -> None:
         for path in (
             ".github/workflows/ci.yml",
@@ -760,7 +775,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 self.assertEqual(outputs["ci_only"], "true")
                 self.assertEqual(outputs["full"], "false")
                 self.assertEqual(outputs["rand_platforms"], "false" if "unrelated" in path else "true")
-                self.assertTrue(all(outputs[key] == "false" for key in SPECIALIZED_KEYS - {"rand_platforms"}))
+                # ci.yml and ci_plan.py also select the native TLS engine jobs.
+                tls = path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"}
+                self.assertEqual(outputs["tls_engine"], "true" if tls else "false")
+                self.assertTrue(
+                    all(outputs[key] == "false" for key in SPECIALIZED_KEYS - {"rand_platforms", "tls_engine"})
+                )
         self.assertIn(
             "printf '%s\\n' \"$changed\" | python3 .github/scripts/ci_plan.py --emit-ci-smoke >> \"$GITHUB_OUTPUT\"",
             self.workflow,
