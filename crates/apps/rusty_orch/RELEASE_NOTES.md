@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## BBP task host designed: ADR-0013
+**2026-10-10** · (link once pushed) · [ADR-0013](docs/adr/0013-bbp-task-host.md)
+
+- **Added (docs):** ADR-0013, Proposed, the design for roadmap Phase 1. A `Role::Implement` card whose goal names a repository is hosted on BBP: a second dispatcher port `TaskHost` (`open` is the one metered call, `poll` is free, `relay` passes a human answer through), `Progress::{Working, Gate, Closed, Cancelled}`, and `Outcome::Waiting` so a process can exit while agents work. The handle lives on the Board as an `Artifact` entry, so the snapshot persists it and `orch-core` is unchanged. BBP gates become Board `Question`s whose answers are `bbp human` verb lines relayed with the card revision, so a stale answer is refused rather than applied. The new `orch-bbp` crate drives the `bbp` binary over `orch_cli::CommandRunner` and decodes `bbp card` with the libs crate `rusty_bbp`; it never links `rusty_bbp_host` (cross-family apps dependency). Reviewer vendor is `Routing::reviewer(author)`, never the Coder's.
+- **Rejected:** BBP as an `AgentRunner` (one call is not one task), the dispatcher proxying the CLI adapters into BBP (the relay loop BBP replaced), linking the host crate.
+- Known limitation: design only. Phasing is four PRs: port and fake, adapter and e2e, goal file and flags, Board slimming docs.
+
+---
+
 ## Gemini adapter dropped
 **2026-10-05** · (link once pushed)
 
