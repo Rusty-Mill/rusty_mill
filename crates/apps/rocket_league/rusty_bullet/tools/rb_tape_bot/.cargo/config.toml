@@ -1,0 +1,5 @@
+# Build output stays next to the bot configs that launch it (`target/release/rb_tape_bot`),
+# whichever way the package is built from this directory. Builds from the repository root
+# (`cargo build -p rb_tape_bot`) use the workspace `target/` instead.
+[build]
+target-dir = "target"
