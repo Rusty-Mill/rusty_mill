@@ -59,6 +59,7 @@ pub mod page;
 pub mod prompt;
 pub mod resource;
 pub mod rpc;
+pub mod schema;
 pub mod subscribe;
 pub mod task;
 pub mod tool;
@@ -93,6 +94,7 @@ pub use resource::{
     Resource, ResourceContents, ResourceTemplate,
 };
 pub use rpc::{ErrorCode, ErrorData, Message, RequestId};
+pub use schema::{Kind, Schema};
 pub use subscribe::{
     AcknowledgedParams, ListenParams, ListenResult, ResourceUpdatedParams, SubscribeParams,
     SubscriptionFilter,
