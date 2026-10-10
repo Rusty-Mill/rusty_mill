@@ -19,7 +19,7 @@ and still fall back to rustls with one switch. The risk differs, so the bar shou
 
 | Item | Status |
 | --- | --- |
-| CI runs the engine (clippy, tests, docs, OpenSSL interop, zero-tests guard) whenever the planner selects `tls_engine`: a change to `rusty_tls` or a crate that depends on it, a change to the engine's own CI files, and full runs (push to main, manual dispatch). Not on unrelated PRs | Met |
+| CI runs the engine (clippy, tests, docs, OpenSSL interop, zero-tests guard) whenever the planner selects `tls_engine`: a change to `rusty_tls` or to a crate it depends on (the planner selects by reverse dependency of what changed), a change to the engine's own CI files, and full runs (manual dispatch, the weekly schedule, and pushes with no usable base). Pushes to main are scoped like PRs. Not on unrelated changes | Met |
 | TLS 1.2 client and server | Met (stages 4b onward) |
 | BoGo through a shim | 861 pass, 0 fail, 455 disabled with reasons; CI floor 830 |
 | OpenSSL interop in both directions, hermetic, in CI | Met |
@@ -37,12 +37,10 @@ and still fall back to rustls with one switch. The risk differs, so the bar shou
 
 All hard gates unless marked. "Candidate" is `rleval-app`'s OIDC transport (Google sign-in).
 
-1. **Repeated live evidence.** The live-internet step passes 10 times in a row over at least
-   7 days, against the candidate's real hosts, with the differential against the
-   rustls-backed stream agreeing. A failure resets the count and is investigated (an
-   interception flag is a runner issue, anything else is an engine finding). The only
-   scheduled CI run today is weekly (Mondays 03:17 UTC), which would take 10 weeks; this
-   item needs a daily trigger for the TLS jobs only (my suggestion, your call).
+1. **Repeated live evidence.** The live-internet step passes on 10 consecutive scheduled CI
+   runs over at least 7 days, against the candidate's real hosts, with the differential
+   against the rustls-backed stream agreeing. A failure resets the count and is investigated
+   (an interception flag is a runner issue, anything else is an engine finding).
 2. **Certificate differential, bounded.** A published external corpus (x509-limbo or
    equivalent) is run against both engines for the chain shapes the candidate meets (RSA and
    ECDSA leaves, two-intermediate chains, SAN names). Every divergence is listed. None is
@@ -77,6 +75,10 @@ proposed to start until Tier 1 has been in use.
 3. ADR: amendment before any wiring (my recommendation); **text not yet written or approved.**
 4. Reviewer: **open.** Without one Tier 1 stalls at item 4.
 5. `ring`: keep (my recommendation).
+6. **Open, not decided:** Tier 1 item 1 as approved counts *scheduled* runs, and the only
+   scheduled CI run today is weekly (Mondays 03:17 UTC), so the criterion would take 10
+   weeks. The criterion above is unchanged. Options for the owner: add a daily schedule for
+   the TLS jobs only, or change which runs count.
 
 ## Limits
 
