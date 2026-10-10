@@ -336,9 +336,7 @@ impl Baggage {
 
             entries.insert(
                 key.to_string(),
-                percent_encoding::percent_decode_str(raw.trim())
-                    .decode_utf8_lossy()
-                    .into_owned(),
+                rusty_percent::decode(raw.trim()).into_owned(),
             );
         }
 
@@ -374,13 +372,7 @@ impl Baggage {
     pub fn to_header_value(&self) -> String {
         self.entries
             .iter()
-            .map(|(key, value)| {
-                let encoded = percent_encoding::utf8_percent_encode(
-                    value,
-                    percent_encoding::NON_ALPHANUMERIC,
-                );
-                format!("{key}={encoded}")
-            })
+            .map(|(key, value)| format!("{key}={}", rusty_percent::encode(value)))
             .collect::<Vec<_>>()
             .join(",")
     }
@@ -557,10 +549,12 @@ mod tests {
         let mut baggage = Baggage::new();
         baggage.insert("userId", "alice");
         baggage.insert("node", "DF 28");
+        baggage.insert("tricky", "a,b;c=d%e~f-g_h.i/é");
 
         let reparsed = Baggage::parse(&baggage.to_header_value());
         assert_eq!(reparsed.get("userId"), Some("alice"));
         assert_eq!(reparsed.get("node"), Some("DF 28"));
+        assert_eq!(reparsed.get("tricky"), Some("a,b;c=d%e~f-g_h.i/é"));
     }
 
     #[test]

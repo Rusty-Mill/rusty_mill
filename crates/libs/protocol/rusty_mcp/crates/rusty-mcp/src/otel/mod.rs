@@ -57,12 +57,33 @@ use crate::otel::metrics::Instruments;
 const SCOPE: &str = "rusty-mcp";
 
 /// Starting an OTLP pipeline failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum OtelError {
     /// The exporter could not be built — usually a malformed endpoint.
-    #[error("could not build the OTLP span exporter: {0}")]
-    Exporter(#[from] opentelemetry_otlp::ExporterBuildError),
+    Exporter(opentelemetry_otlp::ExporterBuildError),
+}
+
+impl std::fmt::Display for OtelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exporter(e) => write!(f, "could not build the OTLP span exporter: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for OtelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Exporter(e) => Some(e),
+        }
+    }
+}
+
+impl From<opentelemetry_otlp::ExporterBuildError> for OtelError {
+    fn from(e: opentelemetry_otlp::ExporterBuildError) -> Self {
+        Self::Exporter(e)
+    }
 }
 
 /// How to talk to the collector, and what to call ourselves.
