@@ -1,6 +1,6 @@
 # TLS native engine: evidence bar proposal (owner to approve)
 
-Date: 2026-10-10. Status: **proposal, nothing approved.** Follows
+Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4), ADR amendment text (item 7). Follows
 `TLS-ENGINE-ASSESSMENT.md` section 6, which this narrows and updates. The engine's default,
 both gates and every consumer are unchanged. The bar, replacing `ring`, and superseding
 ADR-0002 are the owner's decisions.
@@ -68,13 +68,13 @@ Unchanged from assessment section 6 items 1 to 9, plus: the seam adapters (G5), 
 releases in two or more consumers, and a superseding ADR with the replacement guarantee. Not
 proposed to start until Tier 1 has been in use.
 
-## Questions for you
+## Questions for you (answers recorded 2026-10-10)
 
-1. Approve, change or reject Tier 1 as written? Which items would you drop or tighten?
-2. Is the candidate right, or is there a consumer you would rather start with?
-3. Does Tier 1 need an ADR-0002 amendment before any wiring, or only at Tier 2?
-4. Who supplies the independent review (item 4)? Without a reviewer Tier 1 stalls there.
-5. Keep `ring` for now (my recommendation, per the assessment's D2)?
+1. Tier 1: **approved**, fuzz length left to the reviewer.
+2. Candidate: `rleval-app` OIDC transport (my recommendation; not contradicted).
+3. ADR: amendment before any wiring (my recommendation); **text not yet written or approved.**
+4. Reviewer: **open.** Without one Tier 1 stalls at item 4.
+5. `ring`: keep (my recommendation).
 
 ## Limits
 
