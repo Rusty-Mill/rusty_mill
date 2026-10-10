@@ -171,6 +171,123 @@ struct Outcome {
     log: String,
 }
 
+/// Granted read-write to every run: std's null stdio opens it.
+const DEV_NULL: &str = "/dev/null";
+
+/// The run's private scratch directory, `<work>.tmp`, made fresh for this
+/// execution. Fail closed: a symlink at that path is refused (a planted or
+/// stale link would turn its target into a writable sandbox root, since the
+/// sandbox follows links when it installs its rules), a stale directory from
+/// an earlier attempt is removed first so nothing carries over, and the
+/// directory is created exclusively, mode `0700`, then re-checked to be a
+/// real directory at that exact path before it is granted.
+///
+#[cfg(unix)]
+fn restrict_to_owner(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("restricting {}: {e}", dir.display()))
+}
+
+/// The work root must belong to the user who owns `ours` (the scratch
+/// directory just created) and be writable by nobody else.
+#[cfg(unix)]
+fn root_is_private(root: &Path, ours: &std::fs::Metadata) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let root_meta = std::fs::metadata(root)
+        .map_err(|e| format!("inspecting the work root {}: {e}", root.display()))?;
+    if root_meta.uid() != ours.uid() {
+        return Err(format!(
+            "work root {} is owned by uid {}, not by this user ({})",
+            root.display(),
+            root_meta.uid(),
+            ours.uid()
+        ));
+    }
+    if root_meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "work root {} is writable by others (mode {:o}); refusing",
+            root.display(),
+            root_meta.mode() & 0o777
+        ));
+    }
+    Ok(())
+}
+
+/// Without Unix ownership there is no invariant to enforce, so a sandboxed
+/// run fails closed instead of trusting the work root.
+#[cfg(not(unix))]
+fn restrict_to_owner(dir: &Path) -> Result<(), String> {
+    Err(format!(
+        "cannot restrict {} to its owner on this platform",
+        dir.display()
+    ))
+}
+
+#[cfg(not(unix))]
+fn root_is_private(root: &Path, _ours: &std::fs::Metadata) -> Result<(), String> {
+    Err(format!(
+        "cannot verify ownership of the work root {} on this platform",
+        root.display()
+    ))
+}
+
+/// The sandbox helper opens the granted paths by name, so between this
+/// check and the grant only the owner of the work root could swap the
+/// directory. That is the trust boundary, and it is enforced rather than
+/// assumed: the work root must be owned by the user running the runner and
+/// writable by nobody else, or the run is refused. The moderator's user is
+/// trusted with the task directory already (README, "The moderator").
+fn scratch_dir(work: &Path) -> Result<PathBuf, String> {
+    let tmp = work.with_extension("tmp");
+    match std::fs::symlink_metadata(&tmp) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "{} is a symlink; refusing to grant it",
+                tmp.display()
+            ));
+        }
+        Ok(meta) if meta.is_dir() => {
+            std::fs::remove_dir_all(&tmp)
+                .map_err(|e| format!("removing stale {}: {e}", tmp.display()))?;
+        }
+        Ok(_) => {
+            std::fs::remove_file(&tmp)
+                .map_err(|e| format!("removing stale {}: {e}", tmp.display()))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("inspecting {}: {e}", tmp.display())),
+    }
+    std::fs::create_dir(&tmp).map_err(|e| format!("creating {}: {e}", tmp.display()))?;
+    restrict_to_owner(&tmp)?;
+    let meta = std::fs::symlink_metadata(&tmp)
+        .map_err(|e| format!("re-checking {}: {e}", tmp.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!("{} changed under us; refusing", tmp.display()));
+    }
+    // The directory we just made is ours; the work root must be too, and
+    // closed to everyone else, or anyone could swap the scratch directory
+    // between this check and the helper's grant.
+    let root = work.parent().ok_or("work directory has no parent")?;
+    root_is_private(root, &meta)?;
+    let canonical = tmp
+        .canonicalize()
+        .map_err(|e| format!("resolving {}: {e}", tmp.display()))?;
+    let parent = work
+        .parent()
+        .ok_or("work directory has no parent")?
+        .canonicalize()
+        .map_err(|e| format!("resolving the work root: {e}"))?;
+    if canonical.parent() != Some(parent.as_path()) {
+        return Err(format!(
+            "{} resolves outside the work root ({})",
+            tmp.display(),
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
 fn execute<E: Executor>(exec: &E, set: &ProfileSet, work: &Path) -> Outcome
 where
     E::Error: std::fmt::Display,
@@ -205,11 +322,31 @@ where
     };
     let mut read_roots: Vec<PathBuf> = set.read_roots.iter().map(PathBuf::from).collect();
     read_roots.push(work.to_path_buf());
+    // What every toolchain needs beyond the profile's roots, and what the
+    // profile cannot name because it is per run: a scratch directory beside
+    // the checkout as `TMPDIR` (a linker writes its temp files there; `/tmp`
+    // is unreachable), and `/dev/null` read-write, which std opens in the
+    // child whenever a process is spawned with a null stdio (cargo starting
+    // rustc), so without it no child can be started at all.
+    let tmp = match scratch_dir(work) {
+        Ok(t) => t,
+        Err(e) => {
+            return Outcome {
+                status: RunStatus::Error,
+                profiles: vec![],
+                log: format!("scratch directory: {e}\n"),
+            }
+        }
+    };
+    let mut env = set.env.clone();
+    if !env.iter().any(|(k, _)| k == "TMPDIR") {
+        env.push(("TMPDIR".into(), tmp.to_string_lossy().into_owned()));
+    }
     let spec = match SandboxSpec::new(
         read_roots,
-        vec![work.to_path_buf()],
+        vec![work.to_path_buf(), tmp, PathBuf::from(DEV_NULL)],
         work.to_path_buf(),
-        set.env.clone(),
+        env,
         limits,
     ) {
         Ok(s) => s,
