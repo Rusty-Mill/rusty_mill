@@ -10360,6 +10360,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rb_rlbot_client"
+version = "0.1.0"
+dependencies = [
+ "rb_rlbot_wire",
+]
+
+[[package]]
 name = "rb_rlbot_wire"
 version = "0.1.0"
 dependencies = [

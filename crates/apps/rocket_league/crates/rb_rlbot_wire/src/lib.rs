@@ -19,7 +19,7 @@ mod types;
 pub use codec::Struct;
 pub use error::Error;
 pub use message::{CoreMessage, InterfaceMessage};
-pub use tables::{ConnectionSettings, InitComplete, PlayerInput, StopCommand};
+pub use tables::{ConnectionSettings, InitComplete, Ping, PlayerInput, StopCommand};
 pub use types::*;
 
 /// The schema revision the layouts were taken from.

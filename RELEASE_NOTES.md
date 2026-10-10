@@ -17,6 +17,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rb_rlbot_client: blocking RLBot client (RLBot port stage 3) (pending review)
+
+- **Added:** `crates/apps/rocket_league/crates/rb_rlbot_client`: `Connection` (connect, send, receive with or without a timeout, handshake), `run_bots` and `run_hivemind` (handshake, `InitComplete`, packet loop, ping replies, clean exit on disconnect), and `Environment` for the `RLBOT_*` variables. `std::net` only, one thread; depends on `rb_rlbot_wire` alone.
+- **Added (`rb_rlbot_wire`):** `CoreMessage::DisconnectSignal`, `CoreMessage::PingRequest` and `InterfaceMessage::PingResponse` (a shared `Ping { cookie }`), with `From` conversions into `InterfaceMessage`. The ping and disconnect bytes are pinned against `rlbot_flat` fixtures and by `planus` reading what this crate encodes. Core pings used to arrive as `CoreMessage::Other(9)`; they are now `PingRequest`, so `Other(9)` is gone.
+- **Tested:** 20 tests against an in-process fake core (split and coalesced frames, timeouts that keep a half frame, handshake in any order, ping replies, garbage frames, every way a connection ends, car-order of replies), 25 repeated runs without a failure.
+- **Fixed (review):** `recv_timeout` checks its deadline on every pass (the read loop is generic over a scripted transport and clock, so the regression is deterministic: against the original logic four of its five unit tests fail), so bytes trickling in can no longer hold it past the deadline, and a zero timeout is a true poll (buffered message or what is already on the socket, never a wait). `CoreMessage::DisconnectSignal` is validated like any modelled member (message table required, its vtable checked) instead of being accepted from the tag alone. `Connection::handshake` refuses an empty or whitespace-only `agent_id` (core trims it first) with `Error::EmptyAgentId` before sending anything, because core sends team information only to a named agent; a match runner with no id sends its settings with `send` and reads with `recv`, as `rb_match_log` does.
+- **Known limitation:** nothing here has talked to the real core; stage 4 does that once. Comms, ball prediction and rendering callbacks of the `rlbot` crate are not carried over (nothing in `rb_tape_bot` uses them).
+
+---
+
 ## 2026-10-10 - ADR-0002 Amendment 1: MCP crates to Tier T (docs only)
 
 - **Changed:** the MCP crates are Tier T (transitional), with `docs/research/MCP-NATIVE-PLAN.md` as the milestone list. Records the owner decisions of 2026-10-09 (schema builder first, blocking servers on `rusty_serve`, scope is `rmcp` and its whole stack) and a three-point checklist for any MCP server (advertise only implemented revisions, check cancellation before running a queued handler, bounded shutdown on a failed write).
