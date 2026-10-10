@@ -281,6 +281,41 @@ async fn connect_with_bounds_each_call() {
     stop.shutdown();
 }
 
+/// Discovery names the newest revision in `MCP-Protocol-Version`; a server
+/// that speaks only a classic one refuses it, and the `initialize` that
+/// follows must not carry it.
+#[tokio::test]
+async fn a_server_that_speaks_only_a_classic_revision_is_reachable() {
+    use rusty_mcp_server::proto::ProtocolVersion;
+    let classic = Server::builder("old", "1")
+        .tool(Tool::new("t", schema()), |_c, _p| {
+            Ok(CallToolResult::default())
+        })
+        .versions(vec![ProtocolVersion::new(ProtocolVersion::V_2025_06_18)])
+        .build()
+        .unwrap();
+    let http = bind_http(
+        Arc::new(classic),
+        "127.0.0.1:0".parse().unwrap(),
+        HttpConfig::default(),
+        Limits::default(),
+    )
+    .unwrap();
+    let addr = http.local_addr().unwrap();
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    let spec = McpServerSpec {
+        transport: McpTransport::Http,
+        url: Some(format!("http://{addr}/mcp")),
+        ..McpServerSpec::default()
+    };
+    let client = McpClient::connect("old", &spec).await.unwrap();
+    let tools = client.list_tools().await.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "t");
+    stop.shutdown();
+}
+
 #[tokio::test]
 async fn a_session_the_server_forgot_counts_as_dead() {
     use rusty_mcp_server::proto::ProtocolVersion;

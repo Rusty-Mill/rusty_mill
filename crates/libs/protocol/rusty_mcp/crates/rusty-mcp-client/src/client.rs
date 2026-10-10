@@ -172,6 +172,13 @@ impl Transport for Link {
             Self::Http(t) => t.set_protocol_version(version),
         }
     }
+
+    fn clear_protocol_version(&mut self) {
+        match self {
+            Self::Stdio(t) => t.clear_protocol_version(),
+            Self::Http(t) => t.clear_protocol_version(),
+        }
+    }
 }
 
 /// A live connection to one external MCP server.
