@@ -53,8 +53,10 @@ Reading (evidence, not proof):
   baseline in both series. With two series this is neither evidence of a leak nor evidence of its
   absence; it is recorded so it is not lost.
 - This does not establish why the earlier runs reached 4.31 and 4.83, and it does not prove the
-  code is constant time. It does not retire the watch item; it removes the sign that the tail
-  was getting worse on a quiet machine. The valgrind verdict-site check, which is the stronger
+  code is constant time. These two exploratory series did not show increasing maxima; they
+  do not establish the removal of a worsening tail or retire the watch item. The second series
+  was added after viewing the first, so this is not a prespecified two-series experiment.
+  The valgrind verdict-site check, which is the stronger
   evidence about secret-dependent branches, is unchanged and still passes in CI.
 - Not checked: whether anything other than the scalar bits differs between the two classes at
   the hardware level (cache or multiplier effects); the key slot is rewritten in the untimed

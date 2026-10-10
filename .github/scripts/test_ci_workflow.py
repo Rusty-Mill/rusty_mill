@@ -703,8 +703,8 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         )
 
     @classmethod
-    def _planner_map(cls, *args: str) -> dict[str, str]:
-        result = cls._planner(*args)
+    def _planner_map(cls, *args: str, input: str = "") -> dict[str, str]:
+        result = cls._planner(*args, input=input)
         if result.returncode:
             raise AssertionError(result.stderr)
         return dict(line.split("=", 1) for line in result.stdout.splitlines())
@@ -714,6 +714,51 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertFalse(specialized_job_flags([], ["rusty_config", "rusty_pk"])["rand_platforms"])
         self.assertIn("rand_platforms: ${{ steps.plan.outputs.rand_platforms }}", self.workflow)
         self.assertIn("if: needs.plan.outputs.rand_platforms == 'true'", self.workflow)
+
+    def test_rand_platforms_selected_for_mixed_ci_and_docs_changes(self) -> None:
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/scripts/ci_plan.py",
+            ".github/scripts/affected_crates.py",
+            ".github/scripts/test_ci_workflow.py",
+        ):
+            with self.subTest(path=path):
+                changed = f"{path}\ndocs/research/CRYPTO-REPLACEMENT-PLAN.md\n"
+                self.assertNotEqual(self._planner("--is-ci-only", input=changed).returncode, 0)
+                outputs = self._planner_map("--packages", "", input=changed)
+                self.assertEqual(outputs["rand_platforms"], "true")
+        self.assertEqual(self._planner_map(input="docs/README.md\n")["rand_platforms"], "false")
+
+    def test_rand_platforms_survive_ci_only_shortcut(self) -> None:
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/scripts/ci_plan.py",
+            ".github/scripts/affected_crates.py",
+            ".github/scripts/test_ci_workflow.py",
+            ".github/workflows/unrelated.yml",
+        ):
+            with self.subTest(path=path):
+                changed = f"{path}\n.config/nextest.toml\n"
+                self.assertEqual(self._planner("--is-ci-only", input=changed).returncode, 0)
+                outputs = self._planner_map("--emit-ci-smoke", input=changed)
+                self.assertEqual(set(outputs), PLAN_KEYS)
+                self.assertEqual(outputs["ci_only"], "true")
+                self.assertEqual(outputs["full"], "false")
+                self.assertEqual(outputs["rand_platforms"], "false" if "unrelated" in path else "true")
+                self.assertTrue(all(outputs[key] == "false" for key in SPECIALIZED_KEYS - {"rand_platforms"}))
+        self.assertIn(
+            "printf '%s\\n' \"$changed\" | python3 .github/scripts/ci_plan.py --emit-ci-smoke >> \"$GITHUB_OUTPUT\"",
+            self.workflow,
+        )
+
+    def test_rand_platform_commands_and_required_gate_are_preserved(self) -> None:
+        job = self.workflow.split("  rusty-rand-platforms:\n", 1)[1].split("\n  # Every other Rust job", 1)[0]
+        self.assertIn("os: [ubuntu-latest, macos-latest]", job)
+        self.assertIn("run: cargo test -p rusty_rand", job)
+        for target in ("aarch64-unknown-linux-gnu", "riscv64gc-unknown-linux-gnu"):
+            self.assertIn(f"run: cargo check -p rusty_rand --target {target} --all-targets", job)
+        gate = self.workflow.split("  required-gate:\n", 1)[1]
+        self.assertIn("      - rusty-rand-platforms\n", gate)
 
     def test_crypto_constant_time_job_follows_its_crates(self) -> None:
         for package in ("rusty_pk", "rusty_sha2", "rusty_aead", "rusty_ct_check", "rusty_crypto_key"):

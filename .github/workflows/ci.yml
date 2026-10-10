@@ -246,7 +246,7 @@ jobs:
           }
           emit_ci_smoke() {
             echo "CI-only change -- running planner, workflow lint, and representative smoke tests. Full workspace coverage is not implied."
-            python3 .github/scripts/ci_plan.py --emit-ci-smoke >> "$GITHUB_OUTPUT"
+            printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --emit-ci-smoke >> "$GITHUB_OUTPUT"
           }
           mapfile -t event_plan < <(python3 .github/scripts/ci_plan.py \
             --event "${{ github.event_name }}" \

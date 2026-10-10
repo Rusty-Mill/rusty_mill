@@ -828,7 +828,8 @@ deliberately simple (no window table); that costs speed.
   sparse-vs-dense series is the one to watch: its maxima were 3.54 (an earlier single run), 4.31 (run 1) and 4.83 (run 2)
   against matched P-256 A/A maxima of 2.67 (run 1) and 3.31 (run 2). A targeted rerun on an idle machine
   (`EVIDENCE-2026-10-10-ecdh-p256-quiet-rerun.txt`, two 40-repetition series, both reported) gave 0 of 40 alarms in each, leak-test
-  maxima 4.43 and 3.12 against A/A maxima 3.05 and 3.50. That removes the sign that the tail was getting worse on a quiet machine;
+  maxima 4.43 and 3.12 against A/A maxima 3.05 and 3.50. These two exploratory series did not show increasing maxima;
+  they do not establish the removal of a worsening tail. The second series was added after viewing the first;
   it does not explain the earlier 4.31 and 4.83, does not retire the watch item (run 1's 4.43 is close to the threshold and the
   leak test's median sits slightly above its baseline in both series) and does not prove constant time. What differs between the
   classes beyond the scalar bits (cache or multiplier effects) is still unchecked. A first
