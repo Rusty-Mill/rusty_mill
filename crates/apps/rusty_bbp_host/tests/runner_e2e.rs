@@ -426,16 +426,28 @@ fn sandboxed_workload_can_spawn_with_null_stdio_rename_across_dirs_and_use_tmpdi
     // What a toolchain does that a plain `sh -c true` does not: std opens
     // /dev/null when a child is spawned with null stdio (cargo starting
     // rustc), rustc renames an .rmeta across directories, the linker writes
-    // under TMPDIR. The first proving run failed on all three.
+    // under TMPDIR. The first proving run failed on all three. The `probe`
+    // profile establishes on its own whether this kernel can confine at all;
+    // only its failure to set up a sandbox skips the test. The `shape`
+    // profile then must pass. The rename and link are real syscalls through
+    // python, not `mv`, which falls back to copy-and-delete on EXDEV.
     let dir = tempdir("toolchain-shape");
     let (repo, base) = repo(&dir);
-    let set = ProfileSet::shell(
-        "shape",
-        "true </dev/null >/dev/null 2>/dev/null \
-         && mkdir -p a b && : > a/f && mv a/f b/f && test -f b/f \
-         && test -n \"$TMPDIR\" && : > \"$TMPDIR/x\" && test -f \"$TMPDIR/x\" \
-         && echo shape-ok",
-    );
+    let mut set = ProfileSet::shell("probe", "true");
+    set.profiles.push(rusty_bbp_host::profiles::Profile {
+        name: "shape".into(),
+        program: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            "true </dev/null >/dev/null 2>/dev/null \
+             && mkdir -p a b && : > a/f && : > a/g \
+             && /usr/bin/python3 -c 'import os; os.rename(\"a/f\", \"b/f\"); os.link(\"a/g\", \"b/g\")' \
+             && test -f b/f && test -f b/g \
+             && test -n \"$TMPDIR\" && : > \"$TMPDIR/x\" && test -f \"$TMPDIR/x\" \
+             && echo shape-ok"
+                .into(),
+        ],
+    });
     let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
     let exec = runner::Sandboxed::new(
         PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
@@ -451,11 +463,15 @@ fn sandboxed_workload_can_spawn_with_null_stdio_rename_across_dirs_and_use_tmpdi
     )
     .expect("run");
     let (rep, log) = report_of(&t);
-    match rep.status {
-        RunStatus::Passed => assert!(log.contains("shape-ok"), "{log}"),
-        RunStatus::Error => eprintln!("sandbox unavailable here: {log}"),
-        RunStatus::Failed => panic!("{log}"),
+    let probe = rep.profiles.first().expect("probe result");
+    if probe.exit_code == 125 && log.contains("sandbox unavailable") {
+        eprintln!("sandbox unavailable here: {log}");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
     }
+    assert_eq!(probe.exit_code, 0, "the probe ran: {log}");
+    assert_eq!(rep.status, RunStatus::Passed, "{log}");
+    assert!(log.contains("shape-ok"), "{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
