@@ -47,3 +47,50 @@ fn seal_throughput() {
         );
     }
 }
+
+#[test]
+#[ignore = "timing; run manually"]
+fn aes_gcm_seal_throughput() {
+    for (name, alg, key_len) in [
+        ("AES-128-GCM", &aead::AES_128_GCM, 16usize),
+        ("AES-256-GCM", &aead::AES_256_GCM, 32usize),
+    ] {
+        for len in [64usize, 1 << 10, 16 << 10, 16 << 20] {
+            let key = vec![7u8; key_len];
+            let mut buf = vec![1u8; len];
+            let theirs = LessSafeKey::new(UnboundKey::new(alg, &key).unwrap());
+            let reps = ((64 << 20) / len).max(1);
+            let ours_mb = if key_len == 16 {
+                let c = rusty_aead::Aes128Gcm::new(&key.clone().try_into().unwrap());
+                best_mb_s(len * reps, || {
+                    for _ in 0..reps {
+                        std::hint::black_box(c.seal_in_place(&[0; 12], b"", &mut buf).unwrap());
+                    }
+                })
+            } else {
+                let c = rusty_aead::Aes256Gcm::new(&key.clone().try_into().unwrap());
+                best_mb_s(len * reps, || {
+                    for _ in 0..reps {
+                        std::hint::black_box(c.seal_in_place(&[0; 12], b"", &mut buf).unwrap());
+                    }
+                })
+            };
+            let ring_mb = best_mb_s(len * reps, || {
+                for _ in 0..reps {
+                    let tag = theirs
+                        .seal_in_place_separate_tag(
+                            Nonce::assume_unique_for_key([0; 12]),
+                            Aad::empty(),
+                            &mut buf,
+                        )
+                        .unwrap();
+                    let _ = std::hint::black_box(tag);
+                }
+            });
+            eprintln!(
+                "{name} {len:>9} B: rusty_aead {ours_mb:9.1} MB/s  ring {ring_mb:9.1} MB/s  ratio {:.0}x",
+                ring_mb / ours_mb
+            );
+        }
+    }
+}

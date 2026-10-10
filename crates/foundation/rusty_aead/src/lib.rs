@@ -22,8 +22,12 @@
 #![forbid(unsafe_code)]
 
 mod aead;
+mod aes;
 mod chacha20;
+mod gcm;
+mod ghash;
 mod poly1305;
 
 pub use aead::{ChaCha20Poly1305, Error, KEY_LEN, NONCE_LEN, TAG_LEN};
+pub use gcm::{Aes128Gcm, Aes256Gcm, GCM_NONCE_LEN, GCM_TAG_LEN};
 pub use poly1305::Poly1305;
