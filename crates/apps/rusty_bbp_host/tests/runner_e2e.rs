@@ -460,6 +460,85 @@ fn sandboxed_workload_can_spawn_with_null_stdio_rename_across_dirs_and_use_tmpdi
 }
 
 #[test]
+fn a_symlinked_scratch_dir_is_refused_and_its_target_untouched() {
+    let dir = tempdir("scratch-symlink");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell("test", ": > \"$TMPDIR/planted\"; echo PROFILE-EXECUTED");
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let sentinel = dir.join("sentinel");
+    std::fs::create_dir_all(&sentinel).expect("mkdir");
+    std::fs::write(sentinel.join("keep"), b"keep").expect("write");
+    let work_root = dir.join("work");
+    std::fs::create_dir_all(&work_root).expect("mkdir");
+    let run = open_driver(&dir, &t.id)
+        .expect("driver")
+        .state
+        .selected_run()
+        .expect("run")
+        .id;
+    std::os::unix::fs::symlink(&sentinel, work_root.join(format!("run-{}.tmp", run.0)))
+        .expect("symlink");
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &work_root,
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Error, "{log}");
+    assert!(rep.profiles.is_empty(), "nothing ran: {log}");
+    assert!(log.contains("symlink"), "{log}");
+    assert!(!log.contains("PROFILE-EXECUTED"), "{log}");
+    let names: Vec<_> = std::fs::read_dir(&sentinel)
+        .expect("read")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec![std::ffi::OsString::from("keep")],
+        "sentinel untouched"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stale_scratch_dir_is_replaced_before_the_run() {
+    let dir = tempdir("scratch-stale");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell(
+        "test",
+        "test ! -e \"$TMPDIR/stale\" && : > \"$TMPDIR/fresh\"",
+    );
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let work_root = dir.join("work");
+    let run = open_driver(&dir, &t.id)
+        .expect("driver")
+        .state
+        .selected_run()
+        .expect("run")
+        .id;
+    let tmp = work_root.join(format!("run-{}.tmp", run.0));
+    std::fs::create_dir_all(&tmp).expect("mkdir");
+    std::fs::write(tmp.join("stale"), b"old attempt").expect("write");
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &work_root,
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Passed, "{log}");
+    assert!(!tmp.join("stale").exists() && tmp.join("fresh").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn sandboxed_workload_reaches_no_socket_endpoint() {
     use std::os::unix::net::UnixListener;
     let dir = tempdir("endpoint");

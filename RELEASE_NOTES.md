@@ -17,13 +17,6 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
-## 2026-10-10 - rusty_bbp_host: the sandboxed runner can build Rust (proving-run root cause)
-
-- **Fixed:** the first proving run (`docs/proving/2026-10-09-slug-1.md`) escalated because every sandboxed run failed to start `rustc`. Root cause, reproduced here with `strace`: `openat("/dev/null")` returned `EACCES` inside the sandbox, and Rust's std opens `/dev/null` in the child for a null stdio before `exec`, so cargo's spawn of rustc failed before rustc existed. Behind it: no writable `TMPDIR` for the linker, and Landlock `EXDEV` on rustc's cross-directory `.rmeta` rename. The runner now grants `/dev/null` read-write and a per-run `TMPDIR`; `platform-linux` 0.27.3 handles and grants `REFER` on writable roots on ABI v2+ kernels. A sandboxed `cargo test --offline` of a small crate passes end to end on this kernel (Landlock ABI 7).
-- **Added:** `runner_e2e` test for the three behaviours under the real sandbox; `platform-linux` re-exec test for cross-directory rename and link inside a writable root.
-- **Changed:** PAL group bumped to 0.27.3 (behaviour only); the host README and the proving runbook describe the runner's grants and the `CARGO_HOME` symlink pitfall from the record.
-- **Known limitation:** `/etc/ld.so.cache`, `/proc/self/*` and `/dev/urandom` are still unreadable in the sandbox; cargo and rustc fall back (default library paths, `getrandom`) and the build succeeds, but a toolchain that insists on them would need `read_roots` entries.
-
 ## 2026-10-09 - rusty_tls: a blocking stream on the native engine (opt-in, not the seam)
 
 - **Added:** `handrolled::stream::NativeTlsStream`, a `Read + Write` client stream shaped like `TlsStream`, inside the double-gated `handrolled` module. It is the piece a consumer such as `rleval-app`'s Google sign-in would opt into locally. It was built there, and not as a change to `TlsStream`, because ADR-0002 keeps rustls behind every type this crate exports at the root; adding it at the root would have needed that ADR superseded.

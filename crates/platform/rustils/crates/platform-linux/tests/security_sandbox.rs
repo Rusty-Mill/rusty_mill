@@ -10,6 +10,9 @@
 //! shape nexus's own helper-binary design settled on for the real thing.
 
 #![cfg(target_os = "linux")]
+// One raw `libc` call: the Landlock ABI query that decides which REFER
+// behaviour to assert, as `mount_crossing.rs` does for its own probes.
+#![allow(unsafe_code)]
 
 use std::env;
 use std::fs;
@@ -149,15 +152,39 @@ fn run_refer_child() {
     }
     assert_eq!(status, SandboxStatus::Enforced);
 
-    fs::rename(writable.join("a/f"), writable.join("b/f"))
-        .expect("rename across directories inside the writable root");
-    assert_eq!(fs::read(writable.join("b/f")).unwrap(), b"moved");
-    fs::hard_link(writable.join("a/g"), writable.join("b/g"))
-        .expect("link across directories inside the writable root");
+    let rename = fs::rename(writable.join("a/f"), writable.join("b/f"));
+    let link = fs::hard_link(writable.join("a/g"), writable.join("b/g"));
+    if landlock_abi() >= 2 {
+        rename.expect("rename across directories inside the writable root (REFER)");
+        assert_eq!(fs::read(writable.join("b/f")).unwrap(), b"moved");
+        link.expect("link across directories inside the writable root (REFER)");
+    } else {
+        // ABI v1 has no REFER: the kernel refuses every cross-directory
+        // rename and link with EXDEV, whatever the rules grant.
+        assert!(rename.is_err(), "ABI v1 cannot rename across directories");
+        assert!(link.is_err(), "ABI v1 cannot link across directories");
+    }
     assert!(
         fs::rename(writable.join("a/g"), excluded.join("g")).is_err(),
         "rename into an unreachable directory must be refused"
     );
+}
+
+/// The kernel's Landlock ABI, as the ruleset code negotiates it; 0 when
+/// Landlock is absent (the callers above return before asking).
+fn landlock_abi() -> i64 {
+    const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
+    // SAFETY: the documented query form: a null attr, size 0, the VERSION
+    // flag; the kernel reads no memory.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<u8>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    r.max(0)
 }
 
 fn run_network_child() {

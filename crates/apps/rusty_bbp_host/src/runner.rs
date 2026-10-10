@@ -174,6 +174,57 @@ struct Outcome {
 /// Granted read-write to every run: std's null stdio opens it.
 const DEV_NULL: &str = "/dev/null";
 
+/// The run's private scratch directory, `<work>.tmp`, made fresh for this
+/// execution. Fail closed: a symlink at that path is refused (a planted or
+/// stale link would turn its target into a writable sandbox root, since the
+/// sandbox follows links when it installs its rules), a stale directory from
+/// an earlier attempt is removed first so nothing carries over, and the
+/// directory is created exclusively, then re-checked to be a real directory
+/// at that exact path before it is granted.
+fn scratch_dir(work: &Path) -> Result<PathBuf, String> {
+    let tmp = work.with_extension("tmp");
+    match std::fs::symlink_metadata(&tmp) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "{} is a symlink; refusing to grant it",
+                tmp.display()
+            ));
+        }
+        Ok(meta) if meta.is_dir() => {
+            std::fs::remove_dir_all(&tmp)
+                .map_err(|e| format!("removing stale {}: {e}", tmp.display()))?;
+        }
+        Ok(_) => {
+            std::fs::remove_file(&tmp)
+                .map_err(|e| format!("removing stale {}: {e}", tmp.display()))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("inspecting {}: {e}", tmp.display())),
+    }
+    std::fs::create_dir(&tmp).map_err(|e| format!("creating {}: {e}", tmp.display()))?;
+    let meta = std::fs::symlink_metadata(&tmp)
+        .map_err(|e| format!("re-checking {}: {e}", tmp.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!("{} changed under us; refusing", tmp.display()));
+    }
+    let canonical = tmp
+        .canonicalize()
+        .map_err(|e| format!("resolving {}: {e}", tmp.display()))?;
+    let parent = work
+        .parent()
+        .ok_or("work directory has no parent")?
+        .canonicalize()
+        .map_err(|e| format!("resolving the work root: {e}"))?;
+    if canonical.parent() != Some(parent.as_path()) {
+        return Err(format!(
+            "{} resolves outside the work root ({})",
+            tmp.display(),
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
 fn execute<E: Executor>(exec: &E, set: &ProfileSet, work: &Path) -> Outcome
 where
     E::Error: std::fmt::Display,
@@ -214,14 +265,16 @@ where
     // is unreachable), and `/dev/null` read-write, which std opens in the
     // child whenever a process is spawned with a null stdio (cargo starting
     // rustc), so without it no child can be started at all.
-    let tmp = work.with_extension("tmp");
-    if let Err(e) = std::fs::create_dir_all(&tmp) {
-        return Outcome {
-            status: RunStatus::Error,
-            profiles: vec![],
-            log: format!("creating {}: {e}\n", tmp.display()),
-        };
-    }
+    let tmp = match scratch_dir(work) {
+        Ok(t) => t,
+        Err(e) => {
+            return Outcome {
+                status: RunStatus::Error,
+                profiles: vec![],
+                log: format!("scratch directory: {e}\n"),
+            }
+        }
+    };
     let mut env = set.env.clone();
     if !env.iter().any(|(k, _)| k == "TMPDIR") {
         env.push(("TMPDIR".into(), tmp.to_string_lossy().into_owned()));
