@@ -65,7 +65,16 @@ Each item is one PR, with its own tests and a change fragment.
 2. **`serde`/`serde_json` to `rusty_json`** across `auth` and `trace`.
    `ProtectedResourceMetadata::to_value`. The gateway call sites move with it.
    *Done when:* no `serde` in the crate; the metadata document is
-   byte-identical in the existing authorization test.
+   byte-identical in the existing authorization test. **Done (2026-10-10),
+   with three changes:** (1) `rusty-mcp` lists no `serde` or `serde_json`, but
+   `serde` stays in its tree through `jsonwebtoken` (until item 4) and
+   `rusty_json`'s default `serde` feature, which `decode::<Value>` and axum's
+   `Json` need until items 4 and 5. (2) The metadata document has the same
+   content, not the same bytes: keys are now alphabetical, not in declaration
+   order (the existing test parses the body, so it never compared bytes).
+   (3) `VerifiedToken::claims` is a `rusty_json::Value`; the gateway converts
+   once, in `TokenClaims::from_json`. Its rules and `agentgateway-llm` stay on
+   `serde_json`, which is the gateway's own track, not this crate's.
 3. **JWKS fetch on `rusty_request`**, replacing `reqwest`, with a bridge that
    works inside a `tokio` caller. *Done when:* `reqwest` is gone; the
    unreachable-JWKS and refetch-limit tests pass.

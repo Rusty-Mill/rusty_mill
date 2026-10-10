@@ -10,11 +10,11 @@ mod support;
 
 use std::sync::{Arc, Mutex};
 
+use rusty_json::{Map, json};
 use rusty_mcp::trace::TraceContext;
 use rusty_mcp_server::json::Value;
 use rusty_mcp_server::proto::{CallToolResult, ContentBlock, Tool};
 use rusty_mcp_server::{HttpConfig, HttpHandler, Server};
-use serde_json::{Map, json};
 
 const TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01";
 const TRACESTATE: &str = "vendor=opaque";
@@ -83,7 +83,7 @@ async fn round_trip(
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "observe", "arguments": {}, "_meta": meta }
     })
-    .to_string();
+    .to_json_string();
 
     let response = support::post(addr, "tools/call", Some("observe"), body, None).await;
     assert!(response.status().is_success());
@@ -136,7 +136,7 @@ async fn tracestate_without_a_valid_traceparent_is_ignored() {
 
 #[test]
 fn a_context_round_trips_back_onto_an_outbound_request() {
-    let meta: Map<String, serde_json::Value> = json!({
+    let meta: Map = json!({
         "traceparent": TRACEPARENT, "tracestate": TRACESTATE, "baggage": BAGGAGE
     })
     .as_object()

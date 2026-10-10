@@ -27,6 +27,7 @@ unwrap_used = "warn"
 [dependencies]
 agentgateway-config = { workspace = true }
 rusty-mcp = { workspace = true, default-features = false, features = ["jwt"] }
+rusty_json = { workspace = true }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 http = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

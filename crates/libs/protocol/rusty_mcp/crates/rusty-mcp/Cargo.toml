@@ -30,8 +30,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 rusty_base64 = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 http = { workspace = true }
-serde = { workspace = true }
-serde_json = "1"
+rusty_json = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -48,11 +47,10 @@ tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]
 rand = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty_mcp_axum = { workspace = true }
 rsa = "0.9"
-serde = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 
 [features]

@@ -22,8 +22,8 @@ use std::path::Path;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header, errors::ErrorKind, jwk::JwkSet,
 };
+use rusty_json::Value;
 use rusty_mcp::auth::{TokenError, TokenValidator, ValidateFuture, VerifiedToken};
-use serde_json::Value;
 
 /// Failure to load a JWKS from disk.
 #[derive(Debug, thiserror::Error)]

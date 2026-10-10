@@ -10,7 +10,7 @@
 //!
 //! ```
 //! use rusty_mcp::trace::TraceContext;
-//! use serde_json::json;
+//! use rusty_json::json;
 //!
 //! let meta = json!({
 //!     "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
@@ -45,7 +45,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::{Map, Value};
+use rusty_json::{Map, Value};
 
 /// Maximum baggage entries (W3C Baggage §3.2.1).
 const MAX_BAGGAGE_ENTRIES: usize = 180;
@@ -74,7 +74,7 @@ impl TraceContext {
     /// `None` when there is no `traceparent` string, or when it is malformed;
     /// the caller should start a fresh trace in both cases. `tracestate` and
     /// `baggage` that are not strings are ignored.
-    pub fn from_meta(meta: &Map<String, Value>) -> Option<Self> {
+    pub fn from_meta(meta: &Map) -> Option<Self> {
         Self::from_parts(
             meta.get("traceparent")?.as_str()?,
             meta.get("tracestate").and_then(Value::as_str),
@@ -157,7 +157,7 @@ impl TraceContext {
     }
 
     /// Write this context into a `_meta` object, for an outbound request.
-    pub fn apply_to(&self, meta: &mut Map<String, Value>) {
+    pub fn apply_to(&self, meta: &mut Map) {
         meta.insert("traceparent".into(), Value::String(self.to_traceparent()));
         if let Some(tracestate) = &self.tracestate {
             meta.insert("tracestate".into(), Value::String(tracestate.clone()));
