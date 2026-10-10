@@ -179,9 +179,17 @@ const DEV_NULL: &str = "/dev/null";
 /// stale link would turn its target into a writable sandbox root, since the
 /// sandbox follows links when it installs its rules), a stale directory from
 /// an earlier attempt is removed first so nothing carries over, and the
-/// directory is created exclusively, then re-checked to be a real directory
-/// at that exact path before it is granted.
+/// directory is created exclusively, mode `0700`, then re-checked to be a
+/// real directory at that exact path before it is granted.
+///
+/// The sandbox helper opens the granted paths by name, so between this
+/// check and the grant only the owner of the work root could swap the
+/// directory. That is the trust boundary, and it is enforced rather than
+/// assumed: the work root must be owned by the user running the runner and
+/// writable by nobody else, or the run is refused. The moderator's user is
+/// trusted with the task directory already (README, "The moderator").
 fn scratch_dir(work: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let tmp = work.with_extension("tmp");
     match std::fs::symlink_metadata(&tmp) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -202,10 +210,33 @@ fn scratch_dir(work: &Path) -> Result<PathBuf, String> {
         Err(e) => return Err(format!("inspecting {}: {e}", tmp.display())),
     }
     std::fs::create_dir(&tmp).map_err(|e| format!("creating {}: {e}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("restricting {}: {e}", tmp.display()))?;
     let meta = std::fs::symlink_metadata(&tmp)
         .map_err(|e| format!("re-checking {}: {e}", tmp.display()))?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return Err(format!("{} changed under us; refusing", tmp.display()));
+    }
+    // The directory we just made is ours; the work root must be too, and
+    // closed to everyone else, or anyone could swap the scratch directory
+    // between this check and the helper's grant.
+    let root = work.parent().ok_or("work directory has no parent")?;
+    let root_meta = std::fs::metadata(root)
+        .map_err(|e| format!("inspecting the work root {}: {e}", root.display()))?;
+    if root_meta.uid() != meta.uid() {
+        return Err(format!(
+            "work root {} is owned by uid {}, not by this user ({})",
+            root.display(),
+            root_meta.uid(),
+            meta.uid()
+        ));
+    }
+    if root_meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "work root {} is writable by others (mode {:o}); refusing",
+            root.display(),
+            root_meta.mode() & 0o777
+        ));
     }
     let canonical = tmp
         .canonicalize()

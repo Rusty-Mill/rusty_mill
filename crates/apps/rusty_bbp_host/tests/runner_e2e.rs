@@ -426,14 +426,21 @@ fn sandboxed_workload_can_spawn_with_null_stdio_rename_across_dirs_and_use_tmpdi
     // What a toolchain does that a plain `sh -c true` does not: std opens
     // /dev/null when a child is spawned with null stdio (cargo starting
     // rustc), rustc renames an .rmeta across directories, the linker writes
-    // under TMPDIR. The first proving run failed on all three. The `probe`
-    // profile establishes on its own whether this kernel can confine at all;
-    // only its failure to set up a sandbox skips the test. The `shape`
-    // profile then must pass. The rename and link are real syscalls through
-    // python, not `mv`, which falls back to copy-and-delete on EXDEV.
+    // under TMPDIR. The first proving run failed on all three.
+    //
+    // The `probe` profile reports the kernel's Landlock ABI from inside the
+    // sandbox (the VERSION query is allowed there), independently of the
+    // workload. The only skip is the sandbox's own "Landlock ... NotEnforced"
+    // setup refusal, a kernel without Landlock; any other setup error fails.
+    // Cross-directory rename and link are real syscalls through python (mv
+    // falls back to copy-and-delete on EXDEV); they must succeed on ABI 2+
+    // and fail with EXDEV on ABI 1, which has no REFER.
     let dir = tempdir("toolchain-shape");
     let (repo, base) = repo(&dir);
-    let mut set = ProfileSet::shell("probe", "true");
+    let mut set = ProfileSet::shell(
+        "probe",
+        "/usr/bin/python3 -c 'import ctypes; l=ctypes.CDLL(None, use_errno=True); print(\"ABI=%d\" % l.syscall(444, None, 0, 1))'",
+    );
     set.profiles.push(rusty_bbp_host::profiles::Profile {
         name: "shape".into(),
         program: "/bin/sh".into(),
@@ -441,8 +448,7 @@ fn sandboxed_workload_can_spawn_with_null_stdio_rename_across_dirs_and_use_tmpdi
             "-c".into(),
             "true </dev/null >/dev/null 2>/dev/null \
              && mkdir -p a b && : > a/f && : > a/g \
-             && /usr/bin/python3 -c 'import os; os.rename(\"a/f\", \"b/f\"); os.link(\"a/g\", \"b/g\")' \
-             && test -f b/f && test -f b/g \
+             && /usr/bin/python3 -c 'import os, errno\ntry:\n os.rename(\"a/f\", \"b/f\"); os.link(\"a/g\", \"b/g\"); print(\"REFER-OK\")\nexcept OSError as e:\n print(\"REFER-EXDEV\" if e.errno == errno.EXDEV else \"REFER-ERR %d\" % e.errno)' \
              && test -n \"$TMPDIR\" && : > \"$TMPDIR/x\" && test -f \"$TMPDIR/x\" \
              && echo shape-ok"
                 .into(),
@@ -463,15 +469,53 @@ fn sandboxed_workload_can_spawn_with_null_stdio_rename_across_dirs_and_use_tmpdi
     )
     .expect("run");
     let (rep, log) = report_of(&t);
-    let probe = rep.profiles.first().expect("probe result");
-    if probe.exit_code == 125 && log.contains("sandbox unavailable") {
-        eprintln!("sandbox unavailable here: {log}");
+    if log.contains("Landlock filesystem confinement is NotEnforced") {
+        eprintln!("kernel without Landlock; skipping: {log}");
         let _ = std::fs::remove_dir_all(&dir);
         return;
     }
-    assert_eq!(probe.exit_code, 0, "the probe ran: {log}");
     assert_eq!(rep.status, RunStatus::Passed, "{log}");
+    let abi: u32 = log
+        .lines()
+        .find_map(|l| l.strip_prefix("ABI="))
+        .and_then(|n| n.trim().parse().ok())
+        .expect("the probe printed the Landlock ABI");
+    assert!(abi >= 1, "{log}");
     assert!(log.contains("shape-ok"), "{log}");
+    if abi >= 2 {
+        assert!(
+            log.contains("REFER-OK"),
+            "REFER granted on ABI {abi}: {log}"
+        );
+    } else {
+        assert!(log.contains("REFER-EXDEV"), "no REFER on ABI 1: {log}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_work_root_writable_by_others_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir("scratch-open-root");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell("test", "echo PROFILE-EXECUTED");
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let work_root = dir.join("work");
+    std::fs::create_dir_all(&work_root).expect("mkdir");
+    std::fs::set_permissions(&work_root, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &work_root,
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Error, "{log}");
+    assert!(log.contains("writable by others"), "{log}");
+    assert!(!log.contains("PROFILE-EXECUTED"), "{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
