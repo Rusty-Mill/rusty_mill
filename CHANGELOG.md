@@ -7,6 +7,10 @@ internal changes are logged in that crate's own
 and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
+**Archive.** New entries are no longer added here: each PR adds a fragment
+under `changes/` instead (`changes/README.md`). This file holds the history up
+to 2026-10-10.
+
 ## [Unreleased]
 ### Changed
 - **ADR-0002 Amendment 1 (owner decision 2026-10-09): the MCP crates move from Tier A to Tier T.** `rmcp` and the stack under it (`axum`, `tokio`, `reqwest`, `clap`, `tracing-subscriber`, `jsonwebtoken`) are to be replaced by first-party crates, with `docs/research/MCP-NATIVE-PLAN.md` as the milestone list and `rmcp` allowed as a dev-only oracle. The implementation is #577. Docs only; no code or manifest changes.

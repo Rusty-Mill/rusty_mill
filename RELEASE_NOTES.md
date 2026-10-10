@@ -7,6 +7,10 @@ own internal changes, which are logged in that crate's own
 from before the merge; see ADR-0001 for why root and per-crate logs are
 separate rather than one superseding the other).
 
+**Archive.** New entries are no longer added here: each PR adds a fragment
+under `changes/` instead (`changes/README.md`), so concurrent PRs do not
+collide. This file holds the history up to 2026-10-10.
+
 One entry per merged PR against `main`, reverse chronological, each linking
 to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 `**Fixed:**`), known limitations stated plainly.
