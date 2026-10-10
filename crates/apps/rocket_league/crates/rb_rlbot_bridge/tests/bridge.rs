@@ -257,3 +257,21 @@ fn a_packet_that_could_not_be_acted_on_does_not_use_up_its_frame() {
         [1.0]
     );
 }
+
+#[test]
+fn a_repeated_frame_that_lost_its_ball_or_car_gets_nothing_and_no_policy_call() {
+    let mut bot = PolicyBot::new(counting(), 1);
+    let warm = at_frame(40, MatchPhase::Active);
+    assert_eq!(throttles(&mut bot, &[warm.clone()]), [1.0]);
+
+    let mut no_ball = warm.clone();
+    no_ball.balls.clear();
+    assert_eq!(bot.input(&no_ball), None);
+
+    let mut no_car = warm.clone();
+    no_car.players.truncate(1);
+    assert_eq!(bot.input(&no_car), None);
+
+    // Back to the full packet on the same frame: the cache still answers, nothing was asked.
+    assert_eq!(throttles(&mut bot, &[warm]), [1.0]);
+}

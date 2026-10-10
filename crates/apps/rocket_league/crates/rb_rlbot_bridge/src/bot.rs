@@ -48,15 +48,19 @@ impl<P: Policy> PolicyBot<P> {
     /// The input to send for `packet`, or `None` if there is nothing to act on: no ball, or the
     /// car is not in the packet.
     pub fn input(&mut self, packet: &GamePacket) -> Option<PlayerInput> {
+        let car = self.car as usize;
+        // Checked before the cache: a repeat of the last frame that has lost its ball or car
+        // gets nothing, not the input from when it had them.
+        if packet.balls.is_empty() || car >= packet.players.len() {
+            return None;
+        }
         let frame_num = packet.match_info.frame_num;
         if let Some((last, input)) = self.last {
             if last == frame_num {
                 return Some(input);
             }
         }
-        let car = self.car as usize;
         let frame = observation(packet)?;
-        frame.cars.get(car)?;
         let input = PlayerInput {
             player_index: self.car,
             controller_state: controller_state(&self.policy.act(&frame, car)),
