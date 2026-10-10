@@ -7,26 +7,47 @@ use rusty_url::Url;
 use super::token::TokenValidator;
 
 /// The canonical resource URI was unusable.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum AuthConfigError {
     /// Not a parseable absolute URI.
-    #[error("`{uri}` is not a valid absolute URI: {source}")]
     Malformed {
         /// What was supplied.
         uri: String,
         /// Underlying parse failure.
-        #[source]
         source: rusty_url::ParseError,
     },
 
     /// Carried a fragment, which RFC 8707 forbids on a resource identifier.
-    #[error("resource URI `{0}` must not contain a fragment")]
     HasFragment(String),
 
     /// Carried a query string, which is not part of a resource identifier.
-    #[error("resource URI `{0}` must not contain a query string")]
     HasQuery(String),
+}
+
+impl fmt::Display for AuthConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed { uri, source } => {
+                write!(f, "`{uri}` is not a valid absolute URI: {source}")
+            }
+            Self::HasFragment(uri) => {
+                write!(f, "resource URI `{uri}` must not contain a fragment")
+            }
+            Self::HasQuery(uri) => {
+                write!(f, "resource URI `{uri}` must not contain a query string")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AuthConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Malformed { source, .. } => Some(source),
+            Self::HasFragment(_) | Self::HasQuery(_) => None,
+        }
+    }
 }
 
 /// What the MCP endpoint requires of incoming requests, and what it publishes
