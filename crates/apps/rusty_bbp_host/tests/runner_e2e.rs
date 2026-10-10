@@ -592,24 +592,188 @@ fn human_rerun(t: &Task, cand: ArtId) {
     assert!(matches!(r, Response::Ok), "{r:?}");
 }
 
-/// The Coder's recovery path: a request from `build` has no run to redo;
-/// the human answers and the regranted Coder submits.
+/// Send a candidate back to the Coder: the Tester posts `revise` against
+/// the selected run, citing its log.
+fn tester_revises(t: &Task) {
+    let st = t.state();
+    let run = st.selected_run().expect("run");
+    let cand = st.candidate.expect("candidate");
+    let log = run.log.expect("log");
+    let revise = Draft {
+        kind: MessageKind::Verdict,
+        to: vec![Recipient::All],
+        body: Body::Verdict(Verdict {
+            subject: cand,
+            run: run.id,
+            verdict: VerdictKind::Revise,
+            blocking: vec![BlockingItem {
+                id: "B1".into(),
+                reference: Ref::art(log),
+                issue: "rustc cannot run in the sandbox".into(),
+                fix: "none in code; ask the human".into(),
+            }],
+            non_blocking: vec![],
+        }),
+        refs: vec![Ref::art(cand)],
+        evidence: vec![Ref::art(run.report.expect("report"))],
+        reply_to: None,
+        yield_to: None,
+        gate: false,
+    };
+    assert!(matches!(
+        t.agent(Role::Tester, AgentAction::Post(revise)),
+        Response::Posted(_)
+    ));
+    assert_eq!(t.state().state, State::Build);
+}
+
+/// The diff artifacts of the task's current candidate, as stored.
+fn candidate_diffs(t: &Task) -> Vec<Vec<u8>> {
+    let d = open_driver(&t.dir, &t.id).expect("driver");
+    let cand = d.state.candidate.expect("candidate");
+    let ArtifactPayload::Candidate(c) = &d.state.artifacts[&cand].payload else {
+        panic!("not a candidate")
+    };
+    c.diffs
+        .iter()
+        .map(|id| {
+            d.store
+                .blob_get(&d.state.artifacts[id].blob.sha)
+                .expect("diff")
+        })
+        .collect()
+}
+
+/// The Coder's recovery path as the prompt describes it: a candidate was
+/// sent back for an environmental failure, the Coder asks instead of
+/// resubmitting, the human answers, and the regranted Coder works in a
+/// fresh clone that no longer holds the change: it fetches the previous
+/// candidate's diff, reapplies it, and resubmits a nonempty diff.
 #[test]
 fn a_coder_request_is_settled_by_an_answer_and_the_coder_resubmits() {
     let dir = tempdir("recover-coder");
-    let (_repo, base) = repo(&dir);
-    let t = reach_build_with(&dir, &ProfileSet::shell("test", "sh ./test.sh"));
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell("test", "false");
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    assert_eq!(report_of(&t).0.status, RunStatus::Failed);
+    tester_revises(&t);
+    let first = t.state().candidate.expect("candidate");
     let req = request_human(&t, Role::Coder, "the sandbox cannot run rustc");
     let st = t.state();
     assert!(st.turn.is_none());
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
     assert_eq!(st.state, State::Build);
+
     human_answer(&t, req, "toolchain readable now; resubmit your candidate");
     let st = t.state();
     assert!(st.pending_request.is_none());
     assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Coder));
-    submit_candidate(&t, &base, &[flag_diff("ok")]);
-    assert_eq!(t.state().state, State::Test);
+
+    // Fresh clone: the change is gone until the stored diff is reapplied.
+    let clone = dir.join("coder-clone");
+    git(
+        &dir,
+        &[
+            "clone",
+            "--quiet",
+            repo.to_str().expect("utf8"),
+            "coder-clone",
+        ],
+    );
+    assert!(git(&clone, &["diff"]).is_empty());
+    let stored = candidate_diffs(&t);
+    assert_eq!(stored, vec![flag_diff("ok")]);
+    std::fs::write(clone.join("prev.diff"), &stored[0]).expect("write");
+    git(&clone, &["apply", "prev.diff"]);
+    let reapplied = format!(
+        "{}
+",
+        git(&clone, &["diff"])
+    )
+    .into_bytes();
+    assert!(!reapplied.is_empty(), "an empty diff is never a candidate");
+    submit_candidate(&t, &base, &[reapplied]);
+    let st = t.state();
+    assert_eq!(st.state, State::Test);
+    assert_ne!(
+        st.candidate,
+        Some(first),
+        "a new candidate, not the old one"
+    );
+    assert!(
+        String::from_utf8_lossy(&candidate_diffs(&t)[0]).contains("+ok"),
+        "the resubmitted diff carries the change"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Settlement is correlated to the pending request. An answer replying to
+/// another message is refused; a decision naming another request is posted
+/// but settles nothing: the request stays pending and nobody is granted.
+#[test]
+fn an_unrelated_answer_or_decision_settles_nothing() {
+    let dir = tempdir("recover-unrelated");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell("test", "false");
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let req = request_human(&t, Role::Tester, "rustc cannot run");
+    let gate = t
+        .state()
+        .messages
+        .iter()
+        .find(|m| m.draft.gate)
+        .map(|m| m.id)
+        .expect("the plan gate request");
+    assert_ne!(gate, req);
+
+    let r = human::perform(
+        &t.dir,
+        &t.id,
+        "answer",
+        &[&gate.0.to_string(), "this answers the wrong request"],
+        None,
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Rejected(_)), "{r:?}");
+
+    let r = human::perform(
+        &t.dir,
+        &t.id,
+        "decision",
+        &[&gate.0.to_string(), "accept", "still the wrong request"],
+        None,
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Posted(_)), "{r:?}");
+
+    let st = t.state();
+    assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
+    assert!(
+        st.turn.is_none(),
+        "nobody is granted by an unrelated settlement"
+    );
+    assert_eq!(st.state, State::Test);
+
+    human_answer(&t, req, "fixed");
+    assert_eq!(t.state().turn.as_ref().map(|x| x.role), Some(Role::Tester));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
