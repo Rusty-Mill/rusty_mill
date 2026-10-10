@@ -4,6 +4,8 @@ The first task driven end to end by live models under `bbp mod`: four Claude Cod
 
 Files in `docs/proving/`: `brief.md` (the task), `profiles.json` (the frozen test profile), `agents.json` (one launcher per role). Paths in the last two assume `/tmp/bbp` and a user `nano`; edit before use.
 
+Linux only: the runner is Unix-shaped and reports every run as `error` on Windows (README, "The runner"). On a Windows machine run everything below inside WSL2, build `bbp` there, and keep the store outside `/tmp` if WSL may restart (`/tmp` is wiped).
+
 ## 1. Build
 
 ```sh
@@ -13,6 +15,8 @@ export PATH="$MILL/target/release:$PATH"   # `bbp` on PATH: agents.json launches
 ```
 
 `MILL` and `P` are absolute so the later steps work from any directory; step 2 leaves the shell in `/tmp/bbp/target`.
+
+Before anything else, prove the harness can reach the model: `claude -p "say ok" --output-format json | jq .is_error` must print `false`. `claude auth status` can say `loggedIn: true` with an expired token; the moderator would then forfeit every turn after about two minutes of 401 retries.
 
 ## 2. Target repository
 
@@ -47,7 +51,7 @@ bbp assign --role reviewer --principal reviewer --vendor anthropic
 
 ## 4. Run
 
-Shell A, the moderator (returns at `closed` or `cancelled`):
+Shell A, the moderator (returns at `closed` or `cancelled`; at `escalated` it keeps running and waits for `bbp human resume` or `cancel`, so decide, do not just wait):
 
 ```sh
 bbp mod --repo-path /tmp/bbp/target --work /tmp/bbp/work --agents $P/agents.json --max-wall-secs 7200
@@ -73,11 +77,13 @@ States in `bbp human` are lower snake case (`planning`, `plan_gate`, `build`, `t
 
 Destructive verbs (`reject`, `rerun`, `resume`, `cancel`) take `--rev N`, the card revision you are looking at. A stale revision is refused; re-read the card and decide again.
 
+A non-gate `request_decision` from the Coder or Tester (the launcher prompts tell them to post one when a run fails for a reason no code change can fix) shows on the card as `pending_request` with no turn. Answer it with `bbp human answer MSG TEXT...` (fix the environment first if that is what it names) or `decision MSG accept|reject NOTE...`; the requester is regranted and no iteration was spent. The first run's roles did not have this route in their prompts and spent the whole iteration budget on revise/resubmit instead.
+
 Logs: `$BBP_DIR/agents/<sha256(task)>/turn-N.log` per harness, `$BBP_DIR/mcp/<sha256(task)>/turn-N.json` the config each saw, `/tmp/bbp/work/run-N` the runner's checkouts.
 
 ### What the harness can do, and what the log shows
 
-`agents.json` restricts each harness two ways. `--tools ""` removes every built-in tool from the Planner, Tester and Reviewer, so their only actions are the five bbp tools (`--allowedTools` alone would pre-approve those calls without removing Read, Bash and the rest). The Coder keeps `Bash,Edit,Read,Write` for its own clone. This is the model's tool surface, not an OS sandbox: the process still runs as your user, which is the harness-isolation question the record is meant to answer.
+`agents.json` restricts each harness two ways. `--tools ""` removes the built-in tools from the Planner, Tester and Reviewer, so their only actions are the five bbp tools (`--allowedTools` alone would pre-approve those calls without removing Read, Bash and the rest). One exception on Claude Code 2.1.296: `system/init` still lists `LSP` under `--tools ""`; the first run saw it listed on every MCP-only turn and never used. Treat `LSP` in the list as expected and any other built-in tool as a launcher defect. The Coder keeps `Bash,Edit,Read,Write` for its own clone. This is the model's tool surface, not an OS sandbox: the process still runs as your user, which is the harness-isolation question the record is meant to answer.
 
 Every launcher runs with `--output-format stream-json --verbose`, so `turn-N.log` is one JSON object per line: `system/init` (the tools and MCP servers the model saw), `assistant` messages with their `tool_use` blocks, `user` messages with the `tool_result` each call returned (a bbp refusal is a result with `is_error`), and a final `result`. Each line is written as it happens.
 
@@ -87,7 +93,7 @@ Validate this once, after turn 1 ends, before trusting the run:
 
 ```sh
 L=$BBP_DIR/agents/$(printf %s "$BBP_TASK" | sha256sum | cut -c1-64)/turn-1.log
-jq -r 'select(.type=="system" and .subtype=="init") | .tools[]' "$L"            # an MCP-only role lists only mcp__bbp__*
+jq -r 'select(.type=="system" and .subtype=="init") | .tools[]' "$L"            # an MCP-only role lists only mcp__bbp__* (plus LSP, see above)
 jq -c 'select(.type=="assistant") | .message.content[] | select(.type=="tool_use") | {name, input}' "$L"   # every call, in order
 jq -r 'select(.type=="user") | .message.content[] | select(.type=="tool_result" and .is_error==true) | .content' "$L"   # refusals
 bbp card
