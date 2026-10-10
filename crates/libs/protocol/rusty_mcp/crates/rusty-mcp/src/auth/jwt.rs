@@ -33,6 +33,7 @@
 
 use std::{
     collections::BTreeSet,
+    fmt,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -42,7 +43,7 @@ use jsonwebtoken::{
     errors::ErrorKind,
     jwk::{Jwk, JwkSet},
 };
-use serde_json::Value;
+use rusty_json::Value;
 use tokio::sync::RwLock;
 
 use super::token::{TokenError, TokenValidator, ValidateFuture, VerifiedToken};
@@ -58,16 +59,32 @@ const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(300);
 const DEFAULT_MIN_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Building a [`JwtValidator`] failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum JwtValidatorError {
     /// No signing algorithms were permitted.
-    #[error("at least one signing algorithm must be allowed")]
     NoAlgorithms,
 
     /// The HTTP client could not be constructed.
-    #[error("failed to build the HTTP client: {0}")]
-    Http(#[source] reqwest::Error),
+    Http(reqwest::Error),
+}
+
+impl fmt::Display for JwtValidatorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoAlgorithms => f.write_str("at least one signing algorithm must be allowed"),
+            Self::Http(e) => write!(f, "failed to build the HTTP client: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for JwtValidatorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Http(e) => Some(e),
+            Self::NoAlgorithms => None,
+        }
+    }
 }
 
 /// Builder for [`JwtValidator`].
@@ -378,7 +395,7 @@ fn extract_scopes(scope: Option<&Value>) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use rusty_json::json;
 
     #[test]
     fn reads_a_string_audience() {

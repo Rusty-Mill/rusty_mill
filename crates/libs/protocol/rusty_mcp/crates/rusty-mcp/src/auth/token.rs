@@ -7,6 +7,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
+    fmt,
     future::Future,
     pin::Pin,
 };
@@ -29,24 +30,33 @@ pub trait TokenValidator: Send + Sync + 'static {
 }
 
 /// Why a token was rejected.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum TokenError {
     /// Malformed, badly signed, or otherwise unusable. Answered with `401`.
-    #[error("{0}")]
     Invalid(String),
 
     /// Well-formed but past its expiry. Answered with `401`.
-    #[error("the access token has expired")]
     Expired,
 
     /// The validator itself failed — the introspection endpoint was down, a
     /// JWKS fetch timed out. Answered with `503`, never `401`: the client's
     /// token may be perfectly good, and telling it to re-authorize would send
     /// the user through a pointless login.
-    #[error("token validation is unavailable: {0}")]
     Unavailable(String),
 }
+
+impl fmt::Display for TokenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(why) => f.write_str(why),
+            Self::Expired => f.write_str("the access token has expired"),
+            Self::Unavailable(why) => write!(f, "token validation is unavailable: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for TokenError {}
 
 /// A token that passed validation, and the claims the layer acts on.
 ///
@@ -75,7 +85,7 @@ pub struct VerifiedToken {
     /// [`VerifiedToken::audience_checked_by_validator`].
     pub audience_verified: bool,
     /// Everything else the validator decoded, for tools that need more.
-    pub claims: serde_json::Value,
+    pub claims: rusty_json::Value,
 }
 
 impl VerifiedToken {
@@ -83,7 +93,7 @@ impl VerifiedToken {
     pub fn new(audiences: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             audiences: audiences.into_iter().map(Into::into).collect(),
-            claims: serde_json::Value::Null,
+            claims: rusty_json::Value::Null,
             ..Default::default()
         }
     }
@@ -97,7 +107,7 @@ impl VerifiedToken {
     pub fn audience_checked_by_validator() -> Self {
         Self {
             audience_verified: true,
-            claims: serde_json::Value::Null,
+            claims: rusty_json::Value::Null,
             ..Default::default()
         }
     }
@@ -126,7 +136,7 @@ impl VerifiedToken {
     }
 
     /// Attach the raw claim set.
-    pub fn with_claims(mut self, claims: serde_json::Value) -> Self {
+    pub fn with_claims(mut self, claims: rusty_json::Value) -> Self {
         self.claims = claims;
         self
     }

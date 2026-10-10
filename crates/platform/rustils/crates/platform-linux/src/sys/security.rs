@@ -99,11 +99,19 @@ const ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
 const ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
 const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
 const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+/// ABI v2: link or rename a file across directories. A ruleset that does
+/// not handle it makes every cross-directory `rename(2)`/`link(2)` fail
+/// with `EXDEV` on an ABI v2+ kernel, even inside a fully writable root
+/// (rustc renaming an `.rmeta` from a temp dir into `deps/` hits this).
+const ACCESS_FS_REFER: u64 = 1 << 13;
 
-/// Every access right ABI v1 defines — granted on `writable_roots`, and
-/// the `handled_access_fs` mask the ruleset itself is created with (any
-/// access kind in this set is denied everywhere except where a rule
-/// explicitly grants it).
+/// `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`.
+const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
+
+/// Every access right ABI v1 defines. The ruleset handles these (plus
+/// [`ACCESS_FS_REFER`] on an ABI v2+ kernel): any access kind in the
+/// handled set is denied everywhere except where a rule grants it, and a
+/// writable root is granted the whole handled set.
 const ABI_V1_ALL_ACCESS: u64 = ACCESS_FS_EXECUTE
     | ACCESS_FS_WRITE_FILE
     | ACCESS_FS_READ_FILE
@@ -181,9 +189,39 @@ fn set_no_new_privs() -> Result<()> {
 /// disabled via boot parameter) — the caller's cue to report
 /// `SandboxStatus::NotEnforced` rather than erroring, matching nexus's
 /// own degrade-not-fail design.
-fn create_ruleset() -> Result<Option<i32>> {
+/// The kernel's highest Landlock ABI, or `None` when Landlock is absent.
+fn landlock_abi() -> Result<Option<u32>> {
+    // SAFETY: a NULL attr with size 0 and the VERSION flag is the documented
+    // query form; the kernel touches no memory.
+    let r = unsafe {
+        c::syscall(
+            c::SYS_landlock_create_ruleset,
+            std::ptr::null::<LandlockRulesetAttr>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if r < 0 {
+        let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if code == c::ENOSYS || code == c::EOPNOTSUPP {
+            return Ok(None);
+        }
+        return Err(errno_err("landlock_create_ruleset(VERSION)", code));
+    }
+    Ok(Some(r as u32))
+}
+
+/// The ruleset and the access set it handles: every ABI v1 right, plus
+/// `REFER` on an ABI v2+ kernel so that a writable root can be granted it
+/// (an ABI v1 kernel rejects the bit with `EINVAL`).
+fn create_ruleset() -> Result<Option<(i32, u64)>> {
+    let handled = match landlock_abi()? {
+        None => return Ok(None),
+        Some(abi) if abi >= 2 => ABI_V1_ALL_ACCESS | ACCESS_FS_REFER,
+        Some(_) => ABI_V1_ALL_ACCESS,
+    };
     let attr = LandlockRulesetAttr {
-        handled_access_fs: ABI_V1_ALL_ACCESS,
+        handled_access_fs: handled,
     };
     // SAFETY: `attr` is a valid, correctly-sized struct for the ABI v1
     // request its size encodes; `landlock_create_ruleset` reads it once
@@ -203,7 +241,7 @@ fn create_ruleset() -> Result<Option<i32>> {
         }
         return Err(errno_err("landlock_create_ruleset", code));
     }
-    Ok(Some(fd as i32))
+    Ok(Some((fd as i32, handled)))
 }
 
 fn add_rule(ruleset_fd: i32, path: &Path, allowed_access: u64) -> Result<()> {
@@ -247,8 +285,8 @@ pub fn confine_filesystem(
     readable_roots: &[&Path],
     writable_roots: &[&Path],
 ) -> Result<SandboxStatus> {
-    let ruleset_fd = match create_ruleset()? {
-        Some(fd) => fd,
+    let (ruleset_fd, handled) = match create_ruleset()? {
+        Some(ruleset) => ruleset,
         None => return Ok(SandboxStatus::NotEnforced),
     };
 
@@ -256,8 +294,10 @@ pub fn confine_filesystem(
         for root in readable_roots {
             add_rule(ruleset_fd, root, READ_ONLY_ACCESS)?;
         }
+        // Everything the ruleset handles, so a writable root is also where
+        // files may be renamed or linked across directories.
         for root in writable_roots {
-            add_rule(ruleset_fd, root, ABI_V1_ALL_ACCESS)?;
+            add_rule(ruleset_fd, root, handled)?;
         }
         set_no_new_privs()?;
         // SAFETY: `ruleset_fd` is a valid, live ruleset handle from

@@ -1,0 +1,8 @@
+---
+category: Changed
+changelog: "**`rusty_orch`: ADR-0013 amended after design review.** Open-or-adopt that survives a crash before the checkpoint, the gate fence persisted on the Board question, `bbp show` as the inspection contract, `approved` as a gate, decoded `bbp` replies, a `Supervisor` seam for the moderator."
+---
+## 2026-10-10 - rusty_orch: ADR-0013 corrected after design review
+
+- **Changed (docs):** six contract corrections to the BBP task host design, each verified against the code. `TaskHost::open` is open-or-adopt and idempotent at every external step; rusty_orch checkpoints after `Dispatcher::run`, so the ledger count and the handle land in the same snapshot and a crash before it costs exactly one persisted charge on retry. `Progress::Gate` carries a `GateContext` (prompt, card revision, the ids shown) that the dispatcher writes into the Board `Question`'s refs, and `relay` takes that question so revision-fenced verbs use the shown revision and subject-guarded verbs may name only the shown ids; `Relayed::Stale` re-gates. `poll` reads a new `bbp show` because the `Card` has no gate proposal at the first `plan_gate`, no request body, and no receipt or cancellation reason (event log only). `approved` is a gate asking for the external merge and `receipt`, since only the receipt closes the task. Every `bbp` reply is decoded as a `rusty_bbp::Response`: refusals print JSON and exit 0. A `Supervisor` seam spawns `bbp mod` detached and lock-aware; `CommandRunner` stays for finite commands.
+- **Known limitation:** still Proposed, awaiting approval. Phasing gains a prerequisite PR for `bbp show`.

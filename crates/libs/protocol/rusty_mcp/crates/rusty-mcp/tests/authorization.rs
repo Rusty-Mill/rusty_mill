@@ -11,6 +11,7 @@ mod support;
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{Json, Router, routing::get};
+use rusty_json::Value;
 use rusty_mcp::auth::{
     AuthConfig, ProtectedResourceMetadata, RequireAuthLayer, StaticTokenValidator, TokenError,
     TokenValidator, VerifiedToken,
@@ -61,7 +62,7 @@ async fn spawn(auth: AuthConfig) -> SocketAddr {
             &metadata_path,
             get(move || {
                 let metadata = metadata.clone();
-                async move { Json(metadata) }
+                async move { Json(metadata.to_value()) }
             }),
         )
         .nest_service(
@@ -88,6 +89,12 @@ fn www_authenticate(response: &reqwest::Response) -> String {
         .to_str()
         .expect("ascii")
         .to_string()
+}
+
+/// The response body, parsed as JSON.
+async fn body_json(response: reqwest::Response) -> Value {
+    let text = response.text().await.expect("body");
+    Value::parse(&text).expect("json")
 }
 
 #[tokio::test]
@@ -119,7 +126,7 @@ async fn a_valid_token_reaches_the_handler() {
     let response = post(addr, "tools/list", None, tools_list(), Some("good")).await;
 
     assert_eq!(response.status(), 200);
-    let body: serde_json::Value = response.json().await.expect("json");
+    let body = body_json(response).await;
     let names: Vec<_> = body["result"]["tools"]
         .as_array()
         .expect("a tool list")
@@ -197,7 +204,7 @@ async fn the_metadata_document_is_served_without_a_token() {
         .expect("request");
 
     assert_eq!(response.status(), 200);
-    let body: serde_json::Value = response.json().await.expect("json");
+    let body = body_json(response).await;
 
     assert_eq!(body["resource"], RESOURCE);
     assert_eq!(body["authorization_servers"][0], "https://auth.example.com");
@@ -236,6 +243,6 @@ async fn tools_can_read_the_verified_token() {
     .await;
 
     assert_eq!(response.status(), 200);
-    let body: serde_json::Value = response.json().await.expect("json");
+    let body = body_json(response).await;
     assert_eq!(body["result"]["content"][0]["text"], "user-1");
 }

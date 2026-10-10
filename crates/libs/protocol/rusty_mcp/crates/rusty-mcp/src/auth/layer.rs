@@ -12,8 +12,9 @@ use std::{
 use axum::response::{IntoResponse, Response};
 use http::{
     Request, StatusCode,
-    header::{AUTHORIZATION, WWW_AUTHENTICATE},
+    header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
 };
+use rusty_json::{Value, json};
 
 use super::{
     challenge::Challenge,
@@ -174,23 +175,22 @@ impl Rejection {
             // No challenge: the client's credentials may be fine, so inviting
             // it to re-authorize would send the user through a pointless login.
             Rejection::Unavailable => {
-                return (
+                return json_response(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    axum::Json(serde_json::json!({
+                    &json!({
                         "error": "temporarily_unavailable",
                         "error_description": "token validation is temporarily unavailable",
-                    })),
-                )
-                    .into_response();
+                    }),
+                );
             }
         };
 
         let challenge = challenge.with_resource_metadata(metadata_url);
-        let body = serde_json::json!({
+        let body = json!({
             "error": challenge.error().unwrap_or("unauthorized"),
         });
 
-        let mut response = (status, axum::Json(body)).into_response();
+        let mut response = json_response(status, &body);
         match challenge.to_header_value().parse() {
             Ok(value) => {
                 response.headers_mut().insert(WWW_AUTHENTICATE, value);
@@ -281,10 +281,32 @@ fn parse_bearer(header: &str) -> Result<&str, Rejection> {
     Ok(token)
 }
 
+/// A JSON response with the right `Content-Type`.
+fn json_response(status: StatusCode, body: &Value) -> Response {
+    (
+        status,
+        [(CONTENT_TYPE, "application/json")],
+        body.to_json_string(),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::token::StaticTokenValidator;
+
+    #[tokio::test]
+    async fn json_responses_carry_a_json_content_type_and_a_compact_body() {
+        let response = json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({"error": "x"}));
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], br#"{"error":"x"}"#);
+    }
 
     const RESOURCE: &str = "https://mcp.example.com/mcp";
 

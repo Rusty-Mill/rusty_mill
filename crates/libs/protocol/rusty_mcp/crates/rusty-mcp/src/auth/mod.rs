@@ -49,7 +49,7 @@
 //!
 //! let app: Router = Router::new()
 //!     .route("/mcp", post(|| async { "your MCP handler" }).layer(RequireAuthLayer::new(auth)))
-//!     .route(&metadata_path, get(move || async move { Json(metadata.clone()) }));
+//!     .route(&metadata_path, get(move || async move { Json(metadata.to_value()) }));
 //! # let _ = app;
 //! # Ok(())
 //! # }

@@ -592,24 +592,188 @@ fn human_rerun(t: &Task, cand: ArtId) {
     assert!(matches!(r, Response::Ok), "{r:?}");
 }
 
-/// The Coder's recovery path: a request from `build` has no run to redo;
-/// the human answers and the regranted Coder submits.
+/// Send a candidate back to the Coder: the Tester posts `revise` against
+/// the selected run, citing its log.
+fn tester_revises(t: &Task) {
+    let st = t.state();
+    let run = st.selected_run().expect("run");
+    let cand = st.candidate.expect("candidate");
+    let log = run.log.expect("log");
+    let revise = Draft {
+        kind: MessageKind::Verdict,
+        to: vec![Recipient::All],
+        body: Body::Verdict(Verdict {
+            subject: cand,
+            run: run.id,
+            verdict: VerdictKind::Revise,
+            blocking: vec![BlockingItem {
+                id: "B1".into(),
+                reference: Ref::art(log),
+                issue: "rustc cannot run in the sandbox".into(),
+                fix: "none in code; ask the human".into(),
+            }],
+            non_blocking: vec![],
+        }),
+        refs: vec![Ref::art(cand)],
+        evidence: vec![Ref::art(run.report.expect("report"))],
+        reply_to: None,
+        yield_to: None,
+        gate: false,
+    };
+    assert!(matches!(
+        t.agent(Role::Tester, AgentAction::Post(revise)),
+        Response::Posted(_)
+    ));
+    assert_eq!(t.state().state, State::Build);
+}
+
+/// The diff artifacts of the task's current candidate, as stored.
+fn candidate_diffs(t: &Task) -> Vec<Vec<u8>> {
+    let d = open_driver(&t.dir, &t.id).expect("driver");
+    let cand = d.state.candidate.expect("candidate");
+    let ArtifactPayload::Candidate(c) = &d.state.artifacts[&cand].payload else {
+        panic!("not a candidate")
+    };
+    c.diffs
+        .iter()
+        .map(|id| {
+            d.store
+                .blob_get(&d.state.artifacts[id].blob.sha)
+                .expect("diff")
+        })
+        .collect()
+}
+
+/// The Coder's recovery path as the prompt describes it: a candidate was
+/// sent back for an environmental failure, the Coder asks instead of
+/// resubmitting, the human answers, and the regranted Coder works in a
+/// fresh clone that no longer holds the change: it fetches the previous
+/// candidate's diff, reapplies it, and resubmits a nonempty diff.
 #[test]
 fn a_coder_request_is_settled_by_an_answer_and_the_coder_resubmits() {
     let dir = tempdir("recover-coder");
-    let (_repo, base) = repo(&dir);
-    let t = reach_build_with(&dir, &ProfileSet::shell("test", "sh ./test.sh"));
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell("test", "false");
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    assert_eq!(report_of(&t).0.status, RunStatus::Failed);
+    tester_revises(&t);
+    let first = t.state().candidate.expect("candidate");
     let req = request_human(&t, Role::Coder, "the sandbox cannot run rustc");
     let st = t.state();
     assert!(st.turn.is_none());
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
     assert_eq!(st.state, State::Build);
+
     human_answer(&t, req, "toolchain readable now; resubmit your candidate");
     let st = t.state();
     assert!(st.pending_request.is_none());
     assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Coder));
-    submit_candidate(&t, &base, &[flag_diff("ok")]);
-    assert_eq!(t.state().state, State::Test);
+
+    // Fresh clone: the change is gone until the stored diff is reapplied.
+    let clone = dir.join("coder-clone");
+    git(
+        &dir,
+        &[
+            "clone",
+            "--quiet",
+            repo.to_str().expect("utf8"),
+            "coder-clone",
+        ],
+    );
+    assert!(git(&clone, &["diff"]).is_empty());
+    let stored = candidate_diffs(&t);
+    assert_eq!(stored, vec![flag_diff("ok")]);
+    std::fs::write(clone.join("prev.diff"), &stored[0]).expect("write");
+    git(&clone, &["apply", "prev.diff"]);
+    let reapplied = format!(
+        "{}
+",
+        git(&clone, &["diff"])
+    )
+    .into_bytes();
+    assert!(!reapplied.is_empty(), "an empty diff is never a candidate");
+    submit_candidate(&t, &base, &[reapplied]);
+    let st = t.state();
+    assert_eq!(st.state, State::Test);
+    assert_ne!(
+        st.candidate,
+        Some(first),
+        "a new candidate, not the old one"
+    );
+    assert!(
+        String::from_utf8_lossy(&candidate_diffs(&t)[0]).contains("+ok"),
+        "the resubmitted diff carries the change"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Settlement is correlated to the pending request. An answer replying to
+/// another message is refused; a decision naming another request is posted
+/// but settles nothing: the request stays pending and nobody is granted.
+#[test]
+fn an_unrelated_answer_or_decision_settles_nothing() {
+    let dir = tempdir("recover-unrelated");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell("test", "false");
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let req = request_human(&t, Role::Tester, "rustc cannot run");
+    let gate = t
+        .state()
+        .messages
+        .iter()
+        .find(|m| m.draft.gate)
+        .map(|m| m.id)
+        .expect("the plan gate request");
+    assert_ne!(gate, req);
+
+    let r = human::perform(
+        &t.dir,
+        &t.id,
+        "answer",
+        &[&gate.0.to_string(), "this answers the wrong request"],
+        None,
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Rejected(_)), "{r:?}");
+
+    let r = human::perform(
+        &t.dir,
+        &t.id,
+        "decision",
+        &[&gate.0.to_string(), "accept", "still the wrong request"],
+        None,
+    )
+    .expect("call");
+    assert!(matches!(r, Response::Posted(_)), "{r:?}");
+
+    let st = t.state();
+    assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
+    assert!(
+        st.turn.is_none(),
+        "nobody is granted by an unrelated settlement"
+    );
+    assert_eq!(st.state, State::Test);
+
+    human_answer(&t, req, "fixed");
+    assert_eq!(t.state().turn.as_ref().map(|x| x.role), Some(Role::Tester));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -770,6 +934,183 @@ fn an_error_rerun_escalates_and_resume_then_settlement_recovers() {
     assert!(t.state().turn.is_none(), "still pending");
     human_answer(&t, req, "fixed, rerun passed");
     assert_eq!(t.state().turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sandboxed_workload_can_spawn_with_null_stdio_rename_across_dirs_and_use_tmpdir() {
+    // What a toolchain does that a plain `sh -c true` does not: std opens
+    // /dev/null when a child is spawned with null stdio (cargo starting
+    // rustc), rustc renames an .rmeta across directories, the linker writes
+    // under TMPDIR. The first proving run failed on all three.
+    //
+    // The `probe` profile reports the kernel's Landlock ABI from inside the
+    // sandbox (the VERSION query is allowed there), independently of the
+    // workload. The only skip is the sandbox's own "Landlock ... NotEnforced"
+    // setup refusal, a kernel without Landlock; any other setup error fails.
+    // Cross-directory rename and link are real syscalls through python (mv
+    // falls back to copy-and-delete on EXDEV); they must succeed on ABI 2+
+    // and fail with EXDEV on ABI 1, which has no REFER.
+    let dir = tempdir("toolchain-shape");
+    let (repo, base) = repo(&dir);
+    let mut set = ProfileSet::shell(
+        "probe",
+        "/usr/bin/python3 -c 'import ctypes; l=ctypes.CDLL(None, use_errno=True); print(\"ABI=%d\" % l.syscall(444, None, 0, 1))'",
+    );
+    set.profiles.push(rusty_bbp_host::profiles::Profile {
+        name: "shape".into(),
+        program: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            "true </dev/null >/dev/null 2>/dev/null \
+             && mkdir -p a b && : > a/f && : > a/g \
+             && /usr/bin/python3 -c 'import os, errno\ntry:\n os.rename(\"a/f\", \"b/f\"); os.link(\"a/g\", \"b/g\"); print(\"REFER-OK\")\nexcept OSError as e:\n print(\"REFER-EXDEV\" if e.errno == errno.EXDEV else \"REFER-ERR %d\" % e.errno)' \
+             && test -n \"$TMPDIR\" && : > \"$TMPDIR/x\" && test -f \"$TMPDIR/x\" \
+             && echo shape-ok"
+                .into(),
+        ],
+    });
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let exec = runner::Sandboxed::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
+        &dir.join("sandbox-state"),
+    );
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &dir.join("work"),
+        &exec,
+        Confinement::Sandboxed,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    if log.contains("Landlock filesystem confinement is NotEnforced") {
+        eprintln!("kernel without Landlock; skipping: {log}");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(rep.status, RunStatus::Passed, "{log}");
+    // The runner echoes each command line into the log, so only a whole
+    // line is evidence of what the workload printed.
+    let printed = |want: &str| log.lines().any(|l| l.trim() == want);
+    let abi: u32 = log
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ABI="))
+        .and_then(|n| n.parse().ok())
+        .expect("the probe printed the Landlock ABI");
+    assert!(abi >= 1, "{log}");
+    assert!(printed("shape-ok"), "{log}");
+    if abi >= 2 {
+        assert!(printed("REFER-OK"), "REFER granted on ABI {abi}: {log}");
+    } else {
+        assert!(printed("REFER-EXDEV"), "no REFER on ABI 1: {log}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_work_root_writable_by_others_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir("scratch-open-root");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell("test", "echo PROFILE-EXECUTED");
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let work_root = dir.join("work");
+    std::fs::create_dir_all(&work_root).expect("mkdir");
+    std::fs::set_permissions(&work_root, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &work_root,
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Error, "{log}");
+    assert!(log.contains("writable by others"), "{log}");
+    assert!(!log.contains("PROFILE-EXECUTED"), "{log}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_symlinked_scratch_dir_is_refused_and_its_target_untouched() {
+    let dir = tempdir("scratch-symlink");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell("test", ": > \"$TMPDIR/planted\"; echo PROFILE-EXECUTED");
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let sentinel = dir.join("sentinel");
+    std::fs::create_dir_all(&sentinel).expect("mkdir");
+    std::fs::write(sentinel.join("keep"), b"keep").expect("write");
+    let work_root = dir.join("work");
+    std::fs::create_dir_all(&work_root).expect("mkdir");
+    let run = open_driver(&dir, &t.id)
+        .expect("driver")
+        .state
+        .selected_run()
+        .expect("run")
+        .id;
+    std::os::unix::fs::symlink(&sentinel, work_root.join(format!("run-{}.tmp", run.0)))
+        .expect("symlink");
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &work_root,
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Error, "{log}");
+    assert!(rep.profiles.is_empty(), "nothing ran: {log}");
+    assert!(log.contains("symlink"), "{log}");
+    assert!(!log.contains("PROFILE-EXECUTED"), "{log}");
+    let names: Vec<_> = std::fs::read_dir(&sentinel)
+        .expect("read")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec![std::ffi::OsString::from("keep")],
+        "sentinel untouched"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stale_scratch_dir_is_replaced_before_the_run() {
+    let dir = tempdir("scratch-stale");
+    let (repo, base) = repo(&dir);
+    let set = ProfileSet::shell(
+        "test",
+        "test ! -e \"$TMPDIR/stale\" && : > \"$TMPDIR/fresh\"",
+    );
+    let t = reach_test_with(&dir, &base, &[flag_diff("ok")], &set);
+    let work_root = dir.join("work");
+    let run = open_driver(&dir, &t.id)
+        .expect("driver")
+        .state
+        .selected_run()
+        .expect("run")
+        .id;
+    let tmp = work_root.join(format!("run-{}.tmp", run.0));
+    std::fs::create_dir_all(&tmp).expect("mkdir");
+    std::fs::write(tmp.join("stale"), b"old attempt").expect("write");
+    runner::run_once(
+        &dir,
+        &t.id,
+        &repo,
+        &work_root,
+        &Unconfined,
+        Confinement::Unconfined,
+    )
+    .expect("run");
+    let (rep, log) = report_of(&t);
+    assert_eq!(rep.status, RunStatus::Passed, "{log}");
+    assert!(!tmp.join("stale").exists() && tmp.join("fresh").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

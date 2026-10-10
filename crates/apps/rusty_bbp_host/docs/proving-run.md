@@ -47,7 +47,7 @@ bbp assign --role tester   --principal tester   --vendor anthropic
 bbp assign --role reviewer --principal reviewer --vendor anthropic
 ```
 
-`profiles.json` must name the toolchain the workload needs: `read_roots` with `~/.cargo` and `~/.rustup`, `PATH` with `~/.cargo/bin`. The sandbox allows nothing else, and the set is frozen at open: a change afterwards means a new task.
+`profiles.json` must name the toolchain the workload needs: `read_roots` with `~/.cargo` and `~/.rustup`, `PATH` with `~/.cargo/bin`. The sandbox allows nothing else, and the set is frozen at open: a change afterwards means a new task. The runner adds what the profile cannot: `/dev/null`, a per-run `TMPDIR`, and cross-directory rename inside the checkout (see the README, "The runner"). `read_roots` must cover the *resolved* targets of anything under `CARGO_HOME` and `RUSTUP_HOME`: a `~/.cargo/config.toml` that is a symlink into a dotfiles directory makes every run die before a test, so either list that directory or point `CARGO_HOME` at a clean one.
 
 ## 4. Run
 

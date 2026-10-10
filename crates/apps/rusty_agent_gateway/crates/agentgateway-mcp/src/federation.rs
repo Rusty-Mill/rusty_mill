@@ -66,6 +66,17 @@ const RESOURCES_READ: &str = "resources/read";
 #[derive(Debug, Clone)]
 pub struct TokenClaims(pub serde_json::Value);
 
+impl TokenClaims {
+    /// The claims of a verified token, in the form `rules` reads.
+    ///
+    /// # Errors
+    /// Only if `claims` is not valid JSON once written out, which a decoded
+    /// token never is; callers treat it as a failed request, not as no claims.
+    pub fn from_json(claims: &rusty_json::Value) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(&claims.to_json_string()).map(Self)
+    }
+}
+
 /// Failure to build a federation.
 #[derive(Debug, thiserror::Error)]
 pub enum FederationError {
@@ -1287,5 +1298,36 @@ impl Federation {
                 data,
             } => Err(refusal(code, message, data)),
         }
+    }
+}
+
+#[cfg(test)]
+mod claims_tests {
+    use super::TokenClaims;
+
+    #[test]
+    fn claims_keep_their_shape_across_the_json_types() {
+        let claims = rusty_json::json!({
+            "sub": "user-1",
+            "aud": ["a", "b"],
+            "exp": 4_102_444_800_u64,
+            "neg": -7,
+            "ratio": 0.5,
+            "ok": true,
+            "none": null,
+            "org": { "name": "Ünï", "teams": ["x"] },
+        });
+
+        let TokenClaims(seen) = TokenClaims::from_json(&claims).expect("valid json");
+
+        assert_eq!(seen["sub"], "user-1");
+        assert_eq!(seen["aud"][1], "b");
+        assert_eq!(seen["exp"].as_u64(), Some(4_102_444_800));
+        assert_eq!(seen["neg"].as_i64(), Some(-7));
+        assert_eq!(seen["ratio"].as_f64(), Some(0.5));
+        assert_eq!(seen["ok"], true);
+        assert!(seen["none"].is_null());
+        assert_eq!(seen["org"]["name"], "Ünï");
+        assert_eq!(seen["org"]["teams"][0], "x");
     }
 }
