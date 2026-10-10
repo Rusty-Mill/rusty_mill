@@ -152,3 +152,35 @@ fn x25519_speed() {
     });
     report("X25519 keygen+agree", ours, ring);
 }
+
+#[test]
+#[ignore = "timing; run manually"]
+fn ecdh_speed() {
+    use ring::agreement::{self, EphemeralPrivateKey};
+    use ring::rand::SystemRandom;
+    use rusty_pk::ecdh::{Curve, PrivateKey};
+    let rng = SystemRandom::new();
+    for (name, curve, alg) in [
+        ("ecdh p256 agree", Curve::P256, &agreement::ECDH_P256),
+        ("ecdh p384 agree", Curve::P384, &agreement::ECDH_P384),
+    ] {
+        let peer = EphemeralPrivateKey::generate(alg, &rng).unwrap();
+        let peer_pub = peer.compute_public_key().unwrap().as_ref().to_vec();
+        let key = PrivateKey::from_bytes(curve, &vec![0x11; curve.len()]).unwrap();
+        let ours = time(20, || key.agree(&peer_pub).is_ok());
+        // ring cannot import a scalar, so its agree includes generating the ephemeral key
+        // (which computes the public key: a second scalar multiplication). Subtract the
+        // generation alone to compare one agreement with one agreement.
+        let generate = time(20, || EphemeralPrivateKey::generate(alg, &rng).is_ok());
+        let total = time(20, || {
+            let k = EphemeralPrivateKey::generate(alg, &rng).unwrap();
+            agreement::agree_ephemeral(
+                k,
+                &agreement::UnparsedPublicKey::new(alg, &peer_pub),
+                |_| (),
+            )
+            .is_ok()
+        });
+        report(name, ours, (total - generate).max(0.1));
+    }
+}
