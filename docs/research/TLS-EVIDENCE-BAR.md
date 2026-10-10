@@ -25,7 +25,7 @@ and still fall back to rustls with one switch. The risk differs, so the bar shou
 | OpenSSL interop in both directions, hermetic, in CI | Met |
 | rustls differential, protocol side (suites, groups, HRR, resumption, ALPN, SNI, both roles) | Met by per-stage suites; not re-audited as a whole |
 | Certificate differential | **Partial.** Name constraints and the OS trust store only. No x509-limbo or BetterTLS corpus |
-| Fuzz targets | **Exist** (certificate, DER, record and handshake parsers, TLS 1.2 machines). **Not run in CI**, no long run recorded |
+| Fuzz targets | **Exist** (certificate, DER, TLS 1.2 record, schedule, client and server, version negotiation). **Smoke job added 2026-10-10** (30 s per target, per PR; not yet run on a runner). No long run recorded. No target for TLS 1.3 handshake messages or the 1.3 machines beyond negotiation |
 | Live internet | **One runner run, three Google hosts, TLS 1.3, one network.** The step is non-blocking and now runs on every CI pass |
 | Independent review | **None** |
 | Soak in a real consumer | **None** |

@@ -1229,6 +1229,49 @@ jobs:
   # the service and Docker files were moved as-is, with no CI (ADR-0008).
   # ---------------------------------------------------------------------------
 
+  # Coverage-guided fuzz smoke for the native TLS engine's parsers and state
+  # machines (evidence bar, docs/research/TLS-EVIDENCE-BAR.md item 3). A fixed
+  # time per target on every PR: it finds shallow regressions, not deep bugs;
+  # long runs are a separate, deliberate activity. Nightly is pinned to a date
+  # because libFuzzer instrumentation needs it and a floating nightly would let
+  # an unrelated compiler change fail an unrelated PR. The logic lives in a
+  # tested script (tls_fuzz_smoke.sh): a crash, a target that runs nothing, and
+  # a vanished target directory all fail the job.
+  rusty-tls-fuzz:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-tls-fuzz
+      queue: max
+      cancel-in-progress: false
+    name: rusty_tls native engine fuzz smoke
+    needs: plan
+    if: needs.plan.outputs.tls_engine == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg rusty_tls_handrolled
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: nightly-2026-10-07
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: rusty-tls-fuzz
+          workspaces: crates/libs/net/rusty_tls/fuzz
+      - name: fuzz smoke (30 s per target)
+        run: bash .github/scripts/tls_fuzz_smoke.sh 30 8
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rusty-tls-fuzz-artifacts
+          path: crates/libs/net/rusty_tls/fuzz/artifacts
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+
   # The offline replay viewer bundles three.js and a render loop in JS that the
   # Rust golden tests cannot exercise. Render it under software WebGL
   # (swiftshader) and fail on any page error or if the render loop never ticks.
@@ -1619,6 +1662,7 @@ jobs:
       - multimodal-db-msrv
       - rusty-config-no-std-check
       - rusty-tls-engine
+      - rusty-tls-fuzz
       - crypto-constant-time
       - rleval-viewer-gl-smoke
       - rleval-app-feature-sets

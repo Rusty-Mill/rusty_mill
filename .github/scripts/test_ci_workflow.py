@@ -93,6 +93,21 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("bogo/run.sh", job)
         self.assertIn("-lt 830", job)
 
+    def test_the_fuzz_smoke_job_is_gated_and_cannot_pass_vacuously(self) -> None:
+        # Evidence bar item 3: fuzz smoke on every PR that touches the engine.
+        start = self.workflow.index("  rusty-tls-fuzz:\n")
+        end = self.workflow.find("\n  # ----", start)
+        job = self.workflow[start : end if end != -1 else None]
+        self.assertIn("if: needs.plan.outputs.tls_engine == 'true'", job)
+        # The cfg that compiles the engine in, and a dated (not floating) nightly.
+        self.assertIn("RUSTFLAGS: --cfg rusty_tls_handrolled", job)
+        self.assertRegex(job, r"toolchain: nightly-\d{4}-\d{2}-\d{2}\n")
+        # Through the tested script, with a floor on the target count.
+        self.assertRegex(job, r"bash \.github/scripts/tls_fuzz_smoke\.sh \d+ [1-9]\d*")
+        # Blocking: no continue-on-error on a finding.
+        self.assertNotIn("continue-on-error", job)
+        self.assertIn("      - rusty-tls-fuzz\n", self.workflow[self.workflow.index("required-gate:") :])
+
     def test_the_live_internet_step_can_inform_but_never_gate(self) -> None:
         # A third party's server must not decide whether a PR merges, so the
         # live step is continue-on-error. Its output and exit logic live in
