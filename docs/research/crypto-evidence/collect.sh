@@ -111,7 +111,7 @@ How to read this: each number is |t| from one run (dudect-style Welch t, slowest
 seed, ignored tests run with --ignored). Threshold 4.5; an alarm is a printed |t| >= 4.5. The A/A tests do identical work in both
 classes, so their spread is this machine's noise: a leak claim needs a clear, repeatable gap above
 the A/A spread, and a pass is only "no leak detected under these conditions". Samples per run:
-rusty_sha2 200000, rusty_aead 100000, rusty_pk 20000. Classes are written in each test's comments.
+rusty_sha2 200000, rusty_aead 100000, rusty_pk 20000 (X25519), 4000 (ECDH P-256) and 2000 (ECDH P-384). Classes are written in each test's comments.
 The tests time only the operation; class-dependent setup is outside the clock and writes into one
 buffer shared by both classes. An earlier version that set up inside the timed region reported
 |t| up to 25 on this same code (see "harness history" in the plan, stage 3/4 notes).
@@ -135,12 +135,17 @@ rusty_aead|tag_mismatch_position_not_distinguishable|open: first-byte vs last-by
 rusty_pk|null_calibration_identical_classes|A/A  X25519 (baseline)
 rusty_pk|scalar_classes_not_distinguishable|x25519: sparse vs dense scalar
 rusty_pk|fixed_vs_random_scalar|x25519: fixed vs other scalar
+rusty_pk|ecdh_null_calibration_identical_classes|A/A  ECDH P-256 agree (baseline)
+rusty_pk|ecdh_p256_sparse_vs_dense_scalar|ecdh p256: sparse vs dense scalar
+rusty_pk|ecdh_p384_null_calibration_identical_classes|A/A  ECDH P-384 agree (baseline)
+rusty_pk|ecdh_p384_sparse_vs_dense_scalar|ecdh p384: sparse vs dense scalar
 SPECS
 for tf in test_timing_series.py test_check_manifests.py test_planted_leak.py; do
   python3 -I docs/research/crypto-evidence/$tf >/dev/null 2>&1 && echo "collector self-test $tf: passed" || { echo "collector self-test $tf: FAILED"; fail "$tf"; }
 done
 sh crates/foundation/rusty_ct_check/scripts/test_taint_lib.sh >/dev/null 2>&1 && echo "taint_lib self-test: passed" || { echo "taint_lib self-test: FAILED"; fail "test_taint_lib.sh"; }
 python3 -I crates/foundation/rusty_ct_check/scripts/test_disasm_audit.py >/dev/null 2>&1 && echo "disasm_audit self-test: passed" || { echo "disasm_audit self-test: FAILED"; fail "test_disasm_audit.py"; }
+python3 -I crates/foundation/rusty_pk/scripts/test_verdict_sites.py >/dev/null 2>&1 && echo "verdict_sites self-test: passed" || { echo "verdict_sites self-test: FAILED"; fail "test_verdict_sites.py"; }
 
 section "speed, one run each (not benchmarks)"
 cargo test --release -p rusty_pk --test perf -- --ignored --nocapture 2>&1 | grep -E 'ours'

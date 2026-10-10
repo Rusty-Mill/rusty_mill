@@ -17,6 +17,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - Crypto gaps 1 and 2: `rusty_rand` hardened, ECDH P-256/P-384
+
+- **Changed (rusty_rand):** `getrandom(2)` on Linux x86_64/aarch64 (`/dev/random` fallback, never `/dev/urandom`), `/dev/random` on other Linux, lock-free `/dev/urandom` on other Unix with no initialised-pool claim, a tested read loop and backend selection; `rust-version` 1.75 to 1.88.
+- **Added (rusty_pk::ecdh):** ECDH on P-256 and P-384, validated against Wycheproof, RFC 5903 and `ring`; constant-time evidence added (taint, exact jump counts, timing). Adding this code changed LLVM's inlining of `Modulus::add` twice, so it is now `#[inline(never)]` and its previously reviewed jump count of 6 is pinned as a separate symbol (counts were re-read each time).
+- **Known limitations:** slower than `ring` (14x P-256, 5x P-384); constant-time results are x86-64, one VM, preliminary; two 40-repetition evidence records are kept: `EVIDENCE-2026-10-09-ecdh-run1-FAILED.txt` (exit 1: HMAC-SHA512 fixed-vs-other-key alarmed 2 of 40, allowance 1; **the cause is unexplained**, other jobs were running on the machine) and `EVIDENCE-2026-10-09-ecdh-run2.txt` (idle machine, exit 0). Neither threshold nor allowance rule was changed; a passing rerun does not establish why run 1 failed, and neither record proves constant time; not independently reviewed; not wired into `rusty_tls`.
+
+## 2026-10-09 - Ed25519 accepts small-order public keys again
+
+- **Changed (rusty_pk):** reverses the rejection added after Codex round 3 on #540, by owner decision. Behaviour now matches `ring` and RFC 8032 (which does not require rejecting small-order keys). **Known limitation:** the identity key verifies `R = identity, S = 0` for every message; callers must screen untrusted keys themselves. The evidence record `EVIDENCE-2026-10-09.txt` predates this change; Ed25519 verify is variable time and outside the constant-time budgets, so its counts are unaffected, but the vector run was not regenerated.
 ## 2026-10-09 - rb_rlbot_client: blocking RLBot client (RLBot port stage 3) (pending review)
 
 - **Added:** `crates/apps/rocket_league/crates/rb_rlbot_client`: `Connection` (connect, send, receive with or without a timeout, handshake), `run_bots` and `run_hivemind` (handshake, `InitComplete`, packet loop, ping replies, clean exit on disconnect), and `Environment` for the `RLBOT_*` variables. `std::net` only, one thread; depends on `rb_rlbot_wire` alone.
@@ -92,7 +101,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ## 2026-10-09 - Codex review round 3 on #540: Ed25519 small-order keys and four evidence-script defects
 
-- **Fixed (rusty_pk, P1):** Ed25519 verification rejects small-order public keys (the eight torsion points, including the identity). With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
+- **Fixed (rusty_pk, P1):** Ed25519 verification rejected small-order public keys (the eight torsion points, including the identity); **reversed 2026-10-09, see the entry above.** With such a key `[h]A` vanishes, so `R = identity, S = 0` verified every message; `ring` accepts that, we now do not. This is a documented deviation from `ring` parity in the safe direction (plan section 2, stage 2 notes, and 11a-3).
 - **Fixed (evidence tooling, 4 x P2):** taint scripts check the example's exit status (shared `taint_lib.sh`, fake-valgrind regression test); `collect.sh` runs the ignored planted timing leak test and checks every vector file against its `MANIFEST.txt` (found `x25519_test.json` unlisted; 27 vendored files compared byte for byte with upstream); disassembly jump counts are matched exactly, as drift detection only (it does not catch a same-count substitution; the disassembly still needs a human read).
 - **Added to CI:** the `crypto-constant-time` job runs the manifest check and the evidence-tooling self-tests.
 - **Known limitations:** unchanged. Still only evidence, not proof; the human independent review remains required before any `rusty_tls` seam.

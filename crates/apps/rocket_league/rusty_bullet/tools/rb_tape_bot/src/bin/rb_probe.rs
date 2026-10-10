@@ -5,16 +5,13 @@
 
 use std::time::{Duration, Instant};
 
-use rlbot::{
-    flat::{ConnectionSettings, CoreMessage, InitComplete},
-    util::AgentEnvironment,
-    RLBotConnection,
-};
+use rb_rlbot_client::{Connection, CoreMessage, Environment};
+use rb_rlbot_wire::{ConnectionSettings, InitComplete};
 
 fn main() {
-    let AgentEnvironment { server_addr, .. } = AgentEnvironment::from_env();
-    let mut conn = RLBotConnection::new(&server_addr).expect("connect to RLBot core");
-    conn.send_packet(ConnectionSettings {
+    let Environment { server_addr, .. } = Environment::from_env();
+    let mut conn = Connection::connect(&server_addr).expect("connect to RLBot core");
+    conn.send(ConnectionSettings {
         wants_ball_predictions: false,
         wants_comms: false,
         close_between_matches: true,
@@ -22,8 +19,7 @@ fn main() {
     })
     .expect("send connection settings");
     // Core only distributes game packets to a session after InitComplete.
-    conn.send_packet(InitComplete {})
-        .expect("send init complete");
+    conn.send(InitComplete).expect("send init complete");
     println!("probe: connected to {server_addr}");
 
     let start = Instant::now();
@@ -38,7 +34,7 @@ fn main() {
         .and_then(|a| a.parse().ok())
         .unwrap_or(6);
     while start.elapsed() < Duration::from_secs(seconds) {
-        match conn.recv_packet() {
+        match conn.recv() {
             Ok(CoreMessage::GamePacket(gp)) => {
                 packets += 1;
                 let mi = &gp.match_info;

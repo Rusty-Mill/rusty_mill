@@ -1,6 +1,8 @@
-# Standalone package, deliberately outside the root workspace: the `rlbot`
-# dependency (and its transitive crates) must not enter the workspace
-# build, CI or `rb_domain`. See docs/research/BOT-CAPTURE-PLAN.md.
+# Joined the root workspace when the external `rlbot` client was replaced by
+# `rb_rlbot_client` / `rb_rlbot_wire` (rlbot/PLAN.md, stage 4). Build it from this directory:
+# `.cargo/config.toml` keeps the output in `./target`, where the bot configs
+# (`bot.toml`, `bots/*.bot.toml`) and `rb_run_tapes` launch it from.
+# See docs/research/BOT-CAPTURE-PLAN.md.
 [package]
 name = "rb_tape_bot"
 version = "0.1.0"
@@ -8,11 +10,11 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
-[workspace]
-
 [dependencies]
 # Scenario files, shared with `rb-verify --scenario` (workspace crate).
 rb_scenario = { path = "../../../crates/rb_scenario" }
-# The only maintained Rust client for the RLBot v5 socket API (MIT);
-# hand-rolling a FlatBuffers client is worse.
-rlbot = "0.6.0"
+rb_rlbot_client = { path = "../../../crates/rb_rlbot_client" }
+rb_rlbot_wire = { path = "../../../crates/rb_rlbot_wire" }
+
+[package.metadata.rusty_mill]
+layer = "apps"

@@ -12,3 +12,9 @@ Modulus>::mul 17
 Modulus>::add 6
 Field>::sub 17
 rusty_pk::x25519::x25519 9
+# ECDH P-256/P-384 secret path. Jump counts are public bounds checks and the fixed-trip scalar loop; the
+# bit becomes a mask (sar / bt+sbb) and select is straight-line SIMD, read by hand on 1.98.1.
+rusty_pk::ecdh::select 0
+rusty_pk::ecdh::add 1
+rusty_pk::ecdh::double 1
+rusty_pk::ecdh::mul 2

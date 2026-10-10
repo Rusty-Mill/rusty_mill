@@ -3,7 +3,10 @@
 Date: 2026-10-08. Scope: the primitives `rusty_tls`'s native engine takes from `ring`.
 
 **Status.** Stages 0 to 4 are implemented with preliminary validation. **Independent review
-and TLS integration remain pending.** The set is partial: it covers hashes, HMAC, HKDF,
+was reported complete by the owner, with its scope, commit and findings unrecorded (section 11, row
+"Independent review"), so the stage rows below keep "review pending"; TLS integration is pending
+and the gap-closure plan is section 13. Gaps 1 (randomness) and 2 (ECDH P-256/P-384) are
+implemented with preliminary validation and covered by the review the owner verified (section 0), whose commit, method and findings are not recorded (section 13.4).** The set is partial: it covers hashes, HMAC, HKDF,
 signature verification, X25519 and ChaCha20-Poly1305, and does not cover AES-GCM, P-256 or P-384
 key exchange, signing, or randomness (section 0, "Scope limits"). **Consumer status:** no
 consumer, `rusty_tls` file, gate or default was changed; nothing here is used by anything.
@@ -19,6 +22,28 @@ after stage 4. Stage 5 (AES-GCM) and later are out of scope unless the owner reo
 the intrinsics approval is unused until then (no stage so far needed `unsafe` beyond the
 valgrind helper).
 
+**Owner decision (2026-10-09):** the stage-4 freeze is reopened for **randomness and ECDH
+P-256/P-384 only** (section 13.1 gaps 1 and 2). AES-GCM, the `rusty_tls` seam and signing stay
+closed. The 2026-10-08 intrinsics approval was not reconfirmed and is not relied on.
+*Provenance:* this is the implementer's transcription of the owner's instruction in the
+implementing session on 2026-10-09, "go ahead with randomness and ECDH", given in answer to
+"Which gaps do you want me to start on?" after the implementer had explained what reopening the freeze
+means. **Owner confirmation, first reported by the implementer on 2026-10-09 and later received directly (below):** the implementer then listed three open confirmations
+(the freeze reopening for randomness and ECDH, accepting small-order Ed25519 public keys, and the actual scope of the
+owner's review) and the owner replied "Confirm them." This is the implementer's transcription of that reply in the
+implementing session, not a GitHub review; the PR carries a relay comment quoting it, which does not
+authenticate the approval to a reviewer. **Direct owner confirmation was then received on 2026-10-09 (23:44 to 23:46 UTC)**, recorded in
+PR #576 comment 6091204395 (written by the reviewer, relaying it) and confirmed accurate by the owner in the
+implementing session: the independent review is verified and covers both #572 and #576, including ECDH and
+`rusty_rand`; the owner also explicitly confirmed #576's weak-key policy reversal and the reopening of the crypto
+work. The reviewer states this clears the owner-confirmation and independent-review holds on #576, and that it
+does not pre-approve later new code (such as #587), alter technical findings or evidence qualifications, or waive
+exact-head CI. For the first two items the confirmation covers
+exactly what is stated here. For the third (the review), the recorded statement is the one above: verified, covering
+#572 and #576 including ECDH and `rusty_rand`. **The reviewed commit, the method and any findings are still not
+recorded here**, and the statement does not say whether the stage rows for #540 (stages 0 to 4) are covered, so those
+rows keep their "review pending" labels. The scope above is exactly what the original instruction names.
+
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
 new crates rather than extending `rusty_rsa`; one additive function,
@@ -29,8 +54,9 @@ not an adopted bar.
 **Scope limits (read before reading "implemented").**
 - No AES-GCM (stage 5, not done). RFC 8446 section 9.1 requires `TLS_AES_128_GCM_SHA256`
   for a compliant TLS 1.3 implementation, and `rusty_tls`'s ticket key is AES-256-GCM.
-- No P-256 or P-384 key exchange. ECDSA P-256 *verification* does not provide P-256 ECDHE,
-  which RFC 8446 also requires (secp256r1 key exchange); only X25519 is implemented.
+- P-256 and P-384 key exchange: implemented 2026-10-09 (`rusty_pk::ecdh`, section 13.4); preliminary;
+  covered by the owner-verified review (section 0) with its commit, method and findings unrecorded. (ECDSA
+  verification alone never provided it.)
 - No signing of any kind (server role, client certificates), and no randomness: the engine
   still draws all randomness from `ring::rand`.
 - Therefore this is a **partial primitive replacement**, not a complete TLS 1.3 backend, and
@@ -46,6 +72,16 @@ made for any stage. No stage is approved for TLS use.
 | 2 Signature verify | Implemented; review pending (`rusty_pk`: `rsa`, `ecdsa`, `ed25519`) | See "Stage 2 results" below. |
 | 3 ChaCha20-Poly1305 | Implemented; review pending (`rusty_aead`) | See "Stage 3 results" below. |
 | 4 X25519 | Implemented; review pending (`rusty_pk::x25519`) | See "Stage 4 results" below. **Work stops here by owner decision. Independent review is required before any use in `rusty_tls`.** |
+
+**Review status, reconciled (2026-10-09).** The owner reported that an independent review is complete,
+that the reviewer was the owner, and that both Ed25519 behaviours (small-order keys rejected, then accepted)
+were seen. The owner later verified directly (section 0; PR #576 comment 6091204395) that the review covers both
+#572 and #576, **including ECDH and `rusty_rand`**. The owner has not stated the reviewed commit, the method or any
+findings, and has not said that the review covers the #540 stage rows, so nothing in this repository records those.
+This plan therefore keeps the stage-row "review pending" labels above and the statement in section 11 that no
+recorded human review of the Montgomery invariants exists, until the owner records that scope. The ECDH and
+`rusty_rand` work is covered by the verified review as stated; the plan still treats an independent second reviewer
+for ECDH and AES (decision D4) as the owner's call.
 
 ### Stage 2 results (`rusty_pk`, 2026-10-08; preliminary)
 
@@ -74,34 +110,18 @@ Not an extension of `rusty_rsa`: its `BigUint` stays untouched.
   section 5.1.3 rejects a point encoding whose `y` is not below `p`, and one with `x = 0`
   and the sign bit set. `ring` 0.17.14 (its `x25519_ge_frombytes_vartime`, read in
   `crypto/curve25519/curve25519.c`) accepts both, and this implementation reproduces that
-  on purpose so a swap does not change which keys verify. **One deviation goes the other
-  way, stricter than `ring`:** a public key of small order (the eight torsion points,
-  including the identity) is rejected (Codex round 3, P1). For the **identity** specifically,
-  `[h]A` vanishes for every `h`, so the single signature `R = identity, S = 0` verifies every
-  message; `ring` accepts it. For the other seven torsion points `[h]A` depends on `h` modulo the
-  point's order (2, 4 or 8), so the equation does not collapse for every message: a forger can only
-  hit messages (or choices among the few torsion `R` encodings) for which it holds. That is still
-  forgery with no secret, and cheap, but its exact success rate was not measured, so no
-  universal-message claim is made for them. Rejecting all eight is the broader weak-key policy. Regression tests: `identity_key_encodings_are_rejected_unlike_ring`
-  in `tests/ed25519_vectors.rs` (identity, `y = p + 1`, `x = 0` with sign bit set: we reject,
-  `ring` is asserted to accept, three messages each; an off-curve `y`: both reject) and
-  `small_order_public_keys_are_rejected` / `every_torsion_point_is_small_order_and_the_base_point_is_not`
-  in `src/ed25519.rs` (all eight torsion encodings, several messages; the first fails without
-  the check) and `non_canonical_aliases_of_torsion_points_are_rejected_too` (the accepted
-  `y = p` and `y = p + 1` aliases, both sign bits; the rejection is on the decoded point, not a
-  byte blacklist). **What the flaw was:** with a small-order key the verification is
-  message-independent for the identity (one signature verifies every message) and
-  secret-free for the other small-order keys. **Precondition:** it needs such a
-  key to be admitted as a trusted verification identity (a certificate or configuration that
-  accepts it); it does not forge under an honest key or forge a CA signature, and this PR has
-  no TLS consumer. The rejection sits in `verify`, i.e. at the verification boundary, so every
-  caller gets it; a separate strict-vs-compatible API was not needed because no caller wants
-  the weak behaviour. Full prime-subgroup checks and restrictions on `R` are separate policy
-  choices, not made here. Small-order `R` is not rejected, and no impossibility is claimed: a valid
-  zero-nonce signature has `R = identity` and `S = h*a mod L`, so a rule rejecting small-order `R` would
-  reject a mathematically valid (if astronomically rare) signature. That is a separate policy choice
-  and does not affect the public-key rejection above. The `ring` parity statement is therefore "same verdicts on the recorded corpus,
-  except small-order public keys". **Security implication of the encoding leniencies, not yet
+  on purpose so a swap does not change which keys verify. **Small-order public keys (the
+  eight torsion points, including the identity) are accepted, as in `ring`; RFC 8032 does not
+  require rejecting them. Owner decision, confirmed directly by the owner on 2026-10-09 (section 0), reversing the round 3 rejection.** For the identity,
+  `[h]A` vanishes for every `h`, so `R = identity, S = 0` verifies every message under that key;
+  for the other seven torsion points a secret-free forgery works for some messages (success rate
+  not measured, no universal claim). **Consequence:** a caller that admits a verification key
+  from untrusted input must screen small-order keys itself; `verify` does not. It does not forge
+  under an honest key or forge a CA signature, and this PR has no TLS consumer. Regression test:
+  `identity_key_encodings_match_ring` in `tests/ed25519_vectors.rs` (identity, `y = p + 1`, `x = 0`
+  with sign bit set: both accept; an off-curve `y`: both reject) and
+  `identity_public_key_is_accepted_in_every_encoding` in `src/ed25519.rs`. Small-order `R` is
+  accepted too (a zero-nonce signature has `R = identity`, `S = h*a mod L`). The `ring` parity statement is "same verdicts on the recorded corpus". **Security implication of the encoding leniencies, not yet
   reviewed:** a public key then has more than one accepted encoding, so code that treats the
   key bytes as an identity (a hash input, a map key, a pin) can see two names for one key.
   Signature malleability is separate and not introduced here (`S` must be canonical). For TLS
@@ -307,10 +327,10 @@ Primitive coverage is not dependency removal. Call site by call site:
 | `aead` AES_128_GCM / AES_256_GCM (records) | **No** | Stage 5 not done. RFC 8446 mandates AES-128-GCM. |
 | `aead` AES_256_GCM (session tickets, `ticket.rs`) | **No** | Same. |
 | `agreement` X25519 | Yes, `rusty_pk::x25519` | Key generation needs a random scalar, which is `ring::rand` today. |
-| `agreement` ECDH P-256 / P-384 | **No** | Not planned before stage 6a. RFC 8446 requires secp256r1. |
+| `agreement` ECDH P-256 / P-384 | Yes, `rusty_pk::ecdh` (2026-10-09) | Not wired. Preliminary; the key is generated from a caller-supplied fill function. |
 | `signature` verify (RSA, ECDSA, Ed25519) | Yes, `rusty_pk` | Exact verifier subset in section 0. |
 | `signature` signing (`EcdsaKeyPair`, `Ed25519KeyPair`, `RsaKeyPair`, `KeyPair`, PKCS#8 parsing) | **No** | Server role and client certificates. |
-| `rand::SystemRandom` / `SecureRandom` (client random, ephemeral keys, ticket keys and nonces, PSS salts) | **No** | `rusty_rand` exists but differs from `ring`'s (see section 3); not evaluated for this. |
+| `rand::SystemRandom` / `SecureRandom` (client random, ephemeral keys, ticket keys and nonces, PSS salts) | Yes, `rusty_rand` (hardened 2026-10-09) | Not wired. OS entropy only; quality is the OS's. |
 | Helper types: `aead::Nonce`, `Aad`, `UnboundKey`, `LessSafeKey`, `hmac::Context` | Replaced by typed arrays in the new APIs | The seam would need adapters. |
 
 Result: the native engine cannot drop `ring` on the strength of stages 0 to 4.
@@ -502,7 +522,7 @@ Effort is focused engineering days, plus or minus 50 percent, excluding review w
 | **2** Signature verify | RSA PKCS#1/PSS 2048 to 8192, ECDSA P-256/P-384, Ed25519 | Wycheproof (all verify files); differential vs `ring` incl. **every accept/reject divergence listed and classified** (stricter / looser / equal), ring's quirks from section 2.1 matched or documented; fuzz of DER and point parsing; RSA-4096 and 8192 timing within 5x of `ring` | 20 to 25 | `rusty_tls` verify path off `ring` (F7 scope kept); also removes the 200x slow RSA path for `rusty_oauth` |
 | **3** ChaCha20-Poly1305 | AEAD, 12-byte nonce | RFC 8439 + Wycheproof + differential; section 4.4 methods 1 to 3 clean; reviewed once | 3 to 4 | Fast portable AEAD, ChaCha-first client policy possible |
 | **4** X25519 | RFC 7748 | Wycheproof + RFC vectors + differential; all-zero output rejected as `ring` does; methods 1 to 4 clean; independent review. **Evaluate vendoring fiat-crypto generated field code** (formally verified, straight-line, MIT/Apache/BSD; COPYRIGHT file reachable, terms not re-checked) as the strongest correctness evidence on offer | 3 to 4 (+2 to evaluate fiat) | Ephemeral key exchange off `ring` for 25519 |
-| **5** AES-GCM | Fixsliced/bitsliced AES-128/256, constant-time GHASH (no tables) | Wycheproof + CAVP GCM + differential; no table lookup indexed by secret (disassembly script) ; methods 1 to 4 clean; review. **Throughput is 60 to 150x below `ring` unless intrinsics are approved.** | 8 to 12 (+5 to 8 for a reviewed intrinsics module, only if approved) | Needed before any ring-free client; useless alone |
+| **5** AES-GCM | Fixsliced/bitsliced AES-128/256, constant-time GHASH (no tables) | Wycheproof + CAVP GCM + differential; no table lookup indexed by a secret (the disassembly script counts conditional jumps and divisions only and cannot show this; the check still has to be chosen, e.g. valgrind taint, which reports a secret-dependent address, plus review); methods 1 to 4 clean; review. **Throughput is 60 to 150x below `ring` unless intrinsics are approved.** | 8 to 12 (+5 to 8 for a reviewed intrinsics module, only if approved) | Needed before any ring-free client; useless alone |
 | **6a** ECDH P-256/P-384 | secret scalar multiplication, complete formulas, constant-time table selection, on-curve and infinity checks | Wycheproof ECDH (incl. invalid-curve and twist cases); differential; methods 1 to 4; review | 8 to 10 | **Client-only engine ring-free (with 1 to 5)** |
 | **6b** Signing | ECDSA P-256/P-384 (RFC 6979 and hedged nonce), Ed25519, PKCS#8 parsing | Wycheproof; differential both directions (their signatures verify under ours and vice versa); nonce bias test; methods 1 to 4; review | 6 to 8 | Server role and client certificates off `ring` except RSA |
 | **7** RSA sign | constant-time modexp, CRT, blinding, fault check, PKCS#8 RSA parse | As 6b, plus blinding tested, plus verify-after-sign | 15 to 25 | **Recommend not doing.** |
@@ -605,7 +625,7 @@ the honest current position.
 | X25519 boundary tests: decoding, clamping, low-order inputs, all-zero shared-secret rejection (RFC 8446 requires it). | Top-bit masking, non-canonical `u`, clamping mutants, 31 all-zero Wycheproof cases rejected by `agree`, matches `ring` on all 518 public keys. Key generation needs a CSPRNG and is not part of this crate. |
 | Pinned evidence: implementation commit, vector versions, executed and skipped case counts, reproducible commands, review findings. | `docs/research/crypto-evidence/collect.sh` and `EVIDENCE-2026-10-09.txt`. **Review findings: none exist yet.** |
 | `ring` usage inventory including randomness and helper APIs. | Section 2.3. |
-| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Not done. Required.** |
+| Independent review of all secret-handling code (HMAC/HKDF key paths, AEAD, X25519, the shared field code) and of the Ed25519 exception. | **Verified by the owner (baileyrd), 2026-10-09 (23:44 to 23:46 UTC; PR #576 comment 6091204395, relayed by the reviewer and confirmed accurate by the owner in the implementing session): the independent review is verified and covers both #572 and #576, including ECDH and `rusty_rand`.** The reviewer was the owner, who saw both Ed25519 behaviours (small-order keys rejected, then accepted as `ring` does) and decided to accept. **Still not recorded here:** the reviewed commit, the method and any findings (the implementer did not see them), and whether the review covers the #540 components listed in this row (Montgomery-core invariants in the row above, the AEAD, the HMAC/HKDF paths), so this row is **not** evidence for those and the stage rows keep "review pending". One reviewer, who also owns the project. Plan decision D4 (a second reviewer for ECDH and AES) is the owner's call and unchanged. |
 
 ## 11a. Independent review, round 1 (Codex, PR #540, reviewed commit `25fcc18`)
 
@@ -654,7 +674,7 @@ checked by running code here.
 
 | Finding | Verified? | Disposition |
 | --- | --- | --- |
-| P1: an Ed25519 public key of small order (e.g. the identity) leaves no `[h]A` term, so `R = identity, S = 0` verifies every message. | **Yes for the identity** (the old `identity_key_encodings_match_ring` test asserted exactly this acceptance, and `ring` accepts it); for the other seven torsion points the same signature shapes verify only for some messages (`[h]A` depends on `h` modulo the point's order), still without any secret. All eight are rejected. | Fixed, stricter than `ring` on purpose: `[8]A = identity` keys are rejected before hashing (section 2 stage notes). Regression tests fail without the check (mutation-checked) and cover all eight torsion encodings. This is a new documented deviation from `ring` parity, in the safe direction; the owner may revert it by deleting one `if`, but should not without a reason. |
+| P1: an Ed25519 public key of small order (e.g. the identity) leaves no `[h]A` term, so `R = identity, S = 0` verifies every message. | **Yes for the identity** (the old `identity_key_encodings_match_ring` test asserted exactly this acceptance, and `ring` accepts it); for the other seven torsion points the same signature shapes verify only for some messages (`[h]A` depends on `h` modulo the point's order), still without any secret. (The original fix rejected all eight; that was reversed, see Disposition.) | Was fixed by rejecting `[8]A = identity` keys; **reverted by owner decision** (accept, as `ring` and RFC 8032 do; callers screen keys). See section 2 stage notes. The finding stands as a documented caller precondition. |
 | P2: the taint scripts ended in `\|\| true`, so an example that panicked, was misspelled, or a missing `valgrind` read as "0 errors", the expected answer for the clean modes. | **Yes**, in all three `ct_check.sh` and in `valgrind_selftest.sh`. | Fixed in one shared `rusty_ct_check/scripts/taint_lib.sh`: each mode runs once, output to a file, and a non-zero status fails the check. `test_taint_lib.sh` uses a fake `valgrind` (clean, diagnostic, exit 3, exit 127, diagnostic plus failure); weakening the status check fails it. |
 | P2: `collect.sh` never ran the ignored `planted_early_exit_is_detected` test, so the timing detector's own sensitivity was not part of the record. | **Yes.** | Fixed: `collect.sh` runs it explicitly (`--ignored --exact`), propagates its status and requires exactly one passing test. It passed here (0.02 s). |
 | P2: the vector hashes were printed, not compared with the manifests (and the two generated corpora were not pinned). | **Yes**, and the check found a real gap on its first run: `x25519_test.json` was vendored but missing from the `rusty_pk` manifest. | Fixed: `check_manifests.py` fails on a hash mismatch (including whitespace-only drift), a missing file, an unlisted file, a file listed twice and a malformed pin line; both generated corpora and `x25519_test.json` are now pinned; it runs in `collect.sh` and in the `crypto-constant-time` CI job; 9 tests. **Limit:** the manifest sits beside the vectors, so this catches drift and accidents, not a deliberate change of corpus and manifest together; provenance rests on the pinned upstream commit and human review. All 27 vendored Wycheproof files were also compared byte for byte with upstream at `12fd3aaf` (identical). |
@@ -697,3 +717,125 @@ Added after review (current as of the evidence record):
   in full for the files used; fiat-crypto was never evaluated and its licence terms never
   checked. Licence statements other than Wycheproof's (read) come from general knowledge.
 - `rusty_tls#25` remains unread (see the TLS assessment).
+
+## 13. Plan for the gaps (proposal; every item is the owner's decision)
+
+Context: stages 0 to 4 are implemented. The owner has verified an independent review covering #572 and #576
+(including ECDH and `rusty_rand`); its reviewed commit, method and findings are not recorded, and it is not stated to
+cover the #540 stage rows, so those keep their "review pending" labels (section 0, "Review status, reconciled", and
+section 11). The stage-4 freeze (section 0) covers *implementation*. It was reopened for gaps 1 and 2 only, on the
+owner's instruction, which the owner confirmed directly (section 0);
+gaps 3 to 5 stay closed until the owner reopens them. Gaps are those in section 2.3. The goal of this plan is a **client-role native
+engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate decision.
+
+### 13.1 Gaps, in the order I would close them
+
+| # | Gap | Why this order | Scope | Evidence bar | Effort (days, +-50%) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **Randomness** | Smallest; every key generation (X25519, ECDHE, nonces, ticket keys) needs it, so it blocks the rest. | Evaluate `rusty_rand` first (section 3): `getrandom(2)` instead of `/dev/urandom` (blocks until the pool is initialised), no global `Mutex<File>`, fork/short-read behaviour, Windows `BCryptGenRandom`. Prefer fixing `rusty_rand` over a new crate. OS entropy only, no home-made DRBG. | Short-read, failure-path and fork tests; the failure must propagate, never return zeros. Not provable by tests: entropy quality (OS's job). | 2 to 4 |
+| 2 | **ECDH P-256 / P-384** (stage 6a) | RFC 8446 requires secp256r1 key exchange; the Montgomery core is reusable. | Secret scalar multiplication with complete formulas, constant-time table selection, on-curve and infinity checks, uncompressed SEC1 points. Today's scalar multiplication in `rusty_pk` is `_vartime` and **must not be reused for secrets**. | Wycheproof ECDH (invalid-curve and twist cases), differential vs `ring`, methods 1 to 4 of section 4.4 clean (valgrind taint, exact disassembly counts, timing with A/A baseline, planted-leak control), review. | 8 to 10 |
+| 3 | **AES-128/256-GCM** (stage 5) | Hardest and slowest; RFC 8446 mandates AES-128-GCM and the engine prefers AES-256-GCM, so most real handshakes need it. Also the ticket cipher. | Decision needed first (13.2 D1): portable fixsliced AES plus table-free GHASH, or AES-NI/PCLMUL in one reviewed `unsafe` module behind a runtime feature check. | Wycheproof GCM + CAVP + differential; no table lookup indexed by a secret (the disassembly script cannot show this; choose a check, e.g. valgrind taint plus review); methods 1 to 4; review. Portable throughput is 60 to 150x below `ring`; measure before wiring. | 8 to 12 (+5 to 8 with intrinsics) |
+| 4 | **`rusty_tls` backend seam** | Only after 1 to 3 exist; the TLS-engine session owns `rusty_tls`. | Same signatures as the `ring` call sites (section 2.3), selected by an extra cfg beside `rusty_tls_handrolled`; adapters for `Nonce`/`Aad`/`LessSafeKey`/`hmac::Context`; default stays `ring`. | Differential at the seam (same handshakes, both backends), interop with `ring`-backed peers, the whole section 11 table re-checked at the integration commit. | 5 to 8 |
+| 5 | **Signing** (stage 6b) | Only if a server role or client certificates must go native. | ECDSA P-256/P-384 (RFC 6979 or hedged nonce), Ed25519 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays "recommend not doing". | Wycheproof, differential both directions, nonce-bias test, methods 1 to 4, review. | 6 to 8 |
+
+Sum for the client role (1 to 4): about 23 to 34 days plus intrinsics if chosen, before
+review wait. With signing: about 29 to 42. Estimates are reused from section 7.2, not
+re-derived.
+
+### 13.2 Decisions needed
+
+- **D1 AES implementation:** portable only, or intrinsics. The 2026-10-08 intrinsics approval
+  predates "stop after stage 4" and was never exercised; please confirm it still stands. A
+  portable-only AES-GCM is only acceptable if the engine's suite order puts ChaCha20-Poly1305
+  first (today it is AES-256-GCM, AES-128-GCM, then ChaCha20-Poly1305).
+- **D2 Reopen the freeze** for gaps 1 to 3 (and which of 4 and 5).
+- **D3 Client-only or also server role** (gap 5).
+- **D4 Review process per stage:** this plan assumes each of gaps 2, 3 and 5 gets the same
+  evidence package and an independent review before it is wired; the previous review was by
+  the owner alone. A second reviewer for the AES and ECDH secret-handling code is cheap
+  relative to the risk; the owner decides.
+- **D5 Where `ring` is allowed to remain:** it stays in the lockfile for `rustls`,
+  `boringtun`, `jsonwebtoken`, `quinn` (section 2.2). Completion of this plan is "the native
+  `rusty_tls` engine no longer needs `ring`", not "ring-free".
+
+### 13.3 Standing rules for every gap
+
+- New crates or modules: Tier S, no new third-party dependencies, `ring` as a dev-dependency
+  oracle only, `unsafe` only in the single reviewed module (and the valgrind helper).
+- The `crypto-constant-time` CI job and `collect.sh` gain each new secret-handling function
+  (exact disassembly counts, taint, timing with A/A baseline); constant-time claims stay
+  "no leak found by these methods", never proof.
+- No wiring into `rusty_tls` before the seam item, and no default changes without the owner.
+- Every divergence from `ring` is listed and classified, as for Ed25519 (section 2, stage 2).
+
+### 13.4 Results for gaps 1 and 2 (2026-10-09; preliminary; covered by the owner-verified review, whose commit, method and findings are not recorded)
+
+**Gap 1, `rusty_rand`.** On Linux x86_64/aarch64 `fill` calls `getrandom(2)` with flags 0 through
+`rusty_libc` (blocks until the kernel pool is initialised; `strace` shows one 1 MiB call and no
+`/dev/urandom` open). If the kernel lacks it (`ENOSYS`) the whole buffer is refilled from `/dev/random`,
+never `/dev/urandom` (review finding on #576: a `/dev/urandom` fallback would keep the early-boot risk). Other
+Linux targets (no `rusty_libc` support) use `/dev/random`, which also waits for pool initialisation (on kernels
+before 5.6 it can additionally block on a low entropy estimate). Other Unix keeps `/dev/urandom` with
+**no initialised-pool claim**: its early-boot behaviour per BSD was not checked. Reads take no lock. The read loop
+(`fill_with`) and the `getrandom` loop (`fill_getrandom_with`) are separate from the OS and tested with scripted
+sources: short reads, `EINTR`, a zero-progress read, a source claiming too much, a failing source, `ENOSYS` first
+and after a partial fill (the fallback must replace stale bytes), a failing fallback, other errnos failing closed
+without the fallback, and the real `/dev/random` fallback filling a buffer. Backend selection is a pure function
+tested for every target class, plus a test that Linux never selects `/dev/urandom`. No path returns an unfilled
+tail. `rust-version` is now 1.88 (`rusty_libc`'s floor); the public API is unchanged. Not verified:
+entropy quality, Windows and macOS builds (not built here), `fork` behaviour beyond the argument that all state
+is in the kernel, and the blocking behaviour of `/dev/random` on kernels before 5.6.
+
+**Gap 2, `rusty_pk::ecdh`.** `PrivateKey::{from_bytes, generate, public_key, agree}` on P-256 and P-384,
+SEC 1 uncompressed points only (compressed points are refused, as TLS 1.3 requires).
+Scalar multiplication is double-and-add-always over the complete projective formulas of Renes,
+Costello and Batina (algorithms 4 and 6, `a = -3`), with a mask select and a fixed iteration count. It is
+deliberately simple (no window table); that costs speed.
+- *Correctness:* unit tests compare the complete formulas with the existing reference arithmetic
+  (`P + P`, `P + (-P)`, infinity on both sides, doubling infinity) and scalar multiplication for edge and
+  pseudo-random scalars; Wycheproof `ecdh_secp{256,384}r1_ecpoint_test.json` at the pinned commit, all
+  355 and 790 cases (330 + 771 valid with matching shared secrets, 24 + 18 invalid rejected, the one
+  compressed-point case refused); RFC 5903 public keys; agreement with `ring` both ways; the same accept and
+  reject verdicts as `ring` on every Wycheproof public key. The two files are pinned in `MANIFEST.txt`.
+  Mutation checks (select ignores its mask, one line of `add`, one line of `double`, prefix check removed)
+  each make a test fail.
+- *Constant-time evidence (x86-64, rustc 1.98.1, one VM; none of it proves anything):* a review of the first
+  version (PR #576 comment, da929dfa) found that private-scalar validation (`from_bytes`: zero test and range
+  check, also reached by `generate`) used early-exit `*_vartime` helpers on the secret's limbs, that the taint run
+  marked the bytes only after import so it excluded exactly that code, and that the "result is infinity"
+  test on the secret-derived `Z` was a short-circuit limb test whose permitted taint report sat in whole
+  functions (`public_key`, `agree`). A valid scalar is a public fact; the number of limbs examined to establish
+  it was not. Fixed: the length is rejected first (public); `scalar_valid` does the same `k` limb operations for
+  every input (an OR-reduction for non-zero and a full-width borrow chain for `d < n`); the infinity test is the
+  same fixed OR-reduction; the scalar is parsed into a stack array (no heap copy to leave unwiped) and wiped; the
+  only branch on a secret-derived value is the caller's `?` after `ensure(verdict)`. The taint example now marks
+  the bytes secret **before** import and covers `from_bytes` (accepted 1, 2^64, 2^128, 2^(8*len-1), n-1; rejected
+  0, n, all ones; both curves), `generate`, `public_key` and `agree`. `scripts/verdict_sites.py` requires every
+  report to be a conditional jump right after a call to `ecdh::ensure` (one site each in `from_bytes`,
+  `public_key`, `agree`; 3 reports for a full run, 1 for import or generate). Mutation checks: an early exit in
+  the range check, and a short-circuit zero test, are both rejected by `ct_check.sh`; a planted branch on the
+  shared secret still is. Exact jump counts are pinned for `select` (0), `add` (1), `double` (1), `mul` (2);
+  `select` was read by hand (SIMD and/or/andn, no branch), and the scalar bit becomes a mask via `sar` and
+  `bt`/`sbb`. **Limits:** the verdict branch itself is allowed and reveals only valid/invalid (a rejected
+  candidate is discarded; for a valid key the answer is fixed), the site check assumes valgrind's PIE load base
+  0x108000 and fails if that changes, and everything else in the earlier caveats stands. Two full records exist and **both are kept**:
+  `EVIDENCE-2026-10-09-ecdh-run1-FAILED.txt` (clean tree at `200ab7b5`) failed one criterion, HMAC-SHA512
+  fixed-vs-other-key (`rusty_sha2`, unchanged code), 2 alarms of 40 (|t| 4.54, 4.74) against an allowance of 1;
+  `EVIDENCE-2026-10-09-ecdh-run2.txt` (clean tree at `77396880`, started on an idle machine, which run 1 was not)
+  passed every criterion. Neither threshold nor allowance rule was changed. Across the two runs the alarms fell in
+  different tests (run 1: HMAC-SHA512 2, HMAC-SHA256 1, ChaCha20-Poly1305 open 1, X25519 A/A 1; run 2: ECDH P-256
+  sparse-vs-dense 1, at |t| 4.83), which is what noise looks like and is **not** proof of it. The ECDH P-256
+  sparse-vs-dense series is the one to watch: its maxima were 3.54 (an earlier single run), 4.31 (run 1) and 4.83 (run 2)
+  against matched P-256 A/A maxima of 2.67 (run 1) and 3.31 (run 2); a second reading of that test on a quiet machine, and a look at what differs
+  between the classes beyond the scalar (the key slot is rewritten in `prepare`), would be the next step. A first
+  version of the ECDH test chose between two separately stored keys inside the timed closure (review finding on
+  #576) and its numbers are discarded.
+- *Side effect on earlier evidence:* adding this code twice changed LLVM's inlining of `Modulus::add` (once into
+  `Field::add`, 6 jumps to 16, then back). `Modulus::add` is now `#[inline(never)]` so its originally reviewed
+  count of 6 is stable; the counts were re-read each time. Every pin is per binary.
+- *Speed:* about 0.9 ms (P-256) and 1.9 ms (P-384) per agreement, 14x and 5x slower than `ring` (`ring`
+  has assembly for P-256); `ring` cannot import a scalar, so its time is generate-and-agree minus generate.
+- *Known limits:* no windowed multiplication, no blinding; the private scalar's bytes are wiped on drop but
+  intermediate field elements live in unwiped stack copies; the peer-point validation and the infinity test
+  are variable time on public or irrelevant data by design; cofactor 1, so no subgroup check; not reviewed.
+- *Review needed (D4):* the scalar loop, the transcription of the two formulas, the validation helpers and the pinned counts.
