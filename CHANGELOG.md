@@ -7,6 +7,10 @@ internal changes are logged in that crate's own
 and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
+**Archive.** New entries are no longer added here: each PR adds a fragment
+under `changes/` instead (`changes/README.md`). This file holds the history up
+to 2026-10-10.
+
 ## [Unreleased]
 ### Changed
 - **`rusty_rand` hardened** (crypto track gap 1): on Linux x86_64/aarch64 it calls `getrandom(2)` with flags 0 through `rusty_libc` (blocks until the kernel pool is initialised; `/dev/urandom` did not), with `/dev/random` (never `/dev/urandom`) as the `ENOSYS` fallback and for other Linux targets; other Unix keeps `/dev/urandom` with no initialised-pool claim, without the global `Mutex`; a short, empty or failed read is an error, never an unfilled tail (`fill_with`, tested with a scripted source). API unchanged. `rust-version` of `rusty_rand` raised 1.75 to 1.88 (`rusty_libc`'s floor). Quality of the randomness is the OS's and is not tested here.
@@ -20,6 +24,8 @@ Removed / Fixed / Security, newest first.
 - **`rusty_tls` native engine: a wildcard certificate no longer bypasses an excluded name constraint.** `handrolled::name` compared the literal SAN `*.example.com` against the excluded subtree `bad.example.com`, found it outside, and accepted a certificate that authenticates `bad.example.com`; webpki refused it. A wildcard is now excluded when any host it can match is inside the subtree. Only the opt-in engine (`handrolled-engine` plus `--cfg rusty_tls_handrolled`) was affected; the rustls default never was. New differential test (seven cases, both engines agree) and two unit tests. Also fixes two `needless_question_mark` lints in the engine that failed clippy on Rust 1.97.
 
 ### Added
+- **`rb_rlbot_client`** (`crates/apps/rocket_league/crates/rb_rlbot_client`): a blocking RLBot v5 client on `std::net` over `rb_rlbot_wire`: `Connection` (handshake, send, receive with timeout), `run_bots` / `run_hivemind` agent loops that answer pings, and `Environment`. Stage 3 of the native RLBot port (`rlbot/PLAN.md`). `rb_rlbot_wire` gains `DisconnectSignal`, `PingRequest` and `PingResponse`.
+
 - **CI: the `rusty-tls-engine` job runs the live-internet check as a non-blocking step** (`continue-on-error`, with a step summary). It handshakes the native engine against Google's sign-in endpoints and compares with the rustls-backed stream, on a runner that reaches them directly. A failure is a visible warning and never decides a merge; The step runs `.github/scripts/live_internet_check.sh`, which always prints and summarises the output even when cargo fails and fails on a failure or a zero-test run; `test_live_internet_check.py` tests it with fake failing and passing commands, and `test_ci_workflow` pins that the step stays non-blocking and goes through the script.
 - **`rusty_tls` native engine: live-internet check (`tests/handrolled_live.rs`, `#[ignore]`d).** Handshakes the engine against Google's sign-in endpoints (the first candidate consumer's peers; `RUSTY_TLS_LIVE_HOSTS` overrides) with the OS trust anchors, sends a request, and compares the result with the shipped rustls-backed `TlsStream`. It flags a certificate from a TLS-intercepting egress proxy, because then it shows the proxy's server and not the host. Run by hand; not a CI gate.
 - **`rusty_tls` negotiated facts (stage 14)**: `key_exchange_group()`, `used_hello_retry_request()` and `peer_signature_scheme()` on the native engine's connections (the last is `None` on a resumed connection). Fixed: a peer signing its CertificateVerify with a scheme it should not use (SHA-1, `rsa_pkcs1_*` in TLS 1.3, unsupported) drew `decrypt_error` instead of `illegal_parameter` (RFC 8446 4.4.3), on both roles. Verified against rustls in both roles and versions; 15 mutants all caught. 861 BoGo tests pass, 0 fail (was 820). CI floor raised to 830.

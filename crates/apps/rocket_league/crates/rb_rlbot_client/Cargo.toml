@@ -1,0 +1,22 @@
+[package]
+name = "rb_rlbot_client"
+description = "Blocking RLBot v5 client on std::net: connects to RLBot core, runs the handshake, drives bot and hivemind agents from game packets, and sends match, state-setting and stop messages. Replaces the external rlbot crate (see rlbot/PLAN.md)."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+rb_rlbot_wire = { path = "../rb_rlbot_wire" }
+
+[package.metadata.rusty_mill]
+layer = "apps"

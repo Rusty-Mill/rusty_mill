@@ -4,7 +4,7 @@
 use rusty_flatbuffers::{Builder, Offset, Table};
 
 use crate::codec::{TableCodec, R};
-use crate::tables::{ConnectionSettings, InitComplete, PlayerInput, StopCommand};
+use crate::tables::{ConnectionSettings, InitComplete, Ping, PlayerInput, StopCommand};
 use crate::types::{
     ControllableTeamInfo, DesiredGameState, FieldInfo, GamePacket, MatchConfiguration,
 };
@@ -38,6 +38,8 @@ pub enum InterfaceMessage {
     ConnectionSettings(ConnectionSettings),
     StopCommand(StopCommand),
     InitComplete(InitComplete),
+    /// The answer to [`CoreMessage::PingRequest`].
+    PingResponse(Ping),
 }
 
 const I_MATCH_CONFIGURATION: u8 = 3;
@@ -46,6 +48,7 @@ const I_DESIRED_GAME_STATE: u8 = 5;
 const I_CONNECTION_SETTINGS: u8 = 9;
 const I_STOP_COMMAND: u8 = 10;
 const I_INIT_COMPLETE: u8 = 12;
+const I_PING_RESPONSE: u8 = 15;
 
 impl InterfaceMessage {
     /// The payload bytes, without the length prefix (see [`crate::frame`]).
@@ -61,6 +64,7 @@ impl InterfaceMessage {
             }
             InterfaceMessage::StopCommand(m) => packet(I_STOP_COMMAND, |b| m.write(b)),
             InterfaceMessage::InitComplete(m) => packet(I_INIT_COMPLETE, |b| m.write(b)),
+            InterfaceMessage::PingResponse(m) => packet(I_PING_RESPONSE, |b| m.write(b)),
         }
     }
 
@@ -79,6 +83,7 @@ impl InterfaceMessage {
             }
             I_STOP_COMMAND => InterfaceMessage::StopCommand(StopCommand::read(&t)?),
             I_INIT_COMPLETE => InterfaceMessage::InitComplete(InitComplete::read(&t)?),
+            I_PING_RESPONSE => InterfaceMessage::PingResponse(Ping::read(&t)?),
             tag => {
                 return Err(Error::UnknownUnion {
                     name: "InterfaceMessage",
@@ -96,14 +101,20 @@ pub enum CoreMessage {
     FieldInfo(FieldInfo),
     MatchConfiguration(MatchConfiguration),
     ControllableTeamInfo(ControllableTeamInfo),
-    /// A message type this crate does not model (comms, ball prediction, pings, ...), by tag.
+    /// The client should exit.
+    DisconnectSignal,
+    /// Core asks for a [`InterfaceMessage::PingResponse`] with the same cookie.
+    PingRequest(Ping),
+    /// A message type this crate does not model (comms, ball prediction, ...), by tag.
     Other(u8),
 }
 
+const C_DISCONNECT_SIGNAL: u8 = 1;
 const C_GAME_PACKET: u8 = 2;
 const C_FIELD_INFO: u8 = 3;
 const C_MATCH_CONFIGURATION: u8 = 4;
 const C_CONTROLLABLE_TEAM_INFO: u8 = 7;
+const C_PING_REQUEST: u8 = 9;
 
 impl CoreMessage {
     /// Decodes a payload. Unmodelled members are [`CoreMessage::Other`], not errors, because
@@ -113,15 +124,29 @@ impl CoreMessage {
         let tag = root.scalar(0, 0u8)?;
         if !matches!(
             tag,
-            C_GAME_PACKET | C_FIELD_INFO | C_MATCH_CONFIGURATION | C_CONTROLLABLE_TEAM_INFO
+            C_DISCONNECT_SIGNAL
+                | C_GAME_PACKET
+                | C_FIELD_INFO
+                | C_MATCH_CONFIGURATION
+                | C_CONTROLLABLE_TEAM_INFO
+                | C_PING_REQUEST
         ) {
             return Ok(CoreMessage::Other(tag));
         }
+        // The message table is required for every modelled member, an empty one included: a
+        // disconnect whose table is missing or damaged is a bad payload, not a clean exit.
         let (_, t) = open(payload)?;
         Ok(match tag {
+            C_DISCONNECT_SIGNAL => {
+                // No field is read from an empty table, so look up one: that checks its vtable,
+                // which a writer may place after the table and a cut-off buffer may be missing.
+                t.has_field(0)?;
+                CoreMessage::DisconnectSignal
+            }
             C_GAME_PACKET => CoreMessage::GamePacket(GamePacket::read(&t)?),
             C_FIELD_INFO => CoreMessage::FieldInfo(FieldInfo::read(&t)?),
             C_MATCH_CONFIGURATION => CoreMessage::MatchConfiguration(MatchConfiguration::read(&t)?),
+            C_PING_REQUEST => CoreMessage::PingRequest(Ping::read(&t)?),
             _ => CoreMessage::ControllableTeamInfo(ControllableTeamInfo::read(&t)?),
         })
     }
@@ -135,6 +160,9 @@ impl CoreMessage {
             CoreMessage::ControllableTeamInfo(m) => {
                 packet(C_CONTROLLABLE_TEAM_INFO, |b| m.write(b))
             }
+            // `DisconnectSignal` is an empty table, the same shape as `InitComplete`.
+            CoreMessage::DisconnectSignal => packet(C_DISCONNECT_SIGNAL, |b| InitComplete.write(b)),
+            CoreMessage::PingRequest(m) => packet(C_PING_REQUEST, |b| m.write(b)),
             CoreMessage::Other(tag) => Err(Error::UnknownUnion {
                 name: "CoreMessage",
                 tag: *tag,
@@ -142,3 +170,21 @@ impl CoreMessage {
         }
     }
 }
+
+macro_rules! into_interface {
+    ($($variant:ident($ty:ty)),+ $(,)?) => {$(
+        impl From<$ty> for InterfaceMessage {
+            fn from(m: $ty) -> Self {
+                InterfaceMessage::$variant(m)
+            }
+        }
+    )+};
+}
+into_interface!(
+    MatchConfiguration(MatchConfiguration),
+    PlayerInput(PlayerInput),
+    DesiredGameState(DesiredGameState),
+    ConnectionSettings(ConnectionSettings),
+    StopCommand(StopCommand),
+    InitComplete(InitComplete),
+);
