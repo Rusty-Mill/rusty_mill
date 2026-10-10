@@ -1,6 +1,6 @@
 # `rusty_mcp_proto`: minimal scope (A2 inventory)
 
-Status: **read-only scoping**, 2026-10-08. Feeds step A2 of `MCP-NATIVE-PLAN.md`. No code changed.
+Status: **read-only scoping**, 2026-10-08. Feeds step A2 of `MCP-NATIVE-PLAN.md`. No code changed. The implementation is [#577](https://github.com/Rusty-Mill/rusty_mill/pull/577) (`crates/libs/protocol/rusty_mcp_proto`); a parallel build of the first slices in #586 was dropped in its favour.
 
 Method: every `rmcp::` path in the non-Nexus crates was extracted (`use` trees expanded, inline paths included), then checked against the `rmcp` 3.1.4 source (the version in `Cargo.lock`) for the exact wire shape. Not verified: nothing here was run against a live server; shapes come from reading `rmcp` source, not from captured traffic. Nexus (`crates/apps/nexus`) is excluded by owner decision.
 
@@ -110,3 +110,9 @@ Owner decisions that shaped A2:
 All three questions are closed; section 3 is the A2 type list as written (classic and stateless handshakes, tasks, MRTR, opaque elicitation schema).
 
 Suggested first code step once answered: `ContentBlock`, `Tool`, `CallToolParams/Result`, list and pagination types, JSON-RPC envelope, `ErrorData` (covers `rk-app` and the gateway's list/call path), with fixtures diffed against `rmcp` 3.1.4.
+
+## 8. Decisions applied (owner, 2026-10-09)
+
+- Tool schemas come from a **small first-party builder**, not a derive macro. `#[tool]`-style code becomes `server.tool(name, description, schema, handler)` registrations. The macro-using crates (`rusty-mcp-demo`, `rusty_homelab_mcp`, `remind_me_remote`, `rp-mcp`, template) are the migration cost; five crates, none large.
+- Servers are **blocking, one thread per connection**, on `rusty_serve` (and stdio). So `ServerHandler` becomes a plain synchronous trait; `RequestContext`/`Peer` shrink to what blocking handlers need (cancellation flag, progress sender).
+- Scope is `rmcp` **and** its stack (`axum`, `tokio`, `reqwest`, `clap`, `tracing-subscriber`, `jsonwebtoken`).

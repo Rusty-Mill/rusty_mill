@@ -233,6 +233,10 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Known limitations:** nothing uses the crate yet, so no consumer behaviour changed. There is no session or dispatch layer, SSE framing or transport yet (A3/A4). `RequestMeta` refuses a mistyped known key where `rmcp`'s accessors silently return `None`, so a server can answer `-32602` instead of ignoring bad metadata. Completion's 100-value cap is not enforced by the codec (server policy). Annotation `priority` is forwarded as raw JSON, so a value like `0.2` survives exactly where `rmcp` (which stores `f32`) would re-encode it as `0.20000000298`. Unknown members of known types are dropped on decode. Verified by tests only, not against a live server.
 
 
+## 2026-10-10 - ADR-0002 Amendment 1: MCP crates to Tier T (docs only)
+
+- **Changed:** the MCP crates are Tier T (transitional), with `docs/research/MCP-NATIVE-PLAN.md` as the milestone list. Records the owner decisions of 2026-10-09 (schema builder first, blocking servers on `rusty_serve`, scope is `rmcp` and its whole stack) and a three-point checklist for any MCP server (advertise only implemented revisions, check cancellation before running a queued handler, bounded shutdown on a failed write).
+- **Known limitation:** documentation only. The implementation is #577; this PR deliberately carries none of it.
 
 ## 2026-10-09 - CI: live-internet check added to rusty-tls-engine (non-blocking)
 
