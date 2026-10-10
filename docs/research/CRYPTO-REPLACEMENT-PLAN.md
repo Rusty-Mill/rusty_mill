@@ -10,8 +10,8 @@ implemented with preliminary validation and covered by the review the owner veri
 signature verification, X25519 and ChaCha20-Poly1305, and does not cover AES-GCM, P-256 or P-384
 key exchange, signing, or randomness (section 0, "Scope limits"). **Consumer status:** no
 consumer, `rusty_tls` file, gate or default was changed; nothing here is used by anything.
-Work is frozen at stage 4 by owner decision; the next deliverable is review and reproducible
-evidence, not more primitives. Everything marked "decision" is the owner's. Section 10 is a
+Work was frozen at stage 4 by owner decision; the freeze has since been reopened for gaps 1 and 2 (done) and,
+on 2026-10-10, for AES-GCM (gap 3) only, the `rusty_tls` seam and signing staying closed (section 0). Everything marked "decision" is the owner's. Section 10 is a
 draft ADR and is **not accepted**. Vocabulary used below: "implemented" means code and tests
 exist; it never means reviewed or approved for TLS use.
 
@@ -43,6 +43,21 @@ exactly what is stated here. For the third (the review), the recorded statement 
 #572 and #576 including ECDH and `rusty_rand`. **The reviewed commit, the method and any findings are still not
 recorded here**, and the statement does not say whether the stage rows for #540 (stages 0 to 4) are covered, so those
 rows keep their "review pending" labels. The scope above is exactly what the original instruction names.
+
+**Owner decisions (2026-10-10).** Given directly in the implementing session, in answer to the implementer's list of
+next steps; the implementer's transcription, **not yet restated from the owner's GitHub account** (the earlier
+2026-10-09 decisions were later confirmed that way, and these are open to the same confirmation):
+- **"I reviewed it"** (#593, the `rusty_rand` per-OS CI job and the ECDH P-256 quiet-machine rerun). #593 was then
+  merged. The review's method and findings are not recorded here.
+- **"Accept my review"** (the open item in the review-status paragraph below). The owner accepts their own review as
+  complete. This supplied no reviewed commit, method or findings, and did not say that it covers the #540 stage rows
+  (stages 0 to 4), so **those rows keep their "review pending" labels** until the owner states that scope.
+- **"No second reviewer"** (decision D4). ECDH and AES-GCM are reviewed by the owner alone. This is the owner's
+  decision; it is recorded as such and is not a finding that a second review would add nothing.
+- **"Unfreeze"** (decision D2). Read as the freeze reopening for **AES-GCM (gap 3) only**, the item the implementer's
+  list asked about. The `rusty_tls` seam (gap 4) and signing (gap 5) **stay closed** until the owner names them. The
+  2026-10-08 intrinsics approval (decision D1) was **not reconfirmed**: AES work starts portable-only and uses no
+  intrinsics until the owner confirms D1.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -80,8 +95,9 @@ were seen. The owner later verified directly (section 0; PR #576 comment 6091204
 findings, and has not said that the review covers the #540 stage rows, so nothing in this repository records those.
 This plan therefore keeps the stage-row "review pending" labels above and the statement in section 11 that no
 recorded human review of the Montgomery invariants exists, until the owner records that scope. The ECDH and
-`rusty_rand` work is covered by the verified review as stated; the plan still treats an independent second reviewer
-for ECDH and AES (decision D4) as the owner's call.
+`rusty_rand` work is covered by the verified review as stated. On 2026-10-10 the owner accepted that review as
+complete and decided against a second reviewer for ECDH and AES (decision D4; section 0, "Owner decisions
+(2026-10-10)"); the #540 stage rows still keep "review pending" because the scope was not stated.
 
 ### Stage 2 results (`rusty_pk`, 2026-10-08; preliminary)
 
@@ -724,8 +740,8 @@ Context: stages 0 to 4 are implemented. The owner has verified an independent re
 (including ECDH and `rusty_rand`); its reviewed commit, method and findings are not recorded, and it is not stated to
 cover the #540 stage rows, so those keep their "review pending" labels (section 0, "Review status, reconciled", and
 section 11). The stage-4 freeze (section 0) covers *implementation*. It was reopened for gaps 1 and 2 only, on the
-owner's instruction, which the owner confirmed directly (section 0);
-gaps 3 to 5 stay closed until the owner reopens them. Gaps are those in section 2.3. The goal of this plan is a **client-role native
+owner's instruction, which the owner confirmed directly (section 0); on 2026-10-10 it was reopened for gap 3
+(AES-GCM) as well (section 0, "Owner decisions (2026-10-10)"); gaps 4 and 5 stay closed until the owner reopens them. Gaps are those in section 2.3. The goal of this plan is a **client-role native
 engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate decision.
 
 ### 13.1 Gaps, in the order I would close them
@@ -748,12 +764,14 @@ re-derived.
   predates "stop after stage 4" and was never exercised; please confirm it still stands. A
   portable-only AES-GCM is only acceptable if the engine's suite order puts ChaCha20-Poly1305
   first (today it is AES-256-GCM, AES-128-GCM, then ChaCha20-Poly1305).
-- **D2 Reopen the freeze** for gaps 1 to 3 (and which of 4 and 5).
+  *Open (2026-10-10):* not reconfirmed; AES-GCM starts portable-only and uses no intrinsics until the owner confirms.
+- **D2 Reopen the freeze** for gaps 1 to 3 (and which of 4 and 5). *Decided:* gaps 1 and 2 (2026-10-09) and gap 3,
+  AES-GCM (2026-10-10, "Unfreeze"); gaps 4 and 5 stay closed.
 - **D3 Client-only or also server role** (gap 5).
 - **D4 Review process per stage:** this plan assumes each of gaps 2, 3 and 5 gets the same
   evidence package and an independent review before it is wired; the previous review was by
   the owner alone. A second reviewer for the AES and ECDH secret-handling code is cheap
-  relative to the risk; the owner decides.
+  relative to the risk; the owner decides. *Decided 2026-10-10: no second reviewer* (owner's decision).
 - **D5 Where `ring` is allowed to remain:** it stays in the lockfile for `rustls`,
   `boringtun`, `jsonwebtoken`, `quinn` (section 2.2). Completion of this plan is "the native
   `rusty_tls` engine no longer needs `ring`", not "ring-free".
