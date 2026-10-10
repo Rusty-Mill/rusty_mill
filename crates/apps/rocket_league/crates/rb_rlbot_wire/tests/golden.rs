@@ -361,9 +361,29 @@ fn field_and_team_info_match_the_reference_bytes() {
 }
 
 #[test]
+fn disconnect_and_ping_match_the_reference_bytes() {
+    check_core(fixtures::C_DISCONNECT, CoreMessage::DisconnectSignal);
+    check_core(
+        fixtures::C_PING,
+        CoreMessage::PingRequest(Ping { cookie: 5 }),
+    );
+    check_interface(
+        fixtures::I_PONG,
+        InterfaceMessage::PingResponse(Ping { cookie: 5 }),
+    );
+}
+
+#[test]
 fn a_message_type_that_is_not_modelled_is_reported_not_fatal() {
-    assert_eq!(core(fixtures::C_OTHER), CoreMessage::Other(9));
-    assert!(CoreMessage::Other(9).to_payload().is_err());
+    // The same payload as the ping fixture, with the tag of a member this crate does not model.
+    let mut other = unhex(fixtures::C_PING);
+    let tag_at = other.iter().position(|b| *b == 9).unwrap();
+    other[tag_at] = 8;
+    assert_eq!(
+        CoreMessage::from_payload(&other).unwrap(),
+        CoreMessage::Other(8)
+    );
+    assert!(CoreMessage::Other(8).to_payload().is_err());
     // A client message this crate has no member for is an error where a stand-in core reads it.
     let mut other = unhex(fixtures::I_STOP);
     let tag_at = other.iter().position(|b| *b == 10).unwrap();

@@ -17,6 +17,9 @@ How the repo is organised, validated and released:
    Spikes/prototypes are exempt but should say so in the PR.
 4. Add or update docstrings on any public surface you touched.
 5. Open a PR — pick the template that matches (feature / bug fix / docs / chore).
+6. Add a change fragment, `changes/<YYYY-MM-DD>-<slug>.md` (format in
+   `changes/README.md`). Do not edit `RELEASE_NOTES.md` or `CHANGELOG.md`: they are
+   archives, and one file per PR is what keeps concurrent PRs from conflicting.
 
 ## Code style
 - Explicit over implicit; type hints/annotations always.

@@ -7,6 +7,10 @@ own internal changes, which are logged in that crate's own
 from before the merge; see ADR-0001 for why root and per-crate logs are
 separate rather than one superseding the other).
 
+**Archive.** New entries are no longer added here: each PR adds a fragment
+under `changes/` instead (`changes/README.md`), so concurrent PRs do not
+collide. This file holds the history up to 2026-10-10.
+
 One entry per merged PR against `main`, reverse chronological, each linking
 to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 `**Fixed:**`), known limitations stated plainly.
@@ -233,6 +237,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Known limitations:** nothing uses the crate yet, so no consumer behaviour changed. There is no session or dispatch layer, SSE framing or transport yet (A3/A4). `RequestMeta` refuses a mistyped known key where `rmcp`'s accessors silently return `None`, so a server can answer `-32602` instead of ignoring bad metadata. Completion's 100-value cap is not enforced by the codec (server policy). Annotation `priority` is forwarded as raw JSON, so a value like `0.2` survives exactly where `rmcp` (which stores `f32`) would re-encode it as `0.20000000298`. Unknown members of known types are dropped on decode. Verified by tests only, not against a live server.
 
 
+
+## 2026-10-09 - rb_rlbot_client: blocking RLBot client (RLBot port stage 3) (pending review)
+
+- **Added:** `crates/apps/rocket_league/crates/rb_rlbot_client`: `Connection` (connect, send, receive with or without a timeout, handshake), `run_bots` and `run_hivemind` (handshake, `InitComplete`, packet loop, ping replies, clean exit on disconnect), and `Environment` for the `RLBOT_*` variables. `std::net` only, one thread; depends on `rb_rlbot_wire` alone.
+- **Added (`rb_rlbot_wire`):** `CoreMessage::DisconnectSignal`, `CoreMessage::PingRequest` and `InterfaceMessage::PingResponse` (a shared `Ping { cookie }`), with `From` conversions into `InterfaceMessage`. The ping and disconnect bytes are pinned against `rlbot_flat` fixtures and by `planus` reading what this crate encodes. Core pings used to arrive as `CoreMessage::Other(9)`; they are now `PingRequest`, so `Other(9)` is gone.
+- **Tested:** 20 tests against an in-process fake core (split and coalesced frames, timeouts that keep a half frame, handshake in any order, ping replies, garbage frames, every way a connection ends, car-order of replies), 25 repeated runs without a failure.
+- **Fixed (review):** `recv_timeout` checks its deadline on every pass (the read loop is generic over a scripted transport and clock, so the regression is deterministic: against the original logic four of its five unit tests fail), so bytes trickling in can no longer hold it past the deadline, and a zero timeout is a true poll (buffered message or what is already on the socket, never a wait). `CoreMessage::DisconnectSignal` is validated like any modelled member (message table required, its vtable checked) instead of being accepted from the tag alone. `Connection::handshake` refuses an empty or whitespace-only `agent_id` (core trims it first) with `Error::EmptyAgentId` before sending anything, because core sends team information only to a named agent; a match runner with no id sends its settings with `send` and reads with `recv`, as `rb_match_log` does.
+- **Known limitation:** nothing here has talked to the real core; stage 4 does that once. Comms, ball prediction and rendering callbacks of the `rlbot` crate are not carried over (nothing in `rb_tape_bot` uses them).
+
+---
+
 ## 2026-10-10 - ADR-0002 Amendment 1: MCP crates to Tier T (docs only)
 
 - **Changed:** the MCP crates are Tier T (transitional), with `docs/research/MCP-NATIVE-PLAN.md` as the milestone list. Records the owner decisions of 2026-10-09 (schema builder first, blocking servers on `rusty_serve`, scope is `rmcp` and its whole stack) and a three-point checklist for any MCP server (advertise only implemented revisions, check cancellation before running a queued handler, bounded shutdown on a failed write).
@@ -259,6 +274,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Fixed (rusty_tls, P2 x4, engine is double-gated and not wired):** TLS 1.2 client flight fragmented at 2^14 (a long client chain made an oversized record); `CertificateRequest.certificate_types` honoured (an RSA identity is no longer offered for an `ecdsa_sign`-only request); nothing delivered after the peer's `close_notify` in TLS 1.2 or 1.3 (local `close()` still reads the reply); TLS 1.3 sealer and opener share one inner-plaintext limit (2^14 + 1). Each finding has a test, and each test was checked to fail with its fix reverted.
 - **Verified:** 669 `rusty_tls` tests, clippy (`-D warnings`, with and without the cfg), docs, the four OpenSSL suites, and BoGo (861 passed, 0 failed) all pass. CI on GitHub for this head has not been seen.
 - **Known limitations:** unchanged; the review was source-only and is not a substitute for independent human crypto review.
+
+## 2026-10-09 - Cargo.lock: bump yanked wnaf 0.14.0 to 0.14.1
+
+- **Fixed:** `wnaf 0.14.0` (via `p256` -> `rusty_a2a`) was yanked. `cargo update -p wnaf` moves it to 0.14.1: one package, plus its `primefield` edge. `cargo deny check advisories`, the workspace-map and dependency checks and the `rusty_a2a` tests pass. No source changes.
+
+---
+
 ## 2026-10-09 - rk-kernel: rk-observe is a dev-dependency (pending review)
 
 - **Fixed:** `cargo-shear` failed on `main` with `misplaced dependency rk-observe`. `rk-kernel` only names `rk_observe::ToolOutcome` in a doc comment and in `tests/loop_test.rs`, so the dependency moves to `[dev-dependencies]` and the doc comment's intra-doc link becomes plain code (a link would not resolve without the dependency). No code change; `Cargo.lock` unchanged.

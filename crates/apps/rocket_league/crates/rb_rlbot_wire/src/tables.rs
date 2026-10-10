@@ -74,6 +74,24 @@ impl TableCodec for InitComplete {
     }
 }
 
+/// Core's liveness probe (`PingRequest`) and the client's answer (`PingResponse`): the same
+/// table, so one type. The answer must carry the request's cookie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Ping {
+    pub cookie: u64,
+}
+
+impl TableCodec for Ping {
+    fn write(&self, b: &mut Builder) -> R<Offset> {
+        build(b, |t| Ok(t.add_scalar(0, self.cookie, 0)?))
+    }
+    fn read(t: &Table<'_>) -> R<Self> {
+        Ok(Ping {
+            cookie: t.scalar(0, 0)?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StopCommand {
     pub shutdown_server: bool,
