@@ -2,8 +2,7 @@
 //! lifecycle (create/delete/clone/migrate), snapshots, cluster resources,
 //! storage, and backups.
 
-use rmcp::{Json, handler::server::wrapper::Parameters, model::ErrorData, tool, tool_router};
-use rusty_mcp::ToolError;
+use crate::tool_support::{ErrorData, Json, NoArgs, Parameters, ToolError, register};
 use rusty_proxmox::{GuestKind, PowerAction};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -247,12 +246,8 @@ pub struct MigrateGuestArgs {
     pub migration: serde_json::Value,
 }
 
-#[tool_router(router = proxmox_tools, vis = "pub(crate)")]
 impl HomelabServer {
     /// List Proxmox cluster nodes and their status.
-    #[tool(
-        description = "List every node in the Proxmox cluster, with its online/offline status, CPU and memory usage, and uptime."
-    )]
     pub async fn proxmox_list_nodes(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.proxmox()?
@@ -264,9 +259,6 @@ impl HomelabServer {
     }
 
     /// One node's detailed status.
-    #[tool(
-        description = "Get one Proxmox node's detailed status: CPU, memory, swap, load average, kernel version, and uptime. Call proxmox_list_nodes first to find node names."
-    )]
     pub async fn proxmox_node_status(
         &self,
         Parameters(NodeArgs { node }): Parameters<NodeArgs>,
@@ -281,9 +273,6 @@ impl HomelabServer {
     }
 
     /// List guests of one kind on a node.
-    #[tool(
-        description = "List every QEMU virtual machine or LXC container on a Proxmox node, with its VMID, name, and run status. Call proxmox_list_nodes first to find node names."
-    )]
     pub async fn proxmox_list_guests(
         &self,
         Parameters(GuestListArgs { node, kind }): Parameters<GuestListArgs>,
@@ -298,9 +287,6 @@ impl HomelabServer {
     }
 
     /// One guest's live status.
-    #[tool(
-        description = "Get one Proxmox guest's live status: run state, uptime, CPU/memory usage, and configured resources. Call proxmox_list_guests first to find VMIDs."
-    )]
     pub async fn proxmox_guest_status(
         &self,
         Parameters(GuestArgs { node, kind, vmid }): Parameters<GuestArgs>,
@@ -315,9 +301,6 @@ impl HomelabServer {
     }
 
     /// Start, stop, shut down, reboot, suspend, or resume a guest.
-    #[tool(
-        description = "Start, stop, cleanly shut down, reboot, suspend, or resume a Proxmox guest. Runs asynchronously on the Proxmox side; returns the task ID (a UPID string) rather than waiting for the action to finish."
-    )]
     pub async fn proxmox_guest_power(
         &self,
         Parameters(GuestPowerArgs {
@@ -335,9 +318,6 @@ impl HomelabServer {
 
     /// Whether an asynchronous task has finished, and if so, whether it
     /// succeeded.
-    #[tool(
-        description = "Check whether an asynchronous Proxmox task (identified by the UPID that proxmox_guest_power or another action returned) has finished, and if so, whether it succeeded."
-    )]
     pub async fn proxmox_task_status(
         &self,
         Parameters(TaskArgs { node, upid }): Parameters<TaskArgs>,
@@ -352,9 +332,6 @@ impl HomelabServer {
     }
 
     /// An asynchronous task's log output.
-    #[tool(
-        description = "Get an asynchronous Proxmox task's log output (identified by the UPID that proxmox_guest_power or another action returned) -- most useful for finding out why a task failed."
-    )]
     pub async fn proxmox_task_log(
         &self,
         Parameters(TaskArgs { node, upid }): Parameters<TaskArgs>,
@@ -369,9 +346,6 @@ impl HomelabServer {
     }
 
     /// One guest's current configuration.
-    #[tool(
-        description = "Get one Proxmox guest's current configuration: CPU, memory, disks, network interfaces, boot order, and everything else Proxmox stores per-guest. Call proxmox_list_guests first to find VMIDs."
-    )]
     pub async fn proxmox_guest_config(
         &self,
         Parameters(GuestArgs { node, kind, vmid }): Parameters<GuestArgs>,
@@ -386,9 +360,6 @@ impl HomelabServer {
     }
 
     /// Update a guest's configuration.
-    #[tool(
-        description = "Update a Proxmox guest's configuration (CPU, memory, disks, network interfaces, ...). Usually takes effect immediately, but some fields (e.g. a disk resize) run as a background task instead -- check whether the result looks like a UPID string."
-    )]
     pub async fn proxmox_update_guest_config(
         &self,
         Parameters(UpdateGuestConfigArgs {
@@ -408,9 +379,6 @@ impl HomelabServer {
     }
 
     /// Create a new guest.
-    #[tool(
-        description = "Create a new Proxmox QEMU virtual machine or LXC container. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish."
-    )]
     pub async fn proxmox_create_guest(
         &self,
         Parameters(CreateGuestArgs { node, kind, config }): Parameters<CreateGuestArgs>,
@@ -422,9 +390,6 @@ impl HomelabServer {
     }
 
     /// Delete a guest.
-    #[tool(
-        description = "Delete a Proxmox guest. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_guests first to find VMIDs."
-    )]
     pub async fn proxmox_delete_guest(
         &self,
         Parameters(GuestArgs { node, kind, vmid }): Parameters<GuestArgs>,
@@ -436,9 +401,6 @@ impl HomelabServer {
     }
 
     /// Clone a guest.
-    #[tool(
-        description = "Clone a Proxmox guest into a new one. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_guests first to find the source VMID."
-    )]
     pub async fn proxmox_clone_guest(
         &self,
         Parameters(CloneGuestArgs {
@@ -455,9 +417,6 @@ impl HomelabServer {
     }
 
     /// Every snapshot of a guest.
-    #[tool(
-        description = "List every snapshot taken of a Proxmox guest, with its creation time and description. Call proxmox_list_guests first to find VMIDs."
-    )]
     pub async fn proxmox_list_snapshots(
         &self,
         Parameters(GuestArgs { node, kind, vmid }): Parameters<GuestArgs>,
@@ -472,9 +431,6 @@ impl HomelabServer {
     }
 
     /// Create a snapshot.
-    #[tool(
-        description = "Create a snapshot of a Proxmox guest. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish."
-    )]
     pub async fn proxmox_create_snapshot(
         &self,
         Parameters(CreateSnapshotArgs {
@@ -491,9 +447,6 @@ impl HomelabServer {
     }
 
     /// Delete a snapshot.
-    #[tool(
-        description = "Delete a snapshot of a Proxmox guest. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_snapshots first to find snapshot names."
-    )]
     pub async fn proxmox_delete_snapshot(
         &self,
         Parameters(SnapshotArgs {
@@ -510,9 +463,6 @@ impl HomelabServer {
     }
 
     /// Roll a guest back to a snapshot.
-    #[tool(
-        description = "Roll a Proxmox guest back to a previous snapshot, discarding any changes made since. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_snapshots first to find snapshot names."
-    )]
     pub async fn proxmox_rollback_snapshot(
         &self,
         Parameters(SnapshotArgs {
@@ -529,9 +479,6 @@ impl HomelabServer {
     }
 
     /// Every resource in the cluster, in one call.
-    #[tool(
-        description = "List every resource in the Proxmox cluster (nodes, guests, storage, SDN, pools) in one call, instead of paging through proxmox_list_nodes/proxmox_list_guests per node. Pass resource_type to restrict to one kind."
-    )]
     pub async fn proxmox_cluster_resources(
         &self,
         Parameters(ClusterResourcesArgs { resource_type }): Parameters<ClusterResourcesArgs>,
@@ -546,9 +493,6 @@ impl HomelabServer {
     }
 
     /// Every storage entry configured at the datacenter level.
-    #[tool(
-        description = "List every storage entry configured at the Proxmox datacenter level (the shared config every node references)."
-    )]
     pub async fn proxmox_list_storage(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.proxmox()?
@@ -560,9 +504,6 @@ impl HomelabServer {
     }
 
     /// Storage status for one node.
-    #[tool(
-        description = "Get usage, availability, and content types for every datastore visible from one Proxmox node. Call proxmox_list_nodes first to find node names."
-    )]
     pub async fn proxmox_node_storage_status(
         &self,
         Parameters(NodeArgs { node }): Parameters<NodeArgs>,
@@ -577,9 +518,6 @@ impl HomelabServer {
     }
 
     /// Every scheduled backup job.
-    #[tool(
-        description = "List every scheduled vzdump backup job configured on the Proxmox cluster."
-    )]
     pub async fn proxmox_list_backup_jobs(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.proxmox()?
@@ -591,9 +529,6 @@ impl HomelabServer {
     }
 
     /// Run a backup immediately.
-    #[tool(
-        description = "Run a Proxmox backup immediately, outside any schedule. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish."
-    )]
     pub async fn proxmox_run_backup(
         &self,
         Parameters(RunBackupArgs { node, backup }): Parameters<RunBackupArgs>,
@@ -605,9 +540,6 @@ impl HomelabServer {
     }
 
     /// Migrate a guest to another node.
-    #[tool(
-        description = "Migrate a Proxmox guest to another cluster node. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_guests first to find the VMID and proxmox_list_nodes for the destination node name."
-    )]
     pub async fn proxmox_migrate_guest(
         &self,
         Parameters(MigrateGuestArgs {
@@ -628,4 +560,188 @@ impl HomelabServer {
 /// reason about (bad node name, expired token, unreachable host, ...).
 fn proxmox_error(err: rusty_proxmox::Error) -> ErrorData {
     ToolError::failed(err.to_string()).into()
+}
+
+/// Offer every tool of this module on `builder`.
+pub(crate) fn register_tools(
+    builder: rusty_mcp_server::ServerBuilder,
+    server: &HomelabServer,
+    rt: &tokio::runtime::Handle,
+) -> rusty_mcp_server::ServerBuilder {
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_list_nodes",
+        "List every node in the Proxmox cluster, with its online/offline status, CPU and memory usage, and uptime.",
+        |s, _a| async move { s.proxmox_list_nodes().await },
+    );
+    let builder = register::<NodeArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_node_status",
+        "Get one Proxmox node's detailed status: CPU, memory, swap, load average, kernel version, and uptime. Call proxmox_list_nodes first to find node names.",
+        |s, a| async move { s.proxmox_node_status(Parameters(a)).await },
+    );
+    let builder = register::<GuestListArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_list_guests",
+        "List every QEMU virtual machine or LXC container on a Proxmox node, with its VMID, name, and run status. Call proxmox_list_nodes first to find node names.",
+        |s, a| async move { s.proxmox_list_guests(Parameters(a)).await },
+    );
+    let builder = register::<GuestArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_guest_status",
+        "Get one Proxmox guest's live status: run state, uptime, CPU/memory usage, and configured resources. Call proxmox_list_guests first to find VMIDs.",
+        |s, a| async move { s.proxmox_guest_status(Parameters(a)).await },
+    );
+    let builder = register::<GuestPowerArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_guest_power",
+        "Start, stop, cleanly shut down, reboot, suspend, or resume a Proxmox guest. Runs asynchronously on the Proxmox side; returns the task ID (a UPID string) rather than waiting for the action to finish.",
+        |s, a| async move { s.proxmox_guest_power(Parameters(a)).await },
+    );
+    let builder = register::<TaskArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_task_status",
+        "Check whether an asynchronous Proxmox task (identified by the UPID that proxmox_guest_power or another action returned) has finished, and if so, whether it succeeded.",
+        |s, a| async move { s.proxmox_task_status(Parameters(a)).await },
+    );
+    let builder = register::<TaskArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_task_log",
+        "Get an asynchronous Proxmox task's log output (identified by the UPID that proxmox_guest_power or another action returned) -- most useful for finding out why a task failed.",
+        |s, a| async move { s.proxmox_task_log(Parameters(a)).await },
+    );
+    let builder = register::<GuestArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_guest_config",
+        "Get one Proxmox guest's current configuration: CPU, memory, disks, network interfaces, boot order, and everything else Proxmox stores per-guest. Call proxmox_list_guests first to find VMIDs.",
+        |s, a| async move { s.proxmox_guest_config(Parameters(a)).await },
+    );
+    let builder = register::<UpdateGuestConfigArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_update_guest_config",
+        "Update a Proxmox guest's configuration (CPU, memory, disks, network interfaces, ...). Usually takes effect immediately, but some fields (e.g. a disk resize) run as a background task instead -- check whether the result looks like a UPID string.",
+        |s, a| async move { s.proxmox_update_guest_config(Parameters(a)).await },
+    );
+    let builder = register::<CreateGuestArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_create_guest",
+        "Create a new Proxmox QEMU virtual machine or LXC container. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish.",
+        |s, a| async move { s.proxmox_create_guest(Parameters(a)).await },
+    );
+    let builder = register::<GuestArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_delete_guest",
+        "Delete a Proxmox guest. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_guests first to find VMIDs.",
+        |s, a| async move { s.proxmox_delete_guest(Parameters(a)).await },
+    );
+    let builder = register::<CloneGuestArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_clone_guest",
+        "Clone a Proxmox guest into a new one. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_guests first to find the source VMID.",
+        |s, a| async move { s.proxmox_clone_guest(Parameters(a)).await },
+    );
+    let builder = register::<GuestArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_list_snapshots",
+        "List every snapshot taken of a Proxmox guest, with its creation time and description. Call proxmox_list_guests first to find VMIDs.",
+        |s, a| async move { s.proxmox_list_snapshots(Parameters(a)).await },
+    );
+    let builder = register::<CreateSnapshotArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_create_snapshot",
+        "Create a snapshot of a Proxmox guest. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish.",
+        |s, a| async move { s.proxmox_create_snapshot(Parameters(a)).await },
+    );
+    let builder = register::<SnapshotArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_delete_snapshot",
+        "Delete a snapshot of a Proxmox guest. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_snapshots first to find snapshot names.",
+        |s, a| async move { s.proxmox_delete_snapshot(Parameters(a)).await },
+    );
+    let builder = register::<SnapshotArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_rollback_snapshot",
+        "Roll a Proxmox guest back to a previous snapshot, discarding any changes made since. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_snapshots first to find snapshot names.",
+        |s, a| async move { s.proxmox_rollback_snapshot(Parameters(a)).await },
+    );
+    let builder = register::<ClusterResourcesArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_cluster_resources",
+        "List every resource in the Proxmox cluster (nodes, guests, storage, SDN, pools) in one call, instead of paging through proxmox_list_nodes/proxmox_list_guests per node. Pass resource_type to restrict to one kind.",
+        |s, a| async move { s.proxmox_cluster_resources(Parameters(a)).await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_list_storage",
+        "List every storage entry configured at the Proxmox datacenter level (the shared config every node references).",
+        |s, _a| async move { s.proxmox_list_storage().await },
+    );
+    let builder = register::<NodeArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_node_storage_status",
+        "Get usage, availability, and content types for every datastore visible from one Proxmox node. Call proxmox_list_nodes first to find node names.",
+        |s, a| async move { s.proxmox_node_storage_status(Parameters(a)).await },
+    );
+    let builder = register::<NoArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_list_backup_jobs",
+        "List every scheduled vzdump backup job configured on the Proxmox cluster.",
+        |s, _a| async move { s.proxmox_list_backup_jobs().await },
+    );
+    let builder = register::<RunBackupArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_run_backup",
+        "Run a Proxmox backup immediately, outside any schedule. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish.",
+        |s, a| async move { s.proxmox_run_backup(Parameters(a)).await },
+    );
+    register::<MigrateGuestArgs, _, _, _>(
+        builder,
+        server,
+        rt,
+        "proxmox_migrate_guest",
+        "Migrate a Proxmox guest to another cluster node. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_guests first to find the VMID and proxmox_list_nodes for the destination node name.",
+        |s, a| async move { s.proxmox_migrate_guest(Parameters(a)).await },
+    )
 }

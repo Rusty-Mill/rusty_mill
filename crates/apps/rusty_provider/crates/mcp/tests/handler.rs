@@ -1,87 +1,336 @@
-//! Exercises `RustyMcpServer` over a real MCP connection (an in-memory
-//! duplex pair standing in for stdio/HTTP) rather than poking its methods
-//! directly -- `RequestContext` isn't publicly constructible, and a real
-//! client/server round trip is a better test of a `ServerHandler` impl
-//! anyway: it also proves the handshake, tool schemas, and JSON-RPC framing
-//! all actually work, not just the method bodies.
+#![allow(clippy::unwrap_used)]
+//! The merged MCP server over real HTTP, driven by `rusty-mcp-client`: the
+//! handshake, tool schemas, native tools, and the gateway proxying (and
+//! reconnecting to) an upstream server.
 
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use rmcp::model::CallToolRequestParams;
-use rmcp::ServiceExt;
-use rp_mcp::{McpGateway, NativeTools, RustyMcpServer};
-use rp_router::{Config, Router};
+use rp_router::{Config, McpConfig, McpUpstreamConfig, McpUpstreamTransport, Router};
+use rusty_mcp_client::proto::ContentBlock;
+use rusty_mcp_client::{McpClient, McpClientError, McpServerSpec, McpTransport};
+use rusty_mcp_server::json::Value;
+use rusty_mcp_server::proto::{CallToolResult, ProtocolVersion, Tool};
+use rusty_mcp_server::{bind_http, HttpConfig, Server};
+use rusty_serve::{Limits, ShutdownHandle};
 
-async fn connected_client() -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+fn schema() -> Value {
+    let mut s = Value::object();
+    s.insert("type", "object");
+    s
+}
+
+fn text(s: &str) -> CallToolResult {
+    CallToolResult {
+        content: vec![ContentBlock::text(s)],
+        ..CallToolResult::default()
+    }
+}
+
+/// Serve `server` on `addr` from a thread of its own.
+fn serve(server: Server, addr: &str) -> (SocketAddr, ShutdownHandle) {
+    let http = bind_http(
+        Arc::new(server),
+        addr.parse().unwrap(),
+        HttpConfig::default(),
+        Limits::default(),
+    )
+    .unwrap();
+    let bound = http.local_addr().unwrap();
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    (bound, stop)
+}
+
+fn upstream_server() -> Server {
+    upstream_builder().build().unwrap()
+}
+
+/// Speaks only the classic revision, so the client holds a session: a
+/// restarted server no longer knows it, and only a reconnect recovers.
+fn classic_upstream() -> Server {
+    upstream_builder()
+        .versions(vec![ProtocolVersion::new(ProtocolVersion::V_2025_06_18)])
+        .build()
+        .unwrap()
+}
+
+fn upstream_builder() -> rusty_mcp_server::ServerBuilder {
+    Server::builder("upstream", "1")
+        .tool(Tool::new("echo", schema()), |_c, _p| Ok(text("echoed")))
+        .tool(Tool::new("sleep", schema()), |_c, _p| {
+            std::thread::sleep(Duration::from_secs(4));
+            Ok(text("late"))
+        })
+}
+
+fn spec(addr: SocketAddr) -> McpServerSpec {
+    McpServerSpec {
+        transport: McpTransport::Http,
+        url: Some(format!("http://{addr}/mcp")),
+        ..McpServerSpec::default()
+    }
+}
+
+/// An rp-mcp server (no providers) proxying `upstreams`, served over HTTP;
+/// a client connected to it.
+async fn connected(
+    upstreams: Vec<McpUpstreamConfig>,
+    timeout_secs: u64,
+) -> (McpClient, ShutdownHandle) {
+    let (addr, stop) = serve_rp(upstreams, timeout_secs, 4).await;
+    (McpClient::connect("rp", &spec(addr)).await.unwrap(), stop)
+}
+
+/// The rp-mcp server alone: where it listens, and how to stop it.
+async fn serve_rp(
+    upstreams: Vec<McpUpstreamConfig>,
+    timeout_secs: u64,
+    connections: usize,
+) -> (SocketAddr, ShutdownHandle) {
     let router =
         Arc::new(Router::from_config(&Config::from_toml_str("providers = {}").unwrap()).await);
-    let native = NativeTools::new(router);
-    let gateway = Arc::new(McpGateway::empty());
-    let handler = RustyMcpServer::new(native, gateway);
-
-    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(async move {
-        if let Ok(service) = handler.serve(server_io).await {
-            let _ = service.waiting().await;
-        }
-    });
-
-    tokio::time::timeout(Duration::from_secs(5), ().serve(client_io))
-        .await
-        .expect("handshake timed out")
-        .expect("client handshake failed")
+    let config = McpConfig {
+        enabled: true,
+        upstreams,
+        reconnect_backoff_secs: 1,
+        reconnect_backoff_max_secs: 1,
+        timeout_secs,
+        connections,
+        ..McpConfig::default()
+    };
+    let server = rp_mcp::build(&config, router).await.unwrap();
+    let http = bind_http(
+        server,
+        "127.0.0.1:0".parse().unwrap(),
+        HttpConfig::default(),
+        Limits::default(),
+    )
+    .unwrap();
+    let addr = http.local_addr().unwrap();
+    let stop = http.shutdown_handle().unwrap();
+    std::thread::spawn(move || http.run().unwrap());
+    (addr, stop)
 }
 
-#[tokio::test]
-async fn lists_every_native_tool() {
-    let client = connected_client().await;
+fn upstream_config(addr: SocketAddr) -> McpUpstreamConfig {
+    McpUpstreamConfig {
+        name: "up".to_owned(),
+        transport: McpUpstreamTransport::Http {
+            url: format!("http://{addr}/mcp"),
+            bearer_token_env: None,
+        },
+    }
+}
 
-    let tools = tokio::time::timeout(Duration::from_secs(5), client.peer().list_tools(None))
+async fn names(client: &McpClient) -> Vec<String> {
+    let mut names: Vec<String> = client
+        .list_tools()
         .await
-        .expect("list_tools timed out")
-        .expect("list_tools failed");
-
-    let mut names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
     names.sort();
-    assert_eq!(names, vec!["chat_completion", "embeddings", "list_models"]);
-
-    let _ = client.cancel().await;
+    names
 }
 
-#[tokio::test]
-async fn calling_list_models_returns_a_successful_result() {
-    let client = connected_client().await;
-
-    let result = tokio::time::timeout(
-        Duration::from_secs(5),
-        client.call_tool(
-            CallToolRequestParams::new("list_models")
-                .with_arguments(serde_json::json!({}).as_object().cloned().unwrap()),
-        ),
-    )
-    .await
-    .expect("call_tool timed out")
-    .expect("call_tool failed");
-
-    assert_ne!(result.is_error, Some(true));
-
-    let _ = client.cancel().await;
+/// Poll `names` until `done` holds or `limit` passes.
+async fn wait_for(client: &McpClient, limit: Duration, done: impl Fn(&[String]) -> bool) -> bool {
+    let end = Instant::now() + limit;
+    while Instant::now() < end {
+        if done(&names(client).await) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lists_every_native_tool_with_its_schemas() {
+    let (client, stop) = connected(vec![], 5).await;
+    let tools = client.list_tools().await.unwrap();
+    let mut listed: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    listed.sort_unstable();
+    assert_eq!(listed, ["chat_completion", "embeddings", "list_models"]);
+    for tool in &tools {
+        assert!(tool.description.is_some(), "{}", tool.name);
+        assert!(tool.output_schema.is_some(), "{}", tool.name);
+        assert_eq!(tool.input_schema["type"].as_str(), Some("object"));
+    }
+    let chat = tools.iter().find(|t| t.name == "chat_completion").unwrap();
+    assert!(chat.input_schema["required"]
+        .as_array()
+        .is_some_and(|r| r.len() == 2));
+    stop.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn list_models_returns_structured_content() {
+    let (client, stop) = connected(vec![], 5).await;
+    let r = client
+        .call_tool("list_models", serde_json::json!({}).as_object().cloned())
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true));
+    assert!(r.structured_content.is_some_and(|v| v.as_array().is_some()));
+    stop.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bad_native_arguments_are_an_error_not_a_crash() {
+    let (client, stop) = connected(vec![], 5).await;
+    let err = client
+        .call_tool(
+            "embeddings",
+            serde_json::json!({ "model": 7 }).as_object().cloned(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, McpClientError::Service(m) if m.contains("invalid arguments")),
+        "{err:?}"
+    );
+    stop.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn calling_an_unknown_upstream_prefixed_tool_is_a_protocol_error() {
-    let client = connected_client().await;
+    let (client, stop) = connected(vec![], 5).await;
+    let err = client
+        .call_tool("no-such-upstream/some_tool", None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no-such-upstream"), "{err}");
+    stop.shutdown();
+}
 
-    let error = tokio::time::timeout(
-        Duration::from_secs(5),
-        client.call_tool_once(CallToolRequestParams::new("no-such-upstream/some_tool")),
-    )
-    .await
-    .expect("call_tool_once timed out")
-    .expect_err("expected an error for an unknown upstream");
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upstreams_tools_are_listed_prefixed_and_callable() {
+    let (addr, up_stop) = serve(upstream_server(), "127.0.0.1:0");
+    let (client, stop) = connected(vec![upstream_config(addr)], 5).await;
+    let listed = names(&client).await;
+    assert!(listed.contains(&"up/echo".to_owned()), "{listed:?}");
+    assert!(listed.contains(&"chat_completion".to_owned()));
+    let r = client.call_tool("up/echo", None).await.unwrap();
+    assert!(matches!(&r.content[0], ContentBlock::Text { text, .. } if text == "echoed"));
+    stop.shutdown();
+    up_stop.shutdown();
+}
 
-    assert!(error.to_string().contains("no-such-upstream"));
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hung_upstream_call_times_out_and_the_gateway_stays_usable() {
+    let (addr, up_stop) = serve(upstream_server(), "127.0.0.1:0");
+    let (client, stop) = connected(vec![upstream_config(addr)], 1).await;
+    let t = Instant::now();
+    let err = client.call_tool("up/sleep", None).await.unwrap_err();
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    // Native tools never touch the upstream and answer at once.
+    client.call_tool("list_models", None).await.unwrap();
+    stop.shutdown();
+    up_stop.shutdown();
+}
 
-    let _ = client.cancel().await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_upstream_is_reconnected_by_the_supervisor() {
+    let (addr, up_stop) = serve(classic_upstream(), "127.0.0.1:0");
+    let (client, stop) = connected(vec![upstream_config(addr)], 2).await;
+    assert!(names(&client).await.contains(&"up/echo".to_owned()));
+
+    up_stop.shutdown();
+    assert!(
+        wait_for(&client, Duration::from_secs(15), |n| !n
+            .contains(&"up/echo".to_owned()))
+        .await,
+        "the dead upstream stayed listed"
+    );
+
+    // Same address, new process state: the old session id is unknown to it.
+    let (_, up_stop) = serve(classic_upstream(), &addr.to_string());
+    assert!(
+        wait_for(&client, Duration::from_secs(20), |n| n
+            .contains(&"up/echo".to_owned()))
+        .await,
+        "the upstream never came back"
+    );
+    client.call_tool("up/echo", None).await.unwrap();
+    stop.shutdown();
+    up_stop.shutdown();
+}
+
+/// The most `up/sleep` calls the upstream ever ran at once when `calls`
+/// clients (one call each) go through an rp server with `connections`.
+/// Counting overlap, not wall time, keeps this independent of runner speed.
+async fn peak_concurrency(connections: usize, calls: usize) -> usize {
+    let gauge = Arc::new(Gauge::default());
+    let (up, up_stop) = serve(sleeping_upstream(gauge.clone()), "127.0.0.1:0");
+    let (rp, stop) = serve_rp(vec![upstream_config(up)], 10, connections).await;
+    let mut clients = Vec::new();
+    for _ in 0..calls {
+        clients.push(McpClient::connect("rp", &spec(rp)).await.unwrap());
+    }
+    let mut pending = Vec::new();
+    for client in clients {
+        pending.push(tokio::spawn(async move {
+            client.call_tool("up/sleep", None).await.unwrap();
+        }));
+    }
+    for p in pending {
+        p.await.unwrap();
+    }
+    stop.shutdown();
+    up_stop.shutdown();
+    gauge.peak.load(Ordering::SeqCst)
+}
+
+#[derive(Default)]
+struct Gauge {
+    running: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+fn sleeping_upstream(gauge: Arc<Gauge>) -> Server {
+    Server::builder("sleepy", "1")
+        .tool(Tool::new("sleep", schema()), move |_c, _p| {
+            let now = gauge.running.fetch_add(1, Ordering::SeqCst) + 1;
+            gauge.peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(500));
+            gauge.running.fetch_sub(1, Ordering::SeqCst);
+            Ok(text("rested"))
+        })
+        .build()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn calls_to_one_upstream_run_in_parallel_up_to_the_pool_size() {
+    assert_eq!(peak_concurrency(3, 3).await, 3);
+    assert_eq!(peak_concurrency(1, 3).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_hung_call_does_not_block_a_free_connection() {
+    let (up, up_stop) = serve(upstream_server(), "127.0.0.1:0");
+    let (rp, stop) = serve_rp(vec![upstream_config(up)], 2, 2).await;
+    let slow = McpClient::connect("rp", &spec(rp)).await.unwrap();
+    let fast = McpClient::connect("rp", &spec(rp)).await.unwrap();
+    let hung = tokio::spawn(async move { slow.call_tool("up/sleep", None).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let t = Instant::now();
+    fast.call_tool("up/echo", None).await.unwrap();
+    assert!(
+        t.elapsed() < Duration::from_millis(1000),
+        "{:?}",
+        t.elapsed()
+    );
+    assert!(
+        hung.await.unwrap().is_err(),
+        "the hung call should time out"
+    );
+    stop.shutdown();
+    up_stop.shutdown();
 }

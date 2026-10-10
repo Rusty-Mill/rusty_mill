@@ -42,6 +42,14 @@ let server = rusty_serve::Server::bind(addr, api)?.with_web_dir("web/dist".into(
 server.run()?;
 ```
 
+Extras, all additive: `Response::with_header` (validated; replaces a default
+such as the 401 `WWW-Authenticate`; the framing headers are refused),
+`Server::with_limits(Limits { max_connections, max_body_bytes, idle_timeout })`,
+and `Server::bind_shared` with a `SharedHandler` (any
+`Fn(&Request) -> Response + Send + Sync`) that every connection calls at once,
+with no lock. A stream whose client has gone away is dropped on the next
+write, so a long-lived stream should send keep-alive chunks.
+
 Deliberately not async: a personal server has a handful of connections
 and one store behind one lock, so there is no I/O concurrency for a
 runtime to exploit. Users: `rusty_tick`, `rusty_fair_play`, `rusty_agui`

@@ -33,15 +33,27 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-};
 use rusty_mcp::otel::metrics::{Instruments, McpMetricsLayer};
+use rusty_mcp_server::{HttpConfig, HttpHandler};
 use tower_layer::Layer as _;
 use tower_service::Service as _;
 
 /// A federated MCP endpoint, ready to serve.
-type McpService = StreamableHttpService<Federation, LocalSessionManager>;
+type McpService = axum::Router;
+
+/// The path the federation's handler answers on. Every request to an MCP route
+/// is treated as addressed to it, whatever path the route matched.
+const MCP_PATH: &str = "/mcp";
+
+/// The most an MCP request body may be. A `tools/call` carries its arguments
+/// inline, so this is generous, but it is a bound.
+const MAX_MCP_BODY: usize = 8 * 1024 * 1024;
+
+/// The caller's verified claims, as the JSON a handler reads them in.
+fn principal_of(parts: &http::request::Parts) -> Option<rusty_mcp_server::json::Value> {
+    let claims = parts.extensions.get::<TokenClaims>()?;
+    rusty_mcp_server::json::Value::from_json_str(&claims.0.to_string()).ok()
+}
 
 /// The compiled data plane.
 pub struct Gateway {
@@ -366,12 +378,30 @@ impl Gateway {
                             .with_known_names(federation.tool_names())
                     });
 
-                    let federation = Arc::new(federation);
+                    let handler = Arc::new(HttpHandler::new(
+                        Arc::new(federation.server()?),
+                        HttpConfig {
+                            path: MCP_PATH.to_owned(),
+                            // Every reply is an event stream whose head is sent
+                            // at once, so a route's `requestTimeout` (which
+                            // bounds producing the head) never cuts off a slow
+                            // tool; `backendRequestTimeout` does that.
+                            sse_after: std::time::Duration::ZERO,
+                            // Which hosts and browser origins may reach a route
+                            // is the gateway's routing and `cors` policy, applied
+                            // before this handler; the handler's own loopback-
+                            // only default would refuse every public host.
+                            allowed_hosts: Vec::new(),
+                            allowed_origins: vec!["*".to_owned()],
+                            ..HttpConfig::default()
+                        },
+                    ));
                     BackendState::Mcp {
-                        service: StreamableHttpService::new(
-                            move || Ok(Federation::clone(&federation)),
-                            Arc::new(LocalSessionManager::default()),
-                            StreamableHttpServerConfig::default(),
+                        service: rusty_mcp_axum::router_at_with_principal(
+                            handler,
+                            MAX_MCP_BODY,
+                            MCP_PATH,
+                            principal_of,
                         ),
                         metrics,
                     }
@@ -732,14 +762,14 @@ impl Gateway {
                 // behind it are shared, which is what makes the counts add up.
                 Some(metrics) => {
                     let mut service = metrics.layer(service.clone());
-                    match service.call(request).await {
+                    match service.call(request.map(Body::new)).await {
                         Ok(response) => response,
                         Err(never) => match never {},
                     }
                 }
                 None => {
                     let mut service = service.clone();
-                    match service.call(request).await {
+                    match service.call(request.map(Body::new)).await {
                         Ok(response) => response.into_response(),
                         Err(never) => match never {},
                     }
