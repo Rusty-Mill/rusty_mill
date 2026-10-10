@@ -39,6 +39,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Fixed (rusty_tls, P2 x4, engine is double-gated and not wired):** TLS 1.2 client flight fragmented at 2^14 (a long client chain made an oversized record); `CertificateRequest.certificate_types` honoured (an RSA identity is no longer offered for an `ecdsa_sign`-only request); nothing delivered after the peer's `close_notify` in TLS 1.2 or 1.3 (local `close()` still reads the reply); TLS 1.3 sealer and opener share one inner-plaintext limit (2^14 + 1). Each finding has a test, and each test was checked to fail with its fix reverted.
 - **Verified:** 669 `rusty_tls` tests, clippy (`-D warnings`, with and without the cfg), docs, the four OpenSSL suites, and BoGo (861 passed, 0 failed) all pass. CI on GitHub for this head has not been seen.
 - **Known limitations:** unchanged; the review was source-only and is not a substitute for independent human crypto review.
+
+## 2026-10-09 - Cargo.lock: bump yanked wnaf 0.14.0 to 0.14.1
+
+- **Fixed:** `wnaf 0.14.0` (via `p256` -> `rusty_a2a`) was yanked. `cargo update -p wnaf` moves it to 0.14.1: one package, plus its `primefield` edge. `cargo deny check advisories`, the workspace-map and dependency checks and the `rusty_a2a` tests pass. No source changes.
+
+---
+
 ## 2026-10-09 - rk-kernel: rk-observe is a dev-dependency (pending review)
 
 - **Fixed:** `cargo-shear` failed on `main` with `misplaced dependency rk-observe`. `rk-kernel` only names `rk_observe::ToolOutcome` in a doc comment and in `tests/loop_test.rs`, so the dependency moves to `[dev-dependencies]` and the doc comment's intra-doc link becomes plain code (a link would not resolve without the dependency). No code change; `Cargo.lock` unchanged.
