@@ -138,9 +138,8 @@ async fn a_long_lived_subscription_survives_a_short_timeout() {
 
     let (addr, changes) = spawn(|mcp| mcp.layer(LimitsLayer::new().with_timeout(TIMEOUT))).await;
 
-    let body = format!(
-        r#"{{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{{"notifications":{{"resourcesListChanged":true}},"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{}}}}}}}}"#
-    );
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{"notifications":{"resourcesListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#
+        .to_owned();
     let mut stream = post(addr, "subscriptions/listen", None, body, None).await;
     assert!(stream.status().is_success());
 
