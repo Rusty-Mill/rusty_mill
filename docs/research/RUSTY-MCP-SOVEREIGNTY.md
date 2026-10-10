@@ -55,7 +55,11 @@ Each item is one PR, with its own tests and a change fragment.
 
 1. **Trivial swaps.** `percent-encoding` to `rusty_percent`; `thiserror` to
    `rusty_err`. *Done when:* both crates are gone from `Cargo.toml`, tests
-   unchanged.
+   unchanged. **Done (2026-10-10), with one change:** `thiserror` went to
+   hand-written `Display` and `std::error::Error` impls, not `rusty_err`,
+   whose derive implements `rusty_err::Error` and not `std::error::Error`
+   (it cannot, because of its blanket impl), which would break `#[source]`
+   and `?` in the gateway crates. Baggage no longer escapes `-_.~`.
 2. **`serde`/`serde_json` to `rusty_json`** across `auth` and `trace`.
    `ProtectedResourceMetadata::to_value`. The gateway call sites move with it.
    *Done when:* no `serde` in the crate; the metadata document is

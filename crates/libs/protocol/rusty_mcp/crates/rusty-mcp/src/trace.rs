@@ -336,9 +336,7 @@ impl Baggage {
 
             entries.insert(
                 key.to_string(),
-                percent_encoding::percent_decode_str(raw.trim())
-                    .decode_utf8_lossy()
-                    .into_owned(),
+                rusty_percent::decode(raw.trim()).into_owned(),
             );
         }
 
@@ -374,13 +372,7 @@ impl Baggage {
     pub fn to_header_value(&self) -> String {
         self.entries
             .iter()
-            .map(|(key, value)| {
-                let encoded = percent_encoding::utf8_percent_encode(
-                    value,
-                    percent_encoding::NON_ALPHANUMERIC,
-                );
-                format!("{key}={encoded}")
-            })
+            .map(|(key, value)| format!("{key}={}", rusty_percent::encode(value)))
             .collect::<Vec<_>>()
             .join(",")
     }
@@ -567,5 +559,19 @@ mod tests {
     fn empty_baggage_renders_empty() {
         assert!(Baggage::new().to_header_value().is_empty());
         assert!(Baggage::parse("").is_empty());
+    }
+
+    #[test]
+    fn baggage_encodes_delimiters_and_keeps_unreserved_characters() {
+        let mut baggage = Baggage::new();
+        baggage.insert("k", "a b,c;d=e%f-g_h.i~j");
+
+        let header = baggage.to_header_value();
+
+        assert_eq!(header, "k=a%20b%2Cc%3Bd%3De%25f-g_h.i~j");
+        assert_eq!(
+            Baggage::parse(&header).get("k"),
+            Some("a b,c;d=e%f-g_h.i~j")
+        );
     }
 }
