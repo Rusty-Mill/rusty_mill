@@ -765,6 +765,7 @@ re-derived.
   portable-only AES-GCM is only acceptable if the engine's suite order puts ChaCha20-Poly1305
   first (today it is AES-256-GCM, AES-128-GCM, then ChaCha20-Poly1305).
   *Open (2026-10-10):* not reconfirmed; AES-GCM starts portable-only and uses no intrinsics until the owner confirms.
+  Options, order of work, evidence bar and the open questions are in `AES-GCM-DESIGN.md` (draft, no code).
 - **D2 Reopen the freeze** for gaps 1 to 3 (and which of 4 and 5). *Decided:* gaps 1 and 2 (2026-10-09) and gap 3,
   AES-GCM (2026-10-10, "Unfreeze"); gaps 4 and 5 stay closed.
 - **D3 Client-only or also server role** (gap 5).
