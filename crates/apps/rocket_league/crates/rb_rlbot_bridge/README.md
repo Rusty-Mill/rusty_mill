@@ -10,11 +10,11 @@ the game unchanged:
 |---|---|
 | `observation(&GamePacket) -> Option<PhysicsFrame>` | what `Env::reset` takes; `None` when the packet has no ball |
 | `controller_state(&ControllerInput) -> ControllerState` | unset stick axes centred |
-| `Policy` / `PolicyBot` | `act(&PhysicsFrame, car) -> ControllerInput`; any `FnMut` is one; one input per packet |
+| `Policy` / `PolicyBot` | `act(&PhysicsFrame, car) -> ControllerInput`; any `FnMut` is one; runs once per physics frame, a repeated packet gets the previous input |
 | `run_policy(connection, settings, make)` | connects, handshakes and plays `make(init)` for every car core gives us |
 
 ```rust
-let mut connection = Connection::connect(env.server_addr())?;
+let mut connection = Connection::connect(&env.server_addr)?;
 run_policy(&mut connection, settings, |init| {
     let team = init.team as usize;
     move |frame: &PhysicsFrame, car: usize| chase(&frame.cars[car], &frame.ball, team)

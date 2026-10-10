@@ -192,3 +192,68 @@ fn a_game_observation_feeds_rb_env_and_the_chaser() {
     assert_eq!(drive.throttle, 1.0);
     assert!(drive.boost && drive.steer.abs() < 0.2, "{drive:?}");
 }
+
+/// `two_cars` at a given physics frame and phase.
+fn at_frame(frame_num: u32, phase: MatchPhase) -> GamePacket {
+    let mut p = two_cars();
+    p.match_info.frame_num = frame_num;
+    p.match_info.match_phase = phase;
+    p
+}
+
+/// Counts how often it is asked and numbers its answers, so a test sees which packets reached it.
+fn counting() -> impl FnMut(&PhysicsFrame, usize) -> ControllerInput {
+    let mut asked = 0.0;
+    move |_, _| {
+        asked += 1.0;
+        ControllerInput {
+            throttle: asked,
+            ..ControllerInput::default()
+        }
+    }
+}
+
+fn throttles(
+    bot: &mut PolicyBot<impl rb_rlbot_bridge::Policy>,
+    packets: &[GamePacket],
+) -> Vec<f32> {
+    packets
+        .iter()
+        .map(|p| bot.input(p).unwrap().controller_state.throttle)
+        .collect()
+}
+
+#[test]
+fn a_repeated_physics_frame_gets_the_previous_input_without_asking_the_policy() {
+    let mut bot = PolicyBot::new(counting(), 0);
+    let packets = [1500, 1500, 1501].map(|n| at_frame(n, MatchPhase::Active));
+    // Three packets answered, the policy asked twice.
+    assert_eq!(throttles(&mut bot, &packets), [1.0, 1.0, 2.0]);
+}
+
+#[test]
+fn paused_frames_that_advance_are_played() {
+    let mut bot = PolicyBot::new(counting(), 0);
+    let packets = [10, 11, 12].map(|n| at_frame(n, MatchPhase::Paused));
+    assert_eq!(throttles(&mut bot, &packets), [1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn a_frame_number_that_moves_backward_is_a_new_frame() {
+    let mut bot = PolicyBot::new(counting(), 0);
+    let packets = [1501, 3, 3, 4].map(|n| at_frame(n, MatchPhase::Active));
+    assert_eq!(throttles(&mut bot, &packets), [1.0, 2.0, 2.0, 3.0]);
+}
+
+#[test]
+fn a_packet_that_could_not_be_acted_on_does_not_use_up_its_frame() {
+    let mut bot = PolicyBot::new(counting(), 0);
+    let mut no_ball = at_frame(7, MatchPhase::Active);
+    no_ball.balls.clear();
+    assert_eq!(bot.input(&no_ball), None);
+    // The same frame again, now with a ball: the policy has not seen it yet.
+    assert_eq!(
+        throttles(&mut bot, &[at_frame(7, MatchPhase::Active)]),
+        [1.0]
+    );
+}

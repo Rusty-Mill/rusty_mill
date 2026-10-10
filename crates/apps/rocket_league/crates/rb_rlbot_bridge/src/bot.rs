@@ -21,27 +21,48 @@ impl<F: FnMut(&PhysicsFrame, usize) -> ControllerInput> Policy for F {
 }
 
 /// One car driven by a [`Policy`].
+///
+/// The policy runs once per physics frame, not once per packet: core repeats a packet (same
+/// `frame_num`) while the game is paused, and a policy that counts ticks or steps a sequence
+/// (a jump, a tape) must not advance while physics is frozen. A repeat is answered with the
+/// previous input, so core still gets one response per packet. The gate is the frame counter,
+/// not the match phase, since freeplay physics advances in `Paused`; a frame number that moves
+/// backward (a reset) is a new frame.
 pub struct PolicyBot<P> {
     policy: P,
     car: u32,
+    /// The last physics frame acted on and what was answered.
+    last: Option<(u32, PlayerInput)>,
 }
 
 impl<P: Policy> PolicyBot<P> {
     /// A bot for the car at `car` in the game's player list.
     pub fn new(policy: P, car: u32) -> PolicyBot<P> {
-        PolicyBot { policy, car }
+        PolicyBot {
+            policy,
+            car,
+            last: None,
+        }
     }
 
     /// The input to send for `packet`, or `None` if there is nothing to act on: no ball, or the
     /// car is not in the packet.
     pub fn input(&mut self, packet: &GamePacket) -> Option<PlayerInput> {
+        let frame_num = packet.match_info.frame_num;
+        if let Some((last, input)) = self.last {
+            if last == frame_num {
+                return Some(input);
+            }
+        }
         let car = self.car as usize;
         let frame = observation(packet)?;
         frame.cars.get(car)?;
-        Some(PlayerInput {
+        let input = PlayerInput {
             player_index: self.car,
             controller_state: controller_state(&self.policy.act(&frame, car)),
-        })
+        };
+        self.last = Some((frame_num, input));
+        Some(input)
     }
 }
 
