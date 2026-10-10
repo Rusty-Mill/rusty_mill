@@ -22,6 +22,10 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## 2026-10-09 - Ed25519 accepts small-order public keys again
 
 - **Changed (rusty_pk):** reverses the rejection added after Codex round 3 on #540, by owner decision. Behaviour now matches `ring` and RFC 8032 (which does not require rejecting small-order keys). **Known limitation:** the identity key verifies `R = identity, S = 0` for every message; callers must screen untrusted keys themselves. The evidence record `EVIDENCE-2026-10-09.txt` predates this change; Ed25519 verify is variable time and outside the constant-time budgets, so its counts are unaffected, but the vector run was not regenerated.
+## 2026-10-10 - ADR-0002 Amendment 1: MCP crates to Tier T (docs only)
+
+- **Changed:** the MCP crates are Tier T (transitional), with `docs/research/MCP-NATIVE-PLAN.md` as the milestone list. Records the owner decisions of 2026-10-09 (schema builder first, blocking servers on `rusty_serve`, scope is `rmcp` and its whole stack) and a three-point checklist for any MCP server (advertise only implemented revisions, check cancellation before running a queued handler, bounded shutdown on a failed write).
+- **Known limitation:** documentation only. The implementation is #577; this PR deliberately carries none of it.
 
 ## 2026-10-09 - CI: live-internet check added to rusty-tls-engine (non-blocking)
 
@@ -44,6 +48,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Fixed (rusty_tls, P2 x4, engine is double-gated and not wired):** TLS 1.2 client flight fragmented at 2^14 (a long client chain made an oversized record); `CertificateRequest.certificate_types` honoured (an RSA identity is no longer offered for an `ecdsa_sign`-only request); nothing delivered after the peer's `close_notify` in TLS 1.2 or 1.3 (local `close()` still reads the reply); TLS 1.3 sealer and opener share one inner-plaintext limit (2^14 + 1). Each finding has a test, and each test was checked to fail with its fix reverted.
 - **Verified:** 669 `rusty_tls` tests, clippy (`-D warnings`, with and without the cfg), docs, the four OpenSSL suites, and BoGo (861 passed, 0 failed) all pass. CI on GitHub for this head has not been seen.
 - **Known limitations:** unchanged; the review was source-only and is not a substitute for independent human crypto review.
+
+## 2026-10-09 - Cargo.lock: bump yanked wnaf 0.14.0 to 0.14.1
+
+- **Fixed:** `wnaf 0.14.0` (via `p256` -> `rusty_a2a`) was yanked. `cargo update -p wnaf` moves it to 0.14.1: one package, plus its `primefield` edge. `cargo deny check advisories`, the workspace-map and dependency checks and the `rusty_a2a` tests pass. No source changes.
+
+---
+
 ## 2026-10-09 - rk-kernel: rk-observe is a dev-dependency (pending review)
 
 - **Fixed:** `cargo-shear` failed on `main` with `misplaced dependency rk-observe`. `rk-kernel` only names `rk_observe::ToolOutcome` in a doc comment and in `tests/loop_test.rs`, so the dependency moves to `[dev-dependencies]` and the doc comment's intra-doc link becomes plain code (a link would not resolve without the dependency). No code change; `Cargo.lock` unchanged.
