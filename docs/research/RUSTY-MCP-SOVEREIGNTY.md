@@ -23,7 +23,12 @@ Facts below were read from the code on 2026-10-10; nothing here is built yet.
 | `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry` | OTLP trace and metrics pipeline, `McpMetricsLayer` instruments (`otel/mod.rs` 418, `otel/metrics.rs` 551, `trace.rs`) | a first-party OTLP exporter: instruments as atomics, spans from a `tracing` `Layer`, encoding with `rusty_json` (OTLP/HTTP+JSON) over `rusty_request` | no in-house OTLP, no protobuf, no gRPC client. This is the largest item (D2) | large |
 | already first-party | `rusty_url`, `rusty_base64` | | | done |
 
-## 2. Decisions needed first
+## 2. Decisions
+
+Answered by the owner 2026-10-10: D1 cores plus adapters; D2 OTLP/HTTP+JSON;
+D3 keep `tracing` now, in-house facade is item 12; D4 yes, exceptions
+accepted; D5 parity first, other algorithms are item 11. The text below is the
+reasoning behind each.
 
 - **D1. Adapter shape.** Recommended: sans-IO cores (authorize a request,
   admit or shed, record a metric) plus two thin adapters: a `tower` layer
@@ -87,8 +92,15 @@ Each item is one PR, with its own tests and a change fragment.
    Needs D2 and D3.
 10. **Policy and docs.** `check_workspace_deps.py` accepts `rusty-mcp` as
     Tier S except the named exceptions (`http`, `tower-layer`, `tower-service`,
-    `tokio` in the adapter, `tracing` if D3 says keep). ADR-0002 Amendment 1
+    `tokio` in the adapter, `tracing`, D3: keep). ADR-0002 Amendment 1
     status line and `MCP-NATIVE-PLAN.md` A6 updated.
+11. **More JWT algorithms** (after item 4): PS256, ES384, EdDSA, one PR each,
+    on the `rusty_pk` primitives. Same negative-test bar as item 4, plus the
+    algorithm whitelist stays explicit (nothing is accepted by default).
+12. **In-house `tracing` facade** (workspace-wide, after item 9): replace
+    `tracing` and `tracing-subscriber` in the 74 crates that use them. Its own
+    plan and owner sign-off before any code; until then `tracing` is a named
+    Tier A exception of `rusty-mcp`.
 
 ## 4. Risks
 
