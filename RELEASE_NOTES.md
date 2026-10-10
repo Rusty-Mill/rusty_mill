@@ -23,6 +23,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-10 - ADR-0002 Amendment 1: MCP crates to Tier T (docs only)
+
+- **Changed:** the MCP crates are Tier T (transitional), with `docs/research/MCP-NATIVE-PLAN.md` as the milestone list. Records the owner decisions of 2026-10-09 (schema builder first, blocking servers on `rusty_serve`, scope is `rmcp` and its whole stack) and a three-point checklist for any MCP server (advertise only implemented revisions, check cancellation before running a queued handler, bounded shutdown on a failed write).
+- **Known limitation:** documentation only. The implementation is #577; this PR deliberately carries none of it.
+
 ## 2026-10-09 - CI: live-internet check added to rusty-tls-engine (non-blocking)
 
 - **Added (CI):** a last step in `rusty-tls-engine` runs `handrolled_live` on the runner and writes its results to the step summary. It is `continue-on-error`: the first real evidence about Google's endpoints comes from this run, and it cannot block a merge. The logic is a tested script (`live_internet_check.sh`): output and summary are written even when cargo fails, and a failure or zero-test run fails the step. A guard in `test_ci_workflow` keeps the step non-blocking.
