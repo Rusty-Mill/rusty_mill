@@ -13,6 +13,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-09 - rusty_bbp_host: first proving run record
+
+- **Added (docs):** `crates/apps/rusty_bbp_host/docs/proving/2026-10-09-slug-1.md`, the record of the first live run of the Blackboard Protocol under `bbp mod` (Claude Code as Planner, Coder, Tester; Reviewer never reached). Outcome: `escalated`, `Budget(Iterations)`, 5 candidates, 5 failed runs.
+- **Known limitations:** not a pass and not an answer to Q3. Ran in WSL2 (the runner is Unix-only) after two aborted attempts (expired harness login; a symlinked `~/.cargo/config.toml` outside the read roots). Every sandboxed run failed with `rustc` "Permission denied" and the cause is not established; the record lists six runbook defects and notes that `LSP` appears in `system/init` for roles launched with `--tools ""`. The machine-specific path edits to `profiles.json` are described in the record and not committed.
+
 ## 2026-10-10 - ADR-0002 Amendment 1: MCP crates to Tier T (docs only)
 
 - **Changed:** the MCP crates are Tier T (transitional), with `docs/research/MCP-NATIVE-PLAN.md` as the milestone list. Records the owner decisions of 2026-10-09 (schema builder first, blocking servers on `rusty_serve`, scope is `rmcp` and its whole stack) and a three-point checklist for any MCP server (advertise only implemented revisions, check cancellation before running a queued handler, bounded shutdown on a failed write).
