@@ -43,7 +43,7 @@ use jsonwebtoken::{
     errors::ErrorKind,
     jwk::{Jwk, JwkSet},
 };
-use serde_json::Value;
+use rusty_json::Value;
 use tokio::sync::RwLock;
 
 use super::token::{TokenError, TokenValidator, ValidateFuture, VerifiedToken};
@@ -395,7 +395,7 @@ fn extract_scopes(scope: Option<&Value>) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use rusty_json::json;
 
     #[test]
     fn reads_a_string_audience() {

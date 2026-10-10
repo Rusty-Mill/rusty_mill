@@ -85,7 +85,7 @@ pub struct VerifiedToken {
     /// [`VerifiedToken::audience_checked_by_validator`].
     pub audience_verified: bool,
     /// Everything else the validator decoded, for tools that need more.
-    pub claims: serde_json::Value,
+    pub claims: rusty_json::Value,
 }
 
 impl VerifiedToken {
@@ -93,7 +93,7 @@ impl VerifiedToken {
     pub fn new(audiences: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             audiences: audiences.into_iter().map(Into::into).collect(),
-            claims: serde_json::Value::Null,
+            claims: rusty_json::Value::Null,
             ..Default::default()
         }
     }
@@ -107,7 +107,7 @@ impl VerifiedToken {
     pub fn audience_checked_by_validator() -> Self {
         Self {
             audience_verified: true,
-            claims: serde_json::Value::Null,
+            claims: rusty_json::Value::Null,
             ..Default::default()
         }
     }
@@ -136,7 +136,7 @@ impl VerifiedToken {
     }
 
     /// Attach the raw claim set.
-    pub fn with_claims(mut self, claims: serde_json::Value) -> Self {
+    pub fn with_claims(mut self, claims: rusty_json::Value) -> Self {
         self.claims = claims;
         self
     }

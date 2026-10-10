@@ -645,9 +645,21 @@ impl Gateway {
                 // can read `jwt.*`. Only a token this gateway verified is ever
                 // put here, so a rule cannot be fooled by a header a caller
                 // set itself.
-                Ok(token) => {
-                    request.extensions_mut().insert(TokenClaims(token.claims));
-                }
+                Ok(token) => match TokenClaims::from_json(&token.claims) {
+                    Ok(claims) => {
+                        request.extensions_mut().insert(claims);
+                    }
+                    // Claims that cannot reach the rules must not be dropped:
+                    // a rule on `jwt.*` would then judge a token it never saw.
+                    Err(err) => {
+                        tracing::error!(%err, "verified token claims are not valid JSON");
+                        let failed = status(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "the token claims could not be read",
+                        );
+                        return Ok(with_cors(failed, cors_headers));
+                    }
+                },
                 Err(rejection) => return Ok(with_cors(reject(&rejection), cors_headers)),
             }
         }
