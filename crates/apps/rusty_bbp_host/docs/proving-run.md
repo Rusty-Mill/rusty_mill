@@ -51,7 +51,7 @@ bbp assign --role reviewer --principal reviewer --vendor anthropic
 
 ## 4. Run
 
-Shell A, the moderator (returns at `closed` or `cancelled`; at `escalated` it keeps running and waits for `bbp human resume` or `cancel`, so decide, do not just wait):
+Shell A, the moderator (returns at `closed` or `cancelled`; at `escalated` it keeps running until a human command moves the task on, usually `bbp human resume` or `cancel`, so decide, do not just wait):
 
 ```sh
 bbp mod --repo-path /tmp/bbp/target --work /tmp/bbp/work --agents $P/agents.json --max-wall-secs 7200
