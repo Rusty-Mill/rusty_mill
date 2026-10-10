@@ -10386,6 +10386,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rb_tape_bot"
+version = "0.1.0"
+dependencies = [
+ "rb_rlbot_client",
+ "rb_rlbot_wire",
+ "rb_scenario",
+]
+
+[[package]]
 name = "rb_verify_cli"
 version = "0.1.0"
 dependencies = [
@@ -12852,6 +12861,9 @@ dependencies = [
 [[package]]
 name = "rusty_rand"
 version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+]
 
 [[package]]
 name = "rusty_rdp"

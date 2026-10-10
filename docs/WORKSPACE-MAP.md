@@ -35,9 +35,9 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 34 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
-| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 11 |
+| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
 | foundation | rusty_percent | rusty_percent | Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space). | 10 |
-| foundation | rusty_pk | rusty_pk | Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, X25519. Portable, no unsafe. Stages 2 and 4 of the native ring replacement plan. | 0 |
+| foundation | rusty_pk | rusty_pk | Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, X25519, ECDH on P-256 and P-384. Portable, no unsafe. Stages 2 and 4 and gap 2 of the native ring replacement plan. | 0 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 8 |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 5 |
 | foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. | 8 |
@@ -165,9 +165,10 @@ Families are the current directories immediately below `crates/`.
 | apps | rocket_league | rb_env | A stepping environment over the physics port: reset to a frame, apply controller inputs, step one tick, observe (ADR-0059). | 1 |
 | apps | rocket_league | rb_physics_bullet | Physics core: a Rust port of Bullet3's rigid-body integration and sequential-impulse contact solver (zlib-licensed), scoped to sphere-vs-static-plane for v0 (RB-PHYSICS-001). | 2 |
 | apps | rocket_league | rb_replay_ingest | Replay-file ingestion adapter (RB-VERIFY-001): implements PhysicsStateSource by parsing .replay files via boxcars + subtr-actor. | 1 |
-| apps | rocket_league | rb_rlbot_client | Blocking RLBot v5 client on std::net: connects to RLBot core, runs the handshake, drives bot and hivemind agents from game packets, and sends match, state-setting and stop messages. Replaces the external rlbot crate (see rlbot/PLAN.md). | 0 |
-| apps | rocket_league | rb_rlbot_wire | RLBot v5 socket protocol, hand-written on rusty_flatbuffers: the u16-framed messages a bot or match runner exchanges with RLBot core (connection, match setup, player input, state setting, game packets). Replaces the external rlbot/rlbot_flat crates (see rlbot/PLAN.md). | 1 |
-| apps | rocket_league | rb_scenario | Scenario files for scripted mechanic captures: an initial game state plus a run-length input tape (docs/research/BOT-CAPTURE-PLAN.md). Read by rb-verify and by tools/rb_tape_bot. | 1 |
+| apps | rocket_league | rb_rlbot_client | Blocking RLBot v5 client on std::net: connects to RLBot core, runs the handshake, drives bot and hivemind agents from game packets, and sends match, state-setting and stop messages. Replaces the external rlbot crate (see rlbot/PLAN.md). | 1 |
+| apps | rocket_league | rb_rlbot_wire | RLBot v5 socket protocol, hand-written on rusty_flatbuffers: the u16-framed messages a bot or match runner exchanges with RLBot core (connection, match setup, player input, state setting, game packets). Replaces the external rlbot/rlbot_flat crates (see rlbot/PLAN.md). | 2 |
+| apps | rocket_league | rb_scenario | Scenario files for scripted mechanic captures: an initial game state plus a run-length input tape (docs/research/BOT-CAPTURE-PLAN.md). Read by rb-verify and by tools/rb_tape_bot. | 2 |
+| apps | rocket_league | rb_tape_bot |  | 0 |
 | apps | rocket_league | rb_verify_cli | Composition root for the Phase 0 verification pipeline: wires ingestion adapters to the divergence scorer. | 0 |
 | apps | rocket_league | recon-check | Phase 2 cross-check: our boxcars reconstruction vs subtr-actor's independent reconstruction of the same replay | 0 |
 | apps | rocket_league | replay-analyzer | Scoring-agnostic Rocket League replay analyzer: .replay -&gt; canonical match model | 8 |

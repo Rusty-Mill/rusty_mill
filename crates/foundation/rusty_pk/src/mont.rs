@@ -117,7 +117,10 @@ impl Modulus {
         self.mul(out, a, &one[..self.n.len()]);
     }
 
-    /// `out = a + b mod n`. Constant time.
+    /// `out = a + b mod n`. Constant time. `inline(never)` keeps it a separate symbol, so the
+    /// jump count pinned in `scripts/disasm_limits.txt` does not depend on LLVM's inlining of
+    /// the code around it (adding ECDH once folded it into `Field::add`).
+    #[inline(never)]
     pub(crate) fn add(&self, out: &mut [u64], a: &[u64], b: &[u64]) {
         let k = self.n.len();
         let mut t = [0u64; MAX_LIMBS];
