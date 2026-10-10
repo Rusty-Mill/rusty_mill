@@ -10,6 +10,7 @@
 
 ## Checklist
 - [ ] Tests still pass unmodified (or updated where mechanically necessary)
-- [ ] Lockfile/changelog updated if applicable
+- [ ] Lockfile updated if applicable
+- [ ] Change fragment added under `changes/`
 - [ ] No secrets/credentials committed or logged
 - [ ] Reviewed: independent approval, or self-review recorded in the description (no independent reviewer available)
