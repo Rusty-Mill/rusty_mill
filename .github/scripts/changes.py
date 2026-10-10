@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date as calendar_date
 from pathlib import Path
 
 CATEGORIES = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
@@ -35,6 +36,10 @@ def parse(name: str, text: str) -> Fragment:
     if not match:
         raise ValueError(f"{name}: file name must be YYYY-MM-DD-slug.md (lowercase, digits, hyphens)")
     date = match[1]
+    try:
+        calendar_date.fromisoformat(date)
+    except ValueError:
+        raise ValueError(f"{name}: {date} is not a calendar date") from None
     if not text.startswith("---\n"):
         raise ValueError(f"{name}: must start with a '---' front-matter block")
     front, sep, body = text[4:].partition("\n---\n")
@@ -45,6 +50,8 @@ def parse(name: str, text: str) -> Fragment:
         key, colon, value = line.partition(": ")
         if not colon or not value.strip():
             raise ValueError(f"{name}: front-matter line {line!r} is not 'key: value'")
+        if key in meta:
+            raise ValueError(f"{name}: front-matter key {key!r} appears more than once")
         meta[key] = value.strip()
     if set(meta) != KEYS:
         raise ValueError(f"{name}: front matter must have exactly {sorted(KEYS)}, got {sorted(meta)}")
@@ -57,7 +64,12 @@ def parse(name: str, text: str) -> Fragment:
 
 
 def load(directory: Path) -> list[Fragment]:
-    """All fragments in ``directory``, newest first (README.md is not a fragment)."""
+    """All fragments in ``directory``, newest first (README.md is not a fragment).
+
+    The directory must exist: a missing one is an error, not an empty log. An empty one is valid.
+    """
+    if not directory.is_dir():
+        raise ValueError(f"{directory}: not a directory")
     paths = sorted((p for p in directory.glob("*.md") if p.name != "README.md"), reverse=True)
     return [parse(p.name, p.read_text(encoding="utf-8")) for p in paths]
 
