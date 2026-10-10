@@ -102,7 +102,10 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("if: needs.plan.outputs.tls_engine == 'true'", job)
         # The cfg that compiles the engine in, and a dated (not floating) nightly.
         self.assertIn("RUSTFLAGS: --cfg rusty_tls_handrolled", job)
-        self.assertRegex(job, r"toolchain: nightly-\d{4}-\d{2}-\d{2}\n")
+        self.assertRegex(job, r"FUZZ_TOOLCHAIN: nightly-\d{4}-\d{2}-\d{2}\n")
+        self.assertIn("toolchain: ${{ env.FUZZ_TOOLCHAIN }}", job)  # installed...
+        # ...and the script selects that same toolchain, not a floating `nightly`.
+        self.assertNotIn("+nightly\n", job)
         # Through the tested script, with a floor on the target count.
         self.assertRegex(job, r"bash \.github/scripts/tls_fuzz_smoke\.sh \d+ [1-9]\d*")
         # The prebuilt cargo-fuzz is musl and defaults to building for musl;

@@ -44,6 +44,32 @@ def run(targets: str, min_targets: int = 2, **env: str) -> subprocess.CompletedP
         )
 
 
+FAKE_CARGO = """#!/bin/sh
+# Stands in for `cargo` on PATH: logs how the script built the command.
+echo "cargo $*" >> "$FAKE_LOG"
+case "$*" in
+  *" list") printf 'a\\nb\\n' ;;
+  *" run "*) echo "Done 9 runs in 1 second(s)" ;;
+esac
+"""
+
+
+def run_default_command(**env: str) -> list[str]:
+    """Run the script with no CARGO_FUZZ override and a fake `cargo` on PATH."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = Path(tmp) / "cargo"
+        fake.write_text(FAKE_CARGO, encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        log = Path(tmp) / "log"
+        full = {k: v for k, v in os.environ.items() if k not in {"CARGO_FUZZ", "FUZZ_TOOLCHAIN"}}
+        full.update({"PATH": f"{tmp}:{os.environ['PATH']}", "FUZZ_ROOT": tmp, "FAKE_LOG": str(log), **env})
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "1", "2"], capture_output=True, text=True, env=full, check=False
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return log.read_text(encoding="utf-8").splitlines()
+
+
 class TlsFuzzSmokeTests(unittest.TestCase):
     def test_all_targets_running_passes(self) -> None:
         r = run("a b c")
@@ -53,6 +79,17 @@ class TlsFuzzSmokeTests(unittest.TestCase):
     def test_the_target_triple_is_passed_only_when_set(self) -> None:
         self.assertIn("run a --target x86_64-unknown-linux-gnu", run("a b", FUZZ_TARGET_TRIPLE="x86_64-unknown-linux-gnu").stdout)
         self.assertNotIn("--target", run("a b").stdout)
+
+    def test_the_default_command_uses_the_pinned_toolchain_and_never_floating_nightly(self) -> None:
+        pinned = run_default_command(FUZZ_TOOLCHAIN="nightly-2026-10-07")
+        self.assertEqual(pinned[0], "cargo +nightly-2026-10-07 fuzz list")
+        self.assertTrue(all(line.startswith("cargo +nightly-2026-10-07 fuzz ") for line in pinned))
+        self.assertFalse(any("+nightly " in line for line in pinned))
+
+    def test_without_a_toolchain_the_active_one_is_used(self) -> None:
+        active = run_default_command()
+        self.assertEqual(active[0], "cargo fuzz list")
+        self.assertFalse(any("+" in line for line in active))
 
     def test_a_crash_fails_but_the_other_targets_still_run(self) -> None:
         r = run("a b c", FAKE_CRASH="b")

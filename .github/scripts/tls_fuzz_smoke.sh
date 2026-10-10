@@ -18,12 +18,22 @@ set -uo pipefail
 
 secs="${1:?usage: tls_fuzz_smoke.sh <seconds-per-target> [min-targets]}"
 min="${2:-8}"
-fuzz="${CARGO_FUZZ:-cargo +nightly fuzz}"
+# The command is built as an array. `FUZZ_TOOLCHAIN` (a dated nightly in CI)
+# selects the toolchain with `+name`; unset, the active toolchain is used, so
+# the script never silently asks rustup for a floating `nightly`. `CARGO_FUZZ`
+# replaces the whole command (tests use a fake).
+if [ -n "${CARGO_FUZZ:-}" ]; then
+  # shellcheck disable=SC2206 # deliberate word splitting of a command
+  fuzz=($CARGO_FUZZ)
+else
+  fuzz=(cargo)
+  [ -n "${FUZZ_TOOLCHAIN:-}" ] && fuzz+=("+$FUZZ_TOOLCHAIN")
+  fuzz+=(fuzz)
+fi
 root="${FUZZ_ROOT:-$(dirname "$0")/../../crates/libs/net/rusty_tls}"
 cd "$root" || { echo "::error::no fuzz root at $root"; exit 1; }
 
-# shellcheck disable=SC2086 # $fuzz is a command plus arguments
-targets="$($fuzz list)" || { echo "::error::could not list fuzz targets"; exit 1; }
+targets="$("${fuzz[@]}" list)" || { echo "::error::could not list fuzz targets"; exit 1; }
 count="$(printf '%s\n' "$targets" | grep -c .)"
 if [ "$count" -lt "$min" ]; then
   echo "::error::found $count fuzz targets, expected at least $min"
@@ -32,8 +42,7 @@ fi
 
 failed=0
 for t in $targets; do
-  # shellcheck disable=SC2086
-  out="$($fuzz run "$t" ${FUZZ_TARGET_TRIPLE:+--target "$FUZZ_TARGET_TRIPLE"} -- "-max_total_time=$secs" 2>&1)"
+  out="$("${fuzz[@]}" run "$t" ${FUZZ_TARGET_TRIPLE:+--target "$FUZZ_TARGET_TRIPLE"} -- "-max_total_time=$secs" 2>&1)"
   status=$?
   printf '%s\n' "$out" | tail -n 25
   if [ "$status" -ne 0 ]; then

@@ -19,14 +19,14 @@ and still fall back to rustls with one switch. The risk differs, so the bar shou
 
 | Item | Status |
 | --- | --- |
-| CI runs the engine on every PR (clippy, tests, docs, OpenSSL interop, zero-tests guard) | Met |
+| CI runs the engine (clippy, tests, docs, OpenSSL interop, zero-tests guard) whenever the planner selects `tls_engine`: a change to `rusty_tls` or a crate that depends on it, a change to the engine's own CI files, and full runs (push to main, manual dispatch). Not on unrelated PRs | Met |
 | TLS 1.2 client and server | Met (stages 4b onward) |
 | BoGo through a shim | 861 pass, 0 fail, 455 disabled with reasons; CI floor 830 |
 | OpenSSL interop in both directions, hermetic, in CI | Met |
 | rustls differential, protocol side (suites, groups, HRR, resumption, ALPN, SNI, both roles) | Met by per-stage suites; not re-audited as a whole |
 | Certificate differential | **Partial.** Name constraints and the OS trust store only. No x509-limbo or BetterTLS corpus |
-| Fuzz targets | **Exist** (certificate, DER, TLS 1.2 record, schedule, client and server, version negotiation). **Smoke job added 2026-10-10** (30 s per target, per PR; not yet run on a runner). No long run recorded. No target for TLS 1.3 handshake messages or the 1.3 machines beyond negotiation |
-| Live internet | **One runner run, three Google hosts, TLS 1.3, one network.** The step is non-blocking and now runs on every CI pass |
+| Fuzz targets | **Exist** (certificate, DER, TLS 1.2 record, schedule, client and server, version negotiation). **Smoke job added 2026-10-10** (30 s per target, on the same planner selection as the engine job; passed once on a runner, run 38094570843). No long run recorded. No target for TLS 1.3 handshake messages or the 1.3 machines beyond negotiation |
+| Live internet | **One runner run, three Google hosts, TLS 1.3, one network.** The step is non-blocking and runs wherever the engine job runs (same planner selection) |
 | Independent review | **None** |
 | Soak in a real consumer | **None** |
 | Mutation testing as a CI number | **None** (mutants are checked by hand per change) |
@@ -37,15 +37,17 @@ and still fall back to rustls with one switch. The risk differs, so the bar shou
 
 All hard gates unless marked. "Candidate" is `rleval-app`'s OIDC transport (Google sign-in).
 
-1. **Repeated live evidence.** The live-internet step passes on 10 consecutive scheduled CI
-   runs over at least 7 days, against the candidate's real hosts, with the differential
-   against the rustls-backed stream agreeing. A failure resets the count and is investigated
-   (an interception flag is a runner issue, anything else is an engine finding).
+1. **Repeated live evidence.** The live-internet step passes 10 times in a row over at least
+   7 days, against the candidate's real hosts, with the differential against the
+   rustls-backed stream agreeing. A failure resets the count and is investigated (an
+   interception flag is a runner issue, anything else is an engine finding). The only
+   scheduled CI run today is weekly (Mondays 03:17 UTC), which would take 10 weeks; this
+   item needs a daily trigger for the TLS jobs only (my suggestion, your call).
 2. **Certificate differential, bounded.** A published external corpus (x509-limbo or
    equivalent) is run against both engines for the chain shapes the candidate meets (RSA and
    ECDSA leaves, two-intermediate chains, SAN names). Every divergence is listed. None is
    "looser than webpki" unless you accept it by name.
-3. **Fuzz smoke in CI.** Each existing target runs for a fixed budget on every PR, and one
+3. **Fuzz smoke in CI.** Each existing target runs for a fixed budget on every run the planner selects for the engine (see the status table), and one
    long run (for example 24 CPU hours) is clean once before wiring.
 4. **Review.** An independent review of `x509`, `verify`, `name`, `sign` and the 1.3 client
    state machine, findings closed. *This session cannot supply it.* Alternative for your

@@ -17,14 +17,6 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
-## 2026-10-10 - CI: fuzz smoke for the native TLS engine (pending review)
-
-- **Added (CI):** job `rusty-tls-fuzz` runs each of the 8 `rusty_tls` fuzz targets for 30 seconds on every PR that touches the engine (pinned nightly, `cargo-fuzz` 0.13.2). It is blocking and is in `required-gate`. The logic is `tls_fuzz_smoke.sh`, tested offline against a fake `cargo-fuzz`: a crash, a target that runs nothing, a failing target list and fewer than 8 targets each fail it.
-- **Verified:** all 8 targets clean locally (5 s each) and on a GitHub runner (30 s each, job about 5.5 minutes with the build; run 38094570843). The first runner run failed all 8 targets: the prebuilt `cargo-fuzz` is musl and built for musl, which the runner has no std for. Fixed by passing the host triple (`FUZZ_TARGET_TRIPLE`). That run was also the first to show a CI-only PR skipped both TLS engine jobs (a skipped job reports success), so the planner now selects them when `ci.yml` or their scripts change.
-- **Known limitations:** 30 s per target finds shallow regressions only. The long run the evidence bar needs is separate and not done. Targets cover the certificate and DER parsers, the TLS 1.2 record, schedule, client and server, and version negotiation; there is no target for TLS 1.3 handshake messages or the 1.3 client and server machines beyond negotiation. Evidence bar item 3 (`docs/research/TLS-EVIDENCE-BAR.md`) is half met: smoke yes, long run no.
-
----
-
 ## 2026-10-09 - rusty_tls: a blocking stream on the native engine (opt-in, not the seam)
 
 - **Added:** `handrolled::stream::NativeTlsStream`, a `Read + Write` client stream shaped like `TlsStream`, inside the double-gated `handrolled` module. It is the piece a consumer such as `rleval-app`'s Google sign-in would opt into locally. It was built there, and not as a change to `TlsStream`, because ADR-0002 keeps rustls behind every type this crate exports at the root; adding it at the root would have needed that ADR superseded.
