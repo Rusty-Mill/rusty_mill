@@ -104,3 +104,42 @@ change, so it is for the seam work (gap 4, closed) and is flagged here only so i
 - A toolchain change can reintroduce branches: jump-count pins fail loudly, but only on the checked target.
 - Throughput may make the native engine unsuitable for bulk transfers; step 1 measures this before most of the
   work is spent.
+
+## 8. Step 1 results (2026-10-10; spike, preliminary)
+
+Built per section 3: `aes.rs` (bitsliced AES-128/256, 64 blocks per batch), `ghash.rs` (table-free GHASH),
+`gcm.rs` (`Aes128Gcm`, `Aes256Gcm`), all in `rusty_aead`, no `unsafe`, no new dependency.
+
+**Correctness (what was run):** the S-box circuit matches its mathematical definition for all 256 inputs; the FIPS 197
+appendix C vectors pass for AES-128 and AES-256 (this also covers the key schedule); GHASH matches a bit-by-bit
+implementation of SP 800-38D algorithm 1 on edge values and 2000 pseudorandom pairs; GCM specification test case 4
+passes; seal and open agree with `ring` over lengths 0 to 130 plus 255, 256, 1007 to 1009, 1023 to 1025, 2047, 2048,
+4096 and 16384, AAD lengths 0, 1, 13, 16, 17 and 64, both key sizes, tag and ciphertext byte-for-byte; tampered tag,
+ciphertext, AAD, nonce and a truncated tag are rejected and leave the buffer unchanged. **Not yet run:** Wycheproof and
+the other specification vectors, a randomised differential suite, the GCM length limit, and any review.
+
+**Throughput (this machine, idle, `--release`, best of five; `ring` measured in the same run):**
+
+| Size | AES-128-GCM here | `ring` | AES-256-GCM here | `ring` |
+| --- | --- | --- | --- | --- |
+| 64 B | 8.8 MB/s | 806 MB/s | 7.4 MB/s | 707 MB/s |
+| 1 KiB | 61.6 | 5,661 | 51.7 | 4,957 |
+| 16 KiB | 90.7 | 8,970 | 83.9 | 6,442 |
+| 16 MiB | 102.7 | 8,971 | 86.1 | 7,726 |
+
+Bulk throughput (86 to 103 MB/s, 77 to 99 times slower than `ring`) is inside the plan's estimate of 60 to 150 MB/s.
+**New finding: small messages are much worse than that estimate implies.** A batch always processes 64 blocks, so a
+64-byte message (5 blocks) pays for a whole batch: 7 to 9 MB/s, about 90 to 100 times slower than `ring` at that size and
+more in absolute terms than the bulk ratio suggests. Not profiled: how the time splits between AES and GHASH, and how
+much a narrower batch (for example 8 or 16 blocks) would help small records. `open_in_place` also computes the first
+batch twice (once for the tag mask, once for the data), which the measurement above does not include.
+
+**Early constant-time signal (valgrind taint, `examples/taint_aes.rs`; one build, one run each, x86-64):** key and
+plaintext marked secret, 2000-byte plaintext (covers the first and later batches). `gcm128-seal` and `gcm256-seal`: 0
+reports. `gcm128-open`: exactly 1 report, a conditional jump in `Gcm::open` (the public tag verdict). The planted
+control, a table lookup indexed by a secret byte, is reported ("use of uninitialised value of size 8"), so the tool
+sees this leak class here. **Not yet done:** jump-count pins, timing tests, CI wiring, and everything that makes this
+more than one run. This is not a constant-time claim.
+
+**Gate result:** the step 1 gate asked for a measured MB/s to be reported to the owner before more is built. It is
+reported above. Nothing past step 1 has been started.
