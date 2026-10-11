@@ -329,8 +329,9 @@ pad 14 or 18 at known offsets, or drops onto pad 14); read the pickups off the
 `fixture_checks.py [all|caps|ball-spin|boost-taps|ball-roll|bounces|pads]` reads physics constants
 off the committed `fixtures/` captures with the standard library only: the angular and speed caps,
 the ball's friction, rolling threshold and restitution, how long a boost tap really burns, and how
-close a car's hitbox is to a small pad when it takes it. Its numbers are the ones
-`docs/research/PHYSICS-PARITY-VS-ROCKETSIM.md` (pass 2) quotes.
+far a car's origin is from a small pad when it takes it. Its numbers are the ones
+`docs/research/PHYSICS-PARITY-VS-ROCKETSIM.md` (pass 2) quotes. `test_fixture_checks.py` tests its
+reader and estimators (`python -I -m unittest discover -s tools/rb_tape_bot -p "test_fixture_checks.py"`).
 
 ### Beyond the probes: fuzz tapes and contact impulses
 
