@@ -665,3 +665,53 @@ read as a step toward it.
 
 - Promoting the hand-rolled engine to default, without superseding this ADR.
 - Hand-rolling cryptographic primitives under any stage listed here (§6).
+
+## Amendment 1 (2026-10-11): one consumer may opt in locally, under a written evidence bar
+
+Status: Approach approved by the owner on 2026-10-11; this text is for the owner to read
+before the first consumer is wired. It supersedes nothing in sections 1 to 6.
+
+**What this clarifies.** Section 1 says a consumer can reach the hand-rolled engine "only by
+a deliberate, local, visible act by whoever invokes `cargo`", and section 3 says the engine
+is never the default. Neither says whether one named application may take that deliberate
+act for its own build. This amendment says it may, and under which conditions, so the
+question is not decided by a pull request that merely wires it.
+
+**The conditions.** A consumer may use the engine's gated types (today
+`handrolled::stream::NativeTlsStream`) only when all of these hold:
+
+1. **The evidence bar for that tier is met and recorded.** The bar is
+   `docs/research/TLS-EVIDENCE-BAR.md`, Tier 1. The owner approved it on 2026-10-10; a
+   change to the bar is the owner's decision, not a pull request's.
+2. **It is off by default in the consumer.** The consumer reaches the engine through its
+   own off-by-default cargo feature and the same `--cfg rusty_tls_handrolled` as
+   everything else. A plain build of the consumer still uses rustls. A way back to rustls
+   is one line and is documented.
+3. **Nothing exported at the crate root changes.** `TlsStream`, `AsyncTlsStream`,
+   `TlsConnector`, `TlsAcceptor` and `TrustPolicy` stay rustls-backed (section 3). The
+   consumer calls the gated module's types directly; no seam type selects the engine.
+4. **The consumer is named and scoped in writing.** The first is `rleval-app`'s OIDC
+   transport: client only, TLS 1.3, to named hosts. Widening it (another consumer, the
+   server side, TLS 1.2, a new host class) is a new decision against the bar, not a
+   consequence of this one.
+5. **No library default moves.** No feature, cfg or dependency edge makes any other
+   crate's build use the engine.
+
+**What this does not do.**
+
+- It does not authorise Tier 2 (making the engine the default or routing the seam types
+  through it). That still requires superseding this ADR explicitly, with the argument
+  written down (section 3).
+- It does not wire any consumer. Wiring is a separate change that must cite the
+  evidence recorded under condition 1.
+- It does not change section 6: cryptographic primitives stay on `ring`.
+- It does not add a gate or remove one.
+
+**Consequences.**
+
+- The reading of section 1 that permits a local opt-in is now written down. A reviewer
+  need not infer it.
+- The cost is a second, narrower class of exposure than "nobody uses it": one application
+  would carry the engine's risk for its sign-in traffic. The bar exists to make that
+  acceptable, and the one-line way back to rustls is the control if it is not.
+- If the bar is not met, nothing changes: the engine stays unwired.
