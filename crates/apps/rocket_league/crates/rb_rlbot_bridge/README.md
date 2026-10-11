@@ -29,3 +29,15 @@ run_policy(&mut connection, settings, |init| {
 - **Not covered.** Nothing here has been run against the real game. The tests check the
   conversions (a quarter turn of yaw points the nose along +y; the chaser drives straight at a
   ball it faces) and the per-packet decision; the client's own tests cover the packet loop.
+
+## Chaser bot
+
+`chaser(team)` is `rb_env`'s scripted chaser as a `Policy`; the `rb_chaser_bot` binary plays it.
+`chaser.bot.toml` is the RLBot manifest (its `root_dir` is the repo root):
+
+```
+cargo build --release -p rb_rlbot_bridge --bin rb_chaser_bot
+```
+
+Then add `chaser.bot.toml` in the RLBot GUI and start a match. RLBot launches the binary with
+`RLBOT_SERVER_PORT` and `RLBOT_AGENT_ID` set (the port defaults to 23234 when unset); `RLBOT_SERVER_ADDR` overrides the full `host:port`. Not yet run on the real game.

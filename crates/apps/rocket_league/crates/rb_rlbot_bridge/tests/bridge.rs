@@ -3,7 +3,7 @@
 
 use rb_domain::{ControllerInput, PhysicsFrame, Vec3 as DVec3};
 use rb_env::{chaser::chase, Env};
-use rb_rlbot_bridge::{controller_state, observation, PolicyBot};
+use rb_rlbot_bridge::{chaser, controller_state, observation, PolicyBot};
 use rb_rlbot_wire::{
     AirState, BallInfo, GamePacket, MatchInfo, MatchPhase, Physics, PlayerInfo, Rotator, Vec3,
 };
@@ -274,4 +274,25 @@ fn a_repeated_frame_that_lost_its_ball_or_car_gets_nothing_and_no_policy_call() 
 
     // Back to the full packet on the same frame: the cache still answers, nothing was asked.
     assert_eq!(throttles(&mut bot, &[warm]), [1.0]);
+}
+
+#[test]
+fn the_chaser_policy_drives_a_car_that_faces_the_ball_and_idles_a_missing_one() {
+    let frame = observation(&two_cars()).unwrap();
+    let mut policy = chaser(0);
+    let drive = rb_rlbot_bridge::Policy::act(&mut policy, &frame, 1);
+    assert_eq!(drive.throttle, 1.0);
+    assert!(drive.boost && drive.steer.abs() < 0.2, "{drive:?}");
+    let idle = rb_rlbot_bridge::Policy::act(&mut policy, &frame, 9);
+    assert_eq!(idle, ControllerInput::default());
+}
+
+/// A bot built from the chaser answers a game packet with a drive input for its own car.
+#[test]
+fn a_chaser_bot_answers_a_packet_with_its_cars_drive() {
+    let mut bot = PolicyBot::new(chaser(0), 1);
+    let input = bot.input(&two_cars()).unwrap();
+    assert_eq!(input.player_index, 1);
+    assert_eq!(input.controller_state.throttle, 1.0);
+    assert!(input.controller_state.boost);
 }

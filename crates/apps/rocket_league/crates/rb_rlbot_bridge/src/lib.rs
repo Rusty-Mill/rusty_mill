@@ -7,14 +7,17 @@
 //!
 //! - [`observation`]: a `GamePacket` as the `PhysicsFrame` `Env::reset` takes.
 //! - [`controller_state`]: a `ControllerInput` as RLBot's `ControllerState`.
-//! - [`PolicyBot`] / [`run_policy`]: one policy per car, one input per packet.
+//! - [`PolicyBot`] / [`run_policy`]: one policy per car, one input per physics frame.
+//! - [`chaser()`]: `rb_env`'s scripted chaser as a policy, played by the `rb_chaser_bot` binary.
 //!
 //! A policy decides from the frame alone (the team and car index are arguments), so it carries
 //! no RLBot types. What it cannot see is what a `PhysicsFrame` does not hold: boost pad timers,
 //! the match clock and score.
 
 mod bot;
+mod chaser;
 mod convert;
 
 pub use bot::{run_policy, Policy, PolicyBot};
+pub use chaser::chaser;
 pub use convert::{controller_state, observation};
