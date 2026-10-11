@@ -40,9 +40,27 @@ impl TieUp {
     }
 }
 
+/// Whether `--overtime-goal` should shoot now: in overtime play, once. The clock is not asked:
+/// in overtime core reports `game_time_remaining` as 0.0 at the first kickoff and then negative
+/// (-39.0 at a goal 39 s in; seen on RLBot rc17), so any "time left" test never holds.
+pub fn overtime_goal_due(overtime: bool, playing: bool, sent: bool) -> bool {
+    overtime && playing && !sent
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overtime_goal_is_due_once_in_overtime_play_whatever_the_clock_says() {
+        assert!(overtime_goal_due(true, true, false));
+        assert!(!overtime_goal_due(true, true, true), "only once");
+        assert!(
+            !overtime_goal_due(true, false, false),
+            "not during a kickoff or replay"
+        );
+        assert!(!overtime_goal_due(false, true, false), "not in regulation");
+    }
 
     #[test]
     fn a_level_score_is_done_without_a_shot() {
