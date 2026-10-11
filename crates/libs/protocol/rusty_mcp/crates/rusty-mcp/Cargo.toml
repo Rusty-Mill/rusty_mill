@@ -1,6 +1,6 @@
 [package]
 name = "rusty-mcp"
-version = "0.6.0"
+version = "0.7.0"
 description = "Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry"
 keywords = ["mcp", "model-context-protocol", "ai", "llm"]
 categories = ["network-programming", "development-tools"]
