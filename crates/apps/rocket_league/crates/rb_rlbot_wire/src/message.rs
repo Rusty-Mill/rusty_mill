@@ -4,7 +4,9 @@
 use rusty_flatbuffers::{Builder, Offset, Table};
 
 use crate::codec::{TableCodec, R};
-use crate::tables::{ConnectionSettings, InitComplete, Ping, PlayerInput, StopCommand};
+use crate::tables::{
+    ConnectionSettings, InitComplete, Ping, PlayerInput, StartCommand, StopCommand,
+};
 use crate::types::{
     ControllableTeamInfo, DesiredGameState, FieldInfo, GamePacket, MatchConfiguration,
 };
@@ -32,15 +34,30 @@ fn open(payload: &[u8]) -> R<(u8, Table<'_>)> {
 /// What a client (bot, script or match runner) sends to core.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InterfaceMessage {
+    /// The client is leaving.
+    DisconnectSignal,
+    /// Start a match from an `rlbot.toml` path.
+    StartCommand(StartCommand),
     MatchConfiguration(MatchConfiguration),
     PlayerInput(PlayerInput),
     DesiredGameState(DesiredGameState),
     ConnectionSettings(ConnectionSettings),
     StopCommand(StopCommand),
     InitComplete(InitComplete),
+    /// The client asks core for a ping answer (latency measurement).
+    PingRequest(Ping),
     /// The answer to [`CoreMessage::PingRequest`].
     PingResponse(Ping),
+    /// A schema member this crate does not model (render groups, comms, loadouts, ...), by tag.
+    /// A server can skip it; it cannot be encoded.
+    Other(u8),
 }
+
+/// The highest `InterfaceMessage` union member in the pinned schema.
+const I_LAST: u8 = 17;
+const I_DISCONNECT_SIGNAL: u8 = 1;
+const I_START_COMMAND: u8 = 2;
+const I_PING_REQUEST: u8 = 14;
 
 const I_MATCH_CONFIGURATION: u8 = 3;
 const I_PLAYER_INPUT: u8 = 4;
@@ -54,6 +71,15 @@ impl InterfaceMessage {
     /// The payload bytes, without the length prefix (see [`crate::frame`]).
     pub fn to_payload(&self) -> R<Vec<u8>> {
         match self {
+            InterfaceMessage::DisconnectSignal => {
+                packet(I_DISCONNECT_SIGNAL, |b| InitComplete.write(b))
+            }
+            InterfaceMessage::StartCommand(m) => packet(I_START_COMMAND, |b| m.write(b)),
+            InterfaceMessage::PingRequest(m) => packet(I_PING_REQUEST, |b| m.write(b)),
+            InterfaceMessage::Other(tag) => Err(Error::UnknownUnion {
+                name: "InterfaceMessage",
+                tag: *tag,
+            }),
             InterfaceMessage::MatchConfiguration(m) => {
                 packet(I_MATCH_CONFIGURATION, |b| m.write(b))
             }
@@ -73,6 +99,13 @@ impl InterfaceMessage {
     pub fn from_payload(payload: &[u8]) -> R<InterfaceMessage> {
         let (tag, t) = open(payload)?;
         Ok(match tag {
+            I_DISCONNECT_SIGNAL => {
+                // Empty table: look a field up so a damaged vtable is an error, as for core's.
+                t.has_field(0)?;
+                InterfaceMessage::DisconnectSignal
+            }
+            I_START_COMMAND => InterfaceMessage::StartCommand(StartCommand::read(&t)?),
+            I_PING_REQUEST => InterfaceMessage::PingRequest(Ping::read(&t)?),
             I_MATCH_CONFIGURATION => {
                 InterfaceMessage::MatchConfiguration(MatchConfiguration::read(&t)?)
             }
@@ -84,6 +117,7 @@ impl InterfaceMessage {
             I_STOP_COMMAND => InterfaceMessage::StopCommand(StopCommand::read(&t)?),
             I_INIT_COMPLETE => InterfaceMessage::InitComplete(InitComplete::read(&t)?),
             I_PING_RESPONSE => InterfaceMessage::PingResponse(Ping::read(&t)?),
+            tag @ 1..=I_LAST => InterfaceMessage::Other(tag),
             tag => {
                 return Err(Error::UnknownUnion {
                     name: "InterfaceMessage",
@@ -187,4 +221,5 @@ into_interface!(
     ConnectionSettings(ConnectionSettings),
     StopCommand(StopCommand),
     InitComplete(InitComplete),
+    StartCommand(StartCommand),
 );

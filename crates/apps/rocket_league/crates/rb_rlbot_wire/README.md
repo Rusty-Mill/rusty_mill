@@ -5,8 +5,8 @@ Stage 2 of the native RLBot port (`../../rlbot/PLAN.md`).
 
 - **Frames:** `frame::frame`, `frame::read_frame` (blocking) and `frame::FrameDecoder` (byte
   stream in arbitrary pieces, for non-blocking sockets): a `u16` big-endian length, then the payload.
-- **Messages:** `InterfaceMessage` (client to core: connection settings, init complete, stop, player
-  input, state setting, match configuration, ping response) and `CoreMessage` (core to client: game
+- **Messages:** `InterfaceMessage` (client to core: connection settings, init complete, start, disconnect, ping request, stop, player
+  input, state setting, match configuration, ping response; other schema members are `Other(tag)`) and `CoreMessage` (core to client: game
   packet, field info, controllable team info, match configuration, disconnect signal, ping request;
   anything else is `Other(tag)`). Both encode **and** decode, so a stand-in core can be built from the same types.
 - **Scope:** the fields `rb_tape_bot` and a match runner use. Each type documents what it leaves
