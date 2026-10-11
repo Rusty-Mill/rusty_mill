@@ -431,8 +431,8 @@ the in-repo client's bytes. With the game and core set up as above:
    `N packets written`. The tie-up and overtime paths need a finite match, so
    pass `--length five` and enough `--seconds` for regulation to end (a longer
    one for overtime): `--length five --seconds 480 --tie-up` (the score must be unlevel when the last 20 s start, or it has nothing to do), then
-   `--length five --seconds 720 --tie-up --overtime-goal` (goals and replays use wall-clock time, so a
-   five-minute match takes about nine minutes of window, and overtime starts after that). Exit 0 is not a pass:
+   `--length five --seconds 840 --tie-up --overtime-goal` (goals and replays use wall-clock time, so a
+   five-minute match takes about twelve minutes of window, and overtime starts after that). Exit 0 is not a pass:
    the run must print `tie-up goal sent at remaining ...` (when the score was
    not already tied) and, for overtime, `overtime goal sent ...`, and the log
    must show `"overtime":true` rows.
