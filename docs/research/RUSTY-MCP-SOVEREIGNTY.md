@@ -14,7 +14,7 @@ Facts below were read from the code on 2026-10-10; nothing here is built yet.
 | `serde`, `serde_json` | `Value` in `trace`, `auth/*`; `Serialize` on `ProtectedResourceMetadata` | `rusty_json` (`Value`, hand-written codec, as `rusty_mcp_proto` does) | metadata needs a `to_value`; gateway callers pass `serde_json::Value` today | done (direct dependency) |
 | `thiserror` | error enums in `auth/*`, `otel/mod.rs` | hand-written `Display` and `std::error::Error` impls, not `rusty_err` | `rusty_err`'s derive implements its own `Error` trait, not `std::error::Error`, so `?` into `Box<dyn std::error::Error>` (the gateway) would break. Four small enums, no dependency | done |
 | `reqwest` | JWKS fetch (`auth/jwt.rs`, feature `jwt`) | `rusty_request` with its `tokio` feature, which runs each request on the caller's own runtime | none: no bridge or second runtime needed (the plan expected one). `reqwest` stays as a dev-dependency of the tests | done |
-| `jsonwebtoken` | RS256 and ES256 verify, claim checks, JWKS key lookup (`auth/jwt.rs`, 475 lines) | `rusty_oauth`: `jwt::rsa::verify_rs256`, `jwt::es256::verify_es256`, `jwks::JwkSet` (`rsa_key`, `ec_key`), `jwt::{decode_unverified, validate_claims}`; primitives in `rusty_pk`, `rusty_sha2` | glue only. Must keep: algorithm whitelist (no `none`, no HS with a public key), `kid` lookup with refetch limits, `iss`/`aud` (array form)/`exp`/`nbf` with leeway. Reuse the 8 `jwt_validator` tests as the parity suite | medium |
+| `jsonwebtoken` | RS256 and ES256 verify, claim checks, JWKS key lookup (`auth/jwt.rs`, 475 lines) | `rusty_oauth`: `jwt::rsa::verify_rs256`, `jwt::es256::verify_es256`, `jwks::JwkSet` (`rsa_key`, `ec_key`), `jwt::{decode_unverified, validate_claims}`; primitives in `rusty_pk`, `rusty_sha2` | glue only. Must keep: algorithm whitelist (no `none`, no HS with a public key), `kid` lookup with refetch limits, `iss`/`aud` (array form)/`exp`/`nbf` with leeway. Reuse the 8 `jwt_validator` tests as the parity suite | done (dev-dependency only, to sign test tokens) |
 | `axum` | `Response`/`IntoResponse` in `auth/layer.rs`, `limits.rs`, `otel/metrics.rs`; `Json` in doc examples | none needed: build `http::Response<B>` with a generic body | a layer that wraps an `axum::Router` must return axum's body type, so be generic over `B: From<...>` | medium |
 | `tower-layer`, `tower-service` | the `Layer`/`Service` impls of all three layers | none possible while the gateway is axum | interface-only crates (about 100 lines, no dependencies). Keep as a named exception until the gateway leaves axum | exception |
 | `http` | request/response types | `rusty_http` | the gateway speaks `http` types through axum. Keep at the adapter boundary only | exception |
@@ -94,7 +94,21 @@ Each item is one PR, with its own tests and a change fragment.
    algorithm whitelist, claim checks and `kid` handling; add negative tests for
    `alg: none`, an HS256 token signed with the public key, wrong `aud`, expired,
    not-yet-valid, unknown `kid`. *Done when:* `jsonwebtoken` is gone and the 8
-   existing validator tests plus the new negatives pass. Needs D5.
+   existing validator tests plus the new negatives pass. Needs D5. **Done
+   (2026-10-11), with four changes:** (1) `jsonwebtoken` is gone from
+   `rusty-mcp`'s `[dependencies]`; it stays as a dev-dependency because
+   `rusty_oauth` only verifies RSA signatures, so the tests still sign RS256
+   tokens with it, and `agentgateway-auth` keeps its own copy for `file_jwks`.
+   (2) The public `with_algorithms` takes the new `JwtAlgorithm` (`Rs256`,
+   `Es256`, `#[non_exhaustive]`) instead of `jsonwebtoken::Algorithm`, so
+   `rusty-mcp` is 0.9.0. (3) Stricter than before, on purpose: RSA moduli
+   must be 2048 to 4096 bits (the old verifier enforced only the upper bound),
+   exponents odd and at least 3, two JWKS keys with one `kid` match
+   nothing, base64 must be canonical, and a token expires one second earlier
+   at the `exp + leeway` boundary. (4) "Wrong `aud`" has no validator test:
+   the validator leaves `aud` to the layer by design, and the layer's tests
+   cover it. `rusty_oauth`'s RSA verification has no key-size bounds of its
+   own, so the bounds live in this crate; that gap is worth closing there.
 5. **Sans-IO cores** for `auth`, `limits` and metrics recording, on `rusty_http`
    types; the existing layers become tower adapters over them. No behaviour
    change. *Done when:* the cores have unit tests with no `tokio` or `axum`.

@@ -30,6 +30,15 @@
 //! [`AuthConfig::resource`](crate::auth::AuthConfig::resource). Checking it in
 //! both places would mean two sources of truth for the same value, and the one
 //! that silently stopped matching would be the one nobody noticed.
+//!
+//! # Algorithms and keys
+//!
+//! Only RS256 and ES256 exist ([`JwtAlgorithm`]); `none` and the HMAC
+//! algorithms cannot be configured. A token's `alg` is checked against the
+//! allow-list before any key is looked up, the key must be of the family the
+//! algorithm needs, and the token must carry a `kid`. RSA moduli must be 2048
+//! to 4096 bits, because the key arrives in a network document and each
+//! verification costs more the larger it is.
 
 use std::{
     collections::BTreeSet,
@@ -38,12 +47,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use jsonwebtoken::{
-    Algorithm, DecodingKey, Validation, decode, decode_header,
-    errors::ErrorKind,
-    jwk::{Jwk, JwkSet},
-};
 use rusty_json::Value;
+use rusty_oauth::{
+    Error as OAuthError,
+    jwks::{Jwk, JwkSet},
+    jwt::{Validation, decode_unverified, es256, rsa, validate_claims},
+};
 use tokio::sync::RwLock;
 
 use super::token::{TokenError, TokenValidator, ValidateFuture, VerifiedToken};
@@ -57,6 +66,56 @@ const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(300);
 /// authorization server by presenting tokens with random `kid` values — a
 /// cheap amplification attack through a server that is trying to be helpful.
 const DEFAULT_MIN_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// RSA moduli outside this range are refused. The upper bound is what the
+/// previous verifier enforced, and it matters: the modular exponentiation
+/// behind each verification costs more the larger the modulus, and the key
+/// comes from a network document.
+const MIN_RSA_MODULUS_BITS: usize = 2048;
+const MAX_RSA_MODULUS_BITS: usize = 4096;
+
+/// Largest RSA public exponent accepted (33 bits, as before).
+const MAX_RSA_EXPONENT: u64 = (1 << 33) - 1;
+
+/// Leeway is clamped to this many seconds, well inside the range the claim
+/// arithmetic can add to a timestamp without overflowing.
+const MAX_LEEWAY_SECS: u64 = i32::MAX as u64;
+
+/// A signing algorithm a [`JwtValidator`] may be told to accept.
+///
+/// Only asymmetric algorithms exist, on purpose. A shared-secret algorithm
+/// such as `HS256` checked against a key published in a JWKS is the root of
+/// the classic algorithm-confusion forgery, and `none` is never acceptable:
+/// with no variant for either, no configuration can switch them on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum JwtAlgorithm {
+    /// RSASSA-PKCS1-v1_5 with SHA-256 (RFC 7518 §3.3), for RSA keys of 2048
+    /// to 4096 bits.
+    Rs256,
+    /// ECDSA over P-256 with SHA-256 (RFC 7518 §3.4).
+    Es256,
+}
+
+impl JwtAlgorithm {
+    /// The algorithm a token's `alg` header names, if it is one we implement.
+    fn from_header_name(name: &str) -> Option<Self> {
+        match name {
+            "RS256" => Some(Self::Rs256),
+            "ES256" => Some(Self::Es256),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for JwtAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Rs256 => "RS256",
+            Self::Es256 => "ES256",
+        })
+    }
+}
 
 /// Building a [`JwtValidator`] failed.
 #[derive(Debug)]
@@ -81,7 +140,7 @@ impl std::error::Error for JwtValidatorError {}
 pub struct JwtValidatorBuilder {
     issuer: String,
     jwks_uri: String,
-    algorithms: Vec<Algorithm>,
+    algorithms: Vec<JwtAlgorithm>,
     leeway_secs: u64,
     jwks_ttl: Duration,
     min_refetch_interval: Duration,
@@ -95,12 +154,13 @@ impl JwtValidatorBuilder {
     /// Defaults to RS256 and ES256. Keep this list tight: accepting every
     /// algorithm an authorization server *might* use widens the attack surface
     /// for no benefit.
-    pub fn with_algorithms(mut self, algorithms: impl IntoIterator<Item = Algorithm>) -> Self {
+    pub fn with_algorithms(mut self, algorithms: impl IntoIterator<Item = JwtAlgorithm>) -> Self {
         self.algorithms = algorithms.into_iter().collect();
         self
     }
 
-    /// Clock-skew allowance for `exp` and `nbf`, in seconds. Defaults to 60.
+    /// Clock-skew allowance for `exp` and `nbf`, in seconds. Defaults to 60;
+    /// values above `i32::MAX` are clamped to it.
     pub fn with_leeway_secs(mut self, leeway_secs: u64) -> Self {
         self.leeway_secs = leeway_secs;
         self
@@ -187,7 +247,7 @@ impl JwksCache {
 pub struct JwtValidator {
     issuer: String,
     jwks_uri: String,
-    algorithms: Vec<Algorithm>,
+    algorithms: Vec<JwtAlgorithm>,
     leeway_secs: u64,
     jwks_ttl: Duration,
     min_refetch_interval: Duration,
@@ -204,7 +264,7 @@ impl JwtValidator {
         JwtValidatorBuilder {
             issuer: issuer.into(),
             jwks_uri: jwks_uri.into(),
-            algorithms: vec![Algorithm::RS256, Algorithm::ES256],
+            algorithms: vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256],
             leeway_secs: 60,
             jwks_ttl: DEFAULT_JWKS_TTL,
             min_refetch_interval: DEFAULT_MIN_REFETCH_INTERVAL,
@@ -235,7 +295,10 @@ impl JwtValidator {
             )));
         }
 
-        let keys: JwkSet = rusty_json::from_slice(response.bytes())
+        let body = response
+            .text()
+            .map_err(|err| TokenError::Unavailable(format!("malformed JWKS: {err}")))?;
+        let keys = JwkSet::parse(&body)
             .map_err(|err| TokenError::Unavailable(format!("malformed JWKS: {err}")))?;
 
         let mut cache = self.cache.write().await;
@@ -284,57 +347,146 @@ impl JwtValidator {
         )))
     }
 
+    /// The algorithm the token asks for, if this validator accepts it.
+    ///
+    /// Decided from the allow-list alone, before any key is looked up: that is
+    /// what stops an attacker choosing the algorithm (`alg: none`, or an
+    /// HMAC token "signed" with a public key).
+    fn accepted_algorithm(&self, header: &Value) -> Result<JwtAlgorithm, TokenError> {
+        let name = header
+            .get("alg")
+            .and_then(Value::as_str)
+            .ok_or_else(|| TokenError::Invalid("token header has no `alg`".to_string()))?;
+        JwtAlgorithm::from_header_name(name)
+            .filter(|alg| self.algorithms.contains(alg))
+            .ok_or_else(|| {
+                // The name is the caller's, so keep it short.
+                let shown: String = name.chars().take(16).collect();
+                TokenError::Invalid(format!("signing algorithm `{shown}` is not accepted"))
+            })
+    }
+
     /// Verify `token` and extract the claims the layer needs.
     async fn verify(&self, token: &str) -> Result<VerifiedToken, TokenError> {
-        let header = decode_header(token)
-            .map_err(|err| TokenError::Invalid(format!("malformed token header: {err}")))?;
+        let decoded = decode_unverified(token)
+            .map_err(|err| TokenError::Invalid(format!("malformed token: {err}")))?;
 
-        // Pin the algorithm to the allow-list before touching any key. This is
-        // what prevents an attacker choosing the algorithm — the `alg: none`
-        // and RS256-verified-as-HS256 family of attacks.
-        if !self.algorithms.contains(&header.alg) {
-            return Err(TokenError::Invalid(format!(
-                "signing algorithm {:?} is not accepted",
-                header.alg
-            )));
-        }
+        let alg = self.accepted_algorithm(&decoded.header)?;
 
-        let kid = header
-            .kid
+        let kid = decoded
+            .header
+            .get("kid")
+            .and_then(Value::as_str)
             .ok_or_else(|| TokenError::Invalid("token header has no `kid`".to_string()))?;
 
-        let jwk = self.key_for(&kid).await?;
-        let key = DecodingKey::from_jwk(&jwk)
-            .map_err(|err| TokenError::Invalid(format!("unusable signing key: {err}")))?;
+        let jwk = self.key_for(kid).await?;
+        let claims = verify_signature(token, alg, &jwk)?;
+        check_claims(&claims, &self.issuer, self.leeway_secs)?;
 
-        let mut validation = Validation::new(header.alg);
-        validation.set_issuer(&[self.issuer.as_str()]);
-        validation.leeway = self.leeway_secs;
-        validation.validate_exp = true;
-        validation.validate_nbf = true;
-        // Audience is enforced by the layer against the configured resource;
-        // see the module docs.
-        validation.validate_aud = false;
-        validation.required_spec_claims = ["exp", "iss"].iter().map(|s| s.to_string()).collect();
-
-        let data = decode::<Value>(token, &key, &validation).map_err(|err| match err.kind() {
-            ErrorKind::ExpiredSignature => TokenError::Expired,
-            ErrorKind::InvalidIssuer => {
-                TokenError::Invalid("the token was issued by an unexpected issuer".to_string())
-            }
-            ErrorKind::InvalidSignature => {
-                TokenError::Invalid("the token signature is invalid".to_string())
-            }
-            other => TokenError::Invalid(format!("token validation failed: {other:?}")),
-        })?;
-
-        Ok(claims_to_token(data.claims, &self.scope_claim))
+        Ok(claims_to_token(claims, &self.scope_claim))
     }
 }
 
 impl TokenValidator for JwtValidator {
     fn validate<'a>(&'a self, token: &'a str) -> ValidateFuture<'a> {
         Box::pin(self.verify(token))
+    }
+}
+
+/// Verify the signature with a key of the family `alg` needs, and return the
+/// claims. An RSA key never verifies an ES256 token or the reverse: the key
+/// is converted for the algorithm, not the other way round.
+fn verify_signature(token: &str, alg: JwtAlgorithm, jwk: &Jwk) -> Result<Value, TokenError> {
+    let verified = match alg {
+        JwtAlgorithm::Rs256 => {
+            let key = rsa_key(jwk)?;
+            rsa::verify_rs256(token, &key)
+        }
+        JwtAlgorithm::Es256 => {
+            let key = jwk.to_ec_public_key().map_err(unusable_key)?;
+            es256::verify_es256(token, &key)
+        }
+    };
+    verified.map_err(|_| TokenError::Invalid("the token signature is invalid".to_string()))
+}
+
+fn unusable_key(reason: impl fmt::Display) -> TokenError {
+    TokenError::Invalid(format!("unusable signing key: {reason}"))
+}
+
+/// An RSA verification key from a JWK, with the modulus and exponent checked
+/// against the bounds above before any arithmetic is done with them.
+fn rsa_key(jwk: &Jwk) -> Result<rsa::RsaPublicKey, TokenError> {
+    if jwk.kty != "RSA" {
+        return Err(unusable_key("the key is not an RSA key"));
+    }
+    let component = |name: &str| -> Result<Vec<u8>, TokenError> {
+        let encoded = jwk
+            .raw
+            .get(name)
+            .and_then(Value::as_str)
+            .ok_or_else(|| unusable_key(format!("the RSA key has no `{name}`")))?;
+        rusty_base64::decode_url_safe(encoded)
+            .map_err(|err| unusable_key(format!("RSA `{name}` is not base64url: {err}")))
+    };
+    let n = component("n")?;
+    let e = component("e")?;
+
+    // A leading zero byte is not allowed (RFC 7518 §6.3.1.1) and would make
+    // every signature the wrong length for the key.
+    if n.first() == Some(&0) {
+        return Err(unusable_key("the RSA modulus has a leading zero byte"));
+    }
+    let bits = n
+        .first()
+        .map_or(0, |top| n.len() * 8 - top.leading_zeros() as usize);
+    if !(MIN_RSA_MODULUS_BITS..=MAX_RSA_MODULUS_BITS).contains(&bits) {
+        return Err(unusable_key(format!(
+            "the RSA modulus is {bits} bits; {MIN_RSA_MODULUS_BITS} to {MAX_RSA_MODULUS_BITS} are accepted"
+        )));
+    }
+
+    // Five bytes hold 33 bits; anything longer is out of range already.
+    let exponent = if e.len() <= 5 {
+        e.iter()
+            .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte))
+    } else {
+        u64::MAX
+    };
+    if exponent < 3 || exponent % 2 == 0 || exponent > MAX_RSA_EXPONENT {
+        return Err(unusable_key("the RSA public exponent is out of range"));
+    }
+
+    Ok(rsa::RsaPublicKey::from_components(&n, &e))
+}
+
+/// Check `exp`, `nbf` and `iss`. Audience is left to the layer.
+fn check_claims(claims: &Value, issuer: &str, leeway_secs: u64) -> Result<(), TokenError> {
+    let leeway_seconds = i64::try_from(leeway_secs.min(MAX_LEEWAY_SECS)).unwrap_or(i64::MAX);
+    let options = Validation {
+        leeway_seconds,
+        expected_issuer: Some(issuer.to_string()),
+        expected_audience: None,
+        require_exp: true,
+    };
+    validate_claims(claims, &options).map_err(|err| classify_claim_failure(&err))
+}
+
+/// Turn a failed claim check into the error the layer expects. The messages
+/// are ours, not the verifier's, so a token cannot put its own text into a
+/// response header.
+fn classify_claim_failure(err: &OAuthError) -> TokenError {
+    let OAuthError::Validation(reason) = err else {
+        return TokenError::Invalid("token validation failed".to_string());
+    };
+    if reason.starts_with("token has expired") {
+        TokenError::Expired
+    } else if reason.starts_with("token is not yet valid") {
+        TokenError::Invalid("the token is not yet valid".to_string())
+    } else if reason.starts_with("unexpected issuer") {
+        TokenError::Invalid("the token was issued by an unexpected issuer".to_string())
+    } else {
+        TokenError::Invalid("token validation failed".to_string())
     }
 }
 
@@ -385,6 +537,8 @@ fn extract_scopes(scope: Option<&Value>) -> BTreeSet<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
     use rusty_json::json;
 
@@ -457,7 +611,10 @@ mod tests {
         // Symmetric algorithms have no place with a JWKS: the shared secret
         // would have to be published as a key.
         let builder = JwtValidator::builder("https://auth.example.com", "https://auth/jwks");
-        assert_eq!(builder.algorithms, vec![Algorithm::RS256, Algorithm::ES256]);
+        assert_eq!(
+            builder.algorithms,
+            vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256]
+        );
     }
 
     #[tokio::test]
@@ -479,5 +636,233 @@ mod tests {
         let cache = JwksCache::default();
         assert!(!cache.is_fresh(DEFAULT_JWKS_TTL));
         assert!(cache.may_refetch(DEFAULT_MIN_REFETCH_INTERVAL));
+    }
+
+    const ISS: &str = "https://auth.example.com";
+
+    fn now_secs() -> i64 {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        i64::try_from(secs).expect("a plausible time")
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        rusty_base64::encode_url_safe_no_pad(bytes)
+    }
+
+    fn jwk(json: &str) -> Jwk {
+        JwkSet::parse(&format!(r#"{{"keys":[{json}]}}"#))
+            .expect("a JWKS")
+            .keys
+            .remove(0)
+    }
+
+    fn rsa_jwk(n: &[u8], e: &[u8]) -> Jwk {
+        jwk(&format!(
+            r#"{{"kty":"RSA","kid":"k","n":"{}","e":"{}"}}"#,
+            b64(n),
+            b64(e)
+        ))
+    }
+
+    /// A modulus of `bytes` bytes with its top bit set, so it is `bytes * 8` bits.
+    fn modulus_of(bytes: usize) -> Vec<u8> {
+        vec![0xFF; bytes]
+    }
+
+    fn reason(err: TokenError) -> String {
+        match err {
+            TokenError::Invalid(why) => why,
+            other => panic!("expected Invalid, got {other}"),
+        }
+    }
+
+    fn default_validator() -> JwtValidator {
+        JwtValidator::builder(ISS, "https://auth.example.com/jwks")
+            .build()
+            .expect("build")
+    }
+
+    #[test]
+    fn rsa_moduli_from_2048_to_4096_bits_are_accepted() {
+        assert!(rsa_key(&rsa_jwk(&modulus_of(256), &[1, 0, 1])).is_ok());
+        assert!(rsa_key(&rsa_jwk(&modulus_of(512), &[1, 0, 1])).is_ok());
+    }
+
+    #[test]
+    fn rsa_moduli_outside_that_range_are_refused() {
+        // 255 bytes is 2040 bits; 513 bytes is 4104.
+        for bytes in [0, 1, 128, 255, 513, 1024] {
+            let err = rsa_key(&rsa_jwk(&modulus_of(bytes), &[1, 0, 1])).expect_err("out of range");
+            assert!(reason(err).contains("bits"), "{bytes} bytes");
+        }
+    }
+
+    #[test]
+    fn a_modulus_with_a_leading_zero_byte_is_refused() {
+        let mut n = vec![0];
+        n.extend(modulus_of(256));
+        let err = rsa_key(&rsa_jwk(&n, &[1, 0, 1])).expect_err("leading zero");
+        assert!(reason(err).contains("leading zero"));
+    }
+
+    #[test]
+    fn only_odd_exponents_up_to_33_bits_are_accepted() {
+        let n = modulus_of(256);
+        for e in [vec![3], vec![1, 0, 1], vec![1, 0, 0, 0, 1]] {
+            assert!(rsa_key(&rsa_jwk(&n, &e)).is_ok(), "{e:?}");
+        }
+        // Empty, 0, 1, even, 2^33 + 1, and one byte too long.
+        for e in [
+            vec![],
+            vec![0],
+            vec![1],
+            vec![2],
+            vec![4],
+            vec![1, 0, 0, 0, 0],
+            vec![2, 0, 0, 0, 1],
+            vec![1, 0, 0, 0, 0, 1],
+        ] {
+            let err = rsa_key(&rsa_jwk(&n, &e)).expect_err("bad exponent");
+            assert!(reason(err).contains("exponent"), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn an_ec_key_is_not_an_rsa_key() {
+        let key = jwk(r#"{"kty":"EC","crv":"P-256","kid":"k","x":"AA","y":"AA"}"#);
+        let err = rsa_key(&key).expect_err("wrong family");
+        assert!(reason(err).contains("not an RSA key"));
+    }
+
+    #[test]
+    fn claims_that_are_in_order_pass() {
+        let claims = json!({"iss": ISS, "exp": now_secs() + 600});
+        assert!(check_claims(&claims, ISS, 60).is_ok());
+    }
+
+    #[test]
+    fn an_expired_token_is_reported_as_expired() {
+        let claims = json!({"iss": ISS, "exp": now_secs() - 3600});
+        assert!(matches!(
+            check_claims(&claims, ISS, 60),
+            Err(TokenError::Expired)
+        ));
+    }
+
+    #[test]
+    fn leeway_covers_a_slightly_expired_token_and_no_more() {
+        let within = json!({"iss": ISS, "exp": now_secs() - 30});
+        assert!(check_claims(&within, ISS, 60).is_ok());
+
+        let beyond = json!({"iss": ISS, "exp": now_secs() - 120});
+        assert!(matches!(
+            check_claims(&beyond, ISS, 60),
+            Err(TokenError::Expired)
+        ));
+    }
+
+    #[test]
+    fn a_future_nbf_is_not_yet_valid_unless_leeway_covers_it() {
+        let later = json!({"iss": ISS, "exp": now_secs() + 7200, "nbf": now_secs() + 3600});
+        let err = check_claims(&later, ISS, 60).expect_err("not yet valid");
+        assert!(reason(err).contains("not yet valid"));
+
+        let soon = json!({"iss": ISS, "exp": now_secs() + 7200, "nbf": now_secs() + 30});
+        assert!(check_claims(&soon, ISS, 60).is_ok());
+    }
+
+    #[test]
+    fn a_wrong_or_missing_issuer_is_refused() {
+        let exp = now_secs() + 600;
+        let wrong = json!({"iss": "https://evil.example.com", "exp": exp});
+        assert!(
+            reason(check_claims(&wrong, ISS, 60).expect_err("wrong")).contains("unexpected issuer")
+        );
+
+        let missing = json!({"exp": exp});
+        assert!(check_claims(&missing, ISS, 60).is_err());
+
+        let not_a_string = json!({"iss": 7, "exp": exp});
+        assert!(check_claims(&not_a_string, ISS, 60).is_err());
+    }
+
+    #[test]
+    fn a_missing_or_non_integer_exp_is_refused() {
+        for claims in [
+            json!({"iss": ISS}),
+            json!({"iss": ISS, "exp": "soon"}),
+            json!({"iss": ISS, "exp": 4102444800.5}),
+            json!({"iss": ISS, "exp": null}),
+        ] {
+            assert!(check_claims(&claims, ISS, 60).is_err(), "{claims:?}");
+        }
+    }
+
+    #[test]
+    fn an_enormous_leeway_is_clamped_not_overflowed() {
+        let valid = json!({"iss": ISS, "exp": now_secs() + 600});
+        assert!(check_claims(&valid, ISS, u64::MAX).is_ok());
+
+        // Extreme timestamps against the clamped leeway must not overflow either.
+        let far_future_nbf = json!({"iss": ISS, "exp": i64::MAX, "nbf": i64::MAX});
+        assert!(check_claims(&far_future_nbf, ISS, u64::MAX).is_err());
+        let ancient_exp = json!({"iss": ISS, "exp": i64::MIN});
+        assert!(matches!(
+            check_claims(&ancient_exp, ISS, u64::MAX),
+            Err(TokenError::Expired)
+        ));
+    }
+
+    #[test]
+    fn only_the_configured_asymmetric_algorithms_are_accepted() {
+        let validator = default_validator();
+        assert_eq!(
+            validator.accepted_algorithm(&json!({"alg": "RS256"})).ok(),
+            Some(JwtAlgorithm::Rs256)
+        );
+        assert_eq!(
+            validator.accepted_algorithm(&json!({"alg": "ES256"})).ok(),
+            Some(JwtAlgorithm::Es256)
+        );
+        for alg in [
+            "none", "None", "HS256", "HS384", "RS384", "PS256", "EdDSA", "rs256", "",
+        ] {
+            assert!(
+                validator.accepted_algorithm(&json!({"alg": alg})).is_err(),
+                "{alg:?}"
+            );
+        }
+        assert!(validator.accepted_algorithm(&json!({})).is_err());
+        assert!(validator.accepted_algorithm(&json!({"alg": 256})).is_err());
+    }
+
+    #[test]
+    fn a_narrower_allow_list_is_respected() {
+        let validator = JwtValidator::builder(ISS, "https://auth.example.com/jwks")
+            .with_algorithms([JwtAlgorithm::Es256])
+            .build()
+            .expect("build");
+        assert!(
+            validator
+                .accepted_algorithm(&json!({"alg": "RS256"}))
+                .is_err()
+        );
+        assert!(
+            validator
+                .accepted_algorithm(&json!({"alg": "ES256"}))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_long_algorithm_name_is_cut_short_in_the_message() {
+        let validator = default_validator();
+        let err = validator
+            .accepted_algorithm(&json!({"alg": "A".repeat(1000)}))
+            .expect_err("unknown algorithm");
+        assert!(reason(err).len() < 80);
     }
 }

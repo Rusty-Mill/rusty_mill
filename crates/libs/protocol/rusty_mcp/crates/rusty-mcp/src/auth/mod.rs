@@ -87,7 +87,7 @@ mod token;
 pub use challenge::Challenge;
 pub use config::{AuthConfig, AuthConfigError};
 #[cfg(feature = "jwt")]
-pub use jwt::{JwtValidator, JwtValidatorBuilder, JwtValidatorError};
+pub use jwt::{JwtAlgorithm, JwtValidator, JwtValidatorBuilder, JwtValidatorError};
 pub use layer::{RequireAuth, RequireAuthLayer};
 pub use metadata::ProtectedResourceMetadata;
 pub use token::{StaticTokenValidator, TokenError, TokenValidator, ValidateFuture, VerifiedToken};
