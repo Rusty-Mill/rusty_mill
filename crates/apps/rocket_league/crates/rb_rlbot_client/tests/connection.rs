@@ -393,3 +393,35 @@ fn a_match_runner_without_an_id_reads_the_two_messages_core_sends_it() {
     ));
     assert!(matches!(client.recv().unwrap(), CoreMessage::FieldInfo(_)));
 }
+
+/// Reads leave the socket nonblocking; a send after them must still block under backpressure
+/// rather than fail with `WouldBlock` after part of a frame went out.
+#[test]
+fn a_send_after_a_poll_waits_for_a_slow_reader_instead_of_failing_midway() {
+    let core = FakeCore::start();
+    let mut client = Connection::connect(core.addr()).unwrap();
+    let mut peer = core.accept();
+    assert!(client.recv_timeout(Duration::ZERO).unwrap().is_none());
+    assert!(client
+        .recv_timeout(Duration::from_millis(5))
+        .unwrap()
+        .is_none());
+
+    // About 24 MB in one write: more than both socket buffers hold.
+    let big = ConnectionSettings {
+        agent_id: "x".repeat(60_000),
+        ..settings()
+    };
+    let messages: Vec<InterfaceMessage> = (0..400).map(|_| big.clone().into()).collect();
+    let sender = thread::spawn(move || client.send_all(&messages));
+
+    // Core is slow to start reading, so the sender hits a full buffer.
+    thread::sleep(Duration::from_millis(300));
+    for _ in 0..400 {
+        match peer.recv() {
+            InterfaceMessage::ConnectionSettings(s) => assert_eq!(s.agent_id.len(), 60_000),
+            other => panic!("expected ConnectionSettings, got {other:?}"),
+        }
+    }
+    sender.join().unwrap().unwrap();
+}

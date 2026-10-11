@@ -22,7 +22,7 @@ use rb_rlbot_wire::{
     PsyonixSkill, StopCommand,
 };
 use rb_tape_bot::{
-    tie_up::{Action, TieUp},
+    tie_up::{overtime_goal_due, Action, TieUp},
     vector,
 };
 
@@ -178,10 +178,11 @@ fn main() -> Result<()> {
                     }
                 }
                 if overtime_goal
-                    && !overtime_goal_sent
-                    && p.match_info.is_overtime
-                    && p.match_info.match_phase == MatchPhase::Active
-                    && p.match_info.game_time_remaining > 3.0
+                    && overtime_goal_due(
+                        p.match_info.is_overtime,
+                        p.match_info.match_phase == MatchPhase::Active,
+                        overtime_goal_sent,
+                    )
                 {
                     conn.send(goal_state(1.0))?;
                     overtime_goal_sent = true;
