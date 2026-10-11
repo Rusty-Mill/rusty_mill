@@ -40,4 +40,4 @@ cargo build --release -p rb_rlbot_bridge --bin rb_chaser_bot
 ```
 
 Then add `chaser.bot.toml` in the RLBot GUI and start a match. RLBot launches the binary with
-`RLBOT_SERVER_ADDR` and `RLBOT_AGENT_ID` set. Not yet run on the real game.
+`RLBOT_SERVER_PORT` and `RLBOT_AGENT_ID` set (the port defaults to 23234 when unset); `RLBOT_SERVER_ADDR` overrides the full `host:port`. Not yet run on the real game.

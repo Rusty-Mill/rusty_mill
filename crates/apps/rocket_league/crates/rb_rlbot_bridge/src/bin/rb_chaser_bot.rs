@@ -1,6 +1,6 @@
 //! A runnable RLBot v5 bot that plays `rb_env`'s scripted chaser: connects to core, takes every
 //! car it is given, and drives each at the ball. Started by RLBot core from `chaser.bot.toml`
-//! (`RLBOT_SERVER_ADDR` / `RLBOT_AGENT_ID` come from core's environment), or by hand for a
+//! (core sets `RLBOT_SERVER_PORT` and `RLBOT_AGENT_ID`; `RLBOT_SERVER_ADDR` overrides the host and port), or by hand for a
 //! match somebody else started.
 //!
 //! Usage: `rb_chaser_bot` (no arguments).
