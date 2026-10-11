@@ -10,9 +10,9 @@ Facts below were read from the code on 2026-10-10; nothing here is built yet.
 
 | External | Used for (files) | First-party replacement | Gap | Size |
 |---|---|---|---|---|
-| `percent-encoding` | baggage values (`trace.rs`) | `rusty_percent` | none | trivial |
-| `serde`, `serde_json` | `Value` in `trace`, `auth/*`; `Serialize` on `ProtectedResourceMetadata` | `rusty_json` (`Value`, hand-written codec, as `rusty_mcp_proto` does) | metadata needs a `to_value`; gateway callers pass `serde_json::Value` today | small |
-| `thiserror` | error enums in `auth/*`, `otel/mod.rs` | `rusty_err` (derive crate) | check the derive covers `#[error("..")]`, `#[from]`, `#[source]` | small |
+| `percent-encoding` | baggage values (`trace.rs`) | `rusty_percent` | none | done |
+| `serde`, `serde_json` | `Value` in `trace`, `auth/*`; `Serialize` on `ProtectedResourceMetadata` | `rusty_json` (`Value`, hand-written codec, as `rusty_mcp_proto` does) | metadata needs a `to_value`; gateway callers pass `serde_json::Value` today | done (direct dependency) |
+| `thiserror` | error enums in `auth/*`, `otel/mod.rs` | hand-written `Display` and `std::error::Error` impls, not `rusty_err` | `rusty_err`'s derive implements its own `Error` trait, not `std::error::Error`, so `?` into `Box<dyn std::error::Error>` (the gateway) would break. Four small enums, no dependency | done |
 | `reqwest` | JWKS fetch (`auth/jwt.rs`, feature `jwt`) | `rusty_request` (+ `rusty_tls`) | `rusty_request` is async on `rusty_tokio`; the validator runs inside the gateway's `tokio`. Needs a bridge (own runtime, as `rusty_mcp_client_native` does) | medium |
 | `jsonwebtoken` | RS256 and ES256 verify, claim checks, JWKS key lookup (`auth/jwt.rs`, 475 lines) | `rusty_oauth`: `jwt::rsa::verify_rs256`, `jwt::es256::verify_es256`, `jwks::JwkSet` (`rsa_key`, `ec_key`), `jwt::{decode_unverified, validate_claims}`; primitives in `rusty_pk`, `rusty_sha2` | glue only. Must keep: algorithm whitelist (no `none`, no HS with a public key), `kid` lookup with refetch limits, `iss`/`aud` (array form)/`exp`/`nbf` with leeway. Reuse the 8 `jwt_validator` tests as the parity suite | medium |
 | `axum` | `Response`/`IntoResponse` in `auth/layer.rs`, `limits.rs`, `otel/metrics.rs`; `Json` in doc examples | none needed: build `http::Response<B>` with a generic body | a layer that wraps an `axum::Router` must return axum's body type, so be generic over `B: From<...>` | medium |
@@ -23,7 +23,12 @@ Facts below were read from the code on 2026-10-10; nothing here is built yet.
 | `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry` | OTLP trace and metrics pipeline, `McpMetricsLayer` instruments (`otel/mod.rs` 418, `otel/metrics.rs` 551, `trace.rs`) | a first-party OTLP exporter: instruments as atomics, spans from a `tracing` `Layer`, encoding with `rusty_json` (OTLP/HTTP+JSON) over `rusty_request` | no in-house OTLP, no protobuf, no gRPC client. This is the largest item (D2) | large |
 | already first-party | `rusty_url`, `rusty_base64` | | | done |
 
-## 2. Decisions needed first
+## 2. Decisions
+
+Answered by the owner 2026-10-10: D1 cores plus adapters; D2 OTLP/HTTP+JSON;
+D3 keep `tracing` now, in-house facade is item 12; D4 yes, exceptions
+accepted; D5 parity first, other algorithms are item 11. The text below is the
+reasoning behind each.
 
 - **D1. Adapter shape.** Recommended: sans-IO cores (authorize a request,
   admit or shed, record a metric) plus two thin adapters: a `tower` layer
@@ -100,8 +105,15 @@ Each item is one PR, with its own tests and a change fragment.
    Needs D2 and D3.
 10. **Policy and docs.** `check_workspace_deps.py` accepts `rusty-mcp` as
     Tier S except the named exceptions (`http`, `tower-layer`, `tower-service`,
-    `tokio` in the adapter, `tracing` if D3 says keep). ADR-0002 Amendment 1
+    `tokio` in the adapter, `tracing`, D3: keep). ADR-0002 Amendment 1
     status line and `MCP-NATIVE-PLAN.md` A6 updated.
+11. **More JWT algorithms** (after item 4): PS256, ES384, EdDSA, one PR each,
+    on the `rusty_pk` primitives. Same negative-test bar as item 4, plus the
+    algorithm whitelist stays explicit (nothing is accepted by default).
+12. **In-house `tracing` facade** (workspace-wide, after item 9): replace
+    `tracing` and `tracing-subscriber` in the 74 crates that use them. Its own
+    plan and owner sign-off before any code; until then `tracing` is a named
+    Tier A exception of `rusty-mcp`.
 
 ## 4. Risks
 

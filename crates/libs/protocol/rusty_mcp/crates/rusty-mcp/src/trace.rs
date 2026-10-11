@@ -549,10 +549,12 @@ mod tests {
         let mut baggage = Baggage::new();
         baggage.insert("userId", "alice");
         baggage.insert("node", "DF 28");
+        baggage.insert("tricky", "a,b;c=d%e~f-g_h.i/é");
 
         let reparsed = Baggage::parse(&baggage.to_header_value());
         assert_eq!(reparsed.get("userId"), Some("alice"));
         assert_eq!(reparsed.get("node"), Some("DF 28"));
+        assert_eq!(reparsed.get("tricky"), Some("a,b;c=d%e~f-g_h.i/é"));
     }
 
     #[test]

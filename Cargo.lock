@@ -11872,7 +11872,7 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty-mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum 0.8.9",
  "http",
