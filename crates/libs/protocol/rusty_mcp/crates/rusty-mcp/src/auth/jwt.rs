@@ -64,28 +64,17 @@ const DEFAULT_MIN_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
 pub enum JwtValidatorError {
     /// No signing algorithms were permitted.
     NoAlgorithms,
-
-    /// The HTTP client could not be constructed.
-    Http(reqwest::Error),
 }
 
 impl fmt::Display for JwtValidatorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoAlgorithms => f.write_str("at least one signing algorithm must be allowed"),
-            Self::Http(e) => write!(f, "failed to build the HTTP client: {e}"),
         }
     }
 }
 
-impl std::error::Error for JwtValidatorError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Http(e) => Some(e),
-            Self::NoAlgorithms => None,
-        }
-    }
-}
+impl std::error::Error for JwtValidatorError {}
 
 /// Builder for [`JwtValidator`].
 #[derive(Debug, Clone)]
@@ -150,10 +139,17 @@ impl JwtValidatorBuilder {
             return Err(JwtValidatorError::NoAlgorithms);
         }
 
-        let http = reqwest::Client::builder()
+        // The settings `reqwest` had here: a request timeout, at most 10
+        // redirects, no cookie jar, no proxy from the environment. No
+        // connection pool either: fetches are minutes apart, and a pooled
+        // connection the server has since closed fails without a retry (and
+        // would also block the next fetch for the refetch interval).
+        let http = rusty_request::Client::builder()
             .timeout(self.request_timeout)
-            .build()
-            .map_err(JwtValidatorError::Http)?;
+            .max_redirects(10)
+            .no_cookie_store()
+            .no_pool()
+            .build();
 
         Ok(JwtValidator {
             issuer: self.issuer,
@@ -200,7 +196,7 @@ pub struct JwtValidator {
     jwks_ttl: Duration,
     min_refetch_interval: Duration,
     scope_claim: String,
-    http: reqwest::Client,
+    http: rusty_request::Client,
     cache: Arc<RwLock<JwksCache>>,
 }
 
@@ -231,6 +227,7 @@ impl JwtValidator {
         let response = self
             .http
             .get(&self.jwks_uri)
+            .map_err(|err| TokenError::Unavailable(format!("JWKS fetch failed: {err}")))?
             .send()
             .await
             .map_err(|err| TokenError::Unavailable(format!("JWKS fetch failed: {err}")))?;
@@ -242,9 +239,7 @@ impl JwtValidator {
             )));
         }
 
-        let keys: JwkSet = response
-            .json()
-            .await
+        let keys: JwkSet = rusty_json::from_slice(response.bytes())
             .map_err(|err| TokenError::Unavailable(format!("malformed JWKS: {err}")))?;
 
         let mut cache = self.cache.write().await;

@@ -11,7 +11,7 @@ use crate::streaming::StreamingResponse;
 use rusty_http::async_tokio::{AsyncTransport, BodyReader};
 use rusty_http::body::{self, Framing};
 use rusty_http::cookie::CookieJar;
-use rusty_http::head::RequestHead;
+use rusty_http::head::{RequestHead, ResponseHead};
 use rusty_http::url::percent_encode;
 use rusty_http::{HeaderMap, Method, StatusCode, Url, Version};
 use rusty_tls::TrustPolicy;
@@ -1283,6 +1283,30 @@ fn connection_says_close(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+/// More interim (`1xx`) responses than this ahead of the final one is treated
+/// as a misbehaving server rather than waited out.
+const MAX_INTERIM_RESPONSES: usize = 16;
+
+/// Reads response heads until the final one.
+///
+/// A server may send interim responses (`100 Continue`, `103 Early Hints`, ...)
+/// ahead of the real answer (RFC 9110 §15.2). They carry no body, so each is
+/// skipped; `AsyncTransport` keeps any bytes that arrived after one for the
+/// next read. `101 Switching Protocols` is not interim: it is the answer.
+async fn read_final_head<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    t: &mut AsyncTransport<S>,
+) -> Result<ResponseHead> {
+    for _ in 0..=MAX_INTERIM_RESPONSES {
+        let head = t.read_response_head(MAX_RESPONSE_HEAD_LEN).await?;
+        if !head.status.is_informational() || head.status.as_u16() == 101 {
+            return Ok(head);
+        }
+    }
+    Err(Error::InvalidResponse(
+        "too many informational (1xx) responses before the final one".to_string(),
+    ))
+}
+
 /// One request/response round trip on `stream`, with nothing retried:
 /// a failure anywhere in it -- the head write, the body write, reading
 /// the response -- propagates as-is. Which failures may be replayed, and
@@ -1301,7 +1325,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     t.write_request_head(&head).await?;
     write_request_body(&mut t, &request.body).await?;
 
-    let resp_head = t.read_response_head(MAX_RESPONSE_HEAD_LEN).await?;
+    let resp_head = read_final_head(&mut t).await?;
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
     let header_says_close = connection_says_close(&resp_head.headers);
     let keep_alive = !matches!(framing, Framing::Close) && !header_says_close;
@@ -1326,7 +1350,7 @@ async fn attempt_streaming<S: AsyncRead + AsyncWrite + Unpin + Send>(
     t.write_request_head(&head).await?;
     write_request_body(&mut t, &request.body).await?;
 
-    let resp_head = t.read_response_head(MAX_RESPONSE_HEAD_LEN).await?;
+    let resp_head = read_final_head(&mut t).await?;
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
     let reader = t.into_body_reader(framing);
     Ok((resp_head.status, resp_head.headers, reader))

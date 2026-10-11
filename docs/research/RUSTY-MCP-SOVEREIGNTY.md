@@ -13,7 +13,7 @@ Facts below were read from the code on 2026-10-10; nothing here is built yet.
 | `percent-encoding` | baggage values (`trace.rs`) | `rusty_percent` | none | done |
 | `serde`, `serde_json` | `Value` in `trace`, `auth/*`; `Serialize` on `ProtectedResourceMetadata` | `rusty_json` (`Value`, hand-written codec, as `rusty_mcp_proto` does) | metadata needs a `to_value`; gateway callers pass `serde_json::Value` today | done (direct dependency) |
 | `thiserror` | error enums in `auth/*`, `otel/mod.rs` | hand-written `Display` and `std::error::Error` impls, not `rusty_err` | `rusty_err`'s derive implements its own `Error` trait, not `std::error::Error`, so `?` into `Box<dyn std::error::Error>` (the gateway) would break. Four small enums, no dependency | done |
-| `reqwest` | JWKS fetch (`auth/jwt.rs`, feature `jwt`) | `rusty_request` (+ `rusty_tls`) | `rusty_request` is async on `rusty_tokio`; the validator runs inside the gateway's `tokio`. Needs a bridge (own runtime, as `rusty_mcp_client_native` does) | medium |
+| `reqwest` | JWKS fetch (`auth/jwt.rs`, feature `jwt`) | `rusty_request` with its `tokio` feature, which runs each request on the caller's own runtime | none: no bridge or second runtime needed (the plan expected one). `reqwest` stays as a dev-dependency of the tests | done |
 | `jsonwebtoken` | RS256 and ES256 verify, claim checks, JWKS key lookup (`auth/jwt.rs`, 475 lines) | `rusty_oauth`: `jwt::rsa::verify_rs256`, `jwt::es256::verify_es256`, `jwks::JwkSet` (`rsa_key`, `ec_key`), `jwt::{decode_unverified, validate_claims}`; primitives in `rusty_pk`, `rusty_sha2` | glue only. Must keep: algorithm whitelist (no `none`, no HS with a public key), `kid` lookup with refetch limits, `iss`/`aud` (array form)/`exp`/`nbf` with leeway. Reuse the 8 `jwt_validator` tests as the parity suite | medium |
 | `axum` | `Response`/`IntoResponse` in `auth/layer.rs`, `limits.rs`, `otel/metrics.rs`; `Json` in doc examples | none needed: build `http::Response<B>` with a generic body | a layer that wraps an `axum::Router` must return axum's body type, so be generic over `B: From<...>` | medium |
 | `tower-layer`, `tower-service` | the `Layer`/`Service` impls of all three layers | none possible while the gateway is axum | interface-only crates (about 100 lines, no dependencies). Keep as a named exception until the gateway leaves axum | exception |
@@ -80,7 +80,21 @@ Each item is one PR, with its own tests and a change fragment.
    `serde_json`, which is the gateway's own track, not this crate's.
 3. **JWKS fetch on `rusty_request`**, replacing `reqwest`, with a bridge that
    works inside a `tokio` caller. *Done when:* `reqwest` is gone; the
-   unreachable-JWKS and refetch-limit tests pass.
+   unreachable-JWKS and refetch-limit tests pass. **Done (2026-10-11), with
+   three changes:** (1) No bridge: `rusty_request`'s additive `tokio` feature
+   picks the runtime per call, so the fetch runs on the gateway's own `tokio`
+   and no second runtime starts; its own tests cover HTTP and HTTPS that way.
+   (2) `reqwest` is gone from `[dependencies]` but stays in
+   `[dev-dependencies]`, because the integration tests use it as a client for
+   their axum servers; `agentgateway-auth` keeps its own `reqwest` for
+   `extauthz`. (3) `JwtValidatorError::Http` is removed: building a
+   `rusty_request` client cannot fail, so the variant could never be
+   produced. `rusty-mcp` is 0.8.0 for that API change. (4) Behaviour that
+   differs from `reqwest`, found in review: no connection pool (a stale pooled
+   connection is an error in `rusty_request`, not retried), a 1 MiB cap on the
+   JWKS body, and HTTPS trust from `rusty_tls`'s system anchors, which on
+   macOS ignores Keychain trust and distrust settings (rustils#88). Interim
+   `1xx` responses are now handled in `rusty_request`.
 4. **JWT verification on `rusty_oauth`**, replacing `jsonwebtoken`. Port the
    algorithm whitelist, claim checks and `kid` handling; add negative tests for
    `alg: none`, an HS256 token signed with the public key, wrong `aud`, expired,

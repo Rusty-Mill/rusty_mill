@@ -11872,7 +11872,7 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty-mcp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "axum 0.8.9",
  "http",
@@ -11888,6 +11888,7 @@ dependencies = [
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_percent",
+ "rusty_request",
  "rusty_url",
  "tokio",
  "tower-layer",
