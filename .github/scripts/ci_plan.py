@@ -179,6 +179,19 @@ def specialized_job_flags(
         }
         for path in paths
     )
+    # The native TLS engine's jobs are compiled only under a cfg no other job
+    # sets, so an edit to the workflow or to the scripts they run would
+    # otherwise never be exercised by the PR that makes it (a skipped job
+    # reports success).
+    flags["tls_engine"] |= any(
+        path in {
+            ".github/workflows/ci.yml",
+            ".github/scripts/ci_plan.py",
+            ".github/scripts/tls_fuzz_smoke.sh",
+            ".github/scripts/live_internet_check.sh",
+        }
+        for path in paths
+    )
     for job, prefixes in PACKAGE_JOB_PREFIXES.items():
         flags[job] = flags.get(job, False) or any(
             package.startswith(prefix) for package in package_set for prefix in prefixes
