@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -115,14 +116,34 @@ impl Connection {
     }
 }
 
+/// A socket call's failure, named. The original error stays reachable as `source()` (with its
+/// `raw_os_error()`); the wrapping `io::Error` has the same kind and prints as `op: original`.
+#[derive(Debug)]
+struct SocketCall {
+    op: &'static str,
+    source: io::Error,
+}
+
+impl fmt::Display for SocketCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.op, self.source)
+    }
+}
+
+impl std::error::Error for SocketCall {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// Names the socket call that failed, so a bare OS error (Windows 997, say) says where it came
 /// from. The kind is kept; a timeout or interruption is passed through untouched (it is the
 /// normal outcome of a poll, and this runs every few milliseconds).
-fn during(op: &str, e: io::Error) -> io::Error {
+fn during(op: &'static str, e: io::Error) -> io::Error {
     if is_timeout(&e) || e.kind() == io::ErrorKind::Interrupted {
         return e;
     }
-    io::Error::new(e.kind(), format!("{op}: {e}"))
+    io::Error::new(e.kind(), SocketCall { op, source: e })
 }
 
 fn is_timeout(e: &io::Error) -> bool {
@@ -271,14 +292,30 @@ mod tests {
     }
 
     #[test]
-    fn a_failing_socket_call_is_named_and_a_timeout_is_not() {
+    fn a_failing_socket_call_is_named_and_keeps_its_original_error() {
         let named = during("set_nonblocking(false)", io::Error::from_raw_os_error(997));
         assert!(named.to_string().starts_with("set_nonblocking(false): "));
         assert!(named.to_string().contains("997"));
-        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+        let inner = named
+            .get_ref()
+            .and_then(|e| e.source())
+            .and_then(|e| e.downcast_ref::<io::Error>())
+            .unwrap();
+        assert_eq!(inner.raw_os_error(), Some(997));
+        let kind = io::Error::from_raw_os_error(997).kind();
+        assert_eq!(named.kind(), kind);
+    }
+
+    #[test]
+    fn timeouts_and_interruptions_pass_through_untouched() {
+        for kind in [
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::Interrupted,
+        ] {
             let plain = during("read (poll)", kind.into());
             assert_eq!(plain.kind(), kind);
-            assert!(!plain.to_string().contains("read (poll)"));
+            assert!(plain.get_ref().is_none(), "{kind:?} was wrapped");
         }
     }
 
