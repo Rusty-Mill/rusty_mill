@@ -96,6 +96,20 @@ fn cases() -> Vec<(&'static str, Case)> {
             Case::Client(InterfaceMessage::InitComplete(InitComplete)),
         ),
         (
+            "start",
+            Case::Client(InterfaceMessage::StartCommand(StartCommand {
+                config_path: "rlbot/match.toml".into(),
+            })),
+        ),
+        (
+            "disconnect_client",
+            Case::Client(InterfaceMessage::DisconnectSignal),
+        ),
+        (
+            "ping_request",
+            Case::Client(InterfaceMessage::PingRequest(Ping { cookie: 5 })),
+        ),
+        (
             "input",
             Case::Client(InterfaceMessage::PlayerInput(PlayerInput {
                 player_index: 3,
@@ -355,6 +369,12 @@ const PINNED: &[(&str, &str)] = &[
      "0c00000008000a0009000400080000000c000000000a0600080007000600000000000001"),
     ("init",
      "0c00000008000c000b000400080000000c0000000000000c0400040004000000"),
+    ("start", 
+     "0c00000008000a0009000400080000000c0000000002060008000400060000000400000010000000726c626f742f6d617463682e746f6d6c00000000"),
+    ("disconnect_client", 
+     "0c00000008000c000b000400080000000c000000000000010400040004000000"),
+    ("ping_request", 
+     "0c00000008000a0009000400080000000c000000000e06000c000400060000000500000000000000"),
     ("input",
      "0c00000008000c000b000400080000001000000000000004080020001c000400080000000000803f000000bf0000803e00000000000080bf0101000003000000"),
     ("state",

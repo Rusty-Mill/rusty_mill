@@ -74,6 +74,24 @@ impl TableCodec for InitComplete {
     }
 }
 
+/// Starts a match from an `rlbot.toml` on core's machine.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StartCommand {
+    pub config_path: String,
+}
+
+impl TableCodec for StartCommand {
+    fn write(&self, b: &mut Builder) -> R<Offset> {
+        let path = b.create_string(&self.config_path)?;
+        build(b, |t| Ok(t.add_offset(0, path)?))
+    }
+    fn read(t: &Table<'_>) -> R<Self> {
+        Ok(StartCommand {
+            config_path: string_req(t, 0, "config_path")?,
+        })
+    }
+}
+
 /// Core's liveness probe (`PingRequest`) and the client's answer (`PingResponse`): the same
 /// table, so one type. The answer must carry the request's cookie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

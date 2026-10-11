@@ -17,13 +17,12 @@ panic = "warn"
 
 [dependencies]
 rb_domain = { path = "../rb_domain" }
+# `chaser::chase`, the scripted policy the bot binary plays.
+rb_env = { path = "../rb_env" }
 rb_rlbot_client = { path = "../rb_rlbot_client" }
 rb_rlbot_wire = { path = "../rb_rlbot_wire" }
 # `rotator_to_quat`, checked against a recorded quaternion: the one RLBot-rotator convention.
 rb_scenario = { path = "../rb_scenario" }
-
-[dev-dependencies]
-rb_env = { path = "../rb_env" }
 
 [package.metadata.rusty_mill]
 layer = "apps"

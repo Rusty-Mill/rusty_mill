@@ -16,22 +16,83 @@
 | ❌ | RocketSim has it, we do not |
 | ➕ | we have it, RocketSim does not |
 
+## Verification pass 1 (2026-10-11)
+
+Scope: every row whose Rocket Science cell rests on auto-captions (CC), the rows flagged unverified or garbled, and one GDC cell. Each such cell now ends with a tag in square brackets starting `V1`.
+
+**Basis, stated plainly.** No row has been checked against the real game; the game is the ground truth and that check is pass 2. A pass-1 tag means one of: the value agrees with **RocketSim's source** at `c2baacb` (fetched from `RLConst.h`, `CarConfig.h`, `CarConfig.cpp`, `Car.cpp`; line numbers as at that commit), with **arithmetic** from those constants, or with the **GDC slide text** (extracted from the 182-page deck; the vehicle-tuning slides are diagrams of factors and contain no constants). Agreement with RocketSim shows the caption was read correctly, not that the game behaves so.
+
+| Tag | Meaning |
+|---|---|
+| ✔ | the caption's value agrees with the cited source |
+| ✎ | corrected: the caption or an earlier note in this table is wrong or unproven |
+| ? | still unknown: no source here can settle it |
+
+Not done: the audio. Digits garbled by auto-captions can only be settled by listening or by the game, and re-reading the same captions proves nothing. No timestamps are given because only caption text was available; episode numbers are in the cells.
+
+### Rows whose status changed
+
+| Row | Change |
+|---|---|
+| Ball max speed / angular | ✎ the earlier note "60 RPM ≈ 6 rad/s (rounded)" is unproven: 60 RPM is exactly 2π = 6.283 rad/s, 6 rad/s is 57.3 RPM |
+| Jump impulse | ✎ the unit is uu/s, not "uu/s squared" |
+| Min boost time | ✎ video says 13 frames; RocketSim's logic gives 12 ticks (float32 accumulation of 1/120 reaches 0.1 after 12) |
+| Boost pads | ✎ the caption's big radius "28" is a garble of 208 (RocketSim `CYL_RAD_BIG`); small cylinder 144 and big box 160 agree; small box video 96 vs RocketSim 120 |
+| Z scale / forward scale | ✔ now also found in RocketSim's source, not only in the third-party article |
+| Octane hitbox | ✔ the +2.5 margin derivation fits all three extents (it remains a derivation) |
+| Air-control torque / damping | ✔ the three angular accelerations follow exactly from the torque constants and `CAR_TORQUE_SCALE` |
+| Dodge direction deadzone / axis snap | ✔ "≈11.5°" is the total width of a 0.1 band (2 × asin 0.1 = 11.48°) |
+| Flip input deadzone | ✔ 0.5, tested on the sum of all three axes |
+| Sleeping | ? the caption's thresholds have nothing to check against |
+| GDC supersonic cell | ? not in the extracted slide text; source may be the spoken talk |
+
+### Findings (no physics code was changed)
+
+None of these shows a bug in `rb_physics_bullet`; each is a question for the game.
+
+- **F1 Minimum boost duration (closed in pass 2: 12 ticks).** The video says 13 physics frames per activation; RocketSim's code gives 12. If the game really gives 13, both ports are one tick short. A capture of a one-frame boost tap would settle it.
+- **F2 Ball spin cap (closed in pass 2: 6.0 rad/s).** 6 rad/s (RocketSim, ours) or 2π ≈ 6.283 rad/s ("60 RPM")? The maximum ball spin in a capture would settle it.
+- **F3 Boost pad geometry (open: acquisition radius).** RocketSim acquires a pad with the car origin inside a 144 uu cylinder (small) and uses the 120 uu box only for a car already locked. The committed captures show first pickups with the origin 145 to 172 uu away (all 23), matching the port's fitted 176 and not 144. The video's heights (≈168, ≈165, ≈130) against RocketSim's 95 and 64 and the fit's 160, the retention box and the big pad remain unresolved.
+- **F4 GDC column.** The supersonic cell attributes "FOV +5°, trails, demo threshold" to the GDC slides; it is not in the extracted slide text, so its source should be rechecked.
+
+### Still unknown (needs listening or a capture)
+
+230 uu/s² slide friction and 565 uu/s rolling threshold (ball friction row); "first 12 uu give no force" (suspension); the garbled "3,600 uu/s" minimum hold; "first 6 ticks" of wheels staying down on a jump; the ball's sleep thresholds (40 uu/s, 2.5 s, 10 RPM); the Octane tilt and the "Mini #1" 8° versus 2° inconsistency; Merc height and percentage comparisons; Heatseeker rows (out of scope).
+
+## Verification pass 2 (2026-10-11): the real game
+
+Basis: the 73 committed game captures in `tools/rb_tape_bot/fixtures/*.jsonl` (18,146 frames at 120 Hz; BakkesMod state and recorded inputs), read directly. This is the first pass with the game as the source. Reproduce every number with `python -I tools/rb_tape_bot/fixture_checks.py all` (standard library only; run from `rusty_bullet/`); `test_fixture_checks.py` tests its reader and estimators.
+
+| Row | Result | Evidence |
+|---|---|---|
+| Ball max angular velocity | ✔ 6.0 rad/s | never above 6.0001; reached by accumulating in 3 captures (1,230 frames), plus 485 one-step frames in 4 others; closes F2 and rules out 2π |
+| Car max speed / angular | ✔ 2300 / 5.5 | held after acceleration: 2300.0 in `probe_accel_boost` and two more, 5.5 rad/s in 15 captures |
+| Ball slide friction | ✔ about 228 uu/s² | 228.0 with exponential drag removed (415 frames), against 0.35 × 650 = 227.5 |
+| Ball rolling threshold | ✎ 547.5 uu/s, not 565 | rolling begins near frame 448 at v = 547.4 = 6 × 91.25; spin saturates much earlier (frame 116, v = 1239) |
+| Ball restitution | ✔ 0.6 | one ceiling and one floor hit, both ratios 0.5998 |
+| Minimum boost time | ✔ 12 ticks | 12 consecutive drops after two clean taps (3 and 5 frames); `ja_thr`'s 11 drain steps unexplained; closes F1 |
+| Small pad pickup (initial acquisition) | ✎ RocketSim's 144 uu does not match | 23 of 23 pickups with the origin 145 to 172 uu away, agreeing with ADR-0072's 176; retention box, heights and big pads untested; F3 stays open |
+
+Correction to pass 1, and to the first version of this section: the pad radii agreeing with RocketSim (208, 144, 160, 120) was not independent evidence, because RocketSim's pad constants are, by its own comment, mostly taken from the same Rocket Science video the caption column comes from. The first version of this section also claimed that RocketSim's 120 uu box would have triggered earlier than observed; that box is the retention test for a car already locked on the pad, so first pickups say nothing about it, and the claim was withdrawn.
+
+Still untested by these captures: the 6000 uu/s ball cap (the captures reach 3,541), big-pad and airborne pad pickups (the only big-looking increases are respawn boost after a demolition), pad retention (a car locked on consecutive ticks), pad height other than for cars on the ground, the ball's sleep thresholds, the suspension and jump "first N ticks" claims, and everything audio-only listed in pass 1. A slow-approach pad capture and a ball rolling to a stop would settle the last two groups and need the machine with the game.
+
 ## 1. Constants
 
 ### World, ball, car body
 | Quantity | RocketSim | rusty_bullet | | Rocket Science | GDC 2018 |
 |---|---|---|---|---|---|
-| Gravity | −650 | −650 (`world.rs`, sticky `STICKY_GRAVITY_Z`) | ✅ | −650 (CC #4, #11) | - |
+| Gravity | −650 | −650 (`world.rs`, sticky `STICKY_GRAVITY_Z`) | ✅ | −650 (CC #4, #11) [V1 ✔ RocketSim `RLConst.h:12` −650] | - |
 | Ball collision radius | 91.25 | 91.25 `BALL_COLLISION_RADIUS` | ✅ | - (no radius stated) | - |
-| Ball body radius | sphere 91.25 + Bullet sphere margin +0.08 bt (=4 uu) | `BALL_RADIUS` 93.15 (rest height); 91.25 used for contacts (`BALL_CONTACT_SLACK`, ADR-0034/0036/0045) | ⚠ modelled differently, calibrated | ball z≈93.15 used as rest-height example in 1.43/1.44 (CC) | - |
+| Ball body radius | sphere 91.25 + Bullet sphere margin +0.08 bt (=4 uu) | `BALL_RADIUS` 93.15 (rest height); 91.25 used for contacts (`BALL_CONTACT_SLACK`, ADR-0034/0036/0045) | ⚠ modelled differently, calibrated | ball z≈93.15 used as rest-height example in 1.43/1.44 (CC) [V1 ✔ RocketSim `BALL_REST_Z` 93.15, `RLConst.h:43`] | - |
 | Ball mass | 30 | 30 | ✅ | - | - |
-| Ball drag | 0.03, `v *= (1−d)^dt` | 0.03, `(1−d).powf(dt)` (`integrate::apply_damping`) | ✅ | loses 3%/s, halves ≈22 s; spin has no air effect (CC #4) | - |
-| Ball friction / restitution | 0.35 / 0.6 | 0.35 / 0.6 (`RigidBody::ball`) | ✅ | slide friction 230 uu/s²; rolls w/o sliding <≈565 uu/s (CC; 565 vs 2πr≈573 flagged); 60% of perpendicular speed returned (CC #4) | - |
-| Ball max speed / angular | 6000 / 6 | 6000 / 6 | ✅ | 6000 uu/s; spin cap '60 RPM' ≈ 6 rad/s (CC, rounded) | - |
+| Ball drag | 0.03, `v *= (1−d)^dt` | 0.03, `(1−d).powf(dt)` (`integrate::apply_damping`) | ✅ | loses 3%/s, halves ≈22 s; spin has no air effect (CC #4) [V1 ✔ `BALL_DRAG` 0.03 (`RLConst.h:45`); half-life ln 0.5 / ln 0.97 = 22.8 s, so '≈22' is a truncation] | - |
+| Ball friction / restitution | 0.35 / 0.6 | 0.35 / 0.6 (`RigidBody::ball`) | ✅ | slide friction 230 uu/s²; rolls w/o sliding <≈565 uu/s (CC; 565 vs 2πr≈573 flagged); 60% of perpendicular speed returned (CC #4) [V1 ✔ restitution 0.6 and friction 0.35 (`RLConst.h:46-47`); ? 230 uu/s² and 565 uu/s have no RocketSim counterpart and stay unknown] [V2 ✔ real game, `probe_ball_roll`: sliding friction is about 228 uu/s², against 0.35 × 650 = 227.5, so '230' is a rounding (estimator: the 415 frames with ball speed above 600 uu/s and height within 0.2 of 93.2, central difference of speed, exponential drag ln 0.97 × v removed, mean 228.0; a linear drag term gives 228.5, so only 'about 228' is supported); spin grows at 6.228 rad/s² = 2.5 × 227.5 / 91.25 (solid sphere, contact radius 91.25); ✎ the 565 uu/s rolling threshold is wrong: spin reaches the 6 rad/s cap early (frame 116, ball speed 1239 uu/s) and sliding continues; the transition to rolling is near frame 448, where v = 547.4 and spin begins to fall, v / spin = 91.3 ≈ 91.25 (6 × 91.25 = 547.5); 2πr = 573 is not it either; restitution 0.6 ✔: one ceiling hit (frame 20, vz 2882.81 → −1729.24) and one floor hit (frame 132, −2273.67 → 1363.85), both ratios 0.5998 from adjacent frames' velocities] | - |
+| Ball max speed / angular | 6000 / 6 | 6000 / 6 | ✅ | 6000 uu/s; spin cap '60 RPM' ≈ 6 rad/s (CC, rounded) [V1 ✔ 6000 and 6 rad/s match `RLConst.h:44,54`; ✎ the note 'rounded' is wrong or at least unproven: 60 RPM is exactly 2π = 6.283 rad/s, and 6 rad/s is 57.3 RPM, so the caption fits either value; captions cannot settle it, a capture of the maximum ball spin can] [V2 ✔ real game: the ball's |ω| never exceeds 6.0 rad/s (0 frames above 6.0001 in 18,146) and reaches it by accumulating, not only by seeding: from below over several frames in `probe_ball_roll` (frame 116, previous 5.969, 332 frames at the cap), `ballfuzz_203` (689) and `ballfuzz_218` (209), 1,230 dynamic frames; four more captures jump from 0.0 to 6.0 in one step (a collision or a state-set, 485 frames) and are not counted; 2π (6.283) is excluded; the 6000 uu/s ball speed cap is untested (the captures reach 3,541)] | - |
 | Ball rotation integration | skipped (`noRot`, default on) | integrated | ⚠ perf-only in RocketSim; outputs differ only in `rot`, not `vel` | - | - |
 | Car mass | 180 | 180 | ✅ | - (GDC: mass constant, ignored when applying forces) | mass kept constant, ignored in force application (slides) |
-| Car max speed / angular | 2300 / 5.5 | 2300 / 5.5 | ✅ | 2300 uu/s hard cap, speed vector renormalised (KB #14; CC #4, #11); angular 5.5 rad/s (CC Applied #2) | - |
-| Octane hitbox (full) / offset | 120.507×86.6994×38.6591 / (13.8757, 0, 20.755) | half-extents 60.2535, 43.3497, 19.32955 / same offset | ✅ | length 118.01 (CC 1.43/1.44), slightly smaller than visual; repo 120.507 ≈ 118.01+2.5 margin (my derivation, unverified); offsets rel. root joint, x fwd z up; tilted at rest, back 1.22 uu above front (≈0.55°); 'Mini #1' tilt '8° max' vs 'none over 2°' inconsistent | hitbox presets divorce physics from visuals: many vehicles, few presets |
+| Car max speed / angular | 2300 / 5.5 | 2300 / 5.5 | ✅ | 2300 uu/s hard cap, speed vector renormalised (KB #14; CC #4, #11); angular 5.5 rad/s (CC Applied #2) [V1 ✔ `CAR_MAX_SPEED` 2300 and `CAR_MAX_ANG_SPEED` 5.5 (`RLConst.h:53,66`)] [V2 ✔ real game: car speed holds exactly 2300.0 after being reached by acceleration, not only from seeded starts: `probe_accel_boost` from frame 263 (previous 2299.7, 157 frames), `probe_hit_boost` and `bumpr_2100`; car |ω| plateaus at 5.5 after rising in 15 captures (for example `dodgeth_pitch` from frame 79, previous 5.467, 76 frames); the seeded 2300 starts in the bump and demo captures are not counted] | - |
+| Octane hitbox (full) / offset | 120.507×86.6994×38.6591 / (13.8757, 0, 20.755) | half-extents 60.2535, 43.3497, 19.32955 / same offset | ✅ | length 118.01 (CC 1.43/1.44), slightly smaller than visual; repo 120.507 ≈ 118.01+2.5 margin (my derivation, unverified) [V1 ✔ arithmetic: 120.507 − 2.5 = 118.007, 86.6994 − 2.5 = 84.1994, 38.6591 − 2.5 = 36.1591, so the +2.5 margin fits all three; RocketSim's comment in `CarConfig.cpp` says its numbers were chosen to match the real game's inertia matrix and that other published hitbox numbers differ from the simulated ones, without saying by how much; the margin stays a derivation, not a source]; offsets rel. root joint, x fwd z up; tilted at rest, back 1.22 uu above front (≈0.55°); 'Mini #1' tilt '8° max' vs 'none over 2°' inconsistent | hitbox presets divorce physics from visuals: many vehicles, few presets |
 | Arena friction / restitution | 0.6 / 0.3 | 0.6 / 0.3 | ✅ | - | - |
 | Car–ball friction / restitution | 2.0 / 0.0 | 2.0 / 0.0 `CAR_BALL_MATERIAL` | ✅ | - (engine part perfectly inelastic with friction, KB #20) | - |
 | Car–world friction / restitution | 0.3 / 0.3 | 0.3 / 0.3 `CAR_WORLD_MATERIAL` | ✅ | - | - |
@@ -41,7 +102,7 @@
 ### Car–ball extra hit impulse
 | Quantity | RocketSim | rusty_bullet | | Rocket Science | GDC 2018 |
 |---|---|---|---|---|---|
-| Z scale / forward scale | 0.35 / 0.65 | 0.35 / 0.65 | ✅ | hit direction: root point → ball centre, adjusted as if car were shorter, upward part dampened (CC #6, supersedes #4); 0.35/0.65 only in 3P smish.dev (`n.z*=0.35`) | - |
+| Z scale / forward scale | 0.35 / 0.65 | 0.35 / 0.65 | ✅ | hit direction: root point → ball centre, adjusted as if car were shorter, upward part dampened (CC #6, supersedes #4); 0.35/0.65 only in 3P smish.dev (`n.z*=0.35`) [V1 ✔ also in RocketSim's source: `BALL_CAR_EXTRA_IMPULSE_Z_SCALE` 0.35 and `..._FORWARD_SCALE` 0.65 (`RLConst.h:135,137`); the game itself is still unchecked] | - |
 | Max relative speed | 4600 | 4600 | ✅ | - | - |
 | Factor curve | (0,.65) (500,.65) (2300,.55) (4600,.30) | identical | ✅ | scale-by-speed curve only in 3P smish.dev; ≈40% of a stationary-ball hit is the Psyonix part (KB #20) | - |
 | Applied after the physics step, ≥2 ticks apart per car | yes (velocity cache) | ADR-0062 / ADR-0047 | ✅ (ported; behaviour not re-read here) | added force scales with relative speed (KB #20) | - |
@@ -50,8 +111,8 @@
 ### Drive, steering, tyres
 | Quantity | RocketSim | rusty_bullet | | Rocket Science | GDC 2018 |
 |---|---|---|---|---|---|
-| Throttle | engine force `180·400·UU_TO_BT` per wheel via friction impulse | `THROTTLE_ACCELERATION` 1600 uu/s² (=4 wheels × 8 m/s² derived) | ≈ derived from the same constant | ≈58 km/h/s (≈1611 uu/s², my conversion) at standstill (CC wavedash) | force/accel curve instead of transmission; no longitudinal friction |
-| Drive taper curve | (0,1) (1400,.1) (1410,0) | same | ✅ | linear to 0 at ≈50 km/h (≈1389 uu/s, my conversion; repo 1410) (CC); optimal turning speed 850–900 uu/s (#18) | force/accel curve (no numbers) |
+| Throttle | engine force `180·400·UU_TO_BT` per wheel via friction impulse | `THROTTLE_ACCELERATION` 1600 uu/s² (=4 wheels × 8 m/s² derived) | ≈ derived from the same constant | ≈58 km/h/s (≈1611 uu/s², my conversion) at standstill (CC wavedash) [V1 ✔ arithmetic: 1600 uu/s² = 57.6 km/h/s, so '58' is a rounding; ? the 1600 comes from RocketSim's `THROTTLE_TORQUE_AMOUNT`, not from the video] | force/accel curve instead of transmission; no longitudinal friction |
+| Drive taper curve | (0,1) (1400,.1) (1410,0) | same | ✅ | linear to 0 at ≈50 km/h (≈1389 uu/s, my conversion; repo 1410) (CC) [V1 ✔ RocketSim's curve reaches 0 at 1410 (`RLConst.h:447-453`); 50 km/h = 1389 uu/s is 1.5 % lower, within 'about 50 km/h'; ? the exact end point is unknown]; optimal turning speed 850–900 uu/s (#18) | force/accel curve (no numbers) |
 | Taper input | `abs(forward speed)` | signed speed in throttle direction, clamped ≥0 | ⚠ deliberate (FR-058 non-goal) | - | - |
 | Engine ÷4 when <3 wheels touch | yes | yes (`ground.rs` `partial_contact` 0.25) | ✅ | - | - |
 | Brake | torque `180·(14.25+1/3)` | 3500 uu/s² (derived) | ≈ | - | - |
@@ -75,37 +136,37 @@
 | Quantity | RocketSim | rusty_bullet | | Rocket Science | GDC 2018 |
 |---|---|---|---|---|---|
 | Stiffness / damping (compress, relax) | 500 / 25 / 40 | 500 / 25 / 40 | ✅ | - | suspension listed as coupled tuning variable; no numbers |
-| Max travel | 12 | 12 | ✅ | rest ≈2 uu lower under gravity; extends to 12 uu below rest in air (CC #10) | - |
+| Max travel | 12 | 12 | ✅ | rest ≈2 uu lower under gravity; extends to 12 uu below rest in air (CC #10) [V1 ✔ `MAX_SUSPENSION_TRAVEL` 12 (`RLConst.h:164`), which carries RocketSim's own TODO asking whether it is the same for all cars] | - |
 | Rest length front / back | 38.755−12 / 37.055−12 | same | ✅ | - | - |
 | Wheel radius front / back | 12.5 / 15.0 | 12.5 / 15.0 | ✅ | - | - |
 | Force scale front / back | 35.75 / 54.265 | `36−0.25` / `54+0.25+0.015` | ✅ | - | - |
-| `SUSPENSION_SUBTRACTION` | 0.05 bt = 2.5 uu, on ray length **and** pushback reach | 2.5 uu on pushback only | ⚠ deliberate (FR-092) | first 12 uu of compression on landing give no force; wheel hits don't obey Newton's 3rd law (CC #10) | - |
+| `SUSPENSION_SUBTRACTION` | 0.05 bt = 2.5 uu, on ray length **and** pushback reach | 2.5 uu on pushback only | ⚠ deliberate (FR-092) | first 12 uu of compression on landing give no force; wheel hits don't obey Newton's 3rd law (CC #10) [V1 ✔ `SUSPENSION_SUBTRACTION` 0.05 bt (`RLConst.h:165`); ? the 'first 12 uu give no force' claim has no RocketSim counterpart: unknown] | - |
 | Pushback ERP | Bullet default 0.2 | 0.1 | ⚠ calibrated (ADR-0042) | - | - |
 | Steep-contact clip | denominator <0.1 → factor 10 | `STEEP_CONTACT_CLIP` 10 | ✅ | - | - |
 | Wheels for "on ground" | ≥3 | 3 | ✅ | >=3 wheels = grounded; flip available with 0–2 (KB #14) | - |
-| Sticky force | 0.5 base (+`1−|up.z|` when full-stick), 0 for Psyclops | 0.5, full-stick speed 25 | ✅ (Octane) | 0.5 → 325 uu/s² (=0.5×650); wheels stay down first 6 ticks of jump (CC Applied #2) | - |
+| Sticky force | 0.5 base (+`1−|up.z|` when full-stick), 0 for Psyclops | 0.5, full-stick speed 25 | ✅ (Octane) | 0.5 → 325 uu/s² (=0.5×650); wheels stay down first 6 ticks of jump (CC Applied #2) [V1 ✔ sticky force 0.5 (`Car.cpp:491`), 0.5 × 650 = 325 uu/s²; ? 'first 6 ticks' has no RocketSim counterpart: unknown] | - |
 | Sticky force timing | applied this tick | applied one step late (`sticky_surface_up`) | ⚠ deliberate (FR-092) | - | - |
 
 ### Jump, flip, air
 | Quantity | RocketSim | rusty_bullet | | Rocket Science | GDC 2018 |
 |---|---|---|---|---|---|
-| Jump impulse | 875/3 ≈ 291.667 | 875/3 | ✅ | 292 uu/s (CC Applied #2; caption says 'uu/s squared') | - |
-| Hold acceleration | 4375/3 ≈ 1458.33 | 4375/3 | ✅ | 1458 uu/s²; hold ≤0.2 s (CC Applied #2) | - |
+| Jump impulse | 875/3 ≈ 291.667 | 875/3 | ✅ | 292 uu/s (CC Applied #2; caption says 'uu/s squared') [V1 ✔ `JUMP_IMMEDIATE_FORCE` 875/3 = 291.667 (`RLConst.h:95`); ✎ corrected unit: uu/s (a velocity change), 'squared' is a caption error] | - |
+| Hold acceleration | 4375/3 ≈ 1458.33 | 4375/3 | ✅ | 1458 uu/s²; hold ≤0.2 s (CC Applied #2) [V1 ✔ `JUMP_ACCEL` 4375/3 = 1458.33 and `JUMP_MAX_TIME` 0.2 (`RLConst.h:94,98`)] | - |
 | Early-window (0.025 s) scale | **×0.62** | not applied | ⚠ deliberate, capture shows full strength (FR-091, ADR-0019) | not stated | - |
-| Min / max hold time | 0.025 / 0.2 | 0.025 / 0.2 | ✅ | min 3 ticks (=0.025 s); max 0.2 s (KB #1, #14; CC '3,600 uu/s' min is garbled ≈36) | - |
+| Min / max hold time | 0.025 / 0.2 | 0.025 / 0.2 | ✅ | min 3 ticks (=0.025 s); max 0.2 s (KB #1, #14; CC '3,600 uu/s' min is garbled ≈36) [V1 ✔ `JUMP_MIN_TIME` 0.025 s = 3 ticks and max 0.2 (`RLConst.h:96,98`); ? the garbled '3,600' stays unknown] | - |
 | Reset pad | 1/40 | `0.025 + 1/40` window | ✅ | - | - |
 | Double-jump window | 1.25 s | 1.25 s | ✅ | 1.25 s timer starts only after hold ends (total ≤1.45 s) (KB #14) ⚠ check repo mechanism | - |
-| Flip input deadzone (Σ|yaw,pitch,roll|) | 0.5 | `FLIP_INPUT_DEADZONE` 0.5 | ✅ | |x|+|y| ≥ 0.5 (CC #7) | - |
-| Dodge direction deadzone / axis snap | 0.1 / 0.1 | 0.1 / 0.1 | ✅ | ≈11.5° around each straight direction snaps (CC #7; different form) | - |
+| Flip input deadzone (Σ|yaw,pitch,roll|) | 0.5 | `FLIP_INPUT_DEADZONE` 0.5 | ✅ | |x|+|y| ≥ 0.5 (CC #7) [V1 ✔ `dodgeDeadzone` 0.5 (`CarConfig.h:37`) tested against |yaw| + |pitch| + |roll| (`Car.cpp:705-706`); the caption's two terms omit roll] | - |
+| Dodge direction deadzone / axis snap | 0.1 / 0.1 | 0.1 / 0.1 | ✅ | ≈11.5° around each straight direction snaps (CC #7; different form) [V1 ✔ RocketSim zeroes a dodge-direction component when |value| < 0.1 (`Car.cpp:741-742`); asin 0.1 = 5.74° each side, 11.48° wide, so '≈11.5°' fits as the total width of the snap band] | - |
 | Flip initial speed | 500 | 500 | ✅ | +500 uu/s forward, horizontal only (KB #14) | - |
 | Side / backward scale / back-X | 1.9 / 2.5 / 16/15 | 1.9 / 2.5 / 16/15 | ✅ | side base 500 ×1.9 up to 2300; back base 533 (=500×16/15) ×2.5; up to 1333 uu/s braking (KB #14) | - |
 | Backward classification speed | 100 | 100 | ✅ | defined by current travel direction; no number | - |
 | Flip torque (side / forward) | 260 / 224 | 260 / 224 | ✅ | max spin reached in 3 ticks (25 ms) (KB #14) | - |
 | Flip torque time / pitch-lock extra | 0.65 / 0.3 | 0.65 / 0.3 | ✅ | dodge lasts 0.65 s (KB #14); flip cancel ignored first 5 ticks (40 ms); pitch-lock extra not stated | - |
 | Flip Z damp | 0.35 @120 Hz, 0.15–0.21 s | same | ✅ | 18 ticks (0.15 s) unchanged then −35%/tick; upward case 8 ticks (≈3%); downward settles ≈15 uu/s (KB #14) | - |
-| Air-control torque / damping | (130,95,400) / (30,20,50) | identical | ✅ | angular accel yaw 9.11, pitch 12.46, roll 38.34 rad/s² (roll damped), same for all cars (CC Applied #2) | - |
+| Air-control torque / damping | (130,95,400) / (30,20,50) | identical | ✅ | angular accel yaw 9.11, pitch 12.46, roll 38.34 rad/s² (roll damped), same for all cars (CC Applied #2) [V1 ✔ arithmetic: torque × `CAR_TORQUE_SCALE` = 2π/65536×1000 = 0.09587 gives 95→9.108 (yaw), 130→12.464 (pitch), 400→38.350 (roll) (`RLConst.h:124,150`, order pitch/yaw/roll per `Car.cpp:658-660`); the caption's 38.34 is a truncation] | - |
 | Torque scale | 2π/65536·1000 | identical | ✅ | - | - |
-| Air throttle | 200/3 | 200/3 | ✅ | 66 uu/s² ≈ 6% of boost; vertical car cancels ≈10% of gravity (CC Applied #2) | - |
+| Air throttle | 200/3 | 200/3 | ✅ | 66 uu/s² ≈ 6% of boost; vertical car cancels ≈10% of gravity (CC Applied #2) [V1 ✔ `THROTTLE_AIR_ACCEL` 200/3 = 66.67 (`RLConst.h:92`); 66.67 / 1058.3 (air boost 3175/3) = 6.3 %; 66.67 / 650 = 10.3 %] | - |
 | Auto-flip impulse / torque / time / n.z / roll | 200 / 50 / 0.4 / 0.7071 / 2.8 | identical | ✅ | - | - |
 | Auto-roll force / torque | 100 / 80 | 100 / 80 | ✅ | - | - |
 | **Wall jump** (550 uu/s push-off) | **does not exist** (wall behaviour emerges from orientation + sticky) | `WALL_JUMP_HORIZONTAL_SPEED` 550, placeholder | ➕ legacy of the pre-wheel car; see §3 | no wall-jump rule stated | - |
@@ -115,7 +176,7 @@
 |---|---|---|---|---|---|
 | Accel ground / air | 2975/3 / 3175/3 | same | ✅ | - (no number) | - |
 | Use per second | 100/3 = 33.333 | **33.3** | ⚠ 0.1% low, unexplained | - (not stated) | - |
-| Min boost time | 0.1 | 0.1 | ✅ | min 13 physics frames/activation (CC #11; 0.1 s = 12 ticks → unverified) | - |
+| Min boost time | 0.1 | 0.1 | ✅ | min 13 physics frames/activation (CC #11; 0.1 s = 12 ticks → unverified) [V1 ✎ `BOOST_MIN_TIME` 0.1 (`RLConst.h:58`) but RocketSim's loop (`Car.cpp:505-525`) gives 12 boosted ticks when the time is accumulated in float32 (the check `boostingTime < 0.1` fails once 12 ticks have summed to 0.1); the video says 13; difference of one tick unresolved, see F1] [V2 ✔ for the two clean taps, real game: after holds of 3 and 5 input frames the tank drops on exactly 12 consecutive ticks of 0.2775 (100 → 96.67 = 0.1 s × 33.3/s), starting 2 samples after the first input frame, with no timestamp gaps; `ja_thr` (6-frame hold) shows 11 drain steps across the same 12 samples, one tank value unchanged while position and velocity advance: unexplained, and not a duplicated frame. 12 ticks matches RocketSim and `rb_physics_bullet`; the video's 13 may count the latency sample, unproven. Adjacent rows are one tick apart unless the timestamps say otherwise (55 gaps in 18,073 intervals)] | - |
 | Max boost | 100 | 100 | ✅ | - | - |
 | Spawn boost | 33.333 (100 in Heatseeker/Dropshot) | 100 (`DriveState::new`, `rb_env` reset) | ⚠ differs; capture-seeded runs override it | - (not stated) | - |
 | Unlimited boost | `boostUsedPerSecond = 0` mutator (Heatseeker) | `boost_used_per_second` 0 option (ADR-0031) | ✅ | - | - |
@@ -134,8 +195,8 @@
 | Manifold capacity / breaking factor | 4 / 0.02 | 4 / 0.02 | ✅ | - | - |
 | Special ball–world manifold (averaged) | yes | yes (ADR-0038/0039) | ✅ | - | - |
 | Internal-edge utility | yes, on every contact | yes (ADR-0028) | ✅ | - | - |
-| Sleeping | ball forced asleep only at **exact zero** velocity; cars forced `ACTIVE_TAG` every tick | velocity-threshold sleep: 20 uu/s, 0.5 rad/s, 0.5 s (own placeholders) | ⚠ **repo-only mechanism, uncalibrated** — see §3 | ball stops when speed <40 uu/s for 2.5 s with spin <10 RPM; spin ≥10 RPM never stops (CC) — repo 20 uu/s, 0.5 rad/s, 0.5 s ⚠ | - |
-| Tick rate | 15–120 Hz, `tickTime/(1/120)` scaling | 120 Hz (`TICK_SECS`); `dt` is a parameter; flip uses `TICK_120` scaling | ≈ other rates untested | 120 Hz (KB #12; CC #11, #19); #12 tested 500 Hz for post bounces | 120 Hz fixed, 8.33 ms; higher tick costs more, esp. net corrections; 200 ms ping = 24 correction frames |
+| Sleeping | ball forced asleep only at **exact zero** velocity; cars forced `ACTIVE_TAG` every tick | velocity-threshold sleep: 20 uu/s, 0.5 rad/s, 0.5 s (own placeholders) | ⚠ **repo-only mechanism, uncalibrated** — see §3 | ball stops when speed <40 uu/s for 2.5 s with spin <10 RPM; spin ≥10 RPM never stops (CC) — repo 20 uu/s, 0.5 rad/s, 0.5 s ⚠ [V1 ? unknown: RocketSim has no such rule (the ball sleeps only at exact zero velocity); the caption's 40 uu/s, 2.5 s and 10 RPM have nothing to check against; only a capture can test them] | - |
+| Tick rate | 15–120 Hz, `tickTime/(1/120)` scaling | 120 Hz (`TICK_SECS`); `dt` is a parameter; flip uses `TICK_120` scaling | ≈ other rates untested | 120 Hz (KB #12; CC #11, #19); #12 tested 500 Hz for post bounces [V1 ✔ GDC slides (extracted text): fixed 120 Hz, 8.33 ms; the 500 Hz test stays video-only] | 120 Hz fixed, 8.33 ms; higher tick costs more, esp. net corrections; 200 ms ping = 24 correction frames |
 
 ### Arena
 | Item | RocketSim | rusty_bullet | | Rocket Science | GDC 2018 |
@@ -151,15 +212,15 @@ Ranked by value to a Soccar verification pipeline (cheapest/most-testable first)
 
 | # | Missing | RocketSim source | Needed for | Notes | Rocket Science | GDC 2018 |
 |---|---|---|---|---|---|---|
-| 1 | **Boost pads** (34 pads, cylinder/box pickup, 4 s / 10 s cooldown, +12 / +100) | `BoostPad.cpp`, `RLConst::BoostPads` | any boost-using scenario; boost is otherwise a free resource | pure, no solver coupling; coordinates in `RLConst.h`; note big-first ordering vs RLBot | small pad +12% exact (KB #1; CC #6); cylinder on root: small r 144, big r '28' (garble of 208? unverified); heights ≈168 big/165 small; 2nd box 160 big/96 small horiz, ≈130 vert, any non-wheel part counts; lock-on persists while touching (CC Mini #2) | - |
-| 2 | **Supersonic state** (≥2200, maintain ≥2100 for ≤1 s) | `Car::_PostTickUpdate` | demos, flip/dodge conditions in replays | ~10 lines | ≥2200 uu/s: trails, FOV +5°, demo threshold; max 2300; boost tap every 24 ticks (Breakout)/27 (Dominus)/26 (others) → avg ≈2270 (CC #11) | - |
+| 1 | **Boost pads** (34 pads, cylinder/box pickup, 4 s / 10 s cooldown, +12 / +100) | `BoostPad.cpp`, `RLConst::BoostPads` | any boost-using scenario; boost is otherwise a free resource | pure, no solver coupling; coordinates in `RLConst.h`; note big-first ordering vs RLBot | small pad +12% exact (KB #1; CC #6); cylinder on root: small r 144, big r '28' (garble of 208? unverified) [V1 ✔ RocketSim `CYL_RAD_BIG` 208, `CYL_RAD_SMALL` 144, `BOX_RAD_BIG` 160, `BOX_RAD_SMALL` 120, `CYL_HEIGHT` 95, `BOX_HEIGHT` 64 (`RLConst.h:255-261`): '28' is a garble of 208 ✔, small cylinder 144 ✔, big box 160 ✔; ✎ small box: video 96 vs RocketSim 120, unresolved; ? the video's heights (≈168/165 and ≈130 vertical) vs RocketSim's 95 and 64 probably use another origin or half-extents, unresolved, see F3] [V2 ✎ initial acquisition differs from RocketSim: it takes a pad when the car origin is inside a 144 uu cylinder (small; 208 big) and within 95 uu in height, and uses the 120 uu box (160 big) only for a car already locked on the previous tick (`BoostPad.cpp:62-85`), so 120 and the video's 96 are retention figures that first pickups cannot test. In the committed captures all 23 first small-pad pickups by a grounded car register with the origin 145 to 172 uu from the pad, beyond 144; in the slowest approach (`hb_rev_600`, 464 uu/s) the origin is still 172.4 uu away at the pickup frame (file line 21) and crosses 144 only 8 frames later; the two slowest approaches bracket the origin distance at the trigger to [172.4, 172.7). That agrees with the port's fit (ADR-0072, RB-RESEARCH-O021, `pad_fit.py`: 153 runs, 63 small and 24 big pickups; origin within 176 uu small, 207.7 big, at most 160 uu above the pad) and not with 144. '28' = 208 for the big pad now also rests on the game fit; the heights (video ≈168/165, RocketSim 95, fit 157 to 163), the retention box and the big pad geometry stay open]; heights ≈168 big/165 small; 2nd box 160 big/96 small horiz, ≈130 vert, any non-wheel part counts; lock-on persists while touching (CC Mini #2) | - |
+| 2 | **Supersonic state** (≥2200, maintain ≥2100 for ≤1 s) | `Car::_PostTickUpdate` | demos, flip/dodge conditions in replays | ~10 lines | ≥2200 uu/s: trails, FOV +5°, demo threshold; max 2300; boost [V1 ? not found in the extracted slide text (the vehicle-tuning slides are diagrams of factors with no constants); the source may be the spoken talk or its summary; unchecked] tap every 24 ticks (Breakout)/27 (Dominus)/26 (others) → avg ≈2270 (CC #11) | - |
 | 3 | **Bump / demolition / respawn** (bumper x>64.5, curves, 0.25 s cooldown, 3 s respawn) | `Arena::_BtCallback_OnCarCarCollision`, `Car::Respawn` | multi-car matches; `world.rs` explicitly says "bumps and demolitions are not modeled" | needs car–car callback hook | demos need supersonic ≥2200; demo rules ignore surface angle (issues page) | - |
 | 4 | **Goal detection** (`|y| > 5124.25 + r`) and **kickoff reset** (5 spawns, mirrored; random order) | `Arena::IsBallScored`, `ResetToRandomKickoff` | episodes that end on goals; `rb_env` | positional test only | - | - |
-| 5 | **Car presets** (Dominus, Plank, Breakout, Hybrid, Merc, Psyclops three-wheel) — hitboxes, offsets, wheels, sus-rest | `CarConfig.cpp` | replays with non-Octane cars | all numbers are in §8.2 of the RocketSim report; Psyclops needs its own friction curves and no sticky base | Octane, Dominus, Plank, Breakout, Hybrid; Batmobile separate; Plank folded into Batmobile preset in 1.56; Merc: 61.11 uu tall on wheels, 9% narrower, 2% longer, reach 1% less (CC #8) | presets exist to divorce physics from visuals |
+| 5 | **Car presets** (Dominus, Plank, Breakout, Hybrid, Merc, Psyclops three-wheel) — hitboxes, offsets, wheels, sus-rest | `CarConfig.cpp` | replays with non-Octane cars | all numbers are in §8.2 of the RocketSim report; Psyclops needs its own friction curves and no sticky base | Octane, Dominus, Plank, Breakout, Hybrid; Batmobile separate; Plank folded into Batmobile preset in 1.56; Merc: 61.11 uu tall on wheels, 9% narrower, 2% longer, reach 1% less (CC #8) [V1 ✔ RocketSim's Merc hitbox 123.22 × 79.2103 × 44.1591 (`CarConfig.cpp`); ? '61.11 uu tall on wheels' and the percentage comparisons are not checkable from the constants: unknown] | presets exist to divorce physics from visuals |
 | 6 | **Boost recharge** (10/s, 0.25 s delay) | `Car::_UpdateBoost` | Dropshot only | trivial | - | - |
 | 7 | **Ball prediction tracker** | `BallPredTracker` | policies | not physics; belongs in `rb_env` | - | - |
 | 8 | **Mutator surface** (jump/flip accel, boost accel/strength, ball radius/mass, gravity, bump scale…) | `MutatorConfig` | scenario sweeps | gravity, unlimited boost, car–ball tuning already exist as separate knobs; no unified struct | - | - |
-| 9 | **Other modes**: Hoops (net mask, launch +1000 @0.265 s), Dropshot (tiles, charge, launch 985 @0.26 s), Heatseeker (steered ball), Snowday (puck) | `Ball.cpp`, `DropshotTiles` | non-Soccar captures | out of the current Soccar scope | Heatseeker: ball speed after touch depends on touch count, not hit quality; curve is force toward target net centre (CC) | - |
+| 9 | **Other modes**: Hoops (net mask, launch +1000 @0.265 s), Dropshot (tiles, charge, launch 985 @0.26 s), Heatseeker (steered ball), Snowday (puck) | `Ball.cpp`, `DropshotTiles` | non-Soccar captures | out of the current Soccar scope | Heatseeker: ball speed after touch depends on touch count, not hit quality; curve is force toward target net centre (CC) [V1 not checked: out of the Soccar scope] | - |
 | 10 | **`noRot` ball integration** | `btRigidBody::m_noRot` | speed only | skip unless profiling demands it | - | - |
 
 ## 3. Things we have that RocketSim does not (review for removal or calibration)
