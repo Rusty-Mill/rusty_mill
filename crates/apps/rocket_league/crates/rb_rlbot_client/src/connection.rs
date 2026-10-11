@@ -51,6 +51,11 @@ impl Connection {
         for message in messages {
             bytes.extend_from_slice(&frame(&message.to_payload()?)?);
         }
+        // Reads leave the socket nonblocking (polls and bounded waits); a write must block until
+        // the peer has taken it all, or backpressure would fail it after part of a frame was out.
+        self.stream
+            .set_nonblocking(false)
+            .map_err(|e| during("set_nonblocking(false)", e))?;
         self.stream
             .write_all(&bytes)
             .map_err(|e| during("write", e))?;
@@ -151,8 +156,9 @@ fn is_timeout(e: &io::Error) -> bool {
     )
 }
 
-/// The longest nap between looks at the socket while a bounded read waits (the read is nonblocking;
-/// see `Transport for TcpStream`).
+/// The longest nap requested between looks at the socket while a bounded read waits (the read is
+/// nonblocking; see `Transport for TcpStream`). Timer granularity and scheduling can oversleep,
+/// so a bounded wait is not guaranteed to end within a millisecond of its deadline.
 const NAP: Duration = Duration::from_millis(1);
 
 /// How long a read may wait.
