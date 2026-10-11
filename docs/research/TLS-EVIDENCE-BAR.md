@@ -71,7 +71,7 @@ proposed to start until Tier 1 has been in use.
 ## Questions for you (answers recorded 2026-10-10)
 
 1. Tier 1: **approved**, fuzz length left to the reviewer.
-2. Candidate: `rleval-app` OIDC transport (my recommendation; not contradicted).
+2. Candidate: `rleval-app` OIDC transport is **my recommendation, not a chosen consumer**; the owner has not confirmed it.
 3. ADR: amendment before any wiring (my recommendation); **text not yet written or approved.**
 4. Reviewer: **open.** Without one Tier 1 stalls at item 4.
 5. `ring`: keep (my recommendation).
@@ -90,7 +90,7 @@ suite for this note. Effort figures are rough (plus or minus 50 percent).
 
 ## Findings from the x509-limbo differential (2026-10-11)
 
-Corpus: `limbo.json` from C2SP/x509-limbo, sha256 `611e337b...cd4de`, 9,802 cases; 9,777 compared
+Corpus: `limbo.json` from C2SP/x509-limbo at the immutable commit `554528a9b0c0d95e071f55de018326f0b65a8364` (sha256 `611e337b...cd4de`), 9,802 cases; 9,777 compared
 (10 client-validation, 6 custom key-usage, 6 max-depth, 1 no peer name, 2 unparsable time
 skipped). Cases with no stated time use one second after the newest `notBefore`; both engines
 get the same instant. Webpki is `verify_server_name` plus `verify_server_cert_signed_by_trust_anchor`.
@@ -105,16 +105,26 @@ that fails without the fix:
 | End-entity certificate with `basicConstraints` `cA` true accepted | `webpki::ee-basicconstraints-ca` | `PathError::EndEntityIsCa` |
 | Malformed `subjectAltName` entry skipped under a name constraint | `nc-permits-invalid-dns-san`, `nc-permits-invalid-ip-san` | `NameError::MalformedSubjectAltName` |
 
-**After the fixes: 0 cases where this validator accepts something webpki refuses and limbo says to
+**After the fixes: 0 limbo cases where this validator accepts something webpki refuses and limbo says to
 refuse, except two.** The two are `pathological::nc-dos-1` and `-2`: a root with 2,048 name
 constraints and a leaf with 2,048 names. Limbo calls them technically valid and "typically
 rejected by implementations due to quadratic blowup". This validator accepts them; webpki
-refuses. **Owner decision needed:** accept by name, or add a comparison budget. Measured: the
-two cases together take 0.65 s in a debug test build, including parsing and webpki's refusal.
-Their certificates are about 77 KB of DER, inside the 128 KiB handshake buffer
-(`MAX_HANDSHAKE_BUFFER`, the TLS 1.2 constant; I did not check the TLS 1.3 limit), so a peer can
-send a chain of that size and this is roughly the worst case a single handshake can cost.
-My recommendation: accept by name.
+refuses. **Owner decision needed.** Fixture measurement only: the two cases together took 0.65 s
+in a debug test build, including parsing and webpki's refusal; their certificates are about 77 KB
+of DER. That is two data points, not a bound. This validator has no name-comparison budget, and
+path search can repeat the comparison across candidate paths, so I cannot say what the worst
+handshake costs. Accepting them needs an explicit resource bound (for example a comparison
+budget in `check_name_constraints`, which I can add) or broader adversarial evidence; I do not
+recommend accepting them on the timing above.
+
+**A second looser-than-webpki behavior, not covered by limbo, owner decision needed:** a
+certificate or CA whose `extendedKeyUsage` is `anyExtendedKeyUsage` alone is accepted for server
+authentication here (RFC 5280 §4.2.1.12 reads it as any purpose) and refused by webpki 0.103
+(it requires the specific `serverAuth` OID whenever the extension is present, on the leaf and on
+every issuer). Pinned by `any_extended_key_usage_is_accepted_here_and_refused_by_webpki`.
+Aligning is a one-line change in `check_eku` plus reversing an existing, tested leaf
+expectation; I recommend aligning (parity with the engine this would replace, and it is the
+tightening direction), but it reverses a documented choice, so it waits for the owner.
 
 Other divergences, none a defect in this validator:
 - 2 cases where this validator is *looser* than webpki and agrees with limbo (webpki is the stricter one): `pathlen::self-issued-certs-pathlen`, `rfc5280::nc::permitted-self-issued`.
@@ -122,5 +132,8 @@ Other divergences, none a defect in this validator:
 - 1 false refusal: `rfc5280::nc::nc-forbids-othername-noop`. An `otherName` name constraint is refused rather than ignored by design (ADR-0002 section 2b-iii).
 - 57 cases both engines accept that limbo says to refuse: 10 CRL cases (neither engine implements revocation, finding F8), and mostly `pedantic` issuance-profile lints (AKI/SKI presence, serial number size, CN versus SAN, weak or unusual subscriber keys, public-suffix wildcards) and trust-anchor properties (anchors are taken as name and key only, by design). Listed in `tests/data/limbo_divergences.txt`; the ratchet fails if this list changes.
 
-How to run, bump the pin and bless a change: `.github/scripts/limbo_differential.sh` and the
-header of `tests/data/limbo_divergences.txt`.
+The golden also pins `compared`, every `skipped` reason and count, the count per outcome, and a
+digest of every case's id and outcome, so lost coverage or a flip among cases that agree is a diff
+(unit-tested in `handrolled_limbo.rs` without the corpus). The CI step fails, rather than skips, if
+the pinned commit cannot be fetched or its hash differs. How to run, bump the pin and bless a
+change: `.github/scripts/limbo_differential.sh` and the header of `tests/data/limbo_divergences.txt`.

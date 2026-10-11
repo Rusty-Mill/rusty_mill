@@ -243,6 +243,129 @@ fn run_case(case: &Value) -> (Outcome, bool) {
     (Outcome::Compared { ours, theirs }, expected_ok)
 }
 
+/// One case's result, as the harness saw it.
+struct CaseResult {
+    id: String,
+    outcome: Outcome,
+    /// What limbo says a conforming validator does.
+    expected_ok: bool,
+}
+
+fn word(accept: bool) -> &'static str {
+    if accept {
+        "accept"
+    } else {
+        "reject"
+    }
+}
+
+/// Everything the golden file pins, as sorted lines.
+///
+/// * how many cases were compared and how many were skipped, and why -- so
+///   losing coverage (a parse change that skips thousands of cases) is a diff,
+///   not a quiet pass;
+/// * how many cases fell in each (limbo, ours, webpki) outcome -- so cases
+///   that agreed and flip together are counted;
+/// * a digest of every case's id and outcome -- so a flip that keeps every
+///   count unchanged is still caught;
+/// * every case where this validator and webpki differ, or both accept what
+///   limbo says to refuse (agreeing with webpki is not the same as being
+///   right).
+fn summarize(results: &[CaseResult]) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut outcomes: BTreeMap<(bool, bool, bool), usize> = BTreeMap::new();
+    let mut digest_input: Vec<String> = Vec::new();
+    let mut compared = 0usize;
+
+    for r in results {
+        match &r.outcome {
+            Outcome::Skipped(why) => {
+                *skipped.entry(why).or_default() += 1;
+                digest_input.push(format!("{} skipped {why}", r.id));
+            }
+            Outcome::Compared { ours, theirs } => {
+                let (ours, theirs) = (*ours == Verdict::Accept, *theirs == Verdict::Accept);
+                compared += 1;
+                *outcomes.entry((r.expected_ok, ours, theirs)).or_default() += 1;
+                digest_input.push(format!(
+                    "{} limbo-{} ours-{} webpki-{}",
+                    r.id,
+                    if r.expected_ok { "ok" } else { "fail" },
+                    word(ours),
+                    word(theirs)
+                ));
+                if ours != theirs || (ours && !r.expected_ok) {
+                    let class = match (ours, theirs) {
+                        (true, true) => "both-accept",
+                        (true, false) => "looser",
+                        _ => "stricter",
+                    };
+                    lines.push(format!(
+                        "{class} limbo-expects-{} {}",
+                        if r.expected_ok { "ok" } else { "fail" },
+                        r.id
+                    ));
+                }
+            }
+        }
+    }
+
+    lines.sort();
+    digest_input.sort();
+    let digest = ring::digest::digest(&ring::digest::SHA256, digest_input.join("\n").as_bytes());
+    let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+
+    let mut out = vec![
+        format!("compared {compared}"),
+        format!("outcomes-sha256 {hex}"),
+    ];
+    out.extend(skipped.iter().map(|(why, n)| format!("skipped {n} {why}")));
+    out.extend(outcomes.iter().map(|((e, o, t), n)| {
+        format!(
+            "outcome limbo-{} ours-{} webpki-{} {n}",
+            if *e { "ok" } else { "fail" },
+            word(*o),
+            word(*t)
+        )
+    }));
+    out.extend(lines);
+    out
+}
+
+/// Compare the summary with the golden file's lines (comments and blanks
+/// ignored). `Err` carries a readable diff.
+fn check_golden(rendered: &[String], golden: &str) -> Result<(), String> {
+    let golden: Vec<&str> = golden
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .collect();
+    let new: Vec<&String> = rendered
+        .iter()
+        .filter(|l| !golden.contains(&l.as_str()))
+        .collect();
+    let gone: Vec<&&str> = golden
+        .iter()
+        .filter(|l| !rendered.iter().any(|r| r == **l))
+        .collect();
+    if new.is_empty() && gone.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "limbo results changed.\nnow (look at any `looser` first: a possible forged-certificate \
+         acceptance; a lower `compared` or new `skipped` line is lost coverage):\n{}\nwere \
+         pinned and are gone:\n{}\nRerun with LIMBO_BLESS=1 once they are understood.",
+        new.iter()
+            .map(|l| format!("  {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        gone.iter()
+            .map(|l| format!("  {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ))
+}
+
 #[test]
 #[ignore = "needs the x509-limbo corpus: set LIMBO_JSON to limbo.json"]
 fn ours_against_webpki_on_x509_limbo() {
@@ -254,57 +377,24 @@ fn ours_against_webpki_on_x509_limbo() {
         .and_then(Value::as_array)
         .expect("testcases array");
 
-    let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
-    // (expected, ours, theirs) -> ids
-    let mut table: BTreeMap<(bool, bool, bool), Vec<String>> = BTreeMap::new();
-    for case in cases {
-        let id = case
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("?")
-            .to_string();
-        match run_case(case) {
-            (Outcome::Skipped(why), _) => *skipped.entry(why).or_default() += 1,
-            (Outcome::Compared { ours, theirs }, expected) => table
-                .entry((expected, ours == Verdict::Accept, theirs == Verdict::Accept))
-                .or_default()
-                .push(id),
-        }
-    }
-
-    let compared: usize = table.values().map(Vec::len).sum();
-    println!("limbo cases: {}, compared: {compared}", cases.len());
-    for (why, n) in &skipped {
-        println!("  skipped {n:5}  {why}");
-    }
-    println!("  expected ours  theirs  count");
-    for ((expected, ours, theirs), ids) in &table {
-        let e = if *expected { "ok  " } else { "fail" };
-        let o = if *ours { "accept" } else { "reject" };
-        let t = if *theirs { "accept" } else { "reject" };
-        println!("  {e}     {o} {t}  {:5}", ids.len());
-    }
-    // Every case where this validator and webpki differ, and every case where
-    // both accept something limbo says to refuse, as sorted
-    // `class limbo-expects-X id` lines. "Both accept" is listed because
-    // agreeing with webpki is not the same as being right.
-    let mut lines: Vec<String> = Vec::new();
-    for ((expected, ours, theirs), ids) in &table {
-        if ours == theirs && (*expected || !*ours) {
-            continue;
-        }
-        let class = match (*ours, *theirs) {
-            (true, true) => "both-accept",
-            (true, false) => "looser",
-            _ => "stricter",
-        };
-        let expects = if *expected { "ok" } else { "fail" };
-        lines.extend(
-            ids.iter()
-                .map(|id| format!("{class} limbo-expects-{expects} {id}")),
-        );
-    }
-    lines.sort();
+    let results: Vec<CaseResult> = cases
+        .iter()
+        .map(|case| {
+            let id = case
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            let (outcome, expected_ok) = run_case(case);
+            CaseResult {
+                id,
+                outcome,
+                expected_ok,
+            }
+        })
+        .collect();
+    let rendered = summarize(&results);
+    println!("{}", rendered.join("\n"));
 
     let golden_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -319,32 +409,128 @@ fn ours_against_webpki_on_x509_limbo() {
                     .join("\n")
             })
             .unwrap_or_default();
-        std::fs::write(golden_path, format!("{header}\n{}\n", lines.join("\n")))
+        std::fs::write(golden_path, format!("{header}\n{}\n", rendered.join("\n")))
             .expect("golden is writable");
-        println!("blessed {} lines", lines.len());
+        println!("blessed {} lines", rendered.len());
         return;
     }
-    let golden: Vec<String> = std::fs::read_to_string(golden_path)
-        .expect("tests/data/limbo_divergences.txt exists")
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        .map(str::to_string)
-        .collect();
-    let new: Vec<&String> = lines.iter().filter(|l| !golden.contains(l)).collect();
-    let gone: Vec<&String> = golden.iter().filter(|l| !lines.contains(l)).collect();
-    assert!(
-        new.is_empty() && gone.is_empty(),
-        "limbo results changed.\nnew (look at these first; any `looser` is a possible \
-         forged-certificate acceptance):\n{}\nno longer present (improvements, or a changed \
-         corpus):\n{}\nrerun with LIMBO_BLESS=1 once they are understood",
-        new.iter()
-            .map(|l| format!("  {l}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        gone.iter()
-            .map(|l| format!("  {l}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-    assert!(compared > 5000, "the corpus compared only {compared} cases");
+    let golden =
+        std::fs::read_to_string(golden_path).expect("tests/data/limbo_divergences.txt exists");
+    if let Err(diff) = check_golden(&rendered, &golden) {
+        panic!("{diff}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The accounting itself, tested without the corpus.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod accounting {
+    use super::*;
+
+    fn compared(id: &str, expected_ok: bool, ours: Verdict, theirs: Verdict) -> CaseResult {
+        CaseResult {
+            id: id.into(),
+            outcome: Outcome::Compared { ours, theirs },
+            expected_ok,
+        }
+    }
+
+    fn skipped(id: &str, why: &'static str) -> CaseResult {
+        CaseResult {
+            id: id.into(),
+            outcome: Outcome::Skipped(why),
+            expected_ok: true,
+        }
+    }
+
+    fn baseline() -> Vec<CaseResult> {
+        use Verdict::{Accept, Reject};
+        vec![
+            compared("a", true, Accept, Accept),
+            compared("b", false, Reject, Reject),
+            compared("c", false, Accept, Reject), // looser
+            compared("d", false, Accept, Accept), // both accept what limbo refuses
+            skipped("e", "client validation"),
+        ]
+    }
+
+    fn pinned() -> String {
+        summarize(&baseline()).join("\n")
+    }
+
+    #[test]
+    fn identical_results_pass_and_the_summary_lists_what_matters() {
+        let lines = summarize(&baseline());
+        check_golden(&lines, &pinned()).expect("identical results pass");
+        assert!(lines.contains(&"compared 4".to_string()));
+        assert!(lines.contains(&"skipped 1 client validation".to_string()));
+        assert!(lines.contains(&"looser limbo-expects-fail c".to_string()));
+        assert!(lines.contains(&"both-accept limbo-expects-fail d".to_string()));
+        // Agreement that is right is not listed individually.
+        assert!(!lines.iter().any(|l| l.ends_with(" a") || l.ends_with(" b")));
+    }
+
+    #[test]
+    fn losing_coverage_is_a_diff() {
+        // A case that used to be compared is now skipped: no divergence line
+        // changes for `a`, but `compared` and `skipped` do.
+        let mut results = baseline();
+        results[0] = skipped("a", "no peer name");
+        let err = check_golden(&summarize(&results), &pinned()).unwrap_err();
+        assert!(err.contains("compared 3"), "{err}");
+        assert!(err.contains("skipped 1 no peer name"), "{err}");
+    }
+
+    #[test]
+    fn a_new_skip_reason_is_a_diff() {
+        let mut results = baseline();
+        results.push(skipped("f", "unparsable validation time"));
+        assert!(check_golden(&summarize(&results), &pinned()).is_err());
+    }
+
+    #[test]
+    fn an_agreeing_case_that_flips_is_a_diff() {
+        use Verdict::{Accept, Reject};
+        // `a` (limbo ok) was accept/accept and is now reject/reject: both
+        // engines agree, no divergence line appears, but the outcome counts
+        // and the digest move.
+        let mut results = baseline();
+        results[0] = compared("a", true, Reject, Reject);
+        assert!(check_golden(&summarize(&results), &pinned()).is_err());
+        // Two flips that cancel in every count still change the digest.
+        let mut cases = baseline();
+        cases.push(compared("x", true, Accept, Accept));
+        cases.push(compared("y", true, Reject, Reject));
+        let before = summarize(&cases);
+        let n = cases.len();
+        cases[n - 2] = compared("x", true, Reject, Reject);
+        cases[n - 1] = compared("y", true, Accept, Accept);
+        let after = summarize(&cases);
+        let counts = |v: &[String]| -> Vec<String> {
+            v.iter()
+                .filter(|l| l.starts_with("outcome "))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            counts(&before),
+            counts(&after),
+            "the swap keeps every count"
+        );
+        assert!(
+            check_golden(&after, &before.join("\n")).is_err(),
+            "the digest catches it"
+        );
+    }
+
+    #[test]
+    fn a_new_looser_case_is_a_diff() {
+        use Verdict::{Accept, Reject};
+        let mut results = baseline();
+        results.push(compared("g", false, Accept, Reject));
+        let err = check_golden(&summarize(&results), &pinned()).unwrap_err();
+        assert!(err.contains("looser limbo-expects-fail g"), "{err}");
+    }
 }

@@ -6,30 +6,30 @@
 # Downloads limbo.json, checks it against a pinned sha256, and runs the command
 # with LIMBO_JSON pointing at it. The command must report one passing test.
 #
-# The corpus lives upstream and changes, so a download failure or a hash that no
-# longer matches is a *skip with a visible warning*, not a failure: an upstream
-# edit must not break unrelated pull requests. It is also why this is not
-# silent: the warning goes to the log and the step summary, and the pin is
-# re-set by hand (see docs/research/TLS-EVIDENCE-BAR.md). When the corpus does
-# match, any change in the results fails the run (tests/data/limbo_divergences.txt).
+# The corpus is fetched from an immutable upstream commit and checked against a
+# pinned sha256, so the evidence cannot change under the test. If it cannot be
+# fetched or does not match, the step FAILS: a differential that quietly stops
+# running is worse than one that is red. Bumping the pin is a deliberate act
+# (pick a new commit, run the test, review the new results, bless the golden,
+# update both values below); see docs/research/TLS-EVIDENCE-BAR.md.
 #
-# Overrides (tests use them): LIMBO_URL, LIMBO_SHA256, LIMBO_DEST.
+# Overrides (tests use them): LIMBO_URL, LIMBO_SHA256, LIMBO_DEST, LIMBO_RETRIES.
 set -uo pipefail
 
-url="${LIMBO_URL:-https://raw.githubusercontent.com/C2SP/x509-limbo/main/limbo.json}"
+url="${LIMBO_URL:-https://raw.githubusercontent.com/C2SP/x509-limbo/554528a9b0c0d95e071f55de018326f0b65a8364/limbo.json}"
 want="${LIMBO_SHA256:-611e337b9fb477b927bae65434650692cb9d2070ff5b05f975d0403510acd4de}"
 dest="${LIMBO_DEST:-$(mktemp -d)/limbo.json}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
-skip() {
-  echo "::warning::x509-limbo differential SKIPPED: $1"
-  printf '### x509-limbo differential\n**SKIPPED:** %s\n' "$1" >> "$summary"
-  exit 0
+fail() {
+  echo "::error::x509-limbo differential could not run: $1"
+  printf '### x509-limbo differential\n**FAILED TO RUN:** %s\n' "$1" >> "$summary"
+  exit 1
 }
 
-curl -fsSL --retry 3 --max-time 120 -o "$dest" "$url" || skip "could not download $url"
+curl -fsSL --retry "${LIMBO_RETRIES:-5}" --retry-all-errors --max-time 180 -o "$dest" "$url" || fail "could not download $url"
 got="$(sha256sum "$dest" | cut -d' ' -f1)"
-[ "$got" = "$want" ] || skip "corpus sha256 is $got, pinned $want; re-pin after reviewing the new results"
+[ "$got" = "$want" ] || fail "corpus sha256 is $got, pinned $want"
 
 out="$(LIMBO_JSON="$dest" "$@" 2>&1)"
 status=$?

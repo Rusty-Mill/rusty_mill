@@ -1,15 +1,36 @@
-# x509-limbo results that matter, as `class limbo-expects-<ok|fail> <id>`.
+# x509-limbo results pinned for the certificate differential (handrolled_limbo.rs).
 #
-# classes:
-#   looser       this validator accepts, webpki refuses.   A possible forged-certificate
-#                acceptance unless limbo expects `ok` (then webpki is the stricter one).
-#   stricter     this validator refuses, webpki accepts.  A compatibility cost, or this
-#                validator being right when limbo expects `fail`.
-#   both-accept  both accept something limbo says to refuse.  Agreement is not correctness.
+# Lines, in order:
+#   compared N            how many cases were run through both engines
+#   outcomes-sha256 H     a digest of every case's id and outcome, so any flip is a diff
+#   skipped N reason      cases not comparable, and why (lost coverage shows here)
+#   outcome limbo-X ours-Y webpki-Z N    how many cases fell in each outcome
+#   <class> limbo-expects-<ok|fail> <id> the cases that matter, where class is
+#     looser       this validator accepts, webpki refuses. A possible forged-certificate
+#                  acceptance unless limbo expects `ok` (then webpki is the stricter one).
+#     stricter     this validator refuses, webpki accepts. A compatibility cost, or this
+#                  validator being right when limbo expects `fail`.
+#     both-accept  both accept something limbo says to refuse. Agreement is not correctness.
 #
-# This file is a ratchet: the test fails on any line not here and on any line here that
-# has gone. After understanding a change: LIMBO_BLESS=1 cargo test ... -- --ignored.
-# Corpus: see .github/scripts/limbo_differential.sh (pinned by sha256).
+# The test fails on any line not here and any line here that has gone. After understanding a
+# change: LIMBO_BLESS=1 LIMBO_JSON=... cargo test ... --test handrolled_limbo -- --ignored.
+# Corpus: x509-limbo commit 554528a9b0c0d95e071f55de018326f0b65a8364, limbo.json sha256
+# 611e337b9fb477b927bae65434650692cb9d2070ff5b05f975d0403510acd4de (limbo_differential.sh).
+compared 9777
+outcomes-sha256 7ea3c71b90bd3c4b80febf9cafaec03bf682c71ee2c0236b2ed6b063fc4fced9
+skipped 10 client validation
+skipped 6 custom key usage requirement
+skipped 6 max chain depth configured
+skipped 1 no peer name
+skipped 2 unparsable validation time
+outcome limbo-fail ours-reject webpki-reject 8790
+outcome limbo-fail ours-reject webpki-accept 4
+outcome limbo-fail ours-accept webpki-reject 2
+outcome limbo-fail ours-accept webpki-accept 57
+outcome limbo-ok ours-reject webpki-reject 5
+outcome limbo-ok ours-reject webpki-accept 1
+outcome limbo-ok ours-accept webpki-reject 2
+outcome limbo-ok ours-accept webpki-accept 916
 both-accept limbo-expects-fail crl::crlnumber-critical
 both-accept limbo-expects-fail crl::crlnumber-missing
 both-accept limbo-expects-fail crl::issuer-missing-crlsign

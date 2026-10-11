@@ -406,13 +406,12 @@ fn an_intermediate_whose_eku_excludes_server_auth_is_refused() {
 }
 
 /// The same rule must not refuse a CA that does permit server authentication,
-/// permits everything (`anyExtendedKeyUsage`), or says nothing. Without these
+/// or says nothing. Without these
 /// the refusal above could be a blanket rejection of any CA with an EKU.
 #[test]
 fn an_intermediate_eku_that_permits_server_auth_is_accepted() {
     for (label, ekus) in [
         ("serverAuth", vec![ExtendedKeyUsagePurpose::ServerAuth]),
-        ("anyExtendedKeyUsage", vec![ExtendedKeyUsagePurpose::Any]),
         (
             "serverAuth among others",
             vec![
@@ -1285,6 +1284,63 @@ fn a_wildcard_certificate_is_refused_when_it_covers_an_excluded_host() {
             theirs.is_ok(),
             accepted,
             "excluded {excluded:?}, SAN {san:?}: rustls gave {theirs:?}"
+        );
+    }
+}
+
+/// **A known divergence, pinned, awaiting an owner decision.** A certificate (or
+/// CA) whose `extendedKeyUsage` is `anyExtendedKeyUsage` alone is accepted here
+/// for server authentication (RFC 5280 §4.2.1.12 reads it as "any purpose") and
+/// refused by webpki 0.103, which requires the specific `serverAuth` OID
+/// whenever the extension is present, on the leaf and on every issuer. This
+/// validator is the looser one. Aligning it is a one-line change in `check_eku`
+/// plus changing the leaf expectation in `any_extended_key_usage_satisfies_the_requirement`; it is
+/// not made here because it reverses a documented, tested choice. If this test
+/// starts failing, one side changed: decide which.
+#[test]
+fn any_extended_key_usage_is_accepted_here_and_refused_by_webpki() {
+    use rustls::client::verify_server_cert_signed_by_trust_anchor;
+    use rustls::pki_types::{CertificateDer, UnixTime};
+    use std::time::Duration;
+
+    for (label, bend) in [
+        (
+            "leaf",
+            Bend {
+                leaf_ekus: Some(vec![ExtendedKeyUsagePurpose::Any]),
+                ..Default::default()
+            },
+        ),
+        (
+            "intermediate",
+            Bend {
+                intermediate_ekus: Some(vec![ExtendedKeyUsagePurpose::Any]),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let chain = build(bend);
+        validate(&chain, &options())
+            .unwrap_or_else(|e| panic!("{label}: ours should accept: {e:?}"));
+
+        let mut store = rustls::RootCertStore::empty();
+        store
+            .add(CertificateDer::from(chain.root.clone()))
+            .expect("usable anchor");
+        let ee = CertificateDer::from(chain.leaf.clone());
+        let intermediates = [CertificateDer::from(chain.intermediate.clone())];
+        let theirs = verify_server_cert_signed_by_trust_anchor(
+            &rustls::server::ParsedCertificate::try_from(&ee).expect("parses"),
+            &store,
+            &intermediates,
+            UnixTime::since_unix_epoch(Duration::from_secs(NOW as u64)),
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .all,
+        );
+        assert!(
+            theirs.is_err(),
+            "{label}: webpki now accepts anyExtendedKeyUsage; revisit"
         );
     }
 }

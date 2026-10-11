@@ -26,6 +26,7 @@ def run(
             "LIMBO_URL": url or corpus.as_uri(),
             "LIMBO_SHA256": sha,
             "LIMBO_DEST": str(Path(tmp) / "limbo.json"),
+            "LIMBO_RETRIES": "0",
             "GITHUB_STEP_SUMMARY": str(summary),
         }
         result = subprocess.run(
@@ -57,19 +58,25 @@ class LimboDifferentialTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("did not report 1 passed", result.stdout)
 
-    def test_a_changed_corpus_skips_visibly_and_runs_nothing(self) -> None:
-        result, summary = run("echo RAN; exit 1", sha="0" * 64)
-        self.assertEqual(result.returncode, 0)
-        self.assertNotIn("RAN", result.stdout)
-        self.assertIn("::warning::x509-limbo differential SKIPPED", result.stdout)
-        self.assertIn("SKIPPED", summary)
+    def test_a_changed_corpus_fails_and_runs_nothing(self) -> None:
+        # A differential that quietly stops running is worse than a red one.
+        result, summary = run(PASS, sha="0" * 64)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("1 passed", result.stdout)
+        self.assertIn("could not run", result.stdout)
+        self.assertIn("FAILED TO RUN", summary)
 
-    def test_a_failed_download_skips_visibly_and_runs_nothing(self) -> None:
-        result, summary = run("echo RAN; exit 1", url="file:///nonexistent/limbo.json")
-        self.assertEqual(result.returncode, 0)
-        self.assertNotIn("RAN", result.stdout)
+    def test_a_failed_download_fails_and_runs_nothing(self) -> None:
+        result, summary = run(PASS, url="file:///nonexistent/limbo.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("1 passed", result.stdout)
         self.assertIn("could not download", result.stdout)
-        self.assertIn("SKIPPED", summary)
+        self.assertIn("FAILED TO RUN", summary)
+
+    def test_the_default_url_is_an_immutable_commit_not_a_branch(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertRegex(text, r"x509-limbo/[0-9a-f]{40}/limbo\.json")
+        self.assertNotIn("/main/limbo.json", text)
 
 
 if __name__ == "__main__":

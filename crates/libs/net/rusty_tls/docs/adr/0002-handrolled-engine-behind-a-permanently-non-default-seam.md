@@ -668,8 +668,7 @@ read as a step toward it.
 
 ## Amendment 1 (2026-10-11): one consumer may opt in locally, under a written evidence bar
 
-Status: Approach approved by the owner on 2026-10-11; this text is for the owner to read
-before the first consumer is wired. It supersedes nothing in sections 1 to 6.
+Status: Approach approved by the owner on 2026-10-11 (recorded from the owner's reply in the working session); this text is for the owner to read, and the first consumer is still to be chosen, before anything is wired. It supersedes nothing in sections 1 to 6.
 
 **What this clarifies.** Section 1 says a consumer can reach the hand-rolled engine "only by
 a deliberate, local, visible act by whoever invokes `cargo`", and section 3 says the engine
@@ -690,10 +689,11 @@ question is not decided by a pull request that merely wires it.
 3. **Nothing exported at the crate root changes.** `TlsStream`, `AsyncTlsStream`,
    `TlsConnector`, `TlsAcceptor` and `TrustPolicy` stay rustls-backed (section 3). The
    consumer calls the gated module's types directly; no seam type selects the engine.
-4. **The consumer is named and scoped in writing.** The first is `rleval-app`'s OIDC
-   transport: client only, TLS 1.3, to named hosts. Widening it (another consumer, the
-   server side, TLS 1.2, a new host class) is a new decision against the bar, not a
-   consequence of this one.
+4. **The consumer is named and scoped in writing, by the owner.** The first consumer is
+   the owner's choice and is not named by this amendment. The working recommendation is
+   `rleval-app`'s OIDC transport (client only, TLS 1.3, named hosts), pending the owner's
+   confirmation. Whatever is chosen, widening it (another consumer, the server side,
+   TLS 1.2, a new host class) is a new decision against the bar, not a consequence of this one.
 5. **No library default moves.** No feature, cfg or dependency edge makes any other
    crate's build use the engine.
 

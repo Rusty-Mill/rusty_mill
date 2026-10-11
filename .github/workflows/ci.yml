@@ -1249,12 +1249,13 @@ jobs:
       # sandboxes this was developed in do not (they re-sign TLS with their own
       # CA, and the test says so when it sees that).
       # The x509-limbo corpus (about ten thousand certificate-validation cases
-      # written by others) run through this validator and webpki side by side;
-      # any change in the results fails, and so does any case this validator
-      # accepts that webpki refuses and nobody has looked at
-      # (tests/data/limbo_divergences.txt). The corpus is pinned by sha256; if
-      # it cannot be fetched or has changed upstream the step skips with a
-      # warning rather than failing unrelated PRs (limbo_differential.sh).
+      # written by others) run through this validator and webpki side by side.
+      # Any change in the results fails -- including lost coverage (cases that
+      # stop being compared) -- and so does any case this validator accepts that
+      # webpki refuses and nobody has looked at (tests/data/limbo_divergences.txt).
+      # The corpus is fetched from an immutable upstream commit and checked
+      # against a pinned sha256; if it cannot be fetched or does not match, the
+      # step fails rather than skipping (limbo_differential.sh).
       - name: x509-limbo certificate differential
         shell: bash
         run: >
