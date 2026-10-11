@@ -577,11 +577,13 @@ async fn rejects_a_garbled_or_truncated_signature() {
         assert!(why.contains("signature is invalid"), "{why}");
     }
 
-    // Text cut mid-character leaves non-canonical padding bits, which the
-    // strict decoder refuses before any signature check.
-    let cut = format!("{header}.{payload}.{}", &signature[..signature.len() - 8]);
+    // A tail whose unused padding bits are not zero is non-canonical base64
+    // ("AB" is 12 bits: one byte, then four bits that are `0001`). The strict
+    // decoder refuses it before any signature check. (Cutting the real
+    // signature would only sometimes land on such a tail, so use a fixed one.)
+    let non_canonical = format!("{header}.{payload}.AB");
     assert!(
-        rejection(&validator, &cut)
+        rejection(&validator, &non_canonical)
             .await
             .contains("malformed token")
     );
