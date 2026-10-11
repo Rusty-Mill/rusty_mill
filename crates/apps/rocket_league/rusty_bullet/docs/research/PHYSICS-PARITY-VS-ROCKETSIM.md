@@ -61,7 +61,7 @@ None of these shows a bug in `rb_physics_bullet`; each is a question for the gam
 
 ## Verification pass 2 (2026-10-11): the real game
 
-Basis: the 73 committed game captures in `tools/rb_tape_bot/fixtures/*.jsonl` (18,146 frames at 120 Hz; BakkesMod state and recorded inputs), read directly. This is the first pass with the game as the source. The analysis scripts were run from a scratch directory and are not committed.
+Basis: the 73 committed game captures in `tools/rb_tape_bot/fixtures/*.jsonl` (18,146 frames at 120 Hz; BakkesMod state and recorded inputs), read directly. This is the first pass with the game as the source. Reproduce every number with `python -I tools/rb_tape_bot/fixture_checks.py all` (standard library only; run from `rusty_bullet/`).
 
 | Row | Result | Evidence |
 |---|---|---|
@@ -69,7 +69,7 @@ Basis: the 73 committed game captures in `tools/rb_tape_bot/fixtures/*.jsonl` (1
 | Car max speed / angular | ✔ 2300 / 5.5 | exactly 2300.0 in three captures; \|ω\| saturates at 5.5 |
 | Ball slide friction | ✔ about 228 uu/s² | 228.5 after removing drag, against 0.35 × 650 = 227.5 |
 | Ball rolling threshold | ✎ 547.5 uu/s, not 565 | sliding ends at v = ω_cap × 91.25 |
-| Ball restitution | ✔ 0.6 | two ceiling/floor bounces, ratios 0.5998 and 0.5997 |
+| Ball restitution | ✔ 0.6 | two ceiling/floor bounces, both ratios 0.5998 |
 | Minimum boost time | ✔ 12 ticks | 12 consecutive drops after 3 and 5 frame taps; closes F1 |
 | Small pad pickup | ✔ rule already fitted | ADR-0072 fit (origin reach 176 uu), cross-checked at a footprint of about 98 uu; closes F3 for the small pad |
 
@@ -87,7 +87,7 @@ Still untested by these captures: the 6000 uu/s ball cap (the captures reach 3,5
 | Ball body radius | sphere 91.25 + Bullet sphere margin +0.08 bt (=4 uu) | `BALL_RADIUS` 93.15 (rest height); 91.25 used for contacts (`BALL_CONTACT_SLACK`, ADR-0034/0036/0045) | ⚠ modelled differently, calibrated | ball z≈93.15 used as rest-height example in 1.43/1.44 (CC) [V1 ✔ RocketSim `BALL_REST_Z` 93.15, `RLConst.h:43`] | - |
 | Ball mass | 30 | 30 | ✅ | - | - |
 | Ball drag | 0.03, `v *= (1−d)^dt` | 0.03, `(1−d).powf(dt)` (`integrate::apply_damping`) | ✅ | loses 3%/s, halves ≈22 s; spin has no air effect (CC #4) [V1 ✔ `BALL_DRAG` 0.03 (`RLConst.h:45`); half-life ln 0.5 / ln 0.97 = 22.8 s, so '≈22' is a truncation] | - |
-| Ball friction / restitution | 0.35 / 0.6 | 0.35 / 0.6 (`RigidBody::ball`) | ✅ | slide friction 230 uu/s²; rolls w/o sliding <≈565 uu/s (CC; 565 vs 2πr≈573 flagged); 60% of perpendicular speed returned (CC #4) [V1 ✔ restitution 0.6 and friction 0.35 (`RLConst.h:46-47`); ? 230 uu/s² and 565 uu/s have no RocketSim counterpart and stay unknown] [V2 ✔ real game, `probe_ball_roll`: sliding deceleration after removing the 3 %/s drag is 228.5 uu/s² (sd 0.3, 415 frames), against 0.35 × 650 = 227.5, so '230' is a rounding; spin grows at 6.228 rad/s² = 2.5 × 227.5 / 91.25 (solid sphere, contact radius 91.25); ✎ the 565 uu/s rolling threshold is wrong: sliding ends at v = 547.5 = 6 × 91.25 (v reaches 547.5 as ω reaches 6.000, then ω tracks v / 91.25), and 2πr = 573 is not it either; restitution 0.6 ✔ (ceiling hits −2274 → 1364 and 2883 → −1729 uu/s, ratios 0.5998 and 0.5997)] | - |
+| Ball friction / restitution | 0.35 / 0.6 | 0.35 / 0.6 (`RigidBody::ball`) | ✅ | slide friction 230 uu/s²; rolls w/o sliding <≈565 uu/s (CC; 565 vs 2πr≈573 flagged); 60% of perpendicular speed returned (CC #4) [V1 ✔ restitution 0.6 and friction 0.35 (`RLConst.h:46-47`); ? 230 uu/s² and 565 uu/s have no RocketSim counterpart and stay unknown] [V2 ✔ real game, `probe_ball_roll`: sliding deceleration after removing the 3 %/s drag is 228.5 uu/s² (sd 0.3, 415 frames), against 0.35 × 650 = 227.5, so '230' is a rounding; spin grows at 6.228 rad/s² = 2.5 × 227.5 / 91.25 (solid sphere, contact radius 91.25); ✎ the 565 uu/s rolling threshold is wrong: sliding ends at v = 547.5 = 6 × 91.25 (v reaches 547.5 as ω reaches 6.000, then ω tracks v / 91.25), and 2πr = 573 is not it either; restitution 0.6 ✔ (ceiling hits −2274 → 1364 and 2883 → −1729 uu/s, both ratios 0.5998)] | - |
 | Ball max speed / angular | 6000 / 6 | 6000 / 6 | ✅ | 6000 uu/s; spin cap '60 RPM' ≈ 6 rad/s (CC, rounded) [V1 ✔ 6000 and 6 rad/s match `RLConst.h:44,54`; ✎ the note 'rounded' is wrong or at least unproven: 60 RPM is exactly 2π = 6.283 rad/s, and 6 rad/s is 57.3 RPM, so the caption fits either value; captions cannot settle it, a capture of the maximum ball spin can] [V2 ✔ real game: ball |ω| saturates at exactly 6.0 rad/s in 1,715 frames across 7 captures (none above, maximum 6.00001), so 2π (6.283) is excluded; the 6000 uu/s ball speed cap is untested (the captures reach 3,541)] | - |
 | Ball rotation integration | skipped (`noRot`, default on) | integrated | ⚠ perf-only in RocketSim; outputs differ only in `rot`, not `vel` | - | - |
 | Car mass | 180 | 180 | ✅ | - (GDC: mass constant, ignored when applying forces) | mass kept constant, ignored in force application (slides) |
