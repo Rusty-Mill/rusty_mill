@@ -4,6 +4,8 @@ The first task driven end to end by live models under `bbp mod`: four Claude Cod
 
 Files in `docs/proving/`: `brief.md` (the task), `profiles.json` (the frozen test profile), `agents.json` (one launcher per role). Paths in the last two assume `/tmp/bbp` and a user `nano`; edit before use.
 
+Linux only: the runner is Unix-shaped and reports every run as `error` on Windows (README, "The runner"). On a Windows machine run everything below inside WSL2, build `bbp` there, and keep the store outside `/tmp` if WSL may restart (`/tmp` is wiped).
+
 ## 1. Build
 
 ```sh
@@ -13,6 +15,8 @@ export PATH="$MILL/target/release:$PATH"   # `bbp` on PATH: agents.json launches
 ```
 
 `MILL` and `P` are absolute so the later steps work from any directory; step 2 leaves the shell in `/tmp/bbp/target`.
+
+Before anything else, prove the harness can reach the model: `claude -p "say ok" --output-format json | jq .is_error` must print `false`. `claude auth status` can say `loggedIn: true` with an expired token; the moderator would then forfeit every turn after about two minutes of 401 retries.
 
 ## 2. Target repository
 
@@ -43,11 +47,11 @@ bbp assign --role tester   --principal tester   --vendor anthropic
 bbp assign --role reviewer --principal reviewer --vendor anthropic
 ```
 
-`profiles.json` must name the toolchain the workload needs: `read_roots` with `~/.cargo` and `~/.rustup`, `PATH` with `~/.cargo/bin`. The sandbox allows nothing else, and the set is frozen at open: a change afterwards means a new task.
+`profiles.json` must name the toolchain the workload needs: `read_roots` with `~/.cargo` and `~/.rustup`, `PATH` with `~/.cargo/bin`. The sandbox allows nothing else, and the set is frozen at open: a change afterwards means a new task. The runner adds what the profile cannot: `/dev/null`, a per-run `TMPDIR`, and cross-directory rename inside the checkout (see the README, "The runner"). `read_roots` must cover the *resolved* targets of anything under `CARGO_HOME` and `RUSTUP_HOME`: a `~/.cargo/config.toml` that is a symlink into a dotfiles directory makes every run die before a test, so either list that directory or point `CARGO_HOME` at a clean one.
 
 ## 4. Run
 
-Shell A, the moderator (returns at `closed` or `cancelled`):
+Shell A, the moderator (returns at `closed` or `cancelled`; at `escalated` it keeps running until a human command moves the task on, usually `bbp human resume` or `cancel`, so decide, do not just wait):
 
 ```sh
 bbp mod --repo-path /tmp/bbp/target --work /tmp/bbp/work --agents $P/agents.json --max-wall-secs 7200
@@ -73,11 +77,25 @@ States in `bbp human` are lower snake case (`planning`, `plan_gate`, `build`, `t
 
 Destructive verbs (`reject`, `rerun`, `resume`, `cancel`) take `--rev N`, the card revision you are looking at. A stale revision is refused; re-read the card and decide again.
 
+### Recovering from an environment fault
+
+A non-gate `request_decision` from the Coder or Tester (the launcher prompts tell them to post one when a run fails for a reason no code change can fix) shows on the card as `pending_request` with no turn, and nothing is granted while it is open. Settling it regrants the requester; it does not refresh anything else, so the order matters:
+
+1. Fix the environment outside the store (install the toolchain file, fix a permission, point a symlink at a readable target). If the fix needs a change to the frozen profile, read roots, environment or limits, stop: the digest is frozen at open, so `cancel --rev N` this task and open a new one with the corrected `profiles.json`.
+2. If the requester is the Tester (state `test`, the failed run is still the selected one): `bbp human rerun CAND --rev N` with the candidate id from the card. The core revokes the failed run and selects a fresh one; the moderator runs it; wait until the card's `run` shows a terminal status. A stale `--rev` is refused; re-read the card and repeat. Do not answer the request first: a Tester regranted before the rerun reads the same failed report and asks again.
+3. Read the fresh report before settling anything:
+   - `passed`, or `failed` with the tests actually executed (the log shows test output, not a toolchain error): settle. `bbp human answer MSG fixed, rerun passed` or `answer MSG environment fixed; the run failed on the tests`, where `MSG` is the card's `pending_request`. The requester is regranted; the Tester judges that report, a Coder (state `build`, no run to redo) reapplies its diff in a fresh clone and resubmits.
+   - `failed` with the same environment error: the fix did not take. Do not settle; nothing is granted while the request is open. Fix again and rerun again (step 2).
+   - `error` (the runner could not execute the profile, or it hit the wall limit): the task is now `escalated` and the request is still pending. Settling it does not bring the Tester back. Fix the environment, then `bbp human resume test --rev N`, which starts a fresh run; when its report is in, settle as above.
+   - To say the fault is not environmental: `bbp human decision MSG reject NOTE`. The requester is regranted and judges the run as it stands; it may open a new request, since the old one is settled.
+
+An `answer` settles only the request it replies to, and a `decision` only the request it names; any other human message leaves the request pending. No iteration is spent on any of this. The first run's roles did not have the route in their prompts and spent the whole iteration budget on revise/resubmit instead. `tests/runner_e2e.rs` has each branch end to end: `an_environment_fault_is_recovered_by_rerun_then_settlement` (the straight path), `a_failed_rerun_keeps_the_request_open_until_a_run_passes`, `an_error_rerun_escalates_and_resume_then_settlement_recovers`, `a_rejected_request_regrants_the_tester_who_may_ask_again`, and `a_coder_request_is_settled_by_an_answer_and_the_coder_resubmits`.
+
 Logs: `$BBP_DIR/agents/<sha256(task)>/turn-N.log` per harness, `$BBP_DIR/mcp/<sha256(task)>/turn-N.json` the config each saw, `/tmp/bbp/work/run-N` the runner's checkouts.
 
 ### What the harness can do, and what the log shows
 
-`agents.json` restricts each harness two ways. `--tools ""` removes every built-in tool from the Planner, Tester and Reviewer, so their only actions are the five bbp tools (`--allowedTools` alone would pre-approve those calls without removing Read, Bash and the rest). The Coder keeps `Bash,Edit,Read,Write` for its own clone. This is the model's tool surface, not an OS sandbox: the process still runs as your user, which is the harness-isolation question the record is meant to answer.
+`agents.json` restricts each harness two ways. `--tools ""` removes the built-in tools from the Planner, Tester and Reviewer, so their only actions are the five bbp tools (`--allowedTools` alone would pre-approve those calls without removing Read, Bash and the rest). One exception on Claude Code 2.1.296: `system/init` still lists `LSP` under `--tools ""`; the first run saw it listed on every MCP-only turn and never used. Treat `LSP` in the list as expected and any other built-in tool as a launcher defect. The Coder keeps `Bash,Edit,Read,Write` for its own clone. This is the model's tool surface, not an OS sandbox: the process still runs as your user, which is the harness-isolation question the record is meant to answer.
 
 Every launcher runs with `--output-format stream-json --verbose`, so `turn-N.log` is one JSON object per line: `system/init` (the tools and MCP servers the model saw), `assistant` messages with their `tool_use` blocks, `user` messages with the `tool_result` each call returned (a bbp refusal is a result with `is_error`), and a final `result`. Each line is written as it happens.
 
@@ -87,7 +105,7 @@ Validate this once, after turn 1 ends, before trusting the run:
 
 ```sh
 L=$BBP_DIR/agents/$(printf %s "$BBP_TASK" | sha256sum | cut -c1-64)/turn-1.log
-jq -r 'select(.type=="system" and .subtype=="init") | .tools[]' "$L"            # an MCP-only role lists only mcp__bbp__*
+jq -r 'select(.type=="system" and .subtype=="init") | .tools[]' "$L"            # an MCP-only role lists only mcp__bbp__* (plus LSP, see above)
 jq -c 'select(.type=="assistant") | .message.content[] | select(.type=="tool_use") | {name, input}' "$L"   # every call, in order
 jq -r 'select(.type=="user") | .message.content[] | select(.type=="tool_result" and .is_error==true) | .content' "$L"   # refusals
 bbp card

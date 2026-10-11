@@ -38,3 +38,5 @@ Two cores exist for one more stage. The Board and the BBP message store overlap 
 ## Open
 
 - Whether rusty_orch's three CLI adapters become BBP agents by running under a BBP MCP server, or whether the orch dispatcher itself becomes a BBP principal that proxies them during the transition. Decide at stage 3.
+
+Resolved 2026-10-10 by rusty_orch [ADR-0013](../../../../apps/rusty_orch/docs/adr/0013-bbp-task-host.md) (Proposed): neither. The moderator launches the vendor CLIs as BBP agents itself; rusty_orch acts as the task's human principal through a `TaskHost` port and drives the `bbp` CLI.

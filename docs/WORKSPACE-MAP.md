@@ -32,7 +32,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_hex | rusty_hex | Hand-rolled, dependency-free hex encode and decode: lowercase output, either case accepted, fixed-size arrays for keys and digests. | 12 |
 | foundation | rusty_ip | rusty_ip | Allocation-free IP address classification facts without connection policy | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 34 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 37 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |

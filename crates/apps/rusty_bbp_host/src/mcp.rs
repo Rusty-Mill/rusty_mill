@@ -108,10 +108,10 @@ pub fn tools() -> Value {
         ),
         tool(
             "post",
-            "Append a message. kind: ask, answer, propose, finding, verdict, request_decision, pass. refs and evidence are strings like \"art:3#L10-L20\" or \"msg:7\". A verdict body is an object {subject, run, verdict, blocking[], non_blocking[]}.",
+            "Append a message. kind: ask, answer, propose, finding, verdict, request_decision, pass. refs and evidence are strings like \"art:3#L10-L20\" or \"msg:7\". A verdict body is {subject: candidate id, run: run id, verdict: \"approve\"|\"revise\", blocking: [item], non_blocking: [item]} where every item is {id: string, ref: \"art:N\" or \"msg:N\", issue: string, fix: string}; approve needs a passed run. When the run failed for a reason no code change can fix (the toolchain or sandbox itself), do not post revise or resubmit: post kind=request_decision to [\"human\"] with gate=false, which ends your turn and waits for the human without spending an iteration.",
             schema(
                 vec![
-                    ("op", "string", "Operation id, unique per call; retry with the same op to get the same result"),
+                    ("op", "string", "Operation id, unique for your role across the whole task, not just this turn (prefix it with your turn number); retry with the same op to get the same result, reuse with a different payload is refused"),
                     ("kind", "string", "Message kind"),
                     ("to", "array", "Recipients: role names, \"human\" or \"*\""),
                     ("body", "string", "Prose body, at most 1,200 characters (verdict: see verdict)"),

@@ -25,8 +25,8 @@ pub enum AuthConfigError {
     HasQuery(String),
 }
 
-impl std::fmt::Display for AuthConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for AuthConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed { uri, source } => {
                 write!(f, "`{uri}` is not a valid absolute URI: {source}")

@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Router, routing::get};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use rusty_json::{Value, json};
 use rusty_mcp::auth::{JwtValidator, TokenError, TokenValidator};
-use serde_json::{Value, json};
 
 const ISSUER: &str = "https://auth.example.com";
 const KID: &str = "test-key-1";
@@ -223,11 +223,13 @@ async fn rejects_an_unsigned_token() {
 
     // `alg: none` with an empty signature — the classic downgrade attempt.
     let header = rusty_base64::encode_url_safe_no_pad(
-        json!({"alg": "none", "kid": KID}).to_string().as_bytes(),
+        json!({"alg": "none", "kid": KID})
+            .to_json_string()
+            .as_bytes(),
     );
     let payload = rusty_base64::encode_url_safe_no_pad(
         json!({"iss": ISSUER, "exp": now() + 600})
-            .to_string()
+            .to_json_string()
             .as_bytes(),
     );
     let token = format!("{header}.{payload}.");

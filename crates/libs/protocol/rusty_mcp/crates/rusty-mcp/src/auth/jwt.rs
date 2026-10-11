@@ -33,6 +33,7 @@
 
 use std::{
     collections::BTreeSet,
+    fmt,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -42,7 +43,7 @@ use jsonwebtoken::{
     errors::ErrorKind,
     jwk::{Jwk, JwkSet},
 };
-use serde_json::Value;
+use rusty_json::Value;
 use tokio::sync::RwLock;
 
 use super::token::{TokenError, TokenValidator, ValidateFuture, VerifiedToken};
@@ -68,8 +69,8 @@ pub enum JwtValidatorError {
     Http(reqwest::Error),
 }
 
-impl std::fmt::Display for JwtValidatorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for JwtValidatorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoAlgorithms => f.write_str("at least one signing algorithm must be allowed"),
             Self::Http(e) => write!(f, "failed to build the HTTP client: {e}"),
@@ -80,8 +81,8 @@ impl std::fmt::Display for JwtValidatorError {
 impl std::error::Error for JwtValidatorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoAlgorithms => None,
             Self::Http(e) => Some(e),
+            Self::NoAlgorithms => None,
         }
     }
 }
@@ -394,7 +395,7 @@ fn extract_scopes(scope: Option<&Value>) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use rusty_json::json;
 
     #[test]
     fn reads_a_string_audience() {

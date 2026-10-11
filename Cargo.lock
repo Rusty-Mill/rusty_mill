@@ -456,6 +456,7 @@ dependencies = [
  "rsa",
  "rusty-mcp",
  "rusty_base64",
+ "rusty_json",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -524,6 +525,7 @@ dependencies = [
  "prost-types",
  "regex",
  "rusty-mcp",
+ "rusty_json",
  "rusty_mcp_client_native",
  "rusty_mcp_server",
  "rusty_serve",
@@ -9261,7 +9263,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "platform"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "thiserror 1.0.69",
 ]
@@ -9295,7 +9297,7 @@ dependencies = [
 
 [[package]]
 name = "platform-bsd"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "libc 0.2.189",
  "platform",
@@ -9305,7 +9307,7 @@ dependencies = [
 
 [[package]]
 name = "platform-linux"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "libc 0.2.189",
  "platform",
@@ -9318,7 +9320,7 @@ dependencies = [
 
 [[package]]
 name = "platform-mock"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "platform",
  "platform-parity",
@@ -9326,14 +9328,14 @@ dependencies = [
 
 [[package]]
 name = "platform-parity"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "platform",
 ]
 
 [[package]]
 name = "platform-windows"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "platform",
  "platform-mock",
@@ -11870,7 +11872,7 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty-mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum 0.8.9",
  "http",
@@ -11882,12 +11884,11 @@ dependencies = [
  "reqwest 0.13.4",
  "rsa",
  "rusty_base64",
+ "rusty_json",
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_percent",
  "rusty_url",
- "serde",
- "serde_json",
  "tokio",
  "tower-layer",
  "tower-service",

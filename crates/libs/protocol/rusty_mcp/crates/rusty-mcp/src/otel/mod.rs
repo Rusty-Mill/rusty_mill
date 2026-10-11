@@ -66,17 +66,15 @@ pub enum OtelError {
 
 impl std::fmt::Display for OtelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Exporter(e) => write!(f, "could not build the OTLP span exporter: {e}"),
-        }
+        let Self::Exporter(e) = self;
+        write!(f, "could not build the OTLP span exporter: {e}")
     }
 }
 
 impl std::error::Error for OtelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Exporter(e) => Some(e),
-        }
+        let Self::Exporter(e) = self;
+        Some(e)
     }
 }
 

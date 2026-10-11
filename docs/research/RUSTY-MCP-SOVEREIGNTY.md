@@ -10,9 +10,9 @@ Facts below were read from the code on 2026-10-10; nothing here is built yet.
 
 | External | Used for (files) | First-party replacement | Gap | Size |
 |---|---|---|---|---|
-| `percent-encoding` | baggage values (`trace.rs`) | `rusty_percent` | none | trivial |
-| `serde`, `serde_json` | `Value` in `trace`, `auth/*`; `Serialize` on `ProtectedResourceMetadata` | `rusty_json` (`Value`, hand-written codec, as `rusty_mcp_proto` does) | metadata needs a `to_value`; gateway callers pass `serde_json::Value` today | small |
-| `thiserror` | error enums in `auth/*`, `otel/mod.rs` hand-written `Display` and `std::error::Error` impls | `rusty_err`'s derive implements its own sovereign `Error` trait, not `std::error::Error`, so `?` into `Box<dyn std::error::Error>` (the gateway) would break. Four small enums: written by hand, no dependency | done |
+| `percent-encoding` | baggage values (`trace.rs`) | `rusty_percent` | none | done |
+| `serde`, `serde_json` | `Value` in `trace`, `auth/*`; `Serialize` on `ProtectedResourceMetadata` | `rusty_json` (`Value`, hand-written codec, as `rusty_mcp_proto` does) | metadata needs a `to_value`; gateway callers pass `serde_json::Value` today | done (direct dependency) |
+| `thiserror` | error enums in `auth/*`, `otel/mod.rs` | hand-written `Display` and `std::error::Error` impls, not `rusty_err` | `rusty_err`'s derive implements its own `Error` trait, not `std::error::Error`, so `?` into `Box<dyn std::error::Error>` (the gateway) would break. Four small enums, no dependency | done |
 | `reqwest` | JWKS fetch (`auth/jwt.rs`, feature `jwt`) | `rusty_request` (+ `rusty_tls`) | `rusty_request` is async on `rusty_tokio`; the validator runs inside the gateway's `tokio`. Needs a bridge (own runtime, as `rusty_mcp_client_native` does) | medium |
 | `jsonwebtoken` | RS256 and ES256 verify, claim checks, JWKS key lookup (`auth/jwt.rs`, 475 lines) | `rusty_oauth`: `jwt::rsa::verify_rs256`, `jwt::es256::verify_es256`, `jwks::JwkSet` (`rsa_key`, `ec_key`), `jwt::{decode_unverified, validate_claims}`; primitives in `rusty_pk`, `rusty_sha2` | glue only. Must keep: algorithm whitelist (no `none`, no HS with a public key), `kid` lookup with refetch limits, `iss`/`aud` (array form)/`exp`/`nbf` with leeway. Reuse the 8 `jwt_validator` tests as the parity suite | medium |
 | `axum` | `Response`/`IntoResponse` in `auth/layer.rs`, `limits.rs`, `otel/metrics.rs`; `Json` in doc examples | none needed: build `http::Response<B>` with a generic body | a layer that wraps an `axum::Router` must return axum's body type, so be generic over `B: From<...>` | medium |
@@ -59,13 +59,25 @@ reasoning behind each.
 Each item is one PR, with its own tests and a change fragment.
 
 1. **Trivial swaps.** `percent-encoding` to `rusty_percent`; `thiserror` to
-   hand-written `Display`/`std::error::Error` impls (`rusty_err`'s derive is
-   not `std`-compatible). *Done when:* both crates are gone from `Cargo.toml`,
-   tests unchanged. **Done 2026-10-10.**
+   `rusty_err`. *Done when:* both crates are gone from `Cargo.toml`, tests
+   unchanged. **Done (2026-10-10), with one change:** `thiserror` went to
+   hand-written `Display` and `std::error::Error` impls, not `rusty_err`,
+   whose derive implements `rusty_err::Error` and not `std::error::Error`
+   (it cannot, because of its blanket impl), which would break `#[source]`
+   and `?` in the gateway crates. Baggage no longer escapes `-_.~`.
 2. **`serde`/`serde_json` to `rusty_json`** across `auth` and `trace`.
    `ProtectedResourceMetadata::to_value`. The gateway call sites move with it.
    *Done when:* no `serde` in the crate; the metadata document is
-   byte-identical in the existing authorization test.
+   byte-identical in the existing authorization test. **Done (2026-10-10),
+   with three changes:** (1) `rusty-mcp` lists no `serde` or `serde_json`, but
+   `serde` stays in its tree through `jsonwebtoken` (until item 4) and
+   `rusty_json`'s default `serde` feature, which `decode::<Value>` and axum's
+   `Json` need until items 4 and 5. (2) The metadata document has the same
+   content, not the same bytes: keys are now alphabetical, not in declaration
+   order (the existing test parses the body, so it never compared bytes).
+   (3) `VerifiedToken::claims` is a `rusty_json::Value`; the gateway converts
+   once, in `TokenClaims::from_json`. Its rules and `agentgateway-llm` stay on
+   `serde_json`, which is the gateway's own track, not this crate's.
 3. **JWKS fetch on `rusty_request`**, replacing `reqwest`, with a bridge that
    works inside a `tokio` caller. *Done when:* `reqwest` is gone; the
    unreachable-JWKS and refetch-limit tests pass.
