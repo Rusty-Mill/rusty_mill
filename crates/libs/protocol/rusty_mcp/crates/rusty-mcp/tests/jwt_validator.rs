@@ -282,6 +282,98 @@ async fn an_unreachable_jwks_is_unavailable_not_invalid() {
     ));
 }
 
+/// A token that parses far enough to need a key from the JWKS, without paying
+/// for a real signature: the fetch fails (or is refused) before it is checked.
+fn token_needing_a_key() -> String {
+    let header = json!({"alg": "RS256", "typ": "JWT", "kid": KID}).to_json_string();
+    let payload = json!({"iss": ISSUER, "aud": RESOURCE, "exp": now() + 600}).to_json_string();
+    format!(
+        "{}.{}.c2ln",
+        base64_url(header.into_bytes()),
+        base64_url(payload.into_bytes())
+    )
+}
+
+/// Serve `body` with `status` at `/jwks.json` and return the URI.
+async fn serve_raw(status: http::StatusCode, body: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let app = Router::new().route("/jwks.json", get(move || async move { (status, body) }));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}/jwks.json")
+}
+
+async fn unavailable_reason(validator: &JwtValidator) -> String {
+    match validator.validate(&token_needing_a_key()).await {
+        Err(TokenError::Unavailable(why)) => why,
+        Err(other) => panic!("expected Unavailable, got {other}"),
+        Ok(_) => panic!("a token must not validate without its key"),
+    }
+}
+
+#[tokio::test]
+async fn a_failing_jwks_endpoint_is_unavailable_and_says_why() {
+    let uri = serve_raw(http::StatusCode::SERVICE_UNAVAILABLE, "down").await;
+    let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
+
+    let why = unavailable_reason(&validator).await;
+
+    assert!(why.contains("503"), "{why}");
+}
+
+#[tokio::test]
+async fn a_malformed_jwks_is_unavailable_not_invalid() {
+    let uri = serve_raw(http::StatusCode::OK, "this is not json").await;
+    let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
+
+    let why = unavailable_reason(&validator).await;
+
+    assert!(why.contains("malformed JWKS"), "{why}");
+}
+
+#[tokio::test]
+async fn a_malformed_jwks_uri_is_unavailable_not_a_panic() {
+    let validator = JwtValidator::builder(ISSUER, "not a url")
+        .build()
+        .expect("build");
+
+    let why = unavailable_reason(&validator).await;
+
+    assert!(why.contains("JWKS fetch failed"), "{why}");
+}
+
+#[tokio::test]
+async fn a_jwks_server_that_never_answers_is_cut_off_by_the_request_timeout() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    // Accept connections and hold them open without ever replying.
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    let validator = JwtValidator::builder(ISSUER, format!("http://{addr}/jwks.json"))
+        .with_request_timeout(Duration::from_millis(200))
+        .build()
+        .expect("build");
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        validator.validate(&token_needing_a_key()),
+    )
+    .await
+    .expect("the request timeout should fire long before this outer one");
+
+    assert!(matches!(outcome, Err(TokenError::Unavailable(_))));
+}
+
 #[tokio::test]
 async fn reads_an_array_audience_and_array_scopes() {
     let keys = keys();
