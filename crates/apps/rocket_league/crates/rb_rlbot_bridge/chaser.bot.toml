@@ -1,0 +1,16 @@
+#:schema https://rlbot.org/schemas/agent.json
+
+[settings]
+name = "RB Chaser"
+agent_id = "rusty_bullet/chaser_bot"
+# The repository root: the workspace builds into <root>/target.
+root_dir = "../../../../.."
+run_command = 'target\release\rb_chaser_bot.exe'
+run_command_linux = "target/release/rb_chaser_bot"
+hivemind = false
+
+[details]
+description = "rb_env's scripted chaser as a bot: drives at the point behind the ball and boosts when pointed at it."
+developer = "rusty_bullet"
+language = "rust"
+tags = []
