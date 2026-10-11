@@ -308,6 +308,34 @@ async fn serve_raw(status: http::StatusCode, body: &'static str) -> String {
     format!("http://{addr}/jwks.json")
 }
 
+fn fetch_test_claims() -> Value {
+    json!({"iss": ISSUER, "sub": "user-1", "aud": RESOURCE, "exp": now() + 600})
+}
+
+/// A raw HTTP/1.1 server: every connection gets `reply` verbatim and is then
+/// closed. Replies that advertise keep-alive let a client believe the
+/// connection can be reused after the server has already hung up.
+async fn serve_raw_replies(reply: String) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let _ = socket.write_all(reply.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    format!("http://{addr}/jwks.json")
+}
+
 async fn unavailable_reason(validator: &JwtValidator) -> String {
     match validator.validate(&token_needing_a_key()).await {
         Err(TokenError::Unavailable(why)) => why,
@@ -324,6 +352,51 @@ async fn a_failing_jwks_endpoint_is_unavailable_and_says_why() {
     let why = unavailable_reason(&validator).await;
 
     assert!(why.contains("503"), "{why}");
+}
+
+#[tokio::test]
+async fn a_jwks_server_that_closes_its_keepalive_connection_is_still_reachable() {
+    // The server says keep-alive and then hangs up, as an idle timeout would.
+    // Reusing that connection fails with no retry, and a failed fetch would
+    // also block the next one for the refetch interval, so fetches must not
+    // reuse connections.
+    let keys = keys();
+    let body = keys.jwks.to_json_string();
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+        body.len()
+    );
+    let validator = JwtValidator::builder(ISSUER, serve_raw_replies(reply).await)
+        .with_jwks_ttl(Duration::ZERO)
+        .with_min_refetch_interval(Duration::ZERO)
+        .build()
+        .expect("build");
+
+    for round in 1..=3 {
+        let outcome = validator.validate(&sign(&keys, fetch_test_claims())).await;
+        assert!(outcome.is_ok(), "fetch {round} failed: {outcome:?}");
+        // Give the server's close time to reach the client.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_jwks_response_preceded_by_an_informational_one_is_read() {
+    // `103 Early Hints` before the final response is legal HTTP/1.1; the final
+    // `200` is the answer, and arriving in the same packet must not lose it.
+    let keys = keys();
+    let body = keys.jwks.to_json_string();
+    let reply = format!(
+        "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let validator = JwtValidator::builder(ISSUER, serve_raw_replies(reply).await)
+        .build()
+        .expect("build");
+
+    let outcome = validator.validate(&sign(&keys, fetch_test_claims())).await;
+
+    assert!(outcome.is_ok(), "{outcome:?}");
 }
 
 #[tokio::test]

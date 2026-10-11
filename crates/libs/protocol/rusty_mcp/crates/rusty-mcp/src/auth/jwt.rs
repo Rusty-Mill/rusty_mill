@@ -200,11 +200,15 @@ impl JwtValidatorBuilder {
         }
 
         // The settings `reqwest` had here: a request timeout, at most 10
-        // redirects, no cookie jar, no proxy from the environment.
+        // redirects, no cookie jar, no proxy from the environment. No
+        // connection pool either: fetches are minutes apart, and a pooled
+        // connection the server has since closed fails without a retry (and
+        // would also block the next fetch for the refetch interval).
         let http = rusty_request::Client::builder()
             .timeout(self.request_timeout)
             .max_redirects(10)
             .no_cookie_store()
+            .no_pool()
             .build();
 
         Ok(JwtValidator {

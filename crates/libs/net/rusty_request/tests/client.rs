@@ -202,6 +202,125 @@ fn streaming_request_body_is_reopened_for_a_preserved_redirect_hop() {
     });
 }
 
+/// `head` then a final `200 OK` carrying `body`, written as one reply.
+fn interim_then_final(interim: &[&str], body: &[u8]) -> Vec<u8> {
+    let mut reply: Vec<u8> = interim
+        .iter()
+        .flat_map(|head| format!("{head}\r\n\r\n").into_bytes())
+        .collect();
+    reply.extend(http_response(200, "OK", &[], body));
+    reply
+}
+
+#[test]
+fn an_informational_response_before_the_final_one_is_skipped() {
+    run(async {
+        let server = start_test_server(|_req| {
+            interim_then_final(
+                &["HTTP/1.1 103 Early Hints\r\nLink: </a>; rel=preload"],
+                b"final",
+            )
+        });
+
+        let resp = Client::new()
+            .get(&server.url("/"))
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.text().unwrap(), "final");
+    });
+}
+
+#[test]
+fn several_informational_responses_are_skipped() {
+    run(async {
+        let server = start_test_server(|_req| {
+            interim_then_final(
+                &[
+                    "HTTP/1.1 100 Continue",
+                    "HTTP/1.1 103 Early Hints\r\nLink: </a>; rel=preload",
+                    "HTTP/1.1 102 Processing",
+                ],
+                b"final",
+            )
+        });
+
+        let resp = Client::new()
+            .get(&server.url("/"))
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.text().unwrap(), "final");
+    });
+}
+
+#[test]
+fn an_informational_response_does_not_hide_a_streamed_final_one() {
+    run(async {
+        let server = start_test_server(|_req| {
+            interim_then_final(&["HTTP/1.1 103 Early Hints"], b"final streamed")
+        });
+
+        let mut resp = Client::new()
+            .get(&server.url("/"))
+            .unwrap()
+            .send_streaming()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 200);
+        let mut collected = Vec::new();
+        while let Some(chunk) = resp.chunk().await.unwrap() {
+            collected.extend_from_slice(&chunk);
+        }
+        assert_eq!(collected, b"final streamed");
+    });
+}
+
+#[test]
+fn endless_informational_responses_are_an_error() {
+    run(async {
+        let server = start_test_server(|_req| {
+            let interim = vec!["HTTP/1.1 102 Processing"; 40];
+            interim_then_final(&interim, b"never reached")
+        });
+
+        let err = Client::new()
+            .get(&server.url("/"))
+            .unwrap()
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidResponse(_)), "{err:?}");
+    });
+}
+
+#[test]
+fn switching_protocols_is_the_final_response_not_an_interim_one() {
+    run(async {
+        let server = start_test_server(|_req| {
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\nConnection: Upgrade\r\n\r\n"
+                .to_vec()
+        });
+
+        let resp = Client::new()
+            .get(&server.url("/"))
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 101);
+    });
+}
+
 #[test]
 fn send_streaming_reassembles_a_content_length_response() {
     run(async {
