@@ -1,5 +1,7 @@
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use rb_rlbot_wire::frame::{frame, FrameDecoder};
@@ -49,13 +51,19 @@ impl Connection {
         for message in messages {
             bytes.extend_from_slice(&frame(&message.to_payload()?)?);
         }
-        self.stream.write_all(&bytes)?;
+        // Reads leave the socket nonblocking (polls and bounded waits); a write must block until
+        // the peer has taken it all, or backpressure would fail it after part of a frame was out.
+        self.stream
+            .set_nonblocking(false)
+            .map_err(|e| during("set_nonblocking(false)", e))?;
+        self.stream
+            .write_all(&bytes)
+            .map_err(|e| during("write", e))?;
         Ok(())
     }
 
     /// Waits for the next message from core.
     pub fn recv(&mut self) -> Result<CoreMessage> {
-        self.stream.set_read_timeout(None)?;
         match read_message(&mut self.stream, &mut self.decoder, None)? {
             Some(message) => Ok(message),
             None => Err(Error::Io(io::ErrorKind::TimedOut.into())),
@@ -111,12 +119,47 @@ impl Connection {
     }
 }
 
+/// A socket call's failure, named. The original error stays reachable as `source()` (with its
+/// `raw_os_error()`); the wrapping `io::Error` has the same kind and prints as `op: original`.
+#[derive(Debug)]
+struct SocketCall {
+    op: &'static str,
+    source: io::Error,
+}
+
+impl fmt::Display for SocketCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.op, self.source)
+    }
+}
+
+impl std::error::Error for SocketCall {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Names the socket call that failed, so a bare OS error (Windows 997, say) says where it came
+/// from. The kind is kept; a timeout or interruption is passed through untouched (it is the
+/// normal outcome of a poll, and this runs every few milliseconds).
+fn during(op: &'static str, e: io::Error) -> io::Error {
+    if is_timeout(&e) || e.kind() == io::ErrorKind::Interrupted {
+        return e;
+    }
+    io::Error::new(e.kind(), SocketCall { op, source: e })
+}
+
 fn is_timeout(e: &io::Error) -> bool {
     matches!(
         e.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
     )
 }
+
+/// The longest nap requested between looks at the socket while a bounded read waits (the read is
+/// nonblocking; see `Transport for TcpStream`). Timer granularity and scheduling can oversleep,
+/// so a bounded wait is not guaranteed to end within a millisecond of its deadline.
+const NAP: Duration = Duration::from_millis(1);
 
 /// How long a read may wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,21 +184,39 @@ impl Transport for TcpStream {
         Instant::now()
     }
 
+    /// No socket receive timeout (`SO_RCVTIMEO`) is ever set: Microsoft documents the state of a
+    /// connection after a timed-out blocking receive as indeterminate, and a bounded wait here
+    /// is timed out every few milliseconds by design. A bounded wait is a nonblocking read with
+    /// short naps instead; only an unbounded wait blocks.
     fn read_within(&mut self, buf: &mut [u8], wait: Wait) -> io::Result<usize> {
         match wait {
             Wait::Forever => {
-                self.set_read_timeout(None)?;
-                self.read(buf)
-            }
-            Wait::UpTo(limit) => {
-                self.set_read_timeout(Some(limit))?;
-                self.read(buf)
+                self.set_nonblocking(false)
+                    .map_err(|e| during("set_nonblocking(false)", e))?;
+                self.read(buf).map_err(|e| during("read (blocking)", e))
             }
             Wait::Poll => {
-                self.set_nonblocking(true)?;
-                let read = self.read(buf);
-                self.set_nonblocking(false)?;
-                read
+                self.set_nonblocking(true)
+                    .map_err(|e| during("set_nonblocking(true)", e))?;
+                self.read(buf).map_err(|e| during("read (poll)", e))
+            }
+            Wait::UpTo(limit) => {
+                self.set_nonblocking(true)
+                    .map_err(|e| during("set_nonblocking(true)", e))?;
+                let deadline = Instant::now() + limit;
+                loop {
+                    match self.read(buf) {
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            if left.is_zero() {
+                                return Err(io::ErrorKind::TimedOut.into());
+                            }
+                            thread::sleep(left.min(NAP));
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        other => return other.map_err(|e| during("read (bounded)", e)),
+                    }
+                }
             }
         }
     }
@@ -250,6 +311,34 @@ mod tests {
         let mut bytes = 60_000u16.to_be_bytes().to_vec();
         bytes.resize(60_002, 7);
         bytes
+    }
+
+    #[test]
+    fn a_failing_socket_call_is_named_and_keeps_its_original_error() {
+        let named = during("set_nonblocking(false)", io::Error::from_raw_os_error(997));
+        assert!(named.to_string().starts_with("set_nonblocking(false): "));
+        assert!(named.to_string().contains("997"));
+        let inner = named
+            .get_ref()
+            .and_then(|e| e.source())
+            .and_then(|e| e.downcast_ref::<io::Error>())
+            .unwrap();
+        assert_eq!(inner.raw_os_error(), Some(997));
+        let kind = io::Error::from_raw_os_error(997).kind();
+        assert_eq!(named.kind(), kind);
+    }
+
+    #[test]
+    fn timeouts_and_interruptions_pass_through_untouched() {
+        for kind in [
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::Interrupted,
+        ] {
+            let plain = during("read (poll)", kind.into());
+            assert_eq!(plain.kind(), kind);
+            assert!(plain.get_ref().is_none(), "{kind:?} was wrapped");
+        }
     }
 
     #[test]
