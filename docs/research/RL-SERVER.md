@@ -81,9 +81,12 @@ and the RLBot client and bridge. What is missing:
 | Instrumentation | Corrections per minute and their size, resimulated frames, input-buffer depth | The diagnostic payoff. Ties to the sim viewer cards (correction overlays) |
 
 On determinism: reconciliation does not need bit-identical client and server (it resimulates from
-the server's state), but identical float behaviour keeps corrections rare, so divergence between
-the two is what the correction loop measures. RB-SIM-001 only aims at run-to-run determinism so
-far.
+the server's state). Two copies of the same `PhysicsWorld` agree with each other whether or not
+either matches the real game, so a loopback client and server can only disagree because their
+inputs, histories or states differ, never because of simulator fidelity. Netcode correctness
+(prediction, buffering, reconciliation) and simulator fidelity (does it match the real game) are
+separate questions with separate tests; see sections 4 and 6. RB-SIM-001 only aims at run-to-run
+determinism so far.
 
 ## 3. Legal and ToS constraints
 
@@ -93,27 +96,44 @@ Existing findings (RB-RESEARCH-O002, RB-RESEARCH-S005):
 - Psyonix's EULA redirects to Epic's, which contractually prohibits reverse engineering,
   decompiling and disassembling the software. The Rocket League Code of Conduct separately
   prohibits exposing unreleased features found in the game's code.
-- Easy Anti-Cheat blocks BakkesMod in online play, so real inputs are only capturable offline.
+- RB-RESEARCH-S005 records that Easy Anti-Cheat blocks BakkesMod in online matches, so inputs
+  captured through that route are offline-only. That is the one capture route inspected; it does not
+  establish that every possible online capture method is impossible.
 - The binary-RE question is still open, and practical work has not started and is blocked.
 
 Postures for a server clone, and a recommendation:
 
 | Posture | What it means | Assessment |
 |---|---|---|
-| **A. Spec-only from public sources** | Build from the GDC talk, Bullet (zlib), RocketSim's open source and our own offline captures. Our own protocol, compatible with the real game only at gameplay level (same rules and physics constants), never on the wire | **Recommended.** It is what the project already does and needs no new exposure |
+| **A. Spec-only from public sources** | Build from the GDC talk, Bullet (zlib), RocketSim's open source and our own offline captures. Our own protocol, compatible with the real game only at gameplay level (same rules and physics constants), never on the wire | **Recommended** as the lowest-risk of the three. It is what the project already does. It is not a clearance: see "Existing game-derived material" below |
 | B. Formal clean-room | One person reads a protected source and writes a spec, another implements | Not needed if nothing protected is read; heavy for one person |
 | C. Reverse-engineer the real protocol from captured traffic or the binary | Would give wire compatibility with official clients or servers | **Not recommended.** Contract breach risk, EAC, account risk, and the earlier decision not to |
 
 Practical rules under A: do not capture official-server traffic; do not read or decompile game
 binaries for protocol detail; do not accept official clients or connect to official servers; do
-not use Psyonix art, names or assets; keep the physics constants sourced from captures and
-open-source reimplementations, as ADR-0013 and ADR-0019 describe (the capture is ground truth).
+not use Psyonix art or names; add no new game-derived data without the review described below;
+keep the physics constants sourced from captures and open-source reimplementations, as ADR-0013
+and ADR-0019 describe (the capture is ground truth).
+
+### Existing game-derived material
+
+The repository already ships game-derived data, so the posture above reduces new exposure; it does
+not remove existing exposure. `arena::standard_meshes` loads 16 collision mesh files
+(`crates/rb_physics_bullet/assets/soccar/mesh_0.cmf` to `mesh_15.cmf`), copied unmodified from the
+`rlgym_rocket_league` 2.0.1 distribution, which redistributes RocketSim's files under Apache-2.0.
+`rusty_bullet/THIRD_PARTY_NOTICES.md` (lines 81 to 94) states that the geometry itself is Rocket
+League's, dumped from the game by RocketSim's authors, and that Rocket League is a Psyonix / Epic
+trademark; ADR-0037 records the choice. Whether and how this affects licensing or any release is
+an open question for the owner's counsel. This note does not conclude that anything infringes and
+does not ask for anything to be removed or relicensed.
 
 ## 4. How it builds on the simulator and the RLBot port
 
 - **The simulator** is the core: the same `PhysicsWorld` runs on both sides, which is the central
-  fact of the GDC design. Its open gaps (pogo and boost errors, dodge fidelity) become visible
-  net divergence, so they are net-relevant too.
+  fact of the GDC design. Its open fidelity gaps (pogo and boost errors, dodge fidelity) do not show
+  up as client and server disagreement, because both sides share them. They matter for
+  diagnostics: comparing correction behaviour with the real game assumes the simulator resembles
+  it. Fidelity is checked separately, against real-game captures with `rb_verify`.
 - **The RLBot port** gives drivers: bots (`rb_rlbot_client`, `rb_rlbot_bridge`, the chaser) can be
   the clients of a test server, so most of the netcode can be exercised with no human and no game.
 - **A sim-backed RLBot-compatible server** (RESEARCH-BACKLOG O007, reading B) is the stepping stone:
@@ -128,7 +148,8 @@ Phases line up with `PHASE-3-NETCODE` in the roadmap, whose exit criterion is: o
 server pair reproduces the reconciliation behaviour from the GDC talk under simulated network
 conditions.
 
-1. **Foundations (small).** Two `Env` instances fed identical inputs stay bit-identical; a
+1. **Foundations (small).** Two `Env` instances fed identical inputs stay bit-identical (a control,
+   not a fidelity test); a
    full-state snapshot and restore for `Env` (cloning `PhysicsWorld` plus flow, pad and respawn
    state); decide the packet and frame-number conventions. Exit: a determinism test and a
    restore test.
@@ -150,16 +171,23 @@ The experiment that teaches the most for the least effort.
 - **Setup:** one process; two `Env` instances, one as server and one as predicting client, from the
   same start. A scripted input source (the chaser or a recorded tape). A link between them with
   configurable latency, jitter and loss, and a seeded random source so runs repeat.
-- **Step zero:** confirm the two instances stay bit-identical on a perfect link (no latency, no
-  jitter, no loss). If they do not, that is the first finding, and everything after is moot.
+- **Step zero (control):** confirm the two instances stay bit-identical on a perfect link (no
+  latency, no jitter, no loss) with identical inputs. If they do not, that is the first finding.
+  With identical copies this also means no correction should ever fire, so it proves nothing about
+  reconciliation by itself.
+- **Exercise reconciliation on purpose:** give the client a deliberately different history from
+  the server: a small offset in the starting state, dropped, delayed and reordered inputs, a
+  forced input-buffer underrun, an extra input only the client sees. Each should produce a
+  correction of a predictable size.
 - **Then measure** per run: corrections per minute, frames resimulated per correction, position
   error at correction time, and input-buffer depth, as latency, jitter and loss vary; and the same
   with the buffer's two throttles on and off.
-- **What it teaches:** whether corrections arise from the netcode design itself (buffer underruns,
-  ball hits on a predicted car) or from sim divergence; how steeply the cost grows with latency
+- **What it teaches:** which netcode situations cause corrections (buffer underruns, ball hits on
+  a predicted car, loss) and how large they are; how steeply the cost grows with latency
   (the slides give 24 frames at 200 ms and 120 Hz as the reference point); and whether the buffer
-  throttles introduce the "minor desyncs" the slides mention. It needs no new dependency, no
-  game and no protocol work.
+  throttles introduce the "minor desyncs" the slides mention. It cannot reveal simulator fidelity
+  error: that error is the same on both sides, so fidelity stays a separate track (real-game
+  captures and `rb_verify`). It needs no new dependency, no game and no protocol work.
 
 ## Open questions
 
