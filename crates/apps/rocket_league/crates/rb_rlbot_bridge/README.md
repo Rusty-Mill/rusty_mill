@@ -48,6 +48,7 @@ there fails to launch the bot).
 **Real-game check (Windows 11, RLBot v5, one session, a few minutes each).** On the loaded
 Freeplay map (no goals) the bot printed `car 0 on team 0` as blue and `car 1 on team 1` as
 orange, ran with no connection error, and exited cleanly when the match ended; the blue car was
-seen driving at the ball, boosting and chasing it. Not established: which way the orange car
-attacks (not watched), chasing after a goal (the map has none), or anything over a long run. The
+seen driving at the ball, boosting and chasing it, and the orange car was seen chasing and
+driving the ball into a goal. Not established: that orange attacks −y, since Freeplay assigns
+no goal or side, so any goal looks the same; or anything over a long run. The
 bot logs only its startup and exit lines, so the log cannot show stalls.
