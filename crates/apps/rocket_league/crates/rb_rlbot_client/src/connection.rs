@@ -116,6 +116,23 @@ impl Connection {
     }
 }
 
+/// Windows `ERROR_IO_PENDING`.
+const IO_PENDING: i32 = 997;
+
+/// On Windows a `recv` bounded by `SO_RCVTIMEO` now and then fails with `ERROR_IO_PENDING` (997,
+/// "Overlapped I/O operation is in progress") instead of the usual timeout error. Seen three times
+/// in long RLBot rc17 matches, always on this call (`read (timeout)`), with core, game and socket
+/// still healthy; a dead socket reads 0 bytes or fails with a different code. For a read that was
+/// told to wait only so long it means what a timeout means: nothing arrived yet. The caller loops
+/// to its deadline as for any timeout. Applied to the bounded read only: a blocking read treated
+/// this way would spin.
+fn io_pending_is_timeout(e: io::Error) -> io::Error {
+    if cfg!(windows) && e.raw_os_error() == Some(IO_PENDING) {
+        return io::ErrorKind::TimedOut.into();
+    }
+    e
+}
+
 /// A socket call's failure, named. The original error stays reachable as `source()` (with its
 /// `raw_os_error()`); the wrapping `io::Error` has the same kind and prints as `op: original`.
 #[derive(Debug)]
@@ -186,7 +203,9 @@ impl Transport for TcpStream {
             Wait::UpTo(limit) => {
                 self.set_read_timeout(Some(limit))
                     .map_err(|e| during("set_read_timeout(limit)", e))?;
-                self.read(buf).map_err(|e| during("read (timeout)", e))
+                self.read(buf)
+                    .map_err(io_pending_is_timeout)
+                    .map_err(|e| during("read (timeout)", e))
             }
             Wait::Poll => {
                 self.set_nonblocking(true)
@@ -304,6 +323,20 @@ mod tests {
         assert_eq!(inner.raw_os_error(), Some(997));
         let kind = io::Error::from_raw_os_error(997).kind();
         assert_eq!(named.kind(), kind);
+    }
+
+    #[test]
+    fn a_bounded_read_that_reports_io_pending_is_a_timeout_on_windows_only() {
+        let e = io_pending_is_timeout(io::Error::from_raw_os_error(IO_PENDING));
+        if cfg!(windows) {
+            assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+            assert!(is_timeout(&e));
+        } else {
+            assert_eq!(e.raw_os_error(), Some(IO_PENDING));
+        }
+        // Any other failure is left alone.
+        let reset = io_pending_is_timeout(io::ErrorKind::ConnectionReset.into());
+        assert_eq!(reset.kind(), io::ErrorKind::ConnectionReset);
     }
 
     #[test]
