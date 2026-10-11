@@ -1,6 +1,7 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use rb_rlbot_wire::frame::{frame, FrameDecoder};
@@ -58,9 +59,6 @@ impl Connection {
 
     /// Waits for the next message from core.
     pub fn recv(&mut self) -> Result<CoreMessage> {
-        self.stream
-            .set_read_timeout(None)
-            .map_err(|e| during("set_read_timeout", e))?;
         match read_message(&mut self.stream, &mut self.decoder, None)? {
             Some(message) => Ok(message),
             None => Err(Error::Io(io::ErrorKind::TimedOut.into())),
@@ -116,23 +114,6 @@ impl Connection {
     }
 }
 
-/// Windows `ERROR_IO_PENDING`.
-const IO_PENDING: i32 = 997;
-
-/// On Windows a `recv` bounded by `SO_RCVTIMEO` now and then fails with `ERROR_IO_PENDING` (997,
-/// "Overlapped I/O operation is in progress") instead of the usual timeout error. Seen three times
-/// in long RLBot rc17 matches, always on this call (`read (timeout)`), with core, game and socket
-/// still healthy; a dead socket reads 0 bytes or fails with a different code. For a read that was
-/// told to wait only so long it means what a timeout means: nothing arrived yet. The caller loops
-/// to its deadline as for any timeout. Applied to the bounded read only: a blocking read treated
-/// this way would spin.
-fn io_pending_is_timeout(e: io::Error) -> io::Error {
-    if cfg!(windows) && e.raw_os_error() == Some(IO_PENDING) {
-        return io::ErrorKind::TimedOut.into();
-    }
-    e
-}
-
 /// A socket call's failure, named. The original error stays reachable as `source()` (with its
 /// `raw_os_error()`); the wrapping `io::Error` has the same kind and prints as `op: original`.
 #[derive(Debug)]
@@ -170,6 +151,10 @@ fn is_timeout(e: &io::Error) -> bool {
     )
 }
 
+/// The longest nap between looks at the socket while a bounded read waits (the read is nonblocking;
+/// see `Transport for TcpStream`).
+const NAP: Duration = Duration::from_millis(1);
+
 /// How long a read may wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wait {
@@ -193,27 +178,39 @@ impl Transport for TcpStream {
         Instant::now()
     }
 
+    /// No socket receive timeout (`SO_RCVTIMEO`) is ever set: Microsoft documents the state of a
+    /// connection after a timed-out blocking receive as indeterminate, and a bounded wait here
+    /// is timed out every few milliseconds by design. A bounded wait is a nonblocking read with
+    /// short naps instead; only an unbounded wait blocks.
     fn read_within(&mut self, buf: &mut [u8], wait: Wait) -> io::Result<usize> {
         match wait {
             Wait::Forever => {
-                self.set_read_timeout(None)
-                    .map_err(|e| during("set_read_timeout(None)", e))?;
+                self.set_nonblocking(false)
+                    .map_err(|e| during("set_nonblocking(false)", e))?;
                 self.read(buf).map_err(|e| during("read (blocking)", e))
-            }
-            Wait::UpTo(limit) => {
-                self.set_read_timeout(Some(limit))
-                    .map_err(|e| during("set_read_timeout(limit)", e))?;
-                self.read(buf)
-                    .map_err(io_pending_is_timeout)
-                    .map_err(|e| during("read (timeout)", e))
             }
             Wait::Poll => {
                 self.set_nonblocking(true)
                     .map_err(|e| during("set_nonblocking(true)", e))?;
-                let read = self.read(buf).map_err(|e| during("read (poll)", e));
-                self.set_nonblocking(false)
-                    .map_err(|e| during("set_nonblocking(false)", e))?;
-                read
+                self.read(buf).map_err(|e| during("read (poll)", e))
+            }
+            Wait::UpTo(limit) => {
+                self.set_nonblocking(true)
+                    .map_err(|e| during("set_nonblocking(true)", e))?;
+                let deadline = Instant::now() + limit;
+                loop {
+                    match self.read(buf) {
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            if left.is_zero() {
+                                return Err(io::ErrorKind::TimedOut.into());
+                            }
+                            thread::sleep(left.min(NAP));
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        other => return other.map_err(|e| during("read (bounded)", e)),
+                    }
+                }
             }
         }
     }
@@ -323,20 +320,6 @@ mod tests {
         assert_eq!(inner.raw_os_error(), Some(997));
         let kind = io::Error::from_raw_os_error(997).kind();
         assert_eq!(named.kind(), kind);
-    }
-
-    #[test]
-    fn a_bounded_read_that_reports_io_pending_is_a_timeout_on_windows_only() {
-        let e = io_pending_is_timeout(io::Error::from_raw_os_error(IO_PENDING));
-        if cfg!(windows) {
-            assert_eq!(e.kind(), io::ErrorKind::TimedOut);
-            assert!(is_timeout(&e));
-        } else {
-            assert_eq!(e.raw_os_error(), Some(IO_PENDING));
-        }
-        // Any other failure is left alone.
-        let reset = io_pending_is_timeout(io::ErrorKind::ConnectionReset.into());
-        assert_eq!(reset.kind(), io::ErrorKind::ConnectionReset);
     }
 
     #[test]
