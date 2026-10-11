@@ -189,6 +189,7 @@ def specialized_job_flags(
             ".github/scripts/ci_plan.py",
             ".github/scripts/tls_fuzz_smoke.sh",
             ".github/scripts/live_internet_check.sh",
+            ".github/scripts/limbo_differential.sh",
         }
         for path in paths
     )

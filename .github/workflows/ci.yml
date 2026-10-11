@@ -1248,6 +1248,19 @@ jobs:
       # the step summary. The runner reaches the internet directly, which the
       # sandboxes this was developed in do not (they re-sign TLS with their own
       # CA, and the test says so when it sees that).
+      # The x509-limbo corpus (about ten thousand certificate-validation cases
+      # written by others) run through this validator and webpki side by side;
+      # any change in the results fails, and so does any case this validator
+      # accepts that webpki refuses and nobody has looked at
+      # (tests/data/limbo_divergences.txt). The corpus is pinned by sha256; if
+      # it cannot be fetched or has changed upstream the step skips with a
+      # warning rather than failing unrelated PRs (limbo_differential.sh).
+      - name: x509-limbo certificate differential
+        shell: bash
+        run: >
+          bash .github/scripts/limbo_differential.sh
+          cargo test -p rusty_tls --features handrolled-engine
+          --test handrolled_limbo -- --ignored --nocapture --color never
       - name: live internet (non-blocking)
         continue-on-error: true
         shell: bash

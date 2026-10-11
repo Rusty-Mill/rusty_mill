@@ -1,0 +1,78 @@
+# x509-limbo results that matter, as `class limbo-expects-<ok|fail> <id>`.
+#
+# classes:
+#   looser       this validator accepts, webpki refuses.   A possible forged-certificate
+#                acceptance unless limbo expects `ok` (then webpki is the stricter one).
+#   stricter     this validator refuses, webpki accepts.  A compatibility cost, or this
+#                validator being right when limbo expects `fail`.
+#   both-accept  both accept something limbo says to refuse.  Agreement is not correctness.
+#
+# This file is a ratchet: the test fails on any line not here and on any line here that
+# has gone. After understanding a change: LIMBO_BLESS=1 cargo test ... -- --ignored.
+# Corpus: see .github/scripts/limbo_differential.sh (pinned by sha256).
+both-accept limbo-expects-fail crl::crlnumber-critical
+both-accept limbo-expects-fail crl::crlnumber-missing
+both-accept limbo-expects-fail crl::issuer-missing-crlsign
+both-accept limbo-expects-fail crl::revoked-certificate-with-crl
+both-accept limbo-expects-fail crl::structure::crl-duplicate-revoked-serial
+both-accept limbo-expects-fail crl::structure::crl-invalid-signature
+both-accept limbo-expects-fail crl::structure::crl-unknown-critical-extension
+both-accept limbo-expects-fail crl::structure::crl-wrong-signing-key
+both-accept limbo-expects-fail crl::structure::entry-unknown-critical-extension
+both-accept limbo-expects-fail crl::structure::entry-unknown-noncritical-extension
+both-accept limbo-expects-fail rfc5280::aki::critical-aki
+both-accept limbo-expects-fail rfc5280::aki::cross-signed-root-missing-aki
+both-accept limbo-expects-fail rfc5280::aki::intermediate-missing-aki
+both-accept limbo-expects-fail rfc5280::aki::leaf-missing-aki
+both-accept limbo-expects-fail rfc5280::ca-empty-subject
+both-accept limbo-expects-fail rfc5280::leaf-ku-keycertsign
+both-accept limbo-expects-fail rfc5280::nc::not-allowed-in-ee-critical
+both-accept limbo-expects-fail rfc5280::nc::not-allowed-in-ee-noncritical
+both-accept limbo-expects-fail rfc5280::nc::permitted-dns-match-noncritical
+both-accept limbo-expects-fail rfc5280::pc::ica-noncritical-pc
+both-accept limbo-expects-fail rfc5280::root-inconsistent-ca-extensions
+both-accept limbo-expects-fail rfc5280::root-missing-basic-constraints
+both-accept limbo-expects-fail rfc5280::root-non-critical-basic-constraints
+both-accept limbo-expects-fail rfc5280::san::noncritical-with-empty-subject
+both-accept limbo-expects-fail rfc5280::san::underscore-dns
+both-accept limbo-expects-fail rfc5280::serial::too-long
+both-accept limbo-expects-fail rfc5280::serial::zero
+both-accept limbo-expects-fail rfc5280::ski::critical-ski
+both-accept limbo-expects-fail rfc5280::ski::intermediate-missing-ski
+both-accept limbo-expects-fail rfc5280::ski::root-missing-ski
+both-accept limbo-expects-fail rfc5280::unknown-critical-extension-root
+both-accept limbo-expects-fail rfc5280::validity::expired-root
+both-accept limbo-expects-fail webpki::aki::root-with-aki-all-fields
+both-accept limbo-expects-fail webpki::aki::root-with-aki-authoritycertissuer
+both-accept limbo-expects-fail webpki::aki::root-with-aki-authoritycertserialnumber
+both-accept limbo-expects-fail webpki::aki::root-with-aki-missing-keyidentifier
+both-accept limbo-expects-fail webpki::aki::root-with-aki-ski-mismatch
+both-accept limbo-expects-fail webpki::cn::case-mismatch
+both-accept limbo-expects-fail webpki::cn::ipv4-hex-mismatch
+both-accept limbo-expects-fail webpki::cn::ipv4-leading-zeros-mismatch
+both-accept limbo-expects-fail webpki::cn::ipv6-non-rfc5952-mismatch
+both-accept limbo-expects-fail webpki::cn::ipv6-uncompressed-mismatch
+both-accept limbo-expects-fail webpki::cn::ipv6-uppercase-mismatch
+both-accept limbo-expects-fail webpki::cn::not-in-san
+both-accept limbo-expects-fail webpki::cn::punycode-not-in-san
+both-accept limbo-expects-fail webpki::cn::utf8-vs-punycode-mismatch
+both-accept limbo-expects-fail webpki::eku::ee-without-eku
+both-accept limbo-expects-fail webpki::forbidden-dsa-leaf
+both-accept limbo-expects-fail webpki::forbidden-p192-leaf
+both-accept limbo-expects-fail webpki::forbidden-rsa-key-not-divisible-by-8-in-leaf
+both-accept limbo-expects-fail webpki::forbidden-rsa-not-divisible-by-8-in-root
+both-accept limbo-expects-fail webpki::forbidden-weak-rsa-in-leaf
+both-accept limbo-expects-fail webpki::malformed-aia
+both-accept limbo-expects-fail webpki::nc::intermediate-permitted-excluded-subtrees-both-null
+both-accept limbo-expects-fail webpki::san::public-suffix-multi-label-wildcard-san
+both-accept limbo-expects-fail webpki::san::public-suffix-private-namespace-wildcard-san
+both-accept limbo-expects-fail webpki::san::san-critical-with-nonempty-subject
+looser limbo-expects-fail pathological::nc-dos-1
+looser limbo-expects-fail pathological::nc-dos-2
+looser limbo-expects-ok pathlen::self-issued-certs-pathlen
+looser limbo-expects-ok rfc5280::nc::permitted-self-issued
+stricter limbo-expects-fail rfc5280::nc::invalid-dnsname-leading-period
+stricter limbo-expects-fail rfc5280::nc::permitted-empty-sequence-excluded-nonempty
+stricter limbo-expects-fail rfc5280::nc::permitted-nonempty-excluded-empty-sequence
+stricter limbo-expects-fail webpki::nc::intermediate-permitted-excluded-subtrees-both-empty-sequences
+stricter limbo-expects-ok rfc5280::nc::nc-forbids-othername-noop

@@ -129,6 +129,10 @@ ring = "0.17"
 # exist can. Reached exactly the way `src/trust.rs` reaches them, rather than
 # by reimplementing store discovery in a test.
 platform = { workspace = true }
+# Reads the x509-limbo corpus (`limbo.json`, tens of megabytes of test cases)
+# in the certificate differential. First-party, so it adds no external code to
+# the graph; the corpus test is the only user.
+rusty_json = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"

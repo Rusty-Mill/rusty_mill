@@ -115,6 +115,20 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", job)
         self.assertIn("      - rusty-tls-fuzz\n", self.workflow[self.workflow.index("required-gate:") :])
 
+    def test_the_limbo_differential_step_runs_through_its_script_before_the_live_step(self) -> None:
+        start = self.workflow.index("  rusty-tls-engine:\n")
+        end = self.workflow.find("\n  # ----", start)
+        job = self.workflow[start : end if end != -1 else None]
+        marker = "      - name: x509-limbo certificate differential"
+        step = job[job.index(marker) :]
+        step = step[: step.index("\n      - name:", len(marker))]
+        self.assertIn("bash .github/scripts/limbo_differential.sh", step)
+        self.assertIn("--test handrolled_limbo -- --ignored", step)
+        # Blocking when the corpus matches (the script itself skips otherwise).
+        self.assertNotIn("continue-on-error", step)
+        # Before the live step, which must stay last in the job.
+        self.assertLess(job.index(marker), job.index("      - name: live internet (non-blocking)"))
+
     def test_the_live_internet_step_can_inform_but_never_gate(self) -> None:
         # A third party's server must not decide whether a PR merges, so the
         # live step is continue-on-error. Its output and exit logic live in
@@ -758,6 +772,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             ".github/scripts/ci_plan.py",
             ".github/scripts/tls_fuzz_smoke.sh",
             ".github/scripts/live_internet_check.sh",
+            ".github/scripts/limbo_differential.sh",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self._planner_map("--packages", "", input=f"{path}\n")["tls_engine"], "true")

@@ -58,6 +58,7 @@ struct Bend {
     root_is_ca: Option<IsCa>,
     intermediate_is_ca: Option<IsCa>,
     intermediate_key_usages: Option<Vec<KeyUsagePurpose>>,
+    intermediate_ekus: Option<Vec<ExtendedKeyUsagePurpose>>,
     intermediate_extra_extension: Option<CustomExtension>,
     leaf_extra_extension: Option<CustomExtension>,
     leaf_ekus: Option<Vec<ExtendedKeyUsagePurpose>>,
@@ -103,6 +104,9 @@ fn build(bend: Bend) -> Chain {
     mid_params.key_usages = bend
         .intermediate_key_usages
         .unwrap_or_else(|| vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign]);
+    if let Some(ekus) = bend.intermediate_ekus {
+        mid_params.extended_key_usages = ekus;
+    }
     if let Some(extension) = bend.intermediate_extra_extension {
         mid_params.custom_extensions = vec![extension];
     }
@@ -381,6 +385,48 @@ fn an_intermediate_with_no_key_usage_at_all_is_accepted() {
         ..Default::default()
     });
     validate(&chain, &options()).expect("absent keyUsage is not a restriction");
+}
+
+/// A CA whose `extendedKeyUsage` excludes server authentication may not issue
+/// server certificates (RFC 5280 §4.2.1.12; webpki and every browser program
+/// enforce it). Found by the x509-limbo differential: six BetterTLS
+/// `pathbuilding` cases had exactly this one defect, webpki refused them, and
+/// this validator accepted them because it checked `extendedKeyUsage` on the
+/// end-entity certificate only.
+#[test]
+fn an_intermediate_whose_eku_excludes_server_auth_is_refused() {
+    let chain = build(Bend {
+        intermediate_ekus: Some(vec![ExtendedKeyUsagePurpose::EmailProtection]),
+        ..Default::default()
+    });
+    assert_eq!(
+        validate(&chain, &options()),
+        Err(PathError::RequiredEkuMissing)
+    );
+}
+
+/// The same rule must not refuse a CA that does permit server authentication,
+/// permits everything (`anyExtendedKeyUsage`), or says nothing. Without these
+/// the refusal above could be a blanket rejection of any CA with an EKU.
+#[test]
+fn an_intermediate_eku_that_permits_server_auth_is_accepted() {
+    for (label, ekus) in [
+        ("serverAuth", vec![ExtendedKeyUsagePurpose::ServerAuth]),
+        ("anyExtendedKeyUsage", vec![ExtendedKeyUsagePurpose::Any]),
+        (
+            "serverAuth among others",
+            vec![
+                ExtendedKeyUsagePurpose::EmailProtection,
+                ExtendedKeyUsagePurpose::ServerAuth,
+            ],
+        ),
+    ] {
+        let chain = build(Bend {
+            intermediate_ekus: Some(ekus),
+            ..Default::default()
+        });
+        validate(&chain, &options()).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+    }
 }
 
 /// `pathLenConstraint: 0` on the root means no intermediates may follow it.
@@ -1240,5 +1286,84 @@ fn a_wildcard_certificate_is_refused_when_it_covers_an_excluded_host() {
             accepted,
             "excluded {excluded:?}, SAN {san:?}: rustls gave {theirs:?}"
         );
+    }
+}
+
+/// An end-entity certificate that also asserts `cA` is refused (CA/B Forum
+/// Baseline Requirements 7.1.2.7.8; webpki refuses it). Found by the x509-limbo
+/// differential (`webpki::ee-basicconstraints-ca`): this validator accepted it,
+/// because it checked `basicConstraints` on CAs only.
+#[test]
+fn an_end_entity_certificate_that_is_also_a_ca_is_refused() {
+    let chain = build(Bend {
+        leaf_is_ca: Some(IsCa::Ca(BasicConstraints::Unconstrained)),
+        ..Default::default()
+    });
+    assert_eq!(validate(&chain, &options()), Err(PathError::EndEntityIsCa));
+}
+
+/// Under a name constraint, a malformed `subjectAltName` entry cannot be shown
+/// to lie inside the permitted namespace, so the certificate is refused, even
+/// though a different, valid entry is the one that authenticates the host.
+/// Found by x509-limbo (`rfc5280::nc::nc-permits-invalid-dns-san`): webpki
+/// refuses it and this validator used to skip the entry and accept.
+#[test]
+fn a_malformed_san_entry_under_a_name_constraint_is_refused() {
+    use rcgen::{GeneralSubtree, NameConstraints};
+    use rusty_tls::handrolled::name::{NameError, ServerName};
+    use rusty_tls::handrolled::path::verify_peer_certificate;
+
+    for (label, sans, accepted) in [
+        ("control: only a valid name", vec!["foo.example.com"], true),
+        (
+            "leading-dot entry beside a valid one",
+            vec![".example.com", "foo.example.com"],
+            false,
+        ),
+        (
+            "empty label beside a valid one",
+            vec!["a..example.com", "foo.example.com"],
+            false,
+        ),
+    ] {
+        let root_key = KeyPair::generate().expect("key");
+        let mut root_params = CertificateParams::new(vec![]).expect("params");
+        root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root_params
+            .distinguished_name
+            .push(DnType::CommonName, "Malformed SAN Root");
+        root_params.name_constraints = Some(NameConstraints {
+            permitted_subtrees: vec![GeneralSubtree::DnsName("example.com".into())],
+            excluded_subtrees: vec![],
+        });
+        let root = root_params.self_signed(&root_key).expect("root");
+
+        let leaf_key = KeyPair::generate().expect("key");
+        let leaf = CertificateParams::new(sans.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .expect("params")
+            .signed_by(&leaf_key, &root, &root_key)
+            .expect("leaf");
+
+        let root_der = root.der().to_vec();
+        let leaf_der = leaf.der().to_vec();
+        let root_cert = Certificate::parse(&root_der).expect("root parses");
+        let leaf_cert = Certificate::parse(&leaf_der).expect("leaf parses");
+        let anchors = [TrustAnchor::from_certificate(&root_cert)];
+        let result = verify_peer_certificate(
+            &leaf_cert,
+            &[],
+            &anchors,
+            &ServerName::Dns("foo.example.com"),
+            &options(),
+        );
+        if accepted {
+            result.unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        } else {
+            assert_eq!(
+                result,
+                Err(PathError::Name(NameError::MalformedSubjectAltName)),
+                "{label}"
+            );
+        }
     }
 }
