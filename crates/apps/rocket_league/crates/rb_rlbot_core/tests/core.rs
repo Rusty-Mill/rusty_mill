@@ -490,31 +490,94 @@ fn a_bare_connection_cannot_stop_the_match() {
     )));
 }
 
-/// A stream of connections that never speak does not keep the loop from serving a bot or from
-/// ending the match.
+/// Sets a flag and joins its thread when dropped, so a failing test still stops its flooder.
+struct Flood {
+    done: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for Flood {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Connections that never speak keep arriving, well past the client cap, while a bot that was
+/// admitted first plays and then stops the match: the loop serves it and ends the run.
 #[test]
-fn a_connection_flood_does_not_starve_a_bot_or_the_stop() {
+fn a_connection_flood_does_not_starve_an_admitted_bot_or_the_stop() {
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
 
     let running = start(vec![bot("test/bot", 0, 0)]);
     let addr = running.addr;
+
+    // The bot is admitted before any flooding, so the cap cannot turn it away.
+    let mut connection = Connection::connect(addr).unwrap();
+    connection.handshake(settings("test/bot")).unwrap();
+    connection.send(InitComplete).unwrap();
+
     let done = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&done);
-    let flooder = thread::spawn(move || {
-        let mut held = Vec::new();
+    let mut flood = Flood { done, handle: None };
+    flood.handle = Some(thread::spawn(move || {
+        // More idle sockets than the cap, replaced oldest first so arrivals never stop.
+        let mut held = VecDeque::new();
         while !flag.load(Ordering::Relaxed) {
             if let Ok(socket) = std::net::TcpStream::connect(addr) {
-                held.push(socket);
+                held.push_back(socket);
             }
-            if held.len() > 2000 {
-                held.clear();
+            if held.len() > 200 {
+                held.pop_front();
             }
         }
-    });
-    let packets = play(addr, "test/bot", 0, 20);
-    done.store(true, Ordering::Relaxed);
-    flooder.join().unwrap();
-    assert_eq!(packets.len(), 20);
-    let (end, _) = running.finish();
+    }));
+
+    // Wait for evidence that over-cap arrivals are being refused, so the flood is real.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let refused = running.events.lock().unwrap().iter().any(
+            |e| matches!(e, Event::ClientDropped { reason, .. } if reason.contains("too many")),
+        );
+        if refused {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the flood never reached the cap");
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // The admitted bot still gets packets and its input is handled, flood or not.
+    let input = ControllerState {
+        throttle: 1.0,
+        ..ControllerState::default()
+    };
+    for _ in 0..20 {
+        loop {
+            match connection.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Some(CoreMessage::GamePacket(_)) => break,
+                Some(_) => {}
+                None => panic!("no packet within 5 s while flooded"),
+            }
+        }
+        connection
+            .send(PlayerInput {
+                player_index: 0,
+                controller_state: input,
+            })
+            .unwrap();
+    }
+    connection
+        .send(StopCommand {
+            shutdown_server: true,
+        })
+        .unwrap();
+    let (end, _) = running
+        .finish_within(Duration::from_secs(10))
+        .expect("the run did not end while flooded");
     assert!(matches!(end, RunEnd::StopCommand { .. }));
+    drop(flood);
 }
