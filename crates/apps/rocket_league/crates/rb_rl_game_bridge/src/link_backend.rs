@@ -34,6 +34,7 @@ pub struct LinkBackend<S> {
     bridge: BridgeLoop,
     configuration: MatchConfiguration,
     latest: Option<GamePacket>,
+    latest_generation: Option<u64>,
     spawning: bool,
     /// A map has loaded since the backend started.
     map_seen: bool,
@@ -75,11 +76,13 @@ impl<S: Read + Write> LinkBackend<S> {
                 .mutators
                 .is_some_and(|m| m.match_length == MatchLengthMutator::Unlimited),
         );
+        link.configure_players(&configuration.player_configurations, false);
         LinkBackend {
             link,
             bridge,
             configuration,
             latest: None,
+            latest_generation: None,
             spawning: false,
             map_seen: false,
             spawn_sent: 0,
@@ -90,6 +93,8 @@ impl<S: Read + Write> LinkBackend<S> {
     /// not modelled in the configuration, so every bot gets [`Loadout::standard`].
     pub fn with_spawning(mut self, on: bool) -> LinkBackend<S> {
         self.spawning = on;
+        self.link
+            .configure_players(&self.configuration.player_configurations, on);
         self
     }
 
@@ -179,7 +184,9 @@ impl<S: Read + Write> MatchBackend for LinkBackend<S> {
     /// Ready once a packet has been distributed (so bots never see an empty match) and, when
     /// spawning, every bot's car exists.
     fn ready(&self) -> bool {
-        self.latest.is_some() && (!self.spawning || self.bots_spawned())
+        self.latest.is_some()
+            && self.latest_generation == Some(self.link.folder().mapping_generation())
+            && (!self.spawning || self.bots_spawned())
     }
 
     fn self_paced(&self) -> bool {
@@ -204,10 +211,13 @@ impl<S: Read + Write> MatchBackend for LinkBackend<S> {
                     let step = self.bridge.on_clump(clump);
                     if step.map_loaded {
                         // A new map has no cars: spawn the bots again.
+                        self.latest = None;
+                        self.latest_generation = None;
                         self.map_seen = true;
                         self.spawn_sent = 0;
                     }
                     if let Some(packet) = step.distribute {
+                        self.latest_generation = Some(self.link.folder().mapping_generation());
                         self.latest = Some(packet);
                         return Ok(Poll::Packet);
                     }
@@ -220,7 +230,7 @@ impl<S: Read + Write> MatchBackend for LinkBackend<S> {
     fn set_input(&mut self, player_index: u32, state: &ControllerState) -> io::Result<bool> {
         match self.link.send(GameCommand::PlayerInput {
             player_index,
-            state: *state,
+            state: rb_rlbot_core::validation::sanitise_controller(state),
         }) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == ErrorKind::InvalidInput => Ok(false),
@@ -229,6 +239,7 @@ impl<S: Read + Write> MatchBackend for LinkBackend<S> {
     }
 
     fn apply_desired(&mut self, desired: &DesiredGameState) -> io::Result<bool> {
+        rb_rlbot_core::validation::validate_desired(desired)?;
         if let Some(ball) = desired.ball_states.first() {
             if let Some((_, current)) = self.link.folder().ball() {
                 self.link.send(GameCommand::SetBallPhysics {
@@ -263,5 +274,190 @@ impl<S: Read + Write> MatchBackend for LinkBackend<S> {
         self.latest
             .clone()
             .unwrap_or_else(|| self.link.folder().packet())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod regressions {
+    use super::*;
+    use crate::{decode_controller_packet, encode_game_packet, GameBundle, GameEvent};
+    use rb_rlbot_wire::{
+        frame::{frame, FrameDecoder},
+        DesiredBallState, DesiredCarState, MatchPhase,
+    };
+    use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+
+    #[derive(Clone, Default)]
+    struct Stream {
+        input: Rc<RefCell<VecDeque<u8>>>,
+        output: Rc<RefCell<Vec<u8>>>,
+    }
+    impl Stream {
+        fn feed(&self, delta: u8, events: Vec<GameEvent>) {
+            self.input.borrow_mut().extend(
+                frame(
+                    &encode_game_packet(&GameBundle {
+                        app_seconds: 0.0,
+                        delta_physics_frames: delta,
+                        events,
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+    }
+    impl Read for Stream {
+        fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+            let mut input = self.input.borrow_mut();
+            if input.is_empty() {
+                return Err(ErrorKind::WouldBlock.into());
+            }
+            let n = b.len().min(input.len());
+            for byte in &mut b[..n] {
+                *byte = input.pop_front().unwrap();
+            }
+            Ok(n)
+        }
+    }
+    impl Write for Stream {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.output.borrow_mut().extend(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    fn spawn(id: u16, command_id: u16) -> GameEvent {
+        GameEvent::PlayerSpawn {
+            id,
+            command_id: Some(command_id),
+            name: format!("car{id}"),
+            team: 0,
+        }
+    }
+    fn map() -> GameEvent {
+        GameEvent::GameSpawn {
+            map_name: "map".into(),
+            mode: 1,
+            team_size: 1,
+            gravity: None,
+        }
+    }
+
+    #[test]
+    fn readiness_waits_for_distributed_ack_snapshot_and_resets_on_new_map() {
+        let stream = Stream::default();
+        let cfg = rb_rlbot_core::bot_match(&[("bot".into(), 0)], MatchLengthMutator::FiveMinutes);
+        let mut backend = LinkBackend::new(stream.clone(), cfg).with_spawning(true);
+        stream.feed(
+            1,
+            vec![
+                map(),
+                spawn(7, 0),
+                GameEvent::StateChange {
+                    phase: MatchPhase::Active,
+                    is_overtime: false,
+                },
+            ],
+        );
+        assert_eq!(backend.poll().unwrap(), Poll::Packet);
+        assert_eq!(backend.link.folder().actor_for_player(0), None);
+        assert_eq!(backend.link.folder().actor_for_player(1), Some(7));
+        stream.feed(1, vec![]);
+        backend.poll().unwrap();
+        stream.feed(1, vec![]);
+        backend.poll().unwrap();
+        backend.poll().unwrap(); // two-message delay reached: spawn is sent
+        assert!(!backend.ready());
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&stream.output.borrow());
+        let commands = decode_controller_packet(&decoder.next_frame().unwrap()).unwrap();
+        stream.feed(0, vec![spawn(9, commands[0].0)]);
+        assert_eq!(backend.poll().unwrap(), Poll::Idle);
+        assert!(backend.bots_spawned());
+        assert!(
+            !backend.ready(),
+            "cached human packet must not open readiness"
+        );
+        stream.feed(1, vec![]);
+        assert_eq!(backend.poll().unwrap(), Poll::Packet);
+        assert!(backend.ready());
+        assert_eq!(backend.packet().players[0].player_id, 100);
+        assert_eq!(backend.packet().players[0].name, "car9");
+        stream.feed(0, vec![map()]);
+        backend.poll().unwrap();
+        assert!(!backend.ready());
+    }
+
+    #[test]
+    fn nonfinite_state_is_atomic_and_live_input_is_sanitised() {
+        let stream = Stream::default();
+        let cfg = rb_rlbot_core::bot_match(&[("bot".into(), 0)], MatchLengthMutator::FiveMinutes);
+        let mut backend = LinkBackend::new(stream.clone(), cfg);
+        stream.feed(1, vec![spawn(8, 1), GameEvent::BallSpawn { id: 9 }]);
+        backend.poll().unwrap();
+        let before = backend.packet();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let desired = DesiredGameState {
+                ball_states: vec![DesiredBallState {
+                    physics: DesiredPhysics {
+                        location: Some(PartialVec3 {
+                            x: Some(12.0),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                }],
+                car_states: vec![DesiredCarState {
+                    physics: Some(DesiredPhysics {
+                        velocity: Some(PartialVec3 {
+                            y: Some(bad),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    boost_amount: Some(20.0),
+                }],
+                match_info: None,
+            };
+            assert_eq!(
+                backend.apply_desired(&desired).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+            assert_eq!(backend.packet(), before);
+            assert!(stream.output.borrow().is_empty());
+        }
+        backend
+            .set_input(
+                0,
+                &ControllerState {
+                    throttle: f32::NAN,
+                    steer: 22.0,
+                    pitch: f32::INFINITY,
+                    yaw: -22.0,
+                    roll: f32::NEG_INFINITY,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&stream.output.borrow());
+        let commands = decode_controller_packet(&decoder.next_frame().unwrap()).unwrap();
+        let crate::Command::PlayerInput { input, .. } = &commands[0].1 else {
+            unreachable!()
+        };
+        assert_eq!(
+            (
+                input.throttle,
+                input.steer,
+                input.pitch,
+                input.yaw,
+                input.roll
+            ),
+            (0.0, 1.0, 0.0, -1.0, 0.0)
+        );
     }
 }

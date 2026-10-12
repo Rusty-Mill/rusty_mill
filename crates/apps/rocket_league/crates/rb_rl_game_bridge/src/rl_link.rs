@@ -62,6 +62,10 @@ pub struct GameFolder {
     cars: BTreeMap<u16, Car>,
     /// Which actor is the car of each player index.
     slots: BTreeMap<u32, u16>,
+    identities: Vec<rb_rlbot_wire::PlayerConfiguration>,
+    reserved: BTreeSet<u32>,
+    slot_count: u32,
+    mapping_generation: u64,
     /// Spawn commands sent and not yet answered: command id to the player index it was for.
     expected: BTreeMap<u16, u32>,
     /// Player indices whose car is the answer to a spawn command of ours (not a human's, or one
@@ -87,6 +91,10 @@ impl Default for GameFolder {
             map_name: String::new(),
             cars: BTreeMap::new(),
             slots: BTreeMap::new(),
+            identities: Vec::new(),
+            reserved: BTreeSet::new(),
+            slot_count: 0,
+            mapping_generation: 0,
             expected: BTreeMap::new(),
             claimed: BTreeSet::new(),
             ball: None,
@@ -107,10 +115,30 @@ impl GameFolder {
     }
 
     /// Declares the match untimed (from the match configuration, as RLBot does): the packet then
-    /// says so and reports no time remaining, whatever the scoreboard clock does. Survives a
+    /// says so and counts upward from the scoreboard clock. Survives a
     /// new map.
     pub fn set_unlimited_time(&mut self, on: bool) {
         self.unlimited = on;
+    }
+
+    /// Configured identities and optional reservations for bots the backend will spawn.
+    pub fn configure_players(
+        &mut self,
+        players: &[rb_rlbot_wire::PlayerConfiguration],
+        spawning: bool,
+    ) {
+        self.identities = players.to_vec();
+        self.reserved = players
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| spawning && !matches!(p.variety, rb_rlbot_wire::PlayerClass::Human))
+            .map(|(i, _)| i as u32)
+            .collect();
+    }
+
+    /// Changes whenever actor-to-slot mappings change, including map resets.
+    pub fn mapping_generation(&self) -> u64 {
+        self.mapping_generation
     }
 
     /// The actor id of the car with player index `index`.
@@ -134,14 +162,18 @@ impl GameFolder {
     /// The lowest player index that is neither taken nor promised to a pending spawn.
     fn free_index(&self) -> u32 {
         (0..)
-            .find(|i| !self.slots.contains_key(i) && !self.expected.values().any(|e| e == i))
+            .find(|i| {
+                !self.slots.contains_key(i)
+                    && !self.reserved.contains(i)
+                    && !self.expected.values().any(|e| e == i)
+            })
             .unwrap_or(u32::MAX)
     }
 
     /// Folds one message in. Returns whether it announced a newly loaded map.
     ///
     /// Time follows the bundle: the frame count adds `delta_physics_frames`, seconds elapsed is
-    /// frames over 120, pad timers run down, and the match clock runs down between whole-second
+    /// frames over 120, pad timers count elapsed time, and the regulation clock runs down between whole-second
     /// scoreboard updates while play is active (as RLBotCS's does).
     pub fn apply(&mut self, bundle: &GameBundle) -> bool {
         let mut map_loaded = false;
@@ -153,10 +185,20 @@ impl GameFolder {
         }
         if bundle.delta_physics_frames != 0 {
             for pad in self.pads.values_mut().filter(|p| !p.active) {
-                pad.timer -= delta;
+                pad.timer += delta;
             }
-            if self.phase == MatchPhase::Active && before_scoreboard == self.scoreboard_seconds {
-                self.time_remaining = (self.time_remaining - delta).max(0.0);
+            if self.phase == MatchPhase::Active
+                && before_scoreboard == self.scoreboard_seconds
+                && !bundle
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, GameEvent::TimeChange { .. }))
+            {
+                self.time_remaining = if self.unlimited || self.overtime {
+                    self.time_remaining + delta
+                } else {
+                    (self.time_remaining - delta).max(0.0)
+                };
             }
         }
         map_loaded
@@ -170,6 +212,9 @@ impl GameFolder {
                     frame_num: self.frame_num,
                     map_name: map_name.clone(),
                     unlimited: self.unlimited,
+                    identities: self.identities.clone(),
+                    reserved: self.reserved.clone(),
+                    mapping_generation: self.mapping_generation.wrapping_add(1),
                     ..GameFolder::default()
                 };
                 return true;
@@ -196,15 +241,7 @@ impl GameFolder {
             GameEvent::PickupState { id, picked_up } => {
                 if let Some(pad) = self.pads.get_mut(id) {
                     pad.active = !picked_up;
-                    pad.timer = if *picked_up {
-                        if pad.big {
-                            10.0
-                        } else {
-                            4.0
-                        }
-                    } else {
-                        0.0
-                    };
+                    pad.timer = 0.0;
                 }
             }
             GameEvent::PlayerSpawn {
@@ -230,6 +267,10 @@ impl GameFolder {
                         self.slots.insert(moved_to, displaced);
                     }
                 }
+                self.slot_count = self
+                    .slot_count
+                    .max(self.slots.keys().next_back().map_or(0, |i| i + 1));
+                self.mapping_generation = self.mapping_generation.wrapping_add(1);
                 self.cars.insert(
                     *id,
                     Car {
@@ -268,6 +309,7 @@ impl GameFolder {
             }
             GameEvent::ActorDestroyed { id } => {
                 if self.cars.remove(id).is_some() {
+                    self.mapping_generation = self.mapping_generation.wrapping_add(1);
                     let gone: Vec<u32> = self
                         .slots
                         .iter()
@@ -339,26 +381,48 @@ impl GameFolder {
     /// The snapshot the bots get. Cars are by player index; pads are by y, then x, as in
     /// `RLBotCS/Conversion/GameStateToFlat.cs`.
     pub fn packet(&self) -> GamePacket {
-        let players = self
-            .slots
-            .iter()
-            .filter_map(|(index, id)| self.cars.get(id).map(|car| (*index, car)))
-            .map(|(index, car)| PlayerInfo {
-                physics: car.physics,
-                air_state: match car.state {
-                    1 => AirState::Jumping,
-                    2 => AirState::DoubleJumping,
-                    3 => AirState::Dodging,
-                    4 => AirState::InAir,
-                    _ => AirState::OnGround,
-                },
-                // The game says only that a car is demolished, not for how long.
-                demolished_timeout: if car.state == 5 { 0.0 } else { -1.0 },
-                is_bot: car.is_bot,
-                name: car.name.clone(),
-                team: car.team,
-                boost: car.boost,
-                player_id: i32::try_from(index).unwrap_or(i32::MAX),
+        let players = (0..self.slot_count)
+            .map(|index| {
+                let car = self
+                    .actor_for_player(index)
+                    .and_then(|id| self.cars.get(&id));
+                let configured = self.identities.get(index as usize);
+                PlayerInfo {
+                    physics: car.map_or_else(Physics::default, |c| c.physics),
+                    air_state: match car.map(|c| c.state) {
+                        Some(1) => AirState::Jumping,
+                        Some(2) => AirState::DoubleJumping,
+                        Some(3) => AirState::Dodging,
+                        Some(4) => AirState::InAir,
+                        _ => AirState::OnGround,
+                    },
+                    demolished_timeout: if car.is_none_or(|c| c.state == 5) {
+                        0.0
+                    } else {
+                        -1.0
+                    },
+                    is_bot: car.map_or_else(
+                        || {
+                            configured.is_some_and(|p| {
+                                !matches!(p.variety, rb_rlbot_wire::PlayerClass::Human)
+                            })
+                        },
+                        |c| c.is_bot,
+                    ),
+                    name: car.map_or_else(
+                        || {
+                            configured.map_or_else(String::new, |p| match &p.variety {
+                                rb_rlbot_wire::PlayerClass::Human => "Human".into(),
+                                rb_rlbot_wire::PlayerClass::CustomBot(b) => b.name.clone(),
+                                rb_rlbot_wire::PlayerClass::PsyonixBot(b) => b.name.clone(),
+                            })
+                        },
+                        |c| c.name.clone(),
+                    ),
+                    team: car.map_or_else(|| configured.map_or(0, |p| p.team), |c| c.team),
+                    boost: car.map_or(0.0, |c| c.boost),
+                    player_id: configured.map_or(index as i32, |p| p.player_id),
+                }
             })
             .collect();
         let mut pads: Vec<&Pad> = self.pads.values().collect();
@@ -384,11 +448,7 @@ impl GameFolder {
                 .collect(),
             match_info: MatchInfo {
                 seconds_elapsed: self.frame_num as f32 / PHYSICS_HZ,
-                game_time_remaining: if self.unlimited {
-                    0.0
-                } else {
-                    self.time_remaining
-                },
+                game_time_remaining: self.time_remaining,
                 is_overtime: self.overtime,
                 is_unlimited_time: self.unlimited,
                 match_phase: self.phase,
@@ -472,6 +532,15 @@ impl<S: Read + Write> RocketLeagueLink<S> {
         self.folder.set_unlimited_time(on);
     }
 
+    /// Sets identity metadata and reservations before reading game events.
+    pub fn configure_players(
+        &mut self,
+        players: &[rb_rlbot_wire::PlayerConfiguration],
+        spawning: bool,
+    ) {
+        self.folder.configure_players(players, spawning);
+    }
+
     fn actor(&self, player_index: u32) -> io::Result<u16> {
         self.folder.actor_for_player(player_index).ok_or_else(|| {
             io::Error::new(ErrorKind::InvalidInput, format!("no car {player_index}"))
@@ -524,7 +593,10 @@ impl<S: Read + Write> RocketLeagueLink<S> {
                 return Ok(PollClump::Clump(clump));
             }
             match self.stream.read(&mut chunk) {
-                Ok(0) => return Ok(PollClump::Closed),
+                Ok(0) => {
+                    self.decoder.finish()?;
+                    return Ok(PollClump::Closed);
+                }
                 Ok(n) => self.decoder.push(&chunk[..n]),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(PollClump::Idle),
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
@@ -543,7 +615,10 @@ impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
                 return Ok(Some(clump));
             }
             match self.stream.read(&mut chunk) {
-                Ok(0) => return Ok(None),
+                Ok(0) => {
+                    self.decoder.finish()?;
+                    return Ok(None);
+                }
                 Ok(n) => self.decoder.push(&chunk[..n]),
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
@@ -553,7 +628,8 @@ impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
 
     /// Sends one command as its own `ControllerPacket`. A command that would take this message
     /// past [`SEND_BUDGET`] bytes is refused with `WouldBlock` (RLBotCS drops it with a log
-    /// line); retry after the next message from the game.
+    /// line); retry after the next message from the game. A command that cannot fit even an
+    /// empty frame is permanently rejected with `InvalidInput`.
     fn send(&mut self, command: GameCommand) -> io::Result<()> {
         let mut spawned_for = None;
         let command = match command {
@@ -605,6 +681,12 @@ impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
         };
         let command_id = self.next_command_id;
         let payload = encode_controller_packet(command_id, &[command]).map_err(invalid)?;
+        if payload.len() > SEND_BUDGET {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "command exceeds the game frame limit",
+            ));
+        }
         if payload.len() > SEND_BUDGET.saturating_sub(self.sent_since_message) {
             return Err(io::Error::new(
                 ErrorKind::WouldBlock,

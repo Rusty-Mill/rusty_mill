@@ -96,7 +96,17 @@ fn fake_game(addr: SocketAddr, received: Received) -> JoinHandle<()> {
                 .write_all(&frame(&encode_game_packet(b).unwrap()).unwrap())
                 .unwrap();
         };
-        send(&mut stream, &opening());
+        let mut initial = opening();
+        initial.events.insert(
+            1,
+            GameEvent::PlayerSpawn {
+                id: 4,
+                command_id: Some(0),
+                name: "Human".into(),
+                team: 0,
+            },
+        );
+        send(&mut stream, &initial);
         let mut decoder = FrameDecoder::new();
         let mut buf = [0u8; 1024];
         for i in 1..=2_000u32 {
@@ -105,11 +115,14 @@ fn fake_game(addr: SocketAddr, received: Received) -> JoinHandle<()> {
                 &GameBundle {
                     app_seconds: i as f32 / 60.0,
                     delta_physics_frames: 2,
-                    events: vec![GameEvent::PlayerPhysics {
-                        id: 5,
-                        physics: at(i as f32),
-                        state: 0,
-                    }],
+                    events: vec![
+                        GameEvent::ActorDestroyed { id: 4 },
+                        GameEvent::PlayerPhysics {
+                            id: 5,
+                            physics: at(i as f32),
+                            state: 0,
+                        },
+                    ],
                 },
             );
             if let Ok(n) = stream.read(&mut buf) {
@@ -155,7 +168,15 @@ fn a_bot_plays_through_core_in_a_game_that_is_not_the_simulation() {
             .unwrap()
             .expect("the game never connected");
         stream.set_nonblocking(true).unwrap();
-        let config = bot_match(&[("bot".to_string(), 0)], MatchLengthMutator::Unlimited);
+        let mut config = bot_match(&[("bot".to_string(), 0)], MatchLengthMutator::Unlimited);
+        config.player_configurations.insert(
+            0,
+            rb_rlbot_wire::PlayerConfiguration {
+                variety: rb_rlbot_wire::PlayerClass::Human,
+                team: 0,
+                player_id: 42,
+            },
+        );
         let mut core = Core::bind(
             "127.0.0.1:0",
             LinkBackend::new(stream, config),
@@ -176,7 +197,7 @@ fn a_bot_plays_through_core_in_a_game_that_is_not_the_simulation() {
             close_between_matches: true,
         })
         .unwrap();
-    assert_eq!(info.controllable_team_info.controllables[0].index, 0);
+    assert_eq!(info.controllable_team_info.controllables[0].index, 1);
     // The field is what the game announced, not the simulated arena's 34 pads.
     assert_eq!(info.field_info.boost_pads.len(), 2);
     assert_eq!(
@@ -193,11 +214,18 @@ fn a_bot_plays_through_core_in_a_game_that_is_not_the_simulation() {
     while !disconnected {
         match bot.recv().unwrap() {
             CoreMessage::GamePacket(p) => {
-                assert_eq!(p.players[0].name, "Bot");
+                assert_eq!(p.players.len(), 2);
+                assert_eq!(
+                    p.players[1].player_id,
+                    info.controllable_team_info.controllables[0].identifier
+                );
+                assert_eq!(p.players[1].player_id, 100);
+                assert_eq!(p.players[0].demolished_timeout, 0.0);
+                assert_eq!(p.players[1].name, "Bot");
                 assert_eq!(p.match_info.match_phase, MatchPhase::Active);
-                xs.push(p.players[0].physics.location.x);
+                xs.push(p.players[1].physics.location.x);
                 bot.send(PlayerInput {
-                    player_index: 0,
+                    player_index: 1,
                     controller_state: ControllerState {
                         throttle: 1.0,
                         boost: true,
@@ -207,6 +235,20 @@ fn a_bot_plays_through_core_in_a_game_that_is_not_the_simulation() {
                 .unwrap();
                 if !sent_ball && xs.len() > 1 {
                     sent_ball = true;
+                    bot.send(DesiredGameState {
+                        ball_states: vec![DesiredBallState {
+                            physics: DesiredPhysics {
+                                location: Some(PartialVec3 {
+                                    x: Some(f32::NAN),
+                                    y: Some(999.0),
+                                    z: None,
+                                }),
+                                ..Default::default()
+                            },
+                        }],
+                        ..Default::default()
+                    })
+                    .unwrap();
                     bot.send(DesiredGameState {
                         ball_states: vec![DesiredBallState {
                             physics: DesiredPhysics {

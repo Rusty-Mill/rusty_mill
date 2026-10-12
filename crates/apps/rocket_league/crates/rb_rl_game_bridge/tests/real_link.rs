@@ -172,14 +172,14 @@ fn events_fold_into_the_packet_bots_receive() {
     assert_eq!(p.balls[0].physics.location.z, 93.0);
 
     // Pads are ordered by y, then x: (0,-500), (-100,500), (100,500). Pad 30 (big) was picked up
-    // and has run down by the 2 frames since (2/120 s) from its 10 s cooldown.
+    // and reports elapsed time since pickup (2/120 s), not the remaining cooldown.
     let pads: Vec<(bool, f32)> = p
         .boost_pads
         .iter()
         .map(|b| (b.is_active, b.timer))
         .collect();
     assert_eq!(pads[0], (true, 0.0));
-    assert!(!pads[1].0 && (pads[1].1 - 10.0).abs() < 0.1);
+    assert!(!pads[1].0 && (pads[1].1 - 2.0 / 120.0).abs() < 1e-6);
     assert_eq!(pads[2], (true, 0.0));
 
     assert_eq!(p.match_info.match_phase, MatchPhase::Active);
@@ -260,9 +260,10 @@ fn a_destroyed_car_leaves_and_the_others_keep_their_indices() {
     l.next_clump().unwrap();
     let p = l.next_clump().unwrap().unwrap().packet;
     // A bot driving index 1 must not find itself in another car because index 0 left.
-    assert_eq!(p.players.len(), 1);
+    assert_eq!(p.players.len(), 2);
+    assert_eq!(p.players[0].demolished_timeout, 0.0);
     assert_eq!(
-        (p.players[0].name.as_str(), p.players[0].player_id),
+        (p.players[1].name.as_str(), p.players[1].player_id),
         ("Orange", 1)
     );
     assert_eq!(l.folder().actor_for_player(0), None);
@@ -535,4 +536,101 @@ fn a_human_already_in_the_game_moves_along_when_a_bot_is_spawned_for_its_index()
         .map(|p| p.name)
         .collect();
     assert_eq!(names, ["Bot", "Human"]);
+}
+
+#[test]
+fn eof_distinguishes_boundaries_from_truncated_headers_and_payloads() {
+    let good = framed(&[opening()]);
+    for suffix in [vec![], vec![0], vec![0, 5, 1, 2]] {
+        for nonblocking in [false, true] {
+            let mut bytes = good.clone();
+            bytes.extend(&suffix);
+            let mut l = RocketLeagueLink::new(Duplex {
+                input: Cursor::new(bytes),
+                output: vec![],
+            });
+            if nonblocking {
+                assert!(matches!(
+                    l.poll_clump().unwrap(),
+                    rb_rl_game_bridge::PollClump::Clump(_)
+                ));
+                let end = l.poll_clump();
+                if suffix.is_empty() {
+                    assert_eq!(end.unwrap(), rb_rl_game_bridge::PollClump::Closed);
+                } else {
+                    assert_eq!(end.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+                }
+            } else {
+                assert!(l.next_clump().unwrap().is_some());
+                let end = l.next_clump();
+                if suffix.is_empty() {
+                    assert!(end.unwrap().is_none());
+                } else {
+                    assert_eq!(end.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn permanently_oversized_commands_are_not_retryable_and_do_not_consume_ids() {
+    let mut l = link(&[]);
+    assert_eq!(
+        l.send(GameCommand::Console("x".repeat(SEND_BUDGET)))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    l.send(GameCommand::Console("ok".into())).unwrap();
+    assert_eq!(written(&l.into_inner().output)[0].0, 1);
+}
+
+#[test]
+fn elapsed_pad_timer_and_count_up_clocks_follow_events() {
+    for unlimited in [false, true] {
+        let mut folder = rb_rl_game_bridge::GameFolder::new();
+        folder.set_unlimited_time(unlimited);
+        folder.apply(&opening());
+        folder.apply(&bundle(
+            0,
+            vec![
+                GameEvent::StateChange {
+                    phase: MatchPhase::Active,
+                    is_overtime: !unlimited,
+                },
+                GameEvent::TimeChange { display_seconds: 2 },
+                GameEvent::PickupState {
+                    id: 30,
+                    picked_up: true,
+                },
+            ],
+        ));
+        assert_eq!(folder.packet().boost_pads[1].timer, 0.0);
+        folder.apply(&bundle(120, vec![]));
+        assert_eq!(folder.packet().boost_pads[1].timer, 1.0);
+        assert_eq!(folder.packet().match_info.game_time_remaining, 3.0);
+        // Even repeated whole-second updates reset interpolation.
+        folder.apply(&bundle(
+            120,
+            vec![GameEvent::TimeChange { display_seconds: 2 }],
+        ));
+        assert_eq!(folder.packet().match_info.game_time_remaining, 2.0);
+        folder.apply(&bundle(
+            120,
+            vec![GameEvent::StateChange {
+                phase: MatchPhase::Replay,
+                is_overtime: !unlimited,
+            }],
+        ));
+        assert_eq!(folder.packet().match_info.game_time_remaining, 2.0);
+        folder.apply(&bundle(
+            0,
+            vec![GameEvent::PickupState {
+                id: 30,
+                picked_up: false,
+            }],
+        ));
+        assert_eq!(folder.packet().boost_pads[1].timer, 0.0);
+    }
 }

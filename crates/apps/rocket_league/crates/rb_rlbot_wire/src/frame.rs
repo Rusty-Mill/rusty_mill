@@ -35,6 +35,18 @@ impl FrameDecoder {
         FrameDecoder::default()
     }
 
+    /// Verifies that EOF falls on a frame boundary. Call after draining complete frames.
+    pub fn finish(&self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated framed message",
+            ))
+        }
+    }
+
     /// Adds bytes just read from the stream.
     pub fn push(&mut self, bytes: &[u8]) {
         self.pending.extend_from_slice(bytes);
