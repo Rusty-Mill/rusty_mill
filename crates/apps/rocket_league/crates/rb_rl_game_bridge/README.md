@@ -76,9 +76,17 @@ its state setting becomes a ball placement.
   handled: unsent bytes wait in an outbox, ahead of later frames, and are written as the link next
   runs, so the game never sees a half frame followed by a new one. Past 256 KiB waiting, sends are
   refused with `WouldBlock`.
-- **One odd event does not end a session.** An event whose enum value or required field this
-  crate does not know decodes as `GameEvent::Other(tag)`. A message with more than 4096 events or
-  more than 64 KiB of names is refused, since a crafted buffer can make many slots share one string.
+- **One odd event does not end a session, unless it carries state.** An unreadable event
+  (an enum value or required field this crate does not know, or no body) decodes as
+  `GameEvent::Other(tag)` when losing it costs little: physics, boost and the clock are re-sent as
+  they change, a pad heals at its next pickup, and hits and stats are not tracked. A spawn, a
+  destroy, the match phase or a score is announced once and held for minutes, and the game has
+  no known command to resend or snapshot it (the `Exec` console command is untested for this), so an unreadable one is a fault (`WireError::State`, naming
+  the event) and the session ends; carrying on would leave the link wrong for the rest of the
+  match (a lost `PlayerSpawn` means a spawn acknowledgement that never arrives). The only
+  resynchronisation the protocol offers is a new map: its `GameSpawn` announces everything again.
+  A message with more than 4096 events or more than 64 KiB of names is refused, since a crafted
+  buffer can make many slots share one string.
 - **Analysis is strict for supported events.** `decode_game_packet_strict` and the probe report
   missing required fields and invalid validated enums (`MatchPhase`, `PickupStateType`); other
   raw enum bytes are not range-validated, and unsupported event tags remain `Other`. Partial final frames are
