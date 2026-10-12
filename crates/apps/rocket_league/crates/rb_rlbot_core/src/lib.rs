@@ -20,6 +20,7 @@
 mod backend;
 mod server;
 mod sim;
+pub mod validation;
 
 pub use backend::{MatchBackend, Poll};
 pub use server::{Core, Event, Pacing, RunEnd};

@@ -138,6 +138,7 @@ pub struct Simulation {
     inputs: Vec<ControllerInput>,
     frame: PhysicsFrame,
     frame_num: u32,
+    count_up_ticks: u64,
 }
 
 impl Simulation {
@@ -205,6 +206,7 @@ impl Simulation {
             configuration,
             frame,
             frame_num: 0,
+            count_up_ticks: 0,
         })
     }
 
@@ -268,7 +270,7 @@ impl Simulation {
     pub fn set_input(&mut self, player_index: u32, state: &ControllerState) -> bool {
         match self.inputs.get_mut(player_index as usize) {
             Some(slot) => {
-                *slot = sanitised(controller_input(state));
+                *slot = controller_input(&crate::validation::sanitise_controller(state));
                 true
             }
             None => false,
@@ -277,15 +279,26 @@ impl Simulation {
 
     /// Advances one physics tick (1/120 s) with the held inputs.
     pub fn step(&mut self) {
+        let before = self.env.match_state();
         self.frame = self.env.step(&self.inputs);
+        if before
+            .is_some_and(|s| s.phase == Phase::Active && (s.overtime || s.clock_ticks.is_none()))
+        {
+            self.count_up_ticks += 1;
+        }
+        if before.is_some_and(|s| !s.overtime) && self.env.match_state().is_some_and(|s| s.overtime)
+        {
+            self.count_up_ticks = 0;
+        }
         self.frame_num += 1;
     }
 
     /// Applies a client's state-setting message: the fields it names change, the rest stay.
     /// Only the first ball and the cars it lists by index are touched. Match info (gravity,
-    /// game speed) cannot be changed in `rb_env` and is ignored. Returns whether the message
+    /// game speed) cannot be changed in `rb_env` and is ignored. Rejects nonfinite requests atomically with `InvalidInput`. Returns whether the message
     /// named a car that does not exist (the rest of it was still applied).
-    pub fn apply_desired(&mut self, desired: &DesiredGameState) -> bool {
+    pub fn apply_desired(&mut self, desired: &DesiredGameState) -> std::io::Result<bool> {
+        crate::validation::validate_desired(desired)?;
         let mut frame = self.env.peek(&[]);
         if let Some(ball) = desired.ball_states.first() {
             let b = &mut frame.ball;
@@ -296,7 +309,7 @@ impl Simulation {
         }
         let mut unknown_car = false;
         for (index, want) in desired.car_states.iter().enumerate() {
-            let Some(car) = frame.cars.get_mut(index) else {
+            let Some(car) = frame.cars.iter_mut().find(|c| c.player_id == index as u32) else {
                 unknown_car = true;
                 continue;
             };
@@ -316,13 +329,13 @@ impl Simulation {
                     ),
                 );
             }
-            if let Some(boost) = finite(want.boost_amount) {
+            if let Some(boost) = want.boost_amount {
                 car.boost_amount = boost.clamp(0.0, 100.0);
             }
         }
         self.env.snap(&frame);
         self.frame = self.env.peek(&[]);
-        unknown_car
+        Ok(unknown_car)
     }
 
     /// The match as it stands, in the shape core sends every tick.
@@ -335,33 +348,41 @@ impl Simulation {
                 (0..pads.len())
                     .map(|i| BoostPadState {
                         is_active: pads.is_active(i),
-                        timer: pads.cooldown_left(i),
+                        timer: if pads.is_active(i) {
+                            0.0
+                        } else {
+                            let duration = if pads.pad(i).is_some_and(|p| p.big) {
+                                10.0
+                            } else {
+                                4.0
+                            };
+                            (duration - pads.cooldown_left(i)).max(0.0)
+                        },
                     })
                     .collect()
             })
             .unwrap_or_default();
         let configured = &self.configuration.player_configurations;
-        let players = self
-            .frame
-            .cars
+        // Observations omit demolished cars; their player_id remains the physical slot.
+        // Keep a packet entry for every configured slot so controls and state targets never shift.
+        let players = configured
             .iter()
             .enumerate()
-            .map(|(index, car)| PlayerInfo {
-                physics: physics(
-                    car.position,
-                    car.rotation,
-                    car.velocity,
-                    car.angular_velocity,
-                ),
-                air_state: air_state(car),
-                demolished_timeout: -1.0,
-                is_bot: configured
-                    .get(index)
-                    .is_some_and(|p| !matches!(p.variety, PlayerClass::Human)),
-                name: configured.get(index).map(name_of).unwrap_or_default(),
-                team: self.teams[index],
-                boost: car.boost_amount,
-                player_id: configured.get(index).map_or(index as i32, |p| p.player_id),
+            .map(|(index, p)| {
+                let car = self.frame.cars.iter().find(|c| c.player_id == index as u32);
+                PlayerInfo {
+                    physics: car
+                        .map(|c| physics(c.position, c.rotation, c.velocity, c.angular_velocity))
+                        .unwrap_or_default(),
+                    air_state: car.map(air_state).unwrap_or(AirState::OnGround),
+                    // The observation omits the respawn timer; zero denotes demolished, duration unknown.
+                    demolished_timeout: if car.is_some() { -1.0 } else { 0.0 },
+                    is_bot: !matches!(p.variety, PlayerClass::Human),
+                    name: name_of(p),
+                    team: self.teams[index],
+                    boost: car.map_or(0.0, |c| c.boost_amount),
+                    player_id: p.player_id,
+                }
             })
             .collect();
         let score = state.map_or([0, 0], |s| s.score);
@@ -377,11 +398,16 @@ impl Simulation {
                 ),
             }],
             match_info: MatchInfo {
-                seconds_elapsed: self.frame.timestamp_secs,
-                game_time_remaining: state
-                    .and_then(|s| s.seconds_remaining())
-                    .unwrap_or(0.0)
-                    .max(0.0),
+                seconds_elapsed: self.frame_num as f32 / 120.0,
+                game_time_remaining: if state.is_some_and(|s| s.overtime || s.clock_ticks.is_none())
+                {
+                    self.count_up_ticks as f32 / 120.0
+                } else {
+                    state
+                        .and_then(|s| s.seconds_remaining())
+                        .unwrap_or(0.0)
+                        .max(0.0)
+                },
                 is_overtime: state.is_some_and(|s| s.overtime),
                 is_unlimited_time: state.is_none_or(|s| s.clock_ticks.is_none()),
                 match_phase: state.map_or(MatchPhase::Active, wire_phase),
@@ -435,32 +461,6 @@ fn air_state(car: &CarState) -> AirState {
     }
 }
 
-/// A stick axis a bot sent, held to [-1, 1]; a number that is not finite is no input at all.
-fn axis(v: f32) -> f32 {
-    if v.is_finite() {
-        v.clamp(-1.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
-fn sanitised(input: ControllerInput) -> ControllerInput {
-    ControllerInput {
-        throttle: axis(input.throttle),
-        steer: axis(input.steer),
-        pitch: input.pitch.map(axis),
-        yaw: input.yaw.map(axis),
-        roll: input.roll.map(axis),
-        ..input
-    }
-}
-
-/// A component of a partial update, ignored unless it is a finite number: one NaN or infinity
-/// in the physics world would poison every later packet for every bot.
-fn finite(v: Option<f32>) -> Option<f32> {
-    v.filter(|x| x.is_finite())
-}
-
 type Body = (Vec3, Quat, Vec3, Vec3);
 
 /// `current` with the fields `want` names replaced. A rotation naming only some of pitch,
@@ -469,9 +469,9 @@ fn patch(want: &DesiredPhysics, current: Body) -> Body {
     let (position, rotation, velocity, angular_velocity) = current;
     let vec = |w: &Option<PartialVec3>, old: Vec3| match w {
         Some(w) => Vec3::new(
-            finite(w.x).unwrap_or(old.x),
-            finite(w.y).unwrap_or(old.y),
-            finite(w.z).unwrap_or(old.z),
+            w.x.unwrap_or(old.x),
+            w.y.unwrap_or(old.y),
+            w.z.unwrap_or(old.z),
         ),
         None => old,
     };
@@ -479,9 +479,9 @@ fn patch(want: &DesiredPhysics, current: Body) -> Body {
         Some(r) => {
             let [pitch, yaw, roll] = quat_to_rotator(rotation);
             rotator_to_quat([
-                finite(r.pitch).unwrap_or(pitch),
-                finite(r.yaw).unwrap_or(yaw),
-                finite(r.roll).unwrap_or(roll),
+                r.pitch.unwrap_or(pitch),
+                r.yaw.unwrap_or(yaw),
+                r.roll.unwrap_or(roll),
             ])
         }
         None => rotation,
@@ -492,4 +492,163 @@ fn patch(want: &DesiredPhysics, current: Body) -> Body {
         vec(&want.velocity, velocity),
         vec(&want.angular_velocity, angular_velocity),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod regressions {
+    use super::*;
+    use rb_rlbot_wire::DesiredCarState;
+
+    fn active(length: MatchLengthMutator) -> Simulation {
+        let mut sim = Simulation::new(bot_match(
+            &[("blue".into(), 0), ("orange".into(), 1)],
+            length,
+        ))
+        .unwrap();
+        sim.frame = sim.env.reset(&sim.frame);
+        sim
+    }
+
+    #[test]
+    fn demolition_preserves_slots_policy_input_and_state_targets_through_respawn() {
+        let mut sim = active(MatchLengthMutator::FiveMinutes);
+        let mut frame = sim.frame.clone();
+        for car in &mut frame.cars {
+            car.position = Vec3::new(0.0, 0.0, 500.0);
+            car.rotation = rotator_to_quat([0.0, std::f32::consts::FRAC_PI_2, 0.0]);
+            car.velocity = Vec3::ZERO;
+        }
+        frame.cars[1].position.y = -130.0;
+        frame.cars[1].velocity.y = 2300.0;
+        sim.frame = sim.env.reset(&frame);
+        for _ in 0..4 {
+            sim.step();
+        }
+        assert_eq!(sim.frame.cars.len(), 1);
+        assert_eq!(sim.frame.cars[0].player_id, 1);
+        let packet = sim.packet();
+        assert_eq!(packet.players.len(), 2);
+        assert_eq!(packet.players[0].demolished_timeout, 0.0);
+        assert_eq!(
+            (packet.players[1].player_id, packet.players[1].team),
+            (101, 1)
+        );
+        let mut bot = rb_rlbot_bridge::PolicyBot::new(
+            |_: &PhysicsFrame, index: usize| {
+                assert_eq!(index, 1);
+                ControllerInput::default()
+            },
+            1,
+        );
+        assert_eq!(bot.input(&packet).unwrap().player_index, 1);
+        let before = packet.players[1].physics;
+        assert!(sim
+            .apply_desired(&DesiredGameState {
+                car_states: vec![
+                    DesiredCarState {
+                        boost_amount: Some(1.0),
+                        ..Default::default()
+                    },
+                    DesiredCarState {
+                        boost_amount: Some(77.0),
+                        ..Default::default()
+                    }
+                ],
+                ..Default::default()
+            })
+            .unwrap());
+        assert_eq!(sim.packet().players[1].boost, 77.0);
+        assert_eq!(sim.packet().players[1].physics, before);
+        for _ in 0..361 {
+            sim.step();
+        }
+        assert_eq!(sim.packet().players[0].demolished_timeout, -1.0);
+        assert_eq!(sim.packet().players[1].player_id, 101);
+    }
+
+    #[test]
+    fn elapsed_pad_time_increases_then_resets_on_respawn() {
+        for (x, y) in [(0.0, -1024.0), (-3584.0, 0.0)] {
+            let mut sim = active(MatchLengthMutator::FiveMinutes);
+            let mut frame = sim.frame.clone();
+            frame.cars[0].position = Vec3::new(x, y, 17.0);
+            frame.cars[0].boost_amount = 0.0;
+            sim.frame = sim.env.reset(&frame);
+            sim.step();
+            let index = sim
+                .packet()
+                .boost_pads
+                .iter()
+                .position(|p| !p.is_active)
+                .unwrap();
+            assert!(sim.packet().boost_pads[index].timer < 0.02);
+            let mut away = sim.frame.clone();
+            away.cars[0].position.x = 700.0;
+            sim.env.snap(&away);
+            for _ in 0..120 {
+                sim.step();
+            }
+            assert!((sim.packet().boost_pads[index].timer - 1.0).abs() < 0.02);
+            for _ in 0..1200 {
+                sim.step();
+            }
+            assert_eq!(sim.packet().boost_pads[index].timer, 0.0);
+            assert!(sim.packet().boost_pads[index].is_active);
+        }
+    }
+
+    #[test]
+    fn replay_elapsed_time_advances_while_match_clock_holds_and_unlimited_counts_play() {
+        let mut sim = active(MatchLengthMutator::Unlimited);
+        for _ in 0..120 {
+            sim.step();
+        }
+        assert_eq!(sim.packet().match_info.game_time_remaining, 1.0);
+        let mut goal = sim.frame.clone();
+        goal.ball.position = Vec3::new(0.0, 5300.0, 100.0);
+        sim.env.snap(&goal);
+        sim.step();
+        while sim.packet().match_info.match_phase != MatchPhase::Replay {
+            sim.step();
+        }
+        let before = sim.packet();
+        for _ in 0..120 {
+            sim.step();
+        }
+        let after = sim.packet();
+        assert!(
+            (after.match_info.seconds_elapsed - before.match_info.seconds_elapsed - 1.0).abs()
+                < 1e-5
+        );
+        assert_eq!(
+            after.match_info.game_time_remaining,
+            before.match_info.game_time_remaining
+        );
+        assert_eq!(after.balls, before.balls);
+    }
+
+    #[test]
+    fn overtime_starts_at_zero_and_counts_up_only_in_play() {
+        let mut sim = active(MatchLengthMutator::FiveMinutes);
+        sim.env.set_match_length(Some(1));
+        let mut frame = sim.frame.clone();
+        frame.ball.position = Vec3::new(0.0, 0.0, 93.0);
+        sim.frame = sim.env.reset(&frame);
+        for _ in 0..120 {
+            sim.step();
+            if sim.packet().match_info.is_overtime {
+                break;
+            }
+        }
+        assert!(sim.packet().match_info.is_overtime);
+        assert_eq!(sim.packet().match_info.game_time_remaining, 0.0);
+        while sim.packet().match_info.match_phase != MatchPhase::Active {
+            sim.step();
+        }
+        for _ in 0..120 {
+            sim.step();
+        }
+        assert_eq!(sim.packet().match_info.game_time_remaining, 1.0);
+    }
 }

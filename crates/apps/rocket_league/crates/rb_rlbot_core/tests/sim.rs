@@ -194,7 +194,7 @@ fn state_setting_changes_only_the_named_fields() {
         ],
         match_info: None,
     });
-    assert!(unknown, "the third car does not exist");
+    assert!(unknown.unwrap(), "the third car does not exist");
     let packet = sim.packet();
     let ball = packet.balls[0].physics;
     assert_eq!(ball.location.x, 1000.0);
@@ -272,12 +272,12 @@ fn all_finite(packet: &rb_rlbot_wire::GamePacket) -> bool {
 fn numbers_that_are_not_finite_cannot_poison_the_match() {
     let mut sim = two_bots();
     let before = sim.packet();
-    sim.apply_desired(&DesiredGameState {
+    let rejected = sim.apply_desired(&DesiredGameState {
         ball_states: vec![DesiredBallState {
             physics: DesiredPhysics {
                 location: Some(PartialVec3 {
                     x: Some(f32::NAN),
-                    y: Some(f32::INFINITY),
+                    y: Some(123.0),
                     z: None,
                 }),
                 rotation: Some(PartialRotator {
@@ -290,11 +290,16 @@ fn numbers_that_are_not_finite_cannot_poison_the_match() {
         }],
         car_states: vec![DesiredCarState {
             physics: None,
-            boost_amount: Some(f32::NAN),
+            boost_amount: Some(90.0),
         }],
         match_info: None,
     });
+    assert_eq!(
+        rejected.unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
     let after = sim.packet();
+    assert_eq!(after, before);
     assert!(all_finite(&after));
     assert_eq!(
         after.balls[0].physics.location,
@@ -302,6 +307,9 @@ fn numbers_that_are_not_finite_cannot_poison_the_match() {
     );
     assert_eq!(after.players[0].boost, before.players[0].boost);
 
+    while sim.packet().match_info.match_phase != MatchPhase::Active {
+        sim.step();
+    }
     // Wild sticks are held to the legal range, and a NaN is no input; the car just sits.
     let wild = ControllerState {
         throttle: f32::NAN,

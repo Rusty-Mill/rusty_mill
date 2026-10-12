@@ -66,6 +66,7 @@ pub trait MatchBackend {
     fn set_input(&mut self, player_index: u32, state: &ControllerState) -> io::Result<bool>;
 
     /// Applies a state-setting message. `Ok(true)` if it named a car that does not exist.
+    /// Nonfinite values return `InvalidInput` before any state change or command is sent.
     fn apply_desired(&mut self, desired: &DesiredGameState) -> io::Result<bool>;
 
     /// The match as it stands, in the shape core sends every tick.
@@ -91,7 +92,7 @@ impl MatchBackend for Simulation {
     }
 
     fn apply_desired(&mut self, desired: &DesiredGameState) -> io::Result<bool> {
-        Ok(Simulation::apply_desired(self, desired))
+        Simulation::apply_desired(self, desired)
     }
 
     fn packet(&self) -> GamePacket {

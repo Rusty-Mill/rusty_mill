@@ -60,3 +60,10 @@ always -1. Anything a client asks for beyond this is ignored, never a crash.
 `rb_rlbot_client` over loopback, including two full runs compared packet for packet. The built
 `rb_chaser_bot` process joined the built `rb_rlbot_core` process and the match started (hand run,
 2026-10-11). Not verified: against RLBot's own Python or C# clients, or the RLBot GUI.
+
+State setting returns `InvalidInput` for any nonfinite requested value before mutating the
+match. Core reports the rejected request and continues serving the client. Packets retain
+configured slots during demolition (a zero demolished timeout means the remaining duration
+is unknown); controls and state setting retain the original physical identity. Boost timers
+report elapsed time since pickup, and match clocks count upward in unlimited play/overtime.
+Elapsed packet time continues during replay even while the physics world is frozen.

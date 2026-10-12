@@ -407,6 +407,10 @@ impl<B: MatchBackend> Core<B> {
             InterfaceMessage::DesiredGameState(desired) => {
                 if self.backend.configuration().enable_state_setting {
                     match self.backend.apply_desired(&desired) {
+                        Err(e) if e.kind() == ErrorKind::InvalidInput => on_event(Event::Ignored {
+                            agent_id: label,
+                            what: "nonfinite desired state",
+                        }),
                         Ok(false) => {}
                         Ok(true) => on_event(Event::Ignored {
                             agent_id: label,
