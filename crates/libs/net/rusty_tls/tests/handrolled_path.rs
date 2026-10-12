@@ -399,10 +399,10 @@ fn an_intermediate_whose_eku_excludes_server_auth_is_refused() {
         intermediate_ekus: Some(vec![ExtendedKeyUsagePurpose::EmailProtection]),
         ..Default::default()
     });
-    assert_eq!(
+    assert!(matches!(
         validate(&chain, &options()),
         Err(PathError::RequiredEkuMissing)
-    );
+    ));
 }
 
 /// The same rule must not refuse a CA that does permit server authentication,
@@ -830,10 +830,10 @@ fn a_leaf_without_the_required_eku_is_refused() {
         leaf_ekus: Some(vec![ExtendedKeyUsagePurpose::ClientAuth]),
         ..Default::default()
     });
-    assert_eq!(
+    assert!(matches!(
         validate(&chain, &options()),
         Err(PathError::RequiredEkuMissing)
-    );
+    ));
 }
 
 /// Absent `extendedKeyUsage` permits every purpose. Getting this backwards
@@ -847,14 +847,18 @@ fn a_leaf_with_no_eku_extension_satisfies_any_requirement() {
     validate(&chain, &options()).expect("an absent EKU is not a restriction");
 }
 
-/// `anyExtendedKeyUsage` satisfies whatever was asked for.
+/// `anyExtendedKeyUsage` is not a wildcard: the specific purpose must be listed
+/// (webpki's rule; see `any_extended_key_usage_is_refused_like_webpki`).
 #[test]
-fn any_extended_key_usage_satisfies_the_requirement() {
+fn any_extended_key_usage_alone_does_not_satisfy_the_requirement() {
     let chain = build(Bend {
         leaf_ekus: Some(vec![ExtendedKeyUsagePurpose::Any]),
         ..Default::default()
     });
-    validate(&chain, &options()).expect("anyExtendedKeyUsage satisfies serverAuth");
+    assert!(matches!(
+        validate(&chain, &options()),
+        Err(PathError::RequiredEkuMissing)
+    ));
 }
 
 /// Requiring nothing skips the check entirely.
@@ -1288,17 +1292,13 @@ fn a_wildcard_certificate_is_refused_when_it_covers_an_excluded_host() {
     }
 }
 
-/// **A known divergence, pinned, awaiting an owner decision.** A certificate (or
-/// CA) whose `extendedKeyUsage` is `anyExtendedKeyUsage` alone is accepted here
-/// for server authentication (RFC 5280 §4.2.1.12 reads it as "any purpose") and
-/// refused by webpki 0.103, which requires the specific `serverAuth` OID
-/// whenever the extension is present, on the leaf and on every issuer. This
-/// validator is the looser one. Aligning it is a one-line change in `check_eku`
-/// plus changing the leaf expectation in `any_extended_key_usage_satisfies_the_requirement`; it is
-/// not made here because it reverses a documented, tested choice. If this test
-/// starts failing, one side changed: decide which.
+/// A certificate (or CA) whose `extendedKeyUsage` is `anyExtendedKeyUsage` alone
+/// is refused for server authentication, on the leaf and on every issuer, as
+/// webpki 0.103 refuses it (it requires the specific `serverAuth` OID whenever
+/// the extension is present). Aligned with webpki by owner decision; if the
+/// webpki half starts failing, the reference changed: revisit.
 #[test]
-fn any_extended_key_usage_is_accepted_here_and_refused_by_webpki() {
+fn any_extended_key_usage_is_refused_like_webpki() {
     use rustls::client::verify_server_cert_signed_by_trust_anchor;
     use rustls::pki_types::{CertificateDer, UnixTime};
     use std::time::Duration;
@@ -1320,8 +1320,13 @@ fn any_extended_key_usage_is_accepted_here_and_refused_by_webpki() {
         ),
     ] {
         let chain = build(bend);
-        validate(&chain, &options())
-            .unwrap_or_else(|e| panic!("{label}: ours should accept: {e:?}"));
+        assert!(
+            matches!(
+                validate(&chain, &options()),
+                Err(PathError::RequiredEkuMissing)
+            ),
+            "{label}: ours should refuse"
+        );
 
         let mut store = rustls::RootCertStore::empty();
         store
