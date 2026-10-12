@@ -241,7 +241,8 @@ fn an_unreadable_map_announcement_ends_the_link_too() {
 #[test]
 fn an_unreadable_pad_respawn_ends_the_link_instead_of_leaving_the_pad_inactive() {
     // A pad is picked up, then its respawn (Idle) event is unreadable. The folded pad only comes
-    // back on another pickup event, so skipping the respawn would leave it inactive for good.
+    // back on another pickup event, so skipping the respawn would leave it inactive for good: the
+    // link ends at the unreadable event instead (this checks that, not how long a pad stays out).
     let pad = encode_game_packet(&GameBundle {
         app_seconds: 0.0,
         delta_physics_frames: 0,
@@ -268,13 +269,7 @@ fn an_unreadable_pad_respawn_ends_the_link_instead_of_leaving_the_pad_inactive()
         t.add_scalar(1, 99u8, 0u8).unwrap();
         vec![(6, Some(t.finish().unwrap()))]
     });
-    let later = encode_game_packet(&GameBundle {
-        app_seconds: 0.0,
-        delta_physics_frames: 120,
-        events: vec![],
-    })
-    .unwrap();
-    let mut link = link_over(vec![map_and_human(), pad, bad_respawn, later]);
+    let mut link = link_over(vec![map_and_human(), pad, bad_respawn]);
     assert!(link.next_clump().unwrap().is_some());
     assert!(link.next_clump().unwrap().is_some());
     let err = link.next_clump().unwrap_err();
