@@ -255,20 +255,22 @@ impl<B: MatchBackend> Core<B> {
                 self.clear_answers();
                 clock = Clock::new();
             } else if self.started && self.backend.self_paced() {
-                if polled_packet {
-                    // A backend that has stopped being ready (a game that has loaded a new map
-                    // and not yet got its bots' cars back) is not shown to the bots: they would
-                    // get a match with their own cars missing.
-                    if self.backend.ready() {
-                        if std::mem::take(&mut self.held) {
-                            on_event(Event::BroadcastResumed);
-                        }
-                        self.broadcast_packet(&mut on_event);
-                        self.clear_answers();
-                    } else if !std::mem::replace(&mut self.held, true) {
-                        on_event(Event::BroadcastHeld);
+                // A backend that has stopped being ready (a game that has loaded a new map and
+                // not yet got its bots' cars back) is not shown to the bots: they would get a
+                // match with their own cars missing. The loss is noticed on every pass, not only
+                // when a packet is polled: a game with no cars yields none to poll.
+                let ready = self.backend.ready();
+                if !ready && !std::mem::replace(&mut self.held, true) {
+                    on_event(Event::BroadcastHeld);
+                }
+                if polled_packet && ready {
+                    // Resumed is the first real broadcast after a hold, not just readiness.
+                    if std::mem::take(&mut self.held) {
+                        on_event(Event::BroadcastResumed);
                     }
-                } else {
+                    self.broadcast_packet(&mut on_event);
+                    self.clear_answers();
+                } else if !polled_packet {
                     thread::sleep(Duration::from_micros(200));
                 }
             } else if self.started && self.due(&mut clock, &mut on_event) {
