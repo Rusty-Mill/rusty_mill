@@ -112,6 +112,11 @@ pub enum NameError {
     /// A `NameConstraints` extension was structurally invalid, or used the
     /// `minimum`/`maximum` fields RFC 5280 §4.2.1.10 forbids.
     MalformedNameConstraints,
+    /// A certificate under a name constraint has a `subjectAltName` entry that
+    /// is malformed (undecodable, an IP address of the wrong length, or a DNS
+    /// name with an empty label). Such an entry cannot be shown to lie inside
+    /// the permitted namespace, and RFC 5280 §4.2.1.10 requires every name to.
+    MalformedSubjectAltName,
 }
 
 impl core::fmt::Display for NameError {
@@ -134,6 +139,9 @@ impl core::fmt::Display for NameError {
                 "a name constraint uses general-name type {tag}, which cannot be enforced"
             ),
             Self::MalformedNameConstraints => f.write_str("malformed nameConstraints"),
+            Self::MalformedSubjectAltName => {
+                f.write_str("a subjectAltName entry is malformed under a name constraint")
+            }
         }
     }
 }
@@ -408,6 +416,15 @@ fn dns_excluded(base: &str, presented: &str) -> bool {
     }
 }
 
+/// A presented DNS name with an empty label (`.example.com`, `a..b`, or empty).
+///
+/// Deliberately narrower than [`is_valid_dns_name`]: that predicate is strict
+/// about characters (it refuses `_`), and refusing real-world names a
+/// constrained CA issued would be a compatibility regression, not a safety fix.
+fn has_empty_label(presented: &str) -> bool {
+    presented.is_empty() || presented.starts_with('.') || presented.contains("..")
+}
+
 fn ip_within(address: &[u8], mask: &[u8], candidate: &[u8]) -> bool {
     if candidate.len() != address.len() {
         // An IPv4 name is never inside an IPv6 subtree, or the reverse.
@@ -435,12 +452,20 @@ fn check_one(
         .any(|s| matches!(s, Subtree::Ip { .. }));
 
     for entry in certificate.extensions().subject_alt_names() {
-        // A malformed SAN entry cannot match anything and so cannot be
-        // permitted either. Skipping it is safe: `verify_server_name` skips
-        // it too, so it can never authenticate the connection.
-        let Ok(name) = entry else { continue };
+        // A malformed SAN entry cannot match anything, so it can never
+        // authenticate the connection -- but under a constraint it cannot be
+        // shown to be permitted either, and RFC 5280 §4.2.1.10 says every name
+        // must be. Skipping it would accept a certificate carrying a name the
+        // CA's constraint says nothing about. Found by the x509-limbo
+        // differential: webpki refuses these and this code accepted them.
+        let Ok(name) = entry else {
+            return Err(NameError::MalformedSubjectAltName);
+        };
 
         match name {
+            GeneralName::DnsName(presented) if has_empty_label(presented) => {
+                return Err(NameError::MalformedSubjectAltName);
+            }
             GeneralName::DnsName(presented) => {
                 for subtree in &constraints.excluded {
                     if let Subtree::Dns(base) = subtree {

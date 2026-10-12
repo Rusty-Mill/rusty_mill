@@ -206,6 +206,13 @@ pub enum PathError {
     MissingKeyCertSign,
     /// A `pathLenConstraint` in the path was exceeded.
     PathLengthExceeded,
+    /// The end-entity certificate asserts `basicConstraints` `cA` true.
+    ///
+    /// A certificate presented to authenticate a server must not also be a CA
+    /// (CA/B Forum Baseline Requirements 7.1.2.7.8; webpki refuses it). Found by
+    /// the x509-limbo differential (`webpki::ee-basicconstraints-ca`): this
+    /// validator accepted it.
+    EndEntityIsCa,
     /// A certificate carried a critical extension this implementation does not
     /// understand, so it cannot be validated safely.
     ///
@@ -248,6 +255,9 @@ impl core::fmt::Display for PathError {
                 f.write_str("a CA's keyUsage does not permit signing certificates")
             }
             Self::PathLengthExceeded => f.write_str("a pathLenConstraint was exceeded"),
+            Self::EndEntityIsCa => {
+                f.write_str("the end-entity certificate asserts basicConstraints cA")
+            }
             Self::UnhandledCriticalExtension(oid) => {
                 write!(f, "unhandled critical extension {oid:02x?}")
             }
@@ -321,6 +331,13 @@ pub fn validate_path(
     check_validity(end_entity, options.time)?;
     check_no_unhandled_critical(end_entity)?;
     check_eku(end_entity, options.required_eku)?;
+    if end_entity
+        .extensions()
+        .basic_constraints()
+        .is_some_and(|constraints| constraints.is_ca)
+    {
+        return Err(PathError::EndEntityIsCa);
+    }
 
     if options.max_path_length == 0 {
         return Err(PathError::NoPathToTrustAnchor);
@@ -408,7 +425,7 @@ fn search(
 
         // Everything about the candidate that does not depend on what is
         // above it, checked before spending a signature verification on it.
-        if let Err(err) = check_ca(candidate, options.time) {
+        if let Err(err) = check_ca(candidate, options) {
             record(best, err);
             continue;
         }
@@ -480,9 +497,17 @@ fn record(best: &mut PathError, candidate: PathError) {
 }
 
 /// Everything a certificate must satisfy to act as a CA in a path.
-fn check_ca(certificate: &Certificate<'_>, time: i64) -> Result<(), PathError> {
-    check_validity(certificate, time)?;
+fn check_ca(certificate: &Certificate<'_>, options: &PathOptions) -> Result<(), PathError> {
+    check_validity(certificate, options.time)?;
     check_no_unhandled_critical(certificate)?;
+
+    // An `extendedKeyUsage` on a CA limits what it may issue for (RFC 5280
+    // §4.2.1.12, and the practice of every browser trust program and of
+    // webpki). A sub-CA marked for e-mail protection only must not mint server
+    // certificates; checking the end-entity certificate alone would accept the
+    // chain. Found by the x509-limbo / BetterTLS differential: six `pathbuilding`
+    // cases that webpki refused and this validator accepted.
+    check_eku(certificate, options.required_eku)?;
 
     // RFC 5280 §6.1.4(k): basicConstraints must be present with cA true.
     // Absence is not permission — treating it as permission is the bug that
@@ -532,7 +557,8 @@ fn check_no_unhandled_critical(certificate: &Certificate<'_>) -> Result<(), Path
     }
 }
 
-/// The end-entity certificate must permit `required`, if one is required.
+/// A certificate in the path (the end-entity certificate, and each CA below the
+/// anchor) must permit `required`, if one is required.
 ///
 /// An absent `extendedKeyUsage` extension permits every purpose; a present one
 /// permits only what it lists, plus `anyExtendedKeyUsage`. Inverting that

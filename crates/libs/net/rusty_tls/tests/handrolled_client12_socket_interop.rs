@@ -498,6 +498,11 @@ fn ed25519_via_openssl() -> (Pki, i64) {
         ])
         .args(["-subj", &format!("/CN={SERVER}")])
         .args(["-addext", &format!("subjectAltName=DNS:{SERVER}")])
+        // `openssl req -x509` defaults to `CA:TRUE`. This certificate is the
+        // server's leaf as well as its own anchor, and a server certificate
+        // that asserts `cA` is refused (as webpki refuses it); the test is
+        // about Ed25519 verification, so the fixture says what it is.
+        .args(["-addext", "basicConstraints=critical,CA:FALSE"])
         .args(["-keyout", &path(&key), "-out", &path(&cert)])
         .stderr(Stdio::null())
         .status()
