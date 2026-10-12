@@ -633,6 +633,8 @@ fn a_backend_that_stops_being_ready_is_not_broadcast_until_it_is_again() {
     let ready = Arc::new(AtomicBool::new(true));
     let gate = Arc::clone(&ready);
     let (tx, rx) = mpsc::channel();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
     let core = thread::spawn(move || {
         let sim = Simulation::new(MatchConfiguration {
             player_configurations: vec![bot("test/bot", 0, 0)],
@@ -642,7 +644,8 @@ fn a_backend_that_stops_being_ready_is_not_broadcast_until_it_is_again() {
         let mut core =
             Core::bind("127.0.0.1:0", Gate { sim, ready: gate }, Pacing::RealTime).unwrap();
         tx.send(core.local_addr().unwrap()).unwrap();
-        core.run(&AtomicBool::new(false), |_| {}).unwrap()
+        core.run(&AtomicBool::new(false), |e| sink.lock().unwrap().push(e))
+            .unwrap()
     });
     let addr = rx.recv().unwrap();
     let mut connection = Connection::connect(addr).unwrap();
@@ -686,4 +689,13 @@ fn a_backend_that_stops_being_ready_is_not_broadcast_until_it_is_again() {
         })
         .unwrap();
     assert!(matches!(core.join().unwrap(), RunEnd::StopCommand { .. }));
+    // The stall and the recovery are each reported once, in order.
+    let seen: Vec<Event> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, Event::BroadcastHeld | Event::BroadcastResumed))
+        .cloned()
+        .collect();
+    assert_eq!(seen, [Event::BroadcastHeld, Event::BroadcastResumed]);
 }
