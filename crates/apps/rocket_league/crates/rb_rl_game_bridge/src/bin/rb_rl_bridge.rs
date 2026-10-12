@@ -2,14 +2,15 @@
 //! the other.
 //!
 //! ```text
-//! rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] AGENT_ID:TEAM...
+//! rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] [--no-spawn] AGENT_ID:TEAM...
 //! ```
 //!
 //! Listens for the game on `--game-port` (default 23233) and serves bots on `--port` (default
-//! 23234). Start the game with the arguments printed here (or pass `--launch`), with the match
-//! already running and one car per `AGENT_ID:TEAM`, in spawn order: there is no `SpawnBot` yet,
-//! so the cars must exist. Then start the bots with `RLBOT_SERVER_PORT` set. Never run against
-//! a live game as of its writing; `rb_rl_game_probe` is the first thing to try.
+//! 23234). Start the game with the arguments printed here (or pass `--launch`) and a match
+//! loading. Once the map is up the bridge spawns one bot car per `AGENT_ID:TEAM`, in that order,
+//! as RLBot does; with `--no-spawn` it expects those cars to exist already. Then start the bots
+//! with `RLBOT_SERVER_PORT` set. Never run against a live game as of its writing;
+//! `rb_rl_game_probe` is the first thing to try.
 
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
@@ -25,6 +26,7 @@ struct Args {
     game_port: u16,
     port: u16,
     launch: Option<String>,
+    spawn: bool,
     players: Vec<(String, u32)>,
 }
 
@@ -33,6 +35,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         game_port: IDEAL_GAME_PORT,
         port: RLBOT_SOCKETS_PORT,
         launch: None,
+        spawn: true,
         players: Vec::new(),
     };
     while let Some(arg) = args.next() {
@@ -49,6 +52,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                     .map_err(|_| "--port: not a port".to_string())?;
             }
             "--launch" => parsed.launch = Some(value("--launch")?),
+            "--no-spawn" => parsed.spawn = false,
             player => {
                 let (id, team) = player
                     .rsplit_once(':')
@@ -90,7 +94,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Unlimited: the game keeps its own clock; this only fills the configuration.
     let configuration = bot_match(&args.players, MatchLengthMutator::Unlimited);
-    let backend = LinkBackend::new(stream, configuration);
+    let backend = LinkBackend::new(stream, configuration).with_spawning(args.spawn);
     // Pacing is ignored for a game: it decides when a packet exists.
     let mut core = Core::bind(("127.0.0.1", args.port), backend, Pacing::RealTime)?;
     let end = core.run(&AtomicBool::new(false), |event| match event {

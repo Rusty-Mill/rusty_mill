@@ -26,9 +26,9 @@ listens like RLBot does and prints (and with `--record` saves) what a live game 
 
 Checked against buffers built by the DLL's own generated code, both ways. **Never run against
 Rocket League**: that is the probe's job, and a recording from it should be added to
-`tests/fixtures/`. Not ported: forcing a loaded map to `Paused`, the spawn-command queue,
-rendering and `SpawnBot` (needs the loadout model), the stat and Rumble/Dropshot events, boost
-interpolation between `PlayerBoostChange`s. A player's index is its spawn order.
+`tests/fixtures/`. Not ported: forcing a loaded map to `Paused` (spawning does not wait for it), the spawn-command
+queue's batching, rendering, the stat and Rumble/Dropshot events, boost interpolation between
+`PlayerBoostChange`s, and human players being spawned (a human's car takes the next free index).
 
 ## Bots in the real game
 
@@ -40,9 +40,13 @@ without blocking, applies the distribution rules, and sends bot input and state 
 rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] AGENT_ID:TEAM...
 ```
 
-Start the game with the printed `-rlbot` arguments and a match running, with one car per
-`AGENT_ID:TEAM` already spawned in that order (there is no `SpawnBot` yet), then start the bots with
-`RLBOT_SERVER_PORT` set. Tested end to end with a stand-in game (`tests/real_core.rs`): a real
+Start the game with the printed `-rlbot` arguments and a match loading, then start the bots with
+`RLBOT_SERVER_PORT` set. Once the map has been up for two messages the bridge sends one `SpawnBot`
+per `AGENT_ID:TEAM`, in that order, and the match starts when every car has answered (a bot's
+handshake completes then). Each car is tied to its player index by the spawn command's id, as in
+RLBot, so the game may answer in any order; indices stay put when a car leaves. `--no-spawn`
+expects the cars to exist already. Bots get a standard Octane loadout in plain team colours:
+**unverified in the game**, and the configuration's own loadouts are not modelled. Tested end to end with a stand-in game (`tests/real_core.rs`): a real
 `rb_rlbot_client` bot sees the game's field and moving car, its input reaches the right actor, and
 its state setting becomes a ball placement.
 

@@ -7,8 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use rb_rl_game_bridge::{
-    decode_controller_packet, encode_game_packet, BridgeLoop, Command, GameBundle, GameCommand,
-    GameEvent, GameLink, GameListener, RocketLeagueLink, Roster, SEND_BUDGET,
+    decode_controller_packet, encode_game_packet, BotSkill, BridgeLoop, Command, GameBundle,
+    GameCommand, GameEvent, GameLink, GameListener, Loadout, RocketLeagueLink, Roster, SEND_BUDGET,
 };
 use rb_rlbot_wire::frame::{frame, FrameDecoder};
 use rb_rlbot_wire::{AirState, ControllerState, MatchPhase, Physics, Vec3};
@@ -252,17 +252,21 @@ fn a_new_map_clears_the_old_one_but_not_the_clock() {
 }
 
 #[test]
-fn a_destroyed_car_leaves_and_the_rest_renumber() {
+fn a_destroyed_car_leaves_and_the_others_keep_their_indices() {
     let mut l = link(&[
         opening(),
         bundle(0, vec![GameEvent::ActorDestroyed { id: 8 }]),
     ]);
     l.next_clump().unwrap();
     let p = l.next_clump().unwrap().unwrap().packet;
+    // A bot driving index 1 must not find itself in another car because index 0 left.
     assert_eq!(p.players.len(), 1);
-    assert_eq!(p.players[0].name, "Orange");
-    assert_eq!(l.folder().actor_for_player(0), Some(3));
-    assert_eq!(l.folder().actor_for_player(1), None);
+    assert_eq!(
+        (p.players[0].name.as_str(), p.players[0].player_id),
+        ("Orange", 1)
+    );
+    assert_eq!(l.folder().actor_for_player(0), None);
+    assert_eq!(l.folder().actor_for_player(1), Some(3));
 }
 
 /// What the link wrote so far, decoded.
@@ -406,4 +410,95 @@ fn over_a_real_socket_a_game_dials_in_and_is_read_and_answered() {
     assert_eq!(second.packet.match_info.frame_num, 2);
     l.send(GameCommand::Console("Pause".into())).unwrap();
     assert_eq!(game.join().unwrap(), [(1, Command::Exec("Pause".into()))]);
+}
+
+fn spawn(index: u32, name: &str, team: u8) -> GameCommand {
+    GameCommand::SpawnBot {
+        player_index: index,
+        name: name.into(),
+        skill: BotSkill::Custom,
+        team,
+        loadout: Loadout::standard(team),
+    }
+}
+
+fn answered(actor: u16, command_id: Option<u16>, name: &str) -> GameBundle {
+    bundle(
+        1,
+        vec![GameEvent::PlayerSpawn {
+            id: actor,
+            command_id,
+            name: name.into(),
+            team: 0,
+        }],
+    )
+}
+
+#[test]
+fn a_spawned_car_takes_the_index_it_was_spawned_for_whatever_order_cars_appear_in() {
+    // The game answers the second spawn command first, then the first, then a human (command 0).
+    let mut l = link(&[
+        answered(40, Some(2), "Second"),
+        answered(41, Some(1), "First"),
+        answered(42, Some(0), "Human"),
+    ]);
+    l.send(spawn(0, "First", 0)).unwrap();
+    l.send(spawn(1, "Second", 1)).unwrap();
+    for _ in 0..3 {
+        l.next_clump().unwrap();
+    }
+    let folder = l.folder();
+    assert_eq!(folder.actor_for_player(0), Some(41));
+    assert_eq!(folder.actor_for_player(1), Some(40));
+    assert_eq!(
+        folder.actor_for_player(2),
+        Some(42),
+        "a human takes the next free index"
+    );
+    let names: Vec<String> = folder
+        .packet()
+        .players
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(
+        names,
+        ["First", "Second", "Human"],
+        "the packet is by player index"
+    );
+
+    // What went to the game: two SpawnBot commands, counting from 1, with the loadout.
+    let sent = written(&l.into_inner().output);
+    assert_eq!(sent.len(), 2);
+    let (
+        id,
+        Command::SpawnBot {
+            name,
+            skill,
+            team,
+            loadout,
+        },
+    ) = &sent[1]
+    else {
+        panic!("{:?}", sent[1]);
+    };
+    assert_eq!(
+        (*id, name.as_str(), *skill, *team),
+        (2, "Second", BotSkill::Custom, 1)
+    );
+    assert_eq!(loadout.products[0], 23, "an Octane");
+}
+
+#[test]
+fn a_refused_spawn_leaves_no_promise_behind() {
+    // Use up the byte budget so the spawn command is refused.
+    let mut l = link(&[answered(50, None, "Someone")]);
+    // Tiny commands, so what is left cannot hold a spawn.
+    while l.send(GameCommand::Console("x".into())).is_ok() {}
+    let err = l.send(spawn(0, "Refused", 0)).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    // A car that then appears unannounced takes index 0: nothing was promised to the refused
+    // spawn, so nothing is held back for it.
+    l.next_clump().unwrap();
+    assert_eq!(l.folder().actor_for_player(0), Some(50));
 }

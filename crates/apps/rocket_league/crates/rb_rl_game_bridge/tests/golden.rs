@@ -5,7 +5,7 @@
 
 use rb_rl_game_bridge::{
     decode_controller_packet, decode_game_packet, encode_controller_packet, encode_game_packet,
-    Command, GameEvent, VehicleInput,
+    BotSkill, Command, GameEvent, Loadout, Rgba, VehicleInput,
 };
 use rb_rlbot_wire::{MatchPhase, Physics, Rotator, Vec3};
 
@@ -136,6 +136,30 @@ fn expected_commands() -> Vec<(u16, Command)> {
             Command::SetBoost {
                 actor_id: 7,
                 amount: 80,
+            },
+        ),
+        (
+            8,
+            Command::SpawnBot {
+                name: "Ana".into(),
+                skill: BotSkill::Custom,
+                team: 1,
+                loadout: Loadout {
+                    products: [23, 308, 377, 67, 1, 232, 5, 6, 7, 8, 9],
+                    paints: [1, 2, 3, 4, 5, 6, 0, 0, 0, 9, 10],
+                    primary: Rgba {
+                        r: 11,
+                        g: 22,
+                        b: 33,
+                        a: 255,
+                    },
+                    secondary: Rgba {
+                        r: 44,
+                        g: 55,
+                        b: 66,
+                        a: 200,
+                    },
+                },
             },
         ),
     ]

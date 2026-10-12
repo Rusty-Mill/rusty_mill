@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 use rb_rlbot_wire::{ControllerState, GamePacket, Physics};
 
+use crate::game_wire::{BotSkill, Loadout};
+
 use crate::tick::{should_distribute, Clump, Roster, TickTracker};
 
 /// What the bridge can ask of the game.
@@ -31,6 +33,15 @@ pub enum GameCommand {
     SetBallPhysics { physics: Physics },
     /// Set car `player_index`'s boost, 0 to 100.
     SetBoost { player_index: u32, amount: u8 },
+    /// Spawn a bot's car for player `player_index`. The car that answers is tied to that index
+    /// by the command's id, whatever order cars appear in.
+    SpawnBot {
+        player_index: u32,
+        name: String,
+        skill: BotSkill,
+        team: u8,
+        loadout: Loadout,
+    },
 }
 
 /// A connection to a game, real or simulated.

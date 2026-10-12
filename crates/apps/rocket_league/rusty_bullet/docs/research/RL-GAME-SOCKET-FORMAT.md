@@ -90,11 +90,20 @@ data.
 | `DestroyActor` | 0 id S |
 | `SetPhysics` | 0 id S, 1 physics S `PhysicsState` |
 | `SetBoost` | 0 player_id S, 1 amount u8 |
-| `SpawnBot` | 0 name string, 1 skill (`BotSkill`: Intro, Easy, Medium, Hard, Custom), 2 team, 3 loadout T (products, colours, paints) |
+| `SpawnBot` | 0 name string, 1 skill (`BotSkill`: Intro, Easy, Medium, Hard, Custom), 2 team, 3 loadout (T `PlayerLoadout`) |
+| `PlayerLoadout` | 0 products (vector of `u16`, 11), 1 primary colour S `Color`, 2 secondary colour S `Color`, 3 paints (vector of `u8`, 11) |
 | render commands | line, line series, text 2D/3D, remove item |
 
-Not encoded by `rb_rl_game_bridge`: `SpawnBot` (needs the loadout model) and the render
-commands.
+Loadout slot order, products: car, decal, wheels, boost, antenna, hat, paint finish, custom
+finish, engine audio, trails, goal explosion. Paints: car, decal, wheels, boost, antenna, hat,
+three slots RLBot always sends as 0 (indices 6 to 8), trails, goal explosion. A `SpawnBot` carries
+its command id like any command; the game's `PlayerSpawn` for the new car repeats it as
+`command_id`, which is how RLBot ties the car to the player it spawned it for. RLBot spawns after
+the map has been up for two messages and the game is paused; a human's spawn announces command id 0.
+
+Not encoded by `rb_rl_game_bridge`: the render commands. `SpawnBot` is encoded with a standard
+Octane loadout; RLBot's colour swatch tables and the configuration's own loadouts are not
+modelled, so the bots look plain.
 
 ## Behaviour that is not in the bytes
 
@@ -113,8 +122,8 @@ Layouts were read from the decompiled accessors and builders, not guessed, then 
 both directions against the DLL's own generated FlatBuffers code (a scratch project outside this
 repo built `tests/fixtures/*.bin` with it):
 
-- Rust decodes the DLL-built `GamePacket` (13 events) and `ControllerPacket` (7 commands) field
-  for field (`rb_rl_game_bridge/tests/golden.rs`).
+- Rust decodes the DLL-built `GamePacket` (13 events) and `ControllerPacket` (8 commands,
+  `SpawnBot` with a full loadout among them) field for field (`rb_rl_game_bridge/tests/golden.rs`).
 - The DLL's generated reader, pointed at what the Rust encoder writes, prints the same values
   (run once by hand, 2026-10-11; `RB_WRITE_ENCODED=<dir> cargo test -p rb_rl_game_bridge --test
   golden` writes the files).

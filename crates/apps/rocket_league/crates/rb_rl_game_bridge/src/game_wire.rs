@@ -65,6 +65,7 @@ mod game_tag {
 }
 
 mod command_tag {
+    pub const SPAWN_BOT: u8 = 1;
     pub const DESTROY_ACTOR: u8 = 2;
     pub const PLAYER_INPUT: u8 = 3;
     pub const EXEC: u8 = 8;
@@ -191,9 +192,116 @@ impl VehicleInput {
     }
 }
 
+/// A colour as a loadout takes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgba {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+/// How a spawned bot plays: the game's `BotSkill`. `Custom` is a bot an outside program drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BotSkill {
+    Intro = 0,
+    Easy = 1,
+    Medium = 2,
+    Hard = 3,
+    Custom = 4,
+}
+
+impl BotSkill {
+    fn from_u8(value: u8) -> Result<BotSkill> {
+        Ok(match value {
+            0 => BotSkill::Intro,
+            1 => BotSkill::Easy,
+            2 => BotSkill::Medium,
+            3 => BotSkill::Hard,
+            4 => BotSkill::Custom,
+            value => {
+                return Err(WireError::UnknownEnum {
+                    name: "BotSkill",
+                    value,
+                })
+            }
+        })
+    }
+}
+
+/// How many entries the game's loadout vectors carry.
+pub const LOADOUT_SLOTS: usize = 11;
+
+/// The item slots of a bot's loadout, in the game's order: car, decal, wheels, boost, antenna,
+/// hat, paint finish, custom finish, engine audio, trails, goal explosion.
+pub mod product {
+    pub const CAR: usize = 0;
+    pub const DECAL: usize = 1;
+    pub const WHEELS: usize = 2;
+    pub const BOOST: usize = 3;
+    pub const ANTENNA: usize = 4;
+    pub const HAT: usize = 5;
+    pub const PAINT_FINISH: usize = 6;
+    pub const CUSTOM_FINISH: usize = 7;
+    pub const ENGINE_AUDIO: usize = 8;
+    pub const TRAILS: usize = 9;
+    pub const GOAL_EXPLOSION: usize = 10;
+}
+
+/// The paint slots, same length as the products: car, decal, wheels, boost, antenna and hat
+/// paint, three slots RLBot always sends as 0 (6 to 8), trails and goal explosion paint.
+pub mod paint {
+    pub const TRAILS: usize = 9;
+    pub const GOAL_EXPLOSION: usize = 10;
+}
+
+/// A bot's look: item ids per slot, paint ids per slot, and two colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Loadout {
+    pub products: [u16; LOADOUT_SLOTS],
+    pub paints: [u8; LOADOUT_SLOTS],
+    pub primary: Rgba,
+    pub secondary: Rgba,
+}
+
+impl Loadout {
+    /// An Octane (car id 23) with no cosmetics. The colours are plain team colours picked here,
+    /// not looked up from the game's swatches: **unverified in the game**.
+    pub fn standard(team: u8) -> Loadout {
+        let mut products = [0u16; LOADOUT_SLOTS];
+        products[product::CAR] = 23;
+        let (r, g, b) = if team == 0 {
+            (57, 80, 229)
+        } else {
+            (229, 111, 57)
+        };
+        Loadout {
+            products,
+            paints: [0; LOADOUT_SLOTS],
+            primary: Rgba { r, g, b, a: 255 },
+            secondary: Rgba {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
+        }
+    }
+}
+
 /// What we tell the game.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// Spawns a bot's car. The game announces it with a `PlayerSpawn` carrying this command's
+    /// id, which is how it is tied to the player it was spawned for.
+    SpawnBot {
+        name: String,
+        skill: BotSkill,
+        /// 0 blue, 1 orange.
+        team: u8,
+        loadout: Loadout,
+    },
     PlayerInput {
         actor_id: u16,
         input: VehicleInput,
@@ -258,6 +366,18 @@ fn physics(t: &Table<'_>, slot: usize, name: &'static str) -> Result<Physics> {
     t.struct_bytes(slot, <Physics as Struct>::SIZE)?
         .and_then(<Physics as Struct>::read)
         .ok_or(WireError::Missing(name))
+}
+
+fn rgba(t: &Table<'_>, slot: usize, name: &'static str) -> Result<Rgba> {
+    match t.struct_bytes(slot, 4)? {
+        Some([r, g, b, a]) => Ok(Rgba {
+            r: *r,
+            g: *g,
+            b: *b,
+            a: *a,
+        }),
+        _ => Err(WireError::Missing(name)),
+    }
 }
 
 fn read_event(tag: u8, t: &Table<'_>) -> Result<GameEvent> {
@@ -366,6 +486,29 @@ pub fn decode_controller_packet(payload: &[u8]) -> Result<Vec<(u16, Command)>> {
             continue;
         };
         let command = match tag {
+            SPAWN_BOT => {
+                let l = t.table(3)?.ok_or(WireError::Missing("loadout"))?;
+                let mut loadout = Loadout::standard(0);
+                loadout.products = [0; LOADOUT_SLOTS];
+                if let Some(v) = l.vector(0)? {
+                    for (i, slot) in loadout.products.iter_mut().enumerate().take(v.len()) {
+                        *slot = v.scalar::<u16>(i)?;
+                    }
+                }
+                if let Some(v) = l.vector(3)? {
+                    for (i, slot) in loadout.paints.iter_mut().enumerate().take(v.len()) {
+                        *slot = v.scalar::<u8>(i)?;
+                    }
+                }
+                loadout.primary = rgba(&l, 1, "primary colour")?;
+                loadout.secondary = rgba(&l, 2, "secondary colour")?;
+                Command::SpawnBot {
+                    name: t.string(0)?.unwrap_or_default().to_owned(),
+                    skill: BotSkill::from_u8(t.scalar(1, 0u8)?)?,
+                    team: t.scalar(2, 0u8)?,
+                    loadout,
+                }
+            }
             PLAYER_INPUT => {
                 let input = t.table(1)?.ok_or(WireError::Missing("input"))?;
                 Command::PlayerInput {
@@ -582,6 +725,30 @@ pub fn encode_game_packet(bundle: &GameBundle) -> Result<Vec<u8>> {
 fn write_command(b: &mut Builder, command: &Command) -> Result<(u8, Offset)> {
     use command_tag::*;
     Ok(match command {
+        Command::SpawnBot {
+            name,
+            skill,
+            team,
+            loadout,
+        } => {
+            let products = b.create_vector::<u16>(&loadout.products)?;
+            let paints = b.create_vector::<u8>(&loadout.paints)?;
+            let color = |c: &Rgba| [c.r, c.g, c.b, c.a];
+            let l = build(b, |t| {
+                t.add_offset(0, products)?;
+                t.add_struct(1, &color(&loadout.primary), 1)?;
+                t.add_struct(2, &color(&loadout.secondary), 1)?;
+                Ok(t.add_offset(3, paints)?)
+            })?;
+            let name = b.create_string(name)?;
+            let o = build(b, |t| {
+                t.add_offset(0, name)?;
+                t.add_scalar(1, *skill as u8, 0u8)?;
+                t.add_scalar(2, *team, 0u8)?;
+                Ok(t.add_offset(3, l)?)
+            })?;
+            (SPAWN_BOT, o)
+        }
         Command::PlayerInput { actor_id, input } => {
             let vehicle = build(b, |t| {
                 t.add_scalar(0, input.throttle, 0f32)?;

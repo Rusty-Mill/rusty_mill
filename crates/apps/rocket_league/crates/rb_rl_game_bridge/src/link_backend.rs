@@ -6,17 +6,20 @@
 //! ([`BridgeLoop`]), and sends inputs and state setting back. It is **self-paced**: the game
 //! decides when a packet exists, so core's pacing does not apply.
 //!
-//! The cars must already exist in the game: there is no `SpawnBot` yet. A bot's car is the car
-//! with its player index, which is spawn order (see `GameFolder`).
+//! With [`LinkBackend::with_spawning`] the backend spawns the configuration's bots itself, as
+//! RLBot does: once the map has been up for two messages it sends a `SpawnBot` per bot, and the
+//! match starts when every car has answered. Without it the cars must already exist in the
+//! game. Either way a bot's car is the one with its player index (see `GameFolder`).
 
 use std::io::{self, ErrorKind, Read, Write};
 
 use rb_rlbot_core::{MatchBackend, Poll};
 use rb_rlbot_wire::{
     ControllerState, DesiredGameState, DesiredPhysics, FieldInfo, GamePacket, MatchConfiguration,
-    PartialVec3, Physics, Rotator, Vec3,
+    PartialVec3, Physics, PlayerClass, PsyonixSkill, Rotator, Vec3,
 };
 
+use crate::game_wire::{BotSkill, Loadout};
 use crate::link::{BridgeLoop, GameCommand, GameLink};
 use crate::rl_link::{PollClump, RocketLeagueLink};
 use crate::tick::Roster;
@@ -31,6 +34,31 @@ pub struct LinkBackend<S> {
     bridge: BridgeLoop,
     configuration: MatchConfiguration,
     latest: Option<GamePacket>,
+    spawning: bool,
+    /// A map has loaded since the backend started.
+    map_seen: bool,
+    /// How many of the configuration's players have had their spawn command sent for this map.
+    spawn_sent: usize,
+}
+
+/// A player's spawn parameters, if it is a bot: name, skill, team. Humans are not spawned.
+fn bot_of(player: &rb_rlbot_wire::PlayerConfiguration) -> Option<(String, BotSkill, u8)> {
+    let team = u8::try_from(player.team).ok()?;
+    match &player.variety {
+        PlayerClass::CustomBot(bot) => Some((bot.name.clone(), BotSkill::Custom, team)),
+        // RLBot's skill names against the game's (`MatchStarter.cs:459-463`).
+        PlayerClass::PsyonixBot(bot) => Some((
+            bot.name.clone(),
+            match bot.skill {
+                PsyonixSkill::Beginner => BotSkill::Intro,
+                PsyonixSkill::Rookie => BotSkill::Easy,
+                PsyonixSkill::Pro => BotSkill::Medium,
+                PsyonixSkill::AllStar => BotSkill::Hard,
+            },
+            team,
+        )),
+        PlayerClass::Human => None,
+    }
 }
 
 impl<S: Read + Write> LinkBackend<S> {
@@ -44,7 +72,60 @@ impl<S: Read + Write> LinkBackend<S> {
             bridge,
             configuration,
             latest: None,
+            spawning: false,
+            map_seen: false,
+            spawn_sent: 0,
         }
+    }
+
+    /// Whether to spawn the configuration's bots once the map is up (default off). Loadouts are
+    /// not modelled in the configuration, so every bot gets [`Loadout::standard`].
+    pub fn with_spawning(mut self, on: bool) -> LinkBackend<S> {
+        self.spawning = on;
+        self
+    }
+
+    /// Sends the spawn commands that are due. Called every poll; it resumes where a refused
+    /// command (the per-frame byte budget) left off.
+    fn spawn_due(&mut self) -> io::Result<()> {
+        // Two messages after the map loads, as RLBot waits (`BridgeHandler.cs:175-184`). It
+        // also waits for the game to be paused there, which a LAN match never reports.
+        if !self.spawning || !self.map_seen || self.bridge.tracker().ticks_since_map_load() < 2 {
+            return Ok(());
+        }
+        while let Some(player) = self
+            .configuration
+            .player_configurations
+            .get(self.spawn_sent)
+        {
+            let player_index = self.spawn_sent as u32;
+            if let Some((name, skill, team)) = bot_of(player) {
+                let spawn = GameCommand::SpawnBot {
+                    player_index,
+                    name,
+                    skill,
+                    team,
+                    loadout: Loadout::standard(team),
+                };
+                match self.link.send(spawn) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            }
+            self.spawn_sent += 1;
+        }
+        Ok(())
+    }
+
+    /// Whether every bot in the configuration has a car in the game.
+    fn bots_spawned(&self) -> bool {
+        self.configuration
+            .player_configurations
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| bot_of(p).is_some())
+            .all(|(i, _)| self.link.folder().actor_for_player(i as u32).is_some())
     }
 
     pub fn link(&self) -> &RocketLeagueLink<S> {
@@ -86,9 +167,10 @@ impl<S: Read + Write> MatchBackend for LinkBackend<S> {
         self.link.folder().field_info()
     }
 
-    /// Ready once a packet has been distributed, so bots never see an empty match.
+    /// Ready once a packet has been distributed (so bots never see an empty match) and, when
+    /// spawning, every bot's car exists.
     fn ready(&self) -> bool {
-        self.latest.is_some()
+        self.latest.is_some() && (!self.spawning || self.bots_spawned())
     }
 
     fn self_paced(&self) -> bool {
@@ -103,13 +185,20 @@ impl<S: Read + Write> MatchBackend for LinkBackend<S> {
     }
 
     fn poll(&mut self) -> io::Result<Poll> {
+        self.spawn_due()?;
         // A packet is distributed on its own turn so no bot misses one: stop at the first.
         for _ in 0..MAX_CLUMPS_PER_POLL {
             match self.link.poll_clump()? {
                 PollClump::Idle => return Ok(Poll::Idle),
                 PollClump::Closed => return Ok(Poll::Closed),
                 PollClump::Clump(clump) => {
-                    if let Some(packet) = self.bridge.on_clump(clump).distribute {
+                    let step = self.bridge.on_clump(clump);
+                    if step.map_loaded {
+                        // A new map has no cars: spawn the bots again.
+                        self.map_seen = true;
+                        self.spawn_sent = 0;
+                    }
+                    if let Some(packet) = step.distribute {
                         self.latest = Some(packet);
                         return Ok(Poll::Packet);
                     }

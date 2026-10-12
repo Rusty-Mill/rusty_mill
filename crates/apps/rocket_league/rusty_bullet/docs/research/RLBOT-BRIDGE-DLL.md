@@ -135,5 +135,7 @@ against the DLL's own generated code. Nothing decompiled is committed.
 `rb_rl_game_bridge::LinkBackend` (a game behind `RocketLeagueLink` and `BridgeLoop`) is the
 other, so bots play in the real game through the same server. `rb_rl_bridge` is the binary.
 
-Still open: a run against a live game (start with `rb_rl_game_probe`), `SpawnBot` so the bridge
-can create the bots' cars instead of expecting them to exist, and rendering.
+The bridge spawns the bots' cars itself (`SpawnBot`, tied to player indices by command id).
+
+Still open: a run against a live game (start with `rb_rl_game_probe`), the colour swatches and
+configured loadouts for spawned bots, and rendering.

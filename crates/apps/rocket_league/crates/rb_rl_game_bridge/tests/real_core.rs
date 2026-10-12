@@ -11,8 +11,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use rb_rl_game_bridge::{
-    decode_controller_packet, encode_game_packet, Command, GameBundle, GameEvent, GameListener,
-    LinkBackend,
+    decode_controller_packet, encode_game_packet, BotSkill, Command, GameBundle, GameEvent,
+    GameListener, LinkBackend,
 };
 use rb_rlbot_client::Connection;
 use rb_rlbot_core::{bot_match, Core, Event, Pacing, RunEnd};
@@ -264,4 +264,154 @@ fn a_bot_plays_through_core_in_a_game_that_is_not_the_simulation() {
     );
     let events = events.lock().unwrap();
     assert!(events.contains(&Event::MatchStarted));
+}
+
+/// A game that starts with a map and no cars, answers each `SpawnBot` with a `PlayerSpawn`
+/// carrying its command id, and then moves the new car along, until a player input arrives.
+fn spawning_game(addr: SocketAddr, received: Received) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(1)))
+            .unwrap();
+        let send = |stream: &mut TcpStream, b: &GameBundle| {
+            stream
+                .write_all(&frame(&encode_game_packet(b).unwrap()).unwrap())
+                .unwrap();
+        };
+        let mut first = opening();
+        first
+            .events
+            .retain(|e| !matches!(e, GameEvent::PlayerSpawn { .. }));
+        send(&mut stream, &first);
+        let mut decoder = FrameDecoder::new();
+        let mut buf = [0u8; 1024];
+        let mut pending = Vec::new();
+        let mut spawned = false;
+        for i in 1..=3_000u32 {
+            let mut events = Vec::new();
+            for (command_id, name, team) in pending.drain(..) {
+                spawned = true;
+                events.push(GameEvent::PlayerSpawn {
+                    id: 5,
+                    command_id: Some(command_id),
+                    name,
+                    team,
+                });
+            }
+            if spawned {
+                events.push(GameEvent::PlayerPhysics {
+                    id: 5,
+                    physics: at(i as f32),
+                    state: 0,
+                });
+            }
+            send(
+                &mut stream,
+                &GameBundle {
+                    app_seconds: i as f32 / 60.0,
+                    delta_physics_frames: 2,
+                    events,
+                },
+            );
+            if let Ok(n) = stream.read(&mut buf) {
+                decoder.push(&buf[..n]);
+                while let Some(p) = decoder.next_frame() {
+                    for (id, command) in decode_controller_packet(&p).unwrap() {
+                        if let Command::SpawnBot { name, team, .. } = &command {
+                            pending.push((id, name.clone(), *team));
+                        }
+                        received.lock().unwrap().push(command);
+                    }
+                }
+            }
+            let saw_input = received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| matches!(c, Command::PlayerInput { .. }));
+            if saw_input {
+                break;
+            }
+            thread::sleep(Duration::from_millis(3));
+        }
+    })
+}
+
+#[test]
+fn the_bridge_spawns_the_bots_and_the_match_waits_for_their_cars() {
+    let received: Received = Arc::default();
+    let game_listener = GameListener::bind(0).unwrap();
+    let game = spawning_game(game_listener.local_addr().unwrap(), Arc::clone(&received));
+
+    let (tx, rx) = mpsc::channel();
+    let core = thread::spawn(move || {
+        let stream = game_listener
+            .wait_for_connection(Duration::from_secs(10))
+            .unwrap()
+            .expect("the game never connected");
+        stream.set_nonblocking(true).unwrap();
+        let config = bot_match(&[("bot".to_string(), 0)], MatchLengthMutator::Unlimited);
+        let backend = LinkBackend::new(stream, config).with_spawning(true);
+        let mut core = Core::bind("127.0.0.1:0", backend, Pacing::RealTime).unwrap();
+        tx.send(core.local_addr().unwrap()).unwrap();
+        core.run(&AtomicBool::new(false), |_| {}).unwrap()
+    });
+
+    let mut bot = Connection::connect(rx.recv().unwrap()).unwrap();
+    // The handshake completes only once the game has a car for this bot: the opening reply
+    // waits for the match, and the match waits for the spawn.
+    bot.handshake(ConnectionSettings {
+        agent_id: "bot".into(),
+        wants_ball_predictions: false,
+        wants_comms: false,
+        close_between_matches: true,
+    })
+    .unwrap();
+    bot.send(InitComplete).unwrap();
+    let mut seen = 0;
+    loop {
+        match bot.recv().unwrap() {
+            CoreMessage::GamePacket(p) => {
+                assert_eq!(p.players.len(), 1, "the match began with the car in it");
+                assert_eq!(p.players[0].name, "bot");
+                seen += 1;
+                bot.send(PlayerInput {
+                    player_index: 0,
+                    controller_state: ControllerState {
+                        throttle: 1.0,
+                        ..ControllerState::default()
+                    },
+                })
+                .unwrap();
+            }
+            CoreMessage::DisconnectSignal => break,
+            _ => {}
+        }
+    }
+    game.join().unwrap();
+    assert_eq!(core.join().unwrap(), RunEnd::GameClosed);
+    assert!(seen >= 1);
+
+    let got = received.lock().unwrap();
+    let spawns: Vec<&Command> = got
+        .iter()
+        .filter(|c| matches!(c, Command::SpawnBot { .. }))
+        .collect();
+    assert_eq!(spawns.len(), 1, "one bot, spawned once: {got:?}");
+    assert!(
+        matches!(got.first(), Some(Command::SpawnBot { .. })),
+        "the spawn came before any input"
+    );
+    let Command::SpawnBot {
+        name,
+        skill,
+        team,
+        loadout,
+    } = spawns[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!((name.as_str(), *skill, *team), ("bot", BotSkill::Custom, 0));
+    assert_eq!(loadout.products[0], 23);
 }

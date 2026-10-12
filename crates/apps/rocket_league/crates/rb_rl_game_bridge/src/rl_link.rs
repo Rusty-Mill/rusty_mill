@@ -57,8 +57,10 @@ pub struct GameFolder {
     scores: [u32; 2],
     map_name: String,
     cars: BTreeMap<u16, Car>,
-    /// Actor ids in the order the cars spawned: a car's player index.
-    car_order: Vec<u16>,
+    /// Which actor is the car of each player index.
+    slots: BTreeMap<u32, u16>,
+    /// Spawn commands sent and not yet answered: command id to the player index it was for.
+    expected: BTreeMap<u16, u32>,
     ball: Option<(u16, Physics)>,
     pads: BTreeMap<u16, Pad>,
     goals: Vec<GoalInfo>,
@@ -75,7 +77,8 @@ impl Default for GameFolder {
             scores: [0; 2],
             map_name: String::new(),
             cars: BTreeMap::new(),
-            car_order: Vec::new(),
+            slots: BTreeMap::new(),
+            expected: BTreeMap::new(),
             ball: None,
             pads: BTreeMap::new(),
             goals: Vec::new(),
@@ -92,9 +95,23 @@ impl GameFolder {
         &self.map_name
     }
 
-    /// The actor id of the car with player index `index` (spawn order).
+    /// The actor id of the car with player index `index`.
     pub fn actor_for_player(&self, index: u32) -> Option<u16> {
-        self.car_order.get(usize::try_from(index).ok()?).copied()
+        self.slots.get(&index).copied()
+    }
+
+    /// Records that spawn command `command_id` is for player `player_index`: the car the game
+    /// answers it with takes that index, whatever order cars appear in. (A car with no such
+    /// command, such as a human's, takes the lowest index nobody has claimed.)
+    pub fn expect_spawn(&mut self, command_id: u16, player_index: u32) {
+        self.expected.insert(command_id, player_index);
+    }
+
+    /// The lowest player index that is neither taken nor promised to a pending spawn.
+    fn free_index(&self) -> u32 {
+        (0..)
+            .find(|i| !self.slots.contains_key(i) && !self.expected.values().any(|e| e == i))
+            .unwrap_or(u32::MAX)
     }
 
     /// Folds one message in. Returns whether it announced a newly loaded map.
@@ -165,9 +182,19 @@ impl GameFolder {
                     };
                 }
             }
-            GameEvent::PlayerSpawn { id, name, team, .. } => {
-                if !self.cars.contains_key(id) {
-                    self.car_order.push(*id);
+            GameEvent::PlayerSpawn {
+                id,
+                name,
+                team,
+                command_id,
+            } => {
+                if !self.slots.values().any(|a| a == id) {
+                    // Command id 0 is the game's own spawns (a human), never a bot we asked for.
+                    let promised = command_id
+                        .filter(|c| *c != 0)
+                        .and_then(|c| self.expected.remove(&c));
+                    let index = promised.unwrap_or_else(|| self.free_index());
+                    self.slots.insert(index, *id);
                 }
                 self.cars.insert(
                     *id,
@@ -206,7 +233,7 @@ impl GameFolder {
             }
             GameEvent::ActorDestroyed { id } => {
                 if self.cars.remove(id).is_some() {
-                    self.car_order.retain(|c| c != id);
+                    self.slots.retain(|_, actor| actor != id);
                 }
                 if self.ball.is_some_and(|(ball_id, _)| ball_id == *id) {
                     self.ball = None;
@@ -265,14 +292,13 @@ impl GameFolder {
         }
     }
 
-    /// The snapshot the bots get. Cars are in spawn order; pads are by y, then x, as in
+    /// The snapshot the bots get. Cars are by player index; pads are by y, then x, as in
     /// `RLBotCS/Conversion/GameStateToFlat.cs`.
     pub fn packet(&self) -> GamePacket {
         let players = self
-            .car_order
+            .slots
             .iter()
-            .enumerate()
-            .filter_map(|(index, id)| self.cars.get(id).map(|car| (index, car)))
+            .filter_map(|(index, id)| self.cars.get(id).map(|car| (*index, car)))
             .map(|(index, car)| PlayerInfo {
                 physics: car.physics,
                 air_state: match car.state {
@@ -439,7 +465,23 @@ impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
     /// past [`SEND_BUDGET`] bytes is refused with `WouldBlock` (RLBotCS drops it with a log
     /// line); retry after the next message from the game.
     fn send(&mut self, command: GameCommand) -> io::Result<()> {
+        let mut spawned_for = None;
         let command = match command {
+            GameCommand::SpawnBot {
+                player_index,
+                name,
+                skill,
+                team,
+                loadout,
+            } => {
+                spawned_for = Some(player_index);
+                Command::SpawnBot {
+                    name,
+                    skill,
+                    team,
+                    loadout,
+                }
+            }
             GameCommand::PlayerInput {
                 player_index,
                 state,
@@ -471,8 +513,8 @@ impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
                 amount,
             },
         };
-        let payload =
-            encode_controller_packet(self.next_command_id, &[command]).map_err(invalid)?;
+        let command_id = self.next_command_id;
+        let payload = encode_controller_packet(command_id, &[command]).map_err(invalid)?;
         if payload.len() > SEND_BUDGET.saturating_sub(self.sent_since_message) {
             return Err(io::Error::new(
                 ErrorKind::WouldBlock,
@@ -483,6 +525,10 @@ impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
         self.stream.write_all(&bytes)?;
         self.sent_since_message += payload.len();
         self.next_command_id = self.next_command_id.wrapping_add(1).max(1);
+        // Only once it is on the wire: a refused spawn must not leave a promise behind.
+        if let Some(player_index) = spawned_for {
+            self.folder.expect_spawn(command_id, player_index);
+        }
         Ok(())
     }
 }
