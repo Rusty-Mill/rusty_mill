@@ -1,6 +1,6 @@
 # TLS native engine: evidence bar proposal (owner to approve)
 
-Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval. Follows
+Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` and `nc-dos` are unresolved pre-wiring blockers. Follows
 `TLS-ENGINE-ASSESSMENT.md` section 6, which this narrows and updates. The engine's default,
 both gates and every consumer are unchanged. The bar, replacing `ring`, and superseding
 ADR-0002 are the owner's decisions.
@@ -75,13 +75,13 @@ proposed to start until Tier 1 has been in use.
 3. ADR: amendment before any wiring (my recommendation); **text not yet written or approved.**
 4. Reviewer: **open.** Without one Tier 1 stalls at item 4.
 5. `ring`: keep (my recommendation).
-6. **Decided 2026-10-11: leave it.** Tier 1 item 1 counts *scheduled* runs and the only
+6. **Proposed, pending confirmation:** leave it. Tier 1 item 1 counts *scheduled* runs and the only
    scheduled CI run today is weekly (Mondays 03:17 UTC), so the criterion takes 10 weeks as
    written. No schedule is added and the criterion is unchanged.
 7. **Smaller review scope:** drafted in `TLS-REVIEW-SCOPE.md` for the owner's approval.
-8. **ADR amendment:** owner approved the approach on 2026-10-11; the text is Amendment 1 in
+8. **ADR amendment:** approach and text **pending confirmation**; proposed as Amendment 1 in
    `crates/libs/net/rusty_tls/docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md`
-   (for the owner to read; it adds no default and wires nothing).
+   (marked Proposed; it adds no default, wires nothing and is not operative).
 
 ## Limits
 

@@ -666,17 +666,17 @@ read as a step toward it.
 - Promoting the hand-rolled engine to default, without superseding this ADR.
 - Hand-rolling cryptographic primitives under any stage listed here (§6).
 
-## Amendment 1 (2026-10-11): one consumer may opt in locally, under a written evidence bar
+## Amendment 1 (proposed, 2026-10-11): one consumer may opt in locally, under a written evidence bar
 
-Status: Approach approved by the owner on 2026-10-11 (recorded from the owner's reply in the working session); this text is for the owner to read, and the first consumer is still to be chosen, before anything is wired. It supersedes nothing in sections 1 to 6.
+Status: **Proposed. Not accepted; the owner has not confirmed this text or its approach to the reviewer, and nothing here is operative.** Until it is accepted, sections 1 to 6 stand unchanged and no consumer may opt in. It supersedes nothing in sections 1 to 6.
 
 **What this clarifies.** Section 1 says a consumer can reach the hand-rolled engine "only by
 a deliberate, local, visible act by whoever invokes `cargo`", and section 3 says the engine
 is never the default. Neither says whether one named application may take that deliberate
-act for its own build. This amendment says it may, and under which conditions, so the
+act for its own build. This amendment proposes that it may, and under which conditions, so the
 question is not decided by a pull request that merely wires it.
 
-**The conditions.** A consumer may use the engine's gated types (today
+**The proposed conditions.** If accepted, a consumer may use the engine's gated types (today
 `handrolled::stream::NativeTlsStream`) only when all of these hold:
 
 1. **The evidence bar for that tier is met and recorded.** The bar is
@@ -696,6 +696,10 @@ question is not decided by a pull request that merely wires it.
    TLS 1.2, a new host class) is a new decision against the bar, not a consequence of this one.
 5. **No library default moves.** No feature, cfg or dependency edge makes any other
    crate's build use the engine.
+6. **Known divergences from webpki are resolved first.** The `anyExtendedKeyUsage`
+   divergence and the name-constraint resource-budget cases (`nc-dos-1`, `nc-dos-2`) in
+   `TLS-EVIDENCE-BAR.md` are unresolved pre-wiring blockers. Describing their behavior is
+   not approval of them as exceptions.
 
 **What this does not do.**
 
