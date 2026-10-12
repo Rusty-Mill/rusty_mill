@@ -80,7 +80,8 @@ its state setting becomes a ball placement.
   crate does not know decodes as `GameEvent::Other(tag)`. A message with more than 4096 events or
   more than 64 KiB of names is refused, since a crafted buffer can make many slots share one string.
 - **Analysis is strict for supported events.** `decode_game_packet_strict` and the probe report
-  missing fields/unknown enums; unsupported event tags remain `Other`. Partial final frames are
+  missing required fields and invalid validated enums (`MatchPhase`, `PickupStateType`); other
+  raw enum bytes are not range-validated, and unsupported event tags remain `Other`. Partial final frames are
   errors in analysis and live links. Permanently oversized commands return `InvalidInput`.
 - **Recordings use new files only.** Existing paths and aliases are refused without truncation,
   preventing inbound and outbound recordings from sharing a file.

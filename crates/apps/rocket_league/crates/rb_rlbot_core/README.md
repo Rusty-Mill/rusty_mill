@@ -52,7 +52,8 @@ clients) because it logs nothing itself.
 Ball prediction, match comms, rendering, quick chat, loadouts, console commands, starting a new
 match over the socket, gravity and game speed in state setting, and every mutator except match
 length. `air_state` is only on-ground or in-air (from the car's height); `demolished_timeout` is
-always -1. Anything a client asks for beyond this is ignored, never a crash.
+-1 for present cars and zero for demolished placeholders whose remaining duration is unknown.
+Anything a client asks for beyond this is ignored, never a crash.
 
 ## Verified
 

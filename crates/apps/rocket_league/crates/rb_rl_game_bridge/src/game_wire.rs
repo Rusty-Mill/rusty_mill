@@ -421,7 +421,16 @@ fn read_event(tag: u8, t: &Table<'_>) -> Result<GameEvent> {
         },
         PICKUP_STATE_CHANGE => GameEvent::PickupState {
             id: id(t, 0, "pickup id")?,
-            picked_up: t.scalar(1, 0u8)? == 1,
+            picked_up: match t.scalar(1, 0u8)? {
+                0 => false,
+                1 => true,
+                value => {
+                    return Err(WireError::UnknownEnum {
+                        name: "PickupStateType",
+                        value,
+                    })
+                }
+            },
         },
         PLAYER_SPAWN => GameEvent::PlayerSpawn {
             id: id(t, 0, "player id")?,
@@ -463,7 +472,8 @@ pub fn decode_game_packet(payload: &[u8]) -> Result<GameBundle> {
 }
 
 /// Analysis decoder: unknown event tags remain `Other`, but missing required fields and
-/// unknown enum values in supported events are errors instead of a tolerant `Other` fallback.
+/// invalid values of validated enums (`MatchPhase`, `PickupStateType`) are errors instead
+/// of a tolerant `Other` fallback. Raw enum bytes in other fields are not range-validated.
 pub fn decode_game_packet_strict(payload: &[u8]) -> Result<GameBundle> {
     decode_game_packet_mode(payload, true)
 }

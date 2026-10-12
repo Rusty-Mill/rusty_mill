@@ -118,8 +118,11 @@ modelled, so the bots look plain.
 
 ## Decoding limits
 
-An event whose enum value or required field is unknown decodes as `Other(tag)` instead of failing
-the message, so one odd event cannot end a session. A message with more than 4096 events or more
+The tolerant decoder converts missing required fields and invalid validated enum values
+(`MatchPhase`, `PickupStateType`) to `Other(tag)` instead of failing the message. The strict
+analysis decoder reports those errors; raw enum bytes in other fields are not range-validated.
+Unsupported event tags remain `Other` in both modes. Consequently, zero tolerant-decoder errors
+alone does not prove successful decoding of every supported event. A message with more than 4096 events or more
 than 64 KiB of name strings is refused, because a buffer can point many vector slots at one long
 string.
 
@@ -131,19 +134,26 @@ Layouts were read from the decompiled accessors and builders, then checked three
    built `tests/fixtures/game_packet.bin` and `controller_packet.bin` with it): Rust decodes the
    `GamePacket` (13 events) and `ControllerPacket` (8 commands, `SpawnBot` with a full loadout
    among them) field for field, and the generated reader reads back what the Rust encoder writes.
-2. **Against a live Rocket League, receiving** (Epic install, 2026-10-11, Freeplay on
-   TrainStation_P, launched in RLBot mode): 14,993 messages in one session and 2,524 in another,
-   none undecodable. Seen: `GameSpawn`, 2 `GoalSpawn`, 34 `PickupSpawn`, `PlayerSpawn`,
-   `BallSpawn`, `StateChange` (Inactive, Kickoff, Active), `PlayerPhysics`, `BallPhysics`,
-   `PlayerBoost`, `TimeChange`, and three events this crate does not decode: `BallHit` (12),
-   `PlayerInputChange` (18), `BallExtraDataChange` (21). Not seen in the sessions: `PickupStateChange`,
-   `TeamScoreChange`, `ActorDestroyed` (no pad was driven over, no goal scored, no car left), so those
-   three decoders are checked only against the DLL's generated code.
-3. **Against a live Rocket League, sending:** the bridge sent a `SpawnBot` (command 1) and the game
-   answered with a `PlayerSpawn` for a new car carrying `command_id 1`, then took 504 `PlayerInput`
-   commands for that car and kept the connection. The car drove (top speed about 2,300 uu/s).
-   `tests/live_capture.rs` pins the recorded slices and that today's encoder reproduces the
-   accepted `SpawnBot` byte for byte.
+2. **Author-reported live receiving run** (Epic install, 2026-10-11, Freeplay on
+   TrainStation_P): 14,993 messages in one session and 2,524 in another, with no reported
+   decode errors. These full-session totals are not reproducible from the committed slices.
+   The slices contain 250 messages/513 physics frames (human) and 51 messages/115 frames
+   (spawned bot), checked by `tests/live_capture.rs` with strict decoding of supported fields.
+   They include map, goal, pad and player spawns, physics, boost, phase and clock updates,
+   plus opaque events `BallHit` (12), `PlayerInputChange` (18), `BallExtraDataChange` (21).
+   `PickupStateChange`, `TeamScoreChange` and `ActorDestroyed` are not demonstrated by these
+   slices; their decoding is checked with generated-code fixtures and synthetic tests.
+3. **Author-reported live sending run:** a `SpawnBot` was acknowledged by a `PlayerSpawn`
+   carrying its command ID; the author reports 504 subsequent `PlayerInput` commands and
+   a top speed of about 2,300 uu/s. The committed outbound fixture contains one `SpawnBot`
+   and one `PlayerInput`, not all 504 inputs. The inbound bot slice includes a matching spawn
+   response and movement, and the current encoder reproduces the accepted `SpawnBot` bytes.
+
+Exact build SHA and clean-tree identity of the capture binary are unavailable. Command-byte
+agreement supports the codec, but does not establish that all reported runtime observations
+used this reviewed build. No new live run or recording was performed for these corrections.
+Timed matches, multiple bots and Steam remain unverified live; the limited Freeplay evidence
+does not establish full-match or failure-path parity.
 
 ## What the live game showed that the decompiled code did not
 

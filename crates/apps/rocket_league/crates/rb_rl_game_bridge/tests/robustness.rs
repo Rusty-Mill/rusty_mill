@@ -252,3 +252,36 @@ fn missing_known_command_body_is_not_silently_skipped() {
         }
     }
 }
+
+#[test]
+fn pickup_state_enum_is_validated_without_losing_tolerant_session_handling() {
+    use rb_rl_game_bridge::decode_game_packet_strict;
+    for state in [0u8, 1, 99, 255] {
+        let bytes = packet_of(|b| {
+            let mut t = b.start_table();
+            t.add_struct(0, &7u16.to_le_bytes(), 2).unwrap();
+            t.add_scalar(1, state, 0u8).unwrap();
+            vec![(6, Some(t.finish().unwrap()))]
+        });
+        if state <= 1 {
+            let expected = vec![GameEvent::PickupState {
+                id: 7,
+                picked_up: state == 1,
+            }];
+            assert_eq!(decode_game_packet_strict(&bytes).unwrap().events, expected);
+            assert_eq!(decode_game_packet(&bytes).unwrap().events, expected);
+        } else {
+            assert_eq!(
+                decode_game_packet_strict(&bytes).unwrap_err(),
+                WireError::UnknownEnum {
+                    name: "PickupStateType",
+                    value: state
+                }
+            );
+            assert_eq!(
+                decode_game_packet(&bytes).unwrap().events,
+                [GameEvent::Other(6)]
+            );
+        }
+    }
+}
