@@ -149,16 +149,54 @@ impl Default for Validation {
     }
 }
 
+/// Reads a NumericDate claim (RFC 7519 §2): seconds since the epoch, as a JSON
+/// number that need not be an integer. `Ok(None)` if the claim is absent.
+///
+/// A claim that is present but not a usable number (a string, `null`, a
+/// boolean, a structure) is an **error**, never "absent": a token that
+/// claims a time we cannot read must not be treated as having no time limit.
+/// Fractions are rounded to the nearest second, and values beyond what an
+/// `i64` holds saturate, which keeps the claim's meaning (far future, far
+/// past) instead of dropping it.
+pub fn time_claim(claims: &Value, name: &str) -> Result<Option<i64>> {
+    let Some(value) = claims.get(name) else {
+        return Ok(None);
+    };
+    if let Some(seconds) = value.as_i64() {
+        return Ok(Some(seconds));
+    }
+    if let Some(seconds) = value.as_u64() {
+        return Ok(Some(i64::try_from(seconds).unwrap_or(i64::MAX)));
+    }
+    match value.as_f64() {
+        // `rusty_json` numbers are always finite; `as` saturates out-of-range ones.
+        Some(seconds) => Ok(Some(seconds.round() as i64)),
+        None => Err(Error::Validation(format!(
+            "malformed `{name}` claim: not a NumericDate"
+        ))),
+    }
+}
+
 /// Validates the registered time-based and identity claims of RFC 7519
 /// §4.1: `exp`, `nbf`, `iss`, `aud`. Call this after verifying the
 /// signature ([`verify_hs256`] / [`rsa::verify_rs256`]) -- it does not
 /// check the signature itself.
+///
+/// `exp` and `nbf` are read with [`time_claim`], so a fractional value is
+/// honoured and a malformed one is rejected (even when `require_exp` is
+/// false) instead of being skipped.
 pub fn validate_claims(claims: &Value, options: &Validation) -> Result<()> {
-    let now = now_unix();
+    validate_claims_at(claims, options, now_unix())
+}
 
-    match claims.get("exp").and_then(Value::as_i64) {
+fn validate_claims_at(claims: &Value, options: &Validation, now: i64) -> Result<()> {
+    // Widened so a huge leeway or timestamp cannot overflow the comparison.
+    let now = i128::from(now);
+    let leeway = i128::from(options.leeway_seconds);
+
+    match time_claim(claims, "exp")? {
         Some(exp) => {
-            if now - options.leeway_seconds >= exp {
+            if now - leeway >= i128::from(exp) {
                 return Err(Error::Validation("token has expired (`exp`)".to_string()));
             }
         }
@@ -170,8 +208,8 @@ pub fn validate_claims(claims: &Value, options: &Validation) -> Result<()> {
         None => {}
     }
 
-    if let Some(nbf) = claims.get("nbf").and_then(Value::as_i64) {
-        if now + options.leeway_seconds < nbf {
+    if let Some(nbf) = time_claim(claims, "nbf")? {
+        if now + leeway < i128::from(nbf) {
             return Err(Error::Validation(
                 "token is not yet valid (`nbf`)".to_string(),
             ));
@@ -303,6 +341,125 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_claims(&claims, &bad_opts).is_err());
+    }
+
+    // The clock for the NumericDate tests: fixed, so boundaries are exact.
+    const NOW: i64 = 1_700_000_000;
+
+    fn claims(pairs: &[(&str, Value)]) -> Value {
+        Value::from_iter(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())))
+    }
+
+    fn at(claims: &Value, leeway_seconds: i64, require_exp: bool) -> Result<()> {
+        let options = Validation {
+            leeway_seconds,
+            require_exp,
+            ..Default::default()
+        };
+        validate_claims_at(claims, &options, NOW)
+    }
+
+    fn rejected(result: Result<()>) -> String {
+        result.expect_err("should be rejected").to_string()
+    }
+
+    #[test]
+    fn time_claim_reads_integers_fractions_and_saturates() {
+        let read = |v: Value| time_claim(&claims(&[("nbf", v)]), "nbf").unwrap();
+        assert_eq!(read(Value::from(4_102_444_800_i64)), Some(4_102_444_800));
+        assert_eq!(read(Value::from(-5_i64)), Some(-5));
+        assert_eq!(read(Value::from(1.4_f64)), Some(1));
+        assert_eq!(read(Value::from(1.5_f64)), Some(2));
+        assert_eq!(read(Value::from(4_102_444_800.5_f64)), Some(4_102_444_801));
+        assert_eq!(read(Value::from(u64::MAX)), Some(i64::MAX));
+        assert_eq!(read(Value::from(1e300_f64)), Some(i64::MAX));
+        assert_eq!(read(Value::from(-1e300_f64)), Some(i64::MIN));
+        assert_eq!(time_claim(&claims(&[]), "nbf").unwrap(), None);
+    }
+
+    #[test]
+    fn time_claim_refuses_a_present_claim_that_is_not_a_number() {
+        for bad in [
+            Value::from("4102444800"),
+            Value::Null,
+            Value::Bool(true),
+            Value::Array(vec![Value::from(1_i64)]),
+        ] {
+            let why = time_claim(&claims(&[("exp", bad.clone())]), "exp")
+                .expect_err("not a NumericDate")
+                .to_string();
+            assert!(why.contains("malformed `exp`"), "{bad:?}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_future_nbf_is_honoured_in_every_numeric_form() {
+        for nbf in [
+            Value::from(NOW + 3600),
+            Value::from((NOW + 3600) as f64 + 0.5),
+            Value::from(u64::MAX),
+        ] {
+            let c = claims(&[("exp", Value::from(NOW + 7200)), ("nbf", nbf.clone())]);
+            assert!(
+                rejected(at(&c, 60, true)).contains("not yet valid"),
+                "{nbf:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_nbf_is_rejected_not_skipped() {
+        for nbf in [Value::from("4102444800"), Value::Null, Value::Bool(false)] {
+            let c = claims(&[("exp", Value::from(NOW + 7200)), ("nbf", nbf.clone())]);
+            assert!(
+                rejected(at(&c, 60, true)).contains("malformed `nbf`"),
+                "{nbf:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_exp_is_rejected_even_when_exp_is_optional() {
+        // Before, a present `exp` that was not an i64 counted as absent, so
+        // with `require_exp: false` the token never expired.
+        for exp in [Value::from("4102444800"), Value::Null, Value::Bool(true)] {
+            let c = claims(&[("exp", exp.clone())]);
+            assert!(
+                rejected(at(&c, 60, false)).contains("malformed `exp`"),
+                "{exp:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fractional_exp_is_honoured() {
+        let valid = claims(&[("exp", Value::from((NOW + 600) as f64 + 0.5))]);
+        assert!(at(&valid, 0, true).is_ok());
+        let lapsed = claims(&[("exp", Value::from((NOW - 600) as f64 + 0.5))]);
+        assert!(rejected(at(&lapsed, 0, true)).contains("expired"));
+    }
+
+    #[test]
+    fn the_expiry_and_activation_boundaries_are_unchanged() {
+        // Expired once `now - leeway >= exp`; not yet valid while `now + leeway < nbf`.
+        let exp = |e: i64| claims(&[("exp", Value::from(e))]);
+        assert!(rejected(at(&exp(NOW - 60), 60, true)).contains("expired"));
+        assert!(at(&exp(NOW - 59), 60, true).is_ok());
+        let nbf = |n: i64| claims(&[("exp", Value::from(NOW + 9999)), ("nbf", Value::from(n))]);
+        assert!(at(&nbf(NOW + 60), 60, true).is_ok());
+        assert!(rejected(at(&nbf(NOW + 61), 60, true)).contains("not yet valid"));
+    }
+
+    #[test]
+    fn a_huge_leeway_or_timestamp_cannot_overflow() {
+        let c = claims(&[
+            ("exp", Value::from(NOW + 100)),
+            ("nbf", Value::from(NOW - 100)),
+        ]);
+        assert!(at(&c, i64::MAX, true).is_ok());
+        assert!(at(&c, i64::MIN, true).is_err());
+        let far = claims(&[("exp", Value::from(u64::MAX)), ("nbf", Value::from(0_i64))]);
+        assert!(at(&far, i64::MAX, true).is_ok());
     }
 
     #[test]
