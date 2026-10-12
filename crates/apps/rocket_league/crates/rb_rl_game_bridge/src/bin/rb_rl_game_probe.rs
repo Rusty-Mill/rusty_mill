@@ -5,6 +5,7 @@
 //! rb_rl_game_probe [--port N] [--seconds S] [--record FILE] [--launch RocketLeague.exe]
 //! rb_rl_game_probe --analyze FILE
 //! rb_rl_game_probe --commands FILE
+//! rb_rl_game_probe [--census-in FILE] [--census-out FILE]
 //! ```
 //!
 //! Start the game with the arguments this prints (Steam: set them as launch options; or pass
@@ -32,6 +33,8 @@ struct Args {
     launch: Option<String>,
     analyze: Option<String>,
     commands: Option<String>,
+    census_in: Option<String>,
+    census_out: Option<String>,
 }
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -42,6 +45,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         launch: None,
         analyze: None,
         commands: None,
+        census_in: None,
+        census_out: None,
     };
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
@@ -60,6 +65,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--launch" => parsed.launch = Some(value("--launch")?),
             "--analyze" => parsed.analyze = Some(value("--analyze")?),
             "--commands" => parsed.commands = Some(value("--commands")?),
+            "--census-in" => parsed.census_in = Some(value("--census-in")?),
+            "--census-out" => parsed.census_out = Some(value("--census-out")?),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -104,6 +111,31 @@ fn commands(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
     decoder.finish()?;
     println!("--- command counts: {counts:?}");
+    Ok(())
+}
+
+/// Tallies the message tags in a recording from the game (`--record`, `rb_rl_bridge --record-in`)
+/// and the command tags in one sent to it (`rb_rl_bridge --record-out`), and says whether any tag
+/// is outside the unions the format note lists. A tag the decoders treat as `Other` is counted
+/// under its own name; only a tag outside the union is "UNKNOWN".
+fn census(inbound: Option<&str>, outbound: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut census = rb_rl_game_bridge::Census::default();
+    for (path, add) in [
+        (
+            inbound,
+            rb_rl_game_bridge::Census::add_game_packet as fn(&mut _, &[u8]),
+        ),
+        (outbound, rb_rl_game_bridge::Census::add_controller_packet),
+    ] {
+        let Some(path) = path else { continue };
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&std::fs::read(path)?);
+        while let Some(payload) = decoder.next_frame() {
+            add(&mut census, &payload);
+        }
+        decoder.finish()?;
+    }
+    print!("{}", census.report());
     Ok(())
 }
 
@@ -285,6 +317,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(path) = &args.commands {
         return commands(path);
+    }
+    if args.census_in.is_some() || args.census_out.is_some() {
+        return census(args.census_in.as_deref(), args.census_out.as_deref());
     }
     let listener = GameListener::bind(args.port)?;
     println!(

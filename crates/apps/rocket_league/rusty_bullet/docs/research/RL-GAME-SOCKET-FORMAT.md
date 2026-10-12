@@ -169,3 +169,20 @@ does not establish full-match or failure-path parity.
 - Messages are not mostly zero-delta: on average each covers 2 to 3 physics frames (about 48 messages
   a second in a windowed game, not 240), and only the map announcement had delta 0.
 - Not checked in a timed match, with several bots, or on an Epic-less (Steam) install.
+
+## Checking for tags this note does not know
+
+The decoders turn any tag they do not model into `Other(tag)`, so a decode run cannot tell "known
+but not decoded" from "not in the format at all". `rb_rl_game_probe --census-in FILE
+--census-out FILE` (or `rb_rl_game_bridge::Census`) tallies the wrapper tags in a recording, names
+each against the two unions above, and prints every tag outside them as `UNKNOWN`. Record with
+`rb_rl_bridge --record-in/--record-out` (or the probe's `--record`) while RLBot-style traffic
+covers as much as possible: bot spawns and removals, state setting, pause, end match, goals,
+demolitions, a timed match.
+
+What the committed live slices show (Freeplay only): 13 of the 22 message tags and 2 of the 13
+command tags occur, none outside the unions. That is weak evidence, since the slices never saw a
+goal, a pickup state change, a destroy, a pause or a render command. A clean census of a wider
+recording is evidence about what the DLL's version of the unions covers; it does not show what the
+game would accept beyond them, which only the game's own reader defines. Console commands
+(`Exec`) are a separate, open-ended surface this census does not see into.

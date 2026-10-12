@@ -23,6 +23,7 @@
 //! Run against a live Rocket League (Epic, Freeplay) on 2026-10-11; see the README for what that
 //! covered and what it did not.
 
+mod census;
 mod game_wire;
 mod launch;
 mod link;
@@ -32,6 +33,7 @@ mod rl_link;
 mod sim_link;
 mod tick;
 
+pub use census::{Census, CONTROLLER_COMMANDS, GAME_MESSAGES};
 pub use game_wire::{
     carries_state, decode_controller_packet, decode_game_packet, decode_game_packet_strict,
     encode_controller_packet, encode_game_packet, paint, product, BotSkill, Command, GameBundle,
