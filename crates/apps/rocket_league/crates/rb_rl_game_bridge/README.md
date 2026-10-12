@@ -79,10 +79,11 @@ its state setting becomes a ball placement.
 - **One odd event does not end a session, unless it carries state.** An unreadable event
   (an enum value or required field this crate does not know, or no body) decodes as
   `GameEvent::Other(tag)` when losing it costs little: physics, boost and the clock are re-sent as
-  they change, a pad heals at its next pickup, and hits and stats are not tracked. A spawn, a
-  destroy, the match phase or a score is announced once and held for minutes, and the game has
+  they change, and hits and stats are not tracked. A spawn, a
+  destroy, the match phase, a score or a pad's state is announced once and holds until the next event of its own kind, and the game has
   no known command to resend or snapshot it (the `Exec` console command is untested for this), so an unreadable one is a fault (`WireError::State`, naming
-  the event) and the session ends; carrying on would leave the link wrong for the rest of the
+  the event) and the session ends (library callers must stop and drop the link after the `Err`;
+  there is no graceful `DisconnectSignal` at that point); carrying on would leave the link wrong for the rest of the
   match (a lost `PlayerSpawn` means a spawn acknowledgement that never arrives). The only
   resynchronisation the protocol offers is a new map: its `GameSpawn` announces everything again.
   A message with more than 4096 events or more than 64 KiB of names is refused, since a crafted

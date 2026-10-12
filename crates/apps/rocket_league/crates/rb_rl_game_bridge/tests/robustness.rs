@@ -136,6 +136,7 @@ fn an_unreadable_event_that_carries_state_is_a_fault_not_a_skip() {
         (2, "GameStateChange"),
         (4, "GoalSpawn"),
         (5, "PickupSpawn"),
+        (6, "PickupStateChange"),
         (7, "PlayerSpawn"),
         (10, "BallSpawn"),
         (13, "TeamScoreChange"),
@@ -172,8 +173,8 @@ fn an_unreadable_event_that_carries_state_is_a_fault_not_a_skip() {
         WireError::State { tag: 2, cause } if matches!(**cause, WireError::UnknownEnum { .. })
     ));
     assert!(err.to_string().contains("event 2"), "{err}");
-    // The clock, a pad's state, and the physics and boost events are not state.
-    for tag in [3, 6, 8, 9, 11] {
+    // The clock, and the physics and boost events, are not state.
+    for tag in [3, 8, 9, 11] {
         assert!(!rb_rl_game_bridge::carries_state(tag));
     }
 }
@@ -235,6 +236,50 @@ fn an_unreadable_map_announcement_ends_the_link_too() {
     let err = link.next_clump().unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidData);
     assert!(err.to_string().contains("event 1"), "{err}");
+}
+
+#[test]
+fn an_unreadable_pad_respawn_ends_the_link_instead_of_leaving_the_pad_inactive() {
+    // A pad is picked up, then its respawn (Idle) event is unreadable. The folded pad only comes
+    // back on another pickup event, so skipping the respawn would leave it inactive for good.
+    let pad = encode_game_packet(&GameBundle {
+        app_seconds: 0.0,
+        delta_physics_frames: 0,
+        events: vec![
+            GameEvent::PickupSpawn {
+                id: 7,
+                location: rb_rlbot_wire::Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 73.0,
+                },
+                big: false,
+            },
+            GameEvent::PickupState {
+                id: 7,
+                picked_up: true,
+            },
+        ],
+    })
+    .unwrap();
+    let bad_respawn = packet_of(|b| {
+        let mut t = b.start_table();
+        t.add_struct(0, &7u16.to_le_bytes(), 2).unwrap();
+        t.add_scalar(1, 99u8, 0u8).unwrap();
+        vec![(6, Some(t.finish().unwrap()))]
+    });
+    let later = encode_game_packet(&GameBundle {
+        app_seconds: 0.0,
+        delta_physics_frames: 120,
+        events: vec![],
+    })
+    .unwrap();
+    let mut link = link_over(vec![map_and_human(), pad, bad_respawn, later]);
+    assert!(link.next_clump().unwrap().is_some());
+    assert!(link.next_clump().unwrap().is_some());
+    let err = link.next_clump().unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("event 6"), "{err}");
 }
 
 #[test]
@@ -368,7 +413,7 @@ fn missing_known_command_body_is_not_silently_skipped() {
 }
 
 #[test]
-fn pickup_state_enum_is_validated_without_losing_tolerant_session_handling() {
+fn pickup_state_enum_is_validated_and_an_unreadable_one_is_a_fault() {
     use rb_rl_game_bridge::decode_game_packet_strict;
     for state in [0u8, 1, 99, 255] {
         let bytes = packet_of(|b| {
@@ -392,9 +437,16 @@ fn pickup_state_enum_is_validated_without_losing_tolerant_session_handling() {
                     value: state
                 }
             );
+            // A pad's state holds until its next change, so an unreadable one is a fault.
             assert_eq!(
-                decode_game_packet(&bytes).unwrap().events,
-                [GameEvent::Other(6)]
+                decode_game_packet(&bytes).unwrap_err(),
+                WireError::State {
+                    tag: 6,
+                    cause: Box::new(WireError::UnknownEnum {
+                        name: "PickupStateType",
+                        value: state
+                    })
+                }
             );
         }
     }

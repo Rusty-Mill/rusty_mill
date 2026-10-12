@@ -121,7 +121,7 @@ modelled, so the bots look plain.
 The tolerant decoder converts missing required fields and invalid validated enum values
 (`MatchPhase`, `PickupStateType`) to `Other(tag)` instead of failing the message, except for the
 events that carry state (`carries_state`: map, goal, pickup, player and ball spawns, destroys, the
-match phase, scores), which are a `WireError::State` fault: the game announces them once and has
+match phase, scores, pad states), which are a `WireError::State` fault: the game announces them once and has
 no known command to repeat them (`Exec` was not tried), so skipping one leaves the link wrong until the next map. The strict
 analysis decoder reports those errors; raw enum bytes in other fields are not range-validated.
 Unsupported event tags remain `Other` in both modes. Consequently, zero tolerant-decoder errors

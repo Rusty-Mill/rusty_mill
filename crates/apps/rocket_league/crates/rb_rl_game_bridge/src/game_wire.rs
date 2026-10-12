@@ -61,11 +61,11 @@ pub type Result<T> = std::result::Result<T, WireError>;
 
 /// Whether losing event `tag` leaves the link wrong for good, because the game announces it once
 /// and sends nothing to ask for it again (there is no resend or snapshot command). Spawns,
-/// destroys, the match phase and scores are such state: each holds for minutes, so a lost one
-/// leaves the link wrong for the rest of the phase or the match. Physics, boost and the clock are
-/// re-sent as they change, a pad's state heals within seconds at its next pickup or respawn, and
-/// hits and the stat messages are not tracked, so an unreadable one of those is one odd event,
-/// not a fault.
+/// destroys, the match phase, scores and a pad's state are such state: each holds until the next
+/// event of its own kind, which may be minutes away, and the folded pad does not recover on its
+/// own (a pad marked picked up stays inactive until another pickup event arrives). Physics, boost
+/// and the clock are re-sent as they change, and hits and the stat messages are not tracked, so an
+/// unreadable one of those is one odd event, not a fault.
 pub fn carries_state(tag: u8) -> bool {
     use game_tag::*;
     matches!(
@@ -74,6 +74,7 @@ pub fn carries_state(tag: u8) -> bool {
             | GAME_STATE_CHANGE
             | GOAL_SPAWN
             | PICKUP_SPAWN
+            | PICKUP_STATE_CHANGE
             | PLAYER_SPAWN
             | BALL_SPAWN
             | TEAM_SCORE_CHANGE
