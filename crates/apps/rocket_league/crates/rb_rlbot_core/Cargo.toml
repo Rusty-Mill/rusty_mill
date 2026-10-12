@@ -1,0 +1,32 @@
+[package]
+name = "rb_rlbot_core"
+description = "A simulated RLBot v5 core: speaks the RLBot socket protocol to bots and scripts, but plays the match on rb_env's physics instead of Rocket League, so a bot can be run against rusty_bullet repeatably with no game installed. The rusty_bullet counterpart of what RLBot core plus Bridge.dll do with the real game."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+rb_domain = { path = "../rb_domain" }
+rb_env = { path = "../rb_env" }
+rb_physics_bullet = { path = "../rb_physics_bullet" }
+# The inverse conversions (`controller_input`, `physics`) live beside `observation`.
+rb_rlbot_bridge = { path = "../rb_rlbot_bridge" }
+rb_rlbot_wire = { path = "../rb_rlbot_wire" }
+# `rotator_to_quat` / `quat_to_rotator`: the one RLBot-rotator convention.
+rb_scenario = { path = "../rb_scenario" }
+
+[dev-dependencies]
+rb_rlbot_client = { path = "../rb_rlbot_client" }
+
+[package.metadata.rusty_mill]
+layer = "apps"

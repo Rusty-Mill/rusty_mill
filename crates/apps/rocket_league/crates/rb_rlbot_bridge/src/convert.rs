@@ -1,8 +1,8 @@
 //! The two pure conversions between RLBot's records and `rb_domain`'s.
 
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
-use rb_rlbot_wire::{ControllerState, GamePacket, Physics, Vec3 as WireVec3};
-use rb_scenario::rotator_to_quat;
+use rb_rlbot_wire::{ControllerState, GamePacket, Physics, Rotator, Vec3 as WireVec3};
+use rb_scenario::{quat_to_rotator, rotator_to_quat};
 
 fn vec3(v: WireVec3) -> Vec3 {
     Vec3::new(v.x, v.y, v.z)
@@ -58,5 +58,38 @@ pub fn controller_state(input: &ControllerInput) -> ControllerState {
         boost: input.boost,
         handbrake: input.handbrake,
         use_item: false,
+    }
+}
+
+/// The inverse of [`controller_state`], for a core that applies a bot's `PlayerInput`: every
+/// stick axis is `Some`, because a wire controller state always carries all of them. `use_item`
+/// has no `ControllerInput` counterpart and is dropped.
+pub fn controller_input(state: &ControllerState) -> ControllerInput {
+    ControllerInput {
+        throttle: state.throttle,
+        steer: state.steer,
+        pitch: Some(state.pitch),
+        yaw: Some(state.yaw),
+        roll: Some(state.roll),
+        jump: state.jump,
+        boost: state.boost,
+        handbrake: state.handbrake,
+    }
+}
+
+/// RLBot's physics record for a body's state; the inverse of the conversion [`observation`]
+/// does per body. `rotation` goes through `rb_scenario::quat_to_rotator`.
+pub fn physics(position: Vec3, rotation: Quat, velocity: Vec3, angular_velocity: Vec3) -> Physics {
+    let wire = |v: Vec3| WireVec3 {
+        x: v.x,
+        y: v.y,
+        z: v.z,
+    };
+    let [pitch, yaw, roll] = quat_to_rotator(rotation);
+    Physics {
+        location: wire(position),
+        rotation: Rotator { pitch, yaw, roll },
+        velocity: wire(velocity),
+        angular_velocity: wire(angular_velocity),
     }
 }
