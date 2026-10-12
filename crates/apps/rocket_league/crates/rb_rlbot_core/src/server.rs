@@ -26,8 +26,19 @@ const TICK: Duration = Duration::from_nanos(8_333_333);
 /// socket cannot starve the others or the ticks; the rest waits in the socket for the next pass.
 const MAX_READ_PER_PASS: usize = 64 * 1024;
 
-/// How long to wait for a client to take a packet before dropping it.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+/// The most unsent bytes held for one client that is not reading (about a second of packets);
+/// past this it is dropped, so a stalled client never holds up the loop or grows without bound.
+const MAX_OUTBOX: usize = 1024 * 1024;
+
+/// The most clients served at once; a connection past this is closed at once.
+const MAX_CLIENTS: usize = 64;
+
+/// The most arrivals one pass of the loop looks at, refused and aborted ones included, so a
+/// stream of connections cannot keep `accept` from returning to the ticks and the bots.
+const MAX_ACCEPTS_PER_PASS: usize = 64;
+
+/// How long a connection may stay silent before it sends its connection settings.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// If real-time pacing falls this far behind (a debugger, a suspended laptop), it restarts the
 /// schedule instead of stepping flat out to catch up.
@@ -107,9 +118,46 @@ struct Client {
     answered: Vec<u32>,
     /// Its opening reply (team, match, field) is held until the backend has a match to show.
     awaiting_opening: bool,
+    connected: Instant,
+    /// Bytes accepted for sending that the socket has not taken yet, ahead of any later frame.
+    outbox: Vec<u8>,
 }
 
 impl Client {
+    /// Whether it has sent its connection settings (the handshake's first step).
+    fn introduced(&self) -> bool {
+        self.agent_id.is_some() || self.awaiting_opening || self.ready
+    }
+
+    /// Queues `bytes` behind anything unsent and writes what the socket takes. A client whose
+    /// backlog passes [`MAX_OUTBOX`] is an error, as is a failed write.
+    fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.outbox.len() + bytes.len() > MAX_OUTBOX {
+            return Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                "not reading its packets",
+            ));
+        }
+        self.outbox.extend_from_slice(bytes);
+        self.flush()
+    }
+
+    /// Writes as much of the outbox as the socket takes now.
+    fn flush(&mut self) -> io::Result<()> {
+        while !self.outbox.is_empty() {
+            match self.stream.write(&self.outbox) {
+                Ok(0) => return Err(ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    self.outbox.drain(..n);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
     fn label(&self) -> String {
         self.agent_id
             .clone()
@@ -124,6 +172,8 @@ pub struct Core<B = Simulation> {
     pacing: Pacing,
     clients: Vec<Client>,
     started: bool,
+    /// An `accept` failure was reported and none has succeeded since (reported once per streak).
+    accept_failing: bool,
     /// A backend failure noticed while handling a client, to end the run with.
     fatal: Option<io::Error>,
 }
@@ -140,6 +190,7 @@ impl<B: MatchBackend> Core<B> {
             pacing,
             clients: Vec::new(),
             started: false,
+            accept_failing: false,
             fatal: None,
         })
     }
@@ -169,6 +220,7 @@ impl<B: MatchBackend> Core<B> {
             }
             self.accept(&mut on_event)?;
             let stop_command = self.read_clients(&mut on_event);
+            self.flush_outboxes(&mut on_event);
             if let Some(e) = self.fatal.take() {
                 return Err(e);
             }
@@ -223,16 +275,26 @@ impl<B: MatchBackend> Core<B> {
         const DRAIN: Duration = Duration::from_millis(200);
         let deadline = Instant::now() + DRAIN;
         let mut open = std::mem::take(&mut self.clients);
-        for client in &open {
-            // A client already gone is not an error worth reporting at shutdown.
-            let _ = client.stream.shutdown(std::net::Shutdown::Write);
-        }
         let mut sink = [0u8; 1024];
         while !open.is_empty() && Instant::now() < deadline {
-            open.retain_mut(|client| match client.stream.read(&mut sink) {
-                Ok(0) => false,
-                Ok(_) => true,
-                Err(e) => e.kind() == ErrorKind::WouldBlock,
+            open.retain_mut(|client| {
+                // The signal may still be queued behind a slow reader: keep trying to send it.
+                if client.flush().is_err() {
+                    return false;
+                }
+                if client.outbox.is_empty() {
+                    // A clean end of stream after the signal; a client already gone is not
+                    // worth reporting at shutdown.
+                    let _ = client.stream.shutdown(std::net::Shutdown::Write);
+                }
+                match client.stream.read(&mut sink) {
+                    // The peer closed its sending side only: it may still be reading, so keep
+                    // the client until what is queued for it has gone (a full close fails the
+                    // flush above).
+                    Ok(0) => !client.outbox.is_empty(),
+                    Ok(_) => true,
+                    Err(e) => e.kind() == ErrorKind::WouldBlock,
+                }
             });
             thread::sleep(Duration::from_millis(1));
         }
@@ -245,9 +307,17 @@ impl<B: MatchBackend> Core<B> {
     }
 
     fn accept(&mut self, on_event: &mut impl FnMut(Event)) -> io::Result<()> {
-        loop {
+        for _ in 0..MAX_ACCEPTS_PER_PASS {
             match self.listener.accept() {
                 Ok((stream, peer)) => {
+                    self.accept_failing = false;
+                    if self.clients.len() >= MAX_CLIENTS {
+                        on_event(Event::ClientDropped {
+                            agent_id: None,
+                            reason: format!("{peer}: too many clients"),
+                        });
+                        continue;
+                    }
                     // A connection that is already reset can fail these; it is that client's
                     // problem, not the match's.
                     if let Err(e) = stream
@@ -270,6 +340,8 @@ impl<B: MatchBackend> Core<B> {
                         ready: false,
                         answered: Vec::new(),
                         awaiting_opening: false,
+                        connected: Instant::now(),
+                        outbox: Vec::new(),
                     });
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
@@ -280,9 +352,22 @@ impl<B: MatchBackend> Core<B> {
                         e.kind(),
                         ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
                     ) => {}
-                Err(e) => return Err(e),
+                // Anything else (out of descriptors, say) costs that connection, not the match;
+                // reported once until an accept succeeds.
+                Err(e) => {
+                    if !self.accept_failing {
+                        self.accept_failing = true;
+                        on_event(Event::ClientDropped {
+                            agent_id: None,
+                            reason: format!("accept: {e}"),
+                        });
+                    }
+                    return Ok(());
+                }
             }
         }
+        // The budget is spent: the rest waits in the listen queue for the next pass.
+        Ok(())
     }
 
     fn all_expected_ready(&self) -> bool {
@@ -301,7 +386,12 @@ impl<B: MatchBackend> Core<B> {
             let pumped = self.pump(index, on_event);
             // A stop counts even if its sender then closed the socket or sent something bad.
             end = end.or(pumped.stop);
-            if let Some(reason) = pumped.drop {
+            let client = &self.clients[index];
+            let silent = !client.introduced() && client.connected.elapsed() > HANDSHAKE_TIMEOUT;
+            let drop = pumped
+                .drop
+                .or_else(|| silent.then(|| "no connection settings".to_string()));
+            if let Some(reason) = drop {
                 let gone = self.clients.remove(index);
                 on_event(Event::ClientDropped {
                     agent_id: gone.agent_id,
@@ -367,6 +457,17 @@ impl<B: MatchBackend> Core<B> {
         on_event: &mut impl FnMut(Event),
     ) -> Result<Option<RunEnd>, String> {
         let label = self.clients[index].label();
+        // Stopping the match, setting its state and pings are for a client that has introduced
+        // itself; a bare connection can do none of them.
+        if matches!(
+            message,
+            InterfaceMessage::StopCommand(_)
+                | InterfaceMessage::DesiredGameState(_)
+                | InterfaceMessage::PingRequest(_)
+        ) && !self.clients[index].introduced()
+        {
+            return Err("sent a command before its connection settings".into());
+        }
         match message {
             InterfaceMessage::ConnectionSettings(settings) => {
                 self.join(index, settings.agent_id.trim(), on_event)?;
@@ -513,7 +614,26 @@ impl<B: MatchBackend> Core<B> {
         opening.push(CoreMessage::FieldInfo(self.backend.field_info()));
         self.clients[index].awaiting_opening = false;
         let bytes = encode(&opening).map_err(|e| format!("encoding the opening: {e}"))?;
-        send_bytes(&mut self.clients[index].stream, &bytes).map_err(|e| format!("write: {e}"))
+        self.clients[index]
+            .send(&bytes)
+            .map_err(|e| format!("write: {e}"))
+    }
+
+    /// Writes what slow clients have not yet taken; one that fails is dropped.
+    fn flush_outboxes(&mut self, on_event: &mut impl FnMut(Event)) {
+        let mut index = 0;
+        while index < self.clients.len() {
+            match self.clients[index].flush() {
+                Ok(()) => index += 1,
+                Err(e) => {
+                    let gone = self.clients.remove(index);
+                    on_event(Event::ClientDropped {
+                        agent_id: gone.agent_id,
+                        reason: format!("write: {e}"),
+                    });
+                }
+            }
+        }
     }
 
     /// Sends every waiting client its opening now that the backend may be ready.
@@ -589,7 +709,7 @@ impl<B: MatchBackend> Core<B> {
                 index += 1;
                 continue;
             }
-            match send_bytes(&mut self.clients[index].stream, &bytes) {
+            match self.clients[index].send(&bytes) {
                 Ok(()) => index += 1,
                 Err(e) => {
                     let gone = self.clients.remove(index);
@@ -644,12 +764,196 @@ fn encode(messages: &[CoreMessage]) -> Result<Vec<u8>, rb_rlbot_wire::Error> {
     Ok(bytes)
 }
 
-/// Writes all of `bytes`, blocking (with a bound) even though the socket is otherwise read
-/// nonblocking, so a frame is never left half sent.
-fn send_bytes(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
-    stream.set_nonblocking(false)?;
-    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
-    let sent = stream.write_all(bytes);
-    stream.set_nonblocking(true)?;
-    sent
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use rb_rlbot_wire::{CustomBot, MatchConfiguration, PlayerClass, PlayerConfiguration};
+
+    fn core() -> Core<Simulation> {
+        let bot = PlayerConfiguration {
+            variety: PlayerClass::CustomBot(CustomBot {
+                name: "t".into(),
+                root_dir: String::new(),
+                run_command: String::new(),
+                agent_id: "t/bot".into(),
+                hivemind: false,
+                environment: None,
+            }),
+            team: 0,
+            player_id: 0,
+        };
+        let sim = Simulation::new(MatchConfiguration {
+            player_configurations: vec![bot],
+            ..MatchConfiguration::default()
+        })
+        .unwrap();
+        Core::bind("127.0.0.1:0", sim, Pacing::RealTime).unwrap()
+    }
+
+    fn pair() -> (TcpStream, Client) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ours = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (theirs, peer) = listener.accept().unwrap();
+        theirs.set_nonblocking(true).unwrap();
+        let client = Client {
+            stream: theirs,
+            peer,
+            decoder: FrameDecoder::new(),
+            agent_id: None,
+            controllables: Vec::new(),
+            ready: false,
+            answered: Vec::new(),
+            awaiting_opening: false,
+            connected: Instant::now(),
+            outbox: Vec::new(),
+        };
+        (ours, client)
+    }
+
+    #[test]
+    fn a_client_that_never_reads_is_refused_without_blocking() {
+        let (_silent, mut client) = pair();
+        let chunk = vec![0u8; 64 * 1024];
+        let started = Instant::now();
+        let mut error = None;
+        for _ in 0..4096 {
+            if let Err(e) = client.send(&chunk) {
+                error = Some(e);
+                break;
+            }
+        }
+        let error = error.expect("the backlog is bounded");
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert!(client.outbox.len() <= MAX_OUTBOX);
+        // Nothing waited on the peer: the old blocking write took two seconds to give up.
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_slow_reader_gets_every_byte_in_order() {
+        let (mut ours, mut client) = pair();
+        // Several distinct frames-worth of bytes, sent until the socket is full and a backlog
+        // of whole sends is queued, so partial writes and ordering across sends are exercised.
+        let mut bytes = Vec::new();
+        let mut round = 0u8;
+        while client.outbox.len() < 256 * 1024 {
+            let chunk: Vec<u8> = (0..16 * 1024u32).map(|i| (i % 251) as u8 ^ round).collect();
+            client.send(&chunk).unwrap();
+            bytes.extend_from_slice(&chunk);
+            round = round.wrapping_add(1);
+            assert!(bytes.len() < 64 * 1024 * 1024, "the socket never filled");
+        }
+        assert!(!client.outbox.is_empty(), "a backlog is pending");
+        ours.set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 65536];
+        while got.len() < bytes.len() {
+            assert!(Instant::now() < deadline, "the backlog never drained");
+            client.flush().unwrap();
+            match ours.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => got.extend_from_slice(&chunk[..n]),
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(got, bytes);
+        assert!(client.outbox.is_empty());
+    }
+
+    #[test]
+    fn connections_past_the_cap_are_closed_and_the_match_is_unharmed() {
+        let mut core = core();
+        let addr = core.local_addr().unwrap();
+        let sockets: Vec<TcpStream> = (0..MAX_CLIENTS + 3)
+            .map(|_| TcpStream::connect(addr).unwrap())
+            .collect();
+        let mut events = Vec::new();
+        // The kernel queues the connections; a pass looks at a bounded number of them.
+        for _ in 0..4 {
+            core.accept(&mut |e| events.push(e)).unwrap();
+        }
+        assert_eq!(core.clients.len(), MAX_CLIENTS);
+        let refused = events
+            .iter()
+            .filter(
+                |e| matches!(e, Event::ClientDropped { reason, .. } if reason.contains("too many")),
+            )
+            .count();
+        assert_eq!(refused, 3);
+        drop(sockets);
+    }
+
+    #[test]
+    fn one_pass_looks_at_a_bounded_number_of_arrivals() {
+        let mut core = core();
+        let addr = core.local_addr().unwrap();
+        let sockets: Vec<TcpStream> = (0..MAX_CLIENTS)
+            .map(|_| TcpStream::connect(addr).unwrap())
+            .collect();
+        let mut events = Vec::new();
+        core.accept(&mut |e| events.push(e)).unwrap();
+        assert_eq!(core.clients.len(), MAX_CLIENTS);
+        // Now a flood the cap refuses: one pass handles at most the budget of them, however
+        // many are waiting, and returns.
+        // (Fewer than the listen backlog, or the connects themselves would block.)
+        let waiting = MAX_ACCEPTS_PER_PASS + 30;
+        let flood: Vec<TcpStream> = (0..waiting)
+            .map(|_| TcpStream::connect(addr).unwrap())
+            .collect();
+        events.clear();
+        core.accept(&mut |e| events.push(e)).unwrap();
+        assert_eq!(events.len(), MAX_ACCEPTS_PER_PASS);
+        core.accept(&mut |e| events.push(e)).unwrap();
+        assert_eq!(events.len(), waiting, "the rest are seen on the next pass");
+        drop((sockets, flood));
+    }
+
+    #[test]
+    fn a_peer_that_closed_its_write_side_still_gets_what_was_queued() {
+        let mut core = core();
+        let (mut ours, mut client) = pair();
+        // Fill the socket until a lot is left waiting in the outbox (more than one drain pass can send).
+        let chunk: Vec<u8> = (0..32 * 1024u32).map(|i| (i % 251) as u8).collect();
+        let mut bytes = Vec::new();
+        while client.outbox.len() < 512 * 1024 {
+            client.send(&chunk).unwrap();
+            bytes.extend_from_slice(&chunk);
+            assert!(bytes.len() < 64 * 1024 * 1024, "the socket never filled");
+        }
+        // Read EOF on the core's side, while the peer still reads.
+        ours.shutdown(std::net::Shutdown::Write).unwrap();
+        core.clients.push(client);
+        let reader = thread::spawn(move || {
+            // Start reading only after the first drain pass has met the end of stream.
+            thread::sleep(Duration::from_millis(50));
+            let mut got = Vec::new();
+            ours.read_to_end(&mut got).unwrap();
+            got
+        });
+        core.close_clients();
+        assert_eq!(reader.join().unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_connection_that_stays_silent_is_dropped() {
+        let mut core = core();
+        let _socket = TcpStream::connect(core.local_addr().unwrap()).unwrap();
+        let mut events = Vec::new();
+        core.accept(&mut |e| events.push(e)).unwrap();
+        assert_eq!(core.clients.len(), 1);
+        core.read_clients(&mut |e| events.push(e));
+        assert_eq!(core.clients.len(), 1, "still within the handshake window");
+        core.clients[0].connected = Instant::now()
+            .checked_sub(HANDSHAKE_TIMEOUT + Duration::from_secs(1))
+            .unwrap();
+        core.read_clients(&mut |e| events.push(e));
+        assert!(core.clients.is_empty());
+        assert!(events.iter().any(
+            |e| matches!(e, Event::ClientDropped { reason, .. } if reason.contains("no connection settings"))
+        ));
+    }
 }
