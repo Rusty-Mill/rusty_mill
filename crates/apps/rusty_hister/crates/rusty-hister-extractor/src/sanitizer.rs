@@ -647,6 +647,55 @@ mod tests {
         assert!(out.contains("position"));
     }
 
+    fn assert_css_url_cannot_inject_declarations(style: &str) {
+        // RUSTSEC-2021-0157: property allow-listing alone is insufficient.
+        // Even an invalid color value is serialized; an unescaped quote in
+        // its URL could turn the URL's contents into active CSS declarations.
+        // Use data:, which Hister allows, instead of the advisory's cid:.
+        let html = format!("<p style='{style}'>text</p>");
+        for sanitize in [sanitize_html, sanitize_trusted_html] {
+            let out = sanitize(&html);
+            let document = scraper::Html::parse_fragment(&out);
+            let selector = scraper::Selector::parse("p").unwrap();
+            let element = document.select(&selector).next().unwrap();
+            // Inspect the decoded attribute: HTML entity escaping of quotes
+            // does not protect the CSS parser after the browser decodes it.
+            assert_eq!(
+                element.value().attr("style"),
+                Some(r#"color:url("data:\");position:fixed;background:url(\"data:")"#),
+                "{out}"
+            );
+            assert_eq!(sanitize(&out), out, "CSS must remain stable on reparsing");
+        }
+    }
+
+    #[test]
+    fn sanitizer_escapes_quotes_in_css_url_functions() {
+        assert_css_url_cannot_inject_declarations(
+            r#"color:url("data:\");position:fixed;background:url(\"data:")"#,
+        );
+    }
+
+    #[test]
+    fn sanitizer_escapes_quotes_in_unquoted_css_urls() {
+        assert_css_url_cannot_inject_declarations(
+            r#"color:url(data:\"\);position:fixed;background:url\(\"data:)"#,
+        );
+    }
+
+    #[test]
+    fn sanitizer_preserves_safe_styles_and_policy_boundaries() {
+        let html = r#"<p style="color:red;font-weight:bold;position:fixed;background-image:url(https://example.com/image.png)">text</p>"#;
+        assert_eq!(
+            sanitize_html(html),
+            r#"<p style="color:red;font-weight:bold">text</p>"#
+        );
+        assert_eq!(
+            sanitize_trusted_html(html),
+            r#"<p style="color:red;font-weight:bold;position:fixed">text</p>"#
+        );
+    }
+
     #[test]
     fn sanitize_html_keeps_valid_svg_path_data() {
         let out = sanitize_html(r#"<svg><path d="M10 10 L20 20 Z"/></svg>"#);
