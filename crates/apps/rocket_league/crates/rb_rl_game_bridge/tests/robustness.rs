@@ -123,6 +123,7 @@ fn an_event_with_an_unknown_enum_or_a_missing_field_is_one_odd_event_not_the_end
         let good = t.finish().unwrap();
         vec![(2, Some(bad_state)), (8, Some(missing)), (10, Some(good))]
     });
+    assert!(rb_rl_game_bridge::decode_game_packet_strict(&bytes).is_err());
     let bundle = decode_game_packet(&bytes).unwrap();
     assert_eq!(
         bundle.events,
@@ -207,4 +208,47 @@ fn only_cars_with_a_spawn_command_are_reported_as_bots() {
             ("Unannounced".to_string(), false)
         ]
     );
+}
+
+#[test]
+fn strict_analysis_distinguishes_missing_known_events_from_opaque_events() {
+    use rb_rl_game_bridge::decode_game_packet_strict;
+    for body in [false, true] {
+        let bytes = packet_of(|b| vec![(8, body.then(|| b.start_table().finish().unwrap()))]);
+        assert!(matches!(
+            decode_game_packet_strict(&bytes),
+            Err(WireError::Missing(_))
+        ));
+        assert_eq!(
+            decode_game_packet(&bytes).unwrap().events,
+            [GameEvent::Other(8)]
+        );
+    }
+    let bytes = packet_of(|_| vec![(0, None), (200, None)]);
+    assert_eq!(
+        decode_game_packet_strict(&bytes).unwrap().events,
+        [GameEvent::Other(0), GameEvent::Other(200)]
+    );
+}
+
+#[test]
+fn missing_known_command_body_is_not_silently_skipped() {
+    for tag in [3u8, 200] {
+        let mut b = Builder::new();
+        let mut t = b.start_table();
+        t.add_struct(0, &1u16.to_le_bytes(), 2).unwrap();
+        t.add_scalar(1, tag, 0u8).unwrap();
+        let wrapper = t.finish().unwrap();
+        let v = b.create_offset_vector(&[wrapper]).unwrap();
+        let mut t = b.start_table();
+        t.add_offset(0, v).unwrap();
+        let root = t.finish().unwrap();
+        let payload = b.finish(root, None).unwrap();
+        let got = decode_controller_packet(&payload);
+        if tag == 3 {
+            assert_eq!(got.unwrap_err(), WireError::Missing("command body"));
+        } else {
+            assert!(got.unwrap().is_empty());
+        }
+    }
 }

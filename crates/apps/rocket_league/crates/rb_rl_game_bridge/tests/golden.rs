@@ -199,8 +199,12 @@ fn command_ids_count_up_and_wrap() {
 }
 
 #[test]
-fn damaged_input_is_an_error_never_a_panic() {
-    // Every truncation of both fixtures, and a flipped byte in each position.
+fn arbitrary_mutations_never_panic_and_invalid_roots_are_rejected() {
+    for invalid in [&[][..], &[0xff, 0xff, 0xff, 0x7f][..]] {
+        assert!(decode_game_packet(invalid).is_err());
+        assert!(decode_controller_packet(invalid).is_err());
+    }
+    // Arbitrary scalar mutations may remain valid; this loop establishes panic resistance.
     for fixture in [GAME, CONTROLLER] {
         for len in 0..fixture.len() {
             let _ = decode_game_packet(&fixture[..len]);

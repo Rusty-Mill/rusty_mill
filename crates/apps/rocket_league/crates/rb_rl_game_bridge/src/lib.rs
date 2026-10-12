@@ -33,9 +33,9 @@ mod sim_link;
 mod tick;
 
 pub use game_wire::{
-    decode_controller_packet, decode_game_packet, encode_controller_packet, encode_game_packet,
-    paint, product, BotSkill, Command, GameBundle, GameEvent, Loadout, Rgba, VehicleInput,
-    WireError, LOADOUT_SLOTS,
+    decode_controller_packet, decode_game_packet, decode_game_packet_strict,
+    encode_controller_packet, encode_game_packet, paint, product, BotSkill, Command, GameBundle,
+    GameEvent, Loadout, Rgba, VehicleInput, WireError, LOADOUT_SLOTS,
 };
 pub use launch::{
     rlbot_args, GameLaunch, DEFAULT_GAME_PORT, IDEAL_GAME_PORT, PACKET_SEND_RATE,

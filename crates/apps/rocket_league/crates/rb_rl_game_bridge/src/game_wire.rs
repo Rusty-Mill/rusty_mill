@@ -459,6 +459,16 @@ fn read_event(tag: u8, t: &Table<'_>) -> Result<GameEvent> {
 
 /// Decodes a payload sent by the game.
 pub fn decode_game_packet(payload: &[u8]) -> Result<GameBundle> {
+    decode_game_packet_mode(payload, false)
+}
+
+/// Analysis decoder: unknown event tags remain `Other`, but missing required fields and
+/// unknown enum values in supported events are errors instead of a tolerant `Other` fallback.
+pub fn decode_game_packet_strict(payload: &[u8]) -> Result<GameBundle> {
+    decode_game_packet_mode(payload, true)
+}
+
+fn decode_game_packet_mode(payload: &[u8], strict: bool) -> Result<GameBundle> {
     let root = Table::root(payload)?;
     let mut events = Vec::new();
     if let Some(messages) = root.vector(1)? {
@@ -474,12 +484,15 @@ pub fn decode_game_packet(payload: &[u8]) -> Result<GameBundle> {
                 // one odd event, not a reason to end a session: it is reported as `Other`.
                 Some(body) => match read_event(tag, &body) {
                     Ok(event) => event,
-                    Err(WireError::UnknownEnum { .. } | WireError::Missing(_)) => {
+                    Err(WireError::UnknownEnum { .. } | WireError::Missing(_)) if !strict => {
                         GameEvent::Other(tag)
                     }
                     Err(e) => return Err(e),
                 },
                 // NONE, or a union member with no table: nothing to read.
+                None if strict && matches!(tag, 1..=11 | 13 | 14) => {
+                    return Err(WireError::Missing("event body"))
+                }
                 None => GameEvent::Other(tag),
             };
             string_bytes += match &event {
@@ -514,6 +527,19 @@ pub fn decode_controller_packet(payload: &[u8]) -> Result<Vec<(u16, Command)>> {
         let command_id = id(&message, 0, "command id")?;
         let tag = message.scalar(1, 0u8)?;
         let Some(t) = message.table(2)? else {
+            if matches!(
+                tag,
+                SPAWN_BOT
+                    | DESTROY_ACTOR
+                    | PLAYER_INPUT
+                    | EXEC
+                    | SET_PHYSICS
+                    | SET_BOOST
+                    | END_MATCH
+                    | SET_PAUSED
+            ) {
+                return Err(WireError::Missing("command body"));
+            }
             continue;
         };
         let command = match tag {

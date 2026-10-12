@@ -74,6 +74,7 @@ struct Args {
     record_in: Option<String>,
     record_out: Option<String>,
     players: Vec<(String, u32)>,
+    length: MatchLengthMutator,
 }
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -85,6 +86,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         record_in: None,
         record_out: None,
         players: Vec::new(),
+        length: MatchLengthMutator::FiveMinutes,
     };
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
@@ -101,6 +103,15 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--launch" => parsed.launch = Some(value("--launch")?),
             "--no-spawn" => parsed.spawn = false,
+            "--match-length" => {
+                parsed.length = match value("--match-length")?.as_str() {
+                    "5" => MatchLengthMutator::FiveMinutes,
+                    "10" => MatchLengthMutator::TenMinutes,
+                    "20" => MatchLengthMutator::TwentyMinutes,
+                    "unlimited" => MatchLengthMutator::Unlimited,
+                    _ => return Err("--match-length: expected 5, 10, 20 or unlimited".into()),
+                }
+            }
             "--record-in" => parsed.record_in = Some(value("--record-in")?),
             "--record-out" => parsed.record_out = Some(value("--record-out")?),
             player => {
@@ -123,8 +134,16 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(parsed)
 }
 
+fn open_recordings(args: &Args) -> io::Result<(Option<File>, Option<File>)> {
+    // Exclusive creation rejects aliases, symlinks and existing files without truncation.
+    let inbound = args.record_in.as_ref().map(File::create_new).transpose()?;
+    let outbound = args.record_out.as_ref().map(File::create_new).transpose()?;
+    Ok((inbound, outbound))
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse(std::env::args().skip(1))?;
+    let (inbound, outbound) = open_recordings(&args)?;
     let listener = GameListener::bind(args.game_port)?;
     println!(
         "waiting for the game on 127.0.0.1:{}; start it with: {}",
@@ -142,12 +161,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     stream.set_nonblocking(true)?;
     println!("the game connected");
 
-    // Unlimited: the game keeps its own clock; this only fills the configuration.
-    let configuration = bot_match(&args.players, MatchLengthMutator::Unlimited);
+    // This declares the attached match; it does not change the game's settings.
+    let configuration = bot_match(&args.players, args.length);
     let tee = Tee {
         inner: stream,
-        inbound: args.record_in.as_ref().map(File::create).transpose()?,
-        outbound: args.record_out.as_ref().map(File::create).transpose()?,
+        inbound,
+        outbound,
     };
     let backend = LinkBackend::new(tee, configuration).with_spawning(args.spawn);
     // Pacing is ignored for a game: it decides when a packet exists.
@@ -167,5 +186,42 @@ fn main() -> ExitCode {
             eprintln!("rb_rl_bridge: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    #[test]
+    fn attached_duration_is_declared_not_always_unlimited() {
+        let args = parse(["bot:0".to_string()].into_iter()).unwrap();
+        assert_eq!(args.length, MatchLengthMutator::FiveMinutes);
+        let args = parse(
+            ["--match-length", "unlimited", "bot:0"]
+                .map(str::to_string)
+                .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(args.length, MatchLengthMutator::Unlimited);
+    }
+    #[test]
+    fn exclusive_recording_open_rejects_same_path_without_truncating() {
+        let path = std::env::temp_dir().join(format!("rb-record-{}", std::process::id()));
+        let mut args = parse(["bot:0".to_string()].into_iter()).unwrap();
+        args.record_in = Some(path.to_string_lossy().into_owned());
+        args.record_out = args.record_in.clone();
+        assert_eq!(
+            open_recordings(&args).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        let mut first = File::options().write(true).open(&path).unwrap();
+        first.write_all(b"existing bytes").unwrap();
+        assert_eq!(
+            open_recordings(&args).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing bytes");
+        std::fs::remove_file(path).unwrap();
     }
 }

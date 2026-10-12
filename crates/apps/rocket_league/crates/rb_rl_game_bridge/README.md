@@ -26,10 +26,16 @@ listens like RLBot does and prints (and with `--record` saves) what a live game 
 `--analyze FILE` summarises a recording and `--commands FILE` prints what was sent to the game
 (`rb_rl_bridge --record-in` / `--record-out` make those files).
 
-Checked against buffers built by the DLL's own generated code, both ways, and **against a live
-Rocket League** (2026-10-11, Epic install, Freeplay): the codec decoded every message, the game
-accepted `SpawnBot` and `PlayerInput`, and a spawned `rb_chaser_bot` drove. The recordings are in
-`tests/fixtures/` and pinned by `tests/live_capture.rs`. Not yet tried: a timed match, several bots,
+Checked against committed buffers made with the DLL's generated codec. The author reports a
+live Epic Freeplay run on 2026-10-11, totaling 14,993 and 2,524 inbound messages and a bot reaching
+about 2300 uu/s. The committed slices reproduce 250 messages/513 physics frames (human) and
+51 messages/115 frames (spawned bot), plus one accepted SpawnBot and one PlayerInput. They do
+not reproduce the full-session totals or establish which exact build/clean-tree state produced
+them; that build provenance is unavailable here. `tests/live_capture.rs` now uses strict decoding
+for supported events. Tolerant decoding's zero errors alone does not establish that every known
+event decoded successfully. No new live run or capture was performed for the review corrections.
+
+Not yet tried: a timed match, several bots,
 a Steam install. Not ported: forcing a loaded map to `Paused` (spawning does not wait for it), the spawn-command
 queue's batching, rendering, the stat and Rumble/Dropshot events, boost interpolation between
 `PlayerBoostChange`s, and human players being spawned (a human's car takes the next free index).
@@ -41,14 +47,19 @@ without blocking, applies the distribution rules, and sends bot input and state 
 (ball and car placement, boost). `rb_rl_bridge` puts it together:
 
 ```
-rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] AGENT_ID:TEAM...
+rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] [--match-length 5|10|20|unlimited] AGENT_ID:TEAM...
 ```
+
+Declare the attached match's duration with `--match-length` (default 5 minutes; use `unlimited`
+for Freeplay). This option describes the game; it does not change its settings.
 
 Start the game with the printed `-rlbot` arguments and a match loading, then start the bots with
 `RLBOT_SERVER_PORT` set. Once the map has been up for two messages the bridge sends one `SpawnBot`
 per `AGENT_ID:TEAM`, in that order, and the match starts when every car has answered (a bot's
 handshake completes then). Each car is tied to its player index by the spawn command's id, as in
-RLBot, so the game may answer in any order; indices stay put when a car leaves. `--no-spawn`
+RLBot, so the game may answer in any order; indices stay put when a car leaves, using demolished placeholders for empty slots. Configured
+player IDs match the handshake. Bot slots are reserved before any unsolicited car arrives, and
+readiness requires a distributed snapshot containing the acknowledged mapping. `--no-spawn`
 expects the cars to exist already. Bots get a standard Octane loadout in plain team colours:
 **unverified in the game**, and the configuration's own loadouts are not modelled. Tested end to end with a stand-in game (`tests/real_core.rs`): a real
 `rb_rlbot_client` bot sees the game's field and moving car, its input reaches the right actor, and
@@ -68,6 +79,11 @@ its state setting becomes a ball placement.
 - **One odd event does not end a session.** An event whose enum value or required field this
   crate does not know decodes as `GameEvent::Other(tag)`. A message with more than 4096 events or
   more than 64 KiB of names is refused, since a crafted buffer can make many slots share one string.
+- **Analysis is strict for supported events.** `decode_game_packet_strict` and the probe report
+  missing fields/unknown enums; unsupported event tags remain `Other`. Partial final frames are
+  errors in analysis and live links. Permanently oversized commands return `InvalidInput`.
+- **Recordings use new files only.** Existing paths and aliases are refused without truncation,
+  preventing inbound and outbound recordings from sharing a file.
 - **Recordings contain the players' display names** (`--record`, `--record-in`). Scrub them before
   sharing, as the fixtures here were.
 

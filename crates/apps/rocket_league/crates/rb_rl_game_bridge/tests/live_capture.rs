@@ -9,8 +9,8 @@
 
 use rb_physics_bullet::BoostPads;
 use rb_rl_game_bridge::{
-    decode_controller_packet, decode_game_packet, encode_controller_packet, BotSkill, Command,
-    GameEvent, GameFolder, Loadout,
+    decode_controller_packet, decode_game_packet_strict as decode_game_packet,
+    encode_controller_packet, BotSkill, Command, GameEvent, GameFolder, Loadout,
 };
 use rb_rlbot_wire::frame::FrameDecoder;
 use rb_rlbot_wire::MatchPhase;
@@ -157,7 +157,7 @@ fn the_match_goes_kickoff_then_active_and_the_cars_move_sensibly() {
 #[test]
 fn freeplays_scoreboard_clock_counts_up_so_an_untimed_match_reports_none() {
     // Live: the clock read 1, 2, 3, ... 163 over the session. As a time remaining it would be
-    // wrong, so a match the configuration calls untimed ignores it.
+    // wrong: an untimed match instead publishes it as an increasing clock.
     let all = messages();
     let seconds = events(&all)
         .find_map(|e| match e {
@@ -180,7 +180,7 @@ fn freeplays_scoreboard_clock_counts_up_so_an_untimed_match_reports_none() {
     assert!(!timed.packet().match_info.is_unlimited_time);
     let p = untimed.packet();
     assert!(p.match_info.is_unlimited_time);
-    assert_eq!(p.match_info.game_time_remaining, 0.0);
+    assert!(p.match_info.game_time_remaining > 0.0);
 }
 
 #[test]

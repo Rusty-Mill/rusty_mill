@@ -1,10 +1,11 @@
 # How `Bridge.dll` connects RLBot and Rocket League
 
-Status: research note, 2026-10-11. Evidence is RLBot core's **open** source
-(`RLBot/core`, v5.0.0-rc.17, checked out at `C:\dev\core`). `Bridge.dll` itself was **not**
-opened, disassembled or decompiled: it is closed-source on purpose, and this project's
-non-goal is not to decompile Psyonix's or anyone's binaries (`ARCHITECTURE.md`, Non-goals).
-Everything below is what the open code around it shows. Paths are relative to `RLBot/core`.
+Status: historical open-source research, 2026-10-11, followed by the wire-format work below.
+The initial sections describe RLBot core's open source (`RLBot/core`, v5.0.0-rc.17,
+author checkout `C:\dev\core`). Subsequently, ADR-0083 authorized reading `Bridge.dll`
+for its wire format only; owner approval is recorded on PR #623. The original statement
+that the DLL had not been opened applies only to the initial research. It is not a claim
+about the later codec work or legal clearance. Paths below are relative to `RLBot/core`.
 
 ## What it is
 
