@@ -39,19 +39,23 @@
 //! algorithm needs, and the token must carry a `kid`. RSA moduli must be 2048
 //! to 4096 bits, because the key arrives in a network document and each
 //! verification costs more the larger it is.
+//!
+//! Time claims accept unsigned integers and finite nonnegative fractions below
+//! 2^64, rounded to seconds as in the former verifier. `exp` is required; `nbf`
+//! may be absent, but a present malformed time claim is rejected. Expiry exactly
+//! at `now - leeway` is accepted. Arithmetic cannot overflow on extreme dates.
 
 use std::{
     collections::BTreeSet,
     fmt,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rusty_json::Value;
 use rusty_oauth::{
-    Error as OAuthError,
     jwks::{Jwk, JwkSet},
-    jwt::{Validation, decode_unverified, es256, rsa, validate_claims},
+    jwt::{decode_unverified, es256, rsa},
 };
 use tokio::sync::RwLock;
 
@@ -407,7 +411,7 @@ fn verify_signature(token: &str, alg: JwtAlgorithm, jwk: &Jwk) -> Result<Value, 
             rsa::verify_rs256(token, &key)
         }
         JwtAlgorithm::Es256 => {
-            let key = jwk.to_ec_public_key().map_err(unusable_key)?;
+            let key = ec_key(jwk)?;
             es256::verify_es256(token, &key)
         }
     };
@@ -416,6 +420,21 @@ fn verify_signature(token: &str, alg: JwtAlgorithm, jwk: &Jwk) -> Result<Value, 
 
 fn unusable_key(reason: impl fmt::Display) -> TokenError {
     TokenError::Invalid(format!("unusable signing key: {reason}"))
+}
+
+/// P-256 JWK coordinates are fixed-width octet strings, not variable-width
+/// integers. Check their encoding before the primitive's range/on-curve checks.
+fn ec_key(jwk: &Jwk) -> Result<es256::EcPublicKey, TokenError> {
+    let components = jwk.ec_components().map_err(unusable_key)?;
+    if components.crv != "P-256" {
+        return Err(unusable_key("the EC curve is not P-256"));
+    }
+    let x = rusty_base64::decode_url_safe(&components.x).map_err(unusable_key)?;
+    let y = rusty_base64::decode_url_safe(&components.y).map_err(unusable_key)?;
+    if x.len() != 32 || y.len() != 32 {
+        return Err(unusable_key("P-256 coordinates must each be 32 bytes"));
+    }
+    es256::EcPublicKey::from_affine_coordinates(&x, &y).map_err(unusable_key)
 }
 
 /// An RSA verification key from a JWK, with the modulus and exponent checked
@@ -450,6 +469,10 @@ fn rsa_key(jwk: &Jwk) -> Result<rsa::RsaPublicKey, TokenError> {
         )));
     }
 
+    if n.last().is_none_or(|byte| byte & 1 == 0) {
+        return Err(unusable_key("the RSA modulus must be odd"));
+    }
+
     // Five bytes hold 33 bits; anything longer is out of range already.
     let exponent = if e.len() <= 5 {
         e.iter()
@@ -464,34 +487,63 @@ fn rsa_key(jwk: &Jwk) -> Result<rsa::RsaPublicKey, TokenError> {
     Ok(rsa::RsaPublicKey::from_components(&n, &e))
 }
 
-/// Check `exp`, `nbf` and `iss`. Audience is left to the layer.
-fn check_claims(claims: &Value, issuer: &str, leeway_secs: u64) -> Result<(), TokenError> {
-    let leeway_seconds = i64::try_from(leeway_secs.min(MAX_LEEWAY_SECS)).unwrap_or(i64::MAX);
-    let options = Validation {
-        leeway_seconds,
-        expected_issuer: Some(issuer.to_string()),
-        expected_audience: None,
-        require_exp: true,
-    };
-    validate_claims(claims, &options).map_err(|err| classify_claim_failure(&err))
+/// Parse the former jsonwebtoken 11 NumericDate contract: unsigned integers
+/// remain exact; finite nonnegative floats below 2^64 round to whole seconds.
+/// Absence is handled by the caller; a present invalid value never disappears.
+fn numeric_date(value: &Value) -> Result<u64, TokenError> {
+    if let Some(seconds) = value.as_u64() {
+        return Ok(seconds);
+    }
+    if let Some(seconds) = value.as_f64()
+        && seconds.is_finite()
+        && seconds >= 0.0
+        && seconds < u64::MAX as f64
+    {
+        return Ok(seconds.round() as u64);
+    }
+    Err(TokenError::Invalid(
+        "token validation failed: invalid NumericDate".to_string(),
+    ))
 }
 
-/// Turn a failed claim check into the error the layer expects. The messages
-/// are ours, not the verifier's, so a token cannot put its own text into a
-/// response header.
-fn classify_claim_failure(err: &OAuthError) -> TokenError {
-    let OAuthError::Validation(reason) = err else {
-        return TokenError::Invalid("token validation failed".to_string());
-    };
-    if reason.starts_with("token has expired") {
-        TokenError::Expired
-    } else if reason.starts_with("token is not yet valid") {
-        TokenError::Invalid("the token is not yet valid".to_string())
-    } else if reason.starts_with("unexpected issuer") {
-        TokenError::Invalid("the token was issued by an unexpected issuer".to_string())
-    } else {
-        TokenError::Invalid("token validation failed".to_string())
+/// Check `exp`, `nbf` and `iss`. Audience is left to the layer.
+fn check_claims(claims: &Value, issuer: &str, leeway_secs: u64) -> Result<(), TokenError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    check_claims_at(claims, issuer, leeway_secs, now)
+}
+
+fn check_claims_at(
+    claims: &Value,
+    issuer: &str,
+    leeway_secs: u64,
+    now: u64,
+) -> Result<(), TokenError> {
+    let exp = claims.get("exp").ok_or_else(|| {
+        TokenError::Invalid("token validation failed: missing expiry".to_string())
+    })?;
+    let exp = numeric_date(exp)?;
+    let nbf = claims.get("nbf").map(numeric_date).transpose()?;
+    // Widen before addition: even u64::MAX timestamps cannot overflow, and
+    // subtracting a large leeway from a small clock cannot underflow.
+    let leeway = u128::from(leeway_secs.min(MAX_LEEWAY_SECS));
+    let now = u128::from(now);
+    if u128::from(exp) + leeway < now {
+        return Err(TokenError::Expired);
     }
+    if nbf.is_some_and(|nbf| u128::from(nbf) > now + leeway) {
+        return Err(TokenError::Invalid(
+            "the token is not yet valid".to_string(),
+        ));
+    }
+    if claims.get("iss").and_then(Value::as_str) != Some(issuer) {
+        return Err(TokenError::Invalid(
+            "the token was issued by an unexpected issuer".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Map a decoded claim set onto a [`VerifiedToken`].
@@ -690,6 +742,94 @@ mod tests {
     }
 
     #[test]
+    fn zero_prefixed_p256_coordinates_must_retain_all_32_bytes() {
+        // Independent P-256 points generated with Python cryptography/OpenSSL
+        // from the small test scalars noted below. Removing the leading zero
+        // preserves the mathematical point, but violates the JWK encoding.
+        for (coordinate, x, y) in [
+            // d = 379
+            (
+                "x",
+                "AFVDiUrz0A7X10Cr29dclrBod7eH219w7qeLkKjXwAo",
+                "u0yFo9jqKe-q-iRAaRLdhNWxTcMr9lbvbGvVil2UP5I",
+            ),
+            // d = 43
+            (
+                "y",
+                "mGriUG8f8QTQQjCGHY9LSY9LxMbQCbMPdUTcEpuC0o0",
+                "ADzMwKZGDgrjKKTZfTx7YdhvxiicGJ8lJREMRBuwfpc",
+            ),
+        ] {
+            let mut key = jwk(&format!(
+                r#"{{"kty":"EC","crv":"P-256","x":"{x}","y":"{y}"}}"#
+            ));
+            assert!(ec_key(&key).is_ok());
+            let bytes = rusty_base64::decode_url_safe(
+                key.raw[coordinate].as_str().expect("coordinate string"),
+            )
+            .expect("decode coordinate");
+            assert_eq!(bytes[0], 0);
+            key.raw[coordinate] = json!(b64(&bytes[1..]));
+            assert!(reason(ec_key(&key).expect_err("short coordinate")).contains("32 bytes"));
+        }
+    }
+
+    #[test]
+    fn bounded_even_moduli_are_refused_before_arithmetic() {
+        let mut even = modulus_of(256);
+        even[255] = 0xfe;
+        let mut power_of_two = vec![0; 256];
+        power_of_two[0] = 0x80;
+        for n in [even, power_of_two] {
+            assert!(
+                reason(rsa_key(&rsa_jwk(&n, &[1, 0, 1])).expect_err("even modulus"))
+                    .contains("odd")
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_dates_preserve_rounding_and_boundaries_without_overflow() {
+        for (value, expected) in [
+            (json!(1000.49), 1000),
+            (json!(1000.5), 1001),
+            (json!(4102444800.0), 4102444800),
+            (json!(u64::MAX), u64::MAX),
+        ] {
+            assert_eq!(numeric_date(&value).expect("valid NumericDate"), expected);
+        }
+        for value in [
+            json!(-1),
+            json!(-0.5),
+            json!(18446744073709551616.0),
+            json!(1e100),
+            json!("1000"),
+            json!(null),
+            json!(true),
+            json!([]),
+            json!({}),
+        ] {
+            assert!(numeric_date(&value).is_err(), "{value:?}");
+        }
+        // Exact expiry boundary retains the previous verifier's acceptance.
+        let claims = json!({"iss": ISS, "exp": 940, "nbf": 1060});
+        assert!(check_claims_at(&claims, ISS, 60, 1000).is_ok());
+        assert!(matches!(
+            check_claims_at(&claims, ISS, 60, 1001),
+            Err(TokenError::Expired)
+        ));
+        let claims = json!({"iss": ISS, "exp": u64::MAX, "nbf": u64::MAX});
+        assert!(check_claims_at(&claims, ISS, u64::MAX, u64::MAX).is_ok());
+        assert!(check_claims_at(&claims, ISS, u64::MAX, 0).is_err());
+        let claims = json!({"iss": ISS, "exp": 0});
+        assert!(check_claims_at(&claims, ISS, u64::MAX, 0).is_ok());
+        assert!(matches!(
+            check_claims_at(&claims, ISS, u64::MAX, MAX_LEEWAY_SECS + 1),
+            Err(TokenError::Expired)
+        ));
+    }
+
+    #[test]
     fn rsa_moduli_from_2048_to_4096_bits_are_accepted() {
         assert!(rsa_key(&rsa_jwk(&modulus_of(256), &[1, 0, 1])).is_ok());
         assert!(rsa_key(&rsa_jwk(&modulus_of(512), &[1, 0, 1])).is_ok());
@@ -794,11 +934,10 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_non_integer_exp_is_refused() {
+    fn a_missing_or_malformed_exp_is_refused() {
         for claims in [
             json!({"iss": ISS}),
             json!({"iss": ISS, "exp": "soon"}),
-            json!({"iss": ISS, "exp": 4102444800.5}),
             json!({"iss": ISS, "exp": null}),
         ] {
             assert!(check_claims(&claims, ISS, 60).is_err(), "{claims:?}");
@@ -816,7 +955,7 @@ mod tests {
         let ancient_exp = json!({"iss": ISS, "exp": i64::MIN});
         assert!(matches!(
             check_claims(&ancient_exp, ISS, u64::MAX),
-            Err(TokenError::Expired)
+            Err(TokenError::Invalid(_))
         ));
     }
 
