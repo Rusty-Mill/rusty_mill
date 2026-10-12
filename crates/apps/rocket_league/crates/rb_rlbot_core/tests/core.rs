@@ -331,6 +331,8 @@ fn a_stop_sent_just_before_the_client_exits_still_stops_the_match() {
     let core = start(vec![bot("solo", 0, 100)]);
     {
         let mut runner = Connection::connect(core.addr).unwrap();
+        // A runner introduces itself (anonymously) before it may stop the match.
+        runner.send(settings("")).unwrap();
         runner
             .send(StopCommand {
                 shutdown_server: true,
@@ -355,6 +357,7 @@ fn a_stop_followed_by_a_disconnect_in_one_write_still_stops_the_match() {
     let mut runner = Connection::connect(core.addr).unwrap();
     runner
         .send_all(&[
+            InterfaceMessage::ConnectionSettings(settings("")),
             InterfaceMessage::StopCommand(StopCommand {
                 shutdown_server: true,
             }),
@@ -389,6 +392,7 @@ fn init_complete_before_the_connection_settings_is_refused() {
     let mut stopper = Connection::connect(core.addr).unwrap();
     // Give the core a pass over the rude client first, then end the run.
     thread::sleep(Duration::from_millis(200));
+    stopper.send(settings("")).unwrap();
     stopper
         .send(StopCommand {
             shutdown_server: true,
@@ -453,4 +457,35 @@ fn an_input_sent_before_the_match_began_does_not_answer_its_first_packet() {
         })
         .unwrap();
     core.finish();
+}
+
+/// A connection that has not sent its connection settings cannot stop the match, set its state
+/// or ping; it is dropped, and the match carries on for the real bot.
+#[test]
+fn a_bare_connection_cannot_stop_the_match() {
+    use rb_rlbot_wire::frame::frame;
+    use std::io::Write;
+
+    let running = start(vec![bot("test/bot", 0, 0)]);
+    let mut bare = std::net::TcpStream::connect(running.addr).unwrap();
+    let stop = InterfaceMessage::StopCommand(StopCommand {
+        shutdown_server: true,
+    });
+    bare.write_all(&frame(&stop.to_payload().unwrap()).unwrap())
+        .unwrap();
+
+    let packets = play(running.addr, "test/bot", 0, 5);
+    assert_eq!(packets.len(), 5, "the match ran on after the bare stop");
+    let (end, events) = running.finish();
+    // `play` ends the match with shutdown requested.
+    assert_eq!(
+        end,
+        RunEnd::StopCommand {
+            shutdown_server: true
+        }
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::ClientDropped { reason, .. } if reason.contains("before its connection settings")
+    )));
 }

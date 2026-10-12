@@ -346,9 +346,11 @@ fn the_per_frame_byte_budget_stops_sends_until_the_game_speaks_again() {
 }
 
 #[test]
-fn garbage_is_invalid_data_and_a_closed_game_is_the_end() {
+fn a_stream_of_garbage_is_invalid_data_and_a_closed_game_is_the_end() {
+    // 40 frames of three bytes that are not a message.
+    let garbage: Vec<u8> = (0..40).flat_map(|_| [0, 3, 1, 2, 3]).collect();
     let mut bad = RocketLeagueLink::new(Duplex {
-        input: Cursor::new(vec![0, 3, 1, 2, 3]),
+        input: Cursor::new(garbage),
         output: Vec::new(),
     });
     assert_eq!(
@@ -633,4 +635,17 @@ fn elapsed_pad_timer_and_count_up_clocks_follow_events() {
         ));
         assert_eq!(folder.packet().boost_pads[1].timer, 0.0);
     }
+}
+
+#[test]
+fn one_undecodable_frame_is_skipped_and_counted() {
+    // A frame that is not a message, then a good one.
+    let mut bytes = vec![0, 3, 1, 2, 3];
+    bytes.extend(framed(&[opening()]));
+    let mut l = RocketLeagueLink::new(Duplex {
+        input: Cursor::new(bytes),
+        output: Vec::new(),
+    });
+    assert!(l.next_clump().unwrap().is_some(), "the good frame is read");
+    assert_eq!(l.skipped_frames(), 1);
 }

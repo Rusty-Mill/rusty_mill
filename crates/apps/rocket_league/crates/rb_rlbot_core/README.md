@@ -44,8 +44,13 @@ clients) because it logs nothing itself.
   sent before it closed or misbehaved is still handled first (a stop followed by an exit stops the
   match), at most 64 KiB is read from one client per pass, and numbers a bot sends that are not
   finite are ignored (sticks are held to [-1, 1]).
-- **A client that stops reading stalls the whole loop for up to 2 s, once**: the write is blocking
-  with that timeout, and the client is dropped when it expires. The loop is single-threaded.
+- **A client that stops reading never holds up the loop.** Writes are non-blocking; what a client
+  has not taken waits in its own queue, and a client more than 1 MiB behind is dropped.
+- **Limits.** At most 64 clients (the next is closed at once); a connection that sends no
+  connection settings within 10 s is dropped; a stop command, state setting or ping from a
+  connection that has not sent its connection settings drops it (a runner introduces itself, with
+  an empty agent id). An `accept` failure costs that connection, not the match. Agent ids are not
+  authenticated: the first client to claim one holds it.
 
 ## Not modelled
 

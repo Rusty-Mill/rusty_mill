@@ -79,6 +79,10 @@ its state setting becomes a ball placement.
 - **One odd event does not end a session.** An event whose enum value or required field this
   crate does not know decodes as `GameEvent::Other(tag)`. A message with more than 4096 events or
   more than 64 KiB of names is refused, since a crafted buffer can make many slots share one string.
+- **One undecodable frame does not end a session either.** A complete frame that does not decode
+  at all (damaged offsets, bad UTF-8) is skipped and counted (`RocketLeagueLink::skipped_frames`);
+  frames are length-prefixed, so the stream stays in step. 32 in a row is an error: the peer is
+  not the game.
 - **Analysis is strict for supported events.** `decode_game_packet_strict` and the probe report
   missing required fields and invalid validated enums (`MatchPhase`, `PickupStateType`); other
   raw enum bytes are not range-validated, and unsupported event tags remain `Other`. Partial final frames are
