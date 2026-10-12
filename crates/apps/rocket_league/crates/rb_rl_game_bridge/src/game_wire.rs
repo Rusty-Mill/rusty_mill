@@ -26,6 +26,13 @@ pub enum WireError {
     },
     /// A message asks for more than any real one holds (see the `MAX_` limits).
     TooLarge(&'static str),
+    /// An event that carries state the link cannot recover (see [`carries_state`]) could not be
+    /// read: `tag` is its message tag. Skipping it would leave the link believing something that
+    /// is no longer true, and the game never repeats it.
+    State {
+        tag: u8,
+        cause: Box<WireError>,
+    },
 }
 
 impl fmt::Display for WireError {
@@ -35,6 +42,9 @@ impl fmt::Display for WireError {
             WireError::Missing(what) => write!(f, "missing field {what}"),
             WireError::UnknownEnum { name, value } => write!(f, "{value} is not a {name}"),
             WireError::TooLarge(what) => write!(f, "message holds too many {what}"),
+            WireError::State { tag, cause } => {
+                write!(f, "state-carrying event {tag} unreadable: {cause}")
+            }
         }
     }
 }
@@ -48,6 +58,29 @@ impl From<rusty_flatbuffers::Error> for WireError {
 }
 
 pub type Result<T> = std::result::Result<T, WireError>;
+
+/// Whether losing event `tag` leaves the link wrong for good, because the game announces it once
+/// and sends nothing to ask for it again (there is no resend or snapshot command). Spawns,
+/// destroys, the match phase, scores and a pad's state are such state: each holds until the next
+/// event of its own kind, which may be minutes away, and the folded pad does not recover on its
+/// own (a pad marked picked up stays inactive until another pickup event arrives). Physics, boost
+/// and the clock are re-sent as they change, and hits and the stat messages are not tracked, so an
+/// unreadable one of those is one odd event, not a fault.
+pub fn carries_state(tag: u8) -> bool {
+    use game_tag::*;
+    matches!(
+        tag,
+        GAME_SPAWN
+            | GAME_STATE_CHANGE
+            | GOAL_SPAWN
+            | PICKUP_SPAWN
+            | PICKUP_STATE_CHANGE
+            | PLAYER_SPAWN
+            | BALL_SPAWN
+            | TEAM_SCORE_CHANGE
+            | ACTOR_DESTROYED
+    )
+}
 
 /// The most events one message may carry. The real opening message of a map holds about 50.
 pub const MAX_EVENTS_PER_BUNDLE: usize = 4096;
@@ -491,9 +524,18 @@ fn decode_game_packet_mode(payload: &[u8], strict: bool) -> Result<GameBundle> {
             let tag = wrapper.scalar(0, 0u8)?;
             let event = match wrapper.table(1)? {
                 // An event with an enum value or required field this module does not know is
-                // one odd event, not a reason to end a session: it is reported as `Other`.
+                // one odd event, not a reason to end a session: it is reported as `Other`,
+                // unless it carries state the link cannot get back (`carries_state`).
                 Some(body) => match read_event(tag, &body) {
                     Ok(event) => event,
+                    Err(e @ (WireError::UnknownEnum { .. } | WireError::Missing(_)))
+                        if !strict && carries_state(tag) =>
+                    {
+                        return Err(WireError::State {
+                            tag,
+                            cause: Box::new(e),
+                        })
+                    }
                     Err(WireError::UnknownEnum { .. } | WireError::Missing(_)) if !strict => {
                         GameEvent::Other(tag)
                     }
@@ -502,6 +544,12 @@ fn decode_game_packet_mode(payload: &[u8], strict: bool) -> Result<GameBundle> {
                 // NONE, or a union member with no table: nothing to read.
                 None if strict && matches!(tag, 1..=11 | 13 | 14) => {
                     return Err(WireError::Missing("event body"))
+                }
+                None if !strict && carries_state(tag) => {
+                    return Err(WireError::State {
+                        tag,
+                        cause: Box::new(WireError::Missing("event body")),
+                    })
                 }
                 None => GameEvent::Other(tag),
             };

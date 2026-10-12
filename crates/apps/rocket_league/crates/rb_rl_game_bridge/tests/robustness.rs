@@ -109,29 +109,183 @@ fn packet_of(events: impl FnOnce(&mut Builder) -> Vec<(u8, Option<Offset>)>) -> 
 }
 
 #[test]
-fn an_event_with_an_unknown_enum_or_a_missing_field_is_one_odd_event_not_the_end() {
+fn an_unreadable_event_that_carries_no_state_is_one_odd_event_not_the_end() {
     let bytes = packet_of(|b| {
-        // GameStateChange (tag 2) whose state byte 99 is not a phase.
-        let mut t = b.start_table();
-        t.add_scalar(0, 99u8, 0u8).unwrap();
-        let bad_state = t.finish().unwrap();
-        // PlayerPhysicsChange (tag 8) with no player id and no physics.
+        // PlayerPhysicsChange (tag 8) with no player id and no physics: re-sent as it changes.
         let missing = b.start_table().finish().unwrap();
-        // BallSpawn (tag 10) with an id: a good event after the odd ones.
+        // BallSpawn (tag 10) with an id: a good event after the odd one.
         let mut t = b.start_table();
         t.add_struct(0, &9u16.to_le_bytes(), 2).unwrap();
         let good = t.finish().unwrap();
-        vec![(2, Some(bad_state)), (8, Some(missing)), (10, Some(good))]
+        vec![(8, Some(missing)), (10, Some(good))]
     });
     assert!(rb_rl_game_bridge::decode_game_packet_strict(&bytes).is_err());
     let bundle = decode_game_packet(&bytes).unwrap();
     assert_eq!(
         bundle.events,
-        [
-            GameEvent::Other(2),
-            GameEvent::Other(8),
-            GameEvent::BallSpawn { id: 9 }
-        ]
+        [GameEvent::Other(8), GameEvent::BallSpawn { id: 9 }]
+    );
+}
+
+#[test]
+fn an_unreadable_event_that_carries_state_is_a_fault_not_a_skip() {
+    // Each of these is announced once and never repeated, so dropping it would leave the link
+    // wrong for good: a lost PlayerSpawn means a spawn acknowledgement that never comes.
+    for (tag, name) in [
+        (1, "GameSpawn"),
+        (2, "GameStateChange"),
+        (4, "GoalSpawn"),
+        (5, "PickupSpawn"),
+        (6, "PickupStateChange"),
+        (7, "PlayerSpawn"),
+        (10, "BallSpawn"),
+        (13, "TeamScoreChange"),
+        (14, "ActorDestroyed"),
+    ] {
+        assert!(rb_rl_game_bridge::carries_state(tag), "{name}");
+        // An empty body: every required field is missing (GameSpawn, GameStateChange and
+        // TeamScoreChange have none, so an empty body is readable for those; a body-less event is
+        // a fault for all).
+        let empty = packet_of(|b| vec![(tag, Some(b.start_table().finish().unwrap()))]);
+        let bodiless = packet_of(|_| vec![(tag, None)]);
+        // No body at all is a fault for every one of them.
+        match decode_game_packet(&bodiless) {
+            Err(WireError::State { tag: t, .. }) => assert_eq!(t, tag, "{name}"),
+            other => panic!("{name} without a body: {other:?}"),
+        }
+        // An empty body is a fault where a required field is missing; these have none, so it
+        // reads as defaults.
+        match decode_game_packet(&empty) {
+            Err(WireError::State { tag: t, .. }) => assert_eq!(t, tag, "{name}"),
+            Ok(_) if matches!(tag, 1 | 2 | 13) => {}
+            other => panic!("{name} with an empty body: {other:?}"),
+        }
+    }
+    // An unknown phase byte is a fault too, with the cause named.
+    let bytes = packet_of(|b| {
+        let mut t = b.start_table();
+        t.add_scalar(0, 99u8, 0u8).unwrap();
+        vec![(2, Some(t.finish().unwrap()))]
+    });
+    let err = decode_game_packet(&bytes).unwrap_err();
+    assert!(matches!(
+        &err,
+        WireError::State { tag: 2, cause } if matches!(**cause, WireError::UnknownEnum { .. })
+    ));
+    assert!(err.to_string().contains("event 2"), "{err}");
+    // The clock, and the physics and boost events, are not state.
+    for tag in [3, 8, 9, 11] {
+        assert!(!rb_rl_game_bridge::carries_state(tag));
+    }
+}
+
+/// A link over `frames`, already framed, as a game that sent them and went quiet.
+fn link_over(frames: Vec<Vec<u8>>) -> RocketLeagueLink<Choppy> {
+    let input: Vec<u8> = frames
+        .iter()
+        .flat_map(|f| rb_rlbot_wire::frame::frame(f).unwrap())
+        .collect();
+    RocketLeagueLink::new(Choppy {
+        input: Cursor::new(input),
+        out: Vec::new(),
+        calls: 0,
+    })
+}
+
+fn map_and_human() -> Vec<u8> {
+    encode_game_packet(&GameBundle {
+        app_seconds: 0.0,
+        delta_physics_frames: 0,
+        events: vec![
+            GameEvent::GameSpawn {
+                map_name: "Stadium_P".into(),
+                mode: 1,
+                team_size: 1,
+                gravity: None,
+            },
+            GameEvent::PlayerSpawn {
+                id: 5,
+                command_id: Some(0),
+                name: "human".into(),
+                team: 0,
+            },
+        ],
+    })
+    .unwrap()
+}
+
+#[test]
+fn an_unreadable_spawn_after_the_map_ends_the_link_instead_of_leaving_a_stale_claim() {
+    // The map and a human's car arrive; then the spawn of the bot's car arrives unreadable. If
+    // the link skipped it, the spawn acknowledgement would never be seen and startup would wait
+    // for ever; if a later spawn then reused its actor id it could inherit the bot's claim.
+    let bad_spawn = packet_of(|b| vec![(7, Some(b.start_table().finish().unwrap()))]);
+    let mut link = link_over(vec![map_and_human(), bad_spawn]);
+    assert!(link.next_clump().unwrap().is_some(), "the opening is read");
+    let err = link.next_clump().unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("event 7"), "{err}");
+}
+
+#[test]
+fn an_unreadable_map_announcement_ends_the_link_too() {
+    // A second map: its GameSpawn is the one-shot that would reset the folded state.
+    let bad_map = packet_of(|_| vec![(1, None)]);
+    let mut link = link_over(vec![map_and_human(), bad_map]);
+    assert!(link.next_clump().unwrap().is_some());
+    let err = link.next_clump().unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("event 1"), "{err}");
+}
+
+#[test]
+fn an_unreadable_pad_respawn_ends_the_link_instead_of_leaving_the_pad_inactive() {
+    // A pad is picked up, then its respawn (Idle) event is unreadable. The folded pad only comes
+    // back on another pickup event, so skipping the respawn would leave it inactive for good: the
+    // link ends at the unreadable event instead (this checks that, not how long a pad stays out).
+    let pad = encode_game_packet(&GameBundle {
+        app_seconds: 0.0,
+        delta_physics_frames: 0,
+        events: vec![
+            GameEvent::PickupSpawn {
+                id: 7,
+                location: rb_rlbot_wire::Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 73.0,
+                },
+                big: false,
+            },
+            GameEvent::PickupState {
+                id: 7,
+                picked_up: true,
+            },
+        ],
+    })
+    .unwrap();
+    let bad_respawn = packet_of(|b| {
+        let mut t = b.start_table();
+        t.add_struct(0, &7u16.to_le_bytes(), 2).unwrap();
+        t.add_scalar(1, 99u8, 0u8).unwrap();
+        vec![(6, Some(t.finish().unwrap()))]
+    });
+    let mut link = link_over(vec![map_and_human(), pad, bad_respawn]);
+    assert!(link.next_clump().unwrap().is_some());
+    assert!(link.next_clump().unwrap().is_some());
+    let err = link.next_clump().unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("event 6"), "{err}");
+}
+
+#[test]
+fn an_unreadable_physics_update_after_the_map_does_not_end_the_link() {
+    // Physics is re-sent as it changes, so one lost update heals itself.
+    let odd = packet_of(|b| vec![(8, Some(b.start_table().finish().unwrap()))]);
+    let mut link = link_over(vec![map_and_human(), odd]);
+    assert!(link.next_clump().unwrap().is_some());
+    assert!(
+        link.next_clump().unwrap().is_some(),
+        "the odd update is skipped"
     );
 }
 
@@ -254,7 +408,7 @@ fn missing_known_command_body_is_not_silently_skipped() {
 }
 
 #[test]
-fn pickup_state_enum_is_validated_without_losing_tolerant_session_handling() {
+fn pickup_state_enum_is_validated_and_an_unreadable_one_is_a_fault() {
     use rb_rl_game_bridge::decode_game_packet_strict;
     for state in [0u8, 1, 99, 255] {
         let bytes = packet_of(|b| {
@@ -278,9 +432,16 @@ fn pickup_state_enum_is_validated_without_losing_tolerant_session_handling() {
                     value: state
                 }
             );
+            // A pad's state holds until its next change, so an unreadable one is a fault.
             assert_eq!(
-                decode_game_packet(&bytes).unwrap().events,
-                [GameEvent::Other(6)]
+                decode_game_packet(&bytes).unwrap_err(),
+                WireError::State {
+                    tag: 6,
+                    cause: Box::new(WireError::UnknownEnum {
+                        name: "PickupStateType",
+                        value: state
+                    })
+                }
             );
         }
     }
