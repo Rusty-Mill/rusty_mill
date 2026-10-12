@@ -16,7 +16,7 @@ use std::io::{self, ErrorKind, Read, Write};
 use rb_rlbot_core::{MatchBackend, Poll};
 use rb_rlbot_wire::{
     ControllerState, DesiredGameState, DesiredPhysics, FieldInfo, GamePacket, MatchConfiguration,
-    PartialVec3, Physics, PlayerClass, PsyonixSkill, Rotator, Vec3,
+    MatchLengthMutator, PartialVec3, Physics, PlayerClass, PsyonixSkill, Rotator, Vec3,
 };
 
 use crate::game_wire::{BotSkill, Loadout};
@@ -67,8 +67,16 @@ impl<S: Read + Write> LinkBackend<S> {
     pub fn new(stream: S, configuration: MatchConfiguration) -> LinkBackend<S> {
         let mut bridge = BridgeLoop::new();
         bridge.set_roster(Some(Roster::from_configuration(&configuration)));
+        let mut link = RocketLeagueLink::new(stream);
+        // The scoreboard clock counts up in an untimed match, so only the configuration can say
+        // whether it is a time remaining.
+        link.set_unlimited_time(
+            configuration
+                .mutators
+                .is_some_and(|m| m.match_length == MatchLengthMutator::Unlimited),
+        );
         LinkBackend {
-            link: RocketLeagueLink::new(stream),
+            link,
             bridge,
             configuration,
             latest: None,
@@ -118,14 +126,15 @@ impl<S: Read + Write> LinkBackend<S> {
         Ok(())
     }
 
-    /// Whether every bot in the configuration has a car in the game.
+    /// Whether every bot in the configuration has the car its spawn command made. A car at the
+    /// bot's index is not enough: a human who was already in the game may hold it.
     fn bots_spawned(&self) -> bool {
         self.configuration
             .player_configurations
             .iter()
             .enumerate()
             .filter(|(_, p)| bot_of(p).is_some())
-            .all(|(i, _)| self.link.folder().actor_for_player(i as u32).is_some())
+            .all(|(i, _)| self.link.folder().is_claimed(i as u32))
     }
 
     pub fn link(&self) -> &RocketLeagueLink<S> {

@@ -2,7 +2,8 @@
 //! the other.
 //!
 //! ```text
-//! rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] [--no-spawn] AGENT_ID:TEAM...
+//! rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] [--no-spawn]
+//!              [--record-in FILE] [--record-out FILE] AGENT_ID:TEAM...
 //! ```
 //!
 //! Listens for the game on `--game-port` (default 23233) and serves bots on `--port` (default
@@ -12,6 +13,8 @@
 //! with `RLBOT_SERVER_PORT` set. Never run against a live game as of its writing;
 //! `rb_rl_game_probe` is the first thing to try.
 
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -22,11 +25,45 @@ use rb_rl_game_bridge::{
 use rb_rlbot_core::{bot_match, Core, Event, Pacing};
 use rb_rlbot_wire::MatchLengthMutator;
 
+/// A stream that copies what passes through it to files, to see what the game and the bridge
+/// actually said to each other (`--record-in`: from the game; `--record-out`: to it).
+struct Tee<S> {
+    inner: S,
+    inbound: Option<File>,
+    outbound: Option<File>,
+}
+
+impl<S: Read> Read for Tee<S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if let Some(file) = &mut self.inbound {
+            file.write_all(&buf[..n])?;
+        }
+        Ok(n)
+    }
+}
+
+impl<S: Write> Write for Tee<S> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        if let Some(file) = &mut self.outbound {
+            file.write_all(&buf[..n])?;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 struct Args {
     game_port: u16,
     port: u16,
     launch: Option<String>,
     spawn: bool,
+    record_in: Option<String>,
+    record_out: Option<String>,
     players: Vec<(String, u32)>,
 }
 
@@ -36,6 +73,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         port: RLBOT_SOCKETS_PORT,
         launch: None,
         spawn: true,
+        record_in: None,
+        record_out: None,
         players: Vec::new(),
     };
     while let Some(arg) = args.next() {
@@ -53,6 +92,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--launch" => parsed.launch = Some(value("--launch")?),
             "--no-spawn" => parsed.spawn = false,
+            "--record-in" => parsed.record_in = Some(value("--record-in")?),
+            "--record-out" => parsed.record_out = Some(value("--record-out")?),
             player => {
                 let (id, team) = player
                     .rsplit_once(':')
@@ -94,7 +135,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Unlimited: the game keeps its own clock; this only fills the configuration.
     let configuration = bot_match(&args.players, MatchLengthMutator::Unlimited);
-    let backend = LinkBackend::new(stream, configuration).with_spawning(args.spawn);
+    let tee = Tee {
+        inner: stream,
+        inbound: args.record_in.as_ref().map(File::create).transpose()?,
+        outbound: args.record_out.as_ref().map(File::create).transpose()?,
+    };
+    let backend = LinkBackend::new(tee, configuration).with_spawning(args.spawn);
     // Pacing is ignored for a game: it decides when a packet exists.
     let mut core = Core::bind(("127.0.0.1", args.port), backend, Pacing::RealTime)?;
     let end = core.run(&AtomicBool::new(false), |event| match event {

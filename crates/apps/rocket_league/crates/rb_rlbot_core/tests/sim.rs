@@ -85,7 +85,15 @@ fn field_info_has_the_34_pads_and_the_two_goals() {
         .collect();
     // Each goal is named for the team defending it and points into the field.
     assert_eq!(goals, [(0, -5120.0, 1.0), (1, 5120.0, -1.0)]);
-    assert!((field.goals[0].width - 1785.51).abs() < 0.01);
+    // Width, height and centre height as the real game announces them.
+    assert_eq!(
+        (
+            field.goals[0].width,
+            field.goals[0].height,
+            field.goals[0].location.z
+        ),
+        (1920.0, 752.0, 312.0)
+    );
 }
 
 #[test]

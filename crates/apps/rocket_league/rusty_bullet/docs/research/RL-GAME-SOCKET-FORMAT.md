@@ -118,16 +118,34 @@ modelled, so the bots look plain.
 
 ## Verification
 
-Layouts were read from the decompiled accessors and builders, not guessed, then checked in
-both directions against the DLL's own generated FlatBuffers code (a scratch project outside this
-repo built `tests/fixtures/*.bin` with it):
+Layouts were read from the decompiled accessors and builders, then checked three ways.
 
-- Rust decodes the DLL-built `GamePacket` (13 events) and `ControllerPacket` (8 commands,
-  `SpawnBot` with a full loadout among them) field for field (`rb_rl_game_bridge/tests/golden.rs`).
-- The DLL's generated reader, pointed at what the Rust encoder writes, prints the same values
-  (run once by hand, 2026-10-11; `RB_WRITE_ENCODED=<dir> cargo test -p rb_rl_game_bridge --test
-  golden` writes the files).
+1. **Against the DLL's own generated code, both directions** (a scratch project outside this repo
+   built `tests/fixtures/game_packet.bin` and `controller_packet.bin` with it): Rust decodes the
+   `GamePacket` (13 events) and `ControllerPacket` (8 commands, `SpawnBot` with a full loadout
+   among them) field for field, and the generated reader reads back what the Rust encoder writes.
+2. **Against a live Rocket League, receiving** (Epic install, 2026-10-11, Freeplay on
+   TrainStation_P, launched in RLBot mode): 14,993 messages in one session and 2,524 in another,
+   none undecodable. Seen: `GameSpawn`, 2 `GoalSpawn`, 34 `PickupSpawn`, `PlayerSpawn`,
+   `BallSpawn`, `StateChange` (Inactive, Kickoff, Active), `PlayerPhysics`, `BallPhysics`,
+   `PlayerBoost`, `TimeChange`, and three events this crate does not decode: `BallHit` (12),
+   `PlayerInputChange` (18), `BallExtraDataChange` (21). Not seen in the sessions: `PickupStateChange`,
+   `TeamScoreChange`, `ActorDestroyed` (no pad was driven over, no goal scored, no car left), so those
+   three decoders are checked only against the DLL's generated code.
+3. **Against a live Rocket League, sending:** the bridge sent a `SpawnBot` (command 1) and the game
+   answered with a `PlayerSpawn` for a new car carrying `command_id 1`, then took 504 `PlayerInput`
+   commands for that car and kept the connection. The car drove (top speed about 2,300 uu/s).
+   `tests/live_capture.rs` pins the recorded slices and that today's encoder reproduces the
+   accepted `SpawnBot` byte for byte.
 
-**Not checked:** a capture from a running game. Whether the game really sends only these
-events in this order, how it numbers actors, and whether the sizes fit its limits is unknown
-until `rb_rl_game_probe` is run against it and the capture is kept as a fixture.
+## What the live game showed that the decompiled code did not
+
+- A human's `PlayerSpawn` carries `command_id 0`; it is in the game before any bot is spawned.
+- `GoalSpawn` reports a goal 1920 by 752 centred at z 312 (not the goal mouth the physics uses, about
+  1786 by 643). In Freeplay both goals say team 1.
+- The scoreboard clock (`TimeChange`) **counts up** in Freeplay (1, 2, 3 ...), so it is a time
+  remaining only in a timed match; RLBot takes "untimed" from the match configuration.
+- The 34 pad positions and the 6 big pads are exactly the simulation's table.
+- Messages are not mostly zero-delta: on average each covers 2 to 3 physics frames (about 48 messages
+  a second in a windowed game, not 240), and only the map announcement had delta 0.
+- Not checked in a timed match, with several bots, or on an Epic-less (Steam) install.

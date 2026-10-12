@@ -502,3 +502,37 @@ fn a_refused_spawn_leaves_no_promise_behind() {
     l.next_clump().unwrap();
     assert_eq!(l.folder().actor_for_player(0), Some(50));
 }
+
+#[test]
+fn a_human_already_in_the_game_moves_along_when_a_bot_is_spawned_for_its_index() {
+    // The human spawns first (command id 0) and takes index 0; the bot then spawned for index 0
+    // gets it, and the human is not lost.
+    let mut l = link(&[answered(40, Some(0), "Human"), answered(41, Some(1), "Bot")]);
+    l.next_clump().unwrap();
+    assert_eq!(l.folder().actor_for_player(0), Some(40));
+    assert!(
+        !l.folder().is_claimed(0),
+        "a human's car is not a spawned bot"
+    );
+    l.send(spawn(0, "Bot", 0)).unwrap();
+    l.next_clump().unwrap();
+    assert!(l.folder().is_claimed(0));
+    assert_eq!(
+        l.folder().actor_for_player(0),
+        Some(41),
+        "the bot has its index"
+    );
+    assert_eq!(
+        l.folder().actor_for_player(1),
+        Some(40),
+        "the human moved to the next"
+    );
+    let names: Vec<String> = l
+        .folder()
+        .packet()
+        .players
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(names, ["Bot", "Human"]);
+}

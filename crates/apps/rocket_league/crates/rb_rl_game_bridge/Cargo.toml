@@ -22,6 +22,8 @@ rb_rlbot_wire = { path = "../rb_rlbot_wire" }
 rusty_flatbuffers = { workspace = true }
 
 [dev-dependencies]
+# The live pad layout is compared with the simulation's table.
+rb_physics_bullet = { path = "../rb_physics_bullet" }
 rb_rlbot_client = { path = "../rb_rlbot_client" }
 
 [package.metadata.rusty_mill]

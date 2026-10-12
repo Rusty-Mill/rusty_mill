@@ -8,7 +8,7 @@
 //! **Never run against a live game yet.** Everything here is checked against buffers built by
 //! the generated code of `Bridge.dll` (see `tests/golden.rs`) and by this crate's own encoder.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, ErrorKind, Read, Write};
 
 use rb_rlbot_wire::frame::{frame, FrameDecoder};
@@ -61,9 +61,15 @@ pub struct GameFolder {
     slots: BTreeMap<u32, u16>,
     /// Spawn commands sent and not yet answered: command id to the player index it was for.
     expected: BTreeMap<u16, u32>,
+    /// Player indices whose car is the answer to a spawn command of ours (not a human's, or one
+    /// that was already in the game).
+    claimed: BTreeSet<u32>,
     ball: Option<(u16, Physics)>,
     pads: BTreeMap<u16, Pad>,
     goals: Vec<GoalInfo>,
+    /// The match has no time limit. The game's scoreboard clock then counts up (Freeplay, seen
+    /// live: 1, 2, 3 ...) instead of down, so it is not a time remaining.
+    unlimited: bool,
 }
 
 impl Default for GameFolder {
@@ -79,9 +85,11 @@ impl Default for GameFolder {
             cars: BTreeMap::new(),
             slots: BTreeMap::new(),
             expected: BTreeMap::new(),
+            claimed: BTreeSet::new(),
             ball: None,
             pads: BTreeMap::new(),
             goals: Vec::new(),
+            unlimited: false,
         }
     }
 }
@@ -95,9 +103,22 @@ impl GameFolder {
         &self.map_name
     }
 
+    /// Declares the match untimed (from the match configuration, as RLBot does): the packet then
+    /// says so and reports no time remaining, whatever the scoreboard clock does. Survives a
+    /// new map.
+    pub fn set_unlimited_time(&mut self, on: bool) {
+        self.unlimited = on;
+    }
+
     /// The actor id of the car with player index `index`.
     pub fn actor_for_player(&self, index: u32) -> Option<u16> {
         self.slots.get(&index).copied()
+    }
+
+    /// Whether the car at `index` is the answer to a spawn command of ours. A car that was in the
+    /// game already (a human's) is at an index too, but is not claimed.
+    pub fn is_claimed(&self, index: u32) -> bool {
+        self.claimed.contains(&index)
     }
 
     /// Records that spawn command `command_id` is for player `player_index`: the car the game
@@ -145,6 +166,7 @@ impl GameFolder {
                 *self = GameFolder {
                     frame_num: self.frame_num,
                     map_name: map_name.clone(),
+                    unlimited: self.unlimited,
                     ..GameFolder::default()
                 };
                 return true;
@@ -194,7 +216,16 @@ impl GameFolder {
                         .filter(|c| *c != 0)
                         .and_then(|c| self.expected.remove(&c));
                     let index = promised.unwrap_or_else(|| self.free_index());
-                    self.slots.insert(index, *id);
+                    // A human is in the game before any bot is spawned and took the lowest
+                    // index; a bot spawned for that index gets it and the human moves along,
+                    // as RLBot's index changes do, rather than vanishing from the packet.
+                    if promised.is_some() {
+                        self.claimed.insert(index);
+                    }
+                    if let Some(displaced) = self.slots.insert(index, *id) {
+                        let moved_to = self.free_index();
+                        self.slots.insert(moved_to, displaced);
+                    }
                 }
                 self.cars.insert(
                     *id,
@@ -233,7 +264,16 @@ impl GameFolder {
             }
             GameEvent::ActorDestroyed { id } => {
                 if self.cars.remove(id).is_some() {
-                    self.slots.retain(|_, actor| actor != id);
+                    let gone: Vec<u32> = self
+                        .slots
+                        .iter()
+                        .filter(|(_, actor)| *actor == id)
+                        .map(|(index, _)| *index)
+                        .collect();
+                    for index in gone {
+                        self.slots.remove(&index);
+                        self.claimed.remove(&index);
+                    }
                 }
                 if self.ball.is_some_and(|(ball_id, _)| ball_id == *id) {
                     self.ball = None;
@@ -340,9 +380,13 @@ impl GameFolder {
                 .collect(),
             match_info: MatchInfo {
                 seconds_elapsed: self.frame_num as f32 / PHYSICS_HZ,
-                game_time_remaining: self.time_remaining,
+                game_time_remaining: if self.unlimited {
+                    0.0
+                } else {
+                    self.time_remaining
+                },
                 is_overtime: self.overtime,
-                is_unlimited_time: false,
+                is_unlimited_time: self.unlimited,
                 match_phase: self.phase,
                 frame_num: self.frame_num,
             },
@@ -382,6 +426,11 @@ impl<S: Read + Write> RocketLeagueLink<S> {
 
     pub fn folder(&self) -> &GameFolder {
         &self.folder
+    }
+
+    /// See [`GameFolder::set_unlimited_time`].
+    pub fn set_unlimited_time(&mut self, on: bool) {
+        self.folder.set_unlimited_time(on);
     }
 
     fn actor(&self, player_index: u32) -> io::Result<u16> {

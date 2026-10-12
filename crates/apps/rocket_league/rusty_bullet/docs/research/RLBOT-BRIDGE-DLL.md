@@ -137,5 +137,9 @@ other, so bots play in the real game through the same server. `rb_rl_bridge` is 
 
 The bridge spawns the bots' cars itself (`SpawnBot`, tied to player indices by command id).
 
-Still open: a run against a live game (start with `rb_rl_game_probe`), the colour swatches and
-configured loadouts for spawned bots, and rendering.
+Run against a live Rocket League on 2026-10-11: it decodes, accepts `SpawnBot` and `PlayerInput`,
+and the spawned bot drove (see the verification section of the format note, which also lists
+what the game showed that the DLL's code did not).
+
+Still open: a timed match, several bots, a Steam install, the colour swatches and configured
+loadouts for spawned bots, and rendering.

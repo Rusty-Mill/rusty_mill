@@ -9,7 +9,7 @@
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
 use rb_env::flow::{self, MatchState, Phase};
 use rb_env::Env;
-use rb_physics_bullet::arena::{BACK_WALL_Y, GOAL_HALF_WIDTH, GOAL_HEIGHT};
+use rb_physics_bullet::arena::BACK_WALL_Y;
 use rb_physics_bullet::BoostPads;
 use rb_rlbot_bridge::{controller_input, physics};
 use rb_rlbot_wire::{
@@ -41,6 +41,11 @@ impl std::fmt::Display for SetupError {
 }
 
 impl std::error::Error for SetupError {}
+
+/// A goal as the real game announces it in `GoalSpawn` (see `Simulation::field_info`).
+const GOAL_WIDTH: f32 = 1920.0;
+const GOAL_HEIGHT_ANNOUNCED: f32 = 752.0;
+const GOAL_CENTRE_Z: f32 = 312.0;
 
 /// The ticks of play in a match of `length`; `None` for an unlimited one.
 fn match_ticks(length: MatchLengthMutator) -> Option<i64> {
@@ -224,20 +229,23 @@ impl Simulation {
             })
             .collect();
         // A goal is named for the team that defends it; its direction points into the field.
+        // Width, height and centre height are what the real game announced for a standard map
+        // (live capture, TrainStation_P, 2026-10-11): 1920 x 752 centred at z 312. They are larger
+        // than the goal mouth the physics uses, so the physics constants are not reused here.
         let goal = |team_num: i32, sign: f32| GoalInfo {
             team_num,
             location: WireVec3 {
                 x: 0.0,
                 y: sign * BACK_WALL_Y,
-                z: GOAL_HEIGHT / 2.0,
+                z: GOAL_CENTRE_Z,
             },
             direction: WireVec3 {
                 x: 0.0,
                 y: -sign,
                 z: 0.0,
             },
-            width: 2.0 * GOAL_HALF_WIDTH,
-            height: GOAL_HEIGHT,
+            width: GOAL_WIDTH,
+            height: GOAL_HEIGHT_ANNOUNCED,
         };
         FieldInfo {
             boost_pads,
