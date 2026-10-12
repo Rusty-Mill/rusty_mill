@@ -27,6 +27,8 @@ pub enum SetupError {
     NoPlayers,
     /// A player is on a team other than 0 (blue) or 1 (orange).
     BadTeam { player: usize, team: u32 },
+    /// A custom bot's agent id is empty or only whitespace, so no client could ever claim it.
+    BlankAgentId { player: usize },
 }
 
 impl std::fmt::Display for SetupError {
@@ -35,6 +37,9 @@ impl std::fmt::Display for SetupError {
             SetupError::NoPlayers => f.write_str("the match configuration has no players"),
             SetupError::BadTeam { player, team } => {
                 write!(f, "player {player} is on team {team}; only 0 and 1 exist")
+            }
+            SetupError::BlankAgentId { player } => {
+                write!(f, "player {player} is a custom bot with a blank agent id")
             }
         }
     }
@@ -61,9 +66,11 @@ fn match_ticks(length: MatchLengthMutator) -> Option<i64> {
 pub fn expected_agents(configuration: &MatchConfiguration) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for p in &configuration.player_configurations {
+        // Core trims the id a client sends, so the configured one is held trimmed too.
         if let PlayerClass::CustomBot(bot) = &p.variety {
-            if !ids.contains(&bot.agent_id) {
-                ids.push(bot.agent_id.clone());
+            let id = bot.agent_id.trim();
+            if !id.is_empty() && !ids.iter().any(|known| known == id) {
+                ids.push(id.to_string());
             }
         }
     }
@@ -81,7 +88,7 @@ pub fn controllable_team_info(
         let PlayerClass::CustomBot(bot) = &p.variety else {
             continue;
         };
-        if bot.agent_id != agent_id {
+        if bot.agent_id.trim() != agent_id.trim() {
             continue;
         }
         team = p.team;
@@ -151,6 +158,9 @@ impl Simulation {
                     player,
                     team: p.team,
                 });
+            }
+            if matches!(&p.variety, PlayerClass::CustomBot(bot) if bot.agent_id.trim().is_empty()) {
+                return Err(SetupError::BlankAgentId { player });
             }
             teams.push(p.team);
         }
@@ -258,7 +268,7 @@ impl Simulation {
     pub fn set_input(&mut self, player_index: u32, state: &ControllerState) -> bool {
         match self.inputs.get_mut(player_index as usize) {
             Some(slot) => {
-                *slot = controller_input(state);
+                *slot = sanitised(controller_input(state));
                 true
             }
             None => false,
@@ -306,7 +316,7 @@ impl Simulation {
                     ),
                 );
             }
-            if let Some(boost) = want.boost_amount {
+            if let Some(boost) = finite(want.boost_amount) {
                 car.boost_amount = boost.clamp(0.0, 100.0);
             }
         }
@@ -425,6 +435,32 @@ fn air_state(car: &CarState) -> AirState {
     }
 }
 
+/// A stick axis a bot sent, held to [-1, 1]; a number that is not finite is no input at all.
+fn axis(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn sanitised(input: ControllerInput) -> ControllerInput {
+    ControllerInput {
+        throttle: axis(input.throttle),
+        steer: axis(input.steer),
+        pitch: input.pitch.map(axis),
+        yaw: input.yaw.map(axis),
+        roll: input.roll.map(axis),
+        ..input
+    }
+}
+
+/// A component of a partial update, ignored unless it is a finite number: one NaN or infinity
+/// in the physics world would poison every later packet for every bot.
+fn finite(v: Option<f32>) -> Option<f32> {
+    v.filter(|x| x.is_finite())
+}
+
 type Body = (Vec3, Quat, Vec3, Vec3);
 
 /// `current` with the fields `want` names replaced. A rotation naming only some of pitch,
@@ -433,9 +469,9 @@ fn patch(want: &DesiredPhysics, current: Body) -> Body {
     let (position, rotation, velocity, angular_velocity) = current;
     let vec = |w: &Option<PartialVec3>, old: Vec3| match w {
         Some(w) => Vec3::new(
-            w.x.unwrap_or(old.x),
-            w.y.unwrap_or(old.y),
-            w.z.unwrap_or(old.z),
+            finite(w.x).unwrap_or(old.x),
+            finite(w.y).unwrap_or(old.y),
+            finite(w.z).unwrap_or(old.z),
         ),
         None => old,
     };
@@ -443,9 +479,9 @@ fn patch(want: &DesiredPhysics, current: Body) -> Body {
         Some(r) => {
             let [pitch, yaw, roll] = quat_to_rotator(rotation);
             rotator_to_quat([
-                r.pitch.unwrap_or(pitch),
-                r.yaw.unwrap_or(yaw),
-                r.roll.unwrap_or(roll),
+                finite(r.pitch).unwrap_or(pitch),
+                finite(r.yaw).unwrap_or(yaw),
+                finite(r.roll).unwrap_or(roll),
             ])
         }
         None => rotation,

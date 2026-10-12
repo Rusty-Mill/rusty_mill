@@ -2,8 +2,8 @@
 //!
 //! RLBotCS keeps this seam inside the closed-source `Bridge.dll` (`TcpMessenger` and the
 //! `Bridge.Models.*` message types). Here the seam is a trait, so the rules in [`crate::tick`]
-//! and the loop below are tested against [`SimGameLink`](crate::SimGameLink) now, and a link
-//! for the real game's socket format can be added behind it without touching them.
+//! and the loop below run over either [`SimGameLink`](crate::SimGameLink) (the game is `rb_env`)
+//! or [`RocketLeagueLink`](crate::RocketLeagueLink) (the real game's socket).
 
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};

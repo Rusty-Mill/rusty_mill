@@ -40,7 +40,12 @@ clients) because it logs nothing itself.
   fields named. Boost is clamped to 0-100. Honoured only if the configuration enables state
   setting.
 - **Bad clients are dropped, not fatal:** an undecodable frame, a second connection with a taken
-  agent id, a socket that stops reading (2 s write timeout).
+  agent id, `InitComplete` before the connection settings, a socket that stops reading. What a client
+  sent before it closed or misbehaved is still handled first (a stop followed by an exit stops the
+  match), at most 64 KiB is read from one client per pass, and numbers a bot sends that are not
+  finite are ignored (sticks are held to [-1, 1]).
+- **A client that stops reading stalls the whole loop for up to 2 s, once**: the write is blocking
+  with that timeout, and the client is dropped when it expires. The loop is single-threaded.
 
 ## Not modelled
 

@@ -228,3 +228,92 @@ fn the_same_inputs_give_the_same_packets() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn a_blank_agent_id_is_refused_and_a_padded_one_matches_after_trimming() {
+    assert_eq!(
+        Simulation::new(config(vec![bot("  ", 0, 1)])).err(),
+        Some(SetupError::BlankAgentId { player: 0 })
+    );
+    // Core trims the id a client sends, so a configured id with spaces must match the trimmed one.
+    let sim = Simulation::new(config(vec![bot(" a ", 0, 1), bot("a", 1, 2)])).unwrap();
+    assert_eq!(sim.expected_agents(), ["a"]);
+    assert_eq!(sim.controllable_team_info("a").controllables.len(), 2);
+    assert_eq!(sim.controllable_team_info(" a ").controllables.len(), 2);
+}
+
+fn all_finite(packet: &rb_rlbot_wire::GamePacket) -> bool {
+    let v = |p: &rb_rlbot_wire::Physics| {
+        [
+            p.location.x,
+            p.location.y,
+            p.location.z,
+            p.velocity.x,
+            p.velocity.y,
+            p.velocity.z,
+            p.angular_velocity.x,
+            p.angular_velocity.y,
+            p.angular_velocity.z,
+            p.rotation.pitch,
+            p.rotation.yaw,
+            p.rotation.roll,
+        ]
+        .iter()
+        .all(|x| x.is_finite())
+    };
+    packet.balls.iter().all(|b| v(&b.physics))
+        && packet
+            .players
+            .iter()
+            .all(|p| v(&p.physics) && p.boost.is_finite())
+}
+
+#[test]
+fn numbers_that_are_not_finite_cannot_poison_the_match() {
+    let mut sim = two_bots();
+    let before = sim.packet();
+    sim.apply_desired(&DesiredGameState {
+        ball_states: vec![DesiredBallState {
+            physics: DesiredPhysics {
+                location: Some(PartialVec3 {
+                    x: Some(f32::NAN),
+                    y: Some(f32::INFINITY),
+                    z: None,
+                }),
+                rotation: Some(PartialRotator {
+                    pitch: Some(f32::NAN),
+                    yaw: None,
+                    roll: Some(f32::NEG_INFINITY),
+                }),
+                ..DesiredPhysics::default()
+            },
+        }],
+        car_states: vec![DesiredCarState {
+            physics: None,
+            boost_amount: Some(f32::NAN),
+        }],
+        match_info: None,
+    });
+    let after = sim.packet();
+    assert!(all_finite(&after));
+    assert_eq!(
+        after.balls[0].physics.location,
+        before.balls[0].physics.location
+    );
+    assert_eq!(after.players[0].boost, before.players[0].boost);
+
+    // Wild sticks are held to the legal range, and a NaN is no input; the car just sits.
+    let wild = ControllerState {
+        throttle: f32::NAN,
+        steer: 1.0e30,
+        pitch: f32::INFINITY,
+        yaw: f32::NAN,
+        roll: -1.0e30,
+        ..ControllerState::default()
+    };
+    assert!(sim.set_input(0, &wild));
+    for _ in 0..30 {
+        sim.step();
+    }
+    assert!(all_finite(&sim.packet()));
+}

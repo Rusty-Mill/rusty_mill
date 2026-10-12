@@ -10,8 +10,10 @@
 //! 23234). Start the game with the arguments printed here (or pass `--launch`) and a match
 //! loading. Once the map is up the bridge spawns one bot car per `AGENT_ID:TEAM`, in that order,
 //! as RLBot does; with `--no-spawn` it expects those cars to exist already. Then start the bots
-//! with `RLBOT_SERVER_PORT` set. Never run against a live game as of its writing;
-//! `rb_rl_game_probe` is the first thing to try.
+//! with `RLBOT_SERVER_PORT` set. Run live on 2026-10-11 (Epic, Freeplay); see the README.
+//! The bridge must be running before the game starts: the game dials it once at launch, and
+//! spawning waits for the map announcement that follows. `--record-in` / `--record-out` files
+//! contain the players' display names; scrub them before sharing.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -33,12 +35,21 @@ struct Tee<S> {
     outbound: Option<File>,
 }
 
+/// Copies `bytes` to a recorder. If the file fails, recording stops with one warning: the bytes
+/// have already crossed the socket, so the stream must not be told they failed.
+fn record(file: &mut Option<File>, bytes: &[u8], name: &str) {
+    if let Some(f) = file {
+        if let Err(e) = f.write_all(bytes) {
+            eprintln!("rb_rl_bridge: recording {name} stopped: {e}");
+            *file = None;
+        }
+    }
+}
+
 impl<S: Read> Read for Tee<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
-        if let Some(file) = &mut self.inbound {
-            file.write_all(&buf[..n])?;
-        }
+        record(&mut self.inbound, &buf[..n], "--record-in");
         Ok(n)
     }
 }
@@ -46,9 +57,7 @@ impl<S: Read> Read for Tee<S> {
 impl<S: Write> Write for Tee<S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let n = self.inner.write(buf)?;
-        if let Some(file) = &mut self.outbound {
-            file.write_all(&buf[..n])?;
-        }
+        record(&mut self.outbound, &buf[..n], "--record-out");
         Ok(n)
     }
 

@@ -54,6 +54,23 @@ expects the cars to exist already. Bots get a standard Octane loadout in plain t
 `rb_rlbot_client` bot sees the game's field and moving car, its input reaches the right actor, and
 its state setting becomes a ball placement.
 
+## Limits worth knowing
+
+- **Start `rb_rl_bridge` before the game.** The game dials it once, at launch, and spawning waits
+  for the map announcement that follows. A bridge that joins a game already in a match never sees
+  that announcement, so it spawns nothing and the match never starts for it.
+- **A spawn the game never answers is not retried** and has no timeout; the match then never
+  starts. (Resending could create two cars.)
+- **A socket that takes part of a frame** (a stalled game on a non-blocking connection) is
+  handled: unsent bytes wait in an outbox, ahead of later frames, and are written as the link next
+  runs, so the game never sees a half frame followed by a new one. Past 256 KiB waiting, sends are
+  refused with `WouldBlock`.
+- **One odd event does not end a session.** An event whose enum value or required field this
+  crate does not know decodes as `GameEvent::Other(tag)`. A message with more than 4096 events or
+  more than 64 KiB of names is refused, since a crafted buffer can make many slots share one string.
+- **Recordings contain the players' display names** (`--record`, `--record-in`). Scrub them before
+  sharing, as the fixtures here were.
+
 ## Differences from RLBotCS
 
 - `tcp_port_is_free` tries `0.0.0.0` **and** `127.0.0.1`. RLBotCS binds only the wildcard, which

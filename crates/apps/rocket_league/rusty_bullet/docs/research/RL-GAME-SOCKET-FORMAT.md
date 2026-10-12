@@ -116,6 +116,13 @@ modelled, so the bots look plain.
 - A message may name an actor that is not spawned yet; the link keeps what it can and drops the
   rest rather than failing.
 
+## Decoding limits
+
+An event whose enum value or required field is unknown decodes as `Other(tag)` instead of failing
+the message, so one odd event cannot end a session. A message with more than 4096 events or more
+than 64 KiB of name strings is refused, because a buffer can point many vector slots at one long
+string.
+
 ## Verification
 
 Layouts were read from the decompiled accessors and builders, then checked three ways.

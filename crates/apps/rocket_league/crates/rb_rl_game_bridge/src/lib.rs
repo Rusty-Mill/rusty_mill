@@ -14,12 +14,14 @@
 //! - [`GameListener`]: the socket the game connects to.
 //! - [`tick`] and [`BridgeLoop`]: how each message from the game is folded into time, and
 //!   whether its snapshot is handed to the bots.
-//! - [`GameLink`]: the seam to the game's byte format, with [`SimGameLink`] (the game is
-//!   `rb_env`) as its one implementation.
+//! - [`GameLink`]: the seam to the game, with [`SimGameLink`] (the game is `rb_env`) and
+//!   [`RocketLeagueLink`] (the real game's socket) as implementations; [`LinkBackend`] serves a
+//!   real game to `rb_rlbot_core`.
+//! - [`decode_game_packet`] and friends: Rocket League's `-rlbot` socket format, recovered from
+//!   `Bridge.dll` under ADR-0083 and documented in `RL-GAME-SOCKET-FORMAT.md`.
 //!
-//! **Not here: Rocket League's own wire format.** It is defined only inside the closed-source
-//! `Bridge.dll`, and no `GameLink` for the real game exists yet. Everything above is tested
-//! against [`SimGameLink`] and fake connections, not a running game.
+//! Run against a live Rocket League (Epic, Freeplay) on 2026-10-11; see the README for what that
+//! covered and what it did not.
 
 mod game_wire;
 mod launch;

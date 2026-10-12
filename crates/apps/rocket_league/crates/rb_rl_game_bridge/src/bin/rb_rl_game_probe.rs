@@ -269,6 +269,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(std::fs::File::create)
         .transpose()?;
+    if record.is_some() {
+        println!(
+            "note: the recording contains the players' display names; scrub it before sharing"
+        );
+    }
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
 
     let end = Instant::now() + Duration::from_secs(args.seconds);

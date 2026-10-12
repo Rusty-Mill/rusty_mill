@@ -24,6 +24,8 @@ pub enum WireError {
         name: &'static str,
         value: u8,
     },
+    /// A message asks for more than any real one holds (see the `MAX_` limits).
+    TooLarge(&'static str),
 }
 
 impl fmt::Display for WireError {
@@ -32,6 +34,7 @@ impl fmt::Display for WireError {
             WireError::Flat(e) => write!(f, "{e}"),
             WireError::Missing(what) => write!(f, "missing field {what}"),
             WireError::UnknownEnum { name, value } => write!(f, "{value} is not a {name}"),
+            WireError::TooLarge(what) => write!(f, "message holds too many {what}"),
         }
     }
 }
@@ -45,6 +48,13 @@ impl From<rusty_flatbuffers::Error> for WireError {
 }
 
 pub type Result<T> = std::result::Result<T, WireError>;
+
+/// The most events one message may carry. The real opening message of a map holds about 50.
+pub const MAX_EVENTS_PER_BUNDLE: usize = 4096;
+
+/// The most string bytes (map and player names) one message may carry in total. A crafted buffer
+/// can point many slots at one long string, so this bounds what decoding allocates.
+pub const MAX_STRING_BYTES_PER_BUNDLE: usize = 64 * 1024;
 
 // ---- union tags (numbered from 0 in schema order; see the format note) ----
 
@@ -452,14 +462,35 @@ pub fn decode_game_packet(payload: &[u8]) -> Result<GameBundle> {
     let root = Table::root(payload)?;
     let mut events = Vec::new();
     if let Some(messages) = root.vector(1)? {
+        if messages.len() > MAX_EVENTS_PER_BUNDLE {
+            return Err(WireError::TooLarge("events"));
+        }
+        let mut string_bytes = 0usize;
         for i in 0..messages.len() {
             let wrapper = messages.table(i)?;
             let tag = wrapper.scalar(0, 0u8)?;
-            events.push(match wrapper.table(1)? {
-                Some(body) => read_event(tag, &body)?,
+            let event = match wrapper.table(1)? {
+                // An event with an enum value or required field this module does not know is
+                // one odd event, not a reason to end a session: it is reported as `Other`.
+                Some(body) => match read_event(tag, &body) {
+                    Ok(event) => event,
+                    Err(WireError::UnknownEnum { .. } | WireError::Missing(_)) => {
+                        GameEvent::Other(tag)
+                    }
+                    Err(e) => return Err(e),
+                },
                 // NONE, or a union member with no table: nothing to read.
                 None => GameEvent::Other(tag),
-            });
+            };
+            string_bytes += match &event {
+                GameEvent::GameSpawn { map_name, .. } => map_name.len(),
+                GameEvent::PlayerSpawn { name, .. } => name.len(),
+                _ => 0,
+            };
+            if string_bytes > MAX_STRING_BYTES_PER_BUNDLE {
+                return Err(WireError::TooLarge("string bytes"));
+            }
+            events.push(event);
         }
     }
     Ok(GameBundle {

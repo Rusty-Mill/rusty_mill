@@ -5,8 +5,9 @@
 //! `Read + Write` stream (a `TcpStream` from [`crate::GameListener`] in use, a pipe in tests).
 //! The wire layouts are in `rusty_bullet/docs/research/RL-GAME-SOCKET-FORMAT.md`.
 //!
-//! **Never run against a live game yet.** Everything here is checked against buffers built by
-//! the generated code of `Bridge.dll` (see `tests/golden.rs`) and by this crate's own encoder.
+//! Run against a live Rocket League on 2026-10-11 (see the README and `tests/live_capture.rs`),
+//! and checked against buffers built by the generated code of `Bridge.dll`
+//! (`tests/golden.rs`) and by this crate's own encoder.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, ErrorKind, Read, Write};
@@ -32,6 +33,8 @@ pub const SEND_BUDGET: usize = 65_535;
 #[derive(Debug, Clone)]
 struct Car {
     name: String,
+    /// Spawned by a command (RLBot's or anyone's), not a human, whose spawn carries id 0.
+    is_bot: bool,
     team: u32,
     physics: Physics,
     state: u8,
@@ -231,6 +234,7 @@ impl GameFolder {
                     *id,
                     Car {
                         name: name.clone(),
+                        is_bot: command_id.is_some_and(|c| c != 0),
                         team: u32::from(*team),
                         physics: Physics::default(),
                         state: 0,
@@ -350,7 +354,7 @@ impl GameFolder {
                 },
                 // The game says only that a car is demolished, not for how long.
                 demolished_timeout: if car.state == 5 { 0.0 } else { -1.0 },
-                is_bot: true,
+                is_bot: car.is_bot,
                 name: car.name.clone(),
                 team: car.team,
                 boost: car.boost,
@@ -410,7 +414,15 @@ pub struct RocketLeagueLink<S> {
     folder: GameFolder,
     next_command_id: u16,
     sent_since_message: usize,
+    /// Bytes accepted by [`GameLink::send`] that the socket has not taken yet. A non-blocking
+    /// socket can take part of a frame; the rest waits here, ahead of every later frame, so the
+    /// game's framing never sees a half frame followed by a new one.
+    outbox: Vec<u8>,
 }
+
+/// The most unsent bytes held for a game that is not reading; past this, sends are refused with
+/// `WouldBlock` until it catches up.
+const MAX_OUTBOX: usize = 256 * 1024;
 
 impl<S: Read + Write> RocketLeagueLink<S> {
     pub fn new(stream: S) -> RocketLeagueLink<S> {
@@ -421,7 +433,34 @@ impl<S: Read + Write> RocketLeagueLink<S> {
             // RLBot numbers a command queue from 1.
             next_command_id: 1,
             sent_since_message: 0,
+            outbox: Vec::new(),
         }
+    }
+
+    /// Bytes accepted for sending that the socket has not taken yet.
+    pub fn pending_bytes(&self) -> usize {
+        self.outbox.len()
+    }
+
+    /// Writes as much of the outbox as the socket takes now; what it will not take stays queued.
+    fn flush_outbox(&mut self) -> io::Result<()> {
+        while !self.outbox.is_empty() {
+            match self.stream.write(&self.outbox) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        ErrorKind::WriteZero,
+                        "the game's socket took no bytes",
+                    ))
+                }
+                Ok(n) => {
+                    self.outbox.drain(..n);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     pub fn folder(&self) -> &GameFolder {
@@ -478,6 +517,7 @@ impl<S: Read + Write> RocketLeagueLink<S> {
     /// Like [`GameLink::next_clump`] for a stream set non-blocking: reads what has arrived and
     /// returns at once when there is no complete message.
     pub fn poll_clump(&mut self) -> io::Result<PollClump> {
+        self.flush_outbox()?;
         let mut chunk = [0u8; 8192];
         loop {
             if let Some(clump) = self.buffered_clump()? {
@@ -496,6 +536,7 @@ impl<S: Read + Write> RocketLeagueLink<S> {
 
 impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
     fn next_clump(&mut self) -> io::Result<Option<Clump>> {
+        self.flush_outbox()?;
         let mut chunk = [0u8; 8192];
         loop {
             if let Some(clump) = self.buffered_clump()? {
@@ -571,7 +612,17 @@ impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
             ));
         }
         let bytes = frame(&payload).map_err(invalid)?;
-        self.stream.write_all(&bytes)?;
+        // Anything still queued goes first. If the game is not taking bytes, refuse before
+        // queueing more: the command is then not sent, and its id and any spawn promise stay free.
+        self.flush_outbox()?;
+        if self.outbox.len() + bytes.len() > MAX_OUTBOX {
+            return Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                "the game is not reading; too many bytes are waiting to be sent",
+            ));
+        }
+        self.outbox.extend_from_slice(&bytes);
+        self.flush_outbox()?;
         self.sent_since_message += payload.len();
         self.next_command_id = self.next_command_id.wrapping_add(1).max(1);
         // Only once it is on the wire: a refused spawn must not leave a promise behind.

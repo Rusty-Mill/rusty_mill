@@ -310,3 +310,147 @@ fn a_client_that_says_it_is_leaving_is_dropped_and_the_match_goes_on() {
         "{events:?}"
     );
 }
+
+impl Running {
+    /// Like `finish`, but gives up (returning `None`) if the run does not end in `wait`, so a
+    /// regression that leaves the core running fails the test instead of hanging it.
+    fn finish_within(self, wait: Duration) -> Option<(RunEnd, Vec<Event>)> {
+        let deadline = std::time::Instant::now() + wait;
+        while !self.handle.is_finished() {
+            if std::time::Instant::now() > deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Some(self.finish())
+    }
+}
+
+#[test]
+fn a_stop_sent_just_before_the_client_exits_still_stops_the_match() {
+    let core = start(vec![bot("solo", 0, 100)]);
+    {
+        let mut runner = Connection::connect(core.addr).unwrap();
+        runner
+            .send(StopCommand {
+                shutdown_server: true,
+            })
+            .unwrap();
+        // Dropped here: the close follows the stop, and the core may see both in one pass.
+    }
+    let (end, _) = core
+        .finish_within(Duration::from_secs(5))
+        .expect("the stop was lost when its sender closed the socket");
+    assert_eq!(
+        end,
+        RunEnd::StopCommand {
+            shutdown_server: true
+        }
+    );
+}
+
+#[test]
+fn a_stop_followed_by_a_disconnect_in_one_write_still_stops_the_match() {
+    let core = start(vec![bot("solo", 0, 100)]);
+    let mut runner = Connection::connect(core.addr).unwrap();
+    runner
+        .send_all(&[
+            InterfaceMessage::StopCommand(StopCommand {
+                shutdown_server: true,
+            }),
+            InterfaceMessage::DisconnectSignal,
+        ])
+        .unwrap();
+    let (end, events) = core
+        .finish_within(Duration::from_secs(5))
+        .expect("the stop was lost because a later message in the same read was an error");
+    assert!(
+        matches!(end, RunEnd::StopCommand { .. }),
+        "{end:?} {events:?}"
+    );
+}
+
+#[test]
+fn connections_that_vanish_do_not_disturb_the_match() {
+    let core = start(vec![bot("solo", 0, 100)]);
+    for _ in 0..40 {
+        drop(std::net::TcpStream::connect(core.addr).unwrap());
+    }
+    let seen = play(core.addr, "solo", 0, 5);
+    assert_eq!(seen.len(), 5);
+    core.finish();
+}
+
+#[test]
+fn init_complete_before_the_connection_settings_is_refused() {
+    let core = start(vec![bot("solo", 0, 100)]);
+    let mut rude = Connection::connect(core.addr).unwrap();
+    rude.send(InitComplete).unwrap();
+    let mut stopper = Connection::connect(core.addr).unwrap();
+    // Give the core a pass over the rude client first, then end the run.
+    thread::sleep(Duration::from_millis(200));
+    stopper
+        .send(StopCommand {
+            shutdown_server: true,
+        })
+        .unwrap();
+    let (_, events) = core.finish();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::ClientDropped { reason, .. } if reason.contains("before its connection settings")
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn an_input_sent_before_the_match_began_does_not_answer_its_first_packet() {
+    let core = start(vec![bot("early", 0, 100), bot("late", 1, 101)]);
+    let mut early = Connection::connect(core.addr).unwrap();
+    early.handshake(settings("early")).unwrap();
+    early.send(InitComplete).unwrap();
+    // Sent before the match exists, while the core waits for the other bot.
+    early
+        .send(PlayerInput {
+            player_index: 0,
+            controller_state: ControllerState::default(),
+        })
+        .unwrap();
+    thread::sleep(Duration::from_millis(200));
+
+    let mut late = Connection::connect(core.addr).unwrap();
+    late.handshake(settings("late")).unwrap();
+    late.send(InitComplete).unwrap();
+    assert_eq!(next_packet(&mut early).match_info.frame_num, 0);
+    assert_eq!(next_packet(&mut late).match_info.frame_num, 0);
+
+    // `late` answers the first packet; `early` has not (its earlier input does not count), so
+    // lockstep must still wait for it.
+    late.send(PlayerInput {
+        player_index: 1,
+        controller_state: ControllerState::default(),
+    })
+    .unwrap();
+    assert!(
+        early
+            .recv_timeout(Duration::from_millis(400))
+            .unwrap()
+            .is_none(),
+        "the second tick ran without early answering the first packet"
+    );
+    early
+        .send(PlayerInput {
+            player_index: 0,
+            controller_state: ControllerState::default(),
+        })
+        .unwrap();
+    assert_eq!(next_packet(&mut early).match_info.frame_num, 1);
+
+    early
+        .send(StopCommand {
+            shutdown_server: true,
+        })
+        .unwrap();
+    core.finish();
+}

@@ -22,6 +22,10 @@ use crate::sim::Simulation;
 /// Seconds per physics tick, as `Duration`: the game's 120 Hz.
 const TICK: Duration = Duration::from_nanos(8_333_333);
 
+/// The most bytes read from one client in one pass of the loop, so a client that floods the
+/// socket cannot starve the others or the ticks; the rest waits in the socket for the next pass.
+const MAX_READ_PER_PASS: usize = 64 * 1024;
+
 /// How long to wait for a client to take a packet before dropping it.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -83,6 +87,12 @@ pub enum RunEnd {
     Interrupted,
     /// The game behind a self-paced backend closed its connection.
     GameClosed,
+}
+
+/// What came of reading one client: a stop command it sent, and why to drop it, if to.
+struct Pumped {
+    stop: Option<RunEnd>,
+    drop: Option<String>,
 }
 
 struct Client {
@@ -180,6 +190,8 @@ impl<B: MatchBackend> Core<B> {
                 self.started = true;
                 on_event(Event::MatchStarted);
                 self.broadcast_packet(&mut on_event);
+                // An input a bot sent before the match began does not answer this first packet.
+                self.clear_answers();
                 clock = Clock::new();
             } else if self.started && self.backend.self_paced() {
                 if polled_packet {
@@ -236,8 +248,18 @@ impl<B: MatchBackend> Core<B> {
         loop {
             match self.listener.accept() {
                 Ok((stream, peer)) => {
-                    stream.set_nodelay(true)?;
-                    stream.set_nonblocking(true)?;
+                    // A connection that is already reset can fail these; it is that client's
+                    // problem, not the match's.
+                    if let Err(e) = stream
+                        .set_nodelay(true)
+                        .and_then(|()| stream.set_nonblocking(true))
+                    {
+                        on_event(Event::ClientDropped {
+                            agent_id: None,
+                            reason: format!("setting up {peer}: {e}"),
+                        });
+                        continue;
+                    }
                     on_event(Event::ClientConnected(peer));
                     self.clients.push(Client {
                         stream,
@@ -252,6 +274,12 @@ impl<B: MatchBackend> Core<B> {
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                // A client that connected and vanished before it was accepted.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
+                    ) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -270,48 +298,66 @@ impl<B: MatchBackend> Core<B> {
         let mut end = None;
         let mut index = 0;
         while index < self.clients.len() {
-            match self.pump(index, on_event) {
-                Ok(Some(stop)) => end = end.or(Some(stop)),
-                Ok(None) => {}
-                Err(reason) => {
-                    let gone = self.clients.remove(index);
-                    on_event(Event::ClientDropped {
-                        agent_id: gone.agent_id,
-                        reason,
-                    });
-                    continue;
-                }
+            let pumped = self.pump(index, on_event);
+            // A stop counts even if its sender then closed the socket or sent something bad.
+            end = end.or(pumped.stop);
+            if let Some(reason) = pumped.drop {
+                let gone = self.clients.remove(index);
+                on_event(Event::ClientDropped {
+                    agent_id: gone.agent_id,
+                    reason,
+                });
+                continue;
             }
             index += 1;
         }
         end
     }
 
-    /// Reads client `index` dry and handles each message. `Err` carries the reason to drop it.
-    fn pump(
-        &mut self,
-        index: usize,
-        on_event: &mut impl FnMut(Event),
-    ) -> Result<Option<RunEnd>, String> {
+    /// Reads what client `index` has sent (up to [`MAX_READ_PER_PASS`] bytes) and handles each
+    /// complete message. Everything that arrived is handled before a close or an error is acted
+    /// on, so a client that sends a stop (or its last input) and then exits is not ignored.
+    fn pump(&mut self, index: usize, on_event: &mut impl FnMut(Event)) -> Pumped {
         let mut chunk = [0u8; 4096];
-        loop {
+        let mut read = 0;
+        let mut drop = None;
+        while read < MAX_READ_PER_PASS {
             match self.clients[index].stream.read(&mut chunk) {
-                Ok(0) => return Err("connection closed".into()),
-                Ok(n) => self.clients[index].decoder.push(&chunk[..n]),
+                Ok(0) => {
+                    drop = Some("connection closed".to_string());
+                    break;
+                }
+                Ok(n) => {
+                    read += n;
+                    self.clients[index].decoder.push(&chunk[..n]);
+                }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                Err(e) => return Err(format!("read: {e}")),
+                Err(e) => {
+                    drop = Some(format!("read: {e}"));
+                    break;
+                }
             }
         }
-        let mut end = None;
+        let mut stop = None;
         while let Some(payload) = self.clients[index].decoder.next_frame() {
-            let message = InterfaceMessage::from_payload(&payload)
-                .map_err(|e| format!("undecodable message: {e}"))?;
-            if let Some(stop) = self.handle(index, message, on_event)? {
-                end = Some(stop);
+            let message = match InterfaceMessage::from_payload(&payload) {
+                Ok(message) => message,
+                Err(e) => {
+                    drop = Some(format!("undecodable message: {e}"));
+                    break;
+                }
+            };
+            match self.handle(index, message, on_event) {
+                Ok(Some(end)) => stop = Some(end),
+                Ok(None) => {}
+                Err(reason) => {
+                    drop = Some(reason);
+                    break;
+                }
             }
         }
-        Ok(end)
+        Pumped { stop, drop }
     }
 
     fn handle(
@@ -327,6 +373,9 @@ impl<B: MatchBackend> Core<B> {
             }
             InterfaceMessage::InitComplete(_) => {
                 let client = &mut self.clients[index];
+                if client.agent_id.is_none() && !client.ready && !client.awaiting_opening {
+                    return Err("sent InitComplete before its connection settings".into());
+                }
                 if !client.ready {
                     client.ready = true;
                     on_event(Event::AgentReady { agent_id: label });
