@@ -24,7 +24,9 @@ from `Bridge.dll` under ADR-0083). `GameFolder` turns the game's events into the
 bots get; `RocketLeagueLink` runs both over any stream and is a `GameLink`. `rb_rl_game_probe`
 listens like RLBot does and prints (and with `--record` saves) what a live game sends;
 `--analyze FILE` summarises a recording and `--commands FILE` prints what was sent to the game
-(`rb_rl_bridge --record-in` / `--record-out` make those files).
+(`rb_rl_bridge --record-in` / `--record-out` make those files); `--census-in FILE` /
+`--census-out FILE` tally the message and command tags in such recordings and flag any outside
+the known unions (`Census`).
 
 Checked against committed buffers made with the DLL's generated codec. The author reports a
 live Epic Freeplay run on 2026-10-11, totaling 14,993 and 2,524 inbound messages and a bot reaching
