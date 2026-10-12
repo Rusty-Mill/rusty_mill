@@ -528,7 +528,9 @@ fn a_connection_flood_does_not_starve_an_admitted_bot_or_the_stop() {
         // More idle sockets than the cap, replaced oldest first so arrivals never stop.
         let mut held = VecDeque::new();
         while !flag.load(Ordering::Relaxed) {
-            if let Ok(socket) = std::net::TcpStream::connect(addr) {
+            if let Ok(socket) =
+                std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200))
+            {
                 held.push_back(socket);
             }
             if held.len() > 200 {
