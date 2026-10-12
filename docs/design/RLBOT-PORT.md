@@ -172,3 +172,11 @@ dependency; the bot already exists and has run against the real core.
 5. Should option A's GUI be a web UI on `rusty_serve` (as `rleval-app`) or native?
 6. What does the real core do on aspects not read here (`FlatBuffersSession`, readiness, comms, rendering)?
    Read it before step 2 of the build order.
+
+## PR #623 scope clarification
+
+The exclusion above describes the original plan. ADR-0083 in
+`crates/apps/rocket_league/rusty_bullet/docs/adr/` records the owner's narrow exception for
+extracting the game-socket wire format from Bridge.dll, confirmed in PR #623. That PR adds
+the game-facing codec/link as well as the simulated core. It does not authorize copying DLL
+logic, expand the exception to game code/assets, or establish legal clearance.

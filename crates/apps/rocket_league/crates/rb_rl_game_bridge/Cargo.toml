@@ -1,0 +1,30 @@
+[package]
+name = "rb_rl_game_bridge"
+description = "The game-facing half of RLBot core, as rusty_bullet needs it: launching Rocket League with RLBot's arguments, finding the controller port, accepting the game's connection, and the tick and packet-distribution rules RLBotCS's BridgeHandler applies. Rocket League's own socket format is behind the GameLink trait and is not implemented here."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+# `Simulation` backs `SimGameLink`, a game that is rb_env.
+rb_rlbot_core = { path = "../rb_rlbot_core" }
+rb_rlbot_wire = { path = "../rb_rlbot_wire" }
+rusty_flatbuffers = { workspace = true }
+
+[dev-dependencies]
+# The live pad layout is compared with the simulation's table.
+rb_physics_bullet = { path = "../rb_physics_bullet" }
+rb_rlbot_client = { path = "../rb_rlbot_client" }
+
+[package.metadata.rusty_mill]
+layer = "apps"

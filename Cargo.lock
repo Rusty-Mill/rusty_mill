@@ -10365,6 +10365,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rb_rl_game_bridge"
+version = "0.1.0"
+dependencies = [
+ "rb_physics_bullet",
+ "rb_rlbot_client",
+ "rb_rlbot_core",
+ "rb_rlbot_wire",
+ "rusty_flatbuffers",
+]
+
+[[package]]
 name = "rb_rlbot_bridge"
 version = "0.1.0"
 dependencies = [
@@ -10380,6 +10391,19 @@ name = "rb_rlbot_client"
 version = "0.1.0"
 dependencies = [
  "rb_rlbot_wire",
+]
+
+[[package]]
+name = "rb_rlbot_core"
+version = "0.1.0"
+dependencies = [
+ "rb_domain",
+ "rb_env",
+ "rb_physics_bullet",
+ "rb_rlbot_bridge",
+ "rb_rlbot_client",
+ "rb_rlbot_wire",
+ "rb_scenario",
 ]
 
 [[package]]

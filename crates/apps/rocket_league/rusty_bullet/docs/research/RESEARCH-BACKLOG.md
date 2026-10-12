@@ -245,6 +245,13 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
 
 ### RB-RESEARCH-O007 — Long term: RLBot in Rust, over this physics engine
 
+PR #623 update (2026-10-12): the original analysis below is historical. The PR implements
+`rb_rlbot_core` and `rb_rl_game_bridge`; ADR-0083 records the owner-approved wire-format-only
+exception for Bridge.dll. It is under technical review, not declared complete or merged.
+The old unscheduled phasing and missing-physics list below describe the earlier plan.
+Limited committed Freeplay slices support fixture checks; full-session results remain
+author-reported with no exact capture-build provenance established. This is not legal clearance.
+
 - **Why**: the owner wants to redo RLBot in Rust as a long-term growth item.
   "Redo RLBot" can mean two different things; they should not be mixed.
 - **Reading A, a Rust replacement for RLBot core against the real game.**

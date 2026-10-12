@@ -7,6 +7,8 @@
 //!
 //! - [`observation`]: a `GamePacket` as the `PhysicsFrame` `Env::reset` takes.
 //! - [`controller_state`]: a `ControllerInput` as RLBot's `ControllerState`.
+//! - [`controller_input`] and [`physics`]: the inverses, used by `rb_rlbot_core` to apply a bot's
+//!   input and publish a body.
 //! - [`PolicyBot`] / [`run_policy`]: one policy per car, one input per physics frame.
 //! - [`chaser()`]: `rb_env`'s scripted chaser as a policy, played by the `rb_chaser_bot` binary.
 //!
@@ -20,4 +22,4 @@ mod convert;
 
 pub use bot::{run_policy, Policy, PolicyBot};
 pub use chaser::chaser;
-pub use convert::{controller_state, observation};
+pub use convert::{controller_input, controller_state, observation, physics};
