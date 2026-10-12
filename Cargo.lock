@@ -10368,6 +10368,7 @@ dependencies = [
 name = "rb_rl_game_bridge"
 version = "0.1.0"
 dependencies = [
+ "rb_physics_bullet",
  "rb_rlbot_client",
  "rb_rlbot_core",
  "rb_rlbot_wire",
