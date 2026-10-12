@@ -41,7 +41,8 @@ const MAX_EXPONENT: u64 = (1 << 33) - 1;
 /// Building a key never fails; [`verify_pkcs1v15_sha256`] and
 /// [`verify_rs256`] refuse one whose modulus is outside
 /// [`MIN_MODULUS_BITS`]..=[`MAX_MODULUS_BITS`], has a leading zero byte
-/// (RFC 7518 §6.3.1.1), or whose exponent is even, below 3 or over 33 bits.
+/// (RFC 7518 §6.3.1.1), is even, or whose exponent is even, below 3 or over
+/// 33 bits.
 #[derive(Debug, Clone)]
 pub struct RsaPublicKey {
     n: BigUint,
@@ -65,6 +66,11 @@ fn unusable_reason(n_bytes: &[u8], e_bytes: &[u8]) -> Option<String> {
         return Some(format!(
             "RSA modulus is {bits} bits; {MIN_MODULUS_BITS} to {MAX_MODULUS_BITS} are accepted"
         ));
+    }
+    // A modulus is a product of two odd primes, so it is odd; an even one
+    // (a power of two, say) is not an RSA key and is trivially factored.
+    if n_bytes.last().is_some_and(|low| low % 2 == 0) {
+        return Some("RSA modulus is even".to_string());
     }
     // Five bytes hold 33 bits; anything longer is out of range already.
     let exponent = if e_bytes.len() <= 5 {
@@ -281,6 +287,17 @@ mod tests {
         let mut n = modulus(2048);
         n.insert(0, 0);
         assert!(refusal(&n, &[1, 0, 1]).contains("leading zero byte"));
+    }
+
+    #[test]
+    fn even_moduli_are_refused_including_a_power_of_two() {
+        let mut even = modulus(2048);
+        *even.last_mut().expect("non-empty") = 0xFE;
+        let mut power_of_two = vec![0; 256];
+        power_of_two[0] = 0x80; // 2^2047 is exactly 2048 bits and even
+        for n in [even, power_of_two] {
+            assert!(refusal(&n, &[1, 0, 1]).contains("modulus is even"));
+        }
     }
 
     #[test]
