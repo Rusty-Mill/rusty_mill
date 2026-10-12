@@ -87,6 +87,11 @@ pub enum Event {
         agent_id: Option<String>,
         reason: String,
     },
+    /// The match is on but the backend is not ready (a game that loaded a new map and does not
+    /// have the bots' cars back), so the bots are being sent nothing. Once per stall.
+    BroadcastHeld,
+    /// The backend is ready again and the bots are being sent packets.
+    BroadcastResumed,
 }
 
 /// Why [`Core::run`] returned.
@@ -172,6 +177,9 @@ pub struct Core<B = Simulation> {
     pacing: Pacing,
     clients: Vec<Client>,
     started: bool,
+    /// The bots are not being sent packets because the backend is not ready (see
+    /// [`Event::BroadcastHeld`]).
+    held: bool,
     /// An `accept` failure was reported and none has succeeded since (reported once per streak).
     accept_failing: bool,
     /// A backend failure noticed while handling a client, to end the run with.
@@ -191,6 +199,7 @@ impl<B: MatchBackend> Core<B> {
             clients: Vec::new(),
             started: false,
             accept_failing: false,
+            held: false,
             fatal: None,
         })
     }
@@ -247,8 +256,18 @@ impl<B: MatchBackend> Core<B> {
                 clock = Clock::new();
             } else if self.started && self.backend.self_paced() {
                 if polled_packet {
-                    self.broadcast_packet(&mut on_event);
-                    self.clear_answers();
+                    // A backend that has stopped being ready (a game that has loaded a new map
+                    // and not yet got its bots' cars back) is not shown to the bots: they would
+                    // get a match with their own cars missing.
+                    if self.backend.ready() {
+                        if std::mem::take(&mut self.held) {
+                            on_event(Event::BroadcastResumed);
+                        }
+                        self.broadcast_packet(&mut on_event);
+                        self.clear_answers();
+                    } else if !std::mem::replace(&mut self.held, true) {
+                        on_event(Event::BroadcastHeld);
+                    }
                 } else {
                     thread::sleep(Duration::from_micros(200));
                 }

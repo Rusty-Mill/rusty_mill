@@ -583,3 +583,119 @@ fn a_connection_flood_does_not_starve_an_admitted_bot_or_the_stop() {
     assert!(matches!(end, RunEnd::StopCommand { .. }));
     drop(flood);
 }
+
+/// A self-paced stand-in game: every poll is a packet, and `ready` is whatever the test says.
+struct Gate {
+    sim: Simulation,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl rb_rlbot_core::MatchBackend for Gate {
+    fn configuration(&self) -> &MatchConfiguration {
+        self.sim.configuration()
+    }
+    fn field_info(&self) -> rb_rlbot_wire::FieldInfo {
+        self.sim.field_info()
+    }
+    fn ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn self_paced(&self) -> bool {
+        true
+    }
+    fn step(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn poll(&mut self) -> std::io::Result<rb_rlbot_core::Poll> {
+        self.sim.step();
+        // Do not spin: a real game takes a few milliseconds between packets.
+        thread::sleep(Duration::from_millis(2));
+        Ok(rb_rlbot_core::Poll::Packet)
+    }
+    fn set_input(&mut self, i: u32, s: &ControllerState) -> std::io::Result<bool> {
+        Ok(self.sim.set_input(i, s))
+    }
+    fn apply_desired(&mut self, d: &rb_rlbot_wire::DesiredGameState) -> std::io::Result<bool> {
+        self.sim.apply_desired(d)
+    }
+    fn packet(&self) -> GamePacket {
+        self.sim.packet()
+    }
+}
+
+/// Once the match has started, a self-paced backend that stops being ready (a game that loaded a
+/// new map and has not got the bots' cars back) is not shown to the bots, and is again when it
+/// is ready.
+#[test]
+fn a_backend_that_stops_being_ready_is_not_broadcast_until_it_is_again() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let ready = Arc::new(AtomicBool::new(true));
+    let gate = Arc::clone(&ready);
+    let (tx, rx) = mpsc::channel();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let core = thread::spawn(move || {
+        let sim = Simulation::new(MatchConfiguration {
+            player_configurations: vec![bot("test/bot", 0, 0)],
+            ..MatchConfiguration::default()
+        })
+        .unwrap();
+        let mut core =
+            Core::bind("127.0.0.1:0", Gate { sim, ready: gate }, Pacing::RealTime).unwrap();
+        tx.send(core.local_addr().unwrap()).unwrap();
+        core.run(&AtomicBool::new(false), |e| sink.lock().unwrap().push(e))
+            .unwrap()
+    });
+    let addr = rx.recv().unwrap();
+    let mut connection = Connection::connect(addr).unwrap();
+    connection.handshake(settings("test/bot")).unwrap();
+    connection.send(InitComplete).unwrap();
+    let packet_within = |connection: &mut Connection, wait: Duration| loop {
+        match connection.recv_timeout(wait).unwrap() {
+            Some(CoreMessage::GamePacket(_)) => return true,
+            Some(_) => {}
+            None => return false,
+        }
+    };
+    assert!(
+        packet_within(&mut connection, Duration::from_secs(5)),
+        "packets flow when ready"
+    );
+
+    ready.store(false, Ordering::Relaxed);
+    // What was already on its way arrives; then nothing does.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while packet_within(&mut connection, Duration::from_millis(300)) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "packets kept coming while the backend was not ready"
+        );
+    }
+    assert!(
+        !packet_within(&mut connection, Duration::from_millis(500)),
+        "a backend that is not ready is not broadcast"
+    );
+
+    ready.store(true, Ordering::Relaxed);
+    assert!(
+        packet_within(&mut connection, Duration::from_secs(5)),
+        "and packets resume"
+    );
+
+    connection
+        .send(StopCommand {
+            shutdown_server: true,
+        })
+        .unwrap();
+    assert!(matches!(core.join().unwrap(), RunEnd::StopCommand { .. }));
+    // The stall and the recovery are each reported once, in order.
+    let seen: Vec<Event> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, Event::BroadcastHeld | Event::BroadcastResumed))
+        .cloned()
+        .collect();
+    assert_eq!(seen, [Event::BroadcastHeld, Event::BroadcastResumed]);
+}

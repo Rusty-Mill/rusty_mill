@@ -43,7 +43,9 @@ pub trait MatchBackend {
     fn field_info(&self) -> FieldInfo;
 
     /// Whether the backend has a match to show (a game that has connected and sent its first
-    /// packet). The server does not start the match before this.
+    /// packet). The server does not start the match before this, and a self-paced backend that
+    /// stops being ready after the start (a new map whose cars are not back yet) is not
+    /// broadcast to the bots until it is ready again.
     fn ready(&self) -> bool {
         true
     }
