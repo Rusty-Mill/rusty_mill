@@ -594,6 +594,8 @@ struct Gate {
     /// While not ready, produce no packet at all (a game with no cars yields none), instead of
     /// packets that are merely not shown.
     idle_when_unready: bool,
+    /// While set, produce no packet even when ready (ready, but nothing to show yet).
+    idle: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl rb_rlbot_core::MatchBackend for Gate {
@@ -614,7 +616,9 @@ impl rb_rlbot_core::MatchBackend for Gate {
     }
     fn poll(&mut self) -> std::io::Result<rb_rlbot_core::Poll> {
         self.shown = self.ready.load(std::sync::atomic::Ordering::Relaxed);
-        if self.idle_when_unready && !self.shown {
+        if (self.idle_when_unready && !self.shown)
+            || self.idle.load(std::sync::atomic::Ordering::Relaxed)
+        {
             thread::sleep(Duration::from_millis(2));
             return Ok(rb_rlbot_core::Poll::Idle);
         }
@@ -659,6 +663,7 @@ fn a_backend_that_stops_being_ready_is_not_broadcast_until_it_is_again() {
                 ready: gate,
                 shown: true,
                 idle_when_unready: false,
+                idle: Arc::new(AtomicBool::new(false)),
             },
             Pacing::RealTime,
         )
@@ -729,6 +734,8 @@ fn a_hold_is_reported_even_when_the_backend_polls_no_packets() {
 
     let ready = Arc::new(AtomicBool::new(true));
     let gate = Arc::clone(&ready);
+    let idle = Arc::new(AtomicBool::new(false));
+    let idle_flag = Arc::clone(&idle);
     let (tx, rx) = mpsc::channel();
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&events);
@@ -743,6 +750,7 @@ fn a_hold_is_reported_even_when_the_backend_polls_no_packets() {
             ready: gate,
             shown: true,
             idle_when_unready: true,
+            idle: idle_flag,
         };
         let mut core = Core::bind("127.0.0.1:0", backend, Pacing::RealTime).unwrap();
         tx.send(core.local_addr().unwrap()).unwrap();
@@ -768,10 +776,15 @@ fn a_hold_is_reported_even_when_the_backend_polls_no_packets() {
             thread::sleep(Duration::from_millis(5));
         }
     };
-    // Packets flow while it is ready.
+    // Packets flow while it is ready (bounded: fail rather than wait for ever).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no packet while the backend was ready"
+        );
         if let Some(CoreMessage::GamePacket(_)) =
-            connection.recv_timeout(Duration::from_secs(5)).unwrap()
+            connection.recv_timeout(Duration::from_secs(1)).unwrap()
         {
             break;
         }
@@ -785,7 +798,14 @@ fn a_hold_is_reported_even_when_the_backend_polls_no_packets() {
     thread::sleep(Duration::from_millis(200));
     assert_eq!(held(&events), [Event::BroadcastHeld]);
 
+    // Ready again but still nothing to show: the hold stays latched, nothing is resumed.
+    idle.store(true, Ordering::Relaxed);
     ready.store(true, Ordering::Relaxed);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(held(&events), [Event::BroadcastHeld]);
+
+    // Resumed comes with the first real broadcast.
+    idle.store(false, Ordering::Relaxed);
     wait_for(2);
     assert_eq!(
         held(&events),
