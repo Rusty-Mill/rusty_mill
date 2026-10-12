@@ -833,13 +833,25 @@ mod tests {
     #[test]
     fn a_slow_reader_gets_every_byte_in_order() {
         let (mut ours, mut client) = pair();
-        let bytes: Vec<u8> = (0..600_000u32).map(|i| (i % 251) as u8).collect();
-        client.send(&bytes).unwrap();
+        // Several distinct frames-worth of bytes, sent until the socket is full and a backlog
+        // of whole sends is queued, so partial writes and ordering across sends are exercised.
+        let mut bytes = Vec::new();
+        let mut round = 0u8;
+        while client.outbox.len() < 256 * 1024 {
+            let chunk: Vec<u8> = (0..16 * 1024u32).map(|i| (i % 251) as u8 ^ round).collect();
+            client.send(&chunk).unwrap();
+            bytes.extend_from_slice(&chunk);
+            round = round.wrapping_add(1);
+            assert!(bytes.len() < 64 * 1024 * 1024, "the socket never filled");
+        }
+        assert!(!client.outbox.is_empty(), "a backlog is pending");
         ours.set_read_timeout(Some(Duration::from_millis(50)))
             .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
         let mut got = Vec::new();
         let mut chunk = [0u8; 65536];
         while got.len() < bytes.len() {
+            assert!(Instant::now() < deadline, "the backlog never drained");
             client.flush().unwrap();
             match ours.read(&mut chunk) {
                 Ok(0) => break,
