@@ -247,8 +247,13 @@ impl<B: MatchBackend> Core<B> {
                 clock = Clock::new();
             } else if self.started && self.backend.self_paced() {
                 if polled_packet {
-                    self.broadcast_packet(&mut on_event);
-                    self.clear_answers();
+                    // A backend that has stopped being ready (a game that has loaded a new map
+                    // and not yet got its bots' cars back) is not shown to the bots: they would
+                    // get a match with their own cars missing.
+                    if self.backend.ready() {
+                        self.broadcast_packet(&mut on_event);
+                        self.clear_answers();
+                    }
                 } else {
                     thread::sleep(Duration::from_micros(200));
                 }
