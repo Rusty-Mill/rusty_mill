@@ -478,20 +478,11 @@ pub struct RocketLeagueLink<S> {
     /// socket can take part of a frame; the rest waits here, ahead of every later frame, so the
     /// game's framing never sees a half frame followed by a new one.
     outbox: Vec<u8>,
-    /// Frames that were complete but did not decode, skipped (see [`MAX_BAD_RUN`]).
-    skipped_frames: u64,
-    /// Undecodable frames in a row, reset by a good one.
-    bad_run: u32,
 }
 
 /// The most unsent bytes held for a game that is not reading; past this, sends are refused with
 /// `WouldBlock` until it catches up.
 const MAX_OUTBOX: usize = 256 * 1024;
-
-/// Undecodable frames in a row after which the peer is taken not to be the game. One odd frame
-/// is skipped (frames are length-prefixed, so the stream stays in step) and counted; a stream of
-/// them is an error.
-const MAX_BAD_RUN: u32 = 32;
 
 impl<S: Read + Write> RocketLeagueLink<S> {
     pub fn new(stream: S) -> RocketLeagueLink<S> {
@@ -503,14 +494,7 @@ impl<S: Read + Write> RocketLeagueLink<S> {
             next_command_id: 1,
             sent_since_message: 0,
             outbox: Vec::new(),
-            skipped_frames: 0,
-            bad_run: 0,
         }
-    }
-
-    /// Complete frames from the game that did not decode and were skipped.
-    pub fn skipped_frames(&self) -> u64 {
-        self.skipped_frames
     }
 
     /// Bytes accepted for sending that the socket has not taken yet.
@@ -586,24 +570,10 @@ pub enum PollClump {
 impl<S: Read + Write> RocketLeagueLink<S> {
     /// The next complete message already buffered, folded in.
     fn buffered_clump(&mut self) -> io::Result<Option<Clump>> {
-        let bundle = loop {
-            let Some(payload) = self.decoder.next_frame() else {
-                return Ok(None);
-            };
-            match decode_game_packet(&payload) {
-                Ok(bundle) => {
-                    self.bad_run = 0;
-                    break bundle;
-                }
-                Err(e) => {
-                    self.skipped_frames += 1;
-                    self.bad_run += 1;
-                    if self.bad_run >= MAX_BAD_RUN {
-                        return Err(invalid(e));
-                    }
-                }
-            }
+        let Some(payload) = self.decoder.next_frame() else {
+            return Ok(None);
         };
+        let bundle = decode_game_packet(&payload).map_err(invalid)?;
         // Any message from the game means a frame was rendered: the byte budget resets.
         self.sent_since_message = 0;
         let map_just_loaded = self.folder.apply(&bundle);

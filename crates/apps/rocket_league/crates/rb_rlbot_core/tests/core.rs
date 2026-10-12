@@ -489,3 +489,32 @@ fn a_bare_connection_cannot_stop_the_match() {
         Event::ClientDropped { reason, .. } if reason.contains("before its connection settings")
     )));
 }
+
+/// A stream of connections that never speak does not keep the loop from serving a bot or from
+/// ending the match.
+#[test]
+fn a_connection_flood_does_not_starve_a_bot_or_the_stop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let running = start(vec![bot("test/bot", 0, 0)]);
+    let addr = running.addr;
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    let flooder = thread::spawn(move || {
+        let mut held = Vec::new();
+        while !flag.load(Ordering::Relaxed) {
+            if let Ok(socket) = std::net::TcpStream::connect(addr) {
+                held.push(socket);
+            }
+            if held.len() > 2000 {
+                held.clear();
+            }
+        }
+    });
+    let packets = play(addr, "test/bot", 0, 20);
+    done.store(true, Ordering::Relaxed);
+    flooder.join().unwrap();
+    assert_eq!(packets.len(), 20);
+    let (end, _) = running.finish();
+    assert!(matches!(end, RunEnd::StopCommand { .. }));
+}

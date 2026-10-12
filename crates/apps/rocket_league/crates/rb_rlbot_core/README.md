@@ -46,10 +46,10 @@ clients) because it logs nothing itself.
   finite are ignored (sticks are held to [-1, 1]).
 - **A client that stops reading never holds up the loop.** Writes are non-blocking; what a client
   has not taken waits in its own queue, and a client more than 1 MiB behind is dropped.
-- **Limits.** At most 64 clients (the next is closed at once); a connection that sends no
+- **Limits.** At most 64 clients (the next is closed at once) and at most 64 arrivals looked at per pass, so a stream of connections cannot starve the bots or the stop check; a connection that sends no
   connection settings within 10 s is dropped; a stop command, state setting or ping from a
   connection that has not sent its connection settings drops it (a runner introduces itself, with
-  an empty agent id). An `accept` failure costs that connection, not the match. Agent ids are not
+  an empty agent id). An `accept` failure costs that connection, not the match. At shutdown a client that closed only its sending side still gets what is queued for it (within the 200 ms drain). Agent ids are not
   authenticated: the first client to claim one holds it.
 
 ## Not modelled

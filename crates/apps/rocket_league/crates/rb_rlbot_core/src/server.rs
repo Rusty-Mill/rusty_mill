@@ -33,6 +33,10 @@ const MAX_OUTBOX: usize = 1024 * 1024;
 /// The most clients served at once; a connection past this is closed at once.
 const MAX_CLIENTS: usize = 64;
 
+/// The most arrivals one pass of the loop looks at, refused and aborted ones included, so a
+/// stream of connections cannot keep `accept` from returning to the ticks and the bots.
+const MAX_ACCEPTS_PER_PASS: usize = 64;
+
 /// How long a connection may stay silent before it sends its connection settings.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -284,7 +288,10 @@ impl<B: MatchBackend> Core<B> {
                     let _ = client.stream.shutdown(std::net::Shutdown::Write);
                 }
                 match client.stream.read(&mut sink) {
-                    Ok(0) => false,
+                    // The peer closed its sending side only: it may still be reading, so keep
+                    // the client until what is queued for it has gone (a full close fails the
+                    // flush above).
+                    Ok(0) => !client.outbox.is_empty(),
                     Ok(_) => true,
                     Err(e) => e.kind() == ErrorKind::WouldBlock,
                 }
@@ -300,7 +307,7 @@ impl<B: MatchBackend> Core<B> {
     }
 
     fn accept(&mut self, on_event: &mut impl FnMut(Event)) -> io::Result<()> {
-        loop {
+        for _ in 0..MAX_ACCEPTS_PER_PASS {
             match self.listener.accept() {
                 Ok((stream, peer)) => {
                     self.accept_failing = false;
@@ -359,6 +366,8 @@ impl<B: MatchBackend> Core<B> {
                 }
             }
         }
+        // The budget is spent: the rest waits in the listen queue for the next pass.
+        Ok(())
     }
 
     fn all_expected_ready(&self) -> bool {
@@ -851,8 +860,10 @@ mod tests {
             .map(|_| TcpStream::connect(addr).unwrap())
             .collect();
         let mut events = Vec::new();
-        // The kernel queues the connections; accept until the queue is empty.
-        core.accept(&mut |e| events.push(e)).unwrap();
+        // The kernel queues the connections; a pass looks at a bounded number of them.
+        for _ in 0..4 {
+            core.accept(&mut |e| events.push(e)).unwrap();
+        }
         assert_eq!(core.clients.len(), MAX_CLIENTS);
         let refused = events
             .iter()
@@ -862,6 +873,57 @@ mod tests {
             .count();
         assert_eq!(refused, 3);
         drop(sockets);
+    }
+
+    #[test]
+    fn one_pass_looks_at_a_bounded_number_of_arrivals() {
+        let mut core = core();
+        let addr = core.local_addr().unwrap();
+        let sockets: Vec<TcpStream> = (0..MAX_CLIENTS)
+            .map(|_| TcpStream::connect(addr).unwrap())
+            .collect();
+        let mut events = Vec::new();
+        core.accept(&mut |e| events.push(e)).unwrap();
+        assert_eq!(core.clients.len(), MAX_CLIENTS);
+        // Now a flood the cap refuses: one pass handles at most the budget of them, however
+        // many are waiting, and returns.
+        // (Fewer than the listen backlog, or the connects themselves would block.)
+        let waiting = MAX_ACCEPTS_PER_PASS + 30;
+        let flood: Vec<TcpStream> = (0..waiting)
+            .map(|_| TcpStream::connect(addr).unwrap())
+            .collect();
+        events.clear();
+        core.accept(&mut |e| events.push(e)).unwrap();
+        assert_eq!(events.len(), MAX_ACCEPTS_PER_PASS);
+        core.accept(&mut |e| events.push(e)).unwrap();
+        assert_eq!(events.len(), waiting, "the rest are seen on the next pass");
+        drop((sockets, flood));
+    }
+
+    #[test]
+    fn a_peer_that_closed_its_write_side_still_gets_what_was_queued() {
+        let mut core = core();
+        let (mut ours, mut client) = pair();
+        // Fill the socket until a lot is left waiting in the outbox (more than one drain pass can send).
+        let chunk: Vec<u8> = (0..32 * 1024u32).map(|i| (i % 251) as u8).collect();
+        let mut bytes = Vec::new();
+        while client.outbox.len() < 512 * 1024 {
+            client.send(&chunk).unwrap();
+            bytes.extend_from_slice(&chunk);
+            assert!(bytes.len() < 64 * 1024 * 1024, "the socket never filled");
+        }
+        // Read EOF on the core's side, while the peer still reads.
+        ours.shutdown(std::net::Shutdown::Write).unwrap();
+        core.clients.push(client);
+        let reader = thread::spawn(move || {
+            // Start reading only after the first drain pass has met the end of stream.
+            thread::sleep(Duration::from_millis(50));
+            let mut got = Vec::new();
+            ours.read_to_end(&mut got).unwrap();
+            got
+        });
+        core.close_clients();
+        assert_eq!(reader.join().unwrap(), bytes);
     }
 
     #[test]
