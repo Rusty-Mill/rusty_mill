@@ -38,7 +38,8 @@ const MAX_EXPONENT: u64 = (1 << 33) - 1;
 
 /// An RSA public key, as used to verify `RS256`-signed tokens.
 ///
-/// Building a key never fails; [`verify_pkcs1v15_sha256`] and
+/// Building a key from raw components never fails, and from base64url fails
+/// only if the text is not base64url; neither judges the key. [`verify_pkcs1v15_sha256`] and
 /// [`verify_rs256`] refuse one whose modulus is outside
 /// [`MIN_MODULUS_BITS`]..=[`MAX_MODULUS_BITS`], has a leading zero byte
 /// (RFC 7518 §6.3.1.1), is even, or whose exponent is even, below 3 or over
@@ -241,6 +242,35 @@ mod tests {
         let bad_sig = vec![0u8; 10];
         let err = verify_pkcs1v15_sha256(b"message", &bad_sig, &key()).unwrap_err();
         assert!(matches!(err, Error::Validation(_)));
+    }
+
+    // A real 4096-bit RSA key generated with `openssl genrsa 4096`, and a JWT
+    // signed with `openssl dgst -sha256 -sign`: the largest modulus accepted,
+    // verified end to end against a signature made outside this crate.
+    const N_4096_B64: &str = "uNPLg2IuAKSTc3zXcF3nH7zpzKUxLUeVx57qFdckzkG8jjCibtPKvkuLkVCFwZlkBpl1JeG_8PkZ8U1EzQIHM1PDFfRwmniMPyiSvzK0Mxj2zEPTjaaed2n_-sOhFOmUjSQezEcLgNXLyo3rjW7IN1j86yQUi6z0myxJOpaZGe5HAYWmkPXNSynmlt9XRXrjfv_kdXuNcSC9oxlcFhrcEf5BJdI9_qwSKyggA7uQwPkzsZrWa4_9O37zXth3X6T-CQ-GdX-kcRfaPwM1QFPqoLpsUeqHP01L5QJfb5VC9ExgY8-h4nHYIUSmQw7KJuGdpvrO2jPKa6rUhiOOLIsPEFNoXv1GT2z957nZw0pxZv7K--iQOPgISvav76Z-xfZr_ld6mYYDL4xzmK2Q9zeYO7vNqpK6DLbcR0-syvJzNRje5a0mdJkb9tls8jkQVKsgrM1YrCQ6KiW0dDVD2G8Mk3M0WUp9Q8Sm7G-f3-YAjPF8QCHxbYGOAnOG7_4bj_yzLtGHILdIXmAK4TwM7kfaqXMo9bcbquYi2Ax4-sYaj1k4btc6elXlD4q3mlJnVQY9u8aWaerCfaXzY4FVSMSxKjE0UssDg1ZP6NoE0gTuW0RwidrdQJb5R3RnkjuCyuOZD5RRwX0p4DnPLYCTWtdYp0ydrftYxOv40YVkG9v8qac";
+    const TOKEN_4096: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTQwOTYiLCJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlLmNvbSIsImV4cCI6NDEwMjQ0NDgwMH0.LhVyxNfjybeES3yMz2RVXubOHl_OfA5cauawy5BkPv-CR6oQEv5g6f6fWKEg6ZsMrI486b4IsgpCqWPZTc-bzDXfp3xekd4RH6AH4OVwRoyrtVqbBUsdCRglgn1RpNCMsIF-roC6yKtH7q0p28qKSlt81nR_0zhT9yHEEq1-0t_ob_ho1wKarHqEagIhduPLWaVCmub3maUbU7m-R8wY5COeS8FnwO19kfAxfl-lmkoHAk47sVUvf2W6t_MEK7a2C0XgmEWsZH7tGOZ0_vlGq_iQN-Bhvx5iX5PmpsjdSJko_fOZeqwjyiWGgzLgpRIJUcBmzfAZLvEaVJzLlPK_wKVkrOKiCy5Z97KTD20dqF9lBvq8AOVcZBd4q-ASGYGaaLXaVz-djB35u2wiy7z76OtOXRopiFV2Se3jvdyyErCDU8xoYS0MyGQJ-ONA8VLxAdWsP6FIroIjlugBnPlvfpf7e565ClXDSgQhegJS62z8bYarx9HOyD1QM7TobAc8zrnnONUc_pVHCe2mI7VTwkaOFD1cBXi8Fti0aPW2NN-YzxnMwiqKdENb0bYQaaYIXZ_-POVapSjRm1gKwINRWf5hIMS7EH0rlKGvt8G3fyQ8XORauAXXRNn0YjbKaghPK4d19bIgQYsHmQrj592DiPd5hSm6yO3KZxcdXO5jZnw";
+
+    #[test]
+    fn verifies_real_openssl_signed_4096_bit_token() {
+        let key = RsaPublicKey::from_jwk_base64url(N_4096_B64, E_B64).unwrap();
+        let claims = verify_rs256(TOKEN_4096, &key).unwrap();
+        assert_eq!(claims.get("sub").unwrap().as_str(), Some("user-4096"));
+    }
+
+    #[test]
+    fn a_4096_bit_key_rejects_a_flipped_signature_bit() {
+        let key = RsaPublicKey::from_jwk_base64url(N_4096_B64, E_B64).unwrap();
+        let (signing_input, signature) = TOKEN_4096.rsplit_once('.').unwrap();
+        let mut bytes = crate::encoding::base64::decode_url_safe(signature).unwrap();
+        bytes[0] ^= 1;
+        let forged = format!(
+            "{signing_input}.{}",
+            crate::encoding::base64::encode_url_safe_no_pad(&bytes)
+        );
+        let why = verify_rs256(&forged, &key)
+            .expect_err("flipped bit")
+            .to_string();
+        assert!(why.contains("verification failed"), "{why}");
     }
 
     // A modulus of exactly `bits` bits (top bit set, odd), for the bounds
