@@ -10,7 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{Router, routing::get};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rusty_json::{Value, json};
-use rusty_mcp::auth::{JwtValidator, TokenError, TokenValidator};
+use rusty_mcp::auth::{JwtAlgorithm, JwtValidator, TokenError, TokenValidator};
+use rusty_oauth::jwt::{encode_hs256, es256};
 
 const ISSUER: &str = "https://auth.example.com";
 const KID: &str = "test-key-1";
@@ -447,6 +448,276 @@ async fn a_jwks_server_that_never_answers_is_cut_off_by_the_request_timeout() {
     assert!(matches!(outcome, Err(TokenError::Unavailable(_))));
 }
 
+fn valid_claims() -> Value {
+    json!({"iss": ISSUER, "sub": "user-1", "aud": RESOURCE, "exp": now() + 600})
+}
+
+/// The `Invalid` reason for a token the validator must refuse.
+async fn rejection(validator: &JwtValidator, token: &str) -> String {
+    match validator.validate(token).await {
+        Err(TokenError::Invalid(why)) => why,
+        Err(other) => panic!("expected Invalid, got {other}"),
+        Ok(_) => panic!("the token must be rejected"),
+    }
+}
+
+/// The three segments of a compact token.
+fn segments(token: &str) -> (String, String, String) {
+    let mut parts = token.split('.');
+    let mut next = || parts.next().expect("a three-part token").to_string();
+    (next(), next(), next())
+}
+
+fn hex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+#[tokio::test]
+async fn accepts_an_es256_token() {
+    // A fixed P-256 test key, used only here. `rusty_oauth` can sign ES256,
+    // so this path needs no second JWT library.
+    let private = es256::EcPrivateKey::from_bytes(&hex(
+        "67718fec6a6b21b412a5c5306286f1ee30e32498fd6c61b66f57d0ad1d7c0738",
+    ))
+    .expect("private key");
+    let (x, y) = private.public_key().to_affine_coordinates();
+    let jwks = json!({"keys": [{
+        "kty": "EC", "crv": "P-256", "kid": "ec-1", "use": "sig", "alg": "ES256",
+        "x": base64_url(x), "y": base64_url(y),
+    }]});
+    let validator = JwtValidator::builder(ISSUER, serve_jwks(jwks).await)
+        .build()
+        .expect("build");
+
+    let token = es256::encode_es256(&valid_claims(), &private, &[("kid", "ec-1")]);
+
+    let verified = validator.validate(&token).await.expect("should validate");
+    assert_eq!(verified.subject.as_deref(), Some("user-1"));
+}
+
+#[tokio::test]
+async fn rejects_an_hs256_token_keyed_with_the_rsa_public_key() {
+    // The classic algorithm-confusion forgery: an HMAC token "signed" with the
+    // public key as the secret. The algorithm is refused before any key is read.
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    let modulus = keys.jwks["keys"][0]["n"].as_str().expect("modulus");
+
+    let token = encode_hs256(&valid_claims(), modulus.as_bytes(), &[("kid", KID)]);
+
+    assert!(rejection(&validator, &token).await.contains("not accepted"));
+}
+
+#[tokio::test]
+async fn rejects_an_algorithm_the_validator_was_not_given() {
+    let keys = keys();
+    let validator = JwtValidator::builder(ISSUER, serve_jwks(keys.jwks.clone()).await)
+        .with_algorithms([JwtAlgorithm::Es256])
+        .build()
+        .expect("build");
+
+    let token = sign(&keys, valid_claims());
+
+    assert!(rejection(&validator, &token).await.contains("not accepted"));
+}
+
+#[tokio::test]
+async fn rejects_an_rsa_key_presented_for_an_es256_token() {
+    // A genuine RS256 signature under a header that now claims ES256: the RSA
+    // key is never reinterpreted for the other algorithm.
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    let (_, payload, signature) = segments(&sign(&keys, valid_claims()));
+    let header = json!({"alg": "ES256", "typ": "JWT", "kid": KID}).to_json_string();
+
+    let forged = format!("{}.{payload}.{signature}", base64_url(header.into_bytes()));
+
+    assert!(
+        rejection(&validator, &forged)
+            .await
+            .contains("unusable signing key")
+    );
+}
+
+#[tokio::test]
+async fn rejects_a_tampered_payload() {
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    let (header, _, signature) = segments(&sign(&keys, valid_claims()));
+    let forged_claims = json!({"iss": ISSUER, "sub": "admin", "aud": RESOURCE, "exp": now() + 600});
+
+    let forged = format!(
+        "{header}.{}.{signature}",
+        base64_url(forged_claims.to_json_string().into_bytes())
+    );
+
+    assert!(
+        rejection(&validator, &forged)
+            .await
+            .contains("signature is invalid")
+    );
+}
+
+#[tokio::test]
+async fn rejects_a_garbled_or_truncated_signature() {
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    let (header, payload, signature) = segments(&sign(&keys, valid_claims()));
+
+    // Well-formed signatures of the wrong value or length fail verification.
+    let genuine = rusty_base64::decode_url_safe(&signature).expect("a signature");
+    let zeroed = base64_url(vec![0; 256]);
+    let one_byte_short = base64_url(genuine[..genuine.len() - 1].to_vec());
+    for bad in [zeroed, one_byte_short, String::new()] {
+        let token = format!("{header}.{payload}.{bad}");
+        let why = rejection(&validator, &token).await;
+        assert!(why.contains("signature is invalid"), "{why}");
+    }
+
+    // A tail whose unused padding bits are not zero is non-canonical base64
+    // ("AB" is 12 bits: one byte, then four bits that are `0001`). The strict
+    // decoder refuses it before any signature check. (Cutting the real
+    // signature would only sometimes land on such a tail, so use a fixed one.)
+    let non_canonical = format!("{header}.{payload}.AB");
+    assert!(
+        rejection(&validator, &non_canonical)
+            .await
+            .contains("malformed token")
+    );
+}
+
+#[tokio::test]
+async fn rejects_a_token_that_is_not_yet_valid() {
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    let claims = json!({
+        "iss": ISSUER, "aud": RESOURCE, "exp": now() + 7200, "nbf": now() + 3600,
+    });
+
+    let token = sign(&keys, claims);
+
+    assert!(
+        rejection(&validator, &token)
+            .await
+            .contains("not yet valid")
+    );
+}
+
+#[tokio::test]
+async fn accepts_a_token_that_expired_inside_the_leeway() {
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    let claims = json!({"iss": ISSUER, "aud": RESOURCE, "exp": now() - 30});
+
+    assert!(validator.validate(&sign(&keys, claims)).await.is_ok());
+}
+
+#[tokio::test]
+async fn rejects_a_token_with_no_expiry() {
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    let claims = json!({"iss": ISSUER, "aud": RESOURCE});
+
+    assert!(
+        rejection(&validator, &sign(&keys, claims))
+            .await
+            .contains("validation failed")
+    );
+}
+
+#[tokio::test]
+async fn rejects_malformed_tokens_without_panicking() {
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+
+    for token in ["", "abc", "a.b", "a.b.c.d", "....", "!!!.!!!.!!!"] {
+        assert!(
+            rejection(&validator, token)
+                .await
+                .contains("malformed token"),
+            "{token:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejects_a_header_with_no_algorithm_or_no_kid() {
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    // `e30` is `{}`: a well-formed token with an empty header and payload.
+    assert!(rejection(&validator, "e30.e30.").await.contains("no `alg`"));
+
+    let header = base64_url(json!({"alg": "RS256"}).to_json_string().into_bytes());
+    let payload = base64_url(valid_claims().to_json_string().into_bytes());
+    let token = format!("{header}.{payload}.c2ln");
+    assert!(rejection(&validator, &token).await.contains("no `kid`"));
+}
+
+#[tokio::test]
+async fn rejects_deeply_nested_json_in_a_token() {
+    // Header and payload are read before the caller is authenticated, so a
+    // pathological nesting depth must be refused, not recursed into.
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+    let nested = base64_url(deep.into_bytes());
+    let empty = base64_url(b"{}".to_vec());
+
+    for token in [
+        format!("{nested}.{empty}.c2ln"),
+        format!("{empty}.{nested}.c2ln"),
+    ] {
+        assert!(
+            rejection(&validator, &token)
+                .await
+                .contains("malformed token")
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_duplicated_kid_in_the_jwks_matches_no_key() {
+    // Two keys claiming one `kid` is ambiguous, and picking one would be the
+    // wrong way to fail a security-relevant lookup.
+    let keys = keys();
+    let key = keys.jwks["keys"][0].clone();
+    let jwks = json!({"keys": [key.clone(), key]});
+    let validator = JwtValidator::builder(ISSUER, serve_jwks(jwks).await)
+        .build()
+        .expect("build");
+
+    let token = sign(&keys, valid_claims());
+
+    assert!(
+        rejection(&validator, &token)
+            .await
+            .contains("no signing key matches")
+    );
+}
+
+#[tokio::test]
+async fn refuses_rsa_keys_outside_the_size_bounds_without_using_them() {
+    // 8192 bits would make every verification expensive; 1024 is too weak.
+    for modulus_bytes in [1024, 128] {
+        let jwks = json!({"keys": [{
+            "kty": "RSA", "kid": KID, "n": base64_url(vec![0xFF; modulus_bytes]), "e": "AQAB",
+        }]});
+        let validator = JwtValidator::builder(ISSUER, serve_jwks(jwks).await)
+            .build()
+            .expect("build");
+
+        let why = rejection(&validator, &token_needing_a_key()).await;
+
+        assert!(
+            why.contains("unusable signing key"),
+            "{modulus_bytes}: {why}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn reads_an_array_audience_and_array_scopes() {
     let keys = keys();
@@ -469,4 +740,132 @@ async fn reads_an_array_audience_and_array_scopes() {
     let verified = validator.validate(&token).await.expect("validates");
     assert!(verified.audiences.contains(&RESOURCE.to_string()));
     assert!(verified.scopes.contains("mcp:write"));
+}
+
+#[tokio::test]
+async fn signed_numeric_dates_preserve_valid_forms_and_fail_closed() {
+    let keys = keys();
+    let validator = validator_for(&keys).await;
+    for exp in [
+        json!(now() + 600),
+        json!(now() as f64 + 600.5),
+        json!(4102444800.0),
+        json!(u64::MAX),
+    ] {
+        for nbf in [
+            None,
+            Some(json!(now() - 60)),
+            Some(json!(now() as f64 - 60.5)),
+        ] {
+            let mut claims = json!({"iss": ISSUER, "exp": exp.clone()});
+            if let Some(nbf) = nbf {
+                claims["nbf"] = nbf;
+            }
+            assert!(
+                validator
+                    .validate(&sign(&keys, claims.clone()))
+                    .await
+                    .is_ok(),
+                "{claims:?}"
+            );
+        }
+    }
+    for nbf in [json!(4102444800.5), json!(u64::MAX), json!(now() + 3600)] {
+        let claims = json!({"iss": ISSUER, "exp": u64::MAX, "nbf": nbf});
+        assert!(
+            rejection(&validator, &sign(&keys, claims))
+                .await
+                .contains("not yet valid")
+        );
+    }
+    for field in ["exp", "nbf"] {
+        for invalid in [
+            json!("4102444800"),
+            json!(null),
+            json!(-1),
+            json!(-0.5),
+            json!(true),
+            json!([]),
+            json!({}),
+            json!(18446744073709551616.0),
+            json!(1e100),
+        ] {
+            let mut claims = json!({"iss": ISSUER, "exp": now() + 600});
+            claims[field] = invalid;
+            assert!(
+                rejection(&validator, &sign(&keys, claims))
+                    .await
+                    .contains("invalid NumericDate")
+            );
+        }
+    }
+    let claims = json!({"iss": ISSUER, "exp": now() as f64 - 3600.5});
+    assert!(matches!(
+        validator.validate(&sign(&keys, claims)).await,
+        Err(TokenError::Expired)
+    ));
+}
+
+#[tokio::test]
+async fn verifies_independent_openssl_es256_and_rejects_bad_scalars_and_keys() {
+    // Uses the key from rusty_oauth::jwt::es256::tests, but a new signature
+    // because MCP requires kid. Generated independently with OpenSSL:
+    // openssl dgst -sha256 -sign test-key.pem -out signature.der signing-input
+    // Decode DER r/s, left-pad each to 32 bytes, concatenate, base64url encode.
+    // Header: {"alg":"ES256","typ":"JWT","kid":"ec-1"}
+    // Payload: {"iss":"https://auth.example.com","sub":"openssl-user","exp":4102444800}
+    const TOKEN: &str = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImVjLTEifQ.eyJpc3MiOiJodHRwczovL2F1dGguZXhhbXBsZS5jb20iLCJzdWIiOiJvcGVuc3NsLXVzZXIiLCJleHAiOjQxMDI0NDQ4MDB9.ui0VYgAR1_dka872KHYMl0foGaB5iJ7MD7PU0bgaHUVf6wM3fxX60HeSDidj9RRZjupnbmFgHz3rxoxPKx4KeA";
+    let x = hex("9958e30d1b1ca2943fb08c191400beab172729085e843cf130422d686bf81a7b");
+    let y = hex("a7613a86bac66693dd6adead383e9e1f0407424dc7281049bce06c3fefa91e6f");
+    let jwks = json!({"keys": [{"kty": "EC", "crv": "P-256", "kid": "ec-1",
+        "x": base64_url(x), "y": base64_url(y)}]});
+    let validator = JwtValidator::builder(ISSUER, serve_jwks(jwks.clone()).await)
+        .build()
+        .expect("build validator");
+    assert_eq!(
+        validator
+            .validate(TOKEN)
+            .await
+            .expect("OpenSSL signature")
+            .subject
+            .as_deref(),
+        Some("openssl-user")
+    );
+    let (header, payload, signature) = segments(TOKEN);
+    let signature = rusty_base64::decode_url_safe(&signature).expect("signature base64");
+    let order = hex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+    for offset in [0, 32] {
+        for scalar in [vec![0; 32], order.clone(), vec![0xff; 32]] {
+            let mut bad = signature.clone();
+            bad[offset..offset + 32].copy_from_slice(&scalar);
+            let token = format!("{header}.{payload}.{}", base64_url(bad));
+            assert!(
+                rejection(&validator, &token)
+                    .await
+                    .contains("signature is invalid")
+            );
+        }
+    }
+    for bad in [signature[..63].to_vec(), vec![0; 65]] {
+        let token = format!("{header}.{payload}.{}", base64_url(bad));
+        assert!(
+            rejection(&validator, &token)
+                .await
+                .contains("signature is invalid")
+        );
+    }
+    for coordinate in ["x", "y"] {
+        for bad in [vec![0; 32], vec![0xff; 32], vec![0; 31], vec![0; 33]] {
+            let mut malformed = jwks.clone();
+            malformed["keys"][0][coordinate] = json!(base64_url(bad));
+            let validator = JwtValidator::builder(ISSUER, serve_jwks(malformed).await)
+                .build()
+                .expect("build validator");
+            assert!(
+                rejection(&validator, TOKEN)
+                    .await
+                    .contains("unusable signing key")
+            );
+        }
+    }
 }

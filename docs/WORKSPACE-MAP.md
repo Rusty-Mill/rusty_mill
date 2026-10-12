@@ -124,7 +124,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_mcp_proto | rusty_mcp_proto | Sovereign MCP wire types on rusty_json: JSON-RPC 2.0 envelope, error codes, protocol versions, content, tools and paginated lists, with a hand-written codec and no serde | 2 |
 | libs | rusty_mcp_server | rusty_mcp_server | Sovereign MCP server core on rusty_mcp_proto: a tool registry, a sans-IO connection dispatcher for the classic and stateless handshakes, cancellation and progress, pagination, and a stdio transport | 13 |
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 8 |
-| libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 11 |
+| libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 12 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
 | libs | rusty_rag | rusty_rag | Sovereign AI Retrieval-Augmented Generation (RAG) &amp; Question Answering Engine for Rusty Mill | 0 |

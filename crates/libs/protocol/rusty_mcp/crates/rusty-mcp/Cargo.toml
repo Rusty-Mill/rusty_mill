@@ -1,6 +1,6 @@
 [package]
 name = "rusty-mcp"
-version = "0.8.0"
+version = "0.9.0"
 description = "Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry"
 keywords = ["mcp", "model-context-protocol", "ai", "llm"]
 categories = ["network-programming", "development-tools"]
@@ -36,8 +36,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rusty_url = { workspace = true }
 tower-layer = "0.3"
-# `rust_crypto` keeps the build pure-Rust; `aws_lc_rs` would need a C toolchain.
-jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"], optional = true }
+# JWT signature and claim verification (RS256, ES256).
+rusty_oauth = { workspace = true, optional = true }
 # JWKS fetch. The `tokio` feature makes each request run on the caller's own tokio
 # runtime (detected per call), so no second runtime is started.
 rusty_request = { workspace = true, features = ["tokio"], optional = true }
@@ -53,12 +53,15 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty_mcp_axum = { workspace = true }
 rsa = "0.9"
+# Signs the RS256 test tokens: `rusty_oauth` only verifies RSA signatures.
+# `rust_crypto` keeps the build pure-Rust.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 
 [features]
 default = []
 # A JWKS-backed JWT validator for the authorization layer.
-jwt = ["dep:jsonwebtoken", "dep:rusty_request", "tokio/sync"]
+jwt = ["dep:rusty_oauth", "dep:rusty_request", "tokio/sync"]
 # Export spans to an OpenTelemetry collector over OTLP.
 otel = [
     "dep:opentelemetry",
