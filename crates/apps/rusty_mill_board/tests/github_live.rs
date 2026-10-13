@@ -23,17 +23,12 @@ fn lists_real_issues() {
     println!("{repo}: {} issues ({open} open)", issues.len());
     for i in issues.iter().take(3) {
         println!(
-            "  #{} [{}] {:?} labels={:?} updated_ms={}",
+            "  #{} [{}] {:?} labels={:?}",
             i.number,
             if i.closed { "closed" } else { "open" },
             i.title,
-            i.labels,
-            i.updated_ms
+            i.labels
         );
     }
-    assert!(
-        issues
-            .iter()
-            .all(|i| i.number > 0 && i.updated_ms > 1_500_000_000_000)
-    );
+    assert!(issues.iter().all(|i| i.number > 0));
 }

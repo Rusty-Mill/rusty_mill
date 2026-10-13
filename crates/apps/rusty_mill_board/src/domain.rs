@@ -107,6 +107,24 @@ pub fn actionable(column: Column, caps: &BTreeSet<Capability>) -> bool {
     })
 }
 
+/// A stable 64-bit hash (FNV-1a) of a title and body, for comparing text across
+/// sync runs. Stable by construction: it is stored on cards. Insensitive to what
+/// forges change in passing: surrounding whitespace and `\r\n` line endings.
+pub fn text_hash(title: &str, body: &str) -> u64 {
+    let body = body.replace("\r\n", "\n");
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in title
+        .trim()
+        .bytes()
+        .chain([0xff])
+        .chain(body.trim_end().bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
 /// A note on a card.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
@@ -140,6 +158,10 @@ pub struct Card {
     /// Linked forge issue number, if synced.
     #[serde(default)]
     pub issue: Option<u64>,
+    /// [`text_hash`] of the title and body as of the last sync with the linked
+    /// issue: the common ancestor that says which side changed the text since.
+    #[serde(default)]
+    pub synced_text: Option<u64>,
     /// Creation time, Unix ms.
     pub created_ms: i64,
     /// Last change, Unix ms.
@@ -210,6 +232,8 @@ pub enum EventKind {
     Commented,
     /// Linked to a forge issue.
     Linked,
+    /// Title/body brought in line with the linked issue.
+    Synced,
 }
 
 /// One entry in the append-only log. `id` is a UUIDv7 assigned by the store
@@ -284,6 +308,7 @@ impl Card {
             tags,
             comments: Vec::new(),
             issue: None,
+            synced_text: None,
             created_ms: now_ms,
             updated_ms: now_ms,
         })
@@ -383,10 +408,20 @@ impl Card {
         Ok(next)
     }
 
-    /// Record the forge issue this card is synced with.
-    pub fn link(&self, issue: u64, now_ms: i64) -> Self {
+    /// Record the forge issue this card is synced with, and the text both
+    /// sides agreed on at that moment.
+    pub fn link(&self, issue: u64, synced_text: Option<u64>, now_ms: i64) -> Self {
         Self {
             issue: Some(issue),
+            synced_text,
+            ..self.next(now_ms)
+        }
+    }
+
+    /// Record that title and body match the linked issue (hash `synced_text`).
+    pub fn mark_synced(&self, synced_text: u64, now_ms: i64) -> Self {
+        Self {
+            synced_text: Some(synced_text),
             ..self.next(now_ms)
         }
     }
@@ -549,6 +584,23 @@ mod tests {
     }
 
     #[test]
+    fn text_hash_is_stable_and_separates_title_from_body() {
+        assert_eq!(text_hash("a", "b"), text_hash("a", "b"));
+        assert_ne!(
+            text_hash("ab", ""),
+            text_hash("a", "b"),
+            "the boundary matters"
+        );
+        assert_ne!(text_hash("a", "b"), text_hash("a", "c"));
+        // Forges add trailing newlines and CRLFs; neither is a change.
+        assert_eq!(text_hash(" a ", "x\r\ny\n\n"), text_hash("a", "x\ny"));
+        // Pinned (values from an independent Python FNV-1a): the hash is persisted on
+        // cards, so it must never change.
+        assert_eq!(text_hash("", ""), 0xaf64_724c_8602_eb6e);
+        assert_eq!(text_hash("ab", "cd"), 0x20ba_0030_25a7_acc0);
+    }
+
+    #[test]
     fn event_ids_are_strictly_increasing_even_when_the_clock_is_not() {
         let far_future = Uuid::from_u128(u128::MAX >> 8);
         let next = next_event_id(Some(far_future));
@@ -563,8 +615,12 @@ mod tests {
 
     #[test]
     fn link_sets_issue_and_bumps_rev() {
-        let c = card().link(7, 3);
-        assert_eq!((c.issue, c.rev, c.updated_ms), (Some(7), 1, 3));
+        let c = card().link(7, Some(99), 3);
+        assert_eq!(
+            (c.issue, c.synced_text, c.rev, c.updated_ms),
+            (Some(7), Some(99), 1, 3)
+        );
+        assert_eq!(c.mark_synced(5, 4).synced_text, Some(5));
     }
 
     #[test]

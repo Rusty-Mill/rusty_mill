@@ -118,7 +118,12 @@ fn unlinked_card_creates_an_issue_with_the_right_request() {
     assert_eq!(log[1].line, "POST /repos/o/r/issues HTTP/1.1");
     let body: serde_json::Value = serde_json::from_str(&log[1].body).expect("json body");
     assert_eq!(body["title"], "Ship");
-    assert_eq!(body["body"], "details");
+    let sent = body["body"].as_str().expect("body");
+    assert!(sent.starts_with("details"), "{sent}");
+    assert!(
+        sent.ends_with(&format!("<!-- mill-board:card={} -->", card.id)),
+        "the issue carries a hidden marker naming its card, so a retry can adopt it: {sent}"
+    );
     assert_eq!(body["labels"], serde_json::json!(["board:backlog", "bbp"]));
 }
 

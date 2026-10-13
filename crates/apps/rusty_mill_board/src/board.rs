@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     Actor, BoardError, Capability, Card, Column, Event, EventKind, WORK_QUEUES, actionable,
-    entry_column,
+    entry_column, text_hash,
 };
 use crate::store::Store;
 
@@ -156,17 +156,37 @@ impl<S: Store> Board<S> {
     ) -> Result<Card, BoardError> {
         let mut card = Card::new(title, body, tags, (self.clock)())?;
         card.issue = Some(issue);
+        card.synced_text = Some(text_hash(&card.title, &card.body));
         self.store
             .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
         Ok(card)
     }
 
-    /// Record the forge issue a card is synced with.
+    /// Record the forge issue a card is synced with, and the text hash both
+    /// sides agreed on at that moment (`None` when unknown).
     ///
     /// # Errors
     /// If the card is missing or on storage failure.
-    pub fn link_issue(&self, id: Uuid, issue: u64, by: &Actor) -> Result<Card, BoardError> {
-        self.apply(id, by, EventKind::Linked, |c, now| Ok(c.link(issue, now)))
+    pub fn link_issue(
+        &self,
+        id: Uuid,
+        issue: u64,
+        synced_text: Option<u64>,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
+        self.apply(id, by, EventKind::Linked, |c, now| {
+            Ok(c.link(issue, synced_text, now))
+        })
+    }
+
+    /// Record that the card's title and body match its issue (hash `synced_text`).
+    ///
+    /// # Errors
+    /// If the card is missing or on storage failure.
+    pub fn mark_synced(&self, id: Uuid, synced_text: u64, by: &Actor) -> Result<Card, BoardError> {
+        self.apply(id, by, EventKind::Synced, |c, now| {
+            Ok(c.mark_synced(synced_text, now))
+        })
     }
 
     /// Pull work: the next card this actor can act on, entered (Ready ->

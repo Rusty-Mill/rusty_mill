@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::http::Http;
-use crate::sync::{Draft, Forge, Issue, SyncError, parse_iso_ms};
+use crate::sync::{Draft, Forge, Issue, SyncError};
 
 const PAGE: usize = 100;
 /// Longest slice of an error body kept in a message.
@@ -84,7 +84,6 @@ struct RawIssue {
     body: Option<String>,
     labels: Vec<RawLabel>,
     state: String,
-    updated_at: String,
     pull_request: Option<serde_json::Value>,
 }
 
@@ -96,7 +95,6 @@ impl RawIssue {
             body: self.body.unwrap_or_default(),
             labels: self.labels.into_iter().map(|l| l.name).collect(),
             closed: self.state == "closed",
-            updated_ms: parse_iso_ms(&self.updated_at).unwrap_or(0),
         }
     }
 }

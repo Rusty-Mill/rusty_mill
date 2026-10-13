@@ -51,10 +51,12 @@ fn no_event_is_skipped<S: Store + 'static>(store: S) {
         thread::spawn(move || {
             start.wait();
             let (mut cursor, mut seen) = (None::<Uuid>, Vec::new());
-            // Poll until the writers are done, then once more to drain.
-            for last_pass in [false, true].iter().cycle() {
+            loop {
+                // Read the flag first: if the writers had finished before this poll and
+                // it comes back empty, everything committed has been delivered.
                 let finished = done.load(Ordering::SeqCst);
-                for e in board.events(cursor, 7).expect("events") {
+                let batch = board.events(cursor, 7).expect("events");
+                for e in &batch {
                     assert!(
                         cursor.is_none_or(|c| e.id > c),
                         "ids must increase past the cursor"
@@ -62,10 +64,7 @@ fn no_event_is_skipped<S: Store + 'static>(store: S) {
                     cursor = Some(e.id);
                     seen.push(e.id);
                 }
-                if finished && !*last_pass {
-                    continue;
-                }
-                if finished && *last_pass {
+                if finished && batch.is_empty() {
                     break;
                 }
             }
@@ -197,7 +196,7 @@ fn state_is_rebuilt_from_the_single_commit_records_after_a_restart() {
     let a = board.add(&human, "a", "", vec![]).expect("add");
     let b = board.add(&human, "b", "", vec![]).expect("add");
     board.comment(a.id, &human, "note").expect("comment");
-    board.link_issue(b.id, 7, &human).expect("link");
+    board.link_issue(b.id, 7, None, &human).expect("link");
     let (cards, events) = (
         board.list(None).expect("list"),
         board.events(None, 100).expect("events"),
@@ -250,7 +249,7 @@ fn stale_and_duplicate_commits_are_refused_without_effect() {
         Err(BoardError::Conflict),
         "duplicate id"
     );
-    let skipped = card.link(1, 1).link(2, 2); // rev 2, but the store is at rev 0
+    let skipped = card.link(1, None, 1).link(2, None, 2); // rev 2, but the store is at rev 0
     assert_eq!(
         store.replace(&skipped, Event::of(&skipped, EventKind::Linked, "x")),
         Err(BoardError::Conflict)

@@ -30,7 +30,10 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
 - **GitHub sync** (`--github-repo owner/name`, token in `GITHUB_TOKEN`, every
   `--github-secs`, default 60): stateless reconcile between cards and issues.
   The board owns state: the column is one `board:<column>` label and a Done card
-  closes its issue; other labels are kept. Title and body are last-write-wins.
+  closes its issue; other labels are kept. Title and body are merged three ways against the text both sides last agreed on (a hash on the card),
+  not by timestamps: one side changed it, that side wins; both did, the board wins and it is reported. An issue
+  made from a card carries a hidden `<!-- mill-board:card=… -->` marker, so a run interrupted before the link
+  was saved adopts that issue instead of creating a duplicate.
   Unlinked open issues become Backlog cards (closed ones are not imported). An issue
   closed on GitHub while its card is not Done is logged as drift, not reopened or
   moved. The sync actor holds no capabilities, so it cannot move cards. Needs
