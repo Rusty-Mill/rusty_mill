@@ -255,7 +255,7 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
             fx.tick();
         }
         Step::Abort => {
-            fx.run(&Command::AbortTurn);
+            fx.run(&Command::AbortTurn { turn: None });
         }
         Step::HumanAsk(r) => {
             fx.human(HumanAction::Post(ask(*r, "?")));

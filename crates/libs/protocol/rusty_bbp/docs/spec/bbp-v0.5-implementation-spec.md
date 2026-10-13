@@ -110,7 +110,7 @@ The store cannot verify these; they are stated so the host can be audited.
 - **Invocation-bound tokens.** On `turn_granted` the adapter captures the token and turn id into an immutable invocation context and only then starts inference. Every tool call from that invocation carries that token, never a newer one. On `turn_ended` the adapter cancels in-flight generation and drops queued tool calls before honouring any later grant. The model never sees the token.
 - **Runner is a supervisor outside the sandbox.** The supervisor holds the runner credential and the per-run secret and writes reports. The workload has no BBP, push or deploy credentials, no network egress, a read-only mount of the base, bounded output, and time and resource limits. The host contract lists the dependencies available inside the sandbox and how a running workload is cancelled.
 - **Envelope limits.** `max_artifact_bytes` and `max_body_bytes` are enforced before any store work.
-- **`abort_turn`.** The host may end a turn early (cause `aborted`) when an agent process dies or an inference call times out.
+- **`abort_turn`.** The host may end a turn early (cause `aborted`) when an agent process dies or an inference call times out. It names the turn (`Some`: that turn only, a no-op if not live) or none (`None`: every live turn).
 
 ## Data model
 

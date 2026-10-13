@@ -433,6 +433,58 @@ fn known_gap_a_verdict_is_not_bound_to_the_revision_the_reviewer_read() {
     assert_eq!(fx.st().state, State::MergeGate);
 }
 
+#[test]
+fn abort_turn_ends_the_named_turn_only() {
+    let mut fx = build_phase(2, default_budget());
+    let coder = fx.st().turn_of(&RoleId("coder".into())).expect("turn").id;
+    let coder2 = fx.st().turn_of(&RoleId("coder2".into())).expect("turn").id;
+    fx.run(&Command::AbortTurn { turn: Some(coder) });
+    assert_eq!(
+        fx.st().turn_of(&RoleId("coder2".into())).map(|t| t.id),
+        Some(coder2),
+        "the other turn is untouched"
+    );
+    let regranted = fx
+        .st()
+        .turn_of(&RoleId("coder".into()))
+        .expect("regranted")
+        .id;
+    assert_ne!(regranted, coder, "the aborted turn was replaced");
+    let log = fx.d.store.events(&TaskId("T1".into()), 0).unwrap();
+    let aborted: Vec<_> = log
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Event::TurnEnded {
+                    cause: TurnEnd::Aborted,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(aborted.len(), 1);
+}
+
+#[test]
+fn abort_turn_of_a_turn_that_is_not_live_does_nothing() {
+    let mut fx = build_phase(2, default_budget());
+    let before = fx.st().clone();
+    fx.run(&Command::AbortTurn {
+        turn: Some(TurnId(999)),
+    });
+    assert_eq!(fx.st().turns, before.turns);
+}
+
+#[test]
+fn abort_turn_without_an_id_ends_every_live_turn() {
+    let mut fx = build_phase(2, default_budget());
+    let old: Vec<TurnId> = fx.st().turns.iter().map(|t| t.id).collect();
+    fx.run(&Command::AbortTurn { turn: None });
+    assert!(fx.st().turns.iter().all(|t| !old.contains(&t.id)));
+    assert_eq!(fx.st().turns.len(), 2, "both slots were refilled");
+}
+
 mod model {
     use super::*;
     use proptest::prelude::*;
@@ -493,7 +545,7 @@ mod model {
                 fx.advance(u64::from(*ms));
                 fx.tick();
             }
-            Step::Abort => drop(fx.run(&Command::AbortTurn)),
+            Step::Abort => drop(fx.run(&Command::AbortTurn { turn: None })),
         }
     }
 
