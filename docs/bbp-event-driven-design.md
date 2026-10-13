@@ -3,6 +3,13 @@
 Status: proposal, 2026-10-13. Docs only; nothing here is implemented. Base: audit commit `e1e27b54`.
 Inputs: `crates/libs/protocol/rusty_bbp/docs/spec/bbp-v0.4-implementation-spec.md` (v0.4.1), `docs/bbp-role-audit.md` (the nine Role fields), engine and host sources cited inline.
 
+## Amendments (owner decisions, 2026-10-13)
+
+1. **Accepted as Phase 1 only.** Shadow-mode `wake_set` logging "would wake X" next to the real grant. No `EventDriven` scheduling is built until that evidence exists.
+2. **The CRDT rejection is conditional, not a decision.** Where this note rejects concurrent live turns and CRDT merge (the Recommendation's "Why" and Option 3's verdict), it does so on the premise that exactly one turn is live. That premise is now open; see `docs/bbp-concurrency-design.md`.
+3. **`pick_next` returns a set of roles, not one.** Its cardinality is capped by the scheduling policy: `TurnBased` and Phase 1 cap it at one, which is today's behavior. A larger cap is a concurrency-design decision (`max_live_turns`). Read `Option<RoleId>` below as "a set of at most one role".
+4. **`max_chain` is deferred** until shadow-mode evidence. Open question 3 is answered: loop control stays at `turns` only until measured.
+
 ## Recommendation
 
 Add **BBP-side wake derivation, with delivery owned by the host/orch**:
@@ -90,7 +97,7 @@ The seam already exists in practice. `schedule()` (`engine.rs:1335-1347`) is "th
 
 ```
 schedule(w, now)               // guards unchanged: no live turn, no pending request, opened, test-run ready
-  -> pick_next(w.st, roster)   // the seam: Option<RoleId>
+  -> pick_next(w.st, roster)   // the seam: a set of roles, capped by policy (1 for TurnBased and Phase 1)
   -> grant(w, role, Default, None, now)   // unchanged
 ```
 
@@ -132,7 +139,7 @@ Two eager agents answering each other is a loop in which every message is indivi
 | Debounce | Eligibility is evaluated once per transaction in phase 4, after all effects. Several events in one transaction yield one wake. | processing model phase 4 | No |
 | `reads_per_turn` | A woken agent that only reads is bounded. | R11 | No |
 | Message and byte budgets | Unchanged. | R11 | No |
-| Reply-chain depth cap | Candidate new budget field `max_chain`: consecutive agent-to-agent `ask`/`answer` on one `reply_to` chain with no human message and no state change; beyond N, escalate or force `request_decision`. | New R11 field, evaluated like the others in phase 4 | One counter, derivable from messages |
+| Reply-chain depth cap | **Deferred until shadow-mode evidence** (amendment 4). Candidate new budget field `max_chain`: consecutive agent-to-agent `ask`/`answer` on one `reply_to` chain with no human message and no state change; beyond N, escalate or force `request_decision`. | New R11 field, evaluated like the others in phase 4 | One counter, derivable from messages |
 | Wall-clock rate limit | Minimum interval between two default grants to one role. | Host (the `Tick` is already time-driven) | Host only |
 
 The first rows do most of the work for free: `turns` was designed as the loop bound (spec Risks: "`turns` budget bounds the loop"). The reply-chain cap is a candidate, not a requirement; measure first (spec Q1: never raise a limit to make a task pass).
