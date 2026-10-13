@@ -232,7 +232,7 @@ Status: **proposal, awaiting owner approval.** The thresholds below are judgment
 | Metric | Definition |
 | --- | --- |
 | `revocations` | `turn_ended` with cause `revoked`, per task |
-| `discarded_share` | messages + bytes + reads charged in turns that ended `revoked`, over the task's total charged. A proxy for tokens: model tokens are not visible to the core, so token cost needs the harness to report usage, which is not built and is not assumed |
+| `discarded_share` | agent actions (messages + reads) charged in turns that ended `revoked`, over all actions charged in the task; discarded bytes are reported beside it, not added, since bytes and actions have no common unit. A proxy for tokens: model tokens are not visible to the core, so token cost needs the harness to report usage, which is not built and is not assumed |
 | `wall_ratio` | moderator wall clock at N=2 over N=1 for the same task |
 | `budget_refusals` | `rejected(turn_budget_exhausted)`. Each refusal also ends the turn (`turn_ended(budget)`), so the two are not added |
 | `file_overlap_diffs` | stored `diff` artifacts not in the final candidate that touch a path the candidate's diffs touch |
