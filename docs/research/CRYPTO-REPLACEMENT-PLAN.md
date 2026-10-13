@@ -58,6 +58,8 @@ next steps; the implementer's transcription, **not yet restated from the owner's
   list asked about. The `rusty_tls` seam (gap 4) and signing (gap 5) **stay closed** until the owner names them. The
   2026-10-08 intrinsics approval (decision D1) was **not reconfirmed**: AES work starts portable-only and uses no
   intrinsics until the owner confirms D1.
+- **"Keep ct64"** (the AES-GCM bitsliced layout, `AES-GCM-DESIGN.md` section 8). `ct64` only; the 64-block layout is
+  removed. This chose the layout; it did not answer whether about 65 to 80 MB/s bulk is worth finishing, so that stays open.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:

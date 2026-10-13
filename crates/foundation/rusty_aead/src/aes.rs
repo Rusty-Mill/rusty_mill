@@ -404,7 +404,6 @@ fn sbox(q: &mut [u64; 8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aes_wide;
 
     fn xorshift(s: &mut u64) -> u64 {
         *s ^= *s << 13;
@@ -486,45 +485,6 @@ mod tests {
         let mut blocks = [plain; LANES];
         Aes::new_256(&k256).encrypt_blocks(&mut blocks);
         assert!(blocks.iter().all(|b| *b == want256));
-    }
-
-    /// The previous 64-block layout is an independent implementation of the same cipher.
-    #[test]
-    fn matches_the_wide_layout_on_random_keys_and_blocks() {
-        let mut s = 0x0bad_cafe_dead_beefu64;
-        for _ in 0..300 {
-            let mut k128 = [0u8; 16];
-            let mut k256 = [0u8; 32];
-            for b in k128.iter_mut().chain(k256.iter_mut()) {
-                *b = xorshift(&mut s) as u8;
-            }
-            let mut wide_in = [[0u8; 16]; aes_wide::LANES];
-            for b in wide_in.iter_mut() {
-                for byte in b.iter_mut() {
-                    *byte = xorshift(&mut s) as u8;
-                }
-            }
-            for rounds256 in [false, true] {
-                let mut want = wide_in;
-                if rounds256 {
-                    aes_wide::Aes::new_256(&k256).encrypt_blocks(&mut want);
-                } else {
-                    aes_wide::Aes::new_128(&k128).encrypt_blocks(&mut want);
-                }
-                for chunk in 0..aes_wide::LANES / LANES {
-                    let mut got: [[u8; 16]; LANES] =
-                        core::array::from_fn(|i| wide_in[chunk * LANES + i]);
-                    if rounds256 {
-                        Aes::new_256(&k256).encrypt_blocks(&mut got);
-                    } else {
-                        Aes::new_128(&k128).encrypt_blocks(&mut got);
-                    }
-                    for i in 0..LANES {
-                        assert_eq!(got[i], want[chunk * LANES + i]);
-                    }
-                }
-            }
-        }
     }
 
     /// Where the time goes in one 4-block batch. Ignored (machine-dependent); run with

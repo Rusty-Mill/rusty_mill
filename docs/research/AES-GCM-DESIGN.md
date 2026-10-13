@@ -170,7 +170,7 @@ At bulk sizes AES is about 60% of the time and GHASH about 40%.
 
 The profile suggested repacking the bit planes so that a batch is a few blocks, not 64. I tried it: eight planes of
 `u64`, bit `16b + p` of plane `k` holding bit `k` of byte `p` of block `b`, so one S-box circuit handles four blocks
-(`aes.rs`; the previous layout is kept as `aes_wide.rs`, compiled only for tests, as an oracle and a baseline).
+(`aes.rs`). The previous 64-block layout was kept as a test-only oracle while the new core was checked against it, then removed (see "Decision" below).
 Two plane sets run side by side per call (8 blocks), which measured best of one, two and four (AES-128 alone: 112,
 132 and 120 MB/s).
 
@@ -200,6 +200,17 @@ every size, but two AES cores to review and to put through the evidence bar. (3)
 for bulk, 4.7 times worse on 64-byte messages. **My recommendation is (1)**: TLS records are at most 16 KiB, the
 difference at that size is 11 to 22%, and a second core doubles the review and evidence work for a gain the
 client role is unlikely to notice.
+
+**Decision (owner, 2026-10-10: "keep ct64"):** option (1), `ct64` only. The 64-block layout and its equivalence test were
+removed once the new core had independent oracles: FIPS 197, the GCM specification vector, `ring`, and Wycheproof (below).
+The throughput figures above are unchanged by the removal; the old layout's numbers are history.
+
+**Wycheproof (`tests/aes_gcm_vectors.rs`, file pinned at the same commit as the ChaCha vectors, sha-256 in `MANIFEST.txt`):**
+316 cases, 133 executed (AES-128 and AES-256, 96-bit IV, 128-bit tag: 79 valid, 54 invalid), all pass. The other 183 cannot be
+run through the typed API and are counted, not dropped: 103 use AES-192 and 80 use an IV that is not 96 bits (of those,
+some are valid encryptions under the standard, so they are skipped rather than asserted invalid). The totals are pinned in
+the test. A mutation check, dropping the tag mask and then breaking one GHASH reduction shift, makes the test fail both times.
+Not done: other specification vectors (the GCM specification's own cases, NIST CAVP, whose terms for vendoring are unchecked).
 
 **Constant-time evidence for the new core:** the valgrind taint run was repeated on the new code (seal 0 reports,
 open exactly 1 (the public verdict), planted control caught), and the existing `rusty_aead` checks still pass. The
