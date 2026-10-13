@@ -572,7 +572,7 @@ fn resolve_ref(st: &TaskState, r: &Ref) -> R<()> {
     }
 }
 
-fn state_accepts(state: State, kind: MessageKind) -> bool {
+pub(crate) fn state_accepts(state: State, kind: MessageKind) -> bool {
     use MessageKind::*;
     match state {
         State::Planning | State::Build => matches!(
@@ -668,8 +668,9 @@ fn check_common(st: &TaskState, d: &Draft) -> R<()> {
     Ok(())
 }
 
-fn check_verdict(st: &TaskState, role: &Role, v: &Verdict, d: &Draft) -> R<()> {
-    let stage = Stage::of(st.state).ok_or_else(|| {
+/// The stage a verdict is judged at, if `role` may judge it (R6).
+fn verdict_stage(state: State, role: &Role) -> R<Stage> {
+    let stage = Stage::of(state).ok_or_else(|| {
         rej(
             Code::RoleForbidden,
             "verdicts are judged in test and review only",
@@ -678,6 +679,31 @@ fn check_verdict(st: &TaskState, role: &Role, v: &Verdict, d: &Draft) -> R<()> {
     if !role.holds(Cap::Verdict(stage)) {
         return Err(rej(Code::RoleForbidden, role.lacks(Cap::Verdict(stage))));
     }
+    Ok(stage)
+}
+
+/// May `role` post a `kind` message in `state`? The one admission rule shared
+/// by `post` and by `wake_set`'s `can_act`, so scheduling and enforcement
+/// cannot drift: the post capability, the by-state table, and for a verdict
+/// the stage capability. Turn, content and budget checks are not part of it.
+pub(crate) fn admits(state: State, role: &Role, kind: MessageKind) -> R<()> {
+    if !role.holds(Cap::Post(kind)) {
+        return Err(rej(Code::RoleForbidden, role.lacks(Cap::Post(kind))));
+    }
+    if !state_accepts(state, kind) {
+        return Err(rej(
+            Code::WrongState,
+            format!("{kind:?} not accepted in {state:?}"),
+        ));
+    }
+    if kind == MessageKind::Verdict {
+        verdict_stage(state, role)?;
+    }
+    Ok(())
+}
+
+fn check_verdict(st: &TaskState, role: &Role, v: &Verdict, d: &Draft) -> R<()> {
+    verdict_stage(st.state, role)?;
     let cand = st
         .current_candidate()
         .ok_or_else(|| rej(Code::StaleCandidate, "no current candidate"))?;
@@ -738,15 +764,7 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
         return Err(rej(Code::DecisionForbidden, "decisions are human-only"));
     }
     let role = role_data(&w.st, role_id)?.clone();
-    if !role.holds(Cap::Post(d.kind)) {
-        return Err(rej(Code::RoleForbidden, role.lacks(Cap::Post(d.kind))));
-    }
-    if !state_accepts(w.st.state, d.kind) {
-        return Err(rej(
-            Code::WrongState,
-            format!("{:?} not accepted in {:?}", d.kind, w.st.state),
-        ));
-    }
+    admits(w.st.state, &role, d.kind)?;
     let turn =
         w.st.turn_of(role_id)
             .cloned()

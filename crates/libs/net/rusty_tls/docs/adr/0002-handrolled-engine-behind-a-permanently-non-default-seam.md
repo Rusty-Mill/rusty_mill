@@ -696,10 +696,12 @@ question is not decided by a pull request that merely wires it.
    TLS 1.2, a new host class) is a new decision against the bar, not a consequence of this one.
 5. **No library default moves.** No feature, cfg or dependency edge makes any other
    crate's build use the engine.
-6. **Known divergences from webpki are resolved first.** The name-constraint
-   resource-budget cases (`nc-dos-1`, `nc-dos-2`) in `TLS-EVIDENCE-BAR.md` are an
-   unresolved pre-wiring blocker. Describing their behavior is not approval of them as
-   exceptions. (`anyExtendedKeyUsage` was aligned with webpki on 2026-10-12.)
+6. **Known divergences from webpki are resolved first.** `anyExtendedKeyUsage` was
+   aligned with webpki on 2026-10-12, and the name-constraint cases (`nc-dos-1`,
+   `nc-dos-2`) are bounded by a comparison budget as of 2026-10-13. The remaining cases
+   where the engine accepts and webpki refuses (`tests/data/limbo_divergences.txt`,
+   `looser` lines) and any divergence found later are blockers until each is resolved or
+   accepted by the owner in writing; limbo expecting success is not that acceptance.
 
 **What this does not do.**
 

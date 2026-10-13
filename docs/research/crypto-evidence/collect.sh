@@ -56,6 +56,19 @@ print("total Wycheproof cases parsed:", total)
 ch = json.load(open("crates/foundation/rusty_aead/tests/vectors/chacha20_poly1305_test.json"))
 wrong_nonce = sum(1 for g in ch["testGroups"] for t in g["tests"] if len(t["iv"]) != 24)
 print("chacha20_poly1305: cases with a non-96-bit nonce, asserted invalid but not run through the AEAD (typed API cannot express them):", wrong_nonce)
+# AES-GCM: only AES-128/256 with a 96-bit IV can be run through the typed API; the rest are counted here
+# and pinned in tests/aes_gcm_vectors.rs, so "executed = parsed" does NOT hold for this file.
+ag = json.load(open("crates/foundation/rusty_aead/tests/vectors/aes_gcm_test.json"))
+aes192 = other_iv = ran = 0
+for g in ag["testGroups"]:
+    for t in g["tests"]:
+        if g["keySize"] == 192:
+            aes192 += 1
+        elif g["ivSize"] != 96:
+            other_iv += 1
+        else:
+            ran += 1
+print(f"aes_gcm: parsed={aes192 + other_iv + ran}, EXECUTED={ran}, skipped (typed API cannot express them; counted and pinned): AES-192={aes192}, IV not 96 bits={other_iv}")
 pss = 0; native = 0
 H = {"SHA-256": 32, "SHA-384": 48, "SHA-512": 64}
 for f in glob.glob("crates/foundation/rusty_pk/tests/vectors/rsa_pss_*.json"):
@@ -111,7 +124,7 @@ How to read this: each number is |t| from one run (dudect-style Welch t, slowest
 seed, ignored tests run with --ignored). Threshold 4.5; an alarm is a printed |t| >= 4.5. The A/A tests do identical work in both
 classes, so their spread is this machine's noise: a leak claim needs a clear, repeatable gap above
 the A/A spread, and a pass is only "no leak detected under these conditions". Samples per run:
-rusty_sha2 200000, rusty_aead 100000, rusty_pk 20000 (X25519), 4000 (ECDH P-256) and 2000 (ECDH P-384). Classes are written in each test's comments.
+rusty_sha2 200000, rusty_aead 100000 (ChaCha20-Poly1305) and 50000 (AES-GCM), rusty_pk 20000 (X25519), 4000 (ECDH P-256) and 2000 (ECDH P-384). Classes are written in each test's comments.
 The tests time only the operation; class-dependent setup is outside the clock and writes into one
 buffer shared by both classes. An earlier version that set up inside the timed region reported
 |t| up to 25 on this same code (see "harness history" in the plan, stage 3/4 notes).
@@ -132,6 +145,14 @@ rusty_aead|null_calibration_identical_classes|A/A  ChaCha20-Poly1305 seal (basel
 rusty_aead|key_classes_not_distinguishable|seal: fixed vs other key
 rusty_aead|plaintext_classes_not_distinguishable|seal: all-zero vs all-ones plaintext
 rusty_aead|tag_mismatch_position_not_distinguishable|open: first-byte vs last-byte tag mismatch
+rusty_aead|aes_null_calibration_identical_classes|A/A  AES-128-GCM seal, key set up front (baseline)
+rusty_aead|aes_plaintext_classes_not_distinguishable|aes-128-gcm seal: all-zero vs all-ones plaintext
+rusty_aead|aes128_ctor_null_calibration_identical_classes|A/A  AES-128-GCM constructor+seal (baseline)
+rusty_aead|aes128_key_classes_not_distinguishable|aes-128-gcm constructor+seal: fixed vs other key
+rusty_aead|aes256_ctor_null_calibration_identical_classes|A/A  AES-256-GCM constructor+seal (baseline)
+rusty_aead|aes256_key_classes_not_distinguishable|aes-256-gcm constructor+seal: fixed vs other key
+rusty_aead|aes_open_null_calibration_identical_classes|A/A  AES-128-GCM open, invalid tag (baseline)
+rusty_aead|aes_tag_mismatch_position_not_distinguishable|aes-128-gcm open: first-byte vs last-byte tag mismatch
 rusty_pk|null_calibration_identical_classes|A/A  X25519 (baseline)
 rusty_pk|scalar_classes_not_distinguishable|x25519: sparse vs dense scalar
 rusty_pk|fixed_vs_random_scalar|x25519: fixed vs other scalar

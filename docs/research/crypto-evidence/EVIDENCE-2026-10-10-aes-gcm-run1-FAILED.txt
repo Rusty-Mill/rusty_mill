@@ -1,0 +1,327 @@
+
+== implementation ==
+commit: 122a00b73913357d372b515ef47cbb94d2926ee7
+branch: claude/bold-hypatia-i6nvo6
+tree: clean
+date (UTC): 2026-10-13T14:54:29Z
+
+== environment ==
+rustc 1.98.1 (48a229cea 2026-09-01)
+binary: rustc
+commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+commit-date: 2026-09-01
+host: x86_64-unknown-linux-gnu
+release: 1.98.1
+LLVM version: 22.1.8
+cargo 1.98.1 (797e8a9bc 2026-08-05)
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+cores: 4
+cpu flags of interest: aes avx2 pclmulqdq sha_ni 
+kernel: Linux 6.18.44-fc-v114 x86_64
+valgrind: valgrind-3.22.0
+profile: cargo test --release (opt-level 3, workspace default; no target-cpu flags; RUSTFLAGS='')
+virtualised: docker
+
+== dependencies pinned ==
+name = "ring" version = "0.17.14" 
+
+== vector files (hashes checked against each MANIFEST.txt; a mismatch fails the record) ==
+manifest crates/foundation/rusty_sha2/tests/vectors: 6 file(s) match
+manifest crates/foundation/rusty_pk/tests/vectors: 24 file(s) match
+manifest crates/foundation/rusty_aead/tests/vectors: 2 file(s) match
+   rusty_sha2: Source: https://github.com/C2SP/wycheproof @ 12fd3aaf33eb5fa1f52e026912ee00c054f9d984, testvectors_v1/
+   rusty_sha2: Licence: Apache-2.0 (LICENSE-wycheproof). Fetched 2026-10-08. Do not edit; refetch and compare.
+   rusty_pk: Source: https://github.com/C2SP/wycheproof @ 12fd3aaf33eb5fa1f52e026912ee00c054f9d984, testvectors_v1/ (the *_test.json files)
+   rusty_pk: Licence: Apache-2.0 (LICENSE-wycheproof). Fetched 2026-10-08. Do not edit; refetch and compare.
+   rusty_aead: Source: https://github.com/C2SP/wycheproof @ 12fd3aaf33eb5fa1f52e026912ee00c054f9d984, testvectors_v1/
+   rusty_aead: Licence: Apache-2.0 (LICENSE-wycheproof). Fetched 2026-10-08. Do not edit; refetch and compare.
+
+== vector case counts (declared vs parsed; executed = parsed unless noted) ==
+rusty_aead   aes_gcm_test.json                            declared=316 parsed=316 {'valid': 229, 'invalid': 87}
+rusty_aead   chacha20_poly1305_test.json                  declared=325 parsed=325 {'valid': 256, 'invalid': 69}
+rusty_pk     ecdh_secp256r1_ecpoint_test.json             declared=355 parsed=355 {'valid': 330, 'acceptable': 1, 'invalid': 24}
+rusty_pk     ecdh_secp384r1_ecpoint_test.json             declared=790 parsed=790 {'valid': 771, 'acceptable': 1, 'invalid': 18}
+rusty_pk     ecdsa_secp256r1_sha256_test.json             declared=484 parsed=484 {'valid': 174, 'invalid': 310}
+rusty_pk     ecdsa_secp384r1_sha256_test.json             declared=472 parsed=472 {'valid': 162, 'invalid': 310}
+rusty_pk     ecdsa_secp384r1_sha384_test.json             declared=504 parsed=504 {'valid': 194, 'invalid': 310}
+rusty_pk     ed25519_test.json                            declared=151 parsed=151 {'valid': 88, 'invalid': 63}
+rusty_pk     rsa_pss_2048_sha256_mgf1_0_test.json         declared=103 parsed=103 {'valid': 61, 'invalid': 42}
+rusty_pk     rsa_pss_2048_sha256_mgf1_32_test.json        declared=108 parsed=108 {'valid': 63, 'invalid': 45}
+rusty_pk     rsa_pss_3072_sha256_mgf1_32_test.json        declared=108 parsed=108 {'valid': 63, 'invalid': 45}
+rusty_pk     rsa_pss_4096_sha256_mgf1_32_test.json        declared=108 parsed=108 {'valid': 63, 'invalid': 45}
+rusty_pk     rsa_pss_4096_sha512_mgf1_32_test.json        declared=177 parsed=177 {'valid': 132, 'invalid': 45}
+rusty_pk     rsa_pss_misc_test.json                       declared=150 parsed=150 {'valid': 150}
+rusty_pk     rsa_signature_2048_sha256_test.json          declared=259 parsed=259 {'valid': 9, 'acceptable': 1, 'invalid': 249}
+rusty_pk     rsa_signature_2048_sha384_test.json          declared=258 parsed=258 {'valid': 7, 'acceptable': 1, 'invalid': 250}
+rusty_pk     rsa_signature_2048_sha512_test.json          declared=259 parsed=259 {'valid': 8, 'acceptable': 1, 'invalid': 250}
+rusty_pk     rsa_signature_3072_sha256_test.json          declared=259 parsed=259 {'valid': 8, 'acceptable': 1, 'invalid': 250}
+rusty_pk     rsa_signature_3072_sha384_test.json          declared=259 parsed=259 {'valid': 7, 'acceptable': 1, 'invalid': 251}
+rusty_pk     rsa_signature_3072_sha512_test.json          declared=260 parsed=260 {'valid': 8, 'acceptable': 1, 'invalid': 251}
+rusty_pk     rsa_signature_4096_sha256_test.json          declared=258 parsed=258 {'valid': 7, 'acceptable': 1, 'invalid': 250}
+rusty_pk     rsa_signature_4096_sha384_test.json          declared=259 parsed=259 {'valid': 7, 'acceptable': 1, 'invalid': 251}
+rusty_pk     rsa_signature_4096_sha512_test.json          declared=259 parsed=259 {'valid': 7, 'acceptable': 1, 'invalid': 251}
+rusty_pk     x25519_test.json                             declared=518 parsed=518 {'valid': 264, 'acceptable': 254}
+rusty_sha2   hkdf_sha256_test.json                        declared=86 parsed=86 {'valid': 83, 'invalid': 3}
+rusty_sha2   hkdf_sha384_test.json                        declared=83 parsed=83 {'valid': 80, 'invalid': 3}
+rusty_sha2   hkdf_sha512_test.json                        declared=83 parsed=83 {'valid': 80, 'invalid': 3}
+rusty_sha2   hmac_sha256_test.json                        declared=174 parsed=174 {'valid': 66, 'invalid': 108}
+rusty_sha2   hmac_sha384_test.json                        declared=174 parsed=174 {'valid': 66, 'invalid': 108}
+rusty_sha2   hmac_sha512_test.json                        declared=174 parsed=174 {'valid': 66, 'invalid': 108}
+total Wycheproof cases parsed: 7773
+chacha20_poly1305: cases with a non-96-bit nonce, asserted invalid but not run through the AEAD (typed API cannot express them): 9
+rsa_pss: 754 cases across files; 327 use parameters in our profile (hash = mgf hash, salt = hash length); the rest are checked only for equality with ring and, if valid under other parameters, rejection
+generated: crates/foundation/rusty_pk/tests/vectors/ecdsa_p256_sha384.txt lines=72
+generated: crates/foundation/rusty_pk/tests/vectors/rsa_forgeries.txt lines=18
+
+== tests (executed / failed / ignored per binary) ==
+    
+Running unittests src/lib.rs (target/release/deps/rusty_aead-5860c6eb3c2b835c) test result: ok. 5 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s     
+Running tests/aes_gcm_spike.rs (target/release/deps/aes_gcm_spike-99a9d50baf7c45aa) test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s     
+Running tests/aes_gcm_vectors.rs (target/release/deps/aes_gcm_vectors-e51d93409a2d730d) test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s     
+Running tests/differential.rs (target/release/deps/differential-4ae445b9f0808cd4) test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s     
+Running tests/known_answers.rs (target/release/deps/known_answers-5147b15200e0bf76) test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s     
+Running tests/perf.rs (target/release/deps/perf-254f446681c2e13b) test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s     
+Running tests/timing.rs (target/release/deps/timing-c16445fb00ff96cb) test result: ok. 0 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.00s     
+Running unittests src/lib.rs (target/release/deps/rusty_crypto_key-b0bf47a2b3045bbf) test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s     
+Running unittests src/lib.rs (target/release/deps/rusty_ct_check-fd43e7f5da5390c0) test result: ok. 9 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s     
+Running unittests src/lib.rs (target/release/deps/rusty_pk-4cf41e1da02a90a5) test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s     
+Running tests/differential.rs (target/release/deps/differential-bddf0d0ac5e4462c) test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.88s     
+Running tests/ecdh_vectors.rs (target/release/deps/ecdh_vectors-1b3fdbd0febca210) test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.89s     
+Running tests/ecdsa_vectors.rs (target/release/deps/ecdsa_vectors-45e54fd39e338974) test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s     
+Running tests/ed25519_vectors.rs (target/release/deps/ed25519_vectors-dc3f529d42646024) test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s     
+Running tests/mutation_fuzz.rs (target/release/deps/mutation_fuzz-1a14c40ede033544) test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s     
+Running tests/perf.rs (target/release/deps/perf-cb2ca779e888d1fb) test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s     
+Running tests/rsa_vectors.rs (target/release/deps/rsa_vectors-adf4c5033eee061d) test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s     
+Running tests/timing.rs (target/release/deps/timing-e1f713e4e2cb269f) test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s     
+Running tests/x25519_vectors.rs (target/release/deps/x25519_vectors-f1757614371146cf) test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s     
+Running unittests src/lib.rs (target/release/deps/rusty_sha2-5fc39f79952dd7d8) test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s     
+Running tests/differential.rs (target/release/deps/differential-627dc10183a1403f) test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s     
+Running tests/known_answers.rs (target/release/deps/known_answers-33197309449f9636) test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s     
+Running tests/timing.rs (target/release/deps/timing-a2e25a52de2c60ac) test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s   
+Doc-tests rusty_aead test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s   
+Doc-tests rusty_crypto_key test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s   
+Doc-tests rusty_ct_check test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s   
+Doc-tests rusty_pk test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s   
+Doc-tests rusty_sha2 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+ignored tests (run below): 27
+
+== lint and format ==
+fmt: clean
+clippy rusty_ct_check (1.98.1): clean
+clippy rusty_sha2 (1.98.1): clean
+clippy rusty_pk (1.98.1): clean
+clippy rusty_aead (1.98.1): FAILED
+!! FAILED: clippy rusty_aead on 1.98.1
+clippy rusty_crypto_key (1.98.1): clean
+clippy rusty_ct_check (stable): clean
+clippy rusty_sha2 (stable): clean
+clippy rusty_pk (stable): clean
+clippy rusty_aead (stable): FAILED
+!! FAILED: clippy rusty_aead on stable
+clippy rusty_crypto_key (stable): clean
+
+== constant-time checks (taint, disassembly budget, planted-leak controls), per compiler ==
+-- toolchain 1.98.1 (rustc 1.98.1 (48a229cea 2026-09-01))
+   ok: taint tool catches planted leaks and passes the clean probe
+   [rusty_ct_check] exit=0
+   taint(all):     0 error(s), want 0
+   taint(control): 1 error(s), want >=1
+   ok   rusty_sha2::sha256::compress: jcc=2 (reviewed 2) div=0
+   ok   rusty_sha2::sha512::compress: jcc=2 (reviewed 2) div=0
+   [rusty_sha2] exit=0
+   taint(seal):    0 error(s), want 0
+   taint(open):    1 error(s), want exactly 1 (the public verdict)
+   taint(control): 1 error(s), want >=1
+   taint(gcm128-seal): 0 error(s), want 0
+   taint(gcm256-seal): 0 error(s), want 0
+   taint(gcm128-open): 1 error(s), want exactly 1 (the public verdict)
+   taint(control-table): 1 error(s), want >=1
+   ok   <rusty_aead::chacha20::ChaCha20>::block: jcc=1 (reviewed 1) div=0
+   ok   <rusty_aead::poly1305::Poly1305>::block: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::sbox: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::shift_rows: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::mix_columns: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::to_planes: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::from_planes: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::sub_word: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::ghash::bmul64: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::ghash::clmul64: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::ghash::gf_mul: jcc=0 (reviewed 0) div=0
+   ok   <rusty_aead::aes::Aes>::encrypt_blocks: jcc=4 (reviewed 4) div=0
+   ok   <rusty_aead::aes::Aes>::expand: jcc=17 (reviewed 17) div=0
+   [rusty_aead] exit=0
+   taint(x25519):  0 error(s), want 0
+   taint(agree):   1 error(s), want exactly 1 (peer small-order verdict)
+   taint(control): 1 error(s), want >=1
+   taint(ecdh256): 3 error(s), want exactly 3 (verdict branches only)
+      report at 0x1200bc in <rusty_pk::ecdh::PrivateKey>::from_bytes
+      report at 0x120531 in <rusty_pk::ecdh::PrivateKey>::public_key
+      report at 0x120cee in <rusty_pk::ecdh::PrivateKey>::agree
+   taint(ecdh384): 3 error(s), want exactly 3 (verdict branches only)
+      report at 0x1200bc in <rusty_pk::ecdh::PrivateKey>::from_bytes
+      report at 0x120531 in <rusty_pk::ecdh::PrivateKey>::public_key
+      report at 0x120cee in <rusty_pk::ecdh::PrivateKey>::agree
+   taint(ecdh-import256): 1 error(s), want exactly 1 (verdict branches only)
+      report at 0x1200bc in <rusty_pk::ecdh::PrivateKey>::from_bytes
+   taint(ecdh-import384): 1 error(s), want exactly 1 (verdict branches only)
+      report at 0x1200bc in <rusty_pk::ecdh::PrivateKey>::from_bytes
+   taint(ecdh-generate256): 1 error(s), want exactly 1 (verdict branches only)
+      report at 0x1200bc in <rusty_pk::ecdh::PrivateKey>::from_bytes
+   taint(ecdh-generate384): 1 error(s), want exactly 1 (verdict branches only)
+      report at 0x1200bc in <rusty_pk::ecdh::PrivateKey>::from_bytes
+   taint(ecdh-control): 3 error(s), want >=3 (verdicts plus the planted branch)
+   ok   rusty_pk::mont::reduce_once: jcc=10 (reviewed 10) div=0
+   ok   <rusty_pk::mont::Modulus>::mul: jcc=17 (reviewed 17) div=0
+   ok   <rusty_pk::mont::Modulus>::add: jcc=6 (reviewed 6) div=0
+   ok   <rusty_pk::field::Field>::sub: jcc=17 (reviewed 17) div=0
+   ok   rusty_pk::x25519::x25519: jcc=9 (reviewed 9) div=0
+   ok   rusty_pk::ecdh::select: jcc=0 (reviewed 0) div=0
+   ok   rusty_pk::ecdh::add: jcc=1 (reviewed 1) div=0
+   ok   rusty_pk::ecdh::double: jcc=1 (reviewed 1) div=0
+   ok   rusty_pk::ecdh::mul: jcc=2 (reviewed 2) div=0
+   [rusty_pk] exit=0
+-- toolchain stable (rustc 1.99.0 (b940084d7 2026-09-28))
+   ok: taint tool catches planted leaks and passes the clean probe
+   [rusty_ct_check] exit=0
+   taint(all):     0 error(s), want 0
+   taint(control): 1 error(s), want >=1
+   ok   rusty_sha2::sha256::compress: jcc=2 (reviewed 2) div=0
+   ok   rusty_sha2::sha512::compress: jcc=2 (reviewed 2) div=0
+   [rusty_sha2] exit=0
+   taint(seal):    0 error(s), want 0
+   taint(open):    1 error(s), want exactly 1 (the public verdict)
+   taint(control): 1 error(s), want >=1
+   taint(gcm128-seal): 0 error(s), want 0
+   taint(gcm256-seal): 0 error(s), want 0
+   taint(gcm128-open): 1 error(s), want exactly 1 (the public verdict)
+   taint(control-table): 1 error(s), want >=1
+   ok   <rusty_aead::chacha20::ChaCha20>::block: jcc=1 (reviewed 1) div=0
+   ok   <rusty_aead::poly1305::Poly1305>::block: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::sbox: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::shift_rows: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::mix_columns: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::to_planes: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::from_planes: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::aes::sub_word: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::ghash::bmul64: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::ghash::clmul64: jcc=0 (reviewed 0) div=0
+   ok   rusty_aead::ghash::gf_mul: jcc=0 (reviewed 0) div=0
+   ok   <rusty_aead::aes::Aes>::encrypt_blocks: jcc=4 (reviewed 4) div=0
+   ok   <rusty_aead::aes::Aes>::expand: jcc=17 (reviewed 17) div=0
+   [rusty_aead] exit=0
+   taint(x25519):  0 error(s), want 0
+   taint(agree):   1 error(s), want exactly 1 (peer small-order verdict)
+   taint(control): 1 error(s), want >=1
+   taint(ecdh256): 3 error(s), want exactly 3 (verdict branches only)
+      report at 0x1211a8 in <rusty_pk::ecdh::PrivateKey>::from_bytes
+      report at 0x1216a1 in <rusty_pk::ecdh::PrivateKey>::public_key
+      report at 0x121e59 in <rusty_pk::ecdh::PrivateKey>::agree
+   taint(ecdh384): 3 error(s), want exactly 3 (verdict branches only)
+      report at 0x1211a8 in <rusty_pk::ecdh::PrivateKey>::from_bytes
+      report at 0x1216a1 in <rusty_pk::ecdh::PrivateKey>::public_key
+      report at 0x121e59 in <rusty_pk::ecdh::PrivateKey>::agree
+   taint(ecdh-import256): 1 error(s), want exactly 1 (verdict branches only)
+      report at 0x1211a8 in <rusty_pk::ecdh::PrivateKey>::from_bytes
+   taint(ecdh-import384): 1 error(s), want exactly 1 (verdict branches only)
+      report at 0x1211a8 in <rusty_pk::ecdh::PrivateKey>::from_bytes
+   taint(ecdh-generate256): 1 error(s), want exactly 1 (verdict branches only)
+      report at 0x1211a8 in <rusty_pk::ecdh::PrivateKey>::from_bytes
+   taint(ecdh-generate384): 1 error(s), want exactly 1 (verdict branches only)
+      report at 0x1211a8 in <rusty_pk::ecdh::PrivateKey>::from_bytes
+   taint(ecdh-control): 3 error(s), want >=3 (verdicts plus the planted branch)
+   ok   rusty_pk::mont::reduce_once: jcc=10 (reviewed 10) div=0
+   ok   <rusty_pk::mont::Modulus>::mul: jcc=17 (reviewed 17) div=0
+   ok   <rusty_pk::mont::Modulus>::add: jcc=6 (reviewed 6) div=0
+   ok   <rusty_pk::field::Field>::sub: jcc=17 (reviewed 17) div=0
+   ok   rusty_pk::x25519::x25519: jcc=9 (reviewed 9) div=0
+   ok   rusty_pk::ecdh::select: jcc=0 (reviewed 0) div=0
+   ok   rusty_pk::ecdh::add: jcc=1 (reviewed 1) div=0
+   ok   rusty_pk::ecdh::double: jcc=1 (reviewed 1) div=0
+   ok   rusty_pk::ecdh::mul: jcc=2 (reviewed 2) div=0
+   [rusty_pk] exit=0
+
+== timing tests: 40 repetitions per test, with A/A (no-leak) baselines ==
+How to read this: each number is |t| from one run (dudect-style Welch t, slowest 5% cropped, fixed
+seed, ignored tests run with --ignored). Threshold 4.5; an alarm is a printed |t| >= 4.5. The A/A tests do identical work in both
+classes, so their spread is this machine's noise: a leak claim needs a clear, repeatable gap above
+the A/A spread, and a pass is only "no leak detected under these conditions". Samples per run:
+rusty_sha2 200000, rusty_aead 100000 (ChaCha20-Poly1305) and 50000 (AES-GCM), rusty_pk 20000 (X25519), 4000 (ECDH P-256) and 2000 (ECDH P-384). Classes are written in each test's comments.
+The tests time only the operation; class-dependent setup is outside the clock and writes into one
+buffer shared by both classes. An earlier version that set up inside the timed region reported
+|t| up to 25 on this same code (see "harness history" in the plan, stage 3/4 notes).
+   test timing::tests::planted_early_exit_is_detected ... ok
+   test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.03s
+planted timing leak: detected (rusty_ct_check timing::tests::planted_early_exit_is_detected passed)
+rusty_sha2: timing test executable /home/user/rusty_mill/target/release/deps/timing-a2e25a52de2c60ac (sha256 0de5467c59a6276c...)
+A/A  HMAC-SHA512 (baseline): n=40 min=0.01 median=0.56 p90=1.75 max=2.58 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.3 1.52 1.04 0.12 1.5 0.13 0.89 0.33 1.43 1.15 0.27 0.62 0.89 0.13 0.15 0.4 0.24 1.27 0.36 2.55 0.86 0.82 0.1 1.21 0.01 2.01 0.43 0.37 0.21 0.2 2.58 1.16 0.62 0.39 1.75 0.68 0.18 0.05 0.56 2.04
+HMAC-SHA512 fixed vs other key: n=40 min=0.03 median=0.95 p90=2.08 max=4.65 at_or_above_4.5=1; runs failing without a threshold crossing: 0
+   raw: 1.0 0.15 1.44 0.78 0.43 1.37 2.32 1.7 2.08 0.73 1.32 0.03 1.62 2.08 1.63 3.75 0.93 0.7 0.95 0.81 0.82 4.65 0.85 0.82 1.63 2.01 0.16 1.3 2.14 1.02 0.23 0.19 0.46 1.42 0.37 0.15 1.15 1.35 0.93 0.22
+HMAC-SHA256 fixed vs other key: n=40 min=0.11 median=0.85 p90=1.87 max=3.08 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.71 3.08 1.48 2.78 1.27 0.26 1.29 0.44 0.84 0.81 1.13 1.75 2.16 0.11 1.25 0.48 0.87 0.61 1.34 0.26 0.46 0.9 0.29 0.82 1.34 0.74 0.85 0.88 0.48 0.45 2.03 1.05 0.82 1.54 0.22 1.61 1.5 0.35 1.87 0.32
+rusty_aead: timing test executable /home/user/rusty_mill/target/release/deps/timing-c16445fb00ff96cb (sha256 65e613b3487dff84...)
+A/A  ChaCha20-Poly1305 seal (baseline): n=40 min=0.0 median=0.78 p90=1.91 max=3.06 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.32 0.37 0.83 1.3 1.45 0.06 1.36 0.51 1.35 3.06 0.99 0.15 0.52 1.82 1.84 0.92 1.91 0.63 0.26 0.53 1.18 0.36 0.43 2.46 0.0 1.23 0.44 0.07 1.44 1.41 0.27 0.46 0.8 0.75 0.65 0.57 1.3 2.51 0.78 1.92
+seal: fixed vs other key: n=40 min=0.03 median=0.45 p90=2.17 max=3.45 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.03 0.15 0.45 0.28 0.34 0.63 0.23 0.71 2.21 0.6 1.97 0.07 0.17 0.52 3.45 1.66 0.11 2.17 0.59 0.7 2.01 0.17 0.03 2.25 0.27 1.14 0.1 1.01 0.65 2.37 0.03 0.05 0.27 0.11 0.76 0.65 0.18 0.34 0.24 1.28
+seal: all-zero vs all-ones plaintext: n=40 min=0.0 median=0.84 p90=2.1 max=3.21 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.64 1.44 0.84 0.38 0.95 0.18 0.46 2.89 0.6 0.67 1.49 0.29 1.44 0.06 0.01 1.15 0.03 3.21 0.14 0.33 2.15 1.21 1.63 0.84 0.09 2.42 1.02 1.14 2.1 1.02 1.19 0.71 1.7 0.41 0.47 0.9 0.0 0.62 0.06 1.27
+open: first-byte vs last-byte tag mismatch: n=40 min=0.01 median=0.79 p90=2.6 max=4.42 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.32 0.79 0.87 0.07 0.3 0.31 1.76 2.22 0.68 0.99 1.46 2.84 0.56 1.82 0.09 2.05 0.35 0.71 0.09 1.52 1.02 1.51 1.54 2.7 0.65 1.02 0.58 0.31 1.11 0.01 0.84 4.42 0.28 0.99 0.72 3.51 0.4 0.55 2.6 0.6
+A/A  AES-128-GCM seal (baseline): n=40 min=0.0 median=0.86 p90=1.75 max=3.18 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.27 0.0 1.15 0.88 0.02 1.02 0.85 0.92 0.45 0.75 2.34 0.19 0.65 0.39 0.6 1.17 0.27 0.86 0.46 2.64 1.75 1.22 1.12 1.92 1.05 1.0 0.16 0.87 1.19 0.23 1.21 0.14 0.41 0.21 1.18 0.9 3.18 0.02 0.33 1.24
+aes-128-gcm seal: fixed vs other key: n=40 min=0.02 median=0.61 p90=1.41 max=2.48 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 1.04 1.32 2.0 0.02 1.17 0.68 0.13 0.86 0.45 0.13 0.11 0.9 0.32 1.54 0.37 0.57 0.58 0.19 0.11 0.04 0.72 0.6 0.35 0.88 0.13 0.93 1.38 1.41 0.64 2.48 1.02 0.61 0.35 0.42 1.01 0.08 0.35 0.86 2.13 0.79
+aes-256-gcm seal: fixed vs other key: n=40 min=0.02 median=0.73 p90=1.87 max=3.0 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 1.57 1.61 0.14 0.04 1.87 1.17 2.19 0.53 0.35 0.45 1.23 2.14 3.0 0.2 1.32 0.13 1.79 0.29 1.3 0.16 0.37 0.53 2.52 1.49 0.68 0.35 0.02 1.32 0.13 0.9 0.98 1.04 0.27 0.73 0.36 1.6 0.2 0.79 1.54 0.36
+aes-128-gcm seal: all-zero vs all-ones plaintext: n=40 min=0.05 median=0.96 p90=2.07 max=4.54 at_or_above_4.5=1; runs failing without a threshold crossing: 0
+   raw: 0.34 0.94 2.18 0.43 0.45 2.48 0.09 0.05 0.05 0.65 2.07 0.19 0.4 1.07 0.69 1.22 1.23 0.28 1.56 1.63 0.97 0.99 0.17 4.54 0.33 0.63 1.07 2.37 1.74 0.68 0.29 0.97 1.8 0.45 0.11 1.72 0.96 1.73 1.78 1.77
+aes-128-gcm open: first-byte vs last-byte tag mismatch: n=40 min=0.05 median=0.82 p90=2.15 max=4.36 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 2.15 0.35 4.36 1.29 1.02 0.61 0.59 0.72 0.82 0.68 0.42 1.13 0.18 0.75 1.12 0.98 1.41 0.72 1.64 1.74 0.23 1.73 0.05 1.94 2.32 0.76 1.16 1.54 0.5 1.51 2.33 2.78 2.06 0.57 0.37 2.04 0.79 0.42 0.65 0.05
+rusty_pk: timing test executable /home/user/rusty_mill/target/release/deps/timing-e1f713e4e2cb269f (sha256 723ced2fb6997a59...)
+A/A  X25519 (baseline): n=40 min=0.02 median=1.0 p90=2.68 max=3.42 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 2.68 0.66 0.81 0.31 3.14 1.0 0.86 1.55 2.34 0.22 0.66 1.7 0.64 0.97 1.34 1.63 2.02 0.65 0.29 0.07 1.64 1.57 0.7 1.14 3.42 0.54 0.64 2.28 0.73 3.31 0.02 2.2 1.9 1.64 1.26 3.34 0.45 1.12 0.6 0.97
+x25519: sparse vs dense scalar: n=40 min=0.05 median=0.89 p90=1.67 max=2.8 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.56 0.31 0.91 1.36 0.45 1.45 0.46 0.22 0.92 0.4 2.8 0.9 1.55 0.98 0.47 0.26 0.18 1.58 1.62 2.22 0.05 0.06 1.13 1.67 0.89 0.1 1.59 2.77 1.73 0.76 0.11 0.83 1.46 0.11 1.65 0.77 0.05 1.56 0.91 0.32
+x25519: fixed vs other scalar: n=40 min=0.03 median=0.81 p90=2.33 max=3.34 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.88 0.81 0.99 0.13 0.32 1.1 1.57 0.37 1.32 2.78 0.03 0.13 0.99 1.88 0.07 2.28 1.24 0.43 2.33 0.25 0.53 0.04 0.68 1.28 1.44 2.7 0.3 0.23 0.05 3.34 0.9 1.28 1.28 2.21 0.13 2.68 0.74 0.28 0.79 0.12
+A/A  ECDH P-256 agree (baseline): n=40 min=0.09 median=0.94 p90=2.1 max=2.31 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 1.79 2.31 0.94 0.2 1.51 0.69 0.67 0.87 1.33 1.24 1.47 1.33 0.94 1.05 0.51 0.55 0.36 1.7 2.1 2.1 0.09 0.35 1.04 2.2 0.78 1.06 0.36 0.25 0.28 0.43 0.39 0.99 1.15 1.24 0.13 0.33 1.74 2.25 1.23 0.82
+ecdh p256: sparse vs dense scalar: n=40 min=0.02 median=0.88 p90=2.2 max=2.81 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 1.9 0.54 0.71 1.76 0.76 0.4 0.25 2.81 0.22 1.93 0.42 0.26 2.14 0.25 2.47 1.86 0.48 0.88 1.53 1.78 0.19 1.12 1.55 0.6 0.88 0.7 1.15 1.2 0.76 2.2 0.18 2.76 2.26 0.55 0.97 0.71 0.97 1.28 0.02 0.38
+A/A  ECDH P-384 agree (baseline): n=40 min=0.01 median=0.79 p90=1.99 max=2.94 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.51 1.1 0.01 0.76 2.66 0.95 0.78 1.74 0.13 0.73 1.18 0.41 0.62 0.19 1.67 2.13 0.63 1.4 1.22 1.99 1.58 0.43 0.04 1.3 0.71 2.09 1.69 1.36 0.8 2.94 0.28 0.08 1.41 0.82 0.05 0.56 0.79 0.91 0.49 0.62
+ecdh p384: sparse vs dense scalar: n=40 min=0.04 median=0.77 p90=1.86 max=2.62 at_or_above_4.5=0; runs failing without a threshold crossing: 0
+   raw: 0.93 1.86 0.66 0.4 1.55 1.91 0.87 2.27 0.96 0.12 0.77 0.09 0.05 0.1 0.14 1.19 1.6 0.13 1.14 0.04 0.06 1.14 0.77 2.62 0.89 1.31 1.91 0.55 0.43 0.76 1.08 0.83 1.3 0.26 0.44 1.44 0.76 0.52 1.14 0.38
+collector self-test test_timing_series.py: passed
+collector self-test test_check_manifests.py: passed
+collector self-test test_planted_leak.py: passed
+taint_lib self-test: passed
+disasm_audit self-test: passed
+verdict_sites self-test: passed
+
+== speed, one run each (not benchmarks) ==
+ecdh p256 agree        ours   1048.4 us   ring    73.0 us    14.4x
+RSA-2048 PKCS1 SHA256  ours    119.7 us   ring    35.2 us     3.4x
+ecdh p384 agree        ours   2339.9 us   ring   378.5 us     6.2x
+RSA-3072 PKCS1 SHA256  ours    236.4 us   ring    56.0 us     4.2x
+RSA-4096 PKCS1 SHA256  ours    331.7 us   ring    99.1 us     3.3x
+X25519 keygen+agree    ours    617.1 us   ring    71.8 us     8.6x
+ECDSA P-256 SHA256     ours    589.9 us   ring    72.9 us     8.1x
+ECDSA P-384 SHA384     ours   1418.8 us   ring   834.1 us     1.7x
+Ed25519                ours    545.4 us   ring    68.8 us     7.9x
+     1024 B: ours    274 MB/s   ring   1264 MB/s   4.6x slower
+    16384 B: ours    330 MB/s   ring   1765 MB/s   5.4x slower
+ 16777216 B: ours    309 MB/s   ring   1755 MB/s   5.7x slower
+AES-128-GCM        64 B: rusty_aead      35.8 MB/s  ring     799.9 MB/s  ratio 22x
+AES-128-GCM      1024 B: rusty_aead      62.1 MB/s  ring    5366.4 MB/s  ratio 86x
+AES-128-GCM     16384 B: rusty_aead      69.0 MB/s  ring    6087.6 MB/s  ratio 88x
+AES-128-GCM  16777216 B: rusty_aead      61.8 MB/s  ring    8103.7 MB/s  ratio 131x
+AES-256-GCM        64 B: rusty_aead      30.3 MB/s  ring     725.4 MB/s  ratio 24x
+AES-256-GCM      1024 B: rusty_aead      50.3 MB/s  ring    4394.9 MB/s  ratio 87x
+AES-256-GCM     16384 B: rusty_aead      56.7 MB/s  ring    7411.5 MB/s  ratio 131x
+AES-256-GCM  16777216 B: rusty_aead      58.5 MB/s  ring    7216.9 MB/s  ratio 123x
+
+RESULT: FAILED, see the !! lines above
+end of record

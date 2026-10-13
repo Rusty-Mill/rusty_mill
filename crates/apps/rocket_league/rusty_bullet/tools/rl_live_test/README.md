@@ -28,9 +28,11 @@ Findings from the first runs: [`RL-LIVE-TEST-2026-10-12.md`](../../docs/research
    `--census-in/--census-out` and `rb_rl_demo_count`, and writes `report.txt` next to the
    recordings in `%TEMP%\rl-auto-<stamp>`.
 
-`report.txt` replaces the human's display name with "human" and the bots with "bot_a"/"bot_b". The
-recordings and screenshots are **not** scrubbed: they hold the display name, so scrub them before
-sharing.
+`report.txt` holds no display name: the analysis is made with `rb_rl_game_probe --analyze
+--no-names` (players are actor ids and teams, so nothing depends on a pattern matching), and a
+second pass still replaces any name that is not a bot's with "human" and the bots with
+"bot_a"/"bot_b". The recordings and screenshots are **not** scrubbed: they hold the display name,
+so scrub them before sharing.
 
 ## Limits
 
