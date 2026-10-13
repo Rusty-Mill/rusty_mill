@@ -1520,6 +1520,7 @@ fn fire_deadlines(w: &mut Work, now: Time) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
