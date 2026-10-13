@@ -1,0 +1,40 @@
+ECDH P-256 sparse-vs-dense: does |t| grow with the sample count? (diagnostic, NOT a full collect.sh record)
+============================================================================================================
+Why: the second full AES-GCM record (EVIDENCE-2026-10-10-aes-gcm-run2-FAILED.txt) failed on this one test,
+2 alarms of 40 (|t| 4.98 and 5.19) against an allowance of 1 (A/A baseline 0). A real timing difference grows
+with the square root of the sample count; noise does not. So the same test was run at four sample counts.
+
+Protocol (declared before running, all results reported, no resampling): same classes and key-slot method as
+rusty_pk/tests/timing.rs (sparse scalar 0x01.. vs dense 0x7f/0xff.., class chosen in untimed prepare), P-256
+only, fixed seeds 11 (leak test) and 13 (A/A, identical classes), one run per sample count, n = 4,000 (the size
+used in the records), 16,000, 64,000 and 256,000. Run from a temporary test file that was deleted afterwards,
+not committed. Idle machine (the collector had just finished), commit 82dd3177, rustc 1.98.1, Xeon @ 2.10 GHz
+VM, 4 cores. The threshold (4.5) and the allowance rule are unchanged.
+
+Results (|t|):
+  n =   4,000   sparse-vs-dense  0.77   A/A  0.78
+  n =  16,000   sparse-vs-dense  0.38   A/A  2.44
+  n =  64,000   sparse-vs-dense  0.41   A/A  1.14
+  n = 256,000   sparse-vs-dense  0.63   A/A  0.24
+
+Reading (evidence, not proof). |t| did not grow: 0.63 at 256,000 samples against 0.77 at 4,000. A stable
+difference large enough to give |t| near 5 at 4,000 samples would give roughly 40 at 256,000. So the 4.98 and
+5.19 in the record look like noise spikes on a shared VM, not a stable timing difference of that size. This is
+one run per size, so it does not exclude a much smaller difference, and it does not prove constant time.
+
+Full tally of the ECDH P-256 sparse-vs-dense series (40 repetitions each, threshold 4.5), every record so far:
+  record                                        leak-test max  alarms   leak median   A/A max  A/A alarms  A/A median
+  2026-10-09 ecdh-run1-FAILED                        4.31         0         1.21         2.67       0          0.66
+  2026-10-09 ecdh-run2                               4.83         1         1.09         3.31       0          0.66
+  2026-10-10 aes-gcm-run1-FAILED                     2.81         0         0.88         2.31       0          0.94
+  2026-10-10 quiet rerun, series 1                   4.43         0         0.77         3.05       0          0.71
+  2026-10-10 quiet rerun, series 2                   3.12         0         0.87         3.50       0          0.47
+  2026-10-10 aes-gcm-run2-FAILED                     5.19         2         0.93         3.70       0          0.73
+  total                                                           3 of 240                          0 of 240
+Two cautions on that table. The leak-test median is above the A/A median in five of six series (the median of
+|t| for pure noise is about 0.67), a mild and consistent excess that the scaling run does not reproduce at large
+n. And the two ECDH records of 2026-10-09 were produced before the substring-filter fix
+(ERRATUM-2026-10-10-timing-test-filter.txt); the P-256 rows in them came from specs that matched exactly one
+test and are not affected.
+
+Status: the watch item stays open. Nothing here changes the code, the threshold or the allowance rule.

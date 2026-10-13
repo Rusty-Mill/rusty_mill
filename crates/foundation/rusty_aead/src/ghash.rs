@@ -9,6 +9,7 @@
 //! design, not as something this code establishes.
 
 /// Low 64 bits of the carry-less product of `x` and `y`.
+#[inline(never)]
 fn bmul64(x: u64, y: u64) -> u64 {
     const M: [u64; 4] = [
         0x1111_1111_1111_1111,
@@ -27,6 +28,7 @@ fn bmul64(x: u64, y: u64) -> u64 {
 
 /// The full 128-bit carry-less product. The high half comes from the low half of the product
 /// of the bit-reversed operands: reversing within 64 bits maps product bit `k` to `126 - k`.
+#[inline(never)]
 fn clmul64(a: u64, b: u64) -> u128 {
     let lo = bmul64(a, b);
     let hi = bmul64(a.reverse_bits(), b.reverse_bits()).reverse_bits() >> 1;
@@ -36,6 +38,7 @@ fn clmul64(a: u64, b: u64) -> u128 {
 /// Multiplication in GF(2^128) as GCM defines it. `a` and `b` are blocks read big-endian: the
 /// most significant bit is the coefficient of x^0, so reversing the bits gives ordinary
 /// polynomials (bit `i` is the coefficient of x^i), and the result is reversed back.
+#[inline(never)]
 pub(crate) fn gf_mul(a: u128, b: u128) -> u128 {
     let (a, b) = (a.reverse_bits(), b.reverse_bits());
     let (al, ah, bl, bh) = (a as u64, (a >> 64) as u64, b as u64, (b >> 64) as u64);
@@ -55,6 +58,7 @@ pub(crate) fn gf_mul(a: u128, b: u128) -> u128 {
 
 /// GHASH under hash key `h` over `aad` and `ct`, each zero-padded to 16 bytes, followed by the
 /// 64-bit bit lengths of both. Lengths are public.
+#[inline(never)]
 pub(crate) fn ghash(h: u128, aad: &[u8], ct: &[u8]) -> u128 {
     let mut y = 0u128;
     for part in [aad, ct] {
@@ -116,5 +120,35 @@ mod tests {
             let (a, b) = (next(), next());
             assert_eq!(gf_mul(a, b), gf_mul_ref(a, b), "{a:#x} * {b:#x}");
         }
+    }
+
+    /// GHASH throughput on its own. Ignored; run with
+    /// `cargo test -p rusty_aead --release --lib -- --ignored --nocapture profile`.
+    #[test]
+    #[ignore = "timing; run manually"]
+    fn profile_ghash() {
+        use core::hint::black_box;
+        use std::time::Instant;
+        let data = std::vec![0xa5u8; 16 << 20];
+        let h = 0x66e9_4bd4_ef8a_2c3b_0123_4567_89ab_cdefu128;
+        let best = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                black_box(ghash(black_box(h), b"", black_box(&data)));
+                data.len() as f64 / t.elapsed().as_secs_f64() / 1e6
+            })
+            .fold(0.0, f64::max);
+        let mul_ns = (0..5)
+            .map(|_| {
+                let mut x = 1u128;
+                let t = Instant::now();
+                for _ in 0..1_000_000 {
+                    x = gf_mul(black_box(x) ^ 0xdead_beef, h);
+                }
+                black_box(x);
+                t.elapsed().as_nanos() as f64 / 1e6
+            })
+            .fold(f64::MAX, f64::min);
+        std::eprintln!("GHASH over 16 MiB: {best:.1} MB/s; one gf_mul: {mul_ns:.1} ns");
     }
 }

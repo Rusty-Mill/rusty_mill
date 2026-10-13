@@ -1672,7 +1672,7 @@ jobs:
         run: sh crates/foundation/rusty_ct_check/scripts/valgrind_selftest.sh
       - name: rusty_sha2 (HMAC / HKDF keys)
         run: sh crates/foundation/rusty_sha2/scripts/ct_check.sh
-      - name: rusty_aead (ChaCha20-Poly1305)
+      - name: rusty_aead (ChaCha20-Poly1305, AES-GCM)
         run: sh crates/foundation/rusty_aead/scripts/ct_check.sh
       - name: rusty_pk (X25519, ECDH P-256/P-384, shared Montgomery core)
         run: sh crates/foundation/rusty_pk/scripts/ct_check.sh
