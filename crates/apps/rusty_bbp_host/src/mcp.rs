@@ -389,9 +389,13 @@ impl Server {
             .token_for(&self.binding.principal, self.binding.turn)
     }
 
-    /// True while this process's turn is the live one.
+    /// True while this process's turn is live.
     fn turn_live(&self) -> bool {
-        self.driver.state.turn().map(|t| t.id) == Some(self.binding.turn)
+        self.driver
+            .state
+            .turns
+            .iter()
+            .any(|t| t.id == self.binding.turn)
     }
 
     /// True when this principal already had `op` accepted. Its exact replay
