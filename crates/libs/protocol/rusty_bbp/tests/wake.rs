@@ -39,7 +39,7 @@ fn message(id: u64, from: Option<&str>, to: Recipient, kind: MessageKind) -> Eve
     draft.to = vec![to];
     Event::MessageAppended(Message {
         id: MsgId(id),
-        from: from.map_or(PrincipalId("human".into()), |r| pid(r)),
+        from: from.map_or(PrincipalId("human".into()), pid),
         from_role: from.map(RoleId::from),
         draft,
     })
