@@ -588,6 +588,14 @@ fn a_connection_flood_does_not_starve_an_admitted_bot_or_the_stop() {
 struct Gate {
     sim: Simulation,
     ready: Arc<std::sync::atomic::AtomicBool>,
+    /// What `ready()` reports: the flag as it was at the last poll, as a real game's readiness
+    /// only changes when its messages are read, never between a poll and the check after it.
+    shown: bool,
+    /// While not ready, produce no packet at all (a game with no cars yields none), instead of
+    /// packets that are merely not shown.
+    idle_when_unready: bool,
+    /// While set, produce no packet even when ready (ready, but nothing to show yet).
+    idle: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl rb_rlbot_core::MatchBackend for Gate {
@@ -598,7 +606,7 @@ impl rb_rlbot_core::MatchBackend for Gate {
         self.sim.field_info()
     }
     fn ready(&self) -> bool {
-        self.ready.load(std::sync::atomic::Ordering::Relaxed)
+        self.shown
     }
     fn self_paced(&self) -> bool {
         true
@@ -607,6 +615,13 @@ impl rb_rlbot_core::MatchBackend for Gate {
         Err(std::io::ErrorKind::Unsupported.into())
     }
     fn poll(&mut self) -> std::io::Result<rb_rlbot_core::Poll> {
+        self.shown = self.ready.load(std::sync::atomic::Ordering::Relaxed);
+        if (self.idle_when_unready && !self.shown)
+            || self.idle.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            thread::sleep(Duration::from_millis(2));
+            return Ok(rb_rlbot_core::Poll::Idle);
+        }
         self.sim.step();
         // Do not spin: a real game takes a few milliseconds between packets.
         thread::sleep(Duration::from_millis(2));
@@ -641,8 +656,18 @@ fn a_backend_that_stops_being_ready_is_not_broadcast_until_it_is_again() {
             ..MatchConfiguration::default()
         })
         .unwrap();
-        let mut core =
-            Core::bind("127.0.0.1:0", Gate { sim, ready: gate }, Pacing::RealTime).unwrap();
+        let mut core = Core::bind(
+            "127.0.0.1:0",
+            Gate {
+                sim,
+                ready: gate,
+                shown: true,
+                idle_when_unready: false,
+                idle: Arc::new(AtomicBool::new(false)),
+            },
+            Pacing::RealTime,
+        )
+        .unwrap();
         tx.send(core.local_addr().unwrap()).unwrap();
         core.run(&AtomicBool::new(false), |e| sink.lock().unwrap().push(e))
             .unwrap()
@@ -698,4 +723,99 @@ fn a_backend_that_stops_being_ready_is_not_broadcast_until_it_is_again() {
         .cloned()
         .collect();
     assert_eq!(seen, [Event::BroadcastHeld, Event::BroadcastResumed]);
+}
+
+/// A game that has lost its bots' cars yields no packets at all while it has none. The hold must
+/// still be reported (the quiet bots are otherwise unexplained), and the resume only once a
+/// packet is really broadcast.
+#[test]
+fn a_hold_is_reported_even_when_the_backend_polls_no_packets() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let ready = Arc::new(AtomicBool::new(true));
+    let gate = Arc::clone(&ready);
+    let idle = Arc::new(AtomicBool::new(false));
+    let idle_flag = Arc::clone(&idle);
+    let (tx, rx) = mpsc::channel();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let core = thread::spawn(move || {
+        let sim = Simulation::new(MatchConfiguration {
+            player_configurations: vec![bot("test/bot", 0, 0)],
+            ..MatchConfiguration::default()
+        })
+        .unwrap();
+        let backend = Gate {
+            sim,
+            ready: gate,
+            shown: true,
+            idle_when_unready: true,
+            idle: idle_flag,
+        };
+        let mut core = Core::bind("127.0.0.1:0", backend, Pacing::RealTime).unwrap();
+        tx.send(core.local_addr().unwrap()).unwrap();
+        core.run(&AtomicBool::new(false), |e| sink.lock().unwrap().push(e))
+            .unwrap()
+    });
+    let mut connection = Connection::connect(rx.recv().unwrap()).unwrap();
+    connection.handshake(settings("test/bot")).unwrap();
+    connection.send(InitComplete).unwrap();
+    let held = |events: &Arc<Mutex<Vec<Event>>>| {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, Event::BroadcastHeld | Event::BroadcastResumed))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let wait_for = |want: usize| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while held(&events).len() < want {
+            assert!(std::time::Instant::now() < deadline, "{:?}", held(&events));
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+    // Packets flow while it is ready (bounded: fail rather than wait for ever).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no packet while the backend was ready"
+        );
+        if let Some(CoreMessage::GamePacket(_)) =
+            connection.recv_timeout(Duration::from_secs(1)).unwrap()
+        {
+            break;
+        }
+    }
+    assert!(held(&events).is_empty());
+
+    ready.store(false, Ordering::Relaxed);
+    wait_for(1);
+    assert_eq!(held(&events), [Event::BroadcastHeld]);
+    // Still nothing resumed while it stays unready.
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(held(&events), [Event::BroadcastHeld]);
+
+    // Ready again but still nothing to show: the hold stays latched, nothing is resumed.
+    idle.store(true, Ordering::Relaxed);
+    ready.store(true, Ordering::Relaxed);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(held(&events), [Event::BroadcastHeld]);
+
+    // Resumed comes with the first real broadcast.
+    idle.store(false, Ordering::Relaxed);
+    wait_for(2);
+    assert_eq!(
+        held(&events),
+        [Event::BroadcastHeld, Event::BroadcastResumed]
+    );
+
+    connection
+        .send(StopCommand {
+            shutdown_server: true,
+        })
+        .unwrap();
+    assert!(matches!(core.join().unwrap(), RunEnd::StopCommand { .. }));
 }
