@@ -698,10 +698,12 @@ question is not decided by a pull request that merely wires it.
    crate's build use the engine.
 6. **Known divergences from webpki are resolved first.** `anyExtendedKeyUsage` was
    aligned with webpki on 2026-10-12, and the name-constraint cases (`nc-dos-1`,
-   `nc-dos-2`) are bounded by a comparison budget as of 2026-10-13. The remaining cases
-   where the engine accepts and webpki refuses (`tests/data/limbo_divergences.txt`,
-   `looser` lines) and any divergence found later are blockers until each is resolved or
-   accepted by the owner in writing; limbo expecting success is not that acceptance.
+   `nc-dos-2`) are bounded by a comparison budget as of 2026-10-13. The two remaining
+   cases where the engine accepts and webpki refuses (`pathlen::self-issued-certs-pathlen`,
+   `rfc5280::nc::permitted-self-issued`) follow RFC 5280 §6.1.4 and are recorded as
+   exceptions in `TLS-EVIDENCE-BAR.md`, pending the owner's direct confirmation. Any
+   divergence found later is a blocker until resolved or accepted by the owner in writing;
+   limbo expecting success is not that acceptance.
 
 **What this does not do.**
 
