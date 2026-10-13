@@ -6,7 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
-use crate::domain::{Actor, BoardError, Capability, Card, Column, Event, EventKind};
+use crate::domain::{
+    Actor, BoardError, Capability, Card, Column, Event, EventKind, WORK_QUEUES, actionable,
+    entry_column,
+};
 use crate::store::Store;
 
 /// Attempts per operation when another writer wins the revision race.
@@ -156,6 +159,52 @@ impl<S: Store> Board<S> {
     /// If the card is missing or on storage failure.
     pub fn link_issue(&self, id: Uuid, issue: u64, by: &Actor) -> Result<Card, BoardError> {
         self.apply(id, by, EventKind::Linked, |c, now| Ok(c.link(issue, now)))
+    }
+
+    /// Pull work: the next card this actor can act on, entered (Ready ->
+    /// Building) and claimed. With `id`, that card or an error. Cards nearest
+    /// Done come first, then oldest. Cards claimed by someone else are
+    /// skipped; the actor's own claims are resumed. `Ok(None)` when nothing
+    /// is waiting for them.
+    ///
+    /// # Errors
+    /// On storage failure, or (with `id`) whatever refused that card.
+    pub fn take(&self, by: &Actor, id: Option<Uuid>) -> Result<Option<Card>, BoardError> {
+        let rank = |c: &Card| WORK_QUEUES.iter().position(|q| *q == c.column);
+        let mut candidates: Vec<Card> = self
+            .store
+            .list()?
+            .into_iter()
+            .filter(|c| id.is_none_or(|i| c.id == i))
+            .filter(|c| rank(c).is_some() && actionable(c.column, &by.caps))
+            .filter(|c| id.is_some() || c.claim.as_deref().is_none_or(|h| h == by.name))
+            .collect();
+        candidates.sort_by_key(|c| (rank(c), c.created_ms));
+        for card in candidates {
+            match self.enter_and_claim(card, by) {
+                Ok(card) => return Ok(Some(card)),
+                // Another worker won the race for this one: try the next.
+                Err(
+                    BoardError::Conflict | BoardError::Claimed(_) | BoardError::NoSuchMove { .. },
+                ) if id.is_none() => {}
+                Err(e) => return Err(e),
+            }
+        }
+        match id {
+            Some(i) => Err(BoardError::NotFound(i)),
+            None => Ok(None),
+        }
+    }
+
+    fn enter_and_claim(&self, mut card: Card, by: &Actor) -> Result<Card, BoardError> {
+        // Refuse before moving anything: a claimed card must not be half-taken.
+        if let Some(holder) = card.claim.as_ref().filter(|h| **h != by.name) {
+            return Err(BoardError::Claimed(holder.clone()));
+        }
+        if let Some(enter) = entry_column(card.column) {
+            card = self.move_card(card.id, enter, by)?;
+        }
+        self.claim(card.id, by)
     }
 
     /// Apply `op` to the card and commit, re-reading on conflict.

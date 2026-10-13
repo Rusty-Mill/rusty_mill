@@ -6,13 +6,31 @@ use std::sync::Arc;
 use rusty_crypto_key::constant_time_eq;
 use rusty_http::{Method, StatusCode};
 use rusty_mcp_server::HttpHandler;
+use rusty_mcp_server::json::Value as WireValue;
 use rusty_serve::{Request, Response, SharedHandler};
 use serde_json::{Value, json};
 
-use crate::api::{CallError, Op, Shared};
+use crate::api::{CallError, Identity, Op, Shared};
 use crate::domain::BoardError;
+use crate::identities::Credentials;
 
 const UI: &str = include_str!("ui.html");
+
+/// How callers of `/api` and `/mcp` are authenticated.
+pub enum Auth {
+    /// No credential required (loopback use).
+    Open,
+    /// One shared bearer token; callers state their own actor and role.
+    Shared(String),
+    /// A token per model, each bound to an actor and role.
+    Credentials(Credentials),
+}
+
+impl From<Option<&str>> for Auth {
+    fn from(token: Option<&str>) -> Self {
+        token.map_or(Self::Open, |t| Self::Shared(t.to_owned()))
+    }
+}
 
 /// The combined handler.
 pub struct Web {
@@ -21,18 +39,18 @@ pub struct Web {
     mcp: HttpHandler,
     mcp_path: String,
     hosts: Vec<String>,
-    token: Option<String>,
+    auth: Auth,
 }
 
 impl Web {
-    /// `hosts` are accepted `Host` values (port ignored); `token`, if set,
-    /// is required as a bearer on `/api/*` and `/mcp`.
+    /// `hosts` are accepted `Host` values (port ignored); `auth` governs
+    /// `/api/*` and `/mcp`.
     pub fn new(
         board: Arc<Shared>,
         mcp: HttpHandler,
         mcp_path: String,
         hosts: Vec<String>,
-        token: Option<String>,
+        auth: Auth,
     ) -> Self {
         Self {
             board,
@@ -40,7 +58,7 @@ impl Web {
             mcp,
             mcp_path,
             hosts,
-            token,
+            auth,
         }
     }
 
@@ -55,17 +73,26 @@ impl Web {
         self.hosts.iter().any(|h| h == name)
     }
 
-    fn authorized(&self, request: &Request<'_>) -> bool {
-        let Some(expected) = &self.token else {
-            return true;
-        };
-        request
+    /// `Err` when the request must be refused; `Ok(None)` when no identity applies.
+    fn identify(&self, request: &Request<'_>) -> Result<Option<Identity>, ()> {
+        let presented = request
             .authorization
-            .and_then(rusty_oauth::bearer::token_from_authorization)
-            .is_some_and(|got| constant_time_eq(got.as_bytes(), expected.as_bytes()))
+            .and_then(rusty_oauth::bearer::token_from_authorization);
+        match &self.auth {
+            Auth::Open => Ok(None),
+            Auth::Shared(expected) => presented
+                .filter(|got| constant_time_eq(got.as_bytes(), expected.as_bytes()))
+                .map(|_| None)
+                .ok_or(()),
+            Auth::Credentials(all) => presented
+                .and_then(|got| all.identify(got))
+                .cloned()
+                .map(Some)
+                .ok_or(()),
+        }
     }
 
-    fn api(&self, name: &str, request: &Request<'_>) -> Response {
+    fn api(&self, name: &str, identity: Option<&Identity>, request: &Request<'_>) -> Response {
         let json_body = request
             .headers
             .get("content-type")
@@ -80,12 +107,17 @@ impl Web {
             return reply(StatusCode::NOT_FOUND, json!({"error": "no such operation"}));
         };
         let args: Value = serde_json::from_slice(request.body).unwrap_or(Value::Null);
-        match op.call(&self.board, args) {
+        match op.call(&self.board, identity, args) {
             Ok(out) => reply(StatusCode::OK, out),
             Err(CallError::BadArgs(why)) => reply(StatusCode::BAD_REQUEST, json!({"error": why})),
             Err(CallError::Board(e)) => reply(status_of(&e), json!({"error": e.to_string()})),
         }
     }
+}
+
+/// The identity as the MCP layer's principal, which tools read from the call context.
+fn principal(identity: &Identity) -> Option<WireValue> {
+    WireValue::from_json_str(&serde_json::to_string(identity).ok()?).ok()
 }
 
 fn status_of(e: &BoardError) -> StatusCode {
@@ -108,10 +140,11 @@ impl SharedHandler for Web {
     fn handle(&self, request: &Request<'_>) -> Response {
         let path = request.target.split('?').next().unwrap_or("");
         if path == self.mcp_path {
-            return if self.authorized(request) {
-                self.mcp.handle(request)
-            } else {
-                reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}))
+            return match self.identify(request) {
+                Ok(identity) => self
+                    .mcp
+                    .handle_with(request, identity.and_then(|i| principal(&i))),
+                Err(()) => reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"})),
             };
         }
         if !self.host_ok(request) {
@@ -127,9 +160,9 @@ impl SharedHandler for Web {
         let Some(name) = path.strip_prefix("/api/") else {
             return reply(StatusCode::NOT_FOUND, json!({"error": "not found"}));
         };
-        if !self.authorized(request) {
-            return reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
+        match self.identify(request) {
+            Ok(identity) => self.api(name, identity.as_ref(), request),
+            Err(()) => reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"})),
         }
-        self.api(name, request)
     }
 }

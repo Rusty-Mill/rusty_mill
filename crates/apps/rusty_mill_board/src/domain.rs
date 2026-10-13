@@ -88,6 +88,25 @@ pub fn required_capability(from: Column, to: Column) -> Result<Option<Capability
     }
 }
 
+/// Columns where work is picked up, in the order a worker should look:
+/// finish what is nearest Done first.
+pub const WORK_QUEUES: [Column; 4] = [Column::Review, Column::Qa, Column::Building, Column::Ready];
+
+/// The column a worker moves a card into before working it, if it waits in a
+/// pure queue (Ready) rather than a working column.
+pub fn entry_column(column: Column) -> Option<Column> {
+    (column == Column::Ready).then_some(Column::Building)
+}
+
+/// Whether someone holding `caps` can move a card forward out of `column`
+/// (the test for "this card is for my role").
+pub fn actionable(column: Column, caps: &BTreeSet<Capability>) -> bool {
+    Column::ALL.iter().any(|to| {
+        *to != Column::Blocked
+            && matches!(required_capability(column, *to), Ok(Some(cap)) if caps.contains(&cap))
+    })
+}
+
 /// A note on a card.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
@@ -466,6 +485,22 @@ mod tests {
         );
         assert_eq!(c.release(&other, 2), Err(BoardError::Claimed("dev".into())));
         assert!(c.release(&dev, 2).expect("release").claim.is_none());
+    }
+
+    #[test]
+    fn actionable_follows_the_transition_table() {
+        let caps = |c: &[Capability]| c.iter().copied().collect::<BTreeSet<_>>();
+        let builder = caps(&[Capability::Build]);
+        assert!(actionable(Column::Ready, &builder) && actionable(Column::Building, &builder));
+        assert!(!actionable(Column::Qa, &builder) && !actionable(Column::Review, &builder));
+        let reviewer = caps(&[Capability::Review, Capability::Merge]);
+        assert!(actionable(Column::Review, &reviewer) && !actionable(Column::Ready, &reviewer));
+        assert!(
+            !actionable(Column::Done, &caps(&[Capability::Merge])),
+            "done is terminal"
+        );
+        assert_eq!(entry_column(Column::Ready), Some(Column::Building));
+        assert_eq!(entry_column(Column::Qa), None);
     }
 
     #[test]

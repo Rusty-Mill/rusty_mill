@@ -8,8 +8,9 @@ use rusty_mcp_server::{HttpConfig, HttpHandler};
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{Card, Column};
+use rusty_mill_board::mcp;
 use rusty_mill_board::store::MemStore;
-use rusty_mill_board::{mcp, web::Web};
+use rusty_mill_board::web::{Auth, Web};
 use rusty_mill_runner::config::{Stage, parse};
 use rusty_mill_runner::http_board::HttpBoard;
 use rusty_mill_runner::ports::{BoardApi, Outcome, Work};
@@ -28,7 +29,7 @@ fn start(token: Option<&str>) -> (SocketAddr, Arc<Shared>) {
         mcp,
         path,
         vec!["127.0.0.1".into()],
-        token.map(str::to_owned),
+        Auth::from(token),
     );
     let server =
         rusty_serve::Server::bind_shared("127.0.0.1:0".parse().expect("addr"), web).expect("bind");

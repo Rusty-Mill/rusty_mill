@@ -348,9 +348,7 @@ mod tests {
             b.move_card(card.id, to, &h).expect("move");
         }
         b.claim(card.id, &h).expect("claim");
-        for to in [Column::Qa] {
-            b.move_card(card.id, to, &h).expect("move");
-        }
+        b.move_card(card.id, Column::Qa, &h).expect("move");
         b.claim(card.id, &h).expect("claim");
         b.move_card(card.id, Column::Review, &h).expect("move");
         b.claim(card.id, &h).expect("claim");

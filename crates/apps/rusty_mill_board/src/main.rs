@@ -5,6 +5,7 @@
 //! rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
 //! ```
 //! Add `--github-repo owner/name` (and `GITHUB_TOKEN`) to mirror cards to issues.
+//! Add `--identities FILE` for a token per model, each bound to an actor and role.
 //! The HTTP mode serves the UI at `/`, the web API at `/api/<op>` and MCP at
 //! `/mcp`; open `http://127.0.0.1:8787/#token=S` for the UI.
 
@@ -19,10 +20,12 @@ use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::github::{GithubConfig, GithubForge};
+use rusty_mill_board::identities::Credentials;
+use rusty_mill_board::mcp;
 use rusty_mill_board::mmdb::MmdbStore;
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::sync::reconcile;
-use rusty_mill_board::{mcp, web::Web};
+use rusty_mill_board::web::{Auth, Web};
 
 /// Mill Board: kanban for humans and agents.
 #[derive(Parser)]
@@ -33,9 +36,13 @@ struct Cli {
     /// Serve HTTP (UI + API + MCP) on this address instead of MCP over stdio.
     #[arg(long, env = "MILL_BOARD_HTTP")]
     http: Option<SocketAddr>,
-    /// Bearer token required on /api and /mcp.
-    #[arg(long, env = "MILL_BOARD_TOKEN")]
+    /// One shared bearer token required on /api and /mcp (callers state their own actor and role).
+    #[arg(long, env = "MILL_BOARD_TOKEN", hide_env_values = true)]
     auth_token: Option<String>,
+    /// JSON file of per-model credentials: a token bound to an actor and role each
+    /// (must be chmod 600). Callers then cannot choose their actor or role.
+    #[arg(long, env = "MILL_BOARD_IDENTITIES", conflicts_with = "auth_token")]
+    identities: Option<PathBuf>,
     /// Mirror the board to GitHub issues of this repo (`owner/name`). The token
     /// comes from `GITHUB_TOKEN` and needs issues read/write on the repo.
     #[arg(long, env = "MILL_BOARD_GITHUB_REPO")]
@@ -108,12 +115,17 @@ fn run(cli: Cli) -> Result<(), String> {
         ..HttpConfig::default()
     };
     let mcp_path = config.path.clone();
+    let auth = match (&cli.identities, cli.auth_token) {
+        (Some(path), _) => Auth::Credentials(Credentials::load(path, &Roles::default())?),
+        (None, Some(token)) => Auth::Shared(token),
+        (None, None) => Auth::Open,
+    };
     let web = Web::new(
         board,
         HttpHandler::new(server, config),
         mcp_path,
         cli.allowed_hosts,
-        cli.auth_token,
+        auth,
     );
     let http = rusty_serve::Server::bind_shared(addr, web)
         .map_err(|e| format!("cannot bind {addr}: {e}"))?;

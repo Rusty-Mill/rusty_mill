@@ -1,6 +1,7 @@
 //! Mill Board: a capability-gated kanban board for humans and agents.
 //!
 //! - [`api`]: the operation table shared by MCP and web.
+//! - [`identities`]: per-model bearer tokens bound to an actor and role.
 //! - [`board`]: the service: roles, clock, commit with retry.
 //! - [`domain`]: pure cards, columns, capabilities and the transition table.
 //! - [`store`]: the storage port and an in-memory adapter.
@@ -14,6 +15,7 @@ pub mod board;
 pub mod domain;
 pub mod github;
 pub mod http;
+pub mod identities;
 pub mod mcp;
 pub mod mmdb;
 pub mod store;

@@ -2,16 +2,26 @@
 //! so the two surfaces cannot drift: one name, one argument type, one schema.
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::board::Board;
-use crate::domain::{BoardError, Column};
+use crate::domain::{Actor, BoardError, Column};
 use crate::store::Store;
 
 /// The board every surface shares.
 pub type Shared = Board<Box<dyn Store>>;
+
+/// Who a credential belongs to. Set by the transport after it checks a bearer
+/// token; when present it fixes the caller's actor and role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    /// Stable name, recorded in claims and history.
+    pub actor: String,
+    /// Role name; see `board_roles`.
+    pub role: String,
+}
 
 /// Why a call failed.
 #[derive(Debug)]
@@ -28,6 +38,9 @@ impl From<BoardError> for CallError {
     }
 }
 
+type RunFn =
+    Box<dyn Fn(&Shared, Option<&Identity>, Value) -> Result<Value, CallError> + Send + Sync>;
+
 /// One named operation.
 pub struct Op {
     /// Tool name and web path segment.
@@ -36,23 +49,29 @@ pub struct Op {
     pub description: &'static str,
     /// JSON Schema of the arguments.
     pub schema: Value,
-    run: Box<dyn Fn(&Shared, Value) -> Result<Value, CallError> + Send + Sync>,
+    run: RunFn,
 }
 
 impl Op {
-    /// Run with raw JSON arguments.
+    /// Run with raw JSON arguments, as `identity` if the transport
+    /// authenticated one.
     ///
     /// # Errors
     /// [`CallError::BadArgs`] if they don't parse, else whatever the board says.
-    pub fn call(&self, board: &Shared, args: Value) -> Result<Value, CallError> {
-        (self.run)(board, args)
+    pub fn call(
+        &self,
+        board: &Shared,
+        identity: Option<&Identity>,
+        args: Value,
+    ) -> Result<Value, CallError> {
+        (self.run)(board, identity, args)
     }
 }
 
 fn op<A>(
     name: &'static str,
     description: &'static str,
-    f: fn(&Shared, A) -> Result<Value, BoardError>,
+    f: fn(&Shared, Option<&Identity>, A) -> Result<Value, BoardError>,
 ) -> Op
 where
     A: serde::de::DeserializeOwned + JsonSchema + 'static,
@@ -66,27 +85,63 @@ where
         name,
         description,
         schema,
-        run: Box::new(move |board, args| {
+        run: Box::new(move |board, identity, args| {
             let args =
                 serde_json::from_value(args).map_err(|e| CallError::BadArgs(e.to_string()))?;
-            f(board, args).map_err(CallError::Board)
+            f(board, identity, args).map_err(CallError::Board)
         }),
     }
 }
 
-/// Who is acting. The board trusts the caller's claim of role: it is a
-/// workflow guard between cooperating agents, not authentication (the
-/// transport's bearer token is that).
+/// Who is acting. With a per-model credential these are fixed by it: omit
+/// them (or repeat them exactly). Without one the board trusts what the
+/// caller says: a workflow guard between cooperating agents.
 #[derive(Deserialize, JsonSchema)]
 struct Who {
     /// Stable name of the actor, recorded in claims and history.
-    actor: String,
+    actor: Option<String>,
     /// Role name; see `board_roles`.
-    role: String,
+    role: Option<String>,
+}
+
+/// The acting identity: the credential's if there is one (a disagreeing
+/// `actor`/`role` is refused), else the arguments'.
+fn acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Actor, BoardError> {
+    match identity {
+        Some(i) => {
+            let differs = who.actor.as_deref().is_some_and(|a| a != i.actor)
+                || who.role.as_deref().is_some_and(|r| r != i.role);
+            if differs {
+                return Err(BoardError::Invalid(
+                    "actor and role are fixed by your credential; omit them",
+                ));
+            }
+            b.roles().actor(&i.actor, &i.role)
+        }
+        None => {
+            let actor = who
+                .actor
+                .as_deref()
+                .ok_or(BoardError::Invalid("actor is required"))?;
+            let role = who
+                .role
+                .as_deref()
+                .ok_or(BoardError::Invalid("role is required"))?;
+            b.roles().actor(actor, role)
+        }
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct Nothing {}
+
+#[derive(Deserialize, JsonSchema)]
+struct TakeArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Take this card instead of the next one for your role.
+    id: Option<String>,
+}
 
 #[derive(Deserialize, JsonSchema)]
 struct ListArgs {
@@ -180,64 +235,96 @@ pub fn ops() -> Vec<Op> {
         op(
             "board_list",
             "List cards, optionally one column. Columns: backlog, ready, building, qa, review, done, blocked.",
-            |b, a: ListArgs| to_json(json!({ "cards": b.list(a.column)? })),
+            |b, _, a: ListArgs| to_json(json!({ "cards": b.list(a.column)? })),
         ),
         op(
             "board_roles",
             "List roles and the capabilities each holds.",
-            |b, _: Nothing| to_json(json!({ "roles": b.roles().0 })),
+            |b, _, _: Nothing| to_json(json!({ "roles": b.roles().0 })),
         ),
         op(
             "board_events",
             "Poll the change log. Pass the last event id seen as `after` to get only newer events.",
-            |b, a: EventsArgs| {
+            |b, _, a: EventsArgs| {
                 let after = a.after.as_deref().map(id).transpose()?;
                 to_json(json!({ "events": b.events(after, a.limit.unwrap_or(100))? }))
             },
         ),
         op(
+            "board_whoami",
+            "Who you are on this board: your actor name, role and what that role may do.",
+            |b, i, _: Nothing| {
+                let Some(i) = i else {
+                    return to_json(json!({
+                        "authenticated": false,
+                        "note": "no per-model credential: pass actor and role on each call"
+                    }));
+                };
+                let who = b.roles().actor(&i.actor, &i.role)?;
+                to_json(json!({
+                    "authenticated": true,
+                    "actor": who.name,
+                    "role": i.role,
+                    "capabilities": who.caps
+                }))
+            },
+        ),
+        op(
+            "card_take",
+            "Pull your next piece of work: the card nearest Done that your role can act on. A card in Ready is moved to Building, and the card is claimed for you. Returns {card: null} when nothing is waiting. Then do the work, comment with what you did, and card_move it on.",
+            |b, i, a: TakeArgs| {
+                let who = acting(b, i, &a.who)?;
+                let id = a.id.as_deref().map(id).transpose()?;
+                to_json(json!({ "card": b.take(&who, id)? }))
+            },
+        ),
+        op(
             "card_get",
             "Fetch one card with its comments.",
-            |b, a: GetArgs| card(b.get(id(&a.id)?)?),
+            |b, _, a: GetArgs| card(b.get(id(&a.id)?)?),
         ),
-        op("card_add", "Create a card in Backlog.", |b, a: AddArgs| {
-            let who = b.roles().actor(&a.who.actor, &a.who.role)?;
-            card(b.add(
-                &who,
-                &a.title,
-                a.body.as_deref().unwrap_or(""),
-                a.tags.unwrap_or_default(),
-            )?)
-        }),
+        op(
+            "card_add",
+            "Create a card in Backlog.",
+            |b, i, a: AddArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.add(
+                    &who,
+                    &a.title,
+                    a.body.as_deref().unwrap_or(""),
+                    a.tags.unwrap_or_default(),
+                )?)
+            },
+        ),
         op(
             "card_move",
             "Move a card. Needs the capability for that transition; leaving building/qa/review needs your claim.",
-            |b, a: MoveArgs| {
-                let who = b.roles().actor(&a.who.actor, &a.who.role)?;
+            |b, i, a: MoveArgs| {
+                let who = acting(b, i, &a.who)?;
                 card(b.move_card(id(&a.id)?, a.to, &who)?)
             },
         ),
         op(
             "card_claim",
             "Claim a card so only you move it. Fails if someone else holds it.",
-            |b, a: IdArgs| {
-                let who = b.roles().actor(&a.who.actor, &a.who.role)?;
+            |b, i, a: IdArgs| {
+                let who = acting(b, i, &a.who)?;
                 card(b.claim(id(&a.id)?, &who)?)
             },
         ),
         op(
             "card_release",
             "Release your claim on a card.",
-            |b, a: IdArgs| {
-                let who = b.roles().actor(&a.who.actor, &a.who.role)?;
+            |b, i, a: IdArgs| {
+                let who = acting(b, i, &a.who)?;
                 card(b.release(id(&a.id)?, &who)?)
             },
         ),
         op(
             "card_update",
             "Edit a card's title, body or tags.",
-            |b, a: UpdateArgs| {
-                let who = b.roles().actor(&a.who.actor, &a.who.role)?;
+            |b, i, a: UpdateArgs| {
+                let who = acting(b, i, &a.who)?;
                 card(b.edit(
                     id(&a.id)?,
                     &who,
@@ -250,8 +337,8 @@ pub fn ops() -> Vec<Op> {
         op(
             "card_comment",
             "Add a comment to a card.",
-            |b, a: CommentArgs| {
-                let who = b.roles().actor(&a.who.actor, &a.who.role)?;
+            |b, i, a: CommentArgs| {
+                let who = acting(b, i, &a.who)?;
                 card(b.comment(id(&a.id)?, &who, &a.text)?)
             },
         ),
@@ -266,11 +353,20 @@ mod tests {
 
     fn call(name: &str, args: Value) -> Result<Value, CallError> {
         let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        call_as(&board, None, name, args)
+    }
+
+    fn call_as(
+        board: &Shared,
+        who: Option<&Identity>,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, CallError> {
         ops()
             .iter()
             .find(|o| o.name == name)
             .expect("op")
-            .call(&board, args)
+            .call(board, who, args)
     }
 
     #[test]
@@ -313,5 +409,102 @@ mod tests {
         )
         .expect("add");
         assert_eq!(out["card"]["column"], "backlog");
+    }
+
+    fn ident(actor: &str, role: &str) -> Identity {
+        Identity {
+            actor: actor.into(),
+            role: role.into(),
+        }
+    }
+
+    #[test]
+    fn a_credential_fixes_actor_and_role() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let dev = ident("claude", "builder");
+        // No actor/role needed; the card records the credential's actor.
+        let added = call_as(&board, Some(&dev), "card_add", json!({"title": "t"})).expect("add");
+        assert_eq!(added["card"]["column"], "backlog");
+        // Repeating them exactly is fine; claiming to be someone else is refused.
+        assert!(
+            call_as(
+                &board,
+                Some(&dev),
+                "card_add",
+                json!({"title": "t", "actor": "claude", "role": "builder"})
+            )
+            .is_ok()
+        );
+        for lie in [
+            json!({"title": "t", "role": "human"}),
+            json!({"title": "t", "actor": "nano"}),
+        ] {
+            assert!(
+                matches!(call_as(&board, Some(&dev), "card_add", lie), Err(CallError::Board(BoardError::Invalid(m))) if m.contains("fixed by your credential"))
+            );
+        }
+        // Without a credential, they are required.
+        assert!(matches!(
+            call_as(&board, None, "card_add", json!({"title": "t"})),
+            Err(CallError::Board(BoardError::Invalid("actor is required")))
+        ));
+    }
+
+    #[test]
+    fn whoami_reports_identity_and_capabilities() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let me = call_as(
+            &board,
+            Some(&ident("claude", "builder")),
+            "board_whoami",
+            json!({}),
+        )
+        .expect("whoami");
+        assert_eq!(
+            (
+                me["authenticated"].clone(),
+                me["actor"].clone(),
+                me["capabilities"].clone()
+            ),
+            (json!(true), json!("claude"), json!(["build"]))
+        );
+        let anon = call_as(&board, None, "board_whoami", json!({})).expect("whoami");
+        assert_eq!(anon["authenticated"], json!(false));
+    }
+
+    #[test]
+    fn take_pulls_a_ready_card_for_the_credentialed_model() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let (human, dev) = (ident("nano", "human"), ident("claude", "builder"));
+        let id = call_as(&board, Some(&human), "card_add", json!({"title": "work"})).expect("add")
+            ["card"]["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        call_as(
+            &board,
+            Some(&human),
+            "card_move",
+            json!({"id": id, "to": "ready"}),
+        )
+        .expect("ready");
+
+        let taken = call_as(&board, Some(&dev), "card_take", json!({})).expect("take");
+        assert_eq!(
+            (
+                taken["card"]["column"].clone(),
+                taken["card"]["claim"].clone()
+            ),
+            (json!("building"), json!("claude"))
+        );
+        // Nothing else waiting for a builder.
+        let again = call_as(
+            &board,
+            Some(&ident("codex", "builder")),
+            "card_take",
+            json!({}),
+        )
+        .expect("take");
+        assert_eq!(again["card"], Value::Null);
     }
 }

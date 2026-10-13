@@ -128,7 +128,7 @@ fn pull_requests_are_skipped_and_pages_are_followed() {
     let page1: Vec<String> = (1..=100).map(item).collect();
     // The last entry of page 2 is a pull request: the issues API lists those too.
     let pr = r#"{"number":102,"title":"pr","body":"","labels":[],"state":"open","updated_at":"2026-10-13T14:48:34Z","pull_request":{}}"#;
-    let page2 = vec![item(101), pr.to_owned()];
+    let page2 = [item(101), pr.to_owned()];
     let (base, log) = mock(vec![
         (200, format!("[{}]", page1.join(","))),
         (200, format!("[{}]", page2.join(","))),

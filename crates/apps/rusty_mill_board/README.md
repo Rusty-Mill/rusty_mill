@@ -15,9 +15,13 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.
-- **Tools:** `board_list`, `board_roles`, `board_events`, `card_get`, `card_add`,
+- **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_events`, `card_take`, `card_get`, `card_add`,
   `card_move`, `card_claim`, `card_release`, `card_update`, `card_comment`. The web API
   exposes the same table, so the two cannot drift.
+- **Models connect themselves.** Run one HTTP server with `--identities FILE` (a token per model, bound to an
+  actor and role) and register `/mcp` in each model's own client; a model then pulls work with `card_take`,
+  comments, and moves it on, using its own subscription session. See
+  [`docs/connecting-models.md`](docs/connecting-models.md) for setup and the paste-in working loop.
 - **Storage:** `rusty_multimodal_db_engine` (cards and an append-only event log in one
   table; claims are atomic via `replace_if`), or in memory when `--store` is omitted.
   The event id is a UUIDv7 and doubles as the polling cursor (`board_events after=`).
