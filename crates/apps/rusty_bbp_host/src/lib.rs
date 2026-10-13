@@ -9,6 +9,7 @@
 //!   runs the frozen profile set under a sandbox, stores log and report.
 //! - [`profiles`]: the profile set a task freezes at open.
 //! - [`admin`]: open a task and assign roles.
+//! - [`report`]: the concurrency metrics of a task, from its log.
 //! - [`args`]: the small argument parser the `bbp` binary uses.
 
 #![forbid(unsafe_code)]
@@ -19,6 +20,7 @@ pub mod human;
 pub mod mcp;
 pub mod moderator;
 pub mod profiles;
+pub mod report;
 pub mod runner;
 
 use rusty_bbp::*;

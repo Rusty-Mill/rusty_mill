@@ -89,6 +89,60 @@ pub fn vendor(role: &RoleId) -> &'static str {
 
 pub const DIGEST: Sha256 = Sha256([7; 32]);
 
+/// The four test roles plus `coder2` and `coder3`, which also build.
+pub fn builders() -> Vec<Role> {
+    let mut roles = four_roles();
+    for (name, order) in [("coder2", 4), ("coder3", 5)] {
+        let base = roles
+            .iter()
+            .find(|r| r.id.0 == "coder")
+            .expect("coder")
+            .clone();
+        let mut r = base;
+        r.id = RoleId(name.into());
+        r.turn_order = order;
+        roles.push(r);
+    }
+    roles
+}
+
+pub fn budget(messages: u64, reads_per_turn: u64) -> Budget {
+    Budget {
+        messages,
+        reads_per_turn,
+        ..default_budget()
+    }
+}
+
+/// The four roles plus a second reviewer, so `review` has two final-decision judges.
+pub fn two_reviewers() -> Vec<Role> {
+    let mut roles = four_roles();
+    let mut second = roles
+        .iter()
+        .find(|r| r.id.0 == "reviewer")
+        .expect("reviewer")
+        .clone();
+    second.id = RoleId("reviewer2".into());
+    second.turn_order = 6;
+    roles.push(second);
+    roles
+}
+
+/// The four roles plus a second tester: `test` has two non-final judges, which
+/// may hold turns together.
+pub fn two_testers() -> Vec<Role> {
+    let mut roles = four_roles();
+    let mut second = roles
+        .iter()
+        .find(|r| r.id.0 == "tester")
+        .expect("tester")
+        .clone();
+    second.id = RoleId("tester2".into());
+    second.turn_order = 6;
+    roles.push(second);
+    roles
+}
+
 pub fn default_budget() -> Budget {
     Budget {
         messages: 40,

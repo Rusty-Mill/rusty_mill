@@ -19,6 +19,7 @@ An MCP client configuration for Claude Code, one per role, looks like:
 
 ```text
 bbp mcp                                   serve one turn over stdio
+bbp metrics --dir D --task T              concurrency metrics of a task's log, as JSON (`bbp mod` prints `elapsed_ms`)
 bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE]
 bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 bbp card    --dir D --task T
