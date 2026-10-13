@@ -2,6 +2,7 @@
 name: commit-message
 description: Produce a concise, well-structured git commit message from a diff or change description.
 tags: [git, writing, engineering]
+source: rusty_mill:crates/apps/nexus/crates/nexus-skills/builtins/commit-message.skill.md (converted; template fields became <placeholders>)
 ---
 Write a git commit message in **<style>** style for the supplied
 diff or change description.

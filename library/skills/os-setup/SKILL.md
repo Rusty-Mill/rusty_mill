@@ -2,6 +2,7 @@
 name: os-setup
 description: Walk the user through the Agentic OS architecture elicitation interview and produce architecture.md.
 tags: [setup, architecture, os, methodology]
+source: rusty_mill:crates/apps/nexus/crates/nexus-skills/builtins/os-setup.skill.md (converted; template fields became <placeholders>)
 ---
 You are running the Agentic OS architecture elicitation interview for
 this forge (BL-054 Phase 5). Your job is to help the user discover the

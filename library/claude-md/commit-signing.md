@@ -2,6 +2,7 @@
 name: commit-signing
 description: CLAUDE.md section - retry once, then commit unsigned and say so when the signing helper is missing.
 tags: [git, ci, rusty_mill]
+source: rusty_mill:crates/apps/rusty_remind_me/CLAUDE.md (verbatim section)
 ---
 Guidance for Claude Code sessions (and any agents they dispatch) working in this repo.
 

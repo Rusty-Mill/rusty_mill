@@ -18,6 +18,14 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build.entry("prompt", build.ROOT / "p.md", {"name": "x"}, "b")
 
+    def test_entry_requires_source(self) -> None:
+        with self.assertRaises(ValueError):
+            build.entry("prompt", build.ROOT / "p.md", {"name": "x", "description": "d"}, "b")
+
+    def test_mod_source_excludes_tests(self) -> None:
+        mod = build.load_mod(build.ROOT / "mods/backup-before-edit")
+        self.assertNotIn("register.test", mod["body"])
+
     def test_all_seeded_entries_load(self) -> None:
         kinds = {i["kind"] for i in build.collect()}
         self.assertEqual(kinds, {"prompt", "skill", "mod", "claude-md", "agents-md"})

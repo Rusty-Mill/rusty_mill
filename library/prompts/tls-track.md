@@ -2,6 +2,7 @@
 name: tls-track
 description: Session prompt: make rusty_tls native engine a valid rustls replacement.
 tags: [rust, tls, security, rusty_mill]
+source: rusty_mill:docs/research/prompts/tls-track.md
 ---
 # Session prompt: TLS track (make `rusty_tls`'s native engine a valid replacement for rustls)
 

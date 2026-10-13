@@ -2,6 +2,7 @@
 name: ring-track
 description: Session prompt: ring replacement track.
 tags: [rust, crypto, rusty_mill]
+source: rusty_mill:docs/research/prompts/ring-track.md
 ---
 # Session prompt: crypto track (native replacement for `ring`)
 

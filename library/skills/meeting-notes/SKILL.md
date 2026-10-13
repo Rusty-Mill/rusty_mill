@@ -2,6 +2,7 @@
 name: meeting-notes
 description: Turn a meeting transcript or raw notes into a structured summary with action items.
 tags: [meetings, summary, writing]
+source: rusty_mill:crates/apps/nexus/crates/nexus-skills/builtins/meeting-notes.skill.md (converted; template fields became <placeholders>)
 ---
 Produce meeting notes from the supplied content with this shape:
 

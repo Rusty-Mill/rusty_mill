@@ -2,6 +2,7 @@
 name: engineering-principles
 description: CLAUDE.md section - small, modular, typed, tested code; ports-and-adapters; ask before irreversible changes.
 tags: [style, architecture, python, rust]
+source: original; distilled from the owner's stated preferences
 ---
 ## Engineering principles
 

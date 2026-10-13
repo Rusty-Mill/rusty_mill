@@ -2,6 +2,7 @@
 name: project-template
 description: AGENTS.md skeleton - scope, project shape, commands, conventions, boundaries, coordination.
 tags: [template, agents]
+source: original; shaped after rusty_mill:crates/apps/rusty_multimodal_db/AGENTS.md and rusty_hister/AGENTS.md
 ---
 # AGENTS.md
 

@@ -2,6 +2,7 @@
 name: daily-journal
 description: Compose or update today's journal entry with a consistent structure.
 tags: [journal, writing, daily]
+source: rusty_mill:crates/apps/nexus/crates/nexus-skills/builtins/daily-journal.skill.md (converted; template fields became <placeholders>)
 ---
 Generate a journal entry for today in a **<tone>** tone. Use the
 following structure so past-you and future-you can scan the archive

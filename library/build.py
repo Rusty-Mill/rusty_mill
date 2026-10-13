@@ -27,7 +27,7 @@ def parse(text: str) -> tuple[dict[str, object], str]:
 
 
 def entry(kind: str, path: Path, meta: dict[str, object], body: str) -> dict[str, object]:
-    for key in ("name", "description"):
+    for key in ("name", "description", "source"):
         if not meta.get(key):
             raise ValueError(f"{path}: missing {key}")
     return {
@@ -35,6 +35,7 @@ def entry(kind: str, path: Path, meta: dict[str, object], body: str) -> dict[str
         "name": meta["name"],
         "description": meta["description"],
         "tags": meta.get("tags", []),
+        "source": meta["source"],
         "path": str(path.relative_to(ROOT)),
         "body": body,
     }
@@ -45,8 +46,9 @@ def load_mod(d: Path) -> dict[str, object]:
     src = "\n\n".join(
         f"// {p.relative_to(d)}\n{p.read_text().strip()}"
         for p in sorted((d / "hooks").glob("*"))
+        if ".test." not in p.name
     )
-    meta = {**manifest, "tags": manifest.get("keywords", [])}
+    meta = {**manifest, "tags": manifest.get("keywords", []), "source": manifest.get("repository")}
     return entry("mod", d, meta, src)
 
 

@@ -2,6 +2,7 @@
 name: code-reviewer
 description: Review a diff or file for correctness, security, and style issues before it lands.
 tags: [review, code, git]
+source: rusty_mill:crates/apps/nexus/crates/nexus-skills/builtins/code-reviewer.skill.md (converted; template fields became <placeholders>)
 ---
 You are performing a code review. For the provided code or diff, produce:
 

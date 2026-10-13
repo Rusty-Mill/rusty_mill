@@ -2,6 +2,7 @@
 name: mcp-track
 description: Session prompt: replace rmcp with first-party MCP crates.
 tags: [rust, mcp, rusty_mill]
+source: rusty_mill:docs/research/prompts/mcp-track.md
 ---
 # Session prompt: MCP track (replace `rmcp` with first-party crates)
 

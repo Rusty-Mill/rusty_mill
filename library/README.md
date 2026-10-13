@@ -14,6 +14,9 @@ Prompts, skills, and mods as plain files, browsable in one offline page.
 python3 build.py              # -> dist/index.html (open directly, no server)
 python3 -m unittest           # parser + seed checks
 claude plugin validate mods/<name>
+claude plugin test mods/<name>
 ```
+
+Every entry must record where it came from: `source:` in frontmatter (mods: `repository` in `plugin.json`) - a repo path, URL or "original". The UI shows it.
 
 Add an entry by dropping a file in; the build fails on a missing name/description or duplicate.

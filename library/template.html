@@ -29,7 +29,7 @@ pre{background:var(--card);border:1px solid var(--line);border-radius:8px;paddin
 <div id="detail" hidden>
   <div class="row"><button id="back">← Back</button><button id="copy">Copy</button><button id="dl">Download</button></div>
   <div class="kind" id="dkind"></div><h2 id="dname" style="margin:0"></h2>
-  <p class="mut" id="ddesc"></p><p class="mut" id="dinstall"></p><pre id="dbody"></pre>
+  <p class="mut" id="ddesc"></p><p class="mut" id="dsource"></p><p class="mut" id="dinstall"></p><pre id="dbody"></pre>
 </div>
 <div class="grid" id="grid"></div>
 </main>
@@ -84,6 +84,7 @@ function show(i) {
   $("dkind").textContent = i.kind;
   $("dname").textContent = i.name;
   $("ddesc").textContent = i.description;
+  $("dsource").textContent = `Source: ${i.source}`;
   $("dinstall").textContent = typeof how === "function" ? how(i.path) : how;
   $("dbody").textContent = i.body;
   $("copy").onclick = async () => {
