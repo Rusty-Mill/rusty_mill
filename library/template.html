@@ -65,6 +65,11 @@ const INSTALL = {
   "claude-md": "Paste into your project's CLAUDE.md (or ~/.claude/CLAUDE.md).",
   "agents-md": "Paste into your project's AGENTS.md - read by Codex, Cursor, Copilot and other agents.",
 };
+const REMOTE = {
+  mod: i => `git clone https://github.com/${i.repo} && claude --plugin-dir ${i.repo.split("/")[1]}/${i.path}`,
+  skill: i => `From a clone of github.com/${i.repo}, copy ${i.path.replace(/SKILL\.md$/, "")} to ~/.claude/skills/`,
+  prompt: i => `Copy from github.com/${i.repo}:${i.path}.`,
+};
 const FILENAME = {skill: () => "SKILL.md", mod: i => `${i.name}.txt`, "claude-md": () => "CLAUDE.md", "agents-md": () => "AGENTS.md"};
 
 const matchesQ = i => !state.q || `${i.name} ${i.description} ${i.tags.join(" ")} ${i.source} ${i.body}`.toLowerCase().includes(state.q);
@@ -107,6 +112,7 @@ function card(i) {
     open,
     el("span", {className: "desc", textContent: i.description}),
     ...(i.for ? [el("span", {className: "mut small", textContent: `For ${i.for}`})] : []),
+    ...(i.repo ? [el("span", {className: "mut small", textContent: `From ${i.repo}`})] : []),
     ...(flagged ? [el("span", {className: "note", textContent: `Heads up: ${i.status}`})] : []),
     el("div", {className: "acts"}, copy));
 }
@@ -123,7 +129,7 @@ function render() {
     v => { state.tag = state.tag === v ? null : v; render(); });
   $("bysrc").setAttribute("aria-pressed", String(state.bySource));
   if (!items.length) { $("out").replaceChildren(emptyState()); return; }
-  const groups = state.bySource ? [...Map.groupBy(items, i => i.source)] : [["", items]];
+  const groups = state.bySource ? [...Map.groupBy(items, i => i.group)] : [["", items]];
   $("out").replaceChildren(...groups.flatMap(([source, group]) => [
     ...(source ? [el("h3", {textContent: `${source} (${group.length})`})] : []),
     el("div", {className: "grid"}, ...group.map(card)),
@@ -137,12 +143,12 @@ function emptyState() {
 }
 
 function show(i) {
-  const how = INSTALL[i.kind];
+  const how = i.repo ? REMOTE[i.kind] : INSTALL[i.kind];
   $("dkind").textContent = i.kind;
   $("dname").textContent = i.name;
   $("ddesc").textContent = i.description;
   $("dsource").textContent = `Source: ${i.source}`;
-  $("dinstall").textContent = typeof how === "function" ? how(i.path) : how;
+  $("dinstall").textContent = typeof how === "function" ? how(i.repo ? i : i.path) : how;
   $("dbody").textContent = i.body;
   const flagged = Boolean(i.status);
   $("dnote").hidden = !flagged;
