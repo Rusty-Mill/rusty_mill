@@ -335,13 +335,18 @@ impl TaskState {
 
     /// The slice for a turn granted now, or `None` when one live turn is the
     /// cap. Each grant takes `1/(cap - live)` of the unreserved headroom, so
-    /// the slices of the live turns never sum past it.
-    pub fn next_slice(&self) -> Option<Slice> {
+    /// the slices of the live turns never sum past it. A serialized turn (a
+    /// finalizer's, alone by rule) takes all of it.
+    pub fn next_slice(&self, serialized: bool) -> Option<Slice> {
         let cap = u64::from(self.max_live_turns);
         if cap <= 1 {
             return None;
         }
-        let left = cap.saturating_sub(self.turns.len() as u64).max(1);
+        let left = if serialized {
+            1
+        } else {
+            cap.saturating_sub(self.turns.len() as u64).max(1)
+        };
         let r = self.reserved();
         let room = |total: u64, spent: u64, reserved: u64| {
             total.saturating_sub(spent).saturating_sub(reserved) / left

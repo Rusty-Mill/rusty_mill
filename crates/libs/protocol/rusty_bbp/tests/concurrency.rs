@@ -395,23 +395,60 @@ fn two_reviewers() -> Vec<Role> {
     roles
 }
 
+/// The four roles plus a second tester: `test` has two non-final judges, which
+/// may hold turns together.
+fn two_testers() -> Vec<Role> {
+    let mut roles = four_roles();
+    let mut second = roles
+        .iter()
+        .find(|r| r.id.0 == "tester")
+        .expect("tester")
+        .clone();
+    second.id = RoleId("tester2".into());
+    second.turn_order = 6;
+    roles.push(second);
+    roles
+}
+
+/// A finalizer that also judges `test`, ordered first or last among the testers.
+fn finalizing_tester(first: bool) -> Vec<Role> {
+    let mut roles = four_roles();
+    let mut lead = roles
+        .iter()
+        .find(|r| r.id.0 == "reviewer")
+        .expect("reviewer")
+        .clone();
+    lead.id = RoleId("lead".into());
+    lead.verdict_at.push(Stage::Test);
+    let tester = roles
+        .iter_mut()
+        .find(|r| r.id.0 == "tester")
+        .expect("tester");
+    (lead.turn_order, tester.turn_order) = if first { (2, 12) } else { (12, 2) };
+    roles.push(lead);
+    roles
+}
+
 /// KNOWN 2a GAP, owner: the repository owner; closes with 2b's snapshot-hash
 /// binding (design note, section d) or earlier with a `read_rev` on verdicts.
 ///
 /// A verdict binds to the candidate, the selected run and that run's report. It
-/// does not bind to the log revision the reviewer read, so a `finding` appended
-/// by a concurrent turn after the read does not void it. Only a transition
-/// revokes concurrent turns; a finding is not one. This test pins today's
-/// behavior so the gap is visible; when the gap is closed it must flip.
+/// does not bind to the log revision the judge read, so a `finding` appended by
+/// a concurrent turn after the read does not void it. Only a transition revokes
+/// concurrent turns; a finding is not one. It needs two judges live at once,
+/// which only non-final roles can be (finalizers are serialized), so the
+/// stage is `test`. This test pins today's behavior so the gap is visible;
+/// when the gap is closed it must flip.
 #[test]
-fn known_gap_a_verdict_is_not_bound_to_the_revision_the_reviewer_read() {
-    let mut fx = Fx::concurrent(two_reviewers(), 2, default_budget());
-    fx.reach_review();
-    assert_eq!(live_roles(&fx), ["reviewer", "reviewer2"]);
-    // reviewer reads at revision R ...
+fn known_gap_a_verdict_is_not_bound_to_the_revision_the_judge_read() {
+    let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    assert_eq!(live_roles(&fx), ["tester", "tester2"]);
+    // tester reads at revision R ...
     assert!(matches!(
         fx.agent(
-            "reviewer",
+            "tester",
             AgentAction::Read {
                 after: None,
                 limit: 5
@@ -420,17 +457,50 @@ fn known_gap_a_verdict_is_not_bound_to_the_revision_the_reviewer_read() {
         Response::Read { .. }
     ));
     let read_at = fx.rev();
-    // ... reviewer2 then appends a finding against the same candidate and report ...
+    // ... tester2 then appends a finding against the same candidate and report ...
     let cand = fx.st().candidate.expect("candidate");
     let report = fx.report_id();
     let finding = Draft::new(MessageKind::Finding, "the retry loop never backs off")
         .refs(vec![Ref::art(cand)])
         .evidence(vec![Ref::art(report)]);
-    posted(fx.post("reviewer2", finding));
+    posted(fx.post("tester2", finding));
     assert!(fx.rev() > read_at, "an append landed after the read");
-    // ... and the first reviewer's approve is still accepted.
-    posted(fx.verdict("reviewer", VerdictKind::Approve));
-    assert_eq!(fx.st().state, State::MergeGate);
+    // ... and the first tester's approve is still accepted.
+    posted(fx.verdict("tester", VerdictKind::Approve));
+    assert_eq!(fx.st().state, State::Review);
+}
+
+/// Finalizers are serialized: with two final-decision reviewers and room for
+/// two turns, `review` still has one live turn, as at one live turn, so the
+/// first verdict cannot silently revoke a second finalizer's veto.
+#[test]
+fn finalizers_never_hold_concurrent_turns() {
+    let mut fx = Fx::concurrent(two_reviewers(), 2, default_budget());
+    fx.reach_review();
+    assert_eq!(live_roles(&fx), ["reviewer"]);
+    assert_eq!(
+        rejected(fx.post("reviewer2", pass())),
+        Code::StaleTurn,
+        "the second finalizer is not live"
+    );
+    // The slice of a serialized turn is the whole headroom.
+    let t = fx.st().turn_of(&RoleId("reviewer".into())).expect("turn");
+    let s = t.slice.expect("slice");
+    assert_eq!(s.messages, fx.st().budget.messages - fx.st().spent.messages);
+}
+
+#[test]
+fn a_finalizer_is_granted_only_alone_and_blocks_others_while_live() {
+    for (first, want) in [(true, "lead"), (false, "tester")] {
+        let mut fx = Fx::concurrent(finalizing_tester(first), 2, default_budget());
+        fx.reach_test();
+        stored(fx.report(RunStatus::Passed));
+        assert_eq!(
+            live_roles(&fx),
+            [want],
+            "test serves tester and lead; whoever is first holds it alone (lead first: {first})"
+        );
+    }
 }
 
 #[test]
@@ -525,6 +595,31 @@ fn a_refused_write_cannot_mint_turns_past_the_turn_budget() {
     );
 }
 
+/// The deadline path: `handle` fires deadlines before it looks at the command,
+/// so a regrant after an expiry is minted even when the command is then refused.
+#[test]
+fn a_deadline_regrant_cannot_mint_turns_past_the_turn_budget() {
+    let b = Budget {
+        turns: 3,
+        ..default_budget()
+    };
+    let mut fx = Fx::concurrent(builders(), 2, b);
+    fx.reach_build();
+    assert_eq!(fx.st().spent.turns, 3);
+    let latest = fx.st().turns.iter().map(|t| t.deadline).max().unwrap();
+    fx.now = latest;
+    // The command is refused; the expiry regrant that precedes it is not. The
+    // first regrant crosses the limit and escalates, which revokes every turn.
+    assert_eq!(
+        rejected(fx.post("coder3", ask("coder", "late"))),
+        Code::TokenExpired
+    );
+    assert_eq!(fx.st().spent.turns, 4, "one crossing");
+    assert_eq!(fx.st().state, State::Escalated);
+    let log = fx.d.store.events(&TaskId("T1".into()), 0).unwrap();
+    assert_eq!(*fx.st(), TaskState::fold(TaskId("T1".into()), &log));
+}
+
 /// The same path exists at one live turn: a read refused by `reads_per_turn`
 /// ends the turn and regrants it.
 #[test]
@@ -566,6 +661,16 @@ mod model {
         Candidate(usize),
         Tick(u32),
         Abort,
+        /// Refused-write loops. Each retry re-reads the live token, as a
+        /// harness launched for a replacement turn would.
+        /// Keep posting until the slice, then the replacements' slices, run out.
+        HammerAsk(usize, u8),
+        /// Keep reading until `reads_per_turn` ends the turn, again and again.
+        HammerRead(usize, u8),
+        /// Write from a role that holds no live turn (a stale or expired token).
+        Stale(usize),
+        /// Let every live turn expire, then write: the deadline path, then a refusal.
+        ExpireThenAsk(usize),
     }
 
     fn step() -> impl Strategy<Value = Step> {
@@ -577,20 +682,25 @@ mod model {
             1 => (0..3usize).prop_map(Step::Candidate),
             1 => (0u32..120_000).prop_map(Step::Tick),
             1 => Just(Step::Abort),
+            3 => (0..3usize, 1..12u8).prop_map(|(i, n)| Step::HammerAsk(i, n)),
+            3 => (0..3usize, 1..12u8).prop_map(|(i, n)| Step::HammerRead(i, n)),
+            2 => (0..3usize).prop_map(Step::Stale),
+            2 => (0..3usize).prop_map(Step::ExpireThenAsk),
         ]
+    }
+
+    fn read() -> AgentAction {
+        AgentAction::Read {
+            after: None,
+            limit: 5,
+        }
     }
 
     fn run(fx: &mut Fx, s: &Step) {
         match s {
             Step::Ask(i) => drop(fx.post(BUILDERS[*i], ask("planner", "q"))),
             Step::Pass(i) => drop(fx.post(BUILDERS[*i], pass())),
-            Step::Read(i) => drop(fx.agent(
-                BUILDERS[*i],
-                AgentAction::Read {
-                    after: None,
-                    limit: 5,
-                },
-            )),
+            Step::Read(i) => drop(fx.agent(BUILDERS[*i], read())),
             Step::Diff(i) => drop(fx.put(BUILDERS[*i], ArtifactPayload::Diff, b"--- a\n+++ b\n")),
             Step::Candidate(i) => {
                 let diff = fx
@@ -612,9 +722,39 @@ mod model {
                 fx.tick();
             }
             Step::Abort => drop(fx.run(&Command::AbortTurn { turn: None })),
+            Step::HammerAsk(i, n) => {
+                for _ in 0..*n {
+                    drop(fx.post(BUILDERS[*i], ask("planner", "again")));
+                }
+            }
+            Step::HammerRead(i, n) => {
+                for _ in 0..*n {
+                    drop(fx.agent(BUILDERS[*i], read()));
+                }
+            }
+            Step::Stale(i) => {
+                // A token for no live turn: every role's token is derived from its live turn.
+                let role = RoleId(BUILDERS[*i].into());
+                let stale = Token(Sha256([1; 32]));
+                let op = fx.op();
+                drop(fx.agent_with(
+                    role,
+                    Some(stale),
+                    op,
+                    AgentAction::Post(ask("planner", "s")),
+                ));
+            }
+            Step::ExpireThenAsk(i) => {
+                let latest = fx.st().turns.iter().map(|t| t.deadline).max();
+                if let Some(d) = latest {
+                    fx.now = d;
+                }
+                drop(fx.post(BUILDERS[*i], ask("planner", "late")));
+            }
         }
     }
 
+    /// Invariants, stated from the budgets and the log, not from the engine's own helpers.
     fn check(fx: &Fx) {
         let st = fx.st();
         assert!(st.turns.len() <= st.max_live_turns as usize, "cap holds");
@@ -631,9 +771,35 @@ mod model {
         );
         assert!(st.spent.bytes <= st.budget.bytes, "bytes overshoot");
         let r = st.reserved();
-        if st.max_live_turns > 1 && st.state == State::Build {
+        if st.state == State::Build {
             assert!(st.spent.messages + r.messages <= st.budget.messages);
             assert!(st.spent.bytes + r.bytes <= st.budget.bytes);
+        }
+        // Every limit that is crossed has been escalated for: no path that mints
+        // a turn or charges work may skip the budget check.
+        let crossed = [
+            (BudgetField::Turns, st.spent.turns > st.budget.turns),
+            (
+                BudgetField::Messages,
+                st.spent.messages > st.budget.messages,
+            ),
+            (BudgetField::Bytes, st.spent.bytes > st.budget.bytes),
+            (BudgetField::Reads, st.spent.reads > st.budget.reads),
+        ];
+        for (field, over) in crossed {
+            assert!(
+                !over || st.exhausted.contains(&field),
+                "{field:?} crossed, not escalated"
+            );
+        }
+        // A crossing is one grant past the limit, never an unbounded run of them.
+        assert!(
+            st.spent.turns <= st.budget.turns + 1,
+            "turns minted past the limit"
+        );
+        // An escalated task holds no turn and mints none.
+        if st.state == State::Escalated {
+            assert!(st.turns.is_empty(), "turns live in escalated");
         }
         let log = fx.d.store.events(&st.task, 0).expect("log");
         assert_eq!(
@@ -644,13 +810,16 @@ mod model {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig { cases: 200, .. ProptestConfig::default() })]
+        #![proptest_config(ProptestConfig { cases: 300, .. ProptestConfig::default() })]
         #[test]
         fn concurrent_builders_hold_invariants(
             live in 2u32..=3,
-            steps in proptest::collection::vec(step(), 1..50),
+            turns in 4u64..=10,
+            reads_per_turn in 1u64..=4,
+            steps in proptest::collection::vec(step(), 1..60),
         ) {
-            let mut fx = Fx::concurrent(builders(), live, Budget { messages: 12, ..default_budget() });
+            let b = Budget { messages: 12, turns, reads_per_turn, ..default_budget() };
+            let mut fx = Fx::concurrent(builders(), live, b);
             fx.reach_build();
             for s in &steps {
                 run(&mut fx, s);

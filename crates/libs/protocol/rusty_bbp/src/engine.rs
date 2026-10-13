@@ -84,11 +84,6 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
                 principal,
                 code: r.code,
             });
-            // A refusal can end a turn and reschedule (a spent slice or read
-            // budget), and the replacement grant charges `turns`. Evaluate the
-            // budgets here too, or refused writes could mint turns past the
-            // limit without escalation.
-            evaluate_budgets(&mut w, now);
             Handled {
                 events: w.events,
                 response: Response::Rejected(r),
@@ -1385,16 +1380,28 @@ fn human_post(w: &mut Work, d: &Draft, now: Time) -> R<Response> {
 
 // ---------------------------------------------------------------- turns and lifecycle
 
-/// Grant `role` a turn unless it already holds one or `max_live_turns` are live.
+/// Grant `role` a turn unless it already holds one or `max_live_turns` are
+/// live. A `final_decision` role is serialized: it is granted only when no turn
+/// is live, and while it holds one nobody else is granted, so a finalizer's
+/// verdict is never racing another live turn and cannot silently revoke a
+/// second finalizer's veto.
+///
+/// This is the only place a turn is minted, so it is also the only place
+/// `turns` is charged and checked: a crossing escalates here, whichever path
+/// reached it (a refused write, a deadline, a command refused afterwards).
 fn grant(w: &mut Work, role: &RoleId, kind: TurnKind, return_to: Option<RoleId>, now: Time) {
+    let final_role = w.st.roster.is_final(role);
+    let final_live = w.st.turns.iter().any(|t| w.st.roster.is_final(&t.role));
     if !w.st.assigned.contains_key(role)
         || w.st.turn_of(role).is_some()
         || w.st.turns.len() >= w.st.max_live_turns as usize
+        || (final_role && !w.st.turns.is_empty())
+        || final_live
     {
         return;
     }
     let turn = TurnId(w.st.next_turn);
-    let slice = w.st.next_slice();
+    let slice = w.st.next_slice(final_role);
     w.emit(Event::TurnGranted {
         role: role.clone(),
         turn,
@@ -1403,6 +1410,10 @@ fn grant(w: &mut Work, role: &RoleId, kind: TurnKind, return_to: Option<RoleId>,
         return_to,
         slice,
     });
+    let turns = BudgetField::Turns;
+    if w.st.spent.turns > w.st.budget.turns && !w.st.exhausted.contains(&turns) {
+        escalate(w, EscalateReason::Budget(turns), now);
+    }
 }
 
 /// The one scheduling check. Fills the free turn slots with the roles that
@@ -1427,8 +1438,12 @@ fn schedule(w: &mut Work, now: Time) {
     if w.st.state == State::Test && w.st.selected_run().and_then(|r| r.status).is_none() {
         return;
     }
+    let state = w.st.state;
     for role in &serving {
         grant(w, role, TurnKind::Default, None, now);
+        if w.st.state != state {
+            break; // a grant escalated the task; the rest of the list is stale
+        }
     }
 }
 
