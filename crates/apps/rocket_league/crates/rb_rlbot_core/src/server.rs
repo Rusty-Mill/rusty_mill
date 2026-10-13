@@ -190,7 +190,14 @@ impl<B: MatchBackend> Core<B> {
     /// Listens on `addr` (port 0 picks a free one; see [`Core::local_addr`]). `pacing` applies
     /// to a backend that is stepped by core; a self-paced one (a real game) sets its own.
     pub fn bind(addr: impl ToSocketAddrs, backend: B, pacing: Pacing) -> io::Result<Core<B>> {
-        let listener = TcpListener::bind(addr)?;
+        Core::from_listener(TcpListener::bind(addr)?, backend, pacing)
+    }
+
+    /// Serves on a listener the caller already holds. A caller whose backend takes a while to
+    /// exist (a game that has yet to connect) binds first, so a port clash fails before
+    /// anything is launched and a bot that connects early waits in the listener's backlog
+    /// until [`Core::run`] accepts it, instead of being refused.
+    pub fn from_listener(listener: TcpListener, backend: B, pacing: Pacing) -> io::Result<Core<B>> {
         listener.set_nonblocking(true)?;
         Ok(Core {
             listener,
