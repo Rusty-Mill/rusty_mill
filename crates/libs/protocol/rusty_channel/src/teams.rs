@@ -497,9 +497,13 @@ mod tests {
         assert_eq!(clean_text("<at>Bot"), "<at>Bot");
     }
 
-    fn times(pairs: &[(&str, Value)]) -> Result<(), Error> {
+    fn times_at(pairs: &[(&str, Value)], now: u64) -> Result<(), Error> {
         let claims = Value::from_iter(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())));
-        check_times(&claims, NOW)
+        check_times(&claims, now)
+    }
+
+    fn times(pairs: &[(&str, Value)]) -> Result<(), Error> {
+        times_at(pairs, NOW)
     }
 
     fn why(result: Result<(), Error>) -> String {
@@ -555,6 +559,38 @@ mod tests {
         let nbf = |n: i64| times(&[("exp", Value::from(now + 9999)), ("nbf", Value::from(n))]);
         assert!(nbf(now + leeway).is_ok());
         assert!(why(nbf(now + leeway + 1)).contains("not valid before"));
+    }
+
+    // Offsets around a whole-second boundary: a claim `f` seconds past it.
+    const OFFSETS: [f64; 7] = [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75];
+
+    #[test]
+    fn fractional_exp_is_judged_against_the_exact_value() {
+        // Expired once `exp + leeway <= now`, so exp = (now - leeway) + f is
+        // expired exactly when f <= 0. `now` of 0 puts the claim below zero.
+        let leeway = LEEWAY_SECS as i64;
+        for now in [NOW, 0] {
+            for f in OFFSETS {
+                let exp = Value::from(now as i64 as f64 - leeway as f64 + f);
+                let result = times_at(&[("exp", exp)], now);
+                assert_eq!(result.is_err(), f <= 0.0, "now {now} f {f}");
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_nbf_is_judged_against_the_exact_value() {
+        // Refused while `nbf > now + leeway`, so nbf = (now + leeway) + f is
+        // refused exactly when f > 0 (nearest rounding lets 0.25 through).
+        let leeway = LEEWAY_SECS as i64;
+        for now in [NOW, 0] {
+            for f in OFFSETS {
+                let nbf = Value::from(now as i64 as f64 + leeway as f64 + f);
+                let claims = [("exp", Value::from(NOW + 9999)), ("nbf", nbf)];
+                let result = times_at(&claims, now);
+                assert_eq!(result.is_err(), f > 0.0, "now {now} f {f}");
+            }
+        }
     }
 
     #[test]

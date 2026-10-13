@@ -155,9 +155,14 @@ impl Default for Validation {
 /// A claim that is present but not a usable number (a string, `null`, a
 /// boolean, a structure) is an **error**, never "absent": a token that
 /// claims a time we cannot read must not be treated as having no time limit.
-/// Fractions are rounded to the nearest second, and values beyond what an
-/// `i64` holds saturate, which keeps the claim's meaning (far future, far
-/// past) instead of dropping it.
+/// Fractions are rounded **up** to the next whole second. That is exact for
+/// the comparisons made here: for a whole-second `x`, `x >= exp` holds iff
+/// `x >= ceil(exp)`, and `x < nbf` holds iff `x < ceil(nbf)`, so a claim of
+/// `now + leeway + 0.25` is still in the future and `now - leeway + 0.25` is
+/// still unexpired (rounding to the nearest second gets both wrong). Values
+/// beyond what an `i64` holds saturate, which keeps the claim's meaning (far
+/// future, far past) instead of dropping it; the saturation limits are not
+/// exact.
 pub fn time_claim(claims: &Value, name: &str) -> Result<Option<i64>> {
     let Some(value) = claims.get(name) else {
         return Ok(None);
@@ -170,7 +175,7 @@ pub fn time_claim(claims: &Value, name: &str) -> Result<Option<i64>> {
     }
     match value.as_f64() {
         // `rusty_json` numbers are always finite; `as` saturates out-of-range ones.
-        Some(seconds) => Ok(Some(seconds.round() as i64)),
+        Some(seconds) => Ok(Some(seconds.ceil() as i64)),
         None => Err(Error::Validation(format!(
             "malformed `{name}` claim: not a NumericDate"
         ))),
@@ -368,9 +373,15 @@ mod tests {
         let read = |v: Value| time_claim(&claims(&[("nbf", v)]), "nbf").unwrap();
         assert_eq!(read(Value::from(4_102_444_800_i64)), Some(4_102_444_800));
         assert_eq!(read(Value::from(-5_i64)), Some(-5));
-        assert_eq!(read(Value::from(1.4_f64)), Some(1));
+        // Fractions round up, to keep comparisons with whole seconds exact.
+        assert_eq!(read(Value::from(1.0_f64)), Some(1));
+        assert_eq!(read(Value::from(1.25_f64)), Some(2));
         assert_eq!(read(Value::from(1.5_f64)), Some(2));
+        assert_eq!(read(Value::from(1.75_f64)), Some(2));
         assert_eq!(read(Value::from(4_102_444_800.5_f64)), Some(4_102_444_801));
+        assert_eq!(read(Value::from(-5.25_f64)), Some(-5));
+        assert_eq!(read(Value::from(-5.75_f64)), Some(-5));
+        assert_eq!(read(Value::from(-0.5_f64)), Some(0));
         assert_eq!(read(Value::from(u64::MAX)), Some(i64::MAX));
         assert_eq!(read(Value::from(1e300_f64)), Some(i64::MAX));
         assert_eq!(read(Value::from(-1e300_f64)), Some(i64::MIN));
@@ -448,6 +459,46 @@ mod tests {
         let nbf = |n: i64| claims(&[("exp", Value::from(NOW + 9999)), ("nbf", Value::from(n))]);
         assert!(at(&nbf(NOW + 60), 60, true).is_ok());
         assert!(rejected(at(&nbf(NOW + 61), 60, true)).contains("not yet valid"));
+    }
+
+    // Offsets around a whole-second boundary: a claim `f` seconds past it.
+    const OFFSETS: [f64; 7] = [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75];
+
+    #[test]
+    fn fractional_exp_is_judged_against_the_exact_value() {
+        // Expired once `now - leeway >= exp`, so exp = (now - leeway) + f is
+        // expired exactly when f <= 0 (nearest rounding gets 0.25 wrong).
+        for (now, leeway) in [(NOW, 60), (NOW, 0), (-5, 0), (0, 3)] {
+            for f in OFFSETS {
+                let c = claims(&[("exp", Value::from((now - leeway) as f64 + f))]);
+                let options = Validation {
+                    leeway_seconds: leeway,
+                    ..Default::default()
+                };
+                let result = validate_claims_at(&c, &options, now);
+                assert_eq!(result.is_err(), f <= 0.0, "now {now} leeway {leeway} f {f}");
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_nbf_is_judged_against_the_exact_value() {
+        // Not yet valid while `now + leeway < nbf`, so nbf = (now + leeway) + f
+        // is refused exactly when f > 0 (nearest rounding lets 0.25 through).
+        for (now, leeway) in [(NOW, 60), (NOW, 0), (-5, 0), (0, 3)] {
+            for f in OFFSETS {
+                let c = claims(&[
+                    ("exp", Value::from(NOW + 9999)),
+                    ("nbf", Value::from((now + leeway) as f64 + f)),
+                ]);
+                let options = Validation {
+                    leeway_seconds: leeway,
+                    ..Default::default()
+                };
+                let result = validate_claims_at(&c, &options, now);
+                assert_eq!(result.is_err(), f > 0.0, "now {now} leeway {leeway} f {f}");
+            }
+        }
     }
 
     #[test]
