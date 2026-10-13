@@ -101,8 +101,15 @@ pub struct Spent {
     pub messages: u64,
     pub bytes: u64,
     pub reads: u64,
-    pub reads_this_turn: u64,
     pub turns: u64,
+}
+
+/// A turn's share of the task's `messages` and `bytes`, reserved when the
+/// turn is granted so concurrent turns cannot jointly overshoot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Slice {
+    pub messages: u64,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,6 +124,13 @@ pub struct Turn {
     pub state_at: State,
     pub candidate_at: Option<ArtId>,
     pub run_at: Option<RunId>,
+    /// `None` when the task allows one live turn: the whole budget.
+    pub slice: Option<Slice>,
+    /// Spent inside this turn (`reads` against `reads_per_turn`, the other two
+    /// against `slice`).
+    pub reads: u64,
+    pub messages: u64,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,7 +167,8 @@ pub struct Card {
     pub task: TaskId,
     pub rev: Rev,
     pub state: State,
-    pub turn: Option<(RoleId, TurnKind, Time)>,
+    /// Every live turn, in grant order.
+    pub turns: Vec<(RoleId, TurnKind, Time)>,
     pub iteration: u64,
     pub brief: Option<ArtId>,
     pub spec: Option<ArtId>,
@@ -185,6 +200,8 @@ pub struct TaskState {
     pub spent: Spent,
     pub turn_ms: u64,
     pub request_ms: u64,
+    /// Cap on concurrently live turns, at most one per role.
+    pub max_live_turns: u32,
     pub state: State,
     pub iteration: u64,
     pub principals: HashMap<PrincipalId, Principal>,
@@ -198,7 +215,8 @@ pub struct TaskState {
     pub next_run: u64,
     pub artifacts: BTreeMap<ArtId, ArtifactRecord>,
     pub messages: Vec<Message>,
-    pub turn: Option<Turn>,
+    /// Live turns in grant order, at most one per role and `max_live_turns` in all.
+    pub turns: Vec<Turn>,
     pub next_turn: u64,
     pub pending_request: Option<PendingRequest>,
     pub verdicts: Vec<VerdictRecord>,
@@ -245,6 +263,7 @@ impl TaskState {
             spent: Spent::default(),
             turn_ms: 600_000,
             request_ms: 86_400_000,
+            max_live_turns: 1,
             state: State::Planning,
             iteration: 0,
             principals: HashMap::new(),
@@ -258,7 +277,7 @@ impl TaskState {
             next_run: 1,
             artifacts: BTreeMap::new(),
             messages: Vec::new(),
-            turn: None,
+            turns: Vec::new(),
             next_turn: 1,
             pending_request: None,
             verdicts: Vec::new(),
@@ -303,6 +322,57 @@ impl TaskState {
             Some(PrincipalKind::Agent { vendor, .. }) => Some(vendor),
             _ => None,
         }
+    }
+
+    /// The live turn of `role`, if any.
+    pub fn turn_of(&self, role: &RoleId) -> Option<&Turn> {
+        self.turns.iter().find(|t| t.role == *role)
+    }
+
+    /// The live turn when exactly one is allowed; the first granted otherwise.
+    pub fn turn(&self) -> Option<&Turn> {
+        self.turns.first()
+    }
+
+    /// Slice not yet spent by live turns: what a new grant may not take.
+    pub fn reserved(&self) -> Slice {
+        self.turns
+            .iter()
+            .filter_map(|t| t.slice.map(|s| (s, t)))
+            .fold(
+                Slice {
+                    messages: 0,
+                    bytes: 0,
+                },
+                |a, (s, t)| Slice {
+                    messages: a.messages + s.messages.saturating_sub(t.messages),
+                    bytes: a.bytes + s.bytes.saturating_sub(t.bytes),
+                },
+            )
+    }
+
+    /// The slice for a turn granted now, or `None` when one live turn is the
+    /// cap. Each grant takes `1/(cap - live)` of the unreserved headroom, so
+    /// the slices of the live turns never sum past it. A serialized turn (a
+    /// finalizer's, alone by rule) takes all of it.
+    pub fn next_slice(&self, serialized: bool) -> Option<Slice> {
+        let cap = u64::from(self.max_live_turns);
+        if cap <= 1 {
+            return None;
+        }
+        let left = if serialized {
+            1
+        } else {
+            cap.saturating_sub(self.turns.len() as u64).max(1)
+        };
+        let r = self.reserved();
+        let room = |total: u64, spent: u64, reserved: u64| {
+            total.saturating_sub(spent).saturating_sub(reserved) / left
+        };
+        Some(Slice {
+            messages: room(self.budget.messages, self.spent.messages, r.messages),
+            bytes: room(self.budget.bytes, self.spent.bytes, r.bytes),
+        })
     }
 
     pub fn next_msg_id(&self) -> MsgId {
@@ -382,10 +452,11 @@ impl TaskState {
             task: self.task.clone(),
             rev: self.rev,
             state: self.state,
-            turn: self
-                .turn
-                .as_ref()
-                .map(|t| (t.role.clone(), t.kind, t.deadline)),
+            turns: self
+                .turns
+                .iter()
+                .map(|t| (t.role.clone(), t.kind, t.deadline))
+                .collect(),
             iteration: self.iteration,
             brief: self.brief,
             spec: self.approved_spec,
@@ -411,6 +482,7 @@ impl TaskState {
                 budget,
                 turn_ms,
                 request_ms,
+                max_live_turns,
                 human,
                 policy,
             } => {
@@ -424,6 +496,12 @@ impl TaskState {
                 self.budget = *budget;
                 self.turn_ms = *turn_ms;
                 self.request_ms = *request_ms;
+                // Only schema 3 may raise the cap; a schema-2 log is serialized.
+                self.max_live_turns = if *schema >= crate::event::LOG_SCHEMA_CONCURRENT {
+                    (*max_live_turns).max(1)
+                } else {
+                    1
+                };
                 self.human = human.clone();
                 self.policy = *policy;
                 self.opened = true;
@@ -445,8 +523,9 @@ impl TaskState {
                 kind,
                 deadline,
                 return_to,
+                slice,
             } => {
-                self.turn = Some(Turn {
+                self.turns.push(Turn {
                     id: *turn,
                     role: role.clone(),
                     kind: *kind,
@@ -456,16 +535,18 @@ impl TaskState {
                     state_at: self.state,
                     candidate_at: self.candidate,
                     run_at: self.run.as_ref().map(|r| r.id),
+                    slice: *slice,
+                    reads: 0,
+                    messages: 0,
+                    bytes: 0,
                 });
                 self.next_turn = turn.0 + 1;
                 self.spent.turns += 1;
-                self.spent.reads_this_turn = 0;
             }
             Event::TurnEnded { turn, cause: _ } => {
-                if self.turn.as_ref().map(|t| t.id) == Some(*turn) {
-                    if let Some(t) = self.turn.take() {
-                        self.last_turn_end.insert(t.role, self.rev);
-                    }
+                if let Some(i) = self.turns.iter().position(|t| t.id == *turn) {
+                    let t = self.turns.remove(i);
+                    self.last_turn_end.insert(t.role, self.rev);
                 }
             }
             Event::MessageAppended(m) => {
@@ -612,15 +693,15 @@ impl TaskState {
                 self.spent.messages += messages;
                 self.spent.bytes += bytes;
                 self.spent.reads += reads;
-                if turn.is_some() && self.turn.as_ref().map(|t| t.id) == *turn {
-                    self.spent.reads_this_turn += reads;
+                if let Some(t) = self.turns.iter_mut().find(|t| Some(t.id) == *turn) {
+                    t.reads += reads;
+                    t.messages += messages;
+                    t.bytes += bytes;
                 }
             }
             Event::ReadDeduped { turn, art } => {
-                if let Some(t) = self.turn.as_mut() {
-                    if t.id == *turn {
-                        t.read_arts.insert(*art);
-                    }
+                if let Some(t) = self.turns.iter_mut().find(|t| t.id == *turn) {
+                    t.read_arts.insert(*art);
                 }
             }
             Event::Rejected { .. } => self.rejections += 1,

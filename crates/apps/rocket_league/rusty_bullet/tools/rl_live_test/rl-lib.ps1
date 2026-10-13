@@ -80,7 +80,7 @@ function Start-RlSession([string]$Dir, [string]$Stamp, [string[]]$Players) {
     -ArgumentList "-rlbot RLBot_ControllerURL=127.0.0.1:23233 RLBot_PacketSendRate=240 -nomovie $login")
   $login = $null; $raw = $null; $tokens = $null; $keep = $null; $line = $null; $cur = $null; $before = $null
   for ($i = 0; $i -lt 100; $i++) {
-    if ((Get-Content "$Dir\bridge.out.log" -ErrorAction SilentlyContinue) -match 'serving bots on') { return $bridge }
+    if ((Get-Content "$Dir\bridge.out.log" -ErrorAction SilentlyContinue) -match 'waiting to speak') { return $bridge }   # the game has dialled (it speaks only once a map loads)
     Start-Sleep 3
   }
   throw 'the game did not connect to the bridge'

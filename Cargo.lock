@@ -12765,6 +12765,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mill_board"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rusty_crypto_key",
+ "rusty_http",
+ "rusty_mcp_server",
+ "rusty_multimodal_db_engine",
+ "rusty_oauth",
+ "rusty_request",
+ "rusty_serve",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "rusty_mill_runner"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rusty_mcp_server",
+ "rusty_mill_board",
+ "rusty_sandbox",
+ "rusty_serve",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "rusty_multimodal_db"
 version = "0.1.0"
 dependencies = [

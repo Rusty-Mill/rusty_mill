@@ -239,7 +239,7 @@ only through `collect.sh`, by hand:
 - Exact jump-count pins (`scripts/disasm_limits_aes.txt`): `sbox`, `shift_rows`, `mix_columns`, `to_planes`,
   `from_planes`, `sub_word`, `bmul64`, `clmul64`, `gf_mul` are straight-line (0); `Aes::encrypt_blocks` has 4 and
   `Aes::expand` 17, each read in the disassembly and found to compare a public counter or index (loop entry and
-  back-edge, round-key bounds checks, the key-schedule word index). The functions are `#[inline(never)]`, and the
+  back-edge, round-key bounds checks, the key-schedule word index). The nine straight-line building blocks are `#[inline(never)]` (`Aes::encrypt_blocks` and `Aes::expand` are not; they stay separate symbols in the audited build, and the audit fails if one stops being a symbol), and the
   key schedule now counts its word index instead of dividing, so there is no division anywhere in the audited set.
   `ghash::ghash` and `Gcm::{ctr, seal, open}` branch on the public message length and are not pinned.
 - Eight timing tests, 50,000 samples each, in `collect.sh`: AES-128 and AES-256 key classes (constructor included), plaintext

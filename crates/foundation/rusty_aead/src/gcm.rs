@@ -156,7 +156,8 @@ macro_rules! gcm_type {
             }
 
             /// Encrypts `buf` in place and returns the tag over `aad` and the ciphertext.
-            /// Fails only if `buf` is longer than SP 800-38D permits.
+            /// Fails only if `buf` is longer than 2^36 - 32 bytes or `aad` is longer than
+            /// 2^61 - 1 bytes, the limits SP 800-38D sets.
             pub fn seal_in_place(
                 &self,
                 nonce: &[u8; GCM_NONCE_LEN],
@@ -167,7 +168,8 @@ macro_rules! gcm_type {
             }
 
             /// Verifies `tag` over `aad` and the ciphertext `buf`, and only then decrypts
-            /// `buf` in place. On failure `buf` is left unchanged.
+            /// `buf` in place. Fails if the tag does not verify or if `buf` or `aad` exceeds the
+            /// limits above. On failure `buf` is left unchanged.
             pub fn open_in_place(
                 &self,
                 nonce: &[u8; GCM_NONCE_LEN],

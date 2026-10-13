@@ -98,6 +98,8 @@ pub struct Outcome {
     pub state: State,
     pub turns_launched: u64,
     pub runs: u64,
+    /// Wall clock from the loop's start to its end.
+    pub elapsed: Duration,
 }
 
 /// `<dir>/<sub>/<sha256(task id)>`: one directory per task, injective, so
@@ -183,15 +185,25 @@ struct Harness {
 /// Every process the loop started. Dropping it kills the harness and its
 /// whole process group, so an error path cleans up like a normal one.
 struct Supervision {
-    harness: Option<Harness>,
+    harnesses: Vec<Harness>,
     runner: Option<JoinHandle<Result<Response, String>>>,
 }
 
 impl Supervision {
-    /// Kill the harness's process group and reap it.
-    fn kill_harness(&mut self) -> Result<(), String> {
-        match self.harness.take() {
-            Some(mut h) => kill_tree(&mut h.child),
+    /// Kill every harness's process group and reap them, reporting the first failure.
+    fn kill_harnesses(&mut self) -> Result<(), String> {
+        let mut first = Ok(());
+        for mut h in self.harnesses.drain(..) {
+            let r = kill_tree(&mut h.child);
+            first = first.and(r);
+        }
+        first
+    }
+
+    /// Kill the harness of `turn`, if one is running.
+    fn kill_harness_of(&mut self, turn: TurnId) -> Result<(), String> {
+        match self.harnesses.iter().position(|h| h.turn == turn) {
+            Some(i) => kill_tree(&mut self.harnesses.remove(i).child),
             None => Ok(()),
         }
     }
@@ -199,7 +211,7 @@ impl Supervision {
 
 impl Drop for Supervision {
     fn drop(&mut self) {
-        if let Err(e) = self.kill_harness() {
+        if let Err(e) = self.kill_harnesses() {
             eprintln!("bbp mod: harness not cleaned up: {e}");
         }
         if self.runner.is_some() {
@@ -233,7 +245,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     let mut d = open_driver(&cfg.dir, &cfg.task)?;
     let started = Instant::now();
     let mut sup = Supervision {
-        harness: None,
+        harnesses: Vec::new(),
         runner: None,
     };
     let mut launched: HashSet<TurnId> = HashSet::new();
@@ -244,18 +256,19 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     // replacement turn is launched here. The first tick fires deadlines and
     // grants the first turn of a freshly assigned task; that turn is ours.
     // Gates have no turn and keep waiting.
-    let inherited = d.state.turn.as_ref().map(|t| t.id);
+    let inherited: Vec<TurnId> = d.state.turns.iter().map(|t| t.id).collect();
     d.dispatch(&Command::Tick, now())
         .map_err(|e| format!("{e:?}"))?;
-    let live = d.state.turn.as_ref().map(|t| t.id);
-    if let (Some(turn), true) = (inherited, inherited == live) {
-        if !d.state.state.terminal() {
-            eprintln!(
-                "bbp mod: turn {} predates this moderator; aborting it",
-                turn.0
-            );
-            d.dispatch(&Command::AbortTurn, now())
-                .map_err(|e| format!("{e:?}"))?;
+    if !d.state.state.terminal() {
+        for turn in inherited {
+            if d.state.turns.iter().any(|t| t.id == turn) {
+                eprintln!(
+                    "bbp mod: turn {} predates this moderator; aborting it",
+                    turn.0
+                );
+                d.dispatch(&Command::AbortTurn { turn: Some(turn) }, now())
+                    .map_err(|e| format!("{e:?}"))?;
+            }
         }
     }
 
@@ -265,15 +278,16 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             .map_err(|e| format!("{e:?}"))?;
         let state = d.state.state;
         if matches!(state, State::Closed | State::Cancelled) {
-            sup.kill_harness()?;
+            sup.kill_harnesses()?;
             return Ok(Outcome {
                 state,
                 turns_launched: launched.len() as u64,
                 runs: ran.len() as u64,
+                elapsed: started.elapsed(),
             });
         }
         if started.elapsed() > cfg.max_wall {
-            sup.kill_harness()?;
+            sup.kill_harnesses()?;
             return Err(format!("moderator: wall limit reached in state {state:?}"));
         }
 
@@ -300,54 +314,63 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             sup.runner = Some(std::thread::spawn(move || run_once(&cfg)));
         }
 
-        let live = d.state.turn.as_ref().map(|t| (t.id, t.role.clone()));
+        let live: Vec<(TurnId, RoleId)> = d
+            .state
+            .turns
+            .iter()
+            .map(|t| (t.id, t.role.clone()))
+            .collect();
 
         // Reap: a harness that exited without ending its turn forfeits it;
         // one whose turn ended under it is killed.
-        if let Some(h) = sup.harness.as_mut() {
+        let mut forfeited = None;
+        for h in &mut sup.harnesses {
+            let is_live = live.iter().any(|(id, _)| *id == h.turn);
             match h.child.try_wait() {
                 Ok(Some(status)) => {
                     eprintln!("bbp mod: harness for turn {} exited: {status}", h.turn.0);
-                    let turn = h.turn;
-                    sup.kill_harness()?;
-                    if live.as_ref().map(|(id, _)| *id) == Some(turn) {
-                        d.dispatch(&Command::AbortTurn, now())
-                            .map_err(|e| format!("{e:?}"))?;
-                        continue;
-                    }
+                    forfeited = Some((h.turn, is_live));
+                    break;
                 }
-                Ok(None) if live.as_ref().map(|(id, _)| *id) != Some(h.turn) => {
+                Ok(None) if !is_live => {
                     eprintln!("bbp mod: turn {} ended; stopping its harness", h.turn.0);
-                    sup.kill_harness()?;
+                    forfeited = Some((h.turn, false));
+                    break;
                 }
                 Ok(None) => {}
                 Err(e) => return Err(format!("harness wait: {e}")),
             }
         }
+        if let Some((turn, abort)) = forfeited {
+            sup.kill_harness_of(turn)?;
+            if abort {
+                d.dispatch(&Command::AbortTurn { turn: Some(turn) }, now())
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+            continue;
+        }
 
         // Launch: one harness per granted turn.
-        if sup.harness.is_none() {
-            if let Some((turn, role)) = live {
-                if !launched.contains(&turn) {
-                    launched.insert(turn);
-                    match cfg.launchers.for_role(&role) {
-                        Some(l) => {
-                            let principal = d
-                                .state
-                                .assigned
-                                .get(&role)
-                                .cloned()
-                                .ok_or_else(|| format!("{role} has no principal"))?;
-                            let child = spawn(cfg, l, &role, &principal, turn)?;
-                            sup.harness = Some(Harness { turn, child });
-                            continue;
-                        }
-                        None => eprintln!(
-                            "bbp mod: no launcher for {role}; turn {} waits for its deadline",
-                            turn.0
-                        ),
-                    }
+        for (turn, role) in live {
+            if launched.contains(&turn) {
+                continue;
+            }
+            launched.insert(turn);
+            match cfg.launchers.for_role(&role) {
+                Some(l) => {
+                    let principal = d
+                        .state
+                        .assigned
+                        .get(&role)
+                        .cloned()
+                        .ok_or_else(|| format!("{role} has no principal"))?;
+                    let child = spawn(cfg, l, &role, &principal, turn)?;
+                    sup.harnesses.push(Harness { turn, child });
                 }
+                None => eprintln!(
+                    "bbp mod: no launcher for {role}; turn {} waits for its deadline",
+                    turn.0
+                ),
             }
         }
         std::thread::sleep(cfg.poll);

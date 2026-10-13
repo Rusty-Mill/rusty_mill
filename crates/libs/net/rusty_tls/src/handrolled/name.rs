@@ -117,6 +117,11 @@ pub enum NameError {
     /// name with an empty label). Such an entry cannot be shown to lie inside
     /// the permitted namespace, and RFC 5280 §4.2.1.10 requires every name to.
     MalformedSubjectAltName,
+    /// Checking the names against the constraints would take more than
+    /// [`MAX_NAME_COMPARISONS`] comparisons. Refused rather than attempted: the
+    /// work grows with constraints times names, both of which the peer
+    /// controls.
+    TooManyNameComparisons,
 }
 
 impl core::fmt::Display for NameError {
@@ -142,6 +147,9 @@ impl core::fmt::Display for NameError {
             Self::MalformedSubjectAltName => {
                 f.write_str("a subjectAltName entry is malformed under a name constraint")
             }
+            Self::TooManyNameComparisons => {
+                f.write_str("name constraints would need too many comparisons to check")
+            }
         }
     }
 }
@@ -151,6 +159,15 @@ impl std::error::Error for NameError {}
 // ---------------------------------------------------------------------------
 // DNS name syntax
 // ---------------------------------------------------------------------------
+
+/// Most name-against-subtree comparisons one CA's constraints may cost.
+///
+/// A real CA carries tens of constraints and a real certificate a few hundred
+/// names at most, so ordinary chains need a few thousand comparisons. The
+/// x509-limbo `pathological::nc-dos` cases need over four million. The cap sits
+/// between the two with a wide margin on both sides; it applies to each CA in
+/// the path, and the path search is itself bounded.
+pub const MAX_NAME_COMPARISONS: usize = 100_000;
 
 /// Longest permitted presentation-format DNS name, per RFC 1035 §2.3.4.
 const MAX_NAME_LEN: usize = 253;
@@ -542,11 +559,29 @@ pub fn check_name_constraints_body(
 ) -> Result<(), NameError> {
     let constraints = parse_constraints(body)?;
 
-    for (index, certificate) in subordinates.iter().enumerate() {
-        let is_last = index + 1 == subordinates.len();
-        if certificate.is_self_issued() && !is_last {
-            continue;
-        }
+    let checked = || {
+        subordinates
+            .iter()
+            .enumerate()
+            .filter(|(index, certificate)| {
+                !(certificate.is_self_issued() && index + 1 != subordinates.len())
+            })
+            .map(|(_, certificate)| *certificate)
+    };
+
+    // Bound the work before doing it. Every name is compared with every
+    // subtree, and the peer chooses both counts, so a chain of a few thousand
+    // of each costs millions of comparisons. webpki refuses such chains; this
+    // does too, on the product alone, so the check itself is cheap.
+    let subtrees = constraints.permitted.len() + constraints.excluded.len();
+    let names: usize = checked()
+        .map(|certificate| certificate.extensions().subject_alt_names().count())
+        .fold(0, usize::saturating_add);
+    if names.saturating_mul(subtrees) > MAX_NAME_COMPARISONS {
+        return Err(NameError::TooManyNameComparisons);
+    }
+
+    for certificate in checked() {
         check_one(certificate, &constraints)?;
     }
 

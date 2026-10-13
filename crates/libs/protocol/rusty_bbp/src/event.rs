@@ -5,12 +5,45 @@ use crate::ids::*;
 use crate::policy::SchedulingPolicy;
 use crate::record::*;
 use crate::role::Role;
-use crate::state::{Budget, BudgetField, Gate, State, TurnKind};
+use crate::state::{Budget, BudgetField, Gate, Slice, State, TurnKind};
 use rusty_serde::{Deserialize, Serialize};
 
-/// The log schema this crate writes and reads. Schema 1 was v0.4.1 (a fixed
-/// role enumeration, no roster); it does not replay.
+/// The log schema of a task that allows one live turn. Schema 1 was v0.4.1 (a
+/// fixed role enumeration, no roster); it does not replay.
 pub const LOG_SCHEMA: u32 = 2;
+
+/// The log schema of a task that allows several live turns. Written only when
+/// `max_live_turns > 1`, so a build that reads schema 2 alone refuses such a
+/// log instead of replaying it as serialized.
+pub const LOG_SCHEMA_CONCURRENT: u32 = 3;
+
+/// The schema `open` records for a task with this cap.
+pub fn schema_for(max_live_turns: u32) -> u32 {
+    if max_live_turns > 1 {
+        LOG_SCHEMA_CONCURRENT
+    } else {
+        LOG_SCHEMA
+    }
+}
+
+/// Does this build replay a log of this schema?
+pub fn schema_supported(schema: u32) -> bool {
+    schema == LOG_SCHEMA || schema == LOG_SCHEMA_CONCURRENT
+}
+
+fn one_turn() -> u32 {
+    1
+}
+
+// Skipped when serialized so a one-turn task's log is byte-identical to schema 2.
+fn serialized_cap(cap: &u32) -> bool {
+    *cap <= 1
+}
+
+// Skipped when serialized so a turn-based task's log is byte-identical to schema 2.
+fn is_turn_based(p: &SchedulingPolicy) -> bool {
+    *p == SchedulingPolicy::TurnBased
+}
 
 /// The `schema` of the first `task_opened` in `events`, if the log has one.
 pub fn log_schema(events: &[Event]) -> Option<u32> {
@@ -53,9 +86,15 @@ pub enum Event {
         budget: Budget,
         turn_ms: u64,
         request_ms: u64,
+        /// Cap on concurrently live turns. Present only in schema 3; absent
+        /// reads as 1.
+        #[rusty_serde(default = "one_turn", skip_serializing_if = "serialized_cap")]
+        max_live_turns: u32,
         human: PrincipalId,
-        /// Added after schema 2 shipped: a log without it replays as `TurnBased`.
-        #[rusty_serde(default)]
+        /// Added after schema 2 shipped. Absent reads as `TurnBased` and
+        /// `TurnBased` is not written, so a turn-based log is byte for byte
+        /// the one the golden in `tests/schema.rs` pins.
+        #[rusty_serde(default, skip_serializing_if = "is_turn_based")]
         policy: SchedulingPolicy,
     },
     Assigned {
@@ -70,6 +109,11 @@ pub enum Event {
         kind: TurnKind,
         deadline: Time,
         return_to: Option<RoleId>,
+        /// The turn's share of the task budget, reserved at grant. `None`
+        /// when `max_live_turns` is 1: the whole task budget, with the
+        /// crossing write accepted (R11).
+        #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+        slice: Option<Slice>,
     },
     TurnEnded {
         turn: TurnId,

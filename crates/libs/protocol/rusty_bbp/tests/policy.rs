@@ -28,31 +28,29 @@ fn the_policy_is_recorded_in_task_opened_and_folded() {
     assert_eq!(fx.st().policy, SchedulingPolicy::TurnBased);
 }
 
+/// `TurnBased` is the default and is not written, so a turn-based log is byte
+/// for byte the one written before the field existed (`tests/schema.rs` pins it).
 #[test]
-fn task_opened_round_trips_with_its_policy() {
+fn task_opened_round_trips_and_omits_the_default_policy() {
     let fx = Fx::new();
     let e = opened(&fx);
     let text = rusty_serde::json::to_string(&e).expect("encode");
-    assert!(text.contains("\"policy\""), "{text}");
+    assert!(!text.contains("policy"), "{text}");
     let back: Event = rusty_serde::json::from_str(&text).expect("decode");
     assert_eq!(back, e);
 }
 
-/// A log written before the field existed has no `policy` key. It must still
-/// decode, as `TurnBased`, with the schema unchanged.
+/// A log written before the field existed has no `policy` key: it is the same
+/// text as a turn-based log today. It must replay as `TurnBased`, schema 2.
 #[test]
 fn a_log_without_a_policy_replays_as_turn_based() {
     let fx = Fx::new();
-    let e = opened(&fx);
-    let text = rusty_serde::json::to_string(&e).expect("encode");
-    let legacy = text.replacen(",\"policy\":\"TurnBased\"", "", 1);
-    assert_ne!(legacy, text, "the key was not found to strip: {text}");
-    let back: Event = rusty_serde::json::from_str(&legacy).expect("legacy decodes");
-    assert_eq!(back, e);
     let evs = fx.d.store.events(&fx.st().task, 0).expect("events");
-    let mut with_legacy = vec![back];
-    with_legacy.extend_from_slice(&evs[1..]);
-    let st = TaskState::fold(fx.st().task.clone(), &with_legacy);
+    let text = rusty_serde::json::to_string(&evs[0]).expect("encode");
+    let first: Event = rusty_serde::json::from_str(&text).expect("legacy decodes");
+    let mut replay = vec![first];
+    replay.extend_from_slice(&evs[1..]);
+    let st = TaskState::fold(fx.st().task.clone(), &replay);
     assert_eq!(st.policy, SchedulingPolicy::TurnBased);
     assert_eq!(&st, fx.st(), "replay is identical");
 }
@@ -61,7 +59,8 @@ fn a_log_without_a_policy_replays_as_turn_based() {
 fn a_malformed_policy_is_an_error_not_a_default() {
     let fx = Fx::new();
     let text = rusty_serde::json::to_string(&opened(&fx)).expect("encode");
-    let bad = text.replacen("\"TurnBased\"", "\"Nope\"", 1);
+    let bad = text.replacen("\"schema\":", "\"policy\":\"Nope\",\"schema\":", 1);
+    assert_ne!(bad, text, "the key was not injected: {text}");
     assert!(rusty_serde::json::from_str::<Event>(&bad).is_err());
 }
 
@@ -82,6 +81,7 @@ fn open_task() -> OpenTask {
         },
         turn_ms: 1,
         request_ms: 1,
+        max_live_turns: 1,
         brief: store.blob_put(b"brief"),
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::TurnBased,

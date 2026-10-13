@@ -89,6 +89,9 @@ impl Connection {
             paging.ttl_ms = Some(0);
             paging.cache_scope = Some(CacheScope::Public);
         }
+        // Every list result of the 2026-07-28 revision carries `resultType`;
+        // clients (Claude Code) reject a `tools/list` without it.
+        complete_type(&version, &mut paging.result_type);
         Ok((start..end, paging))
     }
 

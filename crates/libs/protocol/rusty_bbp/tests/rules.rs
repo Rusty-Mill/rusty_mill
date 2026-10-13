@@ -522,7 +522,7 @@ fn r18_terminal_rejects_everything() {
 #[test]
 fn tokens_are_keyed_by_the_master_secret_not_the_log() {
     let mut fx = Fx::new();
-    let turn = fx.st().turn.as_ref().expect("planner turn").id;
+    let turn = fx.st().turn().expect("planner turn").id;
     let events = fx.d.store.events(&fx.st().task, 0).expect("events");
     let other = TaskState::fold_with(fx.st().task.clone(), [7; 32], &events);
     let forged = other.token_for(&pid(Who::Planner), turn);
@@ -548,7 +548,7 @@ fn candidate_submission_grants_no_turn_for_the_transition_to_revoke() {
     let (next_turn, turns_spent) = (fx.st().next_turn, fx.st().spent.turns);
     fx.candidate();
     assert_eq!(fx.st().state, State::Test);
-    assert!(fx.st().turn.is_none(), "test waits for the runner");
+    assert!(fx.st().turn().is_none(), "test waits for the runner");
     assert_eq!(fx.st().next_turn, next_turn, "no turn was granted");
     assert_eq!(fx.st().spent.turns, turns_spent, "no budget spent");
     let task = fx.st().task.clone();
@@ -588,6 +588,7 @@ fn assignment_grants_nothing_until_the_first_tick() {
         },
         turn_ms: 60_000,
         request_ms: 3_600_000,
+        max_live_turns: 1,
         brief,
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::default(),
@@ -613,13 +614,13 @@ fn assignment_grants_nothing_until_the_first_tick() {
         )
         .expect("assign"));
     }
-    assert!(d.state.turn.is_none(), "assignment granted a turn");
+    assert!(d.state.turn().is_none(), "assignment granted a turn");
     assert_eq!(d.state.next_turn, 1);
     ok(d.dispatch(&Command::Tick, Time(3)).expect("tick"));
-    let turn = d.state.turn.clone().expect("the first tick grants");
+    let turn = d.state.turn().cloned().expect("the first tick grants");
     assert_eq!((turn.id, turn.role), (TurnId(1), Who::Planner.id()));
     ok(d.dispatch(&Command::Tick, Time(4)).expect("tick"));
-    assert_eq!(d.state.turn.as_ref().map(|t| t.id), Some(TurnId(1)));
+    assert_eq!(d.state.turn().map(|t| t.id), Some(TurnId(1)));
     assert_eq!(
         d.state.next_turn, 2,
         "a tick with a live turn grants nothing"

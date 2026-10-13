@@ -15,6 +15,8 @@ Direction accepted. Recorded decisions, each applied below:
 
 **Amended 2026-10-13 (storage):** the CRDT is no longer a private in-tree type. It is a shared first-party crate `rusty_crdt`, seeded from the `nexus-crdt` algorithm (read in full), with a sync zero-dependency core. See f, Appendix A (API sketch) and Appendix B (ADR draft).
 
+**Status (2026-10-13):** Phase 2a is implemented in `rusty_bbp` and the host (several live turns, one per role, `max_live_turns` in `task_opened`, slices reserved at grant, per-turn abort, one harness per live turn, `bbp open --live-turns N`), with `max_live_turns = 1` as the default and the behavior of v0.5. Differences from the text below: the log schema is 3 when `max_live_turns > 1` (2 otherwise, byte-identical to before); the slice is released implicitly (reserved space is derived from live turns, so no `turn_ended` payload was added); slices are enforced only above one live turn so that `max_live_turns = 1` keeps the accepted crossing write of R11 (the overshoot invariant is mode-dependent); finalizers are serialized and `turns` is checked in the grant that charges it. Known gap: a verdict is not bound to the revision the judge read (spec, Known gaps). Finalizer serialization is not an all-finalizers verdict barrier. The host steps and metrics tooling were integrated into the Phase 2a branch (#657), not `main`. The instrumentation tests show the measurements work; they do not establish a Phase 2b benefit and are not owner adoption approval. Phase 2b stays gated on evidence from 2a and on the owner's approval of the gate criteria.
+
 **Line references** are to `rusty_bbp/src` at `37542c4c` (v0.4.1 engine; the v0.5 engine does not exist yet). Claims I did not verify in source are labelled **[unverified]**.
 
 ## Recommendation
@@ -221,32 +223,41 @@ One field I considered and rejected: `concurrent: bool` on Role. It would let a 
 
 ## 2b gate criteria (proposed, set before any measured run)
 
-Status: **proposal, awaiting owner approval.** The thresholds below are judgment, not derived from data. They are written down first so that no run can pick its own pass mark. The owner may change any number; once approved, changes after the first measured run must be recorded as such.
+Status: **proposal, awaiting owner approval; revised after the owner's review of the first draft (four corrections, recorded below).** The thresholds are judgment, not derived from data. They are written down first so that no run can pick its own pass mark. The owner may change any number; once approved, any change after the first measured run must be recorded as such. Nothing here authorizes building 2b or running an experiment.
 
-**What 2b must beat.** Option 4 (section leases) and plain 2a (parallel diffs joined by one candidate, the loser revoked) are the alternatives. 2b is justified only if real work shows contention that those two handle badly.
+**Scope: the evidence must come from the artifact 2b co-edits.** 2b co-edits the `spec`; `diff` and `candidate` stay immutable (section b). Contention between builders' code diffs is therefore **not** evidence for 2b, and no threshold below counts it: a pass on code-diff contention would justify a CRDT for an artifact that 2b does not touch. If the owner wants co-edited code, that is a different artifact class and a separate, separately approved scope change with its own design note; it is not proposed here. (The code-diff metrics of the metrics tooling stay available as context and are not used by the gate.)
 
-**The runs.** At least 10 tasks with real agents, paired: each task runs once at `max_live_turns = 1` (control) and once at 2, on the same roster, brief, budget and model. At least 5 are *same-artifact* tasks, written so that both builders' natural work edits the same file region (for example, one function both a feature and its error handling must change). The rest are independent-file tasks. The set and the briefs are fixed before the first run. Scripted agents prove the tooling, not the criteria; they do not count toward the 10.
+**What 2b must beat.** Option 4 (section leases) and plain 2a (parallel versions, one approved, the others unused) are the alternatives. 2b is justified only if real spec authoring shows contention that those two handle badly.
 
-**Measured, per task, from the log and the moderator** (nothing is added to the protocol; see the metrics PR):
+**The runs.** At least 10 tasks with real agents, paired: each task runs once at `max_live_turns = 1` (control, one spec author) and once at 2 (two roles that hold `write` ∋ `spec` and serve `planning`), on the same roster otherwise, brief, budget, model and acceptance rubric. At least 5 are *shared-section* tasks, written so that the spec must cover two intertwined concerns that two authors would naturally edit in the same sections; the rest are *separable* tasks whose concerns map to disjoint sections. The set, the briefs and the rubrics are fixed before the first run.
+
+**Comparable outcomes are frozen with the inputs.**
+
+- **Rubric.** Each task has an acceptance rubric fixed in advance: a list of requirements the approved spec must satisfy (for example 8 to 12 items), scored by the same grader for both runs of a pair, blind to which run is which. A run *succeeds* only if it reaches `closed` and the rubric score is at least a pre-declared pass mark, and the build passes the task's frozen profile set.
+- **Failed pairs.** A pair fails if either run does not succeed: cancelled, escalated, wall limit, timeout, or below the pass mark. A failed pair is reported, excluded from every median below, and never counts as fast. At least 8 of the 10 pairs must succeed or the screen is inconclusive and no decision is taken. The N=2 failure count must not exceed the N=1 count by more than 1.
+- **Gates.** The human gates are played by a scripted human with a fixed policy (approve a spec that meets the pass mark, immediately), and wall clock excludes gate waits: `spec_wall` is the time from the first `planning` turn to the plan-gate request. The moderator reports only total elapsed today; per-state timing is a tooling follow-up.
+
+**Measured, per pair** (from the log, the blobs and the rubric; nothing is added to the protocol):
 
 | Metric | Definition |
 | --- | --- |
-| `revocations` | `turn_ended` with cause `revoked`, per task |
-| `discarded_share` | agent actions (messages + reads) charged in turns that ended `revoked`, over all actions charged in the task; discarded bytes are reported beside it, not added, since bytes and actions have no common unit. A proxy for tokens: model tokens are not visible to the core, so token cost needs the harness to report usage, which is not built and is not assumed |
-| `wall_ratio` | moderator wall clock at N=2 over N=1 for the same task |
-| `budget_refusals` | `rejected(turn_budget_exhausted)`. Each refusal also ends the turn (`turn_ended(budget)`), so the two are not added |
-| `file_overlap_diffs` | stored `diff` artifacts not in the final candidate that touch a path the candidate's diffs touch |
-| `hunk_overlap_diffs` | the subset of those with a hunk whose old-file line range intersects a hunk of the candidate's diffs on the same path. Different regions of one file are what section leases would separate; this is the part they would not |
-| `stale_verdicts` | verdicts accepted although another principal appended content after the verdict author's last read (the 2a known gap, spec "Known gaps") |
-| `overshoot` | any run with `spent.messages` or `spent.bytes` above its total at N=2 |
+| `spec_wall` ratio | `spec_wall` at N=2 over N=1 for the same task, successful pairs only |
+| `unused_spec_versions` | `spec` artifacts stored in the task and not the approved one, whose changed lines are less than half present in the approved spec (a version whose content was carried into the approved one is *retained*, not unused) |
+| `unused_share` | bytes of unused spec versions over bytes of all spec versions stored |
+| `spec_conflicts` | an unused spec version and the approved one that edit the same lines of a common base, measured by running a three-way merge on the last version both could have read (empty base if neither could read an earlier one, reported separately as `parallel_rewrites`). **Hunk-header ranges are not used:** they include unchanged context lines, so disjoint edits within a few lines of each other would read as overlapping |
+| `lost_rubric_items` | rubric items met by an unused spec version and not met by the approved one. This is the independent loss evidence: work that was real and was thrown away, not work merely charged in a revoked turn |
+| `revocations`, `revoked_turn_actions` | informational only. A revoked turn's work is not necessarily discarded (it may be retained in another author's artifact), so these are an upper bound and never gate |
+| `budget_refusals` | `rejected(turn_budget_exhausted)`; each also ends its turn, so the two are not added |
+| `stale_verdicts` | verdicts accepted although a message or artifact the author could read, appended by another principal (not the runner) during the author's verdict turn, was never returned to the author by a read the log records (2a known gap). Exact, from the responses of accepted reads: a `get_artifact` is not a view of the messages and a short page does not count as seeing what it omitted |
+| `overshoot` | any N=2 run with `spent.messages` or `spent.bytes` above its total |
 
 **Go to 2b only if all hold:**
 
-1. **Safety (precondition).** `overshoot` is zero in every N=2 run, and replay equals live in every run. Any violation stops everything and is fixed in 2a first.
-2. **Parallelism pays at all.** On the independent-file tasks, the median `wall_ratio` is at most 0.75. If two builders are not clearly faster even without contention, co-editing one artifact cannot help.
-3. **Contention is real.** In at least 3 of the 5 same-artifact tasks, `file_overlap_diffs` is at least 1.
-4. **Hunk overlap, not just file overlap.** Across the same-artifact tasks, `hunk_overlap_diffs` is at least half of `file_overlap_diffs`, so section leases would not separate the writers.
-5. **The status quo is costly.** In the same-artifact tasks the median `discarded_share` is at least 0.15, or the median `revocations` is at least 2.
+1. **Safety (precondition).** `overshoot` is zero in every N=2 run, and replay equals live in every run. A violation stops everything and is fixed in 2a first.
+2. **Comparable outcomes.** At least 8 of 10 pairs succeed, and the N=2 failure count exceeds the N=1 count by at most 1.
+3. **Parallelism pays at all.** On the separable tasks, the median `spec_wall` ratio is at most 0.75. If two authors are not clearly faster even without contention, co-editing one spec cannot help.
+4. **Contention is real.** In at least 3 of the 5 shared-section tasks, at least one unused spec version has a `spec_conflict` with the approved spec.
+5. **The loss is real and attributed.** In at least 3 of the 5 shared-section tasks, `lost_rubric_items` is at least 1, and the median `unused_share` over those tasks is at least 0.15. Work that a merge would have kept, not work that was merely revoked, has to be what is lost.
 6. **The known gap is not the cause.** `stale_verdicts` is below 20% of verdicts; otherwise close the 2a gap (a `read_rev` on verdicts) and re-run before deciding.
 
 **Decision.**
@@ -255,12 +266,17 @@ Status: **proposal, awaiting owner approval.** The thresholds below are judgment
 | --- | --- |
 | All six hold | Build `rusty_crdt` and 2b (Appendix A and B) |
 | 1 fails | Fix 2a; no decision |
-| 2 fails | Stop concurrency work; keep `max_live_turns = 1` as the default and the only tested mode |
-| 2 holds, 3 or 4 fails | 2a alone is enough, or section leases (option 4) if conflicts exist but are separable; no CRDT |
-| 2, 3, 4 hold, 5 fails | Contention exists but is cheap; revisit with more runs before building |
+| 2 fails | Inconclusive; no decision; rerun with a corrected rubric or task set |
+| 3 fails | Stop concurrency work; keep `max_live_turns = 1` as the default and the only tested mode |
+| 3 holds, 4 fails | 2a alone is enough for spec authoring; no CRDT |
+| 3 and 4 hold, 5 fails | Contention exists but loses nothing the rubric values; section leases (option 4) or 2a, no CRDT |
 | 6 fails | Close the verdict-binding gap first |
 
-**Limits, stated up front.** Ten tasks is a small sample and the medians are coarse; this is a go/no-go screen, not a measurement of effect size. `wall_ratio` on scripted agents measures host overhead only. Results depend on the model and on how the briefs are written. The `discarded_share` proxy undercounts reasoning that never reached a charged write.
+**Tooling follow-ups before any run** (not built, not part of this proposal's approval): spec-version metrics (`unused_spec_versions`, `unused_share`, `lost_rubric_items` inputs), the three-way `spec_conflicts` measure, per-state wall timing, and the retained-versus-unused attribution. The merged `overlap` metric (file and hunk-header ranges on code diffs) is a screening proxy that overcounts context and is not used by the gate; it needs the same replacement if code co-editing is ever proposed.
+
+**Limits, stated up front.** Ten tasks is a small sample and the medians are coarse; this is a go/no-go screen, not an effect size. Rubric scoring is a judgment, even blinded. Results depend on the model and on how the briefs are written. Model tokens are not visible to the core, so cost is in artifact bytes and counted actions only. `spec_wall` on scripted agents measures host overhead only; scripted agents prove the tooling and do not count toward the 10.
+
+**Review record.** The owner's review of the first draft required: (1) evidence in the artifact actually co-edited, not code diffs; (2) frozen comparable successful outcomes and predeclared failed-pair handling; (3) changed-line conflicts on a common base, not hunk-header ranges; (4) attribution of genuinely unused work. Each is applied above. The separate finding on the generic RGA id contract (from the earlier design review) is not addressed here.
 
 ## Open questions for the owner (max 5)
 

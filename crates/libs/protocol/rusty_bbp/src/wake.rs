@@ -51,7 +51,9 @@ const WAKING_ARTIFACTS: [ArtifactKind; 4] = [
 /// (visibility), or when nothing it may post would be accepted in this state
 /// (it could not act).
 pub fn wake_set(st: &TaskState) -> Vec<(RoleId, WakeReason)> {
-    if !st.opened || st.turn.is_some() || st.pending_request.is_some() {
+    // Any live turn: with several allowed (`max_live_turns > 1`) this stays
+    // conservative, and nothing calls it yet, so it grants no extra slots.
+    if !st.opened || !st.turns.is_empty() || st.pending_request.is_some() {
         return Vec::new();
     }
     let Some(req) = REQUIREMENTS.iter().find(|q| q.state == st.state) else {

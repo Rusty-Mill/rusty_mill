@@ -21,7 +21,7 @@ fn pair(role: &str, why: WakeReason) -> (String, WakeReason) {
 /// The live state with no live turn: the moment before a grant.
 fn idle(fx: &Fx) -> TaskState {
     let mut st = fx.st().clone();
-    st.turn = None;
+    st.turns.clear();
     st
 }
 
@@ -54,6 +54,7 @@ fn turn_of(role: &str, n: u64) -> [Event; 2] {
             kind: TurnKind::Default,
             deadline: Time(u64::MAX),
             return_to: None,
+            slice: None,
         },
         Event::TurnEnded {
             turn: TurnId(n),
@@ -86,7 +87,7 @@ fn a_fresh_task_wakes_the_state_holder_only() {
 #[test]
 fn nobody_is_woken_while_a_turn_is_live() {
     let fx = Fx::new();
-    assert!(fx.st().turn.is_some());
+    assert!(fx.st().turn().is_some());
     assert!(wake_set(fx.st()).is_empty());
 }
 
@@ -177,7 +178,7 @@ fn a_role_that_just_ended_its_turn_is_not_woken_by_the_same_state() {
     let mut fx = Fx::new();
     posted(fx.post(Who::Planner, pass()));
     let st = fold(&fx, &before_first_regrant(&fx));
-    assert!(st.turn.is_none() && st.last_turn_end.contains_key(&"planner".into()));
+    assert!(st.turn().is_none() && st.last_turn_end.contains_key(&"planner".into()));
     assert!(wake_set(&st).is_empty());
 }
 
@@ -218,7 +219,7 @@ fn a_role_is_not_woken_by_its_own_events_even_after_its_turn_ended() {
     let n = evs.len() as u64;
     evs.push(message(n, Some("planner"), Recipient::All, Ask));
     let mut st = fold(&fx, &evs);
-    st.turn = None;
+    st.turns.clear();
     let woken = wake_set(&st);
     let got: Vec<&str> = woken.iter().map(|(r, _)| r.0.as_str()).collect();
     assert!(!got.contains(&"planner"), "{got:?}");
@@ -232,7 +233,7 @@ fn a_pass_wakes_nobody() {
     let n = evs.len() as u64;
     evs.push(message(n, Some("planner"), Recipient::All, Pass));
     let mut st = fold(&fx, &evs);
-    st.turn = None;
+    st.turns.clear();
     let woken = wake_set(&st);
     let got: Vec<&str> = woken.iter().map(|(r, _)| r.0.as_str()).collect();
     assert_eq!(got, ["planner"], "only the state holder: {got:?}");
@@ -250,14 +251,18 @@ fn a_cooled_down_role_is_woken_again_only_by_something_new() {
     ));
     // The coder's turn ends after the ask: nothing newer addresses it.
     evs.extend(turn_of("coder", 90));
-    let st = fold(&fx, &evs);
+    // The fixture log still holds the engine's own live turn; a real log would
+    // have ended it, so drop it, as the sibling tests do.
+    let mut st = fold(&fx, &evs);
+    st.turns.clear();
     assert!(
         !ids(&wake_set(&st)).contains(&pair("coder", WakeReason::Addressed)),
         "cooled down"
     );
     // A new message after the turn end wakes it again.
     evs.push(message(2, None, Recipient::Role("coder".into()), Ask));
-    let st = fold(&fx, &evs);
+    let mut st = fold(&fx, &evs);
+    st.turns.clear();
     assert!(ids(&wake_set(&st)).contains(&pair("coder", WakeReason::Addressed)));
 }
 
@@ -273,7 +278,7 @@ fn a_scoped_reader_is_woken_only_by_what_it_may_read() {
         message(900, Some("tester"), Recipient::Role("reviewer".into()), Ask),
     );
     let mut st = fold(&fx, &evs);
-    st.turn = None;
+    st.turns.clear();
     let w = ids(&wake_set(&st));
     assert!(
         !w.contains(&pair("reviewer", WakeReason::Addressed)),
@@ -286,7 +291,7 @@ fn a_scoped_reader_is_woken_only_by_what_it_may_read() {
     // The human addressing it is visible.
     evs.push(message(901, None, Recipient::Role("reviewer".into()), Ask));
     let mut st = fold(&fx, &evs);
-    st.turn = None;
+    st.turns.clear();
     assert!(ids(&wake_set(&st)).contains(&pair("reviewer", WakeReason::Addressed)));
 }
 
@@ -394,12 +399,12 @@ fn can_act_agrees_with_the_real_post_path() {
         }
         let live = fx.st().clone();
         let mut st = live.clone();
-        st.turn = None;
+        st.turns.clear();
         for role in roles.iter().filter(|r| r.id.0.starts_with('x')) {
             let kind = role.post[0];
             let mut with_turn = live.clone();
             let turn_id = TurnId(9_999);
-            with_turn.turn = Some(rusty_bbp::state::Turn {
+            with_turn.turns = vec![rusty_bbp::state::Turn {
                 id: turn_id,
                 role: role.id.clone(),
                 kind: TurnKind::Default,
@@ -409,7 +414,11 @@ fn can_act_agrees_with_the_real_post_path() {
                 state_at: with_turn.state,
                 candidate_at: None,
                 run_at: None,
-            });
+                slice: None,
+                reads: 0,
+                messages: 0,
+                bytes: 0,
+            }];
             let token = with_turn.token_for(&pid(role.id.clone()), turn_id);
             let cmd = Command::Agent {
                 principal: pid(role.id.clone()),
@@ -481,7 +490,7 @@ fn eligible_roles_are_ordered_by_reason_then_turn_order() {
     let mut evs = events(&fx);
     evs.push(message(1, None, Recipient::Role("helper".into()), Ask));
     let mut st = fold(&fx, &evs);
-    st.turn = None;
+    st.turns.clear();
     let w = ids(&wake_set(&st));
     assert_eq!(
         w,
