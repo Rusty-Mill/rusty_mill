@@ -211,9 +211,16 @@ impl<S: Store> Board<S> {
         for card in candidates {
             match self.enter_and_claim(card, by) {
                 Ok(card) => return Ok(Some(card)),
-                // Another worker won the race for this one: try the next.
+                // Another worker got there first and the card has moved on or been claimed:
+                // try the next one. (With an explicit `id`, say why instead.)
                 Err(
-                    BoardError::Conflict | BoardError::Claimed(_) | BoardError::NoSuchMove { .. },
+                    BoardError::Conflict
+                    | BoardError::Claimed(_)
+                    | BoardError::NoSuchMove { .. }
+                    | BoardError::Forbidden(_)
+                    | BoardError::NotClaimant
+                    | BoardError::Terminal
+                    | BoardError::NotFound(_),
                 ) if id.is_none() => {}
                 Err(e) => return Err(e),
             }
@@ -224,15 +231,35 @@ impl<S: Store> Board<S> {
         }
     }
 
-    fn enter_and_claim(&self, mut card: Card, by: &Actor) -> Result<Card, BoardError> {
+    /// Enter (if the card waits in Ready) and claim it. Every step re-checks the card
+    /// *inside* its own compare-and-swap, so a card that another worker moved on or
+    /// claimed since it was listed is refused instead of half-taken: a claim never
+    /// lands on a card that is no longer in a queue this actor can work.
+    fn enter_and_claim(&self, listed: Card, by: &Actor) -> Result<Card, BoardError> {
+        let id = listed.id;
+        let workable = |c: &Card| WORK_QUEUES.contains(&c.column) && actionable(c.column, &by.caps);
+        let current = self.get(id)?;
+        if !workable(&current) {
+            return Err(BoardError::Conflict);
+        }
         // Refuse before moving anything: a claimed card must not be half-taken.
-        if let Some(holder) = card.claim.as_ref().filter(|h| **h != by.name) {
+        if let Some(holder) = current.claim.as_ref().filter(|h| **h != by.name) {
             return Err(BoardError::Claimed(holder.clone()));
         }
-        if let Some(enter) = entry_column(card.column) {
-            card = self.move_card(card.id, enter, by)?;
+        if let Some(enter) = entry_column(current.column) {
+            self.apply(id, by, EventKind::Moved, |c, now| {
+                if entry_column(c.column) != Some(enter) {
+                    return Err(BoardError::Conflict);
+                }
+                c.move_to(enter, by, now)
+            })?;
         }
-        self.claim(card.id, by)
+        self.apply(id, by, EventKind::Claimed, |c, now| {
+            if !workable(c) {
+                return Err(BoardError::Conflict);
+            }
+            c.claim(by, now)
+        })
     }
 
     /// Apply `op` to the card and commit, re-reading on conflict.
@@ -289,7 +316,28 @@ impl<S: Store> Board<S> {
         body: Option<&str>,
         tags: Option<Vec<String>>,
     ) -> Result<Card, BoardError> {
+        self.edit_at(id, by, None, title, body, tags)
+    }
+
+    /// As [`Board::edit`], but only if the card is still at revision `expect_rev`
+    /// (what the editor last saw); otherwise [`BoardError::Conflict`], so an
+    /// editor never silently overwrites changes it has not seen.
+    ///
+    /// # Errors
+    /// See [`Card::edit`], and [`BoardError::Conflict`] on a stale revision.
+    pub fn edit_at(
+        &self,
+        id: Uuid,
+        by: &Actor,
+        expect_rev: Option<u64>,
+        title: Option<&str>,
+        body: Option<&str>,
+        tags: Option<Vec<String>>,
+    ) -> Result<Card, BoardError> {
         self.apply(id, by, EventKind::Edited, |c, now| {
+            if expect_rev.is_some_and(|rev| c.rev != rev) {
+                return Err(BoardError::Conflict);
+            }
             c.edit(title, body, tags.clone(), now)
         })
     }

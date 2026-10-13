@@ -197,6 +197,9 @@ struct UpdateArgs {
     body: Option<String>,
     /// New labels (replaces all).
     tags: Option<Vec<String>>,
+    /// The card revision you last saw. If the card has moved on, the update is refused (409)
+    /// so you can look at what changed instead of overwriting it.
+    rev: Option<u64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -331,12 +334,13 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_update",
-            "Edit a card's title, body or tags.",
+            "Edit a card's title, body or tags. Pass `rev` (the revision you last read) to refuse the edit if the card has changed since.",
             |b, i, a: UpdateArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.edit(
+                card(b.edit_at(
                     id(&a.id)?,
                     &who,
+                    a.rev,
                     a.title.as_deref(),
                     a.body.as_deref(),
                     a.tags,
@@ -515,5 +519,108 @@ mod tests {
         )
         .expect("take");
         assert_eq!(again["card"], Value::Null);
+    }
+
+    #[test]
+    fn events_carry_a_cursor_and_tail_starts_a_watcher_at_the_end() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let human = ident("nano", "human");
+        for t in ["a", "b", "c"] {
+            call_as(&board, Some(&human), "card_add", json!({"title": t})).expect("add");
+        }
+        let page =
+            call_as(&board, Some(&human), "board_events", json!({"limit": 2})).expect("events");
+        let first = page["events"].as_array().expect("events");
+        assert_eq!(first.len(), 2);
+        assert_eq!(
+            page["cursor"], first[1]["id"],
+            "the cursor is the last event returned"
+        );
+
+        let rest = call_as(
+            &board,
+            Some(&human),
+            "board_events",
+            json!({"after": page["cursor"]}),
+        )
+        .expect("events");
+        assert_eq!(rest["events"].as_array().expect("events").len(), 1);
+
+        // Nothing newer: no events, and the cursor stays where the caller was.
+        let none = call_as(
+            &board,
+            Some(&human),
+            "board_events",
+            json!({"after": rest["cursor"]}),
+        )
+        .expect("events");
+        assert_eq!(
+            (
+                none["events"].as_array().map(Vec::len),
+                none["cursor"].clone()
+            ),
+            (Some(0), rest["cursor"].clone())
+        );
+
+        // A watcher starts at the very end, however long the log is.
+        let tail =
+            call_as(&board, Some(&human), "board_events", json!({"tail": true})).expect("tail");
+        assert_eq!(
+            (
+                tail["events"].as_array().map(Vec::len),
+                tail["cursor"].clone()
+            ),
+            (Some(0), rest["cursor"].clone())
+        );
+        let empty: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        assert_eq!(
+            call_as(&empty, Some(&human), "board_events", json!({"tail": true})).expect("tail")["cursor"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn an_update_with_a_stale_revision_is_refused() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let human = ident("nano", "human");
+        let card =
+            call_as(&board, Some(&human), "card_add", json!({"title": "t"})).expect("add")["card"]
+                .clone();
+        let id = card["id"].clone();
+        let rev = card["rev"].clone();
+
+        let ok = call_as(
+            &board,
+            Some(&human),
+            "card_update",
+            json!({"id": id, "rev": rev, "title": "one"}),
+        )
+        .expect("current rev");
+        assert_eq!(ok["card"]["title"], "one");
+        // The same (now stale) revision again: refused, and nothing changed.
+        let stale = call_as(
+            &board,
+            Some(&human),
+            "card_update",
+            json!({"id": id, "rev": rev, "title": "two"}),
+        );
+        assert!(
+            matches!(stale, Err(CallError::Board(BoardError::Conflict))),
+            "{stale:?}"
+        );
+        assert_eq!(
+            call_as(&board, Some(&human), "card_get", json!({"id": id})).expect("get")["card"]["title"],
+            "one"
+        );
+        // Without a revision the edit applies, as before.
+        assert!(
+            call_as(
+                &board,
+                Some(&human),
+                "card_update",
+                json!({"id": id, "title": "three"})
+            )
+            .is_ok()
+        );
     }
 }

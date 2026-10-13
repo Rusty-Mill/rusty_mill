@@ -25,7 +25,8 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
 dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,92vw)}
 dialog form{display:grid;gap:8px}
-.cm{border-top:1px solid var(--line);padding:6px 0}
+.cm div{border-top:1px solid var(--line);padding:6px 0}
+.banner{border:1px solid var(--acc);border-radius:6px;padding:6px 8px}.banner:empty{display:none}
 @media (max-width:640px){main{grid-auto-flow:row;grid-auto-columns:auto}}
 </style>
 </head>
@@ -44,18 +45,22 @@ dialog form{display:grid;gap:8px}
 const COLS=["backlog","ready","building","qa","review","done","blocked"];
 const tok=new URLSearchParams(location.hash.slice(1)).get("token");
 const $=id=>document.getElementById(id);
-let cards=[],cursor=null,open=null;
+let cards=[],cursor=null,dlg=null;
 const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{}};
 
 async function api(op,args={}){
   const r=await fetch("/api/"+op,{method:"POST",headers:{"content-type":"application/json",...(tok&&{authorization:"Bearer "+tok})},body:JSON.stringify(args)});
   const j=await r.json().catch(()=>({error:r.statusText}));
-  if(!r.ok)throw new Error(j.error||r.statusText);
+  if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}
   return j;
 }
 const who=()=>({actor:$("actor").value.trim(),role:$("role").value});
 function toast(m){const t=$("toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
-async function act(op,args){try{await api(op,{...who(),...args});await refresh()}catch(e){toast(e.message)}}
+// Run a write as the current actor, then re-read the board. Resolves to the reply, or null after showing the error.
+async function act(op,args){
+  try{const r=await api(op,{...who(),...args});await refresh();return r}
+  catch(e){toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
+}
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
 
 function render(){
@@ -78,36 +83,74 @@ function render(){
     }
     b.append(col);
   }
-  if(open&&$("dlg").open)show(open);
+  syncDialog();
 }
+
+/* The card dialog is built once and then kept in step with the board without ever
+   touching what the person is typing. `dlg.base` is the card as they last saw it. */
+const snap=k=>({rev:k.rev,title:k.title,body:k.body,tags:k.tags.join(", ")});
+const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,tags:dlg.f.g.value});
+const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.tags===b.tags;
+function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s.tags}
 
 function show(id){
-  const k=cards.find(c=>c.id===id);if(!k)return;open=id;
-  const dlg=$("dlg"),f=el("form");f.method="dialog";
-  const t=el("input");t.value=k.title;const body=el("textarea");body.rows=6;body.value=k.body;
-  const tags=el("input");tags.value=k.tags.join(", ");tags.placeholder="tags, comma separated";
+  const k=cards.find(c=>c.id===id);if(!k)return;
+  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input")};
+  f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
+  dlg={id,base:snap(k),f};setFields(dlg.base);
   const row=el("div");
   const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b," ")};
-  btn("Save",()=>act("card_update",{id,title:t.value,body:body.value,tags:tags.value.split(",").map(s=>s.trim()).filter(Boolean)}));
-  btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
-  btn("Close",()=>{open=null;dlg.close()});
-  f.append(t,body,tags,row,el("div",k.column+(k.claim?" · claimed by "+k.claim:""),"meta"));
-  k.comments.forEach(c=>{const d=el("div",null,"cm");d.append(el("b",c.by+": "),el("span",c.text));f.append(d)});
-  const ci=el("input");ci.placeholder="Comment, then Enter";
-  ci.onkeydown=e=>{if(e.key==="Enter"&&ci.value.trim()){e.preventDefault();act("card_comment",{id,text:ci.value})}};
-  f.append(ci);dlg.replaceChildren(f);if(!dlg.open)dlg.showModal();
+  btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
+  btn("Close",()=>$("dlg").close());
+  f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
+  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,row,f.meta,f.cm,f.ci);
+  $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
+  syncDialog();
 }
-$("dlg").onclose=()=>{open=null};
+async function save(){
+  const t=typed();
+  const r=await act("card_update",{id:dlg.id,rev:dlg.base.rev,title:t.title,body:t.body,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)});
+  if(r&&dlg)dlg.base=snap(r.card);
+}
+function syncDialog(){
+  if(!dlg||!$("dlg").open)return;
+  const k=cards.find(c=>c.id===dlg.id),f=dlg.f;
+  if(!k){f.banner.textContent="This card no longer exists.";return}
+  // Display-only parts follow the board; the inputs are never rebuilt.
+  f.meta.textContent=k.column+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
+  const theirs=snap(k);
+  if(theirs.rev===dlg.base.rev){f.banner.replaceChildren();return}
+  const dirty=!sameText(typed(),dlg.base);
+  if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board
+  else if(sameText(theirs,dlg.base)){dlg.base={...dlg.base,rev:theirs.rev};f.banner.replaceChildren()} // only a comment or claim moved: keep the draft
+  else conflict(theirs);                                                       // the text changed under an unsaved edit
+}
+function conflict(theirs){
+  const f=dlg.f,b=el("button","Keep mine"),t=el("button","Take theirs");
+  b.type=t.type="button";
+  b.onclick=()=>{dlg.base=theirs;f.banner.replaceChildren()};          // Save will now apply on top of theirs
+  t.onclick=()=>{dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()};
+  f.banner.replaceChildren(el("div","Someone else changed this card while you were editing. Your unsaved text is kept."),b," ",t);
+}
+$("dlg").onclose=()=>{dlg=null};
 
-async function refresh(){
-  cards=(await api("board_list")).cards;
-  const ev=(await api("board_events",{limit:1000})).events;cursor=ev.length?ev[ev.length-1].id:null;
-  render();
+/* Read the cursor first, then the cards: anything committed in between is in the list
+   AND comes back from the next poll (a harmless extra refresh); nothing can be skipped.
+   Both reads must succeed before either is kept. */
+async function snapshot(){
+  const at=(await api("board_events",{tail:true})).cursor;
+  const list=(await api("board_list")).cards;
+  cursor=at;cards=list;
 }
+async function refresh(){await snapshot();render()}
 async function poll(){
   try{
-    const ev=(await api("board_events",{after:cursor,limit:1000})).events;
-    if(ev.length){cursor=ev[ev.length-1].id;cards=(await api("board_list")).cards;render()}
+    const r=await api("board_events",{after:cursor,limit:1000});
+    if(r.events.length){
+      const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
+      cursor=r.cursor;cards=list;render();
+    }
   }catch(e){}
   setTimeout(poll,1500);
 }

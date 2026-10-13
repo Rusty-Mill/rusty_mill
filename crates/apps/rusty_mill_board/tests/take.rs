@@ -107,3 +107,111 @@ fn a_claimed_ready_card_is_not_half_taken() {
     );
     assert_eq!(b.get(id).expect("card").column, Column::Ready, "not moved");
 }
+
+// ---- concurrency: the claim is the lock, so it must hold under a real race
+
+use std::collections::HashSet;
+use std::sync::{Arc, Barrier};
+use std::thread;
+
+use rusty_mill_board::mmdb::MmdbStore;
+use rusty_mill_board::store::Store;
+
+const WORKERS: usize = 12;
+
+fn racing_workers_never_share_a_card<S: Store + 'static>(store: S, cards: usize) {
+    let b = Arc::new(Board::new(store, Roles::default()));
+    let human = b.roles().actor("nano", "human").expect("role");
+    let ids: HashSet<_> = (0..cards)
+        .map(|i| {
+            let c = b
+                .add(&human, &format!("card {i}"), "", vec![])
+                .expect("add");
+            b.move_card(c.id, Column::Ready, &human).expect("ready");
+            c.id
+        })
+        .collect();
+
+    let start = Arc::new(Barrier::new(WORKERS));
+    let handles: Vec<_> = (0..WORKERS)
+        .map(|w| {
+            let (b, start) = (Arc::clone(&b), Arc::clone(&start));
+            thread::spawn(move || {
+                let me = b
+                    .roles()
+                    .actor(&format!("worker-{w}"), "builder")
+                    .expect("role");
+                start.wait();
+                // Each worker keeps taking until nothing is left for it.
+                let mut mine = Vec::new();
+                while let Some(card) = b.take(&me, None).expect("take") {
+                    mine.push(card.id);
+                    // Hand it on so the same worker does not just resume its own claim.
+                    b.move_card(card.id, Column::Qa, &me).expect("to qa");
+                }
+                mine
+            })
+        })
+        .collect();
+
+    let taken: Vec<_> = handles
+        .into_iter()
+        .flat_map(|h| h.join().expect("worker"))
+        .collect();
+    let unique: HashSet<_> = taken.iter().copied().collect();
+    assert_eq!(taken.len(), unique.len(), "a card was taken by two workers");
+    assert_eq!(unique, ids, "every card was taken exactly once");
+    for id in ids {
+        let card = b.get(id).expect("card");
+        assert_eq!(card.column, Column::Qa);
+        assert_eq!(card.claim, None, "moving on cleared the claim");
+    }
+}
+
+#[test]
+fn racing_workers_never_share_a_card_in_memory() {
+    racing_workers_never_share_a_card(MemStore::default(), 60);
+}
+
+#[test]
+fn racing_workers_never_share_a_card_on_disk() {
+    let dir = std::env::temp_dir().join(format!("mill_take_race_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    racing_workers_never_share_a_card(MmdbStore::open(&dir.join("b.mmap")).expect("open"), 30);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn many_workers_claiming_one_card_produce_exactly_one_winner() {
+    let b = Arc::new(Board::new(MemStore::default(), Roles::default()));
+    let id = ready(&b, "contested");
+    let start = Arc::new(Barrier::new(WORKERS));
+    let handles: Vec<_> = (0..WORKERS)
+        .map(|w| {
+            let (b, start) = (Arc::clone(&b), Arc::clone(&start));
+            thread::spawn(move || {
+                let me = b
+                    .roles()
+                    .actor(&format!("worker-{w}"), "builder")
+                    .expect("role");
+                start.wait();
+                b.take(&me, Some(id))
+                    .map(|c| c.map(|c| c.claim))
+                    .ok()
+                    .flatten()
+                    .flatten()
+            })
+        })
+        .collect();
+    let winners: Vec<_> = handles
+        .into_iter()
+        .filter_map(|h| h.join().expect("worker"))
+        .collect();
+    assert_eq!(winners.len(), 1, "exactly one claim wins: {winners:?}");
+    let card = b.get(id).expect("card");
+    assert_eq!(
+        (card.column, card.claim),
+        (Column::Building, Some(winners[0].clone()))
+    );
+}
