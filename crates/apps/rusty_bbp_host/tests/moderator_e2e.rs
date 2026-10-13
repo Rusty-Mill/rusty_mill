@@ -437,7 +437,7 @@ fn a_restarted_moderator_fences_the_invocation_it_cannot_see() {
     let turn = open_driver(&dir, &task)
         .expect("driver")
         .state
-        .turn
+        .turn()
         .expect("turn")
         .id;
     assert_eq!(turn, TurnId(1));
@@ -496,7 +496,7 @@ fn two_moderators_cannot_hold_one_task() {
         open_driver(&dir, &task)
             .expect("driver")
             .state
-            .turn
+            .turn()
             .is_none(),
         "the refused moderator touched nothing"
     );
@@ -681,5 +681,195 @@ fn a_roster_without_a_finalizer_is_refused_at_open() {
     )
     .expect("dispatch");
     assert!(matches!(r, Response::Stored(_)), "{r:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A shell harness: `body` runs under `/bin/sh` with `$1` the task directory
+/// and `$BBP_BIN` the `bbp` binary. Not a protocol client by itself.
+fn script(dir: &Path, name: &str, body: &str) -> Launcher {
+    let bin = dir.join("agents-bin");
+    std::fs::create_dir_all(&bin).expect("mkdir");
+    let path = bin.join(format!("{name}.sh"));
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    Launcher {
+        program: path.to_string_lossy().into_owned(),
+        args: vec!["{dir}".into()],
+        builtin_tools: false,
+    }
+}
+
+fn alive(pid: &str) -> bool {
+    Proc::new("kill")
+        .args(["-0", pid])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Two builders hold live turns at once (`max_live_turns = 2`), each with its
+/// own harness, and both edit the same lines of the same file. The coder's
+/// harness waits until the second builder has stored its diff, so it deadlocks
+/// if turns are serialized. The coder's candidate then revokes the other turn,
+/// the moderator kills that harness, and `bbp metrics` reports the lost work
+/// and the hunk-level overlap. This checks the measurement, not the criteria.
+#[test]
+fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
+    let dir = tempdir("parallel");
+    let (repo, base) = repo(&dir);
+    let task = TaskId("T1".into());
+    let mut roster = common::roster();
+    let mut second = roster
+        .iter()
+        .find(|r| r.id.0 == "coder")
+        .expect("coder")
+        .clone();
+    second.id = RoleId("coder2".into());
+    second.turn_order = 9;
+    roster.push(second);
+    admin::open_task_live(
+        &dir,
+        &task,
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &ProfileSet::shell("test", "true"),
+        roster,
+        2,
+    )
+    .expect("open");
+    for role in ["planner", "coder", "coder2", "tester", "reviewer"] {
+        admin::assign(
+            &dir,
+            &task,
+            &RoleId(role.into()),
+            &PrincipalId(role.into()),
+            "v",
+        )
+        .expect("assign");
+    }
+    let diff = r"--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n";
+    let mcp = |calls: &[String]| {
+        let mut s = String::from("\"$BBP_BIN\" mcp <<'EOF'\n");
+        s.push_str(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}"#);
+        s.push('\n');
+        for (i, c) in calls.iter().enumerate() {
+            s.push_str(&format!(
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{c}}}"#,
+                i + 1
+            ));
+            s.push('\n');
+        }
+        s.push_str("EOF\n");
+        s
+    };
+    let coder = mcp(&[
+        format!(
+            r#"{{"name":"put_artifact","arguments":{{"op":"c1","kind":"diff","body":"{diff}"}}}}"#
+        ),
+        format!(
+            r#"{{"name":"put_artifact","arguments":{{"op":"c2","kind":"candidate","base":"{base}","diffs":[4],"body":""}}}}"#
+        ),
+    ]);
+    let rival = mcp(&[format!(
+        r#"{{"name":"put_artifact","arguments":{{"op":"r1","kind":"diff","body":"{diff}"}}}}"#
+    )]);
+    let launchers = Launchers::default()
+        .with(
+            "planner",
+            harness(
+                &dir,
+                "planner",
+                &[
+                    r##"{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1"}}"##,
+                    r#"{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}"#,
+                ],
+            ),
+        )
+        .with(
+            "coder",
+            script(
+                &dir,
+                "coder",
+                &format!(
+                    "n=0; while [ ! -f \"$1/coder2.pid\" ]; do n=$((n+1)); [ $n -gt 400 ] && exit 1; sleep 0.05; done\n{coder}"
+                ),
+            ),
+        )
+        .with(
+            "coder2",
+            script(
+                &dir,
+                "coder2",
+                &format!("{rival}echo $$ > \"$1/coder2.pid\"\nexec sleep 300"),
+            ),
+        );
+    let cfg = config(&dir, &task, repo, launchers, 60);
+    let moderator = std::thread::spawn(move || moderator::run(&cfg));
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out in {:?}",
+            card(&dir, &task).state
+        );
+        let c = card(&dir, &task);
+        match c.state {
+            State::PlanGate => {
+                human::perform(&dir, &task, "approve-plan", &["2"], None).expect("approve plan");
+            }
+            State::Test => break,
+            State::Escalated | State::Cancelled => panic!("left the path: {:?}", c.state),
+            _ => {}
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let pid = std::fs::read_to_string(dir.join("coder2.pid")).expect("coder2 started");
+    let pid = pid.trim();
+    let report = rusty_bbp_host::report::of(&dir, &task).expect("report");
+    assert_eq!(report.max_live_turns, 2);
+    assert_eq!(report.metrics.peak_live, 2);
+    assert_eq!(report.metrics.revocations, 1, "coder2's turn");
+    assert_eq!(
+        report.metrics.discarded.bytes,
+        diff.replace("\\n", "\n").len() as u64
+    );
+    assert_eq!(
+        (
+            report.overlap.unused_diffs,
+            report.overlap.file_overlap_diffs,
+            report.overlap.hunk_overlap_diffs
+        ),
+        (1, 1, 1),
+        "the loser edited the winner's lines"
+    );
+    let printed = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["metrics", "--dir"])
+        .arg(&dir)
+        .args(["--task", "T1"])
+        .output()
+        .expect("bbp metrics");
+    let printed = String::from_utf8_lossy(&printed.stdout);
+    assert!(
+        printed.contains("\"revocations\":1") && printed.contains("\"hunk_overlap_diffs\":1"),
+        "{printed}"
+    );
+    let gone = Instant::now() + Duration::from_secs(10);
+    while alive(pid) && Instant::now() < gone {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(pid), "the revoked turn's harness was killed");
+    // The runner and the moderator keep appending, so the revision a cancel
+    // names can go stale (a rejection, not an error): retry on a fresh card.
+    while card(&dir, &task).state != State::Cancelled {
+        assert!(Instant::now() < deadline, "cancel never landed");
+        let c = card(&dir, &task);
+        human::perform(&dir, &task, "cancel", &["done"], Some(c.rev)).expect("cancel");
+    }
+    let out = moderator.join().expect("join").expect("moderator");
+    assert_eq!(out.state, State::Cancelled);
+    assert_eq!(out.turns_launched, 3, "planner, coder and coder2");
+    assert!(out.elapsed > Duration::ZERO && out.elapsed < Duration::from_secs(60));
     let _ = std::fs::remove_dir_all(&dir);
 }

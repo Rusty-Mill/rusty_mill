@@ -161,9 +161,15 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
             schedule(w, now);
             Ok(Flow::Done(Response::Ok))
         }
-        Command::AbortTurn => {
+        Command::AbortTurn { turn } => {
             require_open(&w.st)?;
-            end_turn(w, TurnEnd::Aborted, now);
+            let ids = match turn {
+                Some(id) => vec![*id],
+                None => live_ids(&w.st),
+            };
+            for id in ids {
+                end_turn(w, id, TurnEnd::Aborted, now);
+            }
             Ok(Flow::Done(Response::Ok))
         }
         Command::Agent {
@@ -243,11 +249,15 @@ fn check_token(
     now: Time,
 ) -> R<()> {
     let token = token.ok_or_else(|| rej(Code::BadToken, "no token"))?;
-    let turn = st
-        .turn
-        .as_ref()
-        .ok_or_else(|| rej(Code::TokenExpired, "no live turn"))?;
-    if turn.role != *role || st.token_for(p, turn.id) != token {
+    let Some(turn) = st.turn_of(role) else {
+        // Nobody live: the token expired. Others live: this one is stale.
+        return Err(if st.turns.is_empty() {
+            rej(Code::TokenExpired, "no live turn")
+        } else {
+            rej(Code::StaleTurn, "role holds no live turn")
+        });
+    };
+    if st.token_for(p, turn.id) != token {
         return Err(rej(Code::StaleTurn, "token is not the live turn's"));
     }
     if now >= turn.deadline {
@@ -262,9 +272,19 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
     if w.st.opened {
         return Err(rej(Code::AlreadyOpen, "task already opened"));
     }
-    Roster::new(o.roster.clone()).map_err(|e| rej(Code::BadRoster, e.to_string()))?;
+    let roster = Roster::new(o.roster.clone()).map_err(|e| rej(Code::BadRoster, e.to_string()))?;
+    if o.max_live_turns == 0 || o.max_live_turns as usize > roster.roles().len() {
+        return Err(rej(
+            Code::BadLiveTurns,
+            format!(
+                "max_live_turns {} is not 1 to the roster size {}",
+                o.max_live_turns,
+                roster.roles().len()
+            ),
+        ));
+    }
     w.emit(Event::TaskOpened {
-        schema: LOG_SCHEMA,
+        schema: schema_for(o.max_live_turns),
         roster: o.roster.clone(),
         task: o.task.clone(),
         repo: o.repo.clone(),
@@ -272,6 +292,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         budget: o.budget,
         turn_ms: o.turn_ms,
         request_ms: o.request_ms,
+        max_live_turns: o.max_live_turns,
         human: o.human.clone(),
     });
     let id = w.st.next_art_id();
@@ -336,15 +357,18 @@ pub(crate) fn visible(st: &TaskState, role: &Role, m: &Message) -> bool {
 }
 
 /// R11 per-turn read budget. Exceeding ends the turn and rejects.
-fn charge_read(w: &mut Work, p: &PrincipalId, now: Time) -> R<()> {
-    let turn = w.st.turn.as_ref().map(|t| t.id);
-    if w.st.spent.reads_this_turn + 1 > w.st.budget.reads_per_turn {
-        end_turn(w, TurnEnd::Budget, now);
+fn charge_read(w: &mut Work, p: &PrincipalId, role: &RoleId, now: Time) -> R<()> {
+    let (turn, reads) =
+        w.st.turn_of(role)
+            .map(|t| (t.id, t.reads))
+            .ok_or_else(|| rej(Code::TokenExpired, "no live turn"))?;
+    if reads + 1 > w.st.budget.reads_per_turn {
+        end_turn(w, turn, TurnEnd::Budget, now);
         return Err(rej(Code::TurnBudgetExhausted, "reads_per_turn exceeded"));
     }
     w.emit(Event::Charged {
         principal: p.clone(),
-        turn,
+        turn: Some(turn),
         messages: 0,
         bytes: 0,
         reads: 1,
@@ -360,7 +384,7 @@ fn read(
     limit: usize,
     now: Time,
 ) -> R<Response> {
-    charge_read(w, p, now)?;
+    charge_read(w, p, role, now)?;
     let reader = role_data(&w.st, role)?.clone();
     let limit = limit.clamp(1, READ_PAGE);
     let start = after.map(|a| a.0 as usize).unwrap_or(0);
@@ -397,13 +421,12 @@ fn get_artifact(w: &mut Work, p: &PrincipalId, role: &RoleId, id: ArtId, now: Ti
         return Err(rej(Code::RoleForbidden, reader.lacks(Cap::Read(rec.kind))));
     }
     let turn =
-        w.st.turn
-            .as_ref()
+        w.st.turn_of(role)
             .map(|t| (t.id, t.read_arts.contains(&id)));
     match turn {
         Some((_, true)) => {}
         Some((tid, false)) => {
-            charge_read(w, p, now)?;
+            charge_read(w, p, role, now)?;
             w.emit(Event::ReadDeduped { turn: tid, art: id });
         }
         None => return Err(rej(Code::TokenExpired, "no live turn")),
@@ -431,7 +454,7 @@ fn gate_artifact(st: &TaskState, role: &Role, kind: ArtifactKind) -> R<()> {
     if st.state != state {
         return Err(rej(Code::WrongState, "kind not writable in this state"));
     }
-    if st.turn.as_ref().map(|t| t.kind) == Some(TurnKind::Consultation) {
+    if st.turn_of(&role.id).map(|t| t.kind) == Some(TurnKind::Consultation) {
         return Err(rej(
             Code::ConsultationOnly,
             "consultation turns do not write artifacts",
@@ -474,6 +497,7 @@ fn put_artifact(
         }
         _ => {}
     }
+    charge_slice(w, role, 0, blob.len, now)?;
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {
         id,
@@ -487,7 +511,7 @@ fn put_artifact(
     }));
     w.emit(Event::Charged {
         principal: p.clone(),
-        turn: w.st.turn.as_ref().map(|t| t.id),
+        turn: w.st.turn_of(role).map(|t| t.id),
         messages: 0,
         bytes: blob.len,
         reads: 0,
@@ -504,7 +528,9 @@ fn put_artifact(
         // next line, and scheduling here would grant a Coder turn only for
         // the transition to revoke it (one turn of budget, a skipped id).
         // `transition` runs the Test entry, which schedules once.
-        end_turn_only(w, TurnEnd::Candidate);
+        if let Some(t) = w.st.turn_of(role).map(|t| t.id) {
+            end_turn_only(w, t, TurnEnd::Candidate);
+        }
         transition(w, State::Test, now);
     }
     Ok(Response::Stored(id))
@@ -740,8 +766,8 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
     let role = role_data(&w.st, role_id)?.clone();
     admits(w.st.state, &role, d.kind)?;
     let turn =
-        w.st.turn
-            .clone()
+        w.st.turn_of(role_id)
+            .cloned()
             .ok_or_else(|| rej(Code::TokenExpired, "no live turn"))?;
     if turn.kind == TurnKind::Consultation && !matches!(d.kind, Ask | Answer | Finding | Pass) {
         return Err(rej(Code::ConsultationOnly, "consultation turn"));
@@ -781,6 +807,7 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
             check_yield(&w.st, &turn, &role, target)?;
         }
     }
+    charge_slice(w, role_id, 1, body_len(&d.body).unwrap_or(0) as u64, now)?;
     // Effects.
     let id = w.st.next_msg_id();
     w.emit(Event::MessageAppended(Message {
@@ -799,7 +826,7 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
     match d.kind {
         Pass => match &d.yield_to {
             Some(target) => {
-                end_turn_only(w, TurnEnd::Yield);
+                end_turn_only(w, turn.id, TurnEnd::Yield);
                 grant(
                     w,
                     target,
@@ -808,7 +835,7 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
                     now,
                 );
             }
-            None => end_turn(w, TurnEnd::Pass, now),
+            None => end_turn(w, turn.id, TurnEnd::Pass, now),
         },
         RequestDecision => {
             let deadline = (gate_spec.is_none()).then(|| now.plus(w.st.request_ms));
@@ -818,7 +845,7 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
                 gate: gate_spec.is_some(),
                 deadline,
             });
-            end_turn_only(w, TurnEnd::Request);
+            end_turn_only(w, turn.id, TurnEnd::Request);
             if gate_spec.is_some() {
                 transition(w, State::PlanGate, now);
             }
@@ -828,7 +855,7 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
                 Body::Verdict(v) => v.verdict,
                 _ => VerdictKind::Revise,
             };
-            end_turn_only(w, TurnEnd::Verdict);
+            end_turn_only(w, turn.id, TurnEnd::Verdict);
             let to = match (kind, w.st.state) {
                 (VerdictKind::Approve, State::Test) => State::Review,
                 (VerdictKind::Approve, _) => State::MergeGate,
@@ -1147,7 +1174,6 @@ fn human(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
             });
             start_run(w, *candidate);
             if w.st.state != State::Test {
-                end_turn_only(w, TurnEnd::Revoked);
                 transition(w, State::Test, now);
             }
             Ok(Response::Ok)
@@ -1349,22 +1375,20 @@ fn human_post(w: &mut Work, d: &Draft, now: Time) -> R<Response> {
     if let Some(req) = settles {
         w.emit(Event::RequestSettled { msg: req, by: id });
         if let Some(p) = pending {
-            if w.st.turn.is_none() {
-                let holder = w.st.roster.default_holder(w.st.state).cloned();
-                let kind = if holder.as_ref() == Some(&p.requester) {
-                    TurnKind::Default
-                } else {
-                    TurnKind::Consultation
-                };
-                if kind == TurnKind::Default
-                    || w.st.roster.yieldable_in(w.st.state, &p.requester)
-                    || holder.is_none()
-                {
-                    grant(w, &p.requester, kind, None, now);
-                }
+            let holder = w.st.roster.default_holder(w.st.state).cloned();
+            let kind = if holder.as_ref() == Some(&p.requester) {
+                TurnKind::Default
+            } else {
+                TurnKind::Consultation
+            };
+            if kind == TurnKind::Default
+                || w.st.roster.yieldable_in(w.st.state, &p.requester)
+                || holder.is_none()
+            {
+                grant(w, &p.requester, kind, None, now);
             }
         }
-    } else if d.kind == Ask && w.st.turn.is_none() {
+    } else if d.kind == Ask {
         if let Some(Recipient::Role(role)) = d.to.first() {
             grant(w, role, TurnKind::Consultation, None, now);
         }
@@ -1374,43 +1398,106 @@ fn human_post(w: &mut Work, d: &Draft, now: Time) -> R<Response> {
 
 // ---------------------------------------------------------------- turns and lifecycle
 
+/// Grant `role` a turn unless it already holds one or `max_live_turns` are
+/// live. A `final_decision` role is serialized: it is granted only when no turn
+/// is live, and while it holds one nobody else is granted, so a finalizer's
+/// verdict is never racing another live turn and cannot silently revoke a
+/// second finalizer's veto.
+///
+/// This is the only place a turn is minted, so it is also the only place
+/// `turns` is charged and checked: a crossing escalates here, whichever path
+/// reached it (a refused write, a deadline, a command refused afterwards).
 fn grant(w: &mut Work, role: &RoleId, kind: TurnKind, return_to: Option<RoleId>, now: Time) {
-    if !w.st.assigned.contains_key(role) || w.st.turn.is_some() {
+    let final_role = w.st.roster.is_final(role);
+    let final_live = w.st.turns.iter().any(|t| w.st.roster.is_final(&t.role));
+    if !w.st.assigned.contains_key(role)
+        || w.st.turn_of(role).is_some()
+        || w.st.turns.len() >= w.st.max_live_turns as usize
+        || (final_role && !w.st.turns.is_empty())
+        || final_live
+    {
         return;
     }
     let turn = TurnId(w.st.next_turn);
+    let slice = w.st.next_slice(final_role);
     w.emit(Event::TurnGranted {
         role: role.clone(),
         turn,
         kind,
         deadline: now.plus(w.st.turn_ms),
         return_to,
+        slice,
     });
+    let turns = BudgetField::Turns;
+    if w.st.spent.turns > w.st.budget.turns && !w.st.exhausted.contains(&turns) {
+        escalate(w, EscalateReason::Budget(turns), now);
+    }
 }
 
-/// The one scheduling check.
+/// The one scheduling check. Fills the free turn slots with the roles that
+/// serve the state, in `turn_order`; at `max_live_turns == 1` that is the
+/// default holder alone. An unassigned default holder blocks the rest.
 fn schedule(w: &mut Work, now: Time) {
-    if w.st.turn.is_some() || w.st.pending_request.is_some() || !w.st.opened {
+    if w.st.pending_request.is_some() || !w.st.opened {
         return;
     }
-    let Some(role) = w.st.roster.default_holder(w.st.state).cloned() else {
+    let serving: Vec<RoleId> =
+        w.st.roster
+            .serving(w.st.state)
+            .into_iter()
+            .cloned()
+            .collect();
+    let Some(first) = serving.first() else {
         return;
     };
+    if !w.st.assigned.contains_key(first) {
+        return;
+    }
     if w.st.state == State::Test && w.st.selected_run().and_then(|r| r.status).is_none() {
         return;
     }
-    grant(w, &role, TurnKind::Default, None, now);
+    let state = w.st.state;
+    for role in &serving {
+        grant(w, role, TurnKind::Default, None, now);
+        if w.st.state != state {
+            break; // a grant escalated the task; the rest of the list is stale
+        }
+    }
 }
 
-fn end_turn_only(w: &mut Work, cause: TurnEnd) -> Option<Turn> {
-    let t = w.st.turn.clone()?;
+/// Ids of the live turns, in grant order.
+fn live_ids(st: &TaskState) -> Vec<TurnId> {
+    st.turns.iter().map(|t| t.id).collect()
+}
+
+/// R11 slice: a write past the turn's reserved share ends the turn. Only
+/// tasks with `max_live_turns > 1` carry a slice.
+fn charge_slice(w: &mut Work, role: &RoleId, messages: u64, bytes: u64, now: Time) -> R<()> {
+    let Some((id, s, used)) =
+        w.st.turn_of(role)
+            .and_then(|t| t.slice.map(|s| (t.id, s, (t.messages, t.bytes))))
+    else {
+        return Ok(());
+    };
+    if used.0 + messages > s.messages || used.1 + bytes > s.bytes {
+        end_turn(w, id, TurnEnd::Budget, now);
+        return Err(rej(
+            Code::TurnBudgetExhausted,
+            "turn slice of messages or bytes exceeded",
+        ));
+    }
+    Ok(())
+}
+
+fn end_turn_only(w: &mut Work, turn: TurnId, cause: TurnEnd) -> Option<Turn> {
+    let t = w.st.turns.iter().find(|t| t.id == turn).cloned()?;
     w.emit(Event::TurnEnded { turn: t.id, cause });
     Some(t)
 }
 
-/// End the live turn and run the consultation return or the schedule.
-fn end_turn(w: &mut Work, cause: TurnEnd, now: Time) {
-    let Some(t) = end_turn_only(w, cause) else {
+/// End `turn` and run the consultation return or the schedule.
+fn end_turn(w: &mut Work, turn: TurnId, cause: TurnEnd, now: Time) {
+    let Some(t) = end_turn_only(w, turn, cause) else {
         return;
     };
     let unchanged = t.state_at == w.st.state
@@ -1434,7 +1521,9 @@ fn transition(w: &mut Work, to: State, now: Time) {
     if from == to {
         return;
     }
-    end_turn_only(w, TurnEnd::Revoked);
+    for id in live_ids(&w.st) {
+        end_turn_only(w, id, TurnEnd::Revoked);
+    }
     w.emit(Event::StateChanged { from, to });
     entry(w, now);
 }
@@ -1484,13 +1573,14 @@ fn evaluate_budgets(w: &mut Work, now: Time) {
 
 /// A4: deadlines fire before the command is considered.
 fn fire_deadlines(w: &mut Work, now: Time) {
-    if w.st
-        .turn
-        .as_ref()
-        .map(|t| t.deadline <= now)
-        .unwrap_or(false)
-    {
-        end_turn(w, TurnEnd::Deadline, now);
+    let expired: Vec<TurnId> =
+        w.st.turns
+            .iter()
+            .filter(|t| t.deadline <= now)
+            .map(|t| t.id)
+            .collect();
+    for id in expired {
+        end_turn(w, id, TurnEnd::Deadline, now);
     }
     if let Some(d) = w.st.pending_request.as_ref().and_then(|p| p.deadline) {
         if d <= now && !w.st.state.terminal() && w.st.state != State::Escalated {

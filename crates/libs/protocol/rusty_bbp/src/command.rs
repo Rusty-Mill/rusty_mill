@@ -16,8 +16,12 @@ pub enum Command {
     },
     /// Driver-supplied clock tick. Fires deadlines.
     Tick,
-    /// Host ended a turn early (process died, inference timed out).
-    AbortTurn,
+    /// Host ended a turn early (process died, inference timed out). `Some`
+    /// ends that turn only, and does nothing if it is not live; `None` ends
+    /// every live turn.
+    AbortTurn {
+        turn: Option<TurnId>,
+    },
     Agent {
         principal: PrincipalId,
         /// Adapter-injected; `None` for `task_card`.
@@ -48,6 +52,9 @@ pub struct OpenTask {
     pub budget: crate::state::Budget,
     pub turn_ms: u64,
     pub request_ms: u64,
+    /// At most this many turns are live at once, one per role. 1 is the
+    /// serialized v0.5 behavior; the core accepts 1 to the roster size.
+    pub max_live_turns: u32,
     pub brief: BlobRef,
     pub human: PrincipalId,
 }
@@ -189,6 +196,8 @@ pub enum Code {
     UnknownRole,
     /// `open` carried a roster that failed validation.
     BadRoster,
+    /// `open` carried a `max_live_turns` outside 1 to the roster size.
+    BadLiveTurns,
     /// Driver boundary: the referenced blob is not in the store.
     BlobMissing,
     /// Driver boundary: the claimed payload is not what the stored bytes decode to.

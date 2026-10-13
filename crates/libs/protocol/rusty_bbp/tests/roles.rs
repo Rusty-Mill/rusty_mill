@@ -204,6 +204,7 @@ fn opening_a_task_with_an_invalid_roster_is_refused_and_no_task_exists() {
         },
         turn_ms: 60_000,
         request_ms: 3_600_000,
+        max_live_turns: 1,
         brief,
         human: PrincipalId("human".into()),
     });
@@ -418,10 +419,7 @@ fn a_consultable_assigned_non_default_target_is_granted_the_turn() {
     let mut fx = Fx::new();
     posted(fx.post(Who::Planner, yield_to("coder")));
     assert_eq!(fx.turn_role(), Some(Who::Coder));
-    assert_eq!(
-        fx.st().turn.as_ref().map(|t| t.kind),
-        Some(TurnKind::Consultation)
-    );
+    assert_eq!(fx.st().turn().map(|t| t.kind), Some(TurnKind::Consultation));
 }
 
 #[test]
@@ -429,13 +427,10 @@ fn a_human_ask_reaches_a_role_that_is_not_consultable() {
     // At a gate no default turn is live, so the ask grants a consultation turn.
     let mut fx = Fx::new();
     fx.reach_plan_gate();
-    assert!(fx.st().turn.is_none());
+    assert!(fx.st().turn().is_none());
     posted(fx.human(HumanAction::Post(ask(Who::Reviewer, "your view?"))));
     assert_eq!(fx.turn_role(), Some(Who::Reviewer));
-    assert_eq!(
-        fx.st().turn.as_ref().map(|t| t.kind),
-        Some(TurnKind::Consultation)
-    );
+    assert_eq!(fx.st().turn().map(|t| t.kind), Some(TurnKind::Consultation));
 }
 
 // ---------------------------------------------------------------- final_decision at the merge gate
@@ -571,6 +566,7 @@ fn the_roster_is_recorded_and_cannot_change() {
         budget: fx.st().budget,
         turn_ms: 1,
         request_ms: 1,
+        max_live_turns: 1,
         brief: fx.d.store.blob_put(b"b"),
         human: PrincipalId("human".into()),
     });
@@ -598,6 +594,7 @@ fn a_log_under_another_schema_does_not_replay() {
         },
         turn_ms: 1,
         request_ms: 1,
+        max_live_turns: 1,
         human: PrincipalId("human".into()),
     };
     store.append(&task, Rev(0), &[opened]).expect("append");
@@ -628,7 +625,7 @@ fn the_file_store_refuses_a_v0_4_log_and_a_future_schema() {
     let task = TaskId("T3".into());
     let mut store = FsStore::open(&dir).expect("fresh dir");
     let opened = Event::TaskOpened {
-        schema: LOG_SCHEMA + 1,
+        schema: LOG_SCHEMA_CONCURRENT + 1,
         roster: four_roles(),
         task: task.clone(),
         repo: "r".into(),
@@ -643,13 +640,14 @@ fn the_file_store_refuses_a_v0_4_log_and_a_future_schema() {
         },
         turn_ms: 1,
         request_ms: 1,
+        max_live_turns: 1,
         human: PrincipalId("human".into()),
     };
     store.append(&task, Rev(0), &[opened]).expect("append");
     drop(store);
     let err = FsStore::open(&dir).err().expect("refused");
     assert!(
-        matches!(err, FsError::UnsupportedSchema { found: Some(n), .. } if n == LOG_SCHEMA + 1),
+        matches!(err, FsError::UnsupportedSchema { found: Some(n), .. } if n == LOG_SCHEMA_CONCURRENT + 1),
         "{err}"
     );
     let _ = std::fs::remove_dir_all(&dir);

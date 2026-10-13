@@ -27,6 +27,23 @@ pub fn open_task(
     set: &ProfileSet,
     roster: Vec<Role>,
 ) -> Result<Response, String> {
+    open_task_live(dir, task, repo, brief, human, set, roster, 1)
+}
+
+/// As [`open_task`], allowing `max_live_turns` concurrent turns (1 to the
+/// roster size; the core refuses any other value with `BadLiveTurns`). The
+/// moderator launches one harness per live turn.
+#[allow(clippy::too_many_arguments)]
+pub fn open_task_live(
+    dir: &Path,
+    task: &TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &PrincipalId,
+    set: &ProfileSet,
+    roster: Vec<Role>,
+    max_live_turns: u32,
+) -> Result<Response, String> {
     let master = crate::master::ensure(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
     let mut d = Driver::new(store, task.clone()).with_master(master);
@@ -54,6 +71,7 @@ pub fn open_task(
         },
         turn_ms: 600_000,
         request_ms: 86_400_000,
+        max_live_turns,
         brief: blob,
         human: human.clone(),
     });

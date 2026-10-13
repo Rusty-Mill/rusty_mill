@@ -3,7 +3,7 @@
 use crate::codec::decode_artifact;
 use crate::command::{AgentAction, Code, Command, Rejection, Response};
 use crate::engine::handle;
-use crate::event::{log_schema, Event, LOG_SCHEMA};
+use crate::event::{log_schema, schema_supported, Event};
 use crate::ids::*;
 use crate::record::ArtifactPayload;
 use crate::state::TaskState;
@@ -163,7 +163,7 @@ impl<S: Store> Driver<S> {
     pub fn reload(&mut self) -> Result<(), StoreError> {
         let events = self.store.events(&self.state.task, 0)?;
         match log_schema(&events) {
-            Some(s) if s != LOG_SCHEMA => {
+            Some(s) if !schema_supported(s) => {
                 return Err(StoreError::UnsupportedSchema { found: Some(s) })
             }
             _ => {}

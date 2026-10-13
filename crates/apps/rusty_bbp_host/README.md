@@ -4,7 +4,7 @@ Host commands for the Blackboard Protocol over a `rusty_bbp` file store. Stage 3
 
 ## The process is the invocation
 
-`bbp mcp` serves exactly one turn. It reads `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL` and `BBP_TURN` from its environment, derives that turn's execution token, and once the turn has ended refuses every tool call except the free `task_card` and the exact replay of an operation the turn already accepted (R15: a retry after a lost response gets the original answer; a different payload under the same op or any fresh op is refused). The model never sees the token and cannot change which turn the process speaks for; a late call from a stale inference reaches a server that answers "turn has ended". That is the invocation-bound token from the design reviews, realised by process lifetime rather than in-process cancellation. The host launches one `bbp mcp` per granted turn and lets it die with the turn.
+`bbp mcp` serves exactly one turn. It reads `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL` and `BBP_TURN` from its environment, derives that turn's execution token, and once the turn has ended refuses every tool call except the free `task_card` and the exact replay of an operation the turn already accepted (R15: a retry after a lost response gets the original answer; a different payload under the same op or any fresh op is refused). The model never sees the token and cannot change which turn the process speaks for; a late call from a stale inference reaches a server that answers "turn has ended". That is the invocation-bound token from the design reviews, realised by process lifetime rather than in-process cancellation. The host launches one `bbp mcp` per granted turn and lets it die with the turn. With `bbp open --live-turns N` (N up to the roster size) several turns are live at once: the moderator runs one harness per live turn, kills a harness whose turn ended (a transition revokes them all), and aborts only the turn of a harness that exited.
 
 Transport is newline-delimited JSON-RPC 2.0 on stdio: `initialize`, `ping`, `tools/list`, `tools/call`. Five tools: `task_card`, `read`, `get_artifact`, `post`, `put_artifact`. Artifact bytes are encoded by the server from the typed fields the agent sends (`rusty_bbp::codec`), so the stored payload derives from the stored bytes by construction, and the driver's boundary check confirms it.
 
@@ -19,6 +19,7 @@ An MCP client configuration for Claude Code, one per role, looks like:
 
 ```text
 bbp mcp                                   serve one turn over stdio
+bbp metrics --dir D --task T              concurrency metrics of a task's log, as JSON (`bbp mod` prints `elapsed_ms`)
 bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE]
 bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 bbp card    --dir D --task T

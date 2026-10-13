@@ -255,7 +255,7 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
             fx.tick();
         }
         Step::Abort => {
-            fx.run(&Command::AbortTurn);
+            fx.run(&Command::AbortTurn { turn: None });
         }
         Step::HumanAsk(r) => {
             fx.human(HumanAction::Post(ask(*r, "?")));
@@ -285,20 +285,18 @@ fn check_invariants(fx: &Fx, prev: &TaskState) {
     );
     // Terminal states hold no turn and accept no later writes.
     if st.state.terminal() {
-        assert!(st.turn.is_none());
+        assert!(st.turns.is_empty());
     }
-    // At most one live turn, and it belongs to an assigned role.
-    if let Some(t) = &st.turn {
+    // At most `max_live_turns` live turns, one per role, each belonging to an assigned role.
+    assert!(st.turns.len() <= st.max_live_turns as usize);
+    for (i, t) in st.turns.iter().enumerate() {
         assert!(st.assigned.contains_key(&t.role));
         assert!(t.deadline > Time(0));
+        assert!(st.turns[..i].iter().all(|o| o.role != t.role));
     }
     // No default turn while a request is open.
     if st.pending_request.is_some() {
-        assert!(st
-            .turn
-            .as_ref()
-            .map(|t| t.kind != TurnKind::Default)
-            .unwrap_or(true));
+        assert!(st.turns.iter().all(|t| t.kind != TurnKind::Default));
     }
     // A current candidate always carries the approved spec, or there is none approved.
     if let Some(c) = st.current_candidate() {

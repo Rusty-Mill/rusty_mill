@@ -272,7 +272,11 @@ fn tr_12_read_budgets() {
         Code::TurnBudgetExhausted
     );
     assert_eq!(fx.st().spent.reads, 30);
-    assert_eq!(fx.st().spent.reads_this_turn, 0);
+    assert_eq!(
+        fx.st().turn().map(|t| t.reads),
+        Some(0),
+        "the regranted turn starts at zero"
+    );
 }
 
 #[test]
@@ -380,7 +384,7 @@ fn tr_17_pending_request_blocks_default_turn_after_rebuild() {
     );
     assert_eq!(fx.turn_role(), None);
     fx.d.reload().expect("reload");
-    fx.run(&Command::AbortTurn);
+    fx.run(&Command::AbortTurn { turn: None });
     fx.tick();
     assert_eq!(fx.turn_role(), None, "request still open");
     assert!(fx.st().pending_request.is_some());

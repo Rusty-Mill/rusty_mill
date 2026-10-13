@@ -89,7 +89,77 @@ pub fn vendor(role: &RoleId) -> &'static str {
 
 pub const DIGEST: Sha256 = Sha256([7; 32]);
 
+/// The four test roles plus `coder2` and `coder3`, which also build.
+pub fn builders() -> Vec<Role> {
+    let mut roles = four_roles();
+    for (name, order) in [("coder2", 4), ("coder3", 5)] {
+        let base = roles
+            .iter()
+            .find(|r| r.id.0 == "coder")
+            .expect("coder")
+            .clone();
+        let mut r = base;
+        r.id = RoleId(name.into());
+        r.turn_order = order;
+        roles.push(r);
+    }
+    roles
+}
+
+pub fn budget(messages: u64, reads_per_turn: u64) -> Budget {
+    Budget {
+        messages,
+        reads_per_turn,
+        ..default_budget()
+    }
+}
+
+/// The four roles plus a second reviewer, so `review` has two final-decision judges.
+pub fn two_reviewers() -> Vec<Role> {
+    let mut roles = four_roles();
+    let mut second = roles
+        .iter()
+        .find(|r| r.id.0 == "reviewer")
+        .expect("reviewer")
+        .clone();
+    second.id = RoleId("reviewer2".into());
+    second.turn_order = 6;
+    roles.push(second);
+    roles
+}
+
+/// The four roles plus a second tester: `test` has two non-final judges, which
+/// may hold turns together.
+pub fn two_testers() -> Vec<Role> {
+    let mut roles = four_roles();
+    let mut second = roles
+        .iter()
+        .find(|r| r.id.0 == "tester")
+        .expect("tester")
+        .clone();
+    second.id = RoleId("tester2".into());
+    second.turn_order = 6;
+    roles.push(second);
+    roles
+}
+
+pub fn default_budget() -> Budget {
+    Budget {
+        messages: 40,
+        bytes: 5_000_000,
+        reads: 150,
+        reads_per_turn: 30,
+        turns: 60,
+        iterations: 4,
+    }
+}
+
 impl Fx<MemStore> {
+    /// A task allowing `live` concurrent turns under `budget`.
+    pub fn concurrent(roles: Vec<Role>, live: u32, budget: Budget) -> Fx {
+        Fx::open_with(MemStore::new(), roles, &[], live, budget)
+    }
+
     pub fn new() -> Fx {
         Fx::with_store(MemStore::new())
     }
@@ -112,7 +182,18 @@ impl<S: Store> Fx<S> {
     }
 
     /// As [`Fx::with_store_and_roles`], but leave the roles named in `skip` unassigned.
-    pub fn with_roles_skipping(mut store: S, roles: Vec<Role>, skip: &[&str]) -> Fx<S> {
+    pub fn with_roles_skipping(store: S, roles: Vec<Role>, skip: &[&str]) -> Fx<S> {
+        Fx::open_with(store, roles, skip, 1, default_budget())
+    }
+
+    /// As [`Fx::with_roles_skipping`], with `live` concurrent turns and a budget.
+    pub fn open_with(
+        mut store: S,
+        roles: Vec<Role>,
+        skip: &[&str],
+        live: u32,
+        budget: Budget,
+    ) -> Fx<S> {
         let task = TaskId("T1".into());
         let brief = store.blob_put(b"Add retry with backoff to the HTTP client.");
         let mut fx = Fx {
@@ -125,16 +206,10 @@ impl<S: Store> Fx<S> {
             roster: roles.clone(),
             repo: "github.com/example/repo".into(),
             profile_digest: DIGEST,
-            budget: Budget {
-                messages: 40,
-                bytes: 5_000_000,
-                reads: 150,
-                reads_per_turn: 30,
-                turns: 60,
-                iterations: 4,
-            },
+            budget,
             turn_ms: 60_000,
             request_ms: 3_600_000,
+            max_live_turns: live,
             brief,
             human: PrincipalId("human".into()),
         });
@@ -193,20 +268,20 @@ impl<S: Store> Fx<S> {
     /// Live token for `role`, or a bogus one if it does not hold the turn.
     pub fn tok(&self, role: impl Into<RoleId>) -> Token {
         let role = role.into();
-        match self.st().turn.as_ref() {
-            Some(t) if t.role == role => self.st().token_for(&pid(role), t.id),
-            _ => Token(Sha256([0; 32])),
+        match self.st().turn_of(&role) {
+            Some(t) => self.st().token_for(&pid(role), t.id),
+            None => Token(Sha256([0; 32])),
         }
     }
 
     /// The live turn's holder among the four test roles.
     pub fn turn_role(&self) -> Option<Who> {
-        self.st().turn.as_ref().map(|t| Who::of(&t.role))
+        self.st().turn().map(|t| Who::of(&t.role))
     }
 
     /// The live turn's holder, whatever the roster.
     pub fn turn_holder(&self) -> Option<RoleId> {
-        self.st().turn.as_ref().map(|t| t.role.clone())
+        self.st().turn().map(|t| t.role.clone())
     }
 
     pub fn agent(&mut self, role: impl Into<RoleId>, action: AgentAction) -> Response {
