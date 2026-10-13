@@ -5,6 +5,7 @@ use crate::command::*;
 use crate::event::*;
 use crate::ids::*;
 use crate::record::*;
+use crate::role::*;
 use crate::state::*;
 
 pub const MAX_ARTIFACT_BYTES: u64 = 2_000_000;
@@ -133,8 +134,14 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
         Command::Open(o) => open(w, o, now).map(Flow::Done),
         Command::Assign { role, principal } => {
             require_open(&w.st)?;
+            if w.st.roster.get(role).is_none() {
+                return Err(rej(
+                    Code::UnknownRole,
+                    format!("role {role} is not in the roster"),
+                ));
+            }
             w.emit(Event::Assigned {
-                role: *role,
+                role: role.clone(),
                 principal: principal.clone(),
             });
             // No grant here: a turn needs a host ready to launch its harness,
@@ -167,9 +174,9 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
                     return Ok(Flow::Replay(r));
                 }
                 terminal(&w.st)?;
-                check_token(&w.st, principal, role, *token, now)?;
+                check_token(&w.st, principal, &role, *token, now)?;
             }
-            agent(w, principal, role, action, now).map(Flow::Done)
+            agent(w, principal, &role, action, now).map(Flow::Done)
         }
         Command::Runner {
             op,
@@ -224,7 +231,7 @@ fn replay(st: &TaskState, p: &PrincipalId, op: &OpId, hash: &Sha256) -> R<Option
 fn check_token(
     st: &TaskState,
     p: &PrincipalId,
-    role: Role,
+    role: &RoleId,
     token: Option<Token>,
     now: Time,
 ) -> R<()> {
@@ -233,7 +240,7 @@ fn check_token(
         .turn
         .as_ref()
         .ok_or_else(|| rej(Code::TokenExpired, "no live turn"))?;
-    if turn.role != role || st.token_for(p, turn.id) != token {
+    if turn.role != *role || st.token_for(p, turn.id) != token {
         return Err(rej(Code::StaleTurn, "token is not the live turn's"));
     }
     if now >= turn.deadline {
@@ -248,7 +255,10 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
     if w.st.opened {
         return Err(rej(Code::AlreadyOpen, "task already opened"));
     }
+    Roster::new(o.roster.clone()).map_err(|e| rej(Code::BadRoster, e.to_string()))?;
     w.emit(Event::TaskOpened {
+        schema: LOG_SCHEMA,
+        roster: o.roster.clone(),
         task: o.task.clone(),
         repo: o.repo.clone(),
         profile_digest: o.profile_digest,
@@ -274,10 +284,17 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
 
 // ---------------------------------------------------------------- agent
 
+/// The capability record for a rostered role.
+fn role_data<'a>(st: &'a TaskState, id: &RoleId) -> R<&'a Role> {
+    st.roster
+        .get(id)
+        .ok_or_else(|| rej(Code::NotAssigned, format!("role {id} is not in the roster")))
+}
+
 fn agent(
     w: &mut Work,
     p: &PrincipalId,
-    role: Role,
+    role: &RoleId,
     action: &AgentAction,
     now: Time,
 ) -> R<Response> {
@@ -290,28 +307,25 @@ fn agent(
     }
 }
 
-fn visible(st: &TaskState, role: Role, m: &Message) -> bool {
-    if role != Role::Reviewer {
+/// Does the role's `read_messages` allow it to see `m`?
+fn visible(st: &TaskState, role: &Role, m: &Message) -> bool {
+    if role.read_messages == ReadScope::All {
         return true;
     }
     let from_human = m.from == st.human;
-    let to_reviewer = m
-        .draft
-        .to
-        .iter()
-        .any(|r| matches!(r, Recipient::Role(Role::Reviewer) | Recipient::All));
+    let to_me = m.draft.to.iter().any(|r| match r {
+        Recipient::Role(id) => *id == role.id,
+        Recipient::All => true,
+        Recipient::Human => false,
+    });
     let mine = |id: MsgId| {
         st.message(id)
-            .map(|x| x.from_role == Some(Role::Reviewer))
+            .map(|x| x.from_role.as_ref() == Some(&role.id))
             .unwrap_or(false)
     };
     let answers_mine = m.draft.reply_to.map(mine).unwrap_or(false);
     let decides_mine = matches!(&m.draft.body, Body::Decision(d) if mine(d.subject));
-    from_human && (to_reviewer || answers_mine || decides_mine)
-}
-
-fn readable(role: Role, kind: ArtifactKind) -> bool {
-    role != Role::Reviewer || kind != ArtifactKind::Log
+    from_human && (to_me || answers_mine || decides_mine)
 }
 
 /// R11 per-turn read budget. Exceeding ends the turn and rejects.
@@ -334,12 +348,13 @@ fn charge_read(w: &mut Work, p: &PrincipalId, now: Time) -> R<()> {
 fn read(
     w: &mut Work,
     p: &PrincipalId,
-    role: Role,
+    role: &RoleId,
     after: Option<MsgId>,
     limit: usize,
     now: Time,
 ) -> R<Response> {
     charge_read(w, p, now)?;
+    let reader = role_data(&w.st, role)?.clone();
     let limit = limit.clamp(1, READ_PAGE);
     let start = after.map(|a| a.0 as usize).unwrap_or(0);
     let mut out: Vec<Message> = Vec::new();
@@ -348,7 +363,7 @@ fn read(
         w.st.messages
             .iter()
             .skip(start)
-            .filter(|m| visible(&w.st, role, m))
+            .filter(|m| visible(&w.st, &reader, m))
     {
         if out.len() == limit {
             more = true;
@@ -364,17 +379,15 @@ fn read(
     })
 }
 
-fn get_artifact(w: &mut Work, p: &PrincipalId, role: Role, id: ArtId, now: Time) -> R<Response> {
+fn get_artifact(w: &mut Work, p: &PrincipalId, role: &RoleId, id: ArtId, now: Time) -> R<Response> {
     let rec =
         w.st.artifacts
             .get(&id)
             .cloned()
             .ok_or_else(|| rej(Code::RefUnresolved, format!("{id}")))?;
-    if !readable(role, rec.kind) {
-        return Err(rej(
-            Code::RoleForbidden,
-            "artifact kind not readable by role",
-        ));
+    let reader = role_data(&w.st, role)?;
+    if !reader.holds(Cap::Read(rec.kind)) {
+        return Err(rej(Code::RoleForbidden, reader.lacks(Cap::Read(rec.kind))));
     }
     let turn =
         w.st.turn
@@ -391,31 +404,25 @@ fn get_artifact(w: &mut Work, p: &PrincipalId, role: Role, id: ArtId, now: Time)
     Ok(Response::Artifact(rec))
 }
 
-/// R16 gating table for agent writes.
-fn gate_artifact(st: &TaskState, role: Role, kind: ArtifactKind) -> R<()> {
-    let ok = matches!(
-        (kind, role, st.state),
-        (ArtifactKind::Spec, Role::Planner, State::Planning)
-            | (ArtifactKind::Diff, Role::Coder, State::Build)
-            | (ArtifactKind::Candidate, Role::Coder, State::Build)
-    );
-    if matches!(
-        kind,
-        ArtifactKind::Brief | ArtifactKind::TestReport | ArtifactKind::Log
-    ) {
-        return Err(rej(Code::KindForbidden, "agents cannot write this kind"));
+/// The state each agent-writable artifact kind is stored in (R16).
+fn write_state(kind: ArtifactKind) -> Option<State> {
+    match kind {
+        ArtifactKind::Spec => Some(State::Planning),
+        ArtifactKind::Diff | ArtifactKind::Candidate => Some(State::Build),
+        ArtifactKind::Brief | ArtifactKind::TestReport | ArtifactKind::Log => None,
     }
-    if !ok {
-        let writer_ok = matches!(
-            (kind, role),
-            (ArtifactKind::Spec, Role::Planner)
-                | (ArtifactKind::Diff | ArtifactKind::Candidate, Role::Coder)
-        );
-        return Err(if writer_ok {
-            rej(Code::WrongState, "kind not writable in this state")
-        } else {
-            rej(Code::KindForbidden, "role may not write this kind")
-        });
+}
+
+/// R16 gating table for agent writes: the role's `write` capability, then the state.
+fn gate_artifact(st: &TaskState, role: &Role, kind: ArtifactKind) -> R<()> {
+    let Some(state) = write_state(kind) else {
+        return Err(rej(Code::KindForbidden, "agents cannot write this kind"));
+    };
+    if !role.holds(Cap::Write(kind)) {
+        return Err(rej(Code::KindForbidden, role.lacks(Cap::Write(kind))));
+    }
+    if st.state != state {
+        return Err(rej(Code::WrongState, "kind not writable in this state"));
     }
     if st.turn.as_ref().map(|t| t.kind) == Some(TurnKind::Consultation) {
         return Err(rej(
@@ -429,13 +436,13 @@ fn gate_artifact(st: &TaskState, role: Role, kind: ArtifactKind) -> R<()> {
 fn put_artifact(
     w: &mut Work,
     p: &PrincipalId,
-    role: Role,
+    role: &RoleId,
     blob: BlobRef,
     payload: &ArtifactPayload,
     now: Time,
 ) -> R<Response> {
     let kind = payload.kind();
-    gate_artifact(&w.st, role, kind)?;
+    gate_artifact(&w.st, role_data(&w.st, role)?, kind)?;
     if blob.len > MAX_ARTIFACT_BYTES {
         return Err(rej(Code::TooLarge, "artifact exceeds max_artifact_bytes"));
     }
@@ -532,21 +539,6 @@ fn resolve_ref(st: &TaskState, r: &Ref) -> R<()> {
     }
 }
 
-fn role_may_post(role: Role, kind: MessageKind) -> bool {
-    use MessageKind::*;
-    match role {
-        Role::Planner | Role::Coder => matches!(
-            kind,
-            Ask | Answer | Propose | Finding | RequestDecision | Pass
-        ),
-        Role::Tester => matches!(
-            kind,
-            Ask | Answer | Finding | Verdict | RequestDecision | Pass
-        ),
-        Role::Reviewer => matches!(kind, Answer | Finding | Verdict | RequestDecision | Pass),
-    }
-}
-
 fn state_accepts(state: State, kind: MessageKind) -> bool {
     use MessageKind::*;
     match state {
@@ -620,7 +612,7 @@ fn check_common(st: &TaskState, d: &Draft) -> R<()> {
     for r in &d.to {
         if let Recipient::Role(role) = r {
             if !st.assigned.contains_key(role) {
-                return Err(rej(Code::BadRecipient, format!("{role:?} not assigned")));
+                return Err(rej(Code::BadRecipient, format!("{role} not assigned")));
             }
         }
     }
@@ -643,13 +635,15 @@ fn check_common(st: &TaskState, d: &Draft) -> R<()> {
     Ok(())
 }
 
-fn check_verdict(st: &TaskState, role: Role, v: &Verdict, d: &Draft) -> R<()> {
-    let ok_role = matches!(
-        (role, st.state),
-        (Role::Tester, State::Test) | (Role::Reviewer, State::Review)
-    );
-    if !ok_role {
-        return Err(rej(Code::RoleForbidden, "verdict role/state"));
+fn check_verdict(st: &TaskState, role: &Role, v: &Verdict, d: &Draft) -> R<()> {
+    let stage = Stage::of(st.state).ok_or_else(|| {
+        rej(
+            Code::RoleForbidden,
+            "verdicts are judged in test and review only",
+        )
+    })?;
+    if !role.holds(Cap::Verdict(stage)) {
+        return Err(rej(Code::RoleForbidden, role.lacks(Cap::Verdict(stage))));
     }
     let cand = st
         .current_candidate()
@@ -705,16 +699,14 @@ fn check_verdict(st: &TaskState, role: Role, v: &Verdict, d: &Draft) -> R<()> {
     }
 }
 
-fn post(w: &mut Work, p: &PrincipalId, role: Role, d: &Draft, now: Time) -> R<Response> {
+fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -> R<Response> {
     use MessageKind::*;
     if d.kind == Decision {
         return Err(rej(Code::DecisionForbidden, "decisions are human-only"));
     }
-    if !role_may_post(role, d.kind) {
-        return Err(rej(
-            Code::RoleForbidden,
-            format!("{role:?} may not post {:?}", d.kind),
-        ));
+    let role = role_data(&w.st, role_id)?.clone();
+    if !role.holds(Cap::Post(d.kind)) {
+        return Err(rej(Code::RoleForbidden, role.lacks(Cap::Post(d.kind))));
     }
     if !state_accepts(w.st.state, d.kind) {
         return Err(rej(
@@ -739,23 +731,29 @@ fn post(w: &mut Work, p: &PrincipalId, role: Role, d: &Draft, now: Time) -> R<Re
             return Err(rej(Code::BadReplyTo, "answer must reply to an ask"));
         }
     }
-    if role == Role::Reviewer
+    if role.read_messages == ReadScope::Scoped
         && d.kind == Answer
         && !d.to.iter().all(|r| matches!(r, Recipient::Human))
     {
-        return Err(rej(Code::BadRecipient, "reviewer answers only the human"));
+        return Err(rej(
+            Code::BadRecipient,
+            format!(
+                "role {} reads scoped messages and answers only the human",
+                role.id
+            ),
+        ));
     }
     if let Body::Verdict(v) = &d.body {
-        check_verdict(&w.st, role, v, d)?;
+        check_verdict(&w.st, &role, v, d)?;
     }
     let gate_spec = if d.kind == RequestDecision {
-        check_request(&w.st, role, d)?
+        check_request(&w.st, &role, d)?
     } else {
         None
     };
     if d.kind == Pass {
-        if let Some(target) = d.yield_to {
-            check_yield(&w.st, &turn, target)?;
+        if let Some(target) = &d.yield_to {
+            check_yield(&w.st, &turn, &role, target)?;
         }
     }
     // Effects.
@@ -763,7 +761,7 @@ fn post(w: &mut Work, p: &PrincipalId, role: Role, d: &Draft, now: Time) -> R<Re
     w.emit(Event::MessageAppended(Message {
         id,
         from: p.clone(),
-        from_role: Some(role),
+        from_role: Some(role.id.clone()),
         draft: d.clone(),
     }));
     w.emit(Event::Charged {
@@ -774,10 +772,16 @@ fn post(w: &mut Work, p: &PrincipalId, role: Role, d: &Draft, now: Time) -> R<Re
         reads: 0,
     });
     match d.kind {
-        Pass => match d.yield_to {
+        Pass => match &d.yield_to {
             Some(target) => {
                 end_turn_only(w, TurnEnd::Yield);
-                grant(w, target, TurnKind::Consultation, Some(role), now);
+                grant(
+                    w,
+                    target,
+                    TurnKind::Consultation,
+                    Some(role.id.clone()),
+                    now,
+                );
             }
             None => end_turn(w, TurnEnd::Pass, now),
         },
@@ -785,7 +789,7 @@ fn post(w: &mut Work, p: &PrincipalId, role: Role, d: &Draft, now: Time) -> R<Re
             let deadline = (gate_spec.is_none()).then(|| now.plus(w.st.request_ms));
             w.emit(Event::RequestOpened {
                 msg: id,
-                requester: role,
+                requester: role.id.clone(),
                 gate: gate_spec.is_some(),
                 deadline,
             });
@@ -813,17 +817,20 @@ fn post(w: &mut Work, p: &PrincipalId, role: Role, d: &Draft, now: Time) -> R<Re
 }
 
 /// Returns the spec id when this request opens the plan gate.
-fn check_request(st: &TaskState, role: Role, d: &Draft) -> R<Option<ArtId>> {
+fn check_request(st: &TaskState, role: &Role, d: &Draft) -> R<Option<ArtId>> {
     if st.pending_request.is_some() {
         return Err(rej(Code::AlreadyOpen, "a request is already open"));
     }
     if !d.gate {
         return Ok(None);
     }
-    if role != Role::Planner || st.state != State::Planning {
+    if !role.holds(Cap::Write(ArtifactKind::Spec)) || st.state != State::Planning {
         return Err(rej(
             Code::WrongState,
-            "only the Planner opens the plan gate, in planning",
+            format!(
+                "only a role with {} opens the plan gate, in planning",
+                Cap::Write(ArtifactKind::Spec)
+            ),
         ));
     }
     let spec = match d.refs.first() {
@@ -845,18 +852,35 @@ fn check_request(st: &TaskState, role: Role, d: &Draft) -> R<Option<ArtId>> {
     }
 }
 
-fn check_yield(st: &TaskState, turn: &Turn, target: Role) -> R<()> {
+/// Derived yield rule (spec, Turns): the holder reads every message, and the
+/// target is assigned, consultable and not the state's default holder.
+fn check_yield(st: &TaskState, turn: &Turn, holder: &Role, target: &RoleId) -> R<()> {
     if turn.kind == TurnKind::Consultation {
         return Err(rej(Code::YieldNested, "yields do not nest"));
     }
-    if !st.state.consultable(target) {
+    if holder.read_messages == ReadScope::Scoped {
         return Err(rej(
             Code::WrongState,
-            format!("{target:?} is not consultable in {:?}", st.state),
+            format!(
+                "role {} reads scoped messages and cannot read an answer, so it may not yield",
+                holder.id
+            ),
         ));
     }
-    if !st.assigned.contains_key(&target) {
-        return Err(rej(Code::BadRecipient, format!("{target:?} not assigned")));
+    if st.roster.get(target).is_none() {
+        return Err(rej(
+            Code::BadRecipient,
+            format!("{target} is not in the roster"),
+        ));
+    }
+    if !st.roster.yieldable_in(st.state, target) {
+        return Err(rej(
+            Code::WrongState,
+            format!("{target} is not consultable in {:?}", st.state),
+        ));
+    }
+    if !st.assigned.contains_key(target) {
+        return Err(rej(Code::BadRecipient, format!("{target} not assigned")));
     }
     Ok(())
 }
@@ -1023,10 +1047,16 @@ fn human(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
             if sel.status != Some(RunStatus::Passed) {
                 return Err(rej(Code::NotPassed, "selected run is not passed"));
             }
-            if w.st.verdict(Role::Reviewer, VerdictKind::Approve).is_none() {
+            if !w.st.final_approved() {
                 return Err(rej(
                     Code::NotReviewed,
-                    "no Reviewer approve on this candidate and run",
+                    "no approve from a final_decision role on this candidate and run",
+                ));
+            }
+            if w.st.final_blocked() {
+                return Err(rej(
+                    Code::NotReviewed,
+                    "a final_decision role asked for revision on this candidate and run",
                 ));
             }
             w.emit(Event::HumanApproval {
@@ -1212,14 +1242,15 @@ fn check_resume(st: &TaskState, target: State) -> R<()> {
                     "review needs a current candidate",
                 ));
             }
-            st.verdict(Role::Tester, VerdictKind::Approve)
+            st.verdict_at(Stage::Test, VerdictKind::Approve)
                 .map(|_| ())
-                .ok_or_else(|| rej(Code::NotReviewed, "review needs a Tester approve"))
+                .ok_or_else(|| rej(Code::NotReviewed, "review needs an approve at stage test"))
         }
-        State::MergeGate => st
-            .verdict(Role::Reviewer, VerdictKind::Approve)
-            .map(|_| ())
-            .ok_or_else(|| rej(Code::NotReviewed, "merge_gate needs a Reviewer approve")),
+        State::MergeGate if st.final_approved() && !st.final_blocked() => Ok(()),
+        State::MergeGate => Err(rej(
+            Code::NotReviewed,
+            "merge_gate needs an approve from a final_decision role and no revise from one",
+        )),
         State::Approved => st
             .merge_approval
             .map(|_| ())
@@ -1294,22 +1325,23 @@ fn human_post(w: &mut Work, d: &Draft, now: Time) -> R<Response> {
         w.emit(Event::RequestSettled { msg: req, by: id });
         if let Some(p) = pending {
             if w.st.turn.is_none() {
-                let kind = if w.st.state.default_role() == Some(p.requester) {
+                let holder = w.st.roster.default_holder(w.st.state).cloned();
+                let kind = if holder.as_ref() == Some(&p.requester) {
                     TurnKind::Default
                 } else {
                     TurnKind::Consultation
                 };
                 if kind == TurnKind::Default
-                    || w.st.state.consultable(p.requester)
-                    || w.st.state.default_role().is_none()
+                    || w.st.roster.yieldable_in(w.st.state, &p.requester)
+                    || holder.is_none()
                 {
-                    grant(w, p.requester, kind, None, now);
+                    grant(w, &p.requester, kind, None, now);
                 }
             }
         }
     } else if d.kind == Ask && w.st.turn.is_none() {
         if let Some(Recipient::Role(role)) = d.to.first() {
-            grant(w, *role, TurnKind::Consultation, None, now);
+            grant(w, role, TurnKind::Consultation, None, now);
         }
     }
     Ok(Response::Posted(id))
@@ -1317,13 +1349,13 @@ fn human_post(w: &mut Work, d: &Draft, now: Time) -> R<Response> {
 
 // ---------------------------------------------------------------- turns and lifecycle
 
-fn grant(w: &mut Work, role: Role, kind: TurnKind, return_to: Option<Role>, now: Time) {
-    if !w.st.assigned.contains_key(&role) || w.st.turn.is_some() {
+fn grant(w: &mut Work, role: &RoleId, kind: TurnKind, return_to: Option<RoleId>, now: Time) {
+    if !w.st.assigned.contains_key(role) || w.st.turn.is_some() {
         return;
     }
     let turn = TurnId(w.st.next_turn);
     w.emit(Event::TurnGranted {
-        role,
+        role: role.clone(),
         turn,
         kind,
         deadline: now.plus(w.st.turn_ms),
@@ -1336,13 +1368,13 @@ fn schedule(w: &mut Work, now: Time) {
     if w.st.turn.is_some() || w.st.pending_request.is_some() || !w.st.opened {
         return;
     }
-    let Some(role) = w.st.state.default_role() else {
+    let Some(role) = w.st.roster.default_holder(w.st.state).cloned() else {
         return;
     };
     if w.st.state == State::Test && w.st.selected_run().and_then(|r| r.status).is_none() {
         return;
     }
-    grant(w, role, TurnKind::Default, None, now);
+    grant(w, &role, TurnKind::Default, None, now);
 }
 
 fn end_turn_only(w: &mut Work, cause: TurnEnd) -> Option<Turn> {
@@ -1361,7 +1393,7 @@ fn end_turn(w: &mut Work, cause: TurnEnd, now: Time) {
         && t.run_at == w.st.run.as_ref().map(|r| r.id);
     match (t.kind, t.return_to) {
         (TurnKind::Consultation, Some(back)) if unchanged && w.st.pending_request.is_none() => {
-            grant(w, back, TurnKind::Default, None, now)
+            grant(w, &back, TurnKind::Default, None, now)
         }
         _ => schedule(w, now),
     }

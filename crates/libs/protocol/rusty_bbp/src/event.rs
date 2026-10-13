@@ -3,8 +3,21 @@
 use crate::command::Response;
 use crate::ids::*;
 use crate::record::*;
+use crate::role::Role;
 use crate::state::{Budget, BudgetField, Gate, State, TurnKind};
 use rusty_serde::{Deserialize, Serialize};
+
+/// The log schema this crate writes and reads. Schema 1 was v0.4.1 (a fixed
+/// role enumeration, no roster); it does not replay.
+pub const LOG_SCHEMA: u32 = 2;
+
+/// The `schema` of the first `task_opened` in `events`, if the log has one.
+pub fn log_schema(events: &[Event]) -> Option<u32> {
+    events.iter().find_map(|e| match e {
+        Event::TaskOpened { schema, .. } => Some(*schema),
+        _ => None,
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnEnd {
@@ -29,6 +42,10 @@ pub enum EscalateReason {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     TaskOpened {
+        /// Log schema version ([`LOG_SCHEMA`]). A reader refuses any other.
+        schema: u32,
+        /// The roster, immutable for the task.
+        roster: Vec<Role>,
         task: TaskId,
         repo: String,
         profile_digest: Sha256,
@@ -38,17 +55,17 @@ pub enum Event {
         human: PrincipalId,
     },
     Assigned {
-        role: Role,
+        role: RoleId,
         principal: Principal,
     },
     /// The turn's token is not logged: it is derived from the task's master
     /// secret, which lives outside the log, so a log reader cannot forge it.
     TurnGranted {
-        role: Role,
+        role: RoleId,
         turn: TurnId,
         kind: TurnKind,
         deadline: Time,
-        return_to: Option<Role>,
+        return_to: Option<RoleId>,
     },
     TurnEnded {
         turn: TurnId,
@@ -76,7 +93,7 @@ pub enum Event {
     },
     RequestOpened {
         msg: MsgId,
-        requester: Role,
+        requester: RoleId,
         gate: bool,
         deadline: Option<Time>,
     },

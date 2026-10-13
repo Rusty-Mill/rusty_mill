@@ -3,7 +3,7 @@
 use crate::codec::decode_artifact;
 use crate::command::{AgentAction, Code, Command, Rejection, Response};
 use crate::engine::handle;
-use crate::event::Event;
+use crate::event::{log_schema, Event, LOG_SCHEMA};
 use crate::ids::*;
 use crate::record::ArtifactPayload;
 use crate::state::TaskState;
@@ -18,6 +18,11 @@ pub enum StoreError {
     },
     UnknownTask,
     UnknownBlob,
+    /// The log was written under another schema. `None`: it predates the
+    /// `schema` field (v0.4.1). Archive it; it does not replay.
+    UnsupportedSchema {
+        found: Option<u32>,
+    },
     /// The backing medium failed or is corrupt.
     Backend(String),
 }
@@ -157,6 +162,12 @@ impl<S: Store> Driver<S> {
     /// Rebuild state from the log.
     pub fn reload(&mut self) -> Result<(), StoreError> {
         let events = self.store.events(&self.state.task, 0)?;
+        match log_schema(&events) {
+            Some(s) if s != LOG_SCHEMA => {
+                return Err(StoreError::UnsupportedSchema { found: Some(s) })
+            }
+            _ => {}
+        }
         self.state = TaskState::fold_with(self.state.task.clone(), self.state.master, &events);
         Ok(())
     }
