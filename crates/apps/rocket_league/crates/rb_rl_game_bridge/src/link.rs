@@ -89,9 +89,10 @@ impl BridgeLoop {
     /// reports it) and releasing queued spawn commands two messages after a load; both act on
     /// state the real game link owns.
     pub fn on_clump(&mut self, clump: Clump) -> Step {
-        let advanced = self
-            .tracker
-            .observe(clump.packet.match_info.seconds_elapsed);
+        let advanced = self.tracker.observe(
+            clump.packet.match_info.seconds_elapsed,
+            clump.packet.match_info.frame_num,
+        );
         let distribute = should_distribute(
             self.roster,
             &clump.packet,
