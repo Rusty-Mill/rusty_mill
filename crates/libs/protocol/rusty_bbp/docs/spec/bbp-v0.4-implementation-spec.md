@@ -1,5 +1,7 @@
 # Blackboard Protocol (BBP) v0.4: Implementation Spec
 
+> **Superseded by [v0.5](bbp-v0.5-implementation-spec.md) (Oct 13, 2026).** Kept as the record of the four review rounds; do not implement from this file.
+
 Oct 8, 2026 · revision of v0.3 after a fourth round of review (`review/v0.3-merged.md`, Claude and ChatGPT; Gemini unavailable). Errata v0.4.1 applied from `review/v0.4-review-chatgpt.md`: E1 rerun selects a fresh run, E2 replanning deselects the candidate, E3 escalation fires once, E4 one scheduling check for pending requests, E5 human answer settles a request, E6 replay tests split.
 
 ## Summary
