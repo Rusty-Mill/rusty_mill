@@ -16,8 +16,12 @@ pub enum Command {
     },
     /// Driver-supplied clock tick. Fires deadlines.
     Tick,
-    /// Host ended a turn early (process died, inference timed out).
-    AbortTurn,
+    /// Host ended a turn early (process died, inference timed out). `Some`
+    /// ends that turn only, and does nothing if it is not live; `None` ends
+    /// every live turn.
+    AbortTurn {
+        turn: Option<TurnId>,
+    },
     Agent {
         principal: PrincipalId,
         /// Adapter-injected; `None` for `task_card`.

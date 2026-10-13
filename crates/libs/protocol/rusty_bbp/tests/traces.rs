@@ -384,7 +384,7 @@ fn tr_17_pending_request_blocks_default_turn_after_rebuild() {
     );
     assert_eq!(fx.turn_role(), None);
     fx.d.reload().expect("reload");
-    fx.run(&Command::AbortTurn);
+    fx.run(&Command::AbortTurn { turn: None });
     fx.tick();
     assert_eq!(fx.turn_role(), None, "request still open");
     assert!(fx.st().pending_request.is_some());

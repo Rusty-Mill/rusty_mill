@@ -161,9 +161,13 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
             schedule(w, now);
             Ok(Flow::Done(Response::Ok))
         }
-        Command::AbortTurn => {
+        Command::AbortTurn { turn } => {
             require_open(&w.st)?;
-            for id in live_ids(&w.st) {
+            let ids = match turn {
+                Some(id) => vec![*id],
+                None => live_ids(&w.st),
+            };
+            for id in ids {
                 end_turn(w, id, TurnEnd::Aborted, now);
             }
             Ok(Flow::Done(Response::Ok))

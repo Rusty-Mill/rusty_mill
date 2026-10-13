@@ -244,18 +244,19 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     // replacement turn is launched here. The first tick fires deadlines and
     // grants the first turn of a freshly assigned task; that turn is ours.
     // Gates have no turn and keep waiting.
-    let inherited = d.state.turn().map(|t| t.id);
+    let inherited: Vec<TurnId> = d.state.turns.iter().map(|t| t.id).collect();
     d.dispatch(&Command::Tick, now())
         .map_err(|e| format!("{e:?}"))?;
-    let live = d.state.turn().map(|t| t.id);
-    if let (Some(turn), true) = (inherited, inherited == live) {
-        if !d.state.state.terminal() {
-            eprintln!(
-                "bbp mod: turn {} predates this moderator; aborting it",
-                turn.0
-            );
-            d.dispatch(&Command::AbortTurn, now())
-                .map_err(|e| format!("{e:?}"))?;
+    if !d.state.state.terminal() {
+        for turn in inherited {
+            if d.state.turns.iter().any(|t| t.id == turn) {
+                eprintln!(
+                    "bbp mod: turn {} predates this moderator; aborting it",
+                    turn.0
+                );
+                d.dispatch(&Command::AbortTurn { turn: Some(turn) }, now())
+                    .map_err(|e| format!("{e:?}"))?;
+            }
         }
     }
 
@@ -311,7 +312,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
                     let turn = h.turn;
                     sup.kill_harness()?;
                     if live.as_ref().map(|(id, _)| *id) == Some(turn) {
-                        d.dispatch(&Command::AbortTurn, now())
+                        d.dispatch(&Command::AbortTurn { turn: Some(turn) }, now())
                             .map_err(|e| format!("{e:?}"))?;
                         continue;
                     }

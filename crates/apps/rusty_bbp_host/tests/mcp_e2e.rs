@@ -185,7 +185,7 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     let r = human::perform(&dir, &task, "extend", &["reads_per_turn", "1"], None).expect("extend");
     assert_eq!(r, Response::Ok);
     let mut d = open_driver(&dir, &task).expect("driver");
-    d.dispatch(&Command::AbortTurn, rusty_bbp_host::now())
+    d.dispatch(&Command::AbortTurn { turn: None }, rusty_bbp_host::now())
         .expect("abort");
     assert_ne!(
         d.state.turn().map(|t| t.id),
