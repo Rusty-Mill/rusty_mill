@@ -113,8 +113,8 @@ its state setting becomes a ball placement.
 ## Verified
 
 `cargo test -p rb_rl_game_bridge`: unit tests, the loop and listener, the golden codec, the real
-link (fold, commands, byte budget, spawning), a stand-in game end to end, and 11 tests on recordings
-of a real game. Run live on 2026-10-11 (above).
+link (fold, commands, byte budget, spawning), a stand-in game end to end, the census, the state-fault
+robustness checks, and tests on recordings of a real game. Run live on 2026-10-11 (above).
 
 ## Starting the game in RLBot mode (Epic, Windows)
 

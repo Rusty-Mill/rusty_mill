@@ -233,7 +233,9 @@ fn a_bot_plays_through_core_in_a_game_that_is_not_the_simulation() {
                     },
                 })
                 .unwrap();
-                if !sent_ball && xs.len() > 1 {
+                // The game closes once it has seen the ball placement, so the bot places the ball
+                // only after its third packet: three is then guaranteed, not a race with the close.
+                if !sent_ball && xs.len() >= 3 {
                     sent_ball = true;
                     bot.send(DesiredGameState {
                         ball_states: vec![DesiredBallState {
