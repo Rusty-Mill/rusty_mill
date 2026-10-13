@@ -443,9 +443,9 @@ mod tests {
             }
             let orig = a;
             transpose_bytes8(&mut a);
-            for j in 0..8 {
-                for k in 0..8 {
-                    assert_eq!((a[k] >> (8 * j)) & 0xff, (orig[j] >> (8 * k)) & 0xff);
+            for (j, row) in orig.iter().enumerate() {
+                for (k, col) in a.iter().enumerate() {
+                    assert_eq!((col >> (8 * j)) & 0xff, (row >> (8 * k)) & 0xff);
                 }
             }
         }
@@ -464,8 +464,8 @@ mod tests {
             let st = to_planes(&blocks);
             for (b, block) in blocks.iter().enumerate() {
                 for (p, byte) in block.iter().enumerate() {
-                    for k in 0..8 {
-                        assert_eq!((st[k] >> (16 * b + p)) & 1, u64::from((byte >> k) & 1));
+                    for (k, plane) in st.iter().enumerate() {
+                        assert_eq!((plane >> (16 * b + p)) & 1, u64::from((byte >> k) & 1));
                     }
                 }
             }
