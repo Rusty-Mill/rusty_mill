@@ -8,7 +8,7 @@
 
 use std::io::ErrorKind;
 use std::os::linux::net::SocketAddrExt;
-use std::os::unix::net::{SocketAddr, UnixListener};
+use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -305,4 +305,95 @@ fn a_command_with_network_reaches_the_internet_family_but_no_local_daemon() {
         return;
     };
     assert!(!blocked.ok, "no network, no TCP: {blocked:?}");
+}
+
+/// Tries to turn a `socketpair` into a way out: a datagram pair re-pointed at an outside endpoint.
+const TRY_PAIRS: &str = r#"
+import socket, sys
+path, abstract, stream_abstract = sys.argv[1], sys.argv[2], sys.argv[3]
+for name, addr in (("pathname", path), ("abstract", "\0" + abstract)):
+    try:
+        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+    except PermissionError:
+        print(name, "datagram pair denied")
+        continue
+    a.connect(addr)
+    a.send(b"escaped")
+    print(name, "SENT")
+# Stream pairs stay available (a linker is started through one) but cannot be re-pointed.
+a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+a.send(b"ping")
+print("stream pair works:", b.recv(4) == b"ping")
+try:
+    a.connect("\0" + stream_abstract)
+    print("stream pair CONNECTED")
+except OSError as e:
+    print("stream pair reconnect refused", e.errno)
+"#;
+
+#[test]
+fn a_datagram_socketpair_cannot_be_pointed_at_an_outside_endpoint() {
+    require_python();
+    for network in [false, true] {
+        let f = fixture(&format!("pairs{network}"));
+        let unique = f
+            .root
+            .file_name()
+            .expect("name")
+            .to_string_lossy()
+            .into_owned();
+        let (abstract_name, stream_name) =
+            (format!("mill-dg-{unique}"), format!("mill-st-{unique}"));
+        let path = f.root.join("dgram.sock");
+
+        // Datagram and stream endpoints outside the sandbox, standing for local daemons.
+        let dg_path = UnixDatagram::bind(&path).expect("bind datagram path");
+        let dg_abs = UnixDatagram::bind_addr(
+            &SocketAddr::from_abstract_name(abstract_name.as_bytes()).expect("addr"),
+        )
+        .expect("bind datagram abstract");
+        let st_abs = UnixListener::bind_addr(
+            &SocketAddr::from_abstract_name(stream_name.as_bytes()).expect("addr"),
+        )
+        .expect("bind stream abstract");
+        for d in [&dg_path, &dg_abs] {
+            d.set_nonblocking(true).expect("nonblocking");
+        }
+        st_abs.set_nonblocking(true).expect("nonblocking");
+
+        let argv = [
+            "/usr/bin/python3",
+            "-c",
+            TRY_PAIRS,
+            path.to_str().expect("utf8"),
+            &abstract_name,
+            &stream_name,
+        ];
+        let Some(out) = run_argv(&f, &stage(network), &argv) else {
+            return;
+        };
+        let what = format!("network={network}: {}", out.tail);
+        assert!(out.ok, "{what}");
+        assert!(out.tail.contains("pathname datagram pair denied"), "{what}");
+        assert!(out.tail.contains("abstract datagram pair denied"), "{what}");
+        assert!(!out.tail.contains("SENT"), "{what}");
+        assert!(
+            out.tail.contains("stream pair works: True"),
+            "stream pairs must keep working: {what}"
+        );
+        assert!(out.tail.contains("stream pair reconnect refused"), "{what}");
+        assert!(!out.tail.contains("CONNECTED"), "{what}");
+
+        let mut buf = [0u8; 16];
+        for (name, d) in [("pathname", &dg_path), ("abstract", &dg_abs)] {
+            assert!(
+                matches!(d.recv(&mut buf), Err(e) if e.kind() == ErrorKind::WouldBlock),
+                "the {name} datagram endpoint must receive nothing (network={network})"
+            );
+        }
+        assert!(
+            matches!(st_abs.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock),
+            "the stream endpoint must see no connection (network={network})"
+        );
+    }
 }

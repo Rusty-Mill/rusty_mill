@@ -15,7 +15,9 @@ be confined the way an untrusted task solution is.
 
 `NoInternet` and `Internet` leave local Unix and abstract sockets open (Landlock does not cover them), so a
 program that must not reach a local daemon uses `NoEndpoints`, or `InternetOnly` when it needs the network
-(IPv4/IPv6 sockets only).
+(IPv4/IPv6 sockets only). Both modes also restrict `socketpair(2)` to stream and seqpacket pairs: a descriptor from a
+datagram pair can be re-`connect`ed to any reachable datagram endpoint, which would bypass the socket filter, while a
+connection-oriented pair refuses it (`EISCONN`).
 
 Landlock and seccomp apply to the calling thread and its descendants, and
 installing them after `fork` in a multithreaded process is unsafe, so the

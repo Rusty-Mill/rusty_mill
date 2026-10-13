@@ -396,6 +396,7 @@ mod group_lock {
     const LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
     const JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
     const JSET_K: u16 = 0x45; // BPF_JMP | BPF_JSET | BPF_K
+    const AND_K: u16 = 0x54; // BPF_ALU | BPF_AND | BPF_K
     const RET_K: u16 = 0x06; // BPF_RET | BPF_K
     const RET_ALLOW: u32 = 0x7fff_0000;
     const RET_KILL_PROCESS: u32 = 0x8000_0000;
@@ -403,8 +404,17 @@ mod group_lock {
     const OFFSET_NR: u32 = 0; // struct seccomp_data.nr
     const OFFSET_ARCH: u32 = 4; // struct seccomp_data.arch
     const OFFSET_ARG0: u32 = 16; // struct seccomp_data.args[0], low word (little-endian)
+    const OFFSET_ARG1: u32 = 24; // struct seccomp_data.args[1], low word (little-endian)
     /// `socket(2)` domains `InternetOnly` allows: IPv4 and IPv6.
     const INTERNET_DOMAINS: [u32; 2] = [2, 10];
+    /// `socketpair(2)` types the endpoint-free modes allow: SOCK_STREAM and
+    /// SOCK_SEQPACKET. Both are connection-oriented, so a descriptor made by
+    /// `socketpair` can never be re-`connect`ed to anything outside the job
+    /// (`EISCONN`). A SOCK_DGRAM pair can: its descriptor may be re-pointed at
+    /// any reachable datagram endpoint, which would bypass the socket filter.
+    const PAIR_TYPES: [u32; 2] = [1, 5];
+    /// `type` carries SOCK_NONBLOCK/SOCK_CLOEXEC flags above this mask.
+    const SOCK_TYPE_MASK: u32 = 0xf;
     const X32_SYSCALL_BIT: u32 = 0x4000_0000;
     const PR_SET_SECCOMP: usize = 22;
     const SECCOMP_MODE_FILTER: usize = 2;
@@ -459,17 +469,29 @@ mod group_lock {
         (sockets == Sockets::InternetOnly).then_some(&INTERNET_DOMAINS[..])
     }
 
-    /// The filter: foreign architecture kills; x32 and `denied` get
-    /// `EPERM`; with `domains`, `socket(2)` is allowed only for those address
-    /// families; everything else is allowed. Jump offsets count from the
-    /// next instruction.
-    pub(super) fn program(denied: &[u32], domains: Option<&[u32]>) -> Vec<SockFilter> {
+    /// The `socketpair(2)` types the filter allows, if it filters them at all.
+    pub(super) fn pair_types(sockets: Sockets) -> Option<&'static [u32]> {
+        matches!(sockets, Sockets::InternetOnly | Sockets::NoEndpoints).then_some(&PAIR_TYPES[..])
+    }
+
+    /// The filter: foreign architecture kills; x32 and `denied` get `EPERM`;
+    /// with `domains`, `socket(2)` is allowed only for those address families;
+    /// with `pair_types`, `socketpair(2)` only for those socket types;
+    /// everything else is allowed. Each block ends by handing on to the next
+    /// (reloading the syscall number), so blocks compose. Jump offsets count
+    /// from the next instruction.
+    pub(super) fn program(
+        denied: &[u32],
+        domains: Option<&[u32]>,
+        pair_types: Option<&[u32]>,
+    ) -> Vec<SockFilter> {
         let n = denied.len();
         // Layout: 0 load arch, 1 check arch, 2 load nr, 3 x32 check,
-        // 4..4+n denied checks, [socket check, load domain, one check per
-        // domain, EPERM], then ALLOW, EPERM, KILL.
-        let extra = domains.map_or(0, |d| d.len() + 3);
-        let allow = 4 + n + extra;
+        // 4..4+n denied checks, [socket block], [socketpair block], then
+        // ALLOW, EPERM, KILL.
+        let socket_len = domains.map_or(0, |d| d.len() + 3);
+        let pair_len = pair_types.map_or(0, |t| t.len() + 5);
+        let allow = 4 + n + socket_len + pair_len;
         let (eperm, kill) = (allow + 1, allow + 2);
         let offset = |from: usize, to: usize| (to - from - 1) as u8;
         let mut program = vec![
@@ -483,10 +505,22 @@ mod group_lock {
         }
         if let Some(domains) = domains {
             let at = program.len();
-            program.push(jump(JEQ_K, nr::SOCKET as u32, 0, offset(at, allow)));
+            let next_block = at + socket_len;
+            program.push(jump(JEQ_K, nr::SOCKET as u32, 0, offset(at, next_block)));
             program.push(stmt(LD_W_ABS, OFFSET_ARG0));
             for (i, &domain) in domains.iter().enumerate() {
                 program.push(jump(JEQ_K, domain, offset(at + 2 + i, allow), 0));
+            }
+            program.push(stmt(RET_K, RET_EPERM));
+        }
+        if let Some(types) = pair_types {
+            let at = program.len();
+            program.push(stmt(LD_W_ABS, OFFSET_NR));
+            program.push(jump(JEQ_K, SOCKETPAIR, 0, offset(at + 1, allow)));
+            program.push(stmt(LD_W_ABS, OFFSET_ARG1));
+            program.push(stmt(AND_K, SOCK_TYPE_MASK));
+            for (i, &kind) in types.iter().enumerate() {
+                program.push(jump(JEQ_K, kind, offset(at + 4 + i, allow), 0));
             }
             program.push(stmt(RET_K, RET_EPERM));
         }
@@ -502,7 +536,11 @@ mod group_lock {
     ///
     /// Requires `no_new_privs`, which the Landlock step has already set.
     pub(super) fn install(sockets: Sockets) -> Result<(), Error> {
-        let program = program(&denied(sockets), socket_domains(sockets));
+        let program = program(
+            &denied(sockets),
+            socket_domains(sockets),
+            pair_types(sockets),
+        );
         let fprog = SockFprog {
             len: program.len() as u16,
             filter: program.as_ptr(),
@@ -537,6 +575,17 @@ mod group_lock {
         syscall: u32,
         arg0: u32,
     ) -> u32 {
+        verdict_args(program, arch, syscall, [arg0, 0])
+    }
+
+    /// As [`verdict`], with the syscall's first two arguments (`socketpair`'s type is the second).
+    #[cfg(test)]
+    pub(super) fn verdict_args(
+        program: &[SockFilter],
+        arch: u32,
+        syscall: u32,
+        args: [u32; 2],
+    ) -> u32 {
         let (mut pc, mut acc) = (0usize, 0u32);
         loop {
             let ins = program[pc];
@@ -545,10 +594,12 @@ mod group_lock {
                 LD_W_ABS => {
                     acc = match ins.k {
                         OFFSET_ARCH => arch,
-                        OFFSET_ARG0 => arg0,
+                        OFFSET_ARG0 => args[0],
+                        OFFSET_ARG1 => args[1],
                         _ => syscall,
                     }
                 }
+                AND_K => acc &= ins.k,
                 JEQ_K | JSET_K => {
                     let hit = if ins.code == JEQ_K {
                         acc == ins.k
@@ -667,12 +718,16 @@ mod tests {
             Sockets::None,
         ] {
             let denied = group_lock::denied(sockets);
-            let program = group_lock::program(&denied, group_lock::socket_domains(sockets));
+            let program = group_lock::program(
+                &denied,
+                group_lock::socket_domains(sockets),
+                group_lock::pair_types(sockets),
+            );
             for &syscall in &denied {
                 assert_eq!(group_lock::verdict(&program, arch, syscall), eperm);
             }
             let socket = group_lock::verdict(&program, arch, nr::SOCKET as u32);
-            let pair = group_lock::verdict(&program, arch, group_lock::SOCKETPAIR);
+            let pair = group_lock::verdict_args(&program, arch, group_lock::SOCKETPAIR, [1, 1]); // AF_UNIX, SOCK_STREAM
             let expected = match sockets {
                 // `socket` with domain 0 is not an internet family: refused under InternetOnly.
                 Sockets::InternetOnly => (eperm, allow),
@@ -704,6 +759,7 @@ mod tests {
         let program = group_lock::program(
             &group_lock::denied(sockets),
             group_lock::socket_domains(sockets),
+            group_lock::pair_types(sockets),
         );
         let socket =
             |domain: u32| group_lock::verdict_with_arg(&program, arch, nr::SOCKET as u32, domain);
@@ -722,7 +778,7 @@ mod tests {
             allow
         );
         assert_eq!(
-            group_lock::verdict_with_arg(&program, arch, group_lock::SOCKETPAIR, 1),
+            group_lock::verdict_args(&program, arch, group_lock::SOCKETPAIR, [1, 1]),
             allow
         );
         // The group lock and io_uring refusals still apply.
@@ -731,9 +787,69 @@ mod tests {
             eperm
         );
         // Modes without a domain filter are unchanged: NoInternet allows any socket family here.
-        let plain = group_lock::program(&group_lock::denied(Sockets::NoInternet), None);
+        let plain = group_lock::program(&group_lock::denied(Sockets::NoInternet), None, None);
         assert_eq!(
             group_lock::verdict_with_arg(&plain, arch, nr::SOCKET as u32, 1),
+            allow
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn endpoint_free_modes_allow_only_connection_oriented_socketpairs() {
+        let (arch, allow, eperm, _) = group_lock::VERDICTS;
+        const AF_UNIX: u32 = 1;
+        const SOCK_NONBLOCK: u32 = 0x800;
+        const SOCK_CLOEXEC: u32 = 0x8_0000;
+        let (stream, dgram, raw, seqpacket) = (1, 2, 3, 5);
+        for sockets in [Sockets::NoEndpoints, Sockets::InternetOnly] {
+            let program = group_lock::program(
+                &group_lock::denied(sockets),
+                group_lock::socket_domains(sockets),
+                group_lock::pair_types(sockets),
+            );
+            let pair = |kind: u32| {
+                group_lock::verdict_args(&program, arch, group_lock::SOCKETPAIR, [AF_UNIX, kind])
+            };
+            assert_eq!(
+                (pair(stream), pair(seqpacket)),
+                (allow, allow),
+                "{sockets:?}"
+            );
+            // The flags ride in the type argument and must not change the verdict.
+            assert_eq!(
+                pair(stream | SOCK_CLOEXEC | SOCK_NONBLOCK),
+                allow,
+                "{sockets:?}"
+            );
+            assert_eq!(pair(seqpacket | SOCK_CLOEXEC), allow, "{sockets:?}");
+            // A datagram pair's descriptor can be re-pointed at any reachable datagram endpoint.
+            for bad in [dgram, raw, 0, 4, 10] {
+                assert_eq!(pair(bad), eperm, "{sockets:?} type {bad}");
+            }
+            assert_eq!(
+                pair(dgram | SOCK_CLOEXEC | SOCK_NONBLOCK),
+                eperm,
+                "{sockets:?} dgram with flags"
+            );
+        }
+        // NoEndpoints still refuses socket(2) entirely, with or without the pair block in front of it.
+        let program = group_lock::program(
+            &group_lock::denied(Sockets::NoEndpoints),
+            None,
+            group_lock::pair_types(Sockets::NoEndpoints),
+        );
+        let socket =
+            group_lock::verdict_args(&program, arch, rusty_libc::arch::nr::SOCKET as u32, [2, 1]);
+        assert_eq!(socket, eperm);
+        // Modes that allow arbitrary sockets are not narrowed.
+        let open = group_lock::program(
+            &group_lock::denied(Sockets::NoInternet),
+            None,
+            group_lock::pair_types(Sockets::NoInternet),
+        );
+        assert_eq!(
+            group_lock::verdict_args(&open, arch, group_lock::SOCKETPAIR, [AF_UNIX, dgram]),
             allow
         );
     }
