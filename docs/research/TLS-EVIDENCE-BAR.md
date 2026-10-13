@@ -1,6 +1,6 @@
 # TLS native engine: evidence bar proposal (owner to approve)
 
-Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `nc-dos` is an unresolved pre-wiring blocker (`anyExtendedKeyUsage` aligned 2026-10-12). Follows
+Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` aligned 2026-10-12 and the `nc-dos` cases bounded 2026-10-13; no known divergence from webpki is left open. Follows
 `TLS-ENGINE-ASSESSMENT.md` section 6, which this narrows and updates. The engine's default,
 both gates and every consumer are unchanged. The bar, replacing `ring`, and superseding
 ADR-0002 are the owner's decisions.
@@ -106,16 +106,20 @@ that fails without the fix:
 | Malformed `subjectAltName` entry skipped under a name constraint | `nc-permits-invalid-dns-san`, `nc-permits-invalid-ip-san` | `NameError::MalformedSubjectAltName` |
 
 **After the fixes: 0 limbo cases where this validator accepts something webpki refuses and limbo says to
-refuse, except two.** The two are `pathological::nc-dos-1` and `-2`: a root with 2,048 name
-constraints and a leaf with 2,048 names. Limbo calls them technically valid and "typically
-rejected by implementations due to quadratic blowup". This validator accepts them; webpki
-refuses. **Owner decision needed.** Fixture measurement only: the two cases together took 0.65 s
-in a debug test build, including parsing and webpki's refusal; their certificates are about 77 KB
-of DER. That is two data points, not a bound. This validator has no name-comparison budget, and
-path search can repeat the comparison across candidate paths, so I cannot say what the worst
-handshake costs. Accepting them needs an explicit resource bound (for example a comparison
-budget in `check_name_constraints`, which I can add) or broader adversarial evidence; I do not
-recommend accepting them on the timing above.
+refuse, except two, which are now fixed too (2026-10-13, owner chose "budget").** The two are
+`pathological::nc-dos-1` and `-2`: a root with 2,048 name constraints and a leaf with 2,048 names,
+over four million name-against-subtree comparisons. Limbo calls them technically valid and "typically
+rejected by implementations due to quadratic blowup"; webpki refuses them; this validator used to
+accept after doing all the work (4 s with the cap removed, in a debug build). Now
+`check_name_constraints_body` computes names times subtrees up front and refuses with
+`NameError::TooManyNameComparisons` above `MAX_NAME_COMPARISONS` (100,000), before any comparison.
+The cap is per call, one call per constraining CA per candidate path. Worst case, then: at most the
+signature-check budget of candidate paths (default 100) times the path depth plus one (default 9)
+times the cap, about 9 x 10^7 cheap comparisons, and only for a peer that builds that many validly
+signed candidate paths. That is a bound, not a measurement; it is not a claim about wall-clock time.
+`name_constraints_over_the_comparison_budget_are_refused` pins ordinary sizes and a chain just under
+the cap (accepted), a chain just over it and the limbo shape (refused); raising the cap makes it
+fail. The limbo golden lost the two `looser` lines and nothing else moved.
 
 **A second looser-than-webpki behavior, not covered by limbo, fixed 2026-10-12 (owner decision):**
 a certificate or CA whose `extendedKeyUsage` is `anyExtendedKeyUsage` alone was accepted for server

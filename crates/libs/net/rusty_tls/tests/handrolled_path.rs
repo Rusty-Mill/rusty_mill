@@ -1428,3 +1428,71 @@ fn a_malformed_san_entry_under_a_name_constraint_is_refused() {
         }
     }
 }
+
+/// Name-constraint checking costs names times subtrees, and the peer chooses
+/// both, so the cost is capped (`MAX_NAME_COMPARISONS`) and a chain over the cap
+/// is refused rather than ground through. Found by x509-limbo
+/// (`pathological::nc-dos-1` and `-2`: 2,048 constraints against 2,048 names, over
+/// four million comparisons): webpki refuses them and this validator used to
+/// accept after doing all the work. The cases straddle the cap: ordinary sizes
+/// and a chain just under it still validate.
+#[test]
+fn name_constraints_over_the_comparison_budget_are_refused() {
+    use rcgen::{GeneralSubtree, NameConstraints};
+    use rusty_tls::handrolled::name::{NameError, ServerName, MAX_NAME_COMPARISONS};
+    use rusty_tls::handrolled::path::verify_peer_certificate;
+
+    let side = (MAX_NAME_COMPARISONS as f64).sqrt() as usize;
+    for (label, subtrees, names, accepted) in [
+        ("ordinary", 10, 10, true),
+        ("just under the cap", side - 1, side - 1, true),
+        ("just over the cap", side + 1, side + 1, false),
+        ("the limbo nc-dos shape", 2048, 2048, false),
+    ] {
+        let root_key = KeyPair::generate().expect("key");
+        let mut root_params = CertificateParams::new(vec![]).expect("params");
+        root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root_params
+            .distinguished_name
+            .push(DnType::CommonName, "Budget Root");
+        root_params.name_constraints = Some(NameConstraints {
+            permitted_subtrees: vec![],
+            excluded_subtrees: (0..subtrees)
+                .map(|i| GeneralSubtree::DnsName(format!("bad{i}.test")))
+                .collect(),
+        });
+        let root = root_params.self_signed(&root_key).expect("root");
+
+        let leaf_key = KeyPair::generate().expect("key");
+        let leaf = CertificateParams::new(
+            (0..names)
+                .map(|i| format!("host{i}.example.com"))
+                .collect::<Vec<_>>(),
+        )
+        .expect("params")
+        .signed_by(&leaf_key, &root, &root_key)
+        .expect("leaf");
+
+        let root_der = root.der().to_vec();
+        let leaf_der = leaf.der().to_vec();
+        let root_cert = Certificate::parse(&root_der).expect("root parses");
+        let leaf_cert = Certificate::parse(&leaf_der).expect("leaf parses");
+        let anchors = [TrustAnchor::from_certificate(&root_cert)];
+        let result = verify_peer_certificate(
+            &leaf_cert,
+            &[],
+            &anchors,
+            &ServerName::Dns("host0.example.com"),
+            &options(),
+        );
+        if accepted {
+            result.unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        } else {
+            assert_eq!(
+                result,
+                Err(PathError::Name(NameError::TooManyNameComparisons)),
+                "{label}"
+            );
+        }
+    }
+}
