@@ -26,7 +26,10 @@ listens like RLBot does and prints (and with `--record` saves) what a live game 
 `--analyze FILE` summarises a recording and `--commands FILE` prints what was sent to the game
 (`rb_rl_bridge --record-in` / `--record-out` make those files); `--census-in FILE` /
 `--census-out FILE` tally the message and command tags in such recordings and flag any outside
-the known unions (`Census`).
+the known unions (`Census`). `rb_rl_demo_count FILE` reads a `--record-in` recording and lists, per
+map, every player spawn, every destroy of a player actor and every stretch a car was reported
+Demolished, so a demolition can be told from a destroy-and-respawn; it prints actor ids and teams,
+never display names. `rusty_bullet/tools/rl_live_test` drives a whole live run with it.
 
 Checked against committed buffers made with the DLL's generated codec. The author reports a
 live Epic Freeplay run on 2026-10-11, totaling 14,993 and 2,524 inbound messages and a bot reaching
@@ -121,3 +124,9 @@ args to `Documents\My Games\Rocket League\TAGame\Logs\Launch.log`, read the path
 with `-rlbot RLBot_ControllerURL=127.0.0.1:<port> RLBot_PacketSendRate=240 -nomovie` followed by those
 login args (credentials: never print or log them). Then start a match (Freeplay is enough) and
 `rb_rl_bridge` spawns and drives the bots.
+
+Close the game as soon as a **new** `Init: Command line:` line appears, as RLBot's
+`Epic.Windows.cs` does, not after it reaches the menu: a game that has logged in seems to have
+spent the single-use login code, and the relaunch then sits at "click to start" (seen twice; see
+[`RL-LIVE-TEST-2026-10-12.md`](../../rusty_bullet/docs/research/RL-LIVE-TEST-2026-10-12.md)).
+`rusty_bullet/tools/rl_live_test` does the whole sequence.
