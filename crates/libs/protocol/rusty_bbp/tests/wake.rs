@@ -314,6 +314,36 @@ fn a_role_that_could_not_act_is_not_woken() {
     assert!(!got.contains(&"passer".to_string()), "{got:?}");
 }
 
+#[test]
+fn a_verdict_poster_needs_authority_for_the_current_stage() {
+    let verdicter = |id: &str, order, stages: &[Stage]| {
+        Role::new(id, order)
+            .post(&[MessageKind::Verdict])
+            .verdict_at(stages)
+    };
+    let mut roles = four_roles();
+    roles.push(verdicter("judge", 8, &[Stage::Test]));
+    roles.push(verdicter("wrong", 9, &[Stage::Review]));
+    roles.push(verdicter("none", 10, &[]));
+    let mut fx = Fx::with_roles(roles);
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let mut st = idle(&fx);
+    let mut d = Draft::new(Ask, "to all");
+    d.to = vec![Recipient::All];
+    st.messages.push(Message {
+        id: MsgId(900),
+        from: PrincipalId("human".into()),
+        from_role: None,
+        draft: d,
+    });
+    st.msg_rev.push(Rev(u64::MAX));
+    let got: Vec<String> = wake_set(&st).into_iter().map(|(r, _)| r.0).collect();
+    assert!(got.contains(&"judge".to_string()), "{got:?}");
+    assert!(!got.contains(&"wrong".to_string()), "{got:?}");
+    assert!(!got.contains(&"none".to_string()), "{got:?}");
+}
+
 // ---------------------------------------------------------------- artifact
 
 #[test]
