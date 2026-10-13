@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-KINDS = {"prompts": "prompt", "skills": "skill", "mods": "mod"}
+FLAT = {"prompts": "prompt", "claude-md": "claude-md", "agents-md": "agents-md"}
 
 
 def parse(text: str) -> tuple[dict[str, object], str]:
@@ -52,8 +52,9 @@ def load_mod(d: Path) -> dict[str, object]:
 
 def collect() -> list[dict[str, object]]:
     items = []
-    for p in sorted((ROOT / "prompts").glob("*.md")):
-        items.append(entry("prompt", p, *parse(p.read_text())))
+    for folder, kind in FLAT.items():
+        for p in sorted((ROOT / folder).glob("*.md")):
+            items.append(entry(kind, p, *parse(p.read_text())))
     for p in sorted((ROOT / "skills").glob("*/SKILL.md")):
         items.append(entry("skill", p, *parse(p.read_text())))
     for d in sorted((ROOT / "mods").glob("*/")):

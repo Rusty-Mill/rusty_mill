@@ -36,11 +36,14 @@ pre{background:var(--card);border:1px solid var(--line);border-radius:8px;paddin
 <script>
 const ITEMS = __DATA__;
 const $ = id => document.getElementById(id);
+const FILENAME = {mod: i => `${i.name}.txt`, "claude-md": () => "CLAUDE.md", "agents-md": () => "AGENTS.md"};
 const state = {q: "", kind: "all", tag: null};
 const INSTALL = {
   prompt: "Paste into a session, or save as a file and reference it.",
   skill: p => `Save as ~/.claude/skills/<name>/SKILL.md (source: ${p}).`,
   mod: p => `Try it: claude --plugin-dir ${p}`,
+  "claude-md": "Paste into your project's CLAUDE.md (or ~/.claude/CLAUDE.md).",
+  "agents-md": "Paste into your project's AGENTS.md - read by Codex, Cursor, Copilot and other agents.",
 };
 const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
 
@@ -64,7 +67,7 @@ function chips(box, values, active, onPick) {
 function render() {
   const items = visible();
   $("count").textContent = `${items.length}/${ITEMS.length}`;
-  chips($("kinds"), ["all", "prompt", "skill", "mod"], state.kind, v => { state.kind = v; render(); });
+  chips($("kinds"), ["all", "prompt", "skill", "mod", "claude-md", "agents-md"], state.kind, v => { state.kind = v; render(); });
   chips($("tags"), [...new Set(ITEMS.flatMap(i => i.tags))].sort(), state.tag, v => { state.tag = state.tag === v ? null : v; render(); });
   $("grid").replaceChildren(...items.map(i => {
     const c = el("button", {className: "card"},
@@ -89,7 +92,7 @@ function show(i) {
     setTimeout(() => $("copy").textContent = "Copy", 1200);
   };
   $("dl").onclick = () => {
-    const a = el("a", {href: URL.createObjectURL(new Blob([i.body])), download: `${i.name}${i.kind === "mod" ? ".txt" : ".md"}`});
+    const a = el("a", {href: URL.createObjectURL(new Blob([i.body])), download: FILENAME[i.kind]?.(i) ?? `${i.name}.md`});
     a.click(); URL.revokeObjectURL(a.href);
   };
   $("detail").hidden = false;

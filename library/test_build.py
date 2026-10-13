@@ -20,7 +20,7 @@ class ParseTests(unittest.TestCase):
 
     def test_all_seeded_entries_load(self) -> None:
         kinds = {i["kind"] for i in build.collect()}
-        self.assertEqual(kinds, {"prompt", "skill", "mod"})
+        self.assertEqual(kinds, {"prompt", "skill", "mod", "claude-md", "agents-md"})
 
 
 if __name__ == "__main__":

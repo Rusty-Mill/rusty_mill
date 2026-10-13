@@ -7,6 +7,8 @@ Prompts, skills, and mods as plain files, browsable in one offline page.
 | prompt | `prompts/<name>.md` | frontmatter: `name`, `description`, `tags: [a, b]` |
 | skill | `skills/<name>/SKILL.md` | same frontmatter; drop-in for `~/.claude/skills/` |
 | mod | `mods/<name>/` | Claude Code plugin; tags come from `keywords` in `plugin.json` |
+| claude-md | `claude-md/<name>.md` | a CLAUDE.md section; same frontmatter |
+| agents-md | `agents-md/<name>.md` | an AGENTS.md section or template; same frontmatter |
 
 ```
 python3 build.py              # -> dist/index.html (open directly, no server)
