@@ -43,6 +43,11 @@ the card types, and the layer check allows it). It is a client of the board's HT
 - The runner is only as safe as its sandbox and its prompt source: a card body becomes a prompt, and
   cards can be imported from GitHub issues. Triage into Ready is the human check; the sandbox bounds the
   damage if it is wrong. Secrets passed with `--env` are visible to the command.
+- **Residual: a stage with `network: true` can still reach TCP services on loopback and the local network.**
+  `InternetOnly` closes Unix and abstract sockets, not IP ones, and nothing here brokers or filters egress. Do not
+  run such a stage on a host with an unauthenticated service on `127.0.0.1` (a database, a metrics or admin port,
+  an IDE server) or anything it must not reach; put an egress proxy in front, or run the runner where nothing
+  sensitive listens. Stages without `network` can reach nothing.
 - Not done: killing a command as soon as a person moves its card (only noticed at the end, bounded by
   `wall_secs`); worktree cleanup after merge; per-role credentials, so the runner's role is still a
   claimed name; a pull-request step.

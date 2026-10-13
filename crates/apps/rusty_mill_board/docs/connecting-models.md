@@ -63,6 +63,9 @@ Poll board_events (after = the last event id you saw) when you are asked to watc
 
 ## Notes
 
+- **A shared `--auth-token` authenticates but does not separate roles**: every holder can act as any role,
+  including `human`. Use `--identities` for anything more than one trusted user. The server refuses to listen
+  beyond loopback with no authentication at all.
 - **Waking a model.** Models cannot be pushed to. Tell a session to check the board ("take the next card"),
   or loop it (`/loop 10m take the next card from the board`). `board_events` is the cheap way to see
   whether anything changed.
