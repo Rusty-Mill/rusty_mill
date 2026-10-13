@@ -162,6 +162,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (inbound, outbound) = open_recordings(&args)?;
     let listener = GameListener::bind(args.game_port)?;
     let bots = bind_bots(args.port)?;
+    // Listening is announced here, before the game is found: the game is silent until a map
+    // loads, and what starts the bots (the live-test runner) must not wait on that.
+    println!("serving bots on {}", bots.local_addr()?);
     println!(
         "waiting for the game on 127.0.0.1:{}; start it with: {}",
         args.game_port,
@@ -191,7 +194,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Pacing is ignored for a game: it decides when a packet exists.
     let mut core = Core::from_listener(bots, backend, Pacing::RealTime)?;
     let end = core.run(&AtomicBool::new(false), |event| match event {
-        Event::Listening(addr) => println!("serving bots on {addr}"),
+        // Already announced above, when the port was taken.
+        Event::Listening(_) => {}
         event => println!("{event:?}"),
     })?;
     println!("rb_rl_bridge finished: {end:?}");
