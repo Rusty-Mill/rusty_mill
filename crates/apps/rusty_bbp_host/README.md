@@ -19,7 +19,7 @@ An MCP client configuration for Claude Code, one per role, looks like:
 
 ```text
 bbp mcp                                   serve one turn over stdio
-bbp open    --dir D --task T --repo R --brief FILE [--human ID] [--profiles FILE]
+bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE]
 bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 bbp card    --dir D --task T
 bbp tick    --dir D --task T              fire deadlines and grant the first turn; `bbp mod` does this itself
@@ -65,11 +65,13 @@ Every harness runs in its own process group and is killed, group and all, when i
 
 The harness is trusted with the directory. It runs as the moderator's user, so a harness with shell or file tools can read `<dir>/master` or call `bbp human`; `bbp mcp` is the fence for the model's tool calls, not for the harness process. Run a harness you do not trust under its own sandbox or user, with the task directory unreadable to it except through the MCP server.
 
-`--agents FILE` names one launcher per role:
+`--roster FILE` (on `bbp open`) is a JSON array of roles: id, `turn_order` and the capability fields of the spec's Role table. The roles are the orchestrator's to define; the host passes them on and the core validates and records them. `docs/proving/roster.json` is the four-role example of spec Appendix C.1. An invalid roster is refused with `BadRoster` and no task exists; a roster cannot change afterwards.
+
+`--agents FILE` names one launcher per role id, keyed by the ids of the task's roster. Launch policy for a role lives here, not in the host code: `builtin_tools` says whether that role's harness keeps its shell and file tools (default `false`). The proving config gives it to the `coder` only:
 
 ```json
 {"planner": {"program": "claude", "args": ["-p", "You are the planner. Use the bbp tools.", "--mcp-config", "{mcp_config}"]},
- "coder":   {"program": "claude", "args": ["-p", "You are the coder.",   "--mcp-config", "{mcp_config}"]},
+ "coder":   {"program": "claude", "args": ["-p", "You are the coder.",   "--mcp-config", "{mcp_config}"], "builtin_tools": true},
  "tester":  {"program": "claude", "args": ["-p", "You are the tester.",  "--mcp-config", "{mcp_config}"]},
  "reviewer":{"program": "claude", "args": ["-p", "You are the reviewer.","--mcp-config", "{mcp_config}"]}}
 ```

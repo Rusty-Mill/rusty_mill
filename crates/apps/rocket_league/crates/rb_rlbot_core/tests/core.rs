@@ -11,9 +11,10 @@ use std::time::Duration;
 use rb_rlbot_client::Connection;
 use rb_rlbot_core::{Core, Event, Pacing, RunEnd, Simulation};
 use rb_rlbot_wire::{
-    ConnectionSettings, ControllerState, CoreMessage, CustomBot, GamePacket, InitComplete,
-    InterfaceMessage, MatchConfiguration, MatchPhase, PlayerClass, PlayerConfiguration,
-    PlayerInput, StopCommand,
+    ConnectionSettings, ControllerState, CoreMessage, CustomBot, DesiredBallState,
+    DesiredGameState, DesiredPhysics, GamePacket, InitComplete, InterfaceMessage,
+    MatchConfiguration, MatchLengthMutator, MatchPhase, MutatorSettings, PartialVec3, PlayerClass,
+    PlayerConfiguration, PlayerInput, StopCommand,
 };
 
 fn bot(agent_id: &str, team: u32, player_id: i32) -> PlayerConfiguration {
@@ -818,4 +819,187 @@ fn a_hold_is_reported_even_when_the_backend_polls_no_packets() {
         })
         .unwrap();
     assert!(matches!(core.join().unwrap(), RunEnd::StopCommand { .. }));
+}
+
+#[test]
+fn a_bot_that_connects_before_the_core_runs_waits_and_is_served() {
+    // The port is held first, as a caller does while its game is still starting.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bot_thread = thread::spawn(move || play(addr, "early", 0, 3));
+    // The bot is connected (and its handshake waiting) before any core exists.
+    thread::sleep(Duration::from_millis(300));
+    let core = thread::spawn(move || {
+        let sim = Simulation::new(MatchConfiguration {
+            player_configurations: vec![bot("early", 0, 100)],
+            ..MatchConfiguration::default()
+        })
+        .unwrap();
+        let mut core = Core::from_listener(
+            listener,
+            sim,
+            Pacing::Lockstep {
+                input_timeout: Duration::from_secs(10),
+            },
+        )
+        .unwrap();
+        core.run(&AtomicBool::new(false), |_| {}).unwrap()
+    });
+    assert_eq!(bot_thread.join().unwrap().len(), 3);
+    assert_eq!(
+        core.join().unwrap(),
+        RunEnd::StopCommand {
+            shutdown_server: true
+        }
+    );
+}
+
+/// A stepped backend whose match is over after `steps` ticks.
+struct Short {
+    sim: Simulation,
+    steps: u32,
+}
+
+impl rb_rlbot_core::MatchBackend for Short {
+    fn configuration(&self) -> &MatchConfiguration {
+        self.sim.configuration()
+    }
+    fn field_info(&self) -> rb_rlbot_wire::FieldInfo {
+        self.sim.field_info()
+    }
+    fn finished(&self) -> bool {
+        self.steps == 0
+    }
+    fn step(&mut self) -> std::io::Result<()> {
+        self.steps = self.steps.saturating_sub(1);
+        self.sim.step();
+        Ok(())
+    }
+    fn set_input(&mut self, i: u32, s: &ControllerState) -> std::io::Result<bool> {
+        Ok(self.sim.set_input(i, s))
+    }
+    fn apply_desired(&mut self, d: &rb_rlbot_wire::DesiredGameState) -> std::io::Result<bool> {
+        self.sim.apply_desired(d)
+    }
+    fn packet(&self) -> GamePacket {
+        self.sim.packet()
+    }
+}
+
+/// A backend that says its match is over ends the run, after the last packet and before the
+/// clients are told to disconnect; one that never says so (the default) runs until stopped.
+#[test]
+fn a_finished_match_ends_the_run_after_its_last_packet() {
+    let (tx, rx) = mpsc::channel();
+    let core = thread::spawn(move || {
+        let sim = Simulation::new(MatchConfiguration {
+            player_configurations: vec![bot("solo", 0, 100)],
+            ..MatchConfiguration::default()
+        })
+        .unwrap();
+        let mut core = Core::bind(
+            "127.0.0.1:0",
+            Short { sim, steps: 25 },
+            Pacing::Lockstep {
+                input_timeout: Duration::from_secs(10),
+            },
+        )
+        .unwrap();
+        tx.send(core.local_addr().unwrap()).unwrap();
+        core.run(&AtomicBool::new(false), |_| {}).unwrap()
+    });
+    let mut bot_side = Connection::connect(rx.recv().unwrap()).unwrap();
+    bot_side.handshake(settings("solo")).unwrap();
+    bot_side.send(InitComplete).unwrap();
+    let mut packets = 0;
+    loop {
+        match bot_side.recv().unwrap() {
+            CoreMessage::GamePacket(_) => {
+                packets += 1;
+                assert!(packets < 200, "the run never ended");
+                bot_side
+                    .send(PlayerInput {
+                        player_index: 0,
+                        controller_state: ControllerState::default(),
+                    })
+                    .unwrap();
+            }
+            CoreMessage::DisconnectSignal => break,
+            _ => {}
+        }
+    }
+    assert_eq!(core.join().unwrap(), RunEnd::MatchOver);
+    // The opening packet and one per tick; none is lost to the end.
+    assert_eq!(packets, 26);
+}
+
+/// The same with a real `Simulation` playing a whole five-minute match to its `Ended` phase.
+#[test]
+#[ignore = "plays a whole five-minute match, about 20 s in a debug build"]
+fn a_timed_match_that_has_ended_ends_the_run_after_its_last_packet() {
+    let (tx, rx) = mpsc::channel();
+    let core = thread::spawn(move || {
+        // One idle human car and no bots to wait for; the one goal below decides a
+        // five-minute match.
+        let sim = Simulation::new(MatchConfiguration {
+            player_configurations: vec![PlayerConfiguration {
+                variety: PlayerClass::Human,
+                team: 0,
+                player_id: 42,
+            }],
+            enable_state_setting: true,
+            mutators: Some(MutatorSettings {
+                match_length: MatchLengthMutator::FiveMinutes,
+            }),
+            ..MatchConfiguration::default()
+        })
+        .unwrap();
+        let mut core = Core::bind(
+            "127.0.0.1:0",
+            sim,
+            Pacing::Lockstep {
+                input_timeout: Duration::from_secs(10),
+            },
+        )
+        .unwrap();
+        tx.send(core.local_addr().unwrap()).unwrap();
+        core.run(&AtomicBool::new(false), |_| {}).unwrap()
+    });
+    let mut watcher = Connection::connect(rx.recv().unwrap()).unwrap();
+    watcher.send(settings("")).unwrap();
+    let (mut scored, mut last, mut packets) = (false, None, 0u32);
+    loop {
+        match watcher.recv().unwrap() {
+            CoreMessage::GamePacket(p) => {
+                packets += 1;
+                assert!(packets < 80_000, "the match never ended");
+                if !scored && p.match_info.match_phase == MatchPhase::Active {
+                    scored = true;
+                    // Into the goal at y = +5120, so the leader at full time is decided.
+                    watcher
+                        .send(DesiredGameState {
+                            ball_states: vec![DesiredBallState {
+                                physics: DesiredPhysics {
+                                    location: Some(PartialVec3 {
+                                        x: Some(0.0),
+                                        y: Some(5300.0),
+                                        z: Some(100.0),
+                                    }),
+                                    ..DesiredPhysics::default()
+                                },
+                            }],
+                            ..DesiredGameState::default()
+                        })
+                        .unwrap();
+                }
+                last = Some(p);
+            }
+            CoreMessage::DisconnectSignal => break,
+            _ => {}
+        }
+    }
+    assert_eq!(core.join().unwrap(), RunEnd::MatchOver);
+    let last = last.expect("no packet before the disconnect");
+    assert_eq!(last.match_info.match_phase, MatchPhase::Ended);
+    assert!(scored);
 }

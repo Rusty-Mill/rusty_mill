@@ -28,6 +28,9 @@ pub fn read_frame<R: Read>(reader: &mut R, payload: &mut Vec<u8>) -> io::Result<
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
     pending: Vec<u8>,
+    /// Start of the unread bytes in `pending`; the consumed prefix is dropped on the next
+    /// `push`, so draining n frames from one buffer costs O(n), not O(n²).
+    read: usize,
 }
 
 impl FrameDecoder {
@@ -37,7 +40,7 @@ impl FrameDecoder {
 
     /// Verifies that EOF falls on a frame boundary. Call after draining complete frames.
     pub fn finish(&self) -> io::Result<()> {
-        if self.pending.is_empty() {
+        if self.read == self.pending.len() {
             Ok(())
         } else {
             Err(io::Error::new(
@@ -49,21 +52,17 @@ impl FrameDecoder {
 
     /// Adds bytes just read from the stream.
     pub fn push(&mut self, bytes: &[u8]) {
+        self.pending.drain(..self.read);
+        self.read = 0;
         self.pending.extend_from_slice(bytes);
     }
 
     /// The next complete payload, if the bytes pushed so far hold one.
     pub fn next_frame(&mut self) -> Option<Vec<u8>> {
-        let len = usize::from(u16::from_be_bytes([
-            *self.pending.first()?,
-            *self.pending.get(1)?,
-        ]));
-        if self.pending.len() < 2 + len {
-            return None;
-        }
-        let rest = self.pending.split_off(2 + len);
-        let mut frame = std::mem::replace(&mut self.pending, rest);
-        frame.drain(..2);
+        let unread = &self.pending[self.read..];
+        let len = usize::from(u16::from_be_bytes([*unread.first()?, *unread.get(1)?]));
+        let frame = unread.get(2..2 + len)?.to_vec();
+        self.read += 2 + len;
         Some(frame)
     }
 }
@@ -113,5 +112,25 @@ mod tests {
             assert_eq!(got, [vec![1, 2, 3], vec![], vec![7; 300]], "chunk {chunk}");
         }
         assert_eq!(FrameDecoder::new().next_frame(), None);
+    }
+
+    #[test]
+    fn many_frames_pushed_at_once_drain_in_order_and_finish_sees_a_clean_end() {
+        let stream: Vec<u8> = (0..20_000u16)
+            .flat_map(|i| frame(&i.to_be_bytes()).unwrap())
+            .collect();
+        let mut d = FrameDecoder::new();
+        d.push(&stream);
+        for i in 0..20_000u16 {
+            assert_eq!(d.next_frame(), Some(i.to_be_bytes().to_vec()));
+        }
+        assert_eq!(d.next_frame(), None);
+        d.finish().unwrap();
+        // A half frame after drained ones is still a truncation, and a later push completes it.
+        d.push(&[0, 2, 9]);
+        assert_eq!(d.finish().unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        d.push(&[8]);
+        assert_eq!(d.next_frame(), Some(vec![9, 8]));
+        d.finish().unwrap();
     }
 }

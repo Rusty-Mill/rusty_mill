@@ -295,7 +295,7 @@ impl Simulation {
 
     /// Applies a client's state-setting message: the fields it names change, the rest stay.
     /// Only the first ball and the cars it lists by index are touched. Match info (gravity,
-    /// game speed) cannot be changed in `rb_env` and is ignored. Rejects nonfinite requests atomically with `InvalidInput`. Returns whether the message
+    /// game speed) cannot be changed in `rb_env` and is ignored. Rejects nonfinite or out-of-range requests atomically with `InvalidInput`. Returns whether the message
     /// named a car that does not exist (the rest of it was still applied).
     pub fn apply_desired(&mut self, desired: &DesiredGameState) -> std::io::Result<bool> {
         crate::validation::validate_desired(desired)?;
@@ -424,6 +424,13 @@ impl Simulation {
                 },
             ],
         }
+    }
+
+    /// Whether the match has ended: a timed match past its clock with a leader, or a
+    /// golden goal scored.
+    pub fn is_over(&self) -> bool {
+        self.match_state()
+            .is_some_and(|s| wire_phase(s) == MatchPhase::Ended)
     }
 
     /// Where the match is (match flow is always on for a `Simulation`).

@@ -95,7 +95,7 @@ impl InterfaceMessage {
     }
 
     /// Decodes a payload (what a stand-in core receives). Members this crate does not model
-    /// are [`Error::UnknownUnion`].
+    /// are [`InterfaceMessage::Other`]; only a tag outside the union is [`Error::UnknownUnion`].
     pub fn from_payload(payload: &[u8]) -> R<InterfaceMessage> {
         let (tag, t) = open(payload)?;
         Ok(match tag {

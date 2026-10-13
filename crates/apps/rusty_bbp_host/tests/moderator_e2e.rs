@@ -8,6 +8,8 @@
 //! Unix only, like the runner tests: the harnesses are `/bin/sh`.
 #![cfg(unix)]
 
+mod common;
+use common::Who;
 use rusty_bbp::*;
 use rusty_bbp_host::moderator::{self, Config, Launcher, Launchers};
 use rusty_bbp_host::profiles::ProfileSet;
@@ -76,6 +78,7 @@ fn harness(dir: &Path, name: &str, lines: &[&str]) -> Launcher {
     Launcher {
         program: path.to_string_lossy().into_owned(),
         args: vec!["{role}".into(), "{turn}".into()],
+        builtin_tools: false,
     }
 }
 
@@ -95,30 +98,31 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
         b"Make the flag say ok.",
         &PrincipalId("human".into()),
         &ProfileSet::shell("test", "sh ./test.sh"),
+        common::roster(),
     )
     .expect("open");
-    for role in Role::ALL {
+    for role in Who::ALL {
         admin::assign(
             &dir,
             &task,
-            role,
-            &PrincipalId(admin::role_name(role).into()),
+            &role.id(),
+            &PrincipalId(role.name().into()),
             "v",
         )
         .expect("assign");
     }
     // Artifact ids are sequential: brief 1, spec 2, diff 3, candidate 4, log 5, report 6.
     let diff = r"--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n";
-    let launchers = Launchers {
-        planner: Some(harness(
+    let launchers = Launchers::default()
+        .with("planner", harness(
             &dir,
             "planner",
             &[
                 r##"{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1 flag says ok."}}"##,
                 r#"{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve the plan?","gate":true}}"#,
             ],
-        )),
-        coder: Some(harness(
+        ))
+        .with("coder", harness(
             &dir,
             "coder",
             &[
@@ -129,22 +133,21 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
                     r#"{{"name":"put_artifact","arguments":{{"op":"c2","kind":"candidate","base":"{base}","diffs":[3],"body":""}}}}"#
                 ),
             ],
-        )),
-        tester: Some(harness(
+        ))
+        .with("tester", harness(
             &dir,
             "tester",
             &[
                 r#"{"name":"post","arguments":{"op":"t1","kind":"verdict","to":["*"],"refs":["art:4"],"evidence":["art:6"],"verdict":{"subject":4,"run":1,"verdict":"approve","blocking":[],"non_blocking":[]}}}"#,
             ],
-        )),
-        reviewer: Some(harness(
+        ))
+        .with("reviewer", harness(
             &dir,
             "reviewer",
             &[
                 r#"{"name":"post","arguments":{"op":"r1","kind":"verdict","to":["*"],"refs":["art:4"],"evidence":["art:6"],"verdict":{"subject":4,"run":1,"verdict":"approve","blocking":[],"non_blocking":[]}}}"#,
             ],
-        )),
-    };
+        ));
     let cfg = Config {
         dir: dir.clone(),
         task: task.clone(),
@@ -275,27 +278,24 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
         b"brief",
         &PrincipalId("human".into()),
         &ProfileSet::shell("test", "true"),
+        common::roster(),
     )
     .expect("open");
-    for role in Role::ALL {
+    for role in Who::ALL {
         admin::assign(
             &dir,
             &task,
-            role,
-            &PrincipalId(admin::role_name(role).into()),
+            &role.id(),
+            &PrincipalId(role.name().into()),
             "v",
         )
         .expect("assign");
     }
     // The planner only reads the card and quits.
-    let launchers = Launchers {
-        planner: Some(harness(
-            &dir,
-            "planner",
-            &[r#"{"name":"task_card","arguments":{}}"#],
-        )),
-        ..Launchers::default()
-    };
+    let launchers = Launchers::default().with(
+        "planner",
+        harness(&dir, "planner", &[r#"{"name":"task_card","arguments":{}}"#]),
+    );
     let cfg = Config {
         dir: dir.clone(),
         task: task.clone(),
@@ -333,10 +333,10 @@ fn launchers_file_may_omit_roles() {
     .expect("write");
     let l = Launchers::read_file(&file).expect("parse");
     assert_eq!(
-        l.for_role(Role::Planner).map(|x| x.program.as_str()),
+        l.for_role(&Who::Planner.id()).map(|x| x.program.as_str()),
         Some("sh")
     );
-    assert!(l.for_role(Role::Coder).is_none());
+    assert!(l.for_role(&Who::Coder.id()).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -349,17 +349,12 @@ fn open_assigned(dir: &Path, task: &TaskId, set: &ProfileSet) {
         b"brief",
         &PrincipalId("human".into()),
         set,
+        common::roster(),
     )
     .expect("open");
-    for role in Role::ALL {
-        admin::assign(
-            dir,
-            task,
-            role,
-            &PrincipalId(admin::role_name(role).into()),
-            "v",
-        )
-        .expect("assign");
+    for role in Who::ALL {
+        admin::assign(dir, task, &role.id(), &PrincipalId(role.name().into()), "v")
+            .expect("assign");
     }
 }
 
@@ -450,16 +445,14 @@ fn a_restarted_moderator_fences_the_invocation_it_cannot_see() {
     let mut old = Mcp::spawn(&dir, &task, "planner", 1);
     let (_, err) = old.call("task_card", "{}");
     assert!(!err);
-    let launchers = Launchers {
-        planner: Some(harness(
+    let launchers = Launchers::default()
+        .with("planner", harness(
             &dir,
             "planner",
             &[
                 r#"{"name":"post","arguments":{"op":"new-1","kind":"ask","to":["coder"],"body":"from the replacement turn"}}"#,
             ],
-        )),
-        ..Launchers::default()
-    };
+        ));
     let out = moderator::run(&config(&dir, &task, repo, launchers, 3));
     assert!(out.is_err(), "stops at its wall limit: {out:?}");
     let st = open_driver(&dir, &task).expect("driver").state;
@@ -544,8 +537,9 @@ fn the_harness_process_tree_dies_with_the_moderator() {
     let task = TaskId("T1".into());
     open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
     let hb = dir.join("heartbeat");
-    let launchers = Launchers {
-        planner: Some(Launcher {
+    let launchers = Launchers::default().with(
+        "planner",
+        Launcher {
             program: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
@@ -553,9 +547,9 @@ fn the_harness_process_tree_dies_with_the_moderator() {
                 "sh".into(),
                 "{dir}/heartbeat".into(),
             ],
-        }),
-        ..Launchers::default()
-    };
+            builtin_tools: false,
+        },
+    );
     let out = moderator::run(&config(&dir, &task, repo, launchers, 2));
     assert!(out.is_err(), "{out:?}");
     assert!(hb.exists(), "the heartbeat writer ran");
@@ -576,16 +570,16 @@ fn cancellation_is_honoured_while_a_profile_runs() {
     let task = TaskId("T1".into());
     open_assigned(&dir, &task, &ProfileSet::shell("slow", "sleep 30"));
     let diff = r"--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n";
-    let launchers = Launchers {
-        planner: Some(harness(
+    let launchers = Launchers::default()
+        .with("planner", harness(
             &dir,
             "planner",
             &[
                 r##"{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec"}}"##,
                 r#"{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}"#,
             ],
-        )),
-        coder: Some(harness(
+        ))
+        .with("coder", harness(
             &dir,
             "coder",
             &[
@@ -596,9 +590,7 @@ fn cancellation_is_honoured_while_a_profile_runs() {
                     r#"{{"name":"put_artifact","arguments":{{"op":"c2","kind":"candidate","base":"{base}","diffs":[3],"body":""}}}}"#
                 ),
             ],
-        )),
-        ..Launchers::default()
-    };
+        ));
     let cfg = config(&dir, &task, repo, launchers, 60);
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -631,5 +623,63 @@ fn cancellation_is_honoured_while_a_profile_runs() {
         waited < Duration::from_secs(10),
         "the loop noticed in {waited:?}, not after the 30s profile"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn launchers_are_keyed_by_any_role_id() {
+    let l = Launchers::default().with(
+        "scribe",
+        Launcher {
+            program: "true".into(),
+            args: vec![],
+            builtin_tools: true,
+        },
+    );
+    assert!(l
+        .for_role(&RoleId::from("scribe"))
+        .is_some_and(|x| x.builtin_tools));
+    assert!(l.for_role(&Who::Planner.id()).is_none());
+    assert_eq!(l.roles().collect::<Vec<_>>(), ["scribe"]);
+}
+
+#[test]
+fn a_roster_without_a_finalizer_is_refused_at_open() {
+    let dir = tempdir("badroster");
+    let mut roster = common::roster();
+    for r in &mut roster {
+        r.final_decision = false;
+    }
+    let r = admin::open_task(
+        &dir,
+        &TaskId("T1".into()),
+        "local",
+        b"brief",
+        &PrincipalId("human".into()),
+        &ProfileSet::shell("test", "true"),
+        roster,
+    )
+    .expect("dispatch");
+    match r {
+        Response::Rejected(rej) => {
+            assert_eq!(rej.code, Code::BadRoster);
+            assert!(rej.detail.contains("no finalizer"), "{}", rej.detail);
+        }
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+    // A refused open writes nothing, so the corrected roster opens the same task.
+    let logs = std::fs::read_dir(dir.join("tasks")).map_or(0, Iterator::count);
+    assert_eq!(logs, 0, "no log was written");
+    let r = admin::open_task(
+        &dir,
+        &TaskId("T1".into()),
+        "local",
+        b"brief",
+        &PrincipalId("human".into()),
+        &ProfileSet::shell("test", "true"),
+        common::roster(),
+    )
+    .expect("dispatch");
+    assert!(matches!(r, Response::Stored(_)), "{r:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

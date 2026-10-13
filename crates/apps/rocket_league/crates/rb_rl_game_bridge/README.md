@@ -13,7 +13,7 @@ crate rebuilds what the open code reveals of the second, with citations, in
 | `GameListener` | `TcpMessenger.WaitForConnectionAsync` (the game dials out to RLBot) |
 | `TickTracker`, `should_distribute`, `Roster` | `BridgeHandler.cs:90-110, 229-267` |
 | `BridgeLoop` | `BridgeHandler.HandleServer` |
-| `GameLink`, `GameCommand` | the five `TcpMessenger` methods RLBotCS calls, and `Input.cs` / `RunConsoleCommand.cs` |
+| `GameLink`, `GameCommand` | the `TcpMessenger` send methods RLBotCS calls, and `Input.cs` / `RunConsoleCommand.cs` |
 | `SimGameLink` | a game that is `rb_env` (via `rb_rlbot_core::Simulation`) |
 
 ## The real game
@@ -52,7 +52,8 @@ without blocking, applies the distribution rules, and sends bot input and state 
 (ball and car placement, boost). `rb_rl_bridge` puts it together:
 
 ```
-rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] [--match-length 5|10|20|unlimited] AGENT_ID:TEAM...
+rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] [--match-length 5|10|20|unlimited]
+             [--no-spawn] [--record-in FILE] [--record-out FILE] AGENT_ID:TEAM...
 ```
 
 Declare the attached match's duration with `--match-length` (default 5 minutes; use `unlimited`
@@ -75,6 +76,9 @@ its state setting becomes a ball placement.
 - **Start `rb_rl_bridge` before the game.** The game dials it once, at launch, and spawning waits
   for the map announcement that follows. A bridge that joins a game already in a match never sees
   that announcement, so it spawns nothing and the match never starts for it.
+- **The bots' port is taken at startup**, before the game is launched: a clash fails at once
+  naming the port, and a bot that starts while the game is still loading connects and waits for
+  its handshake instead of being refused. (How long a given bot waits is the bot's own timeout.)
 - **A spawn the game never answers is not retried** and has no timeout; the match then never
   starts. (Resending could create two cars.)
 - **A socket that takes part of a frame** (a stalled game on a non-blocking connection) is
@@ -113,8 +117,8 @@ its state setting becomes a ball placement.
 ## Verified
 
 `cargo test -p rb_rl_game_bridge`: unit tests, the loop and listener, the golden codec, the real
-link (fold, commands, byte budget, spawning), a stand-in game end to end, and 11 tests on recordings
-of a real game. Run live on 2026-10-11 (above).
+link (fold, commands, byte budget, spawning), a stand-in game end to end, the census, the state-fault
+robustness checks, and tests on recordings of a real game. Run live on 2026-10-11 (above).
 
 ## Starting the game in RLBot mode (Epic, Windows)
 

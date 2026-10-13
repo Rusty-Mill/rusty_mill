@@ -19,7 +19,7 @@ fn tr_01_candidate_cannot_be_replaced_at_merge_gate() {
     let a = fx.reach_merge_gate();
     let diff = ArtId(2);
     let r = fx.put(
-        Role::Coder,
+        Who::Coder,
         ArtifactPayload::Candidate(Candidate {
             base: "b".repeat(40),
             diffs: vec![diff],
@@ -70,17 +70,17 @@ fn tr_03_plan_approval_binds_to_requested_spec() {
 fn tr_04_previous_turn_token_rejected_after_regrant() {
     let mut fx = Fx::new();
     fx.reach_build();
-    let old = fx.tok(Role::Coder);
-    posted(fx.post(Role::Coder, pass()));
-    assert_eq!(fx.turn_role(), Some(Role::Coder));
-    assert_ne!(fx.tok(Role::Coder), old);
+    let old = fx.tok(Who::Coder);
+    posted(fx.post(Who::Coder, pass()));
+    assert_eq!(fx.turn_role(), Some(Who::Coder));
+    assert_ne!(fx.tok(Who::Coder), old);
     let op = fx.op();
     assert_eq!(
         rejected(fx.agent_with(
-            Role::Coder,
+            Who::Coder,
             Some(old),
             op,
-            AgentAction::Post(ask(Role::Tester, "?"))
+            AgentAction::Post(ask(Who::Tester, "?"))
         )),
         Code::StaleTurn
     );
@@ -93,7 +93,7 @@ fn tr_05_tester_turn_waits_for_report() {
     assert_eq!(fx.turn_role(), None);
     assert!(fx.st().selected_run().is_some());
     stored(fx.report(RunStatus::Passed));
-    assert_eq!(fx.turn_role(), Some(Role::Tester));
+    assert_eq!(fx.turn_role(), Some(Who::Tester));
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn tr_06_manifest_references_kind_checked() {
     let spec = fx.reach_build();
     assert_eq!(
         rejected(fx.put(
-            Role::Coder,
+            Who::Coder,
             ArtifactPayload::Candidate(Candidate {
                 base: "a".repeat(40),
                 diffs: vec![spec]
@@ -132,7 +132,7 @@ fn tr_07_zombie_run_report_rejected_after_rerun() {
         Code::StaleRun
     );
     stored(fx.report(RunStatus::Passed));
-    assert_eq!(fx.turn_role(), Some(Role::Tester));
+    assert_eq!(fx.turn_role(), Some(Who::Tester));
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn tr_08_replanning_deselects_candidate() {
     assert_eq!(fx.st().state, State::Planning);
     assert_eq!(fx.st().approved_spec, None);
     assert_eq!(fx.st().candidate, None);
-    assert_eq!(fx.turn_role(), Some(Role::Planner));
+    assert_eq!(fx.turn_role(), Some(Who::Planner));
     // Old candidate cannot be judged or approved: the Tester holds no turn and there is no current candidate.
     let (run_before, _) = (RunId(1), ());
     let mut d = Draft::new(MessageKind::Verdict, "");
@@ -163,7 +163,7 @@ fn tr_08_replanning_deselects_candidate() {
     d.refs = vec![Ref::art(c)];
     d.evidence = vec![Ref::art(c)];
     assert!(matches!(
-        rejected(fx.post(Role::Tester, d)),
+        rejected(fx.post(Who::Tester, d)),
         Code::StaleTurn | Code::WrongState | Code::RoleForbidden
     ));
 }
@@ -172,37 +172,34 @@ fn tr_08_replanning_deselects_candidate() {
 fn tr_09_yield_and_return() {
     let mut fx = Fx::new();
     fx.reach_build();
-    let before = fx.tok(Role::Coder);
-    let q = posted(fx.post(
-        Role::Coder,
-        ask(Role::Tester, "Is AC2 testable as written?"),
-    ));
-    posted(fx.post(Role::Coder, yield_to(Role::Tester)));
-    assert_eq!(fx.turn_role(), Some(Role::Tester));
+    let before = fx.tok(Who::Coder);
+    let q = posted(fx.post(Who::Coder, ask(Who::Tester, "Is AC2 testable as written?")));
+    posted(fx.post(Who::Coder, yield_to(Who::Tester)));
+    assert_eq!(fx.turn_role(), Some(Who::Tester));
     let brief = fx.st().brief.expect("brief");
     posted(fx.post(
-        Role::Tester,
+        Who::Tester,
         Draft::new(MessageKind::Answer, "Yes.").reply_to(q),
     ));
     // Consultation turns may not propose.
     assert_eq!(
         rejected(fx.post(
-            Role::Tester,
+            Who::Tester,
             Draft::new(MessageKind::Propose, "x").refs(vec![Ref::art(brief)])
         )),
         Code::RoleForbidden
     );
-    posted(fx.post(Role::Tester, pass()));
-    assert_eq!(fx.turn_role(), Some(Role::Coder));
-    assert_ne!(fx.tok(Role::Coder), before, "fresh token on return");
+    posted(fx.post(Who::Tester, pass()));
+    assert_eq!(fx.turn_role(), Some(Who::Coder));
+    assert_ne!(fx.tok(Who::Coder), before, "fresh token on return");
 }
 
 #[test]
 fn tr_10_replay_after_turn_ended_returns_original() {
     let mut fx = Fx::new();
     fx.reach_build();
-    let diff = stored(fx.put(Role::Coder, ArtifactPayload::Diff, b"d"));
-    let tok = fx.tok(Role::Coder);
+    let diff = stored(fx.put(Who::Coder, ArtifactPayload::Diff, b"d"));
+    let tok = fx.tok(Who::Coder);
     let op = fx.op();
     let payload = ArtifactPayload::Candidate(Candidate {
         base: "a".repeat(40),
@@ -212,11 +209,11 @@ fn tr_10_replay_after_turn_ended_returns_original() {
         fx.d.store
             .blob_put(&encode_artifact(&payload, b"").expect("encode"));
     let action = AgentAction::PutArtifact { blob, payload };
-    let first = fx.agent_with(Role::Coder, Some(tok), op.clone(), action.clone());
+    let first = fx.agent_with(Who::Coder, Some(tok), op.clone(), action.clone());
     assert!(matches!(first, Response::Stored(_)));
     assert_eq!(fx.st().state, State::Test);
     let rev = fx.rev();
-    let again = fx.agent_with(Role::Coder, Some(tok), op, action);
+    let again = fx.agent_with(Who::Coder, Some(tok), op, action);
     assert_eq!(first, again);
     assert_eq!(fx.rev(), rev);
 }
@@ -249,7 +246,7 @@ fn tr_11_resume_to_review_requires_tester_approve() {
         target: State::Test,
         expected_rev: rev,
     }));
-    assert_eq!(fx.turn_role(), Some(Role::Tester));
+    assert_eq!(fx.turn_role(), Some(Who::Tester));
 }
 
 #[test]
@@ -257,7 +254,7 @@ fn tr_12_read_budgets() {
     let mut fx = Fx::new();
     for _ in 0..30 {
         fx.agent(
-            Role::Planner,
+            Who::Planner,
             AgentAction::Read {
                 after: None,
                 limit: 20,
@@ -266,7 +263,7 @@ fn tr_12_read_budgets() {
     }
     assert_eq!(
         rejected(fx.agent(
-            Role::Planner,
+            Who::Planner,
             AgentAction::Read {
                 after: None,
                 limit: 20
@@ -301,7 +298,7 @@ fn tr_14_yield_to_non_consultable_role() {
     let mut fx = Fx::new();
     fx.reach_build();
     assert_eq!(
-        rejected(fx.post(Role::Coder, yield_to(Role::Reviewer))),
+        rejected(fx.post(Who::Coder, yield_to(Who::Reviewer))),
         Code::WrongState
     );
 }
@@ -351,9 +348,9 @@ fn tr_16_budget_escalates_once() {
         field: BudgetField::Messages,
         limit: 1,
     }));
-    posted(fx.post(Role::Planner, ask(Role::Coder, "one")));
+    posted(fx.post(Who::Planner, ask(Who::Coder, "one")));
     assert_eq!(fx.st().state, State::Planning);
-    posted(fx.post(Role::Planner, ask(Role::Coder, "two")));
+    posted(fx.post(Who::Planner, ask(Who::Coder, "two")));
     assert_eq!(
         fx.st().state,
         State::Escalated,
@@ -375,7 +372,7 @@ fn tr_17_pending_request_blocks_default_turn_after_rebuild() {
     let brief = fx.st().brief.expect("brief");
     posted(
         fx.post(
-            Role::Coder,
+            Who::Coder,
             Draft::new(MessageKind::RequestDecision, "Which retry policy?")
                 .to(Recipient::Human)
                 .refs(vec![Ref::art(brief)]),
@@ -396,7 +393,7 @@ fn tr_18_human_answer_settles_request_and_regrants() {
     let brief = fx.st().brief.expect("brief");
     let req = posted(
         fx.post(
-            Role::Coder,
+            Who::Coder,
             Draft::new(MessageKind::RequestDecision, "Which retry policy?")
                 .to(Recipient::Human)
                 .refs(vec![Ref::art(brief)]),
@@ -406,21 +403,21 @@ fn tr_18_human_answer_settles_request_and_regrants() {
         Draft::new(MessageKind::Answer, "Exponential, 5 tries.").reply_to(req),
     )));
     assert!(fx.st().pending_request.is_none());
-    assert_eq!(fx.turn_role(), Some(Role::Coder));
+    assert_eq!(fx.turn_role(), Some(Who::Coder));
 }
 
 #[test]
 fn tr_19_late_command_processed_as_if_tick_preceded() {
     let mut fx = Fx::new();
-    let tok = fx.tok(Role::Planner);
+    let tok = fx.tok(Who::Planner);
     fx.advance(60_000);
     let op = fx.op();
     assert_eq!(
         rejected(fx.agent_with(
-            Role::Planner,
+            Who::Planner,
             Some(tok),
             op,
-            AgentAction::Post(ask(Role::Coder, "?"))
+            AgentAction::Post(ask(Who::Coder, "?"))
         )),
         Code::StaleTurn
     );
@@ -436,7 +433,7 @@ fn tr_19_late_command_processed_as_if_tick_preceded() {
     );
     assert_eq!(
         fx.turn_role(),
-        Some(Role::Planner),
+        Some(Who::Planner),
         "regranted by the deadline, before the command"
     );
 }
@@ -446,7 +443,7 @@ fn tr_20_agent_decision_forbidden() {
     let mut fx = Fx::new();
     let brief = fx.st().brief.expect("brief");
     let p = posted(fx.post(
-        Role::Planner,
+        Who::Planner,
         Draft::new(MessageKind::Propose, "x").refs(vec![Ref::art(brief)]),
     ));
     let mut d = Draft::new(MessageKind::Decision, "");
@@ -456,7 +453,7 @@ fn tr_20_agent_decision_forbidden() {
         note: String::new(),
     });
     d.refs = vec![Ref::Msg(p)];
-    assert_eq!(rejected(fx.post(Role::Planner, d)), Code::DecisionForbidden);
+    assert_eq!(rejected(fx.post(Who::Planner, d)), Code::DecisionForbidden);
 }
 
 #[test]
@@ -464,11 +461,11 @@ fn tr_21_reviewer_sees_only_human_messages_to_it() {
     let mut fx = Fx::new();
     fx.reach_review();
     posted(fx.human(HumanAction::Post(ask(
-        Role::Reviewer,
+        Who::Reviewer,
         "Focus on the retry path.",
     ))));
     match fx.agent(
-        Role::Reviewer,
+        Who::Reviewer,
         AgentAction::Read {
             after: None,
             limit: 20,
@@ -501,7 +498,7 @@ fn tr_22_coder_cannot_write_report() {
         log: ArtId(1),
     };
     assert_eq!(
-        rejected(fx.put(Role::Coder, ArtifactPayload::TestReport(rep), b"r")),
+        rejected(fx.put(Who::Coder, ArtifactPayload::TestReport(rep), b"r")),
         Code::KindForbidden
     );
 }
@@ -550,7 +547,7 @@ fn tr_25_fragment_cap() {
     };
     assert_eq!(
         rejected(fx.post(
-            Role::Planner,
+            Who::Planner,
             Draft::new(MessageKind::Propose, "p").refs(vec![r])
         )),
         Code::FragmentTooLong
@@ -561,9 +558,9 @@ fn tr_25_fragment_cap() {
 fn tr_26_yield_does_not_nest() {
     let mut fx = Fx::new();
     fx.reach_build();
-    posted(fx.post(Role::Coder, yield_to(Role::Tester)));
+    posted(fx.post(Who::Coder, yield_to(Who::Tester)));
     assert_eq!(
-        rejected(fx.post(Role::Tester, yield_to(Role::Planner))),
+        rejected(fx.post(Who::Tester, yield_to(Who::Planner))),
         Code::YieldNested
     );
 }
@@ -573,7 +570,7 @@ fn tr_27_spec_must_reference_brief() {
     let mut fx = Fx::new();
     assert_eq!(
         rejected(fx.put(
-            Role::Planner,
+            Who::Planner,
             ArtifactPayload::Spec { brief: ArtId(42) },
             b"s"
         )),
@@ -589,12 +586,9 @@ fn tr_28_resume_to_approved_after_extension() {
         field: BudgetField::Messages,
         limit: 0,
     }));
-    posted(fx.human(HumanAction::Post(ask(
-        Role::Coder,
-        "Anything else to note?",
-    ))));
+    posted(fx.human(HumanAction::Post(ask(Who::Coder, "Anything else to note?"))));
     posted(fx.post(
-        Role::Coder,
+        Who::Coder,
         Draft::new(MessageKind::Answer, "No.").reply_to(MsgId(fx.st().messages.len() as u64)),
     ));
     assert_eq!(fx.st().state, State::Escalated);
@@ -638,7 +632,7 @@ fn tr_29_store_conflict_reloads_and_recomputes() {
             }],
         )
         .expect("append");
-    let r = fx.post(Role::Planner, ask(Role::Coder, "?"));
+    let r = fx.post(Who::Planner, ask(Who::Coder, "?"));
     assert!(matches!(r, Response::Posted(_)));
     assert_eq!(
         fx.st().budget.bytes,
@@ -652,7 +646,7 @@ fn tr_30_new_candidate_stales_verdicts() {
     let mut fx = Fx::new();
     fx.reach_test();
     stored(fx.report(RunStatus::Passed));
-    posted(fx.verdict(Role::Tester, VerdictKind::Revise));
+    posted(fx.verdict(Who::Tester, VerdictKind::Revise));
     assert_eq!(fx.st().state, State::Build);
     assert_eq!(fx.st().verdicts.len(), 1);
     fx.candidate();
@@ -667,7 +661,7 @@ fn tr_31_revise_then_replan_leaves_no_orphan_verdict() {
     let mut fx = Fx::new();
     fx.reach_test();
     stored(fx.report(RunStatus::Passed));
-    posted(fx.verdict(Role::Tester, VerdictKind::Revise));
+    posted(fx.verdict(Who::Tester, VerdictKind::Revise));
     assert_eq!(fx.st().state, State::Build);
     let rev = fx.rev();
     ok(fx.human(HumanAction::Reject {

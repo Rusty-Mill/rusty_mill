@@ -6,7 +6,8 @@ The Blackboard Protocol's specification and the review rounds that shaped it, mo
 
 | File | What |
 | --- | --- |
-| [`spec/bbp-v0.4-implementation-spec.md`](spec/bbp-v0.4-implementation-spec.md) | The spec the crate implements (v0.4.1 errata applied). |
+| [`spec/bbp-v0.5-implementation-spec.md`](spec/bbp-v0.5-implementation-spec.md) | The spec to implement: roles as data, roster injection, capability checks. |
+| [`spec/bbp-v0.4-implementation-spec.md`](spec/bbp-v0.4-implementation-spec.md) | v0.4.1, superseded by v0.5. The crate implements it until the v0.5 engine lands. |
 | `spec/bbp-v0.3-draft-design.md`, `v0.2`, `v0.1`, `v0` | Earlier drafts, kept for the review history. |
 
 ## Review

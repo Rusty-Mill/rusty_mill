@@ -21,7 +21,7 @@ use crate::runner::{self, Confinement, Unconfined};
 use crate::{now, open_driver};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Proc, Stdio};
@@ -36,34 +36,41 @@ use std::time::{Duration, Instant};
 pub struct Launcher {
     pub program: String,
     pub args: Vec<String>,
+    /// Whether this role's harness keeps its built-in tools (shell, file
+    /// access). Host policy for the role, declared here with the rest of its
+    /// launch configuration; the protocol has no opinion.
+    #[rusty_serde(default)]
+    pub builtin_tools: bool,
 }
 
-/// One launcher per role; a role without one is left to its deadline.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// One launcher per role id, keyed by the ids of the task's roster. A role
+/// without one is left to its deadline.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Launchers {
-    #[rusty_serde(default)]
-    pub planner: Option<Launcher>,
-    #[rusty_serde(default)]
-    pub coder: Option<Launcher>,
-    #[rusty_serde(default)]
-    pub tester: Option<Launcher>,
-    #[rusty_serde(default)]
-    pub reviewer: Option<Launcher>,
+    by_role: BTreeMap<String, Launcher>,
 }
 
 impl Launchers {
+    /// Read an agents file: a JSON object from role id to [`Launcher`].
     pub fn read_file(file: &Path) -> Result<Launchers, String> {
         let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
-        rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))
+        let by_role =
+            rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+        Ok(Launchers { by_role })
     }
 
-    pub fn for_role(&self, role: Role) -> Option<&Launcher> {
-        match role {
-            Role::Planner => self.planner.as_ref(),
-            Role::Coder => self.coder.as_ref(),
-            Role::Tester => self.tester.as_ref(),
-            Role::Reviewer => self.reviewer.as_ref(),
-        }
+    pub fn with(mut self, role: &str, launcher: Launcher) -> Launchers {
+        self.by_role.insert(role.to_owned(), launcher);
+        self
+    }
+
+    pub fn for_role(&self, role: &RoleId) -> Option<&Launcher> {
+        self.by_role.get(&role.0)
+    }
+
+    /// The role ids that have a launcher.
+    pub fn roles(&self) -> impl Iterator<Item = &str> {
+        self.by_role.keys().map(String::as_str)
     }
 }
 
@@ -293,7 +300,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             sup.runner = Some(std::thread::spawn(move || run_once(&cfg)));
         }
 
-        let live = d.state.turn.as_ref().map(|t| (t.id, t.role));
+        let live = d.state.turn.as_ref().map(|t| (t.id, t.role.clone()));
 
         // Reap: a harness that exited without ending its turn forfeits it;
         // one whose turn ended under it is killed.
@@ -303,13 +310,13 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
                     eprintln!("bbp mod: harness for turn {} exited: {status}", h.turn.0);
                     let turn = h.turn;
                     sup.kill_harness()?;
-                    if live.map(|(id, _)| id) == Some(turn) {
+                    if live.as_ref().map(|(id, _)| *id) == Some(turn) {
                         d.dispatch(&Command::AbortTurn, now())
                             .map_err(|e| format!("{e:?}"))?;
                         continue;
                     }
                 }
-                Ok(None) if live.map(|(id, _)| id) != Some(h.turn) => {
+                Ok(None) if live.as_ref().map(|(id, _)| *id) != Some(h.turn) => {
                     eprintln!("bbp mod: turn {} ended; stopping its harness", h.turn.0);
                     sup.kill_harness()?;
                 }
@@ -323,20 +330,20 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             if let Some((turn, role)) = live {
                 if !launched.contains(&turn) {
                     launched.insert(turn);
-                    match cfg.launchers.for_role(role) {
+                    match cfg.launchers.for_role(&role) {
                         Some(l) => {
                             let principal = d
                                 .state
                                 .assigned
                                 .get(&role)
                                 .cloned()
-                                .ok_or_else(|| format!("{role:?} has no principal"))?;
-                            let child = spawn(cfg, l, role, &principal, turn)?;
+                                .ok_or_else(|| format!("{role} has no principal"))?;
+                            let child = spawn(cfg, l, &role, &principal, turn)?;
                             sup.harness = Some(Harness { turn, child });
                             continue;
                         }
                         None => eprintln!(
-                            "bbp mod: no launcher for {role:?}; turn {} waits for its deadline",
+                            "bbp mod: no launcher for {role}; turn {} waits for its deadline",
                             turn.0
                         ),
                     }
@@ -374,13 +381,13 @@ fn run_once(cfg: &Config) -> Result<Response, String> {
 fn spawn(
     cfg: &Config,
     l: &Launcher,
-    role: Role,
+    role: &RoleId,
     principal: &PrincipalId,
     turn: TurnId,
 ) -> Result<Child, String> {
     let bbp = &cfg.bbp;
     let mcp = write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, turn)?;
-    let role_name = crate::admin::role_name(role);
+    let role_name = role.0.as_str();
     let fill = |a: &str| {
         a.replace("{dir}", &cfg.dir.to_string_lossy())
             .replace("{task}", &cfg.task.0)
@@ -429,26 +436,38 @@ mod tests {
     #[test]
     fn proving_run_configs_match_the_schemas() -> Result<(), String> {
         let agents = Launchers::read_file(&proving("agents.json"))?;
-        for role in [Role::Planner, Role::Coder, Role::Tester, Role::Reviewer] {
+        let roster = crate::admin::read_roster(&proving("roster.json"))?;
+        let roles: Vec<&str> = agents.roles().collect();
+        assert_eq!(roles.len(), roster.len(), "one launcher per rostered role");
+        for r in &roster {
             let l = agents
-                .for_role(role)
-                .ok_or_else(|| format!("{role:?} has no launcher"))?;
+                .for_role(&r.id)
+                .ok_or_else(|| format!("{} has no launcher", r.id))?;
             let joined = l.args.join(" ");
             assert!(
                 joined.contains("{mcp_config}"),
-                "{role:?} gets the MCP config"
+                "{} gets the MCP config",
+                r.id
             );
             assert!(
                 joined.contains("--output-format stream-json --verbose"),
-                "{role:?} logs every tool call"
+                "{} logs every tool call",
+                r.id
             );
+            // The launcher's own declaration decides, not the role's name.
             let mcp_only = l.args.windows(2).any(|w| w == ["--tools", ""]);
             assert_eq!(
-                mcp_only,
-                role != Role::Coder,
-                "{role:?}: only the Coder keeps built-in tools"
+                mcp_only, !l.builtin_tools,
+                "{}: builtin_tools must agree with the launch arguments",
+                r.id
             );
         }
+        assert!(
+            agents
+                .roles()
+                .any(|id| agents.for_role(&id.into()).is_some_and(|l| l.builtin_tools)),
+            "the proving run declares one role with built-in tools"
+        );
         let set = crate::profiles::read_file(&proving("profiles.json"))?;
         assert_eq!(set.profiles.len(), 1);
         assert!(

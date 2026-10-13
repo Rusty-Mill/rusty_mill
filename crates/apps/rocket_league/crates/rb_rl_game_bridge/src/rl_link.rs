@@ -26,6 +26,8 @@ use crate::tick::Clump;
 
 /// Physics frames per second; the game's `delta_physics_frames` counts these.
 const PHYSICS_HZ: f32 = 120.0;
+/// Goals kept per map.
+const MAX_GOALS: usize = 16;
 
 /// The most bytes RLBot sends the game between two messages from it (`TcpMessenger.Send`).
 pub const SEND_BUDGET: usize = 65_535;
@@ -178,7 +180,10 @@ impl GameFolder {
     pub fn apply(&mut self, bundle: &GameBundle) -> bool {
         let mut map_loaded = false;
         let delta = f32::from(bundle.delta_physics_frames) / PHYSICS_HZ;
-        self.frame_num += u32::from(bundle.delta_physics_frames);
+        // The wire's frame counter is a `u32`; it wraps after about 414 days at 120 Hz.
+        self.frame_num = self
+            .frame_num
+            .wrapping_add(u32::from(bundle.delta_physics_frames));
         let before_scoreboard = self.scoreboard_seconds;
         for event in &bundle.events {
             map_loaded |= self.event(event);
@@ -332,13 +337,18 @@ impl GameFolder {
                 width,
                 height,
                 ..
-            } => self.goals.push(GoalInfo {
-                team_num: i32::from(*team),
-                location: *center,
-                direction: *direction,
-                width: *width,
-                height: *height,
-            }),
+            } => {
+                // A map has two; the cap only stops a game that never stops announcing them.
+                if self.goals.len() < MAX_GOALS {
+                    self.goals.push(GoalInfo {
+                        team_num: i32::from(*team),
+                        location: *center,
+                        direction: *direction,
+                        width: *width,
+                        height: *height,
+                    });
+                }
+            }
             GameEvent::Other(_) => {}
         }
         false
@@ -447,7 +457,8 @@ impl GameFolder {
                 .map(|(_, physics)| BallInfo { physics: *physics })
                 .collect(),
             match_info: MatchInfo {
-                seconds_elapsed: self.frame_num as f32 / PHYSICS_HZ,
+                // Divided in f64 so the only rounding is the final one to the wire's f32.
+                seconds_elapsed: (f64::from(self.frame_num) / f64::from(PHYSICS_HZ)) as f32,
                 game_time_remaining: self.time_remaining,
                 is_overtime: self.overtime,
                 is_unlimited_time: self.unlimited,
@@ -718,4 +729,74 @@ impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
 /// A controller state as the game takes it; exposed for callers that build [`Command`]s.
 pub fn vehicle_input(state: &ControllerState) -> VehicleInput {
     VehicleInput::from_controller(state)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn bundle(delta: u8, events: Vec<GameEvent>) -> GameBundle {
+        GameBundle {
+            app_seconds: 0.0,
+            delta_physics_frames: delta,
+            events,
+        }
+    }
+
+    #[test]
+    fn the_frame_counter_wraps_instead_of_overflowing() {
+        let mut folder = GameFolder::new();
+        folder.frame_num = u32::MAX - 2;
+        folder.apply(&bundle(5, vec![]));
+        assert_eq!(folder.packet().match_info.frame_num, 2);
+        folder.apply(&bundle(1, vec![]));
+        assert_eq!(folder.packet().match_info.frame_num, 3);
+    }
+
+    #[test]
+    fn seconds_are_the_nearest_f32_to_frames_over_120_even_late_in_a_long_run() {
+        let mut folder = GameFolder::new();
+        // 40 hours in, a frame count an f32 cannot hold exactly (above 2^24).
+        folder.frame_num = 17_280_001;
+        let seconds = folder.packet().match_info.seconds_elapsed;
+        assert_eq!(seconds, (17_280_001_f64 / 120.0) as f32);
+        // The old f32 division is a different number.
+        assert_ne!(seconds, 17_280_001_f32 / 120.0);
+    }
+
+    #[test]
+    fn a_game_that_keeps_announcing_goals_does_not_grow_the_list_without_bound() {
+        let mut folder = GameFolder::new();
+        let goal = |id| GameEvent::GoalSpawn {
+            id,
+            team: (id % 2) as u8,
+            center: Vec3 {
+                x: 0.0,
+                y: 5120.0,
+                z: 321.0,
+            },
+            direction: Vec3 {
+                x: 0.0,
+                y: -1.0,
+                z: 0.0,
+            },
+            width: 1786.0,
+            height: 642.0,
+        };
+        let events = (0..1000).map(goal).collect();
+        folder.apply(&bundle(1, events));
+        assert_eq!(folder.field_info().goals.len(), MAX_GOALS);
+        // A new map starts the list afresh.
+        folder.apply(&bundle(
+            1,
+            vec![GameEvent::GameSpawn {
+                map_name: "next".into(),
+                mode: 1,
+                team_size: 1,
+                gravity: None,
+            }],
+        ));
+        assert!(folder.field_info().goals.is_empty());
+    }
 }

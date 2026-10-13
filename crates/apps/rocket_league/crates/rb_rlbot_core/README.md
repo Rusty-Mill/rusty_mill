@@ -24,7 +24,10 @@ RLBOT_SERVER_PORT=23234 RLBOT_AGENT_ID=rusty_bullet/chaser_bot target/release/rb
 ```
 
 The match starts when every named bot has connected and sent `InitComplete`; a stop command from
-a client ends the run. Core prints each `Event` (joins, readiness, rejected input, dropped
+a client ends the run, and so does the simulated match reaching its end (a timed match past its
+clock with a leader, or a golden goal): the last packet, in the `Ended` phase, is sent, then the
+bots are told to disconnect. A real game never ends the run this way; only closing its connection
+does. Core prints each `Event` (joins, readiness, rejected input, dropped
 clients) because it logs nothing itself.
 
 ## Behaviour
@@ -62,12 +65,12 @@ Anything a client asks for beyond this is ignored, never a crash.
 
 ## Verified
 
-`cargo test -p rb_rlbot_core`: 8 simulation tests; 6 socket tests that drive the core with the real
+`cargo test -p rb_rlbot_core`: simulation tests, and socket tests that drive the core with the real
 `rb_rlbot_client` over loopback, including two full runs compared packet for packet. The built
 `rb_chaser_bot` process joined the built `rb_rlbot_core` process and the match started (hand run,
 2026-10-11). Not verified: against RLBot's own Python or C# clients, or the RLBot GUI.
 
-State setting returns `InvalidInput` for any nonfinite requested value before mutating the
+State setting returns `InvalidInput` for any nonfinite or out-of-range requested value before mutating the
 match. Core reports the rejected request and continues serving the client. Packets retain
 configured slots during demolition (a zero demolished timeout means the remaining duration
 is unknown); controls and state setting retain the original physical identity. Boost timers

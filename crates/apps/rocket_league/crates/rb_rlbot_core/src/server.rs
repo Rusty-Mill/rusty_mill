@@ -103,6 +103,9 @@ pub enum RunEnd {
     Interrupted,
     /// The game behind a self-paced backend closed its connection.
     GameClosed,
+    /// The match reached its end (see [`MatchBackend::finished`]); the last packet, in the
+    /// `Ended` phase, was sent before the clients were told to disconnect.
+    MatchOver,
 }
 
 /// What came of reading one client: a stop command it sent, and why to drop it, if to.
@@ -190,7 +193,14 @@ impl<B: MatchBackend> Core<B> {
     /// Listens on `addr` (port 0 picks a free one; see [`Core::local_addr`]). `pacing` applies
     /// to a backend that is stepped by core; a self-paced one (a real game) sets its own.
     pub fn bind(addr: impl ToSocketAddrs, backend: B, pacing: Pacing) -> io::Result<Core<B>> {
-        let listener = TcpListener::bind(addr)?;
+        Core::from_listener(TcpListener::bind(addr)?, backend, pacing)
+    }
+
+    /// Serves on a listener the caller already holds. A caller whose backend takes a while to
+    /// exist (a game that has yet to connect) binds first, so a port clash fails before
+    /// anything is launched and a bot that connects early waits in the listener's backlog
+    /// until [`Core::run`] accepts it, instead of being refused.
+    pub fn from_listener(listener: TcpListener, backend: B, pacing: Pacing) -> io::Result<Core<B>> {
         listener.set_nonblocking(true)?;
         Ok(Core {
             listener,
@@ -278,6 +288,9 @@ impl<B: MatchBackend> Core<B> {
                 self.broadcast_packet(&mut on_event);
                 clock.advance();
                 self.clear_answers();
+                if self.backend.finished() {
+                    break RunEnd::MatchOver;
+                }
             } else if !self.backend.self_paced() || !polled_packet {
                 thread::sleep(Duration::from_micros(200));
             }
@@ -531,7 +544,7 @@ impl<B: MatchBackend> Core<B> {
                     match self.backend.apply_desired(&desired) {
                         Err(e) if e.kind() == ErrorKind::InvalidInput => on_event(Event::Ignored {
                             agent_id: label,
-                            what: "nonfinite desired state",
+                            what: "nonfinite or out-of-range desired state",
                         }),
                         Ok(false) => {}
                         Ok(true) => on_event(Event::Ignored {

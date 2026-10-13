@@ -71,16 +71,6 @@ const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(300);
 /// cheap amplification attack through a server that is trying to be helpful.
 const DEFAULT_MIN_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
 
-/// RSA moduli outside this range are refused. The upper bound is what the
-/// previous verifier enforced, and it matters: the modular exponentiation
-/// behind each verification costs more the larger the modulus, and the key
-/// comes from a network document.
-const MIN_RSA_MODULUS_BITS: usize = 2048;
-const MAX_RSA_MODULUS_BITS: usize = 4096;
-
-/// Largest RSA public exponent accepted (33 bits, as before).
-const MAX_RSA_EXPONENT: u64 = (1 << 33) - 1;
-
 /// Leeway is clamped to this many seconds, well inside the range the claim
 /// arithmetic can add to a timestamp without overflowing.
 const MAX_LEEWAY_SECS: u64 = i32::MAX as u64;
@@ -437,8 +427,8 @@ fn ec_key(jwk: &Jwk) -> Result<es256::EcPublicKey, TokenError> {
     es256::EcPublicKey::from_affine_coordinates(&x, &y).map_err(unusable_key)
 }
 
-/// An RSA verification key from a JWK, with the modulus and exponent checked
-/// against the bounds above before any arithmetic is done with them.
+/// An RSA verification key from a JWK, refused if `rusty_oauth` finds the
+/// modulus or exponent unusable, before any arithmetic is done with them.
 fn rsa_key(jwk: &Jwk) -> Result<rsa::RsaPublicKey, TokenError> {
     if jwk.kty != "RSA" {
         return Err(unusable_key("the key is not an RSA key"));
@@ -455,36 +445,15 @@ fn rsa_key(jwk: &Jwk) -> Result<rsa::RsaPublicKey, TokenError> {
     let n = component("n")?;
     let e = component("e")?;
 
-    // A leading zero byte is not allowed (RFC 7518 §6.3.1.1) and would make
-    // every signature the wrong length for the key.
-    if n.first() == Some(&0) {
-        return Err(unusable_key("the RSA modulus has a leading zero byte"));
+    // `rusty_oauth` owns the key policy (modulus 2048 to 4096 bits, no leading
+    // zero byte, odd modulus, odd exponent from 3 to 33 bits). Asking now keeps
+    // the early, specific "unusable signing key" answer instead of a generic
+    // "signature is invalid" at verification.
+    let key = rsa::RsaPublicKey::from_components(&n, &e);
+    match key.unusable_reason() {
+        Some(reason) => Err(unusable_key(reason)),
+        None => Ok(key),
     }
-    let bits = n
-        .first()
-        .map_or(0, |top| n.len() * 8 - top.leading_zeros() as usize);
-    if !(MIN_RSA_MODULUS_BITS..=MAX_RSA_MODULUS_BITS).contains(&bits) {
-        return Err(unusable_key(format!(
-            "the RSA modulus is {bits} bits; {MIN_RSA_MODULUS_BITS} to {MAX_RSA_MODULUS_BITS} are accepted"
-        )));
-    }
-
-    if n.last().is_none_or(|byte| byte & 1 == 0) {
-        return Err(unusable_key("the RSA modulus must be odd"));
-    }
-
-    // Five bytes hold 33 bits; anything longer is out of range already.
-    let exponent = if e.len() <= 5 {
-        e.iter()
-            .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte))
-    } else {
-        u64::MAX
-    };
-    if exponent < 3 || exponent % 2 == 0 || exponent > MAX_RSA_EXPONENT {
-        return Err(unusable_key("the RSA public exponent is out of range"));
-    }
-
-    Ok(rsa::RsaPublicKey::from_components(&n, &e))
 }
 
 /// Parse the former jsonwebtoken 11 NumericDate contract: unsigned integers
@@ -783,7 +752,7 @@ mod tests {
         for n in [even, power_of_two] {
             assert!(
                 reason(rsa_key(&rsa_jwk(&n, &[1, 0, 1])).expect_err("even modulus"))
-                    .contains("odd")
+                    .contains("even")
             );
         }
     }

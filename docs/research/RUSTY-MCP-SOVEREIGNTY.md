@@ -114,8 +114,9 @@ Each item is one PR, with its own tests and a change fragment.
    P-256 JWK coordinates retain their required 32-byte width.
    (4) "Wrong `aud`" has no validator test:
    the validator leaves `aud` to the layer by design, and the layer's tests
-   cover it. `rusty_oauth`'s RSA verification has no key-size bounds of its
-   own, so the bounds live in this crate; that gap is worth closing there.
+   cover it. `rusty_oauth`'s RSA verification had no key-size bounds of its
+   own, so the bounds first lived in this crate; they now live in `rusty_oauth`
+   (key-bounds PR) and this crate asks it whether a key is usable.
    **Review corrections (2026-10-12):** MCP checks NumericDate locally:
    unsigned integers (including values above i64::MAX) remain exact; finite
    nonnegative floats below 2^64 round to seconds, matching jsonwebtoken 11.

@@ -99,6 +99,14 @@ impl RsaPublicKey {
         }
     }
 
+    /// Why verification refuses this key, or `None` if it can be used: the
+    /// same check [`verify_pkcs1v15_sha256`] makes, available up front so a
+    /// caller can reject a bad key before it is ever used. The text is fixed
+    /// by this crate and holds only sizes, never key material.
+    pub fn unusable_reason(&self) -> Option<&str> {
+        self.unusable.as_deref()
+    }
+
     /// Builds a key directly from a JWK's base64url-encoded `n` and `e`
     /// members.
     pub fn from_jwk_base64url(n_b64: &str, e_b64: &str) -> Result<Self> {
@@ -111,8 +119,8 @@ impl RsaPublicKey {
 /// Verifies a PKCS#1 v1.5 SHA-256 signature over `message` (RFC 8017
 /// §8.2.2, `RSASSA-PKCS1-V1_5-VERIFY`).
 pub fn verify_pkcs1v15_sha256(message: &[u8], signature: &[u8], key: &RsaPublicKey) -> Result<()> {
-    if let Some(reason) = &key.unusable {
-        return Err(Error::Validation(reason.clone()));
+    if let Some(reason) = key.unusable_reason() {
+        return Err(Error::Validation(reason.to_string()));
     }
     if signature.len() != key.k {
         return Err(Error::Validation(
@@ -359,6 +367,20 @@ mod tests {
             let why = refusal(&n, e);
             assert!(why.contains(REACHED_THE_SIGNATURE_CHECK), "{e:?}: {why}");
         }
+    }
+
+    #[test]
+    fn unusable_reason_names_why_a_key_is_refused_and_is_none_for_a_usable_one() {
+        let usable = RsaPublicKey::from_components(&modulus(2048), &[1, 0, 1]);
+        assert_eq!(usable.unusable_reason(), None);
+        let small = RsaPublicKey::from_components(&modulus(1024), &[1, 0, 1]);
+        let reason = small.unusable_reason().expect("1024 bits is refused");
+        assert!(reason.contains("1024 bits"), "{reason}");
+        // The same reason is what verification reports.
+        assert_eq!(
+            refusal(&modulus(1024), &[1, 0, 1]),
+            format!("validation error: {reason}")
+        );
     }
 
     #[test]
