@@ -34,6 +34,17 @@ fn connect(listener: &GameListener) -> TcpStream {
     TcpStream::connect(listener.local_addr().unwrap()).unwrap()
 }
 
+/// Kills and reaps the bridge process however the test ends, so a failed assertion or a timeout
+/// leaves nothing running.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Reads one framed message from the adopted stream and decodes it.
 fn read_first(mut stream: TcpStream) -> GameBundle {
     stream
@@ -206,7 +217,7 @@ fn a_truncated_message_followed_by_a_close_is_dropped_as_stalled() {
         let (tx, rx) = mpsc::channel();
         // Nothing else ever connects: once the stalled peer is dropped the timeout must run
         // out. A bound on the whole wait turns "never ends" into a failure, not a hang.
-        thread::spawn(move || {
+        let worker = thread::spawn(move || {
             let mut notes = Vec::new();
             let got = listener
                 .wait_for_game_stalling(
@@ -220,6 +231,7 @@ fn a_truncated_message_followed_by_a_close_is_dropped_as_stalled() {
         let (nothing_found, notes) = rx
             .recv_timeout(Duration::from_secs(5))
             .unwrap_or_else(|_| panic!("cut at {cut}: the wait never ended"));
+        worker.join().unwrap();
         assert!(nothing_found, "cut at {cut}");
         assert!(
             notes.iter().any(|n| n.contains("stalled")),
@@ -248,8 +260,9 @@ fn a_message_still_arriving_is_not_called_stalled() {
     drop(writer.join().unwrap());
 }
 
-/// Reviewer case 5: rejecting the oldest (junk) and then overflowing drops the oldest of the
-/// ones left, in arrival order, not whichever happened to be moved into its place.
+/// Rejecting junk and then overflowing drops the oldest of the ones left, in arrival order.
+/// (This sees the eviction side only; the rejection side is pinned by the unit test
+/// `rejecting_a_peer_keeps_arrival_order_for_the_next_overflow` in `link.rs`.)
 #[test]
 fn a_rejection_then_an_overflow_drops_the_oldest_remaining_in_order() {
     let listener = GameListener::bind(0).unwrap();
@@ -293,21 +306,23 @@ fn a_silent_game_does_not_hold_back_the_lines_the_runner_waits_for() {
         l.local_addr().unwrap().port()
     };
     let (game_port, bots_port) = (free(), free());
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rb_rl_bridge"))
-        .args([
-            "--game-port",
-            &game_port.to_string(),
-            "--port",
-            &bots_port.to_string(),
-            "bot:0",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_rb_rl_bridge"))
+            .args([
+                "--game-port",
+                &game_port.to_string(),
+                "--port",
+                &bots_port.to_string(),
+                "bot:0",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let (tx, rx) = mpsc::channel();
-    let stdout = child.stdout.take().unwrap();
-    thread::spawn(move || {
+    let stdout = child.0.stdout.take().unwrap();
+    let reader = thread::spawn(move || {
         for line in std::io::BufReader::new(stdout)
             .lines()
             .map_while(Result::ok)
@@ -351,6 +366,6 @@ fn a_silent_game_does_not_hold_back_the_lines_the_runner_waits_for() {
             break;
         }
     }
-    child.kill().unwrap();
-    child.wait().unwrap();
+    drop(child);
+    reader.join().unwrap();
 }

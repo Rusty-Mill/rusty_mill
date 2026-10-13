@@ -424,4 +424,60 @@ mod finder_tests {
         .unwrap();
         assert!(found.is_some(), "the game was dropped to make room");
     }
+
+    #[test]
+    fn rejecting_a_peer_keeps_arrival_order_for_the_next_overflow() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut buf = vec![0u8; 2 + usize::from(u16::MAX)];
+        let mut candidates = Vec::new();
+        let mut keep = Vec::new();
+        let mut waiting = |candidates: &mut Vec<Candidate>, junk: bool| {
+            let (held, peer, mut dialler) = pair(&listener);
+            if junk {
+                dialler
+                    .write_all(&rb_rlbot_wire::frame::frame(&[0xFF; 40]).unwrap())
+                    .unwrap();
+            }
+            keep.push(dialler);
+            candidates.push(Candidate {
+                stream: held,
+                peer,
+                seen: 0,
+                grew_at: Instant::now(),
+            });
+            peer
+        };
+        // Eight waiting, oldest first: the first of them is junk, which will be rejected.
+        waiting(&mut candidates, true);
+        let quiet: Vec<SocketAddr> = (1..MAX_CANDIDATES)
+            .map(|_| waiting(&mut candidates, false))
+            .collect();
+        let mut notes = Vec::new();
+        // Two arrivals: the first finds the junk and rejects it (room for itself, no eviction);
+        // the second finds the places full and drops the oldest *remaining*.
+        for _ in 0..2 {
+            let (ninth, ninth_peer, dialler) = pair(&listener);
+            keep.push(dialler);
+            let found = admit(
+                &mut candidates,
+                ninth,
+                ninth_peer,
+                STALL_AFTER,
+                &mut buf,
+                &mut |n: &str| notes.push(n.to_string()),
+            )
+            .unwrap();
+            assert!(found.is_none());
+        }
+        let evicted: Vec<&String> = notes
+            .iter()
+            .filter(|n| n.contains("dropped the oldest"))
+            .collect();
+        assert_eq!(evicted.len(), 1, "{notes:?}");
+        assert!(
+            evicted[0].contains(&quiet[0].to_string()),
+            "the oldest remaining is {}: {notes:?}",
+            quiet[0]
+        );
+    }
 }
