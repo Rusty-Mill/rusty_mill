@@ -58,6 +58,8 @@ next steps; the implementer's transcription, **not yet restated from the owner's
   list asked about. The `rusty_tls` seam (gap 4) and signing (gap 5) **stay closed** until the owner names them. The
   2026-10-08 intrinsics approval (decision D1) was **not reconfirmed**: AES work starts portable-only and uses no
   intrinsics until the owner confirms D1.
+- **"Keep ct64"** (the AES-GCM bitsliced layout, `AES-GCM-DESIGN.md` section 8). `ct64` only; the 64-block layout is
+  removed. This chose the layout; it did not answer whether about 65 to 80 MB/s bulk is worth finishing, so that stays open.
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -842,7 +844,7 @@ deliberately simple (no window table); that costs speed.
   fixed-vs-other-key (`rusty_sha2`, unchanged code), 2 alarms of 40 (|t| 4.54, 4.74) against an allowance of 1;
   `EVIDENCE-2026-10-09-ecdh-run2.txt` (clean tree at `77396880`, started on an idle machine, which run 1 was not)
   passed every criterion. Neither threshold nor allowance rule was changed. Across the two runs the alarms fell in
-  different tests (run 1: HMAC-SHA512 2, HMAC-SHA256 1, ChaCha20-Poly1305 open 1, X25519 A/A 1; run 2: ECDH P-256
+  different tests (run 1: HMAC-SHA512 2, HMAC-SHA256 1, ChaCha20-Poly1305 open 1, "X25519 A/A" 1, whose attribution is uncertain, see `ERRATUM-2026-10-10-timing-test-filter.txt`; run 2: ECDH P-256
   sparse-vs-dense 1, at |t| 4.83), which is what noise looks like and is **not** proof of it. The ECDH P-256
   sparse-vs-dense series is the one to watch: its maxima were 3.54 (an earlier single run), 4.31 (run 1) and 4.83 (run 2)
   against matched P-256 A/A maxima of 2.67 (run 1) and 3.31 (run 2). A targeted rerun on an idle machine
@@ -851,7 +853,13 @@ deliberately simple (no window table); that costs speed.
   they do not establish the removal of a worsening tail. The second series was added after viewing the first;
   it does not explain the earlier 4.31 and 4.83, does not retire the watch item (run 1's 4.43 is close to the threshold and the
   leak test's median sits slightly above its baseline in both series) and does not prove constant time. What differs between the
-  classes beyond the scalar bits (cache or multiplier effects) is still unchecked. A first
+  classes beyond the scalar bits (cache or multiplier effects) is still unchecked. A full record taken later the same day
+  (`EVIDENCE-2026-10-10-aes-gcm-run2-FAILED.txt`) **failed this test: 2 alarms of 40 (|t| 4.98 and 5.19) against an
+  allowance of 1**. A diagnostic reran it at 4,000, 16,000, 64,000 and 256,000 samples and |t| did not grow (0.77, 0.38,
+  0.41, 0.63; `EVIDENCE-2026-10-10-ecdh-p256-sample-scaling.txt`), which is what noise does and not what a stable
+  difference does; over all six series so far the leak test alarmed 3 times in 240 runs against 0 in 240 A/A runs, with its
+  median above the A/A median in five of six. The threshold and the allowance rule were not changed, no further full
+  record was taken to obtain a pass, and the watch item stays open. A first
   version of the ECDH test chose between two separately stored keys inside the timed closure (review finding on
   #576) and its numbers are discarded.
 - *Side effect on earlier evidence:* adding this code twice changed LLVM's inlining of `Modulus::add` (once into
