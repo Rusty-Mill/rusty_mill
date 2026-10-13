@@ -81,19 +81,37 @@ fn appending_a_logged_rev_again_writes_nothing() {
 }
 
 #[test]
-fn a_torn_line_is_counted_and_does_not_block_logging() {
+fn a_torn_tail_stays_one_unreadable_line_and_the_next_record_survives() {
     let dir = tempdir("torn");
     let task = setup(&dir);
     let path = shadow::log_path(&dir, &task);
     let mut text = std::fs::read_to_string(&path).expect("log");
-    text.push_str("{\"rev\":9,\"sta");
+    text.push_str("{\"rev\":9,\"sta"); // a write cut short: no newline
     std::fs::write(&path, text).expect("tear");
     let logged = shadow::read(&dir, &task).expect("read");
     assert_eq!((logged.records.len(), logged.unreadable), (1, 1));
     assert_eq!(shadow::of(&dir, &task).expect("report").unreadable_lines, 1);
+
     let mut next = logged.records[0].clone();
     next.rev = Rev(50);
-    assert_eq!(shadow::append(&dir, &task, &[next]).expect("append"), 1);
+    assert_eq!(
+        shadow::append(&dir, &task, &[next.clone()]).expect("append"),
+        1
+    );
+
+    // The new record is read back, the fragment is still exactly one bad line,
+    // the tally counts the record, and appending it again is a no-op.
+    let after = shadow::read(&dir, &task).expect("read");
+    assert_eq!((after.records.len(), after.unreadable), (2, 1));
+    assert!(
+        after.records.iter().any(|s| s.rev == Rev(50)),
+        "{:?}",
+        after.records
+    );
+    let report = shadow::of(&dir, &task).expect("report");
+    assert_eq!((report.records, report.unreadable_lines), (2, 1));
+    assert_eq!(shadow::append(&dir, &task, &[next]).expect("append"), 0);
+    assert_eq!(shadow::read(&dir, &task).expect("read").records.len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

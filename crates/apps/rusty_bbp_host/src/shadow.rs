@@ -38,13 +38,16 @@ pub struct Logged {
     pub unreadable: usize,
 }
 
-/// Read `task`'s log; an absent file is an empty log.
-pub fn read(dir: &Path, task: &TaskId) -> Result<Logged, String> {
-    let text = match fs::read_to_string(log_path(dir, task)) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Logged::default()),
-        Err(e) => return Err(e.to_string()),
-    };
+/// The log's text; an absent file is an empty log.
+fn text(dir: &Path, task: &TaskId) -> Result<String, String> {
+    match fs::read_to_string(log_path(dir, task)) {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn parse(text: &str) -> Logged {
     let mut out = Logged::default();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         match rusty_serde::json::from_str::<Shadow>(line) {
@@ -52,17 +55,27 @@ pub fn read(dir: &Path, task: &TaskId) -> Result<Logged, String> {
             Err(_) => out.unreadable += 1,
         }
     }
-    Ok(out)
+    out
+}
+
+/// Read `task`'s log; an absent file is an empty log.
+pub fn read(dir: &Path, task: &TaskId) -> Result<Logged, String> {
+    Ok(parse(&text(dir, task)?))
 }
 
 /// Append the records whose `rev` is not already in the log. Returns how many
 /// were written. A line that does not parse cannot hide a later duplicate: the
-/// dedupe reads every line it can.
+/// dedupe reads every line it can. If the file ends without a newline (a write
+/// cut short), the new records start on a fresh line, so the torn fragment stays
+/// one unreadable line and never swallows a record.
 pub fn append(dir: &Path, task: &TaskId, records: &[Shadow]) -> Result<usize, String> {
-    let have: BTreeSet<u64> = read(dir, task)?.records.iter().map(|s| s.rev.0).collect();
+    let existing = text(dir, task)?;
+    let mut seen: BTreeSet<u64> = parse(&existing).records.iter().map(|s| s.rev.0).collect();
     let mut lines = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        lines.push('\n');
+    }
     let mut written = 0;
-    let mut seen = have;
     for s in records {
         if !seen.insert(s.rev.0) {
             continue;
