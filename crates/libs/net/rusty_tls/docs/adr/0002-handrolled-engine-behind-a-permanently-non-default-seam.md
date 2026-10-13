@@ -701,8 +701,8 @@ question is not decided by a pull request that merely wires it.
    `nc-dos-2`) are bounded by a comparison budget as of 2026-10-13. The two remaining
    cases where the engine accepts and webpki refuses (`pathlen::self-issued-certs-pathlen`,
    `rfc5280::nc::permitted-self-issued`) follow RFC 5280 §6.1.4(l) and §6.1.3(b)/(c) and are
-   proposed exceptions in `TLS-EVIDENCE-BAR.md`; both remain blockers until the owner
-   confirms them directly. Any
+   accepted exceptions in `TLS-EVIDENCE-BAR.md` (owner acceptance recorded 2026-10-13,
+   covering exactly those two cases). Any
    divergence found later is a blocker until resolved or accepted by the owner in writing;
    limbo expecting success is not that acceptance.
 

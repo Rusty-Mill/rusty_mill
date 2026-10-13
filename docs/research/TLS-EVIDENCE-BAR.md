@@ -1,6 +1,6 @@
 # TLS native engine: evidence bar proposal (owner to approve)
 
-Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` aligned 2026-10-12 and the two `nc-dos` cases bounded 2026-10-13; the two other native-accept/webpki-reject limbo cases are proposed exceptions (see "Proposed exceptions") and remain pre-wiring blockers until the owner confirms them directly on the PR. Follows
+Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` aligned 2026-10-12 and the two `nc-dos` cases bounded 2026-10-13; the two other native-accept/webpki-reject limbo cases are accepted exceptions (see "Accepted exceptions"; owner acceptance recorded 2026-10-13). Follows
 `TLS-ENGINE-ASSESSMENT.md` section 6, which this narrows and updates. The engine's default,
 both gates and every consumer are unchanged. The bar, replacing `ring`, and superseding
 ADR-0002 are the owner's decisions.
@@ -132,7 +132,7 @@ issuer). The owner chose to align with webpki. `check_eku` no longer treats the 
 `any_extended_key_usage_is_refused_like_webpki` (leaf and intermediate, ours and webpki) pin it. The
 limbo golden is unchanged (the corpus has no such case).
 
-**Proposed exceptions (Tier 1 item 2). Both remain pre-wiring blockers until the owner confirms them directly on the PR.** Two cases
+**Accepted exceptions (Tier 1 item 2).** Accepted by the owner in the working session on 2026-10-13: "Confirmed, I accept both exceptions", given after the two cases were named. The reviewer separately reported a matching owner confirmation on PR #670; that report is corroboration only, and this record rests on the owner's message in the session. Two cases
 where this validator is *looser* than webpki and agrees with limbo:
 
 | Case | Why this validator follows the standard |
@@ -141,11 +141,11 @@ where this validator is *looser* than webpki and agrees with limbo:
 | `rfc5280::nc::permitted-self-issued` | RFC 5280 §6.1.3(b) (permitted subtrees) and §6.1.3(c) (excluded subtrees): name constraints are not checked against a self-issued certificate unless it is the final certificate. webpki applies them. |
 
 Basis: the user's direction in the working session on 2026-10-13, "Always err on the side of the
-standards", then choosing to accept these two. Both behaviors are in the code with the RFC section
-cited. This is not inferred from limbo expecting success. An approval would cover exactly these
-two cases as named Tier 1 exceptions and nothing broader: no general standards-over-webpki
-policy, no consumer wiring, no ADR approval. Any other native-accept/webpki-reject case found
-later needs its own decision.
+standards", read as the RFCs plus the Web PKI profile for server authentication, then the acceptance above. Both behaviors are in the code with the RFC section
+cited. This is not inferred from limbo expecting success. The acceptance covers exactly these two
+cases as named Tier 1 exceptions and nothing broader: no consumer wiring, no broader
+standards-preference policy, no reversal of the #628 `anyExtendedKeyUsage` restriction, no
+unrelated ADR. Any other native-accept/webpki-reject case found later needs its own decision.
 
 On `anyExtendedKeyUsage`: RFC 5280 §4.2.1.12 permits a validator to restrict it, so refusing it
 (as merged in #628) is within the standard. Favoring the standards does not require reversing #628.
