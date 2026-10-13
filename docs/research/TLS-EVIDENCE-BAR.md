@@ -132,7 +132,7 @@ issuer). The owner chose to align with webpki. `check_eku` no longer treats the 
 `any_extended_key_usage_is_refused_like_webpki` (leaf and intermediate, ours and webpki) pin it. The
 limbo golden is unchanged (the corpus has no such case).
 
-Other divergences, none a defect in this validator (each is still a native-accept/webpki-reject or a stricter-than-limbo case that needs a named-owner decision as an exception; limbo expecting success is not that decision):
+Other divergences, none a defect in this validator. The two native-accept/webpki-reject cases below still require resolution or named owner acceptance under Tier 1 item 2; limbo expecting success is not that acceptance:
 - 2 cases where this validator is *looser* than webpki and agrees with limbo (webpki is the stricter one): `pathlen::self-issued-certs-pathlen`, `rfc5280::nc::permitted-self-issued`.
 - 4 cases where this validator is *stricter* and limbo expects refusal (empty `permitted`/`excluded` sequences, a leading-period DNS constraint).
 - 1 false refusal: `rfc5280::nc::nc-forbids-othername-noop`. An `otherName` name constraint is refused rather than ignored by design (ADR-0002 section 2b-iii).
