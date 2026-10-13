@@ -28,4 +28,4 @@ pub use record::*;
 pub use role::*;
 pub use state::{Budget, BudgetField, Card, Gate, State, TaskState, TurnKind};
 pub use store::{Driver, MemStore, Store, StoreError};
-pub use wake::{wake_set, WakeReason};
+pub use wake::{can_act, wake_set, WakeReason};

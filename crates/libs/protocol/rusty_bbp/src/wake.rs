@@ -16,7 +16,7 @@
 //! return) are not triggers: they name their grantee directly and bypass the
 //! scheduling check, so they never need to be derived from state.
 
-use crate::engine::{state_accepts, visible};
+use crate::engine::{admits, visible};
 use crate::ids::*;
 use crate::record::*;
 use crate::role::*;
@@ -84,17 +84,12 @@ fn reason(st: &TaskState, req: &Requirement, role: &Role) -> Option<WakeReason> 
     (req.served_by(role) && st.ready_rev > seen).then_some(WakeReason::State)
 }
 
-/// Could the role post anything but `pass` that this state accepts? A
-/// `verdict` also needs `verdict_at` for the current stage, as `check_verdict`
-/// requires (R6): a post-only role cannot answer in `test` or `review`.
-fn can_act(st: &TaskState, role: &Role) -> bool {
-    role.post.iter().any(|k| match k {
-        MessageKind::Pass | MessageKind::Decision => false,
-        MessageKind::Verdict => {
-            state_accepts(st.state, *k)
-                && Stage::of(st.state).is_some_and(|s| role.holds(Cap::Verdict(s)))
-        }
-        _ => state_accepts(st.state, *k),
+/// Could the role post anything but `pass` that this state admits? Uses the
+/// engine's own admission rule (`admits`), so it cannot drift from `post`.
+pub fn can_act(st: &TaskState, role: &Role) -> bool {
+    role.post.iter().any(|k| {
+        !matches!(k, MessageKind::Pass | MessageKind::Decision)
+            && admits(st.state, role, *k).is_ok()
     })
 }
 

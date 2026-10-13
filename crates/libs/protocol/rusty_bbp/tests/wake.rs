@@ -344,6 +344,94 @@ fn a_verdict_poster_needs_authority_for_the_current_stage() {
     assert!(!got.contains(&"none".to_string()), "{got:?}");
 }
 
+/// Table: for every state, post kind and verdict-stage set, a role's
+/// `can_act` agrees with what the real `post` path admits. Rejections that
+/// are about the role, kind or state (`RoleForbidden`, `WrongState`,
+/// `DecisionForbidden`) mean "not admitted"; any other outcome (accepted, or
+/// rejected on content such as a stale candidate) means admitted.
+#[test]
+fn can_act_agrees_with_the_real_post_path() {
+    use MessageKind::*;
+    let kinds = [
+        Ask,
+        Answer,
+        Propose,
+        Finding,
+        Verdict,
+        RequestDecision,
+        MessageKind::Pass,
+        Decision,
+    ];
+    let stage_sets: [&[Stage]; 4] = [
+        &[],
+        &[Stage::Test],
+        &[Stage::Review],
+        &[Stage::Test, Stage::Review],
+    ];
+    let mut checked = 0;
+    for stage in ["build", "test", "review"] {
+        let mut roles = four_roles();
+        for (i, k) in kinds.iter().enumerate() {
+            for (j, set) in stage_sets.iter().enumerate() {
+                roles.push(
+                    Role::new(&format!("x{i}-{j}"), 100 + (i * 10 + j) as u16)
+                        .post(&[*k])
+                        .verdict_at(set),
+                );
+            }
+        }
+        let mut fx = Fx::with_roles(roles.clone());
+        match stage {
+            "build" => {
+                fx.reach_build();
+            }
+            "test" => {
+                fx.reach_test();
+            }
+            _ => {
+                fx.reach_review();
+            }
+        }
+        let live = fx.st().clone();
+        let mut st = live.clone();
+        st.turn = None;
+        for role in roles.iter().filter(|r| r.id.0.starts_with('x')) {
+            let kind = role.post[0];
+            let mut with_turn = live.clone();
+            let turn_id = TurnId(9_999);
+            with_turn.turn = Some(rusty_bbp::state::Turn {
+                id: turn_id,
+                role: role.id.clone(),
+                kind: TurnKind::Default,
+                deadline: Time(u64::MAX),
+                return_to: None,
+                read_arts: Default::default(),
+                state_at: with_turn.state,
+                candidate_at: None,
+                run_at: None,
+            });
+            let token = with_turn.token_for(&pid(role.id.clone()), turn_id);
+            let cmd = Command::Agent {
+                principal: pid(role.id.clone()),
+                token: Some(token),
+                op: OpId("probe".into()),
+                action: AgentAction::Post(Draft::new(kind, "x")),
+            };
+            let admitted = !matches!(
+                handle(&with_turn, &cmd, fx.now).response,
+                Response::Rejected(r) if matches!(
+                    r.code,
+                    Code::RoleForbidden | Code::WrongState | Code::DecisionForbidden
+                )
+            );
+            let expected = admitted && !matches!(kind, MessageKind::Pass | Decision);
+            assert_eq!(can_act(&st, role), expected, "{stage} {kind:?} {role:?}");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 3 * kinds.len() * stage_sets.len());
+}
+
 // ---------------------------------------------------------------- artifact
 
 #[test]
