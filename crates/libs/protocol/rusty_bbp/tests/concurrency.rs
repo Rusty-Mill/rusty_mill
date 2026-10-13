@@ -311,35 +311,126 @@ fn unspent_slice_returns_when_a_turn_ends() {
 }
 
 #[test]
-fn a_log_without_the_new_fields_still_folds() {
-    // Written before max_live_turns and slices existed: both read as absent.
-    let fx = build_phase(1, default_budget());
-    let log = fx.d.store.events(&TaskId("T1".into()), 0).unwrap();
-    let mut text = rusty_serde::json::to_string(&log[0]).expect("json");
-    assert!(text.contains("max_live_turns"));
-    text = text.replace("\"max_live_turns\":1,", "");
-    assert!(!text.contains("max_live_turns"));
-    let first: Event = rusty_serde::json::from_str(&text).expect("old log line decodes");
-    let mut old = vec![first];
-    old.extend(log[1..].iter().map(|e| match e {
-        Event::TurnGranted {
-            role,
-            turn,
-            kind,
-            deadline,
-            return_to,
+fn a_log_written_before_live_turns_decodes_and_folds_as_one_turn() {
+    let old = include_str!("golden/n1_happy.log");
+    let events: Vec<Event> = old
+        .lines()
+        .map(|l| rusty_serde::json::from_str(l).expect("old line decodes"))
+        .collect();
+    let st = TaskState::fold(TaskId("T1".into()), &events);
+    assert_eq!(st.max_live_turns, 1);
+    assert_eq!(st.state, State::Closed);
+}
+
+/// Replay equals live across an expired turn: the fold takes no clock, so an
+/// expiry is state only once a logged `turn_ended(deadline)` says so, and a
+/// replica that reads the log reaches the same state and the same decisions.
+fn replay_equals_live(live: u32) {
+    let mut fx = Fx::concurrent(builders(), live, default_budget());
+    fx.reach_build();
+    let task = TaskId("T1".into());
+    let late = fx.st().turns[0].deadline;
+    fx.now = late; // the deadline has passed; no command has seen it yet
+    let log = fx.d.store.events(&task, 0).unwrap();
+    // Before any command: the expired turn is still live in the fold, as in the live state.
+    assert_eq!(*fx.st(), TaskState::fold(task.clone(), &log));
+    assert!(fx.st().turn_of(&RoleId("coder".into())).is_some());
+    // The same command at the same instant gives the same events from either state.
+    let cmd = Command::Agent {
+        principal: pid("coder"),
+        token: Some(fx.tok("coder")),
+        op: OpId("late".into()),
+        action: AgentAction::Post(ask("planner", "late")),
+    };
+    let replica = TaskState::fold(task.clone(), &log);
+    assert_eq!(
+        handle(fx.st(), &cmd, fx.now),
+        handle(&replica, &cmd, fx.now)
+    );
+    // Dispatch: the deadline is logged, the role is regranted a fresh turn, and
+    // the expired token is refused as stale.
+    assert_eq!(rejected(fx.run(&cmd)), Code::StaleTurn);
+    let log = fx.d.store.events(&task, 0).unwrap();
+    assert!(log.iter().any(|e| matches!(
+        e,
+        Event::TurnEnded {
+            cause: TurnEnd::Deadline,
             ..
-        } => Event::TurnGranted {
-            role: role.clone(),
-            turn: *turn,
-            kind: *kind,
-            deadline: *deadline,
-            return_to: return_to.clone(),
-            slice: None,
-        },
-        e => e.clone(),
-    }));
-    assert_eq!(TaskState::fold(TaskId("T1".into()), &old).max_live_turns, 1);
+        }
+    )));
+    // A fresh driver over the same store reconstructs the live state.
+    let mut other = Driver::new(std::mem::take(&mut fx.d.store), task.clone());
+    other.reload().expect("reload");
+    assert_eq!(other.state, TaskState::fold(task, &log));
+    assert!(
+        other
+            .state
+            .turn_of(&RoleId("coder".into()))
+            .map(|t| t.deadline)
+            != Some(late)
+    );
+}
+
+#[test]
+fn replay_equals_live_with_an_expired_turn_at_one_live_turn() {
+    replay_equals_live(1);
+}
+
+#[test]
+fn replay_equals_live_with_an_expired_turn_above_one_live_turn() {
+    replay_equals_live(2);
+}
+
+/// The four roles plus a second reviewer, so `review` has two final-decision judges.
+fn two_reviewers() -> Vec<Role> {
+    let mut roles = four_roles();
+    let mut second = roles
+        .iter()
+        .find(|r| r.id.0 == "reviewer")
+        .expect("reviewer")
+        .clone();
+    second.id = RoleId("reviewer2".into());
+    second.turn_order = 6;
+    roles.push(second);
+    roles
+}
+
+/// KNOWN 2a GAP, owner: the repository owner; closes with 2b's snapshot-hash
+/// binding (design note, section d) or earlier with a `read_rev` on verdicts.
+///
+/// A verdict binds to the candidate, the selected run and that run's report. It
+/// does not bind to the log revision the reviewer read, so a `finding` appended
+/// by a concurrent turn after the read does not void it. Only a transition
+/// revokes concurrent turns; a finding is not one. This test pins today's
+/// behavior so the gap is visible; when the gap is closed it must flip.
+#[test]
+fn known_gap_a_verdict_is_not_bound_to_the_revision_the_reviewer_read() {
+    let mut fx = Fx::concurrent(two_reviewers(), 2, default_budget());
+    fx.reach_review();
+    assert_eq!(live_roles(&fx), ["reviewer", "reviewer2"]);
+    // reviewer reads at revision R ...
+    assert!(matches!(
+        fx.agent(
+            "reviewer",
+            AgentAction::Read {
+                after: None,
+                limit: 5
+            }
+        ),
+        Response::Read { .. }
+    ));
+    let read_at = fx.rev();
+    // ... reviewer2 then appends a finding against the same candidate and report ...
+    let cand = fx.st().candidate.expect("candidate");
+    let report = fx.report_id();
+    let finding = Draft::new(MessageKind::Finding, "the retry loop never backs off")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("reviewer2", finding));
+    assert!(fx.rev() > read_at, "an append landed after the read");
+    // ... and the first reviewer's approve is still accepted.
+    posted(fx.verdict("reviewer", VerdictKind::Approve));
+    assert_eq!(fx.st().state, State::MergeGate);
 }
 
 mod model {

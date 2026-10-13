@@ -625,7 +625,7 @@ fn the_file_store_refuses_a_v0_4_log_and_a_future_schema() {
     let task = TaskId("T3".into());
     let mut store = FsStore::open(&dir).expect("fresh dir");
     let opened = Event::TaskOpened {
-        schema: LOG_SCHEMA + 1,
+        schema: LOG_SCHEMA_CONCURRENT + 1,
         roster: four_roles(),
         task: task.clone(),
         repo: "r".into(),
@@ -647,7 +647,7 @@ fn the_file_store_refuses_a_v0_4_log_and_a_future_schema() {
     drop(store);
     let err = FsStore::open(&dir).err().expect("refused");
     assert!(
-        matches!(err, FsError::UnsupportedSchema { found: Some(n), .. } if n == LOG_SCHEMA + 1),
+        matches!(err, FsError::UnsupportedSchema { found: Some(n), .. } if n == LOG_SCHEMA_CONCURRENT + 1),
         "{err}"
     );
     let _ = std::fs::remove_dir_all(&dir);

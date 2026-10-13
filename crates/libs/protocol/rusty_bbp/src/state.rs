@@ -472,7 +472,12 @@ impl TaskState {
                 self.budget = *budget;
                 self.turn_ms = *turn_ms;
                 self.request_ms = *request_ms;
-                self.max_live_turns = (*max_live_turns).max(1);
+                // Only schema 3 may raise the cap; a schema-2 log is serialized.
+                self.max_live_turns = if *schema >= crate::event::LOG_SCHEMA_CONCURRENT {
+                    (*max_live_turns).max(1)
+                } else {
+                    1
+                };
                 self.human = human.clone();
                 self.opened = true;
                 let h = Principal {

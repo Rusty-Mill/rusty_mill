@@ -280,7 +280,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         ));
     }
     w.emit(Event::TaskOpened {
-        schema: LOG_SCHEMA,
+        schema: schema_for(o.max_live_turns),
         roster: o.roster.clone(),
         task: o.task.clone(),
         repo: o.repo.clone(),
