@@ -76,6 +76,7 @@ pub struct Client {
     proxy: Option<Proxy>,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
+    max_body_len: u64,
 }
 
 impl Client {
@@ -102,6 +103,7 @@ impl Client {
             proxy: self.proxy.clone(),
             proxy_bypass: self.proxy_bypass.clone(),
             trust_policy: self.trust_policy.clone(),
+            max_body_len: self.max_body_len,
         })
     }
 
@@ -148,6 +150,7 @@ pub struct ClientBuilder {
     proxy: Option<Proxy>,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
+    max_body_len: u64,
 }
 
 impl ClientBuilder {
@@ -168,6 +171,7 @@ impl ClientBuilder {
             proxy: None,
             proxy_bypass: NoProxyRules::default(),
             trust_policy: TrustPolicy::default(),
+            max_body_len: body::DEFAULT_MAX_BODY_LEN,
         }
     }
 
@@ -256,6 +260,19 @@ impl ClientBuilder {
     /// server's own keep-alive timeout to make that race rare.
     pub fn pool_idle_timeout(mut self, timeout: Duration) -> Self {
         self.pool_idle_timeout = timeout;
+        self
+    }
+
+    /// The most response-body bytes a buffered send (`send`) will read;
+    /// a larger body fails with `BodyTooLarge`, and a `Content-Length`
+    /// body over the limit fails before any of it is read. The default is
+    /// [`rusty_http::body::DEFAULT_MAX_BODY_LEN`] (1 MiB). Raise it for a
+    /// client that knows its responses are big, not as a general setting:
+    /// the limit is what stops a hostile or broken server making this
+    /// client buffer without bound. Does not apply to `send_streaming`,
+    /// whose caller reads the body and sets its own bounds.
+    pub fn max_response_body_len(mut self, max_body_len: u64) -> Self {
+        self.max_body_len = max_body_len;
         self
     }
 
@@ -374,6 +391,7 @@ impl ClientBuilder {
             proxy: self.proxy,
             proxy_bypass: self.proxy_bypass,
             trust_policy: self.trust_policy,
+            max_body_len: self.max_body_len,
         }
     }
 }
@@ -419,6 +437,7 @@ pub struct RequestBuilder {
     proxy: Option<Proxy>,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
+    max_body_len: u64,
 }
 
 impl RequestBuilder {
@@ -587,6 +606,7 @@ impl RequestBuilder {
             proxy,
             proxy_bypass,
             trust_policy,
+            max_body_len,
         } = self;
 
         let fut = send_with_retries(
@@ -601,6 +621,7 @@ impl RequestBuilder {
             proxy,
             proxy_bypass,
             trust_policy,
+            max_body_len,
         );
         match request_timeout {
             Some(d) => match rt::timeout(d, fut).await {
@@ -647,6 +668,7 @@ impl RequestBuilder {
             proxy,
             proxy_bypass,
             trust_policy,
+            max_body_len: _,
         } = self;
 
         let fut = send_with_redirects_streaming(
@@ -689,6 +711,7 @@ async fn send_with_retries(
     proxy: Option<Proxy>,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
+    max_body_len: u64,
 ) -> Result<Response> {
     let Some(policy) = retry_policy else {
         return send_with_redirects(
@@ -702,6 +725,7 @@ async fn send_with_retries(
             proxy,
             proxy_bypass,
             trust_policy,
+            max_body_len,
         )
         .await;
     };
@@ -719,6 +743,7 @@ async fn send_with_retries(
             proxy.clone(),
             proxy_bypass.clone(),
             trust_policy.clone(),
+            max_body_len,
         )
         .await;
 
@@ -754,6 +779,7 @@ async fn send_with_redirects(
     proxy: Option<Proxy>,
     proxy_bypass: NoProxyRules,
     trust_policy: TrustPolicy,
+    max_body_len: u64,
 ) -> Result<Response> {
     let mut hop_headers = headers;
     let mut hop = 0usize;
@@ -773,6 +799,7 @@ async fn send_with_redirects(
             headers: wire_headers,
             body: body.clone(),
             timeout: None,
+            max_body_len,
         };
         let response =
             send_one_hop(pool.as_deref(), &request, proxy_for_hop, &trust_policy).await?;
@@ -933,6 +960,7 @@ async fn send_with_redirects_streaming(
             headers: wire_headers,
             body: body.clone(),
             timeout: None,
+            max_body_len: body::DEFAULT_MAX_BODY_LEN,
         };
         let (status, resp_headers, mut streaming_body) =
             send_one_hop_streaming(pool.as_deref(), &request, proxy_for_hop, &trust_policy).await?;
@@ -1329,7 +1357,9 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let framing = body::response_framing(&resp_head.headers, &request.method, resp_head.status)?;
     let header_says_close = connection_says_close(&resp_head.headers);
     let keep_alive = !matches!(framing, Framing::Close) && !header_says_close;
-    let body_bytes = t.read_body(framing).await?;
+    let body_bytes = t
+        .read_body_with_limit(framing, request.max_body_len)
+        .await?;
 
     Ok(RawResponse {
         status: resp_head.status,
@@ -1596,6 +1626,7 @@ mod tests {
             headers: HeaderMap::new(),
             body,
             timeout: None,
+            max_body_len: body::DEFAULT_MAX_BODY_LEN,
         };
         (request, opens)
     }

@@ -140,15 +140,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
     /// whichever way it is framed. See
     /// [`crate::sync::SyncTransport::read_body`].
     pub async fn read_body(&mut self, framing: Framing) -> Result<Vec<u8>> {
+        self.read_body_with_limit(framing, DEFAULT_MAX_BODY_LEN)
+            .await
+    }
+
+    /// Like [`read_body`](Self::read_body), but bounds the buffered total by
+    /// `max_body_len` instead of [`crate::body::DEFAULT_MAX_BODY_LEN`]. A
+    /// body over the limit is [`Error::BodyTooLarge`], and for a
+    /// `Content-Length` body that is decided before any of it is read.
+    pub async fn read_body_with_limit(
+        &mut self,
+        framing: Framing,
+        max_body_len: u64,
+    ) -> Result<Vec<u8>> {
         match framing {
             Framing::None => Ok(Vec::new()),
-            Framing::ContentLength(len) => {
-                self.read_content_length_body(len, DEFAULT_MAX_BODY_LEN)
-                    .await
-            }
-            Framing::Close => self.read_close_delimited_body(DEFAULT_MAX_BODY_LEN).await,
+            Framing::ContentLength(len) => self.read_content_length_body(len, max_body_len).await,
+            Framing::Close => self.read_close_delimited_body(max_body_len).await,
             Framing::Chunked => {
-                self.read_chunked_capped(DEFAULT_MAX_LINE_LEN, DEFAULT_MAX_BODY_LEN)
+                self.read_chunked_capped(DEFAULT_MAX_LINE_LEN, max_body_len)
                     .await
             }
         }
@@ -498,6 +508,34 @@ mod tests {
         let at = chunked_wire(&[&vec![b'x'; max]]);
         let mut t = AsyncTransport::new(wired_with(at).await);
         assert_eq!(t.read_body(Framing::Chunked).await.unwrap().len(), max);
+    }
+
+    #[rusty_tokio::test]
+    async fn read_body_with_limit_replaces_the_default_cap_for_every_framing() {
+        let over_default = DEFAULT_MAX_BODY_LEN as usize + 1;
+        let body: &'static [u8] = Box::leak(vec![b'x'; over_default].into_boxed_slice());
+        let cases = [
+            (Framing::ContentLength(over_default as u64), body),
+            (Framing::Chunked, chunked_wire(&[body])),
+            (Framing::Close, body),
+        ];
+        for (framing, wire) in cases {
+            // The default cap refuses it ...
+            let mut t = AsyncTransport::new(wired_with(wire).await);
+            let err = t.read_body(framing).await.unwrap_err();
+            assert!(is_body_too_large(&err), "{framing:?}: {err:?}");
+
+            // ... a limit of exactly its size reads it all ...
+            let mut t = AsyncTransport::new(wired_with(wire).await);
+            let limit = over_default as u64;
+            let read = t.read_body_with_limit(framing, limit).await.unwrap();
+            assert_eq!(read.len(), over_default, "{framing:?}");
+
+            // ... and one byte less refuses it again.
+            let mut t = AsyncTransport::new(wired_with(wire).await);
+            let err = t.read_body_with_limit(framing, limit - 1).await;
+            assert!(is_body_too_large(&err.unwrap_err()), "{framing:?}");
+        }
     }
 
     #[rusty_tokio::test]

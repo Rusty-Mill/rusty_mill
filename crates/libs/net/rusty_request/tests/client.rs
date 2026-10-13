@@ -1695,3 +1695,153 @@ fn proxy_connection_is_reused_across_different_origins() {
         assert_eq!(proxy.connections_accepted(), 1);
     });
 }
+
+// --- Response body limit -------------------------------------------------
+//
+// `max_response_body_len` raises (or lowers) the cap on a buffered response
+// body for one client; the default stays rusty_http's 1 MiB.
+
+const MIB: usize = 1 << 20;
+
+fn is_body_too_large(err: &Error) -> bool {
+    matches!(err, Error::InvalidResponse(m) if m.contains("maximum allowed size"))
+}
+
+#[test]
+fn the_default_client_refuses_a_response_body_over_one_mib() {
+    run(async {
+        let server = start_test_server(|req| {
+            let size = if req.target == "/over" { MIB + 1 } else { MIB };
+            http_response(200, "OK", &[], &vec![b'x'; size])
+        });
+
+        let err = rusty_request::get(&server.url("/over")).await.unwrap_err();
+        assert!(is_body_too_large(&err), "{err:?}");
+
+        let resp = rusty_request::get(&server.url("/at")).await.unwrap();
+        assert_eq!(resp.bytes().len(), MIB);
+    });
+}
+
+#[test]
+fn a_raised_limit_reads_a_larger_body_with_either_framing() {
+    run(async {
+        let server = start_test_server(|req| {
+            let body = vec![b'y'; MIB + MIB / 2];
+            if req.target == "/chunked" {
+                http_chunked_response(200, "OK", &[], &[&body])
+            } else {
+                http_response(200, "OK", &[], &body)
+            }
+        });
+
+        let client = Client::builder()
+            .max_response_body_len(2 * MIB as u64)
+            .build();
+        for path in ["/length", "/chunked"] {
+            let resp = client.get(&server.url(path)).unwrap().send().await.unwrap();
+            assert_eq!(resp.bytes().len(), MIB + MIB / 2, "{path}");
+        }
+
+        // The same bodies are still refused by a client that kept the default.
+        for path in ["/length", "/chunked"] {
+            let err = Client::new().get(&server.url(path)).unwrap().send().await;
+            assert!(is_body_too_large(&err.unwrap_err()), "{path}");
+        }
+    });
+}
+
+#[test]
+fn the_limit_is_exact_in_both_directions() {
+    run(async {
+        let server = start_test_server(|req| {
+            let size: usize = req.target.trim_start_matches('/').parse().unwrap();
+            http_response(200, "OK", &[], &vec![b'z'; size])
+        });
+
+        // A lowered limit applies: 10 bytes pass, 11 do not.
+        let small = Client::builder().max_response_body_len(10).build();
+        let at = small.get(&server.url("/10")).unwrap().send().await.unwrap();
+        assert_eq!(at.bytes().len(), 10);
+        let err = small.get(&server.url("/11")).unwrap().send().await;
+        assert!(is_body_too_large(&err.unwrap_err()));
+
+        // A raised one is exact too, not rounded up to the old cap.
+        let limit = MIB + 100;
+        let big = Client::builder()
+            .max_response_body_len(limit as u64)
+            .build();
+        let at = big
+            .get(&server.url(&format!("/{limit}")))
+            .unwrap()
+            .send()
+            .await;
+        assert_eq!(at.unwrap().bytes().len(), limit);
+        let over = big
+            .get(&server.url(&format!("/{}", limit + 1)))
+            .unwrap()
+            .send()
+            .await;
+        assert!(is_body_too_large(&over.unwrap_err()));
+    });
+}
+
+#[test]
+fn the_limit_applies_to_the_final_response_of_a_redirect_chain() {
+    run(async {
+        let server = start_test_server(|req| match req.target.as_str() {
+            "/start" => http_response(302, "Found", &[("Location", "/end")], b""),
+            "/end" => http_response(200, "OK", &[], &vec![b'r'; MIB + 1]),
+            other => panic!("unexpected request to {other}"),
+        });
+
+        let client = Client::builder()
+            .max_response_body_len(2 * MIB as u64)
+            .build();
+        let resp = client
+            .get(&server.url("/start"))
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.url().path, "/end");
+        assert_eq!(resp.bytes().len(), MIB + 1);
+
+        let err = Client::new()
+            .get(&server.url("/start"))
+            .unwrap()
+            .send()
+            .await;
+        assert!(is_body_too_large(&err.unwrap_err()));
+    });
+}
+
+#[test]
+fn the_limit_survives_a_retry() {
+    run(async {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_handler = calls.clone();
+        let server = start_test_server(move |_req| {
+            if calls_for_handler.fetch_add(1, Ordering::SeqCst) == 0 {
+                http_response(503, "Service Unavailable", &[], b"")
+            } else {
+                http_response(200, "OK", &[], &vec![b'k'; MIB + 1])
+            }
+        });
+
+        let policy = RetryPolicy::new(2).backoff(Backoff::fixed(Duration::from_millis(1)));
+        let client = Client::builder()
+            .max_response_body_len(2 * MIB as u64)
+            .build();
+        let resp = client
+            .get(&server.url("/"))
+            .unwrap()
+            .retry(policy)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(resp.bytes().len(), MIB + 1);
+    });
+}

@@ -92,7 +92,8 @@ Each item is one PR, with its own tests and a change fragment.
    produced. `rusty-mcp` is 0.8.0 for that API change. (4) Behaviour that
    differs from `reqwest`, found in review: no connection pool (a stale pooled
    connection is an error in `rusty_request`, not retried), a 1 MiB cap on the
-   JWKS body, and HTTPS trust from `rusty_tls`'s system anchors, which on
+   JWKS body (since raised to 4 MiB, per client, because Bot Framework's key set is
+   already about 910 KB), and HTTPS trust from `rusty_tls`'s system anchors, which on
    macOS ignores Keychain trust and distrust settings (rustils#88). Interim
    `1xx` responses are now handled in `rusty_request`.
 4. **JWT verification on `rusty_oauth`**, replacing `jsonwebtoken`. Port the
