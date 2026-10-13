@@ -21,7 +21,7 @@ pub mod wake;
 
 pub use codec::{decode_artifact, encode_artifact, SpecFile};
 pub use command::{AgentAction, Code, Command, HumanAction, OpenTask, Rejection, Response};
-pub use engine::{handle, pick_next, Handled};
+pub use engine::{handle, Handled};
 pub use event::{log_schema, Event, LOG_SCHEMA};
 pub use fs_store::{log_path_for, FsError, FsStore};
 pub use ids::*;

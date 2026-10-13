@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 //! The scheduling seam: the policy recorded in `task_opened`, the old-log
-//! default, and `pick_next` returning a set capped by the policy.
+//! default. `pick_next` is crate-private and unit-tested beside it.
 
 mod common;
 use common::*;
@@ -63,42 +63,4 @@ fn a_malformed_policy_is_an_error_not_a_default() {
     let text = rusty_serde::json::to_string(&opened(&fx)).expect("encode");
     let bad = text.replacen("\"TurnBased\"", "\"Nope\"", 1);
     assert!(rusty_serde::json::from_str::<Event>(&bad).is_err());
-}
-
-#[test]
-fn turn_based_picks_the_default_holder_and_never_more_than_one() {
-    assert_eq!(SchedulingPolicy::TurnBased.max_live(), 1);
-    let mut fx = Fx::new();
-    fx.reach_review();
-    let mut st = fx.st().clone();
-    st.turn = None;
-    for state in [State::Planning, State::Build, State::Test, State::Review] {
-        st.state = state;
-        let got = pick_next(&st);
-        let want: Vec<RoleId> = st
-            .roster
-            .default_holder(state)
-            .cloned()
-            .into_iter()
-            .collect();
-        assert_eq!(got, want, "{state:?}");
-        assert!(got.len() <= st.policy.max_live());
-    }
-}
-
-#[test]
-fn nobody_is_picked_where_no_role_serves_the_state() {
-    let mut fx = Fx::new();
-    fx.reach_merge_gate();
-    let mut st = fx.st().clone();
-    st.turn = None;
-    for state in [
-        State::PlanGate,
-        State::MergeGate,
-        State::Approved,
-        State::Closed,
-    ] {
-        st.state = state;
-        assert!(pick_next(&st).is_empty(), "{state:?}");
-    }
 }

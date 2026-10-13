@@ -1409,7 +1409,7 @@ fn schedule(w: &mut Work, now: Time) {
 /// Who may take the next turn, under the task's policy. A set, so a policy
 /// that allows concurrent turns needs no new signature; capped by
 /// `SchedulingPolicy::max_live`.
-pub fn pick_next(st: &TaskState) -> Vec<RoleId> {
+pub(crate) fn pick_next(st: &TaskState) -> Vec<RoleId> {
     let mut picked: Vec<RoleId> = match st.policy {
         SchedulingPolicy::TurnBased => st
             .roster
@@ -1515,6 +1515,64 @@ fn fire_deadlines(w: &mut Work, now: Time) {
     if let Some(d) = w.st.pending_request.as_ref().and_then(|p| p.deadline) {
         if d <= now && !w.st.state.terminal() && w.st.state != State::Escalated {
             escalate(w, EscalateReason::RequestDeadline, now);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roster() -> Roster {
+        use ArtifactKind::{Candidate, Diff, Spec};
+        Roster::new(vec![
+            Role::new("planner", 0)
+                .write(&[Spec])
+                .post(&[MessageKind::RequestDecision]),
+            Role::new("coder", 1).write(&[Diff, Candidate]),
+            Role::new("tester", 2)
+                .post(&[MessageKind::Verdict])
+                .verdict_at(&[Stage::Test]),
+            Role::new("reviewer", 3)
+                .post(&[MessageKind::Verdict])
+                .verdict_at(&[Stage::Review])
+                .final_decision(),
+        ])
+        .expect("valid roster")
+    }
+
+    fn at(state: State) -> TaskState {
+        let mut st = TaskState::new(TaskId("T".into()));
+        st.roster = roster();
+        st.state = state;
+        st
+    }
+
+    #[test]
+    fn turn_based_picks_the_default_holder_and_never_more_than_one() {
+        for (state, holder) in [
+            (State::Planning, "planner"),
+            (State::Build, "coder"),
+            (State::Test, "tester"),
+            (State::Review, "reviewer"),
+        ] {
+            let got = pick_next(&at(state));
+            assert_eq!(got, vec![RoleId::from(holder)], "{state:?}");
+            assert!(got.len() <= SchedulingPolicy::TurnBased.max_live());
+        }
+    }
+
+    #[test]
+    fn nobody_is_picked_where_no_role_serves_the_state() {
+        for state in [
+            State::PlanGate,
+            State::MergeGate,
+            State::Approved,
+            State::Escalated,
+            State::Closed,
+            State::Cancelled,
+        ] {
+            assert!(pick_next(&at(state)).is_empty(), "{state:?}");
         }
     }
 }
