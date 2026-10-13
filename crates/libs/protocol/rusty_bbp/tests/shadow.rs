@@ -201,3 +201,23 @@ fn an_explicit_grant_that_escalates_keeps_its_pre_grant_state() {
     assert_eq!(ex[0].0, State::Planning);
     assert_eq!(ex[0].1, RoleId::from("tester"));
 }
+
+/// The sink sees exactly the records of each successful dispatch that made any,
+/// and a dispatch that grants nothing never calls it.
+#[test]
+fn a_driver_hands_its_shadow_records_to_the_sink() {
+    use std::sync::{Arc, Mutex};
+    let mut fx = Fx::new();
+    let seen: Arc<Mutex<Vec<Shadow>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let d = std::mem::replace(&mut fx.d, Driver::new(MemStore::new(), TaskId("x".into())));
+    fx.d = d.with_shadow_sink(Box::new(move |s| {
+        sink.lock().expect("lock").extend_from_slice(s)
+    }));
+    let n = fx.shadows.len();
+    fx.reach_build();
+    fx.tick();
+    let seen = seen.lock().expect("lock").clone();
+    assert!(!seen.is_empty());
+    assert_eq!(seen, fx.shadows[n..], "the sink saw every record, once");
+}

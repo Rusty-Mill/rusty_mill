@@ -35,5 +35,5 @@ pub use record::*;
 pub use role::*;
 pub use shadow::{Comparison, Shadow, ShadowKind};
 pub use state::{Budget, BudgetField, Card, Gate, Slice, State, TaskState, Turn, TurnKind};
-pub use store::{Driver, MemStore, Store, StoreError};
+pub use store::{Driver, MemStore, ShadowSink, Store, StoreError};
 pub use wake::{can_act, wake_set, WakeReason};

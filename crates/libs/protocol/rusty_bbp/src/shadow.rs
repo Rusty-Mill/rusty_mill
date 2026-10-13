@@ -6,11 +6,12 @@
 use crate::ids::*;
 use crate::state::{State, TurnKind};
 use crate::wake::WakeReason;
+use rusty_serde::{Deserialize, Serialize};
 
 /// One shadow record, stamped with the log `rev` of the real `turn_granted`
 /// event it sits beside (the first, if a schedule grants several). A grant is one
 /// logged event, so a `rev` is recorded at most once and a host can dedupe on it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shadow {
     pub rev: Rev,
     /// The task state just before the grant. A grant that crosses the turn
@@ -20,7 +21,7 @@ pub struct Shadow {
     pub kind: ShadowKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShadowKind {
     /// `schedule()` chose the holder. `granted` is who it granted; `would` is
     /// what `wake_set` returned just before, best first.

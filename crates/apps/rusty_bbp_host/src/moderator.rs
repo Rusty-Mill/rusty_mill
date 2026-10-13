@@ -104,7 +104,7 @@ pub struct Outcome {
 
 /// `<dir>/<sub>/<sha256(task id)>`: one directory per task, injective, so
 /// two tasks at the same turn id never share a file.
-fn task_dir(dir: &Path, sub: &str, task: &TaskId) -> PathBuf {
+pub(crate) fn task_dir(dir: &Path, sub: &str, task: &TaskId) -> PathBuf {
     dir.join(sub).join(Sha256::of(task.0.as_bytes()).hex())
 }
 

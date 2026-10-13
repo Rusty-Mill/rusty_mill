@@ -10,6 +10,7 @@
 //! - [`profiles`]: the profile set a task freezes at open.
 //! - [`admin`]: open a task and assign roles.
 //! - [`report`]: the concurrency metrics of a task, from its log.
+//! - [`shadow`]: the shadow records of a task, kept deduped on `rev`, and their tally.
 //! - [`args`]: the small argument parser the `bbp` binary uses.
 
 #![forbid(unsafe_code)]
@@ -22,6 +23,7 @@ pub mod moderator;
 pub mod profiles;
 pub mod report;
 pub mod runner;
+pub mod shadow;
 
 use rusty_bbp::*;
 use std::path::Path;
@@ -36,11 +38,14 @@ pub fn now() -> Time {
 }
 
 /// Open the file store at `dir` and rebuild `task`'s state under the
-/// directory's master secret.
+/// directory's master secret. Shadow records of its dispatches go to the
+/// task's shadow log ([`shadow`]).
 pub fn open_driver(dir: &Path, task: &TaskId) -> Result<Driver<FsStore>, String> {
     let master = master::load(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
-    let mut d = Driver::new(store, task.clone()).with_master(master);
+    let mut d = Driver::new(store, task.clone())
+        .with_master(master)
+        .with_shadow_sink(shadow::sink(dir.to_path_buf(), task.clone()));
     d.reload().map_err(|e| format!("{e:?}"))?;
     Ok(d)
 }
