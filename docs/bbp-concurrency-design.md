@@ -2,6 +2,17 @@
 
 Step 6, design only. Waits for owner approval. Builds on `docs/bbp-role-audit.md` (the nine Role fields), `crates/libs/protocol/rusty_bbp/docs/spec/bbp-v0.5-implementation-spec.md` (branch `claude/stoic-pasteur-gg75fs`, `37542c4c`), and the event-driven note (branch `claude/bbp-event-driven-design`, `fc972cbe`, accepted as Phase 1 only).
 
+## Decisions (owner, 2026-10-13)
+
+Direction accepted. Recorded decisions, each applied below:
+
+1. **Serde: option A.** `rusty_crdt` gets a `rusty_serde` feature (first-party), following `rusty_uuid`. `rusty_bbp` does not enable it.
+2. **Location:** `crates/foundation/rusty_crdt`. The private RGA inside `rusty_bbp` stays a documented fallback only.
+3. **`Pending { missing }` is a protocol error in BBP.** It is rejected `ref_unresolved`, never buffered.
+4. **`pick_next` returns a set**, with its cardinality capped by the scheduling policy. `TurnBased` and event-driven Phase 1 cap it at one.
+5. **No `messages_per_turn` or `bytes_per_turn` in v0.5.** Phase 2a derives slices from `max_live_turns` (section e, with the justification).
+6. **No per-writer sequence** (`wseq`).
+
 **Amended 2026-10-13 (storage):** the CRDT is no longer a private in-tree type. It is a shared first-party crate `rusty_crdt`, seeded from the `nexus-crdt` algorithm (read in full), with a sync zero-dependency core. See f, Appendix A (API sketch) and Appendix B (ADR draft).
 
 **Line references** are to `rusty_bbp/src` at `37542c4c` (v0.4.1 engine; the v0.5 engine does not exist yet). Claims I did not verify in source are labelled **[unverified]**.
@@ -46,7 +57,7 @@ The event-driven note rejected CRDT merge because exactly one turn is live (`gra
 
 **No CRDT for plain appends.** The merge of two appended messages is "both, in log order"; a CRDT would add machinery for a problem that does not exist.
 
-**Per-writer sequence.** The request names it for the append-only class. `op` is already the idempotency key, scoped to (principal, task) (R15), and the log gives every writer a total order. A monotone per-writer `wseq` would only add gap detection for a client that needs its intents applied in order. **Recommendation: do not add it now.** The need is **[unverified]**; add it when a trace shows a reordered or lost intent. It would be a field on the command, not on Role.
+**Per-writer sequence.** The request names it for the append-only class. `op` is already the idempotency key, scoped to (principal, task) (R15), and the log gives every writer a total order. A monotone per-writer `wseq` would only add gap detection for a client that needs its intents applied in order. **Decided: no per-writer sequence.** `op` plus the log's total order cover idempotency and ordering. It would be a field on the command, not on Role, if a trace ever shows a reordered or lost intent.
 
 ## c. Several live turns: R14, stale-turn, deadlines, `turns` budget
 
@@ -65,7 +76,7 @@ The event-driven note rejected CRDT merge because exactly one turn is live (`gra
 
 **Why one per principal.** It keeps the host requirement "one Agent API process per role per task" and the token derivation unchanged, so the whole R14 test set carries over. Two live turns for one principal would force the token to carry a turn id and would reopen the zombie-write problem that R14 closes.
 
-**Which roles may hold turns together** is scheduling policy, not protocol structure. The event-driven note's `pick_next` seam is where it lives, and it has to return a set of roles instead of one. That is the one amendment this note makes to that design. With `max_live_turns = 1` the seam degrades to today's behavior and the 31 trace tests are unaffected.
+**Which roles may hold turns together** is scheduling policy, not protocol structure. The event-driven note's `pick_next` seam is where it lives, and it has to return a set of roles instead of one. That is the one amendment this note makes to that design. The policy caps the set's size: `TurnBased` and the event-driven note's Phase 1 cap it at one, which is today's behavior and leaves the 31 trace tests unaffected. A cap above one exists only in 2a, through `max_live_turns`.
 
 ## d. Conflict-free is not coherent: the binding rule
 
@@ -94,13 +105,31 @@ A CRDT guarantees replicas converge. It does not guarantee the converged documen
 
 **Rule.** The control plane reserves before it grants.
 
-1. **Reserve at grant.** `turn_granted` carries a slice `{messages, bytes, reads}`. The grant is refused if `task_total - spent - reserved < slice` for any field, so reservations never exceed totals. Refusal records no turn and falls into the existing escalation path when nothing can ever fit.
+1. **Reserve at grant.** `turn_granted` carries a slice `{messages, bytes, reads}` (derived as below). The grant is refused if `task_total - spent - reserved < slice` for any field, so reservations never exceed totals. Refusal records no turn and falls into the existing escalation path when nothing can ever fit.
 2. **Spend inside the slice.** A write inside a turn is checked against the turn's remaining slice only, not the shared total. Concurrent turns cannot jointly overshoot because the sum of slices already fits.
 3. **Release at turn end.** `turn_ended` returns the unspent part. `charged` stays the record of actual spend.
 4. **Unchanged.** `turns` and `iterations` are control-plane counters charged serially; the crossing-write-is-accepted rule and its one escalation per field stay for them.
-5. **Slices are task configuration**, next to `turn_ms` and `reads_per_turn`: `messages_per_turn`, `bytes_per_turn`. Not Role fields.
+5. **No new budget configuration in v0.5.** v0.5 is `TurnBased` with at most one live turn, so a slice would equal the whole remaining headroom and nothing changes. In 2a, slices are **derived** from the one setting `max_live_turns = N`, not configured.
 
-**Cost.** Two new event kinds (`reserved`/`released`, or fields on `turn_granted`/`turn_ended`), and a slice that is too small ends a turn early with `budget`. At `max_live_turns = 1` the slice can equal the remaining total and behavior matches today.
+**Derived slice (2a).** At a grant with `live` turns already open (`live < N` always, because the cap is checked first), for `f` in `messages` and `bytes`:
+
+`slice_f = floor((total_f - spent_f - reserved_f) / (N - live))`
+
+`reads` keep the existing `reads_per_turn`. The slice is written into `turn_granted`, so replay is deterministic and nothing is recomputed from configuration. Unspent slice returns at `turn_ended`. At `N = 1` the slice is the whole headroom, which is today's behavior.
+
+**Two fields versus one: why derive.**
+
+| | Derive from `max_live_turns` (chosen for 2a) | Add `messages_per_turn`, `bytes_per_turn` |
+| --- | --- | --- |
+| Knobs | One, which must exist anyway | Three |
+| Hard bound | Yes: each grant takes `1/(N-live)` of the headroom left, so the sum of slices never exceeds it | Yes, but only if validated against totals at task open, an extra rule |
+| Behavior at `N = 1` | Identical to today | Identical only if the fields default to the totals |
+| Evidence | None needed | Needs data on what a good per-turn cap is. Spec Q1 says record why a limit was hit before changing it; there is no such record for these |
+| Weakness | Even sharing: the first turn gets `1/N` of the headroom even if its peers stay idle, so one heavy writer can hit its slice early | Predictable caps, matches the `reads_per_turn` precedent |
+
+Reasoning: two new fields are two guesses with no data behind them, and a derived slice already gives the hard bound that motivated the design. The weakness is observable: it shows up as `turn_ended(budget)` while other live turns hold unspent slice. **Trigger to add explicit fields:** 2a evidence that such early exhaustion happens on legitimate turns. Until then, no new fields. This also matches the decided rule against speculative generality.
+
+**Cost.** Two new event payloads (the slice on `turn_granted`, the release on `turn_ended`), and a slice that is too small ends a turn early with `budget`. At `max_live_turns = 1` the slice equals the remaining headroom and behavior matches today.
 
 ## f. Storage and the CRDT type
 
@@ -154,7 +183,7 @@ A CRDT guarantees replicas converge. It does not guarantee the converged documen
 
 | Phase | Scope | Needs | Does not need |
 | --- | --- | --- | --- |
-| 2a | `max_live_turns > 1`, one turn per principal; append-only content (messages, `diff`); control-plane revocation of all turns on transition; reserve-before-spend slices | Turn map in state; per-turn `reads_this_turn`; slice fields in `task_opened`; `pick_next` returning a set (from the event-driven note) | CRDT, snapshot hashes, any new Role field |
+| 2a | `max_live_turns > 1`, one turn per principal; append-only content (messages, `diff`); control-plane revocation of all turns on transition; reserve-before-spend slices | Turn map in state; per-turn `reads_this_turn`; `max_live_turns` in `task_opened`; slices derived from it and carried on `turn_granted`; `pick_next` returning a set capped by policy (from the event-driven note) | CRDT, snapshot hashes, any new Role field |
 | 2b | Co-edited `spec`: op events in the log; `rusty_crdt` RGA (built first, with its law tests); snapshot-hash binding rule (d) | 2a; the ADR in Appendix B accepted; one new artifact payload for ops; verdict/gate/approval records carry hashes | A new store, an external dependency |
 
 2a ships value alone: several agents post and several authors store diffs in parallel, joined by the candidate.
@@ -196,13 +225,13 @@ One field I considered and rejected: `concurrent: bool` on Role. It would let a 
 2. **Sealing.** Should the plan gate seal the spec by default (calmer review) or void on edit (more flexible)?
 3. **Granularity.** Line-granular RGA to start, with per-character as the fallback?
 4. **`max_live_turns` default and cap.** Default 1 is assumed; what upper bound is acceptable for a first release?
-5. **Scheduling.** The event-driven `pick_next` returns a set here. Agree that this amends that note's single-turn premise?
+5. ~~Scheduling.~~ **Decided:** `pick_next` returns a set capped by policy; `TurnBased` and Phase 1 cap at one.
 
 ## Open questions for the `rusty_crdt` extraction (new)
 
-6. **Serde feature.** The brief asks for an optional `serde` feature. An external `serde` in `[dependencies]`, even optional, is an external dependency by ADR-0002's manifest rule, so the crate would not be Tier S by the letter. Options in Appendix B; my recommendation is a `rusty_serde` feature (precedent: `rusty_uuid`), which keeps Tier S and needs no amendment.
-7. **Nexus re-point.** `FROZEN.md` says no new integrations or adapters and removes Nexus from the workspace. The thin adapter you described is therefore blocked until Nexus is unfrozen, and moot if it is retired. Proposed: record it as a conditional follow-up, do nothing now.
-8. **Location.** `crates/foundation/rusty_crdt` (my pick) versus `crates/libs/`.
+6. ~~Serde feature.~~ **Decided:** option A, a `rusty_serde` feature (Appendix B).
+7. **Nexus re-point.** `FROZEN.md` says no new integrations or adapters and removes Nexus from the workspace. The thin adapter is blocked until Nexus is unfrozen, and moot if it is retired. Recorded as a conditional follow-up; nothing is done now.
+8. ~~Location.~~ **Decided:** `crates/foundation/rusty_crdt`.
 
 ## Follow-ups for orch (not touched here)
 
@@ -315,7 +344,7 @@ impl<I, T> Default for Rga<I, T> { /* empty */ }
 
 **ADR-0010 (draft): `rusty_crdt`, a shared sequence CRDT**
 
-Status: Proposed
+Status: Proposed (direction accepted by the owner 2026-10-13; filed as an ADR when 2b is approved)
 Date: 2026-10-13
 
 **Context.** BBP v0.5 needs concurrent co-editing of a spec (this note, 2b). The workspace has one CRDT, `nexus-crdt`, an app-layer crate coupled to the editor and carrying `serde`, `uuid`, `thiserror`, `tokio` and `tracing`. Nexus is frozen and outside the workspace. `rusty_bbp` is Tier S. The consolidation audit says to extract `nexus-crdt` only when a second consumer appears; BBP is that consumer.
@@ -331,14 +360,14 @@ Date: 2026-10-13
 5. Counters, sets and maps are not added until each has two call sites.
 6. `nexus-crdt` is untouched. Re-pointing it through a thin adapter is a separate change on the Nexus side and is conditional on Nexus being unfrozen (`FROZEN.md`).
 
-**Open: how to treat the requested external `serde` feature.**
+**Decided (owner, 2026-10-13): option A.** The table is kept as the record of the alternatives.
 
 | Option | Tier S by the letter? | Cost | Fit |
 | --- | --- | --- | --- |
-| A. `rusty_serde` feature (recommended) | Yes | Nexus's real `serde` types need their own derive in the adapter | Precedent: `rusty_uuid` |
+| **A. `rusty_serde` feature (decided)** | Yes | Nexus's real `serde` types need their own derive in the adapter | Precedent: `rusty_uuid` |
 | B. No serialization in the crate; public plain-data `Op`; adapters own wire types | Yes | Each consumer writes a few derives | Smallest crate; the cleanest Tier S claim |
 | C. Optional external `serde` feature (as briefed) | No: an optional external dependency is still declared in `[dependencies]`. Defensible under ADR-0002's "explicitly scoped shipping profile" sentence (default profile sovereign), but that sentence is not a rule | Needs a one-line ADR-0002 clarification that a crate is Tier S in its default feature set when optional external dependencies are off | Matches the original ask; spends policy |
-| D. Vendor the RGA into `rusty_bbp` | Yes | Duplicates code if Nexus is ever revived | Fallback |
+| D. Vendor the RGA into `rusty_bbp` | Yes | Duplicates code if Nexus is ever revived | Documented fallback only (same API) |
 
 **Consequences.** One more Tier S crate and one ADR. The RGA gets isolated law tests. BBP gains co-editing without an external dependency. If Nexus is never unfrozen, the extraction removes no duplication; its value is isolation and a reusable core.
 
