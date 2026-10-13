@@ -57,7 +57,7 @@ fn crash_mid_batch_drops_only_the_partial_batch() {
     // simulate by appending a batch and cutting its line in half.
     let log = fs_store::log_path_for(&dir, &task);
     let len_before = std::fs::metadata(&log).expect("meta").len();
-    posted(fx.post(Role::Coder, ask(Role::Tester, "Which 429 cases matter?")));
+    posted(fx.post(Who::Coder, ask(Who::Tester, "Which 429 cases matter?")));
     let len_after = std::fs::metadata(&log).expect("meta").len();
     assert!(len_after > len_before);
     truncate_log_for_test(&dir, &task, len_before + (len_after - len_before) / 2)
@@ -77,8 +77,8 @@ fn crash_mid_batch_drops_only_the_partial_batch() {
     let mut fx = Fx::with_store(open(&dir));
     fx.d.reload().expect("reload");
     assert_eq!(fx.st().state, State::Build);
-    assert_eq!(fx.turn_role(), Some(Role::Coder));
-    posted(fx.post(Role::Coder, ask(Role::Tester, "Which 429 cases matter?")));
+    assert_eq!(fx.turn_role(), Some(Who::Coder));
+    posted(fx.post(Who::Coder, ask(Who::Tester, "Which 429 cases matter?")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -92,7 +92,7 @@ fn two_handles_conflict_and_the_driver_recovers() {
     let mut b = Driver::new(open(&dir), task.clone());
     b.reload().expect("reload b");
     assert_eq!(b.state.rev, a.rev());
-    posted(a.post(Role::Coder, ask(Role::Tester, "first")));
+    posted(a.post(Who::Coder, ask(Who::Tester, "first")));
     // B's view is stale. A raw append with the stale rev is refused with the real one.
     let stale = b.state.rev;
     let err = b
@@ -127,7 +127,7 @@ fn two_handles_conflict_and_the_driver_recovers() {
     // The extension plus its op receipt: two events.
     assert_eq!(b.state.rev.0, a.rev().0 + 2);
     // A is now stale and recovers the same way.
-    posted(a.post(Role::Coder, ask(Role::Tester, "second")));
+    posted(a.post(Who::Coder, ask(Who::Tester, "second")));
     assert_eq!(
         a.st().budget.reads,
         999,
@@ -287,6 +287,7 @@ fn open_task(dir: &Path, id: &str) -> Driver<FsStore> {
     let mut d = Driver::new(store, task.clone());
     let cmd = Command::Open(OpenTask {
         task,
+        roster: four_roles(),
         repo: "r".into(),
         profile_digest: DIGEST,
         budget: Budget {
@@ -416,15 +417,15 @@ fn a_log_off_its_canonical_path_is_refused_not_loaded() {
     assert!(d.state.opened);
     let rev = d.state.rev;
     let principal = Principal {
-        id: pid(Role::Planner),
+        id: pid(Who::Planner),
         kind: PrincipalKind::Agent {
-            role: Role::Planner,
-            vendor: vendor(Role::Planner).into(),
+            role: Who::Planner.id(),
+            vendor: vendor(&Who::Planner.id()).into(),
         },
     };
     d.dispatch(
         &Command::Assign {
-            role: Role::Planner,
+            role: Who::Planner.id(),
             principal,
         },
         Time(5),

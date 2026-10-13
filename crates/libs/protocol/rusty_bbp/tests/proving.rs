@@ -16,22 +16,22 @@ fn stage_one_end_to_end() {
 
     // Build: Coder asks the Tester a question through a yield, gets an answer, then submits.
     let q = posted(fx.post(
-        Role::Coder,
-        ask(Role::Tester, "Should 429 count as retryable?"),
+        Who::Coder,
+        ask(Who::Tester, "Should 429 count as retryable?"),
     ));
-    posted(fx.post(Role::Coder, yield_to(Role::Tester)));
+    posted(fx.post(Who::Coder, yield_to(Who::Tester)));
     posted(fx.post(
-        Role::Tester,
+        Who::Tester,
         Draft::new(MessageKind::Answer, "Yes, with backoff.").reply_to(q),
     ));
-    posted(fx.post(Role::Tester, pass()));
-    assert_eq!(fx.turn_role(), Some(Role::Coder));
+    posted(fx.post(Who::Tester, pass()));
+    assert_eq!(fx.turn_role(), Some(Who::Coder));
     let c1 = fx.candidate();
     assert_eq!(fx.st().state, State::Test);
 
     // Test: first run fails; Tester revises; Coder submits c2; run passes.
     stored(fx.report(RunStatus::Failed));
-    posted(fx.verdict(Role::Tester, VerdictKind::Revise));
+    posted(fx.verdict(Who::Tester, VerdictKind::Revise));
     assert_eq!(fx.st().state, State::Build);
     assert_eq!(fx.st().iteration, 1);
     let c2 = fx.candidate();
@@ -80,18 +80,18 @@ fn stage_one_end_to_end() {
     let rev = fx.rev();
     assert_eq!(fx.run(&cmd), first);
     assert_eq!(fx.rev(), rev);
-    assert_eq!(fx.turn_role(), Some(Role::Tester));
+    assert_eq!(fx.turn_role(), Some(Who::Tester));
 
     // A reader crash mid-slice: re-reading from the same offset returns the same page.
     let page1 = fx.agent(
-        Role::Tester,
+        Who::Tester,
         AgentAction::Read {
             after: None,
             limit: 5,
         },
     );
     let page2 = fx.agent(
-        Role::Tester,
+        Who::Tester,
         AgentAction::Read {
             after: None,
             limit: 5,
@@ -105,17 +105,17 @@ fn stage_one_end_to_end() {
     }
 
     // Tester approves; Reviewer reads only the human channel, inspects artifacts, approves.
-    posted(fx.verdict(Role::Tester, VerdictKind::Approve));
+    posted(fx.verdict(Who::Tester, VerdictKind::Approve));
     assert_eq!(fx.st().state, State::Review);
     assert!(matches!(
-        fx.agent(Role::Reviewer, AgentAction::GetArtifact { id: c2 }),
+        fx.agent(Who::Reviewer, AgentAction::GetArtifact { id: c2 }),
         Response::Artifact(_)
     ));
     assert_eq!(
-        rejected(fx.agent(Role::Reviewer, AgentAction::GetArtifact { id: log })),
+        rejected(fx.agent(Who::Reviewer, AgentAction::GetArtifact { id: log })),
         Code::RoleForbidden
     );
-    posted(fx.verdict(Role::Reviewer, VerdictKind::Approve));
+    posted(fx.verdict(Who::Reviewer, VerdictKind::Approve));
     assert_eq!(fx.st().state, State::MergeGate);
 
     // Stale approval: a zombie supervisor from run 1 cannot touch anything; a rerun stales the approvals.
@@ -142,8 +142,8 @@ fn stage_one_end_to_end() {
 
     // Back through test and review on the new run.
     stored(fx.report(RunStatus::Passed));
-    posted(fx.verdict(Role::Tester, VerdictKind::Approve));
-    posted(fx.verdict(Role::Reviewer, VerdictKind::Approve));
+    posted(fx.verdict(Who::Tester, VerdictKind::Approve));
+    posted(fx.verdict(Who::Reviewer, VerdictKind::Approve));
     let (run2, _) = fx.selected_run();
     assert_eq!(
         rejected(fx.human(HumanAction::Approve {
@@ -162,14 +162,14 @@ fn stage_one_end_to_end() {
     assert_eq!(fx.st().state, State::Approved);
 
     // Late write with a dead token.
-    let dead = fx.tok(Role::Coder);
+    let dead = fx.tok(Who::Coder);
     let op = fx.op();
     assert!(matches!(
         rejected(fx.agent_with(
-            Role::Coder,
+            Who::Coder,
             Some(dead),
             op,
-            AgentAction::Post(ask(Role::Tester, "late"))
+            AgentAction::Post(ask(Who::Tester, "late"))
         )),
         Code::TokenExpired | Code::StaleTurn
     ));
@@ -181,7 +181,7 @@ fn stage_one_end_to_end() {
     }));
     assert_eq!(fx.st().state, State::Closed);
     assert_eq!(
-        rejected(fx.human(HumanAction::Post(ask(Role::Coder, "?")))),
+        rejected(fx.human(HumanAction::Post(ask(Who::Coder, "?")))),
         Code::Terminal
     );
 
