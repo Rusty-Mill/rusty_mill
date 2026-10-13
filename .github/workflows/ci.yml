@@ -111,6 +111,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
+  library-tests:
+    # library/ is stdlib-only Python (its builder and the offline UI it emits),
+    # so this needs no cargo and runs for every event like plan-tests. The mod
+    # tests (`claude plugin test`) need the `claude` CLI and are not run here.
+    name: library unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Unit tests
+        working-directory: library
+        run: python3 -m unittest -v
+      - name: Build the library page
+        run: python3 library/build.py
+
   workflow-lint:
     # Runs for every event; it is the primary workflow-specific check for the
     # CI-only route and remains useful when an application change also edits CI.
@@ -1701,6 +1715,7 @@ jobs:
     needs:
       - fmt
       - plan-tests
+      - library-tests
       - workflow-lint
       - dependency-policy
       - cargo-deny
