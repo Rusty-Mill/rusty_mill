@@ -82,7 +82,7 @@ Explicit grants are not triggers. A yield, a human `ask`, a settled request and 
 Rules that keep a trigger honest:
 
 - **Visibility first.** A trigger fires only on records the role may read. A `scoped` reader is never woken by a message it cannot read; otherwise the wake leaks the existence of hidden records (spec Goal 4, fresh reviews by construction).
-- **Capability-gated, not curiosity-gated.** Addressed and Artifact wake a role only if it can *act*: it holds some `post` kind other than `pass` that the current state accepts (`state_accepts`, the by-state table). A role whose every postable kind would be rejected is not eligible.
+- **Capability-gated, not curiosity-gated.** Addressed and Artifact wake a role only if it can *act*: it holds some `post` kind other than `pass` that the current state accepts (`state_accepts`, the by-state table). A `verdict` counts only if the role also holds `verdict_at` for the current stage, the same admission as `check_verdict` (R6); a post-only role would be woken and then rejected. A role whose every postable kind would be rejected is not eligible.
 - **Watermark.** Each role has a `seen_rev`, the card `rev` of the event that ended its last turn (0 if it has had none). A trigger counts only for events with `rev > seen_rev`. `TaskState` derives it, with the append rev of every message and artifact and `ready_rev` (the rev of the last event that made the state's turn available), while folding the log. They are not logged, so the log format is unchanged.
 - **Human gates dominate.** In `plan_gate`, `merge_gate`, `approved` and `escalated` there is no default turn (spec "Turns"), so `wake_set` is empty; a human `ask` is an explicit grant. Event-driven mode does not change that.
 
@@ -141,7 +141,9 @@ Is the seam justified? Yes, narrowly. The two policies differ in exactly one dec
 
 Test impact: none for `TurnBased` (the default). The seam must NOT change who is *allowed* to write; authorization stays in R5/R14 validation.
 
-**Shadow mode.** Before any live grant, `grant()` computes what `EventDriven` would have picked and returns it in `Handled.shadow` beside the real grant: not logged. The host logs it, deduped on `rev`, so real runs give evidence and not only the traces. The comparison (agreements, disagreements and why) is shown to the owner before live mode is enabled.
+**Shadow mode.** Captured in `schedule()`, where `pick_next` runs, not in `grant()`: `grant()` also serves explicit grants (yield, human `ask`, settlement, consultation return) whose grantee is forced, so a `wake_set` comparison there would flag disagreements that are by design. `schedule()` computes what `EventDriven` would have picked and returns it in `Handled.shadow` beside the real grant: not logged. Explicit grants are labelled `Explicit` in `Handled.shadow` and carry the forced grantee as their counterfactual, so they are counted separately and never as disagreements. The host logs the decisions, deduped on `rev`, so real runs give evidence and not only the traces. The comparison (agreements, disagreements and why) is shown to the owner before live mode is enabled.
+
+Planned comparison tests beyond the 31 traces: a human `ask` at a gate (explicit grant, labelled, forced grantee preserved); a yield and its return (both explicit; no `pick_next` comparison in between); a `Tick` at the same `rev` (one shadow record after host dedupe).
 
 ## d. Human gates, budgets, evidence, and runaway ping-pong
 
