@@ -111,27 +111,36 @@ impl Teams {
                 "audience {audience:?} is not this app"
             )));
         }
-        let exp = claims
-            .get("exp")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| Error::Signature("token has no exp".into()))?;
-        if exp.max(0) as u64 + LEEWAY_SECS <= now {
-            return Err(Error::Signature(format!(
-                "token expired at {exp} (now {now})"
-            )));
-        }
-        if let Some(nbf) = claims.get("nbf").and_then(Value::as_i64) {
-            if nbf.max(0) as u64 > now + LEEWAY_SECS {
-                return Err(Error::Signature(format!(
-                    "token not valid before {nbf} (now {now})"
-                )));
-            }
-        }
+        check_times(&claims, now)?;
         if claims.get("serviceurl").and_then(Value::as_str).is_none() {
             return Err(Error::Signature("token has no serviceurl claim".into()));
         }
         Ok(claims)
     }
+}
+
+/// `exp` and `nbf` against `now`, with [`LEEWAY_SECS`] of slack. A claim that
+/// is present but not a NumericDate fails the token: reading it as an
+/// integer only would skip a fractional or very large `nbf` and so accept a
+/// token before its time.
+fn check_times(claims: &Value, now: u64) -> Result<(), Error> {
+    let time = |name| jwt::time_claim(claims, name).map_err(|e| Error::Signature(e.to_string()));
+    let exp = time("exp")?.ok_or_else(|| Error::Signature("token has no exp".into()))?;
+    // Widened so neither a large timestamp nor the leeway can overflow.
+    let (now, leeway) = (i128::from(now), i128::from(LEEWAY_SECS));
+    if i128::from(exp) + leeway <= now {
+        return Err(Error::Signature(format!(
+            "token expired at {exp} (now {now})"
+        )));
+    }
+    if let Some(nbf) = time("nbf")? {
+        if i128::from(nbf) > now + leeway {
+            return Err(Error::Signature(format!(
+                "token not valid before {nbf} (now {now})"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl Channel for Teams {
@@ -486,5 +495,107 @@ mod tests {
     fn mentions_are_stripped() {
         assert_eq!(clean_text("<at>Bot</at> hello <at>Someone</at> "), "hello");
         assert_eq!(clean_text("<at>Bot"), "<at>Bot");
+    }
+
+    fn times_at(pairs: &[(&str, Value)], now: u64) -> Result<(), Error> {
+        let claims = Value::from_iter(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())));
+        check_times(&claims, now)
+    }
+
+    fn times(pairs: &[(&str, Value)]) -> Result<(), Error> {
+        times_at(pairs, NOW)
+    }
+
+    fn why(result: Result<(), Error>) -> String {
+        result.expect_err("should be refused").to_string()
+    }
+
+    #[test]
+    fn a_missing_or_malformed_exp_is_refused() {
+        assert!(why(times(&[])).contains("no exp"));
+        for exp in [Value::from("4102444800"), Value::Null, Value::Bool(true)] {
+            assert!(why(times(&[("exp", exp)])).contains("malformed `exp`"));
+        }
+    }
+
+    #[test]
+    fn a_fractional_exp_is_honoured() {
+        let ahead = Value::from((NOW + 600) as f64 + 0.5);
+        assert!(times(&[("exp", ahead)]).is_ok());
+        let behind = Value::from((NOW - 600) as f64 + 0.5);
+        assert!(why(times(&[("exp", behind)])).contains("expired"));
+    }
+
+    #[test]
+    fn a_future_nbf_is_refused_in_every_numeric_form() {
+        // Before, only an integer `nbf` was read; the others were skipped.
+        let exp = Value::from(NOW + 7200);
+        for nbf in [
+            Value::from(NOW + 3600),
+            Value::from((NOW + 3600) as f64 + 0.5),
+            Value::from(u64::MAX),
+        ] {
+            let result = times(&[("exp", exp.clone()), ("nbf", nbf)]);
+            assert!(why(result).contains("not valid before"));
+        }
+    }
+
+    #[test]
+    fn a_malformed_nbf_is_refused_not_skipped() {
+        let exp = Value::from(NOW + 7200);
+        for nbf in [Value::from("4102444800"), Value::Null] {
+            let result = times(&[("exp", exp.clone()), ("nbf", nbf)]);
+            assert!(why(result).contains("malformed `nbf`"));
+        }
+    }
+
+    #[test]
+    fn the_leeway_boundaries_are_unchanged() {
+        let leeway = LEEWAY_SECS as i64;
+        let now = NOW as i64;
+        let exp = |e: i64| times(&[("exp", Value::from(e))]);
+        assert!(why(exp(now - leeway)).contains("expired"));
+        assert!(exp(now - leeway + 1).is_ok());
+        let nbf = |n: i64| times(&[("exp", Value::from(now + 9999)), ("nbf", Value::from(n))]);
+        assert!(nbf(now + leeway).is_ok());
+        assert!(why(nbf(now + leeway + 1)).contains("not valid before"));
+    }
+
+    // Offsets around a whole-second boundary: a claim `f` seconds past it.
+    const OFFSETS: [f64; 7] = [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75];
+
+    #[test]
+    fn fractional_exp_is_judged_against_the_exact_value() {
+        // Expired once `exp + leeway <= now`, so exp = (now - leeway) + f is
+        // expired exactly when f <= 0. `now` of 0 puts the claim below zero.
+        let leeway = LEEWAY_SECS as i64;
+        for now in [NOW, 0] {
+            for f in OFFSETS {
+                let exp = Value::from(now as i64 as f64 - leeway as f64 + f);
+                let result = times_at(&[("exp", exp)], now);
+                assert_eq!(result.is_err(), f <= 0.0, "now {now} f {f}");
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_nbf_is_judged_against_the_exact_value() {
+        // Refused while `nbf > now + leeway`, so nbf = (now + leeway) + f is
+        // refused exactly when f > 0 (nearest rounding lets 0.25 through).
+        let leeway = LEEWAY_SECS as i64;
+        for now in [NOW, 0] {
+            for f in OFFSETS {
+                let nbf = Value::from(now as i64 as f64 + leeway as f64 + f);
+                let claims = [("exp", Value::from(NOW + 9999)), ("nbf", nbf)];
+                let result = times_at(&claims, now);
+                assert_eq!(result.is_err(), f > 0.0, "now {now} f {f}");
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_timestamps_cannot_overflow() {
+        let far = [("exp", Value::from(u64::MAX)), ("nbf", Value::from(0_i64))];
+        assert!(times(&far).is_ok());
     }
 }
