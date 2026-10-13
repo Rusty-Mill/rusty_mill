@@ -1,0 +1,24 @@
+[package]
+name = "rusty_mill_board"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Mill Board: a capability-gated kanban board for humans and agents, served over MCP and a live web UI."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "warn"
+unwrap_used = "warn"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

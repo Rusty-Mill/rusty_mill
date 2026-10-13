@@ -12765,6 +12765,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mill_board"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "rusty_multimodal_db"
 version = "0.1.0"
 dependencies = [
