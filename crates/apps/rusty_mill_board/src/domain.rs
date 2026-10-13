@@ -7,11 +7,14 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// A board column, in workflow order (the order mirrors super-board's).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Column {
     /// Collected ideas, not yet approved.
@@ -225,7 +228,12 @@ impl Card {
     ///
     /// # Errors
     /// If `title` is blank.
-    pub fn new(title: &str, body: &str, tags: Vec<String>, now_ms: i64) -> Result<Self, BoardError> {
+    pub fn new(
+        title: &str,
+        body: &str,
+        tags: Vec<String>,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
         let title = title.trim();
         if title.is_empty() {
             return Err(BoardError::Invalid("title is empty"));
@@ -245,7 +253,11 @@ impl Card {
     }
 
     fn next(&self, now_ms: i64) -> Self {
-        Self { rev: self.rev + 1, updated_ms: now_ms, ..self.clone() }
+        Self {
+            rev: self.rev + 1,
+            updated_ms: now_ms,
+            ..self.clone()
+        }
     }
 
     /// Take the claim.
@@ -255,7 +267,10 @@ impl Card {
     pub fn claim(&self, by: &Actor, now_ms: i64) -> Result<Self, BoardError> {
         match &self.claim {
             Some(holder) if *holder != by.name => Err(BoardError::Claimed(holder.clone())),
-            _ => Ok(Self { claim: Some(by.name.clone()), ..self.next(now_ms) }),
+            _ => Ok(Self {
+                claim: Some(by.name.clone()),
+                ..self.next(now_ms)
+            }),
         }
     }
 
@@ -266,7 +281,10 @@ impl Card {
     pub fn release(&self, by: &Actor, now_ms: i64) -> Result<Self, BoardError> {
         match &self.claim {
             Some(holder) if *holder != by.name => Err(BoardError::Claimed(holder.clone())),
-            _ => Ok(Self { claim: None, ..self.next(now_ms) }),
+            _ => Ok(Self {
+                claim: None,
+                ..self.next(now_ms)
+            }),
         }
     }
 
@@ -287,7 +305,11 @@ impl Card {
         if worked && self.claim.as_deref() != Some(&by.name) {
             return Err(BoardError::NotClaimant);
         }
-        Ok(Self { column: to, claim: None, ..self.next(now_ms) })
+        Ok(Self {
+            column: to,
+            claim: None,
+            ..self.next(now_ms)
+        })
     }
 
     /// Replace title/body/tags (each optional).
@@ -326,7 +348,11 @@ impl Card {
             return Err(BoardError::Invalid("comment is empty"));
         }
         let mut next = self.next(now_ms);
-        next.comments.push(Comment { by: by.name.clone(), at_ms: now_ms, text: text.to_owned() });
+        next.comments.push(Comment {
+            by: by.name.clone(),
+            at_ms: now_ms,
+            text: text.to_owned(),
+        });
         Ok(next)
     }
 }
@@ -336,7 +362,10 @@ mod tests {
     use super::*;
 
     fn actor(name: &str, caps: &[Capability]) -> Actor {
-        Actor { name: name.into(), caps: caps.iter().copied().collect() }
+        Actor {
+            name: name.into(),
+            caps: caps.iter().copied().collect(),
+        }
     }
 
     fn card() -> Card {
@@ -345,7 +374,10 @@ mod tests {
 
     #[test]
     fn blank_title_rejected() {
-        assert_eq!(Card::new("  ", "", vec![], 0), Err(BoardError::Invalid("title is empty")));
+        assert_eq!(
+            Card::new("  ", "", vec![], 0),
+            Err(BoardError::Invalid("title is empty"))
+        );
     }
 
     #[test]
@@ -379,14 +411,23 @@ mod tests {
 
     #[test]
     fn unknown_and_terminal_moves_rejected() {
-        let all = actor("a", &[Capability::Triage, Capability::Build, Capability::Merge]);
+        let all = actor(
+            "a",
+            &[Capability::Triage, Capability::Build, Capability::Merge],
+        );
         assert_eq!(
             card().move_to(Column::Done, &all, 1),
-            Err(BoardError::NoSuchMove { from: Column::Backlog, to: Column::Done })
+            Err(BoardError::NoSuchMove {
+                from: Column::Backlog,
+                to: Column::Done
+            })
         );
         let mut done = card();
         done.column = Column::Done;
-        assert_eq!(done.move_to(Column::Ready, &all, 1), Err(BoardError::Terminal));
+        assert_eq!(
+            done.move_to(Column::Ready, &all, 1),
+            Err(BoardError::Terminal)
+        );
     }
 
     #[test]
@@ -398,7 +439,10 @@ mod tests {
         assert_eq!(c.move_to(Column::Qa, &dev, 1), Err(BoardError::NotClaimant));
         let c = c.claim(&dev, 1).expect("claim");
         assert_eq!(c.claim(&other, 2), Err(BoardError::Claimed("dev".into())));
-        assert_eq!(c.move_to(Column::Qa, &other, 2), Err(BoardError::NotClaimant));
+        assert_eq!(
+            c.move_to(Column::Qa, &other, 2),
+            Err(BoardError::NotClaimant)
+        );
         assert_eq!(c.release(&other, 2), Err(BoardError::Claimed("dev".into())));
         assert!(c.release(&dev, 2).expect("release").claim.is_none());
     }
@@ -413,7 +457,9 @@ mod tests {
     #[test]
     fn edit_and_comment_bump_rev() {
         let a = actor("a", &[]);
-        let c = card().edit(Some("new"), None, Some(vec!["x".into()]), 5).expect("edit");
+        let c = card()
+            .edit(Some("new"), None, Some(vec!["x".into()]), 5)
+            .expect("edit");
         assert_eq!((c.title.as_str(), c.rev, c.updated_ms), ("new", 1, 5));
         let c = c.comment(&a, "hi", 6).expect("comment");
         assert_eq!((c.comments.len(), c.rev), (1, 2));

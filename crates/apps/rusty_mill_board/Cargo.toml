@@ -10,6 +10,10 @@ publish = false
 [package.metadata.rusty_mill]
 layer = "apps"
 
+[[bin]]
+name = "rusty_mill_board"
+path = "src/main.rs"
+
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
@@ -20,6 +24,15 @@ unwrap_used = "warn"
 
 [dependencies]
 serde = { workspace = true }
+schemars = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 rusty_multimodal_db_engine = { workspace = true }
+rusty_mcp_server = { workspace = true, features = ["http"] }
+rusty_serve = { workspace = true }
+rusty_http = { workspace = true }
+rusty_oauth = { workspace = true }
+rusty_crypto_key = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

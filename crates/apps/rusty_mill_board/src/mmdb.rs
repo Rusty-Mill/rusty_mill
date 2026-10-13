@@ -9,7 +9,9 @@ use std::path::Path;
 
 use rusty_multimodal_db_engine::generic::mmap_store::GenericMmapStore;
 use rusty_multimodal_db_engine::generic::production::GenericProductionStore;
-use rusty_multimodal_db_engine::generic::traits::{IndexedField, Record, ScannableField, SchemaTag};
+use rusty_multimodal_db_engine::generic::traits::{
+    IndexedField, Record, ScannableField, SchemaTag,
+};
 use rusty_multimodal_db_engine::generic::{GuardedReplace, ReplaceError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
@@ -96,7 +98,9 @@ impl MmdbStore {
             GenericMmapStore::create(Vec::new(), path)
         }
         .map_err(storage)?;
-        Ok(Self { db: GenericProductionStore::new(core) })
+        Ok(Self {
+            db: GenericProductionStore::new(core),
+        })
     }
 
     fn rows(&self, kind: &str) -> Vec<Row> {
@@ -118,7 +122,11 @@ impl Store for MmdbStore {
     }
 
     fn list(&self) -> Result<Vec<Card>, BoardError> {
-        let mut cards = self.rows(CARD).iter().map(decode::<Card>).collect::<Result<Vec<_>, _>>()?;
+        let mut cards = self
+            .rows(CARD)
+            .iter()
+            .map(decode::<Card>)
+            .collect::<Result<Vec<_>, _>>()?;
         cards.sort_by_key(|c| (c.created_ms, c.id));
         Ok(cards)
     }
@@ -127,18 +135,26 @@ impl Store for MmdbStore {
         self.db
             .insert(row(card.id, CARD, card.rev, card)?)
             .map_err(|_| BoardError::Conflict)?;
-        self.db.insert(row(event.id, EVENT, event.rev, event)?).map_err(storage)
+        self.db
+            .insert(row(event.id, EVENT, event.rev, event)?)
+            .map_err(storage)
     }
 
     fn replace(&self, card: &Card, event: &Event) -> Result<(), BoardError> {
         let expected = i64::try_from(card.rev).map_err(storage)? - 1;
-        match self.db.replace_if(row(card.id, CARD, card.rev, card)?, |cur| cur.rev == expected) {
+        match self
+            .db
+            .replace_if(row(card.id, CARD, card.rev, card)?, |cur| {
+                cur.rev == expected
+            }) {
             Ok(GuardedReplace::Replaced) => {}
             Ok(GuardedReplace::Refused) => return Err(BoardError::Conflict),
             Err(ReplaceError::NotFound(id)) => return Err(BoardError::NotFound(id)),
             Err(e) => return Err(storage(e)),
         }
-        self.db.insert(row(event.id, EVENT, event.rev, event)?).map_err(storage)
+        self.db
+            .insert(row(event.id, EVENT, event.rev, event)?)
+            .map_err(storage)
     }
 
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {

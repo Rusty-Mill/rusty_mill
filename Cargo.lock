@@ -12768,9 +12768,18 @@ dependencies = [
 name = "rusty_mill_board"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "rusty_crypto_key",
+ "rusty_http",
+ "rusty_mcp_server",
  "rusty_multimodal_db_engine",
+ "rusty_oauth",
+ "rusty_serve",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

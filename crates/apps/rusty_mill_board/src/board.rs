@@ -36,11 +36,17 @@ impl Roles {
     /// # Errors
     /// If the role is unknown or the name blank.
     pub fn actor(&self, name: &str, role: &str) -> Result<Actor, BoardError> {
-        let caps = self.0.get(role).ok_or(BoardError::Invalid("unknown role"))?;
+        let caps = self
+            .0
+            .get(role)
+            .ok_or(BoardError::Invalid("unknown role"))?;
         if name.trim().is_empty() {
             return Err(BoardError::Invalid("actor name is empty"));
         }
-        Ok(Actor { name: name.to_owned(), caps: caps.clone() })
+        Ok(Actor {
+            name: name.to_owned(),
+            caps: caps.clone(),
+        })
     }
 }
 
@@ -61,12 +67,20 @@ pub fn system_ms() -> i64 {
 impl<S: Store> Board<S> {
     /// A board using the system clock.
     pub fn new(store: S, roles: Roles) -> Self {
-        Self { store, roles, clock: system_ms }
+        Self {
+            store,
+            roles,
+            clock: system_ms,
+        }
     }
 
     /// A board with an injected clock (tests).
     pub fn with_clock(store: S, roles: Roles, clock: fn() -> i64) -> Self {
-        Self { store, roles, clock }
+        Self {
+            store,
+            roles,
+            clock,
+        }
     }
 
     /// The role registry.
@@ -104,9 +118,16 @@ impl<S: Store> Board<S> {
     ///
     /// # Errors
     /// On a blank title or storage failure.
-    pub fn add(&self, by: &Actor, title: &str, body: &str, tags: Vec<String>) -> Result<Card, BoardError> {
+    pub fn add(
+        &self,
+        by: &Actor,
+        title: &str,
+        body: &str,
+        tags: Vec<String>,
+    ) -> Result<Card, BoardError> {
         let card = Card::new(title, body, tags, (self.clock)())?;
-        self.store.insert(&card, &Event::of(&card, EventKind::Created, &by.name))?;
+        self.store
+            .insert(&card, &Event::of(&card, EventKind::Created, &by.name))?;
         Ok(card)
     }
 
@@ -164,7 +185,9 @@ impl<S: Store> Board<S> {
         body: Option<&str>,
         tags: Option<Vec<String>>,
     ) -> Result<Card, BoardError> {
-        self.apply(id, by, EventKind::Edited, |c, now| c.edit(title, body, tags.clone(), now))
+        self.apply(id, by, EventKind::Edited, |c, now| {
+            c.edit(title, body, tags.clone(), now)
+        })
     }
 
     /// Comment on a card.
@@ -172,6 +195,8 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// See [`Card::comment`].
     pub fn comment(&self, id: Uuid, by: &Actor, text: &str) -> Result<Card, BoardError> {
-        self.apply(id, by, EventKind::Commented, |c, now| c.comment(by, text, now))
+        self.apply(id, by, EventKind::Commented, |c, now| {
+            c.comment(by, text, now)
+        })
     }
 }

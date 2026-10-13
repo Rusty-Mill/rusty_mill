@@ -47,7 +47,14 @@ impl Store for MemStore {
     }
 
     fn list(&self) -> Result<Vec<Card>, BoardError> {
-        let mut cards: Vec<_> = self.inner.read().map_err(poisoned)?.cards.values().cloned().collect();
+        let mut cards: Vec<_> = self
+            .inner
+            .read()
+            .map_err(poisoned)?
+            .cards
+            .values()
+            .cloned()
+            .collect();
         cards.sort_by_key(|c| (c.created_ms, c.id));
         Ok(cards)
     }
@@ -64,7 +71,10 @@ impl Store for MemStore {
 
     fn replace(&self, card: &Card, event: &Event) -> Result<(), BoardError> {
         let mut inner = self.inner.write().map_err(poisoned)?;
-        let current = inner.cards.get(&card.id).ok_or(BoardError::NotFound(card.id))?;
+        let current = inner
+            .cards
+            .get(&card.id)
+            .ok_or(BoardError::NotFound(card.id))?;
         if current.rev + 1 != card.rev {
             return Err(BoardError::Conflict);
         }
@@ -82,5 +92,23 @@ impl Store for MemStore {
             .take(limit)
             .cloned()
             .collect())
+    }
+}
+
+impl<T: Store + ?Sized> Store for Box<T> {
+    fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+        (**self).get(id)
+    }
+    fn list(&self) -> Result<Vec<Card>, BoardError> {
+        (**self).list()
+    }
+    fn insert(&self, card: &Card, event: &Event) -> Result<(), BoardError> {
+        (**self).insert(card, event)
+    }
+    fn replace(&self, card: &Card, event: &Event) -> Result<(), BoardError> {
+        (**self).replace(card, event)
+    }
+    fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {
+        (**self).events_since(after, limit)
     }
 }
