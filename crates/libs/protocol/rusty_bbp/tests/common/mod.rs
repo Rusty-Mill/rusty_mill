@@ -1,9 +1,72 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-//! Test fixture: an in-memory driver with four agents, a human and a runner,
-//! plus helpers that walk the happy path to any state.
+//! Test fixture: an in-memory driver with a roster of agents, a human and a
+//! runner, plus helpers that walk the happy path to any state. The default
+//! roster is the four-role example of spec Appendix C.1, defined here and
+//! not in the engine.
 #![allow(dead_code)]
 
 use rusty_bbp::*;
+
+/// Handles for the four roles of the test-local roster ([`four_roles`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Who {
+    Planner,
+    Coder,
+    Tester,
+    Reviewer,
+}
+
+impl Who {
+    pub const ALL: [Who; 4] = [Who::Planner, Who::Coder, Who::Tester, Who::Reviewer];
+
+    pub fn id(self) -> RoleId {
+        RoleId(format!("{self:?}").to_lowercase())
+    }
+
+    pub fn of(id: &RoleId) -> Who {
+        Who::ALL
+            .into_iter()
+            .find(|w| w.id() == *id)
+            .expect("one of the four test roles")
+    }
+}
+
+impl From<Who> for RoleId {
+    fn from(w: Who) -> RoleId {
+        w.id()
+    }
+}
+
+/// Spec Appendix C.1.
+pub fn four_roles() -> Vec<Role> {
+    use ArtifactKind::*;
+    use MessageKind::*;
+    let doer = [Ask, Answer, Propose, Finding, RequestDecision, Pass];
+    let all_kinds = [Brief, Spec, Diff, Candidate, TestReport, Log];
+    vec![
+        Role::new("planner", 0)
+            .post(&doer)
+            .write(&[Spec])
+            .read_artifacts(&all_kinds)
+            .consultable(),
+        Role::new("coder", 1)
+            .post(&doer)
+            .write(&[Diff, Candidate])
+            .read_artifacts(&all_kinds)
+            .consultable(),
+        Role::new("tester", 2)
+            .post(&[Ask, Answer, Finding, Verdict, RequestDecision, Pass])
+            .read_artifacts(&all_kinds)
+            .verdict_at(&[Stage::Test])
+            .consultable(),
+        Role::new("reviewer", 3)
+            .post(&[Answer, Finding, Verdict, RequestDecision, Pass])
+            .read_artifacts(&[Brief, Spec, Diff, Candidate, TestReport])
+            .scoped()
+            .verdict_at(&[Stage::Review])
+            .final_decision(),
+    ]
+}
 
 pub struct Fx<S: Store = MemStore> {
     pub d: Driver<S>,
@@ -11,30 +74,126 @@ pub struct Fx<S: Store = MemStore> {
     ops: u64,
 }
 
-pub fn pid(role: Role) -> PrincipalId {
-    PrincipalId(format!("{role:?}").to_lowercase())
+/// The principal that holds `role`: the role id itself.
+pub fn pid(role: impl Into<RoleId>) -> PrincipalId {
+    PrincipalId(role.into().0)
 }
 
-pub fn vendor(role: Role) -> &'static str {
-    match role {
-        Role::Planner => "anthropic",
-        Role::Coder => "openai",
-        Role::Tester => "google",
-        Role::Reviewer => "anthropic",
+pub fn vendor(role: &RoleId) -> &'static str {
+    match role.0.as_str() {
+        "coder" => "openai",
+        "tester" => "google",
+        _ => "anthropic",
     }
 }
 
 pub const DIGEST: Sha256 = Sha256([7; 32]);
 
+/// The four test roles plus `coder2` and `coder3`, which also build.
+pub fn builders() -> Vec<Role> {
+    let mut roles = four_roles();
+    for (name, order) in [("coder2", 4), ("coder3", 5)] {
+        let base = roles
+            .iter()
+            .find(|r| r.id.0 == "coder")
+            .expect("coder")
+            .clone();
+        let mut r = base;
+        r.id = RoleId(name.into());
+        r.turn_order = order;
+        roles.push(r);
+    }
+    roles
+}
+
+pub fn budget(messages: u64, reads_per_turn: u64) -> Budget {
+    Budget {
+        messages,
+        reads_per_turn,
+        ..default_budget()
+    }
+}
+
+/// The four roles plus a second reviewer, so `review` has two final-decision judges.
+pub fn two_reviewers() -> Vec<Role> {
+    let mut roles = four_roles();
+    let mut second = roles
+        .iter()
+        .find(|r| r.id.0 == "reviewer")
+        .expect("reviewer")
+        .clone();
+    second.id = RoleId("reviewer2".into());
+    second.turn_order = 6;
+    roles.push(second);
+    roles
+}
+
+/// The four roles plus a second tester: `test` has two non-final judges, which
+/// may hold turns together.
+pub fn two_testers() -> Vec<Role> {
+    let mut roles = four_roles();
+    let mut second = roles
+        .iter()
+        .find(|r| r.id.0 == "tester")
+        .expect("tester")
+        .clone();
+    second.id = RoleId("tester2".into());
+    second.turn_order = 6;
+    roles.push(second);
+    roles
+}
+
+pub fn default_budget() -> Budget {
+    Budget {
+        messages: 40,
+        bytes: 5_000_000,
+        reads: 150,
+        reads_per_turn: 30,
+        turns: 60,
+        iterations: 4,
+    }
+}
+
 impl Fx<MemStore> {
+    /// A task allowing `live` concurrent turns under `budget`.
+    pub fn concurrent(roles: Vec<Role>, live: u32, budget: Budget) -> Fx {
+        Fx::open_with(MemStore::new(), roles, &[], live, budget)
+    }
+
     pub fn new() -> Fx {
         Fx::with_store(MemStore::new())
+    }
+
+    /// A task on a roster of the test's choosing.
+    pub fn with_roles(roles: Vec<Role>) -> Fx {
+        Fx::with_store_and_roles(MemStore::new(), roles)
     }
 }
 
 impl<S: Store> Fx<S> {
     /// Open a task on any store and assign the four roles.
-    pub fn with_store(mut store: S) -> Fx<S> {
+    pub fn with_store(store: S) -> Fx<S> {
+        Fx::with_store_and_roles(store, four_roles())
+    }
+
+    /// Open a task on any store with `roles`, and assign each to a principal.
+    pub fn with_store_and_roles(store: S, roles: Vec<Role>) -> Fx<S> {
+        Fx::with_roles_skipping(store, roles, &[])
+    }
+
+    /// As [`Fx::with_store_and_roles`], but leave the roles named in `skip` unassigned.
+    pub fn with_roles_skipping(store: S, roles: Vec<Role>, skip: &[&str]) -> Fx<S> {
+        Fx::open_with(store, roles, skip, 1, default_budget())
+    }
+
+    /// As [`Fx::with_roles_skipping`], with `live` concurrent turns and a budget.
+    pub fn open_with(
+        mut store: S,
+        roles: Vec<Role>,
+        skip: &[&str],
+        live: u32,
+        budget: Budget,
+    ) -> Fx<S> {
         let task = TaskId("T1".into());
         let brief = store.blob_put(b"Add retry with backoff to the HTTP client.");
         let mut fx = Fx {
@@ -44,35 +203,43 @@ impl<S: Store> Fx<S> {
         };
         let open = Command::Open(OpenTask {
             task,
+            roster: roles.clone(),
             repo: "github.com/example/repo".into(),
             profile_digest: DIGEST,
-            budget: Budget {
-                messages: 40,
-                bytes: 5_000_000,
-                reads: 150,
-                reads_per_turn: 30,
-                turns: 60,
-                iterations: 4,
-            },
+            budget,
             turn_ms: 60_000,
             request_ms: 3_600_000,
+            max_live_turns: live,
             brief,
             human: PrincipalId("human".into()),
+            policy: SchedulingPolicy::default(),
         });
         fx.run(&open);
-        for role in Role::ALL {
+        for r in roles.iter().filter(|r| !skip.contains(&r.id.0.as_str())) {
             let principal = Principal {
-                id: pid(role),
+                id: pid(r.id.clone()),
                 kind: PrincipalKind::Agent {
-                    role,
-                    vendor: vendor(role).into(),
+                    role: r.id.clone(),
+                    vendor: vendor(&r.id).into(),
                 },
             };
-            fx.run(&Command::Assign { role, principal });
+            fx.run(&Command::Assign {
+                role: r.id.clone(),
+                principal,
+            });
         }
         // Assignment grants nothing; the first tick does.
         fx.run(&Command::Tick);
         fx
+    }
+
+    /// The default holder of `state` under this task's roster.
+    pub fn holder(&self, state: State) -> RoleId {
+        self.st()
+            .roster
+            .default_holder(state)
+            .expect("a roster that serves every state")
+            .clone()
     }
 
     pub fn st(&self) -> &TaskState {
@@ -100,20 +267,28 @@ impl<S: Store> Fx<S> {
     }
 
     /// Live token for `role`, or a bogus one if it does not hold the turn.
-    pub fn tok(&self, role: Role) -> Token {
-        match self.st().turn.as_ref() {
-            Some(t) if t.role == role => self.st().token_for(&pid(role), t.id),
-            _ => Token(Sha256([0; 32])),
+    pub fn tok(&self, role: impl Into<RoleId>) -> Token {
+        let role = role.into();
+        match self.st().turn_of(&role) {
+            Some(t) => self.st().token_for(&pid(role), t.id),
+            None => Token(Sha256([0; 32])),
         }
     }
 
-    pub fn turn_role(&self) -> Option<Role> {
-        self.st().turn.as_ref().map(|t| t.role)
+    /// The live turn's holder among the four test roles.
+    pub fn turn_role(&self) -> Option<Who> {
+        self.st().turn().map(|t| Who::of(&t.role))
     }
 
-    pub fn agent(&mut self, role: Role, action: AgentAction) -> Response {
+    /// The live turn's holder, whatever the roster.
+    pub fn turn_holder(&self) -> Option<RoleId> {
+        self.st().turn().map(|t| t.role.clone())
+    }
+
+    pub fn agent(&mut self, role: impl Into<RoleId>, action: AgentAction) -> Response {
+        let role = role.into();
         let cmd = Command::Agent {
-            principal: pid(role),
+            principal: pid(role.clone()),
             token: Some(self.tok(role)),
             op: self.op(),
             action,
@@ -123,33 +298,43 @@ impl<S: Store> Fx<S> {
 
     pub fn agent_with(
         &mut self,
-        role: Role,
+        role: impl Into<RoleId>,
         token: Option<Token>,
         op: OpId,
         action: AgentAction,
     ) -> Response {
         self.run(&Command::Agent {
-            principal: pid(role),
+            principal: pid(role.into()),
             token,
             op,
             action,
         })
     }
 
-    pub fn post(&mut self, role: Role, d: Draft) -> Response {
+    pub fn post(&mut self, role: impl Into<RoleId>, d: Draft) -> Response {
         self.agent(role, AgentAction::Post(d))
     }
 
     /// Store `body` encoded for `payload` and submit it. `body` is the raw
     /// content for brief, diff and log, the Markdown for a spec, ignored otherwise.
-    pub fn put(&mut self, role: Role, payload: ArtifactPayload, body: &[u8]) -> Response {
+    pub fn put(
+        &mut self,
+        role: impl Into<RoleId>,
+        payload: ArtifactPayload,
+        body: &[u8],
+    ) -> Response {
         let bytes = encode_artifact(&payload, body).expect("encode");
         let blob = self.d.store.blob_put(&bytes);
         self.agent(role, AgentAction::PutArtifact { blob, payload })
     }
 
     /// Submit `payload` claiming `blob` without encoding: for boundary tests.
-    pub fn put_raw(&mut self, role: Role, payload: ArtifactPayload, blob: BlobRef) -> Response {
+    pub fn put_raw(
+        &mut self,
+        role: impl Into<RoleId>,
+        payload: ArtifactPayload,
+        blob: BlobRef,
+    ) -> Response {
         self.agent(role, AgentAction::PutArtifact { blob, payload })
     }
 
@@ -235,7 +420,7 @@ impl<S: Store> Fx<S> {
     pub fn spec(&mut self) -> ArtId {
         let brief = self.st().brief.expect("brief");
         stored(self.put(
-            Role::Planner,
+            self.holder(State::Planning),
             ArtifactPayload::Spec { brief },
             b"# Spec\nAC1 ...",
         ))
@@ -247,7 +432,7 @@ impl<S: Store> Fx<S> {
             .to(Recipient::Human)
             .refs(vec![Ref::art(spec)]);
         d.gate = true;
-        posted(self.post(Role::Planner, d));
+        posted(self.post(self.holder(State::Planning), d));
         assert_eq!(self.st().state, State::PlanGate);
         spec
     }
@@ -264,9 +449,10 @@ impl<S: Store> Fx<S> {
     }
 
     pub fn candidate(&mut self) -> ArtId {
-        let diff = stored(self.put(Role::Coder, ArtifactPayload::Diff, b"--- a\n+++ b\n"));
+        let builder = self.holder(State::Build);
+        let diff = stored(self.put(builder.clone(), ArtifactPayload::Diff, b"--- a\n+++ b\n"));
         stored(self.put(
-            Role::Coder,
+            builder,
             ArtifactPayload::Candidate(Candidate {
                 base: "a".repeat(40),
                 diffs: vec![diff],
@@ -282,7 +468,7 @@ impl<S: Store> Fx<S> {
         c
     }
 
-    pub fn verdict(&mut self, role: Role, kind: VerdictKind) -> Response {
+    pub fn verdict(&mut self, role: impl Into<RoleId>, kind: VerdictKind) -> Response {
         let cand = self.st().candidate.expect("candidate");
         let (run, _) = self.selected_run();
         let report = self.report_id();
@@ -317,14 +503,14 @@ impl<S: Store> Fx<S> {
     pub fn reach_review(&mut self) -> ArtId {
         let c = self.reach_test();
         stored(self.report(RunStatus::Passed));
-        posted(self.verdict(Role::Tester, VerdictKind::Approve));
+        posted(self.verdict(self.holder(State::Test), VerdictKind::Approve));
         assert_eq!(self.st().state, State::Review);
         c
     }
 
     pub fn reach_merge_gate(&mut self) -> ArtId {
         let c = self.reach_review();
-        posted(self.verdict(Role::Reviewer, VerdictKind::Approve));
+        posted(self.verdict(self.holder(State::Review), VerdictKind::Approve));
         assert_eq!(self.st().state, State::MergeGate);
         c
     }
@@ -367,16 +553,23 @@ pub fn rejected(r: Response) -> Code {
     }
 }
 
-pub fn ask(to: Role, text: &str) -> Draft {
-    Draft::new(MessageKind::Ask, text).to(Recipient::Role(to))
+pub fn rejection(r: Response) -> Rejection {
+    match r {
+        Response::Rejected(rej) => rej,
+        other => panic!("expected rejection, got {other:?}"),
+    }
+}
+
+pub fn ask(to: impl Into<RoleId>, text: &str) -> Draft {
+    Draft::new(MessageKind::Ask, text).to(Recipient::Role(to.into()))
 }
 
 pub fn pass() -> Draft {
     Draft::new(MessageKind::Pass, "")
 }
 
-pub fn yield_to(role: Role) -> Draft {
+pub fn yield_to(role: impl Into<RoleId>) -> Draft {
     let mut d = pass();
-    d.yield_to = Some(role);
+    d.yield_to = Some(role.into());
     d
 }

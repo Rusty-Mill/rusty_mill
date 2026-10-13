@@ -344,6 +344,52 @@ async fn unavailable_reason(validator: &JwtValidator) -> String {
     }
 }
 
+/// The test key's JWKS plus unrelated filler keys, until the document is at
+/// least `target` bytes: a stand-in for a provider with a large key set.
+fn jwks_padded_to(keys: &TestKeys, target: usize) -> Value {
+    let mut all = keys.jwks["keys"].as_array().expect("keys").clone();
+    let mut size = keys.jwks.to_json_string().len();
+    let filler = "A".repeat(3000);
+    let mut n = 0;
+    while size < target {
+        let entry = json!({"kty": "oct", "kid": format!("filler-{n}"), "k": filler.clone()});
+        size += entry.to_json_string().len() + 1;
+        all.push(entry);
+        n += 1;
+    }
+    json!({"keys": Value::Array(all)})
+}
+
+#[tokio::test]
+async fn a_jwks_larger_than_rusty_requests_default_cap_is_still_read() {
+    // Bot Framework's key set is about 910 KB today; this one is 1.5 MiB, over
+    // the 1 MiB default, and the real key inside it must still be usable.
+    let keys = keys();
+    let jwks = jwks_padded_to(&keys, 3 << 19);
+    assert!(jwks.to_json_string().len() > 1 << 20);
+    let uri = serve_jwks(jwks).await;
+    let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
+
+    let verified = validator
+        .validate(&sign(&keys, valid_claims()))
+        .await
+        .expect("a valid token must validate against a large key set");
+
+    assert_eq!(verified.subject.as_deref(), Some("user-1"));
+}
+
+#[tokio::test]
+async fn a_jwks_over_the_validators_own_cap_is_unavailable() {
+    // The cap is 4 MiB, so this is refused, not read without bound.
+    let keys = keys();
+    let uri = serve_jwks(jwks_padded_to(&keys, (4 << 20) + 1024)).await;
+    let validator = JwtValidator::builder(ISSUER, uri).build().expect("build");
+
+    let why = unavailable_reason(&validator).await;
+
+    assert!(why.contains("maximum allowed size"), "{why}");
+}
+
 #[tokio::test]
 async fn a_failing_jwks_endpoint_is_unavailable_and_says_why() {
     let uri = serve_raw(http::StatusCode::SERVICE_UNAVAILABLE, "down").await;

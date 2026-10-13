@@ -56,6 +56,13 @@ pub trait MatchBackend {
         false
     }
 
+    /// Whether the match has reached its end and nothing more will happen (a simulated timed
+    /// match that has ended). Core stops serving then. A real game never says so: it rolls into
+    /// the next match, and only it closing its connection ends the run.
+    fn finished(&self) -> bool {
+        false
+    }
+
     /// Advances one physics tick. Only called when not [`self_paced`](Self::self_paced).
     fn step(&mut self) -> io::Result<()>;
 
@@ -68,7 +75,7 @@ pub trait MatchBackend {
     fn set_input(&mut self, player_index: u32, state: &ControllerState) -> io::Result<bool>;
 
     /// Applies a state-setting message. `Ok(true)` if it named a car that does not exist.
-    /// Nonfinite values return `InvalidInput` before any state change or command is sent.
+    /// Nonfinite or out-of-range values (see `validation::MAX_LOCATION` and friends) return `InvalidInput` before any state change or command is sent.
     fn apply_desired(&mut self, desired: &DesiredGameState) -> io::Result<bool>;
 
     /// The match as it stands, in the shape core sends every tick.
@@ -82,6 +89,10 @@ impl MatchBackend for Simulation {
 
     fn field_info(&self) -> FieldInfo {
         Simulation::field_info(self)
+    }
+
+    fn finished(&self) -> bool {
+        Simulation::is_over(self)
     }
 
     fn step(&mut self) -> io::Result<()> {

@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! rb_rl_game_probe [--port N] [--seconds S] [--record FILE] [--launch RocketLeague.exe]
-//! rb_rl_game_probe --analyze FILE
+//! rb_rl_game_probe --analyze FILE [--no-names]
 //! rb_rl_game_probe --commands FILE
 //! rb_rl_game_probe [--census-in FILE] [--census-out FILE]
 //! ```
@@ -14,6 +14,8 @@
 //! the socket or `--seconds` pass (default 30). `--record` writes the raw framed bytes, which
 //! `rb_rlbot_wire::frame` and `decode_game_packet` read back. `--analyze` summarises such a
 //! recording (what events and phases it holds, the map, the spawns, the physics ranges) and exits.
+//! With `--no-names` no player display name is printed (players are actor ids and teams), so
+//! the output can be shared as it is.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -32,6 +34,7 @@ struct Args {
     record: Option<String>,
     launch: Option<String>,
     analyze: Option<String>,
+    no_names: bool,
     commands: Option<String>,
     census_in: Option<String>,
     census_out: Option<String>,
@@ -44,6 +47,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         record: None,
         launch: None,
         analyze: None,
+        no_names: false,
         commands: None,
         census_in: None,
         census_out: None,
@@ -64,6 +68,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--record" => parsed.record = Some(value("--record")?),
             "--launch" => parsed.launch = Some(value("--launch")?),
             "--analyze" => parsed.analyze = Some(value("--analyze")?),
+            "--no-names" => parsed.no_names = true,
             "--commands" => parsed.commands = Some(value("--commands")?),
             "--census-in" => parsed.census_in = Some(value("--census-in")?),
             "--census-out" => parsed.census_out = Some(value("--census-out")?),
@@ -193,8 +198,22 @@ impl Tracks {
     }
 }
 
+/// A player's display name for a line of output, or nothing when names are hidden.
+fn name_suffix(name: &str, show_names: bool) -> String {
+    if show_names {
+        format!(" {name:?}")
+    } else {
+        String::new()
+    }
+}
+
+fn spawn_line(id: u16, command_id: Option<u16>, name: &str, team: u8, show_names: bool) -> String {
+    let name = name_suffix(name, show_names);
+    format!("PlayerSpawn: actor {id} command_id {command_id:?}{name} team {team}")
+}
+
 /// Summarises a recording made with `--record`.
-fn analyze(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn analyze(path: &str, show_names: bool) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let mut decoder = FrameDecoder::new();
     decoder.push(&bytes);
@@ -250,9 +269,7 @@ fn analyze(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     command_id,
                     name,
                     team,
-                } => println!(
-                    "PlayerSpawn: actor {id} command_id {command_id:?} name {name:?} team {team}"
-                ),
+                } => println!("{}", spawn_line(*id, *command_id, name, *team, show_names)),
                 GameEvent::TimeChange { display_seconds } => clock.push(*display_seconds),
                 GameEvent::BallSpawn { id } => println!("BallSpawn: actor {id}"),
                 GameEvent::StateChange { phase, is_overtime } => {
@@ -303,8 +320,13 @@ fn analyze(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let moved =
             ((car.last.0 - car.first.0).powi(2) + (car.last.1 - car.first.1).powi(2)).sqrt();
         println!(
-            "map {epoch} actor {actor} life {life} {:?}: moved {moved:.0} uu (first ({:.0}, {:.0}) last ({:.0}, {:.0})), top speed {:.0} uu/s",
-            car.name, car.first.0, car.first.1, car.last.0, car.last.1, car.top_speed
+            "map {epoch} actor {actor} life {life}{}: moved {moved:.0} uu (first ({:.0}, {:.0}) last ({:.0}, {:.0})), top speed {:.0} uu/s",
+            name_suffix(&car.name, show_names),
+            car.first.0,
+            car.first.1,
+            car.last.0,
+            car.last.1,
+            car.top_speed
         );
     }
     Ok(())
@@ -313,7 +335,7 @@ fn analyze(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse(std::env::args().skip(1))?;
     if let Some(path) = &args.analyze {
-        return analyze(path);
+        return analyze(path, !args.no_names);
     }
     if let Some(path) = &args.commands {
         return commands(path);
@@ -411,6 +433,30 @@ mod tests {
     use super::*;
     use rb_rl_game_bridge::GameBundle;
     use rb_rlbot_wire::{Physics, Vec3};
+    #[test]
+    fn hidden_names_reach_no_line_and_shown_names_still_do() {
+        assert_eq!(
+            spawn_line(38, Some(1), "Secret Name", 0, true),
+            "PlayerSpawn: actor 38 command_id Some(1) \"Secret Name\" team 0"
+        );
+        let hidden = spawn_line(38, Some(1), "Secret Name", 0, false);
+        assert_eq!(hidden, "PlayerSpawn: actor 38 command_id Some(1) team 0");
+        assert!(name_suffix("Secret Name", false).is_empty());
+    }
+
+    #[test]
+    fn no_names_is_a_flag_and_is_off_by_default() {
+        let args = parse(["--analyze", "f"].map(String::from).into_iter()).unwrap();
+        assert!(!args.no_names);
+        let args = parse(
+            ["--analyze", "f", "--no-names"]
+                .map(String::from)
+                .into_iter(),
+        )
+        .unwrap();
+        assert!(args.no_names);
+    }
+
     #[test]
     fn actor_reuse_and_map_epochs_never_merge_trajectories() {
         let mut tracks = Tracks::default();

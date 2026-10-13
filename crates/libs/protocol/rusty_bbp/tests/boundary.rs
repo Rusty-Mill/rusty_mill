@@ -14,7 +14,7 @@ fn missing_blob_is_rejected_before_the_core_sees_it() {
         len: 4,
     };
     assert_eq!(
-        rejected(fx.put_raw(Role::Planner, ArtifactPayload::Diff, ghost)),
+        rejected(fx.put_raw(Who::Planner, ArtifactPayload::Diff, ghost)),
         Code::BlobMissing
     );
     assert_eq!(fx.rev(), rev, "a boundary rejection appends nothing");
@@ -24,7 +24,7 @@ fn missing_blob_is_rejected_before_the_core_sees_it() {
 fn payload_must_match_the_stored_bytes() {
     let mut fx = Fx::new();
     fx.reach_build();
-    let diff = stored(fx.put(Role::Coder, ArtifactPayload::Diff, b"--- a\n+++ b\n"));
+    let diff = stored(fx.put(Who::Coder, ArtifactPayload::Diff, b"--- a\n+++ b\n"));
     let a = Candidate {
         base: "a".repeat(40),
         diffs: vec![diff],
@@ -36,7 +36,7 @@ fn payload_must_match_the_stored_bytes() {
     let bytes_of_a = encode_artifact(&ArtifactPayload::Candidate(a), b"").expect("encode");
     let blob = fx.d.store.blob_put(&bytes_of_a);
     assert_eq!(
-        rejected(fx.put_raw(Role::Coder, ArtifactPayload::Candidate(b), blob)),
+        rejected(fx.put_raw(Who::Coder, ArtifactPayload::Candidate(b), blob)),
         Code::PayloadMismatch
     );
     assert_eq!(fx.st().state, State::Build, "nothing was submitted");
@@ -56,7 +56,7 @@ fn spec_brief_reference_comes_from_the_file() {
         .into_bytes();
     let blob = fx.d.store.blob_put(&bytes);
     assert_eq!(
-        rejected(fx.put_raw(Role::Planner, ArtifactPayload::Spec { brief }, blob)),
+        rejected(fx.put_raw(Who::Planner, ArtifactPayload::Spec { brief }, blob)),
         Code::PayloadMismatch
     );
     // Honest bytes decode and pass through to the core's own checks.
@@ -64,7 +64,7 @@ fn spec_brief_reference_comes_from_the_file() {
         .d
         .store
         .blob_put(&encode_artifact(&ArtifactPayload::Spec { brief }, b"# Spec").expect("encode"));
-    stored(fx.put_raw(Role::Planner, ArtifactPayload::Spec { brief }, honest));
+    stored(fx.put_raw(Who::Planner, ArtifactPayload::Spec { brief }, honest));
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn undecodable_bytes_and_wrong_length_are_rejected() {
         diffs: vec![],
     };
     assert_eq!(
-        rejected(fx.put_raw(Role::Coder, ArtifactPayload::Candidate(c), garbage)),
+        rejected(fx.put_raw(Who::Coder, ArtifactPayload::Candidate(c), garbage)),
         Code::PayloadMismatch
     );
     let real = fx.d.store.blob_put(b"diff");
@@ -86,7 +86,7 @@ fn undecodable_bytes_and_wrong_length_are_rejected() {
         len: real.len + 1,
     };
     assert_eq!(
-        rejected(fx.put_raw(Role::Coder, ArtifactPayload::Diff, lied)),
+        rejected(fx.put_raw(Who::Coder, ArtifactPayload::Diff, lied)),
         Code::PayloadMismatch
     );
 }

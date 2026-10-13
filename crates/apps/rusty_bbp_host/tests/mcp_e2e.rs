@@ -2,6 +2,8 @@
 //! Stage-3a exit criterion: a real `bbp mcp` process, driven over stdio with
 //! JSON-RPC, serves one turn and refuses calls once that turn has ended.
 
+mod common;
+use common::Who;
 use rusty_bbp::*;
 use rusty_bbp_host::{admin, human, open_driver};
 use rusty_serde::Value;
@@ -107,19 +109,20 @@ fn setup(dir: &Path) -> TaskId {
         b"Add retry with backoff.",
         &PrincipalId("human".into()),
         &rusty_bbp_host::profiles::ProfileSet::shell("test", "true"),
+        common::roster(),
     )
     .expect("open");
     for (role, vendor) in [
-        (Role::Planner, "anthropic"),
-        (Role::Coder, "openai"),
-        (Role::Tester, "google"),
-        (Role::Reviewer, "anthropic"),
+        (Who::Planner, "anthropic"),
+        (Who::Coder, "openai"),
+        (Who::Tester, "google"),
+        (Who::Reviewer, "anthropic"),
     ] {
         admin::assign(
             dir,
             &task,
-            role,
-            &PrincipalId(admin::role_name(role).into()),
+            &role.id(),
+            &PrincipalId(role.name().into()),
             vendor,
         )
         .expect("assign");
@@ -133,8 +136,11 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     let dir = tempdir("turn");
     let task = setup(&dir);
     let d = open_driver(&dir, &task).expect("driver");
-    let turn = d.state.turn.as_ref().expect("planner turn").id;
-    assert_eq!(d.state.turn.as_ref().map(|t| t.role), Some(Role::Planner));
+    let turn = d.state.turn().expect("planner turn").id;
+    assert_eq!(
+        d.state.turn().map(|t| t.role.clone()),
+        Some(Who::Planner.id())
+    );
 
     let mut mcp = Mcp::spawn(&dir, "T1", "planner", turn.0);
     let init = mcp.request("initialize", r#"{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}"#);
@@ -179,10 +185,10 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     let r = human::perform(&dir, &task, "extend", &["reads_per_turn", "1"], None).expect("extend");
     assert_eq!(r, Response::Ok);
     let mut d = open_driver(&dir, &task).expect("driver");
-    d.dispatch(&Command::AbortTurn, rusty_bbp_host::now())
+    d.dispatch(&Command::AbortTurn { turn: None }, rusty_bbp_host::now())
         .expect("abort");
     assert_ne!(
-        d.state.turn.as_ref().map(|t| t.id),
+        d.state.turn().map(|t| t.id),
         Some(turn),
         "a new turn was granted"
     );
@@ -196,7 +202,7 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     let (_, err) = mcp.call("task_card", "{}");
     assert!(!err);
     // A new process for the new turn works.
-    let new_turn = d.state.turn.as_ref().expect("turn").id;
+    let new_turn = d.state.turn().expect("turn").id;
     let mut mcp2 = Mcp::spawn(&dir, "T1", "planner", new_turn.0);
     let (ok, err) = mcp2.call(
         "post",
@@ -213,7 +219,7 @@ fn malformed_requests_get_jsonrpc_errors() {
     let turn = open_driver(&dir, &task)
         .expect("driver")
         .state
-        .turn
+        .turn()
         .as_ref()
         .expect("turn")
         .id;
@@ -239,7 +245,7 @@ fn human_cli_drives_a_gate() {
     let turn = open_driver(&dir, &task)
         .expect("driver")
         .state
-        .turn
+        .turn()
         .as_ref()
         .expect("turn")
         .id;
@@ -275,7 +281,10 @@ fn human_cli_drives_a_gate() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "\"Ok\"");
     let card = admin::card(&dir, &task).expect("card");
     assert_eq!(card.state, State::Build);
-    assert_eq!(card.turn.map(|t| t.0), Some(Role::Coder));
+    assert_eq!(
+        card.turns.first().map(|t| t.0.clone()),
+        Some(Who::Coder.id())
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -283,7 +292,7 @@ fn turn_of(dir: &Path, task: &TaskId) -> u64 {
     open_driver(dir, task)
         .expect("driver")
         .state
-        .turn
+        .turn()
         .as_ref()
         .expect("turn")
         .id

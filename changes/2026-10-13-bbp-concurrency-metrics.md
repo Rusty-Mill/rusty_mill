@@ -1,0 +1,10 @@
+---
+category: Added
+changelog: **BBP concurrency metrics.** `rusty_bbp::metrics` folds a task's log into revocations, discarded work, budget refusals, stale rejections, stale verdicts and diff overlap; `bbp metrics` prints them and `bbp mod` reports wall clock.
+---
+## 2026-10-13 - BBP concurrency metrics
+
+- **Added:** `rusty_bbp::metrics::{of, overlap}`: pure folds over the log (no new event, no rule changed). `bbp metrics --dir D --task T` prints them as JSON; `Outcome::elapsed` and `bbp mod`'s `elapsed_ms` give the wall clock (the log has no timestamps). Definitions are those of the 2b gate criteria in `docs/bbp-concurrency-design.md`.
+- **Test:** six scenario tests with known values (losing builder's work counted as discarded, three overlap levels, budget refusals vs stale writes, a stale verdict), and a host e2e where two scripted builders edit the same lines at `max_live_turns = 2` and the report shows one revocation and hunk overlap.
+- **Fixed (review):** hunk ranges are keyed by the path whose old lines they cover (the `---` path), so two unrelated deletions (both `+++ /dev/null`) no longer overlap; hunk bodies are consumed by their counts so a removed line that looks like a header is not read as one; numeric headers use checked arithmetic. `stale_verdicts` now uses the responses of accepted reads in the log: a `get_artifact` is not a view of the messages and a short page does not count as seeing what it omitted; only messages and artifacts appended during the author's verdict turn, by another principal and readable by the author, count.
+- **Known limitations:** `overlap` keys on header ranges that include unchanged context lines, so it is a screening proxy that overcounts nearby disjoint edits (the 2b gate uses a three-way merge instead); model tokens are not visible to the core, so discarded work is in messages, reads and bytes; wall clock on scripted agents measures host overhead only. The scripted run checks the measurement, not the gate criteria; no evidence run has been made.

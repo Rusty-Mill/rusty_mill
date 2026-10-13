@@ -5,29 +5,19 @@ use crate::{now, open_driver};
 use rusty_bbp::*;
 use std::path::Path;
 
-pub fn parse_role(s: &str) -> Result<Role, String> {
-    match s {
-        "planner" => Ok(Role::Planner),
-        "coder" => Ok(Role::Coder),
-        "tester" => Ok(Role::Tester),
-        "reviewer" => Ok(Role::Reviewer),
-        other => Err(format!("unknown role {other}")),
-    }
-}
-
-pub fn role_name(r: Role) -> &'static str {
-    match r {
-        Role::Planner => "planner",
-        Role::Coder => "coder",
-        Role::Tester => "tester",
-        Role::Reviewer => "reviewer",
-    }
+/// Read a roster file: a JSON array of roles (see the spec's Role table).
+/// The roles are the orchestrator's to define; the host only passes them on,
+/// and the core validates them when the task opens.
+pub fn read_roster(file: &Path) -> Result<Vec<Role>, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))
 }
 
 /// Open `task` in the store at `dir` with `brief` as its brief. The profile
 /// set is frozen first; its digest is the task's `profile_digest`. A task
 /// that is already open keeps its frozen file: the core's `AlreadyOpen`
-/// rejection is returned before anything is written.
+/// rejection is returned before anything is written. `roster` is recorded in
+/// the log and cannot change; an invalid one is refused with `BadRoster`.
 pub fn open_task(
     dir: &Path,
     task: &TaskId,
@@ -35,6 +25,24 @@ pub fn open_task(
     brief: &[u8],
     human: &PrincipalId,
     set: &ProfileSet,
+    roster: Vec<Role>,
+) -> Result<Response, String> {
+    open_task_live(dir, task, repo, brief, human, set, roster, 1)
+}
+
+/// As [`open_task`], allowing `max_live_turns` concurrent turns (1 to the
+/// roster size; the core refuses any other value with `BadLiveTurns`). The
+/// moderator launches one harness per live turn.
+#[allow(clippy::too_many_arguments)]
+pub fn open_task_live(
+    dir: &Path,
+    task: &TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &PrincipalId,
+    set: &ProfileSet,
+    roster: Vec<Role>,
+    max_live_turns: u32,
 ) -> Result<Response, String> {
     let master = crate::master::ensure(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
@@ -50,6 +58,7 @@ pub fn open_task(
     let blob = d.store.blob_put(brief);
     let cmd = Command::Open(OpenTask {
         task: task.clone(),
+        roster,
         repo: repo.to_owned(),
         profile_digest,
         budget: Budget {
@@ -62,8 +71,10 @@ pub fn open_task(
         },
         turn_ms: 600_000,
         request_ms: 86_400_000,
+        max_live_turns,
         brief: blob,
         human: human.clone(),
+        policy: SchedulingPolicy::default(),
     });
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
@@ -71,17 +82,17 @@ pub fn open_task(
 pub fn assign(
     dir: &Path,
     task: &TaskId,
-    role: Role,
+    role: &RoleId,
     principal: &PrincipalId,
     vendor: &str,
 ) -> Result<Response, String> {
     let mut d = open_driver(dir, task)?;
     let cmd = Command::Assign {
-        role,
+        role: role.clone(),
         principal: Principal {
             id: principal.clone(),
             kind: PrincipalKind::Agent {
-                role,
+                role: role.clone(),
                 vendor: vendor.to_owned(),
             },
         },

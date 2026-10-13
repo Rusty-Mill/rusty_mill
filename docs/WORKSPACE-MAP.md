@@ -23,7 +23,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_compress | rusty_compress | A sans-IO stream compression and decompression abstraction crate for DEFLATE, Gzip, Zlib, and LZMA | 2 |
 | foundation | rusty_config | rusty_config | A zero-dependency, no_std INI and Key-Value configuration file parser for Rust | 0 |
 | foundation | rusty_confined_fs | rusty_confined_fs | Create directories and open files for writing beneath a root without following a symlink: openat/O_NOFOLLOW walk on Linux, checked fallback elsewhere. | 2 |
-| foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) | 12 |
+| foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) | 13 |
 | foundation | rusty_ct_check | rusty_ct_check | Test-support harness for constant-time evidence: valgrind secret tainting, a dudect-style timing t-test and a disassembly audit script. Detects planted leaks; proves nothing about their absence. Not for production dependencies. | 3 |
 | foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application | 1 |
 | foundation | rusty_dirs | rusty_dirs | Dependency-free per-user config directory lookup: %APPDATA% on Windows, $XDG_CONFIG_HOME or ~/.config elsewhere. | 2 |
@@ -111,7 +111,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 24 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 25 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
@@ -122,16 +122,16 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_mcp_axum | rusty_mcp_axum | Mount a rusty_mcp_server Streamable HTTP handler inside an axum app | 5 |
 | libs | rusty_mcp_client_native | rusty_mcp_client_native | Sovereign MCP client core on rusty_mcp_proto: a sans-IO session for the classic and stateless handshakes, a server-sent-events parser, and a blocking client over a child-process transport | 3 |
 | libs | rusty_mcp_proto | rusty_mcp_proto | Sovereign MCP wire types on rusty_json: JSON-RPC 2.0 envelope, error codes, protocol versions, content, tools and paginated lists, with a hand-written codec and no serde | 2 |
-| libs | rusty_mcp_server | rusty_mcp_server | Sovereign MCP server core on rusty_mcp_proto: a tool registry, a sans-IO connection dispatcher for the classic and stateless handshakes, cancellation and progress, pagination, and a stdio transport | 13 |
-| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 8 |
-| libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 12 |
+| libs | rusty_mcp_server | rusty_mcp_server | Sovereign MCP server core on rusty_mcp_proto: a tool registry, a sans-IO connection dispatcher for the classic and stateless handshakes, cancellation and progress, pagination, and a stdio transport | 15 |
+| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 9 |
+| libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 13 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
 | libs | rusty_rag | rusty_rag | Sovereign AI Retrieval-Augmented Generation (RAG) &amp; Question Answering Engine for Rusty Mill | 0 |
 | libs | rusty_rdp | rusty_rdp | A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format in Rust. | 0 |
-| libs | rusty_request | rusty_request | An async HTTP client -- a Rust take on Python's requests, built on rusty_tokio and rusty_http. | 17 |
+| libs | rusty_request | rusty_request | An async HTTP client -- a Rust take on Python's requests, built on rusty_tokio and rusty_http. | 18 |
 | libs | rusty_routine | rusty_routine | Routines for AG-UI agents: a cron schedule that posts a RunAgentInput on time, disabled after too many consecutive failures | 0 |
-| libs | rusty_sandbox | rusty_sandbox | Fail-closed sandboxed execution for untrusted processes: a filesystem allowlist (Landlock), socket rules (seccomp), hard rlimits and a process-group job, behind an Executor port with a sans-IO spec | 5 |
+| libs | rusty_sandbox | rusty_sandbox | Fail-closed sandboxed execution for untrusted processes: a filesystem allowlist (Landlock), socket rules (seccomp), hard rlimits and a process-group job, behind an Executor port with a sans-IO spec | 6 |
 | libs | rusty_search | rusty-search | Async, pluggable search interface for Rust: swap search engines without changing application code | 0 |
 | libs | rusty_search | rusty-search-algolia | Algolia-backed SearchBackend implementation for rusty_search: a hosted search SaaS | 1 |
 | libs | rusty_search | rusty-search-azure-search | Azure AI Search-backed SearchBackend implementation for rusty_search: a hosted search-as-a-service on Azure | 1 |
@@ -144,7 +144,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_search | rusty-search-solr | Apache Solr-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 1 |
 | libs | rusty_search | rusty-search-sqlite-fts5 | SQLite FTS5-backed SearchBackend implementation for rusty_search: embedded full-text search via SQL virtual tables | 1 |
 | libs | rusty_search | rusty-search-tantivy | Tantivy-backed SearchBackend implementation for rusty_search: embedded full-text search | 1 |
-| libs | rusty_serve | rusty_serve | A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server | 16 |
+| libs | rusty_serve | rusty_serve | A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server | 18 |
 | libs | rusty_sqlite | rusty_sqlite | A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management. | 10 |
 | libs | rusty_stream | rusty_stream | Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio. | 0 |
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
@@ -165,7 +165,7 @@ Families are the current directories immediately below `crates/`.
 | apps | rocket_league | rb_env | A stepping environment over the physics port: reset to a frame, apply controller inputs, step one tick, observe (ADR-0059). | 3 |
 | apps | rocket_league | rb_physics_bullet | Physics core: a Rust port of Bullet3's rigid-body integration and sequential-impulse contact solver (zlib-licensed), scoped to sphere-vs-static-plane for v0 (RB-PHYSICS-001). | 4 |
 | apps | rocket_league | rb_replay_ingest | Replay-file ingestion adapter (RB-VERIFY-001): implements PhysicsStateSource by parsing .replay files via boxcars + subtr-actor. | 1 |
-| apps | rocket_league | rb_rl_game_bridge | The game-facing half of RLBot core, as rusty_bullet needs it: launching Rocket League with RLBot's arguments, finding the controller port, accepting the game's connection, and the tick and packet-distribution rules RLBotCS's BridgeHandler applies. Rocket League's own socket format is behind the GameLink trait and is not implemented here. | 0 |
+| apps | rocket_league | rb_rl_game_bridge | The game-facing half of RLBot core, as rusty_bullet needs it: launching Rocket League with RLBot's arguments, finding the controller port, accepting the game's connection, and the tick and packet-distribution rules RLBotCS's BridgeHandler applies. Rocket League's own socket format is decoded and encoded in game_wire, behind the GameLink trait. | 0 |
 | apps | rocket_league | rb_rlbot_bridge | Plays a rb_env policy in the real game: turns RLBot game packets into the PhysicsFrame observation rb_env speaks and a ControllerInput back into a PlayerInput (RLBot port stage 5, see rlbot/PLAN.md). | 1 |
 | apps | rocket_league | rb_rlbot_client | Blocking RLBot v5 client on std::net: connects to RLBot core, runs the handshake, drives bot and hivemind agents from game packets, and sends match, state-setting and stop messages. Replaces the external rlbot crate (see rlbot/PLAN.md). | 4 |
 | apps | rocket_league | rb_rlbot_core | A simulated RLBot v5 core: speaks the RLBot socket protocol to bots and scripts, but plays the match on rb_env's physics instead of Rocket League, so a bot can be run against rusty_bullet repeatably with no game installed. The rusty_bullet counterpart of what RLBot core plus Bridge.dll do with the real game. | 1 |
@@ -226,6 +226,8 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_meshed | rusty-meshed-schema-registry | Confluent Schema Registry client and compatibility-mode enforcement, ported from meshed.schema_registry. | 3 |
 | apps | rusty_meshed | rusty-meshed-sdk | The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from meshed.sdk and meshed.infrastructure. | 2 |
 | apps | rusty_meshed | rusty-meshed-trace | Reverse-trace and domain-maturity model for rusty_meshed: outcome -&gt; domains -&gt; sources, with a fidelity verdict and a worst-first bottleneck list. | 0 |
+| apps | rusty_mill_board | rusty_mill_board | Mill Board: a capability-gated kanban board for humans and agents, served over MCP and a live web UI. | 1 |
+| apps | rusty_mill_board | rusty_mill_runner | Optional runner for Mill Board: works cards through stages by running a configured agent command per column, sandboxed in a git worktree. | 0 |
 | apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
 | apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. | 1 |
 | apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 4 |

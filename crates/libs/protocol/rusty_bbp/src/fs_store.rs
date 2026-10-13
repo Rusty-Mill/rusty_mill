@@ -20,7 +20,7 @@
 //! another writer's half-written batch, and two writers cannot both pass the
 //! revision check. The lock is never held across a caller's work.
 
-use crate::event::Event;
+use crate::event::{log_schema, schema_supported, Event, LOG_SCHEMA, LOG_SCHEMA_CONCURRENT};
 use crate::ids::*;
 use crate::store::{Store, StoreError};
 use std::collections::HashMap;
@@ -47,6 +47,11 @@ pub enum FsError {
         expected: Sha256,
         actual: Sha256,
     },
+    /// A log written under another schema. `None`: it predates the field.
+    UnsupportedSchema {
+        path: PathBuf,
+        found: Option<u32>,
+    },
 }
 
 impl std::fmt::Display for FsError {
@@ -56,6 +61,12 @@ impl std::fmt::Display for FsError {
             FsError::Corrupt { path, line, detail } => {
                 write!(f, "{}: line {line}: {detail}", path.display())
             }
+            FsError::UnsupportedSchema { path, found } => write!(
+                f,
+                "{}: log schema {} is not supported (this build reads schemas {LOG_SCHEMA} and {LOG_SCHEMA_CONCURRENT}); archive it, it does not replay",
+                path.display(),
+                found.map_or("1 or older".to_string(), |n| n.to_string())
+            ),
             FsError::BlobMismatch { expected, actual } => write!(
                 f,
                 "blob digest mismatch: expected {expected:?}, got {actual:?}"
@@ -74,7 +85,10 @@ impl From<io::Error> for FsError {
 
 impl From<FsError> for StoreError {
     fn from(e: FsError) -> StoreError {
-        StoreError::Backend(e.to_string())
+        match e {
+            FsError::UnsupportedSchema { found, .. } => StoreError::UnsupportedSchema { found },
+            other => StoreError::Backend(other.to_string()),
+        }
     }
 }
 
@@ -91,6 +105,12 @@ pub fn log_path_for(root: &Path, task: &TaskId) -> PathBuf {
 fn task_of(path: &Path, events: &[Event]) -> Result<Option<TaskId>, FsError> {
     match events.first() {
         None => Ok(None),
+        Some(Event::TaskOpened { schema, .. }) if !schema_supported(*schema) => {
+            Err(FsError::UnsupportedSchema {
+                path: path.to_path_buf(),
+                found: log_schema(events),
+            })
+        }
         Some(Event::TaskOpened { task, .. }) => Ok(Some(task.clone())),
         Some(other) => Err(FsError::Corrupt {
             path: path.to_path_buf(),
@@ -213,12 +233,20 @@ fn load_log(path: &Path) -> Result<Vec<Event>, FsError> {
         if line.is_empty() {
             continue;
         }
-        let batch: Vec<Event> =
-            rusty_serde::json::from_str(line).map_err(|e| FsError::Corrupt {
+        let batch: Vec<Event> = rusty_serde::json::from_str(line).map_err(|e| {
+            // A schema-1 `task_opened` has no `schema` field and fails to decode.
+            if i == 0 && line.contains("\"TaskOpened\"") && !line.contains("\"schema\"") {
+                return FsError::UnsupportedSchema {
+                    path: path.to_path_buf(),
+                    found: None,
+                };
+            }
+            FsError::Corrupt {
                 path: path.to_path_buf(),
                 line: i + 1,
                 detail: e.to_string(),
-            })?;
+            }
+        })?;
         events.extend(batch);
     }
     Ok(events)

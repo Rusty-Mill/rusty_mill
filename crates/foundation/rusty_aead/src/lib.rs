@@ -21,6 +21,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+extern crate std;
+
 mod aead;
 mod aes;
 mod chacha20;

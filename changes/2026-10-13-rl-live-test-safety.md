@@ -6,5 +6,6 @@ changelog: Harden RL live-test report scrubbing, owned-process cleanup, watcher 
 
 - **Fixed:** Consume complete Rust Debug names with exact bot labels; retain process handles and fail closed on ambiguous Epic ownership; preserve watcher arguments and verify readiness; report each analyzer exit status.
 - **Fixed:** Fold demolition recordings one bounded frame at a time and reject malformed/truncated data before returning a lifecycle report.
+- **Integration:** Preserve producer-side `--no-names`, dial-based `waiting to speak` readiness, and both required CI jobs when merging later main changes; add synthetic output/argument regressions.
 - **Validation:** Synthetic Rust recordings and a dependency-free mocked PowerShell suite, wired into the required CI gate. No real game, bots, desktop automation or watcher is launched by tests.
 - **Known limitations:** Windows desktop integration is not exercised in cloud validation. Epic delegation through an existing launcher cannot establish ownership and now aborts without killing that game. Historical live findings remain author-reported; login/session causes are unproven.

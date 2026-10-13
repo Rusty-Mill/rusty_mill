@@ -76,7 +76,8 @@ function Invoke-RlAnalyses([string]$Bin, [string]$Dir, [string]$Stamp) {
   $hasIn = (Test-Path $inFile) -and (Get-Item $inFile).Length -gt 0
   $hasOut = (Test-Path $outFile) -and (Get-Item $outFile).Length -gt 0
   if ($hasIn) {
-    $status.analyze = Invoke-RlAnalyzer (Join-Path $Bin 'rb_rl_game_probe.exe') @('--analyze', $inFile) (Join-Path $Dir 'analyze.raw')
+    # Privacy belongs at the producer: newer probe output has no legacy name prefix.
+    $status.analyze = Invoke-RlAnalyzer (Join-Path $Bin 'rb_rl_game_probe.exe') @('--analyze', $inFile, '--no-names') (Join-Path $Dir 'analyze.raw')
     $status.demolitions = Invoke-RlAnalyzer (Join-Path $Bin 'rb_rl_demo_count.exe') @($inFile) (Join-Path $Dir 'demolitions.raw')
     if ($hasOut) { $status.census = Invoke-RlAnalyzer (Join-Path $Bin 'rb_rl_game_probe.exe') @('--census-in', $inFile, '--census-out', $outFile) (Join-Path $Dir 'census.raw') }
   }

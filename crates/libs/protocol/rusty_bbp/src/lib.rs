@@ -12,16 +12,26 @@ pub mod engine;
 pub mod event;
 pub mod fs_store;
 pub mod ids;
+pub mod metrics;
+pub mod policy;
 pub mod record;
+pub mod role;
 pub mod state;
 pub mod store;
+pub mod wake;
 
 pub use codec::{decode_artifact, encode_artifact, SpecFile};
 pub use command::{AgentAction, Code, Command, HumanAction, OpenTask, Rejection, Response};
 pub use engine::{handle, Handled};
-pub use event::Event;
-pub use fs_store::{FsError, FsStore};
+pub use event::{
+    log_schema, schema_for, schema_supported, EscalateReason, Event, TurnEnd, LOG_SCHEMA,
+    LOG_SCHEMA_CONCURRENT,
+};
+pub use fs_store::{log_path_for, FsError, FsStore};
 pub use ids::*;
+pub use policy::SchedulingPolicy;
 pub use record::*;
-pub use state::{Budget, BudgetField, Card, Gate, State, TaskState, TurnKind};
+pub use role::*;
+pub use state::{Budget, BudgetField, Card, Gate, Slice, State, TaskState, Turn, TurnKind};
 pub use store::{Driver, MemStore, Store, StoreError};
+pub use wake::{can_act, wake_set, WakeReason};

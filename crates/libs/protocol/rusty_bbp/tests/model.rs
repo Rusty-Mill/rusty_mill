@@ -8,16 +8,16 @@ use rusty_bbp::*;
 
 #[derive(Clone, Debug)]
 enum Step {
-    Post(Role, u8),
-    Pass(Role),
-    Yield(Role, Role),
-    Read(Role),
+    Post(Who, u8),
+    Pass(Who),
+    Yield(Who, Who),
+    Read(Who),
     Spec,
     Gate,
     Diff,
     Candidate,
     Report(u8),
-    Verdict(Role, bool),
+    Verdict(Who, bool),
     ApprovePlan,
     ApproveMerge,
     RejectToPlanning,
@@ -29,16 +29,16 @@ enum Step {
     Cancel,
     Tick(u32),
     Abort,
-    HumanAsk(Role),
+    HumanAsk(Who),
     Replay,
 }
 
-fn role() -> impl Strategy<Value = Role> {
+fn role() -> impl Strategy<Value = Who> {
     prop_oneof![
-        Just(Role::Planner),
-        Just(Role::Coder),
-        Just(Role::Tester),
-        Just(Role::Reviewer)
+        Just(Who::Planner),
+        Just(Who::Coder),
+        Just(Who::Tester),
+        Just(Who::Reviewer)
     ]
 }
 
@@ -88,7 +88,7 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
     match step {
         Step::Post(r, k) => {
             let d = match k {
-                0 => ask(Role::Coder, "q"),
+                0 => ask(Who::Coder, "q"),
                 1 => Draft::new(MessageKind::Propose, "p").refs(vec![Ref::art(brief)]),
                 2 => Draft::new(MessageKind::Finding, "f")
                     .refs(vec![Ref::art(brief)])
@@ -122,7 +122,7 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
             );
         }
         Step::Spec => {
-            fx.put(Role::Planner, ArtifactPayload::Spec { brief }, b"spec");
+            fx.put(Who::Planner, ArtifactPayload::Spec { brief }, b"spec");
         }
         Step::Gate => {
             let spec = fx
@@ -137,10 +137,10 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
                 .to(Recipient::Human)
                 .refs(vec![Ref::art(spec)]);
             d.gate = true;
-            fx.post(Role::Planner, d);
+            fx.post(Who::Planner, d);
         }
         Step::Diff => {
-            fx.put(Role::Coder, ArtifactPayload::Diff, b"diff");
+            fx.put(Who::Coder, ArtifactPayload::Diff, b"diff");
         }
         Step::Candidate => {
             let diffs: Vec<ArtId> = fx
@@ -151,7 +151,7 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
                 .map(|a| a.id)
                 .collect();
             fx.put(
-                Role::Coder,
+                Who::Coder,
                 ArtifactPayload::Candidate(Candidate {
                     base: "a".repeat(40),
                     diffs,
@@ -255,7 +255,7 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
             fx.tick();
         }
         Step::Abort => {
-            fx.run(&Command::AbortTurn);
+            fx.run(&Command::AbortTurn { turn: None });
         }
         Step::HumanAsk(r) => {
             fx.human(HumanAction::Post(ask(*r, "?")));
@@ -285,20 +285,18 @@ fn check_invariants(fx: &Fx, prev: &TaskState) {
     );
     // Terminal states hold no turn and accept no later writes.
     if st.state.terminal() {
-        assert!(st.turn.is_none());
+        assert!(st.turns.is_empty());
     }
-    // At most one live turn, and it belongs to an assigned role.
-    if let Some(t) = &st.turn {
+    // At most `max_live_turns` live turns, one per role, each belonging to an assigned role.
+    assert!(st.turns.len() <= st.max_live_turns as usize);
+    for (i, t) in st.turns.iter().enumerate() {
         assert!(st.assigned.contains_key(&t.role));
         assert!(t.deadline > Time(0));
+        assert!(st.turns[..i].iter().all(|o| o.role != t.role));
     }
     // No default turn while a request is open.
     if st.pending_request.is_some() {
-        assert!(st
-            .turn
-            .as_ref()
-            .map(|t| t.kind != TurnKind::Default)
-            .unwrap_or(true));
+        assert!(st.turns.iter().all(|t| t.kind != TurnKind::Default));
     }
     // A current candidate always carries the approved spec, or there is none approved.
     if let Some(c) = st.current_candidate() {
@@ -350,6 +348,6 @@ fn every_state_has_an_exit_or_is_terminal() {
     }));
     assert_eq!(fx.st().state, State::Closed);
     for s in State::ALL {
-        let _ = s.default_role();
+        let _ = fx.st().roster.default_holder(s);
     }
 }

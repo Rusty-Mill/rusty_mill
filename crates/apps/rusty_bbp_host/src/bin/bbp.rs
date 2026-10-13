@@ -2,19 +2,22 @@
 //!
 //! ```text
 //! bbp mcp                                   per-turn MCP server; env BBP_DIR, BBP_TASK, BBP_PRINCIPAL, BBP_TURN
-//! bbp open    --dir D --task T --repo R --brief FILE [--human ID]
+//! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N]
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
 //! bbp human   --dir D --task T [--rev N] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
+//! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N]
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
 use rusty_bbp::*;
-use rusty_bbp_host::{admin, args::Args, human, mcp, moderator, profiles, response_json, runner};
+use rusty_bbp_host::{
+    admin, args::Args, human, mcp, moderator, profiles, report, response_json, runner,
+};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,7 +27,7 @@ fn run() -> Result<String, String> {
     let sub = argv
         .first()
         .cloned()
-        .ok_or("usage: bbp <mcp|open|assign|card|tick|human|runner|mod> ...")?;
+        .ok_or("usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|mod> ...")?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
         let err = rusty_sandbox::run_helper(&rest);
@@ -54,7 +57,21 @@ fn run() -> Result<String, String> {
                 Some(file) => profiles::read_file(&PathBuf::from(file))?,
                 None => profiles::ProfileSet::shell("test", "cargo test"),
             };
-            admin::open_task(&dir, &task, a.flag("repo")?, &brief, &human, &set)?
+            let roster = admin::read_roster(&PathBuf::from(a.flag("roster")?))?;
+            let live = match a.flags.get("live-turns") {
+                Some(v) => v.parse().map_err(|_| "--live-turns must be a number")?,
+                None => 1,
+            };
+            admin::open_task_live(
+                &dir,
+                &task,
+                a.flag("repo")?,
+                &brief,
+                &human,
+                &set,
+                roster,
+                live,
+            )?
         }
         "mod" => {
             let confinement = match a.flags.get("confine").map(String::as_str) {
@@ -81,10 +98,14 @@ fn run() -> Result<String, String> {
             };
             let out = moderator::run(&cfg)?;
             return Ok(format!(
-                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{}}}",
-                out.state, out.turns_launched, out.runs
+                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{}}}",
+                out.state,
+                out.turns_launched,
+                out.runs,
+                out.elapsed.as_millis()
             ));
         }
+        "metrics" => return report::json(&dir, &task),
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
             let work = PathBuf::from(a.flag("work")?);
@@ -114,7 +135,7 @@ fn run() -> Result<String, String> {
         "assign" => admin::assign(
             &dir,
             &task,
-            admin::parse_role(a.flag("role")?)?,
+            &RoleId::from(a.flag("role")?),
             &PrincipalId(a.flag("principal")?.to_owned()),
             a.flag("vendor")?,
         )?,

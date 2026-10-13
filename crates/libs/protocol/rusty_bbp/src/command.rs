@@ -2,6 +2,7 @@
 
 use crate::ids::*;
 use crate::record::*;
+use crate::role::Role;
 use crate::state::{Card, Gate, State};
 use rusty_serde::{Deserialize, Serialize};
 
@@ -10,13 +11,17 @@ pub enum Command {
     /// Opens the task. Issued once by the moderator before anything else.
     Open(OpenTask),
     Assign {
-        role: Role,
+        role: RoleId,
         principal: Principal,
     },
     /// Driver-supplied clock tick. Fires deadlines.
     Tick,
-    /// Host ended a turn early (process died, inference timed out).
-    AbortTurn,
+    /// Host ended a turn early (process died, inference timed out). `Some`
+    /// ends that turn only, and does nothing if it is not live; `None` ends
+    /// every live turn.
+    AbortTurn {
+        turn: Option<TurnId>,
+    },
     Agent {
         principal: PrincipalId,
         /// Adapter-injected; `None` for `task_card`.
@@ -40,13 +45,21 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenTask {
     pub task: TaskId,
+    /// The roster for the task. Validated by the core; immutable afterwards.
+    pub roster: Vec<Role>,
     pub repo: String,
     pub profile_digest: Sha256,
     pub budget: crate::state::Budget,
     pub turn_ms: u64,
     pub request_ms: u64,
+    /// At most this many turns are live at once, one per role. 1 is the
+    /// serialized v0.5 behavior; the core accepts 1 to the roster size.
+    pub max_live_turns: u32,
     pub brief: BlobRef,
     pub human: PrincipalId,
+    /// Added after schema 2 shipped: a payload without it opens as `TurnBased`.
+    #[rusty_serde(default)]
+    pub policy: crate::policy::SchedulingPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +195,12 @@ pub enum Code {
     NotOpen,
     AlreadyOpen,
     YieldNested,
+    /// `assign` named a role the task's roster does not contain.
+    UnknownRole,
+    /// `open` carried a roster that failed validation.
+    BadRoster,
+    /// `open` carried a `max_live_turns` outside 1 to the roster size.
+    BadLiveTurns,
     /// Driver boundary: the referenced blob is not in the store.
     BlobMissing,
     /// Driver boundary: the claimed payload is not what the stored bytes decode to.

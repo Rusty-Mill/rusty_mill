@@ -1,0 +1,30 @@
+ERRATUM (2026-10-10): the timing collector selected tests by substring
+=====================================================================
+
+What was wrong. `timing_series.py` ran each timing test as `<executable> --ignored --nocapture <name>`.
+libtest treats a bare name as a SUBSTRING filter, so a spec could run more than one test, in parallel, and the
+collector recorded the first statistic printed, which was not necessarily the named test's.
+
+Which records are affected. Checked on 2026-10-10 by listing every test in every timing executable and matching
+every spec in `collect.sh` against the list: exactly one spec in the specs that existed on 2026-10-09 matched more
+than one test. `rusty_pk|null_calibration_identical_classes`, labelled "A/A  X25519 (baseline)", also matched
+`ecdh_null_calibration_identical_classes` and `ecdh_p384_null_calibration_identical_classes`, which did not exist
+before the ECDH work. Therefore:
+- `EVIDENCE-2026-10-09-ecdh-run1-FAILED.txt` and `EVIDENCE-2026-10-09-ecdh-run2.txt`: the "A/A  X25519 (baseline)"
+  row (and only that row) cannot be attributed to X25519. Three timing tests ran at once for it, so its samples were
+  also taken under extra load. It most likely recorded the ECDH P-384 A/A statistic, which finishes first. A
+  re-listing of the executable on 2026-10-10 reproduced this: the X25519 A/A filter printed P-384's value first.
+- Consequence for run 1's list of alarms: the "X25519 A/A 1" alarm (|t| 4.54) is of unknown origin. It is a no-leak
+  calibration alarm either way, but not necessarily X25519's.
+- Consequence for verdicts: the two x25519 leak tests in each record were judged against that row's alarm count
+  (allowance 2 x baseline + 1, so at least 1). Both had 0 alarms in both records, so their verdicts hold under any
+  baseline. Every other row in both records came from a spec that matched exactly one test and is unaffected.
+- `EVIDENCE-2026-10-09.txt` (before the ECDH tests existed) is unaffected: its X25519 A/A spec matched one test.
+- `EVIDENCE-2026-10-10-ecdh-p256-quiet-rerun.txt` is unaffected: both of its specs matched one test.
+
+Fix. `observe()` now passes `--exact`; `test_timing_series.py` has a regression test (a fake executable that
+implements libtest's substring-versus-exact rule) which fails without the flag. The AES-GCM timing tests added on
+2026-10-10 (`aes_null_calibration_identical_classes` and others) would have collided with the ChaCha specs of the
+same crate had the fix not been made first.
+
+The raw records above are left as produced; this note is the correction.

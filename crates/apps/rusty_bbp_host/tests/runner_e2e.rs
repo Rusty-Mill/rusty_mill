@@ -8,6 +8,8 @@
 //! reported as `error` before anything executes.
 #![cfg(unix)]
 
+mod common;
+use common::Who;
 use rusty_bbp::*;
 use rusty_bbp_host::profiles::ProfileSet;
 use rusty_bbp_host::runner::{self, Confinement, Unconfined};
@@ -62,11 +64,11 @@ struct Task {
 }
 
 impl Task {
-    fn agent(&self, role: Role, action: AgentAction) -> Response {
+    fn agent(&self, role: Who, action: AgentAction) -> Response {
         let mut d = open_driver(&self.dir, &self.id).expect("driver");
-        let turn = d.state.turn.as_ref().expect("turn");
-        assert_eq!(turn.role, role, "{role:?} holds the turn");
-        let principal = PrincipalId(admin::role_name(role).into());
+        let turn = d.state.turn().expect("turn");
+        assert_eq!(turn.role, role.id(), "{role:?} holds the turn");
+        let principal = PrincipalId(role.name().into());
         let cmd = Command::Agent {
             token: Some(d.state.token_for(&principal, turn.id)),
             principal,
@@ -76,7 +78,7 @@ impl Task {
         d.dispatch(&cmd, now()).expect("dispatch")
     }
 
-    fn put(&self, role: Role, payload: ArtifactPayload, body: &[u8]) -> ArtId {
+    fn put(&self, role: Who, payload: ArtifactPayload, body: &[u8]) -> ArtId {
         let bytes = encode_artifact(&payload, body).expect("encode");
         let mut d = open_driver(&self.dir, &self.id).expect("driver");
         let blob = d.store.blob_put(&bytes);
@@ -116,26 +118,27 @@ fn reach_build_with(dir: &Path, set: &ProfileSet) -> Task {
         b"Make the flag say ok.",
         &PrincipalId("human".into()),
         set,
+        common::roster(),
     )
     .expect("open");
-    for role in Role::ALL {
+    for role in Who::ALL {
         admin::assign(
             dir,
             &t.id,
-            role,
-            &PrincipalId(admin::role_name(role).into()),
+            &role.id(),
+            &PrincipalId(role.name().into()),
             "v",
         )
         .expect("assign");
     }
     admin::tick(dir, &t.id).expect("tick");
     let brief = t.state().brief.expect("brief");
-    let spec = t.put(Role::Planner, ArtifactPayload::Spec { brief }, b"# Spec");
+    let spec = t.put(Who::Planner, ArtifactPayload::Spec { brief }, b"# Spec");
     let mut gate = Draft::new(MessageKind::RequestDecision, "Approve?")
         .to(Recipient::Human)
         .refs(vec![Ref::art(spec)]);
     gate.gate = true;
-    t.agent(Role::Planner, AgentAction::Post(gate));
+    t.agent(Who::Planner, AgentAction::Post(gate));
     human::perform(dir, &t.id, "approve-plan", &[&spec.0.to_string()], None).expect("approve");
     assert_eq!(t.state().state, State::Build);
     t
@@ -144,10 +147,10 @@ fn reach_build_with(dir: &Path, set: &ProfileSet) -> Task {
 fn submit_candidate(t: &Task, base: &str, diffs: &[Vec<u8>]) {
     let ids: Vec<ArtId> = diffs
         .iter()
-        .map(|d| t.put(Role::Coder, ArtifactPayload::Diff, d))
+        .map(|d| t.put(Who::Coder, ArtifactPayload::Diff, d))
         .collect();
     t.put(
-        Role::Coder,
+        Who::Coder,
         ArtifactPayload::Candidate(Candidate {
             base: base.to_owned(),
             diffs: ids,
@@ -201,7 +204,7 @@ fn passing_candidate_yields_a_passed_report_and_a_tester_turn() {
     assert!(log.contains("=== test"), "{log}");
     let st = t.state();
     assert_eq!(st.state, State::Test);
-    assert_eq!(st.turn.as_ref().map(|t| t.role), Some(Role::Tester));
+    assert_eq!(st.turn().map(|t| t.role.clone()), Some(Who::Tester.id()));
     // A second invocation finds nothing to serve.
     let again = runner::run_once(
         &dir,
@@ -295,6 +298,7 @@ fn reopening_a_task_keeps_its_frozen_profile_set() {
         b"again",
         &PrincipalId("human".into()),
         &ProfileSet::shell("test", "false"),
+        common::roster(),
     )
     .expect("call");
     assert!(
@@ -335,6 +339,7 @@ fn empty_profile_set_is_refused_at_open() {
         b"brief",
         &PrincipalId("human".into()),
         &set,
+        common::roster(),
     );
     assert!(r.is_err_and(|e| e.contains("no profiles")));
     let _ = std::fs::remove_dir_all(&dir);
@@ -461,7 +466,7 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
     let (rep, _) = report_of(&t);
     assert_eq!(rep.status, RunStatus::Failed, "the environment is broken");
     let st = t.state();
-    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    assert_eq!(st.turn().map(|x| x.role.clone()), Some(Who::Tester.id()));
     let cand = st.candidate.expect("candidate");
     let old_run = st.selected_run().expect("run").id;
     let log = st.selected_run().expect("run").log.expect("log");
@@ -473,12 +478,12 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
     )
     .to(Recipient::Human)
     .refs(vec![Ref::art(log)]);
-    let req = match t.agent(Role::Tester, AgentAction::Post(ask)) {
+    let req = match t.agent(Who::Tester, AgentAction::Post(ask)) {
         Response::Posted(m) => m,
         other => panic!("expected Posted, got {other:?}"),
     };
     let st = t.state();
-    assert!(st.turn.is_none(), "the request ended the turn");
+    assert!(st.turn().is_none(), "the request ended the turn");
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
     assert_eq!(st.iteration, 0, "no iteration spent");
 
@@ -513,7 +518,7 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
     let (rep, _) = report_of(&t);
     assert_eq!(rep.status, RunStatus::Passed);
     assert!(
-        t.state().turn.is_none(),
+        t.state().turn().is_none(),
         "a fresh report grants nobody while the request is pending"
     );
 
@@ -529,7 +534,7 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
     assert!(matches!(r, Response::Posted(_)), "{r:?}");
     let st = t.state();
     assert!(st.pending_request.is_none());
-    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    assert_eq!(st.turn().map(|x| x.role.clone()), Some(Who::Tester.id()));
     let run = st.selected_run().expect("run");
     let report = run.report.expect("report");
     let approve = Draft {
@@ -549,7 +554,7 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
         gate: false,
     };
     assert!(matches!(
-        t.agent(Role::Tester, AgentAction::Post(approve)),
+        t.agent(Who::Tester, AgentAction::Post(approve)),
         Response::Posted(_)
     ));
     assert_eq!(t.state().state, State::Review);
@@ -558,7 +563,7 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
 
 /// A request to the human referencing what it is about: the selected run's
 /// log when there is one, else the approved spec.
-fn request_human(t: &Task, role: Role, body: &str) -> MsgId {
+fn request_human(t: &Task, role: Who, body: &str) -> MsgId {
     let st = t.state();
     let about = st
         .selected_run()
@@ -621,7 +626,7 @@ fn tester_revises(t: &Task) {
         gate: false,
     };
     assert!(matches!(
-        t.agent(Role::Tester, AgentAction::Post(revise)),
+        t.agent(Who::Tester, AgentAction::Post(revise)),
         Response::Posted(_)
     ));
     assert_eq!(t.state().state, State::Build);
@@ -667,16 +672,16 @@ fn a_coder_request_is_settled_by_an_answer_and_the_coder_resubmits() {
     assert_eq!(report_of(&t).0.status, RunStatus::Failed);
     tester_revises(&t);
     let first = t.state().candidate.expect("candidate");
-    let req = request_human(&t, Role::Coder, "the sandbox cannot run rustc");
+    let req = request_human(&t, Who::Coder, "the sandbox cannot run rustc");
     let st = t.state();
-    assert!(st.turn.is_none());
+    assert!(st.turn().is_none());
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
     assert_eq!(st.state, State::Build);
 
     human_answer(&t, req, "toolchain readable now; resubmit your candidate");
     let st = t.state();
     assert!(st.pending_request.is_none());
-    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Coder));
+    assert_eq!(st.turn().map(|x| x.role.clone()), Some(Who::Coder.id()));
 
     // Fresh clone: the change is gone until the stored diff is reapplied.
     let clone = dir.join("coder-clone");
@@ -734,7 +739,7 @@ fn an_unrelated_answer_or_decision_settles_nothing() {
         Confinement::Unconfined,
     )
     .expect("run");
-    let req = request_human(&t, Role::Tester, "rustc cannot run");
+    let req = request_human(&t, Who::Tester, "rustc cannot run");
     let gate = t
         .state()
         .messages
@@ -767,13 +772,16 @@ fn an_unrelated_answer_or_decision_settles_nothing() {
     let st = t.state();
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
     assert!(
-        st.turn.is_none(),
+        st.turn().is_none(),
         "nobody is granted by an unrelated settlement"
     );
     assert_eq!(st.state, State::Test);
 
     human_answer(&t, req, "fixed");
-    assert_eq!(t.state().turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    assert_eq!(
+        t.state().turn().map(|x| x.role.clone()),
+        Some(Who::Tester.id())
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -801,7 +809,7 @@ fn a_failed_rerun_keeps_the_request_open_until_a_run_passes() {
     run_runner();
     assert_eq!(report_of(&t).0.status, RunStatus::Failed);
     let cand = t.state().candidate.expect("candidate");
-    let req = request_human(&t, Role::Tester, "rustc cannot run");
+    let req = request_human(&t, Who::Tester, "rustc cannot run");
 
     // The human reruns without fixing anything: failed again, still pending.
     human_rerun(&t, cand);
@@ -809,7 +817,7 @@ fn a_failed_rerun_keeps_the_request_open_until_a_run_passes() {
     let st = t.state();
     assert_eq!(report_of(&t).0.status, RunStatus::Failed);
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
-    assert!(st.turn.is_none(), "a failed rerun grants nobody");
+    assert!(st.turn().is_none(), "a failed rerun grants nobody");
     assert_eq!(st.iteration, 0);
 
     // A real fix, another rerun, then settlement.
@@ -817,9 +825,12 @@ fn a_failed_rerun_keeps_the_request_open_until_a_run_passes() {
     human_rerun(&t, cand);
     run_runner();
     assert_eq!(report_of(&t).0.status, RunStatus::Passed);
-    assert!(t.state().turn.is_none());
+    assert!(t.state().turn().is_none());
     human_answer(&t, req, "fixed, rerun passed");
-    assert_eq!(t.state().turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    assert_eq!(
+        t.state().turn().map(|x| x.role.clone()),
+        Some(Who::Tester.id())
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -841,7 +852,7 @@ fn a_rejected_request_regrants_the_tester_who_may_ask_again() {
         Confinement::Unconfined,
     )
     .expect("run");
-    let req = request_human(&t, Role::Tester, "please look at the sandbox");
+    let req = request_human(&t, Who::Tester, "please look at the sandbox");
     let r = human::perform(
         &t.dir,
         &t.id,
@@ -860,11 +871,11 @@ fn a_rejected_request_regrants_the_tester_who_may_ask_again() {
     assert!(matches!(r, Response::Posted(_)), "{r:?}");
     let st = t.state();
     assert!(st.pending_request.is_none());
-    assert_eq!(st.turn.as_ref().map(|x| x.role), Some(Role::Tester));
-    let again = request_human(&t, Role::Tester, "then the log is wrong: see art:5");
+    assert_eq!(st.turn().map(|x| x.role.clone()), Some(Who::Tester.id()));
+    let again = request_human(&t, Who::Tester, "then the log is wrong: see art:5");
     let st = t.state();
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(again));
-    assert!(st.turn.is_none());
+    assert!(st.turn().is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -905,7 +916,7 @@ fn an_error_rerun_escalates_and_resume_then_settlement_recovers() {
     }
     assert_eq!(rep.status, RunStatus::Failed, "{log}");
     let cand = t.state().candidate.expect("candidate");
-    let req = request_human(&t, Role::Tester, "rustc cannot run");
+    let req = request_human(&t, Who::Tester, "rustc cannot run");
 
     // A "fix" that makes the run hang: the rerun times out, error, escalated.
     std::fs::write(&hang, b"").expect("hang");
@@ -916,7 +927,7 @@ fn an_error_rerun_escalates_and_resume_then_settlement_recovers() {
     let st = t.state();
     assert_eq!(st.state, State::Escalated);
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
-    assert!(st.turn.is_none());
+    assert!(st.turn().is_none());
 
     // The real fix; resume into test starts a fresh run; settle after it passes.
     std::fs::remove_file(&hang).expect("unhang");
@@ -931,9 +942,12 @@ fn an_error_rerun_escalates_and_resume_then_settlement_recovers() {
     );
     run_runner();
     assert_eq!(report_of(&t).0.status, RunStatus::Passed);
-    assert!(t.state().turn.is_none(), "still pending");
+    assert!(t.state().turn().is_none(), "still pending");
     human_answer(&t, req, "fixed, rerun passed");
-    assert_eq!(t.state().turn.as_ref().map(|x| x.role), Some(Role::Tester));
+    assert_eq!(
+        t.state().turn().map(|x| x.role.clone()),
+        Some(Who::Tester.id())
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -127,6 +127,14 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   keep-alive timeout to make the race rare. `ClientBuilder::no_pool()`
   reverts to a fresh connection with `Connection: close` on every
   request.
+- **Response body limit**: a buffered response is read up to 1 MiB by
+  default (`rusty_http`'s `DEFAULT_MAX_BODY_LEN`), and a larger one fails
+  with `InvalidResponse` ("... exceeded the maximum allowed size"); a
+  `Content-Length` over the limit fails before any of it is read.
+  `ClientBuilder::max_response_body_len(n)` changes the limit for one client
+  (raise it only when you know the responses are big; the limit is what
+  stops a bad server making the client buffer without bound). It does not
+  apply to `send_streaming`, whose caller reads and bounds the body.
 - **JSON**: `rusty_json::Value` (re-exported as `rusty_request::Json`), used
   with its `serde`-free feature set -- no `serde`. No derive-based mapping
   to arbitrary Rust structs; build/read `Value`s directly.

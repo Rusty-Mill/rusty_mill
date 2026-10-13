@@ -38,6 +38,7 @@ macro_rules! int_id {
 str_id!(TaskId);
 str_id!(PrincipalId);
 str_id!(OpId);
+str_id!(RoleId);
 
 int_id!(MsgId, "msg:");
 int_id!(ArtId, "art:");

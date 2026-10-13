@@ -117,3 +117,216 @@ fn null_calibration_identical_classes() {
     .expect("enough samples");
     eprintln!("A/A seal: |t| = {t:.2}");
 }
+
+// ---- AES-GCM (bitsliced AES, table-free GHASH). 50,000 samples each; the AES A/A baseline below
+// must come before these in a series, because the judging script reads each leak test against the
+// most recent A/A of its crate.
+
+use rusty_aead::{Aes128Gcm, Aes256Gcm};
+
+const AES_SAMPLES: usize = 50_000;
+
+fn other_key<const N: usize>() -> [u8; N] {
+    let mut k = [0u8; N];
+    for (i, b) in k.iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+    }
+    k
+}
+
+/// A/A calibration for AES-GCM: identical work in both classes.
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn aes_null_calibration_identical_classes() {
+    let cipher = Aes128Gcm::new(&[7u8; 16]);
+    let buf = RefCell::new([0u8; 256]);
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        5,
+        |_| buf.borrow_mut().fill(0x5a),
+        || {
+            cipher
+                .seal_in_place(&[1; 12], b"", black_box(&mut *buf.borrow_mut()))
+                .unwrap()
+        },
+    )
+    .expect("enough samples");
+    eprintln!("A/A AES-128-GCM seal: |t| = {t:.2}");
+}
+
+/// The key is rewritten in `prepare` (untimed) into one buffer both classes share; the timed
+/// closure includes key expansion, so the key schedule and the hash-key derivation are covered.
+#[test]
+#[ignore = "timing-sensitive; scheduled job only"]
+fn aes128_key_classes_not_distinguishable() {
+    let fixed = black_box([0u8; 16]);
+    let other = black_box(other_key::<16>());
+    let key = RefCell::new([0u8; 16]);
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        6,
+        |class| {
+            key.borrow_mut()
+                .copy_from_slice(if class { &other } else { &fixed })
+        },
+        || {
+            let mut buf = [0x55u8; 256];
+            Aes128Gcm::new(black_box(&key.borrow()))
+                .seal_in_place(&[0; 12], b"aad", &mut buf)
+                .unwrap()
+        },
+    );
+    check("aes-128-gcm seal: fixed key vs other key", t);
+}
+
+#[test]
+#[ignore = "timing-sensitive; scheduled job only"]
+fn aes256_key_classes_not_distinguishable() {
+    let fixed = black_box([0u8; 32]);
+    let other = black_box(other_key::<32>());
+    let key = RefCell::new([0u8; 32]);
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        7,
+        |class| {
+            key.borrow_mut()
+                .copy_from_slice(if class { &other } else { &fixed })
+        },
+        || {
+            let mut buf = [0x55u8; 256];
+            Aes256Gcm::new(black_box(&key.borrow()))
+                .seal_in_place(&[0; 12], b"aad", &mut buf)
+                .unwrap()
+        },
+    );
+    check("aes-256-gcm seal: fixed key vs other key", t);
+}
+
+#[test]
+#[ignore = "timing-sensitive; scheduled job only"]
+fn aes_plaintext_classes_not_distinguishable() {
+    let cipher = Aes128Gcm::new(&[7u8; 16]);
+    let buf = RefCell::new([0u8; 256]);
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        8,
+        |class| buf.borrow_mut().fill(if class { 0xff } else { 0 }),
+        || {
+            cipher
+                .seal_in_place(&[1; 12], b"", black_box(&mut *buf.borrow_mut()))
+                .unwrap()
+        },
+    );
+    check("aes-128-gcm seal: all-zero vs all-ones plaintext", t);
+}
+
+#[test]
+#[ignore = "timing-sensitive; scheduled job only"]
+fn aes_tag_mismatch_position_not_distinguishable() {
+    let cipher = Aes128Gcm::new(&[7u8; 16]);
+    let mut sealed = [0x11u8; 256];
+    let tag = cipher.seal_in_place(&[1; 12], b"", &mut sealed).unwrap();
+    // Both classes are rejected, so decryption is skipped in both; they differ only in where the
+    // wrong byte sits.
+    let (bad, copy) = (RefCell::new(tag), RefCell::new(sealed));
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        9,
+        |class| {
+            let mut b = bad.borrow_mut();
+            *b = tag;
+            b[if class { 15 } else { 0 }] ^= 1;
+            *copy.borrow_mut() = sealed;
+        },
+        || {
+            let tag = *bad.borrow();
+            cipher
+                .open_in_place(
+                    &[1; 12],
+                    b"",
+                    black_box(&mut *copy.borrow_mut()),
+                    black_box(&tag),
+                )
+                .is_err()
+        },
+    );
+    check("aes-128-gcm open: first-byte vs last-byte tag mismatch", t);
+}
+
+// ---- Matched A/A controls. A leak test is judged against the A/A of the SAME workload, so the
+// constructor-inclusive key tests and the invalid-tag open test each get their own.
+
+/// A/A for `aes128_key_classes_not_distinguishable`: same constructor-inclusive seal, same key in
+/// both classes.
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn aes128_ctor_null_calibration_identical_classes() {
+    let key = RefCell::new([0u8; 16]);
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        10,
+        |_| key.borrow_mut().copy_from_slice(&other_key::<16>()),
+        || {
+            let mut buf = [0x55u8; 256];
+            Aes128Gcm::new(black_box(&key.borrow()))
+                .seal_in_place(&[0; 12], b"aad", &mut buf)
+                .unwrap()
+        },
+    )
+    .expect("enough samples");
+    eprintln!("A/A AES-128-GCM constructor+seal: |t| = {t:.2}");
+}
+
+/// A/A for `aes256_key_classes_not_distinguishable`.
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn aes256_ctor_null_calibration_identical_classes() {
+    let key = RefCell::new([0u8; 32]);
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        11,
+        |_| key.borrow_mut().copy_from_slice(&other_key::<32>()),
+        || {
+            let mut buf = [0x55u8; 256];
+            Aes256Gcm::new(black_box(&key.borrow()))
+                .seal_in_place(&[0; 12], b"aad", &mut buf)
+                .unwrap()
+        },
+    )
+    .expect("enough samples");
+    eprintln!("A/A AES-256-GCM constructor+seal: |t| = {t:.2}");
+}
+
+/// A/A for `aes_tag_mismatch_position_not_distinguishable`: the same invalid-tag open, the wrong
+/// byte at the same position in both classes.
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn aes_open_null_calibration_identical_classes() {
+    let cipher = Aes128Gcm::new(&[7u8; 16]);
+    let mut sealed = [0x11u8; 256];
+    let tag = cipher.seal_in_place(&[1; 12], b"", &mut sealed).unwrap();
+    let (bad, copy) = (RefCell::new(tag), RefCell::new(sealed));
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        12,
+        |_| {
+            let mut b = bad.borrow_mut();
+            *b = tag;
+            b[7] ^= 1;
+            *copy.borrow_mut() = sealed;
+        },
+        || {
+            let tag = *bad.borrow();
+            cipher
+                .open_in_place(
+                    &[1; 12],
+                    b"",
+                    black_box(&mut *copy.borrow_mut()),
+                    black_box(&tag),
+                )
+                .is_err()
+        },
+    )
+    .expect("enough samples");
+    eprintln!("A/A AES-128-GCM open (invalid tag): |t| = {t:.2}");
+}

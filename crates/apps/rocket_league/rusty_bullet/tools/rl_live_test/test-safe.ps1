@@ -20,6 +20,12 @@ foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1') {
   $null = [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
   Assert ($errors.Count -eq 0) "parse failed: $($file.Name): $errors"
 }
+$sessionTokens = $null; $sessionErrors = $null
+$libraryAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'rl-lib.ps1'), [ref]$sessionTokens, [ref]$sessionErrors)
+$session = $libraryAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Start-RlSession' }, $true)
+$gates = @($session.FindAll({ param($node) $node -is [Management.Automation.Language.BinaryExpressionAst] -and $node.Operator -eq 'Imatch' }, $true))
+Assert (@($gates | Where-Object { $_.Right.Extent.Text -eq "'waiting to speak'" }).Count -eq 1) 'session must wait for a dial'
+Assert (@($gates | Where-Object { $_.Right.Extent.Text -eq "'serving bots on'" }).Count -eq 0) 'bound bot port is not game readiness'
 foreach ($name in @('plain', 'quote\"private suffix', 'back\\slash', 'rusty_bullet/human', 'rusty_bullet/chaser_bot_extra', 'rusty_bullet/chaser_bot_b\"suffix', 'unicode\u{7f}', 'trailing\\')) {
   Assert ((Scrub ('PlayerSpawn name "' + $name + '" team 0')) -ceq 'PlayerSpawn name "human" team 0') "name leaked: $name"
   Assert ((Scrub ('life 12 "' + $name + '" ended')) -ceq 'life 12 "human" ended') "life leaked: $name"
@@ -120,7 +126,13 @@ function git { 'synthetic-revision' }
   $script:calls = @()
   function Invoke-RlAnalyzer($Exe, $Arguments, $Output) {
     $script:calls += ,@($Exe, $Arguments, $Output)
-    if ($Arguments[0] -eq '--analyze') { return 'FAILED (exit 9)' }
+    if ($Arguments[0] -eq '--analyze') {
+      Assert ($Arguments.Count -eq 3 -and $Arguments[2] -ceq '--no-names') 'analysis must suppress names at the producer'
+      # Model #653's output, whose optional quoted name has no legacy name prefix.
+      $line = if ($Arguments -contains '--no-names') { 'PlayerSpawn: actor 38 command_id None team 0' } else { 'PlayerSpawn: actor 38 command_id None "SYNTHETIC_PRIVATE_NAME" team 0' }
+      Set-Content $Output $line
+      return 'FAILED (exit 9)'
+    }
     return 'passed'
   }
   $status = Invoke-RlAnalyses $dir $dir 'test'
@@ -128,5 +140,7 @@ function git { 'synthetic-revision' }
   Set-Content (Join-Path $dir 'test-out.bin') 'synthetic'
   $status = Invoke-RlAnalyses $dir $dir 'test'
   Assert ($status.census -eq 'passed' -and $calls.Count -eq 5) 'later stages did not run after failure'
+  $analysisOutput = Get-Content (Join-Path $dir 'analyze.raw') | ForEach-Object { Scrub $_ }
+  Assert ($analysisOutput -ceq 'PlayerSpawn: actor 38 command_id None team 0') 'failed analyzer output must remain anonymous'
 } finally { Remove-Item -Recurse -Force $dir }
 Write-Host 'rl_live_test safe regression tests passed (no game, desktop or watcher launched)'

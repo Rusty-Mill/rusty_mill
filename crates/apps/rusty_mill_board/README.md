@@ -1,0 +1,56 @@
+# rusty_mill_board
+
+Mill Board: a kanban board that humans and agents share, over MCP and a web UI.
+The board is the only state; it enforces who may move a card where.
+
+```text
+rusty_mill_board --store board.mmap                                  # MCP over stdio
+rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
+# UI: http://127.0.0.1:8787/#token=S   API: POST /api/<op>   MCP: /mcp
+```
+
+- **Columns:** backlog, ready, building, qa, review, done, blocked.
+- **Rules:** each move needs a capability (triage, build, qa, review, merge); leaving
+  building/qa/review needs your claim. A role is a set of capabilities; roles are
+  defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
+  trusted as given: this is a workflow guard between cooperating agents, and the
+  bearer token is the authentication.
+- **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_events`, `card_take`, `card_get`, `card_add`,
+  `card_move`, `card_claim`, `card_release`, `card_update`, `card_comment`. The web API
+  exposes the same table, so the two cannot drift.
+- **Models connect themselves.** Run one HTTP server with `--identities FILE` (a token per model, bound to an
+  actor and role) and register `/mcp` in each model's own client; a model then pulls work with `card_take`,
+  comments, and moves it on, using its own subscription session. See
+  [`docs/connecting-models.md`](docs/connecting-models.md) for setup and the paste-in working loop.
+- **Storage:** `rusty_multimodal_db_engine` (one durable record per commit holds the event and the card after it,
+  so a commit is atomic; state is rebuilt from those records at open), or in memory when `--store` is omitted.
+  Event ids are UUIDv7 assigned inside the commit, so id order is commit order and doubles as the polling
+  cursor (`board_events` returns a `cursor`; `tail: true` starts a watcher at the current end).
+  A failed append is *unknown*, not "nothing happened" (the engine can fail after the record is durable): the store
+  then refuses writes until reopened, and a reopen replays the log and shows what really committed.
+
+- **GitHub sync** (`--github-repo owner/name`, token in `GITHUB_TOKEN`, every
+  `--github-secs`, default 60): stateless reconcile between cards and issues.
+  The board owns state: the column is one `board:<column>` label and a Done card
+  closes its issue; other labels are kept. Title and body are merged three ways against the text both sides last agreed on (a hash on the card),
+  not by timestamps: one side changed it, that side wins; both did, the board wins and it is reported. An issue
+  made from a card carries a hidden `<!-- mill-board:card=… -->` marker, so a run interrupted before the link
+  was saved adopts that issue instead of creating a duplicate; the marker also records the text the issue was created
+  with, so an edit made on GitHub in that window is merged, not overwritten. Only the marker is stripped from a pulled
+  body. A pull is applied only if the card is unchanged since the run read it; otherwise it waits for the next run.
+  Unlinked open issues become Backlog cards (closed ones are not imported). An issue
+  closed on GitHub while its card is not Done is logged as drift, not reopened or
+  moved. The sync actor holds no capabilities, so it cannot move cards. Needs
+  issues read/write on the repo; `--github-api` points at GitHub Enterprise Server.
+
+UI: the card dialog is kept in step with the board without touching unsaved text; a change to the text under an
+unsaved edit raises a conflict (keep mine / take theirs), and `card_update` takes the `rev` you last saw and refuses a
+stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
+
+Layout: `domain` (pure) / `store` + `mmdb` (port and adapters) / `board` (service) /
+`api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +
+`github` (adapter).
+
+Optional runner: [`runner/`](runner/README.md) (`mill-runner`) works cards through stages by running
+a sandboxed command per column; the board does not depend on it. A BBP conductor is designed but
+paused (ADR-0001).

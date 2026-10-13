@@ -17,15 +17,14 @@
 # Corpus: x509-limbo commit 554528a9b0c0d95e071f55de018326f0b65a8364, limbo.json sha256
 # 611e337b9fb477b927bae65434650692cb9d2070ff5b05f975d0403510acd4de (limbo_differential.sh).
 compared 9777
-outcomes-sha256 7ea3c71b90bd3c4b80febf9cafaec03bf682c71ee2c0236b2ed6b063fc4fced9
+outcomes-sha256 864951f4d96947bad912b12dd9b738fa0f34a497abcd2334d8900ee10c4a23b4
 skipped 10 client validation
 skipped 6 custom key usage requirement
 skipped 6 max chain depth configured
 skipped 1 no peer name
 skipped 2 unparsable validation time
-outcome limbo-fail ours-reject webpki-reject 8790
+outcome limbo-fail ours-reject webpki-reject 8792
 outcome limbo-fail ours-reject webpki-accept 4
-outcome limbo-fail ours-accept webpki-reject 2
 outcome limbo-fail ours-accept webpki-accept 57
 outcome limbo-ok ours-reject webpki-reject 5
 outcome limbo-ok ours-reject webpki-accept 1
@@ -88,8 +87,6 @@ both-accept limbo-expects-fail webpki::nc::intermediate-permitted-excluded-subtr
 both-accept limbo-expects-fail webpki::san::public-suffix-multi-label-wildcard-san
 both-accept limbo-expects-fail webpki::san::public-suffix-private-namespace-wildcard-san
 both-accept limbo-expects-fail webpki::san::san-critical-with-nonempty-subject
-looser limbo-expects-fail pathological::nc-dos-1
-looser limbo-expects-fail pathological::nc-dos-2
 looser limbo-expects-ok pathlen::self-issued-certs-pathlen
 looser limbo-expects-ok rfc5280::nc::permitted-self-issued
 stricter limbo-expects-fail rfc5280::nc::invalid-dnsname-leading-period

@@ -71,6 +71,13 @@ const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(300);
 /// cheap amplification attack through a server that is trying to be helpful.
 const DEFAULT_MIN_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
 
+/// The most bytes read from a JWKS endpoint. A real provider's key set can be
+/// large: Bot Framework's lists 260 keys in about 910 KB, close to
+/// `rusty_request`'s 1 MiB default. The document is parsed and held in
+/// memory, so this leaves room to grow (about 4.6 times that) without being
+/// unbounded; a larger one fails the fetch ("JWKS fetch failed").
+const MAX_JWKS_BODY_LEN: u64 = 4 << 20;
+
 /// Leeway is clamped to this many seconds, well inside the range the claim
 /// arithmetic can add to a timestamp without overflowing.
 const MAX_LEEWAY_SECS: u64 = i32::MAX as u64;
@@ -203,6 +210,7 @@ impl JwtValidatorBuilder {
             .max_redirects(10)
             .no_cookie_store()
             .no_pool()
+            .max_response_body_len(MAX_JWKS_BODY_LEN)
             .build();
 
         Ok(JwtValidator {

@@ -1,26 +1,33 @@
-//! AES-128 and AES-256 encryption (FIPS 197), bitsliced.
+//! AES-128 and AES-256 encryption (FIPS 197), bitsliced, eight blocks per batch.
 //!
 //! No table is indexed by key or data and nothing branches on either: the S-box is the
-//! Boyar-Peralta boolean circuit (113 gates) applied to bit planes, and the state holds 64
-//! blocks at once, one bit plane per `u64` (bit `l` of plane `p` is bit `p % 8` of byte
-//! `p / 8` of block `l`). Encryption only; GCM never needs the inverse cipher.
+//! Boyar-Peralta boolean circuit (113 gates) applied to bit planes. The state is eight `u64`
+//! planes; bit `16 * b + p` of plane `k` is bit `k` of byte `p` of block `b` (`p` is the
+//! column-major byte position, `4 * column + row`). One S-box circuit therefore handles all
+//! 64 bytes of four blocks at once (the layout BearSSL calls `ct64`), and two such plane
+//! sets run side by side so the CPU can overlap them, making a batch eight blocks.
+//! Encryption only; GCM never needs the inverse cipher.
 //!
 //! This is the design, not a proof. Whether the compiled code keeps the property is checked
 //! by the taint, jump-count and timing evidence described in `docs/research/AES-GCM-DESIGN.md`.
 
 use rusty_crypto_key::wipe;
 
+/// Blocks per plane set (the width of the `ct64` layout).
+const GROUP: usize = 4;
+/// Independent plane sets processed together, so the CPU can overlap their work.
+const GROUPS: usize = 2;
 /// Blocks processed per batch.
-pub(crate) const LANES: usize = 64;
+pub(crate) const LANES: usize = GROUP * GROUPS;
 
 /// One batch of bit planes.
-type Planes = [u64; 128];
+type Planes = [u64; 8];
 
 const MAX_ROUNDS: usize = 14;
 
-/// Expanded AES key. Wiped on drop.
+/// Expanded AES key, held as round-key planes. Wiped on drop.
 pub(crate) struct Aes {
-    round_keys: [[u8; 16]; MAX_ROUNDS + 1],
+    round_keys: [Planes; MAX_ROUNDS + 1],
     rounds: usize,
 }
 
@@ -42,54 +49,77 @@ impl Aes {
             word.copy_from_slice(&key[4 * i..4 * i + 4]);
         }
         let mut rcon = 1u8;
+        // `pos` is `i % nk`, counted rather than computed so the schedule needs no division.
+        let mut pos = 0usize;
         for i in nk..total {
             let mut t = w[i - 1];
-            if i % nk == 0 {
+            if pos == 0 {
                 t = sub_word([t[1], t[2], t[3], t[0]]);
                 t[0] ^= rcon;
                 rcon = xtime_byte(rcon);
-            } else if nk > 6 && i % nk == 4 {
+            } else if nk > 6 && pos == 4 {
                 t = sub_word(t);
             }
             for k in 0..4 {
                 w[i][k] = w[i - nk][k] ^ t[k];
             }
+            pos += 1;
+            if pos == nk {
+                pos = 0;
+            }
         }
-        let mut round_keys = [[0u8; 16]; MAX_ROUNDS + 1];
-        for (r, rk) in round_keys.iter_mut().enumerate().take(rounds + 1) {
+        let mut round_keys = [[0u64; 8]; MAX_ROUNDS + 1];
+        for (r, planes) in round_keys.iter_mut().enumerate().take(rounds + 1) {
+            let mut rk = [0u8; 16];
             for c in 0..4 {
                 rk[4 * c..4 * c + 4].copy_from_slice(&w[4 * r + c]);
             }
+            // The same round key in every block position. The replicated copies are raw key
+            // material too, so they are wiped as well.
+            let mut replicated = [rk; GROUP];
+            *planes = to_planes(&replicated);
+            wipe(&mut replicated);
+            wipe(&mut rk);
         }
-        wipe_words(&mut w);
+        for word in w.iter_mut() {
+            wipe(word);
+        }
         Self { round_keys, rounds }
     }
 
-    /// Encrypts up to 64 blocks in place; unused lanes are ignored (and cost the same).
+    /// Encrypts `LANES` blocks in place; unused blocks are ignored (and cost the same).
     pub(crate) fn encrypt_blocks(&self, blocks: &mut [[u8; 16]; LANES]) {
-        let mut st = to_planes(blocks);
-        self.add_round_key(&mut st, 0);
-        for r in 1..self.rounds {
-            sub_bytes(&mut st);
-            shift_rows(&mut st);
-            mix_columns(&mut st);
-            self.add_round_key(&mut st, r);
+        let mut st: [Planes; GROUPS] = core::array::from_fn(|g| {
+            let mut group: [[u8; 16]; GROUP] = core::array::from_fn(|i| blocks[g * GROUP + i]);
+            let planes = to_planes(&group);
+            // The input copy holds plaintext, a counter block or zeros (the hash-key derivation).
+            wipe(&mut group);
+            planes
+        });
+        for s in st.iter_mut() {
+            xor_planes(s, &self.round_keys[0]);
         }
-        sub_bytes(&mut st);
-        shift_rows(&mut st);
-        self.add_round_key(&mut st, self.rounds);
-        from_planes(&mut st, blocks);
-        wipe(&mut st);
-    }
-
-    fn add_round_key(&self, st: &mut Planes, round: usize) {
-        let rk = &self.round_keys[round];
-        for (b, byte) in rk.iter().enumerate() {
-            for k in 0..8 {
-                // All ones when the key bit is set, all zeros otherwise: no branch.
-                let mask = 0u64.wrapping_sub(u64::from((byte >> k) & 1));
-                st[b * 8 + k] ^= mask;
+        for r in 1..self.rounds {
+            for s in st.iter_mut() {
+                sbox(s);
+                shift_rows(s);
+                mix_columns(s);
+                xor_planes(s, &self.round_keys[r]);
             }
+        }
+        for s in st.iter_mut() {
+            sbox(s);
+            shift_rows(s);
+            xor_planes(s, &self.round_keys[self.rounds]);
+        }
+        for (g, s) in st.iter_mut().enumerate() {
+            let mut group = [[0u8; 16]; GROUP];
+            from_planes(s, &mut group);
+            blocks[g * GROUP..(g + 1) * GROUP].copy_from_slice(&group);
+            // The output copy holds the hash key during initialisation and CTR keystream when
+            // encrypting.
+            wipe(&mut group);
+            wipe(s);
         }
     }
 }
@@ -102,9 +132,9 @@ impl Drop for Aes {
     }
 }
 
-fn wipe_words(w: &mut [[u8; 4]]) {
-    for word in w.iter_mut() {
-        wipe(word);
+fn xor_planes(st: &mut Planes, k: &Planes) {
+    for i in 0..8 {
+        st[i] ^= k[i];
     }
 }
 
@@ -112,7 +142,8 @@ fn xtime_byte(b: u8) -> u8 {
     (b << 1) ^ (0x1b & 0u8.wrapping_sub(b >> 7))
 }
 
-/// SubWord for the key schedule: the same circuit, with the four bytes in lanes 0 to 3.
+/// SubWord for the key schedule: the same circuit, with the four bytes in bit positions 0 to 3.
+#[inline(never)]
 fn sub_word(word: [u8; 4]) -> [u8; 4] {
     let mut q = [0u64; 8];
     for (l, byte) in word.iter().enumerate() {
@@ -131,29 +162,43 @@ fn sub_word(word: [u8; 4]) -> [u8; 4] {
     out
 }
 
-fn sub_bytes(st: &mut Planes) {
-    for b in 0..16 {
-        let mut q = [0u64; 8];
-        q.copy_from_slice(&st[b * 8..b * 8 + 8]);
-        sbox(&mut q);
-        st[b * 8..b * 8 + 8].copy_from_slice(&q);
-    }
-}
+/// Row `r` of the column-major state sits at bit `r` of every nibble.
+const ROW: [u64; 4] = [
+    0x1111_1111_1111_1111,
+    0x2222_2222_2222_2222,
+    0x4444_4444_4444_4444,
+    0x8888_8888_8888_8888,
+];
+/// Low `16 - 4r` and high `4r` bits of every 16-bit group (one group per block).
+const GROUP_LOW: [u64; 4] = [
+    0xffff_ffff_ffff_ffff,
+    0x0fff_0fff_0fff_0fff,
+    0x00ff_00ff_00ff_00ff,
+    0x000f_000f_000f_000f,
+];
+const GROUP_HIGH: [u64; 4] = [
+    0,
+    0xf000_f000_f000_f000,
+    0xff00_ff00_ff00_ff00,
+    0xfff0_fff0_fff0_fff0,
+];
 
-/// Output byte `4c + r` takes input byte `4((c + r) mod 4) + r` (state is column-major).
+/// Output byte `4c + r` takes input byte `4((c + r) mod 4) + r`: row `r` rotates by `r`
+/// nibbles inside each 16-bit group.
+#[inline(never)]
 fn shift_rows(st: &mut Planes) {
-    let old = *st;
-    for c in 0..4 {
-        for r in 0..4 {
-            let to = (4 * c + r) * 8;
-            let from = (4 * ((c + r) % 4) + r) * 8;
-            st[to..to + 8].copy_from_slice(&old[from..from + 8]);
+    for x in st.iter_mut() {
+        let mut out = *x & ROW[0];
+        for r in 1..4 {
+            let row = *x & ROW[r];
+            out |= ((row >> (4 * r)) & GROUP_LOW[r]) | ((row << (16 - 4 * r)) & GROUP_HIGH[r]);
         }
+        *x = out;
     }
 }
 
-/// Multiplication by x in GF(2^8) on one byte's eight planes (reduction polynomial 0x11b).
-fn xtime(v: &[u64; 8]) -> [u64; 8] {
+/// Multiplication by x in GF(2^8) on the eight planes (reduction polynomial 0x11b).
+fn xtime(v: &Planes) -> Planes {
     [
         v[7],
         v[0] ^ v[7],
@@ -166,86 +211,83 @@ fn xtime(v: &[u64; 8]) -> [u64; 8] {
     ]
 }
 
-fn xor8(a: &[u64; 8], b: &[u64; 8]) -> [u64; 8] {
-    let mut o = [0u64; 8];
-    for i in 0..8 {
-        o[i] = a[i] ^ b[i];
-    }
-    o
-}
-
-fn load8(st: &Planes, byte: usize) -> [u64; 8] {
-    let mut o = [0u64; 8];
-    o.copy_from_slice(&st[byte * 8..byte * 8 + 8]);
-    o
-}
-
-/// out_r = 2 a_r + 3 a_{r+1} + a_{r+2} + a_{r+3} = xtime(a_r + a_{r+1}) + a_{r+1} + a_{r+2} + a_{r+3}.
+/// out_r = 2 a_r + 3 a_{r+1} + a_{r+2} + a_{r+3} = xtime(a_r + a_{r+1}) + a_{r+1} + a_{r+2} + a_{r+3},
+/// where `a_{r+n}` is the column's row `r + n`: a rotation of the rows inside every nibble.
+#[inline(never)]
 fn mix_columns(st: &mut Planes) {
-    for c in 0..4 {
-        let a = [
-            load8(st, 4 * c),
-            load8(st, 4 * c + 1),
-            load8(st, 4 * c + 2),
-            load8(st, 4 * c + 3),
-        ];
-        for r in 0..4 {
-            let a1 = &a[(r + 1) % 4];
-            let t = xtime(&xor8(&a[r], a1));
-            let o = xor8(&xor8(&t, a1), &xor8(&a[(r + 2) % 4], &a[(r + 3) % 4]));
-            st[(4 * c + r) * 8..(4 * c + r) * 8 + 8].copy_from_slice(&o);
-        }
+    let mut a1 = [0u64; 8];
+    let mut a2 = [0u64; 8];
+    let mut a3 = [0u64; 8];
+    let mut v = [0u64; 8];
+    for i in 0..8 {
+        let x = st[i];
+        a1[i] = ((x >> 1) & 0x7777_7777_7777_7777) | ((x << 3) & 0x8888_8888_8888_8888);
+        a2[i] = ((x >> 2) & 0x3333_3333_3333_3333) | ((x << 2) & 0xcccc_cccc_cccc_cccc);
+        a3[i] = ((x >> 3) & 0x1111_1111_1111_1111) | ((x << 1) & 0xeeee_eeee_eeee_eeee);
+        v[i] = x ^ a1[i];
+    }
+    let t = xtime(&v);
+    for i in 0..8 {
+        st[i] = t[i] ^ a1[i] ^ a2[i] ^ a3[i];
     }
 }
 
-/// Transposes a 64x64 bit matrix held as 64 `u64`s (bit `i` of `a[l]` becomes bit `l` of
-/// `a[i]`). Fixed shifts and masks only.
-fn transpose64(a: &mut [u64; 64]) {
-    let mut j = 32usize;
-    let mut m = 0x0000_0000_ffff_ffffu64;
-    while j != 0 {
-        for k in 0..64 {
-            if k & j == 0 {
-                let t = ((a[k] >> j) ^ a[k + j]) & m;
-                a[k] ^= t << j;
-                a[k + j] ^= t;
+/// Transposes an 8x8 bit matrix held in a `u64` (bit `8r + c` moves to bit `8c + r`).
+fn transpose_bits8(mut x: u64) -> u64 {
+    let t = (x ^ (x >> 7)) & 0x00aa_00aa_00aa_00aa;
+    x ^= t ^ (t << 7);
+    let t = (x ^ (x >> 14)) & 0x0000_cccc_0000_cccc;
+    x ^= t ^ (t << 14);
+    let t = (x ^ (x >> 28)) & 0x0000_0000_f0f0_f0f0;
+    x ^ t ^ (t << 28)
+}
+
+/// Transposes an 8x8 matrix of bytes held in eight `u64`s (byte `k` of word `j` moves to
+/// byte `j` of word `k`).
+fn transpose_bytes8(a: &mut [u64; 8]) {
+    const MASKS: [u64; 3] = [
+        0x00ff_00ff_00ff_00ff,
+        0x0000_ffff_0000_ffff,
+        0x0000_0000_ffff_ffff,
+    ];
+    for (stage, mask) in MASKS.iter().enumerate() {
+        let d = 1usize << stage;
+        for i in 0..8 {
+            if i & d == 0 {
+                let t = ((a[i] >> (8 * d)) ^ a[i + d]) & mask;
+                a[i] ^= t << (8 * d);
+                a[i + d] ^= t;
             }
         }
-        j >>= 1;
-        m ^= m << j;
     }
 }
 
-fn to_planes(blocks: &[[u8; 16]; LANES]) -> Planes {
-    let mut st = [0u64; 128];
-    for g in 0..2 {
-        let mut w = [0u64; 64];
-        for (l, block) in blocks.iter().enumerate() {
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&block[g * 8..g * 8 + 8]);
-            w[l] = u64::from_le_bytes(bytes);
-        }
-        transpose64(&mut w);
-        st[g * 64..g * 64 + 64].copy_from_slice(&w);
-        wipe(&mut w);
+#[inline(never)]
+fn to_planes(blocks: &[[u8; 16]; GROUP]) -> Planes {
+    let mut u = [0u64; 8];
+    for (j, word) in u.iter_mut().enumerate() {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&blocks[j / 2][(j % 2) * 8..(j % 2) * 8 + 8]);
+        *word = transpose_bits8(u64::from_le_bytes(bytes));
     }
-    st
+    transpose_bytes8(&mut u);
+    u
 }
 
-fn from_planes(st: &mut Planes, blocks: &mut [[u8; 16]; LANES]) {
-    for g in 0..2 {
-        let mut w = [0u64; 64];
-        w.copy_from_slice(&st[g * 64..g * 64 + 64]);
-        transpose64(&mut w);
-        for (l, block) in blocks.iter_mut().enumerate() {
-            block[g * 8..g * 8 + 8].copy_from_slice(&w[l].to_le_bytes());
-        }
-        wipe(&mut w);
+#[inline(never)]
+fn from_planes(st: &Planes, blocks: &mut [[u8; 16]; GROUP]) {
+    let mut u = *st;
+    transpose_bytes8(&mut u);
+    for (j, word) in u.iter().enumerate() {
+        let bytes = transpose_bits8(*word).to_le_bytes();
+        blocks[j / 2][(j % 2) * 8..(j % 2) * 8 + 8].copy_from_slice(&bytes);
     }
+    wipe(&mut u);
 }
 
 /// The AES S-box on eight bit planes (`q[k]` holds bit `k`), the Boyar-Peralta circuit.
 #[allow(clippy::many_single_char_names)]
+#[inline(never)]
 fn sbox(q: &mut [u64; 8]) {
     let (x0, x1, x2, x3, x4, x5, x6, x7) = (q[7], q[6], q[5], q[4], q[3], q[2], q[1], q[0]);
 
@@ -384,8 +426,15 @@ fn sbox(q: &mut [u64; 8]) {
 mod tests {
     use super::*;
 
+    fn xorshift(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
     /// The S-box from its definition (multiplicative inverse, then the affine map), as an
-    /// oracle. Variable time and table-free by construction; tests only.
+    /// oracle. Variable time; tests only.
     fn sbox_ref(x: u8) -> u8 {
         fn mul(mut a: u8, mut b: u8) -> u8 {
             let mut p = 0;
@@ -437,24 +486,68 @@ mod tests {
     }
 
     #[test]
-    fn transpose_is_its_own_inverse_and_moves_bit_i_of_word_l_to_bit_l_of_word_i() {
-        let mut a = [0u64; 64];
-        let mut s = 0x1234_5678_9abc_def0u64;
-        for w in a.iter_mut() {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            *w = s;
+    fn sub_word_matches_the_definition() {
+        let mut s = 0x2468_ace0_1357_9bdfu64;
+        for _ in 0..200 {
+            let w = [
+                xorshift(&mut s) as u8,
+                xorshift(&mut s) as u8,
+                xorshift(&mut s) as u8,
+                xorshift(&mut s) as u8,
+            ];
+            assert_eq!(sub_word(w), w.map(sbox_ref));
         }
-        let orig = a;
-        transpose64(&mut a);
-        for (l, row) in orig.iter().enumerate() {
-            for (i, col) in a.iter().enumerate() {
-                assert_eq!((col >> l) & 1, (row >> i) & 1);
+    }
+
+    #[test]
+    fn bit_and_byte_transposes_match_their_definitions() {
+        let mut s = 0x1234_5678_9abc_def1u64;
+        for _ in 0..200 {
+            let x = xorshift(&mut s);
+            let y = transpose_bits8(x);
+            for r in 0..8 {
+                for c in 0..8 {
+                    assert_eq!((y >> (8 * c + r)) & 1, (x >> (8 * r + c)) & 1);
+                }
+            }
+            assert_eq!(transpose_bits8(y), x);
+
+            let mut a = [0u64; 8];
+            for w in a.iter_mut() {
+                *w = xorshift(&mut s);
+            }
+            let orig = a;
+            transpose_bytes8(&mut a);
+            for (j, row) in orig.iter().enumerate() {
+                for (k, col) in a.iter().enumerate() {
+                    assert_eq!((col >> (8 * j)) & 0xff, (row >> (8 * k)) & 0xff);
+                }
             }
         }
-        transpose64(&mut a);
-        assert_eq!(a, orig);
+    }
+
+    #[test]
+    fn planes_put_bit_k_of_byte_p_of_block_b_at_bit_16b_plus_p_of_plane_k() {
+        let mut s = 0xfeed_beef_1234_5678u64;
+        for _ in 0..50 {
+            let mut blocks = [[0u8; 16]; GROUP];
+            for b in blocks.iter_mut() {
+                for byte in b.iter_mut() {
+                    *byte = xorshift(&mut s) as u8;
+                }
+            }
+            let st = to_planes(&blocks);
+            for (b, block) in blocks.iter().enumerate() {
+                for (p, byte) in block.iter().enumerate() {
+                    for (k, plane) in st.iter().enumerate() {
+                        assert_eq!((plane >> (16 * b + p)) & 1, u64::from((byte >> k) & 1));
+                    }
+                }
+            }
+            let mut back = [[0u8; 16]; GROUP];
+            from_planes(&st, &mut back);
+            assert_eq!(back, blocks);
+        }
     }
 
     #[test]
@@ -479,5 +572,54 @@ mod tests {
         let mut blocks = [plain; LANES];
         Aes::new_256(&k256).encrypt_blocks(&mut blocks);
         assert!(blocks.iter().all(|b| *b == want256));
+    }
+
+    /// Where the time goes in one 4-block batch. Ignored (machine-dependent); run with
+    /// `cargo test -p rusty_aead --release --lib -- --ignored --nocapture profile`.
+    #[test]
+    #[ignore = "timing; run manually"]
+    fn profile_stages() {
+        use core::hint::black_box;
+        use std::time::Instant;
+
+        fn ns_per_call(reps: u32, mut f: impl FnMut()) -> f64 {
+            (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    for _ in 0..reps {
+                        f();
+                    }
+                    t.elapsed().as_nanos() as f64 / f64::from(reps)
+                })
+                .fold(f64::MAX, f64::min)
+        }
+
+        let mut blocks = [[0x5au8; 16]; LANES];
+        let mut group = [[0x5au8; 16]; GROUP];
+        let mut st = to_planes(&group);
+        let reps = 200_000;
+        let t_to = ns_per_call(reps, || st = to_planes(black_box(&group)));
+        let t_from = ns_per_call(reps, || from_planes(black_box(&st), &mut group));
+        let t_sub = ns_per_call(reps, || sbox(black_box(&mut st)));
+        let t_shift = ns_per_call(reps, || shift_rows(black_box(&mut st)));
+        let t_mix = ns_per_call(reps, || mix_columns(black_box(&mut st)));
+        let aes128 = Aes::new_128(&[1u8; 16]);
+        let aes256 = Aes::new_256(&[1u8; 32]);
+        let t_e128 = ns_per_call(reps, || aes128.encrypt_blocks(black_box(&mut blocks)));
+        let t_e256 = ns_per_call(reps, || aes256.encrypt_blocks(black_box(&mut blocks)));
+        let t_ks = ns_per_call(reps / 10, || {
+            black_box(Aes::new_128(black_box(&[1u8; 16])));
+        });
+        let mb = |ns: f64| (16 * LANES) as f64 / ns * 1000.0;
+        std::eprintln!("per {GROUP}-block group; encrypt_blocks is {LANES} blocks; best of five:");
+        std::eprintln!("  to_planes       {t_to:8.1} ns");
+        std::eprintln!("  from_planes     {t_from:8.1} ns");
+        std::eprintln!("  sbox            {t_sub:8.1} ns   (x10/14 rounds)");
+        std::eprintln!("  shift_rows      {t_shift:8.1} ns   (x10/14)");
+        std::eprintln!("  mix_columns     {t_mix:8.1} ns   (x9/13)");
+        std::eprintln!("  encrypt_blocks  {t_e128:8.1} ns AES-128 = {:6.1} MB/s;  {t_e256:8.1} ns AES-256 = {:6.1} MB/s", mb(t_e128), mb(t_e256));
+        std::eprintln!("  key expansion   {t_ks:8.1} ns (AES-128)");
+        let sum = t_to + t_from + 10.0 * (t_sub + t_shift) + 9.0 * t_mix;
+        std::eprintln!("  sum of parts (AES-128) {sum:8.1} ns (add_round_key not timed)");
     }
 }
