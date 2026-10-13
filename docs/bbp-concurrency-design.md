@@ -246,7 +246,7 @@ Status: **proposal, awaiting owner approval; revised after the owner's review of
 | `lost_rubric_items` | rubric items met by an unused spec version and not met by the approved one. This is the independent loss evidence: work that was real and was thrown away, not work merely charged in a revoked turn |
 | `revocations`, `revoked_turn_actions` | informational only. A revoked turn's work is not necessarily discarded (it may be retained in another author's artifact), so these are an upper bound and never gate |
 | `budget_refusals` | `rejected(turn_budget_exhausted)`; each also ends its turn, so the two are not added |
-| `stale_verdicts` | verdicts accepted although another principal appended content after the author's last read (2a known gap) |
+| `stale_verdicts` | verdicts accepted although a message or artifact the author could read, appended by another principal (not the runner) during the author's verdict turn, was never returned to the author by a read the log records (2a known gap). Exact, from the responses of accepted reads: a `get_artifact` is not a view of the messages and a short page does not count as seeing what it omitted |
 | `overshoot` | any N=2 run with `spent.messages` or `spent.bytes` above its total |
 
 **Go to 2b only if all hold:**
