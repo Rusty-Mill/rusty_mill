@@ -2,6 +2,8 @@
 name: mod-audit
 description: Audit recent Claude Code sessions and propose five mods worth building.
 tags: [claude-code, mods, workflow]
+for: Claude Code
+featured: true
 source: original; idea from Chase AI, "Claude Mods Is The Biggest Claude Code Upgrade Since Skills" (YouTube Rn4nmFRPe0s)
 ---
 Analyze my last 30 Claude Code sessions. Find repeated friction: commands I

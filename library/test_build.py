@@ -26,6 +26,12 @@ class ParseTests(unittest.TestCase):
         mod = build.load_mod(build.ROOT / "mods/backup-before-edit")
         self.assertNotIn("register.test", mod["body"])
 
+    def test_optional_fields(self) -> None:
+        meta = {"name": "x", "description": "d", "source": "s", "status": "fix coming", "featured": "true"}
+        e = build.entry("prompt", build.ROOT / "p.md", meta, "b")
+        self.assertEqual((e["status"], e["featured"], e["for"]), ("fix coming", True, ""))
+        self.assertEqual(build.entry("skill", build.ROOT / "p.md", meta, "b")["for"], "Claude Code")
+
     def test_all_seeded_entries_load(self) -> None:
         kinds = {i["kind"] for i in build.collect()}
         self.assertEqual(kinds, {"prompt", "skill", "mod", "claude-md", "agents-md"})

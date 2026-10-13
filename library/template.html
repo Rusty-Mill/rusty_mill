@@ -12,32 +12,52 @@ body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-
 main{max-width:1000px;margin:0 auto;padding:16px}
 h1{font-size:20px;margin:0 0 12px}
 input,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
-input{width:100%}button{cursor:pointer}button:hover,button[aria-pressed=true]{border-color:var(--acc);color:var(--acc)}
-.row{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+input{width:100%}button{cursor:pointer}
+button:hover:not(:disabled),button[aria-pressed=true]{border-color:var(--acc);color:var(--acc)}
+button:disabled{cursor:not-allowed;opacity:.5}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.row{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0;align-items:center}
+.row small{opacity:.7}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;text-align:left}
-.card b{display:block}.card small,.mut{color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:4px;
+  content-visibility:auto;contain-intrinsic-size:auto 190px;transition:border-color .15s}
+.card.flagged{filter:grayscale(1);opacity:.65}
+.card .name{border:0;padding:0;text-align:left;font-weight:600;background:none}
+.card .desc{color:var(--mut);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;flex:1}
+.card .acts{display:flex;gap:6px;margin-top:6px}.card .acts .copy{flex:1}
+.note{font-size:13px}.mut{color:var(--mut)}.small{font-size:12px}
 .kind{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--acc)}
+h3{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:18px 0 8px;word-break:break-word}
 pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;white-space:pre-wrap;word-break:break-word;max-height:60vh}
+@media(pointer:coarse){button,input{min-height:44px}}
+@media(max-width:640px){
+  .row.scroll{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;
+    -webkit-mask-image:linear-gradient(to right,#000 92%,transparent);mask-image:linear-gradient(to right,#000 92%,transparent)}
+  .row.scroll button{flex:none;white-space:nowrap}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
 <body><main>
 <h1>Mill Library <span class="mut" id="count"></span></h1>
-<input id="q" type="search" placeholder="Search prompts, skills, mods…" autofocus>
-<div class="row" id="kinds"></div>
-<div class="row" id="tags"></div>
+<div id="list">
+  <input id="q" type="search" placeholder="Search prompts, skills, mods…" aria-label="Search" autofocus>
+  <div class="row scroll" id="kinds" role="group" aria-label="Kind"></div>
+  <div class="row scroll" id="tags" role="group" aria-label="Tag"></div>
+  <div class="row"><button id="bysrc" aria-pressed="false">By source</button></div>
+  <div id="out"></div>
+</div>
 <div id="detail" hidden>
   <div class="row"><button id="back">← Back</button><button id="copy">Copy</button><button id="dl">Download</button></div>
   <div class="kind" id="dkind"></div><h2 id="dname" style="margin:0"></h2>
-  <p class="mut" id="ddesc"></p><p class="mut" id="dsource"></p><p class="mut" id="dinstall"></p><pre id="dbody"></pre>
+  <p class="mut" id="ddesc"></p><p class="mut small" id="dsource"></p><p class="mut small" id="dinstall"></p><pre id="dbody"></pre>
 </div>
-<div class="grid" id="grid"></div>
 </main>
 <script>
 const ITEMS = __DATA__;
+const KINDS = ["prompt", "skill", "mod", "claude-md", "agents-md"];
 const $ = id => document.getElementById(id);
-const FILENAME = {mod: i => `${i.name}.txt`, "claude-md": () => "CLAUDE.md", "agents-md": () => "AGENTS.md"};
-const state = {q: "", kind: "all", tag: null};
+const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+const state = {q: "", kind: "all", tag: null, bySource: false};
 const INSTALL = {
   prompt: "Paste into a session, or save as a file and reference it.",
   skill: p => `Save as ~/.claude/skills/<name>/SKILL.md (source: ${p}).`,
@@ -45,38 +65,67 @@ const INSTALL = {
   "claude-md": "Paste into your project's CLAUDE.md (or ~/.claude/CLAUDE.md).",
   "agents-md": "Paste into your project's AGENTS.md - read by Codex, Cursor, Copilot and other agents.",
 };
-const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+const FILENAME = {mod: i => `${i.name}.txt`, "claude-md": () => "CLAUDE.md", "agents-md": () => "AGENTS.md"};
 
-function visible() {
-  const q = state.q.toLowerCase();
-  return ITEMS.filter(i =>
-    (state.kind === "all" || i.kind === state.kind) &&
-    (!state.tag || i.tags.includes(state.tag)) &&
-    (!q || `${i.name} ${i.description} ${i.tags.join(" ")} ${i.body}`.toLowerCase().includes(q)));
+const matchesQ = i => !state.q || `${i.name} ${i.description} ${i.tags.join(" ")} ${i.source} ${i.body}`.toLowerCase().includes(state.q);
+const matchesKind = i => state.kind === "all" || i.kind === state.kind;
+const matchesTag = i => !state.tag || i.tags.includes(state.tag);
+const byRank = (a, b) => Number(b.featured) - Number(a.featured);
+
+// Facets: each chip row counts what its own filter would leave, given the other filters.
+const kindCounts = () => count(ITEMS.filter(i => matchesQ(i) && matchesTag(i)), i => [i.kind]);
+const tagCounts = () => count(ITEMS.filter(i => matchesQ(i) && matchesKind(i)), i => i.tags);
+function count(items, keys) {
+  const c = new Map();
+  for (const i of items) for (const k of keys(i)) c.set(k, (c.get(k) ?? 0) + 1);
+  return c;
 }
 
-function chips(box, values, active, onPick) {
-  box.replaceChildren(...values.map(v => {
-    const b = el("button", {textContent: v});
-    b.setAttribute("aria-pressed", String(v === active));
-    b.onclick = () => onPick(v);
+async function copyText(text, btn, label = "Copy") {
+  try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
+  catch { btn.textContent = "Copy failed"; }
+  setTimeout(() => { btn.textContent = label; }, 1600);
+}
+
+function chips(box, entries, active, onPick) {
+  box.replaceChildren(...entries.map(([value, n]) => {
+    const b = el("button", {textContent: value}, ...(n === undefined ? [] : [el("small", {textContent: ` ${n}`})]));
+    b.setAttribute("aria-pressed", String(value === active));
+    b.onclick = () => onPick(value);
     return b;
   }));
 }
 
+function card(i) {
+  const flagged = Boolean(i.status);
+  const open = el("button", {className: "name", textContent: i.name});
+  open.onclick = () => show(i);
+  const copy = el("button", {className: "copy", textContent: "Copy", disabled: flagged});
+  copy.onclick = () => copyText(i.body, copy);
+  return el("div", {className: `card${flagged ? " flagged" : ""}`},
+    el("span", {className: "kind", textContent: i.kind}),
+    open,
+    el("span", {className: "desc", textContent: i.description}),
+    ...(i.for ? [el("span", {className: "mut small", textContent: `For ${i.for}`})] : []),
+    ...(flagged ? [el("span", {className: "note", textContent: `Heads up: ${i.status}`})] : []),
+    el("div", {className: "acts"}, copy));
+}
+
 function render() {
-  const items = visible();
+  const items = ITEMS.filter(i => matchesQ(i) && matchesKind(i) && matchesTag(i));
+  if (!state.q && !state.tag && state.kind === "all") items.sort(byRank);
   $("count").textContent = `${items.length}/${ITEMS.length}`;
-  chips($("kinds"), ["all", "prompt", "skill", "mod", "claude-md", "agents-md"], state.kind, v => { state.kind = v; render(); });
-  chips($("tags"), [...new Set(ITEMS.flatMap(i => i.tags))].sort(), state.tag, v => { state.tag = state.tag === v ? null : v; render(); });
-  $("grid").replaceChildren(...items.map(i => {
-    const c = el("button", {className: "card"},
-      el("span", {className: "kind", textContent: i.kind}),
-      el("b", {textContent: i.name}),
-      el("small", {textContent: i.description}));
-    c.onclick = () => show(i);
-    return c;
-  }));
+  const kc = kindCounts(), tc = tagCounts();
+  chips($("kinds"), [["all", [...kc.values()].reduce((a, b) => a + b, 0)], ...KINDS.map(k => [k, kc.get(k) ?? 0])], state.kind,
+    v => { state.kind = v; render(); });
+  chips($("tags"), [...tc].sort(([a], [b]) => a.localeCompare(b)), state.tag,
+    v => { state.tag = state.tag === v ? null : v; render(); });
+  $("bysrc").setAttribute("aria-pressed", String(state.bySource));
+  const groups = state.bySource ? [...Map.groupBy(items, i => i.source)] : [["", items]];
+  $("out").replaceChildren(...groups.flatMap(([source, group]) => [
+    ...(source ? [el("h3", {textContent: `${source} (${group.length})`})] : []),
+    el("div", {className: "grid"}, ...group.map(card)),
+  ]));
 }
 
 function show(i) {
@@ -87,24 +136,18 @@ function show(i) {
   $("dsource").textContent = `Source: ${i.source}`;
   $("dinstall").textContent = typeof how === "function" ? how(i.path) : how;
   $("dbody").textContent = i.body;
-  $("copy").onclick = async () => {
-    try { await navigator.clipboard.writeText(i.body); $("copy").textContent = "Copied"; }
-    catch { $("copy").textContent = "Copy failed"; }
-    setTimeout(() => $("copy").textContent = "Copy", 1200);
-  };
+  $("copy").onclick = () => copyText(i.body, $("copy"));
   $("dl").onclick = () => {
     const a = el("a", {href: URL.createObjectURL(new Blob([i.body])), download: FILENAME[i.kind]?.(i) ?? `${i.name}.md`});
     a.click(); URL.revokeObjectURL(a.href);
   };
   $("detail").hidden = false;
-  $("grid").hidden = $("kinds").hidden = $("tags").hidden = $("q").hidden = true;
+  $("list").hidden = true;
 }
 
-$("back").onclick = () => {
-  $("detail").hidden = true;
-  $("grid").hidden = $("kinds").hidden = $("tags").hidden = $("q").hidden = false;
-};
-$("q").oninput = e => { state.q = e.target.value; render(); };
+$("back").onclick = () => { $("detail").hidden = true; $("list").hidden = false; };
+$("bysrc").onclick = () => { state.bySource = !state.bySource; render(); };
+$("q").oninput = e => { state.q = e.target.value.trim().toLowerCase(); render(); };
 render();
 </script>
 </body></html>

@@ -26,6 +26,10 @@ def parse(text: str) -> tuple[dict[str, object], str]:
     return meta, m[2].strip()
 
 
+# Default target tool per kind; a prompt names its own via `for:`.
+DEFAULT_FOR = {"skill": "Claude Code", "mod": "Claude Code", "claude-md": "Claude Code", "agents-md": "any agent"}
+
+
 def entry(kind: str, path: Path, meta: dict[str, object], body: str) -> dict[str, object]:
     for key in ("name", "description", "source"):
         if not meta.get(key):
@@ -36,6 +40,9 @@ def entry(kind: str, path: Path, meta: dict[str, object], body: str) -> dict[str
         "description": meta["description"],
         "tags": meta.get("tags", []),
         "source": meta["source"],
+        "for": meta.get("for") or DEFAULT_FOR.get(kind, ""),
+        "status": meta.get("status", ""),
+        "featured": meta.get("featured") == "true",
         "path": str(path.relative_to(ROOT)),
         "body": body,
     }

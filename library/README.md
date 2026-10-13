@@ -19,4 +19,6 @@ claude plugin test mods/<name>
 
 Every entry must record where it came from: `source:` in frontmatter (mods: `repository` in `plugin.json`) - a repo path, URL or "original". The UI shows it.
 
+Optional frontmatter: `for:` (target tool; defaults per kind), `status:` (greys the card, disables Copy, shows the note - use for an entry that needs a fix), `featured: true` (sorts first when nothing is filtered).
+
 Add an entry by dropping a file in; the build fails on a missing name/description or duplicate.
