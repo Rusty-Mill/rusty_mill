@@ -1,6 +1,8 @@
 # AES-GCM for `rusty_aead`: design note (draft, no code)
 
-Date: 2026-10-10. Status: **draft for the owner; nothing is implemented.** Plan context:
+Date: 2026-10-10 (updated 2026-10-13). Status: **the design below was written before any code; a spike and its
+constant-time evidence now exist in `rusty_aead` (sections 8 to 10), used by nothing, preliminary, not independently
+reviewed.** Plan context:
 `CRYPTO-REPLACEMENT-PLAN.md` section 13.1 gap 3, decisions D1 and D2. The freeze was reopened for this gap only
 (plan section 0, "Owner decisions (2026-10-10)"). The `rusty_tls` seam and signing stay closed. Numbers marked
 *estimate* are not measurements; the first step below produces the measurement.
@@ -220,15 +222,17 @@ earlier taint result applied to the old layout only. Still one build and one run
 plaintext marked secret, 2000-byte plaintext (covers the first and later batches). `gcm128-seal` and `gcm256-seal`: 0
 reports. `gcm128-open`: exactly 1 report, a conditional jump in `Gcm::open` (the public tag verdict). The planted
 control, a table lookup indexed by a secret byte, is reported ("use of uninitialised value of size 8"), so the tool
-sees this leak class here. **Not yet done:** jump-count pins, timing tests, CI wiring, and everything that makes this
+sees this leak class here. **Not yet done at the time of step 1 (done in step 4, section 9):** jump-count pins, timing tests, CI wiring, and everything that makes this
 more than one run. This is not a constant-time claim.
 
 **Gate result:** the step 1 gate asked for a measured MB/s to be reported to the owner before more is built. It is
-reported above. Nothing past step 1 has been started.
+reported above. (At the time of step 1 nothing past it had been started; steps 2 to 4 followed, see sections 8 to 10.)
 
 ## 9. Step 4 results: constant-time evidence (2026-10-10; preliminary; evidence, not proof)
 
-**What was added** (`rusty_aead`; CI runs all of it through the existing `crypto-constant-time` job):
+**What was added** (`rusty_aead`). CI runs the taint modes and the jump-count pins through the existing `crypto-constant-time` job
+(`ct_check.sh`) together with the collector's self-tests. **CI does not run the timing series**: those tests are `#[ignore]`d and run
+only through `collect.sh`, by hand:
 - Taint modes in `examples/taint_aes.rs`: `gcm128-seal` and `gcm256-seal` must report nothing, `gcm128-open` exactly
   one report in `Gcm::open` (the public tag verdict), and `control-table` (a secret-indexed table lookup, the leak
   class table-based AES has) must be reported. Result: 0, 0, 1 in `Gcm::open`, 1.
@@ -238,8 +242,8 @@ reported above. Nothing past step 1 has been started.
   back-edge, round-key bounds checks, the key-schedule word index). The functions are `#[inline(never)]`, and the
   key schedule now counts its word index instead of dividing, so there is no division anywhere in the audited set.
   `ghash::ghash` and `Gcm::{ctr, seal, open}` branch on the public message length and are not pinned.
-- Five timing tests (AES-128 and AES-256 key classes, plaintext classes, tag-mismatch position, A/A baseline), 50,000
-  samples each, in `collect.sh`.
+- Eight timing tests, 50,000 samples each, in `collect.sh`: AES-128 and AES-256 key classes (constructor included), plaintext
+  classes, tag-mismatch position, and an A/A control for each workload (see section 10 on the matched controls).
 
 **The checks were tested.** Planting a real branch on secret data in `mix_columns`: the taint run reports it (4
 reports in each seal mode) and the pin fails (1 against 0). Planting a secret-indexed table lookup in the key
@@ -282,3 +286,32 @@ MiB and 35.8, 62.1 and 69.0 at 64 B, 1 KiB and 16 KiB (AES-256: 58.5, 30.3, 50.3
 **Still not done:** other specification vectors, a randomised differential suite, repeat taint runs on other
 compilers (the `ct_check.sh` loop for `rusty_pk` runs two toolchains; this crate's script runs the default one),
 timing on any machine but this one, and any independent review.
+
+## 10. Review follow-up (2026-10-13; review of #651)
+
+Fixed in this change:
+- **Secret-copy erasure.** The round-key replication in `Aes::expand` (`[rk; GROUP]`, four raw copies) is now wiped; so are
+  the input and output block groups in `Aes::encrypt_blocks` (the output holds the hash key during initialisation and CTR
+  keystream when encrypting, the input holds plaintext, counter blocks or zeros); `Gcm::new` wipes all eight lanes that hold
+  a copy of the hash key, not only the first; `Gcm`'s `Drop` uses `rusty_crypto_key::wipe` instead of an ordinary store.
+  This is best-effort erasure of the buffers the code owns. **Not done:** the temporaries inside the straight-line round
+  functions (`mix_columns`' intermediate planes, the S-box's locals) and registers are not wiped, and there is no
+  evidence that any wipe survives optimisation beyond `wipe` being the crate's volatile helper.
+- **AAD length limit.** `seal_in_place` and `open_in_place` now refuse an AAD longer than 2^61 - 1 bytes (SP 800-38D: 2^64 - 1
+  bits), which GHASH would otherwise write into a 64-bit length field. Tested arithmetically at the boundaries, with no large
+  allocation (`within_limits`).
+- **S-box coverage restored.** The exhaustive 256-byte test against the S-box definition had been dropped in the `ct64`
+  rewrite while this note and a fragment kept citing it. It is back, with a SubWord test.
+- **Timing controls.** Matched A/A controls for the constructor-inclusive key tests and the invalid-tag open test; see
+  `ERRATUM-2026-10-13-aes-record-accounting-and-baselines.txt`, which also corrects the vector accounting of the two records.
+  The two failed records were not regenerated.
+- **Stale statements** in this note and in the change fragments (nothing implemented, nothing past step 1, no pins or CI,
+  "CI runs all of it") are corrected.
+
+Open, for the owner:
+- **The AES types are exported unconditionally** from `rusty_aead`. Nothing in the repository uses them, but that is not a
+  gate: a downstream user could. A default-off cargo feature (for example `experimental-aes-gcm`) would make the status
+  explicit; it is a public-API change, so it has not been made.
+- The ChaCha20-Poly1305 timing baselines have the same workload mismatch (erratum, item 3).
+- Everything under "Not done" in section 9.
+

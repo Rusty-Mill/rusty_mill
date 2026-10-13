@@ -252,3 +252,81 @@ fn aes_tag_mismatch_position_not_distinguishable() {
     );
     check("aes-128-gcm open: first-byte vs last-byte tag mismatch", t);
 }
+
+// ---- Matched A/A controls. A leak test is judged against the A/A of the SAME workload, so the
+// constructor-inclusive key tests and the invalid-tag open test each get their own.
+
+/// A/A for `aes128_key_classes_not_distinguishable`: same constructor-inclusive seal, same key in
+/// both classes.
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn aes128_ctor_null_calibration_identical_classes() {
+    let key = RefCell::new([0u8; 16]);
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        10,
+        |_| key.borrow_mut().copy_from_slice(&other_key::<16>()),
+        || {
+            let mut buf = [0x55u8; 256];
+            Aes128Gcm::new(black_box(&key.borrow()))
+                .seal_in_place(&[0; 12], b"aad", &mut buf)
+                .unwrap()
+        },
+    )
+    .expect("enough samples");
+    eprintln!("A/A AES-128-GCM constructor+seal: |t| = {t:.2}");
+}
+
+/// A/A for `aes256_key_classes_not_distinguishable`.
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn aes256_ctor_null_calibration_identical_classes() {
+    let key = RefCell::new([0u8; 32]);
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        11,
+        |_| key.borrow_mut().copy_from_slice(&other_key::<32>()),
+        || {
+            let mut buf = [0x55u8; 256];
+            Aes256Gcm::new(black_box(&key.borrow()))
+                .seal_in_place(&[0; 12], b"aad", &mut buf)
+                .unwrap()
+        },
+    )
+    .expect("enough samples");
+    eprintln!("A/A AES-256-GCM constructor+seal: |t| = {t:.2}");
+}
+
+/// A/A for `aes_tag_mismatch_position_not_distinguishable`: the same invalid-tag open, the wrong
+/// byte at the same position in both classes.
+#[test]
+#[ignore = "calibration; scheduled job only"]
+fn aes_open_null_calibration_identical_classes() {
+    let cipher = Aes128Gcm::new(&[7u8; 16]);
+    let mut sealed = [0x11u8; 256];
+    let tag = cipher.seal_in_place(&[1; 12], b"", &mut sealed).unwrap();
+    let (bad, copy) = (RefCell::new(tag), RefCell::new(sealed));
+    let t = leak_statistic_split(
+        AES_SAMPLES,
+        12,
+        |_| {
+            let mut b = bad.borrow_mut();
+            *b = tag;
+            b[7] ^= 1;
+            *copy.borrow_mut() = sealed;
+        },
+        || {
+            let tag = *bad.borrow();
+            cipher
+                .open_in_place(
+                    &[1; 12],
+                    b"",
+                    black_box(&mut *copy.borrow_mut()),
+                    black_box(&tag),
+                )
+                .is_err()
+        },
+    )
+    .expect("enough samples");
+    eprintln!("A/A AES-128-GCM open (invalid tag): |t| = {t:.2}");
+}

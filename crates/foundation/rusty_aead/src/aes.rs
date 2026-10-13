@@ -74,8 +74,11 @@ impl Aes {
             for c in 0..4 {
                 rk[4 * c..4 * c + 4].copy_from_slice(&w[4 * r + c]);
             }
-            // The same round key in every block position.
-            *planes = to_planes(&[rk; GROUP]);
+            // The same round key in every block position. The replicated copies are raw key
+            // material too, so they are wiped as well.
+            let mut replicated = [rk; GROUP];
+            *planes = to_planes(&replicated);
+            wipe(&mut replicated);
             wipe(&mut rk);
         }
         for word in w.iter_mut() {
@@ -87,8 +90,11 @@ impl Aes {
     /// Encrypts `LANES` blocks in place; unused blocks are ignored (and cost the same).
     pub(crate) fn encrypt_blocks(&self, blocks: &mut [[u8; 16]; LANES]) {
         let mut st: [Planes; GROUPS] = core::array::from_fn(|g| {
-            let group: [[u8; 16]; GROUP] = core::array::from_fn(|i| blocks[g * GROUP + i]);
-            to_planes(&group)
+            let mut group: [[u8; 16]; GROUP] = core::array::from_fn(|i| blocks[g * GROUP + i]);
+            let planes = to_planes(&group);
+            // The input copy holds plaintext, a counter block or zeros (the hash-key derivation).
+            wipe(&mut group);
+            planes
         });
         for s in st.iter_mut() {
             xor_planes(s, &self.round_keys[0]);
@@ -110,6 +116,9 @@ impl Aes {
             let mut group = [[0u8; 16]; GROUP];
             from_planes(s, &mut group);
             blocks[g * GROUP..(g + 1) * GROUP].copy_from_slice(&group);
+            // The output copy holds the hash key during initialisation and CTR keystream when
+            // encrypting.
+            wipe(&mut group);
             wipe(s);
         }
     }
@@ -422,6 +431,72 @@ mod tests {
         *s ^= *s >> 7;
         *s ^= *s << 17;
         *s
+    }
+
+    /// The S-box from its definition (multiplicative inverse, then the affine map), as an
+    /// oracle. Variable time; tests only.
+    fn sbox_ref(x: u8) -> u8 {
+        fn mul(mut a: u8, mut b: u8) -> u8 {
+            let mut p = 0;
+            while b != 0 {
+                if b & 1 != 0 {
+                    p ^= a;
+                }
+                a = xtime_byte(a);
+                b >>= 1;
+            }
+            p
+        }
+        let mut inv = 0u8;
+        if x != 0 {
+            for c in 1..=255u8 {
+                if mul(x, c) == 1 {
+                    inv = c;
+                }
+            }
+        }
+        let mut s = 0x63u8;
+        for k in 0..5 {
+            s ^= inv.rotate_left(k);
+        }
+        s
+    }
+
+    #[test]
+    fn bitsliced_sbox_matches_the_definition_for_every_byte() {
+        // 64 values per call, four calls cover all 256 bytes.
+        for base in 0..4u16 {
+            let mut q = [0u64; 8];
+            for l in 0..64u16 {
+                let v = (base * 64 + l) as u8;
+                for (k, plane) in q.iter_mut().enumerate() {
+                    *plane |= u64::from((v >> k) & 1) << l;
+                }
+            }
+            sbox(&mut q);
+            for l in 0..64u16 {
+                let v = (base * 64 + l) as u8;
+                let mut got = 0u8;
+                for (k, plane) in q.iter().enumerate() {
+                    got |= (((plane >> l) & 1) as u8) << k;
+                }
+                assert_eq!(got, sbox_ref(v), "S-box({v:#04x})");
+            }
+        }
+    }
+
+    #[test]
+    fn sub_word_matches_the_definition() {
+        let mut s = 0x2468_ace0_1357_9bdfu64;
+        for _ in 0..200 {
+            let w = [
+                xorshift(&mut s) as u8,
+                xorshift(&mut s) as u8,
+                xorshift(&mut s) as u8,
+                xorshift(&mut s) as u8,
+            ];
+            assert_eq!(sub_word(w), w.map(sbox_ref));
+        }
     }
 
     #[test]
