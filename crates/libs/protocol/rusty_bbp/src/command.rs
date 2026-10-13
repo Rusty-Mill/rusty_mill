@@ -50,6 +50,7 @@ pub struct OpenTask {
     pub request_ms: u64,
     pub brief: BlobRef,
     pub human: PrincipalId,
+    pub policy: crate::policy::SchedulingPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -249,7 +249,7 @@ Human-only. `subject` is the `request_decision` or `propose` settled. An `answer
 
 | Event | Writer | Payload |
 | --- | --- | --- |
-| `task_opened` | moderator | `schema` (2), roster, repo, profile set and digest, budget, brief id |
+| `task_opened` | moderator | `schema` (2), roster, repo, profile set and digest, budget, brief id, `policy` (optional) |
 | `assigned` | moderator | role, principal |
 | `turn_granted` | moderator | role, turn id, kind: `default` or `consultation`, deadline, return-to role or null |
 | `turn_ended` | moderator | turn id, cause: `pass`, `yield`, `verdict`, `candidate`, `request`, `deadline`, `budget`, `aborted`, `revoked` |
@@ -435,6 +435,8 @@ The roster is part of `task_opened` and cannot change: no operation adds, remove
 ### Log schema
 
 Every log begins with `task_opened`, whose `schema` field is 2 for this specification. A reader that meets an unknown `schema` refuses to replay; it never guesses. Schema 1 is v0.4.1 (roles as a fixed enumeration, no roster, no `schema` field). v0.5.0 does not replay schema 1; those logs are archived, not migrated.
+
+**Scheduling policy.** `task_opened` may carry `policy`, the rule that picks who takes the next turn. The only value is `TurnBased`: the default holder of the current state, as before. A log with no `policy` replays as `TurnBased`; the field is additive, so the schema stays 2 and no archived log changes meaning. `pick_next` returns a set of roles and the policy caps its size (`max_live`, one for every policy today), so exactly one turn is live and R14 token binding, stale-turn rejection and deadlines are unchanged. Explicit grants (yield, human `ask`, request settlement, consultation return) do not pass through `pick_next`.
 
 ### Enforcement
 

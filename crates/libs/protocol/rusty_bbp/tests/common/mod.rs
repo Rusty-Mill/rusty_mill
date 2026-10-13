@@ -137,6 +137,7 @@ impl<S: Store> Fx<S> {
             request_ms: 3_600_000,
             brief,
             human: PrincipalId("human".into()),
+            policy: SchedulingPolicy::default(),
         });
         fx.run(&open);
         for r in roles.iter().filter(|r| !skip.contains(&r.id.0.as_str())) {

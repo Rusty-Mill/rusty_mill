@@ -2,6 +2,7 @@
 
 use crate::command::Response;
 use crate::ids::*;
+use crate::policy::SchedulingPolicy;
 use crate::record::*;
 use crate::role::Role;
 use crate::state::{Budget, BudgetField, Gate, State, TurnKind};
@@ -53,6 +54,9 @@ pub enum Event {
         turn_ms: u64,
         request_ms: u64,
         human: PrincipalId,
+        /// Added after schema 2 shipped: a log without it replays as `TurnBased`.
+        #[rusty_serde(default)]
+        policy: SchedulingPolicy,
     },
     Assigned {
         role: RoleId,

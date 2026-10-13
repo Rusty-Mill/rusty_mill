@@ -4,6 +4,7 @@
 use crate::command::*;
 use crate::event::*;
 use crate::ids::*;
+use crate::policy::SchedulingPolicy;
 use crate::record::*;
 use crate::role::*;
 use crate::state::*;
@@ -273,6 +274,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         turn_ms: o.turn_ms,
         request_ms: o.request_ms,
         human: o.human.clone(),
+        policy: o.policy,
     });
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {
@@ -1393,13 +1395,31 @@ fn schedule(w: &mut Work, now: Time) {
     if w.st.turn.is_some() || w.st.pending_request.is_some() || !w.st.opened {
         return;
     }
-    let Some(role) = w.st.roster.default_holder(w.st.state).cloned() else {
-        return;
-    };
     if w.st.state == State::Test && w.st.selected_run().and_then(|r| r.status).is_none() {
         return;
     }
+    // `grant` is a no-op while a turn is live, so only the first of a larger
+    // set could ever take effect; the policy caps the set at one.
+    let Some(role) = pick_next(&w.st).into_iter().next() else {
+        return;
+    };
     grant(w, &role, TurnKind::Default, None, now);
+}
+
+/// Who may take the next turn, under the task's policy. A set, so a policy
+/// that allows concurrent turns needs no new signature; capped by
+/// `SchedulingPolicy::max_live`.
+pub fn pick_next(st: &TaskState) -> Vec<RoleId> {
+    let mut picked: Vec<RoleId> = match st.policy {
+        SchedulingPolicy::TurnBased => st
+            .roster
+            .default_holder(st.state)
+            .cloned()
+            .into_iter()
+            .collect(),
+    };
+    picked.truncate(st.policy.max_live());
+    picked
 }
 
 fn end_turn_only(w: &mut Work, cause: TurnEnd) -> Option<Turn> {

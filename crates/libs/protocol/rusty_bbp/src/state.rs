@@ -3,6 +3,7 @@
 use crate::command::Response;
 use crate::event::{EscalateReason, Event};
 use crate::ids::*;
+use crate::policy::SchedulingPolicy;
 use crate::record::*;
 use crate::role::{Roster, Stage};
 use rusty_serde::{Deserialize, Serialize};
@@ -179,6 +180,7 @@ pub struct TaskState {
     pub repo: String,
     pub profile_digest: Sha256,
     pub human: PrincipalId,
+    pub policy: SchedulingPolicy,
     pub budget: Budget,
     pub spent: Spent,
     pub turn_ms: u64,
@@ -231,6 +233,7 @@ impl TaskState {
             repo: String::new(),
             profile_digest: Sha256([0; 32]),
             human: PrincipalId("human".into()),
+            policy: SchedulingPolicy::default(),
             budget: Budget {
                 messages: 40,
                 bytes: 5_000_000,
@@ -409,6 +412,7 @@ impl TaskState {
                 turn_ms,
                 request_ms,
                 human,
+                policy,
             } => {
                 self.task = task.clone();
                 self.schema = *schema;
@@ -421,6 +425,7 @@ impl TaskState {
                 self.turn_ms = *turn_ms;
                 self.request_ms = *request_ms;
                 self.human = human.clone();
+                self.policy = *policy;
                 self.opened = true;
                 self.ready_rev = self.rev;
                 let h = Principal {

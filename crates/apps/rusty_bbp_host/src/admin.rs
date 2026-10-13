@@ -56,6 +56,7 @@ pub fn open_task(
         request_ms: 86_400_000,
         brief: blob,
         human: human.clone(),
+        policy: SchedulingPolicy::default(),
     });
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }

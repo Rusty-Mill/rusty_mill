@@ -302,6 +302,7 @@ fn open_task(dir: &Path, id: &str) -> Driver<FsStore> {
         request_ms: 3_600_000,
         brief,
         human: PrincipalId("human".into()),
+        policy: SchedulingPolicy::default(),
     });
     assert!(matches!(
         d.dispatch(&cmd, Time(1)).expect("open"),
