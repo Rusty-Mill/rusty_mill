@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! bbp mcp                                   per-turn MCP server; env BBP_DIR, BBP_TASK, BBP_PRINCIPAL, BBP_TURN
-//! bbp open    --dir D --task T --repo R --brief FILE [--human ID]
+//! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE]
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
@@ -54,7 +54,8 @@ fn run() -> Result<String, String> {
                 Some(file) => profiles::read_file(&PathBuf::from(file))?,
                 None => profiles::ProfileSet::shell("test", "cargo test"),
             };
-            admin::open_task(&dir, &task, a.flag("repo")?, &brief, &human, &set)?
+            let roster = admin::read_roster(&PathBuf::from(a.flag("roster")?))?;
+            admin::open_task(&dir, &task, a.flag("repo")?, &brief, &human, &set, roster)?
         }
         "mod" => {
             let confinement = match a.flags.get("confine").map(String::as_str) {
@@ -114,7 +115,7 @@ fn run() -> Result<String, String> {
         "assign" => admin::assign(
             &dir,
             &task,
-            admin::parse_role(a.flag("role")?)?,
+            &RoleId::from(a.flag("role")?),
             &PrincipalId(a.flag("principal")?.to_owned()),
             a.flag("vendor")?,
         )?,

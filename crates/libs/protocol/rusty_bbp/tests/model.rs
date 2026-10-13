@@ -8,16 +8,16 @@ use rusty_bbp::*;
 
 #[derive(Clone, Debug)]
 enum Step {
-    Post(Role, u8),
-    Pass(Role),
-    Yield(Role, Role),
-    Read(Role),
+    Post(Who, u8),
+    Pass(Who),
+    Yield(Who, Who),
+    Read(Who),
     Spec,
     Gate,
     Diff,
     Candidate,
     Report(u8),
-    Verdict(Role, bool),
+    Verdict(Who, bool),
     ApprovePlan,
     ApproveMerge,
     RejectToPlanning,
@@ -29,16 +29,16 @@ enum Step {
     Cancel,
     Tick(u32),
     Abort,
-    HumanAsk(Role),
+    HumanAsk(Who),
     Replay,
 }
 
-fn role() -> impl Strategy<Value = Role> {
+fn role() -> impl Strategy<Value = Who> {
     prop_oneof![
-        Just(Role::Planner),
-        Just(Role::Coder),
-        Just(Role::Tester),
-        Just(Role::Reviewer)
+        Just(Who::Planner),
+        Just(Who::Coder),
+        Just(Who::Tester),
+        Just(Who::Reviewer)
     ]
 }
 
@@ -88,7 +88,7 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
     match step {
         Step::Post(r, k) => {
             let d = match k {
-                0 => ask(Role::Coder, "q"),
+                0 => ask(Who::Coder, "q"),
                 1 => Draft::new(MessageKind::Propose, "p").refs(vec![Ref::art(brief)]),
                 2 => Draft::new(MessageKind::Finding, "f")
                     .refs(vec![Ref::art(brief)])
@@ -122,7 +122,7 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
             );
         }
         Step::Spec => {
-            fx.put(Role::Planner, ArtifactPayload::Spec { brief }, b"spec");
+            fx.put(Who::Planner, ArtifactPayload::Spec { brief }, b"spec");
         }
         Step::Gate => {
             let spec = fx
@@ -137,10 +137,10 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
                 .to(Recipient::Human)
                 .refs(vec![Ref::art(spec)]);
             d.gate = true;
-            fx.post(Role::Planner, d);
+            fx.post(Who::Planner, d);
         }
         Step::Diff => {
-            fx.put(Role::Coder, ArtifactPayload::Diff, b"diff");
+            fx.put(Who::Coder, ArtifactPayload::Diff, b"diff");
         }
         Step::Candidate => {
             let diffs: Vec<ArtId> = fx
@@ -151,7 +151,7 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
                 .map(|a| a.id)
                 .collect();
             fx.put(
-                Role::Coder,
+                Who::Coder,
                 ArtifactPayload::Candidate(Candidate {
                     base: "a".repeat(40),
                     diffs,
@@ -350,6 +350,6 @@ fn every_state_has_an_exit_or_is_terminal() {
     }));
     assert_eq!(fx.st().state, State::Closed);
     for s in State::ALL {
-        let _ = s.default_role();
+        let _ = fx.st().roster.default_holder(s);
     }
 }

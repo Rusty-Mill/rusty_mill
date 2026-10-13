@@ -40,7 +40,7 @@ cargo fetch   # warms ~/.cargo so the sandboxed `cargo test --offline` needs not
 
 ```sh
 export BBP_DIR=/tmp/bbp/store BBP_TASK=slug-1
-bbp open   --repo /tmp/bbp/target --brief $P/brief.md --human nano --profiles $P/profiles.json
+bbp open   --repo /tmp/bbp/target --brief $P/brief.md --roster $P/roster.json --human nano --profiles $P/profiles.json
 bbp assign --role planner  --principal planner  --vendor anthropic
 bbp assign --role coder    --principal coder    --vendor anthropic
 bbp assign --role tester   --principal tester   --vendor anthropic

@@ -4,6 +4,7 @@ use crate::command::Response;
 use crate::event::{EscalateReason, Event};
 use crate::ids::*;
 use crate::record::*;
+use crate::role::{Roster, Stage};
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -36,25 +37,6 @@ impl State {
     ];
     pub fn terminal(self) -> bool {
         matches!(self, State::Closed | State::Cancelled)
-    }
-    /// The role that holds the default turn, if any.
-    pub fn default_role(self) -> Option<Role> {
-        match self {
-            State::Planning => Some(Role::Planner),
-            State::Build => Some(Role::Coder),
-            State::Test => Some(Role::Tester),
-            State::Review => Some(Role::Reviewer),
-            _ => None,
-        }
-    }
-    /// Consultation table: roles that may receive a yielded turn here.
-    pub fn consultable(self, role: Role) -> bool {
-        match self {
-            State::Planning => matches!(role, Role::Coder | Role::Tester),
-            State::Build => matches!(role, Role::Planner | Role::Tester),
-            State::Test => matches!(role, Role::Planner | Role::Coder),
-            _ => false,
-        }
     }
 }
 
@@ -125,10 +107,10 @@ pub struct Spent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Turn {
     pub id: TurnId,
-    pub role: Role,
+    pub role: RoleId,
     pub kind: TurnKind,
     pub deadline: Time,
-    pub return_to: Option<Role>,
+    pub return_to: Option<RoleId>,
     pub read_arts: HashSet<ArtId>,
     /// Snapshot at grant, for the guarded consultation return (T22).
     pub state_at: State,
@@ -148,14 +130,16 @@ pub struct Run {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingRequest {
     pub msg: MsgId,
-    pub requester: Role,
+    pub requester: RoleId,
     pub gate: bool,
     pub deadline: Option<Time>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerdictRecord {
-    pub role: Role,
+    pub role: RoleId,
+    /// The stage the verdict judged, from the state it was posted in.
+    pub stage: Stage,
     pub candidate: ArtId,
     pub run: RunId,
     pub kind: VerdictKind,
@@ -168,7 +152,7 @@ pub struct Card {
     pub task: TaskId,
     pub rev: Rev,
     pub state: State,
-    pub turn: Option<(Role, TurnKind, Time)>,
+    pub turn: Option<(RoleId, TurnKind, Time)>,
     pub iteration: u64,
     pub brief: Option<ArtId>,
     pub spec: Option<ArtId>,
@@ -187,6 +171,10 @@ pub struct TaskState {
     /// keeps it beside the store and sets it on the driver. All zero in the
     /// in-memory tests.
     pub master: [u8; 32],
+    /// Log schema the task was opened under.
+    pub schema: u32,
+    /// The roster `task_opened` recorded. Immutable for the task.
+    pub roster: Roster,
     pub rev: Rev,
     pub repo: String,
     pub profile_digest: Sha256,
@@ -198,7 +186,7 @@ pub struct TaskState {
     pub state: State,
     pub iteration: u64,
     pub principals: HashMap<PrincipalId, Principal>,
-    pub assigned: HashMap<Role, PrincipalId>,
+    pub assigned: HashMap<RoleId, PrincipalId>,
     pub brief: Option<ArtId>,
     pub approved_spec: Option<ArtId>,
     pub gate_request: Option<(MsgId, ArtId)>,
@@ -226,6 +214,8 @@ impl TaskState {
         TaskState {
             task,
             master: [0; 32],
+            schema: 0,
+            roster: Roster::default(),
             rev: Rev(0),
             repo: String::new(),
             profile_digest: Sha256([0; 32]),
@@ -281,10 +271,10 @@ impl TaskState {
         s
     }
 
-    pub fn role_of(&self, p: &PrincipalId) -> Option<Role> {
+    pub fn role_of(&self, p: &PrincipalId) -> Option<RoleId> {
         match self.principals.get(p).map(|x| &x.kind) {
             Some(PrincipalKind::Agent { role, .. }) if self.assigned.get(role) == Some(p) => {
-                Some(*role)
+                Some(role.clone())
             }
             _ => None,
         }
@@ -319,10 +309,34 @@ impl TaskState {
         (Some(r.candidate) == self.candidate).then_some(r)
     }
 
-    pub fn verdict(&self, role: Role, kind: VerdictKind) -> Option<&VerdictRecord> {
+    /// A verdict of `kind` at `stage` on the selected run of the current candidate.
+    pub fn verdict_at(&self, stage: Stage, kind: VerdictKind) -> Option<&VerdictRecord> {
         let run = self.selected_run()?;
         self.verdicts.iter().find(|v| {
-            v.role == role && v.kind == kind && v.candidate == run.candidate && v.run == run.id
+            v.stage == stage && v.kind == kind && v.candidate == run.candidate && v.run == run.id
+        })
+    }
+
+    /// An `approve` at `review` from a `final_decision` role, on the current candidate and run.
+    pub fn final_approved(&self) -> bool {
+        self.final_verdict(VerdictKind::Approve, Some(Stage::Review))
+    }
+
+    /// A `revise` from any `final_decision` role on the current candidate and run blocks the gate.
+    pub fn final_blocked(&self) -> bool {
+        self.final_verdict(VerdictKind::Revise, None)
+    }
+
+    fn final_verdict(&self, kind: VerdictKind, stage: Option<Stage>) -> bool {
+        let Some(run) = self.selected_run() else {
+            return false;
+        };
+        self.verdicts.iter().any(|v| {
+            v.kind == kind
+                && stage.is_none_or(|s| v.stage == s)
+                && v.candidate == run.candidate
+                && v.run == run.id
+                && self.roster.is_final(&v.role)
         })
     }
 
@@ -350,7 +364,10 @@ impl TaskState {
             task: self.task.clone(),
             rev: self.rev,
             state: self.state,
-            turn: self.turn.as_ref().map(|t| (t.role, t.kind, t.deadline)),
+            turn: self
+                .turn
+                .as_ref()
+                .map(|t| (t.role.clone(), t.kind, t.deadline)),
             iteration: self.iteration,
             brief: self.brief,
             spec: self.approved_spec,
@@ -368,6 +385,8 @@ impl TaskState {
         self.rev = Rev(self.rev.0 + 1);
         match e {
             Event::TaskOpened {
+                schema,
+                roster,
                 task,
                 repo,
                 profile_digest,
@@ -377,6 +396,10 @@ impl TaskState {
                 human,
             } => {
                 self.task = task.clone();
+                self.schema = *schema;
+                // The engine validated this roster before logging it; a log
+                // that carries an invalid one folds to an unservable task.
+                self.roster = Roster::new(roster.clone()).unwrap_or_default();
                 self.repo = repo.clone();
                 self.profile_digest = *profile_digest;
                 self.budget = *budget;
@@ -391,7 +414,7 @@ impl TaskState {
                 self.principals.insert(human.clone(), h);
             }
             Event::Assigned { role, principal } => {
-                self.assigned.insert(*role, principal.id.clone());
+                self.assigned.insert(role.clone(), principal.id.clone());
                 self.principals
                     .insert(principal.id.clone(), principal.clone());
             }
@@ -404,10 +427,10 @@ impl TaskState {
             } => {
                 self.turn = Some(Turn {
                     id: *turn,
-                    role: *role,
+                    role: role.clone(),
                     kind: *kind,
                     deadline: *deadline,
-                    return_to: *return_to,
+                    return_to: return_to.clone(),
                     read_arts: HashSet::new(),
                     state_at: self.state,
                     candidate_at: self.candidate,
@@ -471,7 +494,7 @@ impl TaskState {
             } => {
                 self.pending_request = Some(PendingRequest {
                     msg: *msg,
-                    requester: *requester,
+                    requester: requester.clone(),
                     gate: *gate,
                     deadline: *deadline,
                 });
@@ -586,9 +609,12 @@ impl TaskState {
             }
         }
         if let Event::MessageAppended(m) = e {
-            if let (Body::Verdict(v), Some(role)) = (&m.draft.body, m.from_role) {
+            if let (Body::Verdict(v), Some(role), Some(stage)) =
+                (&m.draft.body, &m.from_role, Stage::of(self.state))
+            {
                 self.verdicts.push(VerdictRecord {
-                    role,
+                    role: role.clone(),
+                    stage,
                     candidate: v.subject,
                     run: v.run,
                     kind: v.verdict,

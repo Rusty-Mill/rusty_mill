@@ -2,6 +2,7 @@
 
 use crate::ids::*;
 use crate::record::*;
+use crate::role::Role;
 use crate::state::{Card, Gate, State};
 use rusty_serde::{Deserialize, Serialize};
 
@@ -10,7 +11,7 @@ pub enum Command {
     /// Opens the task. Issued once by the moderator before anything else.
     Open(OpenTask),
     Assign {
-        role: Role,
+        role: RoleId,
         principal: Principal,
     },
     /// Driver-supplied clock tick. Fires deadlines.
@@ -40,6 +41,8 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenTask {
     pub task: TaskId,
+    /// The roster for the task. Validated by the core; immutable afterwards.
+    pub roster: Vec<Role>,
     pub repo: String,
     pub profile_digest: Sha256,
     pub budget: crate::state::Budget,
@@ -182,6 +185,10 @@ pub enum Code {
     NotOpen,
     AlreadyOpen,
     YieldNested,
+    /// `assign` named a role the task's roster does not contain.
+    UnknownRole,
+    /// `open` carried a roster that failed validation.
+    BadRoster,
     /// Driver boundary: the referenced blob is not in the store.
     BlobMissing,
     /// Driver boundary: the claimed payload is not what the stored bytes decode to.
