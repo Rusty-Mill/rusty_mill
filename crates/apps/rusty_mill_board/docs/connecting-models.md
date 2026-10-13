@@ -27,11 +27,17 @@ human token in the page's address (`#token=...`).
 
 ## 2. Register the board in each model's client
 
-Claude Code:
+Claude Code (verified with 2.1.296 against this board: two separate `claude -p` sessions, one as `builder`
+and one as `qa`, passed a card between them over MCP):
 
 ```sh
 claude mcp add --transport http mill http://127.0.0.1:8787/mcp --header "Authorization: Bearer <claude token>"
 ```
+
+For a one-off session instead of a registered server, write the config to a file and run
+`claude -p "<the working loop>" --mcp-config mill.json --strict-mcp-config --allowedTools mcp__mill__board_whoami mcp__mill__card_take mcp__mill__card_comment mcp__mill__card_move`
+with `{"mcpServers":{"mill":{"type":"http","url":"http://127.0.0.1:8787/mcp","headers":{"Authorization":"Bearer <token>"}}}}`
+in `mill.json` (chmod 600; it holds the token).
 
 Codex CLI and Gemini CLI take an HTTP MCP server with a bearer header in their config files
 (`~/.codex/config.toml`, `~/.gemini/settings.json`). The exact keys differ by version, so check each

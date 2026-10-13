@@ -468,3 +468,28 @@ fn the_builder_refuses_duplicates_and_unmatchable_templates() {
         assert!(matches!(built, Err(BuildError::BadTemplate(_))), "{bad:?}");
     }
 }
+
+#[test]
+fn every_list_of_the_stateless_revision_carries_result_type() {
+    let srv = Arc::new(
+        Server::builder("lists", "1")
+            .tool(
+                rusty_mcp_proto::Tool::new("t", Value::object()),
+                |_c, _call| Ok(rusty_mcp_proto::CallToolResult::default()),
+            )
+            .build()
+            .unwrap(),
+    );
+    let input = req(1, "tools/list", "");
+    let out = run_with(srv, &input);
+    let list = result(reply(&out, 1));
+    assert_eq!(
+        list["tools"].get_index(0).unwrap()["name"].as_str(),
+        Some("t")
+    );
+    assert_eq!(
+        list["resultType"].as_str(),
+        Some("complete"),
+        "a 2026-07-28 client rejects tools/list without resultType"
+    );
+}
