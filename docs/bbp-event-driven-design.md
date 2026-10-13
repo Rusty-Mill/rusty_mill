@@ -1,7 +1,7 @@
 # BBP event-driven participation: design
 
-Status: proposal, 2026-10-13. Docs only; nothing here is implemented. Base: audit commit `e1e27b54`.
-Inputs: `crates/libs/protocol/rusty_bbp/docs/spec/bbp-v0.4-implementation-spec.md` (v0.4.1), `docs/bbp-role-audit.md` (the nine Role fields), engine and host sources cited inline.
+Status: Phase 1 accepted, 2026-10-13; reconciled with the merged v0.5 engine the same day (see "Reconciliation"). Docs only; nothing here is implemented yet.
+Inputs: `crates/libs/protocol/rusty_bbp/docs/spec/bbp-v0.5-implementation-spec.md` (v0.5), `docs/bbp-role-audit.md` (the nine Role fields), engine and host sources cited inline. Line numbers are as of `main` at `e2605657`.
 
 ## Amendments (owner decisions, 2026-10-13)
 
@@ -10,11 +10,38 @@ Inputs: `crates/libs/protocol/rusty_bbp/docs/spec/bbp-v0.4-implementation-spec.m
 3. **`pick_next` returns a set of roles, not one.** Its cardinality is capped by the scheduling policy: `TurnBased` and Phase 1 cap it at one, which is today's behavior. A larger cap is a concurrency-design decision (`max_live_turns`). Read `Option<RoleId>` below as "a set of at most one role".
 4. **`max_chain` is deferred** until shadow-mode evidence. Open question 3 is answered: loop control stays at `turns` only until measured.
 
+## Reconciliation with the merged v0.5 engine (2026-10-13)
+
+The note was written before the v0.5 engine landed (#643, #644, #645). The sections below are updated to the code on `main`. Owner decisions that shaped the update:
+
+- **A.** `wake_set(st: &TaskState) -> Vec<(RoleId, WakeReason)>`. The roster is `st.roster`, so no second argument.
+- **B.** `pick_next` is the best role in `wake_set`, else the state's `default_holder`. Without the fallback a passing default holder is never woken again (the watermark suppresses the state trigger) and the task stalls with no live turn.
+- **C.** Shadow decisions are returned from `handle()` in `Handled.shadow` and are **not logged**: a log event would change `rev` on every trace. The host logs them, deduped on `rev`, so real runs give evidence and not only tests.
+- **D.** Priority: `Addressed` > `Artifact` > `State`; ties by `turn_order`; applied after self-exclusion, cooldown, visibility and capability gating.
+- **E.** T-final is dropped, and T-consult and T-reply are explicit grants that bypass `pick_next`.
+- **Sequencing:** one PR per step, no stacking: this reconciliation and `wake_set` in parallel from `main`; the `SchedulingPolicy` seam, then shadow mode with host logging, each after the previous merge. Live mode waits for the owner's approval of the shadow comparison.
+
+What changed against the original text:
+
+| Original | On `main` | Effect |
+| --- | --- | --- |
+| The nine fields, `Roster`, `default_holder`, `turn_order` are proposals | They exist (`role.rs`) | Names and lines updated |
+| T-state: `build` needs `write ∋ candidate`; `review` needs `verdict_at ∋ review` | `REQUIREMENTS` is richer: `planning` also needs `post ∋ request_decision`; `build` needs `write ⊇ {diff, candidate}`; `test` and `review` need `post ∋ verdict`; `review` needs `final_decision` | T-state reuses `Requirement::served_by` |
+| T-final | Redundant: the task enters `review` exactly when a test approve exists, and the `review` row already requires `final_decision` | Dropped (E) |
+| T-consult and T-reply are triggers | Yield, human `ask`, request settlement and the consultation return are direct `grant()` calls that never pass `schedule()`; T-reply is not derivable from state because the request is cleared on settle | Explicit grants (E) |
+| `seen_rev` "derivable from `turn_ended`, no new record" | True for the log, but `TaskState` held no per-role turn-end rev, no append rev per message or artifact, and `TurnEnded` has no role | Four fold-derived fields (not logged): `last_turn_end`, `msg_rev`, `art_rev`, `ready_rev` |
+| `pick_next` "highest priority" | Undefined | D and B |
+| `SchedulingPolicy` in `task_opened` | Verified: a field marked `#[rusty_serde(default)]` on an enum variant deserializes when absent, so the field is additive, needs no schema bump, and old logs replay as `TurnBased` | Spec gets a short paragraph in the seam PR |
+| Capability gating "reuses R5" | `state_accepts` is private to `engine.rs` | Made `pub(crate)` |
+| `Command::Tick` | Calls `schedule()` on every moderator poll | Shadow logging dedupes on `rev` |
+
+To measure in shadow mode (not decided): `seen_rev` is 0 for a role that has had no turn, so every earlier artifact counts as new for it; with `Artifact` above `State` the eligible set is wide early in a task. Alternatives for the baseline are the role's assignment rev or the current state's entry rev.
+
 ## Recommendation
 
 Add **BBP-side wake derivation, with delivery owned by the host/orch**:
 
-1. BBP (pure core) gains a pure function `wake_set(state, roster) -> Vec<(RoleId, WakeReason)>` that says which roles are *eligible* for a turn given the board and each role's capability set. BBP stays I/O-free; it emits no callbacks.
+1. BBP (pure core) gains a pure function `wake_set(st: &TaskState) -> Vec<(RoleId, WakeReason)>` that says which roles are *eligible* for a turn given the board and each role's capability set. BBP stays I/O-free; it emits no callbacks.
 2. The single live turn stays. What changes is *who gets the next grant*: a second scheduling policy (`EventDriven`) picks among eligible roles instead of walking `turn_order`. Turn-based remains the default and every current test stays valid.
 3. Delivery (telling a sleeping agent process "look now") lives in the host adapter (`rusty_bbp_host`, and orch's equivalent), as a wake on the append-only log's `rev`. It is not a BBP concern, not a CRDT concern, and needs no new store.
 
@@ -26,14 +53,15 @@ Honest limit: this gives "jump in when relevant" at turn granularity. An agent i
 
 | Fact | Where |
 | --- | --- |
-| Store is a single-writer, transactional, append-only log; `append(task, expected_rev, events)` is optimistic on `rev`. | `rusty_bbp/src/store.rs:25-33` |
-| `Store::refresh` lets one writer see another's appends; there is no subscribe or notify. | `store.rs:34-38` |
-| Exactly one turn is live: `grant()` returns early if `w.st.turn.is_some()` or the role is unassigned. | `engine.rs:1320-1323` |
-| One scheduling check decides every default grant: no live turn, no pending request, task opened, state has a `default_role()`, and in `test` the selected run has a final report. | `engine.rs:1335-1347` |
-| Token check: role equals the live turn's role, token equals that turn's, and `now < deadline`. | `engine.rs:224-244` |
-| The moderator loop polls: `sync()`, `dispatch(Tick)`, reap, launch one harness per granted turn, `sleep(cfg.poll)`. | `rusty_bbp_host/src/moderator.rs:255-346` |
+| Store is a single-writer, transactional, append-only log; `append(task, expected_rev, events)` is optimistic on `rev`. | `rusty_bbp/src/store.rs:31-37` |
+| `Store::refresh` lets one writer see another's appends; there is no subscribe or notify. | `store.rs:41` |
+| Exactly one turn is live: `grant()` returns early if `w.st.turn.is_some()` or the role is unassigned. | `engine.rs:1359-1362` |
+| One scheduling check decides every default grant: no live turn, no pending request, task opened, the state has a `default_holder`, and in `test` the selected run has a final report. `Tick` calls it on every poll. | `engine.rs:1374-1385`, `:159` |
+| Other grants are direct: a yield (`post`), a human `ask` and a request settlement (`human_post`), the consultation return (`end_turn`). None passes `schedule()`. | `engine.rs:1273-1350`, `:1394-1410` |
+| Token check: role equals the live turn's role, token equals that turn's, and `now < deadline`. | `engine.rs:238-258` |
+| The moderator loop polls: `sync()`, `dispatch(Tick)`, reap, launch one harness per granted turn, `sleep(cfg.poll)`. | `rusty_bbp_host/src/moderator.rs:262-353` |
 | Agents pull (`read`, `get_artifact`); the moderator never forwards content. | spec "Design principles", "Reads and visibility" |
-| `turn_order`, `consultable`, `verdict_at` and the rest do not exist in code yet; they are the v0.5.0 audit's proposal. | `docs/bbp-role-audit.md` |
+| The nine Role fields, the roster and the requirement table that derives each state's default holder. | `role.rs` (`REQUIREMENTS` `:163`, `default_holder` `:335`) |
 
 So today: a *pull* model with a *poll* wake. The host loop is the only thing that wakes anyone, and it wakes whoever the state machine names.
 
@@ -41,25 +69,26 @@ The turn loop exists because separate model processes share no runtime or bus. T
 
 ## a. Trigger conditions
 
-An agent is *eligible* when board state matches a trigger derived from its capability set. Triggers use only the nine Role fields, so BBP names no role (consistent with v0.5.0: roles are roster data).
+An agent is *eligible* when board state matches a trigger derived from its capability set. Triggers use only the nine Role fields, so BBP names no role (consistent with v0.5: roles are roster data).
 
-| Trigger | Fires when | Role fields | Maps to today's check |
+| Trigger | Fires when | Role fields | Maps to today's code |
 | --- | --- | --- | --- |
-| T-state | The task enters a state whose required capability the role holds: `planning` needs `write` containing `spec`; `build` needs `write` containing `candidate`; `test` needs `verdict_at` containing `test` (and the selected run has a final report); `review` needs `verdict_at` containing `review`. | `write`, `verdict_at` | `default_role()` (audit E3), test-run guard `engine.rs:1342` |
-| T-addressed | A message whose `to` contains the role's id or `*` was appended after the role's last turn ended. | `id`, `read_messages` | R9 recipient check; `visible()` (audit E6) |
-| T-artifact | A new artifact of a kind in `read_artifacts` appeared (`diff`, `candidate`, `test_report`, `spec`). | `read_artifacts` | `readable()` (audit E7) |
-| T-reply | A `decision` or `answer` settled a request the role opened. | `post`, `id` | request-settlement regrant, `engine.rs:1297-1304` |
-| T-consult | `yield_to` or a human `ask` addressed to the role. | `consultable`, `id` | `check_yield` (audit E13) |
-| T-final | A `test`-stage approve exists on the current candidate and run, and no `final_decision` role has judged it. | `verdict_at`, `final_decision` | R17, T11 |
+| Addressed | A message whose `to` contains the role's id or `*`, newer than the role's last turn end, authored by someone else, not a `pass`. | `id`, `read_messages` | R9 recipient check; `visible()` |
+| Artifact | A spec, diff, candidate or test report of a kind in `read_artifacts` was stored, newer than the role's last turn end, by someone else. | `read_artifacts` | `get_artifact` read capability |
+| State | The role serves the current working state (`Requirement::served_by`: the capabilities of its `REQUIREMENTS` row) and that state's turn became available since the role's last turn end. | `write`, `post`, `verdict_at`, `final_decision` | `Roster::default_holder`; the `test` run guard in `schedule()` |
+
+Explicit grants are not triggers. A yield, a human `ask`, a settled request and a consultation return name their grantee directly, bypass `schedule()` and so bypass `pick_next`. The request-settlement regrant cannot be derived from state anyway, because the request is cleared when it settles.
 
 Rules that keep a trigger honest:
 
-- **Visibility first.** A trigger fires only on records the role may read. A `Scoped` reader is never woken by a message it cannot read; otherwise the wake leaks the existence of hidden records (spec Goal 4, fresh reviews by construction).
-- **Capability-gated, not curiosity-gated.** T-addressed and T-artifact wake a role only if it can *act*: it holds some `post` kind that R5 accepts in the current state. A role whose every postable kind would be rejected here is not eligible. Cheapest noise filter, and it reuses R5 verbatim.
-- **Watermark.** Each role has a per-task `seen_rev`, the card `rev` when its last turn ended. A trigger counts only for events with `rev > seen_rev`. Derivable from `turn_ended` events, so no new record type.
-- **Human gates dominate.** In `plan_gate`, `merge_gate`, `approved`, `escalated` there is no default turn today (spec "Turns"); the only eligible roles are those addressed by a human `ask` (T-consult). Event-driven mode does not change that.
+- **Visibility first.** A trigger fires only on records the role may read. A `scoped` reader is never woken by a message it cannot read; otherwise the wake leaks the existence of hidden records (spec Goal 4, fresh reviews by construction).
+- **Capability-gated, not curiosity-gated.** Addressed and Artifact wake a role only if it can *act*: it holds some `post` kind other than `pass` that the current state accepts (`state_accepts`, the by-state table). A role whose every postable kind would be rejected is not eligible.
+- **Watermark.** Each role has a `seen_rev`, the card `rev` of the event that ended its last turn (0 if it has had none). A trigger counts only for events with `rev > seen_rev`. `TaskState` derives it, with the append rev of every message and artifact and `ready_rev` (the rev of the last event that made the state's turn available), while folding the log. They are not logged, so the log format is unchanged.
+- **Human gates dominate.** In `plan_gate`, `merge_gate`, `approved` and `escalated` there is no default turn (spec "Turns"), so `wake_set` is empty; a human `ask` is an explicit grant. Event-driven mode does not change that.
 
-`WakeReason` is a closed enum mirroring the rows above. It is computed, not stored, so the log format is unaffected.
+Order: `Addressed` > `Artifact` > `State`, ties by `turn_order`, one entry per role (its best reason).
+
+`WakeReason` is a closed enum with three variants, in priority order. It is computed, not stored, so the log format is unaffected.
 
 ## b. Two separate concerns
 
@@ -93,22 +122,26 @@ D-3 is deferred. Named trigger to revisit: a second delivery adapter that D-2's 
 
 ## c. Scheduling: keep turn-based as one policy
 
-The seam already exists in practice. `schedule()` (`engine.rs:1335-1347`) is "the one scheduling check" and chooses the grantee with `state.default_role()` (`state.rs:41-48`, audit E3/E15). `grant()` (`engine.rs:1320`) is policy-free.
+The seam already exists in practice. `schedule()` (`engine.rs:1374`) is "the one scheduling check" and chooses the grantee with `Roster::default_holder(state)` (`role.rs:335`). `grant()` (`engine.rs:1359`) is policy-free.
 
 ```
 schedule(w, now)               // guards unchanged: no live turn, no pending request, opened, test-run ready
-  -> pick_next(w.st, roster)   // the seam: a set of roles, capped by policy (1 for TurnBased and Phase 1)
+  -> pick_next(w.st)           // the seam: a set of roles, capped by policy (1 for TurnBased and Phase 1)
   -> grant(w, role, Default, None, now)   // unchanged
 ```
 
 | Policy | `pick_next` | Status |
 | --- | --- | --- |
-| `TurnBased` | `Roster::default_holder(state)` (lowest `turn_order` with the required capability) | Exactly today's `default_role()` after the audit refactor. All current tests exercise this. |
-| `EventDriven` | Among `wake_set` roles, highest priority; tie-break by `turn_order` | New. |
+| `TurnBased` | `Roster::default_holder(state)` | Today's behavior. All current tests exercise this. |
+| `EventDriven` | The first role of `wake_set`; if the set is empty, `default_holder` (liveness fallback) | New. |
 
-Is the seam justified? Yes, narrowly, and only when `EventDriven` is actually built. Today there is one policy, so a trait now would be speculative. The two policies differ in exactly one decision (who is picked). So: **no trait**. A `SchedulingPolicy::{TurnBased, EventDriven}` enum recorded in `task_opened`, with `schedule()` calling `default_holder` or `wake_set` accordingly. Recording it in the log keeps replay deterministic; it rides on the audit's decision 3 (roster in `task_opened`). If that is rejected, the policy needs its own home.
+The fallback matters: a default holder who passes is regranted at once today, but the watermark stops the state trigger firing again for a role that has already ended its turn, so without the fallback `wake_set` is empty and the task stalls. With it, an idle task behaves like turn-taking, and `turns` still bounds a loop.
+
+Is the seam justified? Yes, narrowly. The two policies differ in exactly one decision (who is picked), so: **no trait**. A `SchedulingPolicy::{TurnBased, EventDriven}` enum is recorded in `task_opened` as an additive field with `#[rusty_serde(default)]` (default `TurnBased`): old logs and tests are unchanged and no schema bump is needed. Recording it in the log keeps replay deterministic.
 
 Test impact: none for `TurnBased` (the default). The seam must NOT change who is *allowed* to write; authorization stays in R5/R14 validation.
+
+**Shadow mode.** Before any live grant, `grant()` computes what `EventDriven` would have picked and returns it in `Handled.shadow` beside the real grant: not logged. The host logs it, deduped on `rev`, so real runs give evidence and not only the traces. The comparison (agreements, disagreements and why) is shown to the owner before live mode is enabled.
 
 ## d. Human gates, budgets, evidence, and runaway ping-pong
 
@@ -116,10 +149,10 @@ Test impact: none for `TurnBased` (the default). The seam must NOT change who is
 
 | Invariant | Provided by | Under `EventDriven`, one live turn (this design) | Under concurrent live turns (not chosen) |
 | --- | --- | --- | --- |
-| A write must come from the live turn | R14, `check_token` (`engine.rs:224-244`): role, turn id, deadline | Unchanged | `st.turn` is an `Option<Turn>`; becomes a set, token lookup per role, every stale-turn trace re-derived |
+| A write must come from the live turn | R14, `check_token` (`engine.rs:238-258`): role, turn id, deadline | Unchanged | `st.turn` is an `Option<Turn>`; becomes a set, token lookup per role, every stale-turn trace re-derived |
 | Stale-turn rejection after the turn ends | `turn_ended` kills the token | Unchanged | A late write from turn A could land during turn B; needs per-turn fences |
 | Verdict binds to the selected run | R3, R6, R17 | Unchanged | R17's "an approve exists" check races a concurrent `revise` |
-| Deadline per turn | `Turn.deadline`, `fire_deadlines` (`engine.rs:1428`) | Unchanged | One deadline per live turn; recovery must revoke each |
+| Deadline per turn | `Turn.deadline`, `fire_deadlines` (`engine.rs:1468`) | Unchanged | One deadline per live turn; recovery must revoke each |
 | `reads_per_turn` | R11, card `reads_this_turn` | Unchanged | Per-role counters |
 | Recovery revokes the live turn | spec "Recovery" | Unchanged | Revoke N turns |
 
@@ -133,8 +166,8 @@ Two eager agents answering each other is a loop in which every message is indivi
 | --- | --- | --- | --- |
 | Charge on wake | Every wake is a `turn_granted`, which already charges `turns`. A wake that finds nothing to say still costs one turn when the agent `pass`es. | R11 `turns` | No |
 | Turn budget as hard stop | `turns` crossing its limit emits `escalated` (T3, phase 4). Ping-pong cannot outrun it. | R11, T3 | No |
-| Self-wake exclusion | Events authored by role X never wake X. | trigger rules (a) | No |
-| Per-agent cooldown | A role that ended a turn is ineligible until `rev` advances by something it can read and did not author. | `seen_rev` watermark | No (derived from `turn_ended`) |
+| Self-wake exclusion | Events authored by role X never wake X. Under single-turn operation cooldown already implies it, because an author's events precede the end of its own turn. | trigger rules (a) | No |
+| Per-agent cooldown | A role that ended a turn is ineligible until `rev` advances by something it can read and did not author. | `seen_rev` watermark (`TaskState.last_turn_end`) | Fold-derived, not logged |
 | Wake only on content | `pass` has no refs or evidence (R5 table) and wakes nobody. | R5 | No |
 | Debounce | Eligibility is evaluated once per transaction in phase 4, after all effects. Several events in one transaction yield one wake. | processing model phase 4 | No |
 | `reads_per_turn` | A woken agent that only reads is bounded. | R11 | No |
@@ -146,13 +179,13 @@ The first rows do most of the work for free: `turns` was designed as the loop bo
 
 ### d3. Human gates
 
-- No change. Gate states have no default turn, and `wake_set` returns only consult targets there. R13 (no Agent API creates a human event) and R17 are untouched, so event-driven mode cannot open or approve a gate.
-- A wake cannot bypass the scheduling check: `schedule()` returns early on `pending_request.is_some()` (`engine.rs:1336`) and `pick_next` runs after those guards, so an open request still holds the task.
+- No change. Gate states have no default turn, and `wake_set` is empty there (a human `ask` is an explicit grant). R13 (no Agent API creates a human event) and R17 are untouched, so event-driven mode cannot open or approve a gate.
+- A wake cannot bypass the scheduling check: `schedule()` returns early on `pending_request.is_some()` and `pick_next` runs after those guards, so an open request still holds the task.
 - A human `ask` stays a consultation grant and outranks any `EventDriven` pick.
 
 ### d4. Evidence rules
 
-R3 is state, not scheduling. An eager Tester cannot jump in before the report exists: `schedule()` already refuses a `test` grant until `selected_run().status` is set (`engine.rs:1342`), and T-state reproduces that guard. A role woken by T-artifact on a `diff` during `build` may post `finding`, not `verdict` (R5, R6 state checks). No change.
+R3 is state, not scheduling. An eager Tester cannot jump in before the report exists: `schedule()` already refuses a `test` grant until `selected_run().status` is set, and `wake_set` reproduces that guard. A role woken by an `Artifact` trigger on a `diff` during `build` may post `finding`, not `verdict` (R5, R6 state checks). No change.
 
 ## e. Options
 
@@ -221,12 +254,14 @@ CRDT merge is confirmed for DeltaDB. Its delivery mechanism is not public, so th
 
 | Phase | Scope | Gate to proceed |
 | --- | --- | --- |
-| 0 (prereq) | v0.5.0 Role refactor (audit PR2/PR3). `wake_set` needs the nine fields. | Audit work merged. |
-| 1 | `wake_set` as a pure function with tests; no scheduling change; the host logs "would wake X" beside the actual grant in a proving run. | Shadow results show sensible eligible sets. |
-| 2 | `SchedulingPolicy` in `task_opened`; `pick_next` seam; `EventDriven` behind the field; `TurnBased` default. | Phase 1 shows no spurious wakes. |
-| 3 | Reply-chain cap, if measurement shows loops. | Proving-run data. |
+| 0 (prereq) | v0.5 Role refactor. **Done** (#643, #644, #645). | |
+| 1a | `wake_set` as a pure function with tests, plus the four fold-derived `TaskState` fields; no scheduling change. | Merged. |
+| 1b | `SchedulingPolicy` (additive, default `TurnBased`) and the `pick_next` seam, cardinality capped at one. | 1a merged. |
+| 1c | Shadow mode: `Handled.shadow`, the comparison tests over the 31 traces and new cases, and host-side logging deduped on `rev`. | 1b merged. **Stop: the owner reviews the comparison.** |
+| 2 | Live `EventDriven` behind the policy; the real trace test for the R17 `final_decision` revise block. | Owner approval of the shadow comparison. |
+| 3 | Reply-chain cap (`max_chain`), only if measurement shows loops. | Proving-run data. |
 
-Phase 1 is shadow mode on purpose: it falsifies the trigger table before it can affect scheduling.
+Shadow mode is on purpose: it falsifies the trigger table before it can affect scheduling.
 
 ## Non-goals
 
@@ -247,12 +282,12 @@ Phase 1 is shadow mode on purpose: it falsifies the trigger table before it can 
 - `rusty_multimodal_db` transaction semantics against `expected_rev`; whether any consumer needs a client subscription.
 - DeltaDB's delivery mechanism (not public), and whether spec Appendix A's "Delta" is Zed's DeltaDB.
 - Behavior of any `EventDriven` run: no code exists and the trigger table is untested against the traces. Phase 1 exists for this.
-- The audit's `Roster`, `default_holder`, `turn_order` and related names are proposals in `docs/bbp-role-audit.md`, not code at `e1e27b54`; names above are targets, not existing symbols. Line numbers cited are at that commit.
+- The cited line numbers are as of `main` at `e2605657` and will drift; the symbol names are the stable references.
 
 ## Open questions for the owner
 
-1. Is "interrupt the schedule" (one live turn, event-chosen) enough, or is true concurrent authoring a requirement? This decides whether option 3 stays out.
-2. Should `SchedulingPolicy` live in `task_opened` (log format change, replay-deterministic) or in host config (no log change, but replay can diverge)?
-3. Is a `max_chain` reply cap acceptable as a new R11 budget field, or should loop control stay at `turns` only until measured?
-4. Who owns the log-tail delivery loop: `rusty_bbp_host` (next to the engine) or orch (per the BBP/orch boundary)?
-5. Should shadow-mode `wake_set` (phase 1) land before, or inside, the v0.5.0 Role refactor PR?
+Resolved on 2026-10-13: the policy lives in `task_opened` (question 2); `max_chain` is deferred (question 3); the Role refactor merged first (question 5).
+
+1. Is "interrupt the schedule" (one live turn, event-chosen) enough, or is true concurrent authoring a requirement? Superseded by `docs/bbp-concurrency-design.md`, which treats concurrent authoring as a separate design.
+2. Who owns the log-tail delivery loop: `rusty_bbp_host` (next to the engine) or orch (per the BBP/orch boundary)? Host-side shadow logging is in scope for phase 1c; the production delivery loop is not.
+3. What baseline should `seen_rev` have for a role with no turn yet (0, its assignment rev, or the state's entry rev)? Decide from the shadow comparison.
