@@ -172,8 +172,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .as_deref()
         .map(|exe| GameLaunch::new(exe, args.game_port).spawn())
         .transpose()?;
+    // Only a connection that speaks as the game does is taken for it, so a stray local connection
+    // cannot hold the game's place. The game itself stays silent until a map loads.
     let stream = listener
-        .wait_for_connection(Duration::from_secs(300))?
+        .wait_for_game(Duration::from_secs(300), |note| println!("{note}"))?
         .ok_or("the game did not connect within five minutes")?;
     stream.set_nonblocking(true)?;
     println!("the game connected");

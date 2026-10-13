@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use rb_rlbot_wire::{ControllerState, GamePacket, Physics};
 
-use crate::game_wire::{BotSkill, Loadout};
+use crate::game_wire::{decode_game_packet, BotSkill, Loadout};
 
 use crate::tick::{should_distribute, Clump, Roster, TickTracker};
 
@@ -124,6 +124,42 @@ impl BridgeLoop {
     }
 }
 
+/// Connections held at once while looking for the game; past it the oldest is closed.
+pub const MAX_CANDIDATES: usize = 8;
+
+/// What a connection has said so far.
+enum FirstMessage {
+    /// Nothing complete yet.
+    Waiting,
+    /// A whole first message, and it decodes as the game's.
+    Game,
+    /// Closed, or a first message that is not the game's.
+    NotTheGame(String),
+}
+
+/// Looks at a non-blocking connection's first message without reading it.
+fn first_message(stream: &TcpStream) -> io::Result<FirstMessage> {
+    let mut buf = vec![0u8; 2 + usize::from(u16::MAX)];
+    let n = match stream.peek(&mut buf) {
+        Ok(0) => return Ok(FirstMessage::NotTheGame("it closed without a word".into())),
+        Ok(n) => n,
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(FirstMessage::Waiting),
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => return Ok(FirstMessage::Waiting),
+        Err(e) => return Ok(FirstMessage::NotTheGame(format!("it failed: {e}"))),
+    };
+    if n < 2 {
+        return Ok(FirstMessage::Waiting);
+    }
+    let len = usize::from(u16::from_be_bytes([buf[0], buf[1]]));
+    if n < 2 + len {
+        return Ok(FirstMessage::Waiting);
+    }
+    Ok(match decode_game_packet(&buf[2..2 + len]) {
+        Ok(_) => FirstMessage::Game,
+        Err(e) => FirstMessage::NotTheGame(format!("its first message is not the game's: {e}")),
+    })
+}
+
 /// The socket the game connects out to (`TcpMessenger.WaitForConnectionAsync`).
 #[derive(Debug)]
 pub struct GameListener {
@@ -140,6 +176,67 @@ impl GameListener {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    /// Waits for the game, telling it from anything else that dials the port: a connection is
+    /// the game only once its first message arrives and decodes as one of the game's.
+    /// Connections that close or send something that is not a game message are dropped, and
+    /// so is the oldest when more than [`MAX_CANDIDATES`] wait (each reported to `note`); silent
+    /// ones wait, because the
+    /// game connects at launch and says nothing until a map loads. The stream returned has not
+    /// had a byte read from it, so the first message is still there for the link.
+    ///
+    /// `timeout` runs only while no connection is waiting; `Ok(None)` if it ran out.
+    pub fn wait_for_game(
+        &self,
+        timeout: Duration,
+        mut note: impl FnMut(&str),
+    ) -> io::Result<Option<TcpStream>> {
+        let mut candidates: Vec<TcpStream> = Vec::new();
+        let mut idle_since = Instant::now();
+        loop {
+            loop {
+                match self.listener.accept() {
+                    Ok((stream, peer)) => {
+                        stream.set_nonblocking(true)?;
+                        stream.set_nodelay(true)?;
+                        if candidates.len() == MAX_CANDIDATES {
+                            // Newest wins: silent connections must not be able to fill the
+                            // places and keep the game out.
+                            candidates.remove(0);
+                            note("dropped the oldest waiting connection: too many");
+                        }
+                        note(&format!("a connection from {peer} is waiting to speak"));
+                        candidates.push(stream);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            let mut index = 0;
+            while index < candidates.len() {
+                match first_message(&candidates[index])? {
+                    FirstMessage::Game => {
+                        let game = candidates.swap_remove(index);
+                        game.set_nonblocking(false)?;
+                        return Ok(Some(game));
+                    }
+                    FirstMessage::Waiting => index += 1,
+                    FirstMessage::NotTheGame(why) => {
+                        note(&format!("dropped a connection: {why}"));
+                        candidates.swap_remove(index);
+                    }
+                }
+            }
+            let now = Instant::now();
+            if !candidates.is_empty() {
+                idle_since = now;
+            } else if now.duration_since(idle_since) >= timeout {
+                return Ok(None);
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Waits up to `timeout` for the game to connect; `Ok(None)` if it did not.

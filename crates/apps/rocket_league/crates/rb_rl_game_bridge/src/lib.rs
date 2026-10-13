@@ -43,7 +43,7 @@ pub use launch::{
     rlbot_args, GameLaunch, DEFAULT_GAME_PORT, IDEAL_GAME_PORT, PACKET_SEND_RATE,
     RLBOT_SOCKETS_PORT,
 };
-pub use link::{BridgeLoop, GameCommand, GameLink, GameListener, Step};
+pub use link::{BridgeLoop, GameCommand, GameLink, GameListener, Step, MAX_CANDIDATES};
 pub use link_backend::LinkBackend;
 pub use ports::{
     any_started_with_rlbot, controller_port, find_usable_game_port, tcp_port_is_free,
