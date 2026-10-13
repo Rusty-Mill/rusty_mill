@@ -18,7 +18,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rl-lib.ps1')
 
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$stamp = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N')
 $dir   = Join-Path $env:TEMP "rl-auto-$stamp"
 $dir | Set-Content "$env:TEMP\rl-auto-latest.txt"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -78,16 +78,24 @@ function Start-ExhibitionMatch([bool]$FirstTime) {
 }
 
 $bridge = $null
+$watcher = $null
+$failure = $null
+$owned = New-RlOwnership
+$runStatus = 'not started'
+$watchStatus = 'skipped (run did not reach watcher startup)'
+$cleanupStatus = 'not started'
 try {
-  foreach ($exe in 'rb_rl_bridge', 'rb_chaser_bot', 'rb_rl_game_probe') {
-    if (-not (Test-Path "$script:Bin\$exe.exe")) { throw "missing $script:Bin\$exe.exe - run: cargo build --release -p rb_rl_game_bridge -p rb_rlbot_bridge --bins" }
-  }
+  Assert-RlPreflight $script:Bin $script:GameDir
+  $runStatus = 'started'
   Note 'start bridge and launch the game (kill-before-login Epic relaunch)'
-  $bridge = Start-RlSession -Dir $dir -Stamp $stamp -Players @('rusty_bullet/chaser_bot:0', 'rusty_bullet/chaser_bot_b:1')
-  [void](Start-RlBot $dir 'rusty_bullet/chaser_bot' 'a')
-  [void](Start-RlBot $dir 'rusty_bullet/chaser_bot_b' 'b')
-  [void](Start-RlWatcher $dir)
+  $bridge = Start-RlSession -Dir $dir -Stamp $stamp -Players @('rusty_bullet/chaser_bot:0', 'rusty_bullet/chaser_bot_b:1') -Owned $owned
+  [void](Start-RlBot $dir 'rusty_bullet/chaser_bot' 'a' $owned)
+  [void](Start-RlBot $dir 'rusty_bullet/chaser_bot_b' 'b' $owned)
+  $watchStatus = 'FAILED (startup did not complete)'
+  $watcher = Start-RlWatcher $dir $owned
+  $watchStatus = 'ready'
   Start-Sleep 8
+  Assert-RlWatcher $watcher
   Focus-Rl
 
   Start-ExhibitionMatch $true
@@ -136,35 +144,29 @@ try {
 }
 catch {
   Note "ABORTED: $($_.Exception.Message)"; $failure = $_.Exception.Message
-  try { Shot 'abort' } catch { Note "no abort screenshot: $($_.Exception.Message)" }
+  $runStatus = 'FAILED'
+  # Do not capture a desktop/window on preflight or ambiguous-ownership failure.
 }
 finally {
-  Note 'stop bots, game, bridge'
-  Stop-RlAll
-  Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" | Where-Object { $_.CommandLine -match 'rl-watch\.ps1' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  if ($watcher) {
+    try { Assert-RlWatcher $watcher; $watchStatus = 'passed' }
+    catch { $watchStatus = 'FAILED (timeline incomplete)'; $failure = 'timestamp watcher failed' }
+  }
+  Note 'stop only processes owned by this run'
+  try { Stop-RlOwnedProcesses $owned; $cleanupStatus = 'passed' }
+  catch { $cleanupStatus = 'FAILED'; $failure = 'owned process cleanup failed' }
 }
+if ($runStatus -eq 'started') { $runStatus = 'passed' }
 
-# ---- analysis and scrubbed report ----
-$in  = Get-ChildItem $dir -Filter "$stamp-in.bin"  -ErrorAction SilentlyContinue
-$out = Get-ChildItem $dir -Filter "$stamp-out.bin" -ErrorAction SilentlyContinue
-if ($in -and $in.Length -gt 0) {
-  Note 'analyse recordings (slow on big files)'
-  & "$script:Bin\rb_rl_game_probe.exe" --analyze $in.FullName *> "$dir\analyze.raw"
-  & "$script:Bin\rb_rl_game_probe.exe" --census-in $in.FullName --census-out $out.FullName *> "$dir\census.raw"
-  # Demolition episodes per actor (names already labelled human/bot_a/bot_b by the tool).
-  $demo = Join-Path $script:Bin 'rb_rl_demo_count.exe'
-  if (Test-Path $demo) { & $demo $in.FullName *> "$dir\demolitions.raw" }
-}
-# Scrub: any PlayerSpawn/life name that is not one of our bots is the human.
-function Scrub([string]$s) {
-  $s = $s -replace 'name "(?!rusty_bullet/)[^"]*"', 'name "human"'
-  $s = $s -replace '(life \d+ )"(?!rusty_bullet/)[^"]*"', '$1"human"'
-  $s = $s -replace 'rusty_bullet/chaser_bot_b', 'bot_b' -replace 'rusty_bullet/chaser_bot', 'bot_a'
-  $s
-}
+# Every required analysis stage records passed/failed/skipped and controls the final exit code.
+$analysis = Invoke-RlAnalyses $script:Bin $dir $stamp
+if (@($analysis.Values | Where-Object { $_ -ne 'passed' }).Count) { $failure = 'one or more analysis stages failed or were skipped' }
 $report = New-Object System.Collections.Generic.List[string]
 $report.Add("rl live test $stamp   commit: $(git -C $script:Repo rev-parse --short HEAD)   branch: $(git -C $script:Repo branch --show-current)")
 if ($failure) { $report.Add("RUN ABORTED: $failure") }
+
+$report.Add("run: $runStatus; watcher: $watchStatus; cleanup: $cleanupStatus")
+foreach ($stage in $analysis.Keys) { $report.Add("${stage}: $($analysis[$stage])") }
 $report.Add('')
 $report.Add('== timeline (actions and bridge events) ==')
 $tl = @(Get-Content $actions -ErrorAction SilentlyContinue) + @(Get-Content "$dir\timed.log" -ErrorAction SilentlyContinue | ForEach-Object { $_ -replace '^(\S+) ', '$1 BRIDGE ' })
@@ -176,11 +178,12 @@ if (Test-Path "$dir\analyze.raw") {
 }
 $report.Add('')
 $report.Add('== demolitions, spawns and destroys of player actors ==')
-if (Test-Path "$dir\demolitions.raw") { Get-Content "$dir\demolitions.raw" | ForEach-Object { $report.Add($_) } } else { $report.Add('(rb_rl_demo_count not built)') }
+if (Test-Path "$dir\demolitions.raw") { Get-Content "$dir\demolitions.raw" | ForEach-Object { $report.Add((Scrub $_)) } } else { $report.Add('(no demolition output; see stage status)') }
 $report.Add('')
 $report.Add('== census ==')
-if (Test-Path "$dir\census.raw") { Get-Content "$dir\census.raw" | ForEach-Object { $report.Add($_) } }
+if (Test-Path "$dir\census.raw") { Get-Content "$dir\census.raw" | ForEach-Object { $report.Add((Scrub $_)) } }
 Set-Content -Path "$dir\report.txt" -Value $report
 Write-Host "report: $dir\report.txt"
 Write-Host 'The recordings and screenshots contain the human player''s name: scrub before sharing.'
 if ($failure) { exit 1 }
+exit 0

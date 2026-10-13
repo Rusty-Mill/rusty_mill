@@ -13,10 +13,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::{self, Read};
 use std::process::ExitCode;
 
 use rb_rl_game_bridge::{decode_game_packet_strict, GameBundle, GameEvent};
-use rb_rlbot_wire::frame::FrameDecoder;
 
 /// `PlayerPhysicsState` value the game reports for a demolished car
 /// (OnGround, Jumped, DoubleJumped, Dodged, InAir, Demolished).
@@ -66,12 +66,22 @@ impl MapReport {
 
 /// Folds bundles into one report per map. A new `GameSpawn` starts a new map and forgets the
 /// previous map's actors, because the game numbers actors afresh on each map.
-fn summarize(bundles: impl IntoIterator<Item = GameBundle>) -> Vec<MapReport> {
-    let mut maps: Vec<MapReport> = Vec::new();
-    let mut known: BTreeMap<u16, u8> = BTreeMap::new();
-    let mut state: BTreeMap<u16, u8> = BTreeMap::new();
-    let mut down_since: BTreeMap<u16, f32> = BTreeMap::new();
-    for bundle in bundles {
+#[derive(Default)]
+struct Summary {
+    maps: Vec<MapReport>,
+    known: BTreeMap<u16, u8>,
+    state: BTreeMap<u16, u8>,
+    down_since: BTreeMap<u16, f32>,
+}
+
+impl Summary {
+    fn push(&mut self, bundle: GameBundle) {
+        let Self {
+            maps,
+            known,
+            state,
+            down_since,
+        } = self;
         let at = bundle.app_seconds;
         for event in bundle.events {
             if let GameEvent::GameSpawn { map_name, .. } = &event {
@@ -122,24 +132,58 @@ fn summarize(bundles: impl IntoIterator<Item = GameBundle>) -> Vec<MapReport> {
             }
         }
     }
-    maps
+}
+
+#[cfg(test)]
+fn summarize(bundles: impl IntoIterator<Item = GameBundle>) -> Vec<MapReport> {
+    let mut summary = Summary::default();
+    for bundle in bundles {
+        summary.push(bundle);
+    }
+    summary.maps
+}
+
+// Read only one u16-sized frame at a time, reusing its allocation. No whole-file buffer,
+// retained bundles, or FrameDecoder suffix copies. Partial headers/payloads fail closed.
+fn analyze(mut reader: impl Read) -> Result<(u64, Vec<MapReport>), Box<dyn std::error::Error>> {
+    let mut summary = Summary::default();
+    let mut payload = Vec::new();
+    let mut messages = 0;
+    loop {
+        let mut header = [0; 2];
+        let n = loop {
+            match reader.read(&mut header[..1]) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result?,
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        reader.read_exact(&mut header[1..])?;
+        payload.resize(usize::from(u16::from_be_bytes(header)), 0);
+        reader.read_exact(&mut payload)?;
+        // A lost destroy/spawn invalidates identity continuity. Return no report at all
+        // instead of asserting that a reused actor ID is the same player after a gap.
+        let bundle = decode_game_packet_strict(&payload).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "undecodable framed bundle {}: analysis aborted",
+                    messages + 1
+                ),
+            )
+        })?;
+        summary.push(bundle);
+        messages += 1;
+    }
+    Ok((messages, summary.maps))
 }
 
 fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut decoder = FrameDecoder::new();
-    decoder.push(&std::fs::read(path)?);
-    let (mut bundles, mut undecodable, mut messages) = (Vec::new(), 0u32, 0u32);
-    while let Some(payload) = decoder.next_frame() {
-        messages += 1;
-        match decode_game_packet_strict(&payload) {
-            Ok(bundle) => bundles.push(bundle),
-            // Counted and reported, not skipped silently: the report is only as complete as this.
-            Err(_) => undecodable += 1,
-        }
-    }
-    decoder.finish()?;
-    println!("{messages} messages, {undecodable} undecodable");
-    for (i, map) in summarize(bundles).iter().enumerate() {
+    let (messages, maps) = analyze(std::fs::File::open(path)?)?;
+    println!("{messages} framed bundles, 0 undecodable");
+    for (i, map) in maps.iter().enumerate() {
         let episodes: u32 = map.demolitions.values().sum();
         println!(
             "\nmap {} {:?}: {} demolitions, {} player spawns, {} player-actor destroys",
@@ -174,6 +218,7 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use rb_rlbot_wire::Physics;
@@ -289,5 +334,78 @@ mod tests {
         let text: Vec<String> = maps[0].events.iter().map(ToString::to_string).collect();
         assert!(text.iter().all(|line| !line.contains("secret")));
         assert!(text[0].contains("actor 38 team 1"));
+    }
+    fn recording(bundles: impl IntoIterator<Item = GameBundle>) -> Vec<u8> {
+        bundles
+            .into_iter()
+            .flat_map(|b| {
+                rb_rlbot_wire::frame::frame(&rb_rl_game_bridge::encode_game_packet(&b).unwrap())
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn decode_loss_between_down_and_reused_id_fails_without_a_report() {
+        let mut bytes = recording([bundle(
+            0.0,
+            vec![map("m"), spawn(38, 0), physics(38, DEMOLISHED)],
+        )]);
+        bytes.extend(rb_rlbot_wire::frame::frame(&[0xff]).unwrap());
+        bytes.extend(recording([bundle(3.0, vec![spawn(38, 1), physics(38, 0)])]));
+        let error = analyze(bytes.as_slice()).unwrap_err();
+        assert!(error.to_string().contains("undecodable framed bundle 2"));
+    }
+
+    #[test]
+    fn truncated_headers_and_payloads_fail_without_a_report() {
+        for bytes in [vec![0], vec![0, 3, 1, 2]] {
+            assert!(analyze(bytes.as_slice()).is_err());
+        }
+        assert_eq!(analyze([].as_slice()).unwrap(), (0, vec![]));
+    }
+
+    #[test]
+    fn large_recording_is_read_incrementally_with_bounded_requests() {
+        struct Repeated {
+            frame: Vec<u8>,
+            remaining: usize,
+            offset: usize,
+        }
+        impl Read for Repeated {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                assert!(out.len() <= usize::from(u16::MAX));
+                if self.remaining == 0 {
+                    return Ok(0);
+                }
+                // Short reads exercise headers/payloads split at arbitrary boundaries.
+                let n = out.len().min(7).min(self.frame.len() - self.offset);
+                out[..n].copy_from_slice(&self.frame[self.offset..self.offset + n]);
+                self.offset += n;
+                if self.offset == self.frame.len() {
+                    self.remaining -= 1;
+                    self.offset = 0;
+                }
+                Ok(n)
+            }
+        }
+        let bytes = recording([bundle(1.0, vec![physics(38, 0)])]);
+        let (count, maps) = analyze(Repeated {
+            frame: bytes,
+            remaining: 100_000,
+            offset: 0,
+        })
+        .unwrap();
+        assert_eq!(count, 100_000);
+        assert!(maps.is_empty());
+        let bundles = [
+            bundle(0.0, vec![map("m"), spawn(38, 0)]),
+            bundle(1.0, vec![physics(38, DEMOLISHED)]),
+            bundle(4.0, vec![physics(38, 0)]),
+        ];
+        assert_eq!(
+            analyze(recording(bundles.clone()).as_slice()).unwrap(),
+            (3, summarize(bundles))
+        );
     }
 }
