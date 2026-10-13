@@ -76,6 +76,9 @@ its state setting becomes a ball placement.
 - **Start `rb_rl_bridge` before the game.** The game dials it once, at launch, and spawning waits
   for the map announcement that follows. A bridge that joins a game already in a match never sees
   that announcement, so it spawns nothing and the match never starts for it.
+- **The bots' port is taken at startup**, before the game is launched: a clash fails at once
+  naming the port, and a bot that starts while the game is still loading connects and waits for
+  its handshake instead of being refused. (How long a given bot waits is the bot's own timeout.)
 - **A spawn the game never answers is not retried** and has no timeout; the match then never
   starts. (Resending could create two cars.)
 - **A socket that takes part of a frame** (a stalled game on a non-blocking connection) is

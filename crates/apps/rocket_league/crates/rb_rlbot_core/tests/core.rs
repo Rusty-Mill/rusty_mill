@@ -819,3 +819,36 @@ fn a_hold_is_reported_even_when_the_backend_polls_no_packets() {
         .unwrap();
     assert!(matches!(core.join().unwrap(), RunEnd::StopCommand { .. }));
 }
+
+#[test]
+fn a_bot_that_connects_before_the_core_runs_waits_and_is_served() {
+    // The port is held first, as a caller does while its game is still starting.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bot_thread = thread::spawn(move || play(addr, "early", 0, 3));
+    // The bot is connected (and its handshake waiting) before any core exists.
+    thread::sleep(Duration::from_millis(300));
+    let core = thread::spawn(move || {
+        let sim = Simulation::new(MatchConfiguration {
+            player_configurations: vec![bot("early", 0, 100)],
+            ..MatchConfiguration::default()
+        })
+        .unwrap();
+        let mut core = Core::from_listener(
+            listener,
+            sim,
+            Pacing::Lockstep {
+                input_timeout: Duration::from_secs(10),
+            },
+        )
+        .unwrap();
+        core.run(&AtomicBool::new(false), |_| {}).unwrap()
+    });
+    assert_eq!(bot_thread.join().unwrap().len(), 3);
+    assert_eq!(
+        core.join().unwrap(),
+        RunEnd::StopCommand {
+            shutdown_server: true
+        }
+    );
+}

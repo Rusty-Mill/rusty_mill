@@ -10,13 +10,15 @@
 //! 23234). Start the game with the arguments printed here (or pass `--launch`) and a match
 //! loading. Once the map is up the bridge spawns one bot car per `AGENT_ID:TEAM`, in that order,
 //! as RLBot does; with `--no-spawn` it expects those cars to exist already. Then start the bots
-//! with `RLBOT_SERVER_PORT` set. Run live on 2026-10-11 (Epic, Freeplay); see the README.
+//! with `RLBOT_SERVER_PORT` set (the port is taken at startup, so bots may also start first and
+//! wait for the game). Run live on 2026-10-11 (Epic, Freeplay); see the README.
 //! The bridge must be running before the game starts: the game dials it once at launch, and
 //! spawning waits for the map announcement that follows. `--record-in` / `--record-out` files
 //! contain the players' display names; scrub them before sharing.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::net::TcpListener;
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -141,10 +143,25 @@ fn open_recordings(args: &Args) -> io::Result<(Option<File>, Option<File>)> {
     Ok((inbound, outbound))
 }
 
+/// Takes the bots' port. Done before the game is launched so a clash fails now, with the port
+/// named, and not after the game has dialled in and been left with nobody to talk to; bots that
+/// start while the game is still loading connect and wait instead of being refused.
+fn bind_bots(port: u16) -> io::Result<TcpListener> {
+    TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "bots port 127.0.0.1:{port} is not available ({e}); choose another with --port"
+            ),
+        )
+    })
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse(std::env::args().skip(1))?;
     let (inbound, outbound) = open_recordings(&args)?;
     let listener = GameListener::bind(args.game_port)?;
+    let bots = bind_bots(args.port)?;
     println!(
         "waiting for the game on 127.0.0.1:{}; start it with: {}",
         args.game_port,
@@ -170,7 +187,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let backend = LinkBackend::new(tee, configuration).with_spawning(args.spawn);
     // Pacing is ignored for a game: it decides when a packet exists.
-    let mut core = Core::bind(("127.0.0.1", args.port), backend, Pacing::RealTime)?;
+    let mut core = Core::from_listener(bots, backend, Pacing::RealTime)?;
     let end = core.run(&AtomicBool::new(false), |event| match event {
         Event::Listening(addr) => println!("serving bots on {addr}"),
         event => println!("{event:?}"),
@@ -204,6 +221,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(args.length, MatchLengthMutator::Unlimited);
+    }
+    #[test]
+    fn a_taken_bots_port_is_refused_by_name_before_anything_is_launched() {
+        let held = bind_bots(0).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let e = bind_bots(port).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
+        assert!(e.to_string().contains(&port.to_string()), "{e}");
+        drop(held);
+        assert!(bind_bots(port).is_ok(), "free again once released");
     }
     #[test]
     fn exclusive_recording_open_rejects_same_path_without_truncating() {
