@@ -1,6 +1,6 @@
 # ADR-0001: The BBP conductor: a board client that hosts each card as a Blackboard Protocol task
 
-- **Status:** Proposed
+- **Status:** Paused (2026-10-13): BBP is being revised; revisit when it settles. The generic parts (asks, handles, role-bound credentials) are still useful. A BBP-free runner is built first, see ADR-0002.
 - **Date:** 2026-10-13
 
 ## Context

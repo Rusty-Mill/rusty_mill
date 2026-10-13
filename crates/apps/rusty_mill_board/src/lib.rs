@@ -13,6 +13,7 @@ pub mod api;
 pub mod board;
 pub mod domain;
 pub mod github;
+pub mod http;
 pub mod mcp;
 pub mod mmdb;
 pub mod store;

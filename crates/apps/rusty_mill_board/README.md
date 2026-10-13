@@ -35,5 +35,6 @@ Layout: `domain` (pure) / `store` + `mmdb` (port and adapters) / `board` (servic
 `api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +
 `github` (adapter).
 
-Not yet: the autonomous runner, meant to be a client of the tools above (via BBP),
-not code inside this crate.
+Optional runner: [`runner/`](runner/README.md) (`mill-runner`) works cards through stages by running
+a sandboxed command per column; the board does not depend on it. A BBP conductor is designed but
+paused (ADR-0001).

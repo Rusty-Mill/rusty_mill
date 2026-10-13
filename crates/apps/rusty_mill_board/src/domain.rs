@@ -74,7 +74,7 @@ pub struct Actor {
 
 /// The capability needed to move a card `from` -> `to`.
 /// `Ok(None)` means any actor may; `Err` means the move does not exist.
-fn required(from: Column, to: Column) -> Result<Option<Capability>, BoardError> {
+pub fn required_capability(from: Column, to: Column) -> Result<Option<Capability>, BoardError> {
     use Column::*;
     match (from, to) {
         (Done, _) => Err(BoardError::Terminal),
@@ -280,13 +280,16 @@ impl Card {
         }
     }
 
-    /// Drop the claim; only its holder may.
+    /// Drop the claim; only its holder may, or anyone holding `Triage`
+    /// (a person taking a card back from a stuck or runaway agent).
     ///
     /// # Errors
     /// If someone else holds it.
     pub fn release(&self, by: &Actor, now_ms: i64) -> Result<Self, BoardError> {
         match &self.claim {
-            Some(holder) if *holder != by.name => Err(BoardError::Claimed(holder.clone())),
+            Some(holder) if *holder != by.name && !by.caps.contains(&Capability::Triage) => {
+                Err(BoardError::Claimed(holder.clone()))
+            }
             _ => Ok(Self {
                 claim: None,
                 ..self.next(now_ms)
@@ -296,19 +299,23 @@ impl Card {
 
     /// Move to `to`. The claim is cleared on arrival, so the next stage's
     /// worker claims it afresh. Leaving a worked column (Building, Qa, Review)
-    /// requires holding the claim.
+    /// requires holding the claim, unless the actor holds `Triage` (the
+    /// human override).
     ///
     /// # Errors
     /// If the move does not exist, the actor lacks the capability, or the
     /// actor is not the claim holder.
     pub fn move_to(&self, to: Column, by: &Actor, now_ms: i64) -> Result<Self, BoardError> {
-        if let Some(cap) = required(self.column, to)?
+        if let Some(cap) = required_capability(self.column, to)?
             && !by.caps.contains(&cap)
         {
             return Err(BoardError::Forbidden(cap));
         }
         let worked = matches!(self.column, Column::Building | Column::Qa | Column::Review);
-        if worked && self.claim.as_deref() != Some(&by.name) {
+        if worked
+            && self.claim.as_deref() != Some(&by.name)
+            && !by.caps.contains(&Capability::Triage)
+        {
             return Err(BoardError::NotClaimant);
         }
         Ok(Self {
@@ -459,6 +466,32 @@ mod tests {
         );
         assert_eq!(c.release(&other, 2), Err(BoardError::Claimed("dev".into())));
         assert!(c.release(&dev, 2).expect("release").claim.is_none());
+    }
+
+    #[test]
+    fn triage_holder_overrides_a_claim() {
+        let dev = actor("dev", &[Capability::Build]);
+        let human = actor("nano", &[Capability::Triage]);
+        let mut c = card();
+        c.column = Column::Building;
+        let c = c.claim(&dev, 1).expect("claim");
+        assert!(
+            c.release(&human, 2)
+                .expect("override release")
+                .claim
+                .is_none()
+        );
+        assert_eq!(
+            c.move_to(Column::Blocked, &human, 2)
+                .expect("override move")
+                .column,
+            Column::Blocked
+        );
+        let other = actor("other", &[Capability::Build]);
+        assert_eq!(
+            c.move_to(Column::Blocked, &other, 2),
+            Err(BoardError::NotClaimant)
+        );
     }
 
     #[test]

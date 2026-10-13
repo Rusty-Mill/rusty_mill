@@ -1,16 +1,14 @@
 //! GitHub adapter for the [`Forge`] port (REST v3, issues only).
 //!
-//! Blocking: the async client runs on a private current-thread runtime, so
-//! call it from a plain thread, never from inside another runtime.
+//! Blocking: see [`crate::http`] (call it from a plain thread).
 
 use std::fmt;
 use std::time::Duration;
 
-use rusty_request::Client;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::runtime::{Builder, Runtime};
 
+use crate::http::Http;
 use crate::sync::{Draft, Forge, Issue, SyncError, parse_iso_ms};
 
 const PAGE: usize = 100;
@@ -71,8 +69,7 @@ impl GithubConfig {
 /// The forge over GitHub issues.
 pub struct GithubForge {
     config: GithubConfig,
-    http: Client,
-    rt: Runtime,
+    http: Http,
 }
 
 #[derive(Deserialize)]
@@ -114,17 +111,10 @@ impl GithubForge {
     /// # Errors
     /// If the private runtime cannot start.
     pub fn new(config: GithubConfig) -> Result<Self, SyncError> {
-        let rt = Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(forge)?;
-        // Calls are minutes apart: a pooled connection would be stale (closed by
-        // the server) by the next one, and a request landing on it fails.
-        let http = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .no_pool()
-            .build();
-        Ok(Self { config, http, rt })
+        Ok(Self {
+            config,
+            http: Http::new(Duration::from_secs(30)).map_err(forge)?,
+        })
     }
 
     fn url(&self, tail: &str) -> String {
@@ -136,41 +126,22 @@ impl GithubForge {
 
     /// One request; returns the body of a 2xx, else an error naming the status.
     fn call(&self, method: &str, url: &str, body: Option<String>) -> Result<String, SyncError> {
-        self.rt.block_on(async {
-            let builder = match method {
-                "POST" => self.http.post(url),
-                "PATCH" => self.http.patch(url),
-                _ => self.http.get(url),
-            }
-            .map_err(forge)?
-            .header("Authorization", &format!("Bearer {}", self.config.token))
-            .map_err(forge)?
-            .header("Accept", "application/vnd.github+json")
-            .map_err(forge)?
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .map_err(forge)?
-            .header("User-Agent", "rusty_mill_board")
-            .map_err(forge)?;
-            let builder = match body {
-                Some(b) => builder
-                    .header("Content-Type", "application/json")
-                    .map_err(forge)?
-                    .body(b),
-                None => builder,
-            };
-            let response = builder.send().await.map_err(forge)?;
-            let status = response.status();
-            let text = response.text().map_err(forge)?;
-            if status.is_success() {
-                return Ok(text);
-            }
-            let snippet: String = text.chars().take(BODY_SNIPPET).collect();
-            Err(SyncError::Forge(format!(
-                "{method} {} -> {}: {snippet}",
-                url_path(url),
-                status.as_u16()
-            )))
-        })
+        let auth = format!("Bearer {}", self.config.token);
+        let headers = [
+            ("Authorization", auth.as_str()),
+            ("Accept", "application/vnd.github+json"),
+            ("X-GitHub-Api-Version", "2022-11-28"),
+            ("User-Agent", "rusty_mill_board"),
+        ];
+        let (status, text) = self.http.send(method, url, &headers, body).map_err(forge)?;
+        if (200..300).contains(&status) {
+            return Ok(text);
+        }
+        let snippet: String = text.chars().take(BODY_SNIPPET).collect();
+        Err(SyncError::Forge(format!(
+            "{method} {} -> {status}: {snippet}",
+            url_path(url)
+        )))
     }
 
     fn one(&self, method: &str, url: &str, body: serde_json::Value) -> Result<Issue, SyncError> {
