@@ -853,7 +853,13 @@ deliberately simple (no window table); that costs speed.
   they do not establish the removal of a worsening tail. The second series was added after viewing the first;
   it does not explain the earlier 4.31 and 4.83, does not retire the watch item (run 1's 4.43 is close to the threshold and the
   leak test's median sits slightly above its baseline in both series) and does not prove constant time. What differs between the
-  classes beyond the scalar bits (cache or multiplier effects) is still unchecked. A first
+  classes beyond the scalar bits (cache or multiplier effects) is still unchecked. A full record taken later the same day
+  (`EVIDENCE-2026-10-10-aes-gcm-run2-FAILED.txt`) **failed this test: 2 alarms of 40 (|t| 4.98 and 5.19) against an
+  allowance of 1**. A diagnostic reran it at 4,000, 16,000, 64,000 and 256,000 samples and |t| did not grow (0.77, 0.38,
+  0.41, 0.63; `EVIDENCE-2026-10-10-ecdh-p256-sample-scaling.txt`), which is what noise does and not what a stable
+  difference does; over all six series so far the leak test alarmed 3 times in 240 runs against 0 in 240 A/A runs, with its
+  median above the A/A median in five of six. The threshold and the allowance rule were not changed, no further full
+  record was taken to obtain a pass, and the watch item stays open. A first
   version of the ECDH test chose between two separately stored keys inside the timed closure (review finding on
   #576) and its numbers are discarded.
 - *Side effect on earlier evidence:* adding this code twice changed LLVM's inlining of `Modulus::add` (once into

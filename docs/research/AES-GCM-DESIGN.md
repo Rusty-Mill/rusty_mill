@@ -225,3 +225,60 @@ more than one run. This is not a constant-time claim.
 
 **Gate result:** the step 1 gate asked for a measured MB/s to be reported to the owner before more is built. It is
 reported above. Nothing past step 1 has been started.
+
+## 9. Step 4 results: constant-time evidence (2026-10-10; preliminary; evidence, not proof)
+
+**What was added** (`rusty_aead`; CI runs all of it through the existing `crypto-constant-time` job):
+- Taint modes in `examples/taint_aes.rs`: `gcm128-seal` and `gcm256-seal` must report nothing, `gcm128-open` exactly
+  one report in `Gcm::open` (the public tag verdict), and `control-table` (a secret-indexed table lookup, the leak
+  class table-based AES has) must be reported. Result: 0, 0, 1 in `Gcm::open`, 1.
+- Exact jump-count pins (`scripts/disasm_limits_aes.txt`): `sbox`, `shift_rows`, `mix_columns`, `to_planes`,
+  `from_planes`, `sub_word`, `bmul64`, `clmul64`, `gf_mul` are straight-line (0); `Aes::encrypt_blocks` has 4 and
+  `Aes::expand` 17, each read in the disassembly and found to compare a public counter or index (loop entry and
+  back-edge, round-key bounds checks, the key-schedule word index). The functions are `#[inline(never)]`, and the
+  key schedule now counts its word index instead of dividing, so there is no division anywhere in the audited set.
+  `ghash::ghash` and `Gcm::{ctr, seal, open}` branch on the public message length and are not pinned.
+- Five timing tests (AES-128 and AES-256 key classes, plaintext classes, tag-mismatch position, A/A baseline), 50,000
+  samples each, in `collect.sh`.
+
+**The checks were tested.** Planting a real branch on secret data in `mix_columns`: the taint run reports it (4
+reports in each seal mode) and the pin fails (1 against 0). Planting a secret-indexed table lookup in the key
+schedule: the taint run reports it (1 and 2 reports), and the pin does not, as expected, since a lookup adds no jump.
+**My first two attempts at these mutations changed nothing observable** (`^= 0`, `& 0`), the compiler removed them, and
+the checks passed; that was a bad mutation, not a good check, and they were redone with effects the compiler cannot
+remove. The same applies to any future mutation check here.
+
+**Two full `collect.sh` records were produced, and both FAILED, for reasons unrelated to AES timing.**
+- `EVIDENCE-2026-10-10-aes-gcm-run1-FAILED.txt` (clean tree at `122a00b7`): `clippy rusty_aead` failed on 1.98.1 and
+  on stable, three `needless_range_loop` lints in test code. All timing rows were within their allowance. The lints
+  had been missed locally because the check piped coloured clippy output through `grep '^error'`, which never matched;
+  it had also let them reach the pushed branch. Fixed in `82dd3177`, and clippy was re-run with `--color never`,
+  both toolchains and the exit code checked, for every crate touched in this work.
+- `EVIDENCE-2026-10-10-aes-gcm-run2-FAILED.txt` (clean tree at `82dd3177`): clippy clean, taint, pins, vectors and
+  self-tests passed, and **one timing row failed: ECDH P-256 sparse-vs-dense, 2 alarms of 40 (|t| 4.98 and 5.19)
+  against an allowance of 1**. That is the watch item from #576, in code this work does not change. A diagnostic that
+  reran it at 4,000 to 256,000 samples found no growth in |t| (0.77, 0.38, 0.41, 0.63);
+  `EVIDENCE-2026-10-10-ecdh-p256-sample-scaling.txt` has the numbers, the full tally (3 alarms in 240 leak-test runs
+  against 0 in 240 A/A runs) and its cautions. **No third full record was run and no threshold or allowance was
+  changed**: running until a pass would be the sampling this note's rules forbid, so there is no passing full record
+  for this commit, and whether to take one is the owner's call.
+
+**AES timing rows in run 2** (all within allowance, 0 alarms each): A/A AES-128 max 4.07; AES-128 key classes max
+4.37; AES-256 key classes max 2.90; plaintext classes max 2.44; tag-mismatch position max 3.05. Run 1: AES-128
+plaintext classes 1 alarm of 40 (|t| 4.54, within the allowance of 1; A/A 0 alarms at that time). Alarms elsewhere in
+the two records: HMAC-SHA512 key classes 1 (4.65) and 0 of 40 in one record each, HMAC-SHA256 key classes 1, ChaCha20-
+Poly1305 open 1, all within allowance. Across the four full records so far HMAC-SHA512 key classes has alarmed 2, 0,
+1 and 1 times (see the plan, section 13.4).
+
+**A defect in the evidence tooling was found on the way** and is recorded in
+`ERRATUM-2026-10-10-timing-test-filter.txt`: the collector selected tests by libtest's substring filter, so the
+"A/A X25519" row in the two 2026-10-09 ECDH records cannot be attributed to X25519 (verdicts unchanged). Fixed with
+`--exact` and a regression test; the new AES test names would have collided with the ChaCha ones.
+
+**Variance of the speed figures.** In the first full record the same throughput test gave 61.8 MB/s for AES-128 at 16
+MiB and 35.8, 62.1 and 69.0 at 64 B, 1 KiB and 16 KiB (AES-256: 58.5, 30.3, 50.3, 56.7), against 79.2, 41.4, 73.7 and
+81.0 in section 8. So the figures in this note are good to roughly plus or minus 20%, not better.
+
+**Still not done:** other specification vectors, a randomised differential suite, repeat taint runs on other
+compilers (the `ct_check.sh` loop for `rusty_pk` runs two toolchains; this crate's script runs the default one),
+timing on any machine but this one, and any independent review.
