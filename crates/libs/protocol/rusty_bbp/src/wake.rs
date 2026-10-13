@@ -21,10 +21,11 @@ use crate::ids::*;
 use crate::record::*;
 use crate::role::*;
 use crate::state::*;
+use rusty_serde::{Deserialize, Serialize};
 
 /// Why a role is eligible. Declaration order is priority order: an addressed
 /// role outranks an artifact watcher, which outranks the state's own holder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum WakeReason {
     Addressed,
     Artifact,
