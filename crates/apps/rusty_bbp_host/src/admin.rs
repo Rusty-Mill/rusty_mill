@@ -74,6 +74,7 @@ pub fn open_task_live(
         max_live_turns,
         brief: blob,
         human: human.clone(),
+        policy: SchedulingPolicy::default(),
     });
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }

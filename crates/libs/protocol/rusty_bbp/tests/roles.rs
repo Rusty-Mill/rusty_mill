@@ -207,6 +207,7 @@ fn opening_a_task_with_an_invalid_roster_is_refused_and_no_task_exists() {
         max_live_turns: 1,
         brief,
         human: PrincipalId("human".into()),
+        policy: SchedulingPolicy::default(),
     });
     let rej = rejection(d.dispatch(&cmd, Time(1)).expect("dispatch"));
     assert_eq!(rej.code, Code::BadRoster);
@@ -569,6 +570,7 @@ fn the_roster_is_recorded_and_cannot_change() {
         max_live_turns: 1,
         brief: fx.d.store.blob_put(b"b"),
         human: PrincipalId("human".into()),
+        policy: SchedulingPolicy::default(),
     });
     assert_eq!(rejection(fx.run(&again)).code, Code::AlreadyOpen);
     assert_eq!(fx.st().roster, before);
@@ -596,6 +598,7 @@ fn a_log_under_another_schema_does_not_replay() {
         request_ms: 1,
         max_live_turns: 1,
         human: PrincipalId("human".into()),
+        policy: SchedulingPolicy::default(),
     };
     store.append(&task, Rev(0), &[opened]).expect("append");
     let mut d = Driver::new(store, task);
@@ -642,6 +645,7 @@ fn the_file_store_refuses_a_v0_4_log_and_a_future_schema() {
         request_ms: 1,
         max_live_turns: 1,
         human: PrincipalId("human".into()),
+        policy: SchedulingPolicy::default(),
     };
     store.append(&task, Rev(0), &[opened]).expect("append");
     drop(store);

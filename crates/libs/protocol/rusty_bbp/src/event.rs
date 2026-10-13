@@ -2,6 +2,7 @@
 
 use crate::command::Response;
 use crate::ids::*;
+use crate::policy::SchedulingPolicy;
 use crate::record::*;
 use crate::role::Role;
 use crate::state::{Budget, BudgetField, Gate, Slice, State, TurnKind};
@@ -37,6 +38,11 @@ fn one_turn() -> u32 {
 // Skipped when serialized so a one-turn task's log is byte-identical to schema 2.
 fn serialized_cap(cap: &u32) -> bool {
     *cap <= 1
+}
+
+// Skipped when serialized so a turn-based task's log is byte-identical to schema 2.
+fn is_turn_based(p: &SchedulingPolicy) -> bool {
+    *p == SchedulingPolicy::TurnBased
 }
 
 /// The `schema` of the first `task_opened` in `events`, if the log has one.
@@ -85,6 +91,11 @@ pub enum Event {
         #[rusty_serde(default = "one_turn", skip_serializing_if = "serialized_cap")]
         max_live_turns: u32,
         human: PrincipalId,
+        /// Added after schema 2 shipped. Absent reads as `TurnBased` and
+        /// `TurnBased` is not written, so a turn-based log is byte for byte
+        /// the one the golden in `tests/schema.rs` pins.
+        #[rusty_serde(default, skip_serializing_if = "is_turn_based")]
+        policy: SchedulingPolicy,
     },
     Assigned {
         role: RoleId,

@@ -4,6 +4,7 @@
 use crate::command::*;
 use crate::event::*;
 use crate::ids::*;
+use crate::policy::SchedulingPolicy;
 use crate::record::*;
 use crate::role::*;
 use crate::state::*;
@@ -294,6 +295,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         request_ms: o.request_ms,
         max_live_turns: o.max_live_turns,
         human: o.human.clone(),
+        policy: o.policy,
     });
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {
@@ -1441,12 +1443,7 @@ fn schedule(w: &mut Work, now: Time) {
     if w.st.pending_request.is_some() || !w.st.opened {
         return;
     }
-    let serving: Vec<RoleId> =
-        w.st.roster
-            .serving(w.st.state)
-            .into_iter()
-            .cloned()
-            .collect();
+    let serving = pick_next(&w.st);
     let Some(first) = serving.first() else {
         return;
     };
@@ -1462,6 +1459,15 @@ fn schedule(w: &mut Work, now: Time) {
         if w.st.state != state {
             break; // a grant escalated the task; the rest of the list is stale
         }
+    }
+}
+
+/// Who may take the next turns, under the task's policy: the roles that serve
+/// the state, in `turn_order`. The set is not capped here: `grant` admits at
+/// most `max_live_turns` of it, the one place the cap lives.
+pub(crate) fn pick_next(st: &TaskState) -> Vec<RoleId> {
+    match st.policy {
+        SchedulingPolicy::TurnBased => st.roster.serving(st.state).into_iter().cloned().collect(),
     }
 }
 
@@ -1585,6 +1591,64 @@ fn fire_deadlines(w: &mut Work, now: Time) {
     if let Some(d) = w.st.pending_request.as_ref().and_then(|p| p.deadline) {
         if d <= now && !w.st.state.terminal() && w.st.state != State::Escalated {
             escalate(w, EscalateReason::RequestDeadline, now);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn roster() -> Roster {
+        use ArtifactKind::{Candidate, Diff, Spec};
+        Roster::new(vec![
+            Role::new("planner", 0)
+                .write(&[Spec])
+                .post(&[MessageKind::RequestDecision]),
+            Role::new("coder", 1).write(&[Diff, Candidate]),
+            Role::new("tester", 2)
+                .post(&[MessageKind::Verdict])
+                .verdict_at(&[Stage::Test]),
+            Role::new("reviewer", 3)
+                .post(&[MessageKind::Verdict])
+                .verdict_at(&[Stage::Review])
+                .final_decision(),
+        ])
+        .expect("valid roster")
+    }
+
+    fn at(state: State) -> TaskState {
+        let mut st = TaskState::new(TaskId("T".into()));
+        st.roster = roster();
+        st.state = state;
+        st
+    }
+
+    #[test]
+    fn turn_based_picks_the_roles_that_serve_the_state() {
+        for (state, holder) in [
+            (State::Planning, "planner"),
+            (State::Build, "coder"),
+            (State::Test, "tester"),
+            (State::Review, "reviewer"),
+        ] {
+            let got = pick_next(&at(state));
+            assert_eq!(got, vec![RoleId::from(holder)], "{state:?}");
+        }
+    }
+
+    #[test]
+    fn nobody_is_picked_where_no_role_serves_the_state() {
+        for state in [
+            State::PlanGate,
+            State::MergeGate,
+            State::Approved,
+            State::Escalated,
+            State::Closed,
+            State::Cancelled,
+        ] {
+            assert!(pick_next(&at(state)).is_empty(), "{state:?}");
         }
     }
 }

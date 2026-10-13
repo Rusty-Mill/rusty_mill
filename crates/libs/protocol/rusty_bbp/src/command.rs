@@ -57,6 +57,9 @@ pub struct OpenTask {
     pub max_live_turns: u32,
     pub brief: BlobRef,
     pub human: PrincipalId,
+    /// Added after schema 2 shipped: a payload without it opens as `TurnBased`.
+    #[rusty_serde(default)]
+    pub policy: crate::policy::SchedulingPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

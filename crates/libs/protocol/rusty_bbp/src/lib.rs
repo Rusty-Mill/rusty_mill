@@ -13,6 +13,7 @@ pub mod event;
 pub mod fs_store;
 pub mod ids;
 pub mod metrics;
+pub mod policy;
 pub mod record;
 pub mod role;
 pub mod state;
@@ -28,6 +29,7 @@ pub use event::{
 };
 pub use fs_store::{log_path_for, FsError, FsStore};
 pub use ids::*;
+pub use policy::SchedulingPolicy;
 pub use record::*;
 pub use role::*;
 pub use state::{Budget, BudgetField, Card, Gate, Slice, State, TaskState, Turn, TurnKind};
