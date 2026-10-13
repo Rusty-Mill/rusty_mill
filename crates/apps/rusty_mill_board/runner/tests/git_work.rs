@@ -1,13 +1,21 @@
 //! Real git, real sandbox: a card's worktree, a confined command, a runner-made commit.
-//! Skips (loudly) where the kernel cannot confine, rather than passing falsely.
+//!
+//! These tests exercise Landlock and seccomp, so they run on Linux only. Where
+//! the kernel cannot confine they FAIL rather than skip: a green run must mean the
+//! confinement was exercised. Set `MILL_ALLOW_NO_SANDBOX=1` to skip them knowingly.
 
+#![cfg(target_os = "linux")]
+
+use std::io::ErrorKind;
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::{SocketAddr, UnixListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rusty_mill_board::domain::Card;
 use rusty_mill_runner::config::{Stage, parse};
 use rusty_mill_runner::git_work::GitWork;
-use rusty_mill_runner::ports::Work;
+use rusty_mill_runner::ports::{Outcome, Work};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -30,6 +38,12 @@ struct Fixture {
     card: Card,
 }
 
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 fn fixture(name: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!("mill_runner_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -47,44 +61,43 @@ fn fixture(name: &str) -> Fixture {
     Fixture { root, work, card }
 }
 
-fn stage(json: &str) -> Stage {
-    parse(json).expect("stage").remove(0)
+fn stage(network: bool) -> Stage {
+    let json = format!(
+        r#"[{{"name":"build","from":["ready"],"role":"builder","argv":["x"],"wall_secs":20,"network":{network}}}]"#
+    );
+    parse(&json).expect("stage").remove(0)
 }
 
-fn sh(script: &str) -> Vec<String> {
-    vec!["/bin/sh".into(), "-c".into(), script.into()]
+fn skip_allowed() -> bool {
+    std::env::var_os("MILL_ALLOW_NO_SANDBOX").is_some()
 }
 
-/// `None` when the sandbox cannot be set up here.
-fn run(f: &Fixture, s: &Stage, script: &str) -> Option<rusty_mill_runner::ports::Outcome> {
+/// Run `argv` confined in the card's worktree. `None` only when the operator
+/// explicitly allowed an unavailable sandbox; otherwise a failure to confine is a test failure.
+fn run_argv(f: &Fixture, s: &Stage, argv: &[&str]) -> Option<Outcome> {
     let dir = f.work.prepare(&f.card).expect("prepare");
-    match f.work.run(
-        s,
-        &sh(script),
-        &dir,
-        &[("PATH".into(), "/usr/bin:/bin".into())],
-    ) {
+    let argv: Vec<String> = argv.iter().map(|a| (*a).to_owned()).collect();
+    match f
+        .work
+        .run(s, &argv, &dir, &[("PATH".into(), "/usr/bin:/bin".into())])
+    {
         Ok(o) => Some(o),
-        Err(e)
-            if e.to_lowercase().contains("sandbox")
-                || e.to_lowercase().contains("landlock")
-                || e.contains("not supported") =>
-        {
-            eprintln!("SKIPPED: sandbox unavailable here: {e}");
+        Err(e) if skip_allowed() => {
+            eprintln!("SKIPPED (MILL_ALLOW_NO_SANDBOX set): sandbox unavailable here: {e}");
             None
         }
-        Err(e) => panic!("run: {e}"),
+        Err(e) => panic!("the sandbox could not confine the command, so nothing was tested: {e}"),
     }
 }
 
-const BUILD: &str =
-    r#"[{"name":"build","from":["ready"],"role":"builder","argv":["x"],"wall_secs":20}]"#;
+fn sh(f: &Fixture, s: &Stage, script: &str) -> Option<Outcome> {
+    run_argv(f, s, &["/bin/sh", "-c", script])
+}
 
 #[test]
 fn command_edits_the_worktree_and_the_runner_commits_it_on_the_card_branch() {
     let f = fixture("commit");
-    let s = stage(BUILD);
-    let Some(out) = run(&f, &s, "echo built > out.txt && echo done") else {
+    let Some(out) = sh(&f, &stage(false), "echo built > out.txt && echo done") else {
         return;
     };
     assert!(out.ok, "{out:?}");
@@ -112,50 +125,184 @@ fn command_edits_the_worktree_and_the_runner_commits_it_on_the_card_branch() {
         !git(&repo, &["ls-tree", "-r", "--name-only", "main"]).contains("out.txt"),
         "main is untouched"
     );
-    let _ = std::fs::remove_dir_all(&f.root);
 }
 
 #[test]
 fn command_cannot_write_outside_its_worktree_or_into_git() {
     let f = fixture("escape");
-    let s = stage(BUILD);
     let outside = f.root.join("escaped.txt");
-    let Some(out) = run(
-        &f,
-        &s,
-        &format!(
-            "echo x > {}; echo y > {}/repo/.git/pwned; echo z > ../sibling.txt",
-            outside.display(),
-            f.root.display()
-        ),
-    ) else {
+    let script = format!(
+        "echo x > {}; echo y > {}/repo/.git/pwned; echo z > ../sibling.txt",
+        outside.display(),
+        f.root.display()
+    );
+    let Some(out) = sh(&f, &stage(false), &script) else {
         return;
     };
     assert!(!out.ok, "writes outside the sandbox must fail: {out:?}");
     assert!(!outside.exists());
     assert!(!f.root.join("repo/.git/pwned").exists());
     assert!(!f.root.join("work/sibling.txt").exists());
-    let _ = std::fs::remove_dir_all(&f.root);
 }
 
 #[test]
 fn failure_and_timeout_are_outcomes_not_errors() {
     let f = fixture("outcomes");
-    let Some(bad) = run(&f, &stage(BUILD), "echo boom >&2; exit 3") else {
+    let Some(bad) = sh(&f, &stage(false), "echo boom >&2; exit 3") else {
         return;
     };
     assert!(
         !bad.ok && bad.summary.starts_with("exit 3") && bad.tail.contains("boom"),
         "{bad:?}"
     );
-    let slow =
-        stage(r#"[{"name":"build","from":["ready"],"role":"builder","argv":["x"],"wall_secs":1}]"#);
-    let Some(timed) = run(&f, &slow, "sleep 30") else {
+    let mut slow = stage(false);
+    slow.wall_secs = 1;
+    let Some(timed) = sh(&f, &slow, "sleep 30") else {
         return;
     };
     assert!(
         !timed.ok && timed.summary.contains("timed out"),
         "{timed:?}"
     );
-    let _ = std::fs::remove_dir_all(&f.root);
+}
+
+fn require_python() {
+    let have = Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    assert!(
+        have,
+        "python3 is required for the socket tests (the CI image has it)"
+    );
+}
+
+/// A script that tries to reach `target` over each local-socket kind and prints what happened.
+const TRY_LOCAL: &str = r#"
+import socket, sys
+path, abstract = sys.argv[1], sys.argv[2]
+for name, family, addr in (("pathname", socket.AF_UNIX, path), ("abstract", socket.AF_UNIX, "\0" + abstract)):
+    try:
+        s = socket.socket(family, socket.SOCK_STREAM)
+        s.connect(addr)
+        print(name, "CONNECTED")
+    except PermissionError:
+        print(name, "denied")
+    except OSError as e:
+        print(name, "oserror", e.errno)
+"#;
+
+/// Listeners outside the sandbox that stand for a local control daemon.
+struct Daemon {
+    path: UnixListener,
+    abstract_: UnixListener,
+    abstract_name: String,
+    socket_path: PathBuf,
+}
+
+fn daemon(f: &Fixture) -> Daemon {
+    let socket_path = f.root.join("daemon.sock");
+    let path = UnixListener::bind(&socket_path).expect("bind path socket");
+    let unique = f
+        .root
+        .file_name()
+        .expect("name")
+        .to_string_lossy()
+        .into_owned();
+    let abstract_name = format!("mill-test-{unique}");
+    let addr = SocketAddr::from_abstract_name(abstract_name.as_bytes()).expect("abstract addr");
+    let abstract_ = UnixListener::bind_addr(&addr).expect("bind abstract socket");
+    for l in [&path, &abstract_] {
+        l.set_nonblocking(true).expect("nonblocking");
+    }
+    Daemon {
+        path,
+        abstract_,
+        abstract_name,
+        socket_path,
+    }
+}
+
+fn nobody_connected(d: &Daemon) -> bool {
+    [&d.path, &d.abstract_]
+        .iter()
+        .all(|l| matches!(l.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock))
+}
+
+#[test]
+fn a_command_without_network_reaches_no_local_daemon_over_any_socket_kind() {
+    require_python();
+    let f = fixture("noendpoints");
+    let d = daemon(&f);
+    let argv = [
+        "/usr/bin/python3",
+        "-c",
+        TRY_LOCAL,
+        d.socket_path.to_str().expect("utf8"),
+        &d.abstract_name,
+    ];
+    let Some(out) = run_argv(&f, &stage(false), &argv) else {
+        return;
+    };
+    assert!(out.ok, "{out:?}");
+    assert!(
+        out.tail.contains("pathname denied") && out.tail.contains("abstract denied"),
+        "{}",
+        out.tail
+    );
+    assert!(!out.tail.contains("CONNECTED"));
+    assert!(
+        nobody_connected(&d),
+        "the daemon must never see a connection"
+    );
+}
+
+#[test]
+fn a_command_with_network_reaches_the_internet_family_but_no_local_daemon() {
+    require_python();
+    let f = fixture("internetonly");
+    let d = daemon(&f);
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").expect("tcp");
+    tcp.set_nonblocking(true).expect("nonblocking");
+    let port = tcp.local_addr().expect("addr").port().to_string();
+
+    // Local sockets are denied exactly as without network...
+    let argv = [
+        "/usr/bin/python3",
+        "-c",
+        TRY_LOCAL,
+        d.socket_path.to_str().expect("utf8"),
+        &d.abstract_name,
+    ];
+    let Some(out) = run_argv(&f, &stage(true), &argv) else {
+        return;
+    };
+    assert!(
+        out.tail.contains("pathname denied") && out.tail.contains("abstract denied"),
+        "{}",
+        out.tail
+    );
+    assert!(
+        nobody_connected(&d),
+        "the daemon must never see a connection"
+    );
+
+    // ...while an IP connection (what an agent CLI needs to reach its model) works.
+    let code = "import socket,sys; s=socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=5); print('tcp ok')";
+    let Some(tcp_out) = run_argv(&f, &stage(true), &["/usr/bin/python3", "-c", code, &port]) else {
+        return;
+    };
+    assert!(tcp_out.ok && tcp_out.tail.contains("tcp ok"), "{tcp_out:?}");
+    let accepted = (0..50).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        tcp.accept().is_ok()
+    });
+    assert!(accepted, "the TCP listener saw the connection");
+
+    // ...and a stage without network cannot make that TCP connection.
+    let Some(blocked) = run_argv(&f, &stage(false), &["/usr/bin/python3", "-c", code, &port])
+    else {
+        return;
+    };
+    assert!(!blocked.ok, "no network, no TCP: {blocked:?}");
 }

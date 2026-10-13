@@ -1,6 +1,7 @@
 //! A git worktree per card, with commands run in it under `rusty_sandbox`.
 //!
-//! The command can write only its worktree and a scratch directory. It never
+//! The command can write only its worktree and a scratch directory, and can reach
+//! no local socket (Unix or abstract) at all; the internet only if its stage asks. It never
 //! gets the repository's `.git` writable: the runner commits afterwards,
 //! outside the sandbox, naming the git directory explicitly (so a rewritten
 //! `.git` file in the worktree cannot point the runner's git somewhere else)
@@ -187,10 +188,12 @@ impl Work for GitWork {
             limits,
         )
         .map_err(text)?;
+        // Never `NoInternet`: it leaves Unix and abstract sockets open, and a control
+        // daemon behind one can act outside the filesystem confinement.
         let sockets = if stage.network {
-            Sockets::Internet
+            Sockets::InternetOnly
         } else {
-            Sockets::NoInternet
+            Sockets::NoEndpoints
         };
         let (program, args) = argv.split_first().ok_or("empty command")?;
         let out = self

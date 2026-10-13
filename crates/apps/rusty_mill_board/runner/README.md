@@ -24,7 +24,7 @@ mill-runner --stages stages.json --repo ~/src/app --work ~/mill-work \
 - `argv` runs without a shell. Placeholders: `{prompt}` (card title, body, the latest notes),
   `{id}`, `{title}`, `{worktree}`. The command also sees `MILL_CARD_ID` and `MILL_STAGE`.
 - Each card works in its own git worktree on branch `mill/<id8>`, under `rusty_sandbox`: writable
-  worktree and scratch only, no internet unless `network`, `wall_secs` limit, clean environment
+  worktree and scratch only, no local sockets of any kind (Unix or abstract) and no internet unless `network` (then IPv4/IPv6 only), `wall_secs` limit, clean environment
   (`PATH` and `--env` names only). The runner commits on success; the command never gets `.git`.
 - **Running `claude -p` as a stage.** The `claude` binary is a Bun executable: besides its install
   directory it needs `--read-root /proc --read-root /dev/urandom` (without them it aborts in a few

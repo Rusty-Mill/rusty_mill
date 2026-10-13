@@ -21,8 +21,10 @@ the card types, and the layer check allows it). It is a client of the board's HT
   and leaves Review by a person.
 - **One card, one worktree.** Each card gets a git worktree on its own branch `mill/<id8>`. The
   command runs under `rusty_sandbox` (Landlock, rlimits, wall-clock group kill, clean environment):
-  it can write only that worktree and a scratch directory, and read a short list of roots. Internet
-  sockets are off unless the stage sets `network` (an agent CLI reaching its model). The runner
+  it can write only that worktree and a scratch directory, and read a short list of roots. `socket(2)` is refused outright
+  (`NoEndpoints`), so the command cannot reach a local control daemon over a Unix or abstract socket, which
+  Landlock does not cover; a stage that sets `network` (an agent CLI reaching its model) gets `InternetOnly`:
+  IPv4/IPv6 sockets and nothing else. The runner
   commits afterwards, outside the sandbox, with an explicit `--git-dir`, `--no-verify` and no hooks, so
   the command never has `.git` writable and cannot redirect git.
 - **Stateless loop.** Each tick lists the board and fixes what it finds, as the GitHub sync does. A
