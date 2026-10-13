@@ -285,6 +285,27 @@ impl<S: Store> Fx<S> {
                 "shadow rev {:?} outside ({from:?}, {to:?}]",
                 sh.rev
             );
+            // The record sits beside its own `turn_granted`, and its state is
+            // the state just before that event (a grant can escalate).
+            let at = (sh.rev.0 - from.0 - 1) as usize;
+            let who = match &sh.kind {
+                ShadowKind::Auto { granted, .. } => granted.first().expect("a grantee"),
+                ShadowKind::Explicit { granted, .. } => granted,
+            };
+            assert!(
+                matches!(&out.events[at], Event::TurnGranted { role, .. } if role == who),
+                "shadow rev {:?} is not the turn_granted for {who:?}: {:?}",
+                sh.rev,
+                out.events[at]
+            );
+            let mut pre = self.d.state.clone();
+            for e in &out.events[..at] {
+                pre.apply(e);
+            }
+            assert_eq!(
+                sh.state, pre.state,
+                "shadow state vs the state before the grant"
+            );
             match &sh.kind {
                 ShadowKind::Auto { granted, .. } => {
                     recorded.extend(granted.iter().map(|r| r.0.clone()))

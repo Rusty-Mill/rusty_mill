@@ -1463,12 +1463,15 @@ fn grant_explicit(
     return_to: Option<RoleId>,
     now: Time,
 ) {
-    let before = w.events.len();
+    // Read before the grant: it can cross the turn budget and escalate, which
+    // would relabel the grant with the state it escalated to.
+    let (state, rev0, from) = (w.st.state, w.st.rev, w.events.len());
     grant(w, role, kind, return_to, now);
-    if shadowing(&w.st) && !granted_since(w, before).is_empty() {
-        let rev = w.st.rev;
+    let Some((_, rev)) = grants_since(w, from, rev0).into_iter().next() else {
+        return;
+    };
+    if shadowing(&w.st) {
         let granted = role.clone();
-        let state = w.st.state;
         w.shadow.push(Shadow {
             rev,
             state,
@@ -1477,16 +1480,16 @@ fn grant_explicit(
     }
 }
 
-/// The roles granted a turn by the events emitted since `from`. Read from the
+/// The grants made by the events emitted since `from`, each with the rev of its
+/// own `turn_granted` event (`rev0` is the rev before `from`). Read from the
 /// events, not the live turns: a grant that crosses the turn budget escalates
 /// and ends its turn in the same command.
-fn granted_since(w: &Work, from: usize) -> Vec<RoleId> {
-    w.events
-        .get(from..)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|e| match e {
-            Event::TurnGranted { role, .. } => Some(role.clone()),
+fn grants_since(w: &Work, from: usize, rev0: Rev) -> Vec<(RoleId, Rev)> {
+    let new = w.events.get(from..).unwrap_or_default();
+    new.iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            Event::TurnGranted { role, .. } => Some((role.clone(), Rev(rev0.0 + i as u64 + 1))),
             _ => None,
         })
         .collect()
@@ -1511,7 +1514,7 @@ fn schedule(w: &mut Work, now: Time) {
     }
     // Taken before any grant: `wake_set` is defined on a board with no live turn.
     let would = shadowing(&w.st).then(|| wake_set(&w.st));
-    let before = w.events.len();
+    let (rev0, from) = (w.st.rev, w.events.len());
     let state = w.st.state;
     for role in &serving {
         grant(w, role, TurnKind::Default, None, now);
@@ -1522,10 +1525,9 @@ fn schedule(w: &mut Work, now: Time) {
     let Some(would) = would else {
         return;
     };
-    let granted = granted_since(w, before);
-    if !granted.is_empty() {
-        let rev = w.st.rev;
-        let state = w.st.state;
+    let grants = grants_since(w, from, rev0);
+    if let Some(&(_, rev)) = grants.first() {
+        let granted = grants.into_iter().map(|(r, _)| r).collect();
         w.shadow.push(Shadow {
             rev,
             state,

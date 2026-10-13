@@ -158,3 +158,46 @@ fn no_shadow_is_recorded_above_one_live_turn() {
     assert!(fx.shadows.is_empty(), "{:?}", fx.shadows);
     assert!(!fx.d.state.turns.is_empty());
 }
+
+/// A grant that crosses the turn budget escalates in the same command. The
+/// record keeps the state the grant was made in and the rev of its own
+/// `turn_granted`, not the state and rev it escalated to.
+fn one_turn_budget() -> Fx {
+    let budget = Budget {
+        turns: 1,
+        ..default_budget()
+    };
+    Fx::concurrent(four_roles(), 1, budget)
+}
+
+#[test]
+fn an_automatic_grant_that_escalates_keeps_its_pre_grant_state() {
+    let mut fx = one_turn_budget();
+    posted(fx.post(Who::Planner, pass()));
+    assert_eq!(fx.st().state, State::Escalated, "the second grant crossed");
+    let a = autos(&fx).pop().expect("a grant");
+    assert_eq!(a.state, State::Planning);
+    let rev = fx
+        .shadows
+        .iter()
+        .rev()
+        .find(|s| s.comparison().is_some())
+        .expect("auto")
+        .rev;
+    let log = fx.d.store.events(&fx.st().task, 0).expect("events");
+    assert!(
+        matches!(&log[rev.0 as usize - 1], Event::TurnGranted { .. }),
+        "the record points at its turn_granted, not the escalation after it"
+    );
+}
+
+#[test]
+fn an_explicit_grant_that_escalates_keeps_its_pre_grant_state() {
+    let mut fx = one_turn_budget();
+    posted(fx.post(Who::Planner, yield_to(Who::Tester)));
+    assert_eq!(fx.st().state, State::Escalated, "the consultation crossed");
+    let ex = explicits(&fx);
+    assert_eq!(ex.len(), 1, "{ex:?}");
+    assert_eq!(ex[0].0, State::Planning);
+    assert_eq!(ex[0].1, RoleId::from("tester"));
+}

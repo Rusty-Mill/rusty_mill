@@ -7,13 +7,15 @@ use crate::ids::*;
 use crate::state::{State, TurnKind};
 use crate::wake::WakeReason;
 
-/// One shadow record, stamped with the log `rev` after the real grant it sits
-/// beside. A grant is one logged `turn_granted`, so a `rev` is recorded at most
-/// once and a host can dedupe on it.
+/// One shadow record, stamped with the log `rev` of the real `turn_granted`
+/// event it sits beside (the first, if a schedule grants several). A grant is one
+/// logged event, so a `rev` is recorded at most once and a host can dedupe on it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shadow {
     pub rev: Rev,
-    /// The task state the grant was made in.
+    /// The task state just before the grant. A grant that crosses the turn
+    /// budget escalates in the same command; this is still the state it was
+    /// made in.
     pub state: State,
     pub kind: ShadowKind,
 }
