@@ -219,6 +219,49 @@ One field I considered and rejected: `concurrent: bool` on Role. It would let a 
 - Reservation: sum of slices never exceeds totals; an oversized request is refused; unspent is released.
 - 2b property tests: ops commute (any order of delivery converges); idempotent apply; a verdict bound to hash H is rejected once any op changes the hash; a retry after a revision conflict rejects a verdict on a stale hash.
 
+## 2b gate criteria (proposed, set before any measured run)
+
+Status: **proposal, awaiting owner approval.** The thresholds below are judgment, not derived from data. They are written down first so that no run can pick its own pass mark. The owner may change any number; once approved, changes after the first measured run must be recorded as such.
+
+**What 2b must beat.** Option 4 (section leases) and plain 2a (parallel diffs joined by one candidate, the loser revoked) are the alternatives. 2b is justified only if real work shows contention that those two handle badly.
+
+**The runs.** At least 10 tasks with real agents, paired: each task runs once at `max_live_turns = 1` (control) and once at 2, on the same roster, brief, budget and model. At least 5 are *same-artifact* tasks, written so that both builders' natural work edits the same file region (for example, one function both a feature and its error handling must change). The rest are independent-file tasks. The set and the briefs are fixed before the first run. Scripted agents prove the tooling, not the criteria; they do not count toward the 10.
+
+**Measured, per task, from the log and the moderator** (nothing is added to the protocol; see the metrics PR):
+
+| Metric | Definition |
+| --- | --- |
+| `revocations` | `turn_ended` with cause `revoked`, per task |
+| `discarded_share` | agent actions (messages + reads) charged in turns that ended `revoked`, over all actions charged in the task; discarded bytes are reported beside it, not added, since bytes and actions have no common unit. A proxy for tokens: model tokens are not visible to the core, so token cost needs the harness to report usage, which is not built and is not assumed |
+| `wall_ratio` | moderator wall clock at N=2 over N=1 for the same task |
+| `budget_refusals` | `rejected(turn_budget_exhausted)`. Each refusal also ends the turn (`turn_ended(budget)`), so the two are not added |
+| `file_overlap_diffs` | stored `diff` artifacts not in the final candidate that touch a path the candidate's diffs touch |
+| `hunk_overlap_diffs` | the subset of those with a hunk whose old-file line range intersects a hunk of the candidate's diffs on the same path. Different regions of one file are what section leases would separate; this is the part they would not |
+| `stale_verdicts` | verdicts accepted although another principal appended content after the verdict author's last read (the 2a known gap, spec "Known gaps") |
+| `overshoot` | any run with `spent.messages` or `spent.bytes` above its total at N=2 |
+
+**Go to 2b only if all hold:**
+
+1. **Safety (precondition).** `overshoot` is zero in every N=2 run, and replay equals live in every run. Any violation stops everything and is fixed in 2a first.
+2. **Parallelism pays at all.** On the independent-file tasks, the median `wall_ratio` is at most 0.75. If two builders are not clearly faster even without contention, co-editing one artifact cannot help.
+3. **Contention is real.** In at least 3 of the 5 same-artifact tasks, `file_overlap_diffs` is at least 1.
+4. **Hunk overlap, not just file overlap.** Across the same-artifact tasks, `hunk_overlap_diffs` is at least half of `file_overlap_diffs`, so section leases would not separate the writers.
+5. **The status quo is costly.** In the same-artifact tasks the median `discarded_share` is at least 0.15, or the median `revocations` is at least 2.
+6. **The known gap is not the cause.** `stale_verdicts` is below 20% of verdicts; otherwise close the 2a gap (a `read_rev` on verdicts) and re-run before deciding.
+
+**Decision.**
+
+| Outcome | Action |
+| --- | --- |
+| All six hold | Build `rusty_crdt` and 2b (Appendix A and B) |
+| 1 fails | Fix 2a; no decision |
+| 2 fails | Stop concurrency work; keep `max_live_turns = 1` as the default and the only tested mode |
+| 2 holds, 3 or 4 fails | 2a alone is enough, or section leases (option 4) if conflicts exist but are separable; no CRDT |
+| 2, 3, 4 hold, 5 fails | Contention exists but is cheap; revisit with more runs before building |
+| 6 fails | Close the verdict-binding gap first |
+
+**Limits, stated up front.** Ten tasks is a small sample and the medians are coarse; this is a go/no-go screen, not a measurement of effect size. `wall_ratio` on scripted agents measures host overhead only. Results depend on the model and on how the briefs are written. The `discarded_share` proxy undercounts reasoning that never reached a charged write.
+
 ## Open questions for the owner (max 5)
 
 1. **Phase gate.** Approve 2a as the next implementation step, and is 2b conditional on evidence from it?
