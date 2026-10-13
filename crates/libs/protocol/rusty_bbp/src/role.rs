@@ -330,15 +330,21 @@ impl Roster {
         self.roles.iter().find(|r| &r.id == id)
     }
 
+    /// The roles that serve `state`, in `turn_order`. The first is the default
+    /// holder; the rest may hold concurrent turns when `max_live_turns > 1`.
+    pub fn serving(&self, state: State) -> Vec<&RoleId> {
+        let Some(q) = REQUIREMENTS.iter().find(|q| q.state == state) else {
+            return Vec::new();
+        };
+        let mut roles: Vec<&Role> = self.roles.iter().filter(|r| q.served_by(r)).collect();
+        roles.sort_by_key(|r| r.turn_order);
+        roles.into_iter().map(|r| &r.id).collect()
+    }
+
     /// The role that holds the default turn in `state`: the serving role with
     /// the lowest `turn_order`.
     pub fn default_holder(&self, state: State) -> Option<&RoleId> {
-        let q = REQUIREMENTS.iter().find(|q| q.state == state)?;
-        self.roles
-            .iter()
-            .filter(|r| q.served_by(r))
-            .min_by_key(|r| r.turn_order)
-            .map(|r| &r.id)
+        self.serving(state).into_iter().next()
     }
 
     /// Derived yield rule: in a working state a role may be yielded to when it

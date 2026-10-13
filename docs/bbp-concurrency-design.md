@@ -15,6 +15,8 @@ Direction accepted. Recorded decisions, each applied below:
 
 **Amended 2026-10-13 (storage):** the CRDT is no longer a private in-tree type. It is a shared first-party crate `rusty_crdt`, seeded from the `nexus-crdt` algorithm (read in full), with a sync zero-dependency core. See f, Appendix A (API sketch) and Appendix B (ADR draft).
 
+**Status (2026-10-13):** Phase 2a is implemented in `rusty_bbp` (several live turns, one per role, `max_live_turns` in `task_opened`, slices reserved at grant), with `max_live_turns = 1` as the default and the behavior of v0.5. Two differences from the text below: the slice is released implicitly (reserved space is derived from live turns, so no `turn_ended` payload was added), and slices are enforced only above one live turn so that `max_live_turns = 1` keeps the accepted crossing write of R11. The host moderator still launches one harness and passes `max_live_turns = 1`. Phase 2b stays gated on evidence from 2a.
+
 **Line references** are to `rusty_bbp/src` at `37542c4c` (v0.4.1 engine; the v0.5 engine does not exist yet). Claims I did not verify in source are labelled **[unverified]**.
 
 ## Recommendation

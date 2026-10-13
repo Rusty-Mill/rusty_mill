@@ -391,7 +391,7 @@ impl Server {
 
     /// True while this process's turn is the live one.
     fn turn_live(&self) -> bool {
-        self.driver.state.turn.as_ref().map(|t| t.id) == Some(self.binding.turn)
+        self.driver.state.turn().map(|t| t.id) == Some(self.binding.turn)
     }
 
     /// True when this principal already had `op` accepted. Its exact replay

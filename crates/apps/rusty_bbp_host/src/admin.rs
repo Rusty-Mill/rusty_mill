@@ -54,6 +54,7 @@ pub fn open_task(
         },
         turn_ms: 600_000,
         request_ms: 86_400_000,
+        max_live_turns: 1,
         brief: blob,
         human: human.clone(),
     });

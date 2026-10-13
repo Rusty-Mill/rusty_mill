@@ -437,7 +437,7 @@ fn a_restarted_moderator_fences_the_invocation_it_cannot_see() {
     let turn = open_driver(&dir, &task)
         .expect("driver")
         .state
-        .turn
+        .turn()
         .expect("turn")
         .id;
     assert_eq!(turn, TurnId(1));
@@ -496,7 +496,7 @@ fn two_moderators_cannot_hold_one_task() {
         open_driver(&dir, &task)
             .expect("driver")
             .state
-            .turn
+            .turn()
             .is_none(),
         "the refused moderator touched nothing"
     );

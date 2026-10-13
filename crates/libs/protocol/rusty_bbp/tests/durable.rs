@@ -300,6 +300,7 @@ fn open_task(dir: &Path, id: &str) -> Driver<FsStore> {
         },
         turn_ms: 60_000,
         request_ms: 3_600_000,
+        max_live_turns: 1,
         brief,
         human: PrincipalId("human".into()),
     });

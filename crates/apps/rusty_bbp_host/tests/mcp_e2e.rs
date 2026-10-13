@@ -136,9 +136,9 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     let dir = tempdir("turn");
     let task = setup(&dir);
     let d = open_driver(&dir, &task).expect("driver");
-    let turn = d.state.turn.as_ref().expect("planner turn").id;
+    let turn = d.state.turn().expect("planner turn").id;
     assert_eq!(
-        d.state.turn.as_ref().map(|t| t.role.clone()),
+        d.state.turn().map(|t| t.role.clone()),
         Some(Who::Planner.id())
     );
 
@@ -188,7 +188,7 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     d.dispatch(&Command::AbortTurn, rusty_bbp_host::now())
         .expect("abort");
     assert_ne!(
-        d.state.turn.as_ref().map(|t| t.id),
+        d.state.turn().map(|t| t.id),
         Some(turn),
         "a new turn was granted"
     );
@@ -202,7 +202,7 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     let (_, err) = mcp.call("task_card", "{}");
     assert!(!err);
     // A new process for the new turn works.
-    let new_turn = d.state.turn.as_ref().expect("turn").id;
+    let new_turn = d.state.turn().expect("turn").id;
     let mut mcp2 = Mcp::spawn(&dir, "T1", "planner", new_turn.0);
     let (ok, err) = mcp2.call(
         "post",
@@ -219,7 +219,7 @@ fn malformed_requests_get_jsonrpc_errors() {
     let turn = open_driver(&dir, &task)
         .expect("driver")
         .state
-        .turn
+        .turn()
         .as_ref()
         .expect("turn")
         .id;
@@ -245,7 +245,7 @@ fn human_cli_drives_a_gate() {
     let turn = open_driver(&dir, &task)
         .expect("driver")
         .state
-        .turn
+        .turn()
         .as_ref()
         .expect("turn")
         .id;
@@ -281,7 +281,10 @@ fn human_cli_drives_a_gate() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "\"Ok\"");
     let card = admin::card(&dir, &task).expect("card");
     assert_eq!(card.state, State::Build);
-    assert_eq!(card.turn.map(|t| t.0), Some(Who::Coder.id()));
+    assert_eq!(
+        card.turns.first().map(|t| t.0.clone()),
+        Some(Who::Coder.id())
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -289,7 +292,7 @@ fn turn_of(dir: &Path, task: &TaskId) -> u64 {
     open_driver(dir, task)
         .expect("driver")
         .state
-        .turn
+        .turn()
         .as_ref()
         .expect("turn")
         .id

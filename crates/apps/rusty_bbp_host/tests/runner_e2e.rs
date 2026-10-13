@@ -66,7 +66,7 @@ struct Task {
 impl Task {
     fn agent(&self, role: Who, action: AgentAction) -> Response {
         let mut d = open_driver(&self.dir, &self.id).expect("driver");
-        let turn = d.state.turn.as_ref().expect("turn");
+        let turn = d.state.turn().expect("turn");
         assert_eq!(turn.role, role.id(), "{role:?} holds the turn");
         let principal = PrincipalId(role.name().into());
         let cmd = Command::Agent {
@@ -204,10 +204,7 @@ fn passing_candidate_yields_a_passed_report_and_a_tester_turn() {
     assert!(log.contains("=== test"), "{log}");
     let st = t.state();
     assert_eq!(st.state, State::Test);
-    assert_eq!(
-        st.turn.as_ref().map(|t| t.role.clone()),
-        Some(Who::Tester.id())
-    );
+    assert_eq!(st.turn().map(|t| t.role.clone()), Some(Who::Tester.id()));
     // A second invocation finds nothing to serve.
     let again = runner::run_once(
         &dir,
@@ -469,10 +466,7 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
     let (rep, _) = report_of(&t);
     assert_eq!(rep.status, RunStatus::Failed, "the environment is broken");
     let st = t.state();
-    assert_eq!(
-        st.turn.as_ref().map(|x| x.role.clone()),
-        Some(Who::Tester.id())
-    );
+    assert_eq!(st.turn().map(|x| x.role.clone()), Some(Who::Tester.id()));
     let cand = st.candidate.expect("candidate");
     let old_run = st.selected_run().expect("run").id;
     let log = st.selected_run().expect("run").log.expect("log");
@@ -489,7 +483,7 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
         other => panic!("expected Posted, got {other:?}"),
     };
     let st = t.state();
-    assert!(st.turn.is_none(), "the request ended the turn");
+    assert!(st.turn().is_none(), "the request ended the turn");
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
     assert_eq!(st.iteration, 0, "no iteration spent");
 
@@ -524,7 +518,7 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
     let (rep, _) = report_of(&t);
     assert_eq!(rep.status, RunStatus::Passed);
     assert!(
-        t.state().turn.is_none(),
+        t.state().turn().is_none(),
         "a fresh report grants nobody while the request is pending"
     );
 
@@ -540,10 +534,7 @@ fn an_environment_fault_is_recovered_by_rerun_then_settlement() {
     assert!(matches!(r, Response::Posted(_)), "{r:?}");
     let st = t.state();
     assert!(st.pending_request.is_none());
-    assert_eq!(
-        st.turn.as_ref().map(|x| x.role.clone()),
-        Some(Who::Tester.id())
-    );
+    assert_eq!(st.turn().map(|x| x.role.clone()), Some(Who::Tester.id()));
     let run = st.selected_run().expect("run");
     let report = run.report.expect("report");
     let approve = Draft {
@@ -683,17 +674,14 @@ fn a_coder_request_is_settled_by_an_answer_and_the_coder_resubmits() {
     let first = t.state().candidate.expect("candidate");
     let req = request_human(&t, Who::Coder, "the sandbox cannot run rustc");
     let st = t.state();
-    assert!(st.turn.is_none());
+    assert!(st.turn().is_none());
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
     assert_eq!(st.state, State::Build);
 
     human_answer(&t, req, "toolchain readable now; resubmit your candidate");
     let st = t.state();
     assert!(st.pending_request.is_none());
-    assert_eq!(
-        st.turn.as_ref().map(|x| x.role.clone()),
-        Some(Who::Coder.id())
-    );
+    assert_eq!(st.turn().map(|x| x.role.clone()), Some(Who::Coder.id()));
 
     // Fresh clone: the change is gone until the stored diff is reapplied.
     let clone = dir.join("coder-clone");
@@ -784,14 +772,14 @@ fn an_unrelated_answer_or_decision_settles_nothing() {
     let st = t.state();
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
     assert!(
-        st.turn.is_none(),
+        st.turn().is_none(),
         "nobody is granted by an unrelated settlement"
     );
     assert_eq!(st.state, State::Test);
 
     human_answer(&t, req, "fixed");
     assert_eq!(
-        t.state().turn.as_ref().map(|x| x.role.clone()),
+        t.state().turn().map(|x| x.role.clone()),
         Some(Who::Tester.id())
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -829,7 +817,7 @@ fn a_failed_rerun_keeps_the_request_open_until_a_run_passes() {
     let st = t.state();
     assert_eq!(report_of(&t).0.status, RunStatus::Failed);
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
-    assert!(st.turn.is_none(), "a failed rerun grants nobody");
+    assert!(st.turn().is_none(), "a failed rerun grants nobody");
     assert_eq!(st.iteration, 0);
 
     // A real fix, another rerun, then settlement.
@@ -837,10 +825,10 @@ fn a_failed_rerun_keeps_the_request_open_until_a_run_passes() {
     human_rerun(&t, cand);
     run_runner();
     assert_eq!(report_of(&t).0.status, RunStatus::Passed);
-    assert!(t.state().turn.is_none());
+    assert!(t.state().turn().is_none());
     human_answer(&t, req, "fixed, rerun passed");
     assert_eq!(
-        t.state().turn.as_ref().map(|x| x.role.clone()),
+        t.state().turn().map(|x| x.role.clone()),
         Some(Who::Tester.id())
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -883,14 +871,11 @@ fn a_rejected_request_regrants_the_tester_who_may_ask_again() {
     assert!(matches!(r, Response::Posted(_)), "{r:?}");
     let st = t.state();
     assert!(st.pending_request.is_none());
-    assert_eq!(
-        st.turn.as_ref().map(|x| x.role.clone()),
-        Some(Who::Tester.id())
-    );
+    assert_eq!(st.turn().map(|x| x.role.clone()), Some(Who::Tester.id()));
     let again = request_human(&t, Who::Tester, "then the log is wrong: see art:5");
     let st = t.state();
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(again));
-    assert!(st.turn.is_none());
+    assert!(st.turn().is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -942,7 +927,7 @@ fn an_error_rerun_escalates_and_resume_then_settlement_recovers() {
     let st = t.state();
     assert_eq!(st.state, State::Escalated);
     assert_eq!(st.pending_request.as_ref().map(|p| p.msg), Some(req));
-    assert!(st.turn.is_none());
+    assert!(st.turn().is_none());
 
     // The real fix; resume into test starts a fresh run; settle after it passes.
     std::fs::remove_file(&hang).expect("unhang");
@@ -957,10 +942,10 @@ fn an_error_rerun_escalates_and_resume_then_settlement_recovers() {
     );
     run_runner();
     assert_eq!(report_of(&t).0.status, RunStatus::Passed);
-    assert!(t.state().turn.is_none(), "still pending");
+    assert!(t.state().turn().is_none(), "still pending");
     human_answer(&t, req, "fixed, rerun passed");
     assert_eq!(
-        t.state().turn.as_ref().map(|x| x.role.clone()),
+        t.state().turn().map(|x| x.role.clone()),
         Some(Who::Tester.id())
     );
     let _ = std::fs::remove_dir_all(&dir);

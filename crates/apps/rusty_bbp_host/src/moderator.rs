@@ -244,10 +244,10 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     // replacement turn is launched here. The first tick fires deadlines and
     // grants the first turn of a freshly assigned task; that turn is ours.
     // Gates have no turn and keep waiting.
-    let inherited = d.state.turn.as_ref().map(|t| t.id);
+    let inherited = d.state.turn().map(|t| t.id);
     d.dispatch(&Command::Tick, now())
         .map_err(|e| format!("{e:?}"))?;
-    let live = d.state.turn.as_ref().map(|t| t.id);
+    let live = d.state.turn().map(|t| t.id);
     if let (Some(turn), true) = (inherited, inherited == live) {
         if !d.state.state.terminal() {
             eprintln!(
@@ -300,7 +300,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             sup.runner = Some(std::thread::spawn(move || run_once(&cfg)));
         }
 
-        let live = d.state.turn.as_ref().map(|t| (t.id, t.role.clone()));
+        let live = d.state.turn().map(|t| (t.id, t.role.clone()));
 
         // Reap: a harness that exited without ending its turn forfeits it;
         // one whose turn ended under it is killed.

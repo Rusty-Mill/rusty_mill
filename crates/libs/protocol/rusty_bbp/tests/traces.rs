@@ -272,7 +272,11 @@ fn tr_12_read_budgets() {
         Code::TurnBudgetExhausted
     );
     assert_eq!(fx.st().spent.reads, 30);
-    assert_eq!(fx.st().spent.reads_this_turn, 0);
+    assert_eq!(
+        fx.st().turn().map(|t| t.reads),
+        Some(0),
+        "the regranted turn starts at zero"
+    );
 }
 
 #[test]

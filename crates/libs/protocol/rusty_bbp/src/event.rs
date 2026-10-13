@@ -4,7 +4,7 @@ use crate::command::Response;
 use crate::ids::*;
 use crate::record::*;
 use crate::role::Role;
-use crate::state::{Budget, BudgetField, Gate, State, TurnKind};
+use crate::state::{Budget, BudgetField, Gate, Slice, State, TurnKind};
 use rusty_serde::{Deserialize, Serialize};
 
 /// The log schema this crate writes and reads. Schema 1 was v0.4.1 (a fixed
@@ -52,6 +52,10 @@ pub enum Event {
         budget: Budget,
         turn_ms: u64,
         request_ms: u64,
+        /// Cap on concurrently live turns. Absent in logs written before it
+        /// existed, which read as 0 and fold as 1.
+        #[rusty_serde(default)]
+        max_live_turns: u32,
         human: PrincipalId,
     },
     Assigned {
@@ -66,6 +70,11 @@ pub enum Event {
         kind: TurnKind,
         deadline: Time,
         return_to: Option<RoleId>,
+        /// The turn's share of the task budget, reserved at grant. `None`
+        /// when `max_live_turns` is 1: the whole task budget, with the
+        /// crossing write accepted (R11).
+        #[rusty_serde(default)]
+        slice: Option<Slice>,
     },
     TurnEnded {
         turn: TurnId,

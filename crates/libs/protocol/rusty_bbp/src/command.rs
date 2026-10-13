@@ -48,6 +48,9 @@ pub struct OpenTask {
     pub budget: crate::state::Budget,
     pub turn_ms: u64,
     pub request_ms: u64,
+    /// At most this many turns are live at once, one per role. 1 is the
+    /// serialized v0.5 behavior; the core accepts 1 to the roster size.
+    pub max_live_turns: u32,
     pub brief: BlobRef,
     pub human: PrincipalId,
 }
@@ -189,6 +192,8 @@ pub enum Code {
     UnknownRole,
     /// `open` carried a roster that failed validation.
     BadRoster,
+    /// `open` carried a `max_live_turns` outside 1 to the roster size.
+    BadLiveTurns,
     /// Driver boundary: the referenced blob is not in the store.
     BlobMissing,
     /// Driver boundary: the claimed payload is not what the stored bytes decode to.
