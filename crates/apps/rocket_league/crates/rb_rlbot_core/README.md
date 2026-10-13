@@ -62,7 +62,7 @@ Anything a client asks for beyond this is ignored, never a crash.
 
 ## Verified
 
-`cargo test -p rb_rlbot_core`: 8 simulation tests; 6 socket tests that drive the core with the real
+`cargo test -p rb_rlbot_core`: simulation tests, and socket tests that drive the core with the real
 `rb_rlbot_client` over loopback, including two full runs compared packet for packet. The built
 `rb_chaser_bot` process joined the built `rb_rlbot_core` process and the match started (hand run,
 2026-10-11). Not verified: against RLBot's own Python or C# clients, or the RLBot GUI.
