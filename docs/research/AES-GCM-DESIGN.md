@@ -129,10 +129,42 @@ the other specification vectors, a randomised differential suite, the GCM length
 
 Bulk throughput (86 to 103 MB/s, 77 to 99 times slower than `ring`) is inside the plan's estimate of 60 to 150 MB/s.
 **New finding: small messages are much worse than that estimate implies.** A batch always processes 64 blocks, so a
-64-byte message (5 blocks) pays for a whole batch: 7 to 9 MB/s, about 90 to 100 times slower than `ring` at that size and
-more in absolute terms than the bulk ratio suggests. Not profiled: how the time splits between AES and GHASH, and how
-much a narrower batch (for example 8 or 16 blocks) would help small records. `open_in_place` also computes the first
-batch twice (once for the tag mask, once for the data), which the measurement above does not include.
+64-byte message (5 blocks) pays for a whole batch: 7 to 9 MB/s, about 90 to 100 times slower than `ring` at that size.
+`open_in_place` also computes the first batch twice, which the measurement above does not include.
+
+### Profile (2026-10-10, idle machine, release build, best of five; ignored tests `profile_stages` and `profile_ghash`)
+
+Per 64-block batch (1,024 bytes), AES-128: 6,006 ns in total, i.e. 170 MB/s on its own (AES-256: 7,768 ns, 132 MB/s).
+GHASH on its own: 252 MB/s (one field multiplication 62 ns). Combining them as `1 / (1/AES + 1/GHASH)` gives 101 MB/s
+(AES-128) and 87 MB/s (AES-256), which matches the measured 103 and 86 MB/s, so the two halves account for the time.
+
+| AES-128 stage | per batch | calls | total | share of 6,006 ns |
+| --- | --- | --- | --- | --- |
+| S-box (`sub_bytes`) | 278 ns | 10 | 2,780 ns | 46% |
+| transposes (`to_planes` 644 + `from_planes` 647) | 1,291 ns | 1 | 1,291 ns | 21% |
+| `mix_columns` | 99 ns | 9 | 891 ns | 15% |
+| `add_round_key` | 52 ns | 11 | 572 ns | 10% |
+| `shift_rows` | 37 ns | 10 | 370 ns | 6% |
+
+(The stages timed in isolation add up to 5,902 ns against 6,006 ns for the whole, so nothing large is missing.)
+Key expansion costs 661 ns per new key, and `Gcm::new` spends one more batch (about 6 µs) on the hash key.
+At bulk sizes AES is about 60% of the time and GHASH about 40%.
+
+**What this says about the design, including a correction to an earlier statement.**
+- The S-box circuit is already near what scalar code can do (about 1,800 boolean operations in 278 ns, roughly three
+  per cycle). More speed from this layout needs SIMD, which means intrinsics or an unstable portable-SIMD feature.
+- **A narrower batch does not help small messages.** An earlier version of this note, and the report that went with
+  it, suggested a batch of 8 or 16 blocks. That was wrong: with one block per bit of a word, the number of boolean
+  operations is the same whatever the word width, so a narrower word costs the same per batch and only lowers
+  throughput. What would help is a different bit layout, the one BearSSL calls `ct64`, which packs the 16 byte
+  positions of a block into each plane word so that one batch is 4 blocks, not 64, at the same cost per block. That is
+  a re-layout of the state, `shift_rows` and `mix_columns` (they become rotations inside words), not a parameter. It
+  would also shrink the transposes (21% of the time here). **This is a hypothesis, not a measurement:** I estimate a
+  64-byte message could get several times faster, and bulk speed would be unchanged or a little better.
+- GHASH has room: the hash-side reversed operands could be precomputed once per key, and several blocks could share
+  one reduction. I would not expect more than about 1.5 to 2 times from GHASH, and nothing here changes the
+  conclusion that portable AES-GCM stays tens of times slower than `ring`.
+- Realistic ceiling for the portable path, as an estimate: roughly 150 to 200 MB/s bulk after both optimisations.
 
 **Early constant-time signal (valgrind taint, `examples/taint_aes.rs`; one build, one run each, x86-64):** key and
 plaintext marked secret, 2000-byte plaintext (covers the first and later batches). `gcm128-seal` and `gcm256-seal`: 0

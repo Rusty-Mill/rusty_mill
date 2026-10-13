@@ -117,4 +117,34 @@ mod tests {
             assert_eq!(gf_mul(a, b), gf_mul_ref(a, b), "{a:#x} * {b:#x}");
         }
     }
+
+    /// GHASH throughput on its own. Ignored; run with
+    /// `cargo test -p rusty_aead --release --lib -- --ignored --nocapture profile`.
+    #[test]
+    #[ignore = "timing; run manually"]
+    fn profile_ghash() {
+        use core::hint::black_box;
+        use std::time::Instant;
+        let data = std::vec![0xa5u8; 16 << 20];
+        let h = 0x66e9_4bd4_ef8a_2c3b_0123_4567_89ab_cdefu128;
+        let best = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                black_box(ghash(black_box(h), b"", black_box(&data)));
+                data.len() as f64 / t.elapsed().as_secs_f64() / 1e6
+            })
+            .fold(0.0, f64::max);
+        let mul_ns = (0..5)
+            .map(|_| {
+                let mut x = 1u128;
+                let t = Instant::now();
+                for _ in 0..1_000_000 {
+                    x = gf_mul(black_box(x) ^ 0xdead_beef, h);
+                }
+                black_box(x);
+                t.elapsed().as_nanos() as f64 / 1e6
+            })
+            .fold(f64::MAX, f64::min);
+        std::eprintln!("GHASH over 16 MiB: {best:.1} MB/s; one gf_mul: {mul_ns:.1} ns");
+    }
 }

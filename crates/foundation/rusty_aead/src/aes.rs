@@ -480,4 +480,58 @@ mod tests {
         Aes::new_256(&k256).encrypt_blocks(&mut blocks);
         assert!(blocks.iter().all(|b| *b == want256));
     }
+
+    /// Where the time goes in one 64-block batch. Ignored (machine-dependent); run with
+    /// `cargo test -p rusty_aead --release --lib -- --ignored --nocapture profile`.
+    #[test]
+    #[ignore = "timing; run manually"]
+    fn profile_stages() {
+        use core::hint::black_box;
+        use std::time::Instant;
+
+        fn ns_per_call(reps: u32, mut f: impl FnMut()) -> f64 {
+            (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    for _ in 0..reps {
+                        f();
+                    }
+                    t.elapsed().as_nanos() as f64 / f64::from(reps)
+                })
+                .fold(f64::MAX, f64::min)
+        }
+
+        let mut blocks = [[0x5au8; 16]; LANES];
+        let mut st = to_planes(&blocks);
+        let reps = 20_000;
+        let t_to = ns_per_call(reps, || {
+            st = to_planes(black_box(&blocks));
+        });
+        let t_from = ns_per_call(reps, || {
+            from_planes(black_box(&mut st), &mut blocks);
+        });
+        let t_sub = ns_per_call(reps, || sub_bytes(black_box(&mut st)));
+        let t_shift = ns_per_call(reps, || shift_rows(black_box(&mut st)));
+        let t_mix = ns_per_call(reps, || mix_columns(black_box(&mut st)));
+        let aes128 = Aes::new_128(&[1u8; 16]);
+        let aes256 = Aes::new_256(&[1u8; 32]);
+        let t_ark = ns_per_call(reps, || aes128.add_round_key(black_box(&mut st), 1));
+        let t_e128 = ns_per_call(reps, || aes128.encrypt_blocks(black_box(&mut blocks)));
+        let t_e256 = ns_per_call(reps, || aes256.encrypt_blocks(black_box(&mut blocks)));
+        let t_ks = ns_per_call(reps, || {
+            black_box(Aes::new_128(black_box(&[1u8; 16])));
+        });
+        let mb = |ns: f64| 1024.0 / ns * 1000.0; // 64 blocks = 1024 bytes
+        std::eprintln!("per 64-block batch (1024 bytes), best of five:");
+        std::eprintln!("  to_planes       {t_to:8.0} ns");
+        std::eprintln!("  from_planes     {t_from:8.0} ns");
+        std::eprintln!("  sub_bytes       {t_sub:8.0} ns   (x9/13 rounds + 1)");
+        std::eprintln!("  shift_rows      {t_shift:8.0} ns");
+        std::eprintln!("  mix_columns     {t_mix:8.0} ns   (x9/13 rounds)");
+        std::eprintln!("  add_round_key   {t_ark:8.0} ns   (x10/14 + 1)");
+        std::eprintln!("  encrypt_blocks  {t_e128:8.0} ns AES-128 = {:6.1} MB/s;  {t_e256:8.0} ns AES-256 = {:6.1} MB/s", mb(t_e128), mb(t_e256));
+        std::eprintln!("  key expansion   {t_ks:8.0} ns (AES-128)");
+        let sum128 = t_to + t_from + 10.0 * t_sub + 10.0 * t_shift + 9.0 * t_mix + 11.0 * t_ark;
+        std::eprintln!("  sum of parts (AES-128) {sum128:8.0} ns (stages in isolation; compare with encrypt_blocks)");
+    }
 }
