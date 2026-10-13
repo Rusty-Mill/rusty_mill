@@ -1,6 +1,6 @@
 # TLS native engine: evidence bar proposal (owner to approve)
 
-Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` aligned 2026-10-12 and the `nc-dos` cases bounded 2026-10-13; no known divergence from webpki is left open. Follows
+Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` aligned 2026-10-12 and the two `nc-dos` cases bounded 2026-10-13; the other native-accept/webpki-reject limbo cases (see "Other divergences") still await a named-owner decision. Follows
 `TLS-ENGINE-ASSESSMENT.md` section 6, which this narrows and updates. The engine's default,
 both gates and every consumer are unchanged. The bar, replacing `ring`, and superseding
 ADR-0002 are the owner's decisions.
@@ -24,7 +24,7 @@ and still fall back to rustls with one switch. The risk differs, so the bar shou
 | BoGo through a shim | 861 pass, 0 fail, 455 disabled with reasons; CI floor 830 |
 | OpenSSL interop in both directions, hermetic, in CI | Met |
 | rustls differential, protocol side (suites, groups, HRR, resumption, ALPN, SNI, both roles) | Met by per-stage suites; not re-audited as a whole |
-| Certificate differential | **Partial, much improved 2026-10-11.** x509-limbo (9,802 cases, pinned by sha256) now runs against both engines: 9,777 compared. It found three real looser-than-webpki defects (fixed, see below). Remaining: the BetterTLS and limbo `pedantic` classes and CRLs are not enforced by either engine; two name-constraint DoS cases are accepted by us and refused by webpki (owner decision below). No generated-chain corpus at scale yet |
+| Certificate differential | **Partial, much improved 2026-10-11.** x509-limbo (9,802 cases, pinned by sha256) now runs against both engines: 9,777 compared. It found three real looser-than-webpki defects (fixed, see below). Remaining: the BetterTLS and limbo `pedantic` classes and CRLs are not enforced by either engine; the two name-constraint DoS cases are now bounded by a comparison budget (see below), but two other limbo cases where we accept and webpki refuses still need a named-owner decision. No generated-chain corpus at scale yet |
 | Fuzz targets | **Exist** (certificate, DER, TLS 1.2 record, schedule, client and server, version negotiation). **Smoke job added 2026-10-10** (30 s per target, on the same planner selection as the engine job; passed once on a runner, run 38094570843). No long run recorded. No target for TLS 1.3 handshake messages or the 1.3 machines beyond negotiation |
 | Live internet | **One runner run, three Google hosts, TLS 1.3, one network.** The step is non-blocking and runs wherever the engine job runs (same planner selection) |
 | Independent review | **None** |
@@ -106,20 +106,22 @@ that fails without the fix:
 | Malformed `subjectAltName` entry skipped under a name constraint | `nc-permits-invalid-dns-san`, `nc-permits-invalid-ip-san` | `NameError::MalformedSubjectAltName` |
 
 **After the fixes: 0 limbo cases where this validator accepts something webpki refuses and limbo says to
-refuse, except two, which are now fixed too (2026-10-13, owner chose "budget").** The two are
+refuse, except two, which are now fixed too (2026-10-13; the user chose "budget" in the working session, not yet confirmed directly to the reviewer).** The two are
 `pathological::nc-dos-1` and `-2`: a root with 2,048 name constraints and a leaf with 2,048 names,
 over four million name-against-subtree comparisons. Limbo calls them technically valid and "typically
 rejected by implementations due to quadratic blowup"; webpki refuses them; this validator used to
 accept after doing all the work (4 s with the cap removed, in a debug build). Now
 `check_name_constraints_body` computes names times subtrees up front and refuses with
 `NameError::TooManyNameComparisons` above `MAX_NAME_COMPARISONS` (100,000), before any comparison.
+The value is my choice, between real chains and the limbo cases; neither the owner nor webpki specified it.
 The cap is per call, one call per constraining CA per candidate path. Worst case, then: at most the
 signature-check budget of candidate paths (default 100) times the path depth plus one (default 9)
-times the cap, about 9 x 10^7 cheap comparisons, and only for a peer that builds that many validly
-signed candidate paths. That is a bound, not a measurement; it is not a claim about wall-clock time.
-`name_constraints_over_the_comparison_budget_are_refused` pins ordinary sizes and a chain just under
-the cap (accepted), a chain just over it and the limbo shape (refused); raising the cap makes it
-fail. The limbo golden lost the two `looser` lines and nothing else moved.
+times the cap, about 9 x 10^7 logical name-against-subtree comparison attempts, and only for a peer that builds that many validly
+signed candidate paths. That counts attempts, not CPU or bytes: parsing, allocation, scanning and variable-length string comparison sit outside it, so it is neither a measurement nor a claim about wall-clock time.
+Three tests pin it: the exact boundary (100,000 accepted, 100,001 refused) and the limbo shape;
+permitted subtrees counting towards the product; and names aggregated across a path, with a
+self-issued intermediate exempt. Each was mutation-checked (`>=` for `>`, counting the self-issued
+certificate, counting only the last certificate, ignoring permitted subtrees: each fails a test). The limbo golden lost the two `looser` lines and nothing else moved.
 
 **A second looser-than-webpki behavior, not covered by limbo, fixed 2026-10-12 (owner decision):**
 a certificate or CA whose `extendedKeyUsage` is `anyExtendedKeyUsage` alone was accepted for server
@@ -130,7 +132,7 @@ issuer). The owner chose to align with webpki. `check_eku` no longer treats the 
 `any_extended_key_usage_is_refused_like_webpki` (leaf and intermediate, ours and webpki) pin it. The
 limbo golden is unchanged (the corpus has no such case).
 
-Other divergences, none a defect in this validator:
+Other divergences, none a defect in this validator (each is still a native-accept/webpki-reject or a stricter-than-limbo case that needs a named-owner decision as an exception; limbo expecting success is not that decision):
 - 2 cases where this validator is *looser* than webpki and agrees with limbo (webpki is the stricter one): `pathlen::self-issued-certs-pathlen`, `rfc5280::nc::permitted-self-issued`.
 - 4 cases where this validator is *stricter* and limbo expects refusal (empty `permitted`/`excluded` sequences, a leading-period DNS constraint).
 - 1 false refusal: `rfc5280::nc::nc-forbids-othername-noop`. An `otherName` name constraint is refused rather than ignored by design (ADR-0002 section 2b-iii).

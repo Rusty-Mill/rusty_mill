@@ -1429,26 +1429,29 @@ fn a_malformed_san_entry_under_a_name_constraint_is_refused() {
     }
 }
 
-/// Name-constraint checking costs names times subtrees, and the peer chooses
-/// both, so the cost is capped (`MAX_NAME_COMPARISONS`) and a chain over the cap
-/// is refused rather than ground through. Found by x509-limbo
-/// (`pathological::nc-dos-1` and `-2`: 2,048 constraints against 2,048 names, over
-/// four million comparisons): webpki refuses them and this validator used to
-/// accept after doing all the work. The cases straddle the cap: ordinary sizes
-/// and a chain just under it still validate.
-#[test]
-fn name_constraints_over_the_comparison_budget_are_refused() {
-    use rcgen::{GeneralSubtree, NameConstraints};
-    use rusty_tls::handrolled::name::{NameError, ServerName, MAX_NAME_COMPARISONS};
-    use rusty_tls::handrolled::path::verify_peer_certificate;
+/// What a name-constraint budget case builds: a root with `permitted` and
+/// `excluded` DNS subtrees, optionally one intermediate with its own SANs, and a
+/// leaf. `self_issued` gives the intermediate the root's subject, which RFC 5280
+/// §6.1.4(b) exempts from name-constraint checking (it is not the last
+/// certificate).
+struct BudgetCase {
+    permitted: Vec<String>,
+    excluded: Vec<String>,
+    /// (self-issued?, SANs) for an intermediate between root and leaf.
+    intermediate: Option<(bool, Vec<String>)>,
+    leaf_sans: Vec<String>,
+}
 
-    let side = (MAX_NAME_COMPARISONS as f64).sqrt() as usize;
-    for (label, subtrees, names, accepted) in [
-        ("ordinary", 10, 10, true),
-        ("just under the cap", side - 1, side - 1, true),
-        ("just over the cap", side + 1, side + 1, false),
-        ("the limbo nc-dos shape", 2048, 2048, false),
-    ] {
+fn names(prefix: &str, suffix: &str, n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("{prefix}{i}{suffix}")).collect()
+}
+
+impl BudgetCase {
+    fn run(self) -> Result<(), PathError> {
+        use rcgen::{GeneralSubtree, NameConstraints};
+        use rusty_tls::handrolled::name::ServerName;
+        use rusty_tls::handrolled::path::verify_peer_certificate;
+
         let root_key = KeyPair::generate().expect("key");
         let mut root_params = CertificateParams::new(vec![]).expect("params");
         root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -1456,43 +1459,129 @@ fn name_constraints_over_the_comparison_budget_are_refused() {
             .distinguished_name
             .push(DnType::CommonName, "Budget Root");
         root_params.name_constraints = Some(NameConstraints {
-            permitted_subtrees: vec![],
-            excluded_subtrees: (0..subtrees)
-                .map(|i| GeneralSubtree::DnsName(format!("bad{i}.test")))
+            permitted_subtrees: self
+                .permitted
+                .into_iter()
+                .map(GeneralSubtree::DnsName)
+                .collect(),
+            excluded_subtrees: self
+                .excluded
+                .into_iter()
+                .map(GeneralSubtree::DnsName)
                 .collect(),
         });
         let root = root_params.self_signed(&root_key).expect("root");
 
+        let (issuer, issuer_key, intermediate_der) = match self.intermediate {
+            None => (None, None, None),
+            Some((self_issued, sans)) => {
+                let key = KeyPair::generate().expect("key");
+                let mut params = CertificateParams::new(sans).expect("params");
+                params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+                params.distinguished_name.push(
+                    DnType::CommonName,
+                    if self_issued {
+                        "Budget Root"
+                    } else {
+                        "Budget Intermediate"
+                    },
+                );
+                let cert = params.signed_by(&key, &root, &root_key).expect("inter");
+                let der = cert.der().to_vec();
+                (Some(cert), Some(key), Some(der))
+            }
+        };
+
         let leaf_key = KeyPair::generate().expect("key");
-        let leaf = CertificateParams::new(
-            (0..names)
-                .map(|i| format!("host{i}.example.com"))
-                .collect::<Vec<_>>(),
-        )
-        .expect("params")
-        .signed_by(&leaf_key, &root, &root_key)
+        let leaf_params = CertificateParams::new(self.leaf_sans).expect("params");
+        let leaf = match (&issuer, &issuer_key) {
+            (Some(cert), Some(key)) => leaf_params.signed_by(&leaf_key, cert, key),
+            _ => leaf_params.signed_by(&leaf_key, &root, &root_key),
+        }
         .expect("leaf");
 
         let root_der = root.der().to_vec();
         let leaf_der = leaf.der().to_vec();
         let root_cert = Certificate::parse(&root_der).expect("root parses");
         let leaf_cert = Certificate::parse(&leaf_der).expect("leaf parses");
+        let inter_cert = intermediate_der
+            .as_ref()
+            .map(|der| Certificate::parse(der).expect("intermediate parses"));
         let anchors = [TrustAnchor::from_certificate(&root_cert)];
-        let result = verify_peer_certificate(
+        let intermediates: Vec<Certificate<'_>> = inter_cert.into_iter().collect();
+        verify_peer_certificate(
             &leaf_cert,
-            &[],
+            &intermediates,
             &anchors,
             &ServerName::Dns("host0.example.com"),
             &options(),
-        );
-        if accepted {
-            result.unwrap_or_else(|e| panic!("{label}: {e:?}"));
-        } else {
-            assert_eq!(
-                result,
-                Err(PathError::Name(NameError::TooManyNameComparisons)),
-                "{label}"
-            );
-        }
+        )
+        .map(|_| ())
     }
+}
+
+fn over_budget(result: Result<(), PathError>) -> bool {
+    use rusty_tls::handrolled::name::NameError;
+    result == Err(PathError::Name(NameError::TooManyNameComparisons))
+}
+
+/// Name-constraint checking costs names times subtrees, and the peer chooses
+/// both, so the product is capped (`MAX_NAME_COMPARISONS`) and a chain over the
+/// cap is refused before any comparison. Found by x509-limbo
+/// (`pathological::nc-dos-1` and `-2`: 2,048 constraints against 2,048 names, over
+/// four million): webpki refuses them and this validator used to accept after
+/// doing all the work. The cases straddle the cap exactly: 100,000 passes and
+/// 100,001 does not.
+#[test]
+fn name_constraints_over_the_comparison_budget_are_refused() {
+    use rusty_tls::handrolled::name::MAX_NAME_COMPARISONS;
+    assert_eq!(MAX_NAME_COMPARISONS, 100_000, "the boundary cases below");
+
+    let case = |subtrees: usize, names_n: usize| BudgetCase {
+        permitted: vec![],
+        excluded: names("bad", ".test", subtrees),
+        intermediate: None,
+        leaf_sans: names("host", ".example.com", names_n),
+    };
+    case(10, 10).run().expect("ordinary sizes");
+    case(250, 400).run().expect("exactly 100,000 comparisons");
+    assert!(over_budget(case(11, 9091).run()), "100,001 comparisons");
+    assert!(
+        over_budget(case(2048, 2048).run()),
+        "the limbo nc-dos shape"
+    );
+}
+
+/// The budget counts permitted subtrees as well as excluded ones.
+#[test]
+fn permitted_subtrees_count_towards_the_comparison_budget() {
+    let case = |subtrees: usize, names_n: usize| BudgetCase {
+        permitted: names("host", ".example.com", subtrees),
+        excluded: vec![],
+        intermediate: None,
+        leaf_sans: names("host", ".example.com", names_n),
+    };
+    case(300, 300)
+        .run()
+        .expect("90,000 comparisons, all permitted");
+    assert!(over_budget(case(400, 300).run()), "120,000 comparisons");
+}
+
+/// Names are aggregated over every certificate the constraints apply to, so
+/// splitting them across an intermediate and the leaf does not slip under the
+/// cap; a self-issued intermediate is exempt (RFC 5280 §6.1.4(b)) and its names
+/// cost nothing.
+#[test]
+fn the_comparison_budget_aggregates_names_across_the_path() {
+    let case = |self_issued: bool| BudgetCase {
+        permitted: vec![],
+        excluded: names("bad", ".test", 2000),
+        intermediate: Some((self_issued, names("inter", ".example.com", 30))),
+        leaf_sans: names("host", ".example.com", 30),
+    };
+    // 2,000 subtrees x 30 names = 60,000 each, 120,000 together.
+    assert!(over_budget(case(false).run()), "intermediate counts");
+    case(true)
+        .run()
+        .expect("a self-issued intermediate is skipped");
 }
