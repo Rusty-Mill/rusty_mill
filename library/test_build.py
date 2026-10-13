@@ -32,6 +32,17 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((e["status"], e["featured"], e["for"]), ("fix coming", True, ""))
         self.assertEqual(build.entry("skill", build.ROOT / "p.md", meta, "b")["for"], "Claude Code")
 
+    def test_skill_export_round_trips(self) -> None:
+        skill = next(i for i in build.collect() if i["kind"] == "skill")
+        meta, body = build.parse(skill["export"])
+        self.assertEqual((meta["name"], meta["description"], meta["source"]), (skill["name"], skill["description"], skill["source"]))
+        self.assertEqual(body, skill["body"])
+
+    def test_sections_export_body_only(self) -> None:
+        for kind in ("prompt", "claude-md", "agents-md"):
+            item = next(i for i in build.collect() if i["kind"] == kind)
+            self.assertEqual(item["export"], item["body"])
+
     def test_all_seeded_entries_load(self) -> None:
         kinds = {i["kind"] for i in build.collect()}
         self.assertEqual(kinds, {"prompt", "skill", "mod", "claude-md", "agents-md"})

@@ -30,7 +30,10 @@ def parse(text: str) -> tuple[dict[str, object], str]:
 DEFAULT_FOR = {"skill": "Claude Code", "mod": "Claude Code", "claude-md": "Claude Code", "agents-md": "any agent"}
 
 
-def entry(kind: str, path: Path, meta: dict[str, object], body: str) -> dict[str, object]:
+def entry(
+    kind: str, path: Path, meta: dict[str, object], body: str, export: str | None = None
+) -> dict[str, object]:
+    """`export` is what Copy/Download hand out; skills export their whole file."""
     for key in ("name", "description", "source"):
         if not meta.get(key):
             raise ValueError(f"{path}: missing {key}")
@@ -45,6 +48,7 @@ def entry(kind: str, path: Path, meta: dict[str, object], body: str) -> dict[str
         "featured": meta.get("featured") == "true",
         "path": str(path.relative_to(ROOT)),
         "body": body,
+        "export": export if export is not None else body,
     }
 
 
@@ -65,7 +69,8 @@ def collect() -> list[dict[str, object]]:
         for p in sorted((ROOT / folder).glob("*.md")):
             items.append(entry(kind, p, *parse(p.read_text())))
     for p in sorted((ROOT / "skills").glob("*/SKILL.md")):
-        items.append(entry("skill", p, *parse(p.read_text())))
+        text = p.read_text()
+        items.append(entry("skill", p, *parse(text), export=text))
     for d in sorted((ROOT / "mods").glob("*/")):
         items.append(load_mod(d))
     return items

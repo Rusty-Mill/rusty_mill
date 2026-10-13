@@ -49,7 +49,7 @@ pre{background:var(--card);border:1px solid var(--line);border-radius:8px;paddin
 <div id="detail" hidden>
   <div class="row"><button id="back">← Back</button><button id="copy">Copy</button><button id="dl">Download</button></div>
   <div class="kind" id="dkind"></div><h2 id="dname" style="margin:0"></h2>
-  <p class="mut" id="ddesc"></p><p class="mut small" id="dsource"></p><p class="mut small" id="dinstall"></p><pre id="dbody"></pre>
+  <p class="mut" id="ddesc"></p><p class="mut small" id="dsource"></p><p class="mut small" id="dinstall"></p><p class="note" id="dnote" hidden></p><pre id="dbody"></pre>
 </div>
 </main>
 <script>
@@ -65,7 +65,7 @@ const INSTALL = {
   "claude-md": "Paste into your project's CLAUDE.md (or ~/.claude/CLAUDE.md).",
   "agents-md": "Paste into your project's AGENTS.md - read by Codex, Cursor, Copilot and other agents.",
 };
-const FILENAME = {mod: i => `${i.name}.txt`, "claude-md": () => "CLAUDE.md", "agents-md": () => "AGENTS.md"};
+const FILENAME = {skill: () => "SKILL.md", mod: i => `${i.name}.txt`, "claude-md": () => "CLAUDE.md", "agents-md": () => "AGENTS.md"};
 
 const matchesQ = i => !state.q || `${i.name} ${i.description} ${i.tags.join(" ")} ${i.source} ${i.body}`.toLowerCase().includes(state.q);
 const matchesKind = i => state.kind === "all" || i.kind === state.kind;
@@ -101,7 +101,7 @@ function card(i) {
   const open = el("button", {className: "name", textContent: i.name});
   open.onclick = () => show(i);
   const copy = el("button", {className: "copy", textContent: "Copy", disabled: flagged});
-  copy.onclick = () => copyText(i.body, copy);
+  copy.onclick = () => copyText(i.export, copy);
   return el("div", {className: `card${flagged ? " flagged" : ""}`},
     el("span", {className: "kind", textContent: i.kind}),
     open,
@@ -118,14 +118,22 @@ function render() {
   const kc = kindCounts(), tc = tagCounts();
   chips($("kinds"), [["all", [...kc.values()].reduce((a, b) => a + b, 0)], ...KINDS.map(k => [k, kc.get(k) ?? 0])], state.kind,
     v => { state.kind = v; render(); });
+  if (state.tag && !tc.has(state.tag)) tc.set(state.tag, 0);
   chips($("tags"), [...tc].sort(([a], [b]) => a.localeCompare(b)), state.tag,
     v => { state.tag = state.tag === v ? null : v; render(); });
   $("bysrc").setAttribute("aria-pressed", String(state.bySource));
+  if (!items.length) { $("out").replaceChildren(emptyState()); return; }
   const groups = state.bySource ? [...Map.groupBy(items, i => i.source)] : [["", items]];
   $("out").replaceChildren(...groups.flatMap(([source, group]) => [
     ...(source ? [el("h3", {textContent: `${source} (${group.length})`})] : []),
     el("div", {className: "grid"}, ...group.map(card)),
   ]));
+}
+
+function emptyState() {
+  const reset = el("button", {textContent: "Clear search and filters"});
+  reset.onclick = () => { Object.assign(state, {q: "", kind: "all", tag: null}); $("q").value = ""; render(); };
+  return el("p", {className: "mut"}, "No matches. ", reset);
 }
 
 function show(i) {
@@ -136,9 +144,13 @@ function show(i) {
   $("dsource").textContent = `Source: ${i.source}`;
   $("dinstall").textContent = typeof how === "function" ? how(i.path) : how;
   $("dbody").textContent = i.body;
-  $("copy").onclick = () => copyText(i.body, $("copy"));
+  const flagged = Boolean(i.status);
+  $("dnote").hidden = !flagged;
+  $("dnote").textContent = flagged ? `Heads up: ${i.status}` : "";
+  $("copy").disabled = $("dl").disabled = flagged;
+  $("copy").onclick = () => copyText(i.export, $("copy"));
   $("dl").onclick = () => {
-    const a = el("a", {href: URL.createObjectURL(new Blob([i.body])), download: FILENAME[i.kind]?.(i) ?? `${i.name}.md`});
+    const a = el("a", {href: URL.createObjectURL(new Blob([i.export])), download: FILENAME[i.kind]?.(i) ?? `${i.name}.md`});
     a.click(); URL.revokeObjectURL(a.href);
   };
   $("detail").hidden = false;
