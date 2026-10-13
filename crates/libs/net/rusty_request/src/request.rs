@@ -12,6 +12,8 @@ pub struct Request {
     pub(crate) headers: HeaderMap,
     pub(crate) body: Body,
     pub(crate) timeout: Option<Duration>,
+    /// The most response-body bytes a buffered send will read.
+    pub(crate) max_body_len: u64,
 }
 
 impl Request {
