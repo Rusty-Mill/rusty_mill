@@ -336,7 +336,7 @@ fn agent(
 }
 
 /// Does the role's `read_messages` allow it to see `m`?
-fn visible(st: &TaskState, role: &Role, m: &Message) -> bool {
+pub(crate) fn visible(st: &TaskState, role: &Role, m: &Message) -> bool {
     if role.read_messages == ReadScope::All {
         return true;
     }

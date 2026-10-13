@@ -130,20 +130,16 @@ fn refusals_and_stale_writes_are_counted_once() {
     assert_eq!(m.stale_rejections, 1);
 }
 
-#[test]
-fn a_verdict_after_a_concurrent_append_is_a_stale_verdict() {
-    // Two testers are live together (finalizers are serialized, testers are not).
+/// Two testers are live together (finalizers are serialized, testers are not).
+/// `tester2` appends a finding during `tester`'s turn; `then` is what `tester`
+/// does between that finding and its approve.
+fn verdict_after_finding(then: impl FnOnce(&mut Fx)) -> (u64, u64) {
     let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
     fx.reach_test();
     stored(fx.report(RunStatus::Passed));
+    let read = |after, limit| AgentAction::Read { after, limit };
     assert!(matches!(
-        fx.agent(
-            "tester",
-            AgentAction::Read {
-                after: None,
-                limit: 5
-            }
-        ),
+        fx.agent("tester", read(None, 50)),
         Response::Read { .. }
     ));
     let cand = fx.st().candidate.unwrap();
@@ -152,9 +148,61 @@ fn a_verdict_after_a_concurrent_append_is_a_stale_verdict() {
         .refs(vec![Ref::art(cand)])
         .evidence(vec![Ref::art(report)]);
     posted(fx.post("tester2", finding));
+    then(&mut fx);
     posted(fx.verdict("tester", VerdictKind::Approve));
     let m = metrics::of(&log_of(&fx));
-    assert_eq!((m.verdicts, m.stale_verdicts), (1, 1));
+    (m.verdicts, m.stale_verdicts)
+}
+
+#[test]
+fn a_verdict_after_a_concurrent_finding_is_a_stale_verdict() {
+    assert_eq!(verdict_after_finding(|_| {}), (1, 1));
+}
+
+#[test]
+fn fetching_an_artifact_does_not_count_as_having_read_the_messages() {
+    // The tester reads the messages, misses the finding, then fetches the
+    // immutable test report: a read charge, but not a view of the messages.
+    let got = verdict_after_finding(|fx| {
+        let report = fx.report_id();
+        assert!(matches!(
+            fx.agent("tester", AgentAction::GetArtifact { id: report }),
+            Response::Artifact(_)
+        ));
+    });
+    assert_eq!(got, (1, 1));
+}
+
+#[test]
+fn reading_the_messages_after_the_finding_clears_it() {
+    let got = verdict_after_finding(|fx| {
+        assert!(matches!(
+            fx.agent(
+                "tester",
+                AgentAction::Read {
+                    after: None,
+                    limit: 50
+                }
+            ),
+            Response::Read { .. }
+        ));
+    });
+    assert_eq!(got, (1, 0));
+}
+
+#[test]
+fn a_page_that_stops_short_does_not_count_as_having_seen_the_finding() {
+    let got = verdict_after_finding(|fx| {
+        let r = fx.agent(
+            "tester",
+            AgentAction::Read {
+                after: None,
+                limit: 1,
+            },
+        );
+        assert!(matches!(r, Response::Read { more: true, .. }));
+    });
+    assert_eq!(got, (1, 1));
 }
 
 #[test]
