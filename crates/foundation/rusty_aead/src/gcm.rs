@@ -16,6 +16,15 @@ pub const GCM_TAG_LEN: usize = 16;
 /// Longest plaintext, SP 800-38D: 2^39 - 256 bits = 2^36 - 32 bytes, i.e. counters
 /// 2 ..= 2^32 - 1 for data (counter 1 masks the tag).
 const MAX_LEN: u64 = (1 << 36) - 32;
+/// Longest additional authenticated data, SP 800-38D: 2^64 - 1 bits = 2^61 - 1 bytes. GHASH
+/// writes the AAD bit length into a 64-bit field, so a longer AAD would corrupt it.
+const MAX_AAD: u64 = (1 << 61) - 1;
+
+/// Whether the AAD and data lengths are within the specification's limits. Arithmetic only,
+/// so the boundaries can be tested without allocating anything near them.
+fn within_limits(aad_len: u64, data_len: u64) -> bool {
+    aad_len <= MAX_AAD && data_len <= MAX_LEN
+}
 
 struct Gcm {
     aes: Aes,
@@ -28,11 +37,12 @@ impl Gcm {
         let mut zero = [[0u8; 16]; LANES];
         aes.encrypt_blocks(&mut zero);
         let h = u128::from_be_bytes(zero[0]);
-        wipe(&mut zero[0]);
+        // Every lane holds E_K(0^128), i.e. a copy of the hash key.
+        wipe(&mut zero);
         Self { aes, h }
     }
 
-    /// E_K of the counter blocks `iv || ctr` for `ctr = start ..= start + 63` (wrapping).
+    /// E_K of the counter blocks `iv || ctr` for `ctr = start .. start + LANES` (wrapping).
     fn keystream(&self, iv: &[u8; GCM_NONCE_LEN], start: u32) -> [[u8; 16]; LANES] {
         let mut blocks = [[0u8; 16]; LANES];
         for (l, block) in blocks.iter_mut().enumerate() {
@@ -44,8 +54,8 @@ impl Gcm {
     }
 
     /// Applies CTR keystream to `buf` and returns E_K(J0) (the tag mask). Counter 1 is the
-    /// tag mask; data block `i` uses counter `i + 2`, so the first batch (counters 1 to 64)
-    /// carries the mask and the first 63 data blocks.
+    /// tag mask; data block `i` uses counter `i + 2`, so the first batch (counters 1 to `LANES`)
+    /// carries the mask and the first `LANES - 1` data blocks.
     fn ctr(&self, iv: &[u8; GCM_NONCE_LEN], buf: &mut [u8]) -> [u8; 16] {
         let mut mask = [0u8; 16];
         let mut next = 1u32;
@@ -95,7 +105,7 @@ impl Gcm {
         aad: &[u8],
         buf: &mut [u8],
     ) -> Result<[u8; GCM_TAG_LEN], Error> {
-        if buf.len() as u64 > MAX_LEN {
+        if !within_limits(aad.len() as u64, buf.len() as u64) {
             return Err(Error);
         }
         let mut mask = self.ctr(iv, buf);
@@ -111,7 +121,7 @@ impl Gcm {
         buf: &mut [u8],
         tag: &[u8],
     ) -> Result<(), Error> {
-        if buf.len() as u64 > MAX_LEN {
+        if !within_limits(aad.len() as u64, buf.len() as u64) {
             return Err(Error);
         }
         // The mask needs counter 1 only, so compute it from a one-block pass over an empty
@@ -182,6 +192,26 @@ gcm_type!(Aes256Gcm, 32, new_256, "Aes256Gcm");
 
 impl Drop for Gcm {
     fn drop(&mut self) {
-        self.h = 0;
+        wipe(core::slice::from_mut(&mut self.h));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn length_limits_are_exact_at_their_boundaries() {
+        assert!(within_limits(0, 0));
+        assert!(within_limits(MAX_AAD, MAX_LEN));
+        assert!(!within_limits(MAX_AAD + 1, 0));
+        assert!(!within_limits(0, MAX_LEN + 1));
+        assert!(!within_limits(u64::MAX, 0));
+        assert!(!within_limits(0, u64::MAX));
+        // 2^61 - 1 bytes is the largest AAD whose bit length fits in 64 bits.
+        assert_eq!(u128::from(MAX_AAD) * 8, (1u128 << 64) - 8);
+        assert!((u128::from(MAX_AAD) + 1) * 8 > u128::from(u64::MAX));
+        // 2^36 - 32 bytes is 2^39 - 256 bits, the specification's plaintext limit.
+        assert_eq!(u128::from(MAX_LEN) * 8, (1u128 << 39) - 256);
     }
 }

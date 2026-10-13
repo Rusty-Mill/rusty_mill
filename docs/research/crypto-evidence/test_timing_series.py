@@ -28,14 +28,22 @@ if args[:2] == ["--ignored", "--list"]:
     for name in TESTS:
         print(f"{{name}}: test")
     sys.exit(0)
-name = args[2]
-state = os.path.abspath(sys.argv[0]) + "." + name
-n = int(open(state).read()) if os.path.exists(state) else 0
-open(state, "w").write(str(n + 1))
-v = TESTS[name][n % len(TESTS[name])]
-print(f"{{name}}: |t| = {{v}}")
-# Leak tests assert |t| < 4.5 and so fail at or above it; calibration tests only print.
-sys.exit(101 if name != CALIBRATION and v >= 4.5 else 0)
+# Like libtest: the last non-flag argument is a SUBSTRING filter unless --exact is given.
+flt = [a for a in args if not a.startswith("--")][-1]
+exact = "--exact" in args
+status = 0
+for name in TESTS:
+    if not (name == flt if exact else flt in name):
+        continue
+    state = os.path.abspath(sys.argv[0]) + "." + name
+    n = int(open(state).read()) if os.path.exists(state) else 0
+    open(state, "w").write(str(n + 1))
+    v = TESTS[name][n % len(TESTS[name])]
+    print(f"{{name}}: |t| = {{v}}")
+    # Leak tests assert |t| < 4.5 and so fail at or above it; calibration tests only print.
+    if name != CALIBRATION and v >= 4.5:
+        status = 101
+sys.exit(status)
 """
     with open(path, "w") as f:
         f.write(body)
@@ -118,6 +126,19 @@ class SelectionTests(unittest.TestCase):
     def test_package_names_are_parsed_from_both_id_formats(self):
         self.assertEqual(ts.package_name("path+file:///w/crates/foundation/rusty_pk#0.1.0"), "rusty_pk")
         self.assertEqual(ts.package_name("registry+https://x/index#rusty_pk@0.1.0"), "rusty_pk")
+
+
+class ExactNameTests(unittest.TestCase):
+    def test_a_test_whose_name_contains_another_does_not_contaminate_it(self):
+        """libtest filters by substring; the earlier harness recorded whichever statistic printed first."""
+        fx = Fixture(self)
+        # The longer name is listed first, so the old behaviour would have recorded 9.9 for the short one.
+        exe = fx.exe("timing-ddd", {"ecdh_" + CALIBRATION: [9.9], CALIBRATION: [1.5]})
+        status, out = run(fx.cargo({"rusty_pk": exe}), [("rusty_pk", CALIBRATION, "A/A x25519")], reps=3)
+        self.assertEqual(status, 0, out)
+        line = next(l for l in out.splitlines() if l.startswith("A/A x25519:"))
+        self.assertIn("min=1.5 ", line)
+        self.assertIn("max=1.5 ", line)
 
 
 class FailureTests(unittest.TestCase):

@@ -149,13 +149,15 @@ $in  = Get-ChildItem $dir -Filter "$stamp-in.bin"  -ErrorAction SilentlyContinue
 $out = Get-ChildItem $dir -Filter "$stamp-out.bin" -ErrorAction SilentlyContinue
 if ($in -and $in.Length -gt 0) {
   Note 'analyse recordings (slow on big files)'
-  & "$script:Bin\rb_rl_game_probe.exe" --analyze $in.FullName *> "$dir\analyze.raw"
+  & "$script:Bin\rb_rl_game_probe.exe" --analyze $in.FullName --no-names *> "$dir\analyze.raw"
   & "$script:Bin\rb_rl_game_probe.exe" --census-in $in.FullName --census-out $out.FullName *> "$dir\census.raw"
   # Demolition episodes per actor (names already labelled human/bot_a/bot_b by the tool).
   $demo = Join-Path $script:Bin 'rb_rl_demo_count.exe'
   if (Test-Path $demo) { & $demo $in.FullName *> "$dir\demolitions.raw" }
 }
-# Scrub: any PlayerSpawn/life name that is not one of our bots is the human.
+# The analysis is made with --no-names, so no display name is in it to begin with (the probe
+# prints actor ids and teams). Scrub is a second line of defence and keeps the bots readable:
+# any PlayerSpawn/life name that is not one of our bots is the human.
 function Scrub([string]$s) {
   $s = $s -replace 'name "(?!rusty_bullet/)[^"]*"', 'name "human"'
   $s = $s -replace '(life \d+ )"(?!rusty_bullet/)[^"]*"', '$1"human"'

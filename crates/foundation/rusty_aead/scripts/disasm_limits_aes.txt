@@ -1,0 +1,18 @@
+# AES-GCM, reviewed 2026-10-10 on rustc 1.98.1, x86_64, --release (rusty_aead::aes, ::ghash). The building blocks below are
+# straight-line code, so 0; each is #[inline(never)] so that it stays a separate symbol and a changed inlining decision
+# cannot silently move its count. Aes::encrypt_blocks's jumps are all comparisons of public round counters (loop entry,
+# back-edge, and two array-bounds checks on the round-key index). Aes::expand branches only on the public word index
+# (the schedule counts it instead of dividing). ghash::ghash and Gcm::{ctr,seal,open} branch on the public message
+# length and are not audited here, as for Poly1305::update; this counts jumps and divisions and cannot show that no
+# memory access depends on a secret (the valgrind taint run is what covers that).
+rusty_aead::aes::sbox 0
+rusty_aead::aes::shift_rows 0
+rusty_aead::aes::mix_columns 0
+rusty_aead::aes::to_planes 0
+rusty_aead::aes::from_planes 0
+rusty_aead::aes::sub_word 0
+rusty_aead::ghash::bmul64 0
+rusty_aead::ghash::clmul64 0
+rusty_aead::ghash::gf_mul 0
+rusty_aead::aes::Aes>::encrypt_blocks 4
+rusty_aead::aes::Aes>::expand 17
