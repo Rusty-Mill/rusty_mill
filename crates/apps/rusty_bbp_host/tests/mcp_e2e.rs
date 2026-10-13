@@ -2,6 +2,8 @@
 //! Stage-3a exit criterion: a real `bbp mcp` process, driven over stdio with
 //! JSON-RPC, serves one turn and refuses calls once that turn has ended.
 
+mod common;
+use common::Who;
 use rusty_bbp::*;
 use rusty_bbp_host::{admin, human, open_driver};
 use rusty_serde::Value;
@@ -107,19 +109,20 @@ fn setup(dir: &Path) -> TaskId {
         b"Add retry with backoff.",
         &PrincipalId("human".into()),
         &rusty_bbp_host::profiles::ProfileSet::shell("test", "true"),
+        common::roster(),
     )
     .expect("open");
     for (role, vendor) in [
-        (Role::Planner, "anthropic"),
-        (Role::Coder, "openai"),
-        (Role::Tester, "google"),
-        (Role::Reviewer, "anthropic"),
+        (Who::Planner, "anthropic"),
+        (Who::Coder, "openai"),
+        (Who::Tester, "google"),
+        (Who::Reviewer, "anthropic"),
     ] {
         admin::assign(
             dir,
             &task,
-            role,
-            &PrincipalId(admin::role_name(role).into()),
+            &role.id(),
+            &PrincipalId(role.name().into()),
             vendor,
         )
         .expect("assign");
@@ -134,7 +137,10 @@ fn one_process_serves_one_turn_and_refuses_the_next() {
     let task = setup(&dir);
     let d = open_driver(&dir, &task).expect("driver");
     let turn = d.state.turn.as_ref().expect("planner turn").id;
-    assert_eq!(d.state.turn.as_ref().map(|t| t.role), Some(Role::Planner));
+    assert_eq!(
+        d.state.turn.as_ref().map(|t| t.role.clone()),
+        Some(Who::Planner.id())
+    );
 
     let mut mcp = Mcp::spawn(&dir, "T1", "planner", turn.0);
     let init = mcp.request("initialize", r#"{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}"#);
@@ -275,7 +281,7 @@ fn human_cli_drives_a_gate() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "\"Ok\"");
     let card = admin::card(&dir, &task).expect("card");
     assert_eq!(card.state, State::Build);
-    assert_eq!(card.turn.map(|t| t.0), Some(Role::Coder));
+    assert_eq!(card.turn.map(|t| t.0), Some(Who::Coder.id()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -120,7 +120,7 @@ pub fn tools() -> Value {
                     ("evidence", "array", "Evidence references"),
                     ("reply_to", "integer", "Message id this answers or objects to"),
                     ("yield_to", "string", "For pass: role to hand a consultation turn to"),
-                    ("gate", "boolean", "For request_decision from the Planner: open the plan gate"),
+                    ("gate", "boolean", "For request_decision from a role that may write the spec: open the plan gate"),
                 ],
                 &["op", "kind"],
             ),
@@ -188,7 +188,7 @@ fn recipients(v: Option<&Value>) -> Result<Vec<Recipient>, String> {
         .map(|i| match i.as_str() {
             Some("*") => Ok(Recipient::All),
             Some("human") => Ok(Recipient::Human),
-            Some(role) => crate::admin::parse_role(role).map(Recipient::Role),
+            Some(role) => Ok(Recipient::Role(RoleId::from(role))),
             None => Err("recipient must be a string".to_owned()),
         })
         .collect()
@@ -315,11 +315,7 @@ pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
                 refs: refs(a.get("refs"))?,
                 evidence: refs(a.get("evidence"))?,
                 reply_to: a.get("reply_to").and_then(Value::as_u64).map(MsgId),
-                yield_to: a
-                    .get("yield_to")
-                    .and_then(Value::as_str)
-                    .map(crate::admin::parse_role)
-                    .transpose()?,
+                yield_to: a.get("yield_to").and_then(Value::as_str).map(RoleId::from),
                 gate: a.get("gate").and_then(Value::as_bool).unwrap_or(false),
             };
             Ok(translated(op_of(a), AgentAction::Post(draft), None))
