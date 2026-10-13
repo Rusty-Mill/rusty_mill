@@ -7,7 +7,9 @@ use crate::ids::*;
 use crate::policy::SchedulingPolicy;
 use crate::record::*;
 use crate::role::*;
+use crate::shadow::{Shadow, ShadowKind};
 use crate::state::*;
+use crate::wake::wake_set;
 
 pub const MAX_ARTIFACT_BYTES: u64 = 2_000_000;
 const RUNNER: &str = "runner";
@@ -17,6 +19,9 @@ const RUNNER: &str = "runner";
 pub struct Handled {
     pub events: Vec<Event>,
     pub response: Response,
+    /// What an event-driven policy would have done beside each real grant.
+    /// Not logged; empty unless the task has one live turn.
+    pub shadow: Vec<Shadow>,
 }
 
 type R<T> = Result<T, Rejection>;
@@ -29,6 +34,7 @@ fn rej(code: Code, detail: impl Into<String>) -> Rejection {
 struct Work {
     st: TaskState,
     events: Vec<Event>,
+    shadow: Vec<Shadow>,
 }
 
 impl Work {
@@ -48,6 +54,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
     let mut w = Work {
         st: st.clone(),
         events: Vec::new(),
+        shadow: Vec::new(),
     };
     if w.st.opened {
         fire_deadlines(&mut w, now);
@@ -56,6 +63,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
         Ok(Flow::Replay(resp)) => Handled {
             events: w.events,
             response: resp,
+            shadow: w.shadow,
         },
         Ok(Flow::Done(resp)) => {
             if let Some((p, op, hash)) = op_key(&w.st, cmd) {
@@ -70,6 +78,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
             Handled {
                 events: w.events,
                 response: resp,
+                shadow: w.shadow,
             }
         }
         // A command refused before the task exists writes nothing: there is no
@@ -78,6 +87,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
         Err(r) if !w.st.opened => Handled {
             events: Vec::new(),
             response: Response::Rejected(r),
+            shadow: Vec::new(),
         },
         Err(r) => {
             let principal = principal_of(&w.st, cmd);
@@ -88,6 +98,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
             Handled {
                 events: w.events,
                 response: Response::Rejected(r),
+                shadow: w.shadow,
             }
         }
     }
@@ -829,7 +840,7 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
         Pass => match &d.yield_to {
             Some(target) => {
                 end_turn_only(w, turn.id, TurnEnd::Yield);
-                grant(
+                grant_explicit(
                     w,
                     target,
                     TurnKind::Consultation,
@@ -1387,12 +1398,12 @@ fn human_post(w: &mut Work, d: &Draft, now: Time) -> R<Response> {
                 || w.st.roster.yieldable_in(w.st.state, &p.requester)
                 || holder.is_none()
             {
-                grant(w, &p.requester, kind, None, now);
+                grant_explicit(w, &p.requester, kind, None, now);
             }
         }
     } else if d.kind == Ask {
         if let Some(Recipient::Role(role)) = d.to.first() {
-            grant(w, role, TurnKind::Consultation, None, now);
+            grant_explicit(w, role, TurnKind::Consultation, None, now);
         }
     }
     Ok(Response::Posted(id))
@@ -1436,6 +1447,51 @@ fn grant(w: &mut Work, role: &RoleId, kind: TurnKind, return_to: Option<RoleId>,
     }
 }
 
+/// Shadow mode runs only where `wake_set` is defined: a turn-based task with
+/// one live turn.
+fn shadowing(st: &TaskState) -> bool {
+    st.policy == SchedulingPolicy::TurnBased && st.max_live_turns == 1
+}
+
+/// `grant` for a forced grantee (yield, human `ask`, settlement, consultation
+/// return). It bypasses `pick_next`, so shadow mode records it as explicit and
+/// never compares it.
+fn grant_explicit(
+    w: &mut Work,
+    role: &RoleId,
+    kind: TurnKind,
+    return_to: Option<RoleId>,
+    now: Time,
+) {
+    let before = w.events.len();
+    grant(w, role, kind, return_to, now);
+    if shadowing(&w.st) && !granted_since(w, before).is_empty() {
+        let rev = w.st.rev;
+        let granted = role.clone();
+        let state = w.st.state;
+        w.shadow.push(Shadow {
+            rev,
+            state,
+            kind: ShadowKind::Explicit { granted, kind },
+        });
+    }
+}
+
+/// The roles granted a turn by the events emitted since `from`. Read from the
+/// events, not the live turns: a grant that crosses the turn budget escalates
+/// and ends its turn in the same command.
+fn granted_since(w: &Work, from: usize) -> Vec<RoleId> {
+    w.events
+        .get(from..)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|e| match e {
+            Event::TurnGranted { role, .. } => Some(role.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The one scheduling check. Fills the free turn slots with the roles that
 /// serve the state, in `turn_order`; at `max_live_turns == 1` that is the
 /// default holder alone. An unassigned default holder blocks the rest.
@@ -1453,12 +1509,28 @@ fn schedule(w: &mut Work, now: Time) {
     if w.st.state == State::Test && w.st.selected_run().and_then(|r| r.status).is_none() {
         return;
     }
+    // Taken before any grant: `wake_set` is defined on a board with no live turn.
+    let would = shadowing(&w.st).then(|| wake_set(&w.st));
+    let before = w.events.len();
     let state = w.st.state;
     for role in &serving {
         grant(w, role, TurnKind::Default, None, now);
         if w.st.state != state {
             break; // a grant escalated the task; the rest of the list is stale
         }
+    }
+    let Some(would) = would else {
+        return;
+    };
+    let granted = granted_since(w, before);
+    if !granted.is_empty() {
+        let rev = w.st.rev;
+        let state = w.st.state;
+        w.shadow.push(Shadow {
+            rev,
+            state,
+            kind: ShadowKind::Auto { granted, would },
+        });
     }
 }
 
@@ -1511,7 +1583,7 @@ fn end_turn(w: &mut Work, turn: TurnId, cause: TurnEnd, now: Time) {
         && t.run_at == w.st.run.as_ref().map(|r| r.id);
     match (t.kind, t.return_to) {
         (TurnKind::Consultation, Some(back)) if unchanged && w.st.pending_request.is_none() => {
-            grant(w, &back, TurnKind::Default, None, now)
+            grant_explicit(w, &back, TurnKind::Default, None, now)
         }
         _ => schedule(w, now),
     }
