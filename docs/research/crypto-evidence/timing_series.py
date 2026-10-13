@@ -74,7 +74,10 @@ def has_test(exe: str, test: str) -> bool:
 
 def observe(exe: str, test: str):
     """One run: (|t| or None, exit status)."""
-    done = subprocess.run([exe, "--ignored", "--nocapture", test], stdout=subprocess.PIPE,
+    # --exact: a bare name is a substring filter, so `null_calibration_identical_classes` would
+    # also run `ecdh_null_calibration_identical_classes` and its siblings in parallel, and the
+    # first statistic printed (not necessarily this test's) would be recorded.
+    done = subprocess.run([exe, "--ignored", "--nocapture", "--exact", test], stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True)
     for line in done.stdout.splitlines():
         if MARKER in line and "panicked" not in line:

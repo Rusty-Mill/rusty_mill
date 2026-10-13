@@ -9,6 +9,7 @@
 //! design, not as something this code establishes.
 
 /// Low 64 bits of the carry-less product of `x` and `y`.
+#[inline(never)]
 fn bmul64(x: u64, y: u64) -> u64 {
     const M: [u64; 4] = [
         0x1111_1111_1111_1111,
@@ -27,6 +28,7 @@ fn bmul64(x: u64, y: u64) -> u64 {
 
 /// The full 128-bit carry-less product. The high half comes from the low half of the product
 /// of the bit-reversed operands: reversing within 64 bits maps product bit `k` to `126 - k`.
+#[inline(never)]
 fn clmul64(a: u64, b: u64) -> u128 {
     let lo = bmul64(a, b);
     let hi = bmul64(a.reverse_bits(), b.reverse_bits()).reverse_bits() >> 1;
@@ -36,6 +38,7 @@ fn clmul64(a: u64, b: u64) -> u128 {
 /// Multiplication in GF(2^128) as GCM defines it. `a` and `b` are blocks read big-endian: the
 /// most significant bit is the coefficient of x^0, so reversing the bits gives ordinary
 /// polynomials (bit `i` is the coefficient of x^i), and the result is reversed back.
+#[inline(never)]
 pub(crate) fn gf_mul(a: u128, b: u128) -> u128 {
     let (a, b) = (a.reverse_bits(), b.reverse_bits());
     let (al, ah, bl, bh) = (a as u64, (a >> 64) as u64, b as u64, (b >> 64) as u64);
@@ -55,6 +58,7 @@ pub(crate) fn gf_mul(a: u128, b: u128) -> u128 {
 
 /// GHASH under hash key `h` over `aad` and `ct`, each zero-padded to 16 bytes, followed by the
 /// 64-bit bit lengths of both. Lengths are public.
+#[inline(never)]
 pub(crate) fn ghash(h: u128, aad: &[u8], ct: &[u8]) -> u128 {
     let mut y = 0u128;
     for part in [aad, ct] {

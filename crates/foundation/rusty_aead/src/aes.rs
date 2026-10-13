@@ -49,17 +49,23 @@ impl Aes {
             word.copy_from_slice(&key[4 * i..4 * i + 4]);
         }
         let mut rcon = 1u8;
+        // `pos` is `i % nk`, counted rather than computed so the schedule needs no division.
+        let mut pos = 0usize;
         for i in nk..total {
             let mut t = w[i - 1];
-            if i % nk == 0 {
+            if pos == 0 {
                 t = sub_word([t[1], t[2], t[3], t[0]]);
                 t[0] ^= rcon;
                 rcon = xtime_byte(rcon);
-            } else if nk > 6 && i % nk == 4 {
+            } else if nk > 6 && pos == 4 {
                 t = sub_word(t);
             }
             for k in 0..4 {
                 w[i][k] = w[i - nk][k] ^ t[k];
+            }
+            pos += 1;
+            if pos == nk {
+                pos = 0;
             }
         }
         let mut round_keys = [[0u64; 8]; MAX_ROUNDS + 1];
@@ -128,6 +134,7 @@ fn xtime_byte(b: u8) -> u8 {
 }
 
 /// SubWord for the key schedule: the same circuit, with the four bytes in bit positions 0 to 3.
+#[inline(never)]
 fn sub_word(word: [u8; 4]) -> [u8; 4] {
     let mut q = [0u64; 8];
     for (l, byte) in word.iter().enumerate() {
@@ -169,6 +176,7 @@ const GROUP_HIGH: [u64; 4] = [
 
 /// Output byte `4c + r` takes input byte `4((c + r) mod 4) + r`: row `r` rotates by `r`
 /// nibbles inside each 16-bit group.
+#[inline(never)]
 fn shift_rows(st: &mut Planes) {
     for x in st.iter_mut() {
         let mut out = *x & ROW[0];
@@ -196,6 +204,7 @@ fn xtime(v: &Planes) -> Planes {
 
 /// out_r = 2 a_r + 3 a_{r+1} + a_{r+2} + a_{r+3} = xtime(a_r + a_{r+1}) + a_{r+1} + a_{r+2} + a_{r+3},
 /// where `a_{r+n}` is the column's row `r + n`: a rotation of the rows inside every nibble.
+#[inline(never)]
 fn mix_columns(st: &mut Planes) {
     let mut a1 = [0u64; 8];
     let mut a2 = [0u64; 8];
@@ -244,6 +253,7 @@ fn transpose_bytes8(a: &mut [u64; 8]) {
     }
 }
 
+#[inline(never)]
 fn to_planes(blocks: &[[u8; 16]; GROUP]) -> Planes {
     let mut u = [0u64; 8];
     for (j, word) in u.iter_mut().enumerate() {
@@ -255,6 +265,7 @@ fn to_planes(blocks: &[[u8; 16]; GROUP]) -> Planes {
     u
 }
 
+#[inline(never)]
 fn from_planes(st: &Planes, blocks: &mut [[u8; 16]; GROUP]) {
     let mut u = *st;
     transpose_bytes8(&mut u);
@@ -267,6 +278,7 @@ fn from_planes(st: &Planes, blocks: &mut [[u8; 16]; GROUP]) {
 
 /// The AES S-box on eight bit planes (`q[k]` holds bit `k`), the Boyar-Peralta circuit.
 #[allow(clippy::many_single_char_names)]
+#[inline(never)]
 fn sbox(q: &mut [u64; 8]) {
     let (x0, x1, x2, x3, x4, x5, x6, x7) = (q[7], q[6], q[5], q[4], q[3], q[2], q[1], q[0]);
 
