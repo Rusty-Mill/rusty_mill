@@ -22,8 +22,18 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   table; claims are atomic via `replace_if`), or in memory when `--store` is omitted.
   The event id is a UUIDv7 and doubles as the polling cursor (`board_events after=`).
 
-Layout: `domain` (pure) / `store` + `mmdb` (port and adapters) / `board` (service) /
-`api` (operation table) / `mcp` + `web` (surfaces).
+- **GitHub sync** (`--github-repo owner/name`, token in `GITHUB_TOKEN`, every
+  `--github-secs`, default 60): stateless reconcile between cards and issues.
+  The board owns state: the column is one `board:<column>` label and a Done card
+  closes its issue; other labels are kept. Title and body are last-write-wins.
+  Unlinked open issues become Backlog cards (closed ones are not imported). An issue
+  closed on GitHub while its card is not Done is logged as drift, not reopened or
+  moved. The sync actor holds no capabilities, so it cannot move cards. Needs
+  issues read/write on the repo; `--github-api` points at GitHub Enterprise Server.
 
-Not yet: GitHub sync and an autonomous runner. Both are meant to be clients of the
-tools above (the runner via BBP), not code inside this crate.
+Layout: `domain` (pure) / `store` + `mmdb` (port and adapters) / `board` (service) /
+`api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +
+`github` (adapter).
+
+Not yet: the autonomous runner, meant to be a client of the tools above (via BBP),
+not code inside this crate.

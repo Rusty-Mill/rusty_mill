@@ -34,5 +34,7 @@ rusty_http = { workspace = true }
 rusty_oauth = { workspace = true }
 rusty_crypto_key = { workspace = true }
 clap = { workspace = true }
+rusty_request = { workspace = true, features = ["tokio"] }
+tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

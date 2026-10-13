@@ -118,6 +118,9 @@ pub struct Card {
     pub tags: Vec<String>,
     /// Discussion, oldest first.
     pub comments: Vec<Comment>,
+    /// Linked forge issue number, if synced.
+    #[serde(default)]
+    pub issue: Option<u64>,
     /// Creation time, Unix ms.
     pub created_ms: i64,
     /// Last change, Unix ms.
@@ -186,6 +189,8 @@ pub enum EventKind {
     Edited,
     /// Comment added.
     Commented,
+    /// Linked to a forge issue.
+    Linked,
 }
 
 /// One entry in the append-only log. `id` is a UUIDv7, so ids sort in
@@ -247,6 +252,7 @@ impl Card {
             claim: None,
             tags,
             comments: Vec::new(),
+            issue: None,
             created_ms: now_ms,
             updated_ms: now_ms,
         })
@@ -337,6 +343,14 @@ impl Card {
             next.tags = t;
         }
         Ok(next)
+    }
+
+    /// Record the forge issue this card is synced with.
+    pub fn link(&self, issue: u64, now_ms: i64) -> Self {
+        Self {
+            issue: Some(issue),
+            ..self.next(now_ms)
+        }
     }
 
     /// Append a comment.
@@ -452,6 +466,20 @@ mod tests {
         let nobody = actor("n", &[]);
         let c = card().move_to(Column::Blocked, &nobody, 1).expect("block");
         assert_eq!(c.column, Column::Blocked);
+    }
+
+    #[test]
+    fn link_sets_issue_and_bumps_rev() {
+        let c = card().link(7, 3);
+        assert_eq!((c.issue, c.rev, c.updated_ms), (Some(7), 1, 3));
+    }
+
+    #[test]
+    fn cards_stored_before_issue_links_still_load() {
+        let mut v = serde_json::to_value(card()).expect("json");
+        v.as_object_mut().expect("object").remove("issue");
+        let c: Card = serde_json::from_value(v).expect("decode");
+        assert_eq!(c.issue, None);
     }
 
     #[test]

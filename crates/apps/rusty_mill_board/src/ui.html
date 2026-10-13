@@ -68,7 +68,8 @@ function render(){
     for(const k of cards.filter(k=>k.column===c)){
       const d=el("div",null,"card");d.draggable=true;d.append(el("b",k.title));
       const m=el("div",null,"meta");k.tags.forEach(t=>m.append(el("span",t,"tag")));
-      if(k.claim)m.append(el("span","⚑ "+k.claim));
+      if(k.claim)m.append(el("span","⚑ "+k.claim+" "));
+      if(k.issue)m.append(el("span","#"+k.issue));
       if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
       d.append(m);
       d.ondragstart=e=>e.dataTransfer.setData("text",k.id);

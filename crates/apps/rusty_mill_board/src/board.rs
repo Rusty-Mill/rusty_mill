@@ -131,6 +131,33 @@ impl<S: Store> Board<S> {
         Ok(card)
     }
 
+    /// Create a Backlog card for an existing forge issue.
+    ///
+    /// # Errors
+    /// On a blank title or storage failure.
+    pub fn import(
+        &self,
+        by: &Actor,
+        title: &str,
+        body: &str,
+        tags: Vec<String>,
+        issue: u64,
+    ) -> Result<Card, BoardError> {
+        let mut card = Card::new(title, body, tags, (self.clock)())?;
+        card.issue = Some(issue);
+        self.store
+            .insert(&card, &Event::of(&card, EventKind::Created, &by.name))?;
+        Ok(card)
+    }
+
+    /// Record the forge issue a card is synced with.
+    ///
+    /// # Errors
+    /// If the card is missing or on storage failure.
+    pub fn link_issue(&self, id: Uuid, issue: u64, by: &Actor) -> Result<Card, BoardError> {
+        self.apply(id, by, EventKind::Linked, |c, now| Ok(c.link(issue, now)))
+    }
+
     /// Apply `op` to the card and commit, re-reading on conflict.
     fn apply(
         &self,
