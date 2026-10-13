@@ -20,10 +20,10 @@ BBP lets several AI agents collaborate on one software task through a shared sto
 
 - **Generic `Role`.** A role is an id plus nine capability fields (Principals and roles). No role is named in the normative text. The four v0.4.1 roles move to Appendix C as a non-normative example of an orch roster.
 - **Roster injection.** The roster is supplied at `task_opened`, validated, recorded in the log and immutable for the task (Roster).
-- **One requirement table.** A single state-to-required-capability table derives each state's default turn holder and validates the roster, so the two cannot disagree.
+- **One requirement table.** A single state-to-required-capability table derives each state's default turn holder and validates the roster, so the two cannot disagree. A roster with no finalizer fails with its own error, `NoFinalizer`.
 - **Capability checks replace role names** in R5, R6, R17, the gating table, the by-state table, T4, T9 to T11, the resume guards, the entry actions, the consultation rule and the visibility rules. The transition table's topology is unchanged.
 - **`final_decision`.** At least one `approve` from a `final_decision` role is required to pass the merge gate, and a `revise` from any `final_decision` role on the same candidate and run blocks it (R17). With one final role this is v0.4.1's single-Reviewer behavior.
-- **Consultation rule.** The per-state consultation table is replaced by one rule over `consultable`, `read_messages` and the default holder; the four-role roster yields exactly the v0.4.1 table. A human `ask` may address any assigned role in any non-terminal state; v0.4.1's engine already did this and its table understated it.
+- **Consultation rule (derived).** The per-state consultation table is replaced by one rule, derived from the table rather than stated in v0.4.1, over `consultable`, `read_messages` and the default holder; the four-role roster yields exactly the v0.4.1 table. A human `ask` may address any assigned role in any non-terminal state; v0.4.1's engine already did this and its table understated it.
 - **Log schema 2.** `task_opened` carries `schema` and `roster`. v0.4.1 logs (schema 1, four enum roles) do not replay under v0.5.0 and are archived, not migrated.
 - **Moved to orch.** The Reviewer fresh-session host requirement and open question Q3 are roster policy, not protocol (Host requirements, Open questions).
 
@@ -99,7 +99,7 @@ One table says what each working state needs. A role **serves** a state when it 
 | `test` | `verdict` | `verdict_at` ∋ `test`; `post` ∋ `verdict` |
 | `review` | `verdict` | `verdict_at` ∋ `review`; `post` ∋ `verdict`; `final_decision` |
 
-Why `review` requires `final_decision`: the review turn is the only place the merge gate's `approve` can be produced, so its holder has to be able to produce it. Roles that judge `review` without `final_decision` are valid but never hold the default review turn.
+**The review-turn holder must hold both `verdict_at` ∋ `review` and `final_decision`.** The review turn is the only place the merge gate's `approve` can be produced, so its holder has to be able to produce it. Roles that judge `review` without `final_decision` are valid but never hold the default review turn.
 
 ### Host requirements
 
@@ -352,7 +352,7 @@ The roster decides who is isolated. Appendix C shows a roster in which one role 
 
 - **Default turn.** Each working state (`planning`, `build`, `test`, `review`) has one default holder from the requirement table. The `test` turn is granted only when the selected run has a final report. Gate, `approved` and `escalated` states have no default turn.
 - **Consultation turn.** Granted by a `yield_to` or by a human `ask` addressed to a role. The holder may post `ask`, `answer`, `finding`, `pass`. It ends on `pass`, deadline or abort.
-  - **Yield rule.** A default-turn holder may yield to a role when the state is a working state, the holder's `read_messages` is `all` (a `scoped` holder could not read the answer, so its yield could never be satisfied), and the target is assigned, has `consultable` set and is not that state's default holder. In any other case `yield_to` is rejected `wrong_state`.
+  - **Yield rule (derived).** v0.4.1 had a per-state consultation table. This rule is derived from it, not stated in v0.4.1: with the four-role roster of Appendix C it reproduces the table exactly. A default-turn holder may yield to a role when the state is a working state, the holder's `read_messages` is `all` (a `scoped` holder could not read the answer, so its yield could never be satisfied), and the target is assigned, has `consultable` set and is not that state's default holder. In any other case `yield_to` is rejected: `wrong_state` for a non-working state, a non-consultable or default-holder target, or a holder with `scoped` reading; `bad_recipient` for an unassigned target.
   - **Human ask.** A human `ask` may address any assigned role in any non-terminal state, whatever its `consultable`. This is the only way a `scoped` reader or a role with `consultable` unset receives a consultation turn.
 
 - **Scheduling check.** One rule decides every grant, whether from an entry action, restart recovery, a consultation return, or request settlement: no default turn is granted while a pending request is open; a consultation turn may still be granted for a human `ask`. When a request is settled, the check runs again and grants the continuation recorded with the request.
@@ -423,9 +423,10 @@ The host supplies the roster when it opens a task. BBP validates it, records it,
 
 1. **Ids.** Every `id` is a valid token, none is reserved, none repeats.
 2. **Turn order.** Every `turn_order` is distinct, so the default holder is never a tie.
-3. **Servable states.** Every row of the requirement table has a serving role: a spec writer able to open the plan gate, a candidate writer, a `test` judge and a `review` judge that can finalize. A roster missing any of these has a state nobody can leave.
+3. **Servable states.** `planning`, `build` and `test` each have a serving role: a spec writer able to open the plan gate, a candidate writer, a `test` judge. `review` has a role with `verdict_at` ∋ `review` and `post` ∋ `verdict`. A missing one fails as `Unservable` and names the state. A roster missing any of these has a state nobody can leave.
+4. **Finalizer.** At least one role that meets the `review` judge condition in check 3 also has `final_decision`. A roster that passes check 3 but has none fails as `NoFinalizer`, a distinct error from `Unservable`, because the repair differs: add `final_decision` to an existing judge, not a new role.
 
-A roster with no `final_decision` role fails check 3 on the `review` row. Roles beyond those the table needs, including roles with no write capability, are valid.
+Roles beyond those the table needs, including roles with no write capability, are valid. An error carries the check, the field and the role ids involved; the host can show it unchanged.
 
 ### Immutability
 
@@ -477,7 +478,10 @@ The core is a pure library with no I/O: records, the rule set in validation orde
 - **Per rule:** one passing and at least one adversarial failing case, asserting the code.
 - **Model:** random command sequences never leave the table; at most one row matches any (state, command); every non-terminal state has an exit; every entry action runs exactly once per entry.
 - **Properties:** append-only log; a rejected write changes only `rejections`, or ends the turn or escalates exactly as R11 says; the card equals the fold of events after any crash point; task and per-turn totals never decrease without `budget_extended`.
-- **Visibility:** for each role, no read returns a record the matrix denies.
+- **Roster:** a valid two-role, a six-role and an observer-bearing roster open; each failed check (ids, `turn_order`, each unservable state, no finalizer) is rejected with its own error; a roster cannot change after `task_opened`.
+- **Yield (derived rule):** a `scoped` holder cannot yield; a non-`consultable` target, the state's default holder and an unassigned role are each rejected, and a valid yield is granted; a human `ask` reaches a non-`consultable` role.
+- **Capability enforcement:** a post, artifact write, verdict or read that the role's capabilities forbid is rejected with the existing code and a detail naming the role and capability.
+- **Visibility:** for each role, no read returns a record the role's capabilities deny.
 - **Gates:** no Agent API path creates a human event, stores a candidate outside `build`, or stores a report.
 - **Binding:** approval on a non-current candidate or non-selected run is rejected; a report for a non-selected run is rejected; a second final report for a run is rejected; a `rerun` stales verdicts; a candidate without an approved spec is rejected.
 - **Tokens:** a write or charged read with a dead, foreign or stale-turn token is rejected; a late write after the same role's next grant is rejected.
