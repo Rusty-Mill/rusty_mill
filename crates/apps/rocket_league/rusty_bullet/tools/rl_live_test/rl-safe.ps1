@@ -47,8 +47,9 @@ function Get-RlOwnedBootstrap($Launcher, [string]$GamePath) {
 function Scrub([string]$s) {
   # Rust Debug strings use backslash escapes (including escaped quotes and Unicode).
   # Consume the entire quoted token before exact bot-name comparison; prefix collisions
-  # and every other human name are anonymized. Unterminated tokens fail closed to EOL.
-  [regex]::Replace($s, '(name |life \d+ )"((?:[^"\\]|\\.)*)(?:"|$)', {
+  # and every other human name are anonymized. A terminal unpaired backslash is
+  # consumed too: malformed/unterminated tokens must fail closed to end of input.
+  [regex]::Replace($s, '(name |life \d+ )"((?:[^"\\]|\\(?:.|\z))*)(?:"|\z)', {
     param($match)
     $label = switch -CaseSensitive ($match.Groups[2].Value) {
       'rusty_bullet/chaser_bot' { 'bot_a' }

@@ -26,6 +26,11 @@ foreach ($name in @('plain', 'quote\"private suffix', 'back\\slash', 'rusty_bull
 }
 Assert ((Scrub 'name "rusty_bullet/chaser_bot" name "rusty_bullet/chaser_bot_b"') -ceq 'name "bot_a" name "bot_b"') 'exact bot labels'
 Assert ((Scrub 'name "unfinished') -ceq 'name "human"') 'unterminated name'
+foreach ($prefix in @('name ', 'life 12 ')) {
+  foreach ($name in @('\', 'unfinished\', 'rusty_bullet/chaser_bot\', 'escaped\"suffix\')) {
+    Assert ((Scrub ($prefix + '"' + $name)) -ceq ($prefix + '"human"')) 'terminal unpaired backslash leaked'
+  }
+}
 Assert ((Scrub 'name "Rusty_bullet/chaser_bot"') -ceq 'name "human"') 'case collision'
 
 $dir = Join-Path ([IO.Path]::GetTempPath()) ('rl safe tests ' + [guid]::NewGuid())
