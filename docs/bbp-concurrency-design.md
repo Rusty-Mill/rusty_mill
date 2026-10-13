@@ -2,6 +2,8 @@
 
 Step 6, design only. Waits for owner approval. Builds on `docs/bbp-role-audit.md` (the nine Role fields), `crates/libs/protocol/rusty_bbp/docs/spec/bbp-v0.5-implementation-spec.md` (branch `claude/stoic-pasteur-gg75fs`, `37542c4c`), and the event-driven note (branch `claude/bbp-event-driven-design`, `fc972cbe`, accepted as Phase 1 only).
 
+**Amended 2026-10-13 (storage):** the CRDT is no longer a private in-tree type. It is a shared first-party crate `rusty_crdt`, seeded from the `nexus-crdt` algorithm (read in full), with a sync zero-dependency core. See f, Appendix A (API sketch) and Appendix B (ADR draft).
+
 **Line references** are to `rusty_bbp/src` at `37542c4c` (v0.4.1 engine; the v0.5 engine does not exist yet). Claims I did not verify in source are labelled **[unverified]**.
 
 ## Recommendation
@@ -9,7 +11,7 @@ Step 6, design only. Waits for owner approval. Builds on `docs/bbp-role-audit.md
 1. **Split the protocol into two planes.** The control plane (state transitions, human gates, budget reservation, `final_decision` gate) stays serialized by the single log's revision check. The content plane (messages, immutable artifacts, co-edited drafts) admits concurrent writers.
 2. **Sequence it in two steps.** 2a: several live turns, at most one per principal, with append-only content only. 2b: co-edited `spec` as op-based CRDT ops appended to the existing event log, bound to verdicts by snapshot hash.
 3. **No new Role field.** The nine fields already say who may write what; concurrency limits are task configuration, like `turn_ms`.
-4. **CRDT only where merge is needed.** Appends commute and need no CRDT. A minimal in-tree line-granular sequence type (ported from the first-party `nexus-crdt` algorithm, no new dependency) covers 2b.
+4. **CRDT only where merge is needed.** Appends commute and need no CRDT. For 2b, extract only the RGA into a new Tier S crate `rusty_crdt` (zero dependencies, sync, no I/O, generic over id and element), seeded from `nexus-crdt`. Build it at the start of 2b, not before; 2a needs none of it.
 5. **Budgets: reserve at grant.** A turn receives a slice of the task totals when it is granted. Writes inside a turn spend the slice; concurrent turns cannot jointly overshoot.
 
 ## What changes in the premise
@@ -114,17 +116,37 @@ A CRDT guarantees replicas converge. It does not guarantee the converged documen
 
 **Recommendation: ops in the event log.** Mitigate growth with a *snapshot event* (a content-addressed blob of the materialized text plus the op cursor) once measurements show it matters; do not build it speculatively. The growth claim is **[unverified]**: nothing here has been measured.
 
-**Which CRDT.**
+**Which CRDT: a shared `rusty_crdt`, RGA only.**
 
 | Option | Dependencies | Verdict |
 | --- | --- | --- |
-| External Rust CRDT crates (the well-known ones are Automerge, Yjs ports such as `yrs`, Loro, `diamond-types`; descriptions from memory, **[unverified]** in this session) | New third-party dependency, large API surface | **Rejected.** `rusty_bbp` is Tier S, first-party only (ADR-0002; `Cargo.toml` comment; `docs/review/sovereignty.md`). Nothing here justifies leaving that tier |
-| Depend on the first-party `nexus-crdt` | Pulls `serde`, `uuid`, `thiserror`, `tokio`, `tracing` and `nexus-editor`/`nexus-kernel`/`nexus-types` (`crates/apps/nexus/crates/nexus-crdt/Cargo.toml`) | **Rejected.** App-layer crate, external dependencies, wrong direction (a protocol library cannot depend on an app) |
-| Minimal in-tree type in `rusty_bbp`, algorithm ported from `nexus-crdt` | None. Uses `rusty_serde` | **Recommended** |
+| External Rust CRDT crates (Automerge, Yjs ports such as `yrs`, Loro, `diamond-types`; from memory, **[unverified]**) | New third-party dependency, large API surface | **Rejected.** `rusty_bbp` is Tier S (ADR-0002) |
+| Depend on `nexus-crdt` as is | `serde`, `uuid`, `thiserror`, `tokio`, `tracing`, `nexus-editor`, `nexus-kernel`, `nexus-types` | **Rejected.** App-layer, external dependencies, and Nexus is frozen and outside the workspace (`crates/apps/nexus/FROZEN.md`) |
+| Private RGA inside `rusty_bbp` | None | Superseded by the next row. Works, but the law tests and the type would be buried in a protocol crate |
+| **Shared `rusty_crdt`, RGA only, seeded from `nexus-crdt`** | None in the core | **Recommended** |
 
-**What the in-tree type is.** A sequence CRDT (RGA) whose elements are **lines**, not characters, with op ids `(site, lamport)`, a version vector for idempotent apply, tombstones for deletes. `nexus-crdt` has the proven shape: `RgaText` with `build_insert`/`build_delete`/`apply` (`text.rs`, 486 lines), `OpId`/`Lamport`/`SiteId` (`id.rs`, 159 lines, built on `Uuid`), `OpLog` (`log.rs`). Port target: about 250 lines with a site id taken from the principal id, no `Uuid`. Line granularity is a proposal: Markdown specs are edited mostly by whole lines, and it keeps ids and tombstones an order of magnitude smaller than per-character. Whether it is sufficient is **[unverified]**; the fallback is per-character with the same type.
+**Why a separate crate for one live consumer.** The repo's own consolidation audit says to extract `nexus-crdt` "only if a second consumer appears" (`docs/research/CONSOLIDATION-AUDIT.md:210`). BBP is that second consumer. The honest accounting: Nexus is frozen, so today there is one live consumer and one frozen one, which is thinner than the two-call-site rule normally wants. The case for the crate rests on isolation (zero-dependency Tier S core, CRDT law tests that do not live in a protocol crate), not on deduplication. If you would rather wait for a second *live* consumer, the fallback is the private RGA row, with the same API so it can be lifted later.
 
-**Do not couple to `rusty_multimodal_db` now.** The type lives behind the existing `Store` trait (ops are `Event`s), so a CRDT-aware backend can come later without a change here. The multimodal store's global lock and absence of CRDT code are noted in the event-driven design; neither affects this plan.
+**Where it sits.** `crates/foundation/rusty_crdt`, layer `foundation`, beside `rusty_uuid`, `rusty_json`, `rusty_serde`. `rusty_bbp` depends on it by workspace path, which ADR-0002 allows (see Appendix B).
+
+**What was read and what changes.** I read `text.rs` (the RGA), `id.rs`, `log.rs`, `merge.rs` and the causal-delivery path of `doc.rs` in full. The algorithm is a tree RGA: every element has a parent (the element to its left when authored, or the head); siblings sort by descending id; delete is a tombstone; rendering is an iterative pre-order walk. The extraction keeps that and changes these things:
+
+| Finding in `nexus-crdt` | Treatment in `rusty_crdt` |
+| --- | --- |
+| `apply` returns `bool`; an `Insert` with an unknown parent and a `Delete` with an unknown target are silently dropped, and `CrdtDoc` pre-checks causality (`doc.rs:185`, `:233-260`) | `apply` returns `Changed`, `Duplicate` or `Pending { missing }`. The caller (BBP validation, or a nexus buffer) decides |
+| `.expect("parent presence checked above")` (`text.rs:258`) | Arena indices; no `expect` or `unwrap` |
+| Tombstones keep the character | Delete drops the element value, keeps the node |
+| `len()` is O(n) (`text.rs:119`); position lookup is O(n) per local edit | `len()` O(1) via a counter; position lookup stays O(n) and is documented |
+| `Lamport::next` is an unchecked `+ 1` (`id.rs:50`) | Not extracted: ids are the caller's. BBP allocates its own |
+| `VersionVector::contains` means "max lamport seen"; it is only sound with in-order delivery per site (`id.rs:106`) | Not extracted. BBP's log already orders ops; Nexus keeps its own |
+| First op with a given id wins; two different ops with one id make replicas diverge | Documented caller contract: ids unique. BBP rejects a reused id with a different payload at validation. Laws are tested over unique ids only |
+| `Uuid` site ids; v5 synthetic baseline ids (`merge.rs`) | Ids are generic. Baseline-seeding stays in Nexus. In BBP, seed content is ordinary ops by the first author |
+
+**Stays out of `rusty_crdt`:** `OpLog` and its pruning, `VersionVector`, `CrdtDoc`, conflict types, wire/sync, counters, sets and maps. None has a second call site.
+
+**Granularity.** The element type is generic, so BBP instantiates it with a line (`String`) and Nexus with `char`. Line versus character is a BBP choice made at the instantiation, not a property of the crate.
+
+**Do not couple to `rusty_multimodal_db` now.** Ops are `Event`s behind the existing `Store` trait, so a CRDT-aware backend can come later without a change here.
 
 **Rejected alternatives for 2b**, for completeness: (1) section-level leases (one writer per section, serialized) is simpler and may be enough, but it is not "concurrent co-editing of the same artifact"; (2) last-writer-wins per section is conflict-free but silently drops one writer's change, which is the wrong failure for a spec.
 
@@ -133,7 +155,7 @@ A CRDT guarantees replicas converge. It does not guarantee the converged documen
 | Phase | Scope | Needs | Does not need |
 | --- | --- | --- | --- |
 | 2a | `max_live_turns > 1`, one turn per principal; append-only content (messages, `diff`); control-plane revocation of all turns on transition; reserve-before-spend slices | Turn map in state; per-turn `reads_this_turn`; slice fields in `task_opened`; `pick_next` returning a set (from the event-driven note) | CRDT, snapshot hashes, any new Role field |
-| 2b | Co-edited `spec`: op events in the log; in-tree line RGA; snapshot-hash binding rule (d) | 2a; one new artifact payload for ops; verdict/gate/approval records carry hashes | A new store, a new dependency |
+| 2b | Co-edited `spec`: op events in the log; `rusty_crdt` RGA (built first, with its law tests); snapshot-hash binding rule (d) | 2a; the ADR in Appendix B accepted; one new artifact payload for ops; verdict/gate/approval records carry hashes | A new store, an external dependency |
 
 2a ships value alone: several agents post and several authors store diffs in parallel, joined by the candidate.
 
@@ -152,8 +174,9 @@ One field I considered and rejected: `concurrent: bool` on Role. It would let a 
 | --- | --- | --- | --- |
 | 0. Stay single-turn | Nothing new; all current guarantees | No parallelism | Baseline, kept as the default policy |
 | 1. Two planes, 2a only | Parallel posting and diffs; no new data structure; budget safety | Turn map; slices; set-valued scheduling | **Do first** |
-| 2. 1 + 2b in-tree line RGA in the event log | Co-editing; a single audit trail; deterministic binding | About 250 lines of CRDT to own and test; log growth | **Recommended second step**, gated on evidence from 2a |
+| 2. 1 + 2b shared `rusty_crdt` RGA, ops in the event log | Co-editing; a single audit trail; deterministic binding; reusable, independently law-tested core | A new crate and an ADR; log growth | **Recommended second step**, gated on evidence from 2a |
 | 3. 1 + external CRDT crate | Less code to write | Breaks Tier S; large surface | Rejected |
+| 3b. 1 + private RGA in `rusty_bbp` | Smallest change | Law tests buried in a protocol crate; harder to lift later | Fallback if no second live consumer is wanted |
 | 4. 1 + section leases instead of CRDT | Simple | Not co-editing of one artifact | Fallback if 2b's cost is not justified |
 | 5. CRDT in `rusty_multimodal_db` | Reuse of a store | Couples BBP to it; new storage leg | Deferred, per the brief |
 
@@ -175,6 +198,12 @@ One field I considered and rejected: `concurrent: bool` on Role. It would let a 
 4. **`max_live_turns` default and cap.** Default 1 is assumed; what upper bound is acceptable for a first release?
 5. **Scheduling.** The event-driven `pick_next` returns a set here. Agree that this amends that note's single-turn premise?
 
+## Open questions for the `rusty_crdt` extraction (new)
+
+6. **Serde feature.** The brief asks for an optional `serde` feature. An external `serde` in `[dependencies]`, even optional, is an external dependency by ADR-0002's manifest rule, so the crate would not be Tier S by the letter. Options in Appendix B; my recommendation is a `rusty_serde` feature (precedent: `rusty_uuid`), which keeps Tier S and needs no amendment.
+7. **Nexus re-point.** `FROZEN.md` says no new integrations or adapters and removes Nexus from the workspace. The thin adapter you described is therefore blocked until Nexus is unfrozen, and moot if it is retired. Proposed: record it as a conditional follow-up, do nothing now.
+8. **Location.** `crates/foundation/rusty_crdt` (my pick) versus `crates/libs/`.
+
 ## Follow-ups for orch (not touched here)
 
 - Choose `max_live_turns`, slice sizes and the sealing option per factory, and pass them with the roster at `task_opened`.
@@ -187,5 +216,130 @@ One field I considered and rejected: `concurrent: bool` on Role. It would let a 
 - Whether `fs_store` is safe for several writer processes beyond what `refresh` provides.
 - The three external crates' properties (stated from memory) and that none fits Tier S.
 - Whether line granularity is enough for real specs.
-- That `nexus-crdt`'s RGA ports cleanly without `Uuid`: I read its module list and dependencies, not the algorithm in full.
+- Performance of the extracted RGA on real specs (the O(n) position lookup and the `BTreeMap` index are choices made on reading, not on measurement).
+- That the proposed law tests find no counterexample: they are specified in Appendix A, not run.
 - Log growth under real edit sessions.
+
+## Appendix A: `rusty_crdt` API sketch (not code, unbuilt)
+
+Built at the start of 2b, gated on 2a evidence. Sketch only; nothing here compiles yet.
+
+```toml
+# crates/foundation/rusty_crdt/Cargo.toml
+[package]
+name = "rusty_crdt"
+version = "0.1.0"
+edition = "2021"
+description = "Sequence CRDT (RGA): sync, dependency-free, generic over id and element"
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[dependencies]          # none
+
+[features]
+default = []
+# Mirrors rusty_uuid: serialization through the workspace's own rusty_serde.
+rusty_serde = ["dep:rusty_serde"]
+
+[dev-dependencies]
+proptest = "1"          # independent oracle, dev-only (ADR-0002 Tier S)
+
+[lints.rust]
+unsafe_code = "forbid"
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+```
+
+```rust
+//! Contract the caller owns: ids are unique across all replicas and totally
+//! ordered. Among siblings the GREATER id renders first (newest to the left).
+//! Two different ops with one id make replicas diverge; the caller prevents it.
+
+pub struct Rga<I, T> { /* arena of nodes, BTreeMap<I, usize> index, roots, visible count */ }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Op<I, T> {
+    /// Insert `value` after `parent` (`None` = head).
+    Insert { id: I, parent: Option<I>, value: T },
+    /// Tombstone `target`. `id` identifies this delete op to the caller; the RGA ignores it.
+    Delete { id: I, target: I },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Applied<I> {
+    Changed,
+    Duplicate,
+    /// A dependency (parent or target) is unknown. State is unchanged.
+    Pending { missing: I },
+}
+
+impl<I: Clone + Ord, T> Rga<I, T> {
+    pub fn new() -> Self;
+    pub fn len(&self) -> usize;                       // visible elements, O(1)
+    pub fn is_empty(&self) -> bool;
+    pub fn contains(&self, id: &I) -> bool;           // live or tombstoned
+    pub fn iter(&self) -> Iter<'_, I, T>;             // visible (&I, &T), RGA order, iterative
+    pub fn id_at(&self, pos: usize) -> Option<&I>;    // O(n)
+    /// Build the op for a local insert at visible position `pos` (`pos == len()` = tail).
+    pub fn insert_at(&self, pos: usize, value: T, id: I) -> Option<Op<I, T>>; // None if pos > len
+    pub fn delete_at(&self, pos: usize, id: I) -> Option<Op<I, T>>;            // None if out of range
+    pub fn apply(&mut self, op: &Op<I, T>) -> Applied<I> where T: Clone;       // idempotent; never panics
+}
+impl<I, T> Default for Rga<I, T> { /* empty */ }
+```
+
+**Id types.** No trait to implement: any `Clone + Ord` type works. `Ord` defines the sibling tiebreak. Nexus passes its existing `OpId { lamport, site: Uuid }` (the derived order is already lamport-first). BBP passes `(lamport: u64, site: principal index)`, with the lamport allocated by the BBP engine from the log.
+
+**BBP use.** The engine calls `apply` while validating a co-edit command. `Pending` is rejected `ref_unresolved` (BBP's log is already causal, so no buffering); `Duplicate` is idempotent success (R15 replay). The snapshot hash is SHA-256 over `iter()` joined canonically, computed in `rusty_bbp` with `rusty_rsa`, so the crate needs no hashing.
+
+**CRDT law tests, in `rusty_crdt` (proptest):**
+
+1. **Convergence.** For any causally valid op set, applying it in any causally valid order yields the same `iter()` (a generator builds ops from a random multi-site history; replays shuffle while retrying `Pending`).
+2. **Idempotence.** Re-applying any op returns `Duplicate` and leaves state unchanged.
+3. **Commutativity of independent ops.** Two ops with no dependency between them commute.
+4. **Union.** Replicas holding sets A and B converge after exchanging the differences, in any order.
+5. **Delete versus insert.** A delete delivered before its target returns `Pending` and succeeds when retried after the insert; the result matches in-order delivery.
+6. **Single-site model.** A sequence of positional edits from one site renders the same as the same edits on a `Vec`.
+7. **Intention.** An element inserted after parent P renders after P and before any element that followed P at authoring time, absent concurrent siblings.
+8. **Stack safety.** A 300,000-element linear chain renders without overflow (the regression `nexus-crdt` already fixed).
+9. **No-panic.** Arbitrary garbage ops (unknown ids, duplicate ids with different payloads) never panic. The same-id divergence is asserted as documented, not as a law.
+
+**Differential test with `nexus-crdt`** (same random op streams through both implementations) belongs to the later adapter PR on the Nexus side, not here: `rusty_crdt` must not depend on an app crate.
+
+**Out of scope for the crate:** op logs, version vectors, gossip, compaction, counters, sets, maps, any I/O or async.
+
+## Appendix B: ADR draft (number provisional: ADR-0010)
+
+**ADR-0010 (draft): `rusty_crdt`, a shared sequence CRDT**
+
+Status: Proposed
+Date: 2026-10-13
+
+**Context.** BBP v0.5 needs concurrent co-editing of a spec (this note, 2b). The workspace has one CRDT, `nexus-crdt`, an app-layer crate coupled to the editor and carrying `serde`, `uuid`, `thiserror`, `tokio` and `tracing`. Nexus is frozen and outside the workspace. `rusty_bbp` is Tier S. The consolidation audit says to extract `nexus-crdt` only when a second consumer appears; BBP is that consumer.
+
+**Does Tier S allow a first-party workspace crate? Yes, with no amendment.** ADR-0002 defines "external" as crates.io or git sources in `[dependencies]` or `[build-dependencies]`, says a crate's tier is a claim about its own manifest, and says a Tier A crate may depend on Tier S crates. `rusty_bbp` already depends on `rusty_serde`, `rusty_rsa` and `rusty_atomic_file` this way. The only requirement is that the dependency resolve by path or `{ workspace = true }` against a path entry (`ATLAS-RWC-0050`, checked by the `dependency-policy` job), and that `rusty_crdt` itself be Tier S so the claim holds transitively.
+
+**Decision (proposed).**
+
+1. Create `crates/foundation/rusty_crdt`: the RGA only, generic over id and element, sync, no I/O, zero dependencies in the default build, `unsafe` forbidden.
+2. Tier S. Serialization, if wanted, is a feature on the workspace's own `rusty_serde`, following `rusty_uuid`. `rusty_bbp` does not enable it: it serializes ops through its own event types.
+3. Add `rusty_crdt` to `[workspace.dependencies]` by path. `rusty_bbp` depends on it with default features.
+4. CRDT laws are tested in `rusty_crdt` with `proptest` as a dev-dependency.
+5. Counters, sets and maps are not added until each has two call sites.
+6. `nexus-crdt` is untouched. Re-pointing it through a thin adapter is a separate change on the Nexus side and is conditional on Nexus being unfrozen (`FROZEN.md`).
+
+**Open: how to treat the requested external `serde` feature.**
+
+| Option | Tier S by the letter? | Cost | Fit |
+| --- | --- | --- | --- |
+| A. `rusty_serde` feature (recommended) | Yes | Nexus's real `serde` types need their own derive in the adapter | Precedent: `rusty_uuid` |
+| B. No serialization in the crate; public plain-data `Op`; adapters own wire types | Yes | Each consumer writes a few derives | Smallest crate; the cleanest Tier S claim |
+| C. Optional external `serde` feature (as briefed) | No: an optional external dependency is still declared in `[dependencies]`. Defensible under ADR-0002's "explicitly scoped shipping profile" sentence (default profile sovereign), but that sentence is not a rule | Needs a one-line ADR-0002 clarification that a crate is Tier S in its default feature set when optional external dependencies are off | Matches the original ask; spends policy |
+| D. Vendor the RGA into `rusty_bbp` | Yes | Duplicates code if Nexus is ever revived | Fallback |
+
+**Consequences.** One more Tier S crate and one ADR. The RGA gets isolated law tests. BBP gains co-editing without an external dependency. If Nexus is never unfrozen, the extraction removes no duplication; its value is isolation and a reusable core.
+
+**Not decided here.** Whether to build it at all before 2a evidence exists (it is gated on that), and the Nexus adapter.
