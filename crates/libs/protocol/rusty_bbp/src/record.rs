@@ -3,24 +3,12 @@
 use crate::ids::*;
 use rusty_serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Role {
-    Planner,
-    Coder,
-    Tester,
-    Reviewer,
-}
-
-impl Role {
-    pub const ALL: [Role; 4] = [Role::Planner, Role::Coder, Role::Tester, Role::Reviewer];
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrincipalKind {
     Human,
     Moderator,
     Runner,
-    Agent { role: Role, vendor: String },
+    Agent { role: RoleId, vendor: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +39,20 @@ pub enum ArtifactPayload {
     Candidate(Candidate),
     TestReport(Report),
     Log,
+}
+
+impl ArtifactKind {
+    /// The kind's snake_case name, as the spec writes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ArtifactKind::Brief => "brief",
+            ArtifactKind::Spec => "spec",
+            ArtifactKind::Diff => "diff",
+            ArtifactKind::Candidate => "candidate",
+            ArtifactKind::TestReport => "test_report",
+            ArtifactKind::Log => "log",
+        }
+    }
 }
 
 impl ArtifactPayload {
@@ -142,6 +144,22 @@ pub enum MessageKind {
     Pass,
 }
 
+impl MessageKind {
+    /// The kind's snake_case name, as the spec writes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            MessageKind::Ask => "ask",
+            MessageKind::Answer => "answer",
+            MessageKind::Propose => "propose",
+            MessageKind::Finding => "finding",
+            MessageKind::Verdict => "verdict",
+            MessageKind::RequestDecision => "request_decision",
+            MessageKind::Decision => "decision",
+            MessageKind::Pass => "pass",
+        }
+    }
+}
+
 /// A reference to an artifact (with optional opaque fragment) or a message.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Ref {
@@ -157,7 +175,7 @@ impl Ref {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Recipient {
-    Role(Role),
+    Role(RoleId),
     Human,
     All,
 }
@@ -215,7 +233,7 @@ pub struct Draft {
     pub evidence: Vec<Ref>,
     pub reply_to: Option<MsgId>,
     /// `pass` only.
-    pub yield_to: Option<Role>,
+    pub yield_to: Option<RoleId>,
     /// `request_decision` only: opens the plan gate.
     pub gate: bool,
 }
@@ -255,12 +273,12 @@ impl Draft {
 pub struct Message {
     pub id: MsgId,
     pub from: PrincipalId,
-    pub from_role: Option<Role>,
+    pub from_role: Option<RoleId>,
     pub draft: Draft,
 }
 
 /// Protocol version carried on messages.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const BODY_CAP: usize = 1_200;
 pub const FRAGMENT_CAP: usize = 128;
 pub const READ_PAGE: usize = 20;

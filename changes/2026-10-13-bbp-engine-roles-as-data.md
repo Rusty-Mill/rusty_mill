@@ -1,0 +1,11 @@
+---
+category: Changed
+changelog: **`rusty_bbp`: roles are data.** The Role enum and every role match are gone; a validated roster (nine capability fields) is supplied at `task_opened`, recorded in the log (schema 2) and enforced as capabilities. Breaking: v0.4.1 logs do not replay.
+---
+## 2026-10-13 - rusty_bbp: roles are data
+
+- **Changed:** `rusty_bbp::Role` is a struct (id, `turn_order`, `post`, `write`, `read_artifacts`, `read_messages`, `verdict_at`, `final_decision`, `consultable`), `RoleId` a validated string id, `Roster` a validated set. `engine.rs` checks capabilities in `post`, `put_artifact`, `read`, `get_artifact`, verdicts, the plan gate, yields, the merge gate (R17) and the resume guards. `State::default_role` and `State::consultable` are gone; one requirement table (`role::REQUIREMENTS`) derives the default holder and validates the roster.
+- **Added:** roster validation (`RosterError`: bad, reserved or duplicate id, duplicate `turn_order`, unservable state, `NoFinalizer`), rejection codes `UnknownRole` and `BadRoster`, `LOG_SCHEMA = 2` on `task_opened`, `StoreError::UnsupportedSchema`, and a `FsStore` refusal of schema-1 logs. R17 now also blocks the merge gate on a `revise` from any `final_decision` role.
+- **Changed:** a command refused before the task exists (a bad roster, or any command before `open`) writes no event; before this a refused `open` left a log starting with `Rejected`, which `FsStore::open` then refused to load.
+- **Changed (breaking):** `OpenTask` carries the roster, `Event::TaskOpened` carries `schema` and `roster`, role fields are `RoleId` strings. Schema-1 (v0.4.1) logs do not replay and must be archived. The yield rule is derived from the v0.4.1 consultation table (holder reads all messages; target consultable, assigned, not the default holder).
+- **Known limitations:** tests and `rusty_bbp_host` are ported in the following commits.
