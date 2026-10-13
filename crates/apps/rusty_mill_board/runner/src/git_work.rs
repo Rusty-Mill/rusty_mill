@@ -164,6 +164,10 @@ impl Work for GitWork {
         let tmp = PathBuf::from(format!("{}.tmp", dir.display()));
         let mut env = env.to_vec();
         env.push(("TMPDIR".into(), tmp.display().to_string()));
+        // Tools write caches and config under HOME; unless the operator passed one, it is the scratch dir.
+        if !env.iter().any(|(k, _)| k == "HOME") {
+            env.push(("HOME".into(), tmp.display().to_string()));
+        }
         let wall = Duration::from_secs(stage.wall_secs);
         let limits = Limits::new(
             wall.max(Duration::from_secs(1)),

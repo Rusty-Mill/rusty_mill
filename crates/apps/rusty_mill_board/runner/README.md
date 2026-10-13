@@ -26,6 +26,12 @@ mill-runner --stages stages.json --repo ~/src/app --work ~/mill-work \
 - Each card works in its own git worktree on branch `mill/<id8>`, under `rusty_sandbox`: writable
   worktree and scratch only, no internet unless `network`, `wall_secs` limit, clean environment
   (`PATH` and `--env` names only). The runner commits on success; the command never gets `.git`.
+- **Running `claude -p` as a stage.** The `claude` binary is a Bun executable: besides its install
+  directory it needs `--read-root /proc --read-root /dev/urandom` (without them it aborts in a few
+  milliseconds). Give it `--permission-mode acceptEdits --allowedTools Read Write Edit Glob Grep` for a
+  build stage, `"network": true`, and its API access through `--env ANTHROPIC_API_KEY` (or your gateway
+  variables). Do not mount `~/.claude` or any token file just to make a login work: the sandboxed
+  command could send it anywhere it can reach. `HOME` defaults to the card's scratch directory.
 - Add `--read-root` for anything the command must read (toolchains, `~/.claude`), `--env` for variables
   it needs (visible to the command).
 - A person moves cards into Ready and out of Review; the runner never merges. A holder of Triage can take
