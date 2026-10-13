@@ -16,6 +16,7 @@ pub mod record;
 pub mod role;
 pub mod state;
 pub mod store;
+pub mod wake;
 
 pub use codec::{decode_artifact, encode_artifact, SpecFile};
 pub use command::{AgentAction, Code, Command, HumanAction, OpenTask, Rejection, Response};
@@ -27,3 +28,4 @@ pub use record::*;
 pub use role::*;
 pub use state::{Budget, BudgetField, Card, Gate, State, TaskState, TurnKind};
 pub use store::{Driver, MemStore, Store, StoreError};
+pub use wake::{can_act, wake_set, WakeReason};
