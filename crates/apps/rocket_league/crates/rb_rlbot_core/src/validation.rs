@@ -1,15 +1,33 @@
 //! Numeric checks shared by simulated and live match adapters.
-use rb_rlbot_wire::{ControllerState, DesiredGameState, DesiredPhysics};
+use rb_rlbot_wire::{ControllerState, DesiredGameState, DesiredPhysics, PartialVec3};
 use std::io;
 
+/// Largest `|axis|` of a requested location, in uu. The arena is about 8200 x 10300 x 2000, so
+/// this leaves room for a ball placed outside it and nothing a physics engine cannot hold.
+pub const MAX_LOCATION: f32 = 20_000.0;
+/// Largest `|axis|` of a requested velocity, in uu/s (a ball is capped at 6000, a car at 2300).
+pub const MAX_VELOCITY: f32 = 20_000.0;
+/// Largest `|axis|` of a requested angular velocity, in rad/s (the game caps at about 6).
+pub const MAX_ANGULAR_VELOCITY: f32 = 100.0;
+
 /// Rejects the entire request before any mutation or outbound command, including unsupported
-/// fields: accepting only finite siblings would silently apply a different request.
+/// fields: accepting only finite siblings would silently apply a different request. Nonfinite
+/// values and ones beyond the `MAX_*` bounds are refused (not clamped: a clamped request is a
+/// different request), so a buggy bot cannot hand the game or the simulation a value it cannot
+/// hold.
 pub fn validate_desired(state: &DesiredGameState) -> io::Result<()> {
     let finite = |v: Option<f32>| v.is_none_or(f32::is_finite);
+    let within = |v: Option<PartialVec3>, max: f32| {
+        v.is_none_or(|v| {
+            [v.x, v.y, v.z]
+                .into_iter()
+                .all(|a| finite(a) && a.is_none_or(|a| a.abs() <= max))
+        })
+    };
     let physics = |p: &DesiredPhysics| {
-        [p.location, p.velocity, p.angular_velocity]
-            .iter()
-            .all(|v| v.is_none_or(|v| [v.x, v.y, v.z].into_iter().all(finite)))
+        within(p.location, MAX_LOCATION)
+            && within(p.velocity, MAX_VELOCITY)
+            && within(p.angular_velocity, MAX_ANGULAR_VELOCITY)
             && p.rotation
                 .is_none_or(|r| [r.pitch, r.yaw, r.roll].into_iter().all(finite))
     };
@@ -26,7 +44,7 @@ pub fn validate_desired(state: &DesiredGameState) -> io::Result<()> {
     } else {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "nonfinite desired state",
+            "nonfinite or out-of-range desired state",
         ))
     }
 }
@@ -100,5 +118,53 @@ mod tests {
             }
         }
         assert!(validate_desired(&DesiredGameState::default()).is_ok());
+    }
+
+    #[test]
+    fn finite_but_extreme_values_are_refused_and_the_bounds_themselves_are_not() {
+        let vec = |x: f32| {
+            Some(PartialVec3 {
+                x: Some(x),
+                y: None,
+                z: None,
+            })
+        };
+        let ball = |physics: DesiredPhysics| DesiredGameState {
+            ball_states: vec![DesiredBallState { physics }],
+            ..Default::default()
+        };
+        let build = |which: usize, v: Option<PartialVec3>| {
+            let mut p = DesiredPhysics::default();
+            match which {
+                0 => p.location = v,
+                1 => p.velocity = v,
+                _ => p.angular_velocity = v,
+            }
+            p
+        };
+        let cases = [
+            ("location", 0, MAX_LOCATION),
+            ("velocity", 1, MAX_VELOCITY),
+            ("angular velocity", 2, MAX_ANGULAR_VELOCITY),
+        ];
+        for (what, which, max) in cases {
+            assert!(
+                validate_desired(&ball(build(which, vec(max)))).is_ok(),
+                "{what} at the bound"
+            );
+            assert!(
+                validate_desired(&ball(build(which, vec(-max)))).is_ok(),
+                "{what} at -bound"
+            );
+            for beyond in [max * 1.01, -max * 1.01, 1.0e30, f32::MAX] {
+                assert_eq!(
+                    validate_desired(&ball(build(which, vec(beyond))))
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::InvalidInput,
+                    "{what} {beyond}"
+                );
+            }
+        }
     }
 }
