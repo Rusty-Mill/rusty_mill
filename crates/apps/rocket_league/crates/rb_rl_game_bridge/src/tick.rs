@@ -50,15 +50,22 @@ pub struct Clump {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TickTracker {
     seconds_elapsed: f32,
+    frame_num: u32,
     ticks_skipped: u32,
     ticks_since_map_load: u32,
 }
 
 impl TickTracker {
-    /// Folds in the time of the next message and says whether time advanced.
-    pub fn observe(&mut self, seconds_elapsed: f32) -> bool {
-        let advanced = seconds_elapsed - self.seconds_elapsed > TIME_ADVANCE_EPSILON;
+    /// Folds in the time of the next message and says whether time advanced. `frame_num` is the
+    /// game's frame counter (`u32`, wrapping): after about 39 hours an `f32` of seconds can no
+    /// longer show one 1/120 s frame, but the counter still does, so a forward step of it
+    /// counts as time advancing even when the seconds look the same.
+    pub fn observe(&mut self, seconds_elapsed: f32, frame_num: u32) -> bool {
+        let frames = frame_num.wrapping_sub(self.frame_num);
+        let advanced = seconds_elapsed - self.seconds_elapsed > TIME_ADVANCE_EPSILON
+            || (1..=u32::MAX / 2).contains(&frames);
         self.seconds_elapsed = seconds_elapsed;
+        self.frame_num = frame_num;
         self.ticks_skipped = if advanced { 0 } else { self.ticks_skipped + 1 };
         self.ticks_since_map_load += 1;
         advanced
@@ -158,25 +165,52 @@ mod tests {
     #[test]
     fn time_must_advance_by_more_than_a_millisecond() {
         let mut t = TickTracker::default();
-        assert!(t.observe(0.1));
-        assert!(!t.observe(0.1005), "half a millisecond is not a new tick");
+        assert!(t.observe(0.1, 0));
+        assert!(
+            !t.observe(0.1005, 0),
+            "half a millisecond is not a new tick"
+        );
         assert_eq!(t.ticks_skipped(), 1);
-        assert!(!t.observe(0.1005));
+        assert!(!t.observe(0.1005, 0));
         assert_eq!(t.ticks_skipped(), 2);
-        assert!(t.observe(0.2));
+        assert!(t.observe(0.2, 0));
         assert_eq!(t.ticks_skipped(), 0, "advancing resets the skip count");
-        assert!(!t.observe(0.1), "time going backwards is not an advance");
+        assert!(!t.observe(0.1, 0), "time going backwards is not an advance");
+    }
+
+    #[test]
+    fn a_frame_the_seconds_cannot_show_still_advances_time() {
+        // 40 hours in: the f32 seconds are the same for the next frame, the counter is not.
+        let (seconds, frame) = (144_000.0_f32, 17_280_000_u32);
+        let mut t = TickTracker::default();
+        assert!(t.observe(seconds, frame));
+        assert!(t.observe(seconds, frame + 1), "one frame on, same seconds");
+        assert_eq!(t.ticks_skipped(), 0);
+        assert!(!t.observe(seconds, frame + 1), "no frame, no time");
+        assert!(
+            !t.observe(seconds, frame),
+            "a frame counter going back is not an advance"
+        );
+        // The counter wraps (about 414 days of frames); the step across the wrap is forward.
+        let mut t = TickTracker::default();
+        assert!(
+            t.observe(seconds, u32::MAX - 1),
+            "first message: seconds moved"
+        );
+        assert!(t.observe(seconds, u32::MAX));
+        assert!(t.observe(seconds, 0));
+        assert!(t.observe(seconds, 1));
     }
 
     #[test]
     fn map_load_restarts_its_own_counter_only() {
         let mut t = TickTracker::default();
-        t.observe(1.0);
-        t.observe(2.0);
+        t.observe(1.0, 0);
+        t.observe(2.0, 0);
         assert_eq!(t.ticks_since_map_load(), 2);
         t.map_loaded();
         assert_eq!(t.ticks_since_map_load(), 0);
-        t.observe(3.0);
+        t.observe(3.0, 0);
         assert_eq!(t.ticks_since_map_load(), 1);
     }
 
