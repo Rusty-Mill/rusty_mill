@@ -16,6 +16,29 @@ use crate::identities::Credentials;
 
 const UI: &str = include_str!("ui.html");
 
+/// Refuse to serve an unauthenticated board beyond loopback. The `Host`
+/// check is not client authentication: any remote client can send
+/// `Host: localhost` and claim any role, so a reachable board needs
+/// credentials (or an explicit, clearly named override).
+///
+/// # Errors
+/// A message naming the fix, when `addr` is not loopback, `auth` is
+/// [`Auth::Open`] and `accept_unauthenticated` is false.
+pub fn check_bind(
+    addr: std::net::SocketAddr,
+    auth: &Auth,
+    accept_unauthenticated: bool,
+) -> Result<(), String> {
+    if addr.ip().is_loopback() || !matches!(auth, Auth::Open) || accept_unauthenticated {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to serve an unauthenticated board on {addr}: anyone who can reach it can act as any role \
+         (the Host check is not authentication). Use --identities FILE (a token per model) or --auth-token, \
+         bind to loopback, or pass --accept-unauthenticated-public if you really mean it"
+    ))
+}
+
 /// How callers of `/api` and `/mcp` are authenticated.
 pub enum Auth {
     /// No credential required (loopback use).
@@ -164,5 +187,40 @@ impl SharedHandler for Web {
             Ok(identity) => self.api(name, identity.as_ref(), request),
             Err(()) => reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"})),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(s: &str) -> std::net::SocketAddr {
+        s.parse().expect("addr")
+    }
+
+    #[test]
+    fn open_boards_stay_on_loopback() {
+        for ok in ["127.0.0.1:8787", "[::1]:8787", "127.9.9.9:1"] {
+            assert!(check_bind(addr(ok), &Auth::Open, false).is_ok(), "{ok}");
+        }
+        for bad in [
+            "0.0.0.0:8787",
+            "[::]:8787",
+            "192.168.1.5:8787",
+            "10.0.0.1:80",
+        ] {
+            let e = check_bind(addr(bad), &Auth::Open, false).expect_err(bad);
+            assert!(
+                e.contains("--identities") && e.contains("--accept-unauthenticated-public"),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn credentials_or_an_explicit_override_allow_a_public_bind() {
+        let public = addr("0.0.0.0:8787");
+        assert!(check_bind(public, &Auth::Shared("t".into()), false).is_ok());
+        assert!(check_bind(public, &Auth::Open, true).is_ok());
     }
 }

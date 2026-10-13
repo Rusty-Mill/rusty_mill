@@ -25,7 +25,7 @@ use rusty_mill_board::mcp;
 use rusty_mill_board::mmdb::MmdbStore;
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::sync::reconcile;
-use rusty_mill_board::web::{Auth, Web};
+use rusty_mill_board::web::{Auth, Web, check_bind};
 
 /// Mill Board: kanban for humans and agents.
 #[derive(Parser)]
@@ -60,6 +60,10 @@ struct Cli {
     /// Seconds between sync runs.
     #[arg(long, env = "MILL_BOARD_GITHUB_SECS", default_value_t = 60, value_parser = clap::value_parser!(u64).range(5..))]
     github_secs: u64,
+    /// Serve with no authentication on a non-loopback address. Anyone who can reach the
+    /// port can act as any role, including human. Almost never what you want.
+    #[arg(long)]
+    accept_unauthenticated_public: bool,
     /// Accepted Host names (HTTP only).
     #[arg(long = "allowed-host", value_delimiter = ',', default_values_t = ["127.0.0.1".to_owned(), "localhost".to_owned(), "[::1]".to_owned()])]
     allowed_hosts: Vec<String>,
@@ -120,6 +124,7 @@ fn run(cli: Cli) -> Result<(), String> {
         (None, Some(token)) => Auth::Shared(token),
         (None, None) => Auth::Open,
     };
+    check_bind(addr, &auth, cli.accept_unauthenticated_public)?;
     let web = Web::new(
         board,
         HttpHandler::new(server, config),
