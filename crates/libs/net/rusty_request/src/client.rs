@@ -264,7 +264,7 @@ impl ClientBuilder {
     }
 
     /// The most response-body bytes a buffered send (`send`) will read;
-    /// a larger body fails with `BodyTooLarge`, and a `Content-Length`
+    /// a larger body fails with `Error::InvalidResponse`, and a `Content-Length`
     /// body over the limit fails before any of it is read. The default is
     /// [`rusty_http::body::DEFAULT_MAX_BODY_LEN`] (1 MiB). Raise it for a
     /// client that knows its responses are big, not as a general setting:
