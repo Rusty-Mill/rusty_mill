@@ -6,6 +6,7 @@ use crate::engine::handle;
 use crate::event::{log_schema, schema_supported, Event};
 use crate::ids::*;
 use crate::record::ArtifactPayload;
+use crate::shadow::Shadow;
 use crate::state::TaskState;
 use std::collections::HashMap;
 
@@ -97,6 +98,9 @@ impl Store for MemStore {
 pub struct Driver<S: Store> {
     pub store: S,
     pub state: TaskState,
+    /// Shadow records of the last `dispatch`: what an event-driven policy would
+    /// have done beside each real grant. Replaced on every dispatch; not logged.
+    pub shadow: Vec<Shadow>,
 }
 
 impl<S: Store> Driver<S> {
@@ -104,6 +108,7 @@ impl<S: Store> Driver<S> {
         Driver {
             state: TaskState::new(task),
             store,
+            shadow: Vec::new(),
         }
     }
 
@@ -180,6 +185,7 @@ impl<S: Store> Driver<S> {
     /// and the claimed payload is what those bytes decode to (A1). A failure is
     /// a rejection returned without touching the log.
     pub fn dispatch(&mut self, cmd: &Command, now: Time) -> Result<Response, StoreError> {
+        self.shadow.clear();
         if let Some(rej) = self.check_boundary(cmd) {
             return Ok(Response::Rejected(rej));
         }
@@ -193,6 +199,7 @@ impl<S: Store> Driver<S> {
                     for e in &out.events {
                         self.state.apply(e);
                     }
+                    self.shadow = out.shadow;
                     return Ok(out.response);
                 }
                 Err(StoreError::Conflict { .. }) => self.reload()?,

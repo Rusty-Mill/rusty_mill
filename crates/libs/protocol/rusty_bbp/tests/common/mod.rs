@@ -72,6 +72,8 @@ pub struct Fx<S: Store = MemStore> {
     pub d: Driver<S>,
     pub now: Time,
     ops: u64,
+    /// Every shadow record of every dispatch so far, in order.
+    pub shadows: Vec<Shadow>,
 }
 
 /// The principal that holds `role`: the role id itself.
@@ -200,6 +202,7 @@ impl<S: Store> Fx<S> {
             d: Driver::new(store, task.clone()),
             now: Time(1_000),
             ops: 0,
+            shadows: Vec::new(),
         };
         let open = Command::Open(OpenTask {
             task,
@@ -247,9 +250,86 @@ impl<S: Store> Fx<S> {
     }
 
     pub fn run(&mut self, cmd: &Command) -> Response {
-        match self.d.dispatch(cmd, self.now) {
+        // The pure engine's own answer, checked before the driver applies it:
+        // independent of the store, so a reload after a conflict cannot blur it.
+        let out = handle(&self.d.state, cmd, self.now);
+        self.check_shadow(&out);
+        let resp = match self.d.dispatch(cmd, self.now) {
             Ok(r) => r,
             Err(e) => panic!("store error: {e:?}"),
+        };
+        self.shadows.extend(self.d.shadow.iter().cloned());
+        resp
+    }
+
+    /// Shadow mode never decides anything. For every command of every test:
+    /// the recorded grantees are exactly the roles in the `turn_granted` events
+    /// the command produced, every record's rev is within the command's revs,
+    /// and nothing is recorded above one live turn. With `BBP_SHADOW_TRACE`
+    /// set, each record is printed as a tab-separated line for the report.
+    fn check_shadow(&self, out: &Handled) {
+        let from = self.d.state.rev;
+        let to = Rev(from.0 + out.events.len() as u64);
+        let mut granted: Vec<String> = out
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::TurnGranted { role, .. } => Some(role.0.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut recorded: Vec<String> = Vec::new();
+        for sh in &out.shadow {
+            assert!(
+                sh.rev > from && sh.rev <= to,
+                "shadow rev {:?} outside ({from:?}, {to:?}]",
+                sh.rev
+            );
+            // The record sits beside its own `turn_granted`, and its state is
+            // the state just before that event (a grant can escalate).
+            let at = (sh.rev.0 - from.0 - 1) as usize;
+            let who = match &sh.kind {
+                ShadowKind::Auto { granted, .. } => granted.first().expect("a grantee"),
+                ShadowKind::Explicit { granted, .. } => granted,
+            };
+            assert!(
+                matches!(&out.events[at], Event::TurnGranted { role, .. } if role == who),
+                "shadow rev {:?} is not the turn_granted for {who:?}: {:?}",
+                sh.rev,
+                out.events[at]
+            );
+            let mut pre = self.d.state.clone();
+            for e in &out.events[..at] {
+                pre.apply(e);
+            }
+            assert_eq!(
+                sh.state, pre.state,
+                "shadow state vs the state before the grant"
+            );
+            match &sh.kind {
+                ShadowKind::Auto { granted, .. } => {
+                    recorded.extend(granted.iter().map(|r| r.0.clone()))
+                }
+                ShadowKind::Explicit { granted, .. } => recorded.push(granted.0.clone()),
+            }
+            if std::env::var_os("BBP_SHADOW_TRACE").is_some() {
+                eprintln!("{}", trace_line(sh));
+            }
+        }
+        let cap = out
+            .events
+            .iter()
+            .find_map(|e| match e {
+                Event::TaskOpened { max_live_turns, .. } => Some(*max_live_turns),
+                _ => None,
+            })
+            .unwrap_or(self.d.state.max_live_turns);
+        if cap <= 1 {
+            granted.sort();
+            recorded.sort();
+            assert_eq!(recorded, granted, "shadow records vs turn_granted events");
+        } else {
+            assert!(out.shadow.is_empty(), "no shadow above one live turn");
         }
     }
 
@@ -572,4 +652,30 @@ pub fn yield_to(role: impl Into<RoleId>) -> Draft {
     let mut d = pass();
     d.yield_to = Some(role.into());
     d
+}
+
+/// One report line:
+/// `SHADOW<TAB>test<TAB>state<TAB>auto|explicit<TAB>granted<TAB>would<TAB>outcome`,
+/// where `would` is the whole `wake_set`, best first (`role:reason,...`).
+fn trace_line(sh: &Shadow) -> String {
+    let test = std::thread::current().name().unwrap_or("?").to_string();
+    let state = sh.state;
+    match &sh.kind {
+        ShadowKind::Auto { granted, would } => format!(
+            "SHADOW\t{test}\t{state:?}\tauto\t{}\t{}\t{:?}",
+            granted.first().map_or("-", |r| r.0.as_str()),
+            would
+                .iter()
+                .map(|(r, why)| format!("{}:{why:?}", r.0))
+                .collect::<Vec<_>>()
+                .join(","),
+            sh.comparison(),
+        ),
+        ShadowKind::Explicit { granted, kind } => {
+            format!(
+                "SHADOW\t{test}\t{state:?}\texplicit\t{}\t{kind:?}\t-",
+                granted.0
+            )
+        }
+    }
 }
