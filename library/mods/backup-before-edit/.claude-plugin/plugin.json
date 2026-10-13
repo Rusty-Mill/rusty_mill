@@ -1,0 +1,6 @@
+{
+  "name": "backup-before-edit",
+  "version": "0.1.0",
+  "description": "Copies a file to .claude/backups/ before Edit or Write changes it, so any change can be undone.",
+  "keywords": ["safety", "undo", "files"]
+}

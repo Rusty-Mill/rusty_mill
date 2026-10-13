@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mill Library</title>
+<style>
+:root{--bg:#fafaf8;--fg:#1c1c1a;--mut:#6b6b66;--card:#fff;--line:#e2e2dc;--acc:#b4531f}
+@media(prefers-color-scheme:dark){:root{--bg:#16161a;--fg:#e8e8e4;--mut:#9a9a94;--card:#1f1f24;--line:#33333a;--acc:#e08a55}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 12px}
+input,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+input{width:100%}button{cursor:pointer}button:hover,button[aria-pressed=true]{border-color:var(--acc);color:var(--acc)}
+.row{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;text-align:left}
+.card b{display:block}.card small,.mut{color:var(--mut)}
+.kind{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--acc)}
+pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;white-space:pre-wrap;word-break:break-word;max-height:60vh}
+</style>
+</head>
+<body><main>
+<h1>Mill Library <span class="mut" id="count"></span></h1>
+<input id="q" type="search" placeholder="Search prompts, skills, mods…" autofocus>
+<div class="row" id="kinds"></div>
+<div class="row" id="tags"></div>
+<div id="detail" hidden>
+  <div class="row"><button id="back">← Back</button><button id="copy">Copy</button><button id="dl">Download</button></div>
+  <div class="kind" id="dkind"></div><h2 id="dname" style="margin:0"></h2>
+  <p class="mut" id="ddesc"></p><p class="mut" id="dinstall"></p><pre id="dbody"></pre>
+</div>
+<div class="grid" id="grid"></div>
+</main>
+<script>
+const ITEMS = __DATA__;
+const $ = id => document.getElementById(id);
+const state = {q: "", kind: "all", tag: null};
+const INSTALL = {
+  prompt: "Paste into a session, or save as a file and reference it.",
+  skill: p => `Save as ~/.claude/skills/<name>/SKILL.md (source: ${p}).`,
+  mod: p => `Try it: claude --plugin-dir ${p}`,
+};
+const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+
+function visible() {
+  const q = state.q.toLowerCase();
+  return ITEMS.filter(i =>
+    (state.kind === "all" || i.kind === state.kind) &&
+    (!state.tag || i.tags.includes(state.tag)) &&
+    (!q || `${i.name} ${i.description} ${i.tags.join(" ")} ${i.body}`.toLowerCase().includes(q)));
+}
+
+function chips(box, values, active, onPick) {
+  box.replaceChildren(...values.map(v => {
+    const b = el("button", {textContent: v});
+    b.setAttribute("aria-pressed", String(v === active));
+    b.onclick = () => onPick(v);
+    return b;
+  }));
+}
+
+function render() {
+  const items = visible();
+  $("count").textContent = `${items.length}/${ITEMS.length}`;
+  chips($("kinds"), ["all", "prompt", "skill", "mod"], state.kind, v => { state.kind = v; render(); });
+  chips($("tags"), [...new Set(ITEMS.flatMap(i => i.tags))].sort(), state.tag, v => { state.tag = state.tag === v ? null : v; render(); });
+  $("grid").replaceChildren(...items.map(i => {
+    const c = el("button", {className: "card"},
+      el("span", {className: "kind", textContent: i.kind}),
+      el("b", {textContent: i.name}),
+      el("small", {textContent: i.description}));
+    c.onclick = () => show(i);
+    return c;
+  }));
+}
+
+function show(i) {
+  const how = INSTALL[i.kind];
+  $("dkind").textContent = i.kind;
+  $("dname").textContent = i.name;
+  $("ddesc").textContent = i.description;
+  $("dinstall").textContent = typeof how === "function" ? how(i.path) : how;
+  $("dbody").textContent = i.body;
+  $("copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(i.body); $("copy").textContent = "Copied"; }
+    catch { $("copy").textContent = "Copy failed"; }
+    setTimeout(() => $("copy").textContent = "Copy", 1200);
+  };
+  $("dl").onclick = () => {
+    const a = el("a", {href: URL.createObjectURL(new Blob([i.body])), download: `${i.name}${i.kind === "mod" ? ".txt" : ".md"}`});
+    a.click(); URL.revokeObjectURL(a.href);
+  };
+  $("detail").hidden = false;
+  $("grid").hidden = $("kinds").hidden = $("tags").hidden = $("q").hidden = true;
+}
+
+$("back").onclick = () => {
+  $("detail").hidden = true;
+  $("grid").hidden = $("kinds").hidden = $("tags").hidden = $("q").hidden = false;
+};
+$("q").oninput = e => { state.q = e.target.value; render(); };
+render();
+</script>
+</body></html>
