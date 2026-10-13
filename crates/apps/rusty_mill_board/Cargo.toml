@@ -22,3 +22,4 @@ unwrap_used = "warn"
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+rusty_multimodal_db_engine = { workspace = true }

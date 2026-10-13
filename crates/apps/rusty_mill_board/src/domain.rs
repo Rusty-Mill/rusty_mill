@@ -145,6 +145,8 @@ pub enum BoardError {
     Conflict,
     /// Input rejected at the boundary.
     Invalid(&'static str),
+    /// The backing store failed.
+    Storage(String),
 }
 
 impl fmt::Display for BoardError {
@@ -158,11 +160,65 @@ impl fmt::Display for BoardError {
             Self::NotClaimant => write!(f, "only the claim holder may move this card"),
             Self::Conflict => write!(f, "card changed concurrently; retry"),
             Self::Invalid(why) => write!(f, "invalid input: {why}"),
+            Self::Storage(why) => write!(f, "storage error: {why}"),
         }
     }
 }
 
 impl std::error::Error for BoardError {}
+
+/// What happened to a card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
+    /// Card created.
+    Created,
+    /// Card moved column.
+    Moved,
+    /// Claim taken.
+    Claimed,
+    /// Claim dropped.
+    Released,
+    /// Title/body/tags edited.
+    Edited,
+    /// Comment added.
+    Commented,
+}
+
+/// One entry in the append-only log. `id` is a UUIDv7, so ids sort in
+/// commit order and double as a polling cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
+    /// Time-ordered identity and cursor.
+    pub id: Uuid,
+    /// Card concerned.
+    pub card: Uuid,
+    /// Who did it.
+    pub actor: String,
+    /// What happened.
+    pub kind: EventKind,
+    /// Card revision after the change.
+    pub rev: u64,
+    /// Column after the change.
+    pub column: Column,
+    /// Unix milliseconds.
+    pub at_ms: i64,
+}
+
+impl Event {
+    /// The event describing `card` just after `kind` happened.
+    pub fn of(card: &Card, kind: EventKind, actor: &str) -> Self {
+        Self {
+            id: Uuid::now_v7(),
+            card: card.id,
+            actor: actor.to_owned(),
+            kind,
+            rev: card.rev,
+            column: card.column,
+            at_ms: card.updated_ms,
+        }
+    }
+}
 
 impl Card {
     /// A new Backlog card.

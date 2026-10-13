@@ -12768,6 +12768,7 @@ dependencies = [
 name = "rusty_mill_board"
 version = "0.1.0"
 dependencies = [
+ "rusty_multimodal_db_engine",
  "serde",
  "serde_json",
  "uuid",
