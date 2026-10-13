@@ -50,6 +50,8 @@ pub struct OpenTask {
     pub request_ms: u64,
     pub brief: BlobRef,
     pub human: PrincipalId,
+    /// Added after schema 2 shipped: a payload without it opens as `TurnBased`.
+    #[rusty_serde(default)]
     pub policy: crate::policy::SchedulingPolicy,
 }
 
