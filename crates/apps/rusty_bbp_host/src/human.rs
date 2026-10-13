@@ -3,7 +3,6 @@
 //! revision the human saw (`--rev`, R15), never the one the CLI happens to
 //! load, so a delayed command meets newer work with `stale_rev`.
 
-use crate::admin::parse_role;
 use crate::{fresh_op, now, open_driver};
 use rusty_bbp::*;
 use std::path::Path;
@@ -103,7 +102,7 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
             HumanAction::Post(d)
         }
         "ask" => HumanAction::Post(
-            Draft::new(MessageKind::Ask, rest(1)).to(Recipient::Role(parse_role(a(0)?)?)),
+            Draft::new(MessageKind::Ask, rest(1)).to(Recipient::Role(RoleId::from(a(0)?))),
         ),
         "answer" => {
             HumanAction::Post(Draft::new(MessageKind::Answer, rest(1)).reply_to(msg(a(0)?)?))
