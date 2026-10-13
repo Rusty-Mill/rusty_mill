@@ -315,7 +315,7 @@ fn agent(
 }
 
 /// Does the role's `read_messages` allow it to see `m`?
-fn visible(st: &TaskState, role: &Role, m: &Message) -> bool {
+pub(crate) fn visible(st: &TaskState, role: &Role, m: &Message) -> bool {
     if role.read_messages == ReadScope::All {
         return true;
     }
@@ -546,7 +546,7 @@ fn resolve_ref(st: &TaskState, r: &Ref) -> R<()> {
     }
 }
 
-fn state_accepts(state: State, kind: MessageKind) -> bool {
+pub(crate) fn state_accepts(state: State, kind: MessageKind) -> bool {
     use MessageKind::*;
     match state {
         State::Planning | State::Build => matches!(

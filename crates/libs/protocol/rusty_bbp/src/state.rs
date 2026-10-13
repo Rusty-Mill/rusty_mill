@@ -207,6 +207,17 @@ pub struct TaskState {
     /// Fields already escalated for; each fires once (E3).
     pub exhausted: HashSet<BudgetField>,
     pub opened: bool,
+    // Derived by `apply` from the log, never logged: what `wake_set` needs to
+    // tell new events from old ones. Revs are the card revision after the event.
+    /// Per role, the rev of the event that ended its latest turn.
+    pub last_turn_end: HashMap<RoleId, Rev>,
+    /// The rev at which each message was appended, parallel to `messages`.
+    pub msg_rev: Vec<Rev>,
+    /// The rev at which each artifact was stored.
+    pub art_rev: HashMap<ArtId, Rev>,
+    /// The rev of the last event that made the current state's default turn available:
+    /// opening, a state change, a final test report, a settled request.
+    pub ready_rev: Rev,
 }
 
 impl TaskState {
@@ -254,6 +265,10 @@ impl TaskState {
             ops: HashMap::new(),
             exhausted: HashSet::new(),
             opened: false,
+            last_turn_end: HashMap::new(),
+            msg_rev: Vec::new(),
+            art_rev: HashMap::new(),
+            ready_rev: Rev(0),
         }
     }
 
@@ -407,6 +422,7 @@ impl TaskState {
                 self.request_ms = *request_ms;
                 self.human = human.clone();
                 self.opened = true;
+                self.ready_rev = self.rev;
                 let h = Principal {
                     id: human.clone(),
                     kind: PrincipalKind::Human,
@@ -442,10 +458,15 @@ impl TaskState {
             }
             Event::TurnEnded { turn, cause: _ } => {
                 if self.turn.as_ref().map(|t| t.id) == Some(*turn) {
-                    self.turn = None;
+                    if let Some(t) = self.turn.take() {
+                        self.last_turn_end.insert(t.role, self.rev);
+                    }
                 }
             }
-            Event::MessageAppended(m) => self.messages.push(m.clone()),
+            Event::MessageAppended(m) => {
+                self.messages.push(m.clone());
+                self.msg_rev.push(self.rev);
+            }
             Event::ArtifactStored(a) => {
                 if a.kind == ArtifactKind::Brief {
                     self.brief = Some(a.id);
@@ -459,6 +480,7 @@ impl TaskState {
                         }
                     }
                 }
+                self.art_rev.insert(a.id, self.rev);
                 self.artifacts.insert(a.id, a.clone());
             }
             Event::CandidateSubmitted { candidate, .. } => {
@@ -485,6 +507,7 @@ impl TaskState {
                 if let Some(r) = self.run.as_mut() {
                     r.status = Some(*status);
                 }
+                self.ready_rev = self.rev;
             }
             Event::RequestOpened {
                 msg,
@@ -511,7 +534,10 @@ impl TaskState {
                     }
                 }
             }
-            Event::RequestSettled { .. } => self.pending_request = None,
+            Event::RequestSettled { .. } => {
+                self.pending_request = None;
+                self.ready_rev = self.rev;
+            }
             Event::StateChanged { from, to } => {
                 if *to == State::Escalated {
                     self.escalated_from = Some(*from);
@@ -525,6 +551,7 @@ impl TaskState {
                     self.iteration += 1;
                 }
                 self.state = *to;
+                self.ready_rev = self.rev;
             }
             Event::HumanApproval { gate, subject, run } => match gate {
                 Gate::Plan => {

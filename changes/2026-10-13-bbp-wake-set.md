@@ -1,0 +1,9 @@
+---
+category: Added
+changelog: **`rusty_bbp`: `wake_set`, the pure event-driven eligibility function (phase 1, no behaviour change).** Derives which roles the board state makes eligible from the nine Role fields, with self-wake exclusion, a per-role cooldown and capability and visibility gating; `TaskState` gains four fold-derived fields. Nothing grants a turn from it yet.
+---
+## 2026-10-13 - rusty_bbp: wake_set (event-driven phase 1, step 2)
+
+- **Added:** `wake::wake_set(&TaskState) -> Vec<(RoleId, WakeReason)>`, pure. Triggers: `Addressed` (a message naming the role or everyone, newer than the role's last turn end, readable by it), `Artifact` (a spec, diff, candidate or test report it may read, newer than its last turn end), `State` (it serves the current working state and that state's turn became available since its last turn end). Order is reason then `turn_order`. Skipped: unassigned roles, a role's own events (self-wake exclusion), events not newer than its last turn end (cooldown), events it may not read, and roles that could post nothing but `pass` in the state. Empty while a turn is live, a request is open, in gate and terminal states, and in `test` before the final report. Explicit grants (yield, human `ask`, settled request, consultation return) are not triggers and bypass it.
+- **Changed (internal):** `TaskState` gains `last_turn_end`, `msg_rev`, `art_rev` and `ready_rev`, derived by `apply` from the log. No event, command or record type changed, so the log format is unchanged and old logs replay identically; `visible` and `state_accepts` become `pub(crate)`.
+- **Known limitations:** not wired to scheduling (step 3). A role with no turn yet has `seen_rev` 0, so every earlier artifact counts as new for it; with `Artifact` ranked above `State` the set is wide early in a task. Shadow mode (step 4) measures this.
