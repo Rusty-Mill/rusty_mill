@@ -696,10 +696,10 @@ question is not decided by a pull request that merely wires it.
    TLS 1.2, a new host class) is a new decision against the bar, not a consequence of this one.
 5. **No library default moves.** No feature, cfg or dependency edge makes any other
    crate's build use the engine.
-6. **Known divergences from webpki are resolved first.** The `anyExtendedKeyUsage`
-   divergence and the name-constraint resource-budget cases (`nc-dos-1`, `nc-dos-2`) in
-   `TLS-EVIDENCE-BAR.md` are unresolved pre-wiring blockers. Describing their behavior is
-   not approval of them as exceptions.
+6. **Known divergences from webpki are resolved first.** The name-constraint
+   resource-budget cases (`nc-dos-1`, `nc-dos-2`) in `TLS-EVIDENCE-BAR.md` are an
+   unresolved pre-wiring blocker. Describing their behavior is not approval of them as
+   exceptions. (`anyExtendedKeyUsage` was aligned with webpki on 2026-10-12.)
 
 **What this does not do.**
 

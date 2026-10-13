@@ -53,7 +53,7 @@ out. Two ways to make the scope true:
 - The test inventory: BoGo 861 pass and 455 disabled with reasons, OpenSSL interop in CI, the
   per-stage differential suites against rustls, 8 fuzz targets with a 30 s smoke job.
 - A list of what has **not** been checked: the x509-limbo differential is pinned and run, but the BetterTLS and limbo `pedantic` classes and CRLs are enforced by neither engine, and
-  `anyExtendedKeyUsage` and `nc-dos` are unresolved; no long fuzz
+  `nc-dos` is unresolved; no long fuzz
   run, no constant-time evidence for `ring`'s primitives (not ours).
 
 ## Questions for the owner

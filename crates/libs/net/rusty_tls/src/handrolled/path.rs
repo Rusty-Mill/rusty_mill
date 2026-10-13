@@ -561,8 +561,11 @@ fn check_no_unhandled_critical(certificate: &Certificate<'_>) -> Result<(), Path
 /// anchor) must permit `required`, if one is required.
 ///
 /// An absent `extendedKeyUsage` extension permits every purpose; a present one
-/// permits only what it lists, plus `anyExtendedKeyUsage`. Inverting that
-/// would refuse most of the web, and ignoring it would let a
+/// permits only what it lists. `anyExtendedKeyUsage` is deliberately not a
+/// wildcard: webpki (the engine this one is measured against) requires the
+/// specific OID whenever the extension is present, so accepting it here would
+/// be looser than the reference. Inverting the absent-extension rule would
+/// refuse most of the web, and ignoring the extension would let a
 /// code-signing-only certificate authenticate a server.
 fn check_eku(
     certificate: &Certificate<'_>,
@@ -577,7 +580,7 @@ fn check_eku(
 
     for purpose in certificate.extensions().extended_key_usage() {
         let purpose = purpose.map_err(|_| PathError::MalformedExtendedKeyUsage)?;
-        if purpose == required || purpose == oid::EKU_ANY {
+        if purpose == required {
             return Ok(());
         }
     }

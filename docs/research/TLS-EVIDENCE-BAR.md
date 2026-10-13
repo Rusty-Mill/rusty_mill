@@ -1,6 +1,6 @@
 # TLS native engine: evidence bar proposal (owner to approve)
 
-Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` and `nc-dos` are unresolved pre-wiring blockers. Follows
+Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `nc-dos` is an unresolved pre-wiring blocker (`anyExtendedKeyUsage` aligned 2026-10-12). Follows
 `TLS-ENGINE-ASSESSMENT.md` section 6, which this narrows and updates. The engine's default,
 both gates and every consumer are unchanged. The bar, replacing `ring`, and superseding
 ADR-0002 are the owner's decisions.
@@ -117,14 +117,14 @@ handshake costs. Accepting them needs an explicit resource bound (for example a 
 budget in `check_name_constraints`, which I can add) or broader adversarial evidence; I do not
 recommend accepting them on the timing above.
 
-**A second looser-than-webpki behavior, not covered by limbo, owner decision needed:** a
-certificate or CA whose `extendedKeyUsage` is `anyExtendedKeyUsage` alone is accepted for server
-authentication here (RFC 5280 §4.2.1.12 reads it as any purpose) and refused by webpki 0.103
-(it requires the specific `serverAuth` OID whenever the extension is present, on the leaf and on
-every issuer). Pinned by `any_extended_key_usage_is_accepted_here_and_refused_by_webpki`.
-Aligning is a one-line change in `check_eku` plus reversing an existing, tested leaf
-expectation; I recommend aligning (parity with the engine this would replace, and it is the
-tightening direction), but it reverses a documented choice, so it waits for the owner.
+**A second looser-than-webpki behavior, not covered by limbo, fixed 2026-10-12 (owner decision):**
+a certificate or CA whose `extendedKeyUsage` is `anyExtendedKeyUsage` alone was accepted for server
+authentication (RFC 5280 §4.2.1.12 reads it as any purpose) while webpki 0.103 refuses it (it
+requires the specific `serverAuth` OID whenever the extension is present, on the leaf and on every
+issuer). The owner chose to align with webpki. `check_eku` no longer treats the OID as a wildcard;
+`any_extended_key_usage_alone_does_not_satisfy_the_requirement` and
+`any_extended_key_usage_is_refused_like_webpki` (leaf and intermediate, ours and webpki) pin it. The
+limbo golden is unchanged (the corpus has no such case).
 
 Other divergences, none a defect in this validator:
 - 2 cases where this validator is *looser* than webpki and agrees with limbo (webpki is the stricter one): `pathlen::self-issued-certs-pathlen`, `rfc5280::nc::permitted-self-issued`.
