@@ -108,9 +108,9 @@ function show(id){
   syncDialog();
 }
 async function save(){
-  const t=typed();
-  const r=await act("card_update",{id:dlg.id,rev:dlg.base.rev,title:t.title,body:t.body,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)});
-  if(r&&dlg)dlg.base=snap(r.card);
+  const d=dlg,t=typed();
+  const r=await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)});
+  if(r&&dlg===d)d.base=snap(r.card);   // the dialog may have been closed or reopened on another card meanwhile
 }
 function syncDialog(){
   if(!dlg||!$("dlg").open)return;

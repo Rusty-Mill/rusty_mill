@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusty_multimodal_db_engine::generic::mmap_store::GenericMmapStore;
 use rusty_multimodal_db_engine::generic::production::GenericProductionStore;
@@ -76,9 +77,16 @@ impl ScannableField<Rev> for Row {
 type Db = GenericProductionStore<GenericMmapStore<Row, Kind, Rev>>;
 
 /// A [`Store`] persisted at a path (two files: `<path>` and `<path>.records`).
+///
+/// A failed durable append is *ambiguous*: the record may or may not have reached the log
+/// (the engine can fail after writing it). The store cannot tell, so it stops accepting
+/// writes (`BoardError::Storage`) rather than guess; reads keep serving the last state it
+/// knows. Reopening replays the log and settles the question either way.
 pub struct MmdbStore {
     db: Db,
     log: Mutex<Log>,
+    /// Set by a failed append; cleared only by reopening.
+    unsettled: AtomicBool,
 }
 
 fn storage(e: impl std::fmt::Display) -> BoardError {
@@ -118,11 +126,17 @@ impl MmdbStore {
         Ok(Self {
             db,
             log: Mutex::new(log),
+            unsettled: AtomicBool::new(false),
         })
     }
 
     fn commit(&self, card: &Card, event: Event, is_insert: bool) -> Result<(), BoardError> {
         let mut log = self.log.lock().map_err(poisoned)?;
+        if self.unsettled.load(Ordering::SeqCst) {
+            return Err(storage(
+                "an earlier write failed with an unknown outcome; reopen the store to settle it",
+            ));
+        }
         log.check(card, is_insert)?;
         let event = log.stamp(event);
         let row = Row {
@@ -135,8 +149,13 @@ impl MmdbStore {
             })
             .map_err(storage)?,
         };
-        // The one durable, atomic step. If it fails nothing has changed.
-        self.db.insert(row).map_err(storage)?;
+        // The one durable step. An error here does not prove nothing was written.
+        if let Err(e) = self.db.insert(row) {
+            self.unsettled.store(true, Ordering::SeqCst);
+            return Err(storage(format!(
+                "append failed, outcome unknown ({e}); the store refuses writes until reopened"
+            )));
+        }
         log.apply(card, event);
         Ok(())
     }

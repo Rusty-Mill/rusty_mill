@@ -110,3 +110,42 @@ fn stale_replace_conflicts() {
         Err(BoardError::Conflict)
     );
 }
+
+/// The engine can fail *after* its record is durable. The store must not claim "nothing
+/// changed": it refuses further writes, and a reopen reports what really happened.
+#[test]
+fn an_append_that_fails_after_the_log_write_is_unsettled_until_reopened() {
+    use rusty_multimodal_db_engine::test_support::{Fault, arm_fault};
+
+    let dir = std::env::temp_dir().join(format!("mill_board_fault_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("board.mmdb");
+    let _ = std::fs::remove_file(&path);
+    let board = Board::new(MmdbStore::open(&path).expect("open"), Roles::default());
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+
+    arm_fault(Fault::InsertAfterLog);
+    let failed = board.move_card(card.id, Column::Ready, &human);
+    assert!(matches!(failed, Err(BoardError::Storage(_))), "{failed:?}");
+    assert_eq!(
+        board.get(card.id).expect("get").column,
+        Column::Backlog,
+        "memory keeps the last known state"
+    );
+    let refused = board.comment(card.id, &human, "later");
+    assert!(
+        matches!(refused, Err(BoardError::Storage(ref m)) if m.contains("reopen")),
+        "no write on a guess: {refused:?}"
+    );
+    drop(board);
+
+    let board = Board::new(MmdbStore::open(&path).expect("reopen"), Roles::default());
+    let now = board.get(card.id).expect("get");
+    assert_eq!(now.column, Column::Ready, "the durable record is recovered");
+    assert!(now.comments.is_empty(), "the refused write never happened");
+    board
+        .comment(card.id, &human, "now fine")
+        .expect("writable again");
+    let _ = std::fs::remove_dir_all(&dir);
+}

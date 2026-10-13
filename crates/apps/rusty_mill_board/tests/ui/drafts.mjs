@@ -75,6 +75,30 @@ await api("card_update", { id: card.id, title: "Followed" });
 await sleep(3500);
 check((await title.inputValue()) === "Followed", "an unedited dialog follows a remote edit");
 
+// 6. A save still in flight when the dialog is closed and another card opened must not
+//    leak its result into the new dialog (it would carry the wrong revision).
+const cardB = (await api("card_add", { title: "Second card", body: "b" })).card;
+await page.keyboard.press("Escape");
+let release;
+const held = new Promise((r) => { release = r; });
+await page.route("**/api/card_update", async (route) => { await held; await route.continue(); });
+await page.locator(".card", { hasText: "Followed" }).click();
+await title.fill("Saved from A");
+await dialog.getByRole("button", { name: "Save" }).click();
+await page.keyboard.press("Escape");
+await page.locator(".card", { hasText: "Second card" }).click();
+await title.fill("Second saved");                                             // typing in B when A's save lands
+const late = page.waitForResponse("**/api/card_update");
+release();
+await late;
+await sleep(300);
+check(!(await dialog.locator(".banner").innerText()).includes("Someone else"), "A's late save does not raise a false conflict in B");
+await dialog.getByRole("button", { name: "Save" }).click();
+await sleep(800);
+await page.unroute("**/api/card_update");
+const got = (await api("card_get", { id: cardB.id })).card;
+check(got.title === "Second saved", `saving card B after A's late response applies (title is "${got.title}")`);
+
 check(errors.length === 0, `no page errors ${errors.join("; ")}`);
 await browser.close();
 if (failures.length) { console.error(`\n${failures.length} check(s) failed`); process.exit(1); }

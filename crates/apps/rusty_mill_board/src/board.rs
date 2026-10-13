@@ -251,6 +251,10 @@ impl<S: Store> Board<S> {
                 if entry_column(c.column) != Some(enter) {
                     return Err(BoardError::Conflict);
                 }
+                // Checked on the card being committed, not the earlier read.
+                if let Some(holder) = c.claim.as_ref().filter(|h| **h != by.name) {
+                    return Err(BoardError::Claimed(holder.clone()));
+                }
                 c.move_to(enter, by, now)
             })?;
         }

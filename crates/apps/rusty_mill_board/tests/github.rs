@@ -121,8 +121,8 @@ fn unlinked_card_creates_an_issue_with_the_right_request() {
     let sent = body["body"].as_str().expect("body");
     assert!(sent.starts_with("details"), "{sent}");
     assert!(
-        sent.ends_with(&format!("<!-- mill-board:card={} -->", card.id)),
-        "the issue carries a hidden marker naming its card, so a retry can adopt it: {sent}"
+        sent.contains(&format!("<!-- mill-board:card={} text=", card.id)) && sent.ends_with("-->"),
+        "the issue carries a hidden marker naming its card and creation text, so a retry can adopt it: {sent}"
     );
     assert_eq!(body["labels"], serde_json::json!(["board:backlog", "bbp"]));
 }

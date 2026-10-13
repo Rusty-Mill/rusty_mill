@@ -9,9 +9,12 @@
 //!   side wins. Both changed it: the board wins and the conflict is reported.
 //!   Timestamps are not used: a comment, a claim or a label change moves
 //!   them without touching the text.
-//! - an issue created from a card carries a hidden marker with the card's id,
-//!   so a run that was interrupted between creating the issue and linking it
-//!   **adopts** that issue next time instead of creating a duplicate.
+//! - an issue created from a card carries a hidden marker with the card's id
+//!   and the hash of the text it was created with, so a run interrupted between
+//!   creating the issue and linking it **adopts** that issue next time instead
+//!   of creating a duplicate, with the creation text as the common baseline (an
+//!   edit made on the forge in between is then pulled, not overwritten). With no
+//!   proven baseline, a difference is reported and neither side is touched.
 //! - unlinked **open** issues become Backlog cards; closed ones are not imported.
 //! - an issue closed on the forge while its card is not Done is reported as
 //!   drift, never reopened and never moved (moving to Done needs review).
@@ -109,6 +112,10 @@ pub struct Report {
     pub cards_pulled: usize,
     /// Issues whose text and card text both changed since the last sync (the board's won).
     pub conflicts: Vec<u64>,
+    /// Issues whose text differs from the card's with no proven common baseline: neither side was touched.
+    pub unresolved: Vec<u64>,
+    /// Cards left for the next run because they changed after this run read them.
+    pub deferred: usize,
     /// Issues closed on the forge whose card is not Done.
     pub drift: Vec<u64>,
     /// Linked issue numbers the forge no longer lists.
@@ -130,24 +137,62 @@ impl Report {
 const MARKER_START: &str = "<!-- mill-board:card=";
 const MARKER_END: &str = " -->";
 
-/// `body` with the hidden marker naming the card appended.
-fn with_marker(body: &str, card: Uuid) -> String {
-    format!("{}\n\n{MARKER_START}{card}{MARKER_END}", body.trim_end())
+/// The hidden marker an issue made from a card carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Marker {
+    /// The card the issue was made from.
+    pub card: Uuid,
+    /// [`text_hash`] of the title and body it was created with: the common
+    /// baseline if the run is interrupted before the link is saved. Absent on
+    /// markers written without one.
+    pub text: Option<u64>,
 }
 
-/// The body without its marker, and the card id the marker names, if any.
-fn split_marker(body: &str) -> (String, Option<Uuid>) {
-    let Some(start) = body.rfind(MARKER_START) else {
-        return (body.to_owned(), None);
+/// `body` with the hidden marker appended.
+fn with_marker(body: &str, marker: Marker) -> String {
+    let text = marker
+        .text
+        .map_or(String::new(), |t| format!(" text={t:016x}"));
+    format!(
+        "{}\n\n{MARKER_START}{}{text}{MARKER_END}",
+        body.trim_end(),
+        marker.card
+    )
+}
+
+fn parse_marker(inner: &str) -> Option<Marker> {
+    let mut parts = inner.split(' ');
+    let card = Uuid::parse_str(parts.next()?).ok()?;
+    let text = match parts.next() {
+        None => None,
+        Some(rest) => Some(u64::from_str_radix(rest.strip_prefix("text=")?, 16).ok()?),
     };
-    let after = &body[start + MARKER_START.len()..];
-    let id = after
-        .find(MARKER_END)
-        .and_then(|end| Uuid::parse_str(&after[..end]).ok());
-    match id {
-        Some(id) => (body[..start].trim_end().to_owned(), Some(id)),
-        None => (body.to_owned(), None),
+    parts.next().is_none().then_some(Marker { card, text })
+}
+
+/// The body without its marker, and the marker, if any. Only the marker is
+/// removed: text before and after it is kept (a person may type below it).
+/// An unparseable lookalike is just text and is left alone.
+fn split_marker(body: &str) -> (String, Option<Marker>) {
+    let mut end = body.len();
+    while let Some(start) = body[..end].rfind(MARKER_START) {
+        let after = &body[start + MARKER_START.len()..];
+        let parsed = after
+            .find(MARKER_END)
+            .and_then(|e| Some((e, parse_marker(&after[..e])?)));
+        if let Some((e, marker)) = parsed {
+            let before = body[..start].trim_end();
+            let rest = body[start + MARKER_START.len() + e + MARKER_END.len()..].trim_start();
+            let clean = match (before.is_empty(), rest.is_empty()) {
+                (_, true) => before.to_owned(),
+                (true, false) => rest.to_owned(),
+                (false, false) => format!("{before}\n\n{rest}"),
+            };
+            return (clean, Some(marker));
+        }
+        end = start;
     }
+    (body.to_owned(), None)
 }
 
 fn column_label(column: Column) -> String {
@@ -166,7 +211,12 @@ fn issue_text(issue: &Issue) -> u64 {
 /// The issue a card should be, given what the forge already has (if any):
 /// foreign labels are kept, the column label is replaced, missing tags added.
 /// `text` is the title and body to write; `marker` the card id to embed.
-fn draft(card: &Card, existing: Option<&Issue>, text: (&str, &str), marker: Option<Uuid>) -> Draft {
+fn draft(
+    card: &Card,
+    existing: Option<&Issue>,
+    text: (&str, &str),
+    marker: Option<Marker>,
+) -> Draft {
     let mut labels: Vec<String> = existing
         .map(|i| {
             i.labels
@@ -184,7 +234,7 @@ fn draft(card: &Card, existing: Option<&Issue>, text: (&str, &str), marker: Opti
     }
     Draft {
         title: text.0.to_owned(),
-        body: marker.map_or_else(|| text.1.to_owned(), |id| with_marker(text.1, id)),
+        body: marker.map_or_else(|| text.1.to_owned(), |m| with_marker(text.1, m)),
         labels,
         closed: card.column == Column::Done || existing.is_some_and(|i| i.closed),
     }
@@ -209,9 +259,9 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
     };
     let issues = forge.list_issues()?;
     let by_number: HashMap<u64, &Issue> = issues.iter().map(|i| (i.number, i)).collect();
-    let by_marker: HashMap<Uuid, &Issue> = issues
+    let by_marker: HashMap<Uuid, (&Issue, Marker)> = issues
         .iter()
-        .filter_map(|i| split_marker(&i.body).1.map(|id| (id, i)))
+        .filter_map(|i| split_marker(&i.body).1.map(|m| (m.card, (i, m))))
         .collect();
     let cards = board.list(None)?;
     let card_ids: HashSet<Uuid> = cards.iter().map(|c| c.id).collect();
@@ -243,7 +293,7 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
     {
         let (body, marker) = split_marker(&issue.body);
         // An issue made from a card (even one that has since been linked elsewhere) is not new work.
-        if marker.is_some_and(|id| card_ids.contains(&id)) {
+        if marker.is_some_and(|m| card_ids.contains(&m.card)) {
             continue;
         }
         let tags = issue
@@ -264,27 +314,30 @@ fn link_or_create(
     forge: &dyn Forge,
     actor: &Actor,
     card: &Card,
-    by_marker: &HashMap<Uuid, &Issue>,
+    by_marker: &HashMap<Uuid, (&Issue, Marker)>,
     linked: &mut HashSet<u64>,
     report: &mut Report,
 ) -> Result<(), SyncError> {
-    if let Some(issue) = by_marker
+    if let Some((issue, marker)) = by_marker
         .get(&card.id)
-        .filter(|i| !linked.contains(&i.number))
+        .filter(|(i, _)| !linked.contains(&i.number))
     {
-        // The issue's text is what both sides had when it was made: the baseline.
-        board.link_issue(card.id, issue.number, Some(issue_text(issue)), actor)?;
+        // The baseline is the text the issue was *created* with (recorded in its marker),
+        // not what it says now: an edit made on the forge since then is a change to merge,
+        // not the starting point. A marker without that hash proves no baseline, so none
+        // is recorded and a difference stays unresolved rather than being overwritten.
+        board.link_issue(card.id, issue.number, marker.text, actor)?;
         linked.insert(issue.number);
         report.issues_adopted += 1;
         return Ok(());
     }
-    let issue = forge.create_issue(&draft(card, None, (&card.title, &card.body), Some(card.id)))?;
-    board.link_issue(
-        card.id,
-        issue.number,
-        Some(text_hash(&card.title, &card.body)),
-        actor,
-    )?;
+    let created = text_hash(&card.title, &card.body);
+    let marker = Marker {
+        card: card.id,
+        text: Some(created),
+    };
+    let issue = forge.create_issue(&draft(card, None, (&card.title, &card.body), Some(marker)))?;
+    board.link_issue(card.id, issue.number, Some(created), actor)?;
     linked.insert(issue.number);
     report.issues_created += 1;
     Ok(())
@@ -310,17 +363,36 @@ fn sync_pair(
         match card.synced_text {
             // Only the board changed the text since the last sync.
             Some(base) if base == issue_hash => push_text = true,
-            // Only the forge did: take it.
+            // Only the forge did: take it, but only if the card is still as this run read it.
+            // A board edit that landed since must not be overwritten by a decision made
+            // from the older snapshot; the next run sees both changes and merges them.
             Some(base) if base == card_hash => {
-                card = board.edit(card.id, actor, Some(&issue.title), Some(&issue_body), None)?;
+                match board.edit_at(
+                    card.id,
+                    actor,
+                    Some(card.rev),
+                    Some(&issue.title),
+                    Some(&issue_body),
+                    None,
+                ) {
+                    Ok(edited) => card = edited,
+                    Err(BoardError::Conflict) => {
+                        report.deferred += 1;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e.into()),
+                }
                 card = board.mark_synced(card.id, issue_hash, actor)?;
                 report.cards_pulled += 1;
             }
-            // Both did (or there is no baseline to tell): the board owns state.
-            _ => {
+            // Both changed it since the agreed text: the board owns state.
+            Some(_) => {
                 push_text = true;
                 report.conflicts.push(issue.number);
             }
+            // No proven common text (a marker without a baseline): either side could be
+            // the newer one, so change neither and say so.
+            None => report.unresolved.push(issue.number),
         }
     }
     if issue.closed && card.column != Column::Done {
@@ -345,7 +417,8 @@ fn sync_pair(
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
     use crate::board::{Board, Roles};
@@ -422,6 +495,18 @@ mod tests {
         b.roles().actor("nano", "human").expect("role")
     }
 
+    /// A marker with no creation baseline.
+    fn plain(card: Uuid) -> Marker {
+        Marker { card, text: None }
+    }
+
+    fn marker(card: Uuid, text: u64) -> Marker {
+        Marker {
+            card,
+            text: Some(text),
+        }
+    }
+
     /// A store that fails its Nth commit, standing in for a crash between two steps.
     struct FailNth {
         inner: MemStore,
@@ -479,8 +564,11 @@ mod tests {
         assert_eq!(issue.labels, ["board:backlog", "bbp"]);
         assert_eq!(
             split_marker(&issue.body),
-            ("body".to_owned(), Some(card.id)),
-            "marker names the card"
+            (
+                "body".to_owned(),
+                Some(marker(card.id, text_hash("Ship", "body")))
+            ),
+            "the marker names the card and the text it was created with"
         );
         let linked = b.get(card.id).expect("card");
         assert_eq!(
@@ -645,7 +733,7 @@ mod tests {
         let card = b.add(&h, "T", "old", vec![]).expect("add");
         let forge = Fake::default();
         reconcile(&b, &forge).expect("sync");
-        forge.edit(1, |i| i.body = with_marker("new body", card.id));
+        forge.edit(1, |i| i.body = with_marker("new body", plain(card.id)));
         reconcile(&b, &forge).expect("sync");
         assert_eq!(b.get(card.id).expect("card").body, "new body");
     }
@@ -716,7 +804,7 @@ mod tests {
         forge.put(
             1,
             "Ship",
-            &with_marker("v1", card.id),
+            &with_marker("v1", marker(card.id, text_hash("Ship", "v1"))),
             &["board:backlog"],
             false,
         );
@@ -732,8 +820,8 @@ mod tests {
         let b = board();
         let card = b.add(&human(&b), "Ship", "", vec![]).expect("add");
         let forge = Fake::default();
-        forge.put(9, "Ship", &with_marker("", card.id), &[], false);
-        forge.put(4, "elsewhere", &with_marker("", card.id), &[], false); // a second one claiming the same card
+        forge.put(9, "Ship", &with_marker("", plain(card.id)), &[], false);
+        forge.put(4, "elsewhere", &with_marker("", plain(card.id)), &[], false); // a second one claiming the same card
         reconcile(&b, &forge).expect("sync");
         assert_eq!(
             b.list(None).expect("list").len(),
@@ -743,19 +831,250 @@ mod tests {
     }
 
     #[test]
-    fn markers_round_trip_and_ignore_lookalikes() {
+    fn markers_round_trip_and_keep_the_text_around_them() {
         let id = Uuid::from_u128(7);
+        let m = marker(id, 0xdead_beef);
         assert_eq!(
-            split_marker(&with_marker("hello  \n", id)),
-            ("hello".to_owned(), Some(id))
+            split_marker(&with_marker("hello  \n", m)),
+            ("hello".to_owned(), Some(m))
+        );
+        assert_eq!(
+            split_marker(&with_marker("x", plain(id))),
+            ("x".to_owned(), Some(plain(id)))
         );
         assert_eq!(split_marker("no marker"), ("no marker".to_owned(), None));
-        let broken = "text <!-- mill-board:card=not-a-uuid -->";
+
+        // Text typed above, below or around the marker is kept; only the marker goes.
+        let line = format!("{MARKER_START}{id} text=00000000deadbeef{MARKER_END}");
+        for (body, clean) in [
+            (format!("before\n\n{line}\n\nafter"), "before\n\nafter"),
+            (format!("{line}\n\nonly after"), "only after"),
+            (format!("only before\n\n{line}"), "only before"),
+            (format!("a\n{line}\nb\nc"), "a\n\nb\nc"),
+        ] {
+            assert_eq!(split_marker(&body), (clean.to_owned(), Some(m)), "{body}");
+        }
+    }
+
+    #[test]
+    fn malformed_markers_are_just_text_and_are_never_deleted() {
+        let id = Uuid::from_u128(7);
+        for bad in [
+            "text <!-- mill-board:card=not-a-uuid -->".to_owned(),
+            format!("text {MARKER_START}{id}"), // no closing
+            format!("text {MARKER_START}{id} text=zz{MARKER_END}"), // bad hex
+            format!("text {MARKER_START}{id} extra=1{MARKER_END}"), // unknown field
+            format!("text {MARKER_START}{id} text=1 text=2{MARKER_END}"), // too many parts
+            format!("text {MARKER_START}{MARKER_END}"), // empty
+        ] {
+            assert_eq!(split_marker(&bad), (bad.clone(), None), "{bad}");
+        }
+        // A broken marker after a good one does not hide it, and neither is lost.
+        let good = with_marker("body", plain(id));
+        let both = format!("{good}\n\nlater <!-- mill-board:card=oops -->");
+        let (clean, found) = split_marker(&both);
+        assert_eq!(found, Some(plain(id)));
+        assert_eq!(clean, "body\n\nlater <!-- mill-board:card=oops -->");
+    }
+
+    #[test]
+    fn text_written_below_the_marker_is_pulled_and_survives_later_pushes() {
+        let b = board();
+        let h = human(&b);
+        let card = b.add(&h, "Ship", "body", vec![]).expect("add");
+        let forge = Fake::default();
+        reconcile(&b, &forge).expect("sync");
+
+        // Someone types under the hidden marker in the issue.
+        forge.edit(1, |i| i.body.push_str("\n\nadded below the marker"));
+        let r = reconcile(&b, &forge).expect("sync");
+        assert_eq!(r.cards_pulled, 1);
         assert_eq!(
-            split_marker(broken),
-            (broken.to_owned(), None),
-            "an unparseable marker is just text"
+            b.get(card.id).expect("card").body,
+            "body\n\nadded below the marker",
+            "the text after the marker is part of the issue's text"
         );
+
+        // A later outbound sync must not delete it.
+        b.edit(card.id, &h, Some("Ship it"), None, None)
+            .expect("edit");
+        reconcile(&b, &forge).expect("sync");
+        let issue = forge.get(1);
+        assert_eq!(issue.title, "Ship it");
+        assert!(
+            issue.body.contains("added below the marker"),
+            "{}",
+            issue.body
+        );
+        assert!(issue.body.contains(MARKER_START), "the marker is kept");
+        assert!(reconcile(&b, &forge).expect("again").is_quiet());
+    }
+
+    // ---- lost-create recovery keeps the creation baseline
+
+    #[test]
+    fn an_edit_made_on_the_forge_between_a_lost_create_and_its_recovery_is_pulled_not_overwritten()
+    {
+        let b = board();
+        let card = b.add(&human(&b), "Ship", "v1", vec![]).expect("add");
+        let forge = Fake::default();
+        forge.lose_create_response.set(true);
+        assert!(reconcile(&b, &forge).is_err(), "created, response lost");
+        forge.lose_create_response.set(false);
+
+        // Before the run recovers, someone edits the issue on GitHub (the marker stays in the body).
+        forge.edit(1, |i| i.body = i.body.replace("v1", "v2"));
+        assert_eq!(split_marker(&forge.get(1).body).0, "v2");
+
+        let r = reconcile(&b, &forge).expect("recovery");
+        assert_eq!(r.issues_adopted, 1);
+        reconcile(&b, &forge).expect("next tick");
+
+        assert_eq!(
+            b.get(card.id).expect("card").body,
+            "v2",
+            "the forge edit wins: it is a change since creation"
+        );
+        assert_eq!(
+            split_marker(&forge.get(1).body).0,
+            "v2",
+            "and GitHub still says v2"
+        );
+        assert_eq!(forge.count(), 1);
+        assert!(reconcile(&b, &forge).expect("again").is_quiet());
+    }
+
+    #[test]
+    fn if_both_sides_edited_during_a_lost_create_the_board_wins_and_it_is_reported() {
+        let b = board();
+        let h = human(&b);
+        let card = b.add(&h, "Ship", "v1", vec![]).expect("add");
+        let forge = Fake::default();
+        forge.lose_create_response.set(true);
+        assert!(reconcile(&b, &forge).is_err());
+        forge.lose_create_response.set(false);
+        forge.edit(1, |i| i.body = i.body.replace("v1", "forge v2"));
+        b.edit(card.id, &h, None, Some("board v2"), None)
+            .expect("edit");
+
+        reconcile(&b, &forge).expect("recovery");
+        let r = reconcile(&b, &forge).expect("next tick");
+        assert_eq!(r.conflicts, [1]);
+        assert_eq!(split_marker(&forge.get(1).body).0, "board v2");
+    }
+
+    #[test]
+    fn recovery_without_a_proven_baseline_touches_neither_side() {
+        let b = board();
+        let card = b
+            .add(&human(&b), "Ship", "board text", vec![])
+            .expect("add");
+        let forge = Fake::default();
+        // An issue that names the card but records no creation text (an older or hand-made
+        // marker), whose text has since diverged from the card's.
+        forge.put(
+            1,
+            "Ship",
+            &with_marker("forge text", plain(card.id)),
+            &["board:backlog"],
+            false,
+        );
+
+        let r = reconcile(&b, &forge).expect("sync");
+        assert_eq!(r.issues_adopted, 1);
+        let r = reconcile(&b, &forge).expect("sync");
+        assert_eq!(r.unresolved, [1], "reported, not guessed at");
+        assert_eq!(b.get(card.id).expect("card").body, "board text");
+        assert_eq!(
+            split_marker(&forge.get(1).body).0,
+            "forge text",
+            "neither side overwritten"
+        );
+        assert_eq!(r.issues_updated + r.cards_pulled, 0);
+
+        // A person making the two agree resolves it for good.
+        b.edit(card.id, &human(&b), None, Some("forge text"), None)
+            .expect("edit");
+        assert!(reconcile(&b, &forge).expect("sync").unresolved.is_empty());
+        let settled = reconcile(&b, &forge).expect("sync");
+        assert!(settled.is_quiet() && settled.unresolved.is_empty());
+    }
+
+    // ---- a pull must not clobber a board edit that landed after the run read the card
+
+    /// A store that, right after the next `list` once armed, lands a board edit on the
+    /// first card: the race between a run's snapshot and its pull.
+    struct RaceAfterList {
+        inner: MemStore,
+        armed: Arc<AtomicBool>,
+    }
+
+    impl Store for RaceAfterList {
+        fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+            self.inner.get(id)
+        }
+        fn list(&self) -> Result<Vec<Card>, BoardError> {
+            let snapshot = self.inner.list()?;
+            if self.armed.swap(false, Ordering::SeqCst) {
+                let edited = snapshot[0]
+                    .edit(Some("Edited on the board meanwhile"), None, None, 1)
+                    .expect("edit");
+                let event =
+                    crate::domain::Event::of(&edited, crate::domain::EventKind::Edited, "nano");
+                self.inner.replace(&edited, event).expect("concurrent edit");
+            }
+            Ok(snapshot)
+        }
+        fn insert(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+            self.inner.insert(card, event)
+        }
+        fn replace(&self, card: &Card, event: crate::domain::Event) -> Result<(), BoardError> {
+            self.inner.replace(card, event)
+        }
+        fn events_since(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> Result<Vec<crate::domain::Event>, BoardError> {
+            self.inner.events_since(after, limit)
+        }
+        fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+            self.inner.last_event_id()
+        }
+    }
+
+    #[test]
+    fn a_pull_decided_from_an_older_snapshot_does_not_overwrite_a_board_edit() {
+        let armed = Arc::new(AtomicBool::new(false));
+        let store = RaceAfterList {
+            inner: MemStore::default(),
+            armed: Arc::clone(&armed),
+        };
+        let b: Shared = Board::new(Box::new(store), Roles::default());
+        let card = b.add(&human(&b), "Old", "body", vec![]).expect("add");
+        let forge = Fake::default();
+        reconcile(&b, &forge).expect("sync");
+
+        forge.edit(1, |i| i.title = "From GitHub".into());
+        armed.store(true, Ordering::SeqCst); // a board edit lands right after the next run reads the card
+
+        let r = reconcile(&b, &forge).expect("sync");
+        assert_eq!(
+            (r.deferred, r.cards_pulled),
+            (1, 0),
+            "the stale pull is deferred"
+        );
+        assert_eq!(
+            b.get(card.id).expect("card").title,
+            "Edited on the board meanwhile",
+            "the concurrent board edit is not overwritten"
+        );
+
+        // Next run sees both changes since the agreed text: the board wins, reported.
+        let r = reconcile(&b, &forge).expect("sync");
+        assert_eq!(r.conflicts, [1]);
+        assert_eq!(forge.get(1).title, "Edited on the board meanwhile");
+        assert!(reconcile(&b, &forge).expect("again").is_quiet());
     }
 
     #[test]

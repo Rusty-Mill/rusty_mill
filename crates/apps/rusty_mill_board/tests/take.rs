@@ -215,3 +215,92 @@ fn many_workers_claiming_one_card_produce_exactly_one_winner() {
         (Column::Building, Some(winners[0].clone()))
     );
 }
+
+/// A store that, right after the first `get` once armed, lets a rival claim the card:
+/// the race between `take`'s read of a Ready card and its move.
+struct RivalAfterGet {
+    inner: MemStore,
+    rival: Actor,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Store for RivalAfterGet {
+    fn get(&self, id: uuid::Uuid) -> Result<Option<rusty_mill_board::domain::Card>, BoardError> {
+        let seen = self.inner.get(id)?;
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let claimed = seen
+                .as_ref()
+                .expect("card")
+                .claim(&self.rival, 1)
+                .expect("rival claim");
+            let event = rusty_mill_board::domain::Event::of(
+                &claimed,
+                rusty_mill_board::domain::EventKind::Claimed,
+                &self.rival.name,
+            );
+            self.inner.replace(&claimed, event)?;
+        }
+        Ok(seen)
+    }
+    fn list(&self) -> Result<Vec<rusty_mill_board::domain::Card>, BoardError> {
+        self.inner.list()
+    }
+    fn insert(
+        &self,
+        c: &rusty_mill_board::domain::Card,
+        e: rusty_mill_board::domain::Event,
+    ) -> Result<(), BoardError> {
+        self.inner.insert(c, e)
+    }
+    fn replace(
+        &self,
+        c: &rusty_mill_board::domain::Card,
+        e: rusty_mill_board::domain::Event,
+    ) -> Result<(), BoardError> {
+        self.inner.replace(c, e)
+    }
+    fn events_since(
+        &self,
+        a: Option<uuid::Uuid>,
+        l: usize,
+    ) -> Result<Vec<rusty_mill_board::domain::Event>, BoardError> {
+        self.inner.events_since(a, l)
+    }
+    fn last_event_id(&self) -> Result<Option<uuid::Uuid>, BoardError> {
+        self.inner.last_event_id()
+    }
+}
+
+#[test]
+fn a_rival_claim_landing_after_the_read_stops_the_move() {
+    let roles = Roles::default();
+    let rival = roles.actor("codex", "builder").expect("role");
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store = RivalAfterGet {
+        inner: MemStore::default(),
+        rival,
+        armed: Arc::clone(&armed),
+    };
+    let b = Board::new(store, roles);
+    let h = who_in(&b, "nano", "human");
+    let c = b.add(&h, "a", "", vec![]).expect("add");
+    b.move_card(c.id, Column::Ready, &h).expect("ready");
+    let dev = who_in(&b, "claude", "builder");
+    // `take` by id: the first get inside it (the "current" read) triggers the rival.
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let err = b.take(&dev, Some(c.id)).expect_err("claimed by rival");
+    assert!(
+        matches!(err, BoardError::Claimed(ref h) if h == "codex"),
+        "{err:?}"
+    );
+    let now = b.get(c.id).expect("card");
+    assert_eq!(
+        (now.column, now.claim.as_deref()),
+        (Column::Ready, Some("codex")),
+        "not moved"
+    );
+}
+
+fn who_in<S: Store>(b: &Board<S>, name: &str, role: &str) -> Actor {
+    b.roles().actor(name, role).expect("role")
+}
