@@ -166,6 +166,45 @@ At bulk sizes AES is about 60% of the time and GHASH about 40%.
   conclusion that portable AES-GCM stays tens of times slower than `ring`.
 - Realistic ceiling for the portable path, as an estimate: roughly 150 to 200 MB/s bulk after both optimisations.
 
+### The `ct64` re-layout experiment (2026-10-10; run after the profile)
+
+The profile suggested repacking the bit planes so that a batch is a few blocks, not 64. I tried it: eight planes of
+`u64`, bit `16b + p` of plane `k` holding bit `k` of byte `p` of block `b`, so one S-box circuit handles four blocks
+(`aes.rs`; the previous layout is kept as `aes_wide.rs`, compiled only for tests, as an oracle and a baseline).
+Two plane sets run side by side per call (8 blocks), which measured best of one, two and four (AES-128 alone: 112,
+132 and 120 MB/s).
+
+**Correctness:** the new core matches the old one on 300 random keys and 64 random blocks each (both key sizes), the
+FIPS 197 vectors pass, the transposes and the plane layout match their definitions, and the whole GCM suite (spec
+vector, `ring` differential, tamper tests) passes unchanged.
+
+**End-to-end seal throughput, MB/s (single run each, same idle machine; `ring` varied by up to 1.6 times between runs,
+so compare the absolute columns, not the ratios):**
+
+| Size | AES-128 wide | AES-128 ct64 | AES-256 wide | AES-256 ct64 |
+| --- | --- | --- | --- | --- |
+| 64 B | 8.8 | 41.4 | 7.4 | 33.0 |
+| 1 KiB | 61.6 | 73.7 | 51.7 | 61.6 |
+| 16 KiB | 90.7 | 81.0 | 83.9 | 65.2 |
+| 16 MiB | 102.7 | 79.2 | 86.1 | 69.3 |
+
+**Reading:** small messages are about 4.7 times faster (64 B), 1 KiB about 20% faster, and bulk is 11% to 22% slower
+(AES-128 at 16 KiB 11% slower, AES-256 at 16 KiB 22% slower, 16 MiB 23% and 20% slower). The cause is in the linear
+layers: `shift_rows` and `mix_columns` now move bits within words and cost about five times more per block than the
+wide layout's word permutation, while the S-box got faster. GHASH (252 MB/s) is now a third of the time at bulk sizes.
+Not repeated, so run-to-run variance of these figures is unknown.
+
+**Options, none built:** (1) keep ct64 only, with one AES core to review: better for handshake messages, tickets and
+typical small records, 10 to 20% worse on 16 KiB records and bulk. (2) Keep both layouts and choose by length: best at
+every size, but two AES cores to review and to put through the evidence bar. (3) Keep the wide layout only: best
+for bulk, 4.7 times worse on 64-byte messages. **My recommendation is (1)**: TLS records are at most 16 KiB, the
+difference at that size is 11 to 22%, and a second core doubles the review and evidence work for a gain the
+client role is unlikely to notice.
+
+**Constant-time evidence for the new core:** the valgrind taint run was repeated on the new code (seal 0 reports,
+open exactly 1 (the public verdict), planted control caught), and the existing `rusty_aead` checks still pass. The
+earlier taint result applied to the old layout only. Still one build and one run per mode.
+
 **Early constant-time signal (valgrind taint, `examples/taint_aes.rs`; one build, one run each, x86-64):** key and
 plaintext marked secret, 2000-byte plaintext (covers the first and later batches). `gcm128-seal` and `gcm256-seal`: 0
 reports. `gcm128-open`: exactly 1 report, a conditional jump in `Gcm::open` (the public tag verdict). The planted

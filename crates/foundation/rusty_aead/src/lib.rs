@@ -26,6 +26,9 @@ extern crate std;
 
 mod aead;
 mod aes;
+#[cfg(test)]
+#[allow(dead_code)]
+mod aes_wide;
 mod chacha20;
 mod gcm;
 mod ghash;
