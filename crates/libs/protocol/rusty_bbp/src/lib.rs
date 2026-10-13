@@ -12,6 +12,7 @@ pub mod engine;
 pub mod event;
 pub mod fs_store;
 pub mod ids;
+pub mod metrics;
 pub mod record;
 pub mod role;
 pub mod state;

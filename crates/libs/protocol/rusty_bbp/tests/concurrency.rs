@@ -5,31 +5,6 @@ mod common;
 use common::*;
 use rusty_bbp::*;
 
-/// The four test roles plus `coder2` and `coder3`, which also build.
-fn builders() -> Vec<Role> {
-    let mut roles = four_roles();
-    for (name, order) in [("coder2", 4), ("coder3", 5)] {
-        let base = roles
-            .iter()
-            .find(|r| r.id.0 == "coder")
-            .expect("coder")
-            .clone();
-        let mut r = base;
-        r.id = RoleId(name.into());
-        r.turn_order = order;
-        roles.push(r);
-    }
-    roles
-}
-
-fn budget(messages: u64, reads_per_turn: u64) -> Budget {
-    Budget {
-        messages,
-        reads_per_turn,
-        ..default_budget()
-    }
-}
-
 fn live_roles(fx: &Fx) -> Vec<String> {
     fx.st().turns.iter().map(|t| t.role.0.clone()).collect()
 }
@@ -379,35 +354,6 @@ fn replay_equals_live_with_an_expired_turn_at_one_live_turn() {
 #[test]
 fn replay_equals_live_with_an_expired_turn_above_one_live_turn() {
     replay_equals_live(2);
-}
-
-/// The four roles plus a second reviewer, so `review` has two final-decision judges.
-fn two_reviewers() -> Vec<Role> {
-    let mut roles = four_roles();
-    let mut second = roles
-        .iter()
-        .find(|r| r.id.0 == "reviewer")
-        .expect("reviewer")
-        .clone();
-    second.id = RoleId("reviewer2".into());
-    second.turn_order = 6;
-    roles.push(second);
-    roles
-}
-
-/// The four roles plus a second tester: `test` has two non-final judges, which
-/// may hold turns together.
-fn two_testers() -> Vec<Role> {
-    let mut roles = four_roles();
-    let mut second = roles
-        .iter()
-        .find(|r| r.id.0 == "tester")
-        .expect("tester")
-        .clone();
-    second.id = RoleId("tester2".into());
-    second.turn_order = 6;
-    roles.push(second);
-    roles
 }
 
 /// A finalizer that also judges `test`, ordered first or last among the testers.

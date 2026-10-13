@@ -708,9 +708,11 @@ fn alive(pid: &str) -> bool {
 }
 
 /// Two builders hold live turns at once (`max_live_turns = 2`), each with its
-/// own harness. The coder's harness waits until the second builder's harness
-/// has started, so it deadlocks if turns are serialized. The coder's candidate
-/// then revokes the other turn, and the moderator kills that harness.
+/// own harness, and both edit the same lines of the same file. The coder's
+/// harness waits until the second builder has stored its diff, so it deadlocks
+/// if turns are serialized. The coder's candidate then revokes the other turn,
+/// the moderator kills that harness, and `bbp metrics` reports the lost work
+/// and the hunk-level overlap. This checks the measurement, not the criteria.
 #[test]
 fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
     let dir = tempdir("parallel");
@@ -766,9 +768,12 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
             r#"{{"name":"put_artifact","arguments":{{"op":"c1","kind":"diff","body":"{diff}"}}}}"#
         ),
         format!(
-            r#"{{"name":"put_artifact","arguments":{{"op":"c2","kind":"candidate","base":"{base}","diffs":[3],"body":""}}}}"#
+            r#"{{"name":"put_artifact","arguments":{{"op":"c2","kind":"candidate","base":"{base}","diffs":[4],"body":""}}}}"#
         ),
     ]);
+    let rival = mcp(&[format!(
+        r#"{{"name":"put_artifact","arguments":{{"op":"r1","kind":"diff","body":"{diff}"}}}}"#
+    )]);
     let launchers = Launchers::default()
         .with(
             "planner",
@@ -793,7 +798,11 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
         )
         .with(
             "coder2",
-            script(&dir, "coder2", "echo $$ > \"$1/coder2.pid\"\nexec sleep 300"),
+            script(
+                &dir,
+                "coder2",
+                &format!("{rival}echo $$ > \"$1/coder2.pid\"\nexec sleep 300"),
+            ),
         );
     let cfg = config(&dir, &task, repo, launchers, 60);
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
@@ -818,6 +827,34 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
     }
     let pid = std::fs::read_to_string(dir.join("coder2.pid")).expect("coder2 started");
     let pid = pid.trim();
+    let report = rusty_bbp_host::report::of(&dir, &task).expect("report");
+    assert_eq!(report.max_live_turns, 2);
+    assert_eq!(report.metrics.peak_live, 2);
+    assert_eq!(report.metrics.revocations, 1, "coder2's turn");
+    assert_eq!(
+        report.metrics.discarded.bytes,
+        diff.replace("\\n", "\n").len() as u64
+    );
+    assert_eq!(
+        (
+            report.overlap.unused_diffs,
+            report.overlap.file_overlap_diffs,
+            report.overlap.hunk_overlap_diffs
+        ),
+        (1, 1, 1),
+        "the loser edited the winner's lines"
+    );
+    let printed = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["metrics", "--dir"])
+        .arg(&dir)
+        .args(["--task", "T1"])
+        .output()
+        .expect("bbp metrics");
+    let printed = String::from_utf8_lossy(&printed.stdout);
+    assert!(
+        printed.contains("\"revocations\":1") && printed.contains("\"hunk_overlap_diffs\":1"),
+        "{printed}"
+    );
     let gone = Instant::now() + Duration::from_secs(10);
     while alive(pid) && Instant::now() < gone {
         std::thread::sleep(Duration::from_millis(50));
@@ -833,5 +870,6 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
     let out = moderator.join().expect("join").expect("moderator");
     assert_eq!(out.state, State::Cancelled);
     assert_eq!(out.turns_launched, 3, "planner, coder and coder2");
+    assert!(out.elapsed > Duration::ZERO && out.elapsed < Duration::from_secs(60));
     let _ = std::fs::remove_dir_all(&dir);
 }

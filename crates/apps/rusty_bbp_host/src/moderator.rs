@@ -98,6 +98,8 @@ pub struct Outcome {
     pub state: State,
     pub turns_launched: u64,
     pub runs: u64,
+    /// Wall clock from the loop's start to its end.
+    pub elapsed: Duration,
 }
 
 /// `<dir>/<sub>/<sha256(task id)>`: one directory per task, injective, so
@@ -281,6 +283,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
                 state,
                 turns_launched: launched.len() as u64,
                 runs: ran.len() as u64,
+                elapsed: started.elapsed(),
             });
         }
         if started.elapsed() > cfg.max_wall {
