@@ -13,7 +13,7 @@ crate rebuilds what the open code reveals of the second, with citations, in
 | `GameListener` | `TcpMessenger.WaitForConnectionAsync` (the game dials out to RLBot) |
 | `TickTracker`, `should_distribute`, `Roster` | `BridgeHandler.cs:90-110, 229-267` |
 | `BridgeLoop` | `BridgeHandler.HandleServer` |
-| `GameLink`, `GameCommand` | the five `TcpMessenger` methods RLBotCS calls, and `Input.cs` / `RunConsoleCommand.cs` |
+| `GameLink`, `GameCommand` | the `TcpMessenger` send methods RLBotCS calls, and `Input.cs` / `RunConsoleCommand.cs` |
 | `SimGameLink` | a game that is `rb_env` (via `rb_rlbot_core::Simulation`) |
 
 ## The real game
@@ -52,7 +52,8 @@ without blocking, applies the distribution rules, and sends bot input and state 
 (ball and car placement, boost). `rb_rl_bridge` puts it together:
 
 ```
-rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] [--match-length 5|10|20|unlimited] AGENT_ID:TEAM...
+rb_rl_bridge [--game-port N] [--port N] [--launch RocketLeague.exe] [--match-length 5|10|20|unlimited]
+             [--no-spawn] [--record-in FILE] [--record-out FILE] AGENT_ID:TEAM...
 ```
 
 Declare the attached match's duration with `--match-length` (default 5 minutes; use `unlimited`
