@@ -84,6 +84,11 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
                 principal,
                 code: r.code,
             });
+            // A refusal can end a turn and reschedule (a spent slice or read
+            // budget), and the replacement grant charges `turns`. Evaluate the
+            // budgets here too, or refused writes could mint turns past the
+            // limit without escalation.
+            evaluate_budgets(&mut w, now);
             Handled {
                 events: w.events,
                 response: Response::Rejected(r),

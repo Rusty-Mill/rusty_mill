@@ -485,6 +485,72 @@ fn abort_turn_without_an_id_ends_every_live_turn() {
     assert_eq!(fx.st().turns.len(), 2, "both slots were refilled");
 }
 
+/// A slice-refused write ends its turn and reschedules before the error
+/// returns. The replacement turn charges `turns`, so the budget check must run
+/// after that rejection, or fresh turns could be minted without bound.
+#[test]
+fn a_refused_write_cannot_mint_turns_past_the_turn_budget() {
+    let b = Budget {
+        messages: 3,
+        turns: 3,
+        ..default_budget()
+    };
+    let mut fx = Fx::concurrent(builders(), 2, b);
+    fx.reach_build();
+    // One message (the gate request) and three turns (planner, coder, coder2) are spent.
+    assert_eq!((fx.st().spent.messages, fx.st().spent.turns), (1, 3));
+    posted(fx.post("coder", ask("coder2", "a")));
+    posted(fx.post("coder2", ask("coder", "b")));
+    assert_eq!(
+        rejected(fx.post("coder", ask("coder2", "c"))),
+        Code::TurnBudgetExhausted
+    );
+    // The replacement grant crossed the turn budget: one overshoot, escalated.
+    assert_eq!(fx.st().spent.turns, 4);
+    assert_eq!(
+        fx.st().state,
+        State::Escalated,
+        "the crossing was evaluated"
+    );
+    // And no further turn can be minted by writing with fresh tokens.
+    for role in ["coder", "coder2", "coder3"] {
+        drop(fx.post(role, ask("planner", "again")));
+    }
+    assert_eq!(fx.st().spent.turns, 4, "no unbounded replacement grants");
+    let log = fx.d.store.events(&TaskId("T1".into()), 0).unwrap();
+    assert_eq!(
+        *fx.st(),
+        TaskState::fold(TaskId("T1".into()), &log),
+        "replay equals live"
+    );
+}
+
+/// The same path exists at one live turn: a read refused by `reads_per_turn`
+/// ends the turn and regrants it.
+#[test]
+fn a_refused_read_cannot_mint_turns_past_the_turn_budget_at_one_live_turn() {
+    let b = Budget {
+        turns: 1,
+        reads_per_turn: 1,
+        ..default_budget()
+    };
+    let mut fx = Fx::concurrent(four_roles(), 1, b);
+    let read = AgentAction::Read {
+        after: None,
+        limit: 5,
+    };
+    assert!(matches!(
+        fx.agent("planner", read.clone()),
+        Response::Read { .. }
+    ));
+    assert_eq!(
+        rejected(fx.agent("planner", read)),
+        Code::TurnBudgetExhausted
+    );
+    assert_eq!(fx.st().spent.turns, 2, "the regrant crossed the limit once");
+    assert_eq!(fx.st().state, State::Escalated);
+}
+
 mod model {
     use super::*;
     use proptest::prelude::*;
