@@ -211,13 +211,26 @@ fn opening_a_task_with_an_invalid_roster_is_refused_and_no_task_exists() {
     assert_eq!(rej.code, Code::BadRoster);
     assert!(rej.detail.contains("no finalizer"), "{}", rej.detail);
     assert!(!d.state.opened);
-    let events = d.store.events(&d.state.task, 0).expect("events");
+    let events = d.store.events(&d.state.task, 0).unwrap_or_default();
     assert!(
-        events
-            .iter()
-            .all(|e| !matches!(e, Event::TaskOpened { .. })),
-        "no task_opened was logged"
+        events.is_empty(),
+        "a refused open writes nothing: {events:?}"
     );
+    // The same task opens afterwards with a corrected roster.
+    let Command::Open(refused) = cmd else {
+        unreachable!("built above")
+    };
+    let mut fixed = four_roles();
+    fixed[3].final_decision = true;
+    let again = Command::Open(OpenTask {
+        roster: fixed,
+        ..refused
+    });
+    assert!(matches!(
+        d.dispatch(&again, Time(2)).expect("dispatch"),
+        Response::Stored(_)
+    ));
+    assert!(d.state.opened);
 }
 
 // ---------------------------------------------------------------- other roster shapes

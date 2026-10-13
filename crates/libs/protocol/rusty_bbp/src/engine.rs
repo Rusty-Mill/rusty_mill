@@ -71,6 +71,13 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
                 response: resp,
             }
         }
+        // A command refused before the task exists writes nothing: there is no
+        // log to record against, and a refused `open` (a bad roster) must leave
+        // the directory free for a corrected one.
+        Err(r) if !w.st.opened => Handled {
+            events: Vec::new(),
+            response: Response::Rejected(r),
+        },
         Err(r) => {
             let principal = principal_of(&w.st, cmd);
             w.emit(Event::Rejected {
