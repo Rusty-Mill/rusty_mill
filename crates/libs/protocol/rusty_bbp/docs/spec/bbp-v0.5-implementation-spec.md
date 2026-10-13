@@ -182,7 +182,7 @@ A **run** is one supervised execution of the frozen profile set against one cand
 
 ```json
 {
-  "v": 4,
+  "v": 5,
   "id": 41,
   "task": "T06",
   "from": "r2",
@@ -419,7 +419,7 @@ The host supplies the roster when it opens a task. BBP validates it, records it,
 
 ### Validation
 
-`task_opened` is refused, and no task exists, unless all of these hold. Each failure is reported with the field and role involved.
+`task_opened` is refused, and no task exists, unless all of these hold. A refused open writes nothing to the log (there is no task to record against), so the host can correct the roster and open the same task id again. Each failure is reported with the field and role involved.
 
 1. **Ids.** Every `id` is a valid token, none is reserved, none repeats.
 2. **Turn order.** Every `turn_order` is distinct, so the default holder is never a tie.
