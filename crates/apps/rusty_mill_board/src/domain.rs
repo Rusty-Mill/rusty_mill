@@ -212,11 +212,12 @@ pub enum EventKind {
     Linked,
 }
 
-/// One entry in the append-only log. `id` is a UUIDv7, so ids sort in
-/// commit order and double as a polling cursor.
+/// One entry in the append-only log. `id` is a UUIDv7 assigned by the store
+/// *inside* the commit, so ids sort in commit order and double as a polling
+/// cursor: a reader that has seen id N has seen every event committed before it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
-    /// Time-ordered identity and cursor.
+    /// Commit-ordered identity and cursor; nil until the store commits it.
     pub id: Uuid,
     /// Card concerned.
     pub card: Uuid,
@@ -232,11 +233,22 @@ pub struct Event {
     pub at_ms: i64,
 }
 
+/// The id for the next event: a fresh UUIDv7, forced above `last` so ids are
+/// strictly increasing even if the clock stalls or steps back.
+pub fn next_event_id(last: Option<Uuid>) -> Uuid {
+    let now = Uuid::now_v7();
+    match last {
+        Some(prev) if now <= prev => Uuid::from_u128(prev.as_u128().wrapping_add(1)),
+        _ => now,
+    }
+}
+
 impl Event {
-    /// The event describing `card` just after `kind` happened.
+    /// The event describing `card` just after `kind` happened. Its id is
+    /// assigned by the store at commit.
     pub fn of(card: &Card, kind: EventKind, actor: &str) -> Self {
         Self {
-            id: Uuid::now_v7(),
+            id: Uuid::nil(),
             card: card.id,
             actor: actor.to_owned(),
             kind,
@@ -534,6 +546,19 @@ mod tests {
         let nobody = actor("n", &[]);
         let c = card().move_to(Column::Blocked, &nobody, 1).expect("block");
         assert_eq!(c.column, Column::Blocked);
+    }
+
+    #[test]
+    fn event_ids_are_strictly_increasing_even_when_the_clock_is_not() {
+        let far_future = Uuid::from_u128(u128::MAX >> 8);
+        let next = next_event_id(Some(far_future));
+        assert!(next > far_future, "forced above the previous id");
+        let mut last = None;
+        for _ in 0..1000 {
+            let id = next_event_id(last);
+            assert!(last.is_none_or(|l| id > l));
+            last = Some(id);
+        }
     }
 
     #[test]

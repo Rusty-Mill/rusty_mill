@@ -22,9 +22,10 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   actor and role) and register `/mcp` in each model's own client; a model then pulls work with `card_take`,
   comments, and moves it on, using its own subscription session. See
   [`docs/connecting-models.md`](docs/connecting-models.md) for setup and the paste-in working loop.
-- **Storage:** `rusty_multimodal_db_engine` (cards and an append-only event log in one
-  table; claims are atomic via `replace_if`), or in memory when `--store` is omitted.
-  The event id is a UUIDv7 and doubles as the polling cursor (`board_events after=`).
+- **Storage:** `rusty_multimodal_db_engine` (one durable record per commit holds the event and the card after it,
+  so a commit is atomic; state is rebuilt from those records at open), or in memory when `--store` is omitted.
+  Event ids are UUIDv7 assigned inside the commit, so id order is commit order and doubles as the polling
+  cursor (`board_events` returns a `cursor`; `tail: true` starts a watcher at the current end).
 
 - **GitHub sync** (`--github-repo owner/name`, token in `GITHUB_TOKEN`, every
   `--github-secs`, default 60): stateless reconcile between cards and issues.

@@ -1,26 +1,36 @@
 //! Durable store on `rusty_multimodal_db_engine`.
 //!
-//! Cards and events share one mmap-backed table of [`Row`]s: the payload is
-//! JSON (the engine never parses it), `kind` is the indexed field that tells
-//! them apart, and `rev` is the scannable field. Atomic compare-and-swap is
-//! the engine's `replace_if`.
+//! **One durable record per commit.** Each commit is a single [`Row`] holding the
+//! event *and* the card as it is after the event, so there is no moment at which the
+//! card is saved but its event is not (or the reverse): the engine's single-record
+//! insert is the atomic step. The board's state (cards, event log) lives in memory
+//! and is rebuilt from the records at open, in event-id order. The commit lock
+//! covers the revision check, the event id assignment, the durable write and the
+//! in-memory update, so ids are in commit order and a failed write changes nothing.
+//! The cost is that the whole log is held in memory, which suits a board.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use rusty_multimodal_db_engine::generic::mmap_store::GenericMmapStore;
 use rusty_multimodal_db_engine::generic::production::GenericProductionStore;
 use rusty_multimodal_db_engine::generic::traits::{
     IndexedField, Record, ScannableField, SchemaTag,
 };
-use rusty_multimodal_db_engine::generic::{GuardedReplace, ReplaceError};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{BoardError, Card, Event};
-use crate::store::Store;
+use crate::store::{Log, Store};
 
-const CARD: &str = "card";
-const EVENT: &str = "event";
+const COMMIT: &str = "commit";
+
+/// What a commit stores: the event and the card after it.
+#[derive(Serialize, Deserialize)]
+struct Commit {
+    event: Event,
+    card: Card,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Row {
@@ -41,8 +51,9 @@ impl Record for Row {
 }
 
 // On-disk format name: changing the row layout means bumping the suffix.
+// `@2`: one `commit` record (event + card) replaced separate card and event records.
 impl SchemaTag for Row {
-    const SCHEMA_TAG: &'static str = "mill_board::Row@1";
+    const SCHEMA_TAG: &'static str = "mill_board::Row@2";
 }
 
 impl IndexedField<Kind> for Row {
@@ -67,30 +78,23 @@ type Db = GenericProductionStore<GenericMmapStore<Row, Kind, Rev>>;
 /// A [`Store`] persisted at a path (two files: `<path>` and `<path>.records`).
 pub struct MmdbStore {
     db: Db,
+    log: Mutex<Log>,
 }
 
 fn storage(e: impl std::fmt::Display) -> BoardError {
     BoardError::Storage(e.to_string())
 }
 
-fn row<T: Serialize>(id: Uuid, kind: &str, rev: u64, value: &T) -> Result<Row, BoardError> {
-    Ok(Row {
-        id,
-        kind: kind.to_owned(),
-        rev: i64::try_from(rev).map_err(storage)?,
-        json: serde_json::to_string(value).map_err(storage)?,
-    })
-}
-
-fn decode<T: DeserializeOwned>(row: &Row) -> Result<T, BoardError> {
-    serde_json::from_str(&row.json).map_err(storage)
+fn poisoned<T>(_: T) -> BoardError {
+    BoardError::Storage("lock poisoned".into())
 }
 
 impl MmdbStore {
-    /// Open the store at `path`, creating it if absent.
+    /// Open the store at `path`, creating it if absent, and rebuild the
+    /// board's state from its commit records.
     ///
     /// # Errors
-    /// If the files cannot be created or read back.
+    /// If the files cannot be created or read back, or a record does not decode.
     pub fn open(path: &Path) -> Result<Self, BoardError> {
         let core = if path.exists() {
             GenericMmapStore::open_portable(path)
@@ -98,74 +102,68 @@ impl MmdbStore {
             GenericMmapStore::create(Vec::new(), path)
         }
         .map_err(storage)?;
+        let db = GenericProductionStore::new(core);
+
+        let mut commits = db
+            .filter_eq::<Row, Kind>(&COMMIT.to_owned())
+            .into_iter()
+            .filter_map(|id| db.get::<Row>(id))
+            .map(|row| serde_json::from_str::<Commit>(&row.json).map_err(storage))
+            .collect::<Result<Vec<_>, _>>()?;
+        commits.sort_by_key(|c| c.event.id);
+        let mut log = Log::default();
+        for c in commits {
+            log.replay(c.card, c.event);
+        }
         Ok(Self {
-            db: GenericProductionStore::new(core),
+            db,
+            log: Mutex::new(log),
         })
     }
 
-    fn rows(&self, kind: &str) -> Vec<Row> {
-        self.db
-            .filter_eq::<Row, Kind>(&kind.to_owned())
-            .into_iter()
-            .filter_map(|id| self.db.get::<Row>(id))
-            .collect()
+    fn commit(&self, card: &Card, event: Event, is_insert: bool) -> Result<(), BoardError> {
+        let mut log = self.log.lock().map_err(poisoned)?;
+        log.check(card, is_insert)?;
+        let event = log.stamp(event);
+        let row = Row {
+            id: event.id,
+            kind: COMMIT.to_owned(),
+            rev: i64::try_from(card.rev).map_err(storage)?,
+            json: serde_json::to_string(&Commit {
+                event: event.clone(),
+                card: card.clone(),
+            })
+            .map_err(storage)?,
+        };
+        // The one durable, atomic step. If it fails nothing has changed.
+        self.db.insert(row).map_err(storage)?;
+        log.apply(card, event);
+        Ok(())
     }
 }
 
 impl Store for MmdbStore {
     fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
-        self.db
-            .get::<Row>(id)
-            .filter(|r| r.kind == CARD)
-            .map(|r| decode(&r))
-            .transpose()
+        Ok(self.log.lock().map_err(poisoned)?.get(id))
     }
 
     fn list(&self) -> Result<Vec<Card>, BoardError> {
-        let mut cards = self
-            .rows(CARD)
-            .iter()
-            .map(decode::<Card>)
-            .collect::<Result<Vec<_>, _>>()?;
-        cards.sort_by_key(|c| (c.created_ms, c.id));
-        Ok(cards)
+        Ok(self.log.lock().map_err(poisoned)?.list())
     }
 
-    fn insert(&self, card: &Card, event: &Event) -> Result<(), BoardError> {
-        self.db
-            .insert(row(card.id, CARD, card.rev, card)?)
-            .map_err(|_| BoardError::Conflict)?;
-        self.db
-            .insert(row(event.id, EVENT, event.rev, event)?)
-            .map_err(storage)
+    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+        self.commit(card, event, true)
     }
 
-    fn replace(&self, card: &Card, event: &Event) -> Result<(), BoardError> {
-        let expected = i64::try_from(card.rev).map_err(storage)? - 1;
-        match self
-            .db
-            .replace_if(row(card.id, CARD, card.rev, card)?, |cur| {
-                cur.rev == expected
-            }) {
-            Ok(GuardedReplace::Replaced) => {}
-            Ok(GuardedReplace::Refused) => return Err(BoardError::Conflict),
-            Err(ReplaceError::NotFound(id)) => return Err(BoardError::NotFound(id)),
-            Err(e) => return Err(storage(e)),
-        }
-        self.db
-            .insert(row(event.id, EVENT, event.rev, event)?)
-            .map_err(storage)
+    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+        self.commit(card, event, false)
     }
 
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {
-        let mut events = self
-            .rows(EVENT)
-            .iter()
-            .filter(|r| after.is_none_or(|a| r.id > a))
-            .map(decode::<Event>)
-            .collect::<Result<Vec<_>, _>>()?;
-        events.sort_by_key(|e| e.id);
-        events.truncate(limit);
-        Ok(events)
+        Ok(self.log.lock().map_err(poisoned)?.since(after, limit))
+    }
+
+    fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+        Ok(self.log.lock().map_err(poisoned)?.last_id())
     }
 }

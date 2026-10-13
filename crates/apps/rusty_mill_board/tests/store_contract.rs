@@ -97,16 +97,16 @@ fn stale_replace_conflicts() {
     let store = MemStore::default();
     let card = Card::new("a", "", vec![], 0).expect("card");
     store
-        .insert(&card, &Event::of(&card, EventKind::Created, "x"))
+        .insert(&card, Event::of(&card, EventKind::Created, "x"))
         .expect("insert");
     let human = Roles::default().actor("n", "human").expect("role");
     let v1 = card.edit(Some("b"), None, None, 1).expect("edit");
     store
-        .replace(&v1, &Event::of(&v1, EventKind::Edited, "x"))
+        .replace(&v1, Event::of(&v1, EventKind::Edited, "x"))
         .expect("v1");
     let stale = card.comment(&human, "late", 2).expect("comment");
     assert_eq!(
-        store.replace(&stale, &Event::of(&stale, EventKind::Commented, "x")),
+        store.replace(&stale, Event::of(&stale, EventKind::Commented, "x")),
         Err(BoardError::Conflict)
     );
 }

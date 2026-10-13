@@ -215,6 +215,10 @@ struct EventsArgs {
     after: Option<String>,
     /// At most this many (default 100).
     limit: Option<usize>,
+    /// Return no events, only the `cursor` at the end of the log right now. Start
+    /// a watcher with this, then read the board: anything that changes in between
+    /// is delivered by the next poll.
+    tail: Option<bool>,
 }
 
 fn id(raw: &str) -> Result<Uuid, BoardError> {
@@ -244,10 +248,15 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_events",
-            "Poll the change log. Pass the last event id seen as `after` to get only newer events.",
+            "Poll the change log, oldest first. Send the `cursor` of your last reply as `after` to get only newer events (the reply's `cursor` is the last event returned, or your `after` if none). `tail: true` returns just the current end of the log, to start a watcher.",
             |b, _, a: EventsArgs| {
+                if a.tail == Some(true) {
+                    return to_json(json!({ "events": [], "cursor": b.cursor()? }));
+                }
                 let after = a.after.as_deref().map(id).transpose()?;
-                to_json(json!({ "events": b.events(after, a.limit.unwrap_or(100))? }))
+                let events = b.events(after, a.limit.unwrap_or(100))?;
+                let cursor = events.last().map(|e| e.id).or(after);
+                to_json(json!({ "events": events, "cursor": cursor }))
             },
         ),
         op(

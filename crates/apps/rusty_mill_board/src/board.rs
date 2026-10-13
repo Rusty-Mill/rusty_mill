@@ -117,6 +117,14 @@ impl<S: Store> Board<S> {
         self.store.events_since(after, limit)
     }
 
+    /// The newest event id: a cursor that has seen everything committed so far.
+    ///
+    /// # Errors
+    /// On storage failure.
+    pub fn cursor(&self) -> Result<Option<Uuid>, BoardError> {
+        self.store.last_event_id()
+    }
+
     /// Create a Backlog card.
     ///
     /// # Errors
@@ -130,7 +138,7 @@ impl<S: Store> Board<S> {
     ) -> Result<Card, BoardError> {
         let card = Card::new(title, body, tags, (self.clock)())?;
         self.store
-            .insert(&card, &Event::of(&card, EventKind::Created, &by.name))?;
+            .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
         Ok(card)
     }
 
@@ -149,7 +157,7 @@ impl<S: Store> Board<S> {
         let mut card = Card::new(title, body, tags, (self.clock)())?;
         card.issue = Some(issue);
         self.store
-            .insert(&card, &Event::of(&card, EventKind::Created, &by.name))?;
+            .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
         Ok(card)
     }
 
@@ -217,7 +225,7 @@ impl<S: Store> Board<S> {
     ) -> Result<Card, BoardError> {
         for _ in 0..RETRIES {
             let next = op(&self.get(id)?, (self.clock)())?;
-            match self.store.replace(&next, &Event::of(&next, kind, &by.name)) {
+            match self.store.replace(&next, Event::of(&next, kind, &by.name)) {
                 Err(BoardError::Conflict) => continue,
                 result => return result.map(|()| next),
             }
