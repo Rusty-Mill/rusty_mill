@@ -123,14 +123,15 @@ pub struct Report {
 }
 
 impl Report {
-    /// Nothing changed on either side.
+    /// Nothing changed on either side and nothing waits for a person to reconcile.
     pub fn is_quiet(&self) -> bool {
-        self.issues_created
-            + self.issues_adopted
-            + self.issues_updated
-            + self.cards_imported
-            + self.cards_pulled
-            == 0
+        self.unresolved.is_empty()
+            && self.issues_created
+                + self.issues_adopted
+                + self.issues_updated
+                + self.cards_imported
+                + self.cards_pulled
+                == 0
     }
 }
 
@@ -182,7 +183,10 @@ fn split_marker(body: &str) -> (String, Option<Marker>) {
             .and_then(|e| Some((e, parse_marker(&after[..e])?)));
         if let Some((e, marker)) = parsed {
             let before = body[..start].trim_end();
-            let rest = body[start + MARKER_START.len() + e + MARKER_END.len()..].trim_start();
+            // Drop only the blank-line separator: indentation of the first line is content
+            // (an indented Markdown code block) and must survive a pull.
+            let rest = body[start + MARKER_START.len() + e + MARKER_END.len()..]
+                .trim_start_matches(['\n', '\r']);
             let clean = match (before.is_empty(), rest.is_empty()) {
                 (_, true) => before.to_owned(),
                 (true, false) => rest.to_owned(),
@@ -851,6 +855,12 @@ mod tests {
             (format!("{line}\n\nonly after"), "only after"),
             (format!("only before\n\n{line}"), "only before"),
             (format!("a\n{line}\nb\nc"), "a\n\nb\nc"),
+            // Leading indentation after the marker is content, not separator.
+            (format!("{line}\n\n    code()\n"), "    code()\n"),
+            (
+                format!("intro\n\n{line}\n\n    code()"),
+                "intro\n\n    code()",
+            ),
         ] {
             assert_eq!(split_marker(&body), (clean.to_owned(), Some(m)), "{body}");
         }
@@ -908,6 +918,31 @@ mod tests {
         );
         assert!(issue.body.contains(MARKER_START), "the marker is kept");
         assert!(reconcile(&b, &forge).expect("again").is_quiet());
+    }
+
+    #[test]
+    fn an_indented_code_block_after_the_marker_keeps_its_indentation() {
+        let b = board();
+        let h = human(&b);
+        let card = b.add(&h, "Ship", "body", vec![]).expect("add");
+        let forge = Fake::default();
+        reconcile(&b, &forge).expect("sync");
+
+        forge.edit(1, |i| {
+            i.body = i.body.replace("-->", "-->\n\n    let x = 1;\n    x");
+        });
+        assert_eq!(reconcile(&b, &forge).expect("sync").cards_pulled, 1);
+        let pulled = b.get(card.id).expect("card").body;
+        assert!(pulled.ends_with("\n\n    let x = 1;\n    x"), "{pulled:?}");
+
+        b.edit(card.id, &h, Some("Ship it"), None, None)
+            .expect("edit");
+        reconcile(&b, &forge).expect("sync");
+        assert!(
+            forge.get(1).body.contains("\n\n    let x = 1;\n    x"),
+            "a later push keeps the code block: {:?}",
+            forge.get(1).body
+        );
     }
 
     // ---- lost-create recovery keeps the creation baseline
@@ -984,6 +1019,10 @@ mod tests {
         assert_eq!(r.issues_adopted, 1);
         let r = reconcile(&b, &forge).expect("sync");
         assert_eq!(r.unresolved, [1], "reported, not guessed at");
+        assert!(
+            !r.is_quiet(),
+            "a pair that needs a person is never a quiet run"
+        );
         assert_eq!(b.get(card.id).expect("card").body, "board text");
         assert_eq!(
             split_marker(&forge.get(1).body).0,
