@@ -1,0 +1,11 @@
+---
+category: Added
+changelog: **BBP event-driven scheduling, opt-in per task.** `SchedulingPolicy::EventDriven` picks the next turn holder from `wake_set` and falls back to the turn-based choice on a quiet board. Default stays `TurnBased`; no task is opted in.
+---
+## 2026-10-14 - BBP: live event-driven scheduling (phase 1, step 6)
+
+- **Added:** `SchedulingPolicy::EventDriven`, recorded in `task_opened` (`"policy":"EventDriven"`). `pick_next` returns the first role in `wake_set` whose reason is selectable, else the `TurnBased` list. Exactly one live turn still: opening an event-driven task with `max_live_turns != 1` is refused with `bad_live_turns`. R14 token binding, stale-turn rejection, deadlines and the turn cap in `grant` are unchanged. Explicit grants (yield, human `ask`, settlement, consultation return) bypass the policy as before.
+- **Added:** `bbp open --policy turn-based|event-driven` (default `turn-based`) and a `policy` argument to `admin::open_task_live`.
+- **Unchanged:** the default is `TurnBased`, not written to the log, so every existing log and golden is byte for byte what it was. Shadow records are made only for `TurnBased` tasks. No task is opted in by this change.
+- **Added (tests):** the same scripts under both policies (a question to a non-default role, a quiet board, an observer-only artifact, a broadcast verdict, a whole task to `approved`), the open-time refusal, and the R17 merge-gate trace: a second `final_decision` role is named by the tester, gets the `review` turn through `wake_set`, posts a real `revise`, and the gate is blocked and the merge refused. Under `TurnBased` the second role never gets that turn. Mutation checked: disabling the `wake_set` pick fails the question and R17 cases.
+- **Known limitations:** an event-driven log has a `policy` key, so a reader older than this change refuses it (a `TurnBased` log is unaffected). A non-serving role picked as `Addressed` takes a `default` turn, not a `consultation` one. In the engine's own flow a `revise` from a final role sends the task to `build` before the gate is reachable; the R17 check at the gate is the second line of defence, and its injected-event test stays.
