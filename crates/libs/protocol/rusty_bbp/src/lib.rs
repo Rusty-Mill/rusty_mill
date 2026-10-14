@@ -17,11 +17,12 @@ pub mod policy;
 pub mod record;
 pub mod role;
 pub mod shadow;
+pub mod spec_metrics;
 pub mod state;
 pub mod store;
 pub mod wake;
 
-pub use codec::{decode_artifact, encode_artifact, SpecFile};
+pub use codec::{decode_artifact, encode_artifact, spec_markdown, SpecFile};
 pub use command::{AgentAction, Code, Command, HumanAction, OpenTask, Rejection, Response};
 pub use engine::{handle, Handled};
 pub use event::{

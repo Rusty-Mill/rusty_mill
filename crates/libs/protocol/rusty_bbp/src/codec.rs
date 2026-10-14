@@ -48,6 +48,11 @@ pub fn decode_artifact(kind: ArtifactKind, bytes: &[u8]) -> Result<ArtifactPaylo
     })
 }
 
+/// The Markdown of a stored `spec` artifact.
+pub fn spec_markdown(bytes: &[u8]) -> Result<String, DecodeError> {
+    Ok(json::<SpecFile>(bytes)?.markdown)
+}
+
 /// Produce the bytes whose decoding yields `payload`. `body` is the raw
 /// content for `brief`, `diff` and `log`, and the Markdown for `spec`;
 /// it is ignored for `candidate` and `test_report`.
