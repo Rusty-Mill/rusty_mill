@@ -123,6 +123,8 @@ const REVIEW_MEMORY = [
   `Truth-check sub-agents get the fixed brief from super-review → "Adversarial mode", verbatim. After collecting, reclass any Over-engineering Blocker to Should fix; it never decides merge or bounce.`,
   // Merge policy + migrations live in the gate (run.md → Merge protocol step 5).
   `Merge only via super-board-merge-gate.sh. Exit 7 = merge_policy says a human merges (money/auth/schema/size): Blocked with the 🙋 template quoting its human-gate lines; To unblock = merge it yourself, or comment done to approve.`,
+  `Exit 9 = the PR does not target the configured base, or the repo allows no merge method this config permits: Blocked with the 🙋 template quoting the gate's line; never change repository settings or retarget the PR yourself.`,
+  `Exit 10 = CI for the exact head is still running: leave the card in Review (status=advanced is wrong; report column Review, detail "CI pending") and the next wave retries. Exit 11 = CI failed on the head: bounce to Build with the failing check names. Exit 12 = CI evidence missing or for another head: Blocked 🙋.`,
   `Exit 8 = 🙋 needs you (migration for a DB the robot may not touch, failed migrate, declared human step): Blocked with the 🙋 template, exact commands from its needs-you lines, label needs-you.`,
 ]
 
@@ -134,7 +136,10 @@ const BOARD_IO = () =>
   `Board moves and reads: .claude/bin/super-board-card.sh --config ${input.configPath} move <issue> <Status> ` +
   `(1 GraphQL point) · status <issue> · items. Comments, labels, PR reads: REST per .claude/skills/super-board/references/rate-limit-etiquette.md → "Price list". Read GitHub once per decision, never in a sleep loop.`
 
-const lanePrompt = (lane, card) => [
+// `ctx` is where the card really is when this lane starts: { at: its column now,
+// prior: the previous lane's exit (branch, prUrl, detail) }. The original plan card
+// is stale after Build, so lane behaviour keys off ctx, never off card.status.
+const lanePrompt = (lane, card, ctx = { at: card.status, prior: null }) => [
   READ_FAILURE,
   `Run ${LANE[lane].skill} on issue #${card.number} ("${card.title}") for a super-board workflow wave.`,
   `Read .claude/skills/super-board/references/run.md → "${LANE[lane].section}" lifecycle and follow it EXACTLY:`,
@@ -143,8 +148,15 @@ const lanePrompt = (lane, card) => [
   BOARD_IO(),
   `Commits, PR title, PR body blocks, comments: .claude/skills/super-board/references/writing-standard.md. Rewrite only your own PR body blocks, with .claude/bin/super-board-pr-body.sh.`,
   ...(lane === 'review' ? REVIEW_MEMORY : []),
-  ...(lane === 'qa' && card.status === 'Ready'
+  // Only a card that is labelled qa AND still in Ready starts from the base branch.
+  ...(lane === 'qa' && ctx.at === 'Ready' && labelsOf(card).includes('qa')
     ? [`This card is labelled qa: it skips Building. Move it Ready → QA yourself, create the issue branch from the base branch, and test what is already there (run.md → "qa cards").`]
+    : []),
+  // A card that just left Build is tested as built: that branch and PR, not the base.
+  ...(ctx.prior && ctx.prior.status === 'advanced'
+    ? [`The previous lane (${ctx.prior.lane || 'build'}) advanced this card to ${ctx.prior.column || ctx.at}. Test THAT change: ` +
+       `${ctx.prior.branch ? `branch ${ctx.prior.branch}` : 'the issue branch'}${ctx.prior.prUrl ? `, PR ${ctx.prior.prUrl}` : ''}. ` +
+       `Do not recreate the branch from the base and do not test the base alone. ${ctx.prior.detail ? `Handoff note: ${ctx.prior.detail}` : ''}`]
     : []),
   ``,
   `Report your exit via structured output:`,
@@ -173,13 +185,13 @@ const tierFor = (cls) => (cls ? ladder[cls.complexity] : undefined)
 // The classify router writes no code — haiku is fine except on --high runs.
 const classifyModel = (input.tier || 'medium') === 'high' ? 'sonnet' : 'haiku'
 
-const runLane = async (lane, card, model, history) => {
+const runLane = async (lane, card, model, history, ctx) => {
   if (halted) {
     const result = { status: 'halted', column: card.status, detail: 'run halted by a required GitHub read failure' }
     history.push({ lane, ...result })
     return result
   }
-  const r = await agent(lanePrompt(lane, card), {
+  const r = await agent(lanePrompt(lane, card, ctx), {
     label: `${lane}:#${card.number}`,
     phase: LANE[lane].phase,
     schema: STAGE_SCHEMA,
@@ -302,28 +314,32 @@ const results = await pipeline(
     if (halted) return { number: card.number, history: [{ lane: 'none', status: 'halted', column: card.status, detail: 'run halted; preserve current work and resume explicitly' }] }
     const model = tierFor(prev && prev.cls)
     let at = card.status
+    let prior = null   // the previous lane's exit, handed to the next lane
 
     if (at === 'Ready' && readyLane(card) === 'build') {
       if (!preflightGo(card)) {
         history.push(preflightExit(card))
         return { number: card.number, history }
       }
-      const b = await runLane('build', card, model, history)
+      const b = await runLane('build', card, model, history, { at, prior: null })
       if (b.status !== 'advanced') return { number: card.number, history }
+      prior = { ...b, lane: 'build' }
       at = 'QA'
     }
     // A `qa`-labelled card skips Building: Ready → QA, Tester first
     // (run.md "Lanes and label routing").
+    const qaStartAt = at   // 'Ready' for a qa-labelled card (the Tester moves it), else 'QA'
     if (at === 'Ready' && readyLane(card) === 'qa') at = 'QA'
     if (at === 'QA') {
-      const q = await runLane('qa', card, model, history)
+      const q = await runLane('qa', card, model, history, { at: qaStartAt, prior })
       if (q.status !== 'advanced') return { number: card.number, history }
+      prior = { ...q, lane: 'qa' }
       at = 'Review'
     }
     if (at === 'Review') {
       // Reviewer always on session model. No lane-level serialisation: the merge
       // gate holds the mutex for the merge alone (see the note above).
-      await runLane('review', card, undefined, history)
+      await runLane('review', card, undefined, history, { at, prior })
     }
     return { number: card.number, history }
   }
