@@ -333,8 +333,15 @@ fn a_silent_game_does_not_hold_back_the_lines_the_runner_waits_for() {
         }
     });
     let next = |what: &str| {
-        rx.recv_timeout(Duration::from_secs(10))
-            .unwrap_or_else(|_| panic!("no line for: {what}"))
+        let line = rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("no line for: {what}"));
+        // Every line says when it was printed: `[  12.345s] ...`.
+        assert!(
+            line.starts_with('[') && line.contains("s] "),
+            "no timestamp: {line}"
+        );
+        line
     };
     // The bots' port is announced without any game.
     let mut seen = Vec::new();

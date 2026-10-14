@@ -21,7 +21,8 @@ use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use rb_rl_game_bridge::{
     rlbot_args, GameLaunch, GameListener, LinkBackend, IDEAL_GAME_PORT, RLBOT_SOCKETS_PORT,
@@ -157,6 +158,21 @@ fn bind_bots(port: u16) -> io::Result<TcpListener> {
     })
 }
 
+/// `line` as the bridge prints it: led by the seconds since the process started, so a log says
+/// when each step happened (the game's first message comes a while after it dials).
+fn stamped(elapsed: Duration, line: &str) -> String {
+    format!("[{:8.3}s] {line}", elapsed.as_secs_f64())
+}
+
+/// Prints `line` with its timestamp. The start is the first call, which is the first line.
+fn say(line: &str) {
+    static START: OnceLock<Instant> = OnceLock::new();
+    println!(
+        "{}",
+        stamped(START.get_or_init(Instant::now).elapsed(), line)
+    );
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse(std::env::args().skip(1))?;
     let (inbound, outbound) = open_recordings(&args)?;
@@ -164,12 +180,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let bots = bind_bots(args.port)?;
     // Listening is announced here, before the game is found: the game's first message can come a
     // while after it dials, and what starts the bots (the live-test runner) must not wait on it.
-    println!("serving bots on {}", bots.local_addr()?);
-    println!(
+    say(&format!("serving bots on {}", bots.local_addr()?));
+    say(&format!(
         "waiting for the game on 127.0.0.1:{}; start it with: {}",
         args.game_port,
         rlbot_args(args.game_port).join(" ")
-    );
+    ));
     let _child = args
         .launch
         .as_deref()
@@ -178,10 +194,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Only a connection that speaks as the game does is taken for it, so a stray local connection
     // cannot hold the game's place. The game's first message can come a while after it dials.
     let stream = listener
-        .wait_for_game(Duration::from_secs(300), |note| println!("{note}"))?
+        .wait_for_game(Duration::from_secs(300), say)?
         .ok_or("the game did not connect within five minutes")?;
     stream.set_nonblocking(true)?;
-    println!("the game connected");
+    say("the game connected");
 
     // This declares the attached match; it does not change the game's settings.
     let configuration = bot_match(&args.players, args.length);
@@ -196,9 +212,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let end = core.run(&AtomicBool::new(false), |event| match event {
         // Already announced above, when the port was taken.
         Event::Listening(_) => {}
-        event => println!("{event:?}"),
+        event => say(&format!("{event:?}")),
     })?;
-    println!("rb_rl_bridge finished: {end:?}");
+    say(&format!("rb_rl_bridge finished: {end:?}"));
     Ok(())
 }
 
@@ -216,6 +232,15 @@ fn main() -> ExitCode {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_is_led_by_its_seconds_in_a_fixed_width_stamp() {
+        assert_eq!(stamped(Duration::ZERO, "x"), "[   0.000s] x");
+        assert_eq!(stamped(Duration::from_millis(45_678), "x"), "[  45.678s] x");
+        // Past a thousand seconds the stamp grows rather than truncating.
+        assert_eq!(stamped(Duration::from_secs(12_345), "x"), "[12345.000s] x");
+    }
+
     #[test]
     fn attached_duration_is_declared_not_always_unlimited() {
         let args = parse(["bot:0".to_string()].into_iter()).unwrap();

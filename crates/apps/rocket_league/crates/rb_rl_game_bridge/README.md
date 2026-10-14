@@ -93,6 +93,8 @@ its state setting becomes a ball placement.
   taken (bots may start now); `a connection from ... is waiting to speak` when something dials
   the game port (the live-test runner waits for this one: the game has dialled); `the game
   connected` when a connection has spoken as the game (in a live run, at the splash screen).
+  Every line starts with `[  12.345s]`, the seconds since the first line, so the gap between
+  the last two is read off the log.
 - **The bots' port is taken at startup**, before the game is launched: a clash fails at once
   naming the port, and a bot that starts while the game is still loading connects and waits for
   its handshake instead of being refused. (How long a given bot waits is the bot's own timeout.)
