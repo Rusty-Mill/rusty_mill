@@ -171,26 +171,41 @@ fn compare(base: &[String], a: &[String], b: &[String]) -> PairOutcome {
     }
 }
 
-/// The spec versions in storage order, and the position of the one approved at
-/// the plan gate (the last approval). `None` when nothing was approved.
-fn scan(events: &[Event]) -> Option<(Vec<(ArtId, BlobRef)>, usize)> {
+struct SpecHistory {
+    versions: Vec<(ArtId, BlobRef)>,
+    storage_events: Vec<usize>,
+    approved_at: usize,
+    approval_event: usize,
+}
+
+/// Keep the chosen artifact's storage position separate from the last plan
+/// approval's event position: the human may choose an earlier draft.
+fn scan(events: &[Event]) -> Option<SpecHistory> {
     let mut versions: Vec<(ArtId, BlobRef)> = Vec::new();
     let mut approved = None;
-    for e in events {
+    let mut storage_events = Vec::new();
+    for (event_at, e) in events.iter().enumerate() {
         match e {
             Event::ArtifactStored(a) if a.kind == ArtifactKind::Spec => {
                 versions.push((a.id, a.blob));
+                storage_events.push(event_at);
             }
             Event::HumanApproval {
                 gate: Gate::Plan,
                 subject,
                 ..
-            } => approved = Some(*subject),
+            } => approved = Some((*subject, event_at)),
             _ => {}
         }
     }
-    let at = versions.iter().position(|(id, _)| Some(*id) == approved)?;
-    Some((versions, at))
+    let (approved, approval_event) = approved?;
+    let approved_at = versions.iter().position(|(id, _)| *id == approved)?;
+    Some(SpecHistory {
+        versions,
+        storage_events,
+        approved_at,
+        approval_event,
+    })
 }
 
 /// A stored spec's lines, or `None` if it cannot be read or decoded.
@@ -204,7 +219,12 @@ pub fn spec_conflicts(
     events: &[Event],
     blob: &dyn Fn(&BlobRef) -> Option<Vec<u8>>,
 ) -> SpecConflicts {
-    let Some((versions, a_at)) = scan(events) else {
+    let Some(SpecHistory {
+        versions,
+        approved_at: a_at,
+        ..
+    }) = scan(events)
+    else {
         return SpecConflicts::default();
     };
     let approved = versions[a_at].0;
@@ -345,7 +365,13 @@ pub fn spec_attribution(
     events: &[Event],
     blob: &dyn Fn(&BlobRef) -> Option<Vec<u8>>,
 ) -> SpecAttribution {
-    let Some((versions, a_at)) = scan(events) else {
+    let Some(SpecHistory {
+        versions,
+        storage_events,
+        approved_at: a_at,
+        approval_event,
+    }) = scan(events)
+    else {
         return SpecAttribution::default();
     };
     let Some(approved) = spec_lines(blob, &versions[a_at].1) else {
@@ -372,7 +398,7 @@ pub fn spec_attribution(
         }
         let base_at = at.checked_sub(1);
         let base_id = base_at.map(|b| versions[b].0);
-        if at > a_at {
+        if storage_events[at] > approval_event {
             out.versions.push(unmeasured(*id, base_id, bref.len));
             continue;
         }
@@ -801,6 +827,40 @@ mod tests {
         let v = &s.attribution().versions[0];
         assert_eq!((v.base, v.changed, v.carried), (None, 4, 4));
         assert_eq!(v.outcome, Attribution::Retained);
+    }
+
+    #[test]
+    fn choosing_an_earlier_draft_measures_pre_approval_proposals() {
+        let mut s = Specs::new();
+        s.store(2, "a\nb\nc\n");
+        let chosen = s.store(3, "a\nX\nc\n");
+        let unused = s.store(4, "a\nY\nc\n");
+        s.approve(chosen);
+        let late = s.store(5, "a\nZ\nc\n");
+        let r = s.attribution();
+        let proposal = r.versions.iter().find(|v| v.version == unused).unwrap();
+        assert_eq!(
+            (proposal.changed, proposal.carried, proposal.outcome),
+            (1, 0, Attribution::Unused)
+        );
+        assert_eq!(proposal.base, Some(chosen));
+        assert_eq!(
+            r.versions
+                .iter()
+                .find(|v| v.version == late)
+                .unwrap()
+                .outcome,
+            Attribution::Unmeasured
+        );
+        assert_eq!(r.unused_versions(), 1);
+        assert_eq!(r.unused_bytes().0, proposal.bytes);
+        assert_eq!(unused_conflicts(&s.run(), &r), 1);
+
+        // A later approval of the same artifact moves the cutoff as well.
+        s.approve(chosen);
+        let r = s.attribution();
+        assert!(r.is_unused(late));
+        assert_eq!(r.unused_versions(), 2);
     }
 
     #[test]

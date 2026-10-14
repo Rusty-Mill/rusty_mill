@@ -8,3 +8,5 @@ changelog: **BBP spec attribution metric.** `rusty_bbp::spec_metrics::spec_attri
 - **Backs:** 2b gate criterion 4 (contention is real: an unused spec version has a conflict).
 - **Known limitations:** the base is the previous stored version, not the one the author read (the log does not record it). Line identity is exact text without trailing whitespace, so a reflowed line counts as unused. Not an evidence run.
 - **Also:** `SpecAttribution::unused_versions()` and `unused_bytes()` (unused bytes, all spec bytes) give the gate's `unused_spec_versions` and `unused_share` (criterion 5); `bbp metrics` prints `unused_spec_versions` and `unused_bytes`. `lost_rubric_items` is the grader's, read against the `Unused` version ids.
+
+- **Review correction:** attribution uses the last plan-approval event as its cutoff, separately from the selected artifact's storage position. Selecting an earlier draft includes later proposals stored before approval; genuinely post-approval versions remain unmeasured. Inherits the shared-overlap correction from #676.
