@@ -103,7 +103,7 @@
 
 use ring::rand::{SecureRandom, SystemRandom};
 
-use super::client12::CipherSuite12;
+use super::client12::{CipherSuite12, MAX_HANDSHAKE_BUFFER};
 use super::handshake::{
     certificate_verify_content, complete_prefix, encode_alpn_offer, extension, find, messages,
     parse_alpn_selection, parse_encrypted_extensions, parse_extension_list, parse_finished,
@@ -1276,6 +1276,15 @@ impl<'a> ClientHandshake<'a> {
             self.noise.empty_record()?;
         } else {
             self.noise.data();
+        }
+        // Before the ServerHello nothing is authenticated, and a message
+        // declares its own length (up to 2^24 - 1), so unbounded reassembly lets a
+        // peer make this side hold megabytes it will then reject. The dual-version
+        // client has always bounded this; so does this machine on its own.
+        if matches!(self.state, State::AwaitServerHello { .. })
+            && self.buffer.len() + fragment.len() > MAX_HANDSHAKE_BUFFER
+        {
+            return Err(ClientError::HandshakeTooLarge);
         }
         self.buffer.extend_from_slice(&fragment);
         self.drain_buffer()

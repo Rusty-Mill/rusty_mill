@@ -774,6 +774,7 @@ fn a_tls13_only_hello_offers_no_tls12_version_suite_or_fallback_signal() {
         NativeTlsStream::new(tcp, NAME, &trust(&pki))
             .expect("builds")
             .tls13_only()
+            .expect("before the handshake")
     });
 
     // The parse sees what a dual-version hello offers, so the next asserts mean something.
@@ -807,7 +808,8 @@ fn tls13_only_completes_against_a_tls13_server() {
     );
     let mut stream = NativeTlsStream::new(connect(port), NAME, &trust(&pki))
         .expect("builds")
-        .tls13_only();
+        .tls13_only()
+        .expect("before the handshake");
     stream.write_all(b"hello").expect("writes");
     assert_eq!(read_exactly(&mut stream, 5), b"hello");
     stream.shutdown().expect("close_notify");
@@ -825,7 +827,8 @@ fn tls13_only_refuses_a_tls12_only_server_and_stays_failed() {
     );
     let mut stream = NativeTlsStream::new(connect(port), NAME, &trust(&pki))
         .expect("builds")
-        .tls13_only();
+        .tls13_only()
+        .expect("before the handshake");
     let err = stream.complete_handshake().expect_err("no TLS 1.3");
     assert_eq!(err.kind(), ErrorKind::InvalidData, "{err}");
     assert!(
@@ -838,4 +841,94 @@ fn tls13_only_refuses_a_tls12_only_server_and_stays_failed() {
     assert!(stream.write(b"x").is_err());
     drop(stream);
     let _ = server.join();
+}
+
+#[test]
+fn tls13_only_after_the_handshake_is_refused_and_does_not_pretend() {
+    let pki = pki(NAME);
+    let (port, server) = serve(
+        server_config(&pki, &[&rustls::version::TLS12], &[]),
+        Ending::EchoUntilClose,
+    );
+    let mut stream = NativeTlsStream::new(connect(port), NAME, &trust(&pki)).expect("builds");
+    stream.complete_handshake().expect("TLS 1.2 handshake");
+    let err = stream.tls13_only().expect_err("too late");
+    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+    let _ = server.join();
+}
+
+/// A transport that serves one script of records and counts how many were read.
+struct Script {
+    records: Vec<Vec<u8>>,
+    next: usize,
+    pending: Vec<u8>,
+}
+
+impl Read for Script {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.pending.is_empty() {
+            let Some(record) = self.records.get(self.next) else {
+                return Err(io::Error::new(ErrorKind::UnexpectedEof, "script ended"));
+            };
+            self.pending = record.clone();
+            self.next += 1;
+        }
+        let n = out.len().min(self.pending.len());
+        out[..n].copy_from_slice(&self.pending[..n]);
+        self.pending.drain(..n);
+        Ok(n)
+    }
+}
+
+impl Write for Script {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn tls13_only_bounds_handshake_reassembly_before_the_server_hello() {
+    // A handshake message that declares ~16 MiB, delivered in legal 16 KiB
+    // records: 02 ff ff ff, then zeros. Nothing here is a valid ServerHello.
+    const RECORD: usize = 1 << 14;
+    const TOTAL: usize = 100; // 1.6 MiB on offer
+    let records: Vec<Vec<u8>> = (0..TOTAL)
+        .map(|i| {
+            let mut body = vec![0u8; RECORD];
+            if i == 0 {
+                body[..4].copy_from_slice(&[2, 0xff, 0xff, 0xff]);
+            }
+            let mut record = vec![22, 3, 3];
+            record.extend_from_slice(&(RECORD as u16).to_be_bytes());
+            record.extend_from_slice(&body);
+            record
+        })
+        .collect();
+    let script = Script {
+        records,
+        next: 0,
+        pending: Vec::new(),
+    };
+    let mut stream = NativeTlsStream::new(script, NAME, &trust(&pki(NAME)))
+        .expect("builds")
+        .tls13_only()
+        .expect("before the handshake");
+
+    let err = stream.complete_handshake().expect_err("oversized");
+    assert_eq!(err.kind(), ErrorKind::InvalidData, "{err}");
+    // 128 KiB is eight records; the ninth crosses the bound. The rest are never read.
+    assert!(
+        stream.get_ref().next <= 9,
+        "read {} of {TOTAL} records before refusing",
+        stream.get_ref().next
+    );
+    let after = stream.get_ref().next;
+    assert!(
+        stream.complete_handshake().is_err(),
+        "the failure is permanent"
+    );
+    assert_eq!(stream.get_ref().next, after, "and reads nothing more");
 }

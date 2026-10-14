@@ -187,10 +187,19 @@ impl<S: Read + Write> NativeTlsStream<S> {
     /// not speak TLS 1.3 is refused with `protocol_version`, not negotiated
     /// down. This is the enforced form of "TLS 1.3 only"; reviewing the TLS 1.2
     /// code would not have stopped it being negotiated.
-    #[must_use]
-    pub fn tls13_only(mut self) -> Self {
+    ///
+    /// Only before the handshake has started: once it has run, the version is
+    /// already chosen, so a late call is `InvalidInput` and consumes the stream
+    /// rather than leave a caller believing a TLS 1.2 connection is 1.3-only.
+    pub fn tls13_only(mut self) -> io::Result<Self> {
+        if self.phase != Phase::Pending {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tls13_only must be set before the handshake starts",
+            ));
+        }
         self.tls13_only = true;
-        self
+        Ok(self)
     }
 
     /// Whether the handshake has not yet completed.
