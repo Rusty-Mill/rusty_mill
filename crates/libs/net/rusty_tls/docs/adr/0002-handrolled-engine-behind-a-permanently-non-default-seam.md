@@ -693,9 +693,11 @@ question is not decided by a pull request that merely wires it.
    2026-10-14: `rleval-app`'s OIDC transport, client side only, TLS 1.3 only, to named
    hosts. `NativeTlsStream` currently negotiates TLS 1.2 as well, and reviewing TLS 1.2
    would not stop it being negotiated. So before wiring, either TLS 1.3-only operation is
-   enforced (a 1.3-only option on the stream, set by the consumer), or the owner separately
-   approves widening the consumer's protocol scope to TLS 1.2 together with a review of it
-   (`TLS-REVIEW-SCOPE.md`). Neither is decided by this amendment.
+   enforced, or the owner separately approves widening the consumer's protocol scope to
+   TLS 1.2 together with a review of it (`TLS-REVIEW-SCOPE.md`). The enforcement now
+   exists: `NativeTlsStream::tls13_only()` sends a ClientHello with no TLS 1.2 version,
+   suite or fallback signal and never runs the TLS 1.2 client. No consumer sets it yet,
+   because nothing is wired, and a consumer must.
    Widening the consumer (another consumer, the server side, TLS 1.2, a new host class)
    is a new decision against the bar, not a consequence of this one.
 5. **No library default moves.** No feature, cfg or dependency edge makes any other
