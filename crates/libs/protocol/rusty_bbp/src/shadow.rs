@@ -38,13 +38,14 @@ pub enum ShadowKind {
 /// How an automatic grant compares with the event-driven pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Comparison {
-    /// The first of `would` is the role actually granted.
+    /// The first selectable role of `would` is the role actually granted.
     Agree,
-    /// `would` is empty. The event-driven rule then falls back to the state's
-    /// default holder, which is the turn-based grant, so this agrees by
-    /// construction; it is counted apart because it is liveness, not evidence.
+    /// `would` has no selectable role: it is empty, or holds observers only. The
+    /// event-driven rule then falls back to the state's default holder, which is
+    /// the turn-based grant, so this agrees by construction; it is counted apart
+    /// because it is liveness, not evidence.
     Fallback,
-    /// `would` names a different role first.
+    /// `would` names a different selectable role first.
     Disagree,
 }
 
@@ -52,11 +53,15 @@ impl Shadow {
     /// The comparison for an automatic grant; `None` for a forced one.
     pub fn comparison(&self) -> Option<Comparison> {
         match &self.kind {
-            ShadowKind::Auto { granted, would } => Some(match would.first() {
-                None => Comparison::Fallback,
-                Some((r, _)) if granted.first() == Some(r) => Comparison::Agree,
-                Some(_) => Comparison::Disagree,
-            }),
+            // Shadow records exist only at one live turn, where an observer is
+            // not selectable.
+            ShadowKind::Auto { granted, would } => {
+                Some(match would.iter().find(|(_, why)| why.selectable(1)) {
+                    None => Comparison::Fallback,
+                    Some((r, _)) if granted.first() == Some(r) => Comparison::Agree,
+                    Some(_) => Comparison::Disagree,
+                })
+            }
             ShadowKind::Explicit { .. } => None,
         }
     }

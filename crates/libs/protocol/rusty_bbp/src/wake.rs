@@ -3,14 +3,20 @@
 //! scheduling check in `engine.rs` stays the only thing that does.
 //!
 //! Eligibility is derived from the nine Role fields, so no role is named.
-//! Three triggers, all state-derived:
+//! Triggers, all state-derived, best first:
 //!
 //! - **Addressed**: a message that names the role (or everyone) arrived since
-//!   the role's last turn ended, and the role may read it.
-//! - **Artifact**: a spec, diff, candidate or test report the role may read
-//!   was stored since its last turn ended.
+//!   the role's last turn ended, and the role may read it. A role that has
+//!   never had a turn counts every earlier message as new.
 //! - **State**: the role serves the current working state and that state's
-//!   turn became available since the role's last turn ended.
+//!   turn became available since the role's last turn ended. Being assigned
+//!   makes the state's turn available to its server, so a server assigned
+//!   after the state began is not skipped.
+//! - **Artifact**: a spec, diff, candidate or test report the role may read
+//!   was stored in the current state since the role's last turn ended, or, for a
+//!   role that has never had a turn, since it was assigned.
+//! - **Observer**: the same, for a role that does not serve the state. It is
+//!   recorded, and selectable only when several turns may be live.
 //!
 //! Explicit grants (a yield, a human `ask`, a settled request, a consultation
 //! return) are not triggers: they name their grantee directly and bypass the
@@ -24,12 +30,22 @@ use crate::state::*;
 use rusty_serde::{Deserialize, Serialize};
 
 /// Why a role is eligible. Declaration order is priority order: an addressed
-/// role outranks an artifact watcher, which outranks the state's own holder.
+/// role outranks the state's own server, which outranks an artifact watcher
+/// that serves the state, which outranks an observer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum WakeReason {
     Addressed,
-    Artifact,
     State,
+    Artifact,
+    Observer,
+}
+
+impl WakeReason {
+    /// May a role woken for this reason take a turn? An observer is recorded
+    /// but selectable only when `max_live_turns` allows more than one.
+    pub fn selectable(self, max_live_turns: u32) -> bool {
+        self != WakeReason::Observer || max_live_turns > 1
+    }
 }
 
 /// Artifact kinds that wake a reader. `brief` is the human's, `log` is raw
@@ -75,16 +91,28 @@ pub fn wake_set(st: &TaskState) -> Vec<(RoleId, WakeReason)> {
 }
 
 fn reason(st: &TaskState, req: &Requirement, role: &Role) -> Option<WakeReason> {
-    let seen = st.last_turn_end.get(&role.id).copied().unwrap_or(Rev(0));
-    if can_act(st, role) {
-        if addressed(st, role, seen) {
-            return Some(WakeReason::Addressed);
-        }
-        if watches_artifact(st, role, seen) {
-            return Some(WakeReason::Artifact);
-        }
+    // `last` is the end of the role's latest turn (0 if none). A role that has
+    // never run has seen nothing of the messages, but nothing of the artifacts
+    // from before it was assigned or before the state began either.
+    let last = st.last_turn_end.get(&role.id).copied();
+    let assigned = st.assigned_rev.get(&role.id).copied().unwrap_or(Rev(0));
+    let serves = req.served_by(role);
+    let acts = can_act(st, role);
+    if acts && addressed(st, role, last.unwrap_or(Rev(0))) {
+        return Some(WakeReason::Addressed);
     }
-    (req.served_by(role) && st.ready_rev > seen).then_some(WakeReason::State)
+    if serves && st.ready_rev.max(assigned) > last.unwrap_or(Rev(0)) {
+        return Some(WakeReason::State);
+    }
+    let floor = last.unwrap_or(assigned).max(st.entered_rev);
+    if acts && watches_artifact(st, role, floor) {
+        return Some(if serves {
+            WakeReason::Artifact
+        } else {
+            WakeReason::Observer
+        });
+    }
+    None
 }
 
 /// Could the role post anything but `pass` that this state admits? Uses the

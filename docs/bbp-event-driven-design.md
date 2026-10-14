@@ -17,7 +17,7 @@ The note was written before the v0.5 engine landed (#643, #644, #645). The secti
 - **A.** `wake_set(st: &TaskState) -> Vec<(RoleId, WakeReason)>`. The roster is `st.roster`, so no second argument.
 - **B.** `pick_next` is the best role in `wake_set`, else the state's `default_holder`. Without the fallback a passing default holder is never woken again (the watermark suppresses the state trigger) and the task stalls with no live turn.
 - **C.** Shadow decisions are returned from `handle()` in `Handled.shadow` and are **not logged**: a log event would change `rev` on every trace. The host logs them, deduped on `rev`, so real runs give evidence and not only tests.
-- **D.** Priority: `Addressed` > `Artifact` > `State`; ties by `turn_order`; applied after self-exclusion, cooldown, visibility and capability gating.
+- **D.** Priority: `Addressed` > `State` > `Artifact` > `Observer`; ties by `turn_order`; applied after self-exclusion, cooldown, visibility and capability gating. (Revised after the shadow comparison; the first order was `Addressed` > `Artifact` > `State`. See "Decisions after the shadow comparison".)
 - **E.** T-final is dropped, and T-consult and T-reply are explicit grants that bypass `pick_next`.
 - **Sequencing:** one PR per step, no stacking: this reconciliation and `wake_set` in parallel from `main`; the `SchedulingPolicy` seam, then shadow mode with host logging, each after the previous merge. Live mode waits for the owner's approval of the shadow comparison.
 
@@ -35,7 +35,7 @@ What changed against the original text:
 | Capability gating "reuses R5" | `state_accepts` is private to `engine.rs` | Made `pub(crate)` |
 | `Command::Tick` | Calls `schedule()` on every moderator poll | Shadow logging dedupes on `rev` |
 
-To measure in shadow mode (not decided): `seen_rev` is 0 for a role that has had no turn, so every earlier artifact counts as new for it; with `Artifact` above `State` the eligible set is wide early in a task. Alternatives for the baseline are the role's assignment rev or the current state's entry rev.
+Decided after the shadow comparison: see "Decisions after the shadow comparison" below.
 
 ## Recommendation
 
@@ -86,9 +86,9 @@ Rules that keep a trigger honest:
 - **Watermark.** Each role has a `seen_rev`, the card `rev` of the event that ended its last turn (0 if it has had none). A trigger counts only for events with `rev > seen_rev`. `TaskState` derives it, with the append rev of every message and artifact and `ready_rev` (the rev of the last event that made the state's turn available), while folding the log. They are not logged, so the log format is unchanged.
 - **Human gates dominate.** In `plan_gate`, `merge_gate`, `approved` and `escalated` there is no default turn (spec "Turns"), so `wake_set` is empty; a human `ask` is an explicit grant. Event-driven mode does not change that.
 
-Order: `Addressed` > `Artifact` > `State`, ties by `turn_order`, one entry per role (its best reason).
+Order: `Addressed` > `State` > `Artifact` > `Observer`, ties by `turn_order`, one entry per role (its best reason).
 
-`WakeReason` is a closed enum with three variants, in priority order. It is computed, not stored, so the log format is unaffected.
+`WakeReason` is a closed enum with four variants, in priority order. It is computed, not stored, so the log format is unaffected.
 
 ## b. Two separate concerns
 
@@ -292,4 +292,14 @@ Resolved on 2026-10-13: the policy lives in `task_opened` (question 2); `max_cha
 
 1. Is "interrupt the schedule" (one live turn, event-chosen) enough, or is true concurrent authoring a requirement? Superseded by `docs/bbp-concurrency-design.md`, which treats concurrent authoring as a separate design.
 2. Who owns the log-tail delivery loop: `rusty_bbp_host` (next to the engine) or orch (per the BBP/orch boundary)? Host-side shadow logging is in scope for phase 1c; the production delivery loop is not.
-3. What baseline should `seen_rev` have for a role with no turn yet (0, its assignment rev, or the state's entry rev)? Decide from the shadow comparison.
+3. ~~What baseline should `seen_rev` have for a role with no turn yet?~~ Decided: its assignment rev, floored at the state's entry rev for artifacts. See "Decisions after the shadow comparison".
+
+## Decisions after the shadow comparison
+
+The first comparison over the 31 traces (53 automatic grants) was 26 agree, 2 fallback, 25 disagree. In 24 of the 25 the granted role was eligible but outranked, almost always by the lowest-`turn_order` role, which had seen nothing yet and so counted every earlier artifact and broadcast as new. The owner decided:
+
+1. **Baseline.** A role that has never had a turn has `seen_rev` = its assignment rev, not 0. `Artifact` and `Observer` wakes are also floored at the current state's entry rev: only an artifact stored in this state, after the role's last turn end (or assignment), counts. `Addressed` uses the raw end of the last turn (0 if none), so a message sent before a role was assigned still addresses it. `State` needs no floor, because `ready_rev` is never before the state's entry; being assigned makes the state's turn available to its server, so a server assigned after the state began is still woken.
+2. **Priority.** `Addressed` > `State` > `Artifact` > `Observer`, ties by `turn_order`.
+3. **Observers.** An `Artifact` wake of a role that does not serve the current state is recorded as `Observer`. It is in the set, as evidence, but is not selectable (`WakeReason::selectable`) unless `max_live_turns` is above one. If no selectable entry exists, the rule falls back to the default holder.
+
+Result on the same 31 traces: 39 agree, 3 fallback, 11 disagree. All 11 have one cause: a message addressed to `all` (the draft default, which includes every `verdict`) addresses every role that can act, so the planner and coder outrank the reviewer at `review`. With `all` not addressing anyone for scheduling, the same traces give 50 agree, 3 fallback, 0 disagree. Whether `all` should address is the next open question (4) and is not decided here.

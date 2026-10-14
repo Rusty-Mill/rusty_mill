@@ -58,23 +58,22 @@ fn the_first_grant_agrees_with_the_state_trigger() {
     assert_eq!(a[0].cmp, Comparison::Agree);
 }
 
-/// A role with no turn yet has seen nothing, so every earlier artifact counts as
-/// new for it; `Artifact` outranks `State` and ties go to the lowest
-/// `turn_order`. The planner is woken at `test` and would be picked before the
-/// tester. Recorded as a disagreement, with the tester still eligible: this is
-/// the evidence that decides the baseline and tie-break (open question 3).
+/// At `test` the tester serves the state and is first; the others only watch
+/// the report, so they are recorded as observers and never outrank it.
 #[test]
-fn at_test_the_planner_outranks_the_tester_by_the_artifact_trigger() {
+fn at_test_the_server_is_first_and_the_others_are_observers() {
     let mut fx = Fx::new();
     fx.reach_test();
     stored(fx.report(RunStatus::Passed));
     let a = autos(&fx).pop().expect("a grant at test");
     assert_eq!(a.state, State::Test);
     assert_eq!(a.granted, [RoleId::from("tester")]);
-    assert_eq!(a.cmp, Comparison::Disagree);
-    assert_eq!(a.would[0], (RoleId::from("planner"), WakeReason::Artifact));
+    assert_eq!(a.cmp, Comparison::Agree);
+    assert_eq!(a.would[0], (RoleId::from("tester"), WakeReason::State));
     assert!(
-        a.would.iter().any(|(r, _)| r.0 == "tester"),
+        a.would[1..]
+            .iter()
+            .all(|(_, why)| *why == WakeReason::Observer),
         "{:?}",
         a.would
     );
@@ -220,4 +219,101 @@ fn a_driver_hands_its_shadow_records_to_the_sink() {
     let seen = seen.lock().expect("lock").clone();
     assert!(!seen.is_empty());
     assert_eq!(seen, fx.shadows[n..], "the sink saw every record, once");
+}
+
+// ---------------------------------------------------------------- where turn-based wastes a turn
+//
+// Each case drives the real engine and reads the shadow record of the regrant
+// after a turn ended. The real grant is always turn-based; the record says what
+// the event-driven rule would have done.
+
+/// Idle default holder. The coder passes with nothing new anywhere; turn-based
+/// regrants the coder, who just said it had nothing to do. The event-driven set
+/// is empty too (cooldown, no trigger), so it falls back to the same role: no
+/// divergence, and no better choice exists. This is the turn `max_chain`
+/// (deferred) would have to bound.
+#[test]
+fn case_1_an_idle_default_holder_is_regranted_and_the_set_is_empty() {
+    let mut fx = Fx::new();
+    fx.reach_build();
+    posted(fx.post(Who::Coder, pass()));
+    let a = autos(&fx).pop().expect("a regrant");
+    assert_eq!(
+        (a.state, a.granted),
+        (State::Build, vec![RoleId::from("coder")])
+    );
+    assert!(a.would.is_empty(), "{:?}", a.would);
+    assert_eq!(a.cmp, Comparison::Fallback);
+}
+
+/// Addressed non-default role. The coder asks the tester a question and ends
+/// its turn. Turn-based regrants the coder, and the tester, who cannot serve
+/// `build`, sits on the question until `test`. Event-driven selects the tester
+/// at once (`Addressed`); the coder is in cooldown and absent.
+#[test]
+fn case_2_a_question_to_a_non_default_role_is_picked_up_at_once() {
+    let mut fx = Fx::new();
+    fx.reach_build();
+    posted(fx.post(Who::Coder, ask(Who::Tester, "which 429 cases matter?")));
+    posted(fx.post(Who::Coder, pass()));
+    let a = autos(&fx).pop().expect("a regrant");
+    assert_eq!(
+        a.granted,
+        [RoleId::from("coder")],
+        "turn-based: the coder again"
+    );
+    assert_eq!(a.would, [(RoleId::from("tester"), WakeReason::Addressed)]);
+    assert!(a.would[0].1.selectable(1));
+    assert_eq!(a.cmp, Comparison::Disagree);
+}
+
+/// Observer-only artifact wake. The coder stores a diff and ends its turn. The
+/// planner, tester and reviewer can read it but none of them serves `build`, so
+/// each is recorded as an observer and none is selectable: the set holds
+/// observers only and the rule falls back to the coder, as turn-based did.
+#[test]
+fn case_3_an_artifact_alone_leaves_only_observers_and_falls_back() {
+    let mut fx = Fx::new();
+    fx.reach_build();
+    stored(fx.put(Who::Coder, ArtifactPayload::Diff, b"--- a\n+++ b\n"));
+    posted(fx.post(Who::Coder, pass()));
+    let a = autos(&fx).pop().expect("a regrant");
+    assert_eq!(a.granted, [RoleId::from("coder")]);
+    let mut seen: Vec<_> = a.would.iter().map(|(r, w)| (r.0.as_str(), *w)).collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        [
+            ("planner", WakeReason::Observer),
+            ("reviewer", WakeReason::Observer),
+            ("tester", WakeReason::Observer),
+        ]
+    );
+    assert_eq!(a.cmp, Comparison::Fallback);
+}
+
+/// The divergence that remains. A `verdict` is addressed to everyone by
+/// default, so the planner and coder are `Addressed` by the tester's approval
+/// and outrank the reviewer, who serves `review` but is `scoped` and cannot
+/// even read it. Turn-based grants the reviewer; the event-driven set puts the
+/// planner first. Every remaining trace disagreement is this: a message whose
+/// recipient is `all` addressing roles that have nothing to do with it.
+#[test]
+fn case_4_a_broadcast_verdict_addresses_roles_that_do_not_serve_review() {
+    let mut fx = Fx::new();
+    fx.reach_review();
+    let a = autos(&fx).pop().expect("the grant at review");
+    assert_eq!(
+        (a.state, a.granted),
+        (State::Review, vec![RoleId::from("reviewer")])
+    );
+    assert_eq!(
+        a.would,
+        [
+            (RoleId::from("planner"), WakeReason::Addressed),
+            (RoleId::from("coder"), WakeReason::Addressed),
+            (RoleId::from("reviewer"), WakeReason::State),
+        ]
+    );
+    assert_eq!(a.cmp, Comparison::Disagree);
 }
