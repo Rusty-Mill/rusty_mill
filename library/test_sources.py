@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import build
 import sources
@@ -199,6 +200,16 @@ class CollectSourcesTests(unittest.TestCase):
         sources.record(Source("pilot", "o/r", self.sha), repo)
         self.file = write(self.tmp, "sources.json", json.dumps([{"name": "pilot", "repo": "o/r", "ref": self.sha}]))
 
+    def commit(self) -> None:
+        """Commit everything in the cache checkout and re-pin the config to the new commit."""
+        repo = self.cache / "pilot"
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for args in (["add", "-A"], ["commit", "-q", "-m", "more"]):
+            subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+        self.sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+        sources.record(Source("pilot", "o/r", self.sha), repo)
+        self.file = self.configure()
+
     def configure(self, **src: str) -> Path:
         entry = {"name": "pilot", "repo": "o/r", "ref": self.sha, **src}
         return write(self.tmp, "sources.json", json.dumps([entry]))
@@ -237,6 +248,30 @@ class CollectSourcesTests(unittest.TestCase):
         subprocess.run(["git", "config", "--local", "--unset", "library.repo"], cwd=self.cache / "pilot", check=True)
         self.assertRefused(self.file, "no recorded origin")
 
+    def test_local_changes_are_never_attributed_to_the_pinned_commit(self) -> None:
+        repo = self.cache / "pilot"
+        write(repo, ".gitignore", "ignored/\n")
+        self.commit()  # a clean baseline that also has an ignore rule
+        plant = {
+            "modified tracked file": lambda: write(repo, "skills/s/SKILL.md", SKILL.format(n="tampered")),
+            "untracked file": lambda: write(repo, "extra/.claude-plugin/plugin.json", json.dumps({"name": "x", "description": "d"})),
+            "untracked hook in a tracked mod": lambda: write(repo, "skills/s/hook.sh", "evil"),
+            "ignored file": lambda: write(repo, "ignored/SKILL.md", SKILL.format(n="hidden")),
+            "deleted tracked file": lambda: (repo / "skills/s/SKILL.md").unlink(),
+        }
+        self.assertEqual(build.collect_sources(self.file, self.cache)[1], [])
+        for label, make in plant.items():
+            with self.subTest(label):
+                subprocess.run(["git", "clean", "-qffdx"], cwd=repo, check=True)
+                subprocess.run(["git", "checkout", "-q", "--", "."], cwd=repo, check=True)
+                make()
+                self.assertRefused(self.file, "cache has local changes")
+
+    def test_strict_build_fails_on_a_dirty_cache(self) -> None:
+        write(self.cache / "pilot", "skills/s/SKILL.md", SKILL.format(n="tampered"))
+        with mock.patch.object(build, "SOURCES_FILE", self.file), mock.patch.object(build, "CACHE", self.cache):
+            self.assertEqual(build.main(["--strict"]), 1)
+
     def test_plain_directory_is_not_mistaken_for_the_surrounding_repo(self) -> None:
         # The cache lives inside a larger repository, as `library/.cache` does in rusty_mill.
         env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
@@ -257,6 +292,7 @@ class CollectSourcesTests(unittest.TestCase):
         mod = self.cache / "pilot" / "mods" / "$(id) x"
         write(mod, ".claude-plugin/plugin.json", json.dumps({"name": "m", "description": "d"}))
         write(mod, "hooks/register.ts", "code")
+        self.commit()
         items, warnings = build.collect_sources(self.file, self.cache)
         (item,) = [i for i in items if i["kind"] == "mod"]
         self.assertEqual(warnings, [])
@@ -267,6 +303,7 @@ class CollectSourcesTests(unittest.TestCase):
     def test_a_path_that_cannot_be_quoted_safely_gets_no_command_and_a_warning(self) -> None:
         mod = self.cache / "pilot" / 'mods' / 'say "hi"'
         write(mod, ".claude-plugin/plugin.json", json.dumps({"name": "m", "description": "d"}))
+        self.commit()
         items, warnings = build.collect_sources(self.file, self.cache)
         (item,) = [i for i in items if i["kind"] == "mod"]
         self.assertEqual(item["install"], "")
