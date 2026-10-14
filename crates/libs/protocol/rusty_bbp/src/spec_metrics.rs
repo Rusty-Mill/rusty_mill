@@ -113,13 +113,34 @@ fn regions(ops: &[DiffOp<String>]) -> Vec<Region> {
     out
 }
 
-/// Do two regions edit a common base line, or insert at the same point, with
-/// different results? Touching regions (one ends where the other starts) edit
-/// different lines and do not conflict; neither do identical edits.
+/// The effect on shared base lines is empty for a deletion, or the matching
+/// replacement lines for a line-for-line edit. A length-changing replacement
+/// cannot be subdivided unambiguously; keep it atomic.
+fn shared_effect(r: &Region, start: usize, end: usize) -> Option<&[String]> {
+    if r.ins.is_empty() {
+        Some(&[])
+    } else if r.ins.len() == r.end - r.start {
+        Some(&r.ins[start - r.start..end - r.start])
+    } else {
+        None
+    }
+}
+
+/// Compare effects on shared base lines, not whole coalesced regions. Touching
+/// edits remain disjoint. Identical atomic replacements and insertions agree.
 fn clash(a: &Region, b: &Region) -> bool {
-    let overlap = a.start < b.end && b.start < a.end;
-    let same_point = a.start == a.end && b.start == b.end && a.start == b.start;
-    (overlap || same_point) && a != b
+    if a == b {
+        return false;
+    }
+    let start = a.start.max(b.start);
+    let end = a.end.min(b.end);
+    if start < end {
+        return match (shared_effect(a, start, end), shared_effect(b, start, end)) {
+            (Some(x), Some(y)) => x != y,
+            _ => true,
+        };
+    }
+    a.start == a.end && b.start == b.end && a.start == b.start
 }
 
 fn lines(text: &str) -> Vec<String> {
@@ -509,6 +530,32 @@ mod tests {
     fn the_same_edit_on_both_sides_is_clean() {
         let p = pair(&edit(12, &[(5, "X")]), &edit(12, &[(5, "X")]));
         assert_eq!(p.outcome, PairOutcome::Clean);
+    }
+
+    #[test]
+    fn partial_overlaps_compare_only_shared_effects() {
+        let base = lines("a\nb\nc\nd\n");
+        for (other, approved, expected) in [
+            ("a\nX\nY\nd\n", "a\nX\nc\nd\n", PairOutcome::Clean),
+            ("a\nX\nY\nd\n", "a\nb\nY\nd\n", PairOutcome::Clean),
+            ("a\nX\nY\nd\n", "a\nZ\nc\nd\n", PairOutcome::Conflict),
+            ("a\nX\nY\nd\n", "a\nb\nZ\nd\n", PairOutcome::Conflict),
+            ("a\nd\n", "a\nb\nd\n", PairOutcome::Clean),
+            ("a\nd\n", "a\nb\nY\nd\n", PairOutcome::Conflict),
+        ] {
+            let (a, b) = (lines(other), lines(approved));
+            assert_eq!(compare(&base, &a, &b), expected);
+            assert_eq!(compare(&base, &b, &a), expected, "symmetric");
+        }
+    }
+
+    #[test]
+    fn overlapping_deletions_with_different_extents_are_compatible() {
+        let base = lines("a\nb\nc\nd\ne\n");
+        assert_eq!(
+            compare(&base, &lines("a\nd\ne\n"), &lines("a\nb\ne\n")),
+            PairOutcome::Clean
+        );
     }
 
     #[test]
