@@ -103,19 +103,26 @@ def pushes(command, cwd):
                 i += 1
         if i >= len(args) or args[i] != "push":
             continue
-        flags, positional, j = [], [], i + 1
+        flags, positional, j, repo = [], [], i + 1, None
         while j < len(args):
             a = args[j]
             if a == "--":
                 positional += args[j + 1:]
                 break
-            if a in PUSH_VALUE_OPTS:
+            if a == "--repo" and j + 1 < len(args):
+                repo = args[j + 1]  # the remote, supplied as an option: every positional is a refspec
+                j += 1
+            elif a.startswith("--repo="):
+                repo = a.split("=", 1)[1]
+            elif a in PUSH_VALUE_OPTS:
                 j += 1
             elif a.startswith("-"):
                 flags.append(a)
             elif not re.match(r"^\d*[<>]", a):
                 positional.append(a)
             j += 1
+        if repo is not None:
+            positional.insert(0, repo)  # check() treats the first positional as the remote
         found.append((git_dir, flags, positional))
     return found
 

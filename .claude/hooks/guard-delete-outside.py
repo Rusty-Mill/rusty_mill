@@ -96,14 +96,19 @@ def under(path, root):
 def verdict(path, project, env):
     """None when the deletion target is fine, else why it is not."""
     home = os.path.normpath(env.get("HOME", "")) if env.get("HOME") else None
-    forms = {path, os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))}
+    # What rm actually removes: the parent is followed through symlinks, the last
+    # component is not (deleting a symlink removes the link, not its target).
+    effective = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+    # Dangerous-target checks look at both spellings; containment only at the effective one.
+    forms = {path, effective}
     if any(p == os.sep for p in forms) or (home and any(p == home for p in forms)):
         return "is the filesystem root or your home directory"
     roots = {project, os.path.realpath(project)}
-    if any(under(p, r) for p in forms for r in roots):
+    if any(under(effective, r) for r in roots):
         return None
     temps = TEMP_ROOTS + ([os.path.normpath(env["TMPDIR"])] if env.get("TMPDIR") else [])
-    if any(under(p, t) and p.rstrip(os.sep) != t.rstrip(os.sep) for p in forms for t in temps):
+    temps = temps + [os.path.realpath(t) for t in temps]
+    if any(under(effective, t) and effective.rstrip(os.sep) != t.rstrip(os.sep) for t in temps):
         return None
     return "is outside the project (%s)" % project
 

@@ -153,6 +153,12 @@ def merged_state(cwd, tip, bases, merged_pr_oids=()):
         if git(cwd, "merge-base", "--is-ancestor", tip, b["sha"])[0] == 0:
             return "ancestor of " + b["name"]
     for b in bases:
+        # `git cherry` skips merge commits, so "every patch is in the base" says nothing about
+        # a merge's own content (a conflict resolution, an evil merge). Trust it only when the
+        # branch has no merge commits the base lacks; otherwise fall through to the tree probe.
+        merges = git_out(cwd, "rev-list", "--merges", "--count", b["sha"] + ".." + tip)
+        if merges != "0":
+            continue
         lines = [l for l in (git_out(cwd, "cherry", b["sha"], tip) or "").splitlines() if l]
         if lines and all(l.startswith("-") for l in lines):
             return "every patch already in " + b["name"]
@@ -386,6 +392,12 @@ def apply(ctx, rows, prunable, args, log):
                 except OSError:
                     pass
         if row["delete_branch"] and row["facts"]["branch"]:
+            # Keep a recovery ref unless the tip is a plain ancestor of the base: -D drops the
+            # only branch ref, and "merged" evidence other than ancestry can be wrong.
+            tip = row["facts"].get("tip") or git_out(ctx["cwd"], "rev-parse", "-q", "--verify", "refs/heads/" + row["facts"]["branch"])
+            if tip and not str(row["facts"].get("merged") or "").startswith("ancestor of"):
+                git(ctx["cwd"], "update-ref", "refs/cleanup-wt/recovery/" + row["facts"]["branch"], tip)
+                done.append("recovery ref refs/cleanup-wt/recovery/" + row["facts"]["branch"] + " -> " + tip[:10])
             code, _, err = git(ctx["cwd"], "branch", "-D", row["facts"]["branch"])
             done.append(("deleted branch " if code == 0 else "kept branch ") + row["facts"]["branch"]
                         + ("" if code == 0 else ": " + err.splitlines()[0]))
