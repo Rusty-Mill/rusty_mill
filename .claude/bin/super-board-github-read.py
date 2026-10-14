@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -289,7 +290,7 @@ def read(args, kind='json', meta=None, recovering=False):
         if not recovering:
             check_halt()
         try:
-            result = subprocess.run([os.environ.get('SB_GH', 'gh'), *args], capture_output=True, text=True, timeout=30)
+            result = subprocess.run([*shlex.split(os.environ.get('SB_GH', 'gh')), *args], capture_output=True, text=True, timeout=30)
             diagnostic = result.stderr
             if result.returncode:
                 diagnostic += result.stdout

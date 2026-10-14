@@ -12,23 +12,14 @@ description: >-
 
 # super-qa — BFS Route-Crawler that Builds the Spec Suite
 
-## Auth bootstrap — auto-discover, never ask
+## Auth: explicit test account only, never created here
 
-Before iter 1, resolve a test login. **Never ask the user; discover or create.** Order:
+QA never creates, resets or modifies accounts, and never reads secret files or admin keys. Use a disposable account the owner set up for testing. Resolve it in this order:
 
-1. **Cached creds** at `.claude/settings.local.json` `.e2e.user` / `.e2e.pass` — use them as-is.
-2. **Env-file fallback** — read in order: `.env.production.local`, `.env.local`, `.env`. Pull `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`. If both present, auto-create `e2e-test@<owner-domain>` (owner from `git config user.email` domain, fallback `erictech.ca`) via:
-   ```bash
-   curl -sS -X POST "$SUPABASE_URL/auth/v1/admin/users" \
-     -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-     -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-     -H "Content-Type: application/json" \
-     -d "{\"email\":\"$E2E_USER\",\"password\":\"$E2E_PASS\",\"email_confirm\":true,\"user_metadata\":{\"role\":\"e2e-test\",\"created_by\":\"super-qa-bootstrap\"}}"
-   ```
-   Generate a 24-char random password (`openssl rand -base64 24 | tr -d '/+=' | cut -c1-24`). Save to `.claude/settings.local.json` `.e2e` so the next run skips bootstrap. Verify by logging in (`POST /auth/v1/token?grant_type=password` returns access_token).
-3. **Unauth-only fallback** — if neither cached creds nor env-file admin key exist, log "no admin key — restricting to public routes" and proceed with `/login`, `/signup`, `/forgot-password` only. Do NOT halt.
+1. **Configured credentials** in `.claude/settings.local.json` `.e2e.user` / `.e2e.pass`, pointing at a staging or other disposable test environment. Use them as given.
+2. **No credentials configured**: log "no test account configured, restricting to public routes" and crawl `/login`, `/signup`, `/forgot-password` only. Do NOT halt, do NOT ask, and do NOT try to obtain credentials.
 
-The bootstrap is **non-interactive**. If the curl returns an existing-user error (`User already registered`), reset the password via the same admin endpoint and continue. Save creds either way.
+Creating or resetting an account, or touching production auth, needs the owner's explicit authorization in the current conversation. A general QA run never triggers it. If an authenticated crawl would help, say so in the run summary and name the one thing the owner must do: add a test account for a non-production environment to `.claude/settings.local.json`.
 
 ## QA loop state board — GitHub Project as the state store
 

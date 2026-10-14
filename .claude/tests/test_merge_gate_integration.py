@@ -6,6 +6,7 @@ Run: python3 -m unittest discover -s .claude/tests -v
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import stat
 import subprocess
@@ -96,7 +97,7 @@ class Gate(unittest.TestCase):
                'FAKE_CI': json.dumps(ci or green),
                'FAKE_SETTINGS': json.dumps(settings or {'mergeCommitAllowed': True, 'squashMergeAllowed': False,
                                                          'rebaseMergeAllowed': False}),
-               'SB_GH': str(self.bindir / ('gh.cmd' if os.name == 'nt' else 'gh')),
+               'SB_GH': shlex.join([pathlib.Path(sys.executable).as_posix(), (self.bindir / 'fake_gh.py').as_posix()]),
                'SB_GITHUB_HALT_FILE': str(self.tmp / 'halt.json'), 'SB_GITHUB_RETRY_DELAY': '0'}
         args = ['bash', str(GATE), '--config', str(cfgfile), '--pr', '7', '--expect-head', self.sha, '--lock-timeout', '5']
         if dry:

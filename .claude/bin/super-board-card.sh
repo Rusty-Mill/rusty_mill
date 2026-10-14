@@ -23,7 +23,8 @@
 #     item-id <issue>         print the card's project item id (cached)
 #     ids                     print {projectId, fieldId, options:{name:id}} (cached)
 #     items                   the whole board in `gh project item-list --format json` shape
-#                             ({items:[{id,status,labels,title,content:{type,number,title,url,repository}}],totalCount})
+#                             ({items:[{id,status,labels,title,content:{type,number,title,url,repository,assignees}}],totalCount};
+#                             assignees is a list of logins — the claim mutex; a card without it would look unclaimed)
 #
 # Owner/number/repo come from --config (project.owner, project.number,
 # repo.remote), else $BUILD_LOOP_OWNER / $BUILD_LOOP_PROJECT and the origin remote.
@@ -146,16 +147,26 @@ item_id() {  # $1 = issue
   [ -n "$ITEM_ID" ] || read_card "$1"
 }
 
+# A mutation is never retried blindly. If GitHub answered with an errors payload the
+# write was rejected (exit 69, safe to retry once after a stale-id refresh). If there
+# was no readable answer the write may have landed (exit 70): reconcile by reading the
+# card, and halt when that cannot settle it. Replaying could overwrite a newer move.
 set_status() {  # $1 = item id, $2 = option id — one mutation
   local out
-  out=$(gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){
-      updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }' \
-      -f p="$PROJECT_ID" -f i="$1" -f f="$FIELD_ID" -f o="$2" 2>&1) || { echo "$out" >&2; return 69; }
-  echo "$out" | no_errors || { echo "$out" >&2; return 69; }
+  python3 "$HERE/super-board-github-read.py" --check || return $?
+  if out=$(gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){
+      updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }'       -f p="$PROJECT_ID" -f i="$1" -f f="$FIELD_ID" -f o="$2" 2>&1); then
+    echo "$out" | jq -e '(.errors // null) == null and .data.updateProjectV2ItemFieldValue.projectV2Item.id != null' >/dev/null 2>&1 && return 0
+  fi
+  echo "$out" >&2
+  # An errors payload is GitHub saying no; anything else is an unknown outcome.
+  echo "$out" | jq -e '(.errors // null) != null' >/dev/null 2>&1 && return 69
+  return 70
 }
 
 move() {  # $1 = issue, $2 = Status name
-  local issue="$1" name="$2" opt attempt
+  local issue="$1" name="$2" opt attempt rc
+  python3 "$HERE/super-board-github-read.py" --check || return $?
   for attempt in 1 2; do
     load_ids || return $?
     opt=$(echo "$OPTIONS_JSON" | jq -r --arg n "$name" '.[$n] // empty')
@@ -164,8 +175,18 @@ move() {  # $1 = issue, $2 = Status name
       echo "Status option '$name' is not on project $OWNER/$NUMBER" >&2; return 3
     fi
     item_id "$issue" || return $?
-    if set_status "$ITEM_ID" "$opt"; then echo "moved #$issue → $name"; return 0; fi
-    [ "$attempt" = 1 ] && { echo "move failed; re-reading board ids once" >&2; cache_drop; }
+    rc=0; set_status "$ITEM_ID" "$opt" || rc=$?
+    if [ "$rc" -eq 0 ]; then echo "moved #$issue → $name"; return 0; fi
+    if [ "$rc" -eq 70 ]; then
+      # Unknown outcome: look before doing anything else.
+      if read_card "$issue" && [ "$STATUS_NAME" = "$name" ]; then
+        echo "moved #$issue → $name (confirmed after a lost response)"; return 0
+      fi
+      python3 "$HERE/super-board-github-read.py" --halt "Status write for #${issue} → ${name} has an unknown outcome and the card does not show it; reconcile the board before restarting. The write was not replayed."
+      return $?
+    fi
+    [ "$rc" -eq 69 ] || return "$rc"
+    [ "$attempt" = 1 ] && { echo "move rejected; re-reading board ids once" >&2; cache_drop; }
   done
   return 69
 }
@@ -177,8 +198,8 @@ items() {  # whole board, gh item-list shape, ~1 point per 100 cards
         items(first:100, after:$endCursor){ totalCount pageInfo{ hasNextPage endCursor }
           nodes{ id fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } }
             content{ __typename
-              ... on Issue { number title url repository{ nameWithOwner } labels(first:30){ nodes{ name } } }
-              ... on PullRequest { number title url repository{ nameWithOwner } labels(first:30){ nodes{ name } } }
+              ... on Issue { number title url repository{ nameWithOwner } labels(first:30){ nodes{ name } } assignees(first:20){ nodes{ login } } }
+              ... on PullRequest { number title url repository{ nameWithOwner } labels(first:30){ nodes{ name } } assignees(first:20){ nodes{ login } } }
               ... on DraftIssue { title } } } } } } } }' \
       -F owner="$OWNER" -F number="$NUMBER") || return $?
   echo "$pages" | no_errors || { echo "board read returned errors" >&2; return 69; }
@@ -191,7 +212,8 @@ items() {  # whole board, gh item-list shape, ~1 point per 100 cards
             content: ({ type: .content.__typename, title: .content.title }
                       + (if .content.__typename == "DraftIssue" then {} else
                           { number: .content.number, url: .content.url,
-                            repository: .content.repository.nameWithOwner } end)) }
+                            repository: .content.repository.nameWithOwner,
+                            assignees: [ .content.assignees.nodes[].login ] } end)) }
           + (if .fieldValueByName.name then { status: .fieldValueByName.name } else {} end)
           + (if ((.content.labels.nodes // []) | length) > 0
              then { labels: [ .content.labels.nodes[].name ] } else {} end) ] as $items
