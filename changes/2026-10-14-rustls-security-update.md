@@ -11,3 +11,7 @@ changelog: Update locked rustls from 0.23.45 to 0.23.46 to address RUSTSEC-2026-
   allocation, and unauthenticated key-share prediction.
 - Existing dependency requirements accept the patched release; no API migration
   or unrelated dependency update is required.
+- The TLS 1.3 record differential retains its complete content-type matrix and
+  byte-identical sealing checks, and now expects rustls to reject protected
+  ChangeCipherSpec with its specific protocol error. The native low-level opener
+  defers that rejection to protocol dispatch; production behavior is unchanged.
