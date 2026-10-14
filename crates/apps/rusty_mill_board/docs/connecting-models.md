@@ -20,6 +20,10 @@ chmod 600 ~/mill-identities.json                 # refused otherwise
 rusty_mill_board --store ~/mill-board.mmap --http 127.0.0.1:8787 --identities ~/mill-identities.json
 ```
 
+To keep a model inside one application of a monorepo, add `"projects": ["rocket_league"]` to its entry (names
+from the board's `--projects FILE`, which the server checks at start): that token cannot see, take or change
+cards of any other project, and `card_take` only ever returns its own.
+
 Generate tokens with `openssl rand -hex 24`. A token fixes the caller's actor and role: a model cannot
 act as another, and it does not pass `actor`/`role` at all. Roles (see `board_roles`): `human` (everything),
 `builder` (Build), `qa` (Qa), `reviewer` (Review, Merge). The UI is at `http://127.0.0.1:8787/`; give the

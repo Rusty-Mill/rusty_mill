@@ -147,7 +147,9 @@ fn status_of(e: &BoardError) -> StatusCode {
     match e {
         BoardError::NotFound(_) => StatusCode::NOT_FOUND,
         BoardError::Conflict | BoardError::Claimed(_) => StatusCode::CONFLICT,
-        BoardError::Forbidden(_) | BoardError::NotClaimant => StatusCode::FORBIDDEN,
+        BoardError::Forbidden(_) | BoardError::NotClaimant | BoardError::OutOfScope(_) => {
+            StatusCode::FORBIDDEN
+        }
         BoardError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         BoardError::Terminal | BoardError::NoSuchMove { .. } | BoardError::Invalid(_) => {
             StatusCode::UNPROCESSABLE_ENTITY

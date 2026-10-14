@@ -3,6 +3,7 @@
 //! - [`api`]: the operation table shared by MCP and web.
 //! - [`identities`]: per-model bearer tokens bound to an actor and role.
 //! - [`board`]: the service: roles, clock, commit with retry.
+//! - [`projects`]: the applications one board serves, and the paths each may change.
 //! - [`domain`]: pure cards, columns, capabilities and the transition table.
 //! - [`store`]: the storage port and an in-memory adapter.
 //! - [`mcp`], [`web`]: the two surfaces over [`api`].
@@ -18,6 +19,7 @@ pub mod http;
 pub mod identities;
 pub mod mcp;
 pub mod mmdb;
+pub mod projects;
 pub mod store;
 pub mod sync;
 pub mod web;

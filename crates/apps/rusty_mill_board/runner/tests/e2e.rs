@@ -71,6 +71,12 @@ impl Work for Scripted {
             },
         })
     }
+    fn changed(&self, _: &Path) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+    fn discard(&self, _: &Path) -> Result<(), String> {
+        Ok(())
+    }
     fn commit(&self, _: &Path, _: &str) -> Result<bool, String> {
         Ok(false)
     }

@@ -23,6 +23,7 @@ use rusty_mill_board::github::{GithubConfig, GithubForge};
 use rusty_mill_board::identities::Credentials;
 use rusty_mill_board::mcp;
 use rusty_mill_board::mmdb::MmdbStore;
+use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::sync::reconcile;
 use rusty_mill_board::web::{Auth, Web, check_bind};
@@ -43,6 +44,11 @@ struct Cli {
     /// (must be chmod 600). Callers then cannot choose their actor or role.
     #[arg(long, env = "MILL_BOARD_IDENTITIES", conflicts_with = "auth_token")]
     identities: Option<PathBuf>,
+    /// JSON file naming the projects (applications) this board serves and the repository
+    /// paths each may change: `{"rocket_league": ["crates/apps/rocket_league"]}`. Without it
+    /// there is only the `default` project.
+    #[arg(long, env = "MILL_BOARD_PROJECTS")]
+    projects: Option<PathBuf>,
     /// Mirror the board to GitHub issues of this repo (`owner/name`). The token
     /// comes from `GITHUB_TOKEN` and needs issues read/write on the repo.
     #[arg(long, env = "MILL_BOARD_GITHUB_REPO")]
@@ -94,7 +100,12 @@ fn run(cli: Cli) -> Result<(), String> {
         Some(path) => Box::new(MmdbStore::open(path).map_err(|e| e.to_string())?),
         None => Box::new(MemStore::default()),
     };
-    let board: Arc<Shared> = Arc::new(Board::new(store, Roles::default()));
+    let projects = match &cli.projects {
+        Some(path) => Projects::load(path)?,
+        None => Projects::default(),
+    };
+    let board: Arc<Shared> =
+        Arc::new(Board::new(store, Roles::default()).with_projects(projects.clone()));
     if let Some(repo) = &cli.github_repo {
         let token = cli
             .github_token
@@ -120,7 +131,9 @@ fn run(cli: Cli) -> Result<(), String> {
     };
     let mcp_path = config.path.clone();
     let auth = match (&cli.identities, cli.auth_token) {
-        (Some(path), _) => Auth::Credentials(Credentials::load(path, &Roles::default())?),
+        (Some(path), _) => {
+            Auth::Credentials(Credentials::load(path, &Roles::default(), &projects)?)
+        }
         (None, Some(token)) => Auth::Shared(token),
         (None, None) => Auth::Open,
     };

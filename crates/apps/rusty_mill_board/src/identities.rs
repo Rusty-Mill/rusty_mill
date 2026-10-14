@@ -4,7 +4,9 @@
 //! [{"token": "<random, 16+ chars>", "actor": "claude-code", "role": "builder"},
 //!  {"token": "<random>",            "actor": "codex",       "role": "reviewer"}]
 //! ```
-//! A model that holds a token cannot act as any other actor or role.
+//! A model that holds a token cannot act as any other actor or role. An optional
+//! `"projects": ["rocket_league"]` limits it to those projects: it cannot see, take
+//! or change cards of any other.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -14,6 +16,7 @@ use serde::Deserialize;
 
 use crate::api::Identity;
 use crate::board::Roles;
+use crate::projects::Projects;
 
 /// Shortest accepted token, in characters.
 const MIN_TOKEN: usize = 16;
@@ -24,18 +27,19 @@ struct Entry {
     token: String,
     actor: String,
     role: String,
+    projects: Option<Vec<String>>,
 }
 
 /// Token -> identity.
 pub struct Credentials(Vec<(String, Identity)>);
 
 impl Credentials {
-    /// Parse and validate a credentials file's JSON against the board's roles.
+    /// Parse and validate a credentials file's JSON against the board's roles and projects.
     ///
     /// # Errors
     /// On malformed JSON, a short or duplicate token, a blank actor, an
-    /// unknown role, or an empty list.
-    pub fn parse(json: &str, roles: &Roles) -> Result<Self, String> {
+    /// unknown role or project, an empty project list, or an empty list.
+    pub fn parse(json: &str, roles: &Roles, projects: &Projects) -> Result<Self, String> {
         let entries: Vec<Entry> =
             serde_json::from_str(json).map_err(|e| format!("identities: {e}"))?;
         if entries.is_empty() {
@@ -59,11 +63,20 @@ impl Credentials {
             if !roles.0.contains_key(&e.role) {
                 return Err(bad(&format!("unknown role {:?}", e.role)));
             }
+            if let Some(scope) = &e.projects {
+                if scope.is_empty() {
+                    return Err(bad("projects is empty; omit it for all projects"));
+                }
+                if let Some(unknown) = scope.iter().find(|p| !projects.contains(p)) {
+                    return Err(bad(&format!("unknown project {unknown:?}")));
+                }
+            }
             out.push((
                 e.token,
                 Identity {
                     actor: e.actor,
                     role: e.role,
+                    projects: e.projects,
                 },
             ));
         }
@@ -74,7 +87,7 @@ impl Credentials {
     ///
     /// # Errors
     /// If it cannot be read, is group/world-accessible, or does not validate.
-    pub fn load(path: &Path, roles: &Roles) -> Result<Self, String> {
+    pub fn load(path: &Path, roles: &Roles, projects: &Projects) -> Result<Self, String> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -91,7 +104,7 @@ impl Credentials {
             }
         }
         let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Self::parse(&json, roles)
+        Self::parse(&json, roles, projects)
     }
 
     /// Whose token this is. Compares against every entry, so timing does not
@@ -119,12 +132,18 @@ mod tests {
 
     #[test]
     fn identifies_by_token() {
-        let c = Credentials::parse(&entry(TOK, "builder"), &Roles::default()).expect("valid");
+        let c = Credentials::parse(
+            &entry(TOK, "builder"),
+            &Roles::default(),
+            &Projects::default(),
+        )
+        .expect("valid");
         assert_eq!(
             c.identify(TOK),
             Some(&Identity {
                 actor: "claude".into(),
-                role: "builder".into()
+                role: "builder".into(),
+                projects: None,
             })
         );
         assert_eq!(c.identify("0123456789abcdef0124"), None);
@@ -154,7 +173,32 @@ mod tests {
                 "unknown field",
             ),
         ] {
-            let e = Credentials::parse(&json, &roles).err().expect(&json);
+            let e = Credentials::parse(&json, &roles, &Projects::default())
+                .err()
+                .expect(&json);
+            assert!(e.contains(why), "{json} -> {e}");
+        }
+    }
+
+    #[test]
+    fn projects_must_exist_and_are_kept() {
+        let known = Projects::parse(r#"{"rl": ["crates/apps/rocket_league"]}"#).expect("projects");
+        let with = |projects: &str| {
+            format!(r#"[{{"token":"{TOK}","actor":"c","role":"builder","projects":{projects}}}]"#)
+        };
+        let ok = Credentials::parse(&with(r#"["rl","default"]"#), &Roles::default(), &known)
+            .expect("known projects");
+        assert_eq!(
+            ok.identify(TOK).and_then(|i| i.projects.clone()),
+            Some(vec!["rl".to_owned(), "default".to_owned()])
+        );
+        for (json, why) in [
+            (with(r#"["nope"]"#), "unknown project"),
+            (with("[]"), "is empty"),
+        ] {
+            let e = Credentials::parse(&json, &Roles::default(), &known)
+                .err()
+                .expect(&json);
             assert!(e.contains(why), "{json} -> {e}");
         }
     }
@@ -166,12 +210,12 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mill_ident_{}.json", std::process::id()));
         std::fs::write(&path, entry(TOK, "builder")).expect("write");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        let e = Credentials::load(&path, &Roles::default())
+        let e = Credentials::load(&path, &Roles::default(), &Projects::default())
             .err()
             .expect("refused");
         assert!(e.contains("chmod 600"), "{e}");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
-        assert!(Credentials::load(&path, &Roles::default()).is_ok());
+        assert!(Credentials::load(&path, &Roles::default(), &Projects::default()).is_ok());
         std::fs::remove_file(&path).ok();
     }
 }

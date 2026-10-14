@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use rusty_mill_board::domain::{Capability, Card, Column};
+use rusty_mill_board::projects::Projects;
 use uuid::Uuid;
 
 use crate::config::Stage;
@@ -44,6 +45,8 @@ pub trait BoardApi: Sync {
     fn get(&self, id: Uuid) -> Result<Card, ApiError>;
     /// The board's roles.
     fn roles(&self) -> Result<Roles, ApiError>;
+    /// The board's projects and the paths each may change.
+    fn projects(&self) -> Result<Projects, ApiError>;
     /// Move a card as `role`.
     fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError>;
     /// Claim a card as `role`.
@@ -84,6 +87,17 @@ pub trait Work: Sync {
         dir: &Path,
         env: &[(String, String)],
     ) -> Result<Outcome, String>;
+    /// Every repository path with uncommitted changes in `dir` (`/`-separated, from the
+    /// repository root; both sides of a rename).
+    ///
+    /// # Errors
+    /// A message if the state could not be read.
+    fn changed(&self, dir: &Path) -> Result<Vec<String>, String>;
+    /// Throw away everything uncommitted in `dir`: the stage's work is not wanted.
+    ///
+    /// # Errors
+    /// A message if the directory could not be restored.
+    fn discard(&self, dir: &Path) -> Result<(), String>;
     /// Commit what the stage changed. `Ok(false)` when there was nothing to commit.
     ///
     /// # Errors

@@ -7,9 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::domain::{
-    Actor, BoardError, Capability, Card, Column, Event, EventKind, WORK_QUEUES, actionable,
-    entry_column, text_hash,
+    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, WORK_QUEUES,
+    actionable, entry_column, text_hash,
 };
+use crate::projects::Projects;
 use crate::store::Store;
 
 /// Attempts per operation when another writer wins the revision race.
@@ -49,6 +50,7 @@ impl Roles {
         Ok(Actor {
             name: name.to_owned(),
             caps: caps.clone(),
+            projects: None,
         })
     }
 }
@@ -57,6 +59,7 @@ impl Roles {
 pub struct Board<S> {
     store: S,
     roles: Roles,
+    projects: Projects,
     clock: fn() -> i64,
 }
 
@@ -70,11 +73,7 @@ pub fn system_ms() -> i64 {
 impl<S: Store> Board<S> {
     /// A board using the system clock.
     pub fn new(store: S, roles: Roles) -> Self {
-        Self {
-            store,
-            roles,
-            clock: system_ms,
-        }
+        Self::with_clock(store, roles, system_ms)
     }
 
     /// A board with an injected clock (tests).
@@ -82,8 +81,21 @@ impl<S: Store> Board<S> {
         Self {
             store,
             roles,
+            projects: Projects::default(),
             clock,
         }
+    }
+
+    /// Serve these projects instead of only `default`.
+    #[must_use]
+    pub fn with_projects(mut self, projects: Projects) -> Self {
+        self.projects = projects;
+        self
+    }
+
+    /// The project registry.
+    pub fn projects(&self) -> &Projects {
+        &self.projects
     }
 
     /// The role registry.
@@ -125,7 +137,7 @@ impl<S: Store> Board<S> {
         self.store.last_event_id()
     }
 
-    /// Create a Backlog card.
+    /// Create a Backlog card in the `default` project.
     ///
     /// # Errors
     /// On a blank title or storage failure.
@@ -136,7 +148,30 @@ impl<S: Store> Board<S> {
         body: &str,
         tags: Vec<String>,
     ) -> Result<Card, BoardError> {
-        let card = Card::new(title, body, tags, (self.clock)())?;
+        self.add_in(by, DEFAULT_PROJECT, title, body, tags)
+    }
+
+    /// Create a Backlog card in `project`.
+    ///
+    /// # Errors
+    /// On a blank title, an unknown project, a project outside `by`'s scope, or
+    /// storage failure.
+    pub fn add_in(
+        &self,
+        by: &Actor,
+        project: &str,
+        title: &str,
+        body: &str,
+        tags: Vec<String>,
+    ) -> Result<Card, BoardError> {
+        if !self.projects.contains(project) {
+            return Err(BoardError::Invalid("unknown project"));
+        }
+        if !by.may_work_in(project) {
+            return Err(BoardError::OutOfScope(project.to_owned()));
+        }
+        let mut card = Card::new(title, body, tags, (self.clock)())?;
+        project.clone_into(&mut card.project);
         self.store
             .insert(&card, Event::of(&card, EventKind::Created, &by.name))?;
         Ok(card)
@@ -198,12 +233,36 @@ impl<S: Store> Board<S> {
     /// # Errors
     /// On storage failure, or (with `id`) whatever refused that card.
     pub fn take(&self, by: &Actor, id: Option<Uuid>) -> Result<Option<Card>, BoardError> {
+        self.take_in(by, id, None)
+    }
+
+    /// As [`Board::take`], restricted to cards of `project` when given. A card of a project
+    /// outside `by`'s scope is refused by the write itself (see `apply`), so it is skipped
+    /// when scanning and an error when named by `id`.
+    ///
+    /// # Errors
+    /// As [`Board::take`], plus an unknown or out-of-scope `project`.
+    pub fn take_in(
+        &self,
+        by: &Actor,
+        id: Option<Uuid>,
+        project: Option<&str>,
+    ) -> Result<Option<Card>, BoardError> {
+        if let Some(p) = project {
+            if !self.projects.contains(p) {
+                return Err(BoardError::Invalid("unknown project"));
+            }
+            if !by.may_work_in(p) {
+                return Err(BoardError::OutOfScope(p.to_owned()));
+            }
+        }
         let rank = |c: &Card| WORK_QUEUES.iter().position(|q| *q == c.column);
         let mut candidates: Vec<Card> = self
             .store
             .list()?
             .into_iter()
             .filter(|c| id.is_none_or(|i| c.id == i))
+            .filter(|c| project.is_none_or(|p| c.project == p))
             .filter(|c| rank(c).is_some() && actionable(c.column, &by.caps))
             .filter(|c| id.is_some() || c.claim.as_deref().is_none_or(|h| h == by.name))
             .collect();
@@ -220,6 +279,7 @@ impl<S: Store> Board<S> {
                     | BoardError::Forbidden(_)
                     | BoardError::NotClaimant
                     | BoardError::Terminal
+                    | BoardError::OutOfScope(_)
                     | BoardError::NotFound(_),
                 ) if id.is_none() => {}
                 Err(e) => return Err(e),
@@ -275,7 +335,12 @@ impl<S: Store> Board<S> {
         op: impl Fn(&Card, i64) -> Result<Card, BoardError>,
     ) -> Result<Card, BoardError> {
         for _ in 0..RETRIES {
-            let next = op(&self.get(id)?, (self.clock)())?;
+            let current = self.get(id)?;
+            // Checked on the card being committed, so a card re-assigned mid-call is refused too.
+            if !by.may_work_in(&current.project) {
+                return Err(BoardError::OutOfScope(current.project));
+            }
+            let next = op(&current, (self.clock)())?;
             match self.store.replace(&next, Event::of(&next, kind, &by.name)) {
                 Err(BoardError::Conflict) => continue,
                 result => return result.map(|()| next),
@@ -290,6 +355,23 @@ impl<S: Store> Board<S> {
     /// See [`Card::move_to`].
     pub fn move_card(&self, id: Uuid, to: Column, by: &Actor) -> Result<Card, BoardError> {
         self.apply(id, by, EventKind::Moved, |c, now| c.move_to(to, by, now))
+    }
+
+    /// Move a card to another project. Needs `Triage`, and both projects in scope.
+    ///
+    /// # Errors
+    /// An unknown project, a missing capability, an out-of-scope project, or a Done card.
+    pub fn assign(&self, id: Uuid, project: &str, by: &Actor) -> Result<Card, BoardError> {
+        if !self.projects.contains(project) {
+            return Err(BoardError::Invalid("unknown project"));
+        }
+        if !by.caps.contains(&Capability::Triage) {
+            return Err(BoardError::Forbidden(Capability::Triage));
+        }
+        if !by.may_work_in(project) {
+            return Err(BoardError::OutOfScope(project.to_owned()));
+        }
+        self.apply(id, by, EventKind::Assigned, |c, now| c.assign(project, now))
     }
 
     /// Claim a card.

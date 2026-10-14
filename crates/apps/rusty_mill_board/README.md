@@ -15,8 +15,17 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.
-- **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_events`, `card_take`, `card_get`, `card_add`,
-  `card_move`, `card_claim`, `card_release`, `card_update`, `card_comment`. The web API
+- **Projects:** one board serves several applications of a monorepo. `--projects FILE` names them and the
+  repository paths each may change (`{"rocket_league": ["crates/apps/rocket_league"]}`); the `default` project
+  always exists and owns every path no other project does. A card belongs to one project (old cards to
+  `default`; `card_add` takes `project`, `card_assign` moves one and needs Triage). A credential in
+  `--identities` may carry `"projects": [...]`: it then cannot see, take or change any other project's cards,
+  checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
+  `board_list` and `card_take` take a `project` filter, and the UI has a project switcher. The runner
+  enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
+  `board_events` carries no card text but does not hide other projects' event metadata.
+- **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_events`, `card_take`,
+  `card_get`, `card_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_comment`. The web API
   exposes the same table, so the two cannot drift.
 - **Models connect themselves.** Run one HTTP server with `--identities FILE` (a token per model, bound to an
   actor and role) and register `/mcp` in each model's own client; a model then pulls work with `card_take`,

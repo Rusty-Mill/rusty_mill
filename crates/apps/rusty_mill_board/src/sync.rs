@@ -260,6 +260,7 @@ pub fn reconcile(board: &Shared, forge: &dyn Forge) -> Result<Report, SyncError>
     let actor = Actor {
         name: "github-sync".into(),
         caps: BTreeSet::new(),
+        projects: None,
     };
     let issues = forge.list_issues()?;
     let by_number: HashMap<u64, &Issue> = issues.iter().map(|i| (i.number, i)).collect();

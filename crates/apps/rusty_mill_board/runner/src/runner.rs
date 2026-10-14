@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::thread;
 
 use rusty_mill_board::domain::{Card, Column, required_capability};
+use rusty_mill_board::projects::Projects;
 use uuid::Uuid;
 
 use crate::config::Stage;
@@ -39,6 +40,41 @@ pub enum Step {
     GaveUp(Uuid),
 }
 
+/// The one project a runner serves, and the paths its work may change: the project's own,
+/// plus `shared` ones every project touches (change fragments, the lockfile).
+#[derive(Debug, Clone)]
+pub struct Scope {
+    project: String,
+    projects: Projects,
+    shared: Vec<String>,
+}
+
+impl Scope {
+    /// # Errors
+    /// If `project` is not one of `projects`.
+    pub fn new(project: &str, projects: Projects, shared: Vec<String>) -> Result<Self, String> {
+        if !projects.contains(project) {
+            return Err(format!("the board has no project {project:?}"));
+        }
+        Ok(Self {
+            project: project.to_owned(),
+            projects,
+            shared,
+        })
+    }
+
+    /// Whether this project's work may change repository path `file`.
+    pub fn allows(&self, file: &str) -> bool {
+        self.projects.owner_of(file) == self.project
+            || self.shared.iter().any(|s| {
+                file == s
+                    || file
+                        .strip_prefix(s.as_str())
+                        .is_some_and(|r| r.starts_with('/'))
+            })
+    }
+}
+
 /// The runner.
 pub struct Runner<B, W> {
     board: B,
@@ -47,6 +83,7 @@ pub struct Runner<B, W> {
     actor: String,
     max_parallel: usize,
     env: Vec<(String, String)>,
+    scope: Option<Scope>,
 }
 
 impl<B: BoardApi, W: Work> Runner<B, W> {
@@ -66,7 +103,16 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
             actor: actor.to_owned(),
             max_parallel: max_parallel.max(1),
             env,
+            scope: None,
         }
+    }
+
+    /// Serve one project only: other projects' cards are never touched, and a stage whose
+    /// work changes files outside the project's paths is discarded and fails.
+    #[must_use]
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = Some(scope);
+        self
     }
 
     /// Check every stage's role exists and may make the moves the stage makes.
@@ -75,6 +121,16 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
     /// A message naming the stage and the first problem found.
     pub fn validate(&self) -> Result<(), String> {
         let roles = self.board.roles().map_err(|e| e.to_string())?;
+        if self.scope.is_none() {
+            let projects = self.board.projects().map_err(|e| e.to_string())?;
+            if projects.names().count() > 1 {
+                return Err(
+                    "the board has several projects: pass --project NAME so this runner only \
+                     works (and may only change) one application"
+                        .into(),
+                );
+            }
+        }
         for s in &self.stages {
             let caps = roles
                 .get(&s.role)
@@ -116,7 +172,11 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
         for stage in self.stages.iter().rev() {
             for column in stage.from.iter().rev() {
                 for card in self.board.list(*column)? {
-                    let ours = card.claim.as_deref().is_none_or(|c| c == self.actor);
+                    let in_scope = self
+                        .scope
+                        .as_ref()
+                        .is_none_or(|s| s.project == card.project);
+                    let ours = in_scope && card.claim.as_deref().is_none_or(|c| c == self.actor);
                     if ours && taken.insert(card.id) {
                         jobs.push((stage, card));
                     }
@@ -215,6 +275,19 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
         env.push(("MILL_STAGE".into(), stage.name.clone()));
         let outcome = self.work.run(stage, &argv, &dir, &env)?;
         let mut report = outcome.summary;
+        if outcome.ok
+            && let Some(stray) = self.stray_changes(&dir)?
+        {
+            self.work.discard(&dir)?;
+            return Ok((
+                false,
+                format!(
+                    "{report}; changed files outside project {:?}, all uncommitted work discarded: {}",
+                    self.scope.as_ref().map_or("", |s| s.project.as_str()),
+                    stray.join(", ")
+                ),
+            ));
+        }
         if outcome.ok {
             let message = format!("mill: {} [{}]", card.title, stage.name);
             if self.work.commit(&dir, &message)? {
@@ -226,6 +299,22 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
             report.push_str(outcome.tail.trim_end());
         }
         Ok((outcome.ok, report))
+    }
+}
+
+impl<B: BoardApi, W: Work> Runner<B, W> {
+    /// The changed files this runner's project may not change, if there are any.
+    fn stray_changes(&self, dir: &std::path::Path) -> Result<Option<Vec<String>>, String> {
+        let Some(scope) = &self.scope else {
+            return Ok(None);
+        };
+        let stray: Vec<String> = self
+            .work
+            .changed(dir)?
+            .into_iter()
+            .filter(|f| !scope.allows(f))
+            .collect();
+        Ok((!stray.is_empty()).then_some(stray))
     }
 }
 
@@ -297,7 +386,7 @@ mod tests {
         let status = match e {
             NotFound(_) => 404,
             Conflict | Claimed(_) => 409,
-            Forbidden(_) | NotClaimant => 403,
+            Forbidden(_) | NotClaimant | OutOfScope(_) => 403,
             Terminal | NoSuchMove { .. } | Invalid(_) => 422,
             Storage(_) => 500,
         };
@@ -316,6 +405,9 @@ mod tests {
         }
         fn roles(&self) -> Result<Roles, ApiError> {
             Ok(self.0.roles().0.clone())
+        }
+        fn projects(&self) -> Result<Projects, ApiError> {
+            Ok(self.0.projects().clone())
         }
         fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError> {
             self.0
@@ -354,6 +446,10 @@ mod tests {
         prompts: Mutex<Vec<String>>,
         prepare_fails: bool,
         before_run: Mutex<Option<Box<dyn Fn() + Send>>>,
+        /// Files the scripted command "changed", reported by `changed`.
+        changed: Mutex<Vec<String>>,
+        discards: std::sync::atomic::AtomicUsize,
+        commits: std::sync::atomic::AtomicUsize,
     }
 
     impl Fake {
@@ -403,7 +499,16 @@ mod tests {
                 Err(e) => Err(e),
             }
         }
+        fn changed(&self, _: &Path) -> Result<Vec<String>, String> {
+            Ok(self.changed.lock().expect("lock").clone())
+        }
+        fn discard(&self, _: &Path) -> Result<(), String> {
+            self.discards.fetch_add(1, Ordering::Relaxed);
+            self.changed.lock().expect("lock").clear();
+            Ok(())
+        }
         fn commit(&self, _: &Path, _: &str) -> Result<bool, String> {
+            self.commits.fetch_add(1, Ordering::Relaxed);
             Ok(true)
         }
     }
@@ -641,6 +746,159 @@ mod tests {
             let e = r.validate().expect_err(json);
             assert!(e.contains(why), "{json} -> {e}");
         }
+    }
+
+    // ---- projects: a runner serves one application and may change only its paths
+
+    fn projects() -> Projects {
+        Projects::parse(
+            r#"{"rl": ["crates/apps/rocket_league"], "orch": ["crates/apps/rusty_orch"]}"#,
+        )
+        .expect("projects")
+    }
+
+    /// A board with a Ready card in each of `rl`, `orch` and `default`.
+    fn setup_projects(fake: Fake) -> (Runner<Local, Fake>, Vec<(String, Uuid)>) {
+        let board: Arc<Shared> = Arc::new(
+            Board::with_clock(
+                Box::new(MemStore::default()) as Box<dyn rusty_mill_board::store::Store>,
+                BoardRoles::default(),
+                tick_clock,
+            )
+            .with_projects(projects()),
+        );
+        let human = board.roles().actor("nano", "human").expect("role");
+        let cards = ["rl", "orch", "default"]
+            .iter()
+            .map(|p| {
+                let c = board.add_in(&human, p, p, "do it", vec![]).expect("add");
+                board.move_card(c.id, Ready, &human).expect("ready");
+                ((*p).to_owned(), c.id)
+            })
+            .collect();
+        let runner = Runner::new(
+            Local(board),
+            fake,
+            parse(STAGES).expect("stages"),
+            "mill-runner",
+            3,
+            vec![],
+        );
+        (runner, cards)
+    }
+
+    fn scope(project: &str) -> Scope {
+        Scope::new(
+            project,
+            projects(),
+            vec!["changes".into(), "Cargo.lock".into()],
+        )
+        .expect("scope")
+    }
+
+    #[test]
+    fn a_board_with_several_projects_needs_a_scoped_runner() {
+        let (r, _) = setup_projects(Fake::default());
+        let e = r.validate().expect_err("unscoped");
+        assert!(e.contains("--project"), "{e}");
+        let (r, _) = setup_projects(Fake::default());
+        assert!(r.with_scope(scope("rl")).validate().is_ok());
+        assert!(Scope::new("nope", projects(), vec![]).is_err());
+    }
+
+    #[test]
+    fn a_scoped_runner_works_only_its_own_projects_cards() {
+        let (r, cards) = setup_projects(
+            Fake::default()
+                .then("build", Ok(true))
+                .then("build", Ok(true)),
+        );
+        let r = r.with_scope(scope("orch"));
+        let steps = r.tick().expect("tick");
+        let orch = cards.iter().find(|(p, _)| p == "orch").expect("card").1;
+        assert_eq!(
+            steps,
+            [Step::Done {
+                stage: "build".into(),
+                card: orch,
+                ok: true
+            }]
+        );
+        for (project, id) in &cards {
+            let expected = if project == "orch" { Qa } else { Ready };
+            assert_eq!(column(&r, *id), expected, "{project}");
+        }
+    }
+
+    #[test]
+    fn work_outside_the_project_is_discarded_and_not_committed() {
+        let fake = Fake::default().then("build", Ok(true));
+        *fake.changed.lock().expect("lock") = vec![
+            "crates/apps/rocket_league/src/lib.rs".into(),
+            "crates/apps/rusty_orch/src/lib.rs".into(),
+        ];
+        let (r, cards) = setup_projects(fake);
+        let r = r.with_scope(scope("rl"));
+        let rl = cards.iter().find(|(p, _)| p == "rl").expect("card").1;
+        r.tick().expect("tick");
+        assert_eq!(
+            r.work.commits.load(Ordering::Relaxed),
+            0,
+            "nothing was committed"
+        );
+        assert_eq!(r.work.discards.load(Ordering::Relaxed), 1);
+        let card = r.board.get(rl).expect("card");
+        assert_eq!(card.column, Blocked, "the build stage's failure column");
+        let note = &card.comments[0].text;
+        assert!(
+            note.contains("outside project") && note.contains("crates/apps/rusty_orch/src/lib.rs"),
+            "{note}"
+        );
+        assert!(
+            !note.contains("rocket_league/src/lib.rs"),
+            "only the stray files are named: {note}"
+        );
+    }
+
+    #[test]
+    fn work_inside_the_project_and_shared_paths_is_committed() {
+        let fake = Fake::default().then("build", Ok(true));
+        *fake.changed.lock().expect("lock") = vec![
+            "crates/apps/rocket_league/src/lib.rs".into(),
+            "changes/2026-10-14-rl.md".into(),
+            "Cargo.lock".into(),
+        ];
+        let (r, cards) = setup_projects(fake);
+        let r = r.with_scope(scope("rl"));
+        let rl = cards.iter().find(|(p, _)| p == "rl").expect("card").1;
+        r.tick().expect("tick");
+        assert_eq!(r.work.commits.load(Ordering::Relaxed), 1);
+        assert_eq!(r.work.discards.load(Ordering::Relaxed), 0);
+        assert_eq!(column(&r, rl), Qa);
+    }
+
+    #[test]
+    fn scope_allows_own_paths_shared_paths_and_nothing_that_merely_shares_a_prefix() {
+        let s = scope("rl");
+        for ok in [
+            "crates/apps/rocket_league/a.rs",
+            "changes/x.md",
+            "Cargo.lock",
+        ] {
+            assert!(s.allows(ok), "{ok}");
+        }
+        for bad in [
+            "crates/apps/rusty_orch/a.rs",
+            "crates/apps/rocket_league_old/a.rs",
+            "changes.md",
+            "Cargo.lock.bak",
+            "README.md", // default-project territory
+        ] {
+            assert!(!s.allows(bad), "{bad}");
+        }
+        // The default project owns whatever no other project does.
+        assert!(scope("default").allows("README.md"));
+        assert!(!scope("default").allows("crates/apps/rocket_league/a.rs"));
     }
 
     #[test]
