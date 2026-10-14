@@ -2,7 +2,7 @@
 category: Added
 changelog: The library can index skills, mods and prompts that live in other repos via `library/sources.json`, pinned to a commit and tagged with the repo; piloted with `baileyrd/my_claude_mods`.
 ---
-## 2026-10-13 - Library sources: index entries from other repos
+## 2026-10-14 - Library sources: index entries from other repos
 
 - **Added:** `library/sources.json` lists repos whose skills (`SKILL.md`), mods (plugin folders) and root `prompts/*.md` the library indexes in place. `python3 library/build.py --sync` fetches each source (git over https, shallow, into the git-ignored `.cache/`) and builds; plain `build.py` stays offline and warns about any unsynced source; `--strict` fails on warnings. New modules: `fmt.py` (parsing/reading, moved out of `build.py`) and `sources.py` (validation, sync, scan).
 - **Added:** computed provenance `github.com/<repo>@<sha>:<path>` on every remote entry, the repo name as a tag, a "From <repo>" label on cards, remote install hints (`git clone … && claude --plugin-dir …`), and "By source" grouping by `repo@sha`.
