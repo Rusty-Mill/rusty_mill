@@ -55,29 +55,24 @@ use std::{
     convert::Infallible,
     future::Future,
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
 
 use axum::response::{IntoResponse, Response};
-use http::{Request, StatusCode, header::RETRY_AFTER};
-use tokio::sync::Semaphore;
+use http::{Request, header::RETRY_AFTER};
 
-/// `Retry-After` sent with a shed response, in seconds.
-///
-/// Short on purpose: the point is a brief pause while the backlog clears, not
-/// a client that goes away for a minute.
-const RETRY_AFTER_SECS: u32 = 1;
+use crate::admission::{Admission, Rejection};
 
 /// Bounds concurrent requests and how long each may take.
 ///
-/// Cheap to clone; the permit pool is shared, which is the whole point — a
-/// limit that each clone counted separately would bound nothing.
+/// A tower adapter over [`crate::admission`]: the counting and the refusals
+/// live there, this adds the clock and the response type. Cheap to clone; the
+/// count is shared, which is the whole point — a limit that each clone counted
+/// separately would bound nothing.
 #[derive(Debug, Clone, Default)]
 pub struct LimitsLayer {
-    permits: Option<Arc<Semaphore>>,
-    max_concurrent: Option<usize>,
+    admission: Option<Admission>,
     timeout: Option<Duration>,
 }
 
@@ -97,9 +92,7 @@ impl LimitsLayer {
     ///
     /// Zero is treated as one, since a limit of zero would refuse everything.
     pub fn with_max_concurrent(mut self, max: usize) -> Self {
-        let max = max.max(1);
-        self.max_concurrent = Some(max);
-        self.permits = Some(Arc::new(Semaphore::new(max)));
+        self.admission = Some(Admission::new(max));
         self
     }
 
@@ -114,7 +107,7 @@ impl LimitsLayer {
 
     /// The concurrency limit, if one is set.
     pub fn max_concurrent(&self) -> Option<usize> {
-        self.max_concurrent
+        self.admission.as_ref().map(Admission::max)
     }
 
     /// The request timeout, if one is set.
@@ -124,7 +117,7 @@ impl LimitsLayer {
 
     /// Permits available right now, for a health endpoint or a test.
     pub fn available(&self) -> Option<usize> {
-        self.permits.as_ref().map(|p| p.available_permits())
+        self.admission.as_ref().map(Admission::available)
     }
 }
 
@@ -134,7 +127,7 @@ impl<S> tower_layer::Layer<S> for LimitsLayer {
     fn layer(&self, inner: S) -> Self::Service {
         Limited {
             inner,
-            permits: self.permits.clone(),
+            admission: self.admission.clone(),
             timeout: self.timeout,
         }
     }
@@ -144,7 +137,7 @@ impl<S> tower_layer::Layer<S> for LimitsLayer {
 #[derive(Debug, Clone)]
 pub struct Limited<S> {
     inner: S,
-    permits: Option<Arc<Semaphore>>,
+    admission: Option<Admission>,
     timeout: Option<Duration>,
 }
 
@@ -173,21 +166,18 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
-        let permits = self.permits.clone();
+        let admission = self.admission.clone();
         let timeout = self.timeout;
 
         Box::pin(async move {
-            // `try_acquire_owned` rather than `acquire_owned`: the former
-            // refuses, the latter waits. Waiting is the failure mode this
-            // whole module exists to avoid.
-            let _permit = match &permits {
-                Some(semaphore) => match Arc::clone(semaphore).try_acquire_owned() {
-                    Ok(permit) => Some(permit),
-                    Err(_) => {
-                        tracing::warn!("shedding a request: the concurrency limit is reached");
-                        return Ok(overloaded());
-                    }
-                },
+            // `try_admit` refuses rather than waits. Waiting is the failure
+            // mode this whole module exists to avoid.
+            let _permit = match admission.as_ref().map(Admission::try_admit) {
+                Some(Ok(permit)) => Some(permit),
+                Some(Err(rejection)) => {
+                    tracing::warn!("shedding a request: the concurrency limit is reached");
+                    return Ok(respond(rejection));
+                }
                 None => None,
             };
 
@@ -204,7 +194,7 @@ where
                         timeout_ms = timeout.as_millis() as u64,
                         "a request produced no response within the timeout"
                     );
-                    Ok(timed_out())
+                    Ok(respond(Rejection::TIMED_OUT))
                 }
             }
             // The permit drops here, after the response exists — so the count
@@ -213,27 +203,19 @@ where
     }
 }
 
-fn overloaded() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [(RETRY_AFTER, RETRY_AFTER_SECS.to_string())],
-        "Service Unavailable: too many requests in flight",
-    )
-        .into_response()
-}
-
-fn timed_out() -> Response {
-    (
-        StatusCode::GATEWAY_TIMEOUT,
-        "Gateway Timeout: the server took too long to respond",
-    )
-        .into_response()
+fn respond(rejection: Rejection) -> Response {
+    let mut response = (rejection.status, rejection.body).into_response();
+    if let Some(secs) = rejection.retry_after_secs {
+        response.headers_mut().insert(RETRY_AFTER, secs.into());
+    }
+    response
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use http::StatusCode;
     use tower_layer::Layer as _;
     use tower_service::Service as _;
 
