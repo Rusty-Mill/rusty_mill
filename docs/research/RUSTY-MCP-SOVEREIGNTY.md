@@ -131,6 +131,8 @@ Each item is one PR, with its own tests and a change fragment.
 5. **Sans-IO cores** for `auth`, `limits` and metrics recording, on `rusty_http`
    types; the existing layers become tower adapters over them. No behaviour
    change. *Done when:* the cores have unit tests with no `tokio` or `axum`.
+   **Metrics core done (2026-10-14):** crate-private `otel::labels` (the
+   cardinality guard and per-instrument attribute sets), under the `otel` feature.
 6. **Drop `axum`** from the adapters (generic body, `http::Response`). *Done
    when:* `axum` is gone from `[dependencies]`; the gateway still compiles and
    its 24 suites pass. Needs D1.
