@@ -459,3 +459,57 @@ fn the_bridge_spawns_the_bots_and_the_match_waits_for_their_cars() {
     assert_eq!((name.as_str(), *skill, *team), ("bot", BotSkill::Custom, 0));
     assert_eq!(loadout.products[0], 23);
 }
+
+/// A game that is killed does not close its socket politely: it resets it. That is the game
+/// going away (`GameClosed`), not an error that ends the run. The reset is made the way a dying
+/// process makes it: closing a socket with bytes the game never read, here the `SpawnBot` the
+/// bridge sends after the map announcement.
+#[test]
+fn a_game_that_dies_with_unread_bytes_ends_the_run_as_closed_not_as_an_error() {
+    let game_listener = GameListener::bind(0).unwrap();
+    let addr = game_listener.local_addr().unwrap();
+    let game = thread::spawn(move || {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let mut first = opening();
+        first
+            .events
+            .retain(|e| !matches!(e, GameEvent::PlayerSpawn { .. }));
+        stream
+            .write_all(&frame(&encode_game_packet(&first).unwrap()).unwrap())
+            .unwrap();
+        // The bridge spawns its bots two messages after the map loads; keep the game talking
+        // for a few, then die without ever reading the SpawnBot. Closing a socket with unread
+        // data sends a reset.
+        for i in 1..=5u32 {
+            thread::sleep(Duration::from_millis(20));
+            let tick = GameBundle {
+                app_seconds: i as f32 / 60.0,
+                delta_physics_frames: 2,
+                events: vec![],
+            };
+            stream
+                .write_all(&frame(&encode_game_packet(&tick).unwrap()).unwrap())
+                .unwrap();
+        }
+        thread::sleep(Duration::from_millis(400));
+    });
+    let (tx, rx) = mpsc::channel();
+    let core = thread::spawn(move || {
+        let stream = game_listener
+            .wait_for_connection(Duration::from_secs(10))
+            .unwrap()
+            .expect("the game never connected");
+        stream.set_nonblocking(true).unwrap();
+        let config = bot_match(&[("bot".to_string(), 0)], MatchLengthMutator::Unlimited);
+        let backend = LinkBackend::new(stream, config).with_spawning(true);
+        let mut core = Core::bind("127.0.0.1:0", backend, Pacing::RealTime).unwrap();
+        let end = core.run(&AtomicBool::new(false), |_| {});
+        tx.send(end.map_err(|e| e.to_string())).unwrap();
+    });
+    let end = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the run never ended");
+    game.join().unwrap();
+    core.join().unwrap();
+    assert_eq!(end, Ok(RunEnd::GameClosed));
+}

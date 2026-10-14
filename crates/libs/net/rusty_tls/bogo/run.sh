@@ -14,6 +14,23 @@ set -euo pipefail
 # tests, so it is a deliberate change, reviewed like a dependency bump.
 PINNED_COMMIT=0c8a01ade0e5349f5b0f9afd5e4de622599ae1da
 
+# googlesource.com answers the occasional fetch with a transient 503 ("RPC
+# failed"). That says nothing about the engine, so retry with a growing pause
+# instead of failing the job; a persistent failure still fails it.
+fetch_pinned() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if git -C "$BORINGSSL" fetch -q --depth 1 origin "$PINNED_COMMIT"; then
+      return 0
+    fi
+    echo "bogo: fetching $PINNED_COMMIT failed (attempt $attempt of 5)" >&2
+    if [ "$attempt" -lt 5 ]; then
+      sleep $((attempt * ${BOGO_FETCH_PAUSE:-5}))
+    fi
+  done
+  return 1
+}
+
 here="$(cd "$(dirname "$0")" && pwd)"
 out="${OUT:-$here/target}"
 mkdir -p "$out"
@@ -25,7 +42,7 @@ if [ -z "${BORINGSSL:-}" ]; then
     git -C "$BORINGSSL" remote add origin https://boringssl.googlesource.com/boringssl
   fi
   if [ "$(git -C "$BORINGSSL" rev-parse HEAD 2>/dev/null || true)" != "$PINNED_COMMIT" ]; then
-    git -C "$BORINGSSL" fetch -q --depth 1 origin "$PINNED_COMMIT"
+    fetch_pinned
     git -C "$BORINGSSL" checkout -q FETCH_HEAD
   fi
 fi

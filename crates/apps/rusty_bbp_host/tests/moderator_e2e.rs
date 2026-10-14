@@ -871,7 +871,25 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
     }
     let out = moderator.join().expect("join").expect("moderator");
     assert_eq!(out.state, State::Cancelled);
-    assert_eq!(out.turns_launched, 3, "planner, coder and coder2");
+    // A tester turn (no launcher) may also be granted once the runner reports,
+    // depending on when the cancel lands, so count the builders' turns from the
+    // log instead of the moderator's total.
+    assert!(
+        out.turns_launched >= 3,
+        "at least planner, coder and coder2"
+    );
+    let log = open_driver(&dir, &task)
+        .expect("driver")
+        .store
+        .events(&task, 0)
+        .expect("log");
+    for role in ["planner", "coder", "coder2"] {
+        let n = log
+            .iter()
+            .filter(|e| matches!(e, Event::TurnGranted { role: r, .. } if r.0 == role))
+            .count();
+        assert_eq!(n, 1, "{role} was granted exactly one turn");
+    }
     assert!(out.elapsed > Duration::ZERO && out.elapsed < Duration::from_secs(60));
     let _ = std::fs::remove_dir_all(&dir);
 }

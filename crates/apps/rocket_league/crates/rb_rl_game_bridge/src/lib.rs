@@ -40,8 +40,8 @@ pub use game_wire::{
     GameEvent, Loadout, Rgba, VehicleInput, WireError, LOADOUT_SLOTS,
 };
 pub use launch::{
-    rlbot_args, GameLaunch, DEFAULT_GAME_PORT, IDEAL_GAME_PORT, PACKET_SEND_RATE,
-    RLBOT_SOCKETS_PORT,
+    needs_epic_login, rlbot_args, GameLaunch, DEFAULT_GAME_PORT, EPIC_LAUNCH_WARNING,
+    IDEAL_GAME_PORT, PACKET_SEND_RATE, RLBOT_SOCKETS_PORT,
 };
 pub use link::{
     BridgeLoop, GameCommand, GameLink, GameListener, Step, MAX_CANDIDATES, STALL_AFTER,

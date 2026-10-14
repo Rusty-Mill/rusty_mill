@@ -535,7 +535,7 @@ fn check_one(
 /// end-entity certificate.
 ///
 /// Self-issued subordinates are skipped except when last, per RFC 5280
-/// §6.1.4(b): a CA re-issuing to itself is a key rollover, not a step into a
+/// §6.1.3(b) and (c): a CA re-issuing to itself is a key rollover, not a step into a
 /// new part of the namespace, so constraining it would break renewals.
 pub fn check_name_constraints(
     constraining: &Certificate<'_>,
