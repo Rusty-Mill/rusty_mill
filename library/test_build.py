@@ -43,6 +43,11 @@ class ParseTests(unittest.TestCase):
             item = next(i for i in build.collect_local() if i["kind"] == kind)
             self.assertEqual(item["export"], item["body"])
 
+    def test_local_mod_install_command_is_built_in_python_and_quoted(self) -> None:
+        mod = build.load_mod(build.ROOT / "mods/backup-before-edit")
+        self.assertIn("claude --plugin-dir mods/backup-before-edit", mod["install"])
+        self.assertIn("# PowerShell", mod["install"])
+
     def test_duplicates_name_both_places(self) -> None:
         a = build.entry("skill", "skills/x/SKILL.md", {"name": "x", "description": "d", "source": "s"}, "b")
         b = build.entry("skill", "x", {"name": "x", "description": "d", "source": "s"}, "b", repo="o/r")

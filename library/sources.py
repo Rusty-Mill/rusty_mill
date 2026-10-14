@@ -1,7 +1,8 @@
 """Entries that live in other repos: sync a pinned checkout into a cache, then scan it.
 
 Nothing from a source repo is ever executed: files are only read as text. Symlinks are
-never followed, so a hostile repo cannot make the page embed files from outside it.
+never followed, so a hostile repo cannot make the page embed files from outside it. Every
+value taken from a source is type-checked here, at the boundary, before it can reach a page.
 """
 import json
 import os
@@ -15,10 +16,9 @@ from fmt import parse, read_mod_source, read_text
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*")
 REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,99}")
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
 PRUNE = {".git", "node_modules", "tests", "test", "types", "dist", "target", "__pycache__", ".cache"}
-# Only these frontmatter keys are taken from a source repo: `featured` and `status`
-# would let a source promote itself or grey out other entries.
-TRUSTED_KEYS = ("name", "description", "tags", "for")
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # tab and newline are checked separately
 
 
 class SourceError(Exception):
@@ -71,7 +71,31 @@ def _git(cwd: Path, *args: str) -> str:
 
 
 def head_sha(checkout: Path) -> str:
+    # Without its own .git, git would walk up and report the surrounding repository's commit.
+    if not (checkout / ".git").exists():
+        raise SourceError(f"{checkout} is not a git checkout")
     return _git(checkout, "rev-parse", "HEAD")
+
+
+def record(source: Source, checkout: Path) -> None:
+    """Bind a checkout to the repo and ref it was fetched for."""
+    _git(checkout, "config", "--local", "library.repo", source.repo)
+    _git(checkout, "config", "--local", "library.ref", source.ref)
+
+
+def check_cache(source: Source, checkout: Path) -> str | None:
+    """Why this cached checkout cannot stand for `source`, or None when it can."""
+    try:
+        repo = _git(checkout, "config", "--local", "--get", "library.repo")
+        ref = _git(checkout, "config", "--local", "--get", "library.ref")
+        sha = head_sha(checkout)
+    except SourceError:
+        return "cache has no recorded origin (re-sync)"
+    if (repo, ref) != (source.repo, source.ref):
+        return f"cache holds {repo}@{ref} but sources.json says {source.repo}@{source.ref} (re-sync)"
+    if FULL_SHA.fullmatch(source.ref) and sha != source.ref:
+        return f"cache is at {sha[:12]} but sources.json pins {source.ref[:12]} (re-sync)"
+    return None
 
 
 def sync(source: Source, cache: Path) -> str:
@@ -81,6 +105,7 @@ def sync(source: Source, cache: Path) -> str:
     _git(dest, "init", "-q")
     _git(dest, "fetch", "-q", "--depth", "1", "--", f"https://github.com/{source.repo}.git", source.ref)
     _git(dest, "-c", "advice.detachedHead=false", "checkout", "-q", "--force", "--detach", "FETCH_HEAD")
+    record(source, dest)
     return head_sha(dest)
 
 
@@ -89,24 +114,52 @@ def _regular(path: Path, root: Path) -> bool:
     return path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(root.resolve())
 
 
-def _trusted(meta: dict[str, object]) -> dict[str, object]:
-    out = {k: meta[k] for k in TRUSTED_KEYS if k in meta}
-    if isinstance(out.get("tags"), str):
-        out["tags"] = [out["tags"]]
-    return out
+def _text(value: object, label: str, limit: int, multiline: bool = False) -> str:
+    """A non-empty string without control characters, or ValueError."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty string")
+    if len(value) > limit:
+        raise ValueError(f"{label} is longer than {limit} characters")
+    if CONTROL.search(value) or (not multiline and ("\n" in value or "\t" in value)):
+        raise ValueError(f"{label} has control characters")
+    return value.strip()
+
+
+def _tags(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValueError("tags must be a list of at most 20 strings")
+    return [_text(t, "tag", 40) for t in value]
+
+
+def _trusted(raw: dict[str, object]) -> dict[str, object]:
+    """Only these keys are taken from a source, each type-checked.
+
+    `featured` and `status` are never taken: they would let a source promote itself or
+    grey out other entries.
+    """
+    meta: dict[str, object] = {
+        "name": _text(raw.get("name"), "name", 80),
+        "description": _text(raw.get("description"), "description", 1000, multiline=True),
+        "tags": _tags(raw.get("tags")),
+    }
+    if "for" in raw:
+        meta["for"] = _text(raw["for"], "for", 40)
+    return meta
 
 
 def _doc(root: Path, path: Path, kind: str, found: list[Found], warnings: list[str]) -> None:
     rel = path.relative_to(root).as_posix()
     try:
+        _text(rel, "path", 300)
         text = read_text(path)
         meta, body = parse(text)
+        meta = _trusted(meta)
     except (OSError, ValueError) as e:
         warnings.append(f"{rel}: skipped ({e})")
-        return
-    meta = _trusted(meta)
-    if not (meta.get("name") and meta.get("description")):
-        warnings.append(f"{rel}: skipped (needs name and description)")
         return
     found.append(Found(kind, rel, meta, body, text if kind == "skill" else body))
 
@@ -114,9 +167,12 @@ def _doc(root: Path, path: Path, kind: str, found: list[Found], warnings: list[s
 def _mod(root: Path, d: Path, found: list[Found], warnings: list[str]) -> None:
     rel = d.relative_to(root).as_posix() or "."
     try:
+        _text(rel, "path", 300)
         manifest = json.loads(read_text(d / ".claude-plugin" / "plugin.json"))
-        meta = _trusted({"name": manifest["name"], "description": manifest["description"], "tags": manifest.get("keywords", [])})
-    except (OSError, ValueError, KeyError, TypeError) as e:
+        if not isinstance(manifest, dict):
+            raise ValueError("plugin.json must be an object")
+        meta = _trusted({**manifest, "tags": manifest.get("keywords")})
+    except (OSError, ValueError) as e:
         warnings.append(f"{rel}: skipped (bad plugin.json: {e})")
         return
     src = read_mod_source(d)

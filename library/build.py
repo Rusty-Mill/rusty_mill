@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 from fmt import parse, read_mod_source
-from sources import Found, SourceError, head_sha, load_sources, scan, sync
+from hints import mod_commands, render as render_install
+from sources import Found, SourceError, check_cache, head_sha, load_sources, scan, sync
 
 ROOT = Path(__file__).parent
 SOURCES_FILE = ROOT / "sources.json"
@@ -30,11 +31,14 @@ def entry(
     export: str | None = None,
     repo: str = "",
     group: str = "",
+    rev: str = "",
+    install: str = "",
 ) -> Item:
     """One UI entry. `export` is what Copy/Download hand out; skills export their whole file.
 
     `repo` is set for entries pulled from another repo, and then `path` is relative to it.
-    `group` is the "By source" heading; it defaults to `source`.
+    `group` is the "By source" heading; it defaults to `source`. `rev` is the full commit the
+    entry was indexed at, and `install` the ready-to-paste command that fetches exactly it.
     """
     for key in ("name", "description", "source"):
         if not meta.get(key):
@@ -51,6 +55,8 @@ def entry(
         "featured": meta.get("featured") == "true",
         "path": path,
         "repo": repo,
+        "rev": rev,
+        "install": install,
         "body": body,
         "export": export if export is not None else body,
     }
@@ -59,7 +65,9 @@ def entry(
 def load_mod(d: Path) -> Item:
     manifest = json.loads((d / ".claude-plugin/plugin.json").read_text())
     meta = {**manifest, "tags": manifest.get("keywords", []), "source": manifest.get("repository")}
-    return entry("mod", str(d.relative_to(ROOT)), meta, read_mod_source(d))
+    path = str(d.relative_to(ROOT))
+    install = render_install([["claude", "--plugin-dir", path]])  # run from this folder
+    return entry("mod", path, meta, read_mod_source(d), install=install)
 
 
 def collect_local() -> list[Item]:
@@ -79,11 +87,17 @@ def from_source(f: Found, repo: str, name: str, sha: str) -> Item:
     # Provenance is computed, never taken from the source's own frontmatter.
     origin = f"github.com/{repo}@{sha[:12]}"
     meta = {**f.meta, "source": f"{origin}:{f.rel}", "tags": [*f.meta.get("tags", []), name]}
-    return entry(f.kind, f.rel, meta, f.body, f.export, repo=repo, group=origin)
+    install = ""
+    if f.kind == "mod":
+        try:
+            install = render_install(mod_commands(repo, sha, f.rel))
+        except ValueError:
+            pass  # reported by collect_sources: the entry is shown without a command
+    return entry(f.kind, f.rel, meta, f.body, f.export, repo=repo, group=origin, rev=sha, install=install)
 
 
 def collect_sources(sources_file: Path, cache: Path) -> tuple[list[Item], list[str]]:
-    """Index every synced source; an unsynced one is a warning, not a silent skip."""
+    """Index every synced source; an unsynced or mismatched one is a warning, never a silent skip."""
     items: list[Item] = []
     warnings: list[str] = []
     for src in load_sources(sources_file):
@@ -91,10 +105,17 @@ def collect_sources(sources_file: Path, cache: Path) -> tuple[list[Item], list[s
         if not checkout.is_dir():
             warnings.append(f"{src.name}: not synced (run build.py --sync)")
             continue
+        if problem := check_cache(src, checkout):
+            warnings.append(f"{src.name}: {problem}")
+            continue
         found, notes = scan(checkout)
         warnings += [f"{src.name}: {n}" for n in notes]
         sha = head_sha(checkout)
-        items += [from_source(f, src.repo, src.name, sha) for f in found]
+        for f in found:
+            item = from_source(f, src.repo, src.name, sha)
+            if f.kind == "mod" and not item["install"]:
+                warnings.append(f"{src.name}: {f.rel}: no install command (path cannot be quoted safely for every shell)")
+            items.append(item)
     return items, warnings
 
 
