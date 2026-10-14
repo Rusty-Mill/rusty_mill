@@ -98,10 +98,18 @@ pub struct Outcome {
     pub state: State,
     pub turns_launched: u64,
     pub runs: u64,
-    /// Wall clock from the loop's start to its end.
+    /// Wall clock for this invocation, from loop start through successful
+    /// final harness cleanup. Visits stop before that cleanup.
     pub elapsed: Duration,
-    /// Each visit to a state in order, with how long the loop saw it last.
-    /// Resolution is one poll; a state shorter than that may not appear.
+    /// Observed state visits for this moderator invocation, in order.
+    /// Transitions between observations are invisible, including departures
+    /// and returns to the same state. Loop work and scheduling delays mean
+    /// measurement error is not bounded by the configured poll interval.
+    /// Restarting starts a fresh series; error and wall-limit exits return no
+    /// Outcome and discard visits. Successful visits end at the terminal-state
+    /// observation, before final harness cleanup (included in `elapsed`).
+    /// The first Planning visit excludes any later replanning; these raw visits
+    /// do not define authoring time for the ultimately approved spec.
     pub visits: Vec<(State, Duration)>,
 }
 
@@ -505,6 +513,29 @@ mod tests {
                 (State::Planning, Duration::from_millis(30)),
             ]
         );
+    }
+
+    #[test]
+    fn rejected_plan_and_replanning_remain_separate_observed_visits() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut v = Visits::new(State::Planning, t0);
+        v.observe(State::PlanGate, at(10));
+        v.observe(State::Planning, at(30)); // rejected draft, then rework
+        v.observe(State::PlanGate, at(70));
+        v.observe(State::Build, at(80)); // eventual approval
+        assert_eq!(
+            v.finish(at(90)),
+            vec![
+                (State::Planning, Duration::from_millis(10)),
+                (State::PlanGate, Duration::from_millis(20)),
+                (State::Planning, Duration::from_millis(40)),
+                (State::PlanGate, Duration::from_millis(10)),
+                (State::Build, Duration::from_millis(10)),
+            ]
+        );
+        // Raw arithmetic only: choosing an authoring-time endpoint is a
+        // separate policy decision; the first visit omits the 40 ms of rework.
     }
 
     fn proving(file: &str) -> PathBuf {
