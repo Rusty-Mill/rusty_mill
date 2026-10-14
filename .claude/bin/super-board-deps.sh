@@ -86,11 +86,18 @@ else
       repository(owner:$owner,name:$repo){
         issues(states:OPEN,first:100,after:$endCursor){
           pageInfo{ hasNextPage endCursor }
-          nodes{ number title body state labels(first:30){ nodes{ name } } comments(last:8){ nodes{ body } } }
+          nodes{ number title body state labels(first:30){ nodes{ name } } comments(last:100){ pageInfo{ hasPreviousPage } nodes{ body } } }
         }
       }
     }' -F owner="${REPO%%/*}" -F repo="${REPO##*/}") || exit $?
   ISSUES=$(printf '%s' "$PAGES" | jq '[ .[].data.repository.issues.nodes[] ]')
+  # The newest `blocked-by:` comment overrides the body, so the whole history must be
+  # visible. `comments(last:100)` hides older ones; for any issue with more, read every
+  # page over REST. A failed read halts the run rather than guessing from a partial view.
+  for n in $(echo "$ISSUES" | jq -r '.[] | select(.comments.pageInfo.hasPreviousPage == true) | .number'); do
+    CPAGES=$(python3 "$HERE/super-board-github-read.py" --kind comments -- api "repos/${REPO}/issues/${n}/comments" --paginate --slurp) || exit $?
+    ISSUES=$(echo "$ISSUES" | jq --argjson n "$n" --argjson c "$CPAGES"       '(.[] | select(.number == $n) | .comments) = { nodes: [ $c[][] | { body: .body } ] }')
+  done
 fi
 
 APPROVAL_REPO="$REPO"

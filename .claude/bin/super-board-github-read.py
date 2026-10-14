@@ -203,6 +203,7 @@ def validate(text, kind, meta=None):
             require(all(isinstance(n, dict) and type(n.get('number')) is int and isinstance(n.get('body'), str)
                         and isinstance(n.get('title'), str) and n.get('state') == 'OPEN'
                         and isinstance(n.get('comments', {}).get('nodes'), list)
+                        and type((n.get('comments', {}).get('pageInfo') or {}).get('hasPreviousPage')) is bool
                         and isinstance(n.get('labels', {}).get('nodes'), list) for n in nodes), 'dependency issue fields missing')
     elif kind == 'quota':
         resources = value['resources']
