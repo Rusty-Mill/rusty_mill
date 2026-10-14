@@ -118,6 +118,10 @@ pub struct Report {
     pub total: Row,
     /// By the state the grant was made in.
     pub by_state: BTreeMap<String, Row>,
+    /// By the wake rules the record was computed under (`WAKE_RULES`). Records
+    /// from different rules must not be summed: read one key, or run on a fresh
+    /// store. A record written before the field existed counts under "1".
+    pub by_rules: BTreeMap<String, BTreeMap<String, Row>>,
 }
 
 /// Tally `task`'s shadow log.
@@ -129,10 +133,14 @@ pub fn of(dir: &Path, task: &TaskId) -> Result<Report, String> {
         unreadable_lines: logged.unreadable as u64,
         total: Row::default(),
         by_state: BTreeMap::new(),
+        by_rules: BTreeMap::new(),
     };
     for s in &logged.records {
-        let row = report.by_state.entry(format!("{:?}", s.state)).or_default();
-        for r in [row, &mut report.total] {
+        let state = format!("{:?}", s.state);
+        let by_rules = report.by_rules.entry(s.rules.to_string()).or_default();
+        let by_rules_row = by_rules.entry(state.clone()).or_default();
+        let row = report.by_state.entry(state).or_default();
+        for r in [row, by_rules_row, &mut report.total] {
             match s.comparison() {
                 Some(Comparison::Agree) => r.agree += 1,
                 Some(Comparison::Fallback) => r.fallback += 1,

@@ -162,3 +162,20 @@ fn bbp_shadow_reports_the_log_the_drivers_wrote() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_tally_keeps_records_from_different_wake_rules_apart() {
+    let dir = tempdir("rules");
+    let task = setup(&dir);
+    let mut old = shadow::read(&dir, &task).expect("read").records[0].clone();
+    old.rev = Rev(900);
+    old.rules = 1;
+    assert_eq!(shadow::append(&dir, &task, &[old]).expect("append"), 1);
+    let report = shadow::of(&dir, &task).expect("report");
+    assert_eq!(report.total.agree, 2, "the plain total sums them");
+    let now = WAKE_RULES.to_string();
+    assert_eq!(report.by_rules["1"]["Planning"].agree, 1);
+    assert_eq!(report.by_rules[&now]["Planning"].agree, 1);
+    assert_eq!(report.by_rules.len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
