@@ -22,6 +22,10 @@ pub struct Report {
     pub spec_attribution: SpecAttribution,
     /// Versions that are both a `Conflict` and `Unused` (criterion 4's count).
     pub unused_conflicts: u64,
+    /// `unused_spec_versions` of the 2b gate.
+    pub unused_spec_versions: u64,
+    /// `unused_share` as `[unused bytes, all spec bytes]`; the gate takes the ratio.
+    pub unused_bytes: (u64, u64),
 }
 
 /// Read `task`'s log and blobs and compute its [`Report`].
@@ -33,6 +37,8 @@ pub fn of(dir: &Path, task: &TaskId) -> Result<Report, String> {
     let spec_conflicts = spec_metrics::spec_conflicts(&events, &blob);
     let spec_attribution = spec_metrics::spec_attribution(&events, &blob);
     let unused_conflicts = spec_metrics::unused_conflicts(&spec_conflicts, &spec_attribution);
+    let unused_spec_versions = spec_attribution.unused_versions();
+    let unused_bytes = spec_attribution.unused_bytes();
     Ok(Report {
         task: task.0.clone(),
         max_live_turns: d.state.max_live_turns,
@@ -42,6 +48,8 @@ pub fn of(dir: &Path, task: &TaskId) -> Result<Report, String> {
         spec_conflicts,
         spec_attribution,
         unused_conflicts,
+        unused_spec_versions,
+        unused_bytes,
     })
 }
 

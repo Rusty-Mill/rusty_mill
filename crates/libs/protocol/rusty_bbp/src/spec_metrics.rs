@@ -243,17 +243,37 @@ pub struct VersionAttribution {
     /// something else in the approved spec is not carried just because both
     /// removed the old one.
     pub carried: u64,
+    /// Stored size of the version, for `unused_share`.
+    pub bytes: u64,
     pub outcome: Attribution,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecAttribution {
     pub approved: Option<ArtId>,
+    /// Stored size of the approved version.
+    pub approved_bytes: u64,
     /// Every non-approved spec version, in storage order.
     pub versions: Vec<VersionAttribution>,
 }
 
 impl SpecAttribution {
+    /// `unused_spec_versions` of the 2b gate.
+    pub fn unused_versions(&self) -> u64 {
+        self.count(Attribution::Unused)
+    }
+    /// Bytes of the unused versions and of every stored spec version: the
+    /// numerator and denominator of `unused_share` (kept apart so a reader can
+    /// take the median over tasks without a float in the log).
+    pub fn unused_bytes(&self) -> (u64, u64) {
+        let unused = self
+            .versions
+            .iter()
+            .filter(|v| v.outcome == Attribution::Unused)
+            .map(|v| v.bytes);
+        let all = self.versions.iter().map(|v| v.bytes);
+        (unused.sum(), all.sum::<u64>() + self.approved_bytes)
+    }
     pub fn count(&self, o: Attribution) -> u64 {
         self.versions.iter().filter(|v| v.outcome == o).count() as u64
     }
@@ -310,17 +330,19 @@ pub fn spec_attribution(
     let Some(approved) = spec_lines(blob, &versions[a_at].1) else {
         return SpecAttribution {
             approved: Some(versions[a_at].0),
+            approved_bytes: versions[a_at].1.len,
             versions: versions
                 .iter()
                 .enumerate()
                 .filter(|(at, _)| *at != a_at)
-                .map(|(_, (id, _))| unmeasured(*id, None))
+                .map(|(_, (id, bref))| unmeasured(*id, None, bref.len))
                 .collect(),
         };
     };
     let approved_set: HashSet<String> = approved.iter().map(|l| l.trim_end().to_owned()).collect();
     let mut out = SpecAttribution {
         approved: Some(versions[a_at].0),
+        approved_bytes: versions[a_at].1.len,
         versions: Vec::new(),
     };
     for (at, (id, bref)) in versions.iter().enumerate() {
@@ -330,7 +352,7 @@ pub fn spec_attribution(
         let base_at = at.checked_sub(1);
         let base_id = base_at.map(|b| versions[b].0);
         if at > a_at {
-            out.versions.push(unmeasured(*id, base_id));
+            out.versions.push(unmeasured(*id, base_id, bref.len));
             continue;
         }
         let base = match base_at {
@@ -338,16 +360,16 @@ pub fn spec_attribution(
             Some(b) => spec_lines(blob, &versions[b].1),
         };
         let (Some(base), Some(text)) = (base, spec_lines(blob, bref)) else {
-            out.versions.push(unmeasured(*id, base_id));
+            out.versions.push(unmeasured(*id, base_id, bref.len));
             continue;
         };
         if base.len() + text.len() > MAX_DIFF_INPUT_LEN {
-            out.versions.push(unmeasured(*id, base_id));
+            out.versions.push(unmeasured(*id, base_id, bref.len));
             continue;
         }
         let ops = diff_myers(&base, &text);
         if degraded(&base, &text, &ops) {
-            out.versions.push(unmeasured(*id, base_id));
+            out.versions.push(unmeasured(*id, base_id, bref.len));
             continue;
         }
         let (changed, carried) = contribution(&approved_set, &ops);
@@ -361,18 +383,20 @@ pub fn spec_attribution(
             base: base_id,
             changed,
             carried,
+            bytes: bref.len,
             outcome,
         });
     }
     out
 }
 
-fn unmeasured(version: ArtId, base: Option<ArtId>) -> VersionAttribution {
+fn unmeasured(version: ArtId, base: Option<ArtId>, bytes: u64) -> VersionAttribution {
     VersionAttribution {
         version,
         base,
         changed: 0,
         carried: 0,
+        bytes,
         outcome: Attribution::Unmeasured,
     }
 }
@@ -688,6 +712,25 @@ mod tests {
             (lost.changed, lost.carried, lost.outcome),
             (1, 0, Attribution::Unused)
         );
+    }
+
+    #[test]
+    fn unused_share_is_unused_bytes_over_all_spec_bytes() {
+        let mut s = Specs::new();
+        s.store(2, &doc(10));
+        let dropped = edit(10, &[(2, "A"), (5, "B")]);
+        s.store(3, &dropped);
+        let a = s.store(4, &doc(10));
+        s.approve(a);
+        let r = s.attribution();
+        assert_eq!(r.unused_versions(), 1);
+        let (unused, all) = r.unused_bytes();
+        let n = |t: &str| {
+            let payload = ArtifactPayload::Spec { brief: ArtId(1) };
+            encode_artifact(&payload, t.as_bytes()).unwrap().len() as u64
+        };
+        assert_eq!(unused, n(&dropped));
+        assert_eq!(all, n(&doc(10)) * 2 + n(&dropped));
     }
 
     #[test]
