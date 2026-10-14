@@ -15,7 +15,10 @@ BARE = re.compile(r"--|-{0,2}[A-Za-z0-9][A-Za-z0-9._/:=+-]*")
 # the ASCII double quote (Windows PowerShell 5.1 mangles it in native arguments), and the
 # typographic quotes U+2018-U+201E, which PowerShell's tokenizer treats as quote characters
 # even inside an ASCII-quoted literal (U+2018-U+201B are single quotes: one ends the literal).
-UNQUOTABLE = re.compile(r'[\x00-\x1f\x7f\x85‘-„  "]')
+UNQUOTABLE = re.compile(
+    r'[\x00-\x1f\x7f\x85\N{LEFT SINGLE QUOTATION MARK}-\N{DOUBLE LOW-9 QUOTATION MARK}'
+    r'\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}"]'
+)
 
 
 def posix(arg: str) -> str:
