@@ -3,13 +3,14 @@
 //! Which methods and names may become labels, how a status becomes an outcome,
 //! and which attributes each instrument carries are pure decisions, and the
 //! ones that matter most: they are the cardinality guard (see
-//! [`super::metrics`]). Nothing here imports `opentelemetry`, `tower`, `axum`
-//! or `tokio`. The adapter turns these labels into `KeyValue`s and does the
+//! [`super::metrics`]). Nothing here imports `opentelemetry`, `tower`, `axum`,
+//! `tokio` or the external `http` crate: statuses are `rusty_http`'s and header
+//! values arrive as plain text. The adapter turns these labels into `KeyValue`s and does the
 //! recording.
 
 use std::collections::BTreeSet;
 
-use http::{HeaderMap, StatusCode};
+use rusty_http::StatusCode;
 
 /// The `Mcp-Method` header (SEP-2243).
 pub(crate) const HEADER_MCP_METHOD: &str = "mcp-method";
@@ -142,19 +143,18 @@ impl KnownNames {
     }
 
     /// The `mcp.name` label for a request, if one is safe to record.
-    pub(crate) fn name_label(&self, method: &str, headers: &HeaderMap) -> Option<String> {
+    pub(crate) fn name_label(&self, method: &str, name_header: Option<&str>) -> Option<String> {
         if !NAMED_METHODS.contains(&method) {
             return None;
         }
-        let name = header(headers, HEADER_MCP_NAME)?;
+        let name = decode_header(name_header?)?;
         self.0.contains(&name).then_some(name)
     }
 }
 
-/// A header value, decoded if `rmcp` base64-wrapped it.
-pub(crate) fn header(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(name)?.to_str().ok()?;
-
+/// A header value, decoded if `rmcp` base64-wrapped it. `None` when the
+/// wrapper is malformed, so a bad value is dropped rather than recorded raw.
+pub(crate) fn decode_header(raw: &str) -> Option<String> {
     let Some(encoded) = raw
         .strip_prefix(BASE64_PREFIX)
         .and_then(|rest| rest.strip_suffix(BASE64_SUFFIX))
@@ -195,17 +195,6 @@ pub(crate) fn task_labels(outcome: TaskOutcome) -> Vec<Label> {
 mod tests {
     use super::*;
 
-    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
-        let mut map = HeaderMap::new();
-        for (name, value) in pairs {
-            map.insert(
-                http::HeaderName::from_bytes(name.as_bytes()).expect("name"),
-                http::HeaderValue::from_str(value).expect("value"),
-            );
-        }
-        map
-    }
-
     fn names(known: &[&str]) -> KnownNames {
         KnownNames::new(known.iter().copied())
     }
@@ -226,10 +215,10 @@ mod tests {
 
     #[test]
     fn a_known_tool_name_is_labelled() {
-        let request = headers(&[("mcp-method", "tools/call"), ("mcp-name", "add")]);
+        let name = Some("add");
         assert_eq!(
             names(&["add", "divide"])
-                .name_label("tools/call", &request)
+                .name_label("tools/call", name)
                 .as_deref(),
             Some("add")
         );
@@ -238,42 +227,36 @@ mod tests {
     #[test]
     fn an_unknown_tool_name_is_dropped() {
         // The call will fail, but the label would already have been recorded.
-        let request = headers(&[("mcp-method", "tools/call"), ("mcp-name", "a1b2c3d4")]);
-        assert_eq!(names(&["add"]).name_label("tools/call", &request), None);
+        let name = Some("a1b2c3d4");
+        assert_eq!(names(&["add"]).name_label("tools/call", name), None);
     }
 
     #[test]
     fn a_resource_uri_is_never_labelled() {
         // `Mcp-Name` for `resources/read` is the URI. Unbounded by definition,
         // and the single easiest way to take a metrics backend down.
-        let request = headers(&[
-            ("mcp-method", "resources/read"),
-            ("mcp-name", "db://tables/users"),
-        ]);
+        let name = Some("db://tables/users");
         assert_eq!(
-            names(&["db://tables/users"]).name_label("resources/read", &request),
+            names(&["db://tables/users"]).name_label("resources/read", name),
             None
         );
     }
 
     #[test]
     fn a_task_id_is_never_labelled() {
-        let request = headers(&[("mcp-method", "tasks/get"), ("mcp-name", "task-1234")]);
-        assert_eq!(
-            names(&["task-1234"]).name_label("tasks/get", &request),
-            None
-        );
+        let name = Some("task-1234");
+        assert_eq!(names(&["task-1234"]).name_label("tasks/get", name), None);
     }
 
     #[test]
     fn a_base64_wrapped_header_is_decoded() {
         let encoded = rusty_base64::encode_standard(b"a prompt");
         let wrapped = format!("{BASE64_PREFIX}{encoded}{BASE64_SUFFIX}");
-        let request = headers(&[("mcp-method", "prompts/get"), ("mcp-name", &wrapped)]);
+        let name = Some(wrapped.as_str());
 
         assert_eq!(
             names(&["a prompt"])
-                .name_label("prompts/get", &request)
+                .name_label("prompts/get", name)
                 .as_deref(),
             Some("a prompt")
         );
@@ -282,14 +265,14 @@ mod tests {
     #[test]
     fn a_malformed_base64_header_is_dropped_rather_than_recorded_raw() {
         let wrapped = format!("{BASE64_PREFIX}!!!not-base64!!!{BASE64_SUFFIX}");
-        let request = headers(&[("mcp-method", "tools/call"), ("mcp-name", &wrapped)]);
-        assert_eq!(names(&["add"]).name_label("tools/call", &request), None);
+        let name = Some(wrapped.as_str());
+        assert_eq!(names(&["add"]).name_label("tools/call", name), None);
     }
 
     #[test]
     fn a_missing_name_header_is_not_an_error() {
-        let request = headers(&[("mcp-method", "tools/call")]);
-        assert_eq!(names(&["add"]).name_label("tools/call", &request), None);
+        let name = None;
+        assert_eq!(names(&["add"]).name_label("tools/call", name), None);
     }
 
     #[test]

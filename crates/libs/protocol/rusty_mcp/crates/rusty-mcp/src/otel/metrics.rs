@@ -64,10 +64,11 @@ use opentelemetry::{
     KeyValue,
     metrics::{Counter, Histogram, Meter, UpDownCounter},
 };
+use rusty_http::StatusCode;
 
 use super::labels::{
-    self, HEADER_MCP_METHOD, KnownNames, Label, header, in_flight_labels, request_labels,
-    task_labels,
+    self, HEADER_MCP_METHOD, HEADER_MCP_NAME, KnownNames, Label, decode_header, in_flight_labels,
+    request_labels, task_labels,
 };
 pub use super::labels::{Outcome, TaskOutcome};
 
@@ -252,8 +253,10 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
-        let method = header(request.headers(), HEADER_MCP_METHOD).unwrap_or_default();
-        let name = self.known_names.name_label(&method, request.headers());
+        let method = method_of(&request);
+        let name = self
+            .known_names
+            .name_label(&method, text_header(&request, HEADER_MCP_NAME));
         let instruments = Arc::clone(&self.instruments);
 
         Box::pin(async move {
@@ -265,11 +268,64 @@ where
             instruments.request_finished(
                 &method,
                 name.as_deref(),
-                Outcome::from_status(response.status()),
+                Outcome::from_status(StatusCode::from_u16(response.status().as_u16())),
                 started.elapsed().as_secs_f64(),
             );
 
             Ok(response)
         })
+    }
+}
+
+/// The request's MCP method, decoded if `rmcp` base64-wrapped it; empty if absent
+/// or unreadable (which labels as `other`).
+fn method_of<ReqBody>(request: &Request<ReqBody>) -> String {
+    text_header(request, HEADER_MCP_METHOD)
+        .and_then(decode_header)
+        .unwrap_or_default()
+}
+
+/// A header value as text, if it has one.
+fn text_header<'a, ReqBody>(request: &'a Request<ReqBody>, name: &str) -> Option<&'a str> {
+    request.headers().get(name)?.to_str().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_method_is_decoded_when_wrapped_and_empty_when_unreadable() {
+        let wrapped = format!(
+            "=?base64?{}?=",
+            rusty_base64::encode_standard(b"tools/call")
+        );
+        let build = |value: &str| {
+            Request::builder()
+                .header("mcp-method", value)
+                .body(())
+                .expect("request")
+        };
+
+        assert_eq!(method_of(&build("tools/list")), "tools/list");
+        assert_eq!(method_of(&build(&wrapped)), "tools/call");
+        assert_eq!(method_of(&build("=?base64?!!!?=")), "");
+        assert_eq!(method_of(&Request::new(())), "");
+    }
+
+    #[test]
+    fn a_present_text_header_is_read_and_anything_else_is_not() {
+        let request = Request::builder()
+            .header("mcp-method", "tools/call")
+            .header(
+                "mcp-name",
+                http::HeaderValue::from_bytes(b"\xff").expect("opaque"),
+            )
+            .body(())
+            .expect("request");
+
+        assert_eq!(text_header(&request, "mcp-method"), Some("tools/call"));
+        assert_eq!(text_header(&request, "mcp-name"), None, "not text");
+        assert_eq!(text_header(&request, "absent"), None);
     }
 }

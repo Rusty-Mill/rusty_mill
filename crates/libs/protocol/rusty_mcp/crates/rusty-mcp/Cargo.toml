@@ -30,6 +30,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 rusty_base64 = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 http = { workspace = true }
+# The cores' status type; `http` stays in the tower adapters.
+rusty_http = { workspace = true }
 rusty_json = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }
