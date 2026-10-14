@@ -316,5 +316,131 @@ class CollectSourcesTests(unittest.TestCase):
         self.assertEqual(warnings, ["pilot: not synced (run build.py --sync)"])
 
 
+@unittest.skipUnless(shutil.which("git"), "git not available")
+class SyncTests(unittest.TestCase):
+    """`sync` with the network step replaced by a real local commit (the git calls are real)."""
+
+    ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.cache = self.tmp / "cache"
+        self.source = Source("pilot", "o/r", "main")
+        self.content = "v1"
+        patch = mock.patch.object(sources, "_fetch", self.fake_fetch)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def git(self, cwd: Path, *args: str) -> str:
+        env = {**os.environ, **self.ENV}
+        return subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+    def fake_fetch(self, source: Source, dest: Path) -> None:
+        self.git(dest, "init", "-q")
+        write(dest, "skills/s/SKILL.md", SKILL.format(n=self.content))
+        self.git(dest, "add", ".")
+        self.git(dest, "commit", "-q", "-m", "x")
+
+    def sentinel_repo(self, root: Path) -> list[Path]:
+        """A user's own repository with untracked and ignored files that must survive."""
+        root.parent.mkdir(parents=True, exist_ok=True)
+        self.git(root.parent, "init", "-q", str(root))
+        write(root, ".gitignore", "ignored/\n")
+        self.git(root, "add", ".")
+        self.git(root, "commit", "-q", "-m", "x")
+        return [
+            write(root, "untracked.txt", "KEEP"),
+            write(root, "ignored/secret.txt", "KEEP"),
+            write(root / "nested", "inner.txt", "KEEP"),
+        ]
+
+    def assertKept(self, files: list[Path]) -> None:
+        for f in files:
+            self.assertEqual(f.read_text(), "KEEP", f"{f} was touched")
+
+    def test_first_sync_makes_an_owned_checkout_that_passes_the_cache_check(self) -> None:
+        sha = sources.sync(self.source, self.cache)
+        self.assertEqual(sha, sources.head_sha(self.cache / "pilot"))
+        self.assertIsNone(sources.check_cache(self.source, self.cache / "pilot"))
+        self.assertEqual([p.name for p in self.cache.iterdir()], ["pilot"], "no staging leftovers")
+
+    def test_resync_replaces_an_untouched_previous_checkout(self) -> None:
+        sources.sync(self.source, self.cache)
+        self.content = "v2"
+        sources.sync(self.source, self.cache)
+        self.assertIn("v2", (self.cache / "pilot" / "skills/s/SKILL.md").read_text())
+        self.assertEqual([p.name for p in self.cache.iterdir()], ["pilot"])
+
+    def test_a_symlinked_destination_is_never_followed_or_cleaned(self) -> None:
+        outside = self.tmp / "users-repo"
+        kept = self.sentinel_repo(outside)
+        self.cache.mkdir()
+        try:
+            (self.cache / "pilot").symlink_to(outside, target_is_directory=True)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        with self.assertRaises(SourceError):
+            sources.sync(self.source, self.cache)
+        self.assertKept(kept)
+        self.assertTrue((self.cache / "pilot").is_symlink())
+        self.assertEqual([p.name for p in self.cache.iterdir()], ["pilot"], "staging directory not removed")
+
+    def test_a_symlink_to_a_real_synced_checkout_is_still_refused(self) -> None:
+        other = self.tmp / "other-cache"
+        sources.sync(self.source, other)  # an owned, untouched checkout, but not at this destination
+        self.cache.mkdir()
+        try:
+            (self.cache / "pilot").symlink_to(other / "pilot", target_is_directory=True)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        with self.assertRaises(SourceError):
+            sources.sync(self.source, self.cache)
+        self.assertTrue((self.cache / "pilot").is_symlink())
+        self.assertIsNone(sources.check_cache(self.source, other / "pilot"))
+
+    def test_a_foreign_or_plain_destination_is_refused_untouched(self) -> None:
+        foreign = self.cache / "pilot"
+        kept = self.sentinel_repo(foreign)  # a git repo, but not made by --sync (no recorded origin)
+        with self.assertRaises(SourceError):
+            sources.sync(self.source, self.cache)
+        self.assertKept(kept)
+        plain = self.tmp / "cache2" / "pilot"
+        kept = [write(plain, "mine.txt", "KEEP")]
+        with self.assertRaises(SourceError):
+            sources.sync(self.source, self.tmp / "cache2")
+        self.assertKept(kept)
+
+    def test_a_modified_previous_checkout_is_preserved(self) -> None:
+        sources.sync(self.source, self.cache)
+        kept = [write(self.cache / "pilot", "untracked.txt", "KEEP")]
+        with self.assertRaises(SourceError):
+            sources.sync(self.source, self.cache)
+        self.assertKept(kept)
+
+    def test_a_failed_fetch_keeps_the_previous_cache_and_leaves_no_staging(self) -> None:
+        sources.sync(self.source, self.cache)
+        before = sources.head_sha(self.cache / "pilot")
+
+        def broken(source: Source, dest: Path) -> None:
+            raise SourceError("network down")
+
+        with mock.patch.object(sources, "_fetch", broken), self.assertRaises(SourceError):
+            sources.sync(self.source, self.cache)
+        self.assertEqual(sources.head_sha(self.cache / "pilot"), before)
+        self.assertEqual([p.name for p in self.cache.iterdir()], ["pilot"])
+
+    def test_check_cache_refuses_a_symlinked_cache_directory(self) -> None:
+        sources.sync(self.source, self.cache)
+        moved = self.tmp / "elsewhere"
+        (self.cache / "pilot").rename(moved)
+        try:
+            (self.cache / "pilot").symlink_to(moved, target_is_directory=True)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        self.assertIn("not a plain git checkout", sources.check_cache(self.source, self.cache / "pilot") or "")
+
+
 if __name__ == "__main__":
     unittest.main()
