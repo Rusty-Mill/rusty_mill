@@ -60,7 +60,7 @@ use std::{
 };
 
 use axum::response::{IntoResponse, Response};
-use http::{Request, header::RETRY_AFTER};
+use http::{Request, StatusCode, header::RETRY_AFTER};
 
 use crate::admission::{Admission, Rejection};
 
@@ -204,7 +204,9 @@ where
 }
 
 fn respond(rejection: Rejection) -> Response {
-    let mut response = (rejection.status, rejection.body).into_response();
+    let status = StatusCode::from_u16(rejection.status.as_u16())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = (status, rejection.body).into_response();
     if let Some(secs) = rejection.retry_after_secs {
         response.headers_mut().insert(RETRY_AFTER, secs.into());
     }
@@ -215,7 +217,6 @@ fn respond(rejection: Rejection) -> Response {
 mod tests {
     use super::*;
 
-    use http::StatusCode;
     use tower_layer::Layer as _;
     use tower_service::Service as _;
 

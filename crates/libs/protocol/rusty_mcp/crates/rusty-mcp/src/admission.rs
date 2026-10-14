@@ -4,14 +4,15 @@
 //! atomic counter and some constants. Nothing here knows about `tokio`, `axum`
 //! or `tower`, so the same core can sit behind any server's adapter. The
 //! adapter is the part that waits on a clock (the timeout) and turns a
-//! [`Rejection`] into its own response type.
+//! [`Rejection`] into its own response type. Status codes are
+//! `rusty_http`'s; the external `http` crate stays in the adapter.
 
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
-use http::StatusCode;
+use rusty_http::StatusCode;
 
 /// `Retry-After` sent with a shed response, in seconds.
 ///
