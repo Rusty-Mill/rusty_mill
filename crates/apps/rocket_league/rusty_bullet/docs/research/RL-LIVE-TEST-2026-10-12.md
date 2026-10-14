@@ -2,7 +2,8 @@
 
 What `rb_rl_bridge` did against Rocket League (Epic, Windows) around demolitions, a map reload, goals
 and a pause. Times are the machine's local clock. Tested at `fc4bdceb1` (PR #631, now on `main`).
-Everything here is from this machine and these runs; where a cause is a guess, it says so.
+These are the author's reported observations from that machine and those runs, not independently
+reproduced results. Private recordings were unavailable for review; where a cause is a guess, it says so.
 
 ## Summary
 
@@ -23,7 +24,7 @@ Everything here is from this machine and these runs; where a cause is a guess, i
 On Epic, `rb_rl_bridge --launch` cannot work: it has no login arguments, so the game never connects.
 The recipe in `rb_rl_game_bridge/README.md` (start through Epic, read the log, close the game, relaunch
 with `-rlbot ...`) got stuck twice at "click to start": the click made its sound but the splash never
-advanced. Reading RLBot's own `Epic.Windows.cs` showed why. RLBot starts the game through
+advanced. RLBot's `Epic.Windows.cs` suggested a different launch sequence. RLBot starts the game through
 `com.epicgames.launcher://apps/...?action=launch&silent=true`, and **kills it the moment the new
 `Init: Command line:` line appears**, before the game logs in, then relaunches with that line's
 arguments. In the stuck runs the first game had reached the menu and logged in (`Eos login result
@@ -105,7 +106,10 @@ into the next match. Nothing unexpected in the goal, replay and kickoff cycle.
 
 ## Census
 
-The longest run: 117,869 inbound messages over 3 maps, 0 unreadable.
+The author reported 117,869 inbound **framed bundles** over 3 maps, 0 unreadable.
+The inbound tag counts below sum to 224,376 **event wrappers** inside those bundles.
+These are different units: multiple wrappers can occur in one bundle, so the different totals
+do not demonstrate a counting bug.
 
 | Tag | Count | Tag | Count |
 |---|---|---|---|
@@ -124,7 +128,7 @@ The longest run: 117,869 inbound messages over 3 maps, 0 unreadable.
 Tags outside the known unions: none. The committed Freeplay slice
 (`tests/fixtures/live_freeplay_slice.bin`) holds only tags 1 to 5, 7 to 12, 18 and 21, so 6, 13, 14,
 15, 16 and 17 (and the commands in the other direction) are new to the evidence. `PlayerStatEvent`
-(303 messages) is not decoded; whether any of them mark demolitions was not checked.
+(303 event wrappers) is not decoded; whether any of them mark demolitions was not checked.
 
 ## Open
 

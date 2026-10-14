@@ -1,5 +1,6 @@
 # Helpers for the live Rocket League / rb_rl_bridge test. Dot-source this file.
-# Credentials rule: the Epic login args live only in a local variable inside Start-RlGame
+. (Join-Path $PSScriptRoot 'rl-safe.ps1')
+# Credentials rule: the Epic login args live only in a local variable inside Start-RlSession
 # and are never printed, logged or written to disk.
 
 # Repo root = six levels above this folder (crates/apps/rocket_league/rusty_bullet/tools/rl_live_test).
@@ -45,24 +46,15 @@ function Get-InitLine {
   } catch { $null }
 }
 
-function Stop-RlAll {
-  Stop-Process -Name rb_chaser_bot -Force -ErrorAction SilentlyContinue
-  Stop-Process -Name RocketLeague -Force -ErrorAction SilentlyContinue
-  Start-Sleep 3
-  Stop-Process -Name rb_rl_bridge -Force -ErrorAction SilentlyContinue
-}
-
-# Starts the bridge (recording into $Dir), then launches the game the way RLBot does:
-# silent Epic launch, kill the moment a NEW Init line appears (before login spends the
-# single-use code), relaunch with -rlbot args. Returns the bridge Process.
-function Start-RlSession([string]$Dir, [string]$Stamp, [string[]]$Players) {
-  Stop-RlAll
+# Bootstrap ownership must be verified before stopping/relaunching any game.
+function Start-RlSession([string]$Dir, [string]$Stamp, [string[]]$Players, $Owned) {
   New-Item -ItemType Directory -Force -Path $Dir | Out-Null
   $before = Get-InitLine
   $bridge = Start-Process "$script:Bin\rb_rl_bridge.exe" -WorkingDirectory $Dir -PassThru -WindowStyle Hidden `
     -ArgumentList (@('--record-in', "$Stamp-in.bin", '--record-out', "$Stamp-out.bin") + $Players) `
     -RedirectStandardOutput "$Dir\bridge.out.log" -RedirectStandardError "$Dir\bridge.err.log"
-  Start-Process cmd.exe -WindowStyle Hidden -ArgumentList "/c start `"`" `"$script:EpicUrl`""
+  $null = Add-RlOwnedProcess $Owned $bridge
+  $launcher = Add-RlOwnedProcess $Owned (Start-Process cmd.exe -PassThru -WindowStyle Hidden -ArgumentList "/c start `"`" `"$script:EpicUrl`"")
   $line = $null
   for ($i = 0; $i -lt 240; $i++) {
     $cur = Get-InitLine
@@ -70,13 +62,14 @@ function Start-RlSession([string]$Dir, [string]$Stamp, [string[]]$Players) {
     Start-Sleep -Milliseconds 500
   }
   if (-not $line) { throw 'no new Init line from the Epic launch' }
-  Stop-Process -Name RocketLeague -Force -ErrorAction SilentlyContinue
-  while (Get-Process RocketLeague -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 300 }
+  $bootstrap = Add-RlOwnedProcess $Owned (Get-RlOwnedBootstrap $launcher (Join-Path $script:GameDir 'RocketLeague.exe'))
+  $bootstrap.Kill()
+  if (-not $bootstrap.WaitForExit(10000)) { throw 'owned bootstrap game did not exit' }
   $raw = $line -replace '^.*Init: Command line:\s*', ''
   $tokens = [regex]::Matches($raw, '(?:"[^"]*"|\S)+') | ForEach-Object Value
   $keep = $tokens | Where-Object { $_ -notmatch '^"?[A-Za-z]:\\' -and $_ -notmatch '^-rlbot$|^RLBot_|^-nomovie$' }
   $login = $keep -join ' '
-  [void](Start-Process "$script:GameDir\RocketLeague.exe" -WorkingDirectory $script:GameDir `
+  $script:OwnedGame = Add-RlOwnedProcess $Owned (Start-Process "$script:GameDir\RocketLeague.exe" -PassThru -WorkingDirectory $script:GameDir `
     -ArgumentList "-rlbot RLBot_ControllerURL=127.0.0.1:23233 RLBot_PacketSendRate=240 -nomovie $login")
   $login = $null; $raw = $null; $tokens = $null; $keep = $null; $line = $null; $cur = $null; $before = $null
   for ($i = 0; $i -lt 100; $i++) {
@@ -86,15 +79,16 @@ function Start-RlSession([string]$Dir, [string]$Stamp, [string[]]$Players) {
   throw 'the game did not connect to the bridge'
 }
 
-function Start-RlBot([string]$Dir, [string]$AgentId, [string]$Tag) {
+function Start-RlBot([string]$Dir, [string]$AgentId, [string]$Tag, $Owned) {
   $env:RLBOT_SERVER_PORT = '23234'; $env:RLBOT_AGENT_ID = $AgentId
-  Start-Process "$script:Bin\rb_chaser_bot.exe" -PassThru -WindowStyle Hidden `
+  $process = Start-Process "$script:Bin\rb_chaser_bot.exe" -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput "$Dir\bot-$Tag.out.log" -RedirectStandardError "$Dir\bot-$Tag.err.log"
+  Add-RlOwnedProcess $Owned $process
 }
 
 function Get-RlWindow {
-  $p = Get-Process RocketLeague -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-  if (-not $p) { throw 'no Rocket League window' }
+  $p = $script:OwnedGame
+  if (-not $p -or $p.HasExited -or $p.MainWindowHandle -eq 0) { throw 'no Rocket League window' }
   $p.MainWindowHandle
 }
 
@@ -162,23 +156,3 @@ function Press-Key([byte]$Vk, [int]$HoldMs = 80) {
   [Win]::keybd_event($Vk, $sc, 2, [UIntPtr]::Zero); Start-Sleep -Milliseconds 300
 }
 $script:Vk = @{ Enter = 0x0D; Esc = 0x1B; Up = 0x26; Down = 0x28; Left = 0x25; Right = 0x27; Space = 0x20 }
-
-# Timestamped copy of NEW bridge log lines (lines already present are skipped, so nothing is
-# mislabelled with the watcher's start time). Runs as a detached process: a PowerShell job dies
-# with the tool call that started it.
-function Start-RlWatcher([string]$Dir) {
-  $script = Join-Path $env:TEMP 'rl-watch.ps1'
-  Set-Content $script @'
-param($d)
-$seen = @(Get-Content "$d\bridge.out.log" -ErrorAction SilentlyContinue).Count
-while ($true) {
-  $l = @(Get-Content "$d\bridge.out.log" -ErrorAction SilentlyContinue)
-  if ($l.Count -gt $seen) {
-    $l[$seen..($l.Count - 1)] | ForEach-Object { '{0:HH:mm:ss.fff} {1}' -f (Get-Date), $_ } | Add-Content "$d\timed.log"
-    $seen = $l.Count
-  }
-  Start-Sleep -Milliseconds 200
-}
-'@
-  Start-Process pwsh -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile', '-File', $script, $Dir
-}

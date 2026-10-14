@@ -100,6 +100,19 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  rl-live-test-safety:
+    concurrency:
+      group: ci-${{ github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rl-live-test-safety
+      queue: max
+      cancel-in-progress: false
+    name: RL live tooling mocked safety tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Synthetic orchestration tests (no game or desktop)
+        shell: pwsh
+        run: ./crates/apps/rocket_league/rusty_bullet/tools/rl_live_test/test-safe.ps1
+
   plan-tests:
     # affected_crates.py decides what every other job runs on a PR, and
     # check_workspace_deps.py enforces the dependency-sovereignty policy
@@ -1715,6 +1728,7 @@ jobs:
     needs:
       - fmt
       - plan-tests
+      - rl-live-test-safety
       - library-tests
       - workflow-lint
       - dependency-policy
