@@ -162,8 +162,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (inbound, outbound) = open_recordings(&args)?;
     let listener = GameListener::bind(args.game_port)?;
     let bots = bind_bots(args.port)?;
-    // Listening is announced here, before the game is found: the game is silent until a map
-    // loads, and what starts the bots (the live-test runner) must not wait on that.
+    // Listening is announced here, before the game is found: the game's first message can come a
+    // while after it dials, and what starts the bots (the live-test runner) must not wait on it.
     println!("serving bots on {}", bots.local_addr()?);
     println!(
         "waiting for the game on 127.0.0.1:{}; start it with: {}",
@@ -176,7 +176,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(|exe| GameLaunch::new(exe, args.game_port).spawn())
         .transpose()?;
     // Only a connection that speaks as the game does is taken for it, so a stray local connection
-    // cannot hold the game's place. The game itself stays silent until a map loads.
+    // cannot hold the game's place. The game's first message can come a while after it dials.
     let stream = listener
         .wait_for_game(Duration::from_secs(300), |note| println!("{note}"))?
         .ok_or("the game did not connect within five minutes")?;

@@ -15,8 +15,10 @@
 //! number × content type:
 //!
 //! 1. sealing produces byte-identical records,
-//! 2. rustls opens what this crate seals,
-//! 3. this crate opens what rustls seals.
+//! 2. rustls opens what this crate seals, except protected ChangeCipherSpec
+//!    records, which must be rejected as negative interoperability cases,
+//! 3. this crate's low-level Opener opens what rustls seals; protocol rejection
+//!    of protected ChangeCipherSpec is deferred to handshake/established dispatch.
 //!
 //! (1) alone would be satisfied by two implementations that agree on
 //! encryption and disagree on parsing, which is why (2) and (3) are separate.
@@ -39,7 +41,10 @@ use rustls::crypto::cipher::{
 use rustls::crypto::ring::cipher_suite::{
     TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256,
 };
-use rustls::{ContentType as RustlsType, ProtocolVersion, SupportedCipherSuite, Tls13CipherSuite};
+use rustls::{
+    ContentType as RustlsType, Error, PeerMisbehaved, ProtocolVersion, SupportedCipherSuite,
+    Tls13CipherSuite,
+};
 use rusty_tls::handrolled::record::{Aead, ContentType, Opener, Sealer, HEADER_LEN};
 
 fn tls13(suite: SupportedCipherSuite) -> &'static Tls13CipherSuite {
@@ -176,29 +181,47 @@ fn rustls_opens_what_we_seal() {
 
                     let mut decrypter = suite.aead_alg.decrypter(AeadKey::from(key), Iv::new(iv));
                     let mut body = ours[HEADER_LEN..].to_vec();
-                    let opened = decrypter
-                        .decrypt(
-                            InboundOpaqueMessage::new(
-                                RustlsType::ApplicationData,
-                                ProtocolVersion::TLSv1_2,
-                                &mut body,
-                            ),
-                            seq,
+                    let opened = decrypter.decrypt(
+                        InboundOpaqueMessage::new(
+                            RustlsType::ApplicationData,
+                            ProtocolVersion::TLSv1_2,
+                            &mut body,
+                        ),
+                        seq,
+                    );
+                    // TLS 1.3 CCS is only valid as an unprotected compatibility
+                    // record. rustls 0.23.46 rejects it at the decrypter boundary.
+                    if ours_typ == ContentType::ChangeCipherSpec {
+                        assert_eq!(
+                            opened.unwrap_err(),
+                            Error::PeerMisbehaved(PeerMisbehaved::IllegalMiddleboxChangeCipherSpec),
+                            "{name}: protected CCS at len={len} seq={seq} typ={ours_typ:?}"
+                        );
+                        continue;
+                    }
+                    let opened = opened.unwrap_or_else(|e| {
+                        panic!(
+                            "{name}: rustls rejected our record at len={len} seq={seq} typ={ours_typ:?}: {e:?}"
                         )
-                        .unwrap_or_else(|e| {
-                            panic!(
-                                "{name}: rustls rejected our record at len={len} seq={seq}: {e:?}"
-                            )
-                        });
+                    });
 
-                    assert_eq!(opened.typ, theirs_typ, "{name}: content type at len={len}");
-                    assert_eq!(opened.payload, &payload[..], "{name}: payload at len={len}");
+                    assert_eq!(
+                        opened.typ, theirs_typ,
+                        "{name}: content type at len={len} seq={seq} typ={ours_typ:?}"
+                    );
+                    assert_eq!(
+                        opened.payload,
+                        &payload[..],
+                        "{name}: payload at len={len} seq={seq} typ={ours_typ:?}"
+                    );
                 }
             }
         }
     }
 }
 
+/// Opener handles record cryptography, not protocol-state validation: protected
+/// CCS decodes here, then handshake/established dispatch rejects its content type.
 #[test]
 fn we_open_what_rustls_seals() {
     for (name, alg, suite) in comparable_suites() {

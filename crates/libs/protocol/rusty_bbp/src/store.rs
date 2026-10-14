@@ -6,6 +6,7 @@ use crate::engine::handle;
 use crate::event::{log_schema, schema_supported, Event};
 use crate::ids::*;
 use crate::record::ArtifactPayload;
+use crate::shadow::Shadow;
 use crate::state::TaskState;
 use std::collections::HashMap;
 
@@ -97,13 +98,24 @@ impl Store for MemStore {
 pub struct Driver<S: Store> {
     pub store: S,
     pub state: TaskState,
+    /// Shadow records of the last `dispatch`: what an event-driven policy would
+    /// have done beside each real grant. Replaced on every dispatch; not logged.
+    pub shadow: Vec<Shadow>,
+    /// Called after a successful `dispatch` that made shadow records, so a host
+    /// can keep them. Advisory: it cannot fail or change the dispatch.
+    shadow_sink: Option<ShadowSink>,
 }
+
+/// A host's receiver of shadow records.
+pub type ShadowSink = Box<dyn FnMut(&[Shadow]) + Send>;
 
 impl<S: Store> Driver<S> {
     pub fn new(store: S, task: TaskId) -> Driver<S> {
         Driver {
             state: TaskState::new(task),
             store,
+            shadow: Vec::new(),
+            shadow_sink: None,
         }
     }
 
@@ -111,6 +123,12 @@ impl<S: Store> Driver<S> {
     /// derives or checks uses it. Survives `reload`.
     pub fn with_master(mut self, master: [u8; 32]) -> Driver<S> {
         self.state.master = master;
+        self
+    }
+
+    /// Send the shadow records of every later `dispatch` to `sink`.
+    pub fn with_shadow_sink(mut self, sink: ShadowSink) -> Driver<S> {
+        self.shadow_sink = Some(sink);
         self
     }
 
@@ -180,6 +198,7 @@ impl<S: Store> Driver<S> {
     /// and the claimed payload is what those bytes decode to (A1). A failure is
     /// a rejection returned without touching the log.
     pub fn dispatch(&mut self, cmd: &Command, now: Time) -> Result<Response, StoreError> {
+        self.shadow.clear();
         if let Some(rej) = self.check_boundary(cmd) {
             return Ok(Response::Rejected(rej));
         }
@@ -192,6 +211,11 @@ impl<S: Store> Driver<S> {
                 Ok(()) => {
                     for e in &out.events {
                         self.state.apply(e);
+                    }
+                    self.shadow = out.shadow;
+                    if let (Some(sink), false) = (self.shadow_sink.as_mut(), self.shadow.is_empty())
+                    {
+                        sink(&self.shadow);
                     }
                     return Ok(out.response);
                 }

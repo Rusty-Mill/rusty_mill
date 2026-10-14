@@ -1,6 +1,6 @@
 # TLS native engine: evidence bar proposal (owner to approve)
 
-Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` aligned 2026-10-12 and the two `nc-dos` cases bounded 2026-10-13; the other native-accept/webpki-reject limbo cases (see "Other divergences") still await a named-owner decision. Follows
+Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` aligned 2026-10-12 and the two `nc-dos` cases bounded 2026-10-13; the two other native-accept/webpki-reject limbo cases are accepted exceptions (see "Accepted exceptions"; owner acceptance recorded 2026-10-13). Follows
 `TLS-ENGINE-ASSESSMENT.md` section 6, which this narrows and updates. The engine's default,
 both gates and every consumer are unchanged. The bar, replacing `ring`, and superseding
 ADR-0002 are the owner's decisions.
@@ -132,8 +132,25 @@ issuer). The owner chose to align with webpki. `check_eku` no longer treats the 
 `any_extended_key_usage_is_refused_like_webpki` (leaf and intermediate, ours and webpki) pin it. The
 limbo golden is unchanged (the corpus has no such case).
 
-Other divergences, none a defect in this validator. The two native-accept/webpki-reject cases below still require resolution or named owner acceptance under Tier 1 item 2; limbo expecting success is not that acceptance:
-- 2 cases where this validator is *looser* than webpki and agrees with limbo (webpki is the stricter one): `pathlen::self-issued-certs-pathlen`, `rfc5280::nc::permitted-self-issued`.
+**Accepted exceptions (Tier 1 item 2).** Accepted by the owner in the working session on 2026-10-13: "Confirmed, I accept both exceptions", given after the two cases were named. The reviewer separately reported a matching owner confirmation on PR #670; that report is corroboration only, and this record rests on the owner's message in the session. Two cases
+where this validator is *looser* than webpki and agrees with limbo:
+
+| Case | Why this validator follows the standard |
+| --- | --- |
+| `pathlen::self-issued-certs-pathlen` | RFC 5280 §6.1.4(l): a self-issued certificate does not consume path length. webpki counts it. |
+| `rfc5280::nc::permitted-self-issued` | RFC 5280 §6.1.3(b) (permitted subtrees) and §6.1.3(c) (excluded subtrees): name constraints are not checked against a self-issued certificate unless it is the final certificate. webpki applies them. |
+
+Basis: the user's direction in the working session on 2026-10-13, "Always err on the side of the
+standards", read as the RFCs plus the Web PKI profile for server authentication, then the acceptance above. Both behaviors are in the code with the RFC section
+cited. This is not inferred from limbo expecting success. The acceptance covers exactly these two
+cases as named Tier 1 exceptions and nothing broader: no consumer wiring, no broader
+standards-preference policy, no reversal of the #628 `anyExtendedKeyUsage` restriction, no
+unrelated ADR. Any other native-accept/webpki-reject case found later needs its own decision.
+
+On `anyExtendedKeyUsage`: RFC 5280 §4.2.1.12 permits a validator to restrict it, so refusing it
+(as merged in #628) is within the standard. Favoring the standards does not require reversing #628.
+
+Other divergences, none a defect in this validator:
 - 4 cases where this validator is *stricter* and limbo expects refusal (empty `permitted`/`excluded` sequences, a leading-period DNS constraint).
 - 1 false refusal: `rfc5280::nc::nc-forbids-othername-noop`. An `otherName` name constraint is refused rather than ignored by design (ADR-0002 section 2b-iii).
 - 57 cases both engines accept that limbo says to refuse: 10 CRL cases (neither engine implements revocation, finding F8), and mostly `pedantic` issuance-profile lints (AKI/SKI presence, serial number size, CN versus SAN, weak or unusual subscriber keys, public-suffix wildcards) and trust-anchor properties (anchors are taken as name and key only, by design). Listed in `tests/data/limbo_divergences.txt`; the ratchet fails if this list changes.

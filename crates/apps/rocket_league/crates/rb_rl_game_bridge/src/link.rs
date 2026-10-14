@@ -134,8 +134,8 @@ const MAX_ACCEPTS_PER_PASS: usize = 8;
 /// How long a connection may sit on part of a first message, with no more of it arriving,
 /// before it is dropped. The game writes whole messages at once; a peer that sent a few bytes
 /// and went quiet (or closed behind them: `peek` cannot see an end of stream past buffered
-/// bytes) is not it. A connection with *no* bytes is not subject to this: the game is silent
-/// until a map loads.
+/// bytes) is not it. A connection with *no* bytes is not subject to this: the game's first
+/// message can come a while after it dials.
 pub const STALL_AFTER: Duration = Duration::from_secs(10);
 
 /// A connection that has yet to prove it is the game.
@@ -274,8 +274,8 @@ impl GameListener {
     ///
     /// - A connection that closes, sends something that is not a game message, or stalls
     ///   part-way through one ([`STALL_AFTER`]) is dropped.
-    /// - A silent connection waits, because the game connects at launch and says nothing until
-    ///   a map loads.
+    /// - A silent connection waits, because the game's first message can come a while after
+    ///   it dials (about 45 s later, at the splash screen, in a live run).
     /// - At most [`MAX_CANDIDATES`] wait; a newer arrival drops the oldest, in arrival order,
     ///   after every waiting connection has been looked at, so a game already speaking is
     ///   never the one dropped.

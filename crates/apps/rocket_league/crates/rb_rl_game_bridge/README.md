@@ -81,7 +81,9 @@ its state setting becomes a ball placement.
   (it looks without reading, so the link still sees that message). A connection that closes,
   sends something else, or stalls part-way through a message (`STALL_AFTER`, ten seconds: `peek`
   cannot see a close behind buffered bytes) is dropped and the wait goes on; a silent one waits,
-  because the game says nothing until a map loads. At most `MAX_CANDIDATES` wait; a newer
+  because the game's first message comes some time after it dials (about 45 s later, at the
+  splash screen and before any map, in a live run; the committed live fixture likewise opens
+  with two empty menu messages before the map announcement). At most `MAX_CANDIDATES` wait; a newer
   arrival drops the oldest, in arrival order, after every waiting connection has been looked at,
   so a game that has spoken is never the one dropped. Limits: this is not authentication (a
   local process that speaks the game's format first is taken for the game), and a game still
@@ -90,7 +92,7 @@ its state setting becomes a ball placement.
 - **What the bridge prints, in order.** `serving bots on ADDR` as soon as the bots' port is
   taken (bots may start now); `a connection from ... is waiting to speak` when something dials
   the game port (the live-test runner waits for this one: the game has dialled); `the game
-  connected` when a connection has spoken as the game (a map has loaded).
+  connected` when a connection has spoken as the game (in a live run, at the splash screen).
 - **The bots' port is taken at startup**, before the game is launched: a clash fails at once
   naming the port, and a bot that starts while the game is still loading connects and waits for
   its handshake instead of being refused. (How long a given bot waits is the bot's own timeout.)

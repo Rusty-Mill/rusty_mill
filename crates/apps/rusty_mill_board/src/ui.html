@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mill Board</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#f6f6f4;--panel:#ececE8;--card:#fff;--ink:#1b1b1a;--mute:#6b6b66;--line:#d8d8d2;--acc:#a8461c;--err:#b3261e}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#161615;--panel:#1f1f1d;--card:#292927;--ink:#ececE8;--mute:#9a9a92;--line:#3a3a36;--acc:#e07a4a;--err:#f2867e}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+h1{font-size:16px;margin:0 auto 0 0}
+input,select,textarea,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+button{cursor:pointer}button:hover{border-color:var(--acc)}
+main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:10px;padding:12px 16px;overflow-x:auto;min-height:calc(100vh - 60px)}
+.col{background:var(--panel);border-radius:8px;padding:8px;min-height:120px}
+.col.over{outline:2px dashed var(--acc)}
+.col h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:2px 4px 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:8px;cursor:grab}
+.card b{display:block}
+.meta{color:var(--mute);font-size:12px;margin-top:4px}
+.tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
+dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,92vw)}
+dialog form{display:grid;gap:8px}
+.cm div{border-top:1px solid var(--line);padding:6px 0}
+.banner{border:1px solid var(--acc);border-radius:6px;padding:6px 8px}.banner:empty{display:none}
+@media (max-width:640px){main{grid-auto-flow:row;grid-auto-columns:auto}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Mill Board</h1>
+  <input id="actor" placeholder="your name" size="12" aria-label="actor name">
+  <select id="role" aria-label="role"></select>
+  <input id="title" placeholder="New card title" size="26" aria-label="new card title">
+  <button id="add">Add</button>
+</header>
+<main id="board"></main>
+<dialog id="dlg"></dialog>
+<div id="toast" role="alert"></div>
+<script>
+const COLS=["backlog","ready","building","qa","review","done","blocked"];
+const tok=new URLSearchParams(location.hash.slice(1)).get("token");
+const $=id=>document.getElementById(id);
+let cards=[],cursor=null,dlg=null;
+const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{}};
+
+async function api(op,args={}){
+  const r=await fetch("/api/"+op,{method:"POST",headers:{"content-type":"application/json",...(tok&&{authorization:"Bearer "+tok})},body:JSON.stringify(args)});
+  const j=await r.json().catch(()=>({error:r.statusText}));
+  if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}
+  return j;
+}
+const who=()=>({actor:$("actor").value.trim(),role:$("role").value});
+function toast(m){const t=$("toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
+// Run a write as the current actor, then re-read the board. Resolves to the reply, or null after showing the error.
+async function act(op,args){
+  try{const r=await api(op,{...who(),...args});await refresh();return r}
+  catch(e){toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
+}
+function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
+
+function render(){
+  const b=$("board");b.replaceChildren();
+  for(const c of COLS){
+    const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",c));
+    col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
+    col.ondragleave=()=>col.classList.remove("over");
+    col.ondrop=e=>{e.preventDefault();col.classList.remove("over");act("card_move",{id:e.dataTransfer.getData("text"),to:c})};
+    for(const k of cards.filter(k=>k.column===c)){
+      const d=el("div",null,"card");d.draggable=true;d.append(el("b",k.title));
+      const m=el("div",null,"meta");k.tags.forEach(t=>m.append(el("span",t,"tag")));
+      if(k.claim)m.append(el("span","⚑ "+k.claim+" "));
+      if(k.issue)m.append(el("span","#"+k.issue));
+      if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
+      d.append(m);
+      d.ondragstart=e=>e.dataTransfer.setData("text",k.id);
+      d.onclick=()=>show(k.id);
+      col.append(d);
+    }
+    b.append(col);
+  }
+  syncDialog();
+}
+
+/* The card dialog is built once and then kept in step with the board without ever
+   touching what the person is typing. `dlg.base` is the card as they last saw it. */
+const snap=k=>({rev:k.rev,title:k.title,body:k.body,tags:k.tags.join(", ")});
+const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,tags:dlg.f.g.value});
+const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.tags===b.tags;
+function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s.tags}
+
+function show(id){
+  const k=cards.find(c=>c.id===id);if(!k)return;
+  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input")};
+  f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
+  dlg={id,base:snap(k),f};setFields(dlg.base);
+  const row=el("div");
+  const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b," ")};
+  btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
+  btn("Close",()=>$("dlg").close());
+  f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
+  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,row,f.meta,f.cm,f.ci);
+  $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
+  syncDialog();
+}
+async function save(){
+  const d=dlg,t=typed();
+  const r=await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)});
+  if(r&&dlg===d)d.base=snap(r.card);   // the dialog may have been closed or reopened on another card meanwhile
+}
+function syncDialog(){
+  if(!dlg||!$("dlg").open)return;
+  const k=cards.find(c=>c.id===dlg.id),f=dlg.f;
+  if(!k){f.banner.textContent="This card no longer exists.";return}
+  // Display-only parts follow the board; the inputs are never rebuilt.
+  f.meta.textContent=k.column+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
+  const theirs=snap(k);
+  if(theirs.rev===dlg.base.rev){f.banner.replaceChildren();return}
+  const dirty=!sameText(typed(),dlg.base);
+  if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board
+  else if(sameText(theirs,dlg.base)){dlg.base={...dlg.base,rev:theirs.rev};f.banner.replaceChildren()} // only a comment or claim moved: keep the draft
+  else conflict(theirs);                                                       // the text changed under an unsaved edit
+}
+function conflict(theirs){
+  const f=dlg.f,b=el("button","Keep mine"),t=el("button","Take theirs");
+  b.type=t.type="button";
+  b.onclick=()=>{dlg.base=theirs;f.banner.replaceChildren()};          // Save will now apply on top of theirs
+  t.onclick=()=>{dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()};
+  f.banner.replaceChildren(el("div","Someone else changed this card while you were editing. Your unsaved text is kept."),b," ",t);
+}
+$("dlg").onclose=()=>{dlg=null};
+
+/* Read the cursor first, then the cards: anything committed in between is in the list
+   AND comes back from the next poll (a harmless extra refresh); nothing can be skipped.
+   Both reads must succeed before either is kept. */
+async function snapshot(){
+  const at=(await api("board_events",{tail:true})).cursor;
+  const list=(await api("board_list")).cards;
+  cursor=at;cards=list;
+}
+async function refresh(){await snapshot();render()}
+async function poll(){
+  try{
+    const r=await api("board_events",{after:cursor,limit:1000});
+    if(r.events.length){
+      const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
+      cursor=r.cursor;cards=list;render();
+    }
+  }catch(e){}
+  setTimeout(poll,1500);
+}
+(async()=>{
+  const roles=Object.keys((await api("board_roles").catch(()=>({roles:{human:1}}))).roles);
+  roles.forEach(r=>$("role").append(new Option(r,r)));
+  $("actor").value=pref("actor")||"";$("role").value=pref("role")||(roles.includes("human")?"human":roles[0]);
+  $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
+  $("add").onclick=()=>{const t=$("title").value.trim();if(t){$("title").value="";act("card_add",{title:t})}};
+  $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
+  try{await refresh()}catch(e){toast(e.message)}
+  poll();
+})();
+</script>
+</body>
+</html>

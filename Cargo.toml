@@ -87,6 +87,8 @@ members = [
     "crates/libs/homelab/rusty_opnsense",
     "crates/libs/homelab/rusty_fedora",
     "crates/apps/rusty_homelab_mcp",
+    "crates/apps/rusty_mill_board",
+    "crates/apps/rusty_mill_board/runner",
     "crates/apps/rusty_fedora_agent",
     "crates/apps/rusty_multimodal_db",
     "crates/apps/rusty_tick",

@@ -4,9 +4,12 @@
 use crate::command::*;
 use crate::event::*;
 use crate::ids::*;
+use crate::policy::SchedulingPolicy;
 use crate::record::*;
 use crate::role::*;
+use crate::shadow::{Shadow, ShadowKind};
 use crate::state::*;
+use crate::wake::wake_set;
 
 pub const MAX_ARTIFACT_BYTES: u64 = 2_000_000;
 const RUNNER: &str = "runner";
@@ -16,6 +19,9 @@ const RUNNER: &str = "runner";
 pub struct Handled {
     pub events: Vec<Event>,
     pub response: Response,
+    /// What an event-driven policy would have done beside each real grant.
+    /// Not logged; empty unless the task has one live turn.
+    pub shadow: Vec<Shadow>,
 }
 
 type R<T> = Result<T, Rejection>;
@@ -28,6 +34,7 @@ fn rej(code: Code, detail: impl Into<String>) -> Rejection {
 struct Work {
     st: TaskState,
     events: Vec<Event>,
+    shadow: Vec<Shadow>,
 }
 
 impl Work {
@@ -47,6 +54,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
     let mut w = Work {
         st: st.clone(),
         events: Vec::new(),
+        shadow: Vec::new(),
     };
     if w.st.opened {
         fire_deadlines(&mut w, now);
@@ -55,6 +63,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
         Ok(Flow::Replay(resp)) => Handled {
             events: w.events,
             response: resp,
+            shadow: w.shadow,
         },
         Ok(Flow::Done(resp)) => {
             if let Some((p, op, hash)) = op_key(&w.st, cmd) {
@@ -69,6 +78,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
             Handled {
                 events: w.events,
                 response: resp,
+                shadow: w.shadow,
             }
         }
         // A command refused before the task exists writes nothing: there is no
@@ -77,6 +87,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
         Err(r) if !w.st.opened => Handled {
             events: Vec::new(),
             response: Response::Rejected(r),
+            shadow: Vec::new(),
         },
         Err(r) => {
             let principal = principal_of(&w.st, cmd);
@@ -87,6 +98,7 @@ pub fn handle(st: &TaskState, cmd: &Command, now: Time) -> Handled {
             Handled {
                 events: w.events,
                 response: Response::Rejected(r),
+                shadow: w.shadow,
             }
         }
     }
@@ -294,6 +306,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         request_ms: o.request_ms,
         max_live_turns: o.max_live_turns,
         human: o.human.clone(),
+        policy: o.policy,
     });
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {
@@ -827,7 +840,7 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
         Pass => match &d.yield_to {
             Some(target) => {
                 end_turn_only(w, turn.id, TurnEnd::Yield);
-                grant(
+                grant_explicit(
                     w,
                     target,
                     TurnKind::Consultation,
@@ -1385,12 +1398,12 @@ fn human_post(w: &mut Work, d: &Draft, now: Time) -> R<Response> {
                 || w.st.roster.yieldable_in(w.st.state, &p.requester)
                 || holder.is_none()
             {
-                grant(w, &p.requester, kind, None, now);
+                grant_explicit(w, &p.requester, kind, None, now);
             }
         }
     } else if d.kind == Ask {
         if let Some(Recipient::Role(role)) = d.to.first() {
-            grant(w, role, TurnKind::Consultation, None, now);
+            grant_explicit(w, role, TurnKind::Consultation, None, now);
         }
     }
     Ok(Response::Posted(id))
@@ -1434,6 +1447,54 @@ fn grant(w: &mut Work, role: &RoleId, kind: TurnKind, return_to: Option<RoleId>,
     }
 }
 
+/// Shadow mode runs only where `wake_set` is defined: a turn-based task with
+/// one live turn.
+fn shadowing(st: &TaskState) -> bool {
+    st.policy == SchedulingPolicy::TurnBased && st.max_live_turns == 1
+}
+
+/// `grant` for a forced grantee (yield, human `ask`, settlement, consultation
+/// return). It bypasses `pick_next`, so shadow mode records it as explicit and
+/// never compares it.
+fn grant_explicit(
+    w: &mut Work,
+    role: &RoleId,
+    kind: TurnKind,
+    return_to: Option<RoleId>,
+    now: Time,
+) {
+    // Read before the grant: it can cross the turn budget and escalate, which
+    // would relabel the grant with the state it escalated to.
+    let (state, rev0, from) = (w.st.state, w.st.rev, w.events.len());
+    grant(w, role, kind, return_to, now);
+    let Some((_, rev)) = grants_since(w, from, rev0).into_iter().next() else {
+        return;
+    };
+    if shadowing(&w.st) {
+        let granted = role.clone();
+        w.shadow.push(Shadow {
+            rev,
+            state,
+            kind: ShadowKind::Explicit { granted, kind },
+        });
+    }
+}
+
+/// The grants made by the events emitted since `from`, each with the rev of its
+/// own `turn_granted` event (`rev0` is the rev before `from`). Read from the
+/// events, not the live turns: a grant that crosses the turn budget escalates
+/// and ends its turn in the same command.
+fn grants_since(w: &Work, from: usize, rev0: Rev) -> Vec<(RoleId, Rev)> {
+    let new = w.events.get(from..).unwrap_or_default();
+    new.iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            Event::TurnGranted { role, .. } => Some((role.clone(), Rev(rev0.0 + i as u64 + 1))),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The one scheduling check. Fills the free turn slots with the roles that
 /// serve the state, in `turn_order`; at `max_live_turns == 1` that is the
 /// default holder alone. An unassigned default holder blocks the rest.
@@ -1441,12 +1502,7 @@ fn schedule(w: &mut Work, now: Time) {
     if w.st.pending_request.is_some() || !w.st.opened {
         return;
     }
-    let serving: Vec<RoleId> =
-        w.st.roster
-            .serving(w.st.state)
-            .into_iter()
-            .cloned()
-            .collect();
+    let serving = pick_next(&w.st);
     let Some(first) = serving.first() else {
         return;
     };
@@ -1456,12 +1512,36 @@ fn schedule(w: &mut Work, now: Time) {
     if w.st.state == State::Test && w.st.selected_run().and_then(|r| r.status).is_none() {
         return;
     }
+    // Taken before any grant: `wake_set` is defined on a board with no live turn.
+    let would = shadowing(&w.st).then(|| wake_set(&w.st));
+    let (rev0, from) = (w.st.rev, w.events.len());
     let state = w.st.state;
     for role in &serving {
         grant(w, role, TurnKind::Default, None, now);
         if w.st.state != state {
             break; // a grant escalated the task; the rest of the list is stale
         }
+    }
+    let Some(would) = would else {
+        return;
+    };
+    let grants = grants_since(w, from, rev0);
+    if let Some(&(_, rev)) = grants.first() {
+        let granted = grants.into_iter().map(|(r, _)| r).collect();
+        w.shadow.push(Shadow {
+            rev,
+            state,
+            kind: ShadowKind::Auto { granted, would },
+        });
+    }
+}
+
+/// Who may take the next turns, under the task's policy: the roles that serve
+/// the state, in `turn_order`. The set is not capped here: `grant` admits at
+/// most `max_live_turns` of it, the one place the cap lives.
+pub(crate) fn pick_next(st: &TaskState) -> Vec<RoleId> {
+    match st.policy {
+        SchedulingPolicy::TurnBased => st.roster.serving(st.state).into_iter().cloned().collect(),
     }
 }
 
@@ -1505,7 +1585,7 @@ fn end_turn(w: &mut Work, turn: TurnId, cause: TurnEnd, now: Time) {
         && t.run_at == w.st.run.as_ref().map(|r| r.id);
     match (t.kind, t.return_to) {
         (TurnKind::Consultation, Some(back)) if unchanged && w.st.pending_request.is_none() => {
-            grant(w, &back, TurnKind::Default, None, now)
+            grant_explicit(w, &back, TurnKind::Default, None, now)
         }
         _ => schedule(w, now),
     }
@@ -1585,6 +1665,64 @@ fn fire_deadlines(w: &mut Work, now: Time) {
     if let Some(d) = w.st.pending_request.as_ref().and_then(|p| p.deadline) {
         if d <= now && !w.st.state.terminal() && w.st.state != State::Escalated {
             escalate(w, EscalateReason::RequestDeadline, now);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn roster() -> Roster {
+        use ArtifactKind::{Candidate, Diff, Spec};
+        Roster::new(vec![
+            Role::new("planner", 0)
+                .write(&[Spec])
+                .post(&[MessageKind::RequestDecision]),
+            Role::new("coder", 1).write(&[Diff, Candidate]),
+            Role::new("tester", 2)
+                .post(&[MessageKind::Verdict])
+                .verdict_at(&[Stage::Test]),
+            Role::new("reviewer", 3)
+                .post(&[MessageKind::Verdict])
+                .verdict_at(&[Stage::Review])
+                .final_decision(),
+        ])
+        .expect("valid roster")
+    }
+
+    fn at(state: State) -> TaskState {
+        let mut st = TaskState::new(TaskId("T".into()));
+        st.roster = roster();
+        st.state = state;
+        st
+    }
+
+    #[test]
+    fn turn_based_picks_the_roles_that_serve_the_state() {
+        for (state, holder) in [
+            (State::Planning, "planner"),
+            (State::Build, "coder"),
+            (State::Test, "tester"),
+            (State::Review, "reviewer"),
+        ] {
+            let got = pick_next(&at(state));
+            assert_eq!(got, vec![RoleId::from(holder)], "{state:?}");
+        }
+    }
+
+    #[test]
+    fn nobody_is_picked_where_no_role_serves_the_state() {
+        for state in [
+            State::PlanGate,
+            State::MergeGate,
+            State::Approved,
+            State::Escalated,
+            State::Closed,
+            State::Cancelled,
+        ] {
+            assert!(pick_next(&at(state)).is_empty(), "{state:?}");
         }
     }
 }

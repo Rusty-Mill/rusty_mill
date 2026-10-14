@@ -249,7 +249,7 @@ Human-only. `subject` is the `request_decision` or `propose` settled. An `answer
 
 | Event | Writer | Payload |
 | --- | --- | --- |
-| `task_opened` | moderator | `schema` (2, or 3 when `max_live_turns > 1`), roster, `max_live_turns` (schema 3 only), repo, profile set and digest, budget, brief id |
+| `task_opened` | moderator | `schema` (2, or 3 when `max_live_turns > 1`), roster, `max_live_turns` (schema 3 only), repo, profile set and digest, budget, brief id, `policy` (optional) |
 | `assigned` | moderator | role, principal |
 | `turn_granted` | moderator | role, turn id, kind: `default` or `consultation`, deadline, return-to role or null |
 | `turn_ended` | moderator | turn id, cause: `pass`, `yield`, `verdict`, `candidate`, `request`, `deadline`, `budget`, `aborted`, `revoked` |
@@ -439,6 +439,10 @@ The roster is part of `task_opened` and cannot change: no operation adds, remove
 ### Log schema
 
 Every log begins with `task_opened`, whose `schema` field is 2 for a task that allows one live turn and 3 for a task with `max_live_turns > 1`. Schema 3 is written only for such tasks, so a one-turn task's log is byte-identical to schema 2 (the new `max_live_turns` and `slice` fields are omitted at 1) and a build that reads schema 2 alone refuses a concurrent log rather than replaying it as serialized. A schema 2 log folds with a cap of 1 whatever it carries. A reader that meets an unknown `schema` refuses to replay; it never guesses. Schema 1 is v0.4.1 (roles as a fixed enumeration, no roster, no `schema` field). v0.5.0 does not replay schema 1; those logs are archived, not migrated.
+
+**Scheduling policy.** `task_opened` may carry `policy`, the rule that picks who takes the next turns. The only value is `TurnBased`: the roles that serve the current state, in `turn_order`, the default holder first, as before. `TurnBased` is the default and is not written, so a turn-based log is byte for byte what it was before the field existed and a log without `policy` replays as `TurnBased`; the schema is unchanged. `pick_next` returns a set of roles; `grant` admits at most `max_live_turns` of it, so that cap, not the policy, bounds the live turns, and R14 token binding, stale-turn rejection and deadlines are unchanged. Explicit grants (yield, human `ask`, request settlement, consultation return) do not pass through `pick_next`.
+
+**Shadow mode (informational).** `handle` also returns `shadow`: for each automatic grant, the roles `wake_set` would have woken just before it, and for each forced grant (yield, human `ask`, request settlement, consultation return) the forced grantee, labelled explicit and never compared. It is not logged, changes no grant, and is recorded only for a turn-based task with one live turn. A host may log it, deduped on `rev` (the reference host appends it to `<dir>/shadow/<task hash>.jsonl` from every process that opens a driver, and `bbp shadow` tallies it by state). It exists to measure how often an event-driven rule would differ before any rule is allowed to grant.
 
 ### Enforcement
 

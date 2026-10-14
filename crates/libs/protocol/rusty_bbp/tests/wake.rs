@@ -349,7 +349,7 @@ fn a_verdict_poster_needs_authority_for_the_current_stage() {
     assert!(!got.contains(&"none".to_string()), "{got:?}");
 }
 
-/// Table: for every state, post kind and verdict-stage set, a role's
+/// Table: for build, test and review, every post kind and verdict-stage set, a role's
 /// `can_act` agrees with what the real `post` path admits. Rejections that
 /// are about the role, kind or state (`RoleForbidden`, `WrongState`,
 /// `DecisionForbidden`) mean "not admitted"; any other outcome (accepted, or
