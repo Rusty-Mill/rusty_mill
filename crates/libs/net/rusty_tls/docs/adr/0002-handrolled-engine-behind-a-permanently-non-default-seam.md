@@ -691,9 +691,11 @@ question is not decided by a pull request that merely wires it.
    consumer calls the gated module's types directly; no seam type selects the engine.
 4. **The consumer is named and scoped in writing, by the owner.** The owner named it on
    2026-10-14: `rleval-app`'s OIDC transport, client side only, TLS 1.3 only, to named
-   hosts. `NativeTlsStream` currently negotiates TLS 1.2 as well, so the "TLS 1.3 only"
-   scope needs either a 1.3-only option on the stream or a wider review scope
-   (`TLS-REVIEW-SCOPE.md`); that is settled before wiring, not by this amendment.
+   hosts. `NativeTlsStream` currently negotiates TLS 1.2 as well, and reviewing TLS 1.2
+   would not stop it being negotiated. So before wiring, either TLS 1.3-only operation is
+   enforced (a 1.3-only option on the stream, set by the consumer), or the owner separately
+   approves widening the consumer's protocol scope to TLS 1.2 together with a review of it
+   (`TLS-REVIEW-SCOPE.md`). Neither is decided by this amendment.
    Widening the consumer (another consumer, the server side, TLS 1.2, a new host class)
    is a new decision against the bar, not a consequence of this one.
 5. **No library default moves.** No feature, cfg or dependency edge makes any other
