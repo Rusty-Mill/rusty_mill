@@ -31,6 +31,14 @@ use crate::role::*;
 use crate::state::*;
 use rusty_serde::{Deserialize, Serialize};
 
+/// The version of the wake rules `wake_set` implements. Stamped on every shadow
+/// record, so records written under different rules are never summed together.
+/// Bump it whenever a trigger, the priority, a baseline or the addressing rule
+/// changes. 1 is the rules of the first shadow comparison; 2 adds the assignment
+/// baseline, the state-entry floor, observers, State above Artifact, and `all`
+/// addressing no one.
+pub const WAKE_RULES: u32 = 2;
+
 /// Why a role is eligible. Declaration order is priority order: an addressed
 /// role outranks the state's own server, which outranks an artifact watcher
 /// that serves the state, which outranks an observer.

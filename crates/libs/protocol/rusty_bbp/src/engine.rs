@@ -9,7 +9,7 @@ use crate::record::*;
 use crate::role::*;
 use crate::shadow::{Shadow, ShadowKind};
 use crate::state::*;
-use crate::wake::wake_set;
+use crate::wake::{wake_set, WAKE_RULES};
 
 pub const MAX_ARTIFACT_BYTES: u64 = 2_000_000;
 const RUNNER: &str = "runner";
@@ -1474,6 +1474,7 @@ fn grant_explicit(
         let granted = role.clone();
         w.shadow.push(Shadow {
             rev,
+            rules: WAKE_RULES,
             state,
             kind: ShadowKind::Explicit { granted, kind },
         });
@@ -1530,6 +1531,7 @@ fn schedule(w: &mut Work, now: Time) {
         let granted = grants.into_iter().map(|(r, _)| r).collect();
         w.shadow.push(Shadow {
             rev,
+            rules: WAKE_RULES,
             state,
             kind: ShadowKind::Auto { granted, would },
         });

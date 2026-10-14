@@ -342,3 +342,25 @@ fn case_5_a_verdict_naming_a_recipient_still_addresses_it() {
     );
     assert_eq!(a.cmp, Comparison::Disagree);
 }
+
+/// Every record says which wake rules computed its `would`, so records written
+/// under different rules are never summed. One written before the field existed
+/// has no `rules` and reads as the first rules.
+#[test]
+fn a_record_carries_its_wake_rules_and_an_old_one_reads_as_the_first() {
+    let fx = Fx::new();
+    let rec = fx.shadows[0].clone();
+    assert_eq!(rec.rules, WAKE_RULES);
+    let text = rusty_serde::json::to_string(&rec).expect("encode");
+    let key = format!("\"rules\":{WAKE_RULES},");
+    assert!(text.contains(&key), "{text}");
+    let old: Shadow = rusty_serde::json::from_str(&text.replacen(&key, "", 1)).expect("old");
+    assert_eq!(old.rules, 1);
+    assert_eq!(
+        Shadow {
+            rules: WAKE_RULES,
+            ..old
+        },
+        rec
+    );
+}

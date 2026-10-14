@@ -14,6 +14,10 @@ use rusty_serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shadow {
     pub rev: Rev,
+    /// The wake rules (`WAKE_RULES`) the `would` set was computed under. A
+    /// record written before this field existed has none and reads as 1.
+    #[rusty_serde(default = "first_rules")]
+    pub rules: u32,
     /// The task state just before the grant. A grant that crosses the turn
     /// budget escalates in the same command; this is still the state it was
     /// made in.
@@ -33,6 +37,10 @@ pub enum ShadowKind {
     /// return). It bypasses `pick_next`, so its counterfactual is itself: it is
     /// reported, never compared.
     Explicit { granted: RoleId, kind: TurnKind },
+}
+
+fn first_rules() -> u32 {
+    1
 }
 
 /// How an automatic grant compares with the event-driven pick.
