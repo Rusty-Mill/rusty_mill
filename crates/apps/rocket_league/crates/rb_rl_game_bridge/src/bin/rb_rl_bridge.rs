@@ -158,8 +158,9 @@ fn bind_bots(port: u16) -> io::Result<TcpListener> {
     })
 }
 
-/// `line` as the bridge prints it: led by the seconds since the process started, so a log says
-/// when each step happened (the game's first message comes a while after it dials).
+/// `line` as the bridge prints it: led by the seconds since the first line (the clock starts at
+/// the first call, just after the ports are taken), so a log says when each step happened (the
+/// game's first message comes a while after it dials).
 fn stamped(elapsed: Duration, line: &str) -> String {
     format!("[{:8.3}s] {line}", elapsed.as_secs_f64())
 }
