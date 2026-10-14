@@ -10,13 +10,15 @@ use std::{
 
 use axum::response::{IntoResponse, Response};
 use http::{
-    Request,
+    Request, StatusCode,
     header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
 };
 
 use super::{
     config::AuthConfig,
-    decision::{Refusal, Rejection, bearer_token, check_claims, from_validation},
+    decision::{
+        AuthorizationHeader, Refusal, Rejection, bearer_token, check_claims, from_validation,
+    },
     token::VerifiedToken,
 };
 
@@ -129,19 +131,26 @@ async fn authorize(
     config: &AuthConfig,
     header: Option<&http::HeaderValue>,
 ) -> Result<VerifiedToken, Rejection> {
-    let token = bearer_token(header)?;
+    let token = bearer_token(authorization_header(header))?;
     let verified = from_validation(config.validator.validate(token).await)?;
     check_claims(config, verified)
 }
 
+/// Read the header as the core wants it: absent, not text, or text.
+fn authorization_header(header: Option<&http::HeaderValue>) -> AuthorizationHeader<'_> {
+    match header {
+        None => AuthorizationHeader::Absent,
+        Some(value) => value
+            .to_str()
+            .map_or(AuthorizationHeader::NotText, AuthorizationHeader::Text),
+    }
+}
+
 /// Turn a refusal into a response.
 fn into_response(refusal: Refusal) -> Response {
-    let mut response = (
-        refusal.status,
-        [(CONTENT_TYPE, "application/json")],
-        refusal.body,
-    )
-        .into_response();
+    let status =
+        StatusCode::from_u16(refusal.status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = (status, [(CONTENT_TYPE, "application/json")], refusal.body).into_response();
     if let Some(challenge) = refusal.challenge {
         match challenge.parse() {
             Ok(value) => {
@@ -158,8 +167,6 @@ fn into_response(refusal: Refusal) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use http::StatusCode;
-
     use super::*;
     use crate::auth::token::StaticTokenValidator;
 
@@ -199,6 +206,33 @@ mod tests {
             authorize(&config, Some(&bearer("Bearer nope"))).await,
             Err(Rejection::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn the_header_is_read_as_absent_not_text_or_text() {
+        let opaque = http::HeaderValue::from_bytes(b"Bearer \xff").expect("opaque bytes");
+        let text = bearer("Bearer abc");
+
+        assert_eq!(authorization_header(None), AuthorizationHeader::Absent);
+        assert_eq!(
+            authorization_header(Some(&opaque)),
+            AuthorizationHeader::NotText
+        );
+        assert_eq!(
+            authorization_header(Some(&text)),
+            AuthorizationHeader::Text("Bearer abc")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_text_header_is_a_bad_request_not_a_missing_one() {
+        let config = config_with(StaticTokenValidator::new());
+        let opaque = http::HeaderValue::from_bytes(b"Bearer \xff").expect("opaque bytes");
+
+        let Err(rejection) = authorize(&config, Some(&opaque)).await else {
+            panic!("an opaque header must be refused");
+        };
+        assert_eq!(rejection.refusal(&config).status.as_u16(), 400);
     }
 
     #[tokio::test]

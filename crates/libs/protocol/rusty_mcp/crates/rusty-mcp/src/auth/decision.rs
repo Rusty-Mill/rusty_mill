@@ -5,11 +5,13 @@
 //! functions of the config and the token. Nothing here awaits, touches a
 //! response type, or knows about `tower`, `axum` or `tokio`. The adapter
 //! ([`super::layer`]) supplies the one effectful step — running the validator —
-//! and turns a [`Refusal`] into its own response.
+//! and turns a [`Refusal`] into its own response. Status codes are
+//! `rusty_http`'s and the header arrives as plain text, so the external `http`
+//! crate stays in the adapter.
 
 use std::collections::BTreeSet;
 
-use http::{HeaderValue, StatusCode};
+use rusty_http::StatusCode;
 use rusty_json::json;
 
 use super::{
@@ -97,14 +99,30 @@ impl Rejection {
     }
 }
 
+/// What the transport found in the `Authorization` header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthorizationHeader<'a> {
+    /// There is no such header.
+    Absent,
+    /// There is one, but its bytes are not text.
+    NotText,
+    /// There is one.
+    Text(&'a str),
+}
+
 /// Pull the bearer token out of the `Authorization` header.
 ///
 /// The scheme is matched case-insensitively, as RFC 7235 requires.
-pub(crate) fn bearer_token(header: Option<&HeaderValue>) -> Result<&str, Rejection> {
-    let header = header.ok_or(Rejection::Missing)?;
-    let header = header
-        .to_str()
-        .map_err(|_| Rejection::Malformed("the Authorization header is not valid text".into()))?;
+pub(crate) fn bearer_token(header: AuthorizationHeader<'_>) -> Result<&str, Rejection> {
+    let header = match header {
+        AuthorizationHeader::Absent => return Err(Rejection::Missing),
+        AuthorizationHeader::NotText => {
+            return Err(Rejection::Malformed(
+                "the Authorization header is not valid text".into(),
+            ));
+        }
+        AuthorizationHeader::Text(text) => text,
+    };
 
     let (scheme, token) = header
         .split_once(' ')
@@ -188,14 +206,14 @@ mod tests {
             .with_required_scopes(required.iter().map(|s| s.to_string()))
     }
 
-    fn header(value: &str) -> HeaderValue {
-        HeaderValue::from_str(value).expect("valid header")
+    fn header(value: &str) -> AuthorizationHeader<'_> {
+        AuthorizationHeader::Text(value)
     }
 
     #[test]
     fn parses_the_bearer_scheme_case_insensitively() {
         for value in ["Bearer abc", "bearer abc", "BEARER abc"] {
-            assert_eq!(bearer_token(Some(&header(value))).ok(), Some("abc"));
+            assert_eq!(bearer_token(header(value)).ok(), Some("abc"));
         }
     }
 
@@ -203,10 +221,7 @@ mod tests {
     fn rejects_other_schemes_and_empty_tokens() {
         for value in ["Basic dXNlcjpwdw==", "abc", "Bearer   "] {
             assert!(
-                matches!(
-                    bearer_token(Some(&header(value))),
-                    Err(Rejection::Malformed(_))
-                ),
+                matches!(bearer_token(header(value)), Err(Rejection::Malformed(_))),
                 "{value:?}"
             );
         }
@@ -214,14 +229,16 @@ mod tests {
 
     #[test]
     fn a_missing_header_is_distinct_from_a_malformed_one() {
-        assert!(matches!(bearer_token(None), Err(Rejection::Missing)));
+        assert!(matches!(
+            bearer_token(AuthorizationHeader::Absent),
+            Err(Rejection::Missing)
+        ));
     }
 
     #[test]
     fn a_header_that_is_not_text_is_malformed() {
-        let value = HeaderValue::from_bytes(b"Bearer \xff").expect("opaque bytes");
         assert!(matches!(
-            bearer_token(Some(&value)),
+            bearer_token(AuthorizationHeader::NotText),
             Err(Rejection::Malformed(_))
         ));
     }
