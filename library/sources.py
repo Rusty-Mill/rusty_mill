@@ -7,7 +7,9 @@ value taken from a source is type-checked here, at the boundary, before it can r
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,6 +85,24 @@ def record(source: Source, checkout: Path) -> None:
     _git(checkout, "config", "--local", "library.ref", source.ref)
 
 
+def _is_own_checkout(path: Path) -> bool:
+    """A real directory (not a symlink or junction) that is the root of its own git worktree."""
+    git_dir = path / ".git"
+    if not path.is_dir() or path.resolve() != path.parent.resolve() / path.name:
+        return False
+    if not git_dir.is_dir() or git_dir.is_symlink():
+        return False
+    try:
+        return Path(_git(path, "rev-parse", "--show-toplevel")).resolve() == path.resolve()
+    except SourceError:
+        return False
+
+
+def _changes(checkout: Path) -> str:
+    """`git status` lines for anything that differs from the commit: modified, untracked, ignored."""
+    return _git(checkout, "status", "--porcelain", "--untracked-files=all", "--ignored=matching")
+
+
 def check_cache(source: Source, checkout: Path) -> str | None:
     """Why this cached checkout cannot stand for `source`, or None when it can.
 
@@ -95,29 +115,69 @@ def check_cache(source: Source, checkout: Path) -> str | None:
         sha = head_sha(checkout)
     except SourceError:
         return "cache has no recorded origin (re-sync)"
+    if not _is_own_checkout(checkout):
+        return "cache is not a plain git checkout of its own (symlinked or foreign); move or delete it and re-sync"
     if (repo, ref) != (source.repo, source.ref):
         return f"cache holds {repo}@{ref} but sources.json says {source.repo}@{source.ref} (re-sync)"
     if FULL_SHA.fullmatch(source.ref) and sha != source.ref:
         return f"cache is at {sha[:12]} but sources.json pins {source.ref[:12]} (re-sync)"
     try:
-        changes = _git(checkout, "status", "--porcelain", "--untracked-files=all", "--ignored=matching")
+        changes = _changes(checkout)
     except SourceError:
         return "cache status cannot be read (re-sync)"
     if changes:
-        return f"cache has local changes, not the pinned commit: {changes.splitlines()[0]} (re-sync)"
+        return f"cache has local changes, not the pinned commit: {changes.splitlines()[0]}; move or delete it and re-sync"
     return None
 
 
-def sync(source: Source, cache: Path) -> str:
-    """Fetch `source.ref` (shallow, https only) into cache/<name>; returns the commit SHA."""
-    dest = cache / source.name
-    dest.mkdir(parents=True, exist_ok=True)
+def _fetch(source: Source, dest: Path) -> None:
     _git(dest, "init", "-q")
     _git(dest, "fetch", "-q", "--depth", "1", "--", f"https://github.com/{source.repo}.git", source.ref)
     _git(dest, "-c", "advice.detachedHead=false", "checkout", "-q", "--force", "--detach", "FETCH_HEAD")
-    _git(dest, "clean", "-qffdx")  # the cache is ours: drop anything the commit does not contain
-    record(source, dest)
-    return head_sha(dest)
+
+
+def _require_replaceable(dest: Path) -> None:
+    """Refuse to replace anything but an untouched checkout this tool made itself."""
+    if not os.path.lexists(dest):
+        return
+    try:
+        recorded = bool(_git(dest, "config", "--local", "--get", "library.repo")) if _is_own_checkout(dest) else False
+        dirty = _changes(dest) if recorded else ""
+    except SourceError:
+        recorded, dirty = False, ""
+    if not recorded:
+        raise SourceError(f"{dest} exists but was not made by --sync (symlink, plain or foreign directory); move or delete it and re-run")
+    if dirty:
+        raise SourceError(f"{dest} has local changes; move or delete it and re-run")
+
+
+def sync(source: Source, cache: Path) -> str:
+    """Fetch `source.ref` (shallow, https only) into cache/<name>; returns the commit SHA.
+
+    The fetch happens in a fresh directory this call created, so nothing already on disk is
+    ever initialised, checked out over or cleaned. An existing cache/<name> is replaced only
+    if it is an untouched checkout made by a previous sync; anything else is left alone and
+    reported.
+    """
+    cache.mkdir(parents=True, exist_ok=True)
+    dest = cache / source.name
+    stage = Path(tempfile.mkdtemp(prefix=f".{source.name}-", dir=cache))
+    old = cache / f".old{stage.name}"
+    try:
+        _fetch(source, stage)
+        record(source, stage)
+        sha = head_sha(stage)
+        _require_replaceable(dest)
+        if os.path.lexists(dest):
+            dest.rename(old)
+        stage.rename(dest)
+    except BaseException:
+        if old.exists() and not os.path.lexists(dest):
+            old.rename(dest)  # put the previous cache back
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+    return sha
 
 
 def _regular(path: Path, root: Path) -> bool:

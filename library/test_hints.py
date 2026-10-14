@@ -14,7 +14,51 @@ import hints
 HOSTILE = ["a b", "$(id)", "it's", ";rm -rf ~", "`id`", "x&&y", "*", "$HOME", "a\\b", "a|b", "~", "#c", "a'$(b)'c"]
 
 
+PS_QUOTES = "'\u2018\u2019\u201a\u201b"  # PowerShell's tokenizer: each of these opens and closes a literal
+
+
+def outside_literals(statement: str) -> str:
+    """What PowerShell would parse as code: `statement` minus its single-quoted literals.
+
+    Models the tokenizer: any of PS_QUOTES opens a literal; inside, one of them directly
+    followed by another is an escaped character, and a lone one closes it.
+    """
+    code, i, open_ = [], 0, False
+    while i < len(statement):
+        c = statement[i]
+        if open_ and c in PS_QUOTES:
+            if i + 1 < len(statement) and statement[i + 1] in PS_QUOTES:
+                i += 1  # escaped quote stays inside the literal
+            else:
+                open_ = False
+        elif not open_ and c in PS_QUOTES:
+            open_ = True
+        elif not open_:
+            code.append(c)
+        i += 1
+    return "".join(code)
+
+
 class QuotingTests(unittest.TestCase):
+    def test_the_tokenizer_model_sees_a_typographic_quote_end_a_literal(self) -> None:
+        self.assertIn("Write-Output X", outside_literals("'a\u2019; Write-Output X; Write-Output \u2019b'"))
+        self.assertEqual(outside_literals("'it''s' x"), " x")
+
+    def test_powershell_code_never_depends_on_the_path(self) -> None:
+        skeleton = outside_literals(hints.render_powershell(hints.mod_commands("o/r", "a" * 40, "x y")))  # a quoted path
+        for path in HOSTILE:
+            with self.subTest(path=path):
+                self.assertEqual(outside_literals(hints.render_powershell(hints.mod_commands("o/r", "a" * 40, path))), skeleton)
+
+    def test_typographic_quotes_and_separators_are_refused_for_both_shells(self) -> None:
+        injections = ["x\u2019; Write-Output SENTINEL; Write-Output \u2019tail", *(f"a{c}b" for c in "\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u0085\u2028\u2029")]
+        for path in injections:
+            commands = hints.mod_commands("o/r", "a" * 40, path)
+            for render in (hints.render, hints.render_powershell, hints.refuse_unquotable):
+                with self.subTest(path=path, render=render.__name__), self.assertRaises(ValueError):
+                    render(commands)
+
+
     def test_posix_round_trips_every_hostile_path_as_one_argument(self) -> None:
         for path in HOSTILE:
             with self.subTest(path=path):
