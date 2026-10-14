@@ -197,8 +197,10 @@ fn an_addressed_role_is_woken_and_the_author_is_not() {
     assert_eq!(ids(&wake_set(&st)), [pair("coder", WakeReason::Addressed)]);
 }
 
+/// A message to `all` names no one, so it addresses no one for scheduling. It is
+/// still a message everyone may read; only the trigger ignores it.
 #[test]
-fn a_message_to_everyone_wakes_every_role_that_can_act_except_its_author() {
+fn a_message_to_all_addresses_no_one_for_scheduling() {
     let mut fx = Fx::new();
     let mut d = Draft::new(Finding, "heads up");
     d.to = vec![Recipient::All];
@@ -206,10 +208,30 @@ fn a_message_to_everyone_wakes_every_role_that_can_act_except_its_author() {
     d = d.refs(vec![Ref::art(spec)]).evidence(vec![Ref::art(spec)]);
     posted(fx.post(Who::Planner, d));
     posted(fx.post(Who::Planner, pass()));
-    let w = wake_set(&fold(&fx, &before_first_regrant(&fx)));
-    let got: Vec<&str> = w.iter().map(|(r, _)| r.0.as_str()).collect();
-    assert!(!got.contains(&"planner"), "{got:?}");
-    assert!(got.contains(&"coder") && got.contains(&"tester"), "{got:?}");
+    let w = ids(&wake_set(&fold(&fx, &before_first_regrant(&fx))));
+    assert!(
+        w.iter().all(|(_, why)| *why != WakeReason::Addressed),
+        "no role is addressed by a broadcast: {w:?}"
+    );
+}
+
+/// ... while the same message naming a role does address it.
+#[test]
+fn a_message_naming_a_role_addresses_it_and_only_it() {
+    let mut fx = Fx::new();
+    let mut d = Draft::new(Finding, "heads up");
+    d.to = vec![Recipient::Role("tester".into())];
+    let spec = fx.spec();
+    d = d.refs(vec![Ref::art(spec)]).evidence(vec![Ref::art(spec)]);
+    posted(fx.post(Who::Planner, d));
+    posted(fx.post(Who::Planner, pass()));
+    let w = ids(&wake_set(&fold(&fx, &before_first_regrant(&fx))));
+    let addressed: Vec<&str> = w
+        .iter()
+        .filter(|(_, why)| *why == WakeReason::Addressed)
+        .map(|(r, _)| r.as_str())
+        .collect();
+    assert_eq!(addressed, ["tester"], "{w:?}");
 }
 
 #[test]
@@ -221,12 +243,26 @@ fn a_role_is_not_woken_by_its_own_events_even_after_its_turn_ended() {
     let mut evs = events(&fx);
     evs.extend(turn_of("planner", 90));
     let n = evs.len() as u64;
-    evs.push(message(n, Some("planner"), Recipient::All, Ask));
+    evs.push(message(
+        n,
+        Some("planner"),
+        Recipient::Role("planner".into()),
+        Ask,
+    ));
+    evs.push(message(
+        n + 1,
+        Some("planner"),
+        Recipient::Role("coder".into()),
+        Ask,
+    ));
     let mut st = fold(&fx, &evs);
     st.turns.clear();
     let woken = wake_set(&st);
     let got: Vec<&str> = woken.iter().map(|(r, _)| r.0.as_str()).collect();
-    assert!(!got.contains(&"planner"), "{got:?}");
+    assert!(
+        !got.contains(&"planner"),
+        "an author, even naming itself: {got:?}"
+    );
     assert!(got.contains(&"coder"), "others are woken: {got:?}");
 }
 

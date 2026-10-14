@@ -5,9 +5,11 @@
 //! Eligibility is derived from the nine Role fields, so no role is named.
 //! Triggers, all state-derived, best first:
 //!
-//! - **Addressed**: a message that names the role (or everyone) arrived since
-//!   the role's last turn ended, and the role may read it. A role that has
-//!   never had a turn counts every earlier message as new.
+//! - **Addressed**: a message that names the role arrived since the role's
+//!   last turn ended, and the role may read it. A message to `all` names no
+//!   one: it addresses nobody for scheduling (it is still readable by everyone
+//!   who could read it). A role that has never had a turn counts every earlier
+//!   message as new.
 //! - **State**: the role serves the current working state and that state's
 //!   turn became available since the role's last turn ended. Being assigned
 //!   makes the state's turn available to its server, so a server assigned
@@ -131,7 +133,8 @@ fn addressed(st: &TaskState, role: &Role, seen: Rev) -> bool {
             && m.from_role.as_ref() != Some(&role.id)
             && m.draft.to.iter().any(|r| match r {
                 Recipient::Role(id) => *id == role.id,
-                Recipient::All => true,
+                // `all` names no one: it is a broadcast, not a request to this role.
+                Recipient::All => false,
                 Recipient::Human => false,
             })
             && visible(st, role, m)

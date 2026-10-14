@@ -292,14 +292,14 @@ fn case_3_an_artifact_alone_leaves_only_observers_and_falls_back() {
     assert_eq!(a.cmp, Comparison::Fallback);
 }
 
-/// The divergence that remains. A `verdict` is addressed to everyone by
-/// default, so the planner and coder are `Addressed` by the tester's approval
-/// and outrank the reviewer, who serves `review` but is `scoped` and cannot
-/// even read it. Turn-based grants the reviewer; the event-driven set puts the
-/// planner first. Every remaining trace disagreement is this: a message whose
-/// recipient is `all` addressing roles that have nothing to do with it.
+/// Regression guard for open question 4. A `verdict` defaults to `to: [all]`,
+/// and `all` names no one, so it addresses no one for scheduling. The tester's
+/// approval used to address the planner and coder, who outranked the reviewer,
+/// who serves `review` but is `scoped` and cannot even read it. Now the set is
+/// the reviewer alone and agrees with turn-based. (The old behaviour caused all
+/// 11 remaining disagreements over the 31 traces.)
 #[test]
-fn case_4_a_broadcast_verdict_addresses_roles_that_do_not_serve_review() {
+fn case_4_a_broadcast_verdict_addresses_no_one_and_agrees() {
     let mut fx = Fx::new();
     fx.reach_review();
     let a = autos(&fx).pop().expect("the grant at review");
@@ -307,10 +307,35 @@ fn case_4_a_broadcast_verdict_addresses_roles_that_do_not_serve_review() {
         (a.state, a.granted),
         (State::Review, vec![RoleId::from("reviewer")])
     );
+    assert_eq!(a.would, [(RoleId::from("reviewer"), WakeReason::State)]);
+    assert_eq!(a.cmp, Comparison::Agree);
+}
+
+/// The same approval with a named recipient still addresses that role. The
+/// tester tells the coder directly; the coder (`Addressed`) outranks the
+/// reviewer (`State`), so event-driven would hand the coder the turn. Scheduling
+/// only: visibility and read scope are unchanged.
+#[test]
+fn case_5_a_verdict_naming_a_recipient_still_addresses_it() {
+    let mut fx = Fx::new();
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let tester = fx.holder(State::Test);
+    posted(fx.verdict_to(
+        tester,
+        VerdictKind::Approve,
+        vec![Recipient::Role("coder".into())],
+    ));
+    assert_eq!(fx.st().state, State::Review);
+    let a = autos(&fx).pop().expect("the grant at review");
+    assert_eq!(
+        a.granted,
+        [RoleId::from("reviewer")],
+        "turn-based: the reviewer"
+    );
     assert_eq!(
         a.would,
         [
-            (RoleId::from("planner"), WakeReason::Addressed),
             (RoleId::from("coder"), WakeReason::Addressed),
             (RoleId::from("reviewer"), WakeReason::State),
         ]
