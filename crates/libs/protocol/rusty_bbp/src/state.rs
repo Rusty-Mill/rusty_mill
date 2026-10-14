@@ -502,14 +502,22 @@ impl TaskState {
                 self.budget = *budget;
                 self.turn_ms = *turn_ms;
                 self.request_ms = *request_ms;
-                // Only schema 3 may raise the cap; a schema-2 log is serialized.
+                // Only schema 3 and up may raise the cap; a schema-2 log is
+                // serialized.
                 self.max_live_turns = if *schema >= crate::event::LOG_SCHEMA_CONCURRENT {
                     (*max_live_turns).max(1)
                 } else {
                     1
                 };
                 self.human = human.clone();
-                self.policy = *policy;
+                // Only schema 4 may name a live policy; below it the field is
+                // ignored, as a build that predates it would, so every reader
+                // of one log agrees.
+                self.policy = if *schema >= crate::event::LOG_SCHEMA_EVENT_DRIVEN {
+                    *policy
+                } else {
+                    SchedulingPolicy::TurnBased
+                };
                 self.opened = true;
                 self.ready_rev = self.rev;
                 self.entered_rev = self.rev;

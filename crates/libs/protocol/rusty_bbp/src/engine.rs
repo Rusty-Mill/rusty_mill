@@ -305,7 +305,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         ));
     }
     w.emit(Event::TaskOpened {
-        schema: schema_for(o.max_live_turns),
+        schema: schema_for(o.max_live_turns, o.policy),
         roster: o.roster.clone(),
         task: o.task.clone(),
         repo: o.repo.clone(),
@@ -877,13 +877,23 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
                 Body::Verdict(v) => v.verdict,
                 _ => VerdictKind::Revise,
             };
-            end_turn_only(w, turn.id, TurnEnd::Verdict);
+            // T11: only a `final_decision` role's approve opens the merge gate.
+            // Another judge's approve at `review` is recorded and moves nothing,
+            // so the finalizer still gets its review (R17 needs its approve and
+            // no one could schedule the gate).
             let to = match (kind, w.st.state) {
-                (VerdictKind::Approve, State::Test) => State::Review,
-                (VerdictKind::Approve, _) => State::MergeGate,
-                (VerdictKind::Revise, _) => State::Build,
+                (VerdictKind::Approve, State::Test) => Some(State::Review),
+                (VerdictKind::Approve, State::Review) if !w.st.roster.is_final(role_id) => None,
+                (VerdictKind::Approve, _) => Some(State::MergeGate),
+                (VerdictKind::Revise, _) => Some(State::Build),
             };
-            transition(w, to, now);
+            match to {
+                Some(to) => {
+                    end_turn_only(w, turn.id, TurnEnd::Verdict);
+                    transition(w, to, now);
+                }
+                None => end_turn(w, turn.id, TurnEnd::Verdict, now),
+            }
         }
         _ => {}
     }

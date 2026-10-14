@@ -199,3 +199,62 @@ fn a_revise_from_a_second_final_role_blocks_the_merge_gate() {
         other => panic!("the merge must be refused, got {other:?}"),
     }
 }
+
+/// A judge that may post a review verdict but is not a finalizer.
+fn with_non_final_judge() -> Vec<Role> {
+    let mut roles = two_finals();
+    let i = roles.len() - 1;
+    roles[i].id = RoleId::from("judge2");
+    roles[i].final_decision = false;
+    roles
+}
+
+fn approve_then_finalize(fx: &mut Fx) {
+    assert_eq!(fx.st().state, State::Review);
+    assert_eq!(holder(fx), RoleId::from("judge2"), "named, so it judges");
+    posted(fx.verdict("judge2", VerdictKind::Approve));
+    // Its approve is recorded and moves nothing: the finalizer still reviews.
+    assert_eq!(fx.st().state, State::Review);
+    assert!(!fx.st().final_approved());
+    assert_eq!(
+        holder(fx),
+        fx.holder(State::Review),
+        "the finalizer is next"
+    );
+    posted(fx.verdict(fx.holder(State::Review), VerdictKind::Approve));
+    assert_eq!(fx.st().state, State::MergeGate);
+    assert!(fx.st().final_approved() && !fx.st().final_blocked());
+}
+
+/// An addressed non-final judge approves at `review`. Under T11 that must not
+/// open the merge gate: the task would sit there with nobody to schedule and
+/// the human's approval refused. The finalizer reviews, then the human merges.
+#[test]
+fn a_non_final_judge_approving_at_review_does_not_strand_the_gate() {
+    let mut fx = Fx::event_driven(with_non_final_judge());
+    let cand = fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let tester = fx.holder(State::Test);
+    posted(fx.verdict_to(
+        tester,
+        VerdictKind::Approve,
+        vec![Recipient::Role("judge2".into())],
+    ));
+    approve_then_finalize(&mut fx);
+    let (run, _) = fx.selected_run();
+    ok(fx.human(HumanAction::Approve {
+        gate: Gate::Merge,
+        subject: cand,
+        run: Some(run),
+    }));
+    assert_eq!(fx.st().state, State::Approved);
+}
+
+/// A finalizer's own revise still blocks (R17); the guard only withholds the
+/// gate from a non-final approve.
+#[test]
+fn a_final_roles_approve_still_opens_the_gate() {
+    let mut fx = Fx::event_driven(two_finals());
+    fx.reach_merge_gate();
+    assert_eq!(fx.st().state, State::MergeGate);
+}
