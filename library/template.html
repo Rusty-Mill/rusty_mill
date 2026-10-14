@@ -49,7 +49,7 @@ pre{background:var(--card);border:1px solid var(--line);border-radius:8px;paddin
 <div id="detail" hidden>
   <div class="row"><button id="back">← Back</button><button id="copy">Copy</button><button id="dl">Download</button></div>
   <div class="kind" id="dkind"></div><h2 id="dname" style="margin:0"></h2>
-  <p class="mut" id="ddesc"></p><p class="mut small" id="dsource"></p><p class="mut small" id="dinstall"></p><p class="note" id="dnote" hidden></p><pre id="dbody"></pre>
+  <p class="mut" id="ddesc"></p><p class="mut small" id="dsource"></p><p class="mut small" id="dinstall"></p><pre class="small" id="dcmd" hidden></pre><p class="note" id="dnote" hidden></p><pre id="dbody"></pre>
 </div>
 </main>
 <script>
@@ -61,9 +61,16 @@ const state = {q: "", kind: "all", tag: null, bySource: false};
 const INSTALL = {
   prompt: "Paste into a session, or save as a file and reference it.",
   skill: p => `Save as ~/.claude/skills/<name>/SKILL.md (source: ${p}).`,
-  mod: p => `Try it: claude --plugin-dir ${p}`,
+  mod: () => "Run it from the library folder. Read the hooks above first: they run unsandboxed once launched.",
   "claude-md": "Paste into your project's CLAUDE.md (or ~/.claude/CLAUDE.md).",
   "agents-md": "Paste into your project's AGENTS.md - read by Codex, Cursor, Copilot and other agents.",
+};
+const REMOTE = {
+  mod: i => i.install
+    ? `Pinned to ${i.rev.slice(0, 12)}. Read the hooks above first: they run unsandboxed once launched.`
+    : `No install command (unusual path). Fetch github.com/${i.repo} at ${i.rev} and review it by hand.`,
+  skill: i => `From a checkout of github.com/${i.repo} at ${i.rev.slice(0, 12)}, copy ${i.path.replace(/SKILL\.md$/, "")} to ~/.claude/skills/`,
+  prompt: i => `Copy from github.com/${i.repo}@${i.rev.slice(0, 12)}:${i.path}.`,
 };
 const FILENAME = {skill: () => "SKILL.md", mod: i => `${i.name}.txt`, "claude-md": () => "CLAUDE.md", "agents-md": () => "AGENTS.md"};
 
@@ -107,6 +114,7 @@ function card(i) {
     open,
     el("span", {className: "desc", textContent: i.description}),
     ...(i.for ? [el("span", {className: "mut small", textContent: `For ${i.for}`})] : []),
+    ...(i.repo ? [el("span", {className: "mut small", textContent: `From ${i.repo}`})] : []),
     ...(flagged ? [el("span", {className: "note", textContent: `Heads up: ${i.status}`})] : []),
     el("div", {className: "acts"}, copy));
 }
@@ -123,7 +131,7 @@ function render() {
     v => { state.tag = state.tag === v ? null : v; render(); });
   $("bysrc").setAttribute("aria-pressed", String(state.bySource));
   if (!items.length) { $("out").replaceChildren(emptyState()); return; }
-  const groups = state.bySource ? [...Map.groupBy(items, i => i.source)] : [["", items]];
+  const groups = state.bySource ? [...Map.groupBy(items, i => i.group)] : [["", items]];
   $("out").replaceChildren(...groups.flatMap(([source, group]) => [
     ...(source ? [el("h3", {textContent: `${source} (${group.length})`})] : []),
     el("div", {className: "grid"}, ...group.map(card)),
@@ -137,12 +145,14 @@ function emptyState() {
 }
 
 function show(i) {
-  const how = INSTALL[i.kind];
+  const how = i.repo ? REMOTE[i.kind] : INSTALL[i.kind];
   $("dkind").textContent = i.kind;
   $("dname").textContent = i.name;
   $("ddesc").textContent = i.description;
   $("dsource").textContent = `Source: ${i.source}`;
-  $("dinstall").textContent = typeof how === "function" ? how(i.path) : how;
+  $("dinstall").textContent = typeof how === "function" ? how(i.repo ? i : i.path) : how;
+  $("dcmd").hidden = !i.install;
+  $("dcmd").textContent = i.install;
   $("dbody").textContent = i.body;
   const flagged = Boolean(i.status);
   $("dnote").hidden = !flagged;
