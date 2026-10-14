@@ -110,6 +110,10 @@
     // "human": every PR waits for a human click (the old human_approves_merge).
     // Onboard recommends "human" when base_branch is production-detected.
     "default": "auto",
+    // `gh pr merge` method the gate uses: "merge" (default), "squash" or "rebase".
+    // Must be allowed by the repository; the gate exits 9 rather than fall back or
+    // change repository settings. CONTRIBUTING-style repos that forbid squash keep "merge".
+    "method": "merge",
     // Small PRs by design. A PR with more changed lines (additions +
     // deletions) than this waits for a human: Blocked 🙋 "big PR — please
     // review". Default 400; 0 = no size cap. Files matching size_exclude and
@@ -252,6 +256,11 @@
   //             Claude: cards that reach Review wait there for the next Claude
   //             wave. The launcher refuses a fallback lane without this value.
   "usage_fallback": "none",
+
+  // Merge only when GitHub reports every check green for the exact head (exit 10
+  // pending, 11 failing, 12 missing/other head). `ci_required_checks` names checks that
+  // must have reported; `ci_required: false` is the explicit opt-out.
+  "ci_required_checks": ["required-gate"],
 
   "verify_commands": [
     "cd server && npm ci --silent && npm run typecheck && npm test"

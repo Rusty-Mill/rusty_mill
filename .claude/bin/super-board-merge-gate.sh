@@ -83,6 +83,13 @@
 #      card → Blocked with the 🙋 template: the human reviews and merges it, or
 #      comments "done" after its pinned request to approve — the next wave re-runs
 #      the gate, which then skips the policy check and merges.
+#   9  the PR does not target the configured base_branch, or the repository allows
+#      no merge method this config permits (merge_policy.method, default "merge":
+#      CONTRIBUTING.md forbids squash). Nothing merged; repository settings are
+#      never changed to make a merge possible.
+#   10 CI for the exact head is still running — leave the card in Review, retry later
+#   11 CI for the exact head failed — back to Build
+#   12 CI evidence missing, unreadable, or for another head — fail closed
 #   79 required GitHub evidence unavailable: local run halt; preserve card and
 #      approval state, stop dispatch, and explicitly restart after diagnosis.
 #   8  🙋 needs you — the PR has migrations for a database the robot may not
@@ -111,6 +118,7 @@ set -euo pipefail
 export SB_GITHUB_READ_STRICT=1
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 GITHUB_READ="$HERE/super-board-github-read.py"
+CHECKS="$HERE/super-board-merge-checks.py"
 
 CONFIG=""; PR=""; LOCK_TIMEOUT=1800; STALE_AFTER=""; DRY=0; EXPECT_HEAD=""; SUBJECT=""; MSG_FILE=""
 while [ $# -gt 0 ]; do
@@ -192,7 +200,7 @@ say "lock taken; verifying against ${BASE} as it is now"
 # Done in a throwaway worktree so the branch under test is never mutated: the
 # gate proves a merge, it does not perform one locally and it never pushes.
 SCRATCH=$(mktemp -d)
-cleanup() { git -C "$REPO_PATH" worktree remove --force "$SCRATCH" 2>/dev/null || true; rm -rf "$SCRATCH" "${META:-}" "${DIFF:-}"; release; }
+cleanup() { git -C "$REPO_PATH" worktree remove --force "$SCRATCH" 2>/dev/null || true; rm -rf "$SCRATCH" "${META:-}" "${DIFF:-}" "${TARGET_META:-}" "${CI_META:-}"; release; }
 trap cleanup EXIT
 
 # ---- the head guard --------------------------------------------------------
@@ -220,6 +228,22 @@ if [ -n "$EXPECT_HEAD" ]; then
 else
   say "WARNING: no --expect-head; pinning the head read now (${HEAD_SHA}), not the reviewed one"
 fi
+
+# ---- target branch and merge method (fail closed, before any work) ---------
+# The head guard pins the commit, not where it lands. Board config says BASE; the PR's
+# real target is what `gh pr merge` writes to, so compare them, now and again just
+# before the merge.
+TARGET_META=$(mktemp)
+check_target() {
+  python3 "$GITHUB_READ" --kind pr-target -- pr view "$PR" ${REPO:+--repo "$REPO"} --json baseRefName,headRefOid > "$TARGET_META" || exit $?
+  python3 "$CHECKS" target --expect "$BASE" --meta "$TARGET_META" || exit $?
+  [ "$(jq -r .headRefOid "$TARGET_META")" = "$HEAD_SHA" ] || { say "head moved while checking the target"; exit 6; }
+}
+check_target
+SETTINGS_FILE=$(mktemp)
+python3 "$GITHUB_READ" --kind repo-merge -- repo view ${REPO:+"$REPO"} --json mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed > "$SETTINGS_FILE" || exit $?
+MERGE_FLAG=$(python3 "$CHECKS" method --config "$CONFIG" --settings "$SETTINGS_FILE") || exit $?
+rm -f "$SETTINGS_FILE"
 
 # ---- merge policy + migration plan ----------------------------------------
 # One read of the PR's labels, paths, size and body plus its diff, classified by
@@ -335,15 +359,24 @@ if [ "$APPROVED" = true ]; then
 fi
 
 # ---- the merge -------------------------------------------------------------
+# Local verify_commands prove the branch builds; they say nothing about tests, lint,
+# dependency policy or the required gate. Merge only when GitHub reports every check
+# green for this exact head, and re-confirm the target right before the write.
+check_target
+CI_META=$(mktemp)
+python3 "$GITHUB_READ" --kind ci -- pr view "$PR" ${REPO:+--repo "$REPO"} --json headRefOid,statusCheckRollup > "$CI_META" || exit $?
+python3 "$CHECKS" ci --head "$HEAD_SHA" --meta "$CI_META" --config "$CONFIG" || exit $?
+say "CI green for ${HEAD_SHA}"
+
 if [ "$DRY" -eq 1 ]; then
-  say "dry run: would squash-merge PR #${PR}"
+  say "dry run: would merge PR #${PR} with ${MERGE_FLAG}"
   exit 0
 fi
 
 # --match-head-commit makes GitHub refuse if anything was pushed after HEAD_SHA,
 # including during the verification run above.
 python3 "$GITHUB_READ" --check
-if gh pr merge "$PR" ${REPO:+--repo "$REPO"} --squash --delete-branch \
+if gh pr merge "$PR" ${REPO:+--repo "$REPO"} "$MERGE_FLAG" --delete-branch \
      ${SUBJECT:+--subject "$SUBJECT"} ${MSG_FILE:+--body-file "$MSG_FILE"} \
      --match-head-commit "$HEAD_SHA" 2>&1 | tail -3 >&2; then
   say "merged ${HEAD_SHA}"

@@ -242,6 +242,15 @@ def validate(text, kind, meta=None):
         require(value.get('state') in ('OPEN', 'CLOSED', 'MERGED') and re.fullmatch(r'[0-9a-f]{40}', value.get('headRefOid', '')), 'merge outcome unreadable')
         if value['state'] == 'MERGED':
             require(re.fullmatch(r'[0-9a-f]{40}', (value.get('mergeCommit') or {}).get('oid', '')), 'merged commit missing')
+    elif kind == 'pr-target':
+        require(isinstance(value.get('baseRefName'), str) and value['baseRefName']
+                and re.fullmatch(r'[0-9a-f]{40}', value.get('headRefOid', '')), 'PR target or head missing')
+    elif kind == 'ci':
+        require(re.fullmatch(r'[0-9a-f]{40}', value.get('headRefOid', '')) and isinstance(value.get('statusCheckRollup'), list),
+                'PR checks or head missing')
+    elif kind == 'repo-merge':
+        require(all(isinstance(value.get(k), bool) for k in ('mergeCommitAllowed', 'squashMergeAllowed', 'rebaseMergeAllowed')),
+                'repository merge settings missing')
     elif kind == 'body':
         require(isinstance(value.get('body'), str) and re.fullmatch(r'[0-9a-f]{40}', value.get('headRefOid', '')), 'PR body/head missing')
     elif kind == 'dedupe':
@@ -280,7 +289,7 @@ def read(args, kind='json', meta=None, recovering=False):
         if not recovering:
             check_halt()
         try:
-            result = subprocess.run(['gh', *args], capture_output=True, text=True, timeout=30)
+            result = subprocess.run([os.environ.get('SB_GH', 'gh'), *args], capture_output=True, text=True, timeout=30)
             diagnostic = result.stderr
             if result.returncode:
                 diagnostic += result.stdout
@@ -318,7 +327,7 @@ def read(args, kind='json', meta=None, recovering=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--kind', choices=('json','scalar','issue-number','head','state','diff','metadata','items','issues','quota','projects','project','fields','status-field','permission','comments','approval','merge-state','body','dedupe','prs-open','prs-merged','issues-closed','issue','object','array'))
+    parser.add_argument('--kind', choices=('json','scalar','issue-number','head','state','diff','metadata','items','issues','quota','projects','project','fields','status-field','permission','comments','approval','merge-state','pr-target','ci','repo-merge','body','dedupe','prs-open','prs-merged','issues-closed','issue','object','array'))
     parser.add_argument('--meta')
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--halt', help='record an unresolved mutation outcome and stop; never retry it')
