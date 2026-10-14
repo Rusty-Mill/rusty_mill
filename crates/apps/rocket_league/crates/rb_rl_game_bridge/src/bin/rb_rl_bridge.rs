@@ -25,7 +25,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use rb_rl_game_bridge::{
-    rlbot_args, GameLaunch, GameListener, LinkBackend, IDEAL_GAME_PORT, RLBOT_SOCKETS_PORT,
+    needs_epic_login, rlbot_args, GameLaunch, GameListener, LinkBackend, EPIC_LAUNCH_WARNING,
+    IDEAL_GAME_PORT, RLBOT_SOCKETS_PORT,
 };
 use rb_rlbot_core::{bot_match, Core, Event, Pacing};
 use rb_rlbot_wire::MatchLengthMutator;
@@ -187,6 +188,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         args.game_port,
         rlbot_args(args.game_port).join(" ")
     ));
+    if args
+        .launch
+        .as_deref()
+        .is_some_and(|exe| needs_epic_login(exe.as_ref()))
+    {
+        say(EPIC_LAUNCH_WARNING);
+    }
     let _child = args
         .launch
         .as_deref()
