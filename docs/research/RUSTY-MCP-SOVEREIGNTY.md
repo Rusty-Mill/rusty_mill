@@ -131,6 +131,8 @@ Each item is one PR, with its own tests and a change fragment.
 5. **Sans-IO cores** for `auth`, `limits` and metrics recording, on `rusty_http`
    types; the existing layers become tower adapters over them. No behaviour
    change. *Done when:* the cores have unit tests with no `tokio` or `axum`.
+   **`auth` core done (2026-10-14):** crate-private `auth::decision`
+   (`bearer_token`, `from_validation`, `check_claims`, `Refusal`); metrics remain.
 6. **Drop `axum`** from the adapters (generic body, `http::Response`). *Done
    when:* `axum` is gone from `[dependencies]`; the gateway still compiles and
    its 24 suites pass. Needs D1.
