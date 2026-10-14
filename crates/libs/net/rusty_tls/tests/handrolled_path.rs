@@ -1432,7 +1432,7 @@ fn a_malformed_san_entry_under_a_name_constraint_is_refused() {
 /// What a name-constraint budget case builds: a root with `permitted` and
 /// `excluded` DNS subtrees, optionally one intermediate with its own SANs, and a
 /// leaf. `self_issued` gives the intermediate the root's subject, which RFC 5280
-/// §6.1.4(b) exempts from name-constraint checking (it is not the last
+/// §6.1.3(b)/(c) exempts from name-constraint checking (it is not the last
 /// certificate).
 struct BudgetCase {
     permitted: Vec<String>,
@@ -1569,7 +1569,7 @@ fn permitted_subtrees_count_towards_the_comparison_budget() {
 
 /// Names are aggregated over every certificate the constraints apply to, so
 /// splitting them across an intermediate and the leaf does not slip under the
-/// cap; a self-issued intermediate is exempt (RFC 5280 §6.1.4(b)) and its names
+/// cap; a self-issued intermediate is exempt (RFC 5280 §6.1.3(b)/(c)) and its names
 /// cost nothing.
 #[test]
 fn the_comparison_budget_aggregates_names_across_the_path() {
