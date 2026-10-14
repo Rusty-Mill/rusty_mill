@@ -84,7 +84,11 @@ def record(source: Source, checkout: Path) -> None:
 
 
 def check_cache(source: Source, checkout: Path) -> str | None:
-    """Why this cached checkout cannot stand for `source`, or None when it can."""
+    """Why this cached checkout cannot stand for `source`, or None when it can.
+
+    The scan reads the worktree, so the worktree must be exactly the commit it is attributed
+    to: any modified, untracked or ignored file refuses the cache.
+    """
     try:
         repo = _git(checkout, "config", "--local", "--get", "library.repo")
         ref = _git(checkout, "config", "--local", "--get", "library.ref")
@@ -95,6 +99,12 @@ def check_cache(source: Source, checkout: Path) -> str | None:
         return f"cache holds {repo}@{ref} but sources.json says {source.repo}@{source.ref} (re-sync)"
     if FULL_SHA.fullmatch(source.ref) and sha != source.ref:
         return f"cache is at {sha[:12]} but sources.json pins {source.ref[:12]} (re-sync)"
+    try:
+        changes = _git(checkout, "status", "--porcelain", "--untracked-files=all", "--ignored=matching")
+    except SourceError:
+        return "cache status cannot be read (re-sync)"
+    if changes:
+        return f"cache has local changes, not the pinned commit: {changes.splitlines()[0]} (re-sync)"
     return None
 
 
@@ -105,6 +115,7 @@ def sync(source: Source, cache: Path) -> str:
     _git(dest, "init", "-q")
     _git(dest, "fetch", "-q", "--depth", "1", "--", f"https://github.com/{source.repo}.git", source.ref)
     _git(dest, "-c", "advice.detachedHead=false", "checkout", "-q", "--force", "--detach", "FETCH_HEAD")
+    _git(dest, "clean", "-qffdx")  # the cache is ours: drop anything the commit does not contain
     record(source, dest)
     return head_sha(dest)
 
