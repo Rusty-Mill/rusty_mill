@@ -2,7 +2,7 @@
 
 use crate::open_driver;
 use rusty_bbp::metrics::{self, Metrics, Overlap};
-use rusty_bbp::spec_metrics::{self, SpecConflicts};
+use rusty_bbp::spec_metrics::{self, SpecAttribution, SpecConflicts};
 use rusty_bbp::*;
 use rusty_serde::Serialize;
 use std::path::Path;
@@ -18,6 +18,10 @@ pub struct Report {
     pub overlap: Overlap,
     /// Each non-approved spec version against the approved one (2b criterion 4).
     pub spec_conflicts: SpecConflicts,
+    /// Whether each non-approved spec version's work reached the approved one.
+    pub spec_attribution: SpecAttribution,
+    /// Versions that are both a `Conflict` and `Unused` (criterion 4's count).
+    pub unused_conflicts: u64,
 }
 
 /// Read `task`'s log and blobs and compute its [`Report`].
@@ -27,6 +31,8 @@ pub fn of(dir: &Path, task: &TaskId) -> Result<Report, String> {
     let blob = |b: &BlobRef| d.store.blob_get(&b.sha).ok();
     let overlap = metrics::overlap(&events, &blob);
     let spec_conflicts = spec_metrics::spec_conflicts(&events, &blob);
+    let spec_attribution = spec_metrics::spec_attribution(&events, &blob);
+    let unused_conflicts = spec_metrics::unused_conflicts(&spec_conflicts, &spec_attribution);
     Ok(Report {
         task: task.0.clone(),
         max_live_turns: d.state.max_live_turns,
@@ -34,6 +40,8 @@ pub fn of(dir: &Path, task: &TaskId) -> Result<Report, String> {
         metrics: metrics::of(&events),
         overlap,
         spec_conflicts,
+        spec_attribution,
+        unused_conflicts,
     })
 }
 
