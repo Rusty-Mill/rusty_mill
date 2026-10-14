@@ -489,6 +489,22 @@ pub struct RocketLeagueLink<S> {
     /// socket can take part of a frame; the rest waits here, ahead of every later frame, so the
     /// game's framing never sees a half frame followed by a new one.
     outbox: Vec<u8>,
+    /// The game's end of the socket has gone (see [`game_gone`]); nothing more can be sent.
+    gone: bool,
+}
+
+/// Whether an I/O error means the game is no longer at the other end of its socket. A process
+/// that is killed on Windows resets the connection (`os error 10054`) instead of closing it
+/// cleanly, and writing to it then fails with a broken pipe; none of these is a fault of the
+/// link, the game has simply gone.
+fn game_gone(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::NotConnected
+    )
 }
 
 /// The most unsent bytes held for a game that is not reading; past this, sends are refused with
@@ -505,6 +521,7 @@ impl<S: Read + Write> RocketLeagueLink<S> {
             next_command_id: 1,
             sent_since_message: 0,
             outbox: Vec::new(),
+            gone: false,
         }
     }
 
@@ -528,6 +545,12 @@ impl<S: Read + Write> RocketLeagueLink<S> {
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if game_gone(e.kind()) => {
+                    // Nothing more can reach the game; the next read reports it closed.
+                    self.gone = true;
+                    self.outbox.clear();
+                    return Ok(());
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -598,6 +621,9 @@ impl<S: Read + Write> RocketLeagueLink<S> {
     /// returns at once when there is no complete message.
     pub fn poll_clump(&mut self) -> io::Result<PollClump> {
         self.flush_outbox()?;
+        if self.gone {
+            return Ok(PollClump::Closed);
+        }
         let mut chunk = [0u8; 8192];
         loop {
             if let Some(clump) = self.buffered_clump()? {
@@ -611,6 +637,10 @@ impl<S: Read + Write> RocketLeagueLink<S> {
                 Ok(n) => self.decoder.push(&chunk[..n]),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(PollClump::Idle),
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if game_gone(e.kind()) => {
+                    self.gone = true;
+                    return Ok(PollClump::Closed);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -642,6 +672,14 @@ impl<S: Read + Write> GameLink for RocketLeagueLink<S> {
     /// line); retry after the next message from the game. A command that cannot fit even an
     /// empty frame is permanently rejected with `InvalidInput`.
     fn send(&mut self, command: GameCommand) -> io::Result<()> {
+        if self.gone {
+            // Refused like an over-budget command: the caller drops or retries it, and the
+            // next poll reports the game closed, which is what ends the run.
+            return Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                "the game has gone away",
+            ));
+        }
         let mut spawned_for = None;
         let command = match command {
             GameCommand::SpawnBot {
@@ -742,6 +780,104 @@ mod tests {
             delta_physics_frames: delta,
             events,
         }
+    }
+
+    /// A stream that fails reads and/or writes with a chosen error kind, after handing out
+    /// `to_read` first.
+    struct Scripted {
+        to_read: std::io::Cursor<Vec<u8>>,
+        read_error: Option<ErrorKind>,
+        write_error: Option<ErrorKind>,
+    }
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.to_read.read(buf)?;
+            match (n, self.read_error) {
+                (0, Some(kind)) => Err(io::Error::new(kind, "scripted")),
+                (0, None) => Err(io::Error::new(ErrorKind::WouldBlock, "nothing yet")),
+                _ => Ok(n),
+            }
+        }
+    }
+
+    impl Write for Scripted {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            match self.write_error {
+                Some(kind) => Err(io::Error::new(kind, "scripted")),
+                None => Ok(buf.len()),
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn scripted(
+        to_read: Vec<u8>,
+        read_error: Option<ErrorKind>,
+        write_error: Option<ErrorKind>,
+    ) -> RocketLeagueLink<Scripted> {
+        RocketLeagueLink::new(Scripted {
+            to_read: std::io::Cursor::new(to_read),
+            read_error,
+            write_error,
+        })
+    }
+
+    #[test]
+    fn a_reset_or_aborted_read_is_the_game_going_away_not_a_fault() {
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+            ErrorKind::NotConnected,
+        ] {
+            let mut link = scripted(vec![], Some(kind), None);
+            assert!(
+                matches!(link.poll_clump(), Ok(PollClump::Closed)),
+                "{kind:?}"
+            );
+            // And it stays closed.
+            assert!(matches!(link.poll_clump(), Ok(PollClump::Closed)));
+        }
+        // Half a frame and then the reset: the game died mid-message; still just gone.
+        let mut link = scripted(vec![0, 50, 1, 2], Some(ErrorKind::ConnectionReset), None);
+        assert!(matches!(link.poll_clump(), Ok(PollClump::Closed)));
+    }
+
+    #[test]
+    fn a_failed_write_to_a_gone_game_ends_in_closed_not_an_error() {
+        let mut link = scripted(vec![], None, Some(ErrorKind::ConnectionReset));
+        // The command was handed to a socket that then reset: not a fault of the command.
+        assert!(link.send(GameCommand::Console("x".into())).is_ok());
+        assert_eq!(link.pending_bytes(), 0, "nothing waits for a dead socket");
+        assert!(matches!(link.poll_clump(), Ok(PollClump::Closed)));
+        // Later commands are refused like an over-budget one: dropped by the caller.
+        let e = link.send(GameCommand::Console("y".into())).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn other_socket_errors_and_a_close_mid_message_are_still_faults() {
+        let mut link = scripted(vec![], Some(ErrorKind::InvalidData), None);
+        assert_eq!(
+            link.poll_clump().unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        let mut link = scripted(vec![], None, Some(ErrorKind::PermissionDenied));
+        assert_eq!(
+            link.send(GameCommand::Console("x".into()))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        // A clean close with half a message buffered is a truncated message, not a reset.
+        let mut link = RocketLeagueLink::new(std::io::Cursor::new(vec![0, 50, 1, 2]));
+        assert_eq!(
+            link.poll_clump().unwrap_err().kind(),
+            ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]
