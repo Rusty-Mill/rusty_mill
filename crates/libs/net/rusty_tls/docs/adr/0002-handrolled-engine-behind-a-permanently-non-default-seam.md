@@ -666,17 +666,17 @@ read as a step toward it.
 - Promoting the hand-rolled engine to default, without superseding this ADR.
 - Hand-rolling cryptographic primitives under any stage listed here (§6).
 
-## Amendment 1 (proposed, 2026-10-11): one consumer may opt in locally, under a written evidence bar
+## Amendment 1 (accepted 2026-10-14): one consumer may opt in locally, under a written evidence bar
 
-Status: **Proposed. Not accepted; the owner has not confirmed this text or its approach to the reviewer, and nothing here is operative.** Until it is accepted, sections 1 to 6 stand unchanged and no consumer may opt in. It supersedes nothing in sections 1 to 6.
+Status: **Accepted by the owner on 2026-10-14**, in the working session that maintains this crate ("3 approved recommendation", answering the question of which consumer to name and whether to adopt this text). That session message is the basis of this record; it was not relayed through a pull-request comment. The acceptance names one consumer (condition 4) and adopts this text. It wires nothing: wiring is a separate change that must cite met Tier 1 evidence. It supersedes nothing in sections 1 to 6.
 
 **What this clarifies.** Section 1 says a consumer can reach the hand-rolled engine "only by
 a deliberate, local, visible act by whoever invokes `cargo`", and section 3 says the engine
 is never the default. Neither says whether one named application may take that deliberate
-act for its own build. This amendment proposes that it may, and under which conditions, so the
+act for its own build. This amendment says it may, and under which conditions, so the
 question is not decided by a pull request that merely wires it.
 
-**The proposed conditions.** If accepted, a consumer may use the engine's gated types (today
+**The conditions.** A consumer may use the engine's gated types (today
 `handrolled::stream::NativeTlsStream`) only when all of these hold:
 
 1. **The evidence bar for that tier is met and recorded.** The bar is
@@ -689,11 +689,15 @@ question is not decided by a pull request that merely wires it.
 3. **Nothing exported at the crate root changes.** `TlsStream`, `AsyncTlsStream`,
    `TlsConnector`, `TlsAcceptor` and `TrustPolicy` stay rustls-backed (section 3). The
    consumer calls the gated module's types directly; no seam type selects the engine.
-4. **The consumer is named and scoped in writing, by the owner.** The first consumer is
-   the owner's choice and is not named by this amendment. The working recommendation is
-   `rleval-app`'s OIDC transport (client only, TLS 1.3, named hosts), pending the owner's
-   confirmation. Whatever is chosen, widening it (another consumer, the server side,
-   TLS 1.2, a new host class) is a new decision against the bar, not a consequence of this one.
+4. **The consumer is named and scoped in writing, by the owner.** The owner named it on
+   2026-10-14: `rleval-app`'s OIDC transport, client side only, TLS 1.3 only, to named
+   hosts. `NativeTlsStream` currently negotiates TLS 1.2 as well, and reviewing TLS 1.2
+   would not stop it being negotiated. So before wiring, either TLS 1.3-only operation is
+   enforced (a 1.3-only option on the stream, set by the consumer), or the owner separately
+   approves widening the consumer's protocol scope to TLS 1.2 together with a review of it
+   (`TLS-REVIEW-SCOPE.md`). Neither is decided by this amendment.
+   Widening the consumer (another consumer, the server side, TLS 1.2, a new host class)
+   is a new decision against the bar, not a consequence of this one.
 5. **No library default moves.** No feature, cfg or dependency edge makes any other
    crate's build use the engine.
 6. **Known divergences from webpki are resolved first.** `anyExtendedKeyUsage` was
