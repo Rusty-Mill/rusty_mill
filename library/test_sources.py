@@ -110,6 +110,30 @@ class ScanTests(unittest.TestCase):
             self.skipTest("symlinks unavailable")
         self.assertEqual(self.kinds(), {})
 
+    def test_mod_files_reached_through_symlinks_never_reach_the_page(self) -> None:
+        sentinel = "SENTINEL_OUTSIDE_CONTENT"  # synthetic: never a real secret
+        outside = Path(self._tmp.name) / "outside"
+        write(outside, "evil.ts", sentinel)
+        write(outside, "README.md", sentinel)
+        manifest = json.dumps({"name": "m", "description": "d"})
+        cases = {
+            "hooks dir is a symlink out": lambda m: (m / "hooks").symlink_to(outside, target_is_directory=True),
+            "hook file is a symlink out": lambda m: ((m / "hooks").mkdir(), (m / "hooks" / "x.ts").symlink_to(outside / "evil.ts")),
+            "README is a symlink out": lambda m: ((m / "hooks").mkdir(), (m / "README.md").symlink_to(outside / "README.md")),
+            "hooks subdir is a symlink out": lambda m: ((m / "hooks").mkdir(), (m / "hooks" / "sub").symlink_to(outside, target_is_directory=True)),
+        }
+        for label, plant in cases.items():
+            with self.subTest(label):
+                mod = self.root / label.replace(" ", "_")
+                write(mod, ".claude-plugin/plugin.json", manifest)
+                try:
+                    plant(mod)
+                except OSError:
+                    self.skipTest("symlinks unavailable")
+                found, _ = sources.scan(self.root)
+                items = [build.from_source(f, "o/r", "pilot", "0" * 40) for f in found]
+                self.assertNotIn(sentinel, build.render(items))
+
     def test_pruned_dirs_are_skipped(self) -> None:
         write(self.root, "node_modules/x/SKILL.md", SKILL.format(n="n"))
         write(self.root, ".git/x/SKILL.md", SKILL.format(n="g"))

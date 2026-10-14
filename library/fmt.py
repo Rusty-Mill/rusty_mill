@@ -31,13 +31,27 @@ def read_text(path: Path, limit: int = MAX_FILE) -> str:
     return text + "\n… [truncated]" if len(data) > limit else text
 
 
+def _inside(path: Path, base: Path) -> bool:
+    """A real file that resolves under `base`: no symlink on the way out, at any component."""
+    return path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(base)
+
+
 def read_mod_source(d: Path) -> str:
-    """A mod's README, then every hook file except tests, each under a `// name` header."""
-    files = [d / "README.md", *sorted((d / "hooks").glob("*"))]
+    """A mod's README, then every hook file except tests, each under a `// name` header.
+
+    Everything read must resolve inside the mod folder: a `hooks` directory that is a
+    symlink to somewhere else yields ordinary-looking files, so each path is checked
+    after resolution, not just for being a symlink itself.
+    """
+    base = d.resolve()
+    hooks = d / "hooks"
+    files = [d / "README.md"]
+    if hooks.is_dir() and not hooks.is_symlink() and hooks.resolve().is_relative_to(base):
+        files += sorted(hooks.glob("*"))
     parts: list[str] = []
     used = 0
     for p in files:
-        if ".test." in p.name or p.is_symlink() or not p.is_file():
+        if ".test." in p.name or not _inside(p, base):
             continue
         if used >= MAX_MOD:
             parts.append("// … remaining files omitted (size cap)")
