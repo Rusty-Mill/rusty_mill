@@ -153,6 +153,12 @@ const SIDE_IMPULSE_DAMPING: f32 = 0.2;
 /// `CAR_MASS_BT / 3`, multiplied into every wheel's friction impulse.
 const FRICTION_SCALE: f32 = 180.0 / 3.0;
 
+/// The brake's impulse per unit contact speed below its clamp. With four wheels
+/// on a 180-mass car at 120 Hz it removes `4 * 113.73963 * 60 * dt / 180 = 1.264`
+/// of the speed per tick, so a slow coasting car's speed ratio is -0.2638 per
+/// tick; the captures measure -0.2632 (227 ticks).
+const BRAKE_RESPONSE: f32 = 113.73963;
+
 /// Full brake deceleration (uu/s^2). RocketSim's per-wheel brake
 /// (`BRAKE_TORQUE_AMOUNT * UU_TO_BT = 52.5`) times four wheels over
 /// `frictionScale`'s `CAR_MASS_BT / 3` gives `70` m/s^2, i.e. `3500` uu/s^2.
@@ -167,9 +173,11 @@ pub(super) const COASTING_BRAKE_FACTOR: f32 = 0.15;
 /// `STOPPING_FORWARD_VEL`.
 pub(super) const STOPPING_FORWARD_SPEED: f32 = 25.0;
 
-/// Throttle magnitude below which RocketSim treats the car as coasting:
-/// `THROTTLE_DEADZONE`.
-pub(super) const THROTTLE_DEADZONE: f32 = 0.001;
+/// Throttle magnitude up to which the car coasts: `|throttle| <= 0.01`.
+/// RocketSim's `THROTTLE_DEADZONE` is 0.001, which would drive on the
+/// smallest nonzero input (1/127 = 0.0079). No capture has a throttle in
+/// between (it is only ever 0, 0.5 or 1), so this is unscored.
+pub(super) const THROTTLE_DEADZONE: f32 = 0.01;
 
 /// Slip ratio RocketSim's tire curves are looked up by: the lateral share
 /// of the contact speed, zero at or below `SLIP_LATERAL_SPEED_THRESHOLD`.
@@ -191,7 +199,7 @@ pub(super) fn pedals(throttle: f32, forward_speed: f32, handbrake: bool) -> (f32
     if handbrake {
         return (throttle, 0.0);
     }
-    if throttle.abs() < THROTTLE_DEADZONE {
+    if throttle.abs() <= THROTTLE_DEADZONE {
         let brake = if forward_speed.abs() < STOPPING_FORWARD_SPEED {
             1.0
         } else {
@@ -220,8 +228,11 @@ pub(super) fn tire_grip(slip: f32, handbrake_amount: f32) -> (f32, f32) {
 struct DriveForces {
     /// Engine acceleration (uu/s^2) along each wheel's heading.
     engine_acceleration: f32,
-    /// Braking deceleration (uu/s^2) against each wheel's rolling speed.
+    /// Braking deceleration (uu/s^2) against each wheel's rolling speed,
+    /// before the longitudinal grip factor.
     brake_deceleration: f32,
+    /// Longitudinal tire grip (handbrake blend) scaling the whole brake impulse.
+    longitudinal_grip: f32,
     /// Throttle (or boost) engaged: tires keep full grip on any surface.
     sticky: bool,
 }
@@ -259,6 +270,7 @@ fn wheel_impulses(
     let DriveForces {
         engine_acceleration,
         brake_deceleration,
+        longitudinal_grip,
         sticky,
     } = drive;
     let forward = forward_axis(car);
@@ -300,8 +312,12 @@ fn wheel_impulses(
             let quarter_mass = car.mass() / WHEELS.len() as f32;
             let drive = engine_acceleration * quarter_mass * dt;
             let rolling_speed = car.velocity_at_point(&point).dot(&rolling);
-            let brake =
-                (brake_deceleration * surface_grip * dt).min(rolling_speed.abs()) * quarter_mass;
+            // The brake is `clamp(K * v, +-B) * 60 * dt` per wheel with no
+            // effective-mass term, so below the clamp four wheels remove more
+            // than all of the speed and a slow car rings (see `BRAKE_RESPONSE`).
+            let linear = BRAKE_RESPONSE * FRICTION_SCALE * dt * rolling_speed.abs();
+            let saturated = brake_deceleration * dt * quarter_mass;
+            let brake = linear.min(saturated) * longitudinal_grip * surface_grip;
             Some((
                 axle * impulse + rolling * (drive - rolling_speed.signum() * brake),
                 flat,
@@ -359,7 +375,7 @@ pub(super) fn apply_ground_control(
     let partial_contact = if touching < 3 { 0.25 } else { 1.0 };
     let taper = drive_speed_taper(forward_speed.abs()) * partial_contact;
     let acceleration = engine * THROTTLE_ACCELERATION * taper * longitudinal_grip;
-    let deceleration = BRAKE_DECELERATION * brake * longitudinal_grip;
+    let deceleration = BRAKE_DECELERATION * brake;
 
     // RB-PHYSICS-001-FR-086/FR-089: steering, sideways grip and the engine
     // are per-wheel impulses; the steered front wheels' impulses turn the car.
@@ -371,6 +387,7 @@ pub(super) fn apply_ground_control(
         DriveForces {
             engine_acceleration: acceleration,
             brake_deceleration: deceleration,
+            longitudinal_grip,
             sticky: throttle != 0.0,
         },
         dt,

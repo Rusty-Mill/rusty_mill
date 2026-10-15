@@ -63,18 +63,23 @@ pub(super) fn update_boosting(
     *boosting
 }
 
+/// Pays for a burn that was already running last tick: the tank drops by
+/// `used_per_second * dt` (never below 0) at the start of the tick, before
+/// `update_boosting` decides whether the burn continues. A burn that starts
+/// this tick (`was_boosting == false`) is free: captures show the first push
+/// one tick before the first tank drop. Held boost drains even when the force
+/// below doesn't apply (at `MAX_CAR_SPEED`, or pushing into a wall), as in
+/// the real game.
+pub(super) fn drain(was_boosting: bool, boost_amount: &mut f32, used_per_second: f32, dt: f32) {
+    if was_boosting {
+        *boost_amount = (*boost_amount - used_per_second * dt).max(0.0);
+    }
+}
+
 /// Applies boost acceleration along `forward` while `boosting` (see
-/// `update_boosting`), below `MAX_CAR_SPEED`, and drains the tank by
-/// `used_per_second` regardless of whether the force applied.
-pub(super) fn apply_boost(
-    car: &mut RigidBody,
-    boosting: bool,
-    on_ground: bool,
-    forward: Vec3,
-    boost_amount: &mut f32,
-    used_per_second: f32,
-    dt: f32,
-) {
+/// `update_boosting`), below `MAX_CAR_SPEED`. The tank was already paid for by
+/// `drain`.
+pub(super) fn apply_boost(car: &mut RigidBody, boosting: bool, on_ground: bool, forward: Vec3) {
     if !boosting {
         return;
     }
@@ -92,9 +97,4 @@ pub(super) fn apply_boost(
         };
         car.apply_central_force(forward * (boost_acceleration * car.mass()));
     }
-    // Held boost drains the tank even when the force above didn't
-    // apply (e.g. already at MAX_CAR_SPEED, or pushing into a wall) —
-    // matching real Rocket League, where holding boost costs fuel
-    // regardless of whether it's doing anything.
-    *boost_amount = (*boost_amount - used_per_second * dt).max(0.0);
 }

@@ -5,14 +5,18 @@
 .DESCRIPTION
   Run from the repository root:
       powershell -File tools\rb_tape_bot\run_batch.ps1 [-Repeat 2] [-Scenarios a,b]
-  Needs BakkesMod running with the capture plugin (1.4+) set to load at game
-  start. Writes replays\batch_<timestamp>\ with the captures and results.md.
+  Needs BakkesMod with the capture plugin (1.4+) set to load at game start;
+  BakkesMod.exe is started if it is not already running (-BakkesMod gives its
+  path, -NoBakkesMod skips that). Writes replays\batch_<timestamp>\ with the
+  captures and results.md.
   Use -ScoreOnly <dir> to re-score an existing batch directory.
 #>
 param(
     [int]$Repeat = 2,
     [string[]]$Scenarios = @(),
-    [string]$ScoreOnly = ""
+    [string]$ScoreOnly = "",
+    [string]$BakkesMod = "C:\Program Files\BakkesMod\BakkesMod.exe",
+    [switch]$NoBakkesMod
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,9 +26,27 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $bot = Join-Path $root "tools\rb_tape_bot"
 $verify = Join-Path $root "target\release\rb-verify.exe"
 
+# The capture plugin only loads into a game that BakkesMod injects, so BakkesMod
+# must be up before core launches Rocket League. Start it only if it is not
+# already running.
+function Start-BakkesModIfNeeded([string]$exe) {
+    if (Get-Process -Name "BakkesMod" -ErrorAction SilentlyContinue) { return }
+    if (-not (Test-Path $exe)) {
+        throw "BakkesMod is not running and '$exe' does not exist; start it yourself or pass -BakkesMod <path> (or -NoBakkesMod)"
+    }
+    Write-Host "starting BakkesMod: $exe"
+    Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe)
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Seconds 1
+        if (Get-Process -Name "BakkesMod" -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 3; return }
+    }
+    throw "BakkesMod did not start within 20 s ($exe)"
+}
+
 if ($ScoreOnly) {
     $out = (Resolve-Path $ScoreOnly).Path
 } else {
+    if (-not $NoBakkesMod) { Start-BakkesModIfNeeded $BakkesMod }
     Push-Location $bot
     try {
         cargo build --release --color never

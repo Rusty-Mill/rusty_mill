@@ -910,8 +910,11 @@ impl PhysicsWorld {
     /// holds between frames). Panics if `index` is out of bounds — an
     /// invalid index is a programming error, not a recoverable runtime
     /// condition (see the crate's "trust internal callers" convention).
+    ///
+    /// The analog axes are quantized the way the game does before the car
+    /// sees them (`drive::quantize_input`): +0.5 reads 64/127, -0.5 stays -0.5.
     pub fn set_car_input(&mut self, index: usize, input: ControllerInput) {
-        self.car_inputs[index] = input;
+        self.car_inputs[index] = drive::quantize_input(input);
     }
 
     /// Sets how much fuel every car, present and later, drains per second
@@ -3549,9 +3552,45 @@ mod tests {
         assert_eq!(world.frame().cars[0].boost_amount, 32.0, "used up");
     }
 
+    /// The game's byte round trip on analog input (`RB-PHYSICS-001-FR-160`
+    /// candidate): +0.5 reaches the car as 64/127, -0.5 stays -0.5, so a held
+    /// +0.5 spins the car 1.0079 times as fast as a held -0.5. Measured on 18
+    /// captures (`quant_ratio.py`): 1.0079 on roll, 1.008 to 1.009 on pitch and yaw.
+    #[test]
+    fn a_held_half_stick_spins_the_car_by_the_games_quantized_ratio() {
+        let spin_after_hold = |roll: f32| {
+            let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(3000.0, 3000.0, 93.0));
+            let car = some_car(Vec3::new(0.0, 0.0, 1000.0));
+            let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+            for _ in 0..60 {
+                world.step(1.0 / 120.0);
+            }
+            world.set_car_input(
+                0,
+                rb_domain::ControllerInput {
+                    roll: Some(roll),
+                    ..Default::default()
+                },
+            );
+            for _ in 0..30 {
+                world.step(1.0 / 120.0);
+            }
+            let w = world.frame().cars[0].angular_velocity;
+            (w.x * w.x + w.y * w.y + w.z * w.z).sqrt()
+        };
+        let ratio = spin_after_hold(0.5) / spin_after_hold(-0.5);
+        assert!(
+            (ratio - 64.0 / 127.0 / 0.5).abs() < 5e-4,
+            "spin(+0.5) / spin(-0.5) = {ratio}, expected 1.0079"
+        );
+    }
+
     #[test]
     fn the_pickup_adds_to_the_boost_the_tick_burned() {
         // 26.2 -> 37.9 in the recordings: the pad's 12 on top of that tick's burn.
+        // A burn costs from its second tick (the game's boost component drains
+        // before it pushes and the activation tick is free), so the first tick
+        // adds the pad's 12 alone and the second pays the burn.
         let mut world = car_on_pad_14(50.0, true);
         world.set_car_input(
             0,
@@ -3561,9 +3600,11 @@ mod tests {
             },
         );
         world.step(1.0 / 120.0);
+        assert!((world.frame().cars[0].boost_amount - 62.0).abs() < 1e-3);
+        world.step(1.0 / 120.0);
         let burn = crate::drive::BOOST_USED_PER_SECOND / 120.0;
         let boost = world.frame().cars[0].boost_amount;
-        assert!((boost - (50.0 - burn + 12.0)).abs() < 1e-3, "{boost}");
+        assert!((boost - (62.0 - burn)).abs() < 1e-3, "{boost}");
     }
 
     #[test]
