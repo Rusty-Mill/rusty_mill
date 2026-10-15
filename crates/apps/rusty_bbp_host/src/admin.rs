@@ -13,6 +13,17 @@ pub fn read_roster(file: &Path) -> Result<Vec<Role>, String> {
     rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))
 }
 
+/// A policy name as `bbp open --policy` spells it.
+pub fn parse_policy(name: &str) -> Result<SchedulingPolicy, String> {
+    match name {
+        "turn-based" => Ok(SchedulingPolicy::TurnBased),
+        "event-driven" => Ok(SchedulingPolicy::EventDriven),
+        other => Err(format!(
+            "unknown --policy {other}: turn-based or event-driven"
+        )),
+    }
+}
+
 /// Open `task` in the store at `dir` with `brief` as its brief. The profile
 /// set is frozen first; its digest is the task's `profile_digest`. A task
 /// that is already open keeps its frozen file: the core's `AlreadyOpen`
@@ -27,12 +38,22 @@ pub fn open_task(
     set: &ProfileSet,
     roster: Vec<Role>,
 ) -> Result<Response, String> {
-    open_task_live(dir, task, repo, brief, human, set, roster, 1)
+    open_task_live(
+        dir,
+        task,
+        repo,
+        brief,
+        human,
+        set,
+        roster,
+        1,
+        SchedulingPolicy::default(),
+    )
 }
 
 /// As [`open_task`], allowing `max_live_turns` concurrent turns (1 to the
-/// roster size; the core refuses any other value with `BadLiveTurns`). The
-/// moderator launches one harness per live turn.
+/// roster size; the core refuses any other value with `BadLiveTurns`) and
+/// scheduling under `policy`. The moderator launches one harness per live turn.
 #[allow(clippy::too_many_arguments)]
 pub fn open_task_live(
     dir: &Path,
@@ -43,6 +64,7 @@ pub fn open_task_live(
     set: &ProfileSet,
     roster: Vec<Role>,
     max_live_turns: u32,
+    policy: SchedulingPolicy,
 ) -> Result<Response, String> {
     let master = crate::master::ensure(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
@@ -74,7 +96,7 @@ pub fn open_task_live(
         max_live_turns,
         brief: blob,
         human: human.clone(),
-        policy: SchedulingPolicy::default(),
+        policy,
     });
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
@@ -108,4 +130,20 @@ pub fn tick(dir: &Path, task: &TaskId) -> Result<Response, String> {
     open_driver(dir, task)?
         .dispatch(&Command::Tick, now())
         .map_err(|e| format!("{e:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_names_parse_and_anything_else_is_refused() {
+        assert_eq!(parse_policy("turn-based"), Ok(SchedulingPolicy::TurnBased));
+        assert_eq!(
+            parse_policy("event-driven"),
+            Ok(SchedulingPolicy::EventDriven)
+        );
+        assert!(matches!(parse_policy("EventDriven"), Err(e) if e.contains("--policy")));
+        assert!(parse_policy("").is_err());
+    }
 }

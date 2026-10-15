@@ -27,7 +27,7 @@ pub use command::{AgentAction, Code, Command, HumanAction, OpenTask, Rejection, 
 pub use engine::{handle, Handled};
 pub use event::{
     log_schema, schema_for, schema_supported, EscalateReason, Event, TurnEnd, LOG_SCHEMA,
-    LOG_SCHEMA_CONCURRENT,
+    LOG_SCHEMA_CONCURRENT, LOG_SCHEMA_EVENT_DRIVEN,
 };
 pub use fs_store::{log_path_for, FsError, FsStore};
 pub use ids::*;

@@ -736,6 +736,7 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
         &ProfileSet::shell("test", "true"),
         roster,
         2,
+        SchedulingPolicy::default(),
     )
     .expect("open");
     for role in ["planner", "coder", "coder2", "tester", "reviewer"] {

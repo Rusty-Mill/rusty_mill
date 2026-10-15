@@ -295,8 +295,17 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
             ),
         ));
     }
+    if o.policy == SchedulingPolicy::EventDriven && o.max_live_turns != 1 {
+        return Err(rej(
+            Code::BadLiveTurns,
+            format!(
+                "event-driven scheduling needs max_live_turns 1, got {}",
+                o.max_live_turns
+            ),
+        ));
+    }
     w.emit(Event::TaskOpened {
-        schema: schema_for(o.max_live_turns),
+        schema: schema_for(o.max_live_turns, o.policy),
         roster: o.roster.clone(),
         task: o.task.clone(),
         repo: o.repo.clone(),
@@ -868,13 +877,23 @@ fn post(w: &mut Work, p: &PrincipalId, role_id: &RoleId, d: &Draft, now: Time) -
                 Body::Verdict(v) => v.verdict,
                 _ => VerdictKind::Revise,
             };
-            end_turn_only(w, turn.id, TurnEnd::Verdict);
+            // T11: only a `final_decision` role's approve opens the merge gate.
+            // Another judge's approve at `review` is recorded and moves nothing,
+            // so the finalizer still gets its review (R17 needs its approve and
+            // no one could schedule the gate).
             let to = match (kind, w.st.state) {
-                (VerdictKind::Approve, State::Test) => State::Review,
-                (VerdictKind::Approve, _) => State::MergeGate,
-                (VerdictKind::Revise, _) => State::Build,
+                (VerdictKind::Approve, State::Test) => Some(State::Review),
+                (VerdictKind::Approve, State::Review) if !w.st.roster.is_final(role_id) => None,
+                (VerdictKind::Approve, _) => Some(State::MergeGate),
+                (VerdictKind::Revise, _) => Some(State::Build),
             };
-            transition(w, to, now);
+            match to {
+                Some(to) => {
+                    end_turn_only(w, turn.id, TurnEnd::Verdict);
+                    transition(w, to, now);
+                }
+                None => end_turn(w, turn.id, TurnEnd::Verdict, now),
+            }
         }
         _ => {}
     }
@@ -1538,12 +1557,19 @@ fn schedule(w: &mut Work, now: Time) {
     }
 }
 
-/// Who may take the next turns, under the task's policy: the roles that serve
-/// the state, in `turn_order`. The set is not capped here: `grant` admits at
-/// most `max_live_turns` of it, the one place the cap lives.
+/// Who may take the next turns, under the task's policy. `TurnBased`: the roles
+/// that serve the state, in `turn_order`. `EventDriven`: the first selectable
+/// role `wake_set` names, else the `TurnBased` list, so a quiet board still
+/// moves. Not capped here: `grant` admits at most `max_live_turns` of it, the
+/// one place the cap lives.
 pub(crate) fn pick_next(st: &TaskState) -> Vec<RoleId> {
+    let serving = || st.roster.serving(st.state).into_iter().cloned().collect();
     match st.policy {
-        SchedulingPolicy::TurnBased => st.roster.serving(st.state).into_iter().cloned().collect(),
+        SchedulingPolicy::TurnBased => serving(),
+        SchedulingPolicy::EventDriven => wake_set(st)
+            .into_iter()
+            .find(|(_, why)| why.selectable(st.max_live_turns))
+            .map_or_else(serving, |(role, _)| vec![role]),
     }
 }
 

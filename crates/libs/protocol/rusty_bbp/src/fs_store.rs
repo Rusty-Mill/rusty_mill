@@ -20,7 +20,9 @@
 //! another writer's half-written batch, and two writers cannot both pass the
 //! revision check. The lock is never held across a caller's work.
 
-use crate::event::{log_schema, schema_supported, Event, LOG_SCHEMA, LOG_SCHEMA_CONCURRENT};
+use crate::event::{
+    log_schema, schema_supported, Event, LOG_SCHEMA, LOG_SCHEMA_CONCURRENT, LOG_SCHEMA_EVENT_DRIVEN,
+};
 use crate::ids::*;
 use crate::store::{Store, StoreError};
 use std::collections::HashMap;
@@ -63,7 +65,7 @@ impl std::fmt::Display for FsError {
             }
             FsError::UnsupportedSchema { path, found } => write!(
                 f,
-                "{}: log schema {} is not supported (this build reads schemas {LOG_SCHEMA} and {LOG_SCHEMA_CONCURRENT}); archive it, it does not replay",
+                "{}: log schema {} is not supported (this build reads schemas {LOG_SCHEMA}, {LOG_SCHEMA_CONCURRENT} and {LOG_SCHEMA_EVENT_DRIVEN}); archive it, it does not replay",
                 path.display(),
                 found.map_or("1 or older".to_string(), |n| n.to_string())
             ),

@@ -73,3 +73,55 @@ fn a_schema_2_log_cannot_raise_the_cap() {
     }
     assert_eq!(TaskState::fold(TaskId("T1".into()), &log).max_live_turns, 1);
 }
+
+fn live_policy(live: u32) -> Fx {
+    let policy = SchedulingPolicy::EventDriven;
+    Fx::open_policy(
+        MemStore::new(),
+        four_roles(),
+        &[],
+        live,
+        default_budget(),
+        policy,
+    )
+}
+
+/// An event-driven log is schema 4. A build that predates the `policy` field
+/// accepts exactly schemas 2 and 3 and ignores an unknown key, so it would
+/// replay the task as turn-based; schema 4 is what it refuses. Those two
+/// constants are pinned because the historical reader's check is a literal.
+#[test]
+fn an_event_driven_log_is_schema_4_which_a_historical_reader_refuses() {
+    assert_eq!((LOG_SCHEMA, LOG_SCHEMA_CONCURRENT), (2, 3));
+    let historical_reader_replays = |s: u32| s == 2 || s == 3;
+    let fx = live_policy(1);
+    let schema = log_schema(&log_of(&fx)).expect("schema");
+    assert_eq!(schema, LOG_SCHEMA_EVENT_DRIVEN);
+    assert!(!historical_reader_replays(schema));
+    assert!(schema_supported(schema), "this build replays it");
+    let text = rusty_serde::json::to_string(&log_of(&fx)[0]).expect("json");
+    assert!(text.contains("\"policy\":\"EventDriven\""), "{text}");
+}
+
+/// Turn-based tasks keep schema 2 and 3, so their logs are what they were.
+#[test]
+fn a_turn_based_log_keeps_its_schema() {
+    for (live, schema) in [(1, LOG_SCHEMA), (2, LOG_SCHEMA_CONCURRENT)] {
+        let fx = Fx::concurrent(four_roles(), live, default_budget());
+        assert_eq!(log_schema(&log_of(&fx)), Some(schema));
+    }
+}
+
+/// Below schema 4 the `policy` field is ignored on replay, as an old build
+/// would, so every reader of a log agrees on its policy.
+#[test]
+fn a_log_below_schema_4_cannot_name_a_live_policy() {
+    let fx = live_policy(1);
+    let mut log = log_of(&fx);
+    if let Event::TaskOpened { schema, .. } = &mut log[0] {
+        *schema = LOG_SCHEMA;
+    }
+    let st = TaskState::fold(TaskId("T1".into()), &log);
+    assert_eq!(st.policy, SchedulingPolicy::TurnBased);
+    assert_eq!(fx.st().policy, SchedulingPolicy::EventDriven);
+}

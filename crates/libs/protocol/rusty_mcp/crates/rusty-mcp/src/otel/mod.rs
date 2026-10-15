@@ -38,6 +38,7 @@
 //! we; if it did not, we stay quiet. Deciding independently is how traces end
 //! up half-recorded, with gaps exactly where a service made its own choice.
 
+mod labels;
 pub mod metrics;
 
 use std::{sync::Arc, time::Duration};
