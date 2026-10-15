@@ -249,6 +249,10 @@ fn a_granted_turn_with_no_harness_output_names_no_model_and_the_evaluation_refus
 // ---- second review, finding 1: a run the moderator stopped is a failed run
 
 fn stopped_facts(tag: &str, stop: &str) -> pairs::RunFacts {
+    facts_with_log(tag, stop, Some(ASSISTANT))
+}
+
+fn facts_with_log(tag: &str, stop: &str, log: Option<&str>) -> pairs::RunFacts {
     let root = tempdir(tag);
     let (_repo, head) = checkout(&root);
     let criteria = root.join("criteria.json");
@@ -260,7 +264,7 @@ fn stopped_facts(tag: &str, stop: &str) -> pairs::RunFacts {
     let out = format!(
         r#"{{"state":"Planning","turns_launched":1,"runs":0,"elapsed_ms":1,"state_ms":[["Planning",10]],"replay_equals_live":true,"stop":"{stop}","stop_reason":"stopped","bbp_build_sha":"{head}"}}"#
     );
-    let r = run(&root, "stopped", &out, Some(ASSISTANT));
+    let r = run(&root, "stopped", &out, log);
     let (c, sha) = rusty_bbp_host::tokens::read_criteria(&criteria).unwrap();
     let f = pairs::facts(
         &rusty_bbp_host::pairs::RunRef {
@@ -291,4 +295,20 @@ fn a_run_stopped_by_the_wall_limit_loads_as_a_failed_run() {
     assert!(!f.over_cap);
     assert!(!f.succeeded());
     assert_eq!(f.replay_equals_live, Some(true));
+}
+
+// ---- round two: a turn that never printed a result
+
+#[test]
+fn a_run_with_a_turn_that_never_printed_a_result_fails_and_keeps_its_known_cost() {
+    // The assistant line is $0.000002 at the test prices; the harness was
+    // killed before its result.
+    let f = facts_with_log("killed", "wall", Some(ASSISTANT));
+    assert_eq!(f.killed_turns, 1);
+    assert!(
+        f.usd_floor.is_some_and(|u| (u - 0.000002).abs() < 1e-12),
+        "{:?}",
+        f.usd_floor
+    );
+    assert!(!f.succeeded());
 }

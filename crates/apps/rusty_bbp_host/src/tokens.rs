@@ -555,6 +555,9 @@ pub struct TurnTokens {
     pub models: BTreeMap<String, Usage>,
     /// Whether the turn's log holds stream-json a cost can be read from.
     pub log: LogState,
+    /// The cache lifetime the turn's writes had: `1h`, `5m` or `mixed`; none
+    /// when it wrote nothing or has no result.
+    pub cache_ttl: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -574,6 +577,9 @@ pub struct TaskTokens {
     pub without_output: u64,
     /// Turns with output but no usable result.
     pub unknown_turns: u64,
+    /// The cache lifetime of the run's writes: `1h`, `5m` or `mixed`; none
+    /// when nothing was written.
+    pub cache_ttl: Option<String>,
 }
 
 /// Per-turn tokens of `task`, from its log and the harness output under `dir`.
@@ -602,6 +608,7 @@ pub fn of(
         revoked: 0,
         without_output: 0,
         unknown_turns: 0,
+        cache_ttl: None,
     };
     let (mut usd, mut floor) = (0.0, 0.0);
     let mut all_known = true;
@@ -705,6 +712,7 @@ pub fn of(
             usd_floor: turn_floor,
             models,
             log,
+            cache_ttl: None,
         });
     }
     if criteria.is_some() {

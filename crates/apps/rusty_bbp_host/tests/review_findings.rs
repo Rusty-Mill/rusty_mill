@@ -346,3 +346,82 @@ fn disallowing_the_agent_tool_leaves_no_subagent_to_price() {
     let r = tokens::price_turn(&stream, &criteria("denied", SONNET_ONLY)).unwrap();
     assert!(matches!(r, tokens::Cost::Known { .. }), "{r:?}");
 }
+
+// ---- round two: the cache split is priced, and its lifetime logged
+
+#[test]
+fn five_minute_writes_are_priced_at_the_five_minute_rate_from_the_usage_split() {
+    // Sonnet: the capture's writes at 2.5 (5m), not 4.0 (1h); the harness's own
+    // total is what the price must reproduce.
+    for name in ["completed-ttl-5m", "settings-env-overrides-ttl"] {
+        let stream = fixture(name);
+        let tokens::Cost::Known { usd, .. } =
+            tokens::price_turn(&stream, &criteria(name, SONNET_ONLY))
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+        else {
+            panic!("{name}: a completed turn prices");
+        };
+        let total = tokens::last_result(&stream)
+            .unwrap()
+            .total_cost_usd
+            .unwrap();
+        assert!(near(usd, total), "{name}: priced {usd}, harness {total}");
+    }
+}
+
+#[test]
+fn a_split_that_does_not_fit_one_model_is_priced_at_the_one_hour_rate() {
+    // Two models in modelUsage and a main-agent split: the split cannot be
+    // assigned to either, so every write is priced at the 1-hour rate, which can
+    // only raise the price (and trip the 2% cross-check).
+    let stream = fixture("completed-with-subagent").replace(
+        r#""ephemeral_5m_input_tokens":0"#,
+        r#""ephemeral_5m_input_tokens":100"#,
+    );
+    let hourly = tokens::price_turn(&fixture("completed-with-subagent"), &criteria("both", BOTH));
+    let split = tokens::price_turn(&stream, &criteria("both2", BOTH));
+    let (Ok(tokens::Cost::Known { usd: a, .. }), Ok(tokens::Cost::Known { usd: b, .. })) =
+        (&hourly, &split)
+    else {
+        panic!("{hourly:?} {split:?}");
+    };
+    assert!(
+        near(*a, *b),
+        "an unassignable split changes nothing: {a} vs {b}"
+    );
+}
+
+#[test]
+fn the_effective_cache_lifetime_is_logged_per_turn_and_per_run() {
+    let ttl = |name: &str| {
+        let t = tokens_of(
+            name,
+            &[("planner", fixture(name))],
+            &criteria(name, SONNET_ONLY),
+        )
+        .unwrap();
+        (t.turns[0].cache_ttl.clone(), t.cache_ttl)
+    };
+    assert_eq!(
+        ttl("completed-ttl-1h"),
+        (Some("1h".into()), Some("1h".into()))
+    );
+    assert_eq!(
+        ttl("completed-ttl-5m"),
+        (Some("5m".into()), Some("5m".into()))
+    );
+    assert_eq!(
+        ttl("settings-env-overrides-ttl"),
+        (Some("5m".into()), Some("5m".into()))
+    );
+    let mixed = tokens_of(
+        "mixed",
+        &[
+            ("planner", fixture("completed-ttl-1h")),
+            ("coder", fixture("completed-ttl-5m")),
+        ],
+        &criteria("mixedc", SONNET_ONLY),
+    )
+    .unwrap();
+    assert_eq!(mixed.cache_ttl.as_deref(), Some("mixed"));
+}

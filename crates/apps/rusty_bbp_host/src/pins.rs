@@ -1395,4 +1395,40 @@ mod tests {
         );
         assert_eq!(pinned_model(&sh).unwrap(), Some("m1".into()));
     }
+
+    // ---- round two: no setting sources at all, not even the user's
+
+    #[test]
+    fn a_harness_loads_no_settings_at_all() {
+        let base = |sources: &[&str]| {
+            let mut a = vec![
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--disallowedTools",
+                "Agent,Task",
+            ];
+            a.extend(sources);
+            launcher("claude", &a)
+        };
+        for ok in [&["--setting-sources", ""][..], &["--setting-sources="]] {
+            assert_eq!(check_harness(&base(ok)), Ok(()), "{ok:?}");
+        }
+        for bad in [
+            &[][..],
+            &["--setting-sources", "user"],
+            &["--setting-sources=user"],
+            &["--setting-sources", "project"],
+            &["--setting-sources", "user,project"],
+        ] {
+            let err = check_harness(&base(bad)).unwrap_err();
+            assert!(err.contains("setting"), "{bad:?}: {err}");
+        }
+        let sh = launcher(
+            "sh",
+            &["-c", "exec claude --model m1 --output-format stream-json --disallowedTools Agent,Task --setting-sources ''"],
+        );
+        assert_eq!(check_harness(&sh), Ok(()));
+    }
 }

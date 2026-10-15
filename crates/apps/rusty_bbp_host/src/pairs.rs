@@ -69,6 +69,19 @@ pub struct RunFacts {
     /// Granted turns with no model observed: no harness output, or output with
     /// no assistant message (a `result` line alone names no model).
     pub no_model_turns: u64,
+    /// Turns that ended with no valid result (killed, interrupted, crashed):
+    /// their cost is only known from below.
+    pub killed_turns: u64,
+    /// The dollars the run is known to have cost, at least: complete turns at
+    /// their result, the rest at what their printed messages show.
+    pub usd_floor: Option<f64>,
+}
+
+/// What a failed pair is known to have cost, at least.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FailedCost {
+    pub pair: String,
+    pub usd_at_least: f64,
 }
 
 impl RunFacts {
@@ -148,6 +161,10 @@ pub struct Evaluation {
     /// The commit this `bbp` binary was built from; `load` refuses unless it
     /// is `git_sha`.
     pub bbp_build_sha: Option<String>,
+    /// Failed pairs and what each cost, at least, reported apart from 7.
+    pub failed_pair_costs: Vec<FailedCost>,
+    /// What every run together is known to have cost, at least.
+    pub total_usd_at_least: f64,
 }
 
 fn median(mut v: Vec<f64>) -> Option<f64> {
@@ -354,6 +371,8 @@ pub fn evaluate(pairs: &[Pair], poll_ms: u64) -> Evaluation {
         criteria_sha256: None,
         git_sha: None,
         bbp_build_sha: None,
+        failed_pair_costs: Vec::new(),
+        total_usd_at_least: 0.0,
     };
     e.decision = decide(&e);
     e
@@ -510,6 +529,8 @@ pub fn facts(
         role_models,
         build_sha: build_sha_of(&text)?,
         no_model_turns,
+        killed_turns: 0,
+        usd_floor: None,
     })
 }
 
@@ -1558,6 +1579,7 @@ mod tests {
             usd: None,
             usd_floor: None,
             log: tokens::scan(stream).0,
+            cache_ttl: None,
             models: if result.is_empty() {
                 tokens::by_model(stream)
             } else {
@@ -1576,6 +1598,7 @@ mod tests {
             revoked: 0,
             without_output,
             unknown_turns: 0,
+            cache_ttl: None,
         }
     }
 
@@ -1703,5 +1726,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- round two: a killed turn fails its pair; its cost stays counted
+
+    fn killed(mut r: RunFacts, floor: f64) -> RunFacts {
+        r.killed_turns = 1;
+        r.usd_floor = Some(floor);
+        r
+    }
+
+    #[test]
+    fn a_run_with_a_killed_turn_is_a_failed_run() {
+        assert!(run(1, 1).succeeded());
+        assert!(!killed(run(1, 1), 0.5).succeeded());
+    }
+
+    #[test]
+    fn a_pair_with_a_killed_turn_is_left_out_of_the_cost_ratio_and_its_cost_is_reported_apart() {
+        let mut p = all([0.5; 5], 1, 1);
+        for x in &mut p {
+            x.control.usd_floor = Some(1.0);
+            x.treatment.usd_floor = Some(1.0);
+        }
+        let honest = evaluate(&p, 500);
+        assert_eq!(honest.failed_pair_costs, vec![]);
+        // One shared pair's treatment run lost a builder to a revocation: its
+        // known cost is $3, its tokens would have made the ratio 9x.
+        let i = p.iter().position(|x| x.kind == Kind::Shared).unwrap();
+        let id = p[i].id.clone();
+        p[i].treatment = killed(
+            RunFacts {
+                tokens: Some(900.0),
+                ..run(100_000, 100)
+            },
+            3.0,
+        );
+        let e = evaluate(&p, 500);
+        assert_eq!(
+            e.cost_ratios.len(),
+            honest.cost_ratios.len() - 1,
+            "left out of 7"
+        );
+        assert_eq!(e.c7_cost, honest.c7_cost);
+        assert_eq!(
+            e.failed_pair_costs,
+            vec![FailedCost {
+                pair: id,
+                usd_at_least: 4.0
+            }]
+        );
+        // The killed run's cost is in the total all the same.
+        assert!(
+            near_f(e.total_usd_at_least, 2.0 * p.len() as f64 + 2.0),
+            "{}",
+            e.total_usd_at_least
+        );
+    }
+
+    fn near_f(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
     }
 }
