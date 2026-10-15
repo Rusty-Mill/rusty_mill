@@ -44,7 +44,7 @@ pub struct Metrics {
     /// Verdicts accepted although a message or artifact that the author could
     /// read, appended by another principal (not the runner) during the
     /// author's verdict turn, was never returned to the author by any read the
-    /// log records (the 2a known gap). Exact, from the responses of accepted
+    /// log records. The engine now refuses such a verdict above one live turn, so this reads zero on a current log and counts it on one written before the refusal. Exact, from the responses of accepted
     /// reads: a `get_artifact` does not count as having seen messages, and a
     /// page that stopped short does not count as having seen what it omitted.
     pub stale_verdicts: u64,
