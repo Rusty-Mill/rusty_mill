@@ -151,20 +151,38 @@ fn both_orders() -> (Vec<Event>, Vec<Event>) {
     let mut fx = one_turn_task(30);
     drop(fx.post("planner", pass()));
     let new = log(&fx);
-    let grant = new
+    (reorder(&new), new)
+}
+
+/// The new-order log as a pre-#657 engine would have written it: the first
+/// `OpAccepted` after the crossing moves to directly after the crossing grant.
+/// Everything after it is the same events in the same order.
+fn reorder(new: &[Event]) -> Vec<Event> {
+    let crossing = new
         .iter()
-        .rposition(|e| matches!(e, Event::TurnGranted { .. }))
-        .expect("the crossing grant");
-    let op = new
-        .iter()
-        .rposition(|e| matches!(e, Event::OpAccepted { .. }))
-        .expect("the accepted op");
+        .position(|e| {
+            matches!(
+                e,
+                Event::Escalated {
+                    reason: EscalateReason::Budget(BudgetField::Turns),
+                    ..
+                }
+            )
+        })
+        .expect("the crossing");
+    let grant = crossing - 1;
+    assert!(matches!(new[grant], Event::TurnGranted { .. }));
+    let op = crossing
+        + new[crossing..]
+            .iter()
+            .position(|e| matches!(e, Event::OpAccepted { .. }))
+            .expect("the accepted op");
     assert!(op > grant + 1, "the new order has the escalation between");
-    let mut old = new.clone();
+    let mut old = new.to_vec();
     let accepted = old.remove(op);
     old.insert(grant + 1, accepted);
     assert_eq!(
-        names(&old[old.len() - 5..]),
+        names(&old[grant..grant + 5]),
         [
             "TurnGranted",
             "OpAccepted",
@@ -174,7 +192,7 @@ fn both_orders() -> (Vec<Event>, Vec<Event>) {
         ],
         "the order a pre-#657 engine wrote (confirmed on 45824a55)"
     );
-    (old, new)
+    old
 }
 
 fn with_schema(events: &[Event], schema: u32) -> Vec<Event> {
@@ -260,4 +278,155 @@ fn wake_set_is_the_same_at_every_prefix_of_either_order() {
         differing_prefixes > 0,
         "the prefixes do differ as states, or this compares nothing"
     );
+}
+
+// ------------------------------------------------------- after a resume
+
+/// Human actions that lift the escalation: raise the turns limit, then resume
+/// to planning. A turn is granted again by the resume.
+fn resume(fx: &mut Fx) {
+    ok(fx.human(HumanAction::BudgetExtended {
+        field: BudgetField::Turns,
+        limit: 60,
+    }));
+    let rev = fx.rev();
+    ok(fx.human(HumanAction::Resume {
+        target: State::Planning,
+        expected_rev: rev,
+    }));
+    assert_eq!(fx.st().state, State::Planning);
+}
+
+fn ask_role(fx: &mut Fx, to: &str) {
+    let mut d = ask(to, "why this approach?");
+    d.to = vec![Recipient::Role(RoleId::from(to))];
+    posted(fx.human(HumanAction::Post(d)));
+}
+
+/// Where two `wake_set`s differ: the roles in one and not the other, or with
+/// another reason, and the state and rev stamps of the two folds.
+fn describe(a: &TaskState, b: &TaskState) -> String {
+    let (x, y) = (wake_set(a), wake_set(b));
+    let only = |p: &[(RoleId, WakeReason)], q: &[(RoleId, WakeReason)]| {
+        p.iter()
+            .filter(|e| !q.contains(e))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    format!(
+        "state {:?}/{:?}; only in old {:?}, only in new {:?}; stamps old/new: last_turn_end {:?}/{:?}, ready_rev {:?}/{:?}, entered_rev {:?}/{:?}",
+        a.state, b.state, only(&x, &y), only(&y, &x),
+        a.last_turn_end, b.last_turn_end, a.ready_rev, b.ready_rev, a.entered_rev, b.entered_rev
+    )
+}
+
+/// `wake_set` at every prefix of the old-order and new-order logs of `fx`,
+/// under every schema. Returns the new-order sets that are not empty, by prefix.
+fn same_wake_set_everywhere(fx: &Fx) -> Vec<(usize, Vec<(RoleId, WakeReason)>)> {
+    let new = log(fx);
+    let old = reorder(&new);
+    let mut seen = Vec::new();
+    for schema in SCHEMAS {
+        let (old, new) = (with_schema(&old, schema), with_schema(&new, schema));
+        for n in 1..=old.len() {
+            let (a, b) = (fold(&old[..n]), fold(&new[..n]));
+            assert_eq!(
+                wake_set(&a),
+                wake_set(&b),
+                "schema {schema}, prefix {n} (after {:?} / {:?}): {}",
+                names(&old[n - 1..n]),
+                names(&new[n - 1..n]),
+                describe(&a, &b)
+            );
+            if schema == LOG_SCHEMA && !wake_set(&b).is_empty() {
+                seen.push((n, wake_set(&b)));
+            }
+        }
+    }
+    seen
+}
+
+/// The prefix right after the resume has put the task back in planning, before
+/// the resume's own grant: no live turn, and the planner's `last_turn_end` is
+/// still the revoke of the crossing turn, the stamp that differs by one.
+fn after_resume_state_change(events: &[Event]) -> usize {
+    let resumed = events
+        .iter()
+        .position(|e| matches!(e, Event::Resumed { .. }))
+        .expect("a resume");
+    resumed
+        + events[resumed..]
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    Event::StateChanged {
+                        to: State::Planning,
+                        ..
+                    }
+                )
+            })
+            .expect("back to planning")
+        + 1
+}
+
+#[test]
+fn wake_set_is_the_same_through_a_resume() {
+    let mut fx = one_turn_task(30);
+    drop(fx.post("planner", pass()));
+    resume(&mut fx);
+    let seen = same_wake_set_everywhere(&fx);
+    // The set that reads the crossing's stamp: the planner is woken by the
+    // state (the resume's rev is later than the revoke's, in either order).
+    let at = after_resume_state_change(&log(&fx));
+    assert!(
+        seen.contains(&(at, vec![(RoleId::from("planner"), WakeReason::State)])),
+        "{seen:?}"
+    );
+}
+
+/// The cooldown. A message to the planner from before the crossing is older
+/// than the end of its last turn, so it does not wake the planner after the
+/// resume, in either order. Dropping the planner's last turn end shows it was
+/// the cooldown that held it back.
+#[test]
+fn the_cooldown_holds_a_message_older_than_the_planners_last_turn_in_either_order() {
+    let mut fx = one_turn_task(30);
+    ask_role(&mut fx, "planner"); // the planner's turn is live: no grant, the message waits
+    drop(fx.post("planner", pass()));
+    resume(&mut fx);
+    let seen = same_wake_set_everywhere(&fx);
+    let new = log(&fx);
+    let at = after_resume_state_change(&new);
+    let set = &seen.iter().find(|(n, _)| *n == at).expect("a set here").1;
+    assert_eq!(set, &vec![(RoleId::from("planner"), WakeReason::State)]);
+    // The control: the same board with no turn ever ended is Addressed.
+    let mut no_cooldown = fold(&new[..at]);
+    no_cooldown.last_turn_end.clear();
+    assert_eq!(
+        wake_set(&no_cooldown)[0],
+        (RoleId::from("planner"), WakeReason::Addressed)
+    );
+}
+
+/// A role Addressed after the resume. The coder has never had a turn, so its
+/// `last_turn_end` is read as absent; the planner's turn after the resume ends
+/// with a fresh stamp that replaces the crossing's.
+#[test]
+fn an_addressed_role_after_the_resume_is_woken_the_same_in_either_order() {
+    let mut fx = one_turn_task(30);
+    drop(fx.post("planner", pass()));
+    resume(&mut fx);
+    ask_role(&mut fx, "coder"); // the planner's turn is live: no grant
+    drop(fx.post("planner", pass()));
+    let seen = same_wake_set_everywhere(&fx);
+    assert!(
+        seen.iter()
+            .any(|(_, set)| set.contains(&(RoleId::from("coder"), WakeReason::Addressed))),
+        "{seen:?}"
+    );
+    // Once the planner's own turn has ended again, the crossing's stamps are
+    // gone and the two orders fold to the very same state.
+    let new = log(&fx);
+    assert_eq!(fold(&reorder(&new)), fold(&new));
 }
