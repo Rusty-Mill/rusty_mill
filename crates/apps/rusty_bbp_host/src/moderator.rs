@@ -348,12 +348,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         visits.observe(state, seen);
         if matches!(state, State::Closed | State::Cancelled) {
             sup.kill_harnesses()?;
-            // The poll that sees the end is not exempt from the cap: output
-            // that arrived since the last check, or from a model with no
-            // price, must not close as a success.
-            if let Some(cap) = &cfg.cost_cap {
-                enforce_cap(cfg, &d, cap)?;
-            }
+            check_terminal(cfg, &d)?;
             return Ok(Outcome {
                 visits: visits.finish(seen),
                 state,
@@ -456,6 +451,17 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             }
         }
         std::thread::sleep(cfg.poll);
+    }
+}
+
+/// The end of a run is not exempt from the cap: output that arrived since the
+/// last poll, or from a model with no price, must not close as a success.
+/// Called once the harnesses are stopped, with the final usage on disk; a
+/// no-op for a task that is not in a terminal state, whose cap is polled.
+pub fn check_terminal<S: Store>(cfg: &Config, d: &Driver<S>) -> Result<(), String> {
+    match (&cfg.cost_cap, d.state.state) {
+        (Some(cap), State::Closed | State::Cancelled) => enforce_cap(cfg, d, cap),
+        _ => Ok(()),
     }
 }
 
