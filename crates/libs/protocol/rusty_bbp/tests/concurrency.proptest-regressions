@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 963e0e383db840d024a648427303496f269503af7862ef26a3d7c761e5c9fcb8 # shrinks to live = 2, steps = [Ask(0), Ask(0), Pass(0), Ask(0), Ask(0), Ask(0), Ask(0), Ask(0), Ask(0), Ask(0), Ask(0), Ask(0)]
+cc 5014f8d17aa40576d475afcbc552c8f78841f922b6a8047ab9e6114cd7b8fd89 # shrinks to turns = 6, steps = [Finding(1), Verdict(0)]

@@ -726,6 +726,12 @@ pub(crate) fn admits(state: State, role: &Role, kind: MessageKind) -> R<()> {
 
 fn check_verdict(st: &TaskState, role: &Role, v: &Verdict, d: &Draft) -> R<()> {
     verdict_stage(st.state, role)?;
+    if st.turn_of(&role.id).is_some_and(|t| !t.unseen.is_empty()) {
+        return Err(rej(
+            Code::StaleSubject,
+            "content was appended during this turn that you have not read",
+        ));
+    }
     let cand = st
         .current_candidate()
         .ok_or_else(|| rej(Code::StaleCandidate, "no current candidate"))?;

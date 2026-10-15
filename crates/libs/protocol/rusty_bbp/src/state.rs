@@ -5,7 +5,7 @@ use crate::event::{EscalateReason, Event};
 use crate::ids::*;
 use crate::policy::SchedulingPolicy;
 use crate::record::*;
-use crate::role::{Roster, Stage};
+use crate::role::{Cap, Role, Roster, Stage};
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -131,6 +131,18 @@ pub struct Turn {
     pub reads: u64,
     pub messages: u64,
     pub bytes: u64,
+    /// Content another principal appended during this turn, that this role may
+    /// read and has not yet received in a read response. Kept only when the
+    /// task allows several live turns; a verdict is refused while it is not
+    /// empty (the verdict would bind to content its author never saw).
+    pub unseen: HashSet<Unseen>,
+}
+
+/// A message or artifact the judge has not been shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Unseen {
+    Message(MsgId),
+    Artifact(ArtId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +343,50 @@ impl TaskState {
     }
 
     /// The live turn of `role`, if any.
+    /// A new item by `author`: every other live turn whose role `readable`
+    /// admits has not seen it. Only tracked above one live turn.
+    fn note_unseen(
+        &mut self,
+        item: Unseen,
+        author: &PrincipalId,
+        readable: impl Fn(&TaskState, &Role) -> bool,
+    ) {
+        if self.max_live_turns <= 1 {
+            return;
+        }
+        let affected: Vec<TurnId> = self
+            .turns
+            .iter()
+            .filter(|t| self.assigned.get(&t.role) != Some(author))
+            .filter(|t| self.roster.get(&t.role).is_some_and(|r| readable(self, r)))
+            .map(|t| t.id)
+            .collect();
+        for t in self.turns.iter_mut().filter(|t| affected.contains(&t.id)) {
+            t.unseen.insert(item);
+        }
+    }
+
+    /// A read response shown to `principal`: what it carried is seen.
+    fn mark_seen(&mut self, principal: &PrincipalId, response: &Response) {
+        let Some(role) = self.role_of(principal) else {
+            return;
+        };
+        let Some(turn) = self.turns.iter_mut().find(|t| t.role == role) else {
+            return;
+        };
+        match response {
+            Response::Read { messages, .. } => {
+                for m in messages {
+                    turn.unseen.remove(&Unseen::Message(m.id));
+                }
+            }
+            Response::Artifact(rec) => {
+                turn.unseen.remove(&Unseen::Artifact(rec.id));
+            }
+            _ => {}
+        }
+    }
+
     pub fn turn_of(&self, role: &RoleId) -> Option<&Turn> {
         self.turns.iter().find(|t| t.role == *role)
     }
@@ -555,6 +611,7 @@ impl TaskState {
                     reads: 0,
                     messages: 0,
                     bytes: 0,
+                    unseen: HashSet::new(),
                 });
                 self.next_turn = turn.0 + 1;
                 self.spent.turns += 1;
@@ -568,6 +625,9 @@ impl TaskState {
             Event::MessageAppended(m) => {
                 self.messages.push(m.clone());
                 self.msg_rev.push(self.rev);
+                self.note_unseen(Unseen::Message(m.id), &m.from, |st, role| {
+                    crate::engine::visible(st, role, m)
+                });
             }
             Event::ArtifactStored(a) => {
                 if a.kind == ArtifactKind::Brief {
@@ -584,6 +644,11 @@ impl TaskState {
                 }
                 self.art_rev.insert(a.id, self.rev);
                 self.artifacts.insert(a.id, a.clone());
+                if a.author.0 != "runner" {
+                    self.note_unseen(Unseen::Artifact(a.id), &a.author, |_, role| {
+                        role.holds(Cap::Read(a.kind))
+                    });
+                }
             }
             Event::CandidateSubmitted { candidate, .. } => {
                 self.candidate = Some(*candidate);
@@ -732,6 +797,7 @@ impl TaskState {
                     (principal.clone(), op.clone()),
                     (*payload, response.clone()),
                 );
+                self.mark_seen(principal, response);
             }
             Event::VerdictsStaled { candidate } => {
                 self.verdicts.retain(|v| v.candidate != *candidate);

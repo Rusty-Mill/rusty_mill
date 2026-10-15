@@ -458,6 +458,7 @@ fn can_act_agrees_with_the_real_post_path() {
                 reads: 0,
                 messages: 0,
                 bytes: 0,
+                unseen: Default::default(),
             }];
             let token = with_turn.token_for(&pid(role.id.clone()), turn_id);
             let cmd = Command::Agent {
