@@ -133,6 +133,8 @@ Each item is one PR, with its own tests and a change fragment.
    change. *Done when:* the cores have unit tests with no `tokio` or `axum`.
    **`limits` core done (2026-10-14):** crate-private `admission` (`Admission`,
    `Permit`, `Rejection`); `auth` and metrics remain.
+   **Metrics core done (2026-10-14):** crate-private `otel::labels` (the
+   cardinality guard and per-instrument attribute sets), under the `otel` feature.
 6. **Drop `axum`** from the adapters (generic body, `http::Response`). *Done
    when:* `axum` is gone from `[dependencies]`; the gateway still compiles and
    its 24 suites pass. Needs D1.
