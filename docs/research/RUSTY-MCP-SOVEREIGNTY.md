@@ -135,6 +135,9 @@ Each item is one PR, with its own tests and a change fragment.
    `Permit`, `Rejection`); `auth` and metrics remain.
    **Metrics core done (2026-10-14):** crate-private `otel::labels` (the
    cardinality guard and per-instrument attribute sets), under the `otel` feature.
+   **`auth` core done (2026-10-14):** crate-private `auth::decision`
+   (`bearer_token`, `from_validation`, `check_claims`, `Refusal`). With this, all three
+   cores are done.
 6. **Drop `axum`** from the adapters (generic body, `http::Response`). *Done
    when:* `axum` is gone from `[dependencies]`; the gateway still compiles and
    its 24 suites pass. Needs D1.

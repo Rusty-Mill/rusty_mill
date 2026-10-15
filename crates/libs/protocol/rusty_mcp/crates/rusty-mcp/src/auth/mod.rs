@@ -78,6 +78,7 @@
 
 mod challenge;
 mod config;
+mod decision;
 #[cfg(feature = "jwt")]
 mod jwt;
 mod layer;
