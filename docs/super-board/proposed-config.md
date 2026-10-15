@@ -1,3 +1,7 @@
+> **Superseded 2026-10-15.** The operational config is now
+> `.claude/super-board/configs/rusty-mill.json`, with the values from the accepted
+> [autonomy policy](autonomy-policy.md). This page is kept as the original proposal.
+
 # Super-board configuration proposal — inactive
 
 This is a documentation-only proposal, not an operational configuration. It was
