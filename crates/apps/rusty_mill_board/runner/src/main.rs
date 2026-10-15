@@ -84,8 +84,9 @@ fn run(cli: Cli) -> Result<(), String> {
         .collect();
     let scope = match &cli.project {
         Some(name) => {
-            let projects = board.projects().map_err(|e| e.to_string())?;
-            Some(Scope::new(name, projects, cli.shared)?)
+            // Also proves the project exists and this credential may work in it.
+            board.foreign(name, &[]).map_err(|e| e.to_string())?;
+            Some(Scope::new(name, cli.shared))
         }
         None => None,
     };

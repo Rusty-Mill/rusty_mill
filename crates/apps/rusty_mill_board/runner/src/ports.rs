@@ -5,7 +5,6 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use rusty_mill_board::domain::{Capability, Card, Column};
-use rusty_mill_board::projects::Projects;
 use uuid::Uuid;
 
 use crate::config::Stage;
@@ -45,8 +44,11 @@ pub trait BoardApi: Sync {
     fn get(&self, id: Uuid) -> Result<Card, ApiError>;
     /// The board's roles.
     fn roles(&self) -> Result<Roles, ApiError>;
-    /// The board's projects and the paths each may change.
-    fn projects(&self) -> Result<Projects, ApiError>;
+    /// How many projects the board has (whatever this credential may see).
+    fn project_count(&self) -> Result<usize, ApiError>;
+    /// The `files` that `project` does not own, by the board's whole registry. Also the check
+    /// that `project` exists and this credential may work in it.
+    fn foreign(&self, project: &str, files: &[String]) -> Result<Vec<String>, ApiError>;
     /// Move a card as `role`.
     fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError>;
     /// Claim a card as `role`.

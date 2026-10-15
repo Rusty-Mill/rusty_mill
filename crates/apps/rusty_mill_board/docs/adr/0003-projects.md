@@ -30,7 +30,7 @@ shared and cut the links between cards of different applications.
   strong as the credentials. With `--identities` it is a property of the token.
 - The sandbox's write scope is not narrowed to the project: builds need `target/` and caches in the worktree.
   Out-of-scope edits are caught at commit, not prevented while the command runs.
-- A limited credential is told by `board_projects` only of its own projects (and the repositories holding them).
+- A limited credential is told by `board_projects` only of its own projects (and the repositories holding them). It cannot rebuild the registry from that, so which paths a project owns is answered by `board_owns` from the whole registry: a runner limited to `default` still learns that a file belongs to a sibling, without being told the sibling's name or paths.
 - `board_events` still reports every project's event metadata (ids, actor, kind, column); card text is not in it.
 - GitHub sync does not know about projects.
 

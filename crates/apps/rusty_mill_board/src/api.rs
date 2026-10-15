@@ -163,6 +163,14 @@ struct ListArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct OwnsArgs {
+    /// The project (see `board_projects`).
+    project: String,
+    /// Repository paths to classify.
+    files: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct AssignArgs {
     #[serde(flatten)]
     who: Who,
@@ -317,7 +325,19 @@ pub fn ops() -> Vec<Op> {
                     });
                     map.retain(|_, projects| projects.as_object().is_some_and(|p| !p.is_empty()));
                 }
-                to_json(json!({ "repos": repos, "default": DEFAULT_PROJECT }))
+                to_json(json!({
+                    "repos": repos,
+                    "default": DEFAULT_PROJECT,
+                    "count": b.projects().names().count(),
+                }))
+            },
+        ),
+        op(
+            "board_owns",
+            "Which of `files` (repository paths, `/`-separated) the project does NOT own: those belonging to another project of its repository. Answers from the whole registry, so a runner limited to one project can still tell when work strays into a sibling's paths: {foreign: [paths]}.",
+            |b, i, a: OwnsArgs| {
+                checked_project(b, scope(i), Some(&a.project))?;
+                to_json(json!({ "foreign": b.projects().not_owned_by(&a.project, &a.files) }))
             },
         ),
         op(

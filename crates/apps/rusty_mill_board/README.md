@@ -30,7 +30,7 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   a coloured edge, a tint and a chip, whose dot pulses while the card is in building, qa or review. The runner
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
-- **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_events`, `card_take`,
+- **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
   `card_get`, `card_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_comment`. The web API
   exposes the same table, so the two cannot drift.
 - **Settings.** The ⚙ button opens a view to add and remove agents (credentials: name, role, project limit; a

@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use rusty_mill_board::domain::{Card, Column};
 use rusty_mill_board::http::Http;
-use rusty_mill_board::projects::Projects;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -89,10 +88,14 @@ impl BoardApi for HttpBoard {
         serde_json::from_value(out["roles"].clone()).map_err(transport)
     }
 
-    fn projects(&self) -> Result<Projects, ApiError> {
+    fn project_count(&self) -> Result<usize, ApiError> {
         let out = self.call("board_projects", json!({}))?;
-        let listed = serde_json::from_value(out["repos"].clone()).map_err(transport)?;
-        Projects::from_listing(listed).map_err(transport)
+        serde_json::from_value(out["count"].clone()).map_err(transport)
+    }
+
+    fn foreign(&self, project: &str, files: &[String]) -> Result<Vec<String>, ApiError> {
+        let out = self.call("board_owns", json!({ "project": project, "files": files }))?;
+        serde_json::from_value(out["foreign"].clone()).map_err(transport)
     }
 
     fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError> {

@@ -228,6 +228,16 @@ impl Projects {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// The `files` (repository paths) that `project` does not own: those of another project
+    /// of its repository. Empty for an unknown project.
+    pub fn not_owned_by(&self, project: &str, files: &[String]) -> Vec<String> {
+        let Some(repo) = self.repo_of(project) else {
+            return Vec::new();
+        };
+        let foreign = |f: &&String| self.owner_of(repo, f) != project;
+        files.iter().filter(foreign).cloned().collect()
+    }
+
     /// The project of `repo` that owns the repository file `file` (a `/`-separated path from
     /// the root): the one whose path contains it, else the repository's own project.
     pub fn owner_of<'a>(&'a self, repo: &'a str, file: &str) -> &'a str {
@@ -391,5 +401,31 @@ mod tests {
         let wire = serde_json::to_value(&p).expect("json");
         let listed: BTreeMap<String, Paths> = serde_json::from_value(wire).expect("map");
         assert_eq!(Projects::from_listing(listed).expect("rebuild"), p);
+    }
+
+    #[test]
+    fn not_owned_by_names_the_files_of_sibling_projects_only() {
+        let p = Projects::parse(
+            r#"{"repos": {"a": {"x": ["src"]}, "b": {"y": ["src"], "z": ["docs"]}}}"#,
+        )
+        .expect("projects");
+        let files = |v: &[&str]| v.iter().map(|f| (*f).to_owned()).collect::<Vec<_>>();
+        let all = files(&["src/lib.rs", "docs/a.md", "README.md", "srcx/a.rs"]);
+        // The same path belongs to a different project in each repository.
+        assert_eq!(
+            p.not_owned_by("x", &all),
+            files(&["docs/a.md", "README.md", "srcx/a.rs"])
+        );
+        assert_eq!(
+            p.not_owned_by("y", &all),
+            files(&["docs/a.md", "README.md", "srcx/a.rs"])
+        );
+        // A repository's own project owns what its projects do not, and only there.
+        assert_eq!(p.not_owned_by("a", &all), files(&["src/lib.rs"]));
+        assert_eq!(
+            p.not_owned_by("b", &all),
+            files(&["src/lib.rs", "docs/a.md"])
+        );
+        assert!(p.not_owned_by("nope", &all).is_empty());
     }
 }

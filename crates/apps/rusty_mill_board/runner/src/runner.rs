@@ -9,7 +9,6 @@ use std::collections::HashSet;
 use std::thread;
 
 use rusty_mill_board::domain::{Card, Column, required_capability};
-use rusty_mill_board::projects::Projects;
 use uuid::Uuid;
 
 use crate::config::Stage;
@@ -40,39 +39,32 @@ pub enum Step {
     GaveUp(Uuid),
 }
 
-/// The one project a runner serves, and the paths its work may change: the project's own,
-/// plus `shared` ones every project touches (change fragments, the lockfile).
+/// The one project a runner serves, and the paths besides its own that its work may change:
+/// `shared` ones every project touches (change fragments, the lockfile). Which paths are the
+/// project's own is the board's to say (`BoardApi::foreign`), from its whole registry.
 #[derive(Debug, Clone)]
 pub struct Scope {
     project: String,
-    projects: Projects,
     shared: Vec<String>,
 }
 
 impl Scope {
-    /// # Errors
-    /// If `project` is not one of `projects`.
-    pub fn new(project: &str, projects: Projects, shared: Vec<String>) -> Result<Self, String> {
-        if !projects.contains(project) {
-            return Err(format!("the board has no project {project:?}"));
-        }
-        Ok(Self {
+    /// Serve `project`; `shared` paths may be changed by any project.
+    pub fn new(project: &str, shared: Vec<String>) -> Self {
+        Self {
             project: project.to_owned(),
-            projects,
             shared,
-        })
+        }
     }
 
-    /// Whether this project's work may change repository path `file`.
-    pub fn allows(&self, file: &str) -> bool {
-        let repo = self.projects.repo_of(&self.project).unwrap_or_default();
-        self.projects.owner_of(repo, file) == self.project
-            || self.shared.iter().any(|s| {
-                file == s
-                    || file
-                        .strip_prefix(s.as_str())
-                        .is_some_and(|r| r.starts_with('/'))
-            })
+    /// Whether `file` is one every project may change.
+    fn is_shared(&self, file: &str) -> bool {
+        self.shared.iter().any(|s| {
+            file == s
+                || file
+                    .strip_prefix(s.as_str())
+                    .is_some_and(|r| r.starts_with('/'))
+        })
     }
 }
 
@@ -122,15 +114,12 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
     /// A message naming the stage and the first problem found.
     pub fn validate(&self) -> Result<(), String> {
         let roles = self.board.roles().map_err(|e| e.to_string())?;
-        if self.scope.is_none() {
-            let projects = self.board.projects().map_err(|e| e.to_string())?;
-            if projects.names().count() > 1 {
-                return Err(
-                    "the board has several projects: pass --project NAME so this runner only \
-                     works (and may only change) one application"
-                        .into(),
-                );
-            }
+        if self.scope.is_none() && self.board.project_count().map_err(|e| e.to_string())? > 1 {
+            return Err(
+                "the board has several projects: pass --project NAME so this runner only \
+                 works (and may only change) one application"
+                    .into(),
+            );
         }
         for s in &self.stages {
             let caps = roles
@@ -309,12 +298,16 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
         let Some(scope) = &self.scope else {
             return Ok(None);
         };
-        let stray: Vec<String> = self
+        let files: Vec<String> = self
             .work
             .changed(dir)?
             .into_iter()
-            .filter(|f| !scope.allows(f))
+            .filter(|f| !scope.is_shared(f))
             .collect();
+        let stray = self
+            .board
+            .foreign(&scope.project, &files)
+            .map_err(|e| e.to_string())?;
         Ok((!stray.is_empty()).then_some(stray))
     }
 }
@@ -407,8 +400,11 @@ mod tests {
         fn roles(&self) -> Result<Roles, ApiError> {
             Ok(self.0.roles().0.clone())
         }
-        fn projects(&self) -> Result<Projects, ApiError> {
-            Ok(self.0.projects().clone())
+        fn project_count(&self) -> Result<usize, ApiError> {
+            Ok(self.0.projects().names().count())
+        }
+        fn foreign(&self, project: &str, files: &[String]) -> Result<Vec<String>, ApiError> {
+            Ok(self.0.projects().not_owned_by(project, files))
         }
         fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError> {
             self.0
@@ -751,8 +747,8 @@ mod tests {
 
     // ---- projects: a runner serves one application and may change only its paths
 
-    fn projects() -> Projects {
-        Projects::parse(
+    fn projects() -> rusty_mill_board::projects::Projects {
+        rusty_mill_board::projects::Projects::parse(
             r#"{"rl": ["crates/apps/rocket_league"], "orch": ["crates/apps/rusty_orch"]}"#,
         )
         .expect("projects")
@@ -789,12 +785,7 @@ mod tests {
     }
 
     fn scope(project: &str) -> Scope {
-        Scope::new(
-            project,
-            projects(),
-            vec!["changes".into(), "Cargo.lock".into()],
-        )
-        .expect("scope")
+        Scope::new(project, vec!["changes".into(), "Cargo.lock".into()])
     }
 
     #[test]
@@ -804,7 +795,6 @@ mod tests {
         assert!(e.contains("--project"), "{e}");
         let (r, _) = setup_projects(Fake::default());
         assert!(r.with_scope(scope("rl")).validate().is_ok());
-        assert!(Scope::new("nope", projects(), vec![]).is_err());
     }
 
     #[test]
@@ -879,42 +869,14 @@ mod tests {
     }
 
     #[test]
-    fn scope_allows_own_paths_shared_paths_and_nothing_that_merely_shares_a_prefix() {
+    fn shared_paths_are_whole_path_components() {
         let s = scope("rl");
-        for ok in [
-            "crates/apps/rocket_league/a.rs",
-            "changes/x.md",
-            "Cargo.lock",
-        ] {
-            assert!(s.allows(ok), "{ok}");
+        for shared in ["changes/x.md", "changes", "Cargo.lock"] {
+            assert!(s.is_shared(shared), "{shared}");
         }
-        for bad in [
-            "crates/apps/rusty_orch/a.rs",
-            "crates/apps/rocket_league_old/a.rs",
-            "changes.md",
-            "Cargo.lock.bak",
-            "README.md", // default-project territory
-        ] {
-            assert!(!s.allows(bad), "{bad}");
+        for own in ["changes.md", "Cargo.lock.bak", "crates/a.rs"] {
+            assert!(!s.is_shared(own), "{own}");
         }
-        // The default project owns whatever no other project does.
-        assert!(scope("default").allows("README.md"));
-        assert!(!scope("default").allows("crates/apps/rocket_league/a.rs"));
-    }
-
-    #[test]
-    fn scope_follows_the_projects_own_repository() {
-        let projects = Projects::parse(
-            r#"{"repos": {"a": {"x": ["src"]}, "b": {"y": ["src"], "z": ["docs"]}}}"#,
-        )
-        .expect("projects");
-        let scope = |p: &str| Scope::new(p, projects.clone(), vec![]).expect("scope");
-        // The same path belongs to a different project in each repository.
-        assert!(scope("x").allows("src/lib.rs") && !scope("y").allows("docs/a.md"));
-        assert!(scope("y").allows("src/lib.rs") && scope("z").allows("docs/a.md"));
-        // A repository's own project owns what its projects do not, and only there.
-        assert!(scope("a").allows("README.md") && !scope("a").allows("src/lib.rs"));
-        assert!(scope("b").allows("README.md") && !scope("b").allows("docs/a.md"));
     }
 
     #[test]
