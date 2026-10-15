@@ -2,10 +2,12 @@
 //! pinned model has a price, and the two arms of a pair pin the same models.
 //! A pin is the `--model ID` or `--model=ID` argument of the launched program;
 //! argument boundaries are kept, so prompt text that mentions the flag pins
-//! nothing. A `sh -c` launcher is parsed with shell quoting and comments, every
-//! `claude` command in it must pin, and syntax whose effective execution cannot
-//! be established (a nested shell, `eval`, control flow, a computed command, an
-//! unreadable quote) is an error.
+//! nothing. A `sh -c` launcher is parsed with shell quoting and comments; every
+//! `claude` command in it must pin; the only other commands allowed are a short
+//! list of setup commands, also inside `$( ... )` substitutions; and anything
+//! whose effective execution cannot be established (a nested shell with or
+//! without a path, `eval`, control flow, a computed command, an unreadable
+//! quote) is an error.
 //! The checks read the file, not the run: `bbp pairs` repeats them on what the
 //! harnesses actually used.
 
@@ -13,11 +15,13 @@ use crate::moderator::{Launcher, Launchers};
 use crate::tokens::Criteria;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// One word of a shell command line. `dynamic`: it contains an expansion
-/// (`$`, a backtick) that is live, so its text is not what the shell will pass.
+/// One word of a shell command line. `dynamic`: it contains a live expansion
+/// (`$`), so its text is not what the shell will pass. `subst`: the bodies of
+/// its `$( ... )` command substitutions, which run before the command does.
 struct Word {
     text: String,
     dynamic: bool,
+    subst: Vec<String>,
 }
 
 /// The command lines read so far, and the word being built.
@@ -29,6 +33,7 @@ struct Lexer {
     /// A word is being built (an empty `""` is still a word).
     live: bool,
     dynamic: bool,
+    subst: Vec<String>,
 }
 
 impl Lexer {
@@ -37,6 +42,7 @@ impl Lexer {
             self.words.push(Word {
                 text: std::mem::take(&mut self.cur),
                 dynamic: self.dynamic,
+                subst: std::mem::take(&mut self.subst),
             });
             self.live = false;
             self.dynamic = false;
@@ -55,6 +61,40 @@ impl Lexer {
         self.cur.push(c);
     }
 
+    /// After a `$`: a `$( ... )` substitution is kept as text and its body
+    /// recorded; a nested one is not read. Any other `$` is a plain expansion.
+    fn dollar(&mut self, chars: &mut std::str::Chars) -> Result<(), String> {
+        self.live = true;
+        self.dynamic = true;
+        self.cur.push('$');
+        if chars.clone().next() != Some('(') {
+            return Ok(());
+        }
+        chars.next();
+        let mut depth = 1;
+        let mut body = String::new();
+        for c in chars.by_ref() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                '`' => return Err("a backtick substitution is not read literally".into()),
+                _ => {}
+            }
+            if depth == 0 {
+                self.cur.push('(');
+                self.cur.push_str(&body);
+                self.cur.push(')');
+                if body.contains("$(") {
+                    return Err("a nested command substitution is not read literally".into());
+                }
+                self.subst.push(body);
+                return Ok(());
+            }
+            body.push(c);
+        }
+        Err("unterminated command substitution".into())
+    }
+
     fn single_quoted(&mut self, chars: &mut std::str::Chars) -> Result<(), String> {
         self.live = true;
         for q in chars.by_ref() {
@@ -71,6 +111,8 @@ impl Lexer {
         while let Some(q) = chars.next() {
             match q {
                 '"' => return Ok(()),
+                '`' => return Err("a backtick substitution is not read literally".into()),
+                '$' => self.dollar(chars)?,
                 '\\' => match chars.next() {
                     Some(e @ ('"' | '\\' | '$' | '`')) => self.cur.push(e),
                     Some('\n') => {}
@@ -80,10 +122,7 @@ impl Lexer {
                     }
                     None => break,
                 },
-                q => {
-                    self.dynamic |= matches!(q, '$' | '`');
-                    self.cur.push(q);
-                }
+                q => self.cur.push(q),
             }
         }
         Err("unterminated double quote".into())
@@ -92,9 +131,10 @@ impl Lexer {
 
 /// Split a shell command line into simple commands of words, the way a shell
 /// would for the constructs launchers use: single and double quotes, backslash
-/// escapes, `#` comments, and `;` `&` `|` newline between commands. Anything that cannot be
-/// read without running the shell (an unterminated quote, a subshell) is an
-/// error: an opaque launcher cannot be shown to pin a model.
+/// escapes, `#` comments, `$( ... )` substitutions (recorded, not run) and `;`
+/// `&` `|` newline between commands. Anything that cannot be read without
+/// running the shell (an unterminated quote, a subshell, a backtick or nested
+/// substitution) is an error: an opaque launcher cannot be shown to pin a model.
 fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
     let mut lx = Lexer::default();
     let mut chars = script.chars();
@@ -112,10 +152,8 @@ fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
                 Some(e) => lx.push(e),
                 None => return Err("trailing backslash".into()),
             },
-            '$' | '`' => {
-                lx.dynamic = true;
-                lx.push(c);
-            }
+            '$' => lx.dollar(&mut chars)?,
+            '`' => return Err("a backtick substitution is not read literally".into()),
             '(' | ')' if !lx.live => {
                 return Err("a subshell is not read literally".into());
             }
@@ -128,19 +166,35 @@ fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
     Ok(lx.commands)
 }
 
-/// Words that run other code or steer control flow, which this reader does not
-/// follow: a `claude` behind any of them would run unseen, or not run.
-const OPAQUE: [&str; 24] = [
-    "eval", "source", ".", "sh", "bash", "dash", "zsh", "ksh", "xargs", "ssh", "su", "sudo", "if",
-    "then", "else", "elif", "fi", "while", "until", "for", "do", "done", "case", "function",
+/// The commands a launcher may run besides `claude`: setup that starts no
+/// harness. Anything else is refused, so a harness cannot hide behind a command
+/// this reader does not know (a nested shell, `eval`, `xargs`, control flow).
+const SETUP: [&str; 16] = [
+    "set", "cd", "rm", "mkdir", "git", "cp", "mv", "export", "echo", "printf", "true", "false",
+    "sleep", "ls", "cat", "pwd",
 ];
+
+/// A command word without its directory: `/bin/sh` is `sh`.
+fn base(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// What a simple command runs.
+enum Runs {
+    /// Only assignments (or a wrapper with nothing after it).
+    Nothing,
+    /// A listed setup command.
+    Setup,
+    /// `claude`, with its arguments starting at this word.
+    Claude(usize),
+}
 
 /// The command word of a simple command, past `NAME=value` assignments and the
 /// wrappers that run the next word as is (`exec`, `command`, `nohup`, `time`,
-/// `env`, without options of their own). `Ok(None)` for a command of only
-/// assignments. An error for a command word that is computed, opaque, or hidden
-/// behind a wrapper's options: what runs cannot be established.
-fn command_index(words: &[Word]) -> Result<Option<usize>, String> {
+/// `env`, without options of their own). An error for a command word that is
+/// computed, not `claude` and not a listed setup command, or hidden behind a
+/// wrapper's options: what runs cannot be established.
+fn runs(words: &[Word]) -> Result<Runs, String> {
     for (i, w) in words.iter().enumerate() {
         let assignment = w.text.split_once('=').is_some_and(|(n, _)| {
             !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_')
@@ -148,21 +202,41 @@ fn command_index(words: &[Word]) -> Result<Option<usize>, String> {
         if assignment {
             continue;
         }
-        if matches!(
-            w.text.as_str(),
-            "exec" | "env" | "command" | "nohup" | "time"
-        ) {
+        let name = base(&w.text);
+        if matches!(name, "exec" | "env" | "command" | "nohup" | "time") {
             if words.get(i + 1).is_some_and(|n| n.text.starts_with('-')) {
-                return Err(format!("{} with options is not read literally", w.text));
+                return Err(format!("{name} with options is not read literally"));
             }
             continue;
         }
-        if w.dynamic || OPAQUE.contains(&w.text.as_str()) {
-            return Err(format!("the command {:?} is not read literally", w.text));
+        if w.dynamic {
+            return Err(format!("the command {:?} is computed", w.text));
         }
-        return Ok(Some(i));
+        return match name {
+            "claude" => Ok(Runs::Claude(i)),
+            n if SETUP.contains(&n) => Ok(Runs::Setup),
+            n => Err(format!(
+                "the command {n:?} is not a supported setup command"
+            )),
+        };
     }
-    Ok(None)
+    Ok(Runs::Nothing)
+}
+
+/// Every command substitution in a command's words runs before it does, so its
+/// body must itself be setup commands only: `$(claude ...)` starts a harness.
+fn check_substitutions(words: &[Word]) -> Result<(), String> {
+    for body in words.iter().flat_map(|w| &w.subst) {
+        for inner in shell_commands(body)? {
+            check_substitutions(&inner)?;
+            if !matches!(runs(&inner)?, Runs::Setup | Runs::Nothing) {
+                return Err(format!(
+                    "the substitution $({body}) starts a harness or an unknown command"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The models named by `--model` in one argv, where each item is one argument
@@ -212,12 +286,10 @@ pub fn pinned_model(l: &Launcher) -> Result<Option<String>, String> {
             let script = l.args.get(i + 1).map_or("", String::as_str);
             let mut per_command: Vec<Vec<String>> = Vec::new();
             for words in shell_commands(script)? {
-                let Some(at) = command_index(&words)? else {
+                check_substitutions(&words)?;
+                let Runs::Claude(at) = runs(&words)? else {
                     continue;
                 };
-                if words[at].text.rsplit('/').next() != Some("claude") {
-                    continue;
-                }
                 per_command.push(argv_models(
                     words[at + 1..].iter().map(|w| (w.text.as_str(), w.dynamic)),
                 )?);
@@ -559,5 +631,61 @@ mod tests {
             ],
         );
         assert_eq!(pinned_model(&ok).unwrap(), Some("m1".into()));
+    }
+
+    #[test]
+    fn a_nested_shell_is_refused_with_or_without_a_path() {
+        for script in [
+            r#"claude --model m1 -p warmup; /bin/sh -c "claude -p task""#,
+            "claude --model m1 -p warmup; /usr/bin/env bash -c 'claude -p task'",
+            "claude --model m1 -p warmup; ./launch.sh",
+            "claude --model m1 -p warmup; /opt/x/xargs claude",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert!(pinned_model(&sh).is_err(), "{script}");
+        }
+    }
+
+    #[test]
+    fn a_command_substitution_is_checked_wherever_it_hides() {
+        // In an assignment, an argument of a setup command, a quoted prompt of
+        // a pinned harness: the substitution runs before the command does.
+        for script in [
+            r#"X="$(claude -p task)"; exec claude --model m1 -p next"#,
+            "X=$(claude -p task); exec claude --model m1 -p next",
+            r#"echo "$(claude -p task)"; exec claude --model m1 -p next"#,
+            r#"exec claude --model m1 -p "$(claude -p task)""#,
+            "X=$(echo $(claude -p task)); exec claude --model m1 -p next", // nested
+            "X=$(sh -c 'claude -p task'); exec claude --model m1 -p next",
+            "X=`claude -p task`; exec claude --model m1 -p next",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert!(pinned_model(&sh).is_err(), "{script}");
+        }
+        // A substitution of setup commands only is fine, in any of those places.
+        for script in [
+            r#"X="$(git rev-parse HEAD)"; exec claude --model m1 -p "at $X""#,
+            r#"exec claude --model m1 -p "at $(git rev-parse HEAD) in $(pwd)""#,
+            "cd $(pwd); exec claude --model m1 -p x",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert_eq!(pinned_model(&sh).unwrap(), Some("m1".into()), "{script}");
+        }
+    }
+
+    #[test]
+    fn a_claude_given_by_path_is_still_a_claude_command() {
+        let pinned = launcher("sh", &["-c", "exec /usr/local/bin/claude --model m1 -p x"]);
+        assert_eq!(pinned_model(&pinned).unwrap(), Some("m1".into()));
+        let partial = launcher(
+            "sh",
+            &[
+                "-c",
+                "/usr/local/bin/claude -p a; exec claude --model m1 -p b",
+            ],
+        );
+        assert!(pinned_model(&partial).is_err());
+        let bare = launcher("/bin/sh", &["-c", "exec ./claude -p x"]);
+        assert_eq!(pinned_model(&bare).unwrap(), None);
     }
 }
