@@ -516,4 +516,23 @@ mod tests {
         assert!(rubric(3, 0).check().is_err());
         assert!(rubric(3, 4).check().is_err());
     }
+
+    #[test]
+    fn every_task_contributes_the_same_number_of_entries_whatever_its_unused_versions() {
+        // "auth" has an unused version, "cache" has none: if both arms' specs
+        // went into one pack, auth would show 3 entries and cache 2.
+        let (_, key) = pack(&sources(), "s");
+        let mut per_task: BTreeMap<&str, usize> = BTreeMap::new();
+        for e in key.entries.iter().filter(|e| e.which == Which::Approved) {
+            *per_task.entry(e.pair.as_str()).or_default() += 1;
+        }
+        let (pack_entries, _) = pack(&sources(), "s");
+        // The pack the grader sees first carries exactly the approved specs.
+        assert_eq!(
+            pack_entries.len(),
+            per_task.values().sum::<usize>(),
+            "approved specs only"
+        );
+        assert!(per_task.values().all(|n| *n == 2), "{per_task:?}");
+    }
 }

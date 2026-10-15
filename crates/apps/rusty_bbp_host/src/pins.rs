@@ -217,4 +217,57 @@ mod tests {
             .unwrap_err()
             .contains("extra role"));
     }
+
+    // ---- review probes on `pinned_model`
+
+    #[test]
+    fn a_model_flag_mentioned_inside_a_prompt_string_is_not_a_pin() {
+        let l = launcher(
+            "sh",
+            &[
+                "-c",
+                "exec claude -p \"never pass --model foo here\" --tools Bash",
+            ],
+        );
+        assert_eq!(pinned_model(&l).unwrap(), None);
+    }
+
+    #[test]
+    fn a_prompt_that_mentions_the_flag_plus_a_real_pin_is_the_real_pin() {
+        let l = launcher(
+            "sh",
+            &[
+                "-c",
+                "exec claude -p \"use --model sonnet if asked\" --model opus",
+            ],
+        );
+        assert_eq!(pinned_model(&l).unwrap(), Some("opus".into()));
+    }
+
+    #[test]
+    fn an_echo_or_a_comment_is_not_a_pin() {
+        let echo = launcher("sh", &["-c", "echo --model m1; exec claude -p x"]);
+        assert_eq!(pinned_model(&echo).unwrap(), None);
+        let comment = launcher("sh", &["-c", "exec claude -p x # --model m2"]);
+        assert_eq!(pinned_model(&comment).unwrap(), None);
+    }
+
+    #[test]
+    fn an_unresolved_placeholder_is_not_a_model_name() {
+        let l = launcher("claude", &["--model", "{role}", "-p", "x"]);
+        assert!(pinned_model(&l).is_err());
+        let l = launcher("claude", &["--model={turn}"]);
+        assert!(pinned_model(&l).is_err());
+    }
+
+    #[test]
+    fn a_fallback_model_or_a_subagent_definition_is_refused() {
+        let fb = launcher("claude", &["--model", "m1", "--fallback-model", "m2"]);
+        assert!(pinned_model(&fb).unwrap_err().contains("fallback"));
+        let agents = launcher(
+            "claude",
+            &["--model", "m1", "--agents", "{\"h\":{\"model\":\"haiku\"}}"],
+        );
+        assert!(pinned_model(&agents).unwrap_err().contains("agents"));
+    }
 }

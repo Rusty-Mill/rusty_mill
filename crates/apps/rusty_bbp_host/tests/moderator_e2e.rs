@@ -1029,3 +1029,96 @@ fn an_evidence_run_refuses_to_start_with_an_unpinned_or_unpriced_role() {
         "{unpriced}"
     );
 }
+
+// ---- review findings 9 and 13
+
+const SONNET_PRICES: &str = r#"{"prices_as_of":"t","models":{"claude-sonnet-5-5":{"input":2.0,"output":10.0,"cache_creation_5m":2.5,"cache_creation_1h":4.0,"cache_read":0.10}}}"#;
+
+fn sonnet_criteria(dir: &Path) -> rusty_bbp_host::tokens::Criteria {
+    let f = dir.join("criteria.json");
+    std::fs::write(&f, SONNET_PRICES).expect("write criteria");
+    rusty_bbp_host::tokens::read_criteria(&f)
+        .expect("criteria")
+        .0
+}
+
+fn opened(tag: &str) -> (PathBuf, TaskId, PathBuf) {
+    let dir = tempdir(tag);
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    admin::open_task(
+        &dir,
+        &task,
+        "local",
+        b"brief",
+        &PrincipalId("human".into()),
+        &ProfileSet::shell("test", "true"),
+        common::roster(),
+    )
+    .expect("open");
+    for role in Who::ALL {
+        admin::assign(
+            &dir,
+            &task,
+            &role.id(),
+            &PrincipalId(role.name().into()),
+            "v",
+        )
+        .expect("assign");
+    }
+    (dir, task, repo)
+}
+
+#[test]
+fn spend_that_lands_before_the_run_ends_is_still_checked_against_the_cap() {
+    // A real completed result costing about $1.01, written before the
+    // moderator starts, and a task that is already over (cancelled): the loop
+    // sees the terminal state on its first pass, before any later check.
+    let (dir, task, repo) = opened("final-poll");
+    admin::tick(&dir, &task).expect("tick grants the planner its turn");
+    let log = rusty_bbp_host::moderator::log_path(&dir, &task, TurnId(1));
+    std::fs::create_dir_all(log.parent().expect("parent")).expect("mkdir");
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/stream-json/completed-default-ttl.jsonl"),
+    )
+    .expect("fixture")
+    .replace("\"outputTokens\":4", "\"outputTokens\":100000")
+    .replace(
+        "\"total_cost_usd\":0.0086289",
+        "\"total_cost_usd\":1.0085889",
+    )
+    .replace("\"costUSD\":0.0086289", "\"costUSD\":1.0085889");
+    std::fs::write(&log, text).expect("write log");
+    let rev = card(&dir, &task).rev;
+    human::perform(&dir, &task, "cancel", &["stop"], Some(rev)).expect("cancel");
+    let mut cfg = config(&dir, &task, repo, Launchers::default(), 10);
+    cfg.cost_cap = Some(moderator::CostCap {
+        usd: 0.5,
+        criteria: sonnet_criteria(&dir),
+    });
+    let err = moderator::run(&cfg).expect_err("over the cap is not a clean finish");
+    assert!(err.contains("cost cap reached"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_task_started_with_a_cap_cannot_be_resumed_without_one() {
+    let (dir, task, repo) = opened("resume-uncapped");
+    let mut planner = script(&dir, "planner", "sleep 60");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut first = config(&dir, &task, repo.clone(), launchers.clone(), 2);
+    first.cost_cap = Some(moderator::CostCap {
+        usd: 1000.0,
+        criteria: sonnet_criteria(&dir),
+    });
+    let e1 = moderator::run(&first).expect_err("wall limit");
+    assert!(e1.contains("wall limit"), "{e1}");
+    let second = config(&dir, &task, repo, launchers, 2);
+    let e2 = moderator::run(&second).expect_err("refused");
+    assert!(e2.contains("refusing to start"), "{e2}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

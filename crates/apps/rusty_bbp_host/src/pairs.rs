@@ -1031,4 +1031,245 @@ mod tests {
             assert!(decide(&e).starts_with("incomplete"), "{}", decide(&e));
         }
     }
+
+    // ---- review probes C, D, E: no decisive row from inconclusive criteria
+
+    /// Nulls, `sep` separable pairs at `ratio`, and 5 shared pairs.
+    fn partial(sep: usize, ratio: f64, tokens_ratio: f64) -> Vec<Pair> {
+        let mut p = nulls([1.0, 0.95, 1.1]);
+        p.extend((0..sep).map(|i| {
+            let mut t = run((100_000.0 * ratio) as u64, 100);
+            t.tokens = Some(100.0 * tokens_ratio);
+            pair(&format!("s{i}"), Kind::Separable, run(100_000, 100), t)
+        }));
+        p.extend(shared(1, 1));
+        p
+    }
+
+    #[test]
+    fn probe_c_four_separable_pairs_with_a_failing_ratio_is_not_a_decision() {
+        let e = evaluate(&partial(4, 0.9, 1.0), 500);
+        assert_eq!(e.c3_parallelism, Verdict::Fails, "the ratio does fail");
+        assert_eq!(
+            (e.c1_safety, e.c2_comparable),
+            (Verdict::Inconclusive, Verdict::Inconclusive)
+        );
+        assert!(e.decision.starts_with("incomplete"), "{}", e.decision);
+    }
+
+    #[test]
+    fn probe_d_four_separable_pairs_with_a_cost_failure_is_not_a_decision() {
+        let e = evaluate(&partial(4, 0.5, 2.0), 500);
+        assert_eq!(e.c7_cost, Verdict::Fails);
+        assert!(e.decision.starts_with("incomplete"), "{}", e.decision);
+    }
+
+    #[test]
+    fn probe_e_unknown_tokens_with_a_failing_contention_is_not_a_decision() {
+        let mut p = all([0.5; 5], 0, 1);
+        let i = p.iter().position(|x| x.kind == Kind::Shared).unwrap();
+        p[i].treatment.tokens = None;
+        let e = evaluate(&p, 500);
+        assert_eq!(
+            (e.c7_cost, e.c4_contention),
+            (Verdict::Inconclusive, Verdict::Fails)
+        );
+        assert!(e.decision.starts_with("incomplete"), "{}", e.decision);
+    }
+
+    // ---- boundaries the review's surviving mutations crossed
+
+    fn verdicts_of(p: &[Pair]) -> Evaluation {
+        evaluate(p, 500)
+    }
+
+    #[test]
+    fn criterion_one_needs_all_ten_pairs() {
+        let nine = [
+            nulls([1.0; 3]),
+            separable([0.5; 5]),
+            shared(1, 1)[..4].to_vec(),
+        ]
+        .concat();
+        assert_eq!(verdicts_of(&nine).c1_safety, Verdict::Inconclusive);
+        assert_eq!(verdicts_of(&all([0.5; 5], 1, 1)).c1_safety, Verdict::Holds);
+    }
+
+    #[test]
+    fn criterion_two_needs_ten_pairs_and_fails_early_only_past_two_failures() {
+        let nine_ok = [
+            nulls([1.0; 3]),
+            separable([0.5; 5]),
+            shared(1, 1)[..4].to_vec(),
+        ]
+        .concat();
+        assert_eq!(verdicts_of(&nine_ok).c2_comparable, Verdict::Inconclusive);
+        let with_failed = |n: usize| {
+            let mut p = nine_ok.clone();
+            let idx: Vec<usize> = p
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| x.kind != Kind::Null)
+                .map(|(i, _)| i)
+                .collect();
+            for i in &idx[..n] {
+                p[*i].control.closed = false;
+                p[*i].treatment.closed = false;
+            }
+            p
+        };
+        assert_eq!(
+            verdicts_of(&with_failed(2)).c2_comparable,
+            Verdict::Inconclusive,
+            "two failed: not yet"
+        );
+        assert_eq!(
+            verdicts_of(&with_failed(3)).c2_comparable,
+            Verdict::Fails,
+            "three failed: already lost"
+        );
+    }
+
+    #[test]
+    fn criterion_three_boundaries() {
+        // A ratio of exactly 1.0 is not inverted: five at 1.0 fail on the
+        // median, but [0.5 x3, 1.0 x2] holds.
+        assert_eq!(
+            verdicts_of(&all([0.5, 0.5, 0.5, 1.0, 1.0], 1, 1)).c3_parallelism,
+            Verdict::Holds
+        );
+        // A median of exactly 0.75 holds; just above it fails.
+        assert_eq!(
+            verdicts_of(&all([0.75; 5], 1, 1)).c3_parallelism,
+            Verdict::Holds
+        );
+        assert_eq!(
+            verdicts_of(&all([0.76; 5], 1, 1)).c3_parallelism,
+            Verdict::Fails
+        );
+        // Two ratios above 1.0 fail even with a low median; one is allowed.
+        assert_eq!(
+            verdicts_of(&all([0.5, 0.5, 0.5, 1.01, 1.01], 1, 1)).c3_parallelism,
+            Verdict::Fails
+        );
+        assert_eq!(
+            verdicts_of(&all([0.5, 0.5, 0.5, 0.5, 1.01], 1, 1)).c3_parallelism,
+            Verdict::Holds
+        );
+    }
+
+    #[test]
+    fn a_poll_of_exactly_five_percent_of_the_control_is_still_measurable() {
+        // 500 ms poll against a 10 s control: exactly 5%.
+        let mut p = all([0.5; 5], 1, 1);
+        for x in p.iter_mut().filter(|x| x.kind == Kind::Separable) {
+            x.control.spec_wall_ms = Some(10_000);
+            x.treatment.spec_wall_ms = Some(5_000);
+        }
+        assert_eq!(verdicts_of(&p).separable_ratios.len(), 5);
+        // Just under: 9_999 ms makes every pair unmeasurable.
+        for x in p.iter_mut().filter(|x| x.kind == Kind::Separable) {
+            x.control.spec_wall_ms = Some(9_999);
+        }
+        assert_eq!(verdicts_of(&p).c3_parallelism, Verdict::Inconclusive);
+    }
+
+    fn shared_with(spec: &[(bool, u64, Option<u64>, (u64, u64))]) -> Vec<Pair> {
+        spec.iter()
+            .enumerate()
+            .map(|(i, (ok, conflicts, lost, bytes))| {
+                let mut t = run(100_000, 100);
+                t.closed = *ok;
+                t.unused_conflicts = *conflicts;
+                t.unused_bytes = *bytes;
+                let mut p = pair(&format!("h{i}"), Kind::Shared, run(100_000, 100), t);
+                p.lost_rubric_items = *lost;
+                p
+            })
+            .collect()
+    }
+
+    fn with_rest(shared: Vec<Pair>) -> Vec<Pair> {
+        [nulls([1.0; 3]), separable([0.5; 5]), shared].concat()
+    }
+
+    #[test]
+    fn criterion_four_boundaries() {
+        let hit = (true, 1, Some(1), (30, 100));
+        let miss = (true, 0, Some(1), (30, 100));
+        let v = |s: &[_]| verdicts_of(&with_rest(shared_with(s))).c4_contention;
+        assert_eq!(
+            v(&[hit, hit, hit, miss, miss]),
+            Verdict::Holds,
+            "three of five"
+        );
+        assert_eq!(
+            v(&[hit, hit, miss, miss, miss]),
+            Verdict::Fails,
+            "two of five"
+        );
+        // A hit in a failed pair does not count.
+        let failed_hit = (false, 1, Some(1), (30, 100));
+        assert_eq!(v(&[hit, hit, failed_hit, miss, miss]), Verdict::Fails);
+        // With fewer than five shared pairs the answer is not known yet.
+        assert_eq!(v(&[hit, hit, miss, miss]), Verdict::Inconclusive);
+        assert_eq!(
+            v(&[hit, hit, hit, miss]),
+            Verdict::Holds,
+            "three hits are enough early"
+        );
+    }
+
+    #[test]
+    fn criterion_five_boundaries() {
+        let lost = |n, share| (true, 1, Some(n), (share, 100));
+        let v = |s: &[_]| verdicts_of(&with_rest(shared_with(s))).c5_loss;
+        // Three pairs with lost items and a median share of exactly 0.15.
+        let at = lost(1, 15);
+        let none = lost(0, 15);
+        assert_eq!(v(&[at, at, at, none, none]), Verdict::Holds);
+        assert_eq!(
+            v(&[at, at, none, none, none]),
+            Verdict::Fails,
+            "two lost is not three"
+        );
+        // The median share is a floor: just under fails.
+        assert_eq!(
+            v(&[
+                lost(1, 14),
+                lost(1, 14),
+                lost(1, 14),
+                lost(0, 14),
+                lost(0, 14)
+            ]),
+            Verdict::Fails
+        );
+        // Lost items with a negligible share fail on the share.
+        assert_eq!(v(&[lost(1, 1); 5]), Verdict::Fails);
+        // An ungraded pair makes it unknown, not a pass.
+        let ungraded = (true, 1, None, (15, 100));
+        assert_eq!(v(&[at, at, at, at, ungraded]), Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn failed_pairs_do_not_count_toward_the_cost_ratio() {
+        // Four good pairs at 1.0x and six failed pairs at 5x: only the good
+        // ones are the median.
+        let mut p = nulls([1.0; 3]);
+        for i in 0..10 {
+            let ok = i < 4;
+            let mut t = run(100_000, 500);
+            t.closed = ok;
+            p.push(pair(
+                &format!("p{i}"),
+                if i < 5 { Kind::Separable } else { Kind::Shared },
+                run(100_000, 100),
+                t,
+            ));
+            if ok {
+                p.last_mut().unwrap().treatment.tokens = Some(100.0);
+            }
+        }
+        assert_eq!(verdicts_of(&p).c7_cost, Verdict::Holds);
+    }
 }
