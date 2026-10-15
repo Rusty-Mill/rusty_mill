@@ -3,7 +3,7 @@
 
 mod common;
 use common::*;
-use rusty_bbp::metrics::{self, Overlap, Work};
+use rusty_bbp::metrics::{self, GateKind, Overlap, Work};
 use rusty_bbp::*;
 
 const WON: &[u8] = b"--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n";
@@ -132,7 +132,10 @@ fn refusals_and_stale_writes_are_counted_once() {
 
 /// Two testers are live together (finalizers are serialized, testers are not).
 /// `tester2` appends a finding during `tester`'s turn; `then` is what `tester`
-/// does between that finding and its approve.
+/// does between that finding and its approve. The engine now refuses an
+/// approve over unread content, so the live turn's `unseen` set is cleared
+/// first: this emulates a log written before the refusal existed, which is what
+/// the counter still has to read.
 fn verdict_after_finding(then: impl FnOnce(&mut Fx)) -> (u64, u64) {
     let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
     fx.reach_test();
@@ -149,9 +152,35 @@ fn verdict_after_finding(then: impl FnOnce(&mut Fx)) -> (u64, u64) {
         .evidence(vec![Ref::art(report)]);
     posted(fx.post("tester2", finding));
     then(&mut fx);
+    fx.d.state.turns.iter_mut().for_each(|t| t.unseen.clear());
     posted(fx.verdict("tester", VerdictKind::Approve));
     let m = metrics::of(&log_of(&fx));
     (m.verdicts, m.stale_verdicts)
+}
+
+/// The refusal and the counter agree: the engine refuses the stale verdict, so
+/// the log of a current build holds none.
+#[test]
+fn the_engine_refuses_what_the_counter_would_count() {
+    let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let read = AgentAction::Read {
+        after: None,
+        limit: 50,
+    };
+    assert!(matches!(fx.agent("tester", read), Response::Read { .. }));
+    let (cand, report) = (fx.st().candidate.unwrap(), fx.report_id());
+    let finding = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", finding));
+    assert_eq!(
+        rejected(fx.verdict("tester", VerdictKind::Approve)),
+        Code::StaleSubject
+    );
+    let m = metrics::of(&log_of(&fx));
+    assert_eq!((m.verdicts, m.stale_verdicts), (0, 0));
 }
 
 #[test]
@@ -217,4 +246,41 @@ fn a_serialized_run_has_nothing_to_report() {
     );
     assert_eq!(m.discarded_share, 0.0);
     assert_eq!(m.discarded.bytes, 0);
+}
+
+#[test]
+fn each_human_gate_answer_is_listed_with_the_op_that_carried_it() {
+    let mut fx = Fx::new();
+    fx.reach_approved();
+    let log = log_of(&fx);
+    let got = metrics::gate_answers(&log);
+    assert_eq!(
+        got.iter().map(|g| g.gate).collect::<Vec<_>>(),
+        [GateKind::PlanApproval, GateKind::MergeApproval]
+    );
+    assert_ne!(got[0].op, got[1].op);
+    // The op is the one the human command carried.
+    let human_ops: Vec<&OpId> = log
+        .iter()
+        .filter_map(|e| match e {
+            Event::OpAccepted { principal, op, .. } if *principal == fx.st().human => Some(op),
+            _ => None,
+        })
+        .collect();
+    assert!(got.iter().all(|g| human_ops.contains(&&g.op)));
+}
+
+#[test]
+fn a_rejection_is_a_gate_answer_and_agent_ops_are_not() {
+    let mut fx = Fx::new();
+    fx.reach_plan_gate();
+    let rev = fx.rev();
+    ok(fx.human(HumanAction::Reject {
+        expected_rev: rev,
+        target: State::Planning,
+        reason: "again".into(),
+    }));
+    let got = metrics::gate_answers(&log_of(&fx));
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].gate, GateKind::Rejection);
 }

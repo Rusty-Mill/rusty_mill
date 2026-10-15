@@ -25,6 +25,7 @@ pub mod profiles;
 pub mod report;
 pub mod runner;
 pub mod shadow;
+pub mod tokens;
 pub mod why;
 
 use rusty_bbp::*;
