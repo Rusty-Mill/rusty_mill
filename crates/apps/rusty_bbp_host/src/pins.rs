@@ -1,7 +1,7 @@
 //! Pre-run checks on an agents file: every launched role pins a model, every
 //! pinned model has a price, and the two arms of a pair pin the same models.
-//! A pin is `--model ID` or `--model=ID` anywhere in a launcher's program or
-//! arguments (so it is found inside an `sh -c` command line too). The checks
+//! A pin is `--model ID` or `--model=ID` on a `claude` command of a launcher,
+//! found inside an `sh -c` script too. The checks
 //! read the file, not the run: `bbp pairs` repeats them on what the harnesses
 //! actually used.
 
@@ -9,33 +9,178 @@ use crate::moderator::{Launcher, Launchers};
 use crate::tokens::Criteria;
 use std::collections::{BTreeMap, BTreeSet};
 
-fn unquote(t: &str) -> &str {
-    t.trim_matches(|c| matches!(c, '"' | '\'' | ';' | ','))
-}
-
-/// The model a launcher pins. `Ok(None)` when it pins none; an error when it
-/// pins two different ones, since the harness would take only one.
-pub fn pinned_model(l: &Launcher) -> Result<Option<String>, String> {
-    let words: Vec<&str> = std::iter::once(l.program.as_str())
-        .chain(l.args.iter().map(String::as_str))
-        .flat_map(str::split_whitespace)
-        .map(unquote)
-        .collect();
-    let mut found: BTreeSet<&str> = BTreeSet::new();
-    for (i, w) in words.iter().enumerate() {
-        if let Some(v) = w.strip_prefix("--model=") {
-            found.insert(unquote(v));
-        } else if *w == "--model" {
-            if let Some(v) = words.get(i + 1) {
-                found.insert(v);
+/// Split a shell script into simple commands of unquoted words. Handles
+/// quotes, backslashes, `#` comments and the command separators; not
+/// substitutions or here-documents, which a launcher has no need for.
+fn commands(script: &str) -> Vec<Vec<String>> {
+    let (mut out, mut cmd, mut word) = (Vec::new(), Vec::new(), String::new());
+    let mut in_word = false;
+    let mut chars = script.chars().peekable();
+    let end_word = |cmd: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
+        if std::mem::take(in_word) {
+            cmd.push(std::mem::take(word));
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                word.extend(chars.by_ref().take_while(|q| *q != '\''));
+            }
+            '"' => {
+                in_word = true;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => break,
+                        '\\' => word.extend(chars.next()),
+                        _ => word.push(q),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                word.extend(chars.next());
+            }
+            '#' if !in_word => {
+                chars.by_ref().find(|q| *q == '\n');
+                end_word(&mut cmd, &mut word, &mut in_word);
+                out.push(std::mem::take(&mut cmd));
+            }
+            ';' | '&' | '|' | '\n' | '(' | ')' => {
+                end_word(&mut cmd, &mut word, &mut in_word);
+                out.push(std::mem::take(&mut cmd));
+            }
+            c if c.is_whitespace() => end_word(&mut cmd, &mut word, &mut in_word),
+            c => {
+                in_word = true;
+                word.push(c);
             }
         }
     }
-    found.remove("");
+    end_word(&mut cmd, &mut word, &mut in_word);
+    out.push(cmd);
+    out.retain(|c| !c.is_empty());
+    out
+}
+
+/// Environment variables that change the model or the cache lifetime behind
+/// the pin's back. The moderator sets the TTLs itself; a launcher may not.
+const FORBIDDEN_ENV: [&str; 8] = [
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_PROMPT_CACHE_TTL",
+    "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
+];
+
+fn is_assignment(w: &str) -> Option<&str> {
+    let (name, _) = w.split_once('=')?;
+    let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    ok.then_some(name)
+}
+
+fn base(w: &str) -> &str {
+    w.rsplit('/').next().unwrap_or(w)
+}
+
+fn check_env(name: &str) -> Result<(), String> {
+    if FORBIDDEN_ENV.contains(&name) {
+        return Err(format!(
+            "the launcher sets {name}, which the pin cannot see"
+        ));
+    }
+    Ok(())
+}
+
+/// The model pins of one command, or an error for flags that route around a pin.
+fn pins_of(cmd: &[String], found: &mut BTreeSet<String>) -> Result<(), String> {
+    // Leading assignments, then wrappers that run the next word.
+    let mut i = 0;
+    while let Some(name) = cmd.get(i).and_then(|w| is_assignment(w)) {
+        check_env(name)?;
+        i += 1;
+    }
+    while let Some(w) = cmd.get(i) {
+        match base(w) {
+            "exec" | "command" | "nohup" | "time" | "env" | "export" => {
+                i += 1;
+                while let Some(name) = cmd.get(i).and_then(|w| is_assignment(w)) {
+                    check_env(name)?;
+                    i += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    let Some(program) = cmd.get(i) else {
+        return Ok(());
+    };
+    let args = &cmd[i + 1..];
+    match base(program) {
+        "sh" | "bash" | "dash" | "zsh" => {
+            if let Some(at) = args.iter().position(|a| a == "-c") {
+                if let Some(script) = args.get(at + 1) {
+                    return scan(script, found);
+                }
+            }
+            Ok(())
+        }
+        "claude" => flags(args, found),
+        _ => Ok(()),
+    }
+}
+
+fn flags(args: &[String], found: &mut BTreeSet<String>) -> Result<(), String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v)),
+            _ => (a.as_str(), None),
+        };
+        match flag {
+            "--fallback-model" => {
+                return Err("--fallback-model can switch the model mid-run".into())
+            }
+            "--agents" => return Err("--agents can define a subagent with its own model".into()),
+            "--model" => {
+                let v = inline
+                    .or_else(|| it.next().map(String::as_str))
+                    .unwrap_or("");
+                if v.contains(['{', '}', '$']) {
+                    return Err(format!("--model {v} is a placeholder, not a model name"));
+                }
+                if !v.is_empty() {
+                    found.insert(v.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn scan(script: &str, found: &mut BTreeSet<String>) -> Result<(), String> {
+    commands(script).iter().try_for_each(|c| pins_of(c, found))
+}
+
+/// The model a launcher pins: `--model ID` or `--model=ID` on a `claude`
+/// command, direct or inside an `sh -c` script. Prompt text, comments and other
+/// commands do not count. `Ok(None)` when it pins none; an error when it pins
+/// two different ones (the harness would take only one), names a placeholder,
+/// or uses `--fallback-model`, `--agents` or a model-routing environment
+/// variable.
+pub fn pinned_model(l: &Launcher) -> Result<Option<String>, String> {
+    let mut cmd = vec![l.program.clone()];
+    cmd.extend(l.args.iter().cloned());
+    let mut found = BTreeSet::new();
+    pins_of(&cmd, &mut found)?;
     let mut it = found.into_iter();
     match (it.next(), it.next()) {
         (None, _) => Ok(None),
-        (Some(m), None) => Ok(Some(m.to_owned())),
+        (Some(m), None) => Ok(Some(m)),
         (Some(a), Some(b)) => Err(format!("pins both {a} and {b}")),
     }
 }
@@ -269,5 +414,27 @@ mod tests {
             &["--model", "m1", "--agents", "{\"h\":{\"model\":\"haiku\"}}"],
         );
         assert!(pinned_model(&agents).unwrap_err().contains("agents"));
+    }
+
+    #[test]
+    fn a_launcher_may_not_route_the_model_or_the_cache_lifetime_by_environment() {
+        for script in [
+            "ANTHROPIC_MODEL=haiku exec claude --model m1",
+            "export CLAUDE_CODE_SUBAGENT_MODEL=haiku; exec claude --model m1",
+            "env CLAUDE_CODE_PROMPT_CACHE_TTL=5m claude --model m1",
+            "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL=5m claude --model m1",
+        ] {
+            let l = launcher("sh", &["-c", script]);
+            assert!(pinned_model(&l).unwrap_err().contains("sets"), "{script}");
+        }
+        // The same words in a prompt are only text.
+        let l = launcher("sh", &["-c", "claude --model m1 -p 'ANTHROPIC_MODEL=x'"]);
+        assert_eq!(pinned_model(&l).unwrap(), Some("m1".into()));
+    }
+
+    #[test]
+    fn a_pin_on_a_command_that_is_not_claude_is_not_a_pin() {
+        let l = launcher("sh", &["-c", "grep --model m1 f; exec claude -p x"]);
+        assert_eq!(pinned_model(&l).unwrap(), None);
     }
 }
