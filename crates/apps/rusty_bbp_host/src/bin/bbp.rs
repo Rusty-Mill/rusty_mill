@@ -13,7 +13,7 @@
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
-//! bbp grade   pack --manifest M --rubrics D --seed S --out O | join --key K --scores S --rubrics D   blind rubric grading
+//! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--max-usd C --criteria FILE]
@@ -47,8 +47,15 @@ fn run() -> Result<String, String> {
             "pack" => {
                 grade::write_pack(&p("manifest")?, &p("rubrics")?, a.flag("seed")?, &p("out")?)
             }
-            "join" => grade::join_files(&p("key")?, &p("scores")?, &p("rubrics")?),
-            other => Err(format!("unknown grade action {other} (pack|join)")),
+            "release" => grade::release_files(&p("key")?, &p("held")?, &p("scores")?, &p("out")?),
+            "join" => grade::join_files(
+                &p("key")?,
+                &p("scores")?,
+                &p("unused-scores")?,
+                &p("release")?,
+                &p("rubrics")?,
+            ),
+            other => Err(format!("unknown grade action {other} (pack|release|join)")),
         };
     }
     if sub == "agents-check" {

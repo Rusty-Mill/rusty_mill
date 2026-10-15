@@ -1332,7 +1332,9 @@ fn grade_pack_and_join_work_on_real_run_dirs() {
         .map(|r| r[..16].to_owned())
         .collect();
     assert_eq!(ids.len(), 2);
-    assert_eq!(read("unused.json"), "[]");
+    // The unused versions are held back until the approved scores are sealed.
+    assert!(!out.join("pack").join("unused.json").exists());
+    assert_eq!(read("unused.held.json"), "[]");
     for leak in ["control", "treatment", "grade-c", "grade-t"] {
         assert!(!read("pack.json").contains(leak), "pack leaks {leak}");
     }
@@ -1349,6 +1351,40 @@ fn grade_pack_and_join_work_on_real_run_dirs() {
     )
     .unwrap();
     let key = out.join("pack").join("key.json");
+    let held = out.join("pack").join("unused.held.json");
+    let release_dir = out.join("release");
+    let release = || {
+        bbp(&[
+            flag("release"),
+            flag("--key"),
+            &key,
+            flag("--held"),
+            &held,
+            flag("--scores"),
+            &scores,
+            flag("--out"),
+            &release_dir,
+        ])
+    };
+    // Partial approved scores do not release anything.
+    let (ok, _, err) = release();
+    assert!(!ok && err.contains("approved"), "{err}");
+    assert!(!release_dir.join("unused.json").exists());
+    std::fs::write(
+        &scores,
+        format!(r#"{{"grader":"g","met":{{{}}}}}"#, met(&ids)),
+    )
+    .unwrap();
+    let (ok, released, err) = release();
+    assert!(ok, "bbp grade release: {err}");
+    assert!(released.contains("approved_scores_sha256"), "{released}");
+    assert_eq!(
+        std::fs::read_to_string(release_dir.join("unused.json")).unwrap(),
+        "[]"
+    );
+    let unused_scores = out.join("unused-scores.json");
+    std::fs::write(&unused_scores, r#"{"grader":"g","met":{}}"#).unwrap();
+    let record = release_dir.join("release.json");
     let join = || {
         bbp(&[
             flag("join"),
@@ -1356,20 +1392,28 @@ fn grade_pack_and_join_work_on_real_run_dirs() {
             &key,
             flag("--scores"),
             &scores,
+            flag("--unused-scores"),
+            &unused_scores,
+            flag("--release"),
+            &record,
             flag("--rubrics"),
             &rubrics,
         ])
     };
-    let (ok, _, err) = join();
-    assert!(!ok && err.contains("sealed"), "{err}");
-    std::fs::write(
-        &scores,
-        format!(r#"{{"grader":"g","met":{{{}}}}}"#, met(&ids)),
-    )
-    .unwrap();
     let (ok, joined, err) = join();
     assert!(ok, "bbp grade join: {err}");
     assert!(joined.contains("\"rubric_ok\":true"), "{joined}");
+    // The approved scores were edited after the release: refused.
+    std::fs::write(
+        &scores,
+        format!(
+            r#"{{"grader":"g","met":{{{}}}}}"#,
+            met(&ids).replace("false", "true")
+        ),
+    )
+    .unwrap();
+    let (ok, _, err) = join();
+    assert!(!ok && err.contains("after the release"), "{err}");
     for d in [cdir, tdir, out] {
         let _ = std::fs::remove_dir_all(d);
     }
