@@ -11,6 +11,7 @@
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
+//! bbp grade   pack --manifest M --rubrics D --seed S --out O | join --key K --scores S --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T                             model tokens per turn, from the harness output, as JSON
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N]
@@ -19,8 +20,8 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, args::Args, human, mcp, moderator, pairs, profiles, report, response_json, runner,
-    shadow, tokens,
+    admin, args::Args, grade, human, mcp, moderator, pairs, profiles, report, response_json,
+    runner, shadow, tokens,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -29,7 +30,7 @@ use std::process::ExitCode;
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let sub = argv.first().cloned().ok_or(
-        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|shadow|mod> ...",
+        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|grade|shadow|mod> ...",
     )?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
@@ -38,6 +39,16 @@ fn run() -> Result<String, String> {
         std::process::exit(i32::from(rusty_sandbox::SETUP_FAILED));
     }
     let a = Args::parse(argv.into_iter().skip(1));
+    if sub == "grade" {
+        let p = |k: &str| a.flag(k).map(PathBuf::from);
+        return match a.pos(0)? {
+            "pack" => {
+                grade::write_pack(&p("manifest")?, &p("rubrics")?, a.flag("seed")?, &p("out")?)
+            }
+            "join" => grade::join_files(&p("key")?, &p("scores")?, &p("rubrics")?),
+            other => Err(format!("unknown grade action {other} (pack|join)")),
+        };
+    }
     if sub == "pairs" {
         return pairs::json(&PathBuf::from(a.flag("manifest")?));
     }

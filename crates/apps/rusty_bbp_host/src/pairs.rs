@@ -325,7 +325,9 @@ pub struct RunRef {
     pub task: String,
     /// The saved stdout of `bbp mod` for this run.
     pub mod_output: String,
-    /// The grader's verdict for this run's approved spec (`bbp grade`).
+    /// The grader's verdict for this run's approved spec (`bbp grade join`).
+    /// Absent before grading, which reads as not met.
+    #[rusty_serde(default)]
     pub rubric_ok: bool,
 }
 
