@@ -6,13 +6,14 @@ A quick look at car and ball error per scenario (the full table is
 `run_batch.ps1 -ScoreOnly`). Scenario files are looked up in `scenarios/`
 then `experiments/`.
 """
+import os
 import pathlib
 import re
 import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+VERIFY = pathlib.Path(os.environ.get("RB_VERIFY") or ROOT / "target" / "release" / "rb-verify.exe")
 BOT = ROOT / "tools" / "rb_tape_bot"
 
 

@@ -7,13 +7,14 @@ error on ticks where any wheel's hit normal changed against the ticks where none
 A facet crossing that explains the wall error shows as a much larger mean error on the
 FACET ticks, and an error that has a direction (here its mean vector in world axes).
 """
+import os
 import re
 import statistics
 import subprocess
 import sys
 
 ROOT = __file__.replace("\\", "/").rsplit("/tools/", 1)[0]
-VERIFY = ROOT + "/target/release/rb-verify.exe"
+VERIFY = os.environ.get("RB_VERIFY") or ROOT + "/target/release/rb-verify.exe"
 LINE = re.compile(r"dv err \(\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\) \|\s*([\d.]+)\|")
 
 

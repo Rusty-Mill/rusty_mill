@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+VERIFY = pathlib.Path(os.environ.get("RB_VERIFY") or ROOT / "target" / "release" / "rb-verify.exe")
 STATE = re.compile(
     r"car (\d) tick\s+(\d+): rec pos \(\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\).*?pred pos \(\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\)"
 )
