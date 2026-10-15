@@ -19,23 +19,21 @@ Keep changes focused, preserve unrelated work, and add or update the PR's
 - Validate the affected scope using repository checks; a local `cargo check` alone
   does not establish green CI or merge readiness.
 
-## Super-board — deferred and unavailable
+## Super-board — present, inactive
 
-The super-board skills, scripts, hooks, workflows and settings are not shipped
-in this checkout. `/super-review` and the super-board merge gate are unavailable;
-mandatory use of them is deferred, not a prerequisite for the workflow above.
-The same applies to `/super-board`, `/super-build`, `/super-qa`, `/super-collect`,
-`/git-sync`, `/ui-refine-loop` and `/visual` from that removed bundle.
+The super-board skills, scripts, hooks, workflows and tests are in `.claude/`, but nothing
+activates them. No permission rules and no auto-run hooks are committed; the guard hooks in
+`.claude/settings.json` only deny. The board config is documentation at
+[proposed-config.md](docs/super-board/proposed-config.md), outside the discovery path, so
+`/super-board run` and the merge gate have no config to run from. Do not add one.
 
-Removed writing standards, ticket-format and block templates, PR author notes,
-`super-board-pr-body.sh` and `super-board-env-check.sh` are deferred references,
-not installed helpers or required commands. The standalone
-[issue template](docs/agents/issue-tracker.md) remains available as documentation.
+The proposed [permissions and session hook](docs/super-board/proposed-settings.md) are
+proposals, not authority. Their writing standards, ticket format, block templates and
+PR author notes ship with the tooling and are not required by the workflow above. The
+standalone [issue template](docs/agents/issue-tracker.md) is documentation.
 
-The [proposed configuration](docs/super-board/proposed-config.md) is inactive
-reference material outside the operational discovery path. Its staging target,
-automatic merge and test/staging migration settings are proposals, not established
-authority. These docs do not authorize activation, automatic merges, migrations,
-permission changes or credential operations, including through local tooling copies.
-A separately reviewed implementation and an explicit bounded owner policy decision
-are required before any activation. Do not restore tooling to satisfy these docs.
+These docs do not authorize activation, automatic merges, migrations, permission changes
+or credential operations, including through local copies of the config or settings.
+Activation needs an independent review of the tooling and an explicit bounded owner policy
+decision on autonomy, permissions and migrations. `/super-review` and the super-board merge
+gate stay out of the workflow above until then.
