@@ -409,6 +409,11 @@ pub fn pinned_model(l: &Launcher) -> Result<Option<String>, String> {
     }
 }
 
+/// What an evidence run needs of every launched harness besides its pin.
+pub fn check_harness(_l: &Launcher) -> Result<(), String> {
+    Ok(())
+}
+
 /// Role to model for every role in the agents file. Every role must pin one.
 pub fn pins(l: &Launchers) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
@@ -875,5 +880,217 @@ mod tests {
             );
             assert!(pinned_model(&sh).is_err(), "{bad}");
         }
+    }
+
+    // ---- second review (findings 3, 4 and the cap's input)
+
+    fn refused(l: &Launcher) -> bool {
+        pinned_model(l).is_err()
+    }
+
+    #[test]
+    fn a_direct_launcher_may_not_route_models_by_flag() {
+        let fb = launcher(
+            "claude",
+            &["--model", "m1", "--fallback-model", "m2", "-p", "x"],
+        );
+        assert!(refused(&fb), "--fallback-model");
+        let fb = launcher("claude", &["--model", "m1", "--fallback-model=m2"]);
+        assert!(refused(&fb), "--fallback-model=");
+        let ag = launcher(
+            "claude",
+            &["--model", "m1", "--agents", "{\"a\":{\"model\":\"m9\"}}"],
+        );
+        assert!(refused(&ag), "--agents");
+        let st = launcher(
+            "claude",
+            &[
+                "--model",
+                "m1",
+                "--settings",
+                "{\"env\":{\"CLAUDE_CODE_SUBAGENT_MODEL\":\"m9\"}}",
+            ],
+        );
+        assert!(refused(&st), "--settings");
+        let st = launcher("claude", &["--model", "m1", "--settings=x.json"]);
+        assert!(refused(&st), "--settings=");
+        let sh = launcher(
+            "sh",
+            &["-c", "exec claude --model m1 --settings x.json -p y"],
+        );
+        assert!(refused(&sh), "--settings in a script");
+    }
+
+    #[test]
+    fn a_direct_launcher_may_not_set_the_environment() {
+        for l in [
+            launcher(
+                "env",
+                &["CLAUDE_CODE_SUBAGENT_MODEL=m9", "claude", "--model", "m1"],
+            ),
+            launcher(
+                "env",
+                &["CLAUDE_CODE_PROMPT_CACHE_TTL=5m", "claude", "--model", "m1"],
+            ),
+        ] {
+            assert!(refused(&l), "{l:?}");
+        }
+    }
+
+    #[test]
+    fn the_program_must_be_claude() {
+        for l in [
+            launcher("sh", &["./wrapper.sh", "--model", "m1"]),
+            launcher("python3", &["-c", "import os", "--model", "m1"]),
+            launcher("/usr/bin/true", &["--model", "m1"]),
+            launcher("/tmp/evil/claude", &["--model", "m1"]),
+            launcher("./claude", &["--model", "m1"]),
+            launcher(
+                "sh",
+                &["-c", "cp /tmp/evil ./claude; exec ./claude --model m1"],
+            ),
+            launcher("sh", &["-c", "exec /tmp/evil/claude --model m1"]),
+        ] {
+            assert!(refused(&l), "{l:?}");
+        }
+        assert_eq!(
+            pinned_model(&launcher("claude", &["--model", "m1"])).unwrap(),
+            Some("m1".into())
+        );
+    }
+
+    #[test]
+    fn what_follows_a_double_dash_is_prompt_not_flags() {
+        let direct = launcher("claude", &["-p", "--", "--model", "m1"]);
+        assert_eq!(pinned_model(&direct).unwrap(), None);
+        let sh = launcher("sh", &["-c", "exec claude -p -- --model m1"]);
+        assert_eq!(pinned_model(&sh).unwrap(), None);
+        // A real pin before the `--` still counts, and flags after it are text.
+        let both = launcher(
+            "claude",
+            &["--model", "m1", "-p", "--", "--fallback-model", "x"],
+        );
+        assert_eq!(pinned_model(&both).unwrap(), Some("m1".into()));
+    }
+
+    /// A launcher with everything an evidence run needs.
+    fn harness_ok() -> Launcher {
+        launcher(
+            "claude",
+            &[
+                "-p",
+                "x",
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--disallowedTools",
+                "Agent,Task",
+            ],
+        )
+    }
+
+    #[test]
+    fn a_harness_with_stream_json_and_no_subagents_passes() {
+        assert_eq!(check_harness(&harness_ok()), Ok(()));
+        let eq = launcher(
+            "claude",
+            &[
+                "--model=m1",
+                "--output-format=stream-json",
+                "--tools",
+                "Bash,Read",
+            ],
+        );
+        assert_eq!(
+            check_harness(&eq),
+            Ok(()),
+            "an allow-list with no Agent or Task"
+        );
+        let sh = launcher(
+            "sh",
+            &["-c", "set -e; exec claude -p x --model m1 --output-format stream-json --verbose --disallowedTools 'Agent Task'"],
+        );
+        assert_eq!(check_harness(&sh), Ok(()));
+    }
+
+    #[test]
+    fn a_harness_must_print_stream_json_to_its_log() {
+        let no_format = launcher(
+            "claude",
+            &["--model", "m1", "--disallowedTools", "Agent,Task"],
+        );
+        assert!(check_harness(&no_format).is_err(), "no --output-format");
+        let text = launcher(
+            "claude",
+            &[
+                "--model",
+                "m1",
+                "--output-format",
+                "text",
+                "--disallowedTools",
+                "Agent,Task",
+            ],
+        );
+        assert!(check_harness(&text).is_err(), "--output-format text");
+        let redirect = launcher(
+            "sh",
+            &["-c", "exec claude --model m1 --output-format stream-json --disallowedTools Agent,Task > /tmp/x"],
+        );
+        assert!(check_harness(&redirect).is_err(), "redirect");
+        let piped = launcher(
+            "sh",
+            &["-c", "claude --model m1 --output-format stream-json --disallowedTools Agent,Task | tee /tmp/x"],
+        );
+        assert!(check_harness(&piped).is_err(), "pipe");
+        let err = launcher(
+            "sh",
+            &["-c", "exec claude --model m1 --output-format stream-json --disallowedTools Agent,Task 2>/dev/null"],
+        );
+        assert!(check_harness(&err).is_err(), "stderr redirect");
+    }
+
+    #[test]
+    fn a_harness_must_not_be_able_to_start_subagents() {
+        let open = launcher(
+            "claude",
+            &["--model", "m1", "--output-format", "stream-json"],
+        );
+        assert!(check_harness(&open).unwrap_err().contains("subagent"));
+        let half = launcher(
+            "claude",
+            &[
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--disallowedTools",
+                "Task",
+            ],
+        );
+        assert!(check_harness(&half).is_err(), "Agent is still allowed");
+        let allow = launcher(
+            "claude",
+            &[
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--tools",
+                "Bash,Agent",
+            ],
+        );
+        assert!(check_harness(&allow).is_err(), "Agent in the allow-list");
+    }
+
+    #[test]
+    fn check_run_applies_the_harness_checks() {
+        let good = Launchers::default().with("planner", harness_ok());
+        assert!(check_run(&good, &criteria(&["m1"])).is_ok());
+        let bad =
+            Launchers::default().with("planner", launcher("claude", &["--model", "m1", "-p", "x"]));
+        let err = check_run(&bad, &criteria(&["m1"])).unwrap_err();
+        assert!(err.contains("planner"), "{err}");
     }
 }

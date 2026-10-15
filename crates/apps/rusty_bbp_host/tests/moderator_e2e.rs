@@ -21,7 +21,27 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
+/// A `claude` on PATH that runs the role's script from `agents-bin/`, so test
+/// launchers can be what an evidence run requires: the program `claude`.
+fn fake_claude_on_path() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let bin = std::env::temp_dir().join(format!("bbp_fake_claude_{}", std::process::id()));
+        std::fs::create_dir_all(&bin).expect("mkdir");
+        let claude = bin.join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nexec sh \"$BBP_DIR/agents-bin/$BBP_ROLE.sh\" \"$@\"\n",
+        )
+        .expect("write claude");
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+    });
+}
+
 fn tempdir(tag: &str) -> PathBuf {
+    fake_claude_on_path();
     let dir = std::env::temp_dir().join(format!("bbp_mod_{}_{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
@@ -697,15 +717,24 @@ fn a_roster_without_a_finalizer_is_refused_at_open() {
 /// A shell harness: `body` runs under `/bin/sh` with `$1` the task directory
 /// and `$BBP_BIN` the `bbp` binary. Not a protocol client by itself.
 fn script(dir: &Path, name: &str, body: &str) -> Launcher {
-    // Named `claude`, like the real harness, so the agents-file check sees it.
-    let bin = dir.join("agents-bin").join(name);
+    let bin = dir.join("agents-bin");
     std::fs::create_dir_all(&bin).expect("mkdir");
-    let path = bin.join("claude");
+    let path = bin.join(format!("{name}.sh"));
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // What an evidence run requires of a launcher, less the pin the test adds.
     Launcher {
-        program: path.to_string_lossy().into_owned(),
-        args: vec!["{dir}".into()],
+        program: "claude".into(),
+        args: [
+            "{dir}",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--disallowedTools",
+            "Agent,Task",
+        ]
+        .map(String::from)
+        .into(),
         builtin_tools: false,
     }
 }
@@ -953,6 +982,17 @@ fn capped_run(
     cap_usd: f64,
     wall: u64,
 ) -> Result<moderator::Outcome, String> {
+    capped_run_by(tag, pin, model_in_output, cap_usd, wall, moderator::run)
+}
+
+fn capped_run_by(
+    tag: &str,
+    pin: Option<&str>,
+    model_in_output: &str,
+    cap_usd: f64,
+    wall: u64,
+    run: fn(&Config) -> Result<moderator::Outcome, String>,
+) -> Result<moderator::Outcome, String> {
     let dir = tempdir(tag);
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
@@ -986,7 +1026,7 @@ fn capped_run(
     let launchers = Launchers::default().with("planner", planner);
     let mut cfg = config(&dir, &task, repo, launchers, wall);
     cfg.cost_cap = Some(cost_cap(cap_usd));
-    let out = moderator::run(&cfg);
+    let out = run(&cfg);
     let _ = std::fs::remove_dir_all(&dir);
     out
 }
@@ -1291,4 +1331,167 @@ fn grade_pack_and_join_work_on_real_run_dirs() {
     for d in [cdir, tdir, out] {
         let _ = std::fs::remove_dir_all(d);
     }
+}
+
+// ---- second review: findings 1, 2, 4, 5
+
+#[test]
+fn a_run_stopped_by_the_cap_is_an_outcome_with_its_stop_and_its_replay() {
+    let out = capped_run_by(
+        "stop-cap",
+        Some("priced-model"),
+        "priced-model",
+        1.0,
+        30,
+        moderator::run_to_stop,
+    )
+    .expect("a cap stop is reported, not lost");
+    let stop = out.stop.expect("stop");
+    assert_eq!(stop.kind, moderator::StopKind::Cap);
+    assert!(stop.reason.contains("cost cap reached"), "{}", stop.reason);
+    assert!(out.replay_equals_live, "the replay is still checked");
+    assert!(!out.state.terminal());
+}
+
+#[test]
+fn a_run_stopped_by_the_wall_limit_is_an_outcome_with_its_stop() {
+    let out = capped_run_by(
+        "stop-wall",
+        Some("priced-model"),
+        "priced-model",
+        1000.0,
+        3,
+        moderator::run_to_stop,
+    )
+    .expect("a wall stop is reported, not lost");
+    assert_eq!(out.stop.expect("stop").kind, moderator::StopKind::Wall);
+}
+
+/// Everything `bbp mod` needs for a capped run of a planner that prints `body`.
+fn mod_cli(tag: &str, body: &str) -> (std::process::Output, PathBuf) {
+    let (dir, task, repo) = opened(tag);
+    let planner = script(&dir, "planner", body);
+    let mut l = planner;
+    l.args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let agents = dir.join("agents.json");
+    std::fs::write(
+        &agents,
+        format!(
+            r#"{{"planner":{{"program":"claude","args":{},"builtin_tools":false}}}}"#,
+            rusty_serde::json::to_string(&l.args).expect("args")
+        ),
+    )
+    .expect("agents");
+    let criteria = dir.join("criteria.json");
+    std::fs::write(&criteria, SONNET_PRICES).expect("criteria");
+    let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["mod", "--dir"])
+        .arg(&dir)
+        .args(["--task", &task.0, "--repo-path"])
+        .arg(&repo)
+        .arg("--work")
+        .arg(dir.join("work"))
+        .arg("--agents")
+        .arg(&agents)
+        .args([
+            "--confine",
+            "none",
+            "--poll-ms",
+            "50",
+            "--max-wall-secs",
+            "30",
+            "--max-usd",
+            "1",
+        ])
+        .arg("--criteria")
+        .arg(&criteria)
+        .output()
+        .expect("run bbp mod");
+    (out, dir)
+}
+
+const TEN_DOLLARS: &str = r#"echo '{"type":"assistant","message":{"id":"m1","model":"claude-sonnet-5-5","usage":{"input_tokens":0,"output_tokens":1000000}}}'
+sleep 60"#;
+
+#[test]
+fn bbp_mod_prints_its_json_with_the_stop_reason_when_the_cap_stops_the_run() {
+    let (out, dir) = mod_cli("cli-cap", TEN_DOLLARS);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "a stopped run is not a success");
+    assert!(stdout.contains("\"stop\":\"cap\""), "stdout: {stdout:?}");
+    let facts = rusty_bbp_host::pairs::mod_facts(&stdout).expect("loads");
+    assert_eq!(facts.stop.as_deref(), Some("cap"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_task_started_uncapped_cannot_be_resumed_with_a_cap_and_counted() {
+    let (dir, task, repo) = opened("uncapped-first");
+    let mut planner = script(&dir, "planner", "sleep 60");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let first = config(&dir, &task, repo.clone(), launchers.clone(), 2);
+    let e1 = moderator::run(&first).expect_err("wall limit");
+    assert!(e1.contains("wall limit"), "{e1}");
+    let mut second = config(&dir, &task, repo, launchers, 2);
+    second.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let e2 = moderator::run(&second).expect_err("a capped resume of an uncapped task is refused");
+    assert!(e2.contains("refusing to start"), "{e2}");
+    let sha = second.cost_cap.as_ref().unwrap().criteria_sha256.clone();
+    assert!(moderator::require_evidence_marker(&dir, &task, 1000.0, &sha).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_harness_that_prints_garbage_stops_a_capped_run() {
+    let started = Instant::now();
+    let (out, dir) = mod_cli("garbage", "echo 'this is not stream-json'\nsleep 60");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot enforce the cost cap"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "stopped by the cap check, not the wall"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_harness_that_has_printed_nothing_yet_is_left_to_the_wall_limit() {
+    let (dir, task, repo) = opened("silent");
+    let mut planner = script(&dir, "planner", "sleep 60");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 3);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let err = moderator::run(&cfg).expect_err("wall limit");
+    assert!(err.contains("wall limit"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_evidence_runs_harness_gets_the_subagent_model_pinned_to_the_roles_model() {
+    let (dir, task, repo) = opened("subagent-env");
+    let mut planner = script(
+        &dir,
+        "planner",
+        "echo \"$CLAUDE_CODE_SUBAGENT_MODEL\" > \"$1/subagent.txt\"\nsleep 30",
+    );
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 3);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    std::env::set_var("CLAUDE_CODE_SUBAGENT_MODEL", "claude-haiku-5-5");
+    let _ = moderator::run(&cfg);
+    std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL");
+    let seen = std::fs::read_to_string(dir.join("subagent.txt")).expect("the harness ran");
+    assert_eq!(seen.trim(), "claude-sonnet-5-5");
+    let _ = std::fs::remove_dir_all(&dir);
 }

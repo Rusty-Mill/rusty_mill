@@ -129,3 +129,53 @@ fn a_task_that_is_not_terminal_is_left_to_the_poll() {
     assert_eq!(moderator::check_terminal(&cfg, &fx.d), Ok(()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- second review, finding 5: the cap fails closed on output it cannot read
+
+/// A closed task whose first turn's log is exactly `log`.
+fn closed_task_with_log(dir: &Path, log: &str) -> Fx {
+    let fx = closed_task(dir, "priced-model");
+    std::fs::write(moderator::log_path(dir, &fx.st().task, TurnId(1)), log).unwrap();
+    fx
+}
+
+fn terminal(tag: &str, log: &str) -> Result<(), String> {
+    let dir = tempdir(tag);
+    let fx = closed_task_with_log(&dir, log);
+    let cfg = config(&dir, &fx.st().task, Some(cap(1.0)));
+    let r = moderator::check_terminal(&cfg, &fx.d);
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+const TEN_DOLLARS: &str = r#"{"type":"assistant","message":{"id":"m1","model":"priced-model","usage":{"input_tokens":0,"output_tokens":1000000}}}"#;
+/// A completed turn that cost one millionth of a dollar.
+const SMALL_RESULT: &str = r#"{"type":"result","is_error":false,"terminal_reason":"completed","total_cost_usd":0.000001,"modelUsage":{"priced-model":{"inputTokens":1,"outputTokens":0,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}"#;
+
+#[test]
+fn a_log_with_no_stream_json_cannot_be_checked_against_the_cap() {
+    for (what, log) in [("plain text", "just some words\n"), ("empty", "")] {
+        let err = terminal(what, log).unwrap_err();
+        assert!(err.contains("cannot enforce the cost cap"), "{what}: {err}");
+    }
+}
+
+#[test]
+fn an_assistant_message_after_the_last_result_still_counts() {
+    let log = format!("{SMALL_RESULT}\n{TEN_DOLLARS}\n");
+    let err = terminal("after-result", &log).unwrap_err();
+    assert!(err.contains("cost cap reached"), "{err}");
+}
+
+#[test]
+fn a_usage_line_that_does_not_parse_is_not_skipped() {
+    let broken = TEN_DOLLARS.replace(
+        r#""output_tokens":1000000"#,
+        r#""output_tokens":1000000,"cache_creation":null"#,
+    );
+    let err = terminal("null-split", &format!("{broken}\n")).unwrap_err();
+    assert!(err.contains("cannot enforce the cost cap"), "{err}");
+    // Noise around good lines (a harness's stderr is in the same log) is fine.
+    let noisy = format!("warning: slow\n{SMALL_RESULT}\n");
+    assert_eq!(terminal("noisy", &noisy), Ok(()));
+}

@@ -72,7 +72,7 @@ pub struct RunFacts {
 }
 
 impl RunFacts {
-    fn succeeded(&self) -> bool {
+    pub fn succeeded(&self) -> bool {
         self.closed && self.rubric_ok && !self.over_cap
     }
 }
@@ -416,6 +416,8 @@ pub struct ModFacts {
     /// State boundaries up to and including the end of that visit.
     pub spec_boundaries: u64,
     pub replay_equals_live: Option<bool>,
+    /// `cap` or `wall` when the moderator stopped the run.
+    pub stop: Option<String>,
 }
 
 pub fn mod_facts(mod_output: &str) -> Result<ModFacts, String> {
@@ -425,6 +427,7 @@ pub fn mod_facts(mod_output: &str) -> Result<ModFacts, String> {
         spec_wall_ms: at.map(|i| m.state_ms[i].1),
         spec_boundaries: at.map_or(0, |i| i as u64 + 1),
         replay_equals_live: m.replay_equals_live,
+        stop: None,
     })
 }
 
@@ -471,7 +474,12 @@ fn model_evidence(tok: &tokens::TaskTokens) -> (BTreeMap<String, BTreeSet<String
     (role_models, none)
 }
 
-fn facts(r: &RunRef, c: &tokens::Criteria, sha: &str, cap_usd: f64) -> Result<RunFacts, String> {
+pub fn facts(
+    r: &RunRef,
+    c: &tokens::Criteria,
+    sha: &str,
+    cap_usd: f64,
+) -> Result<RunFacts, String> {
     let task = TaskId(r.task.clone());
     crate::moderator::require_evidence_marker(Path::new(&r.dir), &task, cap_usd, sha)?;
     let rep = report::of(Path::new(&r.dir), &task, None)?;
@@ -1601,5 +1609,106 @@ mod tests {
             [&"m1".to_owned()]
         );
         assert!(models["coder"].is_empty());
+    }
+
+    // ---- second review: findings 6, 7, 8
+
+    #[test]
+    fn criterion_one_includes_the_null_pairs_repeat_runs() {
+        let mut p = all([0.5; 5], 1, 1);
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Holds);
+        let null = p.iter().position(|x| x.kind == Kind::Null).unwrap();
+        p[null].treatment.replay_equals_live = Some(false);
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Fails);
+        p[null].treatment.replay_equals_live = None;
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Inconclusive);
+        p[null].treatment.replay_equals_live = Some(true);
+        p[null].control.replay_equals_live = Some(false);
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Fails);
+    }
+
+    fn visits(states: &[&str]) -> String {
+        let v: Vec<String> = states.iter().map(|s| format!("[\"{s}\",100]")).collect();
+        format!(r#"{{"state_ms":[{}]}}"#, v.join(","))
+    }
+
+    #[test]
+    fn the_planning_window_has_the_boundaries_it_has() {
+        // Planning first: the start is exact, so only its end is a boundary.
+        let first = mod_facts(&visits(&["Planning", "PlanGate"])).unwrap();
+        assert_eq!(first.spec_boundaries, 1);
+        // Entered from another state: its start and its end.
+        let later = mod_facts(&visits(&["Assigned", "Planning", "PlanGate"])).unwrap();
+        assert_eq!(later.spec_boundaries, 2);
+        // A first Planning visit after earlier states is still two, not index + 1.
+        let third = mod_facts(&visits(&["Assigned", "Open", "Planning", "PlanGate"])).unwrap();
+        assert_eq!(third.spec_boundaries, 2);
+        let none = mod_facts(&visits(&["Assigned"])).unwrap();
+        assert_eq!((none.spec_wall_ms, none.spec_boundaries), (None, 0));
+    }
+
+    const NOTE: &str = include_str!("../../../../docs/bbp-concurrency-design.md");
+
+    /// The decision table of the note: the Action column, in order.
+    fn note_actions() -> Vec<String> {
+        let at = NOTE
+            .find("| Outcome | Action |")
+            .expect("the decision table");
+        NOTE[at..]
+            .lines()
+            .skip(2)
+            .take_while(|l| l.starts_with('|'))
+            .map(|l| {
+                let cells: Vec<&str> = l.trim_matches('|').splitn(2, '|').collect();
+                cells[1].trim().to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_code_says_what_the_note_says_row_by_row() {
+        let actions = note_actions();
+        let rows: [fn(&mut Evaluation); 11] = [
+            |e| e.noise_gate = Verdict::Fails,
+            |e| e.c1_safety = Verdict::Fails,
+            |e| e.c2_comparable = Verdict::Fails,
+            |e| e.c1_safety = Verdict::Inconclusive,
+            |e| e.c3_parallelism = Verdict::Inconclusive,
+            |e| e.c3_parallelism = Verdict::Fails,
+            |e| e.c7_cost = Verdict::Fails,
+            |e| e.c4_contention = Verdict::Fails,
+            |e| e.c5_loss = Verdict::Fails,
+            |_| {},
+            |e| e.c4_contention = Verdict::Inconclusive,
+        ];
+        assert_eq!(actions.len(), rows.len(), "{actions:#?}");
+        for (i, (cond, action)) in rows.iter().zip(&actions).enumerate() {
+            let mut e = all_hold();
+            cond(&mut e);
+            assert_eq!(&decide(&e), action, "row {i}");
+        }
+    }
+
+    #[test]
+    fn rows_four_and_five_need_their_criteria_to_hold_not_merely_not_fail() {
+        use Verdict::*;
+        let all = [Holds, Fails, Inconclusive];
+        for c7 in all {
+            for c4 in all {
+                for c5 in all {
+                    let mut e = all_hold();
+                    (e.c7_cost, e.c4_contention, e.c5_loss) = (c7, c4, c5);
+                    let got = decide(&e);
+                    let want = match (c7, c4, c5) {
+                        (Fails, _, _) => note_actions()[6].clone(),
+                        (Holds, Fails, _) => note_actions()[7].clone(),
+                        (Holds, Holds, Fails) => note_actions()[8].clone(),
+                        (Holds, Holds, Holds) => note_actions()[9].clone(),
+                        _ => note_actions()[10].clone(),
+                    };
+                    assert_eq!(got, want, "{c7:?} {c4:?} {c5:?}");
+                }
+            }
+        }
     }
 }

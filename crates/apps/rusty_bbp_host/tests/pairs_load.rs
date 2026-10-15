@@ -245,3 +245,50 @@ fn a_granted_turn_with_no_harness_output_names_no_model_and_the_evaluation_refus
         "{err}"
     );
 }
+
+// ---- second review, finding 1: a run the moderator stopped is a failed run
+
+fn stopped_facts(tag: &str, stop: &str) -> pairs::RunFacts {
+    let root = tempdir(tag);
+    let (_repo, head) = checkout(&root);
+    let criteria = root.join("criteria.json");
+    std::fs::write(
+        &criteria,
+        r#"{"prices_as_of":"test","models":{"m":{"input":1,"output":1,"cache_creation_5m":1,"cache_creation_1h":1,"cache_read":1}}}"#,
+    )
+    .unwrap();
+    let out = format!(
+        r#"{{"state":"Planning","turns_launched":1,"runs":0,"elapsed_ms":1,"state_ms":[["Planning",10]],"replay_equals_live":true,"stop":"{stop}","stop_reason":"stopped","bbp_build_sha":"{head}"}}"#
+    );
+    let r = run(&root, "stopped", &out, Some(ASSISTANT));
+    let (c, sha) = rusty_bbp_host::tokens::read_criteria(&criteria).unwrap();
+    let f = pairs::facts(
+        &rusty_bbp_host::pairs::RunRef {
+            dir: r.dir.clone(),
+            task: "T1".into(),
+            mod_output: r.out.clone(),
+            rubric_ok: true,
+        },
+        &c,
+        &sha,
+        CAP_USD,
+    )
+    .expect("a stopped run loads");
+    let _ = std::fs::remove_dir_all(&root);
+    f
+}
+
+#[test]
+fn a_run_stopped_by_the_cap_loads_as_a_failed_run_over_the_cap() {
+    let f = stopped_facts("stopped-cap", "cap");
+    assert!(f.over_cap);
+    assert!(!f.succeeded());
+}
+
+#[test]
+fn a_run_stopped_by_the_wall_limit_loads_as_a_failed_run() {
+    let f = stopped_facts("stopped-wall", "wall");
+    assert!(!f.over_cap);
+    assert!(!f.succeeded());
+    assert_eq!(f.replay_equals_live, Some(true));
+}

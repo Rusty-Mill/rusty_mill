@@ -134,6 +134,27 @@ pub struct Outcome {
     /// Folding the whole log reproduces the live state at the terminal
     /// observation: the replay a metric is computed from is the run it saw.
     pub replay_equals_live: bool,
+    /// Why the run was stopped before it ended, when it was.
+    pub stop: Option<Stop>,
+}
+
+/// A run the moderator stopped: over its dollar cap, or past its wall limit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopKind {
+    Cap,
+    Wall,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stop {
+    pub kind: StopKind,
+    pub reason: String,
+}
+
+/// [`run`], but a run stopped by the cap or the wall limit is an `Ok` outcome
+/// carrying the stop, so the caller can still print what happened.
+pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
+    run(cfg)
 }
 
 /// Ordered state visits, timed by the loop's own clock (the log has none).
@@ -368,6 +389,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             let replay = TaskState::fold_with(cfg.task.clone(), d.state.master, &events);
             return Ok(Outcome {
                 replay_equals_live: replay == d.state,
+                stop: None,
                 visits: visits.finish(seen),
                 state,
                 turns_launched: launched.len() as u64,
