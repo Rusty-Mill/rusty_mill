@@ -48,9 +48,8 @@
 use std::{
     future::Future,
     pin::pin,
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex, PoisonError},
     task::{Context, Poll, Wake, Waker},
-    thread::{self, Thread},
 };
 
 use rusty_http::StatusCode;
@@ -142,11 +141,25 @@ where
 /// The resource-server check over an `Authorization` header value: the pure
 /// steps are in [`decision`]; only the validator is polled here.
 fn authorize(config: &AuthConfig, header: Option<&str>) -> Result<VerifiedToken, Refusal> {
-    let header = header.map_or(AuthorizationHeader::Absent, AuthorizationHeader::Text);
+    let header = header.map_or(AuthorizationHeader::Absent, authorization_text);
     let token = decision::bearer_token(header).map_err(|r| r.refusal(config))?;
     let validated = block_on(config.validator.validate(token));
     let verified = decision::from_validation(validated).map_err(|r| r.refusal(config))?;
     decision::check_claims(config, verified).map_err(|r| r.refusal(config))
+}
+
+/// Classify a present header as the tower layer does: only visible ASCII and
+/// tabs are text (`http::HeaderValue::to_str`), so a value with, say, a
+/// no-break space is refused before token parsing can trim it away.
+fn authorization_text(value: &str) -> AuthorizationHeader<'_> {
+    let text = value
+        .bytes()
+        .all(|b| b == b'\t' || (0x20..0x7f).contains(&b));
+    if text {
+        AuthorizationHeader::Text(value)
+    } else {
+        AuthorizationHeader::NotText
+    }
 }
 
 /// A refusal as a `rusty_serve` response, with its challenge if it has one.
@@ -188,26 +201,46 @@ fn shed_response(rejection: Shed) -> Response {
     }
 }
 
-/// Wakes the thread that is blocked in [`block_on`].
-struct ThreadWaker(Thread);
+/// A wake-up flag private to one [`block_on`] call. Unlike the thread's park
+/// token it cannot be consumed by anything else running on the thread.
+#[derive(Default)]
+struct Signal {
+    woken: Mutex<bool>,
+    changed: Condvar,
+}
 
-impl Wake for ThreadWaker {
+impl Wake for Signal {
     fn wake(self: Arc<Self>) {
-        self.0.unpark();
+        *self.woken.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.changed.notify_one();
     }
 }
 
-/// Drive `future` to completion on this thread, parking while it is pending.
+impl Signal {
+    /// Block until woken since the last call, then clear the flag.
+    fn wait(&self) {
+        let guard = self.woken.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self
+            .changed
+            .wait_while(guard, |woken| !*woken)
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard = false;
+    }
+}
+
+/// Drive `future` to completion on this thread, sleeping while it is pending.
 /// There is no reactor, so only a future that makes progress on its own (or is
-/// woken by another thread) ever finishes.
+/// woken by another thread) ever finishes. A wake that lands during a poll is
+/// remembered, so the next wait returns at once.
 fn block_on<T>(future: impl Future<Output = T>) -> T {
-    let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
+    let signal = Arc::new(Signal::default());
+    let waker = Waker::from(Arc::clone(&signal));
     let mut context = Context::from_waker(&waker);
     let mut future = pin!(future);
     loop {
         match future.as_mut().poll(&mut context) {
             Poll::Ready(value) => return value,
-            Poll::Pending => thread::park(),
+            Poll::Pending => signal.wait(),
         }
     }
 }
@@ -216,6 +249,7 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 mod tests {
     use std::{
         sync::atomic::{AtomicBool, Ordering},
+        thread,
         time::Duration,
     };
 
@@ -253,6 +287,35 @@ mod tests {
     fn block_on_parks_until_the_future_is_woken() {
         let future = WokenByAnotherThread(Arc::new(AtomicBool::new(false)), false);
         assert_eq!(block_on(future), "done");
+    }
+
+    /// Wakes itself during the poll, then burns the thread's park token the way
+    /// a nested `park_timeout` in a validator would, and is pending once.
+    struct WakesThenParks(bool);
+
+    impl Future for WakesThenParks {
+        type Output = ();
+
+        fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                return Poll::Ready(());
+            }
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            thread::current().unpark();
+            thread::park_timeout(Duration::from_millis(10));
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn a_wake_during_the_poll_is_not_lost_to_a_nested_park() {
+        let (done, finished) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            block_on(WakesThenParks(false));
+            let _ = done.send(());
+        });
+        assert!(finished.recv_timeout(Duration::from_secs(5)).is_ok());
     }
 
     #[test]
