@@ -285,3 +285,64 @@ fn reconcile_rejects_a_non_finite_api_cost() {
     assert!(tokens::reconcile(&u, &u, Some((f64::NAN, 1.0)), 0, 0.02).is_err());
     assert!(tokens::reconcile(&u, &u, Some((1.0, f64::INFINITY)), 0, 0.02).is_err());
 }
+
+// ---- captured for the second review (Claude Code 2.1.300, 2026-10-15)
+
+fn real_criteria() -> Criteria {
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/bbp/2b-criteria.json");
+    tokens::read_criteria(&f)
+        .expect("the committed price file")
+        .0
+}
+
+#[test]
+fn opus_priced_from_the_committed_file_matches_the_harness_total_to_the_cent() {
+    let stream = fixture("opus-completed-1h");
+    let Ok(tokens::Cost::Known { usd, models, .. }) = tokens::price_turn(&stream, &real_criteria())
+    else {
+        panic!("an Opus turn at the 1-hour rate prices");
+    };
+    let total = tokens::last_result(&stream)
+        .unwrap()
+        .total_cost_usd
+        .unwrap();
+    assert!((usd - total).abs() < 1e-9, "priced {usd}, harness {total}");
+    assert!(models.contains_key("claude-opus-5-5"));
+}
+
+#[test]
+fn a_settings_env_that_overrides_the_pinned_ttl_is_caught_by_the_five_minute_writes() {
+    // Process env said 1h; `--settings '{"env":{"CLAUDE_CODE_PROMPT_CACHE_TTL":"5m"}}'`
+    // won, and the result shows it.
+    let err = tokens::price_turn(
+        &fixture("settings-env-overrides-ttl"),
+        &criteria("settings", SONNET_ONLY),
+    )
+    .unwrap_err();
+    assert!(err.contains("5 minutes"), "{err}");
+}
+
+#[test]
+fn a_subagent_pinned_to_the_main_model_is_one_priced_model() {
+    let stream = fixture("subagent-pinned-to-main-model");
+    assert!(
+        stream.contains(r#""name":"Agent""#),
+        "the capture did start a subagent"
+    );
+    let r = tokens::price_turn(&stream, &criteria("pinned-sub", SONNET_ONLY)).unwrap();
+    let tokens::Cost::Known { models, .. } = r else {
+        panic!("{r:?}")
+    };
+    assert_eq!(models.keys().collect::<Vec<_>>(), ["claude-sonnet-5-5"]);
+}
+
+#[test]
+fn disallowing_the_agent_tool_leaves_no_subagent_to_price() {
+    let stream = fixture("subagents-disallowed");
+    assert!(
+        !stream.contains(r#""name":"Agent""#),
+        "no subagent was started"
+    );
+    let r = tokens::price_turn(&stream, &criteria("denied", SONNET_ONLY)).unwrap();
+    assert!(matches!(r, tokens::Cost::Known { .. }), "{r:?}");
+}

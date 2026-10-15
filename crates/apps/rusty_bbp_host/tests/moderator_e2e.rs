@@ -732,6 +732,8 @@ fn script(dir: &Path, name: &str, body: &str) -> Launcher {
             "--verbose",
             "--disallowedTools",
             "Agent,Task",
+            "--setting-sources",
+            "user",
         ]
         .map(String::from)
         .into(),
@@ -1267,7 +1269,6 @@ fn an_evidence_runs_harness_gets_both_cache_ttl_variables_pinned_to_one_hour() {
 /// when every id is scored.
 #[test]
 fn grade_pack_and_join_work_on_real_run_dirs() {
-    use rusty_bbp_host::grade;
     let (cdir, ctask, _, _) = happy_run("grade-c");
     let (tdir, ttask, _, _) = happy_run("grade-t");
     let out = tempdir("grade-out");
@@ -1295,7 +1296,33 @@ fn grade_pack_and_join_work_on_real_run_dirs() {
         ),
     )
     .unwrap();
-    let packed = grade::write_pack(&manifest, &rubrics, "seed", &out.join("pack")).expect("pack");
+    // Through the binary, as a person runs it.
+    let bbp = |args: &[&Path]| {
+        let o = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .arg("grade")
+            .args(args)
+            .output()
+            .expect("run bbp grade");
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let flag = |f: &'static str| Path::new(f);
+    let pack_dir = out.join("pack");
+    let (ok, packed, err) = bbp(&[
+        flag("pack"),
+        flag("--manifest"),
+        &manifest,
+        flag("--rubrics"),
+        &rubrics,
+        flag("--seed"),
+        flag("seed"),
+        flag("--out"),
+        &pack_dir,
+    ]);
+    assert!(ok, "bbp grade pack: {err}");
     assert!(packed.contains("\"approved\":2"), "{packed}");
     assert!(packed.contains("\"unused\":0"), "{packed}");
     let read = |n: &str| std::fs::read_to_string(out.join("pack").join(n)).unwrap();
@@ -1322,15 +1349,26 @@ fn grade_pack_and_join_work_on_real_run_dirs() {
     )
     .unwrap();
     let key = out.join("pack").join("key.json");
-    assert!(grade::join_files(&key, &scores, &rubrics)
-        .unwrap_err()
-        .contains("sealed"));
+    let join = || {
+        bbp(&[
+            flag("join"),
+            flag("--key"),
+            &key,
+            flag("--scores"),
+            &scores,
+            flag("--rubrics"),
+            &rubrics,
+        ])
+    };
+    let (ok, _, err) = join();
+    assert!(!ok && err.contains("sealed"), "{err}");
     std::fs::write(
         &scores,
         format!(r#"{{"grader":"g","met":{{{}}}}}"#, met(&ids)),
     )
     .unwrap();
-    let joined = grade::join_files(&key, &scores, &rubrics).expect("join");
+    let (ok, joined, err) = join();
+    assert!(ok, "bbp grade join: {err}");
     assert!(joined.contains("\"rubric_ok\":true"), "{joined}");
     for d in [cdir, tdir, out] {
         let _ = std::fs::remove_dir_all(d);
@@ -1497,5 +1535,82 @@ fn an_evidence_runs_harness_gets_the_subagent_model_pinned_to_the_roles_model() 
     std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL");
     let seen = std::fs::read_to_string(dir.join("subagent.txt")).expect("the harness ran");
     assert_eq!(seen.trim(), "claude-sonnet-5-5");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `bbp agents-check` as a person runs it: two agents files and a price file.
+#[test]
+fn agents_check_as_a_binary_accepts_a_matched_pair_and_refuses_the_rest() {
+    let dir = tempdir("agents-check");
+    let launcher = |model: &str, extra: &[&str]| {
+        let mut args: Vec<String> = [
+            "-p",
+            "do the task",
+            "--model",
+            model,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--disallowedTools",
+            "Agent,Task",
+            "--setting-sources",
+            "user",
+        ]
+        .map(String::from)
+        .into();
+        args.extend(extra.iter().map(|s| (*s).to_owned()));
+        format!(
+            r#"{{"program":"claude","args":{},"builtin_tools":false}}"#,
+            rusty_serde::json::to_string(&args).unwrap()
+        )
+    };
+    let write = |name: &str, planner: &str| {
+        let f = dir.join(name);
+        std::fs::write(&f, format!(r#"{{"planner":{planner}}}"#)).unwrap();
+        f
+    };
+    let criteria = dir.join("criteria.json");
+    std::fs::write(&criteria, SONNET_PRICES).unwrap();
+    let run = |c: &Path, t: &Path| {
+        Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["agents-check", "--control"])
+            .arg(c)
+            .arg("--treatment")
+            .arg(t)
+            .arg("--criteria")
+            .arg(&criteria)
+            .output()
+            .expect("run bbp agents-check")
+    };
+    let good = write("good.json", &launcher("claude-sonnet-5-5", &[]));
+    let ok = run(&good, &good);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("claude-sonnet-5-5"));
+    // Each way a launcher can be wrong is a refusal that names the role.
+    for (what, planner) in [
+        (
+            "fallback model",
+            launcher("claude-sonnet-5-5", &["--fallback-model", "x"]),
+        ),
+        (
+            "settings",
+            launcher("claude-sonnet-5-5", &["--settings", "x.json"]),
+        ),
+        ("unpriced model", launcher("claude-haiku-5-5", &[])),
+        (
+            "not claude",
+            launcher("claude-sonnet-5-5", &[]).replace("\"claude\"", "\"/usr/bin/true\""),
+        ),
+    ] {
+        let bad = write("bad.json", &planner);
+        let o = run(&good, &bad);
+        assert!(!o.status.success(), "{what}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("treatment"), "{what}: {err}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

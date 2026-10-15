@@ -545,8 +545,8 @@ fn no_subagents(args: &[Arg]) -> bool {
 
 /// What an evidence run needs of every harness a launcher starts, beyond its
 /// pin: it prints `--output-format stream-json` to its log, unredirected and
-/// unpiped (the cap reads that log), and cannot start a subagent (which would
-/// run on a model nobody pinned).
+/// unpiped (the cap reads that log), loads no project or local settings, and
+/// cannot start a subagent (which would run on a model nobody pinned).
 pub fn check_harness(l: &Launcher) -> Result<(), String> {
     let commands = claude_commands(l)?;
     if commands.is_empty() {
@@ -568,6 +568,22 @@ pub fn check_harness(l: &Launcher) -> Result<(), String> {
         if format != Some("stream-json") {
             return Err(format!(
                 "--output-format is {format:?}; the cap and the criteria read stream-json"
+            ));
+        }
+        // A project's or a local `.claude/settings*.json` `env` overrides the
+        // process environment (captured: its 5m cache TTL beat the moderator's
+        // 1h), so only user settings may load.
+        let sources = args
+            .iter()
+            .enumerate()
+            .find_map(|(i, a)| match flag_of(&a.text) {
+                ("--setting-sources", Some(v)) => Some(v),
+                ("--setting-sources", None) => args.get(i + 1).map(|n| n.text.as_str()),
+                _ => None,
+            });
+        if sources.is_none_or(|v| v.split(',').any(|s| s == "project" || s == "local")) {
+            return Err(format!(
+                "--setting-sources is {sources:?}; pass `--setting-sources user` so a project's settings `env` cannot override the pinned cache lifetime"
             ));
         }
         if !no_subagents(args) {
@@ -738,6 +754,8 @@ mod tests {
                     "stream-json",
                     "--tools",
                     "Bash",
+                    "--setting-sources",
+                    "user",
                 ],
             )
         };
@@ -1167,6 +1185,8 @@ mod tests {
                 "--verbose",
                 "--disallowedTools",
                 "Agent,Task",
+                "--setting-sources",
+                "user",
             ],
         )
     }
@@ -1181,6 +1201,7 @@ mod tests {
                 "--output-format=stream-json",
                 "--tools",
                 "Bash,Read",
+                "--setting-sources=user",
             ],
         );
         assert_eq!(
@@ -1190,7 +1211,7 @@ mod tests {
         );
         let sh = launcher(
             "sh",
-            &["-c", "set -e; exec claude -p x --model m1 --output-format stream-json --verbose --disallowedTools 'Agent Task'"],
+            &["-c", "set -e; exec claude -p x --model m1 --output-format stream-json --verbose --disallowedTools 'Agent Task' --setting-sources user"],
         );
         assert_eq!(check_harness(&sh), Ok(()));
     }
@@ -1235,7 +1256,14 @@ mod tests {
     fn a_harness_must_not_be_able_to_start_subagents() {
         let open = launcher(
             "claude",
-            &["--model", "m1", "--output-format", "stream-json"],
+            &[
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--setting-sources",
+                "user",
+            ],
         );
         assert!(check_harness(&open).unwrap_err().contains("subagent"));
         let half = launcher(
@@ -1247,6 +1275,8 @@ mod tests {
                 "stream-json",
                 "--disallowedTools",
                 "Task",
+                "--setting-sources",
+                "user",
             ],
         );
         assert!(check_harness(&half).is_err(), "Agent is still allowed");
@@ -1259,6 +1289,8 @@ mod tests {
                 "stream-json",
                 "--tools",
                 "Bash,Agent",
+                "--setting-sources",
+                "user",
             ],
         );
         assert!(check_harness(&allow).is_err(), "Agent in the allow-list");
@@ -1272,5 +1304,41 @@ mod tests {
             Launchers::default().with("planner", launcher("claude", &["--model", "m1", "-p", "x"]));
         let err = check_run(&bad, &criteria(&["m1"])).unwrap_err();
         assert!(err.contains("planner"), "{err}");
+    }
+
+    // ---- captured: a project's `.claude/settings.json` `env` overrides the
+    // process environment (a 5m cache TTL beat the moderator's 1h), and
+    // `--setting-sources` is what keeps it out.
+
+    #[test]
+    fn a_harness_must_not_load_project_or_local_settings() {
+        let base = |sources: &[&str]| {
+            let mut a = vec![
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--disallowedTools",
+                "Agent,Task",
+            ];
+            a.extend(sources);
+            launcher("claude", &a)
+        };
+        for ok in [
+            &["--setting-sources", "user"][..],
+            &["--setting-sources", ""],
+            &["--setting-sources=user"],
+        ] {
+            assert_eq!(check_harness(&base(ok)), Ok(()), "{ok:?}");
+        }
+        for bad in [
+            &[][..],
+            &["--setting-sources", "user,project"],
+            &["--setting-sources", "local"],
+            &["--setting-sources=project,local,user"],
+        ] {
+            let err = check_harness(&base(bad)).unwrap_err();
+            assert!(err.contains("settings"), "{bad:?}: {err}");
+        }
     }
 }
