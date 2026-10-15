@@ -342,7 +342,6 @@ impl TaskState {
         }
     }
 
-    /// The live turn of `role`, if any.
     /// A new item by `author`: every other live turn whose role `readable`
     /// admits has not seen it. Only tracked above one live turn.
     fn note_unseen(
@@ -363,6 +362,52 @@ impl TaskState {
             .collect();
         for t in self.turns.iter_mut().filter(|t| affected.contains(&t.id)) {
             t.unseen.insert(item);
+        }
+    }
+
+    /// A fresh turn starts with everything in the current state that others
+    /// appended and its role may read, unread: the read base of a judge is the
+    /// entry into the stage, so a replacement turn (after an expiry or an
+    /// abort) cannot inherit its predecessor's refusal-free path. Only
+    /// tracked above one live turn.
+    fn seed_unseen(&mut self, turn: TurnId) {
+        if self.max_live_turns <= 1 {
+            return;
+        }
+        let Some(role) = self
+            .turns
+            .iter()
+            .find(|t| t.id == turn)
+            .map(|t| t.role.clone())
+        else {
+            return;
+        };
+        let (Some(r), me) = (self.roster.get(&role), self.assigned.get(&role)) else {
+            return;
+        };
+        let since = self.entered_rev;
+        let mut unseen: HashSet<Unseen> = self
+            .messages
+            .iter()
+            .zip(&self.msg_rev)
+            .filter(|(m, at)| {
+                **at > since && Some(&m.from) != me && crate::engine::visible(self, r, m)
+            })
+            .map(|(m, _)| Unseen::Message(m.id))
+            .collect();
+        unseen.extend(
+            self.artifacts
+                .values()
+                .filter(|a| {
+                    self.art_rev.get(&a.id).is_some_and(|at| *at > since)
+                        && a.author.0 != "runner"
+                        && Some(&a.author) != me
+                        && r.holds(Cap::Read(a.kind))
+                })
+                .map(|a| Unseen::Artifact(a.id)),
+        );
+        if let Some(t) = self.turns.iter_mut().find(|t| t.id == turn) {
+            t.unseen = unseen;
         }
     }
 
@@ -387,6 +432,7 @@ impl TaskState {
         }
     }
 
+    /// The live turn of `role`, if any.
     pub fn turn_of(&self, role: &RoleId) -> Option<&Turn> {
         self.turns.iter().find(|t| t.role == *role)
     }
@@ -615,6 +661,7 @@ impl TaskState {
                 });
                 self.next_turn = turn.0 + 1;
                 self.spent.turns += 1;
+                self.seed_unseen(*turn);
             }
             Event::TurnEnded { turn, cause: _ } => {
                 if let Some(i) = self.turns.iter().position(|t| t.id == *turn) {
