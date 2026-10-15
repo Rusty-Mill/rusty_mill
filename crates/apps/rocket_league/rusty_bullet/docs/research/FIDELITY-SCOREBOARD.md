@@ -120,15 +120,17 @@ error is a few events per tape, not a drift. For comparison the same families be
 354 uu (random drives, seeds 101 to 524), median 48 to 143, and the wall-start median was 132 uu.
 
 **Brake, boost order, throttle deadzone and input quantization, honest alignment.** A slow coasting car's speed
-now flips sign and keeps 0.26 of itself each tick (captures: -0.2632 over 227 ticks). Batch `20261008-111216`,
+now flips sign and keeps about 0.25 of itself each tick (357 captured ticks: mean ratio -0.2528, 95 % interval
+-0.2585 to -0.2471; the model uses -0.2638). Batch `20261008-111216`,
 fuzz/hitfuzz/wallfuzz mean of means 151.0 to 140.3 uu (14 tapes better, 3 worse by at most 5 uu, 55 unchanged),
 duels 574.6 to 516.5 uu; the holdout (seeds 101 to 124) is neutral, 132.3 to 132.4 uu. The four holdout tapes
 that moved most are the four where the old and new builds pick a different brake-or-drive state at the 25 uu/s
 switch (5 ticks in 24 tapes, the new build matching the recording in 2 and the old in 3): threshold luck, not a
 rule error. Boost now drains from the second tick of a burn: tank error 1.25 to 1.14 (holdout) and 1.43 to 1.33
 tank units, closer on 90 of 96 tapes, positions identical. Input quantization (+0.5 reads 64/127, -0.5 exact) is
-confirmed on 18 captures (spin ratio of a held +0.5 to -0.5: 1.0079 on roll) and the port now reproduces them to
-0.00 rad/s; the fuzz tapes are chaotic around it (batch 140.3 to 159.8 uu with a median per-tape change of 0,
+confirmed on captures at five stick levels (spin ratio of a held +v to -v on roll: 1.0080, 1.0080, 1.0079, 0.9967,
+0.9991 at 0.1, 0.3, 0.5, 0.7, 0.9) and the port now reproduces the 0.5 captures to 0.00 rad/s; the throttle deadzone
+is bracketed by captures (0.0079 leaves the car still, 0.0157 drives it); the fuzz tapes are chaotic around it (batch 140.3 to 159.8 uu with a median per-tape change of 0,
 holdout 132.4 to 126.4 uu).
 
 ## Random ball launches

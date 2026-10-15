@@ -156,7 +156,9 @@ const FRICTION_SCALE: f32 = 180.0 / 3.0;
 /// The brake's impulse per unit contact speed below its clamp. With four wheels
 /// on a 180-mass car at 120 Hz it removes `4 * 113.73963 * 60 * dt / 180 = 1.264`
 /// of the speed per tick, so a slow coasting car's speed ratio is -0.2638 per
-/// tick; the captures measure -0.2632 (227 ticks).
+/// tick. Captures of slow coasting (357 ticks, 2 to 10 uu/s) give a mean ratio of
+/// -0.2528 (95 % interval -0.2585 to -0.2471), i.e. a constant of 112.75 (112.2 to
+/// 113.3): the value used is within 1 % of that fit.
 const BRAKE_RESPONSE: f32 = 113.73963;
 
 /// Full brake deceleration (uu/s^2). RocketSim's per-wheel brake
@@ -175,8 +177,10 @@ pub(super) const STOPPING_FORWARD_SPEED: f32 = 25.0;
 
 /// Throttle magnitude up to which the car coasts: `|throttle| <= 0.01`.
 /// RocketSim's `THROTTLE_DEADZONE` is 0.001, which would drive on the
-/// smallest nonzero input (1/127 = 0.0079). No capture has a throttle in
-/// between (it is only ever 0, 0.5 or 1), so this is unscored.
+/// smallest nonzero input (1/127 = 0.0079). Captures bracket it: from rest a
+/// throttle of 0.008 (one byte step, 0.0079) leaves the car at rest, 0.016 (two
+/// steps, 0.0157) accelerates it at 24.7 uu/s^2; any threshold in [0.0079, 0.0157)
+/// behaves identically on byte-quantized input.
 pub(super) const THROTTLE_DEADZONE: f32 = 0.01;
 
 /// Slip ratio RocketSim's tire curves are looked up by: the lateral share

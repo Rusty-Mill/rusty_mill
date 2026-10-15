@@ -1,0 +1,45 @@
+{
+  "name": "dz_1step: on the floor at rest, throttle 0.008 for 90 ticks",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      0,
+      -3000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 90,
+      "throttle": 0.008
+    }
+  ]
+}

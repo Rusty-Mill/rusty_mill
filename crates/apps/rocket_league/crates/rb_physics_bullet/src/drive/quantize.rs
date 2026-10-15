@@ -7,9 +7,11 @@
 //! `(byte - 128) / 127` from 128 up. Negative values step by 1/128, positive by
 //! 1/127, so `+0.5` becomes 64/127 = 0.5039 while `-0.5` stays `-0.5`.
 //!
-//! Confirmed on 18 captures (`tools/rb_tape_bot/quant_ratio.py`): the spin from a
-//! held `+0.5` over the spin from a held `-0.5` is 1.0079 on roll (the exact
-//! prediction), 1.008 to 1.009 on pitch and yaw. It applies to throttle, steer,
+//! Confirmed on captures (`tools/rb_tape_bot/capture_checks.py`): the spin from a
+//! held `+v` over a held `-v` on roll is 1.0080, 1.0080, 1.0079, 0.9967 and 0.9991
+//! at v = 0.1, 0.3, 0.5, 0.7 and 0.9, the byte rule's prediction at every level
+//! (the two signs round differently, so an absent or symmetric quantizer gives
+//! 1.0000); 1.008 to 1.009 on pitch and yaw at 0.5. It applies to throttle, steer,
 //! pitch, yaw and roll; the button bits are untouched.
 
 use rb_domain::ControllerInput;

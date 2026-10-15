@@ -1,0 +1,48 @@
+{
+  "name": "quantlvl_roll_30_pos: level at z = 1000, roll 0.3 after 60 idle ticks",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      0,
+      1000
+    ],
+    "rotation": [
+      0,
+      0,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 60
+    },
+    {
+      "ticks": 30,
+      "roll": 0.3
+    }
+  ]
+}

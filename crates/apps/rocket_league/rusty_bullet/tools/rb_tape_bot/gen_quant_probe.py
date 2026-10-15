@@ -38,8 +38,47 @@ def tape(axis: str, value: float) -> dict:
     }
 
 
+# Extra stick levels on roll: the byte round trip rounds the two signs differently, so the +/- spin ratio
+# changes with the level (0.5 -> 1.0079, 0.7 -> 0.9967, 0.9 -> 0.9991 ...) and tests the rounding rule itself.
+LEVELS = (0.1, 0.3, 0.7, 0.9)
+# Throttle near the pedal deadzone from a standstill on the floor: 0.008 reads one byte step (1/127 = 0.0079),
+# 0.016 two steps (0.0157). A car that drives on the first and not the second puts the deadzone between them.
+DEADZONE_THROTTLES = {"dz_0": 0.0, "dz_1step": 0.008, "dz_2step": 0.016, "dz_neg1step": -0.008}
+
+
+def level_tape(value: float) -> dict:
+    doc = tape("roll", value)
+    sign = "pos" if value > 0 else "neg"
+    doc["name"] = f"quantlvl_roll_{round(abs(value) * 100)}_{sign}: level at z = 1000, roll {value} after {IDLE_TICKS} idle ticks"
+    return doc
+
+
+def deadzone_tape(name: str, throttle: float) -> dict:
+    return {
+        "name": f"{name}: on the floor at rest, throttle {throttle} for 90 ticks",
+        "settle_ticks": 60,
+        "car": {
+            "location": [0, -3000, 17],
+            "rotation": [0, 1.5708, 0],
+            "velocity": [0, 0, 0],
+            "angular_velocity": [0, 0, 0],
+            "boost": 0,
+        },
+        "ball": {"location": [3500, 3500, 93.15], "velocity": [0, 0, 0]},
+        "steps": [{"ticks": 90, "throttle": throttle}] if throttle else [{"ticks": 90}],
+    }
+
+
 def main() -> None:
     names = []
+    for value in LEVELS:
+        for signed in (value, -value):
+            name = f"quantlvl_roll_{round(value * 100)}_{'pos' if signed > 0 else 'neg'}"
+            (EXP / f"{name}.json").write_text(json.dumps(level_tape(signed), indent=2) + chr(10), encoding="utf-8", newline=chr(10))
+            names.append(name)
+    for name, throttle in DEADZONE_THROTTLES.items():
+        (EXP / f"{name}.json").write_text(json.dumps(deadzone_tape(name, throttle), indent=2) + chr(10), encoding="utf-8", newline=chr(10))
+        names.append(name)
     for axis in AXES:
         for value in (0.5, -0.5):
             doc = tape(axis, value)

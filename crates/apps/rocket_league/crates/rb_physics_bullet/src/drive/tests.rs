@@ -739,7 +739,8 @@ fn slip_ratio_is_zero_at_the_lateral_threshold_and_one_when_purely_sideways() {
 
 /// `|throttle| <= 0.01` coasts (inputs are 1/127-quantized, so 0.0079 is the
 /// smallest nonzero value and 0.0157 the next); RocketSim's 0.001 would drive
-/// on 0.0079.
+/// on 0.0079. Captures agree: a throttle of 0.0079 from rest leaves the car
+/// still, 0.0157 drives it.
 #[test]
 fn throttle_inside_one_percent_coasts_like_the_game() {
     let coast = (0.0, COASTING_BRAKE_FACTOR);
@@ -778,6 +779,26 @@ fn analog_inputs_round_trip_through_a_byte_like_the_game() {
         "below half a step rounds to zero"
     );
     assert_eq!(quantize_analog(-0.003), 0.0);
+}
+
+/// Captured spin ratios of a held +v over a held -v on roll (3 runs each, 3 frame
+/// offsets): the two signs round differently, so the ratio changes with the level
+/// and drops below 1 at 0.7 and 0.9.
+#[test]
+fn quantization_reproduces_the_captured_spin_ratios_at_five_levels() {
+    for (level, captured) in [
+        (0.1, 1.0080),
+        (0.3, 1.0080),
+        (0.5, 1.0079),
+        (0.7, 0.9967),
+        (0.9, 0.9991),
+    ] {
+        let ratio = quantize_analog(level) / quantize_analog(-level).abs();
+        assert!(
+            (ratio - captured).abs() < 2e-4,
+            "level {level}: model {ratio} vs captured {captured}"
+        );
+    }
 }
 
 #[test]
@@ -938,8 +959,9 @@ fn opposing_throttle_brakes_at_full_brake_deceleration() {
 /// `113.73963 * 60 * dt * v` of impulse below its clamp, so four wheels on a
 /// 180-mass car remove `1 - 4 * 113.73963 * 60 * dt / 180 = -0.2638` of the
 /// speed per 120 Hz tick: a slow coasting car overshoots zero and rings.
-/// Measured on the owner's captures: mean -0.2632 over 227 ticks (flat
-/// grounded coasting, 5 < |v| <= 10 uu/s).
+/// Captures of flat grounded coasting (357 ticks, 2 < |v| <= 10 uu/s) give a
+/// mean of -0.2528 (95 % interval -0.2585 to -0.2471); the model's -0.2638 is
+/// within 1 % of the implied constant.
 #[test]
 fn a_slow_coasting_car_overshoots_zero_by_a_quarter_each_tick() {
     for speed in [6.0_f32, 8.0, 10.0] {
