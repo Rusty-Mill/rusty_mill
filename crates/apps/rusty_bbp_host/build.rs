@@ -20,10 +20,19 @@ fn main() {
         },
     );
     println!("cargo:rustc-env=BBP_BUILD_SHA={sha}");
-    // Rebuild when the checked-out commit changes.
-    if let Some(dir) = git(&["rev-parse", "--git-dir"]) {
-        println!("cargo:rerun-if-changed={dir}/HEAD");
-        println!("cargo:rerun-if-changed={dir}/index");
+    // Rebuild when the commit, the branch it names, or any source changes: the
+    // index alone misses an unstaged edit, and HEAD alone a commit on a branch.
+    let mut watch = vec!["HEAD".to_owned(), "index".to_owned(), "packed-refs".to_owned()];
+    watch.extend(git(&["symbolic-ref", "-q", "HEAD"]));
+    for f in watch {
+        if let Some(path) = git(&["rev-parse", "--git-path", &f]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    if let Some(top) = git(&["rev-parse", "--show-toplevel"]) {
+        for tracked in ["crates", "Cargo.toml", "Cargo.lock"] {
+            println!("cargo:rerun-if-changed={top}/{tracked}");
+        }
     }
     println!("cargo:rerun-if-changed=build.rs");
 }
