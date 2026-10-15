@@ -17,9 +17,17 @@ pub const LOG_SCHEMA: u32 = 2;
 /// log instead of replaying it as serialized.
 pub const LOG_SCHEMA_CONCURRENT: u32 = 3;
 
-/// The schema `open` records for a task with this cap.
-pub fn schema_for(max_live_turns: u32) -> u32 {
-    if max_live_turns > 1 {
+/// The log schema of an event-driven task. A build that predates the `policy`
+/// field reads schema 2 and 3 and would drop an unknown `policy` key without
+/// error, replaying the task as turn-based; refusing schema 4 is the fence
+/// that keeps it from doing so. Written only for `EventDriven`.
+pub const LOG_SCHEMA_EVENT_DRIVEN: u32 = 4;
+
+/// The schema `open` records for a task with this cap and policy.
+pub fn schema_for(max_live_turns: u32, policy: SchedulingPolicy) -> u32 {
+    if policy == SchedulingPolicy::EventDriven {
+        LOG_SCHEMA_EVENT_DRIVEN
+    } else if max_live_turns > 1 {
         LOG_SCHEMA_CONCURRENT
     } else {
         LOG_SCHEMA
@@ -28,7 +36,10 @@ pub fn schema_for(max_live_turns: u32) -> u32 {
 
 /// Does this build replay a log of this schema?
 pub fn schema_supported(schema: u32) -> bool {
-    schema == LOG_SCHEMA || schema == LOG_SCHEMA_CONCURRENT
+    matches!(
+        schema,
+        LOG_SCHEMA | LOG_SCHEMA_CONCURRENT | LOG_SCHEMA_EVENT_DRIVEN
+    )
 }
 
 fn one_turn() -> u32 {
@@ -92,7 +103,8 @@ pub enum Event {
         max_live_turns: u32,
         human: PrincipalId,
         /// Added after schema 2 shipped. Absent reads as `TurnBased` and
-        /// `TurnBased` is not written, so a turn-based log is byte for byte
+        /// `TurnBased` is not written; `EventDriven` is written only under
+        /// schema 4, and a fold honors the field only there, so a turn-based log is byte for byte
         /// the one the golden in `tests/schema.rs` pins.
         #[rusty_serde(default, skip_serializing_if = "is_turn_based")]
         policy: SchedulingPolicy,

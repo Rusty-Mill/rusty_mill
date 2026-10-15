@@ -32,7 +32,8 @@ use crate::state::*;
 use rusty_serde::{Deserialize, Serialize};
 
 /// The version of the wake rules `wake_set` implements. Stamped on every shadow
-/// record, so records written under different rules are never summed together.
+/// record, so a consumer can keep records written under different rules apart
+/// (`bbp shadow` reports `by_rules`; its plain totals still add them).
 /// Bump it whenever a trigger, the priority, a baseline or the addressing rule
 /// changes. 1 is the rules of the first shadow comparison; 2 adds the assignment
 /// baseline, the state-entry floor, observers, State above Artifact, and `all`
@@ -79,7 +80,7 @@ const WAKING_ARTIFACTS: [ArtifactKind; 4] = [
 /// (it could not act).
 pub fn wake_set(st: &TaskState) -> Vec<(RoleId, WakeReason)> {
     // Any live turn: with several allowed (`max_live_turns > 1`) this stays
-    // conservative, and nothing calls it yet, so it grants no extra slots.
+    // conservative. `pick_next` calls it only for a one-live-turn task.
     if !st.opened || !st.turns.is_empty() || st.pending_request.is_some() {
         return Vec::new();
     }

@@ -170,6 +170,12 @@ impl Fx<MemStore> {
     pub fn with_roles(roles: Vec<Role>) -> Fx {
         Fx::with_store_and_roles(MemStore::new(), roles)
     }
+
+    /// A one-live-turn task on `roles`, scheduled event-driven.
+    pub fn event_driven(roles: Vec<Role>) -> Fx {
+        let policy = SchedulingPolicy::EventDriven;
+        Fx::open_policy(MemStore::new(), roles, &[], 1, default_budget(), policy)
+    }
 }
 
 impl<S: Store> Fx<S> {
@@ -190,11 +196,30 @@ impl<S: Store> Fx<S> {
 
     /// As [`Fx::with_roles_skipping`], with `live` concurrent turns and a budget.
     pub fn open_with(
+        store: S,
+        roles: Vec<Role>,
+        skip: &[&str],
+        live: u32,
+        budget: Budget,
+    ) -> Fx<S> {
+        Fx::open_policy(
+            store,
+            roles,
+            skip,
+            live,
+            budget,
+            SchedulingPolicy::default(),
+        )
+    }
+
+    /// As [`Fx::open_with`], under `policy`.
+    pub fn open_policy(
         mut store: S,
         roles: Vec<Role>,
         skip: &[&str],
         live: u32,
         budget: Budget,
+        policy: SchedulingPolicy,
     ) -> Fx<S> {
         let task = TaskId("T1".into());
         let brief = store.blob_put(b"Add retry with backoff to the HTTP client.");
@@ -215,7 +240,7 @@ impl<S: Store> Fx<S> {
             max_live_turns: live,
             brief,
             human: PrincipalId("human".into()),
-            policy: SchedulingPolicy::default(),
+            policy,
         });
         fx.run(&open);
         for r in roles.iter().filter(|r| !skip.contains(&r.id.0.as_str())) {
@@ -324,12 +349,23 @@ impl<S: Store> Fx<S> {
                 _ => None,
             })
             .unwrap_or(self.d.state.max_live_turns);
-        if cap <= 1 {
+        let policy = out
+            .events
+            .iter()
+            .find_map(|e| match e {
+                Event::TaskOpened { policy, .. } => Some(*policy),
+                _ => None,
+            })
+            .unwrap_or(self.d.state.policy);
+        if cap <= 1 && policy == SchedulingPolicy::TurnBased {
             granted.sort();
             recorded.sort();
             assert_eq!(recorded, granted, "shadow records vs turn_granted events");
         } else {
-            assert!(out.shadow.is_empty(), "no shadow above one live turn");
+            assert!(
+                out.shadow.is_empty(),
+                "no shadow above one live turn or off the turn-based policy"
+            );
         }
     }
 
