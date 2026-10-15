@@ -46,6 +46,8 @@ rusty_request = { workspace = true, features = ["tokio"], optional = true }
 rusty_percent = { workspace = true }
 # Optional (feature `otel`): the metrics push thread runs `rusty_request` on a small `rusty_tokio` runtime.
 rusty_tokio = { workspace = true, optional = true }
+# Optional (feature `serve`): the blocking-server adapters for the auth and limits cores.
+rusty_serve = { workspace = true, optional = true }
 opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic"], optional = true }
@@ -65,6 +67,8 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 
 [features]
 default = []
+# Auth and load shedding for a blocking `rusty_serve` server, without tower.
+serve = ["dep:rusty_serve"]
 # A JWKS-backed JWT validator for the authorization layer.
 jwt = ["dep:rusty_oauth", "dep:rusty_request", "tokio/sync"]
 # Export spans to an OpenTelemetry collector over OTLP.

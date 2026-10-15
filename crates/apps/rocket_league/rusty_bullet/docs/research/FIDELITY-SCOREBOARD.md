@@ -119,6 +119,18 @@ Seeds move these a lot (the earlier fresh sets gave 105 to 121 uu and medians 25
 error is a few events per tape, not a drift. For comparison the same families before this run's fixes were 140 to
 354 uu (random drives, seeds 101 to 524), median 48 to 143, and the wall-start median was 132 uu.
 
+**Brake, boost order, throttle deadzone and input quantization, honest alignment.** A slow coasting car's speed
+now flips sign and keeps 0.26 of itself each tick (captures: -0.2632 over 227 ticks). Batch `20261008-111216`,
+fuzz/hitfuzz/wallfuzz mean of means 151.0 to 140.3 uu (14 tapes better, 3 worse by at most 5 uu, 55 unchanged),
+duels 574.6 to 516.5 uu; the holdout (seeds 101 to 124) is neutral, 132.3 to 132.4 uu. The four holdout tapes
+that moved most are the four where the old and new builds pick a different brake-or-drive state at the 25 uu/s
+switch (5 ticks in 24 tapes, the new build matching the recording in 2 and the old in 3): threshold luck, not a
+rule error. Boost now drains from the second tick of a burn: tank error 1.25 to 1.14 (holdout) and 1.43 to 1.33
+tank units, closer on 90 of 96 tapes, positions identical. Input quantization (+0.5 reads 64/127, -0.5 exact) is
+confirmed on 18 captures (spin ratio of a held +0.5 to -0.5: 1.0079 on roll) and the port now reproduces them to
+0.00 rad/s; the fuzz tapes are chaotic around it (batch 140.3 to 159.8 uu with a median per-tape change of 0,
+holdout 132.4 to 126.4 uu).
+
 ## Random ball launches
 
 `gen_ball_fuzz.py`: 24 seeded 6 s launches (random place, velocity 500 to 2500 uu/s,

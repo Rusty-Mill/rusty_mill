@@ -286,7 +286,7 @@ will not stack duplicates.
 When invoked by super-board (env `SUPER_BOARD_RUN=1` or invocation contains "super-board run"):
 
 ### State protocol
-- Read from issue + PR comments + PR review threads.
+- Read from issue + PR comments + PR review threads. `reviewThreads` is a GraphQL field, not a `gh pr view --json` field: that call fails and halts the run. Read PR comments with `gh pr view <PR> --json comments`, and inline review comments with `gh api repos/<owner>/<repo>/pulls/<PR>/comments`.
 - **GitHub budget** — every "move card" is `.claude/bin/super-board-card.sh --config <cfg> move <N> <Status>` (1 GraphQL point; `gh project item-list` / `field-list` cost ~100–200). Comments, labels and PR reads go over REST; [rate-limit-etiquette.md](../super-board/references/rate-limit-etiquette.md) → "Price list" has the calls.
 - Respect handed-down worktree at `.claude/worktrees/issue-<N>-review/` and branch `issue-<N>-<slug>`.
 
@@ -368,7 +368,11 @@ two complete builds. In order, no shortcuts:
 
    `gh pr view <PR> --json state,mergeCommit` must report `MERGED` plus a commit sha,
    and that sha must be an ancestor of the base branch
-   (`git merge-base --is-ancestor <sha> origin/<base>`).
+   (`git merge-base --is-ancestor <sha> origin/<base>`). With a merge queue the PR is
+   still OPEN right after the gate exits 0: repeat that same read every 30s for up to
+   10 minutes. Request only `state,mergeCommit`; `isInMergeQueue` is not a
+   `gh pr view --json` field and an invalid field halts the run. Still OPEN after the
+   wait: leave the card in Review, report "queued, not yet merged", stop without a halt.
 4. Only then: close the issue, move card Review → **Done**, post the ✅ comment citing
    the merge commit sha.
 5. Merge refused (failing checks, conflicts, branch protection) → card Review →

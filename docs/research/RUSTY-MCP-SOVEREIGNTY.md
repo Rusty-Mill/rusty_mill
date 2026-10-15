@@ -143,6 +143,10 @@ Each item is one PR, with its own tests and a change fragment.
    its 24 suites pass. Needs D1.
 7. **`rusty_serve` adapter** for the cores, so a blocking server can use auth
    and limits without tower. One test per layer against `rusty_serve`.
+   **Done (2026-10-15)**, behind a `serve` feature: `serve::LimitedHandler` and
+   `serve::AuthorizedHandler` for a `SharedHandler`. Limits have no timeout (a
+   blocking handler cannot be cancelled) and the validator runs on a `std`
+   executor with no reactor, so the JWKS-backed validator needs the tower layers.
 8. **`limits` without `tokio::sync`**: an atomic admission counter; keep
    `tokio::time` only in the tower adapter's timeout. **Done (2026-10-14)**
    with the `limits` core: `Admission` is a compare-and-swap counter.

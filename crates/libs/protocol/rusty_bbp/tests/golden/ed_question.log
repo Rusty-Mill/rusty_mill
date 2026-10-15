@@ -1,0 +1,34 @@
+{"TaskOpened":{"schema":4,"roster":[{"id":"planner","turn_order":0,"post":["Ask","Answer","Propose","Finding","RequestDecision","Pass"],"write":["Spec"],"read_artifacts":["Brief","Spec","Diff","Candidate","TestReport","Log"],"read_messages":"All","verdict_at":[],"final_decision":false,"consultable":true},{"id":"coder","turn_order":1,"post":["Ask","Answer","Propose","Finding","RequestDecision","Pass"],"write":["Diff","Candidate"],"read_artifacts":["Brief","Spec","Diff","Candidate","TestReport","Log"],"read_messages":"All","verdict_at":[],"final_decision":false,"consultable":true},{"id":"tester","turn_order":2,"post":["Ask","Answer","Finding","Verdict","RequestDecision","Pass"],"write":[],"read_artifacts":["Brief","Spec","Diff","Candidate","TestReport","Log"],"read_messages":"All","verdict_at":["Test"],"final_decision":false,"consultable":true},{"id":"reviewer","turn_order":3,"post":["Answer","Finding","Verdict","RequestDecision","Pass"],"write":[],"read_artifacts":["Brief","Spec","Diff","Candidate","TestReport"],"read_messages":"Scoped","verdict_at":["Review"],"final_decision":true,"consultable":false}],"task":"T1","repo":"github.com/example/repo","profile_digest":"0707070707070707070707070707070707070707070707070707070707070707","budget":{"messages":40,"bytes":5000000,"reads":150,"reads_per_turn":30,"turns":60,"iterations":4},"turn_ms":60000,"request_ms":3600000,"human":"human","policy":"EventDriven"}}
+{"ArtifactStored":{"id":1,"author":"human","kind":"Brief","blob":{"sha":"223a18d8a9be7faac73da2d6c71568203b15a90f0e3f070c3a25e31a8a9fb5fe","len":42},"payload":"Brief","spec":null,"candidate":null,"run":null}}
+{"Assigned":{"role":"planner","principal":{"id":"planner","kind":{"Agent":{"role":"planner","vendor":"anthropic"}}}}}
+{"Assigned":{"role":"coder","principal":{"id":"coder","kind":{"Agent":{"role":"coder","vendor":"openai"}}}}}
+{"Assigned":{"role":"tester","principal":{"id":"tester","kind":{"Agent":{"role":"tester","vendor":"google"}}}}}
+{"Assigned":{"role":"reviewer","principal":{"id":"reviewer","kind":{"Agent":{"role":"reviewer","vendor":"anthropic"}}}}}
+{"TurnGranted":{"role":"planner","turn":1,"kind":"Default","deadline":61000,"return_to":null}}
+{"ArtifactStored":{"id":2,"author":"planner","kind":"Spec","blob":{"sha":"ca1172391a91463f89cbffba251b15338c0750448d61611bf2976c18b0a42c64","len":40},"payload":{"Spec":{"brief":1}},"spec":null,"candidate":null,"run":null}}
+{"Charged":{"principal":"planner","turn":1,"messages":0,"bytes":40,"reads":0}}
+{"OpAccepted":{"principal":"planner","op":"op1","payload":"de8aaf763de47712542289956fa4a09e057b7a4d35e8a49435109774761585de","response":{"Stored":2}}}
+{"MessageAppended":{"id":1,"from":"planner","from_role":"planner","draft":{"kind":"RequestDecision","to":["Human"],"body":{"Prose":"Please approve the plan."},"refs":[{"Art":{"id":2,"fragment":null}}],"evidence":[],"reply_to":null,"yield_to":null,"gate":true}}}
+{"Charged":{"principal":"planner","turn":1,"messages":1,"bytes":24,"reads":0}}
+{"RequestOpened":{"msg":1,"requester":"planner","gate":true,"deadline":null}}
+{"TurnEnded":{"turn":1,"cause":"Request"}}
+{"StateChanged":{"from":"Planning","to":"PlanGate"}}
+{"OpAccepted":{"principal":"planner","op":"op2","payload":"840e98b9fc0ebd3fbd5316014d1ce81bc661dcaec5a9cb159846faaff480aac5","response":{"Posted":1}}}
+{"HumanApproval":{"gate":"Plan","subject":2,"run":null}}
+{"RequestSettled":{"msg":1,"by":1}}
+{"StateChanged":{"from":"PlanGate","to":"Build"}}
+{"TurnGranted":{"role":"coder","turn":2,"kind":"Default","deadline":61000,"return_to":null}}
+{"OpAccepted":{"principal":"human","op":"op3","payload":"68564c8962317eafdd7bd8df1c94cf93e5fc87cfe8eb78f38b910ff6b6292d94","response":"Ok"}}
+{"MessageAppended":{"id":2,"from":"coder","from_role":"coder","draft":{"kind":"Ask","to":[{"Role":"tester"}],"body":{"Prose":"which 429 cases matter?"},"refs":[],"evidence":[],"reply_to":null,"yield_to":null,"gate":false}}}
+{"Charged":{"principal":"coder","turn":2,"messages":1,"bytes":23,"reads":0}}
+{"OpAccepted":{"principal":"coder","op":"op4","payload":"1c1fe376c8c86be8ce2e85f9383683292e191e9ffee379e9ef8377f501a637d8","response":{"Posted":2}}}
+{"MessageAppended":{"id":3,"from":"coder","from_role":"coder","draft":{"kind":"Pass","to":["All"],"body":{"Prose":""},"refs":[],"evidence":[],"reply_to":null,"yield_to":null,"gate":false}}}
+{"Charged":{"principal":"coder","turn":2,"messages":1,"bytes":0,"reads":0}}
+{"TurnEnded":{"turn":2,"cause":"Pass"}}
+{"TurnGranted":{"role":"tester","turn":3,"kind":"Default","deadline":61000,"return_to":null}}
+{"OpAccepted":{"principal":"coder","op":"op5","payload":"1797ca47a0a42139fa7cbe8a9bbce925c05e9dce876683eba2b65e9779ed2ac2","response":{"Posted":3}}}
+{"MessageAppended":{"id":4,"from":"tester","from_role":"tester","draft":{"kind":"Pass","to":["All"],"body":{"Prose":""},"refs":[],"evidence":[],"reply_to":null,"yield_to":null,"gate":false}}}
+{"Charged":{"principal":"tester","turn":3,"messages":1,"bytes":0,"reads":0}}
+{"TurnEnded":{"turn":3,"cause":"Pass"}}
+{"TurnGranted":{"role":"coder","turn":4,"kind":"Default","deadline":61000,"return_to":null}}
+{"OpAccepted":{"principal":"tester","op":"op6","payload":"1797ca47a0a42139fa7cbe8a9bbce925c05e9dce876683eba2b65e9779ed2ac2","response":{"Posted":4}}}

@@ -61,6 +61,20 @@ pub enum Capability {
     Review,
     /// Merge a reviewed card to Done.
     Merge,
+    /// Change the board's settings: agents and their credentials, repositories, projects, roles.
+    Admin,
+}
+
+impl Capability {
+    /// Every capability, in display order.
+    pub const ALL: [Capability; 6] = [
+        Capability::Triage,
+        Capability::Build,
+        Capability::Qa,
+        Capability::Review,
+        Capability::Merge,
+        Capability::Admin,
+    ];
 }
 
 /// Who is acting, and what they may do.
@@ -70,6 +84,23 @@ pub struct Actor {
     pub name: String,
     /// Capabilities held.
     pub caps: BTreeSet<Capability>,
+    /// Projects this actor may work in; `None` means all of them.
+    #[serde(default)]
+    pub projects: Option<BTreeSet<String>>,
+}
+
+impl Actor {
+    /// Whether this actor may read or change cards of `project`.
+    pub fn may_work_in(&self, project: &str) -> bool {
+        self.projects.as_ref().is_none_or(|p| p.contains(project))
+    }
+}
+
+/// The project a card belongs to unless one is named. It always exists.
+pub const DEFAULT_PROJECT: &str = "default";
+
+fn default_project() -> String {
+    DEFAULT_PROJECT.to_owned()
 }
 
 /// The capability needed to move a card `from` -> `to`.
@@ -153,6 +184,9 @@ pub struct Card {
     pub claim: Option<String>,
     /// Free-form labels.
     pub tags: Vec<String>,
+    /// The project (application) this card belongs to; see `projects`.
+    #[serde(default = "default_project")]
+    pub project: String,
     /// Discussion, oldest first.
     pub comments: Vec<Comment>,
     /// Linked forge issue number, if synced.
@@ -192,6 +226,11 @@ pub enum BoardError {
     Conflict,
     /// Input rejected at the boundary.
     Invalid(&'static str),
+    /// The card belongs to a project this actor may not work in.
+    OutOfScope(String),
+    /// A settings change was refused, with the reason (it would lock everyone out, drop a
+    /// project that still has cards, and so on).
+    Refused(String),
     /// The backing store failed.
     Storage(String),
 }
@@ -207,6 +246,8 @@ impl fmt::Display for BoardError {
             Self::NotClaimant => write!(f, "only the claim holder may move this card"),
             Self::Conflict => write!(f, "card changed concurrently; retry"),
             Self::Invalid(why) => write!(f, "invalid input: {why}"),
+            Self::OutOfScope(p) => write!(f, "project {p:?} is outside your scope"),
+            Self::Refused(why) => f.write_str(why),
             Self::Storage(why) => write!(f, "storage error: {why}"),
         }
     }
@@ -234,6 +275,8 @@ pub enum EventKind {
     Linked,
     /// Title/body brought in line with the linked issue.
     Synced,
+    /// Moved to another project.
+    Assigned,
 }
 
 /// One entry in the append-only log. `id` is a UUIDv7 assigned by the store
@@ -306,6 +349,7 @@ impl Card {
             column: Column::Backlog,
             claim: None,
             tags,
+            project: default_project(),
             comments: Vec::new(),
             issue: None,
             synced_text: None,
@@ -320,6 +364,21 @@ impl Card {
             updated_ms: now_ms,
             ..self.clone()
         }
+    }
+
+    /// Move the card to `project`, dropping any claim (the claimant may not be in scope there).
+    ///
+    /// # Errors
+    /// If the card is Done.
+    pub fn assign(&self, project: &str, now_ms: i64) -> Result<Self, BoardError> {
+        if self.column == Column::Done {
+            return Err(BoardError::Terminal);
+        }
+        Ok(Self {
+            project: project.to_owned(),
+            claim: None,
+            ..self.next(now_ms)
+        })
     }
 
     /// Take the claim.
@@ -452,6 +511,7 @@ mod tests {
         Actor {
             name: name.into(),
             caps: caps.iter().copied().collect(),
+            projects: None,
         }
     }
 

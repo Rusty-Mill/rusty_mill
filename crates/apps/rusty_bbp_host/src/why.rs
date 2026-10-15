@@ -6,10 +6,10 @@
 //! state, and the policy's pick rule is applied to it. Read-only: nothing is
 //! written, and the core is used as it is.
 //!
-//! The pick rule is the core's `pick_next`, which is crate-private there, so it
-//! is restated here (a few lines). A grant the restated rule does not
-//! reproduce is reported as [`How::Unexplained`], never as a match, so a drift
-//! between the two shows up in the output and in `tests/why.rs`.
+//! The pick rule is the core's own: `pick_from` for the event-driven pick (the
+//! same function `pick_next` calls) and `Roster::default_holder` for the
+//! turn-based choice and the fallback. A grant the rule does not reproduce is
+//! reported as [`How::Unexplained`], never as a match.
 //!
 //! Grants that bypass the policy (a settled request, a yield or `ask`, the
 //! return from a consultation) are recognised from the events around them and
@@ -51,7 +51,7 @@ pub enum How {
     DefaultHolder,
     /// Forced; the policy was not consulted.
     Explicit(Cause),
-    /// The restated rule would have picked another role (or none). Not a match.
+    /// Replaying the pick rule on the state before the grant gives another role (or none). Not a match.
     Unexplained { replayed: Option<RoleId> },
 }
 
@@ -140,16 +140,12 @@ fn automatic(
     logged: &[Shadow],
     rev: u64,
 ) -> (How, Option<Vec<Woken>>, Option<Shadowed>) {
-    let serving: Vec<RoleId> = pre.roster.serving(pre.state).into_iter().cloned().collect();
-    let first = serving.first().cloned();
+    let first = pre.roster.default_holder(pre.state).cloned();
     let one_live = pre.max_live_turns == 1;
     let raw = if one_live { wake_set(pre) } else { Vec::new() };
     match pre.policy {
         SchedulingPolicy::EventDriven => {
-            let pick = raw
-                .iter()
-                .find(|(_, why)| why.selectable(pre.max_live_turns));
-            let (expected, how) = match pick {
+            let (expected, how) = match pick_from(&raw, pre.max_live_turns) {
                 Some((r, why)) => (Some(r.clone()), How::WakeSet(*why)),
                 None => (first, How::Fallback),
             };
@@ -164,7 +160,7 @@ fn automatic(
             let ok = if one_live {
                 first.as_ref() == Some(role)
             } else {
-                serving.contains(role)
+                pre.roster.serving(pre.state).contains(&role)
             };
             let how = if ok {
                 How::DefaultHolder

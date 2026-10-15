@@ -397,3 +397,43 @@ fn a_datagram_socketpair_cannot_be_pointed_at_an_outside_endpoint() {
         );
     }
 }
+
+#[test]
+fn changed_lists_every_touched_path_and_discard_restores_the_worktree() {
+    let f = fixture("scope");
+    let dir = f.work.prepare(&f.card).expect("prepare");
+    assert_eq!(f.work.changed(&dir).expect("clean"), Vec::<String>::new());
+
+    std::fs::write(dir.join("README"), "changed\n").expect("modify");
+    std::fs::create_dir_all(dir.join("a/b")).expect("dirs");
+    std::fs::write(dir.join("a/b/new.rs"), "x").expect("new file");
+    std::fs::write(dir.join("with space.txt"), "x").expect("odd name");
+    let mut seen = f.work.changed(&dir).expect("changed");
+    seen.sort();
+    assert_eq!(
+        seen,
+        ["README", "a/b/new.rs", "with space.txt"],
+        "untracked files are listed one by one"
+    );
+
+    f.work.discard(&dir).expect("discard");
+    assert_eq!(
+        f.work.changed(&dir).expect("clean again"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("README")).expect("read"),
+        "hi\n"
+    );
+    assert!(!dir.join("a").exists() && !dir.join("with space.txt").exists());
+}
+
+#[test]
+fn a_rename_reports_both_paths() {
+    let f = fixture("rename");
+    let dir = f.work.prepare(&f.card).expect("prepare");
+    git(&dir, &["mv", "README", "elsewhere"]);
+    let mut seen = f.work.changed(&dir).expect("changed");
+    seen.sort();
+    assert_eq!(seen, ["README", "elsewhere"], "the path it left counts too");
+}

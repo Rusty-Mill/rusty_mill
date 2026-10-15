@@ -277,6 +277,7 @@ mod air;
 mod boost;
 mod ground;
 mod jump;
+mod quantize;
 mod roll;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -284,6 +285,7 @@ mod tests;
 mod wheels;
 
 pub use boost::{BOOST_USED_PER_SECOND, MAX_BOOST};
+pub use quantize::{quantize_analog, quantize_input};
 pub use wheels::{cast_wheels, is_on_ground, WheelContact, WheelContacts, NO_WHEEL_CONTACTS};
 
 /// The no-slip bicycle-model yaw rate for `ground::steer_angle` over the
@@ -526,6 +528,16 @@ pub fn apply_driven_forces(
         car.wake();
     }
 
+    // Boost drains first: a burn already running pays for this tick before it
+    // may push, so the activation tick is free and the tick that empties the
+    // tank has no push (captures: the first push precedes the first drain).
+    boost::drain(
+        state.boosting,
+        &mut state.boost_amount,
+        state.boost_used_per_second,
+        dt,
+    );
+
     let forward = forward_axis(car);
     let jump_pressed = input.jump && !state.jump_held;
     state.jump_held = input.jump;
@@ -659,15 +671,7 @@ pub fn apply_driven_forces(
         &mut state.boosting_time,
         dt,
     );
-    boost::apply_boost(
-        car,
-        boosting,
-        wheels.iter().any(Option::is_some),
-        forward,
-        &mut state.boost_amount,
-        state.boost_used_per_second,
-        dt,
-    );
+    boost::apply_boost(car, boosting, wheels.iter().any(Option::is_some), forward);
 }
 
 /// Whether the car boosts this tick, as `boost::update_boosting` will set it

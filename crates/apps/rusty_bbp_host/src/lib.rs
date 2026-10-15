@@ -18,9 +18,11 @@
 
 pub mod admin;
 pub mod args;
+pub mod grade;
 pub mod human;
 pub mod mcp;
 pub mod moderator;
+pub mod pairs;
 pub mod profiles;
 pub mod report;
 pub mod runner;

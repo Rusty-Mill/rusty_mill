@@ -11915,6 +11915,7 @@ dependencies = [
  "rusty_oauth",
  "rusty_percent",
  "rusty_request",
+ "rusty_serve",
  "rusty_tokio",
  "rusty_url",
  "tokio",
@@ -12772,11 +12773,13 @@ name = "rusty_mill_board"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "rusty_atomic_file",
  "rusty_crypto_key",
  "rusty_http",
  "rusty_mcp_server",
  "rusty_multimodal_db_engine",
  "rusty_oauth",
+ "rusty_rand",
  "rusty_request",
  "rusty_serve",
  "schemars 1.2.2",

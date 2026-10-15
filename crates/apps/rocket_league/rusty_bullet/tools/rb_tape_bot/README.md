@@ -128,7 +128,8 @@ build the plugin (`bakkesmod-plugin/rusty_bullet_capture/README.md`), copy
 `%APPDATA%\bakkesmod\bakkesmod\plugins\`, and add the line
 `plugin load rusty_bullet_capture` to
 `%APPDATA%\bakkesmod\bakkesmod\cfg\plugins.cfg` so it loads at game start.
-Start `BakkesMod.exe` before running.
+`run_batch.ps1` starts `BakkesMod.exe` itself if it is not already running (`-BakkesMod <path>` if it is not in
+`C:\Program Files\BakkesMod`, `-NoBakkesMod` to skip); a hand run needs it started first.
 
 `-Scenarios` takes shipped names or files in `experiments/` (variants kept out
 of the default set).
