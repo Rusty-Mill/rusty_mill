@@ -274,7 +274,7 @@ fn a_shed_request_never_reaches_token_validation() {
 
 #[test]
 fn a_header_the_tower_layer_would_call_not_text_is_refused_unvalidated() {
-    // `Bearer`, a no-break space, then a valid token: trimming would accept it.
+    // Trimming or tolerating a no-break space anywhere would accept `good`.
     let validations = Arc::new(AtomicUsize::new(0));
     let app = AuthorizedHandler::new(
         config(Counting(Arc::clone(&validations), tokens()), &[]),
@@ -282,11 +282,19 @@ fn a_header_the_tower_layer_would_call_not_text_is_refused_unvalidated() {
     );
     let (addr, stop) = serve(app);
 
-    let reply = get(addr, "/mcp", Some("Bearer \u{a0}good"));
+    for value in [
+        "Bearer \u{a0}good",
+        "Bearer good\u{a0}",
+        "\u{a0}Bearer good",
+    ] {
+        let reply = get(addr, "/mcp", Some(value));
+        assert_eq!(reply.status, 400, "{value:?}");
+        let challenge = reply.header("www-authenticate").expect("challenge");
+        assert!(
+            challenge.contains("invalid_request"),
+            "{value:?}: {challenge}"
+        );
+    }
     stop.shutdown();
-
-    assert_eq!(reply.status, 400);
-    let challenge = reply.header("www-authenticate").expect("challenge");
-    assert!(challenge.contains("invalid_request"), "{challenge}");
     assert_eq!(validations.load(Ordering::SeqCst), 0);
 }
