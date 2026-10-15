@@ -7,6 +7,7 @@
 use crate::{report, tokens};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Thresholds of the criteria note.
@@ -51,6 +52,10 @@ pub struct RunFacts {
     pub unused_conflicts: u64,
     /// `unused_share` as (unused bytes, all spec bytes).
     pub unused_bytes: (u64, u64),
+    /// The task's `reads_per_turn`, from its card.
+    pub reads_per_turn: u64,
+    /// The models each role's turns used, from the harness output.
+    pub role_models: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl RunFacts {
@@ -127,6 +132,9 @@ pub struct Evaluation {
     /// The commit the run was built from; set by `load`, which refuses a dirty
     /// tree or a commit that does not contain `min_commit`.
     pub git_sha: Option<String>,
+    /// The commit this `bbp` binary was built from; `load` refuses unless it
+    /// is `git_sha`.
+    pub bbp_build_sha: Option<String>,
 }
 
 fn median(mut v: Vec<f64>) -> Option<f64> {
@@ -319,6 +327,7 @@ pub fn evaluate(pairs: &[Pair], poll_ms: u64) -> Evaluation {
         decision: "",
         criteria_sha256: None,
         git_sha: None,
+        bbp_build_sha: None,
     };
     e.decision = decide(&e);
     e
@@ -353,6 +362,8 @@ pub struct PairRef {
 pub struct Manifest {
     /// The `--poll-ms` the runs used.
     pub poll_ms: u64,
+    /// The `reads_per_turn` every run must have been opened with.
+    pub reads_per_turn: u64,
     /// The committed criteria file whose prices cost the tokens.
     pub criteria: String,
     /// The git checkout the run's binaries were built from.
@@ -383,6 +394,13 @@ fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
     let text =
         std::fs::read_to_string(&r.mod_output).map_err(|e| format!("{}: {e}", r.mod_output))?;
     let st = &d.state;
+    let mut role_models: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for t in &tok.turns {
+        role_models
+            .entry(t.role.clone())
+            .or_default()
+            .extend(t.models.keys().cloned());
+    }
     Ok(RunFacts {
         closed: st.state == State::Closed,
         rubric_ok: r.rubric_ok,
@@ -391,7 +409,52 @@ fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
+        reads_per_turn: st.budget.reads_per_turn,
+        role_models,
     })
+}
+
+/// Settings every run must share. `reads_per_turn` is what the manifest says
+/// for every run; each role uses exactly one model in a run, the same one in
+/// both arms of a pair, and an extra role of the N=2 arm uses a model the
+/// control arm also used. A run that breaks this is not comparable, so the
+/// evaluation refuses rather than reports.
+pub fn check_settings(pairs: &[Pair], reads_per_turn: u64) -> Result<(), String> {
+    for p in pairs {
+        for (arm, r) in [("control", &p.control), ("treatment", &p.treatment)] {
+            if r.reads_per_turn != reads_per_turn {
+                return Err(format!(
+                    "{}/{arm}: reads_per_turn is {}, the manifest says {reads_per_turn}",
+                    p.id, r.reads_per_turn
+                ));
+            }
+            if let Some((role, ms)) = r.role_models.iter().find(|(_, ms)| ms.len() > 1) {
+                return Err(format!(
+                    "{}/{arm}: role {role} used several models: {ms:?}",
+                    p.id
+                ));
+            }
+        }
+        let control: BTreeSet<&String> = p.control.role_models.values().flatten().collect();
+        for (role, ms) in &p.treatment.role_models {
+            match p.control.role_models.get(role) {
+                Some(c) if c != ms => {
+                    return Err(format!(
+                        "{}: role {role} used {c:?} in the control and {ms:?} in the treatment",
+                        p.id
+                    ))
+                }
+                None if !ms.iter().all(|m| control.contains(m)) => {
+                    return Err(format!(
+                        "{}: extra role {role} used {ms:?}, which the control never used",
+                        p.id
+                    ))
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<(bool, String), String> {
@@ -410,7 +473,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<(bool, String), String> {
 /// The commit a run is pinned to: HEAD of `repo`, which must be clean and must
 /// contain `min_commit` (the merge of the verdict-binding fix). A criteria file
 /// with no `min_commit` refuses: the pin is part of the criteria.
-pub fn pin(repo: &Path, min_commit: Option<&str>) -> Result<String, String> {
+pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<String, String> {
     let min =
         min_commit.ok_or("the criteria file does not pin min_commit (the verdict-binding fix)")?;
     let (ok, head) = git(repo, &["rev-parse", "HEAD"])?;
@@ -424,6 +487,11 @@ pub fn pin(repo: &Path, min_commit: Option<&str>) -> Result<String, String> {
     let (contains, _) = git(repo, &["merge-base", "--is-ancestor", min, "HEAD"])?;
     if !contains {
         return Err(format!("HEAD {head} does not contain min_commit {min}"));
+    }
+    if build_sha != head {
+        return Err(format!(
+            "this bbp was built from {build_sha}, not from HEAD {head}: rebuild from the pinned checkout"
+        ));
     }
     Ok(head)
 }
@@ -448,10 +516,16 @@ pub fn load(manifest: &Path) -> Result<Evaluation, String> {
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let sha_run = pin(Path::new(&m.repo), c.min_commit.as_deref())?;
+    check_settings(&pairs, m.reads_per_turn)?;
+    let sha_run = pin(
+        Path::new(&m.repo),
+        c.min_commit.as_deref(),
+        crate::BUILD_SHA,
+    )?;
     let mut e = evaluate(&pairs, m.poll_ms);
     e.criteria_sha256 = Some(sha);
     e.git_sha = Some(sha_run);
+    e.bbp_build_sha = Some(crate::BUILD_SHA.to_owned());
     Ok(e)
 }
 
@@ -744,19 +818,217 @@ mod tests {
     }
 
     #[test]
-    fn a_run_is_pinned_to_a_clean_head_that_contains_the_minimum_commit() {
+    fn a_run_is_pinned_to_a_clean_head_built_into_the_binary_that_contains_the_minimum_commit() {
         let (d, first, second) = repo();
-        assert_eq!(pin(&d, Some(&first)).unwrap(), second);
-        assert_eq!(pin(&d, Some(&second)).unwrap(), second);
+        assert_eq!(pin(&d, Some(&first), &second).unwrap(), second);
+        assert_eq!(pin(&d, Some(&second), &second).unwrap(), second);
+        // A binary built from another commit, or from a dirty tree, refuses.
+        assert!(pin(&d, Some(&first), &first)
+            .unwrap_err()
+            .contains("built from"));
+        assert!(pin(&d, Some(&first), &format!("{second}-dirty")).is_err());
+        assert!(pin(&d, Some(&first), "unknown").is_err());
         // A commit HEAD does not contain (here: a made-up sha) refuses.
-        assert!(pin(&d, Some(&"0".repeat(40))).is_err());
+        assert!(pin(&d, Some(&"0".repeat(40)), &second).is_err());
         // No pin in the criteria refuses.
-        assert!(pin(&d, None).unwrap_err().contains("min_commit"));
+        assert!(pin(&d, None, &second).unwrap_err().contains("min_commit"));
         // A dirty tree refuses.
         std::fs::write(d.join("a"), "dirty").unwrap();
-        assert!(pin(&d, Some(&first)).unwrap_err().contains("not clean"));
+        assert!(pin(&d, Some(&first), &second)
+            .unwrap_err()
+            .contains("not clean"));
         // Not a repo refuses.
-        assert!(pin(&std::env::temp_dir().join("no-such-repo-dir"), Some(&first)).is_err());
+        assert!(pin(
+            &std::env::temp_dir().join("no-such-repo-dir"),
+            Some(&first),
+            &second
+        )
+        .is_err());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    fn with_models(mut r: RunFacts, rpt: u64, roles: &[(&str, &[&str])]) -> RunFacts {
+        r.reads_per_turn = rpt;
+        r.role_models = roles
+            .iter()
+            .map(|(role, ms)| {
+                (
+                    (*role).to_owned(),
+                    ms.iter().map(|m| (*m).to_owned()).collect(),
+                )
+            })
+            .collect();
+        r
+    }
+
+    fn model_pair(c: &[(&str, &[&str])], t: &[(&str, &[&str])]) -> Pair {
+        pair(
+            "p",
+            Kind::Separable,
+            with_models(run(1, 1), 30, c),
+            with_models(run(1, 1), 30, t),
+        )
+    }
+
+    #[test]
+    fn one_model_per_role_identical_across_arms_is_accepted() {
+        let p = model_pair(
+            &[("planner", &["m1"]), ("coder", &["m2"])],
+            &[
+                ("planner", &["m1"]),
+                ("coder", &["m2"]),
+                ("planner2", &["m1"]),
+            ],
+        );
+        assert_eq!(check_settings(&[p], 30), Ok(()));
+    }
+
+    #[test]
+    fn a_role_on_two_models_or_a_different_model_in_the_other_arm_refuses() {
+        let two = model_pair(&[("planner", &["m1", "m2"])], &[("planner", &["m1"])]);
+        assert!(check_settings(&[two], 30)
+            .unwrap_err()
+            .contains("several models"));
+        let differs = model_pair(&[("planner", &["m1"])], &[("planner", &["m2"])]);
+        let err = check_settings(&[differs], 30).unwrap_err();
+        assert!(
+            err.contains("control") && err.contains("treatment"),
+            "{err}"
+        );
+        // An extra N=2 role on a model the control never used refuses.
+        let extra = model_pair(
+            &[("planner", &["m1"])],
+            &[("planner", &["m1"]), ("planner2", &["m9"])],
+        );
+        assert!(check_settings(&[extra], 30)
+            .unwrap_err()
+            .contains("extra role"));
+    }
+
+    #[test]
+    fn a_run_whose_reads_per_turn_is_not_the_manifests_refuses() {
+        let mut p = model_pair(&[("planner", &["m1"])], &[("planner", &["m1"])]);
+        assert_eq!(check_settings(&[p.clone()], 30), Ok(()));
+        assert!(check_settings(&[p.clone()], 20)
+            .unwrap_err()
+            .contains("reads_per_turn"));
+        p.treatment.reads_per_turn = 10;
+        assert!(check_settings(&[p], 30).unwrap_err().contains("treatment"));
+    }
+
+    // ---- the decision table, row by row
+
+    /// An evaluation in which every criterion holds.
+    fn all_hold() -> Evaluation {
+        let mut e = evaluate(&[], 500);
+        e.noise_gate = Verdict::Holds;
+        e.c1_safety = Verdict::Holds;
+        e.c2_comparable = Verdict::Holds;
+        e.c3_parallelism = Verdict::Holds;
+        e.c4_contention = Verdict::Holds;
+        e.c5_loss = Verdict::Holds;
+        e.c7_cost = Verdict::Holds;
+        e
+    }
+
+    /// One condition per row, in table order, with the text its row starts with.
+    type Row = (&'static str, fn(&mut Evaluation), &'static str);
+    const ROWS: [Row; 9] = [
+        (
+            "noise gate",
+            |e| e.noise_gate = Verdict::Fails,
+            "noise gate failed",
+        ),
+        ("1 fails", |e| e.c1_safety = Verdict::Fails, "1 fails"),
+        ("2 fails", |e| e.c2_comparable = Verdict::Fails, "2 fails"),
+        (
+            "3 inconclusive",
+            |e| e.c3_parallelism = Verdict::Inconclusive,
+            "3 inconclusive",
+        ),
+        ("3 fails", |e| e.c3_parallelism = Verdict::Fails, "3 fails"),
+        (
+            "7 fails",
+            |e| e.c7_cost = Verdict::Fails,
+            "3 holds, 7 fails",
+        ),
+        (
+            "4 fails",
+            |e| e.c4_contention = Verdict::Fails,
+            "3 and 7 hold, 4 fails",
+        ),
+        (
+            "5 fails",
+            |e| e.c5_loss = Verdict::Fails,
+            "3, 7 and 4 hold, 5 fails",
+        ),
+        (
+            "incomplete",
+            |e| e.c4_contention = Verdict::Inconclusive,
+            "incomplete",
+        ),
+    ];
+
+    #[test]
+    fn all_holding_builds_after_the_preconditions() {
+        assert!(decide(&all_hold()).starts_with("1 to 5 and 7 hold"));
+    }
+
+    #[test]
+    fn every_decision_row_fires_alone() {
+        for (name, cond, want) in ROWS {
+            let mut e = all_hold();
+            cond(&mut e);
+            assert!(decide(&e).starts_with(want), "{name}: {}", decide(&e));
+        }
+    }
+
+    #[test]
+    fn the_first_matching_row_wins_over_every_later_one() {
+        // The last row is the fallback, not a condition, so it is never applied
+        // as a "later" row.
+        let conditions = &ROWS[..ROWS.len() - 1];
+        for (i, (name, cond, want)) in conditions.iter().enumerate() {
+            // Every later row's condition holds too. They are applied latest
+            // first so an earlier one wins any field two of them share, and
+            // this row's last so it wins its own.
+            let mut e = all_hold();
+            for (_, later, _) in conditions[i + 1..].iter().rev() {
+                later(&mut e);
+            }
+            cond(&mut e);
+            assert!(decide(&e).starts_with(want), "{name}: {}", decide(&e));
+        }
+    }
+
+    #[test]
+    fn a_row_is_not_rescued_by_a_later_criterion_holding() {
+        // 3 fails with 4, 5 and 7 all holding is still "3 fails".
+        let mut e = all_hold();
+        e.c3_parallelism = Verdict::Fails;
+        assert!(decide(&e).starts_with("3 fails"));
+        // 3 holding and 7 failing stays "7 fails" whatever 4 and 5 show.
+        let mut e = all_hold();
+        e.c7_cost = Verdict::Fails;
+        e.c4_contention = Verdict::Holds;
+        assert!(decide(&e).starts_with("3 holds, 7 fails"));
+        e.c4_contention = Verdict::Fails;
+        e.c5_loss = Verdict::Fails;
+        assert!(decide(&e).starts_with("3 holds, 7 fails"));
+    }
+
+    #[test]
+    fn an_inconclusive_criterion_is_never_a_build() {
+        for f in [
+            (|e: &mut Evaluation| e.c1_safety = Verdict::Inconclusive) as fn(&mut Evaluation),
+            |e| e.c2_comparable = Verdict::Inconclusive,
+            |e| e.c4_contention = Verdict::Inconclusive,
+            |e| e.c5_loss = Verdict::Inconclusive,
+            |e| e.c7_cost = Verdict::Inconclusive,
+        ] {
+            let mut e = all_hold();
+            f(&mut e);
+            assert!(decide(&e).starts_with("incomplete"), "{}", decide(&e));
+        }
     }
 }

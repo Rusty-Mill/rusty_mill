@@ -16,6 +16,9 @@
 
 #![forbid(unsafe_code)]
 
+/// The commit this binary was built from (`-dirty` or `unknown` when not clean).
+pub const BUILD_SHA: &str = env!("BBP_BUILD_SHA");
+
 pub mod admin;
 pub mod args;
 pub mod grade;

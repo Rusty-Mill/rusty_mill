@@ -158,6 +158,7 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(90),
+        cost_cap: None,
     };
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
 
@@ -306,6 +307,7 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(5),
+        cost_cap: None,
     };
     let first = card(&dir, &task);
     let out = moderator::run(&cfg);
@@ -369,6 +371,7 @@ fn config(dir: &Path, task: &TaskId, repo: PathBuf, launchers: Launchers, wall: 
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(wall),
+        cost_cap: None,
     }
 }
 
@@ -905,4 +908,93 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
     }
     assert!(out.elapsed > Duration::ZERO && out.elapsed < Duration::from_secs(60));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- live cost cap
+
+/// A planner whose harness prints one assistant message (priced by the model it
+/// names) and then idles, under a cost cap.
+fn capped_run(
+    tag: &str,
+    model_in_output: &str,
+    cap_usd: f64,
+    wall: u64,
+) -> Result<moderator::Outcome, String> {
+    let dir = tempdir(tag);
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    admin::open_task(
+        &dir,
+        &task,
+        "local",
+        b"brief",
+        &PrincipalId("human".into()),
+        &ProfileSet::shell("test", "true"),
+        common::roster(),
+    )
+    .expect("open");
+    for role in Who::ALL {
+        admin::assign(
+            &dir,
+            &task,
+            &role.id(),
+            &PrincipalId(role.name().into()),
+            "v",
+        )
+        .expect("assign");
+    }
+    let line = format!(
+        r#"{{"type":"assistant","message":{{"id":"m1","model":"{model_in_output}","usage":{{"input_tokens":0,"output_tokens":1000000}}}}}}"#
+    );
+    let launchers = Launchers::default().with(
+        "planner",
+        script(&dir, "planner", &format!("echo '{line}'\nsleep 60")),
+    );
+    let mut cfg = config(&dir, &task, repo, launchers, wall);
+    cfg.cost_cap = Some(moderator::CostCap {
+        usd: cap_usd,
+        criteria: rusty_bbp_host::tokens::Criteria {
+            prices_as_of: "test".into(),
+            models: [(
+                "priced-model".to_owned(),
+                rusty_bbp_host::tokens::Prices {
+                    input: 1.0,
+                    output: 20.0, // 1M output tokens is $20
+                    cache_creation: 1.0,
+                    cache_read: 1.0,
+                },
+            )]
+            .into(),
+            min_commit: None,
+        },
+    });
+    let out = moderator::run(&cfg);
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn a_run_over_its_dollar_cap_is_stopped_and_its_harness_killed() {
+    let started = Instant::now();
+    let err = capped_run("cap-over", "priced-model", 1.0, 30).unwrap_err();
+    assert!(err.contains("cost cap reached"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "stopped by the cap, not by the wall limit or the harness's own sleep"
+    );
+}
+
+#[test]
+fn a_run_under_its_cap_is_left_to_the_wall_limit() {
+    let err = capped_run("cap-under", "priced-model", 1000.0, 3).unwrap_err();
+    assert!(err.contains("wall limit"), "{err}");
+}
+
+#[test]
+fn a_model_with_no_price_stops_the_run_because_the_cap_cannot_be_enforced() {
+    let err = capped_run("cap-unpriced", "unpriced-model", 1000.0, 30).unwrap_err();
+    assert!(
+        err.contains("cannot enforce the cost cap") && err.contains("unpriced-model"),
+        "{err}"
+    );
 }

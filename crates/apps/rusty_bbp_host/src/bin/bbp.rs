@@ -15,7 +15,7 @@
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | join --key K --scores S --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
-//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N]
+//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--max-usd C --criteria FILE]
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
@@ -122,6 +122,18 @@ fn run() -> Result<String, String> {
                 confinement,
                 poll: std::time::Duration::from_millis(num("poll-ms", 500)?),
                 max_wall: std::time::Duration::from_secs(num("max-wall-secs", u64::MAX / 1000)?),
+                cost_cap: match (a.flags.get("max-usd"), a.flags.get("criteria")) {
+                    (Some(usd), Some(file)) => Some(moderator::CostCap {
+                        usd: usd
+                            .parse()
+                            .ok()
+                            .filter(|u: &f64| u.is_finite() && *u > 0.0)
+                            .ok_or("--max-usd must be a positive number")?,
+                        criteria: tokens::read_criteria(&PathBuf::from(file))?.0,
+                    }),
+                    (None, None) => None,
+                    _ => return Err("--max-usd and --criteria go together".into()),
+                },
             };
             let out = moderator::run(&cfg)?;
             let visits: Vec<String> = out
@@ -130,12 +142,13 @@ fn run() -> Result<String, String> {
                 .map(|(s, d)| format!("[\"{s:?}\",{}]", d.as_millis()))
                 .collect();
             return Ok(format!(
-                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}]}}",
+                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}],\"bbp_build_sha\":\"{}\"}}",
                 out.state,
                 out.turns_launched,
                 out.runs,
                 out.elapsed.as_millis(),
-                visits.join(",")
+                visits.join(","),
+                rusty_bbp_host::BUILD_SHA
             ));
         }
         "metrics" => return report::json(&dir, &task, a.flags.get("owner").map(String::as_str)),

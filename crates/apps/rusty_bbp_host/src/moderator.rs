@@ -91,6 +91,18 @@ pub struct Config {
     pub poll: Duration,
     /// Give up after this long; the task is left where it stands.
     pub max_wall: Duration,
+    /// Stop the run when its harnesses have cost more than this.
+    pub cost_cap: Option<CostCap>,
+}
+
+/// A live dollar cap on one run. Checked each poll from the harness output the
+/// moderator keeps, so it lags by a poll and by what a harness has printed: it
+/// cuts a run short, it does not bound spend exactly. The API key's spend limit
+/// is the hard stop.
+#[derive(Clone, Debug)]
+pub struct CostCap {
+    pub usd: f64,
+    pub criteria: crate::tokens::Criteria,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -337,6 +349,12 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             sup.kill_harnesses()?;
             return Err(format!("moderator: wall limit reached in state {state:?}"));
         }
+        if let Some(cap) = &cfg.cost_cap {
+            if let Err(e) = enforce_cap(cfg, &d, cap) {
+                sup.kill_harnesses()?;
+                return Err(e);
+            }
+        }
 
         // The runner works on its own thread so the loop keeps ticking,
         // honouring cancellation and the wall limit while a profile runs.
@@ -422,6 +440,22 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         }
         std::thread::sleep(cfg.poll);
     }
+}
+
+/// Fail closed: over the cap, or a model that cannot be priced (so the cap
+/// cannot be enforced), stops the run.
+fn enforce_cap<S: Store>(cfg: &Config, d: &Driver<S>, cap: &CostCap) -> Result<(), String> {
+    let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
+    let t = crate::tokens::of(&cfg.dir, &cfg.task, &events, Some(&cap.criteria))
+        .map_err(|e| format!("moderator: cannot enforce the cost cap: {e}"))?;
+    let usd = t.usd.unwrap_or(0.0);
+    if usd > cap.usd {
+        return Err(format!(
+            "moderator: cost cap reached (${usd:.4} over ${:.4})",
+            cap.usd
+        ));
+    }
+    Ok(())
 }
 
 fn run_once(cfg: &Config) -> Result<Response, String> {
