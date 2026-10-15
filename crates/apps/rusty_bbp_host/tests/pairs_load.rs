@@ -127,7 +127,7 @@ fn load_with_logs(
     std::fs::write(
         &criteria,
         format!(
-            r#"{{"prices_as_of":"test","models":{{"m":{{"input":1,"output":1,"cache_creation":1,"cache_read":1}}}},"min_commit":"{head}"}}"#
+            r#"{{"prices_as_of":"test","models":{{"m":{{"input":1,"output":1,"cache_creation_5m":1,"cache_creation_1h":1,"cache_read":1}}}},"min_commit":"{head}"}}"#
         ),
     )
     .unwrap();
