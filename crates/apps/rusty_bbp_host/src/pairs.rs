@@ -86,7 +86,7 @@ pub struct FailedCost {
 
 impl RunFacts {
     pub fn succeeded(&self) -> bool {
-        self.closed && self.rubric_ok && !self.over_cap
+        self.closed && self.rubric_ok && !self.over_cap && self.killed_turns == 0
     }
 }
 
@@ -345,6 +345,23 @@ fn decide(e: &Evaluation) -> &'static str {
     }
 }
 
+/// What each failed pair is known to have cost, at least: it is out of
+/// criterion 7, but its spend is real.
+fn failed_pair_costs(pairs: &[Pair]) -> Vec<FailedCost> {
+    pairs
+        .iter()
+        .filter(|p| !p.ok())
+        .map(|p| FailedCost {
+            pair: p.id.clone(),
+            usd_at_least: [&p.control, &p.treatment]
+                .iter()
+                .filter_map(|r| r.usd_floor)
+                .sum(),
+        })
+        .filter(|f| f.usd_at_least > 0.0)
+        .collect()
+}
+
 /// Evaluate the criteria over `pairs` with the run's poll interval.
 pub fn evaluate(pairs: &[Pair], poll_ms: u64) -> Evaluation {
     let (gate, null_ratios) = noise_gate(pairs);
@@ -371,8 +388,12 @@ pub fn evaluate(pairs: &[Pair], poll_ms: u64) -> Evaluation {
         criteria_sha256: None,
         git_sha: None,
         bbp_build_sha: None,
-        failed_pair_costs: Vec::new(),
-        total_usd_at_least: 0.0,
+        failed_pair_costs: failed_pair_costs(pairs),
+        total_usd_at_least: pairs
+            .iter()
+            .flat_map(|p| [&p.control, &p.treatment])
+            .filter_map(|r| r.usd_floor)
+            .sum(),
     };
     e.decision = decide(&e);
     e
@@ -529,8 +550,8 @@ pub fn facts(
         role_models,
         build_sha: build_sha_of(&text)?,
         no_model_turns,
-        killed_turns: 0,
-        usd_floor: None,
+        killed_turns: tok.unknown_turns,
+        usd_floor: tok.usd_floor,
     })
 }
 
@@ -703,7 +724,7 @@ pub fn json(manifest: &Path) -> Result<String, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

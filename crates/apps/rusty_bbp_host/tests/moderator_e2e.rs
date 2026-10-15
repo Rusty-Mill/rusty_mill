@@ -733,7 +733,7 @@ fn script(dir: &Path, name: &str, body: &str) -> Launcher {
             "--disallowedTools",
             "Agent,Task",
             "--setting-sources",
-            "user",
+            "",
         ]
         .map(String::from)
         .into(),
@@ -1554,7 +1554,7 @@ fn agents_check_as_a_binary_accepts_a_matched_pair_and_refuses_the_rest() {
             "--disallowedTools",
             "Agent,Task",
             "--setting-sources",
-            "user",
+            "",
         ]
         .map(String::from)
         .into();

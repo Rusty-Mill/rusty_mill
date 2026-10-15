@@ -10,11 +10,15 @@
 //! are not printed at all. So dollars are priced only from a valid final
 //! `result`; a turn without one (a killed harness, a crash, an interrupt, which
 //! prints a result with zeroed usage) has an unknown cost, never a smaller one.
-//! `modelUsage` does not split cache writes by lifetime (the `usage` object
-//! does, but excludes subagents), so cache writes are priced at the 1-hour
-//! rate and the moderator pins both cache TTL variables to 1 hour; a run that
-//! shows 5-minute writes, or whose priced total disagrees with the harness's
-//! `total_cost_usd`, is refused.
+//! `modelUsage` does not split cache writes by lifetime; the `usage` object
+//! does, but only for the main agent. Subagents are forbidden in an evidence
+//! run, so that split is the whole run's: with one model in `modelUsage` the
+//! 5-minute writes it reports are priced at the 5-minute rate and the rest at
+//! the 1-hour rate. With no split, or one that cannot be assigned (several
+//! models), every write is priced at the 1-hour rate, so cost is never
+//! understated. The moderator pins both cache TTL variables to 1 hour, each
+//! turn's effective lifetime is logged, and the priced total must agree with
+//! the harness's own `total_cost_usd`.
 
 use crate::moderator::log_path;
 use rusty_bbp::*;
@@ -338,6 +342,8 @@ pub struct ResultInfo {
     fast_mode_state: Option<String>,
     /// 5-minute cache writes the main agent's `usage` reports.
     five_minute_writes: u64,
+    /// 1-hour cache writes the main agent's `usage` reports.
+    one_hour_writes: u64,
 }
 
 /// The last `result` line of a harness's output. A log can hold several (a
@@ -367,6 +373,9 @@ pub fn last_result(stream: &str) -> Option<ResultInfo> {
                 five_minute_writes: u
                     .as_ref()
                     .map_or(0, |u| u.cache_creation.ephemeral_5m_input_tokens),
+                one_hour_writes: u
+                    .as_ref()
+                    .map_or(0, |u| u.cache_creation.ephemeral_1h_input_tokens),
             }
         })
 }
@@ -457,6 +466,16 @@ fn split_at_last_result(stream: &str) -> (&str, &str) {
     stream.split_at(end)
 }
 
+/// The lifetime of a turn's cache writes, from the main agent's split.
+fn ttl_of(five: u64, hour: u64) -> Option<&'static str> {
+    match (five > 0, hour > 0) {
+        (true, true) => Some("mixed"),
+        (true, false) => Some("5m"),
+        (false, true) => Some("1h"),
+        (false, false) => None,
+    }
+}
+
 /// What a turn's output says it cost.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cost {
@@ -471,8 +490,8 @@ pub enum Cost {
 }
 
 /// Price a harness's output. `Err` means the output is refusable (a model with
-/// no price, fast mode, a priority tier, regional inference, 5-minute cache
-/// writes, or a total that disagrees with the harness's own `total_cost_usd`);
+/// no price, fast mode, a priority tier, regional inference, or a total that
+/// disagrees with the harness's own `total_cost_usd`);
 /// `Ok(Unknown)` means there is nothing to price.
 pub fn price_turn(stream: &str, c: &Criteria) -> Result<Cost, String> {
     let Some(r) = last_result(stream) else {
@@ -508,15 +527,19 @@ pub fn price_turn(stream: &str, c: &Criteria) -> Result<Cost, String> {
             ));
         }
     }
-    if r.five_minute_writes > 0 {
-        return Err(format!(
-            "{} cache tokens were written for 5 minutes; {} must be pinned to {}",
-            r.five_minute_writes,
-            CACHE_TTL_ENV.join(" and "),
-            PINNED_CACHE_TTL
-        ));
+    // The main agent's split belongs to the run's one model (subagents are
+    // forbidden); with several models it cannot be assigned, and every write
+    // is priced at the 1-hour rate.
+    let mut models = r.models.clone();
+    if r.five_minute_writes > 0 && models.len() == 1 {
+        for u in models.values_mut() {
+            u.cache_creation = CacheCreation {
+                ephemeral_5m_input_tokens: r.five_minute_writes,
+                ephemeral_1h_input_tokens: r.one_hour_writes,
+            };
+        }
     }
-    let usd = c.dollars(&r.models)?;
+    let usd = c.dollars(&models)?;
     let total = r
         .total_cost_usd
         .filter(|t| t.is_finite())
@@ -526,11 +549,7 @@ pub fn price_turn(stream: &str, c: &Criteria) -> Result<Cost, String> {
             "priced ${usd:.6} but the harness reports total_cost_usd ${total:.6}: the price file or the cache TTL does not match what ran"
         ));
     }
-    Ok(Cost::Known {
-        usd,
-        usage,
-        models: r.models,
-    })
+    Ok(Cost::Known { usd, usage, models })
 }
 
 /// One turn's tokens.
@@ -712,9 +731,21 @@ pub fn of(
             usd_floor: turn_floor,
             models,
             log,
-            cache_ttl: None,
+            cache_ttl: last_result(&text)
+                .and_then(|r| ttl_of(r.five_minute_writes, r.one_hour_writes))
+                .map(str::to_owned),
         });
     }
+    let ttls: HashSet<&str> = out
+        .turns
+        .iter()
+        .filter_map(|t| t.cache_ttl.as_deref())
+        .collect();
+    out.cache_ttl = match ttls.len() {
+        0 => None,
+        1 => ttls.into_iter().next().map(str::to_owned),
+        _ => Some("mixed".into()),
+    };
     if criteria.is_some() {
         out.usd_floor = Some(floor);
         out.usd = all_known.then_some(usd);

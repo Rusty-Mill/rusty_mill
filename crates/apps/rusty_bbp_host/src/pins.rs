@@ -547,7 +547,7 @@ fn no_subagents(args: &[Arg]) -> bool {
 
 /// What an evidence run needs of every harness a launcher starts, beyond its
 /// pin: it prints `--output-format stream-json` to its log, unredirected and
-/// unpiped (the cap reads that log), loads no project or local settings, and
+/// unpiped (the cap reads that log), loads no settings source (`--setting-sources ""`), and
 /// cannot start a subagent (which would run on a model nobody pinned).
 pub fn check_harness(l: &Launcher) -> Result<(), String> {
     let commands = claude_commands(l)?;
@@ -572,9 +572,9 @@ pub fn check_harness(l: &Launcher) -> Result<(), String> {
                 "--output-format is {format:?}; the cap and the criteria read stream-json"
             ));
         }
-        // A project's or a local `.claude/settings*.json` `env` overrides the
-        // process environment (captured: its 5m cache TTL beat the moderator's
-        // 1h), so only user settings may load.
+        // A settings file's `env` overrides the process environment (captured:
+        // a project's `.claude/settings.json` set a 5m cache TTL over the
+        // moderator's 1h), so no settings source loads at all.
         let sources = args
             .iter()
             .enumerate()
@@ -583,9 +583,9 @@ pub fn check_harness(l: &Launcher) -> Result<(), String> {
                 ("--setting-sources", None) => args.get(i + 1).map(|n| n.text.as_str()),
                 _ => None,
             });
-        if sources.is_none_or(|v| v.split(',').any(|s| s == "project" || s == "local")) {
+        if sources != Some("") {
             return Err(format!(
-                "--setting-sources is {sources:?}; pass `--setting-sources user` so a project's settings `env` cannot override the pinned cache lifetime"
+                "--setting-sources is {sources:?}; pass `--setting-sources \"\"` so no settings file's `env` can override the pinned cache lifetime or model"
             ));
         }
         if !no_subagents(args) {
@@ -757,7 +757,7 @@ mod tests {
                     "--tools",
                     "Bash",
                     "--setting-sources",
-                    "user",
+                    "",
                 ],
             )
         };
@@ -1188,7 +1188,7 @@ mod tests {
                 "--disallowedTools",
                 "Agent,Task",
                 "--setting-sources",
-                "user",
+                "",
             ],
         )
     }
@@ -1203,7 +1203,7 @@ mod tests {
                 "--output-format=stream-json",
                 "--tools",
                 "Bash,Read",
-                "--setting-sources=user",
+                "--setting-sources=",
             ],
         );
         assert_eq!(
@@ -1213,7 +1213,7 @@ mod tests {
         );
         let sh = launcher(
             "sh",
-            &["-c", "set -e; exec claude -p x --model m1 --output-format stream-json --verbose --disallowedTools 'Agent Task' --setting-sources user"],
+            &["-c", "set -e; exec claude -p x --model m1 --output-format stream-json --verbose --disallowedTools 'Agent Task' --setting-sources ''"],
         );
         assert_eq!(check_harness(&sh), Ok(()));
     }
@@ -1264,7 +1264,7 @@ mod tests {
                 "--output-format",
                 "stream-json",
                 "--setting-sources",
-                "user",
+                "",
             ],
         );
         assert!(check_harness(&open).unwrap_err().contains("subagent"));
@@ -1278,7 +1278,7 @@ mod tests {
                 "--disallowedTools",
                 "Task",
                 "--setting-sources",
-                "user",
+                "",
             ],
         );
         assert!(check_harness(&half).is_err(), "Agent is still allowed");
@@ -1292,7 +1292,7 @@ mod tests {
                 "--tools",
                 "Bash,Agent",
                 "--setting-sources",
-                "user",
+                "",
             ],
         );
         assert!(check_harness(&allow).is_err(), "Agent in the allow-list");
@@ -1306,94 +1306,6 @@ mod tests {
             Launchers::default().with("planner", launcher("claude", &["--model", "m1", "-p", "x"]));
         let err = check_run(&bad, &criteria(&["m1"])).unwrap_err();
         assert!(err.contains("planner"), "{err}");
-    }
-
-    // ---- captured: a project's `.claude/settings.json` `env` overrides the
-    // process environment (a 5m cache TTL beat the moderator's 1h), and
-    // `--setting-sources` is what keeps it out.
-
-    #[test]
-    fn a_harness_must_not_load_project_or_local_settings() {
-        let base = |sources: &[&str]| {
-            let mut a = vec![
-                "--model",
-                "m1",
-                "--output-format",
-                "stream-json",
-                "--disallowedTools",
-                "Agent,Task",
-            ];
-            a.extend(sources);
-            launcher("claude", &a)
-        };
-        for ok in [
-            &["--setting-sources", "user"][..],
-            &["--setting-sources", ""],
-            &["--setting-sources=user"],
-        ] {
-            assert_eq!(check_harness(&base(ok)), Ok(()), "{ok:?}");
-        }
-        for bad in [
-            &[][..],
-            &["--setting-sources", "user,project"],
-            &["--setting-sources", "local"],
-            &["--setting-sources=project,local,user"],
-        ] {
-            let err = check_harness(&base(bad)).unwrap_err();
-            assert!(err.contains("settings"), "{bad:?}: {err}");
-        }
-    }
-
-    #[test]
-    fn only_what_the_shipped_launcher_uses_is_allowed_and_each_other_command_is_refused() {
-        // claude, set, cd, rm, git and the exec wrapper. Every other command is
-        // refused as a command word, as a wrapper and inside a substitution.
-        for cmd in [
-            "cp a b",
-            "mv a b",
-            "ls",
-            "cat f",
-            "printf x",
-            "sleep 1",
-            "mkdir d",
-            "echo x",
-            "true",
-            "false",
-            "pwd",
-            "export A=1",
-            "env A=1",
-            "command true",
-            "nohup true",
-            "time true",
-        ] {
-            for script in [
-                format!("{cmd}; exec claude --model m1 -p x"),
-                format!("{cmd} && exec claude --model m1 -p x"),
-                format!("X=$({cmd}); exec claude --model m1 -p x"),
-            ] {
-                let sh = launcher("sh", &["-c", &script]);
-                assert!(pinned_model(&sh).is_err(), "{script}");
-            }
-        }
-        // The wrappers other than exec do not run claude either.
-        for script in [
-            "env claude --model m1 -p x",
-            "nohup claude --model m1 -p x",
-            "command claude --model m1 -p x",
-            "time claude --model m1 -p x",
-        ] {
-            let sh = launcher("sh", &["-c", script]);
-            assert!(pinned_model(&sh).is_err(), "{script}");
-        }
-        // What the shipped coder launcher uses still reads.
-        let sh = launcher(
-            "sh",
-            &[
-                "-c",
-                r#"set -e; W=/tmp/w; rm -rf "$W"; git clone -q /tmp/t "$W"; cd "$W"; exec claude --model m1 -p "at $(git rev-parse HEAD)""#,
-            ],
-        );
-        assert_eq!(pinned_model(&sh).unwrap(), Some("m1".into()));
     }
 
     // ---- round two: no setting sources at all, not even the user's

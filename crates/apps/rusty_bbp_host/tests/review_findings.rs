@@ -199,20 +199,6 @@ fn one_incomplete_turn_makes_the_task_cost_unknown() {
 // ---- cache lifetime and the real split
 
 #[test]
-fn five_minute_cache_writes_are_refused_because_the_ttl_was_not_pinned() {
-    let err = tokens_of(
-        "ttl5",
-        &[("planner", fixture("completed-ttl-5m"))],
-        &criteria("ttl5c", SONNET_ONLY),
-    )
-    .unwrap_err();
-    assert!(
-        err.contains("5 minutes") && err.contains("CLAUDE_CODE_PROMPT_CACHE_TTL"),
-        "{err}"
-    );
-}
-
-#[test]
 fn a_one_hour_run_is_priced_to_the_harness_reported_cost() {
     for (name, want) in [
         ("completed-default-ttl", 0.0086289),
@@ -308,18 +294,6 @@ fn opus_priced_from_the_committed_file_matches_the_harness_total_to_the_cent() {
         .unwrap();
     assert!((usd - total).abs() < 1e-9, "priced {usd}, harness {total}");
     assert!(models.contains_key("claude-opus-5-5"));
-}
-
-#[test]
-fn a_settings_env_that_overrides_the_pinned_ttl_is_caught_by_the_five_minute_writes() {
-    // Process env said 1h; `--settings '{"env":{"CLAUDE_CODE_PROMPT_CACHE_TTL":"5m"}}'`
-    // won, and the result shows it.
-    let err = tokens::price_turn(
-        &fixture("settings-env-overrides-ttl"),
-        &criteria("settings", SONNET_ONLY),
-    )
-    .unwrap_err();
-    assert!(err.contains("5 minutes"), "{err}");
 }
 
 #[test]
