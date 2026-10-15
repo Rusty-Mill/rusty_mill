@@ -362,7 +362,7 @@ pub fn spec_wall_ms(mod_output: &str) -> Result<Option<u64>, String> {
 
 fn facts(r: &RunRef) -> Result<RunFacts, String> {
     let task = TaskId(r.task.clone());
-    let rep = report::of(Path::new(&r.dir), &task)?;
+    let rep = report::of(Path::new(&r.dir), &task, None)?;
     let d = crate::open_driver(Path::new(&r.dir), &task)?;
     let events = d.store.events(&task, 0).map_err(|e| format!("{e:?}"))?;
     let tok = tokens::of(Path::new(&r.dir), &task, &events);
