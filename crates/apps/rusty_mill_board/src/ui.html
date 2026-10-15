@@ -23,6 +23,14 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
+:root{--al:40%}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--al:66%}}
+.card.claimed{border-left:4px solid var(--ag);background:color-mix(in srgb,var(--ag) 9%,var(--card))}
+.tag.agent{border-color:var(--ag);color:var(--ag)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--ag);margin-right:6px;flex:none}
+@keyframes pulse{50%{opacity:.25}}
+.running .dot{animation:pulse 1.6s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.running .dot{animation:none}}
 .shell{display:grid;grid-template-columns:auto minmax(0,1fr);min-height:100vh}
 .shell.noside{grid-template-columns:minmax(0,1fr)}.shell.noside #side{display:none}
 #side{display:flex;background:var(--panel);border-right:1px solid var(--line)}
@@ -34,6 +42,7 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 #side .item:hover{background:var(--card)}
 #side .item.on{background:var(--acc);color:#fff}
 #side .item .n{opacity:.75;font-variant-numeric:tabular-nums;white-space:nowrap}
+#side .item .name{display:flex;align-items:center}
 #toggle{padding:4px 9px}
 @media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}#side nav,#side nav+nav{width:100%;min-height:0;border-left:0}}
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
@@ -70,6 +79,23 @@ const projects=()=>Object.values(repos).flat();
 const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
 const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
+/* One colour per agent, the same on every card and in the panel. Twelve hues 30 degrees apart; a name
+   prefers the slot its hash picks and takes the next free one if another agent has it, so two agents
+   never look alike. The set of agents seen is kept in this browser so colours do not shuffle. */
+const SLOTS=12;
+let known=[];try{known=JSON.parse(pref("agents")||"[]")}catch{}
+let slotOf={};
+const hash=n=>{let h=2166136261;for(const c of n){h^=c.charCodeAt(0);h=Math.imul(h,16777619)}return h>>>0};
+function assignSlots(){
+  const used=new Set();slotOf={};
+  for(const n of known){let k=hash(n)%SLOTS;for(let i=0;i<SLOTS&&used.has(k);i++)k=(k+1)%SLOTS;used.add(k);slotOf[n]=k}
+}
+assignSlots();
+function agentColor(n){
+  if(!(n in slotOf)){known=[...new Set([...known,n])].sort();pref("agents",JSON.stringify(known));assignSlots()}
+  return "hsl("+(slotOf[n]*30+8)+" 62% var(--al))";
+}
+const RUNNING=["building","qa","review"];
 const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{}};
 
 async function api(op,args={}){
@@ -99,7 +125,10 @@ function render(){
       const m=el("div",null,"meta");
       if(projects().length>1&&!sel.project){const t=el("span",k.project,"tag proj");t.title=repoOf(k.project);m.append(t)}
       k.tags.forEach(t=>m.append(el("span",t,"tag")));
-      if(k.claim)m.append(el("span","⚑ "+k.claim+" "));
+      if(k.claim){
+        d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
+        const t=el("span",null,"tag agent"+(RUNNING.includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
+      }
       if(k.issue)m.append(el("span","#"+k.issue));
       if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
       d.append(m);
@@ -117,7 +146,11 @@ function render(){
 function renderSide(){
   const names=Object.keys(repos).filter(r=>Object.keys(repos).length===1||count(k=>repoOf(k.project)===r)>0||r===sel.repo);
   $("shell").classList.toggle("noside",(projects().length<2&&!cards.some(k=>k.claim))||pref("side")==="0");
-  const item=(label,n,on,fn)=>{const b=el("button",null,"item"+(on?" on":""));b.type="button";b.append(el("span",label),el("span",String(n),"n"));b.onclick=fn;return b};
+  const item=(label,n,on,fn,agent)=>{
+    const b=el("button",null,"item"+(on?" on":""));b.type="button";
+    const name=el("span",null,"name");
+    if(agent){const d=el("i",null,"dot");d.style.setProperty("--ag",agentColor(agent));name.append(d)}
+    name.append(label);b.append(name,el("span",String(n),"n"));b.onclick=fn;return b};
   const n1=$("nav1");n1.replaceChildren();
   if(projects().length>1){
     n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
@@ -128,7 +161,7 @@ function renderSide(){
   const agents=Object.keys(claims).sort();
   if(agents.length){
     n1.append(el("h2","Agents","sep"),item("Everyone",cards.filter(k=>k.claim).length,!sel.agent,()=>pickAgent("")));
-    for(const a of agents)n1.append(item(a,claims[a],sel.agent===a,()=>pickAgent(a)));
+    for(const a of agents)n1.append(item(a,claims[a],sel.agent===a,()=>pickAgent(a),a));
   }
   const n2=$("nav2");n2.hidden=!sel.repo;n2.replaceChildren();
   if(sel.repo){

@@ -83,9 +83,27 @@ await page.reload();
 await page.waitForSelector(".card");
 check((await page.locator("#nav1 .item.on", { hasText: "rusty_mill" }).count()) === 1, "the chosen repository is remembered");
 
+// Each agent has one colour, shared by its card and its entry in the panel.
+const swatch = (loc) => loc.evaluate((e) => getComputedStyle(e).backgroundColor);
+const cardEdge = (title) => page.locator(".card", { hasText: title }).evaluate((e) => getComputedStyle(e).borderLeftColor);
+const dotOf = (name) => swatch(page.locator("#nav1 .item", { hasText: name }).locator(".dot"));
+const claudeDot = await dotOf("claude");
+check((await cardEdge("Orch card")) === claudeDot, `a card an agent holds wears the agent's colour (${claudeDot})`);
+check((await page.locator(".card", { hasText: "RL card" }).evaluate((e) => e.classList.contains("claimed"))) === false, "an unclaimed card has none");
+check((await page.locator(".card", { hasText: "Orch card" }).locator(".tag.agent").innerText()) === "claude", "and names the agent");
 await page.locator("#nav1 .item", { hasText: "claude" }).click();
 check((await titles()).join() === "Orch card", "choosing an agent shows only the cards it holds");
 await page.locator("#nav1 .item", { hasText: "Everyone" }).click();
+
+// Agents never share a colour, even when their names hash close together.
+const board = (await api("board_list")).cards;
+for (const [title, actor] of [["Skills card", "codex"], ["Mill loose card", "gemini"], ["Added under repo", "mill-runner"], ["Orch card", "claude"]]) {
+  await api("card_claim", { id: board.find((c) => c.title === title).id, actor, role: "builder" });
+}
+await page.locator("#nav1 .item", { hasText: "All repositories" }).click();
+await page.waitForFunction(() => document.querySelectorAll("#nav1 .item .dot").length >= 4);
+const colours = await Promise.all(["claude", "codex", "gemini", "mill-runner"].map(dotOf));
+check(new Set(colours).size === 4, `four agents, four colours (${colours.join(" ")})`);
 
 await page.click("#toggle");
 check(!(await page.locator("#side").isVisible()), "the toggle hides the panel");

@@ -25,7 +25,9 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
   `board_list` and `card_take` take a `project` filter. The UI has a two-pane side panel: repositories with card counts, and for the chosen one
   its projects; both filter the board, and new cards go to the chosen project (else the repository's own). An
-  Agents list under the repositories (everyone holding a claim, with their count) filters by claimant. The runner
+  Agents list under the repositories (everyone holding a claim, with their count) filters by claimant. Each agent
+  has its own colour (twelve hues; two agents never share one), shown in the list and on every card it holds:
+  a coloured edge, a tint and a chip, whose dot pulses while the card is in building, qa or review. The runner
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_events`, `card_take`,
