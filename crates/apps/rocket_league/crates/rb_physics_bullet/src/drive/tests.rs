@@ -959,9 +959,9 @@ fn opposing_throttle_brakes_at_full_brake_deceleration() {
 /// `113.73963 * 60 * dt * v` of impulse below its clamp, so four wheels on a
 /// 180-mass car remove `1 - 4 * 113.73963 * 60 * dt / 180 = -0.2638` of the
 /// speed per 120 Hz tick: a slow coasting car overshoots zero and rings.
-/// Captures of flat grounded coasting (357 ticks, 2 < |v| <= 10 uu/s) give a
-/// mean of -0.2528 (95 % interval -0.2585 to -0.2471); the model's -0.2638 is
-/// within 1 % of the implied constant.
+/// 363 captured flat grounded coasting ticks (2 < |v| <= 10 uu/s): 80 % form a
+/// tight cluster at -0.2674 (sd 0.0075) and the median is -0.2679; the model's
+/// -0.2638 is 0.3 % off in the constant.
 #[test]
 fn a_slow_coasting_car_overshoots_zero_by_a_quarter_each_tick() {
     for speed in [6.0_f32, 8.0, 10.0] {

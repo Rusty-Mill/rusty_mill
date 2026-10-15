@@ -156,9 +156,9 @@ const FRICTION_SCALE: f32 = 180.0 / 3.0;
 /// The brake's impulse per unit contact speed below its clamp. With four wheels
 /// on a 180-mass car at 120 Hz it removes `4 * 113.73963 * 60 * dt / 180 = 1.264`
 /// of the speed per tick, so a slow coasting car's speed ratio is -0.2638 per
-/// tick. Captures of slow coasting (357 ticks, 2 to 10 uu/s) give a mean ratio of
-/// -0.2528 (95 % interval -0.2585 to -0.2471), i.e. a constant of 112.75 (112.2 to
-/// 113.3): the value used is within 1 % of that fit.
+/// tick. In 363 captured slow-coasting ticks (2 to 10 uu/s) 80 % form a tight
+/// cluster at -0.2674 (sd 0.0075; median -0.2679), i.e. a constant of 114.07
+/// (113.99 to 114.14): the value used is 0.3 % below that.
 const BRAKE_RESPONSE: f32 = 113.73963;
 
 /// Full brake deceleration (uu/s^2). RocketSim's per-wheel brake
