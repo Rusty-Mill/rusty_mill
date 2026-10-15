@@ -132,7 +132,10 @@ fn refusals_and_stale_writes_are_counted_once() {
 
 /// Two testers are live together (finalizers are serialized, testers are not).
 /// `tester2` appends a finding during `tester`'s turn; `then` is what `tester`
-/// does between that finding and its approve.
+/// does between that finding and its approve. The engine now refuses an
+/// approve over unread content, so the live turn's `unseen` set is cleared
+/// first: this emulates a log written before the refusal existed, which is what
+/// the counter still has to read.
 fn verdict_after_finding(then: impl FnOnce(&mut Fx)) -> (u64, u64) {
     let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
     fx.reach_test();
@@ -149,9 +152,35 @@ fn verdict_after_finding(then: impl FnOnce(&mut Fx)) -> (u64, u64) {
         .evidence(vec![Ref::art(report)]);
     posted(fx.post("tester2", finding));
     then(&mut fx);
+    fx.d.state.turns.iter_mut().for_each(|t| t.unseen.clear());
     posted(fx.verdict("tester", VerdictKind::Approve));
     let m = metrics::of(&log_of(&fx));
     (m.verdicts, m.stale_verdicts)
+}
+
+/// The refusal and the counter agree: the engine refuses the stale verdict, so
+/// the log of a current build holds none.
+#[test]
+fn the_engine_refuses_what_the_counter_would_count() {
+    let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let read = AgentAction::Read {
+        after: None,
+        limit: 50,
+    };
+    assert!(matches!(fx.agent("tester", read), Response::Read { .. }));
+    let (cand, report) = (fx.st().candidate.unwrap(), fx.report_id());
+    let finding = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", finding));
+    assert_eq!(
+        rejected(fx.verdict("tester", VerdictKind::Approve)),
+        Code::StaleSubject
+    );
+    let m = metrics::of(&log_of(&fx));
+    assert_eq!((m.verdicts, m.stale_verdicts), (0, 0));
 }
 
 #[test]
