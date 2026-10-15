@@ -10,9 +10,51 @@ use crate::event::{Event, TurnEnd};
 use crate::ids::*;
 use crate::record::*;
 use crate::role::Cap;
-use crate::state::TaskState;
+use crate::state::{Gate, TaskState};
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+
+/// What a human gate command decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum GateKind {
+    PlanApproval,
+    MergeApproval,
+    Rejection,
+}
+
+/// One accepted human gate command and the operation id that carried it. The
+/// log records that the task's human principal acted, not who sat behind it;
+/// the op id is the only caller-supplied label, so a host that names itself in
+/// it can attribute the answer (see `rusty_bbp_host::human`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GateAnswer {
+    pub gate: GateKind,
+    pub op: OpId,
+}
+
+/// Every human approval and rejection in `events`, in order, with its op.
+pub fn gate_answers(events: &[Event]) -> Vec<GateAnswer> {
+    let mut pending: Vec<GateKind> = Vec::new();
+    let mut out = Vec::new();
+    for e in events {
+        match e {
+            Event::HumanApproval { gate, .. } => pending.push(match gate {
+                Gate::Plan => GateKind::PlanApproval,
+                Gate::Merge => GateKind::MergeApproval,
+            }),
+            Event::HumanRejection { .. } => pending.push(GateKind::Rejection),
+            // A command's events precede its `op_accepted`.
+            Event::OpAccepted { op, .. } => {
+                out.extend(pending.drain(..).map(|gate| GateAnswer {
+                    gate,
+                    op: op.clone(),
+                }));
+            }
+            _ => {}
+        }
+    }
+    out
+}
 
 /// Charged work: messages and reads are agent actions; bytes are stored size.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

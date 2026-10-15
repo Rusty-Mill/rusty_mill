@@ -3,7 +3,7 @@
 
 mod common;
 use common::*;
-use rusty_bbp::metrics::{self, Overlap, Work};
+use rusty_bbp::metrics::{self, GateKind, Overlap, Work};
 use rusty_bbp::*;
 
 const WON: &[u8] = b"--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n";
@@ -246,4 +246,41 @@ fn a_serialized_run_has_nothing_to_report() {
     );
     assert_eq!(m.discarded_share, 0.0);
     assert_eq!(m.discarded.bytes, 0);
+}
+
+#[test]
+fn each_human_gate_answer_is_listed_with_the_op_that_carried_it() {
+    let mut fx = Fx::new();
+    fx.reach_approved();
+    let log = log_of(&fx);
+    let got = metrics::gate_answers(&log);
+    assert_eq!(
+        got.iter().map(|g| g.gate).collect::<Vec<_>>(),
+        [GateKind::PlanApproval, GateKind::MergeApproval]
+    );
+    assert_ne!(got[0].op, got[1].op);
+    // The op is the one the human command carried.
+    let human_ops: Vec<&OpId> = log
+        .iter()
+        .filter_map(|e| match e {
+            Event::OpAccepted { principal, op, .. } if *principal == fx.st().human => Some(op),
+            _ => None,
+        })
+        .collect();
+    assert!(got.iter().all(|g| human_ops.contains(&&g.op)));
+}
+
+#[test]
+fn a_rejection_is_a_gate_answer_and_agent_ops_are_not() {
+    let mut fx = Fx::new();
+    fx.reach_plan_gate();
+    let rev = fx.rev();
+    ok(fx.human(HumanAction::Reject {
+        expected_rev: rev,
+        target: State::Planning,
+        reason: "again".into(),
+    }));
+    let got = metrics::gate_answers(&log_of(&fx));
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].gate, GateKind::Rejection);
 }

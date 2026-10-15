@@ -818,7 +818,8 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
         let c = card(&dir, &task);
         match c.state {
             State::PlanGate => {
-                human::perform(&dir, &task, "approve-plan", &["2"], None).expect("approve plan");
+                human::perform_as(&dir, &task, "approve-plan", &["2"], None, "script")
+                    .expect("approve plan");
             }
             State::Test => break,
             State::Escalated | State::Cancelled => panic!("left the path: {:?}", c.state),
@@ -828,7 +829,18 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
     }
     let pid = std::fs::read_to_string(dir.join("coder2.pid")).expect("coder2 started");
     let pid = pid.trim();
-    let report = rusty_bbp_host::report::of(&dir, &task).expect("report");
+    let report = rusty_bbp_host::report::of(&dir, &task, None).expect("report");
+    // The scripted human answered the plan gate: named in the output, and
+    // self-approved, as every scripted gate is.
+    assert_eq!(
+        report
+            .gates
+            .iter()
+            .map(|g| (g.answered_by.as_str(), g.self_approved))
+            .collect::<Vec<_>>(),
+        [("script", true)]
+    );
+    assert!(report.self_approved);
     assert_eq!(report.max_live_turns, 2);
     assert_eq!(report.metrics.peak_live, 2);
     assert_eq!(report.metrics.revocations, 1, "coder2's turn");

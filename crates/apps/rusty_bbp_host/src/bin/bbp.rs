@@ -6,7 +6,7 @@
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
-//! bbp human   --dir D --task T [--rev N] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
+//! bbp human   --dir D --task T [--rev N] [--as WHO] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
@@ -117,7 +117,7 @@ fn run() -> Result<String, String> {
                 visits.join(",")
             ));
         }
-        "metrics" => return report::json(&dir, &task),
+        "metrics" => return report::json(&dir, &task, a.flags.get("owner").map(String::as_str)),
         "shadow" => return shadow::json(&dir, &task),
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
@@ -169,7 +169,14 @@ fn run() -> Result<String, String> {
                         .map_err(|_| "--rev must be a number".to_owned())
                 })
                 .transpose()?;
-            human::perform(&dir, &task, verb, &rest, rev)?
+            human::perform_as(
+                &dir,
+                &task,
+                verb,
+                &rest,
+                rev,
+                a.flags.get("as").map_or(human::UNLABELLED, String::as_str),
+            )?
         }
         other => return Err(format!("unknown subcommand {other}")),
     };
