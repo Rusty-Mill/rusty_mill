@@ -22,7 +22,11 @@ fn main() {
     println!("cargo:rustc-env=BBP_BUILD_SHA={sha}");
     // Rebuild when the commit, the branch it names, or any source changes: the
     // index alone misses an unstaged edit, and HEAD alone a commit on a branch.
-    let mut watch = vec!["HEAD".to_owned(), "index".to_owned(), "packed-refs".to_owned()];
+    let mut watch = vec![
+        "HEAD".to_owned(),
+        "index".to_owned(),
+        "packed-refs".to_owned(),
+    ];
     watch.extend(git(&["symbolic-ref", "-q", "HEAD"]));
     for f in watch {
         if let Some(path) = git(&["rev-parse", "--git-path", &f]) {

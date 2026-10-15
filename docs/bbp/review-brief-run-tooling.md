@@ -15,7 +15,7 @@ You are reviewing code you did not write, in a session that has not seen the aut
 
 - `crates/apps/rusty_bbp_host/src/pairs.rs`: `evaluate`, `decide`, the per-criterion functions.
 - `crates/apps/rusty_bbp_host/src/grade.rs`: the blind packs (`pack`, `sources`, `join`).
-- `crates/apps/rusty_bbp_host/src/tokens.rs`: pricing (`Criteria::dollars`, `Usage::cache_writes`, `by_model`, `parse`, `reconcile`) and `docs/bbp/2b-criteria.json`.
+- `crates/apps/rusty_bbp_host/src/tokens.rs`: pricing (`price_turn`, `last_result`, `by_model`, `of`, `reconcile`, `Prices::check`), priced from the last `result` line's `modelUsage`; fixtures are real captures in `tests/fixtures/stream-json` and `docs/bbp/2b-criteria.json`.
 - `crates/apps/rusty_bbp_host/src/pins.rs` and `moderator.rs`: the pre-run agents-file check and the live cost cap.
 
 ## Task 1: the decision rows
@@ -32,7 +32,7 @@ The decision table in the criteria note is applied by `decide`. For **each** row
 The grader must not be able to tell the arm, the pair, the run, the role or the log from what it is given.
 
 1. Read `PackEntry` and what `pack` writes. List every field, and for each say what it could reveal.
-2. Build a small synthetic manifest (two runs, one control and one treatment, with specs of your own) and run `bbp grade pack`. Diff `pack.json` against `key.json`. Look for anything in `pack.json` that correlates with the key: ids, order, lengths, rubric text, whitespace, spec text copied from artifact bytes (does `spec_markdown` strip all of the artifact framing?).
+2. Build a small synthetic manifest (two runs, one control and one treatment, with specs of your own) and run `bbp grade pack`. Diff `pack.json` and `unused.json` against `key.json`; `pack.json` must hold exactly two entries per task. Look for anything in `pack.json` that correlates with the key: ids, order, lengths, rubric text, whitespace, spec text copied from artifact bytes (does `spec_markdown` strip all of the artifact framing?).
 3. Try to defeat the blindness: run the pack twice with different input order and the same seed; with different seeds; with a run that has no unused versions against one that has three. Does the **count** of entries per task, or their order, leak the arm?
 4. Check `join`: can the key be opened with partial scores? With extra ids? With the wrong number of verdicts? Can `lost_rubric_items` be computed for a control run?
 
@@ -48,10 +48,10 @@ A run must never look cheap because a model was missing from the price table.
 
 ## Task 4: the agents-file check and the cost cap
 
-1. `pinned_model` finds `--model` in a launcher's program and arguments. Find a launcher that really pins a model and is **not** detected (a pin inside an environment variable, a wrapper script, a different flag spelling), and a launcher that is detected as pinned although the harness would not take that model (a `--model` inside a prompt string).
+1. `pinned_model` finds `--model` on `claude` commands of a launcher (shell-aware; it also refuses `--fallback-model`, `--agents` and model or TTL environment overrides). Find a launcher that really pins a model and is **not** detected (a pin inside an environment variable, a wrapper script, a different flag spelling), and a launcher that is detected as pinned although the harness would not take that model (a `--model` inside a prompt string).
 2. Can `bbp mod` start an evidence run with an unpinned role by any route (no `--criteria`, a role added after the check, a launcher edited between the check and the run)? Say which.
 3. The cost cap re-reads harness output each poll. Find an input where the cap fails to stop a run that has spent more than the cap: output the parser skips, a model name that prices, a message printed after the check, a harness that writes elsewhere.
-4. Cache writes: confirm that a missing or short `cache_creation` split can only raise the price relative to the printed split, and that the 5-minute and 1-hour prices in `docs/bbp/2b-criteria.json` are the ones the price page lists.
+4. Cache writes: confirm that pricing every write at the 1-hour rate can only raise the price relative to the printed split (`modelUsage` has none), and that the 5-minute and 1-hour prices in `docs/bbp/2b-criteria.json` are the ones the price page lists.
 
 ## What to hand back
 

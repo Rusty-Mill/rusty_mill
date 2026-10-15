@@ -501,9 +501,10 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
             if let Some(parent) = file.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            std::fs::write(&file, marker_text(cap)).map_err(|e| format!("{}: {e}", file.display()))
+            std::fs::write(&file, marker_text(cap.usd, &cap.criteria_sha256))
+                .map_err(|e| format!("{}: {e}", file.display()))
         }
-        (Some(cap), Some(text)) if text == marker_text(cap) => Ok(()),
+        (Some(cap), Some(text)) if text == marker_text(cap.usd, &cap.criteria_sha256) => Ok(()),
         (Some(_), Some(_)) => Err(
             "moderator: refusing to start: this task was started with a different --max-usd or \
              price file"
@@ -512,11 +513,30 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
     }
 }
 
-fn marker_text(cap: &CostCap) -> String {
-    format!(
-        "{{\"max_usd\":{},\"criteria_sha256\":\"{}\"}}\n",
-        cap.usd, cap.criteria_sha256
-    )
+fn marker_text(usd: f64, criteria_sha256: &str) -> String {
+    format!("{{\"max_usd\":{usd},\"criteria_sha256\":\"{criteria_sha256}\"}}\n")
+}
+
+/// The run was started as an evidence run under exactly this cap and price
+/// file. A run started without a cap has no marker, so it cannot be counted.
+pub fn require_evidence_marker(
+    dir: &Path,
+    task: &TaskId,
+    usd: f64,
+    criteria_sha256: &str,
+) -> Result<(), String> {
+    let file = task_dir(dir, "evidence", task).with_extension("json");
+    match std::fs::read_to_string(&file) {
+        Ok(t) if t == marker_text(usd, criteria_sha256) => Ok(()),
+        Ok(_) => Err(format!(
+            "{}: started under a different cap or price file",
+            task.0
+        )),
+        Err(_) => Err(format!(
+            "{}: not started as an evidence run (no cap)",
+            task.0
+        )),
+    }
 }
 
 fn run_once(cfg: &Config) -> Result<Response, String> {

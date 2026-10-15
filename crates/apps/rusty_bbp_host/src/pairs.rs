@@ -426,8 +426,9 @@ pub fn spec_wall_ms(mod_output: &str) -> Result<Option<u64>, String> {
     Ok(mod_facts(mod_output)?.spec_wall_ms)
 }
 
-fn facts(r: &RunRef, c: &tokens::Criteria, cap_usd: f64) -> Result<RunFacts, String> {
+fn facts(r: &RunRef, c: &tokens::Criteria, sha: &str, cap_usd: f64) -> Result<RunFacts, String> {
     let task = TaskId(r.task.clone());
+    crate::moderator::require_evidence_marker(Path::new(&r.dir), &task, cap_usd, sha)?;
     let rep = report::of(Path::new(&r.dir), &task, None)?;
     let d = crate::open_driver(Path::new(&r.dir), &task)?;
     let events = d.store.events(&task, 0).map_err(|e| format!("{e:?}"))?;
@@ -555,8 +556,8 @@ pub fn load(manifest: &Path) -> Result<Evaluation, String> {
             Ok(Pair {
                 id: p.id.clone(),
                 kind: p.kind,
-                control: facts(&p.control, &c, m.cap_usd)?,
-                treatment: facts(&p.treatment, &c, m.cap_usd)?,
+                control: facts(&p.control, &c, &sha, m.cap_usd)?,
+                treatment: facts(&p.treatment, &c, &sha, m.cap_usd)?,
                 lost_rubric_items: p.lost_rubric_items,
             })
         })

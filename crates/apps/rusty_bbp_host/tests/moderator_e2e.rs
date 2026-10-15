@@ -697,9 +697,10 @@ fn a_roster_without_a_finalizer_is_refused_at_open() {
 /// A shell harness: `body` runs under `/bin/sh` with `$1` the task directory
 /// and `$BBP_BIN` the `bbp` binary. Not a protocol client by itself.
 fn script(dir: &Path, name: &str, body: &str) -> Launcher {
-    let bin = dir.join("agents-bin");
+    // Named `claude`, like the real harness, so the agents-file check sees it.
+    let bin = dir.join("agents-bin").join(name);
     std::fs::create_dir_all(&bin).expect("mkdir");
-    let path = bin.join(format!("{name}.sh"));
+    let path = bin.join("claude");
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     Launcher {
@@ -1125,6 +1126,13 @@ fn a_task_started_with_a_cap_cannot_be_resumed_without_one() {
     let second = config(&dir, &task, repo, launchers, 2);
     let e2 = moderator::run(&second).expect_err("refused");
     assert!(e2.contains("refusing to start"), "{e2}");
+    // `bbp pairs` counts only runs that carry the marker of the manifest's cap.
+    let sha = first.cost_cap.as_ref().unwrap().criteria_sha256.clone();
+    assert!(moderator::require_evidence_marker(&dir, &task, 1000.0, &sha).is_ok());
+    assert!(moderator::require_evidence_marker(&dir, &task, 999.0, &sha).is_err());
+    assert!(
+        moderator::require_evidence_marker(&dir, &TaskId("other".into()), 1000.0, &sha).is_err()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
