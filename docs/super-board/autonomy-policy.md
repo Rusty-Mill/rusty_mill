@@ -1,8 +1,8 @@
-# Super-board autonomy policy — DRAFT for owner decision
+# Super-board autonomy policy
 
-**Status: proposal. Nothing here is in force.** It authorizes nothing until the owner
-accepts it in a reviewed PR. Accepting means: edit the "Decision" column, change the status
-line, and merge. Until then [AGENTS.md](../../AGENTS.md) governs and the tooling stays off.
+**Status: ACCEPTED by the owner on 2026-10-15, as written** (every recommended default
+below is the decision). It takes effect when the PR that carries this file merges. Changes
+to it need a reviewed PR.
 
 **Owner direction (2026-10-15):** automatic merging is the point. No category of change is
 routed to a human by default, and the policy does not require an independent reviewer. The
@@ -37,16 +37,16 @@ Since no human gate is wanted, **recommended: drop `staging`** and have the robo
 
 | # | Question | Recommended default | Why | Decision |
 |---|---|---|---|---|
-| 1 | Who merges? | **The robot**, through the merge gate, after review passes | Owner direction | |
-| 2 | Which branch do PRs target? | **`main`**, via the merge queue; delete `staging` | See the table above; `staging` is unprotected today | |
-| 3 | Migrations | None allowed (`allowed_envs: []`); never a live database | No migrations exist | |
-| 4 | Commands the agent may run without asking | The lanes' own commands, **narrow rules only**; no wildcard `git push` or `gh api` | A wildcard covers far more than a lane needs | |
-| 5 | Pushes | Only to `claude/*` branches; never `main`, `master` or `staging` | The push guard denies protected branches | |
-| 6 | Tickets the robot may take | Cards in **Ready** only, labelled `feature`, `bug` or `qa`, lint-clean | A card nobody moved to Ready never starts | |
-| 7 | Merge conditions (all mechanical) | Green `required-gate` for the exact head; target is `main`; allowed merge method; PR under 400 changed lines; no failed truth-check | The gate enforces each one and fails closed | |
-| 8 | Pace | `max_workers: 2`; `no_progress_cycles: 6`; `usage_pause_pct: 95` | Cost ceiling and a runaway stop | |
-| 9 | Stopping | `/super-board stop` any time; the halt file stops everything on a GitHub read failure | A kill switch | |
-| 10 | Recovery | A bad merge is reverted by PR; two reverts in a day pauses the robot | Makes the cost of being wrong small and visible | |
+| 1 | Who merges? | **The robot**, through the merge gate, after review passes | Owner direction | Accepted |
+| 2 | Which branch do PRs target? | **`main`**, via the merge queue; delete `staging` | See the table above; `staging` is unprotected today | Accepted |
+| 3 | Migrations | None allowed (`allowed_envs: []`); never a live database | No migrations exist | Accepted |
+| 4 | Commands the agent may run without asking | The lanes' own commands, **narrow rules only**; no wildcard `git push` or `gh api` | A wildcard covers far more than a lane needs | Accepted |
+| 5 | Pushes | Only to `claude/*` branches; never `main`, `master` or `staging` | The push guard denies protected branches | Accepted |
+| 6 | Tickets the robot may take | Cards in **Ready** only, labelled `feature`, `bug` or `qa`, lint-clean | A card nobody moved to Ready never starts | Accepted |
+| 7 | Merge conditions (all mechanical) | Green `required-gate` for the exact head; target is `main`; allowed merge method; PR under 400 changed lines; no failed truth-check | The gate enforces each one and fails closed | Accepted |
+| 8 | Pace | `max_workers: 2`; `no_progress_cycles: 6`; `usage_pause_pct: 95` | Cost ceiling and a runaway stop | Accepted |
+| 9 | Stopping | `/super-board stop` any time; the halt file stops everything on a GitHub read failure | A kill switch | Accepted |
+| 10 | Recovery | A bad merge is reverted by PR; two reverts in a day pauses the robot | Makes the cost of being wrong small and visible | Accepted |
 
 ## Rollout
 
@@ -55,16 +55,18 @@ Since no human gate is wanted, **recommended: drop `staging`** and have the robo
 | 1. Pilot | Run **one** card (#685) with the owner watching, merging through the queue | It merged cleanly and the owner agrees the PR was fine |
 | 2. Steady | Take Ready cards automatically within the conditions above | Ongoing; any revert triggers decision 10 |
 
-## What accepting this changes in the repo
+## What accepting changes in the repo (done in the PR that carries this file)
 
-1. Copy the config from [proposed-config.md](proposed-config.md) into
-   `.claude/super-board/configs/rusty-mill.json` with `base_branch: "main"`,
-   `merge_policy.default: "auto"`, `allowed_envs: []`, and an empty `always_human` list.
-2. Add the narrow permission rules the owner picks from
-   [proposed-settings.md](proposed-settings.md).
-3. Amend CONTRIBUTING.md and [AGENTS.md](../../AGENTS.md) to match (no required independent
+1. Done: `.claude/super-board/configs/rusty-mill.json` added (`base_branch: "main"`,
+   `merge_policy.default: "auto"`, `method: "merge"`, `allowed_envs: []`, empty `always_human`,
+   `ci_required_checks: ["required-gate"]`, `max_workers: 2`).
+2. Not committed, by design: permission rules. Each person who runs the board adds the
+   narrow set from [proposed-settings.md](proposed-settings.md) to their own
+   `.claude/settings.local.json`. Without them the agent asks before each command.
+3. Done: CONTRIBUTING.md and [AGENTS.md](../../AGENTS.md) amended (no required independent
    review for robot PRs; the tooling is active).
-4. Delete `staging`, or protect it and add its promotion gate.
+4. Owner action after merge: delete `staging` (`git push origin --delete staging`; the push
+   guard blocks it, so the owner runs it).
 
 ## Risks the owner accepts
 
