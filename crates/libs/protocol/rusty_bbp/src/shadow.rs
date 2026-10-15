@@ -14,6 +14,10 @@ use rusty_serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shadow {
     pub rev: Rev,
+    /// The wake rules (`WAKE_RULES`) the `would` set was computed under. A
+    /// record written before this field existed has none and reads as 1.
+    #[rusty_serde(default = "first_rules")]
+    pub rules: u32,
     /// The task state just before the grant. A grant that crosses the turn
     /// budget escalates in the same command; this is still the state it was
     /// made in.
@@ -35,16 +39,21 @@ pub enum ShadowKind {
     Explicit { granted: RoleId, kind: TurnKind },
 }
 
+fn first_rules() -> u32 {
+    1
+}
+
 /// How an automatic grant compares with the event-driven pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Comparison {
-    /// The first of `would` is the role actually granted.
+    /// The first selectable role of `would` is the role actually granted.
     Agree,
-    /// `would` is empty. The event-driven rule then falls back to the state's
-    /// default holder, which is the turn-based grant, so this agrees by
-    /// construction; it is counted apart because it is liveness, not evidence.
+    /// `would` has no selectable role: it is empty, or holds observers only. The
+    /// event-driven rule then falls back to the state's default holder, which is
+    /// the turn-based grant, so this agrees by construction; it is counted apart
+    /// because it is liveness, not evidence.
     Fallback,
-    /// `would` names a different role first.
+    /// `would` names a different selectable role first.
     Disagree,
 }
 
@@ -52,11 +61,15 @@ impl Shadow {
     /// The comparison for an automatic grant; `None` for a forced one.
     pub fn comparison(&self) -> Option<Comparison> {
         match &self.kind {
-            ShadowKind::Auto { granted, would } => Some(match would.first() {
-                None => Comparison::Fallback,
-                Some((r, _)) if granted.first() == Some(r) => Comparison::Agree,
-                Some(_) => Comparison::Disagree,
-            }),
+            // Shadow records exist only at one live turn, where an observer is
+            // not selectable.
+            ShadowKind::Auto { granted, would } => {
+                Some(match would.iter().find(|(_, why)| why.selectable(1)) {
+                    None => Comparison::Fallback,
+                    Some((r, _)) if granted.first() == Some(r) => Comparison::Agree,
+                    Some(_) => Comparison::Disagree,
+                })
+            }
             ShadowKind::Explicit { .. } => None,
         }
     }

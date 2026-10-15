@@ -2,8 +2,7 @@
 
 use rusty_serde::{Deserialize, Serialize};
 
-/// The scheduling policy of a task. One variant today; the event-driven
-/// variants arrive behind this enum, after the shadow comparison is reviewed.
+/// The scheduling policy of a task, chosen when it opens and never changed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SchedulingPolicy {
     /// The roles that serve the current state take turns in `turn_order`, the
@@ -11,4 +10,8 @@ pub enum SchedulingPolicy {
     /// Also what a log written before this field existed replays as.
     #[default]
     TurnBased,
+    /// The next turn goes to the first role `wake_set` makes selectable, and to
+    /// the `TurnBased` choice when none is. Still exactly one live turn, so the
+    /// task must open with `max_live_turns == 1`. Opt-in, per task.
+    EventDriven,
 }

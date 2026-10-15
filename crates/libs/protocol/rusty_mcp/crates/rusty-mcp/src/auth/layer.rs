@@ -1,7 +1,6 @@
 //! The `tower` layer enforcing the resource-server contract.
 
 use std::{
-    collections::BTreeSet,
     convert::Infallible,
     future::Future,
     pin::Pin,
@@ -14,12 +13,13 @@ use http::{
     Request, StatusCode,
     header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
 };
-use rusty_json::{Value, json};
 
 use super::{
-    challenge::Challenge,
     config::AuthConfig,
-    token::{TokenError, VerifiedToken},
+    decision::{
+        AuthorizationHeader, Refusal, Rejection, bearer_token, check_claims, from_validation,
+    },
+    token::VerifiedToken,
 };
 
 /// Applies bearer-token authorization to the service it wraps.
@@ -112,7 +112,7 @@ where
         Box::pin(async move {
             let token = match authorize(&config, request.headers().get(AUTHORIZATION)).await {
                 Ok(token) => token,
-                Err(rejection) => return Ok(rejection.into_response(&config)),
+                Err(rejection) => return Ok(into_response(rejection.refusal(&config))),
             };
 
             // Hand the claims to the handler. Tools reach them through the
@@ -125,73 +125,34 @@ where
     }
 }
 
-/// Why a request was turned away.
-#[derive(Debug)]
-enum Rejection {
-    /// No credentials at all.
-    Missing,
-    /// The `Authorization` header could not be parsed.
-    Malformed(String),
-    /// A token was presented but did not validate.
-    Invalid(String),
-    /// Valid token, wrong audience. Treated as invalid rather than forbidden:
-    /// the token is unusable here and the client needs a new one.
-    WrongAudience,
-    /// Valid token, missing scopes.
-    InsufficientScope(BTreeSet<String>),
-    /// The validator could not reach its dependencies.
-    Unavailable,
+/// Run the full resource-server check over an `Authorization` header: the
+/// pure steps are in [`super::decision`]; only the validator is awaited here.
+async fn authorize(
+    config: &AuthConfig,
+    header: Option<&http::HeaderValue>,
+) -> Result<VerifiedToken, Rejection> {
+    let token = bearer_token(authorization_header(header))?;
+    let verified = from_validation(config.validator.validate(token).await)?;
+    check_claims(config, verified)
 }
 
-impl Rejection {
-    fn into_response(self, config: &AuthConfig) -> Response {
-        let metadata_url = config.metadata_url();
+/// Read the header as the core wants it: absent, not text, or text.
+fn authorization_header(header: Option<&http::HeaderValue>) -> AuthorizationHeader<'_> {
+    match header {
+        None => AuthorizationHeader::Absent,
+        Some(value) => value
+            .to_str()
+            .map_or(AuthorizationHeader::NotText, AuthorizationHeader::Text),
+    }
+}
 
-        let (status, challenge) = match self {
-            Rejection::Missing => (
-                StatusCode::UNAUTHORIZED,
-                Challenge::unauthorized().with_scope(&config.required_scopes),
-            ),
-            Rejection::Malformed(reason) => (
-                StatusCode::BAD_REQUEST,
-                Challenge::invalid_request(reason).with_scope(&config.required_scopes),
-            ),
-            Rejection::Invalid(reason) => (
-                StatusCode::UNAUTHORIZED,
-                Challenge::invalid_token(reason).with_scope(&config.required_scopes),
-            ),
-            Rejection::WrongAudience => (
-                StatusCode::UNAUTHORIZED,
-                Challenge::invalid_token(format!(
-                    "the access token was not issued for {}",
-                    config.resource()
-                ))
-                .with_scope(&config.required_scopes),
-            ),
-            Rejection::InsufficientScope(missing) => (
-                StatusCode::FORBIDDEN,
-                Challenge::insufficient_scope(&missing),
-            ),
-            // No challenge: the client's credentials may be fine, so inviting
-            // it to re-authorize would send the user through a pointless login.
-            Rejection::Unavailable => {
-                return json_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    &json!({
-                        "error": "temporarily_unavailable",
-                        "error_description": "token validation is temporarily unavailable",
-                    }),
-                );
-            }
-        };
-
-        let challenge = challenge.with_resource_metadata(metadata_url);
-        let body = json!({
-            "error": challenge.error().unwrap_or("unauthorized"),
-        });
-
-        let mut response = json_response(status, &body);
-        match challenge.to_header_value().parse() {
+/// Turn a refusal into a response.
+fn into_response(refusal: Refusal) -> Response {
+    let status =
+        StatusCode::from_u16(refusal.status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = (status, [(CONTENT_TYPE, "application/json")], refusal.body).into_response();
+    if let Some(challenge) = refusal.challenge {
+        match challenge.parse() {
             Ok(value) => {
                 response.headers_mut().insert(WWW_AUTHENTICATE, value);
             }
@@ -200,95 +161,8 @@ impl Rejection {
                 tracing::error!(%err, "built an unusable WWW-Authenticate value");
             }
         }
-        response
     }
-}
-
-/// Run the full resource-server check over an `Authorization` header.
-async fn authorize(
-    config: &AuthConfig,
-    header: Option<&http::HeaderValue>,
-) -> Result<VerifiedToken, Rejection> {
-    let Some(header) = header else {
-        return Err(Rejection::Missing);
-    };
-
-    let header = header
-        .to_str()
-        .map_err(|_| Rejection::Malformed("the Authorization header is not valid text".into()))?;
-
-    let token = parse_bearer(header)?;
-
-    let verified = config.validator.validate(token).await.map_err(|err| {
-        match err {
-            TokenError::Invalid(reason) => Rejection::Invalid(reason),
-            TokenError::Expired => Rejection::Invalid("the access token has expired".into()),
-            TokenError::Unavailable(reason) => {
-                // Log the cause; the client is told nothing beyond "try later".
-                tracing::error!(%reason, "token validation failed");
-                Rejection::Unavailable
-            }
-        }
-    })?;
-
-    // Audience binding. This is the check that stops the server accepting a
-    // token minted for a different resource, so it is enforced here rather than
-    // left to each validator to remember.
-    if !verified.audience_verified
-        && !verified
-            .audiences
-            .iter()
-            .any(|aud| config.matches_audience(aud))
-    {
-        tracing::warn!(
-            audiences = ?verified.audiences,
-            resource = config.resource(),
-            "rejected a token whose audience does not name this resource"
-        );
-        return Err(Rejection::WrongAudience);
-    }
-
-    if !verified.has_scopes(&config.required_scopes) {
-        let missing = verified
-            .missing_scopes(&config.required_scopes)
-            .into_iter()
-            .collect();
-        return Err(Rejection::InsufficientScope(missing));
-    }
-
-    Ok(verified)
-}
-
-/// Pull the credentials out of a `Bearer <token>` header.
-///
-/// The scheme is matched case-insensitively, as RFC 7235 requires.
-fn parse_bearer(header: &str) -> Result<&str, Rejection> {
-    let (scheme, token) = header
-        .split_once(' ')
-        .ok_or_else(|| Rejection::Malformed("expected `Bearer <token>`".into()))?;
-
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return Err(Rejection::Malformed(format!(
-            "unsupported authorization scheme `{scheme}`; expected Bearer"
-        )));
-    }
-
-    let token = token.trim();
-    if token.is_empty() {
-        return Err(Rejection::Malformed("the bearer token is empty".into()));
-    }
-
-    Ok(token)
-}
-
-/// A JSON response with the right `Content-Type`.
-fn json_response(status: StatusCode, body: &Value) -> Response {
-    (
-        status,
-        [(CONTENT_TYPE, "application/json")],
-        body.to_json_string(),
-    )
-        .into_response()
+    response
 }
 
 #[cfg(test)]
@@ -296,59 +170,23 @@ mod tests {
     use super::*;
     use crate::auth::token::StaticTokenValidator;
 
-    #[tokio::test]
-    async fn json_responses_carry_a_json_content_type_and_a_compact_body() {
-        let response = json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({"error": "x"}));
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        assert_eq!(&body[..], br#"{"error":"x"}"#);
-    }
-
     const RESOURCE: &str = "https://mcp.example.com/mcp";
 
-    fn config_with(validator: StaticTokenValidator, required: &[&str]) -> AuthConfig {
-        AuthConfig::new(RESOURCE, Arc::new(validator))
-            .expect("valid resource")
-            .with_required_scopes(required.iter().map(|s| s.to_string()))
+    fn config_with(validator: StaticTokenValidator) -> AuthConfig {
+        AuthConfig::new(RESOURCE, Arc::new(validator)).expect("valid resource")
     }
 
     fn bearer(value: &str) -> http::HeaderValue {
         http::HeaderValue::from_str(value).expect("valid header")
     }
 
-    #[test]
-    fn parses_the_bearer_scheme_case_insensitively() {
-        assert_eq!(parse_bearer("Bearer abc").ok(), Some("abc"));
-        assert_eq!(parse_bearer("bearer abc").ok(), Some("abc"));
-        assert_eq!(parse_bearer("BEARER abc").ok(), Some("abc"));
-    }
-
-    #[test]
-    fn rejects_other_schemes_and_empty_tokens() {
-        assert!(matches!(
-            parse_bearer("Basic dXNlcjpwdw=="),
-            Err(Rejection::Malformed(_))
-        ));
-        assert!(matches!(parse_bearer("abc"), Err(Rejection::Malformed(_))));
-        assert!(matches!(
-            parse_bearer("Bearer   "),
-            Err(Rejection::Malformed(_))
-        ));
-    }
-
     #[tokio::test]
-    async fn accepts_a_correctly_audienced_token() {
+    async fn accepts_a_token_the_validator_vouches_for() {
         let validator = StaticTokenValidator::new().with_token(
             "good",
-            VerifiedToken::new([RESOURCE])
-                .with_scopes(["mcp:read"])
-                .with_subject("user-1"),
+            VerifiedToken::new([RESOURCE]).with_subject("user-1"),
         );
-        let config = config_with(validator, &["mcp:read"]);
+        let config = config_with(validator);
 
         let token = authorize(&config, Some(&bearer("Bearer good")))
             .await
@@ -357,68 +195,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_a_token_minted_for_another_resource() {
-        // The confused-deputy case: a real, validly-signed token that simply
-        // was not issued for us.
-        let validator = StaticTokenValidator::new().with_token(
-            "other",
-            VerifiedToken::new(["https://other.example.com/mcp"]).with_scopes(["mcp:read"]),
-        );
-        let config = config_with(validator, &["mcp:read"]);
-
-        assert!(matches!(
-            authorize(&config, Some(&bearer("Bearer other"))).await,
-            Err(Rejection::WrongAudience)
-        ));
-    }
-
-    #[tokio::test]
-    async fn rejects_a_token_with_no_audience_at_all() {
-        let validator = StaticTokenValidator::new()
-            .with_token("bare", VerifiedToken::default().with_scopes(["mcp:read"]));
-        let config = config_with(validator, &["mcp:read"]);
-
-        assert!(matches!(
-            authorize(&config, Some(&bearer("Bearer bare"))).await,
-            Err(Rejection::WrongAudience)
-        ));
-    }
-
-    #[tokio::test]
-    async fn honours_a_validator_that_bound_the_audience_itself() {
-        let validator = StaticTokenValidator::new().with_token(
-            "delegated",
-            VerifiedToken::audience_checked_by_validator().with_scopes(["mcp:read"]),
-        );
-        let config = config_with(validator, &["mcp:read"]);
-
-        assert!(
-            authorize(&config, Some(&bearer("Bearer delegated")))
-                .await
-                .is_ok()
-        );
-    }
-
-    #[tokio::test]
-    async fn reports_every_missing_scope_at_once() {
-        let validator = StaticTokenValidator::new()
-            .with_token("thin", VerifiedToken::new([RESOURCE]).with_scopes(["a"]));
-        let config = config_with(validator, &["a", "b", "c"]);
-
-        let Err(Rejection::InsufficientScope(missing)) =
-            authorize(&config, Some(&bearer("Bearer thin"))).await
-        else {
-            panic!("expected an insufficient-scope rejection");
-        };
-        assert_eq!(
-            missing.into_iter().collect::<Vec<_>>(),
-            vec!["b".to_string(), "c".to_string()]
-        );
-    }
-
-    #[tokio::test]
     async fn missing_header_is_distinct_from_an_invalid_token() {
-        let config = config_with(StaticTokenValidator::new(), &[]);
+        let config = config_with(StaticTokenValidator::new());
 
         assert!(matches!(
             authorize(&config, None).await,
@@ -428,5 +206,60 @@ mod tests {
             authorize(&config, Some(&bearer("Bearer nope"))).await,
             Err(Rejection::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn the_header_is_read_as_absent_not_text_or_text() {
+        let opaque = http::HeaderValue::from_bytes(b"Bearer \xff").expect("opaque bytes");
+        let text = bearer("Bearer abc");
+
+        assert_eq!(authorization_header(None), AuthorizationHeader::Absent);
+        assert_eq!(
+            authorization_header(Some(&opaque)),
+            AuthorizationHeader::NotText
+        );
+        assert_eq!(
+            authorization_header(Some(&text)),
+            AuthorizationHeader::Text("Bearer abc")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_text_header_is_a_bad_request_not_a_missing_one() {
+        let config = config_with(StaticTokenValidator::new());
+        let opaque = http::HeaderValue::from_bytes(b"Bearer \xff").expect("opaque bytes");
+
+        let Err(rejection) = authorize(&config, Some(&opaque)).await else {
+            panic!("an opaque header must be refused");
+        };
+        assert_eq!(rejection.refusal(&config).status.as_u16(), 400);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_becomes_a_json_response_with_its_challenge() {
+        let config = config_with(StaticTokenValidator::new());
+        let response = into_response(Rejection::Missing.refusal(&config));
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert!(
+            response.headers()[WWW_AUTHENTICATE]
+                .to_str()
+                .expect("text")
+                .starts_with("Bearer")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], br#"{"error":"unauthorized"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_challenge_free_refusal_sets_no_www_authenticate() {
+        let config = config_with(StaticTokenValidator::new());
+        let response = into_response(Rejection::Unavailable.refusal(&config));
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().get(WWW_AUTHENTICATE).is_none());
     }
 }

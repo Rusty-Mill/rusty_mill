@@ -21,6 +21,8 @@ rusty_serde = { workspace = true }
 rusty_rsa = { workspace = true }
 # Crash-atomic blob files: temp, fsync, rename, directory fsync.
 rusty_atomic_file = { workspace = true }
+# Line diff (Myers) for the spec-authoring metrics. First-party, no dependencies.
+rusty_diff = { workspace = true }
 
 [dev-dependencies]
 # Independent test oracle for the model tests (dev-only, allowed in Tier S).

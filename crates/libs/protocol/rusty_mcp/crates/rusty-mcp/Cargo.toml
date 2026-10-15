@@ -30,6 +30,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 rusty_base64 = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 http = { workspace = true }
+# The cores' status type; `http` stays in the tower adapters.
+rusty_http = { workspace = true }
 rusty_json = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }
@@ -57,6 +59,8 @@ rsa = "0.9"
 # `rust_crypto` keeps the build pure-Rust.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
+# `testing` adds the in-memory metric exporter, so a test can read a gauge back.
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 
 [features]
 default = []

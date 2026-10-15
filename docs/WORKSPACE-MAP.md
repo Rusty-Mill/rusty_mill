@@ -25,7 +25,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_confined_fs | rusty_confined_fs | Create directories and open files for writing beneath a root without following a symlink: openat/O_NOFOLLOW walk on Linux, checked fallback elsewhere. | 2 |
 | foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) | 13 |
 | foundation | rusty_ct_check | rusty_ct_check | Test-support harness for constant-time evidence: valgrind secret tainting, a dudect-style timing t-test and a disassembly audit script. Detects planted leaks; proves nothing about their absence. Not for production dependencies. | 3 |
-| foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application | 1 |
+| foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application | 2 |
 | foundation | rusty_dirs | rusty_dirs | Dependency-free per-user config directory lookup: %APPDATA% on Windows, $XDG_CONFIG_HOME or ~/.config elsewhere. | 2 |
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 15 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
@@ -111,7 +111,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 25 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 26 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |

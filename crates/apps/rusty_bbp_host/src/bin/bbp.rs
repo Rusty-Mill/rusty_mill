@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! bbp mcp                                   per-turn MCP server; env BBP_DIR, BBP_TASK, BBP_PRINCIPAL, BBP_TURN
-//! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N]
+//! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
@@ -63,6 +63,10 @@ fn run() -> Result<String, String> {
                 Some(v) => v.parse().map_err(|_| "--live-turns must be a number")?,
                 None => 1,
             };
+            let policy = match a.flags.get("policy") {
+                Some(v) => admin::parse_policy(v)?,
+                None => SchedulingPolicy::default(),
+            };
             admin::open_task_live(
                 &dir,
                 &task,
@@ -72,6 +76,7 @@ fn run() -> Result<String, String> {
                 &set,
                 roster,
                 live,
+                policy,
             )?
         }
         "mod" => {
@@ -98,12 +103,18 @@ fn run() -> Result<String, String> {
                 max_wall: std::time::Duration::from_secs(num("max-wall-secs", u64::MAX / 1000)?),
             };
             let out = moderator::run(&cfg)?;
+            let visits: Vec<String> = out
+                .visits
+                .iter()
+                .map(|(s, d)| format!("[\"{s:?}\",{}]", d.as_millis()))
+                .collect();
             return Ok(format!(
-                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{}}}",
+                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}]}}",
                 out.state,
                 out.turns_launched,
                 out.runs,
-                out.elapsed.as_millis()
+                out.elapsed.as_millis(),
+                visits.join(",")
             ));
         }
         "metrics" => return report::json(&dir, &task),

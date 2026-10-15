@@ -128,9 +128,13 @@ fn test_waits_for_the_report_then_wakes_its_judge() {
     assert!(wake_set(&idle(&fx)).is_empty(), "no final report yet");
     stored(fx.report(RunStatus::Passed));
     let w = ids(&wake_set(&idle(&fx)));
-    // The tester has had no turn yet, so the stored artifacts count as new for
-    // it and its best reason is `Artifact`, which outranks `State`.
-    assert!(w.contains(&pair("tester", WakeReason::Artifact)), "{w:?}");
+    // The tester serves `test` and has never run: its reason is `State`. The
+    // others only watch the report, and do not serve the state.
+    assert_eq!(w[0], pair("tester", WakeReason::State), "{w:?}");
+    assert!(
+        w[1..].iter().all(|(_, why)| *why == WakeReason::Observer),
+        "{w:?}"
+    );
 }
 
 #[test]
@@ -193,8 +197,10 @@ fn an_addressed_role_is_woken_and_the_author_is_not() {
     assert_eq!(ids(&wake_set(&st)), [pair("coder", WakeReason::Addressed)]);
 }
 
+/// A message to `all` names no one, so it addresses no one for scheduling. It is
+/// still a message everyone may read; only the trigger ignores it.
 #[test]
-fn a_message_to_everyone_wakes_every_role_that_can_act_except_its_author() {
+fn a_message_to_all_addresses_no_one_for_scheduling() {
     let mut fx = Fx::new();
     let mut d = Draft::new(Finding, "heads up");
     d.to = vec![Recipient::All];
@@ -202,10 +208,30 @@ fn a_message_to_everyone_wakes_every_role_that_can_act_except_its_author() {
     d = d.refs(vec![Ref::art(spec)]).evidence(vec![Ref::art(spec)]);
     posted(fx.post(Who::Planner, d));
     posted(fx.post(Who::Planner, pass()));
-    let w = wake_set(&fold(&fx, &before_first_regrant(&fx)));
-    let got: Vec<&str> = w.iter().map(|(r, _)| r.0.as_str()).collect();
-    assert!(!got.contains(&"planner"), "{got:?}");
-    assert!(got.contains(&"coder") && got.contains(&"tester"), "{got:?}");
+    let w = ids(&wake_set(&fold(&fx, &before_first_regrant(&fx))));
+    assert!(
+        w.iter().all(|(_, why)| *why != WakeReason::Addressed),
+        "no role is addressed by a broadcast: {w:?}"
+    );
+}
+
+/// ... while the same message naming a role does address it.
+#[test]
+fn a_message_naming_a_role_addresses_it_and_only_it() {
+    let mut fx = Fx::new();
+    let mut d = Draft::new(Finding, "heads up");
+    d.to = vec![Recipient::Role("tester".into())];
+    let spec = fx.spec();
+    d = d.refs(vec![Ref::art(spec)]).evidence(vec![Ref::art(spec)]);
+    posted(fx.post(Who::Planner, d));
+    posted(fx.post(Who::Planner, pass()));
+    let w = ids(&wake_set(&fold(&fx, &before_first_regrant(&fx))));
+    let addressed: Vec<&str> = w
+        .iter()
+        .filter(|(_, why)| *why == WakeReason::Addressed)
+        .map(|(r, _)| r.as_str())
+        .collect();
+    assert_eq!(addressed, ["tester"], "{w:?}");
 }
 
 #[test]
@@ -217,12 +243,26 @@ fn a_role_is_not_woken_by_its_own_events_even_after_its_turn_ended() {
     let mut evs = events(&fx);
     evs.extend(turn_of("planner", 90));
     let n = evs.len() as u64;
-    evs.push(message(n, Some("planner"), Recipient::All, Ask));
+    evs.push(message(
+        n,
+        Some("planner"),
+        Recipient::Role("planner".into()),
+        Ask,
+    ));
+    evs.push(message(
+        n + 1,
+        Some("planner"),
+        Recipient::Role("coder".into()),
+        Ask,
+    ));
     let mut st = fold(&fx, &evs);
     st.turns.clear();
     let woken = wake_set(&st);
     let got: Vec<&str> = woken.iter().map(|(r, _)| r.0.as_str()).collect();
-    assert!(!got.contains(&"planner"), "{got:?}");
+    assert!(
+        !got.contains(&"planner"),
+        "an author, even naming itself: {got:?}"
+    );
     assert!(got.contains(&"coder"), "others are woken: {got:?}");
 }
 
@@ -444,7 +484,7 @@ fn can_act_agrees_with_the_real_post_path() {
 // ---------------------------------------------------------------- artifact
 
 #[test]
-fn a_stored_artifact_wakes_readers_that_can_act_but_not_its_author() {
+fn a_stored_artifact_makes_non_serving_readers_observers_and_never_its_author() {
     let mut fx = Fx::new();
     fx.reach_build();
     let diff = stored(fx.put(Who::Coder, ArtifactPayload::Diff, b"--- a\n+++ b\n"));
@@ -455,8 +495,36 @@ fn a_stored_artifact_wakes_readers_that_can_act_but_not_its_author() {
         !w.iter().any(|(r, _)| *r == "coder"),
         "author excluded: {w:?}"
     );
-    assert!(w.contains(&pair("tester", WakeReason::Artifact)), "{w:?}");
-    assert!(w.contains(&pair("planner", WakeReason::Artifact)), "{w:?}");
+    // None of them serves `build`, so each only observes.
+    for who in ["tester", "planner"] {
+        assert!(w.contains(&pair(who, WakeReason::Observer)), "{w:?}");
+    }
+    assert!(
+        w.iter().all(|(_, why)| *why == WakeReason::Observer),
+        "{w:?}"
+    );
+}
+
+/// A role that serves the state and is woken only by an artifact is selectable:
+/// `Artifact`, not `Observer`.
+#[test]
+fn a_serving_role_woken_only_by_an_artifact_is_selectable() {
+    let mut roles = four_roles();
+    roles.push(
+        Role::new("coder2", 5)
+            .post(&[Ask, Answer, Finding, Pass])
+            .write(&[Diff, Candidate])
+            .read_artifacts(&[Spec, Diff, Candidate, TestReport]),
+    );
+    let mut fx = Fx::with_roles(roles);
+    fx.reach_build();
+    stored(fx.put(Who::Coder, ArtifactPayload::Diff, b"--- a\n+++ b\n"));
+    let mut st = idle(&fx);
+    // coder2 has already had its turn in this state, so `State` is spent.
+    st.last_turn_end.insert("coder2".into(), st.entered_rev);
+    let w = ids(&wake_set(&st));
+    assert!(w.contains(&pair("coder2", WakeReason::Artifact)), "{w:?}");
+    assert!(WakeReason::Artifact.selectable(1));
 }
 
 fn before_last_turn_end(fx: &Fx) -> Vec<Event> {
@@ -504,16 +572,87 @@ fn eligible_roles_are_ordered_by_reason_then_turn_order() {
 
 // ---------------------------------------------------------------- baseline
 
+/// A role that has never run is not woken by artifacts from before its state
+/// began: only `coder`, which serves `build`, is eligible on entering it.
 #[test]
-fn a_role_with_no_turn_yet_counts_every_earlier_event_as_new() {
-    // `seen_rev` starts at 0, so on reaching `build` the coder, which has not
-    // had a turn, is woken by the spec the planner stored. Shadow mode measures
-    // how much this inflates the set; changing the baseline is a separate call.
+fn a_role_that_never_ran_ignores_artifacts_from_before_the_state() {
     let mut fx = Fx::new();
     fx.reach_build();
     let w = ids(&wake_set(&idle(&fx)));
-    assert!(w.contains(&pair("coder", WakeReason::Artifact)), "{w:?}");
-    assert!(w.contains(&pair("reviewer", WakeReason::Artifact)), "{w:?}");
+    assert_eq!(w, [pair("coder", WakeReason::State)]);
+}
+
+/// ... and not by artifacts from before it was assigned, even in the same
+/// state.
+#[test]
+fn a_role_that_never_ran_ignores_artifacts_from_before_it_was_assigned() {
+    let mut fx = Fx::new();
+    fx.reach_build();
+    stored(fx.put(Who::Coder, ArtifactPayload::Diff, b"--- a\n+++ b\n"));
+    let mut st = idle(&fx);
+    // Pretend the tester was assigned after that diff was stored.
+    st.assigned_rev.insert("tester".into(), st.rev);
+    let w = ids(&wake_set(&st));
+    assert!(!w.iter().any(|(r, _)| r == "tester"), "{w:?}");
+    st.assigned_rev.insert("tester".into(), Rev(1));
+    let w = ids(&wake_set(&st));
+    assert!(w.contains(&pair("tester", WakeReason::Observer)), "{w:?}");
+}
+
+/// `Addressed` uses the end of the last turn, not the assignment: a message
+/// sent before a never-run role was assigned still addresses it.
+#[test]
+fn a_message_from_before_assignment_still_addresses_a_role_that_never_ran() {
+    let mut fx = Fx::new();
+    fx.reach_build();
+    let mut st = idle(&fx);
+    st.messages.push(Message {
+        id: MsgId(900),
+        from: PrincipalId("human".into()),
+        from_role: None,
+        draft: {
+            let mut d = Draft::new(Ask, "x");
+            d.to = vec![Recipient::Role("tester".into())];
+            d
+        },
+    });
+    st.msg_rev.push(Rev(1));
+    st.assigned_rev.insert("tester".into(), st.rev);
+    let w = ids(&wake_set(&st));
+    assert_eq!(w[0], pair("tester", WakeReason::Addressed), "{w:?}");
+}
+
+/// A role assigned after its state began is still woken by `State`: being
+/// assigned makes the state's turn available to it.
+#[test]
+fn assignment_makes_the_states_turn_available_to_its_server() {
+    let fx = Fx::with_roles_skipping(MemStore::new(), four_roles(), &["planner"]);
+    let mut st = idle(&fx);
+    assert!(wake_set(&st).is_empty(), "planner not assigned yet");
+    st.assigned
+        .insert("planner".into(), PrincipalId("planner".into()));
+    st.assigned_rev.insert("planner".into(), st.rev);
+    assert_eq!(ids(&wake_set(&st)), [pair("planner", WakeReason::State)]);
+}
+
+#[test]
+fn priority_is_addressed_then_state_then_artifact_then_observer() {
+    assert!(WakeReason::Addressed < WakeReason::State);
+    assert!(WakeReason::State < WakeReason::Artifact);
+    assert!(WakeReason::Artifact < WakeReason::Observer);
+}
+
+#[test]
+fn an_observer_is_selectable_only_above_one_live_turn() {
+    assert!(!WakeReason::Observer.selectable(1));
+    assert!(WakeReason::Observer.selectable(2));
+    for r in [
+        WakeReason::Addressed,
+        WakeReason::State,
+        WakeReason::Artifact,
+    ] {
+        assert!(r.selectable(1));
+    }
 }
 
 // ---------------------------------------------------------------- fold-derived fields

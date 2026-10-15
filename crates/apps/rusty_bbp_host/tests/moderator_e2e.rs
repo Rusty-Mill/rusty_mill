@@ -736,6 +736,7 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
         &ProfileSet::shell("test", "true"),
         roster,
         2,
+        SchedulingPolicy::default(),
     )
     .expect("open");
     for role in ["planner", "coder", "coder2", "tester", "reviewer"] {
@@ -852,7 +853,9 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
         .expect("bbp metrics");
     let printed = String::from_utf8_lossy(&printed.stdout);
     assert!(
-        printed.contains("\"revocations\":1") && printed.contains("\"hunk_overlap_diffs\":1"),
+        printed.contains("\"revocations\":1")
+            && printed.contains("\"hunk_overlap_diffs\":1")
+            && printed.contains("\"spec_conflicts\""),
         "{printed}"
     );
     let gone = Instant::now() + Duration::from_secs(10);

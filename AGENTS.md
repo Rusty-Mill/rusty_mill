@@ -1,44 +1,41 @@
-# AGENTS.md
+# Agent instructions
 
-<!-- super-board:begin v3.1.2 (managed; edits inside are overwritten on upgrade) -->
-## Super Board
+## Current contribution workflow
 
-Board: Backlog · Ready · Building · QA · Review · Blocked · Done. Labels route: `qa` skips Building · `bug`, `feature`, none → built first.
+Follow [CONTRIBUTING.md](CONTRIBUTING.md), including its review and merge rules.
+Keep changes focused, preserve unrelated work, and add or update the PR's
+[change fragment](changes/README.md). Use the existing PR templates.
 
-| When | Use | NEVER |
-|---|---|---|
-| Set up / repair the board | `/super-board onboard` | DON'T hand-edit config mid-run |
-| Check tickets before a run | `/super-board lint` | NEVER run with AC-less tickets |
-| Drain the board | `/super-board run` | NEVER build, test or merge from the orchestrator |
-| Board state / halt | `/super-board status` · `/super-board stop` | |
-| Build one ticket | `/super-build` | NEVER build outside the card's worktree |
-| QA a branch, or a live URL alone | `/super-qa` · `/super-qa <url>` | NEVER mark QA pass without evidence |
-| Review a PR, merge | `/super-review` | NEVER `gh pr merge` direct — merge gate only |
-| File bugs from Sentry, PostHog, PRs | `/super-collect` | DON'T file without a verifier pass |
-| UI polish | `/ui-refine-loop` (human runs it) | board NEVER runs it |
-| Diagram / explainer page | `/visual` | |
-| Commit, pull, push this branch | `/git-sync` | NEVER force push or rebase shared history |
+- Every change lands through a PR; never push directly to the default branch.
+- Require green CI for the current PR head and review of that diff. Obtain an
+  independent approval when reasonably available; otherwise follow CONTRIBUTING's
+  documented self-review procedure after CI is green. Record self-review honestly.
+  Security-sensitive, irreversible and ecosystem-breaking changes follow its
+  independent-review guidance.
+- Merge through the merge queue using "Merge when ready" and wait for
+  `required-gate` on the queued entry. Use a **merge commit**, never squash or
+  rebase merge. Do not bypass red or stuck checks.
+- Never force push or rebase shared history. Never read `.env` or commit/log secrets.
+- Validate the affected scope using repository checks; a local `cargo check` alone
+  does not establish green CI or merge readiness.
 
-| Rule | Value |
-|---|---|
-| Config | `.claude/super-board/configs/<slug>.json` |
-| Isolation | 1 card · 1 worktree · 1 branch |
-| Merge | auto for normal changes · money, auth, destructive schema (DROP/TRUNCATE/RENAME) → human · PR > 400 changed lines → human |
-| Migrations | additive → robot migrates allowed DBs only · live DB ALWAYS → 🙋 needs you |
-| Blocked card | block-template comment · last line `blocked-by:` · 🙋 = needs you |
-| Secrets | NEVER read `.env`; key names via `.claude/bin/super-board-env-check.sh` |
+## Super-board — deferred and unavailable
 
-## Writing (super-board)
+The super-board skills, scripts, hooks, workflows and settings are not shipped
+in this checkout. `/super-review` and the super-board merge gate are unavailable;
+mandatory use of them is deferred, not a prerequisite for the workflow above.
+The same applies to `/super-board`, `/super-build`, `/super-qa`, `/super-collect`,
+`/git-sync`, `/ui-refine-loop` and `/visual` from that removed bundle.
 
-| Thing | Format → `.claude/skills/super-board/references/writing-standard.md` |
-|---|---|
-| Commit, PR title | `<emoji> [type] scope: subject` + short bullets · ✨ feat 🐛 fix 🔧 chore ♻️ refactor 🧪 test 📝 docs |
-| PR body | blocks: status · Problem · Solution · AC + proof · history · Before\|After · Risk — `super-board-pr-body.sh` |
-| Ticket | Problem · Context · Fix · AC · Risk · Blocked by → `docs/agents/issue-tracker.md` |
-| Comment | `[role] [label] status` · Did · ✅ Done · ❌ Not done · Next · ≤ 8 lines |
-| PR author notes | file + critical inline review comments: Purpose · What changed · Why it matters → `pr-author-notes.md` |
+Removed writing standards, ticket-format and block templates, PR author notes,
+`super-board-pr-body.sh` and `super-board-env-check.sh` are deferred references,
+not installed helpers or required commands. The standalone
+[issue template](docs/agents/issue-tracker.md) remains available as documentation.
 
-- NEVER chain steps with arrows. One step per line, lettered under Where.
-- NEVER link screenshots. Embed a raw URL pinned to a sha.
-- DON'T repeat file lists in status comments. DON'T write "Not verified" or "Next" in a PR body.
-<!-- super-board:end -->
+The [proposed configuration](docs/super-board/proposed-config.md) is inactive
+reference material outside the operational discovery path. Its staging target,
+automatic merge and test/staging migration settings are proposals, not established
+authority. These docs do not authorize activation, automatic merges, migrations,
+permission changes or credential operations, including through local tooling copies.
+A separately reviewed implementation and an explicit bounded owner policy decision
+are required before any activation. Do not restore tooling to satisfy these docs.
