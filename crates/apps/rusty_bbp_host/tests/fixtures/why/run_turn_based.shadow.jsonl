@@ -1,0 +1,4 @@
+{"rev":7,"rules":2,"state":"Planning","kind":{"Auto":{"granted":["planner"],"would":[["planner","State"]]}}}
+{"rev":23,"rules":2,"state":"Build","kind":{"Auto":{"granted":["coder"],"would":[["coder","State"]]}}}
+{"rev":44,"rules":2,"state":"Test","kind":{"Auto":{"granted":["tester"],"would":[["tester","State"],["planner","Observer"],["coder","Observer"],["reviewer","Observer"]]}}}
+{"rev":67,"rules":2,"state":"Review","kind":{"Auto":{"granted":["reviewer"],"would":[["reviewer","State"]]}}}
