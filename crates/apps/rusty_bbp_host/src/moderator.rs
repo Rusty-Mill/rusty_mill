@@ -337,6 +337,12 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         visits.observe(state, seen);
         if matches!(state, State::Closed | State::Cancelled) {
             sup.kill_harnesses()?;
+            // The poll that sees the end is not exempt from the cap: output
+            // that arrived since the last check, or from a model with no
+            // price, must not close as a success.
+            if let Some(cap) = &cfg.cost_cap {
+                enforce_cap(cfg, &d, cap)?;
+            }
             return Ok(Outcome {
                 visits: visits.finish(seen),
                 state,
