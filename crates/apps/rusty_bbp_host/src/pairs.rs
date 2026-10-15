@@ -56,6 +56,8 @@ pub struct RunFacts {
     pub reads_per_turn: u64,
     /// The models each role's turns used, from the harness output.
     pub role_models: BTreeMap<String, BTreeSet<String>>,
+    /// The build commit the run's own `bbp mod` reported.
+    pub build_sha: String,
 }
 
 impl RunFacts {
@@ -374,6 +376,31 @@ pub struct Manifest {
 #[derive(Deserialize)]
 struct ModOut {
     state_ms: Vec<(String, u64)>,
+    #[rusty_serde(default)]
+    bbp_build_sha: Option<String>,
+}
+
+/// The commit the `bbp` that produced this `bbp mod` output was built from:
+/// the run's own `bbp_build_sha`, which must be a clean full commit id. An
+/// absent field (a `bbp` that predates the pin), a `-dirty` build, an `unknown`
+/// one and anything else that is not 40 lowercase hex digits are refused.
+pub fn build_sha_of(mod_output: &str) -> Result<String, String> {
+    let m: ModOut = rusty_serde::json::from_str(mod_output).map_err(|e| e.to_string())?;
+    let sha = m
+        .bbp_build_sha
+        .ok_or("the run reported no bbp_build_sha: its bbp predates the build pin")?;
+    if sha.ends_with("-dirty") {
+        return Err(format!("the run's bbp was built from a dirty tree ({sha})"));
+    }
+    if sha == "unknown" {
+        return Err("the run's bbp was built from an unknown commit".into());
+    }
+    if sha.len() != 40 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(format!(
+            "the run's bbp_build_sha {sha:?} is not a commit id"
+        ));
+    }
+    Ok(sha)
 }
 
 /// The first `Planning` visit of a `bbp mod` output, in ms.
@@ -411,7 +438,34 @@ fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
         unused_bytes: rep.unused_bytes,
         reads_per_turn: st.budget.reads_per_turn,
         role_models,
+        build_sha: build_sha_of(&text)?,
     })
+}
+
+/// Every run must have been produced by a `bbp` built from `head`.
+pub fn check_builds(pairs: &[Pair], head: &str) -> Result<(), String> {
+    let mut first: Option<(String, &str)> = None;
+    for p in pairs {
+        for (arm, r) in [("control", &p.control), ("treatment", &p.treatment)] {
+            let who = format!("{}/{arm}", p.id);
+            let sha = r.build_sha.as_str();
+            match &first {
+                Some((other, s)) if *s != sha => {
+                    return Err(format!(
+                        "runs were built from different commits: {other} from {s}, {who} from {sha}"
+                    ))
+                }
+                None => first = Some((who.clone(), sha)),
+                _ => {}
+            }
+            if sha != head {
+                return Err(format!(
+                    "{who} was built from {sha}, not the pinned HEAD {head}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Settings every run must share. `reads_per_turn` is what the manifest says
@@ -498,6 +552,12 @@ pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<Str
 
 /// Read `manifest` and evaluate every pair in it.
 pub fn load(manifest: &Path) -> Result<Evaluation, String> {
+    load_as(manifest, crate::BUILD_SHA)
+}
+
+/// [`load`] for an evaluator built from `evaluator_build` (tests pass one; a
+/// test binary is not built from the checkout it inspects).
+pub fn load_as(manifest: &Path, evaluator_build: &str) -> Result<Evaluation, String> {
     let text =
         std::fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
     let m: Manifest =
@@ -510,22 +570,20 @@ pub fn load(manifest: &Path) -> Result<Evaluation, String> {
             Ok(Pair {
                 id: p.id.clone(),
                 kind: p.kind,
-                control: facts(&p.control, &c)?,
-                treatment: facts(&p.treatment, &c)?,
+                control: facts(&p.control, &c).map_err(|e| format!("{}/control: {e}", p.id))?,
+                treatment: facts(&p.treatment, &c)
+                    .map_err(|e| format!("{}/treatment: {e}", p.id))?,
                 lost_rubric_items: p.lost_rubric_items,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let sha_run = pin(Path::new(&m.repo), c.min_commit.as_deref(), evaluator_build)?;
+    check_builds(&pairs, &sha_run)?;
     check_settings(&pairs, m.reads_per_turn)?;
-    let sha_run = pin(
-        Path::new(&m.repo),
-        c.min_commit.as_deref(),
-        crate::BUILD_SHA,
-    )?;
     let mut e = evaluate(&pairs, m.poll_ms);
     e.criteria_sha256 = Some(sha);
     e.git_sha = Some(sha_run);
-    e.bbp_build_sha = Some(crate::BUILD_SHA.to_owned());
+    e.bbp_build_sha = Some(evaluator_build.to_owned());
     Ok(e)
 }
 
@@ -1030,5 +1088,68 @@ mod tests {
             f(&mut e);
             assert!(decide(&e).starts_with("incomplete"), "{}", decide(&e));
         }
+    }
+
+    // ---- build identity of the producers
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn out(sha: Option<&str>) -> String {
+        match sha {
+            Some(s) => format!(
+                r#"{{"state":"Closed","state_ms":[["Planning",10]],"bbp_build_sha":"{s}"}}"#
+            ),
+            None => r#"{"state":"Closed","state_ms":[["Planning",10]]}"#.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_run_reports_the_commit_its_bbp_was_built_from() {
+        assert_eq!(build_sha_of(&out(Some(A))).unwrap(), A);
+    }
+
+    #[test]
+    fn a_run_with_no_clean_build_identity_is_refused() {
+        let missing = build_sha_of(&out(None)).unwrap_err();
+        assert!(missing.contains("bbp_build_sha"), "{missing}");
+        let dirty = build_sha_of(&out(Some(&format!("{A}-dirty")))).unwrap_err();
+        assert!(dirty.contains("dirty"), "{dirty}");
+        let unknown = build_sha_of(&out(Some("unknown"))).unwrap_err();
+        assert!(unknown.contains("unknown"), "{unknown}");
+        for bad in ["", "abc", &A.to_uppercase(), &format!("{A}0")] {
+            assert!(build_sha_of(&out(Some(bad))).is_err(), "{bad:?}");
+        }
+    }
+
+    fn built(sha: &str) -> RunFacts {
+        RunFacts {
+            build_sha: sha.to_owned(),
+            ..run(1, 1)
+        }
+    }
+
+    #[test]
+    fn every_run_must_be_built_from_the_pinned_head() {
+        let ok = pair("p", Kind::Separable, built(A), built(A));
+        assert_eq!(check_builds(&[ok], A), Ok(()));
+        let old = pair("p", Kind::Separable, built(A), built(B));
+        let err = check_builds(&[old], A).unwrap_err();
+        assert!(err.contains("p/treatment") && err.contains(B), "{err}");
+    }
+
+    #[test]
+    fn runs_built_from_different_commits_are_refused_even_if_one_matches() {
+        let mixed = pair("p", Kind::Separable, built(A), built(B));
+        let err = check_builds(&[mixed], A).unwrap_err();
+        assert!(err.contains("p/treatment"), "{err}");
+        // Two pairs, each internally consistent, built from different commits.
+        let a = pair("a", Kind::Separable, built(A), built(A));
+        let b = pair("b", Kind::Separable, built(B), built(B));
+        let err = check_builds(&[a, b], A).unwrap_err();
+        assert!(err.contains("b/control"), "{err}");
+        // A run that reported nothing is not a match for any head.
+        let none = pair("p", Kind::Separable, built(A), built(""));
+        assert!(check_builds(&[none], A).is_err());
     }
 }
