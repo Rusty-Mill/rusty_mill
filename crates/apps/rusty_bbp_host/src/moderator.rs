@@ -181,10 +181,6 @@ fn outcome<S: Store>(
     })
 }
 
-/// Run the loop until the task is closed or cancelled, or `max_wall` passes.
-/// A run the cap or the wall limit stops is an `Ok` outcome carrying the stop,
-/// so the caller can still print what happened; [`run`] turns it into an error.
-
 /// Ordered state visits, timed by the loop's own clock (the log has none).
 struct Visits {
     done: Vec<(State, Duration)>,
@@ -363,6 +359,9 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     }
 }
 
+/// Run the loop until the task is closed or cancelled, or `max_wall` passes.
+/// A run the cap or the wall limit stops is an `Ok` outcome carrying the stop,
+/// so the caller can still print what happened; [`run`] turns it into an error.
 pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
     // An evidence run (one with a cost cap and its prices) starts only if every
     // role pins a priced model.
