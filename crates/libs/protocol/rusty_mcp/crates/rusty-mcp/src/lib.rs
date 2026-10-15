@@ -23,4 +23,6 @@ pub mod auth;
 pub mod limits;
 #[cfg(feature = "otel")]
 pub mod otel;
+#[cfg(feature = "serve")]
+pub mod serve;
 pub mod trace;
