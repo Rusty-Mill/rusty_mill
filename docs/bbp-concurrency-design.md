@@ -229,13 +229,17 @@ Status: **proposal, awaiting owner approval; revised after the owner's review of
 
 **What 2b must beat.** Option 4 (section leases) and plain 2a (parallel versions, one approved, the others unused) are the alternatives. 2b is justified only if real spec authoring shows contention that those two handle badly.
 
-**The runs.** At least 10 tasks with real agents, paired: each task runs once at `max_live_turns = 1` (control, one spec author) and once at 2 (two roles that hold `write` ∋ `spec` and serve `planning`), on the same roster otherwise, brief, budget, model and acceptance rubric. At least 5 are *shared-section* tasks, written so that the spec must cover two intertwined concerns that two authors would naturally edit in the same sections; the rest are *separable* tasks whose concerns map to disjoint sections. The set, the briefs and the rubrics are fixed before the first run. In addition, **3 null pairs**: three of the separable tasks run a second time at `max_live_turns = 1` against their own control, to measure run-to-run noise (see criterion 3). The run is therefore 26 runs.
+**The runs.** At least 10 tasks with real agents, paired: each task runs once at `max_live_turns = 1` (control, one spec author) and once at 2 (two roles that hold `write` ∋ `spec` and serve `planning`), on the same roster otherwise, brief, budget, model and acceptance rubric. At least 5 are *shared-section* tasks, written so that the spec must cover two intertwined concerns that two authors would naturally edit in the same sections; the rest are *separable* tasks whose concerns map to disjoint sections.
+
+**Definitions, fixed with the task set.** The owner records, per task and before the first run, two concern lists (one per author) and the section each rubric item belongs to. A task is **separable** if every rubric item maps to exactly one concern and the two concerns own disjoint sections of the expected spec: no section is owned by both, and no rubric item needs content from both. A task is **shared-section** if at least 30% of its rubric items, and at least 2, need content in a section that both concerns own. A task that is neither (some overlap, below that line) is not used. The classification is frozen with the briefs; it is never changed after any run has been seen. The set, the briefs and the rubrics are fixed before the first run. In addition, **3 null pairs**: three of the separable tasks run a second time at `max_live_turns = 1` against their own control, to measure run-to-run noise (see criterion 3). The run is therefore 26 runs, in two phases (below).
+
+**Order: the noise gate runs first.** Phase 1 is the six runs of the three null pairs (each of the three tasks twice at N=1, the first run being that task's control for phase 2). After phase 1 the null ratios (second over first `spec_wall`) are computed. **If any is outside 0.85 to 1.15, stop and report: no phase 2 run is started** and the owner decides whether to lengthen the tasks, repeat, or abandon the screen. Phase 2 is the 10 paired tasks, N=2 against the control (for the three null tasks, the phase 1 first run). Phase 1 spends 6 of the 26 runs' tokens before anything is learned about the hypothesis; that is the price of not building a threshold inside the noise.
 
 **Comparable outcomes are frozen with the inputs.**
 
-- **Rubric.** Each task has an acceptance rubric fixed in advance: a list of requirements the approved spec must satisfy (for example 8 to 12 items), scored by the same grader for both runs of a pair, blind to which run is which. A run *succeeds* only if it reaches `closed` and the rubric score is at least a pre-declared pass mark, and the build passes the task's frozen profile set.
+- **Rubric.** Each task has an acceptance rubric fixed in advance: a list of requirements the approved spec must satisfy (for example 8 to 12 items), scored by the same grader for both runs of a pair, blind to which run is which. **The rubrics, briefs, task classification and pass marks are committed to the repository as final, in their own PR, before the first run;** the run output records the hash of that committed set, and a run whose set differs from it is void. **Blindness is mechanical:** the grader receives the approved spec text and the rubric only, under a neutral id; arm, pair, turn counts and logs are withheld; the order is shuffled; the id-to-run key is sealed until every score is written, and scores are not edited after the key is opened. The grader tool (`bbp grade`) builds the packs and joins the scores; whoever scores, a person or a model, is named in the output. A run *succeeds* only if it reaches `closed` and the rubric score is at least a pre-declared pass mark, and the build passes the task's frozen profile set.
 - **Failed pairs.** A pair fails if either run does not succeed: cancelled, escalated, wall limit, timeout, or below the pass mark. A failed pair is reported, excluded from every median below, and never counts as fast. At least 8 of the 10 pairs must succeed or the screen is inconclusive and no decision is taken. The N=2 failure count must not exceed the N=1 count by more than 1.
-- **Gates.** The human gates are played by a scripted human with a fixed policy (approve a spec that meets the pass mark, immediately), and wall clock excludes gate waits: `spec_wall` is the time from the first `planning` turn to the plan-gate request. The moderator reports only total elapsed today; per-state timing is a tooling follow-up.
+- **Gates.** The human gates are played by a scripted human with a fixed policy (approve a spec that meets the pass mark, immediately). **Every gate's answer is recorded in the run output with the principal that gave it, and a run whose gates were not answered by the declared owner is labelled `self_approved`.** A scripted gate is `self_approved` by definition, so every run in this screen is, and the label is reported with the result: it says no person reviewed any approved spec, and nothing here is evidence about the quality of human review. (I could not find "card #29" in the repository or the tracker; this follows the instruction as written and the owner should say if that card defines the label differently.) Wall clock excludes gate waits: `spec_wall` is the time from the first `planning` turn to the plan-gate request. The moderator reports only total elapsed today; per-state timing is a tooling follow-up.
 
 **Measured, per pair** (from the log, the blobs and the rubric; nothing is added to the protocol):
 
@@ -266,17 +270,19 @@ Status: **proposal, awaiting owner approval; revised after the owner's review of
 
 **Decision.**
 
+Rows apply from the top and the first match decides; a later criterion never rescues an earlier failure. Criterion 3 holding and criterion 7 failing is the "7 fails" row whatever 4 and 5 show: a speedup that costs more than the bound is not built on.
+
 | Outcome | Action |
 | --- | --- |
-| 1 to 5 and 7 hold | Build `rusty_crdt` and 2b (Appendix A and B), after criterion 6's precondition |
+| Noise gate fails (phase 1) | Stop; no phase 2 run; the owner decides |
 | 1 fails | Fix 2a; no decision |
 | 2 fails | Inconclusive; no decision; rerun with a corrected rubric or task set |
-| 3 fails | Stop concurrency work; keep `max_live_turns = 1` as the default and the only tested mode |
 | 3 inconclusive (noise or measurement error) | No decision; rerun the separable pairs with longer tasks or more repetitions |
-| 7 fails (3 holds) | Parallelism pays in time but not in cost; keep `max_live_turns = 1` the default, 2a stays opt-in; no CRDT |
-| 3 holds, 4 fails | 2a alone is enough for spec authoring; no CRDT |
-| 3 and 4 hold, 5 fails | Contention exists but loses nothing the rubric values; section leases (option 4) or 2a, no CRDT |
-| All hold, 6 not yet met | Close the verdict-binding gap first (a separate small change, see the proposal below), then build 2b |
+| 3 fails | Stop concurrency work; keep `max_live_turns = 1` as the default and the only tested mode |
+| 3 holds, 7 fails | Parallelism pays in time but not in cost; keep `max_live_turns = 1` the default, 2a stays opt-in; no CRDT |
+| 3 and 7 hold, 4 fails | 2a alone is enough for spec authoring; no CRDT |
+| 3, 7 and 4 hold, 5 fails | Contention exists but loses nothing the rubric values; section leases (option 4) or 2a, no CRDT |
+| 1 to 5 and 7 hold | Build `rusty_crdt` and 2b (Appendix A and B), after criterion 6's precondition: the verdict-binding change lands first |
 
 **Tooling.** Built and merged: `spec_conflicts` and the retained-versus-unused attribution with `unused_spec_versions` and `unused_share` (#676, #677), and per-state wall timing in `bbp mod` (#678). Still not built, and needed before any run: the launcher's token capture (for `tokens_per_outcome` and the cap below), the rubric grader, and the null-pair and ratio report. The `overlap` metric (file and hunk-header ranges on code diffs) is a screening proxy that overcounts context and is not used by the gate.
 
