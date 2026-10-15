@@ -217,7 +217,10 @@ fn parse_header_lines(buf: &[u8]) -> Result<Option<(HeaderMap, usize)>> {
         let (name, value) = line_str
             .split_once(':')
             .ok_or_else(|| Error::InvalidHead(format!("malformed header line `{line_str}`")))?;
-        headers.append(name.trim(), value.trim())?;
+        // Only optional whitespace (SP/HTAB, RFC 9110) is stripped from a value;
+        // `str::trim` would also eat Unicode whitespace such as a no-break
+        // space, which is part of the value and must reach its consumer.
+        headers.append(name.trim(), value.trim_matches([' ', '\t']))?;
     }
 }
 
@@ -243,6 +246,16 @@ fn head_len_within(consumed: usize, max_head_len: usize) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_values_lose_only_http_whitespace() {
+        let buf = "GET / HTTP/1.1\r\nA: \t x \t\r\nB: \u{a0}x\u{a0}\r\n\r\n".as_bytes();
+        let Outcome::Complete { head, .. } = parse_request_head(buf, 1024).unwrap() else {
+            panic!("incomplete");
+        };
+        assert_eq!(head.headers.get("A"), Some("x"));
+        assert_eq!(head.headers.get("B"), Some("\u{a0}x\u{a0}"));
+    }
 
     #[test]
     fn parses_simple_request_head() {
