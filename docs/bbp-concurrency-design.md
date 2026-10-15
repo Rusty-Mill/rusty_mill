@@ -252,7 +252,7 @@ Status: **proposal, awaiting owner approval; revised after the owner's review of
 | `lost_rubric_items` | rubric items met by an unused spec version and not met by the approved one. This is the independent loss evidence: work that was real and was thrown away, not work merely charged in a revoked turn |
 | `revocations`, `revoked_turn_actions` | informational only. A revoked turn's work is not necessarily discarded (it may be retained in another author's artifact), so these are an upper bound and never gate |
 | `budget_refusals` | `rejected(turn_budget_exhausted)`; each also ends its turn, so the two are not added |
-| `tokens_per_outcome` | **cost-weighted tokens** of every turn of a run, revoked turns included, divided by the number of successful runs it produced (0 or 1 per run, so per pair: the run's cost if it succeeded, otherwise the pair is failed and excluded). The weighted figure is `input + w_out x output + w_write x cache_creation + w_read x cache_read` in input-token equivalents, with the weights stored in `docs/bbp/2b-criteria.json` and frozen with these criteria (below). `bbp tokens` reports the raw parts, the plain sum and the weighted figure side by side; criterion 7 and the cap use the weighted one. Reported per pair as the N=2 over N=1 ratio. Not visible to the core: `bbp tokens` reads each harness's usage from the output the moderator keeps (#723) |
+| `tokens_per_outcome` | **dollar cost** of every turn of a run, revoked turns included, divided by the number of successful runs it produced (0 or 1 per run, so per pair: the run's cost if it succeeded, otherwise the pair is failed and excluded). Each assistant message is priced by its own model from the dollars-per-million-token prices in `docs/bbp/2b-criteria.json`, which carries the price-page date and is frozen with these criteria; a model with no price is an error, never zero. `bbp tokens` reports the raw parts, the plain sum and the dollars side by side. Reported per pair as the N=2 over N=1 ratio. Not visible to the core: `bbp tokens` reads each harness's usage from the output the moderator keeps (#723) |
 | `stale_verdicts` | verdicts accepted although a message or artifact the author could read, appended by another principal (not the runner) during the author's verdict turn, was never returned to the author by a read the log records (2a known gap). Exact, from the responses of accepted reads: a `get_artifact` is not a view of the messages and a short page does not count as seeing what it omitted. **This run cannot exercise the gap** (criterion 6) |
 | `overshoot` | any N=2 run with `spent.messages` or `spent.bytes` above its total |
 
@@ -266,7 +266,7 @@ Status: **proposal, awaiting owner approval; revised after the owner's review of
 4. **Contention is real.** In at least 3 of the 5 shared-section tasks, at least one unused spec version has a `spec_conflict` with the approved spec. `unused_conflicts` is an upper bound (above), so each flagged version is read by the owner or a named reviewer against the approved spec before it counts; a version the reader judges merged into the approved spec is removed.
 5. **The loss is real and attributed.** In at least 3 of the 5 shared-section tasks, `lost_rubric_items` is at least 1, and the median `unused_share` over those tasks is at least 0.15. Work that a merge would have kept, not work that was merely revoked, has to be what is lost.
 6. **The known gap is closed before 2b, not measured by this run.** The gap needs two non-final judges. This run's roster has one tester, so `stale_verdicts` is reported but is expected to be near zero for a structural reason, and a low value is **not** evidence that the gap is harmless. The criterion is therefore a build precondition: the verdict-binding gap is closed (the proposal "Log revision at grant", below, or a `read_rev` on verdicts) before 2b merges, whatever this run shows. (Option: a roster variant with two testers, below.)
-7. **The cost is bounded.** The median `tokens_per_outcome` ratio (N=2 over N=1) over the successful pairs is at most 1.6. Two authors plan twice as much by construction; a 25% speedup bought at more than 1.6 times the tokens is not a win. The number is judgment, like the others; the owner may change it before the run.
+7. **The cost is bounded.** The median `tokens_per_outcome` ratio (N=2 over N=1) over the successful pairs is at most 1.6. Two authors plan twice as much by construction; a 25% speedup bought at more than 1.6 times the tokens is not a win. The owner has accepted 1.6.
 
 **Decision.**
 
@@ -300,33 +300,30 @@ To exercise the verdict-binding gap, run a subset on a roster with a second non-
 
 The proposal here was `at_rev` on `TurnGranted`. The refusal does not need it: the fold already derives what a turn has been shown (appends and accepted read responses), so a verdict is refused `stale_subject` while content another principal appended during the judge's turn is unread (above one live turn only; the turn stays live, no turn is minted, no log format changes). That is [#720](https://github.com/Rusty-Mill/rusty_mill/pull/720) (merged), with a follow-up in [#727](https://github.com/Rusty-Mill/rusty_mill/pull/727): the read base of a judge is the entry into the stage, so a turn starts with everything others appended in the state unread, and a judge that reads nothing, or a replacement turn after an expiry, is bound too. #727 lands before 2b merges. `at_rev` would still give the spec metrics an observed read base (so `unused_conflicts` stops being an upper bound); it is a separate, optional schema 3 change and is not built.
 
-### Proposed cost weighting (subject to approval)
+### Cost in dollars, per model (owner decision)
 
-Raw token sums mislead because the four counts are priced very differently: cache reads dominate a long agent turn and cost a small fraction of fresh input. The proposal is one weight set, in a committed file `docs/bbp/2b-criteria.json` that is part of the criteria and frozen with them (the run output records its sha256; a run under different weights is void). Weights are per model, so the file names the model the harness runs on. From the pricing the Claude API documents (cached 2026-10-06; the owner confirms them against the price page before approving):
+Raw token sums mislead because the four counts are priced very differently, and a roster that mixes models cannot be normalized to one unit. **The cost figure is dollars.** The committed file `docs/bbp/2b-criteria.json` stores, per model id as the harness prints it, the dollars per million tokens for input, output, cache creation and cache read, plus `prices_as_of` (the date the owner read them off the price page); the run output records the file's sha256, and a run under a different file is void.
 
-| Count | Weight | Basis |
-| --- | --- | --- |
-| input | 1 | the unit |
-| output | 5 | output price is 5x input on every current model (for example $4 and $20 per MTok on Claude Opus 5.5) |
-| cache creation | 1.25 | 5-minute cache write; 2 for a 1-hour write |
-| cache read | 0.05 | on Claude Opus 5.5 ($0.20 against $4); 0.1 on most other models, 0.025 on Claude Fable 5.1 |
+**Which the planned roster needs.** The shipped proving config (`docs/proving/agents.json`) launches every role as `claude -p` without pinning a model, so the model is whatever the harness defaults to and a roster can mix models without anyone choosing to. A single-model roster could be normalized, but a mixed one cannot, and an unpinned one is not known to be either. So the run needs dollars unless every role is pinned to one model, and the file prices exactly the models the owner lists: `bbp tokens` fails on any model not in it. Opus 5.5 and Sonnet 5.5 are filled in from the Claude API documentation (cached 2026-10-06) as a proposal; the owner confirms them and adds any other model the roster uses.
 
-`bbp tokens` prints the raw parts, the plain sum and the weighted figure, so the owner can see what the weighting changed. The weights are proposed, not approved, and nothing else in this note depends on their values.
+### Pinning the run to a commit
+
+The run uses a commit that contains the verdict-binding fix (#727). `min_commit` in the criteria file names the merge commit of that fix; `bbp pairs` refuses a criteria file with no `min_commit`, a checkout whose HEAD does not contain it, or a working tree that is not clean, and records `git_sha` (HEAD) and `criteria_sha256` in its output. It pins the checkout the manifest names; it cannot prove the `bbp` binary came from it, so the run script builds from that checkout and records its HEAD.
 
 ### Pilot reconciliation
 
-The pilot pair runs on a dedicated API key. Before any counted run, `bbp tokens` for the pilot is reconciled against that key's usage as the Usage and Cost API reports it, per part (input, output, cache creation, cache read). **A part differing by more than 2%, or any turn with no harness output, stops the run:** the capture is not trustworthy and the cap and criterion 7 would rest on it. 2% is a proposed tolerance; a killed harness prints less than it spent, and a retried request the harness never printed is spent but unseen, so a real mismatch is likely and the pilot is the place to find it. `bbp tokens --api-usage FILE` does the comparison (FILE holds the four numbers from the usage report); a mismatch is a non-zero exit.
+The pilot pair runs on a dedicated API key. Before any counted run, `bbp tokens` for the pilot is reconciled against that key's usage as the Usage and Cost API reports it, per part (input, output, cache creation, cache read). **A part (or the dollars) differing by more than 2%, or any turn with no harness output, stops the run:** the capture is not trustworthy and the cap and criterion 7 would rest on it. The 2% is accepted by the owner and is not loosened: a failed reconciliation is reported as a finding about the capture, not tuned away. a killed harness prints less than it spent, and a retried request the harness never printed is spent but unseen, so a real mismatch is likely and the pilot is the place to find it. `bbp tokens --api-usage FILE` does the comparison (FILE holds the four numbers from the usage report, and `cost_usd` when it has one); a mismatch is a non-zero exit.
 
-### Proposed token cap for the run
+### Cost cap for the run
 
-Model tokens are the cost the run spends, and the harness may loop, so the run has a cap set before it starts. There is no measured token figure for a BBP planning turn yet, so the cap is a rule, not a guess at a number:
+The run spends money and the harness may loop, so the cap is set before it starts, in dollars, and **matches the spend limit of the dedicated API key**: the key's limit is the hard stop. There is no measured cost for a BBP planning turn yet, so the cap is a rule, not a guess at a number:
 
-1. **Pilot (not counted).** One N=1 pair on a task outside the set measures cost-weighted tokens per run, reconciled as above. The pilot sets only this figure; it changes no criterion, threshold or weight.
-2. **Per-run cap** `C = 3 x` the pilot's N=1 weighted tokens, rounded up. A run reaching it is stopped (the harness killed through its separate API key's limit or the launcher) and counts as a failed run under the failed-pair rule.
-3. **Total cap** `26 x C`, and an early stop: if half the total is spent with fewer than half of the pairs complete, stop and report; the screen is inconclusive and nothing is decided.
-4. **Enforcement** is outside the protocol: a dedicated API key with a spend limit, plus `--max-wall-secs`. No code in `rusty_bbp`.
+1. **Pilot (not counted).** One N=1 pair on a task outside the set measures the dollar cost per run, reconciled as above. The pilot sets only this figure; it changes no criterion, threshold or price.
+2. **Per-run cap** `C = 3 x` the pilot's N=1 cost per run, rounded up. It is checked after each run from `bbp tokens` (a run over `C` counts as a failed run under the failed-pair rule); it cannot stop a run in flight, only the key's limit does.
+3. **Total cap** `26 x C`, set as the key's spend limit, and an early stop: if half the total is spent with fewer than half of the pairs complete, stop and report; the screen is inconclusive and nothing is decided.
+4. **Enforcement** is outside the protocol: the key's spend limit, plus `--max-wall-secs`. No code in `rusty_bbp`.
 
-The owner sets the pilot task and approves the resulting `C` before the first counted run. Until the pilot exists there is no number to approve, and none is proposed here.
+The owner approves the resulting `C` and the key limit after the pilot. Until the pilot exists there is no number to approve, and none is proposed here.
 
 ## Open questions for the owner (max 5)
 
