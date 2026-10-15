@@ -9,6 +9,11 @@ Project, config and base branch; that fits a repository per product, but here it
 shared and cut the links between cards of different applications.
 
 ## Decision
+- **Repositories** group projects: `{"repos": {repo: {project: [paths]}}}` (a flat file is the repository
+  `default`). Project names are unique across repositories, so a card carries only its `project` and the
+  repository is looked up. Each repository has an implicit project named like itself that owns the paths no
+  other project of it does. Paths are per repository. The UI's side panel lists repositories with counts and a
+  project dropdown for the chosen one; it only filters.
 - A card has a `project`. The registry (`--projects FILE`) maps each non-default project to the repository paths
   its work may change; `default` always exists and owns the rest. A card stored before projects existed reads
   as `default` (`#[serde(default)]`), so the record layout needs no migration.
@@ -25,6 +30,7 @@ shared and cut the links between cards of different applications.
   strong as the credentials. With `--identities` it is a property of the token.
 - The sandbox's write scope is not narrowed to the project: builds need `target/` and caches in the worktree.
   Out-of-scope edits are caught at commit, not prevented while the command runs.
+- A limited credential is told by `board_projects` only of its own projects (and the repositories holding them).
 - `board_events` still reports every project's event metadata (ids, actor, kind, column); card text is not in it.
 - GitHub sync does not know about projects.
 

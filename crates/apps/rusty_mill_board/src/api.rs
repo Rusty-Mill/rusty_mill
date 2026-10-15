@@ -300,9 +300,20 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_projects",
-            "List the projects (applications) this board serves and the repository paths each may change. Cards belong to one project; `default` owns every path no other project does.",
-            |b, _, _: Nothing| {
-                to_json(json!({ "projects": b.projects(), "default": DEFAULT_PROJECT }))
+            "List the repositories this board serves, their projects (applications) and the repository paths each project may change: {repos: {repo: {project: [paths]}}}. Cards belong to one project; a repository's own project (named like it) owns every path no other project of that repository does.",
+            |b, i, _: Nothing| {
+                // A limited credential is told only about the projects it may work in.
+                let mut repos = serde_json::to_value(b.projects())
+                    .map_err(|e| BoardError::Storage(e.to_string()))?;
+                if let (Some(scope), Some(map)) = (scope(i), repos.as_object_mut()) {
+                    map.values_mut().for_each(|projects| {
+                        if let Some(p) = projects.as_object_mut() {
+                            p.retain(|name, _| scope.iter().any(|s| s == name));
+                        }
+                    });
+                    map.retain(|_, projects| projects.as_object().is_some_and(|p| !p.is_empty()));
+                }
+                to_json(json!({ "repos": repos, "default": DEFAULT_PROJECT }))
             },
         ),
         op(
@@ -768,8 +779,24 @@ mod tests {
         assert_eq!(taken["card"]["title"], "rl card");
         let listed = call_as(&board, Some(&dev), "board_projects", json!({})).expect("projects");
         assert_eq!(listed["default"], "default");
+        let repos = listed["repos"].as_object().expect("repos");
         assert_eq!(
-            listed["projects"]["rl"],
+            repos.len(),
+            1,
+            "a limited credential hears of no other project: {repos:?}"
+        );
+        assert_eq!(repos["default"].as_object().expect("projects").len(), 1);
+        let everything =
+            call_as(&board, Some(&human), "board_projects", json!({})).expect("projects");
+        assert_eq!(
+            everything["repos"]["default"]
+                .as_object()
+                .expect("projects")
+                .len(),
+            3
+        );
+        assert_eq!(
+            listed["repos"]["default"]["rl"],
             json!(["crates/apps/rocket_league"])
         );
     }

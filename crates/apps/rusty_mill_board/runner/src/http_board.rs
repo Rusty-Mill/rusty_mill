@@ -91,7 +91,7 @@ impl BoardApi for HttpBoard {
 
     fn projects(&self) -> Result<Projects, ApiError> {
         let out = self.call("board_projects", json!({}))?;
-        let listed = serde_json::from_value(out["projects"].clone()).map_err(transport)?;
+        let listed = serde_json::from_value(out["repos"].clone()).map_err(transport)?;
         Projects::from_listing(listed).map_err(transport)
     }
 

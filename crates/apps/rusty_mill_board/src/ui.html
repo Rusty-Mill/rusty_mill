@@ -23,6 +23,17 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
+.shell{display:grid;grid-template-columns:230px minmax(0,1fr);min-height:100vh}
+.shell.noside{grid-template-columns:minmax(0,1fr)}.shell.noside #side{display:none}
+#side{background:var(--panel);border-right:1px solid var(--line);padding:12px 8px;overflow-y:auto}
+#side h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute);margin:4px 8px 8px}
+#side .repo{display:flex;justify-content:space-between;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 8px;margin-top:2px}
+#side .repo:hover{background:var(--card)}
+#side .repo.on{background:var(--acc);color:#fff}
+#side .repo .n{opacity:.75;font-variant-numeric:tabular-nums}
+#side select{width:100%;margin:2px 0 6px}
+#toggle{padding:4px 9px}
+@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{border-right:0;border-bottom:1px solid var(--line)}}
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
 dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,92vw)}
 dialog form{display:grid;gap:8px}
@@ -32,22 +43,31 @@ dialog form{display:grid;gap:8px}
 </style>
 </head>
 <body>
+<div class="shell" id="shell">
+<aside id="side" aria-label="repositories and projects"></aside>
+<div>
 <header>
+  <button id="toggle" aria-label="toggle repositories panel" title="Repositories">&#9776;</button>
   <h1>Mill Board</h1>
   <input id="actor" placeholder="your name" size="12" aria-label="actor name">
   <select id="role" aria-label="role"></select>
-  <select id="proj" aria-label="project"></select>
   <input id="title" placeholder="New card title" size="26" aria-label="new card title">
   <button id="add">Add</button>
 </header>
 <main id="board"></main>
+</div>
+</div>
 <dialog id="dlg"></dialog>
 <div id="toast" role="alert"></div>
 <script>
 const COLS=["backlog","ready","building","qa","review","done","blocked"];
 const tok=new URLSearchParams(location.hash.slice(1)).get("token");
 const $=id=>document.getElementById(id);
-let cards=[],cursor=null,dlg=null,projects=[];
+let cards=[],cursor=null,dlg=null,repos={},sel={repo:"",project:""};
+const projects=()=>Object.values(repos).flat();
+const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
+const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project);
+const count=f=>cards.filter(f).length;
 const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{}};
 
 async function api(op,args={}){
@@ -72,10 +92,10 @@ function render(){
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
     col.ondragleave=()=>col.classList.remove("over");
     col.ondrop=e=>{e.preventDefault();col.classList.remove("over");act("card_move",{id:e.dataTransfer.getData("text"),to:c})};
-    for(const k of cards.filter(k=>k.column===c&&(!$("proj").value||k.project===$("proj").value))){
+    for(const k of cards.filter(k=>k.column===c&&shown(k))){
       const d=el("div",null,"card");d.draggable=true;d.append(el("b",k.title));
       const m=el("div",null,"meta");
-      if(projects.length>1&&!$("proj").value)m.append(el("span",k.project,"tag proj"));
+      if(projects().length>1&&!sel.project){const t=el("span",k.project,"tag proj");t.title=repoOf(k.project);m.append(t)}
       k.tags.forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim)m.append(el("span","⚑ "+k.claim+" "));
       if(k.issue)m.append(el("span","#"+k.issue));
@@ -87,8 +107,28 @@ function render(){
     }
     b.append(col);
   }
-  syncDialog();
+  renderSide();syncDialog();
 }
+
+/* The side panel: repositories, and for the chosen one a dropdown of its projects. Both
+   narrow what the board shows; nothing here changes the cards. */
+function renderSide(){
+  const s=$("side");s.replaceChildren();
+  const names=Object.keys(repos).filter(r=>Object.keys(repos).length===1||count(k=>repoOf(k.project)===r)>0||r===sel.repo);
+  $("shell").classList.toggle("noside",projects().length<2||pref("side")==="0");
+  s.append(el("h2","Repositories"));
+  const row=(label,n,on,fn)=>{const b=el("button",null,"repo"+(on?" on":""));b.type="button";b.append(el("span",label),el("span",String(n),"n"));b.onclick=fn;return b};
+  s.append(row("All repositories",cards.length,!sel.repo,()=>pick("","")));
+  for(const r of names){
+    s.append(row(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
+    if(sel.repo!==r)continue;
+    const d=el("select");d.setAttribute("aria-label","project in "+r);
+    d.append(new Option("all projects in "+r+" ("+count(k=>repoOf(k.project)===r)+")",""));
+    for(const p of repos[r])d.append(new Option(p+" ("+count(k=>k.project===p)+")",p));
+    d.value=sel.project;d.onchange=()=>pick(r,d.value);s.append(d);
+  }
+}
+function pick(repo,project){sel={repo,project};pref("repo",repo);pref("project",project);render()}
 
 /* The card dialog is built once and then kept in step with the board without ever
    touching what the person is typing. `dlg.base` is the card as they last saw it. */
@@ -100,7 +140,8 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
   const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select")};
-  projects.forEach(p=>f.p.append(new Option("project: "+p,p)));f.p.setAttribute("aria-label","project");
+  for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(p,p)));f.p.append(g)}
+  f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   dlg={id,base:snap(k),f};setFields(dlg.base);
@@ -109,7 +150,7 @@ function show(id){
   btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
-  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,...(projects.length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
+  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -166,14 +207,14 @@ async function poll(){
   roles.forEach(r=>$("role").append(new Option(r,r)));
   $("actor").value=pref("actor")||"";$("role").value=pref("role")||(roles.includes("human")?"human":roles[0]);
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
-  // A credential limited to some projects only gets those back; with one project there is nothing to choose.
-  projects=Object.keys((await api("board_projects").catch(()=>({projects:{}}))).projects);
-  if(projects.length>1){
-    $("proj").append(new Option("all projects",""));projects.forEach(p=>$("proj").append(new Option(p,p)));
-    $("proj").value=projects.includes(pref("project"))?pref("project"):"";
-    $("proj").onchange=()=>{pref("project",$("proj").value);render()};
-  }else $("proj").hidden=true;
-  $("add").onclick=()=>{const t=$("title").value.trim();if(t){$("title").value="";act("card_add",{title:t,...($("proj").value&&{project:$("proj").value})})}};
+  // repo -> its projects. A credential limited to some projects still lists all of them here (names only).
+  const listed=(await api("board_projects").catch(()=>({repos:{}}))).repos;
+  repos=Object.fromEntries(Object.entries(listed).map(([r,p])=>[r,Object.keys(p)]));
+  const r=pref("repo"),p=pref("project");
+  if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||""};
+  $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
+  // New cards go to the chosen project, else to the chosen repository's own project.
+  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(t){$("title").value="";act("card_add",{title:t,...(project&&{project})})}};
   $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
   try{await refresh()}catch(e){toast(e.message)}
   poll();

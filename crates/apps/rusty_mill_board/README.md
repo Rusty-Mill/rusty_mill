@@ -15,13 +15,17 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.
-- **Projects:** one board serves several applications of a monorepo. `--projects FILE` names them and the
-  repository paths each may change (`{"rocket_league": ["crates/apps/rocket_league"]}`); the `default` project
-  always exists and owns every path no other project does. A card belongs to one project (old cards to
+- **Projects:** one board serves several applications of a monorepo, and several repositories.
+  `--projects FILE` names the projects and the repository paths each may change
+  (`{"rocket_league": ["crates/apps/rocket_league"]}`, or `{"repos": {"rusty_mill": {...}, "other": {...}}}`
+  for several repositories; project names are unique across them). Every repository also has a project named
+  like itself that owns the paths no other project of it does (a flat file is the repository `default`). A card belongs to one project (old cards to
   `default`; `card_add` takes `project`, `card_assign` moves one and needs Triage). A credential in
   `--identities` may carry `"projects": [...]`: it then cannot see, take or change any other project's cards,
   checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
-  `board_list` and `card_take` take a `project` filter, and the UI has a project switcher. The runner
+  `board_list` and `card_take` take a `project` filter. The UI has a side panel: repositories with card counts,
+  and for the chosen one a dropdown of its projects; both filter the board, and new cards go to the chosen
+  project (else the repository's own). The runner
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_events`, `card_take`,

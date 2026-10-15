@@ -65,7 +65,8 @@ impl Scope {
 
     /// Whether this project's work may change repository path `file`.
     pub fn allows(&self, file: &str) -> bool {
-        self.projects.owner_of(file) == self.project
+        let repo = self.projects.repo_of(&self.project).unwrap_or_default();
+        self.projects.owner_of(repo, file) == self.project
             || self.shared.iter().any(|s| {
                 file == s
                     || file
@@ -899,6 +900,21 @@ mod tests {
         // The default project owns whatever no other project does.
         assert!(scope("default").allows("README.md"));
         assert!(!scope("default").allows("crates/apps/rocket_league/a.rs"));
+    }
+
+    #[test]
+    fn scope_follows_the_projects_own_repository() {
+        let projects = Projects::parse(
+            r#"{"repos": {"a": {"x": ["src"]}, "b": {"y": ["src"], "z": ["docs"]}}}"#,
+        )
+        .expect("projects");
+        let scope = |p: &str| Scope::new(p, projects.clone(), vec![]).expect("scope");
+        // The same path belongs to a different project in each repository.
+        assert!(scope("x").allows("src/lib.rs") && !scope("y").allows("docs/a.md"));
+        assert!(scope("y").allows("src/lib.rs") && scope("z").allows("docs/a.md"));
+        // A repository's own project owns what its projects do not, and only there.
+        assert!(scope("a").allows("README.md") && !scope("a").allows("src/lib.rs"));
+        assert!(scope("b").allows("README.md") && !scope("b").allows("docs/a.md"));
     }
 
     #[test]
