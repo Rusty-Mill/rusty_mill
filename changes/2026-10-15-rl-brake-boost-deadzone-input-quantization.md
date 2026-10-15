@@ -5,9 +5,11 @@ changelog: rb_physics_bullet follows the game on slow-car braking, boost drain o
 ## 2026-10-15 - rb_physics_bullet: brake, boost order, deadzone, input quantization
 
 - **Fixed:** the wheel brake is `clamp(K * v, +-B) * 60 * dt` per wheel with no effective-mass term, so a slow
-  coasting car overshoots zero and rings (per-tick speed ratio -0.2638 in the model; of 363 captured coasting ticks
-  between 2 and 10 uu/s, 80 % form a tight cluster at -0.2674, median -0.2679, i.e. a constant of 114.07 against the
-  113.74 used: 0.3 %) instead of stopping dead. Fast braking is unchanged (3500 uu/s^2). Batch `20261008-111216`: fuzz families mean
+  coasting car overshoots zero and rings (per-tick speed ratio -0.2638 in the model; settled probes, a car at rest given
+  6.7, 13.3 or 20 uu/s by one tick of throttle forward and backward, give a first-tick ratio of -0.2645 with sd 0.0005
+  over six tapes, the same on the next ticks, i.e. a constant of 113.81 against the 113.74 used; natural coasting on
+  settled ticks gives -0.2681) instead of stopping dead. The same probes give the clamped full brake as -3500 uu/s^2 on
+  each of three ticks and the coasting brake as -526 uu/s^2 (0.15 of it), which the port already used. Fast braking is unchanged (3500 uu/s^2). Batch `20261008-111216`: fuzz families mean
   of means 151.0 to 140.3 uu, duels 574.6 to 516.5 uu; the holdout is neutral (132.3 to 132.4 uu).
 - **Fixed:** boost drains from the second tick of a burn, before that tick's push. The activation tick is free and
   the tick that empties the tank does not push; pushing ticks are unchanged (361 for a full tank at 120 Hz).
@@ -24,9 +26,10 @@ changelog: rb_physics_bullet follows the game on slow-car braking, boost drain o
   0.5 captures to 0.00 rad/s.
 - **Added:** `run_batch.ps1` starts BakkesMod when it is not running (`-BakkesMod <path>`, `-NoBakkesMod`); the
   six `quant_*` and eight `quantlvl_*` probe tapes, four `dz_*` deadzone tapes, `gen_quant_probe.py`,
-  `quant_ratio.py` and `capture_checks.py`.
-- **Known limitations:** 71 of the 363 coasting ticks fall outside the cluster (57 lose less speed, 14 more) and are
-  not explained; the fuzz tapes are chaotic around the input quantization change (batch mean of means
+  `quant_ratio.py` and `capture_checks.py`, and nine settled `brake_ring2_*` / `brake_sat2_*` brake probe tapes with
+  `gen_brake_probe.py` and `brake_probe_checks.py`.
+- **Known limitations:** natural coasting gives a ratio 0.0036 more negative than the settled probes (within the probes'
+  own later-tick spread, not investigated); the fuzz tapes are chaotic around the input quantization change (batch mean of means
   140.3 to 159.8 uu with a median per-tape change of 0; holdout 132.4 to 126.4 uu), and the four holdout tapes that
   moved most after the brake change sit on a hard 25 uu/s pedal threshold (threshold luck, not a rule error). The
   recorded input echoed in `frame()` is the quantized value. The `rusty_bullet` subfolder's own `CHANGELOG.md` is

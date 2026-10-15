@@ -120,8 +120,9 @@ error is a few events per tape, not a drift. For comparison the same families be
 354 uu (random drives, seeds 101 to 524), median 48 to 143, and the wall-start median was 132 uu.
 
 **Brake, boost order, throttle deadzone and input quantization, honest alignment.** A slow coasting car's speed
-now flips sign and keeps about 0.27 of itself each tick (363 captured ticks: 80 % form a tight cluster at -0.2674,
-median -0.2679; the model uses -0.2638). Batch `20261008-111216`,
+now flips sign and keeps about 0.265 of itself each tick (settled probes, forward and backward at 6.7, 13.3 and
+20 uu/s: -0.2645 with sd 0.0005 over six tapes; natural coasting -0.2681; the model uses -0.2638); the clamped full
+brake (-3500 uu/s^2) and the coasting brake (-526) are confirmed by the same probes. Batch `20261008-111216`,
 fuzz/hitfuzz/wallfuzz mean of means 151.0 to 140.3 uu (14 tapes better, 3 worse by at most 5 uu, 55 unchanged),
 duels 574.6 to 516.5 uu; the holdout (seeds 101 to 124) is neutral, 132.3 to 132.4 uu. The four holdout tapes
 that moved most are the four where the old and new builds pick a different brake-or-drive state at the 25 uu/s

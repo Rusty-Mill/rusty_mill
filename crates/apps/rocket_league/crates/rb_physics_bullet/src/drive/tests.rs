@@ -959,9 +959,9 @@ fn opposing_throttle_brakes_at_full_brake_deceleration() {
 /// `113.73963 * 60 * dt * v` of impulse below its clamp, so four wheels on a
 /// 180-mass car remove `1 - 4 * 113.73963 * 60 * dt / 180 = -0.2638` of the
 /// speed per 120 Hz tick: a slow coasting car overshoots zero and rings.
-/// 363 captured flat grounded coasting ticks (2 < |v| <= 10 uu/s): 80 % form a
-/// tight cluster at -0.2674 (sd 0.0075) and the median is -0.2679; the model's
-/// -0.2638 is 0.3 % off in the constant.
+/// Settled probes (a car at rest given 6.7, 13.3 or 20 uu/s by one tick of throttle,
+/// both directions): first-tick ratio -0.2645 (sd 0.0005 over six tapes) against
+/// the model's -0.2638; natural coasting on settled ticks gives -0.2681.
 #[test]
 fn a_slow_coasting_car_overshoots_zero_by_a_quarter_each_tick() {
     for speed in [6.0_f32, 8.0, 10.0] {
