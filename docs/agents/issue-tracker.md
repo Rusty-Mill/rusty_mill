@@ -1,6 +1,8 @@
 # Issue tracker
 
-GitHub Project board: https://github.com/orgs/Rusty-Mill/projects/1 (repo Rusty-Mill/rusty_mill). Base branch: `staging`.
+GitHub Project board: https://github.com/orgs/Rusty-Mill/projects/1 (repo Rusty-Mill/rusty_mill). Proposed automation base branch: `staging` (inactive).
+For current contributions, follow [CONTRIBUTING](../../CONTRIBUTING.md); this
+proposal does not retarget PRs or change the merge workflow.
 
 ## Ticket format
 
@@ -30,4 +32,6 @@ GitHub Project board: https://github.com/orgs/Rusty-Mill/projects/1 (repo Rusty-
 - #<N> — <why>          ← or exactly: - None.
 ```
 
-Full rules: .claude/skills/super-board/references/ticket-format.md
+The removed `.claude/skills/super-board/references/ticket-format.md` is deferred
+and unavailable in this checkout. The template above is standalone documentation;
+it does not require that helper. See the [inactive proposal](../super-board/proposed-config.md).
