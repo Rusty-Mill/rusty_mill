@@ -375,8 +375,11 @@ fi
 
 # --match-head-commit makes GitHub refuse if anything was pushed after HEAD_SHA,
 # including during the verification run above.
+# No --delete-branch: gh refuses it when the merge queue is enabled ("Cannot use
+# -d/--delete-branch when merge queue enabled"), which halted the run with the PR
+# unmerged. The repo's "automatically delete head branches" setting does the cleanup.
 python3 "$GITHUB_READ" --check
-if gh pr merge "$PR" ${REPO:+--repo "$REPO"} "$MERGE_FLAG" --delete-branch \
+if gh pr merge "$PR" ${REPO:+--repo "$REPO"} "$MERGE_FLAG" \
      ${SUBJECT:+--subject "$SUBJECT"} ${MSG_FILE:+--body-file "$MSG_FILE"} \
      --match-head-commit "$HEAD_SHA" 2>&1 | tail -3 >&2; then
   say "merged ${HEAD_SHA}"

@@ -22,7 +22,8 @@ bbp mcp                                   serve one turn over stdio
 bbp metrics --dir D --task T              concurrency metrics of a task's log, as JSON (`bbp mod` prints `elapsed_ms`)
 bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE]
 bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
-bbp card    --dir D --task T
+bbp card    --dir D --task T              the core card plus the task's scheduling `policy`, as JSON
+bbp why     --dir D (--task T | T) [--turn N]   why each turn was granted, replayed from the log, as JSON
 bbp tick    --dir D --task T              fire deadlines and grant the first turn; `bbp mod` does this itself
 bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N]
@@ -31,6 +32,16 @@ bbp human   --dir D --task T [--rev N] VERB ARGS...
   ask ROLE TEXT... | answer MSG TEXT... | rerun ART | receipt ART REVISION | resume STATE
   extend FIELD LIMIT | cancel REASON...
 ```
+
+`bbp why` answers "why did this role get this turn?" for a task of either policy. The log records who was granted a turn, not why, so it recomputes the reason: it folds the log to the event before each `turn_granted`, runs `wake_set` on that state, and applies the policy's pick rule. Read-only. Per grant it prints the turn, role, state and kind, then `how`:
+
+- `{"WakeSet": "<reason>"}`: an event-driven task took the first selectable role of `wake_set` (`State`, `Addressed`, `Artifact`); `wake_set` lists every entry with its reason, observers included.
+- `"Fallback"`: event-driven, nothing selectable, so the turn-based choice (the default holder).
+- `"DefaultHolder"`: a turn-based task's grant. With one live turn it also carries `shadow`: what `wake_set` would have woken (`would`), `comparison` (`agree`, `fallback` or `disagree`), and, if `bbp shadow` kept a record for the grant, that record's `logged_rules` and whether it equals the replay (`logged_same`).
+- `{"Explicit": ...}`: a forced grant that bypassed the policy: `Settlement` (a request was settled), `Consultation` (a yield or `ask`) or `ConsultationReturn`.
+- `{"Unexplained": {"replayed": ...}}`: the replayed rule picks another role, so the reason is not known. This is not a match; it means the log or the build has drifted.
+
+The reason is reconstructed, not recorded, and `wake_rules` is the version of the build that replays, which may be newer than the one that ran. The pick rule is restated in the host (the core's `pick_next` is crate-private); `tests/why.rs` checks it against the engine.
 
 `--dir` and `--task` fall back to `BBP_DIR` and `BBP_TASK`. `reject`, `rerun`, `resume` and `cancel` take `--rev N`, the card revision the human saw (`bbp card` prints it), and refuse to run without it; the core answers `stale_rev` when the card has moved on, so a delayed command is refused rather than applied to newer work.
 

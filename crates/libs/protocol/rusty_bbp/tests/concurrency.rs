@@ -375,45 +375,276 @@ fn finalizing_tester(first: bool) -> Vec<Role> {
     roles
 }
 
-/// KNOWN 2a GAP, owner: the repository owner; closes with 2b's snapshot-hash
-/// binding (design note, section d) or earlier with a `read_rev` on verdicts.
-///
-/// A verdict binds to the candidate, the selected run and that run's report. It
-/// does not bind to the log revision the judge read, so a `finding` appended by
-/// a concurrent turn after the read does not void it. Only a transition revokes
-/// concurrent turns; a finding is not one. It needs two judges live at once,
-/// which only non-final roles can be (finalizers are serialized), so the
-/// stage is `test`. This test pins today's behavior so the gap is visible;
-/// when the gap is closed it must flip.
+/// A verdict binds to what its judge was shown. With several live turns, a
+/// message or artifact another principal appended during the judge's turn, that
+/// the judge's reads have not returned, refuses the verdict (`stale_subject`).
+/// The refusal keeps the turn live and mints nothing; reading the new content
+/// lets the same verdict through. (This closed the known 2a gap, where the
+/// verdict of the first tester stood after the second tester's finding.)
 #[test]
-fn known_gap_a_verdict_is_not_bound_to_the_revision_the_judge_read() {
+fn a_verdict_is_refused_until_the_judge_has_read_what_was_appended() {
     let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
     fx.reach_test();
     stored(fx.report(RunStatus::Passed));
     assert_eq!(live_roles(&fx), ["tester", "tester2"]);
-    // tester reads at revision R ...
+    let read_all = || AgentAction::Read {
+        after: None,
+        limit: 50,
+    };
     assert!(matches!(
-        fx.agent(
-            "tester",
-            AgentAction::Read {
-                after: None,
-                limit: 5
-            }
-        ),
+        fx.agent("tester", read_all()),
         Response::Read { .. }
     ));
-    let read_at = fx.rev();
-    // ... tester2 then appends a finding against the same candidate and report ...
     let cand = fx.st().candidate.expect("candidate");
     let report = fx.report_id();
     let finding = Draft::new(MessageKind::Finding, "the retry loop never backs off")
         .refs(vec![Ref::art(cand)])
         .evidence(vec![Ref::art(report)]);
     posted(fx.post("tester2", finding));
-    assert!(fx.rev() > read_at, "an append landed after the read");
-    // ... and the first tester's approve is still accepted.
+    let turns = (fx.st().spent.turns, fx.st().turns.len());
+    assert_eq!(
+        rejected(fx.verdict("tester", VerdictKind::Approve)),
+        Code::StaleSubject
+    );
+    assert_eq!(
+        (fx.st().spent.turns, fx.st().turns.len()),
+        turns,
+        "a refusal mints and ends no turn"
+    );
+    assert_eq!(fx.st().state, State::Test);
+    // After reading it, the same verdict is accepted.
+    assert!(matches!(
+        fx.agent("tester", read_all()),
+        Response::Read { .. }
+    ));
     posted(fx.verdict("tester", VerdictKind::Approve));
     assert_eq!(fx.st().state, State::Review);
+}
+
+/// The read base of a judge is the entry into the stage. A judge that reads
+/// nothing is refused if another principal appended anything readable in this
+/// stage before its turn was granted (here: its first turn was aborted after the
+/// other tester's finding, so the replacement turn starts after the append).
+#[test]
+fn a_judge_that_reads_nothing_is_bound_to_everything_since_the_stage_began() {
+    let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    let finding = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", finding));
+    let first = fx.st().turn_of(&RoleId("tester".into())).expect("turn").id;
+    fx.run(&Command::AbortTurn { turn: Some(first) });
+    let second = fx
+        .st()
+        .turn_of(&RoleId("tester".into()))
+        .expect("replacement")
+        .id;
+    assert_ne!(
+        first, second,
+        "the replacement is granted after the finding"
+    );
+    assert_eq!(
+        rejected(fx.verdict("tester", VerdictKind::Approve)),
+        Code::StaleSubject,
+        "it read nothing and the finding predates its grant"
+    );
+    let read = AgentAction::Read {
+        after: None,
+        limit: 50,
+    };
+    assert!(matches!(fx.agent("tester", read), Response::Read { .. }));
+    posted(fx.verdict("tester", VerdictKind::Approve));
+}
+
+/// The terminal path: a judge that keeps retrying a refused verdict without
+/// reading reaches its deadline; the expiry regrants through `grant`, the
+/// replacement is refused the same way, and each replacement counts against
+/// the turns budget until the task escalates. No refusal mints a turn; only
+/// the deadline regrants do.
+#[test]
+fn refused_verdict_retries_end_in_expiry_regrant_and_escalation() {
+    let b = Budget {
+        turns: 6,
+        ..default_budget()
+    };
+    let mut fx = Fx::concurrent(two_testers(), 2, b);
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    let finding = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", finding));
+    let mut expiries = 0;
+    for _ in 0..40 {
+        if fx.st().state == State::Escalated {
+            break;
+        }
+        // Retry hard: refusals mint nothing.
+        let minted = fx.st().spent.turns;
+        for _ in 0..5 {
+            drop(fx.verdict("tester", VerdictKind::Approve));
+        }
+        assert_eq!(fx.st().spent.turns, minted, "refusals mint no turn");
+        assert_ne!(fx.st().state, State::Review, "no verdict was accepted");
+        // Then the deadline passes: the expiry regrants through `grant`.
+        let latest = fx
+            .st()
+            .turns
+            .iter()
+            .map(|t| t.deadline)
+            .max()
+            .expect("live");
+        fx.now = latest;
+        fx.tick();
+        expiries += 1;
+    }
+    let st = fx.st();
+    assert_eq!(st.state, State::Escalated, "after {expiries} expiries");
+    assert!(st.exhausted.contains(&BudgetField::Turns));
+    assert!(
+        st.spent.turns <= st.budget.turns + 1,
+        "one crossing, no more"
+    );
+    assert!(st.turns.is_empty(), "an escalated task holds no turn");
+    let log = fx.d.store.events(&st.task, 0).unwrap();
+    assert_eq!(*st, TaskState::fold(st.task.clone(), &log));
+    let m = rusty_bbp::metrics::of(&log);
+    assert_eq!(m.stale_verdicts, 0);
+}
+
+/// More unread content than a turn can read: the refusal says how much and why,
+/// the turn's own reads run out, the regrants go through `grant`, and the turns
+/// budget escalates. (25 findings are more than one 20-message page, and the
+/// turn may read once.)
+#[test]
+fn unread_content_beyond_reads_per_turn_ends_in_a_clear_refusal_and_escalation() {
+    let b = Budget {
+        turns: 6,
+        reads_per_turn: 1,
+        messages: 200,
+        ..default_budget()
+    };
+    let mut fx = Fx::concurrent(two_testers(), 2, b);
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    for i in 0..25 {
+        let f = Draft::new(MessageKind::Finding, format!("finding {i}"))
+            .refs(vec![Ref::art(cand)])
+            .evidence(vec![Ref::art(report)]);
+        posted(fx.post("tester2", f));
+    }
+    let mut refusals = 0;
+    for _ in 0..40 {
+        if fx.st().state == State::Escalated {
+            break;
+        }
+        // One read: a page of 20, from the start of the unread tail.
+        let first = fx
+            .st()
+            .messages
+            .iter()
+            .rev()
+            .nth(24)
+            .map(|m| MsgId(m.id.0 - 1));
+        let read = AgentAction::Read {
+            after: first,
+            limit: 20,
+        };
+        if !matches!(fx.agent("tester", read.clone()), Response::Read { .. }) {
+            continue; // the turn had already ended; the next loop reads again
+        }
+        match fx.verdict("tester", VerdictKind::Approve) {
+            Response::Rejected(r) => {
+                assert_eq!(r.code, Code::StaleSubject);
+                assert!(
+                    r.detail.contains("item(s) appended in this state")
+                        && r.detail.contains("reads_per_turn is 1"),
+                    "the error says what is unread and why: {}",
+                    r.detail
+                );
+                refusals += 1;
+            }
+            other => panic!("a verdict over 25 unread findings was accepted: {other:?}"),
+        }
+        // The second read exceeds reads_per_turn: the turn ends and is regranted.
+        drop(fx.agent("tester", read));
+    }
+    assert!(refusals >= 1);
+    let st = fx.st();
+    assert_eq!(st.state, State::Escalated, "after {refusals} refusals");
+    assert!(st.exhausted.contains(&BudgetField::Turns));
+    assert!(st.spent.turns <= st.budget.turns + 1, "one crossing");
+    assert!(st.turns.is_empty());
+    let log = fx.d.store.events(&st.task, 0).unwrap();
+    assert_eq!(*st, TaskState::fold(st.task.clone(), &log));
+}
+
+/// A role with scoped reads is bound only by what it can see: another
+/// tester's finding is invisible to it, a human message addressed to it is not.
+#[test]
+fn a_scoped_read_judge_is_bound_only_by_what_it_may_read() {
+    let mut roster = two_testers();
+    roster
+        .iter_mut()
+        .find(|r| r.id.0 == "tester")
+        .expect("tester")
+        .read_messages = ReadScope::Scoped;
+    let mut fx = Fx::concurrent(roster, 2, default_budget());
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    // tester2's finding is not visible to the scoped tester: nothing to read.
+    let f = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", f));
+    let t = fx.st().turn_of(&RoleId("tester".into())).expect("turn");
+    assert!(t.unseen.is_empty(), "invisible content is not unread");
+    // A human message addressed to it is visible, so it is unread until read.
+    let human = posted(fx.human(HumanAction::Post(ask("tester", "mind the retry loop"))));
+    let t = fx.st().turn_of(&RoleId("tester".into())).expect("turn");
+    assert!(t.unseen.contains(&rusty_bbp::state::Unseen::Message(human)));
+    assert_eq!(
+        rejected(fx.verdict("tester", VerdictKind::Approve)),
+        Code::StaleSubject
+    );
+    let read = AgentAction::Read {
+        after: None,
+        limit: 20,
+    };
+    assert!(matches!(fx.agent("tester", read), Response::Read { .. }));
+    posted(fx.verdict("tester", VerdictKind::Approve));
+}
+
+/// One live turn is unchanged: nothing is tracked, nothing refused, whether the
+/// turn is the first or a replacement after an abort.
+#[test]
+fn at_one_live_turn_a_verdict_is_never_refused_for_unread_content() {
+    let mut fx = Fx::concurrent(two_testers(), 1, default_budget());
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    assert!(fx.st().turns.iter().all(|t| t.unseen.is_empty()));
+    let human = posted(fx.human(HumanAction::Post(ask("tester", "look at the retry loop"))));
+    assert!(
+        fx.st().turns.iter().all(|t| t.unseen.is_empty()),
+        "{human:?}"
+    );
+    let first = fx.st().turn_of(&RoleId("tester".into())).expect("turn").id;
+    fx.run(&Command::AbortTurn { turn: Some(first) });
+    let t = fx
+        .st()
+        .turn_of(&RoleId("tester".into()))
+        .expect("replacement");
+    assert!(
+        t.unseen.is_empty(),
+        "a replacement turn is not seeded at one live turn"
+    );
+    posted(fx.verdict("tester", VerdictKind::Approve));
 }
 
 /// Finalizers are serialized: with two final-decision reviewers and room for
@@ -770,6 +1001,122 @@ mod model {
             for s in &steps {
                 run(&mut fx, s);
                 check(&fx);
+            }
+        }
+    }
+
+    /// Verdict loops: two testers judge while each appends findings, with
+    /// refused verdicts retried, turns aborted and clocks run. The oracle is
+    /// `metrics::stale_verdicts`, computed independently from the log: no
+    /// accepted verdict may bind to content its judge was not shown. A refusal
+    /// mints no turn, and the turn and message budgets still escalate.
+    mod judges {
+        use super::*;
+
+        #[derive(Clone, Debug)]
+        enum J {
+            Read(usize),
+            Finding(usize),
+            Verdict(usize),
+            /// Retry the verdict without reading in between.
+            HammerVerdict(usize, u8),
+            /// Read then verdict, as a well-behaved judge.
+            ReadThenVerdict(usize),
+            Abort,
+            Tick(u32),
+        }
+
+        fn j() -> impl Strategy<Value = J> {
+            prop_oneof![
+                3 => (0..2usize).prop_map(J::Read),
+                3 => (0..2usize).prop_map(J::Finding),
+                3 => (0..2usize).prop_map(J::Verdict),
+                3 => (0..2usize, 1..10u8).prop_map(|(i, n)| J::HammerVerdict(i, n)),
+                2 => (0..2usize).prop_map(J::ReadThenVerdict),
+                1 => Just(J::Abort),
+                1 => (0u32..120_000).prop_map(J::Tick),
+            ]
+        }
+
+        const JUDGES: [&str; 2] = ["tester", "tester2"];
+
+        fn read_all() -> AgentAction {
+            AgentAction::Read {
+                after: None,
+                limit: 200,
+            }
+        }
+
+        fn verdict(fx: &mut Fx, who: &str) {
+            if fx.st().state != State::Test {
+                return;
+            }
+            let (turns, live) = (fx.st().spent.turns, fx.st().turns.len());
+            let resp = fx.verdict(who, VerdictKind::Approve);
+            if matches!(&resp, Response::Rejected(r) if r.code == Code::StaleSubject) {
+                assert_eq!(
+                    (fx.st().spent.turns, fx.st().turns.len()),
+                    (turns, live),
+                    "a refused verdict mints and ends no turn"
+                );
+            }
+        }
+
+        fn step_j(fx: &mut Fx, s: &J) {
+            match s {
+                J::Read(i) => drop(fx.agent(JUDGES[*i], read_all())),
+                J::Finding(i) => {
+                    let (Some(cand), Some(report)) = (
+                        fx.st().candidate,
+                        fx.st().selected_run().and_then(|r| r.report),
+                    ) else {
+                        return;
+                    };
+                    let d = Draft::new(MessageKind::Finding, "f")
+                        .refs(vec![Ref::art(cand)])
+                        .evidence(vec![Ref::art(report)]);
+                    drop(fx.post(JUDGES[*i], d));
+                }
+                J::Verdict(i) => verdict(fx, JUDGES[*i]),
+                J::HammerVerdict(i, n) => {
+                    for _ in 0..*n {
+                        verdict(fx, JUDGES[*i]);
+                    }
+                }
+                J::ReadThenVerdict(i) => {
+                    drop(fx.agent(JUDGES[*i], read_all()));
+                    verdict(fx, JUDGES[*i]);
+                }
+                J::Abort => drop(fx.run(&Command::AbortTurn { turn: None })),
+                J::Tick(ms) => {
+                    fx.advance(u64::from(*ms));
+                    fx.tick();
+                }
+            }
+        }
+
+        fn check_j(fx: &Fx) {
+            check(fx);
+            let log = fx.d.store.events(&fx.st().task, 0).expect("log");
+            let m = rusty_bbp::metrics::of(&log);
+            assert_eq!(m.stale_verdicts, 0, "a verdict bound to unread content");
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 200, .. ProptestConfig::default() })]
+            #[test]
+            fn verdicts_never_bind_to_unread_content(
+                turns in 6u64..=14,
+                steps in proptest::collection::vec(j(), 1..50),
+            ) {
+                let b = Budget { messages: 40, turns, ..default_budget() };
+                let mut fx = Fx::concurrent(two_testers(), 2, b);
+                fx.reach_test();
+                stored(fx.report(RunStatus::Passed));
+                for s in &steps {
+                    step_j(&mut fx, s);
+                    check_j(&fx);
+                }
             }
         }
     }

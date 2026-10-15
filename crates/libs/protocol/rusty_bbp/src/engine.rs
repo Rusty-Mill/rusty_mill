@@ -726,6 +726,21 @@ pub(crate) fn admits(state: State, role: &Role, kind: MessageKind) -> R<()> {
 
 fn check_verdict(st: &TaskState, role: &Role, v: &Verdict, d: &Draft) -> R<()> {
     verdict_stage(st.state, role)?;
+    if let Some(n) = st
+        .turn_of(&role.id)
+        .map(|t| t.unseen.len())
+        .filter(|n| *n > 0)
+    {
+        return Err(rej(
+            Code::StaleSubject,
+            format!(
+                "{n} item(s) appended in this state have not been read by this turn; read them \
+                 before judging (reads_per_turn is {}; a read returns at most {READ_PAGE} \
+                 messages, an artifact costs one read)",
+                st.budget.reads_per_turn
+            ),
+        ));
+    }
     let cand = st
         .current_candidate()
         .ok_or_else(|| rej(Code::StaleCandidate, "no current candidate"))?;

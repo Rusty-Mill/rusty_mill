@@ -6,10 +6,12 @@
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
-//! bbp human   --dir D --task T [--rev N] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
+//! bbp human   --dir D --task T [--rev N] [--as WHO] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
+//! bbp tokens  --dir D --task T                             model tokens per turn, from the harness output, as JSON
+//! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N]
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
@@ -18,6 +20,7 @@
 use rusty_bbp::*;
 use rusty_bbp_host::{
     admin, args::Args, human, mcp, moderator, profiles, report, response_json, runner, shadow,
+    tokens, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -25,10 +28,9 @@ use std::process::ExitCode;
 
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let sub = argv
-        .first()
-        .cloned()
-        .ok_or("usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|shadow|mod> ...")?;
+    let sub = argv.first().cloned().ok_or(
+        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|why|shadow|mod> ...",
+    )?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
         let err = rusty_sandbox::run_helper(&rest);
@@ -44,7 +46,11 @@ fn run() -> Result<String, String> {
             .map_err(|e| e.to_string());
     }
     let dir = PathBuf::from(a.flag_or_env("dir", "BBP_DIR")?);
-    let task = TaskId(a.flag_or_env("task", "BBP_TASK")?);
+    // `bbp why TASK` names the task positionally too.
+    let task = match (sub.as_str(), a.positional.first()) {
+        ("why", Some(t)) => TaskId(t.clone()),
+        _ => TaskId(a.flag_or_env("task", "BBP_TASK")?),
+    };
     let resp = match sub.as_str() {
         "open" => {
             let brief = std::fs::read(a.flag("brief")?).map_err(|e| e.to_string())?;
@@ -117,7 +123,15 @@ fn run() -> Result<String, String> {
                 visits.join(",")
             ));
         }
-        "metrics" => return report::json(&dir, &task),
+        "metrics" => return report::json(&dir, &task, a.flags.get("owner").map(String::as_str)),
+        "tokens" => return tokens::json(&dir, &task),
+        "why" => {
+            let turn = match a.flags.get("turn") {
+                Some(v) => Some(v.parse().map_err(|_| "--turn must be a number")?),
+                None => None,
+            };
+            return why::json(&dir, &task, turn);
+        }
         "shadow" => return shadow::json(&dir, &task),
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
@@ -153,7 +167,7 @@ fn run() -> Result<String, String> {
             a.flag("vendor")?,
         )?,
         "card" => {
-            return rusty_serde::json::to_string(&admin::card(&dir, &task)?)
+            return rusty_serde::json::to_string(&admin::card_view(&dir, &task)?)
                 .map_err(|e| e.to_string())
         }
         "tick" => admin::tick(&dir, &task)?,
@@ -169,7 +183,14 @@ fn run() -> Result<String, String> {
                         .map_err(|_| "--rev must be a number".to_owned())
                 })
                 .transpose()?;
-            human::perform(&dir, &task, verb, &rest, rev)?
+            human::perform_as(
+                &dir,
+                &task,
+                verb,
+                &rest,
+                rev,
+                a.flags.get("as").map_or(human::UNLABELLED, String::as_str),
+            )?
         }
         other => return Err(format!("unknown subcommand {other}")),
     };
