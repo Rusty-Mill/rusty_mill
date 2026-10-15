@@ -151,11 +151,39 @@ pub struct Stop {
     pub reason: String,
 }
 
-/// [`run`], but a run stopped by the cap or the wall limit is an `Ok` outcome
-/// carrying the stop, so the caller can still print what happened.
-pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
-    run(cfg)
+/// What a finished or stopped invocation reports.
+struct Tally {
+    launched: u64,
+    ran: u64,
+    started: Instant,
 }
+
+/// The outcome at `state`: the visits, and whether the log still folds to the
+/// live state. A stopped run gets the same account as a finished one.
+fn outcome<S: Store>(
+    cfg: &Config,
+    d: &Driver<S>,
+    visits: Visits,
+    seen: Instant,
+    tally: &Tally,
+    stop: Option<Stop>,
+) -> Result<Outcome, String> {
+    let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
+    let replay = TaskState::fold_with(cfg.task.clone(), d.state.master, &events);
+    Ok(Outcome {
+        replay_equals_live: replay == d.state,
+        visits: visits.finish(seen),
+        state: d.state.state,
+        turns_launched: tally.launched,
+        runs: tally.ran,
+        elapsed: tally.started.elapsed(),
+        stop,
+    })
+}
+
+/// Run the loop until the task is closed or cancelled, or `max_wall` passes.
+/// A run the cap or the wall limit stops is an `Ok` outcome carrying the stop,
+/// so the caller can still print what happened; [`run`] turns it into an error.
 
 /// Ordered state visits, timed by the loop's own clock (the log has none).
 struct Visits {
@@ -326,8 +354,16 @@ fn kill_tree(child: &mut Child) -> Result<(), String> {
     child.wait().map(|_| ()).map_err(|e| format!("wait: {e}"))
 }
 
-/// Run the loop until the task is closed or cancelled, or `max_wall` passes.
+/// [`run_to_stop`], with a stop as the error: the reason.
 pub fn run(cfg: &Config) -> Result<Outcome, String> {
+    let out = run_to_stop(cfg)?;
+    match out.stop {
+        Some(s) => Err(s.reason),
+        None => Ok(out),
+    }
+}
+
+pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
     // An evidence run (one with a cost cap and its prices) starts only if every
     // role pins a priced model.
     if let Some(cap) = &cfg.cost_cap {
@@ -377,29 +413,41 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         // Before the terminal return, so spend that lands between the last poll
         // and the close is still held against the cap.
         if let Some(cap) = &cfg.cost_cap {
-            if let Err(e) = enforce_cap(cfg, &d, cap) {
+            if let Err(reason) = enforce_cap(cfg, &d, cap, false) {
                 sup.kill_harnesses()?;
-                return Err(e);
+                let tally = Tally {
+                    launched: launched.len() as u64,
+                    ran: ran.len() as u64,
+                    started,
+                };
+                let stop = Stop {
+                    kind: StopKind::Cap,
+                    reason,
+                };
+                return outcome(cfg, &d, visits, seen, &tally, Some(stop));
             }
         }
+        let tally = || Tally {
+            launched: launched.len() as u64,
+            ran: ran.len() as u64,
+            started,
+        };
         if matches!(state, State::Closed | State::Cancelled) {
             sup.kill_harnesses()?;
-            check_terminal(cfg, &d)?;
-            let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
-            let replay = TaskState::fold_with(cfg.task.clone(), d.state.master, &events);
-            return Ok(Outcome {
-                replay_equals_live: replay == d.state,
-                stop: None,
-                visits: visits.finish(seen),
-                state,
-                turns_launched: launched.len() as u64,
-                runs: ran.len() as u64,
-                elapsed: started.elapsed(),
+            let stop = check_terminal(cfg, &d).err().map(|reason| Stop {
+                kind: StopKind::Cap,
+                reason,
             });
+            return outcome(cfg, &d, visits, seen, &tally(), stop);
         }
         if started.elapsed() > cfg.max_wall {
             sup.kill_harnesses()?;
-            return Err(format!("moderator: wall limit reached in state {state:?}"));
+            let reason = format!("moderator: wall limit reached in state {state:?}");
+            let stop = Stop {
+                kind: StopKind::Wall,
+                reason,
+            };
+            return outcome(cfg, &d, visits, seen, &tally(), Some(stop));
         }
 
         // The runner works on its own thread so the loop keeps ticking,
@@ -494,14 +542,22 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
 /// no-op for a task that is not in a terminal state, whose cap is polled.
 pub fn check_terminal<S: Store>(cfg: &Config, d: &Driver<S>) -> Result<(), String> {
     match (&cfg.cost_cap, d.state.state) {
-        (Some(cap), State::Closed | State::Cancelled) => enforce_cap(cfg, d, cap),
+        (Some(cap), State::Closed | State::Cancelled) => enforce_cap(cfg, d, cap, true),
         _ => Ok(()),
     }
 }
 
-/// Fail closed: over the cap, or a model that cannot be priced (so the cap
-/// cannot be enforced), stops the run.
-fn enforce_cap<S: Store>(cfg: &Config, d: &Driver<S>, cap: &CostCap) -> Result<(), String> {
+/// Fail closed: over the cap, a model that cannot be priced, or a harness log
+/// the cap cannot read, stops the run. A harness that has printed nothing yet
+/// is let alone while the run is live (it may be starting) but not at the end,
+/// and a log with no stream-json in it never is: the cap would be blind to it.
+fn enforce_cap<S: Store>(
+    cfg: &Config,
+    d: &Driver<S>,
+    cap: &CostCap,
+    terminal: bool,
+) -> Result<(), String> {
+    use crate::tokens::LogState;
     let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
     let t = crate::tokens::of(&cfg.dir, &cfg.task, &events, Some(&cap.criteria))
         .map_err(|e| format!("moderator: cannot enforce the cost cap: {e}"))?;
@@ -514,6 +570,19 @@ fn enforce_cap<S: Store>(cfg: &Config, d: &Driver<S>, cap: &CostCap) -> Result<(
             "moderator: cost cap reached (${usd:.4} over ${:.4})",
             cap.usd
         ));
+    }
+    for turn in &t.turns {
+        let blind = match turn.log {
+            LogState::Readable => false,
+            LogState::Unreadable => true,
+            LogState::Empty => terminal,
+        };
+        if blind {
+            return Err(format!(
+                "moderator: cannot enforce the cost cap: turn {} ({}) printed no stream-json the cap can read",
+                turn.turn, turn.role
+            ));
+        }
     }
     Ok(())
 }
@@ -532,6 +601,16 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
                 .into(),
         ),
         (Some(cap), None) => {
+            // Only a task nothing has run on is an evidence run: a segment run
+            // without a cap, or without the pre-run checks, would be counted.
+            let d = open_driver(&cfg.dir, &cfg.task)?;
+            let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
+            if events
+                .iter()
+                .any(|e| matches!(e, Event::TurnGranted { .. }))
+            {
+                return Err("moderator: refusing to start: this task already ran without a cap, so it is not an evidence run; open a new task for the run".into());
+            }
             write_evidence_marker(&cfg.dir, &cfg.task, cap.usd, &cap.criteria_sha256)
         }
         (Some(cap), Some(text)) if text == marker_text(cap.usd, &cap.criteria_sha256) => Ok(()),
@@ -650,6 +729,11 @@ fn spawn(
     if cfg.cost_cap.is_some() {
         for var in crate::tokens::CACHE_TTL_ENV {
             cmd.env(var, crate::tokens::PINNED_CACHE_TTL);
+        }
+        // A subagent, if one starts despite the launcher's restrictions, runs
+        // on the role's own model, which is priced.
+        if let Ok(Some(model)) = crate::pins::pinned_model(l) {
+            cmd.env("CLAUDE_CODE_SUBAGENT_MODEL", model);
         }
     }
     cmd.stdout(Stdio::from(log)).stderr(Stdio::from(err));

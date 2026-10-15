@@ -1077,6 +1077,8 @@ fn cancelled_with_final_output(
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
     open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    // The earlier, capped segment that granted the turn and saw it print.
+    moderator::write_evidence_marker(&dir, &task, cap_usd, "test").expect("marker");
     admin::tick(&dir, &task).expect("tick");
     let line = format!(
         r#"{{"type":"assistant","message":{{"id":"m1","model":"{model_in_output}","usage":{{"input_tokens":0,"output_tokens":1000000}}}}}}"#
@@ -1186,6 +1188,8 @@ fn spend_that_lands_before_the_run_ends_is_still_checked_against_the_cap() {
     // moderator starts, and a task that is already over (cancelled): the loop
     // sees the terminal state on its first pass, before any later check.
     let (dir, task, repo) = opened("final-poll");
+    let cap = sonnet_cap(&dir, 0.5);
+    moderator::write_evidence_marker(&dir, &task, 0.5, &cap.criteria_sha256).expect("marker");
     admin::tick(&dir, &task).expect("tick grants the planner its turn");
     let log = rusty_bbp_host::moderator::log_path(&dir, &task, TurnId(1));
     std::fs::create_dir_all(log.parent().expect("parent")).expect("mkdir");
@@ -1204,7 +1208,7 @@ fn spend_that_lands_before_the_run_ends_is_still_checked_against_the_cap() {
     let rev = card(&dir, &task).rev;
     human::perform(&dir, &task, "cancel", &["stop"], Some(rev)).expect("cancel");
     let mut cfg = config(&dir, &task, repo, Launchers::default(), 10);
-    cfg.cost_cap = Some(sonnet_cap(&dir, 0.5));
+    cfg.cost_cap = Some(cap);
     let err = moderator::run(&cfg).expect_err("over the cap is not a clean finish");
     assert!(err.contains("cost cap reached"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);

@@ -25,6 +25,9 @@ struct Word {
     text: String,
     dynamic: bool,
     subst: Vec<String>,
+    /// An unquoted `<` or `>` is in it, or it stands for a `|` that ends the
+    /// command: the command's streams go somewhere else.
+    redirect: bool,
 }
 
 /// The command lines read so far, and the word being built.
@@ -37,6 +40,7 @@ struct Lexer {
     live: bool,
     dynamic: bool,
     subst: Vec<String>,
+    redirect: bool,
 }
 
 impl Lexer {
@@ -46,9 +50,11 @@ impl Lexer {
                 text: std::mem::take(&mut self.cur),
                 dynamic: self.dynamic,
                 subst: std::mem::take(&mut self.subst),
+                redirect: self.redirect,
             });
             self.live = false;
             self.dynamic = false;
+            self.redirect = false;
         }
     }
 
@@ -160,7 +166,24 @@ fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
             '(' | ')' => {
                 return Err("a subshell or process substitution is not read literally".into());
             }
-            ';' | '&' | '|' | '\n' => lx.end_command(),
+            '<' | '>' => {
+                lx.push(c);
+                lx.redirect = true;
+            }
+            '|' => {
+                // The command's output is piped away: keep that visible.
+                lx.end_word();
+                if !lx.words.is_empty() {
+                    lx.words.push(Word {
+                        text: "|".into(),
+                        dynamic: false,
+                        subst: Vec::new(),
+                        redirect: true,
+                    });
+                }
+                lx.end_command();
+            }
+            ';' | '&' | '\n' => lx.end_command(),
             c if c.is_whitespace() => lx.end_word(),
             c => lx.push(c),
         }
@@ -300,6 +323,12 @@ fn runs(words: &[Word], vars: &mut Vars) -> Result<Runs, String> {
         if w.dynamic {
             return Err(format!("the command {:?} is computed", w.text));
         }
+        if name == "claude" && w.text != "claude" {
+            return Err(format!(
+                "{:?} is not `claude`: a harness is started by name, never by path",
+                w.text
+            ));
+        }
         return match name {
             "claude" => Ok(Runs::Claude(i)),
             n if SETUP.contains(&n) => {
@@ -335,28 +364,63 @@ fn check_substitutions(words: &[Word], vars: &Vars) -> Result<(), String> {
     Ok(())
 }
 
-/// The models named by `--model` in one argv, where each item is one argument
-/// as the program will receive it: `--model ID` (the next argument) or
-/// `--model=ID`. Nothing is split: an argument that merely contains the text
-/// is a prompt, not a flag.
-fn argv_models<'a>(argv: impl Iterator<Item = (&'a str, bool)>) -> Result<Vec<String>, String> {
-    let argv: Vec<(&str, bool)> = argv.collect();
+/// One argument of a `claude` command as the program will receive it.
+struct Arg {
+    text: String,
+    /// A live expansion: the text is not what the program will see.
+    dynamic: bool,
+    /// An unquoted redirect or pipe: its output goes elsewhere.
+    redirect: bool,
+}
+
+/// The flags that route a model or a setting around the pin: a fallback model,
+/// a subagent definition, or a settings file or string (whose `env` can set
+/// `CLAUDE_CODE_SUBAGENT_MODEL` or the cache lifetime).
+const ROUTING_FLAGS: [&str; 3] = ["--fallback-model", "--agents", "--settings"];
+
+/// The flag part of one argument: `--x=v` is (`--x`, Some(`v`)).
+fn flag_of(arg: &str) -> (&str, Option<&str>) {
+    match arg.split_once('=') {
+        Some((f, v)) if f.starts_with("--") => (f, Some(v)),
+        _ => (arg, None),
+    }
+}
+
+/// The arguments before a `--`: after it everything is prompt text.
+fn flags(args: &[Arg]) -> &[Arg] {
+    let end = args
+        .iter()
+        .position(|a| a.text == "--")
+        .unwrap_or(args.len());
+    &args[..end]
+}
+
+/// The models named by `--model` in one argv: `--model ID` (the next argument)
+/// or `--model=ID`. Nothing is split: an argument that merely contains the text
+/// is a prompt, not a flag, and what follows `--` is prompt. A flag that routes
+/// a model or a setting around the pin is an error.
+fn argv_models(args: &[Arg]) -> Result<Vec<String>, String> {
+    let args = flags(args);
     let mut found = Vec::new();
-    for (i, (arg, _)) in argv.iter().enumerate() {
-        let value = if let Some(v) = arg.strip_prefix("--model=") {
-            Some((v, argv[i].1))
-        } else if *arg == "--model" {
-            argv.get(i + 1).copied()
-        } else {
-            None
+    for (i, arg) in args.iter().enumerate() {
+        let (flag, inline) = flag_of(&arg.text);
+        if ROUTING_FLAGS.contains(&flag) {
+            return Err(format!("{flag} routes a model or a setting around the pin"));
+        }
+        if flag != "--model" {
+            continue;
+        }
+        let (v, dynamic) = match inline {
+            Some(v) => (v, arg.dynamic),
+            None => args
+                .get(i + 1)
+                .map_or(("", false), |n| (n.text.as_str(), n.dynamic)),
         };
-        if let Some((v, dynamic)) = value {
-            if dynamic {
-                return Err(format!("the value of --model ({v:?}) is not a literal"));
-            }
-            if !v.is_empty() {
-                found.push(v.to_owned());
-            }
+        if dynamic {
+            return Err(format!("the value of --model ({v:?}) is not a literal"));
+        }
+        if !v.is_empty() {
+            found.push(v.to_owned());
         }
     }
     Ok(found)
@@ -367,40 +431,68 @@ fn is_shell(program: &str) -> bool {
     matches!(name, "sh" | "bash" | "dash" | "zsh" | "ksh")
 }
 
-/// The model a launcher pins. `Ok(None)` when it pins none; an error when it
-/// pins two different ones (the harness would take only one) or when it is a
-/// shell line that cannot be read literally.
-///
-/// A direct launcher is its argument list: argument boundaries are kept. A
-/// shell launcher (`sh -c SCRIPT`) is parsed with shell quoting and comments,
-/// and only the arguments of a `claude` command in it count, so `--model`
-/// inside a quoted prompt, a comment or another command pins nothing. Every
-/// `claude` command in the line must pin.
-pub fn pinned_model(l: &Launcher) -> Result<Option<String>, String> {
-    let models = match l.args.iter().position(|a| a == "-c") {
-        Some(i) if is_shell(&l.program) => {
-            let script = l.args.get(i + 1).map_or("", String::as_str);
-            let mut per_command: Vec<Vec<String>> = Vec::new();
-            let mut vars = Vars::new();
-            for words in shell_commands(script)? {
-                check_substitutions(&words, &vars)?;
-                let Runs::Claude(at) = runs(&words, &mut vars)? else {
-                    continue;
-                };
-                per_command.push(argv_models(
-                    words[at + 1..].iter().map(|w| (w.text.as_str(), w.dynamic)),
-                )?);
-            }
-            // Each harness the line starts must pin; one that does not runs on
-            // the default model whatever its neighbours pin.
-            if per_command.iter().any(Vec::is_empty) && per_command.iter().any(|m| !m.is_empty()) {
-                return Err("a claude command in the line pins no model".into());
-            }
-            per_command.concat()
-        }
-        _ => argv_models(l.args.iter().map(|a| (a.as_str(), false)))?,
+/// The `claude` commands a launcher runs, each as its arguments. A direct
+/// launcher is the program `claude` itself, by that name; anything else is an
+/// error, since what it runs cannot be shown to pin or to print what the cap
+/// reads. A shell launcher (`sh -c SCRIPT`) is parsed with shell quoting and
+/// comments, and only `claude` commands in it count.
+fn claude_commands(l: &Launcher) -> Result<Vec<Vec<Arg>>, String> {
+    let plain = |a: &String| Arg {
+        text: a.clone(),
+        dynamic: false,
+        redirect: false,
     };
-    let found: BTreeSet<String> = models.into_iter().collect();
+    let Some(i) = l
+        .args
+        .iter()
+        .position(|a| a == "-c")
+        .filter(|_| is_shell(&l.program))
+    else {
+        if l.program != "claude" {
+            return Err(format!(
+                "the program is {:?}, not `claude`: only a direct `claude` or `sh -c` launcher can be read",
+                l.program
+            ));
+        }
+        return Ok(vec![l.args.iter().map(plain).collect()]);
+    };
+    let script = l.args.get(i + 1).map_or("", String::as_str);
+    let mut out = Vec::new();
+    let mut vars = Vars::new();
+    for words in shell_commands(script)? {
+        check_substitutions(&words, &vars)?;
+        let Runs::Claude(at) = runs(&words, &mut vars)? else {
+            continue;
+        };
+        out.push(
+            words[at + 1..]
+                .iter()
+                .map(|w| Arg {
+                    text: w.text.clone(),
+                    dynamic: w.dynamic,
+                    redirect: w.redirect,
+                })
+                .collect(),
+        );
+    }
+    Ok(out)
+}
+
+/// The model a launcher pins. `Ok(None)` when it pins none; an error when it
+/// pins two different ones (the harness would take only one), when a `claude`
+/// command routes a model or a setting around the pin, or when the launcher
+/// cannot be read literally. Every `claude` command in a line must pin.
+pub fn pinned_model(l: &Launcher) -> Result<Option<String>, String> {
+    let per_command: Vec<Vec<String>> = claude_commands(l)?
+        .iter()
+        .map(|c| argv_models(c))
+        .collect::<Result<_, _>>()?;
+    // Each harness the line starts must pin; one that does not runs on the
+    // default model whatever its neighbours pin.
+    if per_command.iter().any(Vec::is_empty) && per_command.iter().any(|m| !m.is_empty()) {
+        return Err("a claude command in the line pins no model".into());
+    }
+    let found: BTreeSet<String> = per_command.into_iter().flatten().collect();
     let mut it = found.into_iter();
     match (it.next(), it.next()) {
         (None, _) => Ok(None),
@@ -409,8 +501,79 @@ pub fn pinned_model(l: &Launcher) -> Result<Option<String>, String> {
     }
 }
 
-/// What an evidence run needs of every launched harness besides its pin.
-pub fn check_harness(_l: &Launcher) -> Result<(), String> {
+/// The names in a tool list: `Agent,Task`, `Agent Task`.
+fn tool_names(v: &str) -> Vec<&str> {
+    v.split([',', ' ']).filter(|t| !t.is_empty()).collect()
+}
+
+/// The values of a list flag: after `--flag` up to the next flag, or `--flag=v`.
+fn list_values(args: &[Arg], names: &[&str]) -> Option<Vec<String>> {
+    let at = args
+        .iter()
+        .position(|a| names.contains(&flag_of(&a.text).0))?;
+    let mut vals: Vec<String> = flag_of(&args[at].text)
+        .1
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    vals.extend(
+        args[at + 1..]
+            .iter()
+            .take_while(|a| !a.text.starts_with('-'))
+            .map(|a| a.text.clone()),
+    );
+    Some(vals)
+}
+
+/// Whether one `claude` command cannot start a subagent: a `--tools` list
+/// without `Agent` and `Task`, or a `--disallowedTools` list with both.
+fn no_subagents(args: &[Arg]) -> bool {
+    let named = |v: Vec<String>| -> Vec<String> {
+        v.iter()
+            .flat_map(|s| tool_names(s).into_iter().map(str::to_owned))
+            .collect()
+    };
+    if let Some(v) = list_values(args, &["--tools"]) {
+        let t = named(v);
+        return !t.iter().any(|n| n == "Agent" || n == "Task");
+    }
+    list_values(args, &["--disallowedTools", "--disallowed-tools"]).is_some_and(|v| {
+        let t = named(v);
+        ["Agent", "Task"].iter().all(|n| t.iter().any(|x| x == n))
+    })
+}
+
+/// What an evidence run needs of every harness a launcher starts, beyond its
+/// pin: it prints `--output-format stream-json` to its log, unredirected and
+/// unpiped (the cap reads that log), and cannot start a subagent (which would
+/// run on a model nobody pinned).
+pub fn check_harness(l: &Launcher) -> Result<(), String> {
+    let commands = claude_commands(l)?;
+    if commands.is_empty() {
+        return Err("the launcher starts no claude command".into());
+    }
+    for args in &commands {
+        let args = flags(args);
+        if args.iter().any(|a| a.redirect) {
+            return Err("a claude command's output is redirected or piped, so the log the cap reads would not hold it".into());
+        }
+        let format = args
+            .iter()
+            .enumerate()
+            .find_map(|(i, a)| match flag_of(&a.text) {
+                ("--output-format", Some(v)) => Some(v),
+                ("--output-format", None) => args.get(i + 1).map(|n| n.text.as_str()),
+                _ => None,
+            });
+        if format != Some("stream-json") {
+            return Err(format!(
+                "--output-format is {format:?}; the cap and the criteria read stream-json"
+            ));
+        }
+        if !no_subagents(args) {
+            return Err("subagents are not restricted: pass `--disallowedTools Agent,Task` (or a `--tools` list without them), since a subagent runs on a model nobody pinned".into());
+        }
+    }
     Ok(())
 }
 
@@ -436,9 +599,13 @@ pub fn pins(l: &Launchers) -> Result<BTreeMap<String, String>, String> {
     }
 }
 
-/// [`pins`], and every pinned model has a price in `criteria`.
+/// [`pins`], every launcher passes [`check_harness`], and every pinned model
+/// has a price in `criteria`.
 pub fn check_run(l: &Launchers, criteria: &Criteria) -> Result<BTreeMap<String, String>, String> {
     let p = pins(l)?;
+    for (role, launcher) in l.iter() {
+        check_harness(launcher).map_err(|e| format!("role {role}: {e}"))?;
+    }
     let unpriced: BTreeSet<&str> = p
         .values()
         .map(String::as_str)
@@ -561,9 +728,22 @@ mod tests {
 
     #[test]
     fn a_pinned_model_without_a_price_is_refused() {
+        let with = |m: &str| {
+            launcher(
+                "claude",
+                &[
+                    "--model",
+                    m,
+                    "--output-format",
+                    "stream-json",
+                    "--tools",
+                    "Bash",
+                ],
+            )
+        };
         let l = Launchers::default()
-            .with("planner", launcher("claude", &["--model", "m1"]))
-            .with("coder", launcher("claude", &["--model", "m2"]));
+            .with("planner", with("m1"))
+            .with("coder", with("m2"));
         assert!(check_run(&l, &criteria(&["m1", "m2"])).is_ok());
         let err = check_run(&l, &criteria(&["m1"])).unwrap_err();
         assert!(err.contains("m2") && err.contains("no price"), "{err}");
@@ -776,19 +956,19 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_given_by_path_is_still_a_claude_command() {
-        let pinned = launcher("sh", &["-c", "exec /usr/local/bin/claude --model m1 -p x"]);
-        assert_eq!(pinned_model(&pinned).unwrap(), Some("m1".into()));
-        let partial = launcher(
-            "sh",
-            &[
-                "-c",
-                "/usr/local/bin/claude -p a; exec claude --model m1 -p b",
-            ],
-        );
-        assert!(pinned_model(&partial).is_err());
-        let bare = launcher("/bin/sh", &["-c", "exec ./claude -p x"]);
-        assert_eq!(pinned_model(&bare).unwrap(), None);
+    fn a_harness_is_started_by_name_never_by_path() {
+        // Any file named `claude` would do, and a line can write one.
+        for script in [
+            "exec /usr/local/bin/claude --model m1 -p x",
+            "/usr/local/bin/claude -p a; exec claude --model m1 -p b",
+            "exec ./claude -p x",
+        ] {
+            let l = launcher("sh", &["-c", script]);
+            assert!(
+                pinned_model(&l).unwrap_err().contains("by name"),
+                "{script}"
+            );
+        }
     }
 
     #[test]

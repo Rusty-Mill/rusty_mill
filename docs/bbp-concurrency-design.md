@@ -277,12 +277,14 @@ Rows apply from the top and the first match decides; a later criterion never res
 | Noise gate fails (phase 1) | Stop; no phase 2 run; the owner decides |
 | 1 fails | Fix 2a; no decision |
 | 2 fails | Inconclusive; no decision; rerun with a corrected rubric or task set |
+| 1 or 2 not yet known to hold (fewer than 10 pairs, or fewer than 8 of 10 succeeding) | Incomplete; no decision until 1 and 2 are known to hold |
 | 3 inconclusive (noise or measurement error) | No decision; rerun the separable pairs with longer tasks or more repetitions |
 | 3 fails | Stop concurrency work; keep `max_live_turns = 1` as the default and the only tested mode |
 | 3 holds, 7 fails | Parallelism pays in time but not in cost; keep `max_live_turns = 1` the default, 2a stays opt-in; no CRDT |
 | 3 and 7 hold, 4 fails | 2a alone is enough for spec authoring; no CRDT |
 | 3, 7 and 4 hold, 5 fails | Contention exists but loses nothing the rubric values; section leases (option 4) or 2a, no CRDT |
 | 1 to 5 and 7 hold | Build `rusty_crdt` and 2b (Appendix A and B), after criterion 6's precondition: the verdict-binding change lands first |
+| 3 holds, but 7, 4 or 5 is not yet known to hold | Incomplete; no decision until 3, 7, 4 and 5 are known to hold |
 
 **Tooling.** Built and merged: `spec_conflicts` and the retained-versus-unused attribution with `unused_spec_versions` and `unused_share` (#676, #677), and per-state wall timing in `bbp mod` (#678). Built, open for review: token capture `bbp tokens` (#723), the pair report `bbp pairs` (#724), the blind grader `bbp grade` (#725), gate answers with the `self_approved` label (#721). Not built: none of the tooling the run needs is outstanding except the committed rubrics and task set, which follow your approval of the criteria. The `overlap` metric (file and hunk-header ranges on code diffs) is a screening proxy that overcounts context and is not used by the gate.
 

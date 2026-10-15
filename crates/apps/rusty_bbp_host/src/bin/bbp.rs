@@ -154,14 +154,27 @@ fn run() -> Result<String, String> {
                     _ => return Err("--max-usd and --criteria go together".into()),
                 },
             };
-            let out = moderator::run(&cfg)?;
+            let out = moderator::run_to_stop(&cfg)?;
             let visits: Vec<String> = out
                 .visits
                 .iter()
                 .map(|(s, d)| format!("[\"{s:?}\",{}]", d.as_millis()))
                 .collect();
-            return Ok(format!(
-                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}],\"replay_equals_live\":{},\"bbp_build_sha\":\"{}\"}}",
+            // A stopped run still prints what it has, with the reason, so
+            // `bbp pairs` can load it as a failed run; the exit is non-zero.
+            let stop = match &out.stop {
+                None => String::new(),
+                Some(s) => format!(
+                    ",\"stop\":\"{}\",\"stop_reason\":{}",
+                    match s.kind {
+                        moderator::StopKind::Cap => "cap",
+                        moderator::StopKind::Wall => "wall",
+                    },
+                    rusty_serde::json::to_string(&s.reason).map_err(|e| e.to_string())?
+                ),
+            };
+            let json = format!(
+                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}],\"replay_equals_live\":{},\"bbp_build_sha\":\"{}\"{stop}}}",
                 out.state,
                 out.turns_launched,
                 out.runs,
@@ -169,7 +182,14 @@ fn run() -> Result<String, String> {
                 visits.join(","),
                 out.replay_equals_live,
                 rusty_bbp_host::BUILD_SHA
-            ));
+            );
+            return match out.stop {
+                None => Ok(json),
+                Some(s) => {
+                    println!("{json}");
+                    Err(s.reason)
+                }
+            };
         }
         "metrics" => return report::json(&dir, &task, a.flags.get("owner").map(String::as_str)),
         "tokens" => {

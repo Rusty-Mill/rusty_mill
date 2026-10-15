@@ -181,14 +181,15 @@ fn noise_gate(pairs: &[Pair]) -> (Verdict, Vec<f64>) {
 }
 
 /// Safety: no N=2 run overshot a budget, and the moderator's live state equalled
-/// the replay of the log in every run. Known only with all ten pairs in.
-fn c1(pairs: &[&Pair]) -> Verdict {
-    let runs = || pairs.iter().flat_map(|p| [&p.control, &p.treatment]);
-    if pairs.iter().any(|p| p.treatment.overshoot)
+/// the replay of the log in every run, the null pairs' repeats included. Known
+/// only with all ten pairs in.
+fn c1(phase2: &[&Pair], all: &[Pair]) -> Verdict {
+    let runs = || all.iter().flat_map(|p| [&p.control, &p.treatment]);
+    if phase2.iter().any(|p| p.treatment.overshoot)
         || runs().any(|r| r.replay_equals_live == Some(false))
     {
         Verdict::Fails
-    } else if pairs.len() >= PAIRS && runs().all(|r| r.replay_equals_live == Some(true)) {
+    } else if phase2.len() >= PAIRS && runs().all(|r| r.replay_equals_live == Some(true)) {
         Verdict::Holds
     } else {
         Verdict::Inconclusive
@@ -293,37 +294,37 @@ fn c7(pairs: &[&Pair]) -> (Verdict, Vec<f64>) {
     (verdict(holds), ratios)
 }
 
-/// The decision table of the criteria note, first match.
+/// The decision table of the criteria note, first match. The texts are the
+/// note's Action column word for word; a test reads the note and compares.
 fn decide(e: &Evaluation) -> &'static str {
     use self::Verdict::*;
-    const INCOMPLETE: &str = "incomplete: some criteria are not yet measurable; no decision";
     if e.noise_gate == Fails {
-        return "noise gate failed: stop; no phase 2 run; the owner decides";
+        return "Stop; no phase 2 run; the owner decides";
     }
     if e.c1_safety == Fails {
-        return "1 fails: fix 2a; no decision";
+        return "Fix 2a; no decision";
     }
     if e.c2_comparable == Fails {
-        return "2 fails: inconclusive; no decision; rerun with a corrected rubric or task set";
+        return "Inconclusive; no decision; rerun with a corrected rubric or task set";
     }
     // Without 8 of 10 pairs succeeding and a clean safety result "the screen is
     // inconclusive and no decision is taken": no later row is reachable.
     if e.c1_safety != Holds || e.c2_comparable != Holds {
-        return INCOMPLETE;
+        return "Incomplete; no decision until 1 and 2 are known to hold";
     }
     if e.c3_parallelism == Inconclusive {
-        return "3 inconclusive: no decision (noise, measurement error or too few measurable pairs)";
+        return "No decision; rerun the separable pairs with longer tasks or more repetitions";
     }
     if e.c3_parallelism == Fails {
-        return "3 fails: stop concurrency work; max_live_turns = 1 stays the default";
+        return "Stop concurrency work; keep `max_live_turns = 1` as the default and the only tested mode";
     }
     // Each row below names criteria that must hold, not merely not fail.
     match (e.c7_cost, e.c4_contention, e.c5_loss) {
-        (Fails, _, _) => "3 holds, 7 fails: parallelism pays in time but not in cost; no CRDT",
-        (Holds, Fails, _) => "3 and 7 hold, 4 fails: 2a alone is enough for spec authoring; no CRDT",
-        (Holds, Holds, Fails) => "3, 7 and 4 hold, 5 fails: section leases or 2a; no CRDT",
-        (Holds, Holds, Holds) => "1 to 5 and 7 hold: build rusty_crdt and 2b, after criterion 6's precondition (verdict binding landed); criterion 4 still needs the flagged versions read by hand",
-        _ => INCOMPLETE,
+        (Fails, _, _) => "Parallelism pays in time but not in cost; keep `max_live_turns = 1` the default, 2a stays opt-in; no CRDT",
+        (Holds, Fails, _) => "2a alone is enough for spec authoring; no CRDT",
+        (Holds, Holds, Fails) => "Contention exists but loses nothing the rubric values; section leases (option 4) or 2a, no CRDT",
+        (Holds, Holds, Holds) => "Build `rusty_crdt` and 2b (Appendix A and B), after criterion 6's precondition: the verdict-binding change lands first",
+        _ => "Incomplete; no decision until 3, 7, 4 and 5 are known to hold",
     }
 }
 
@@ -333,7 +334,7 @@ pub fn evaluate(pairs: &[Pair], poll_ms: u64) -> Evaluation {
     let phase2: Vec<&Pair> = pairs.iter().filter(|p| p.kind != Kind::Null).collect();
     let of = |k| -> Vec<&Pair> { phase2.iter().copied().filter(|p| p.kind == k).collect() };
     let (separable, shared) = (of(Kind::Separable), of(Kind::Shared));
-    let c1 = c1(&phase2);
+    let c1 = c1(&phase2, pairs);
     let (c3v, separable_ratios) = c3(&separable, gate, poll_ms);
     let (c5v, median_unused_share) = c5(&shared);
     let (c7v, cost_ratios) = c7(&phase2);
@@ -406,6 +407,8 @@ struct ModOut {
     replay_equals_live: Option<bool>,
     #[rusty_serde(default)]
     bbp_build_sha: Option<String>,
+    #[rusty_serde(default)]
+    stop: Option<String>,
 }
 
 /// What `bbp mod` printed that the criteria use.
@@ -413,7 +416,8 @@ struct ModOut {
 pub struct ModFacts {
     /// The first `Planning` visit, in ms.
     pub spec_wall_ms: Option<u64>,
-    /// State boundaries up to and including the end of that visit.
+    /// State boundaries of that visit's window: its end, and its start unless
+    /// it was the first state the moderator saw (that start is exact).
     pub spec_boundaries: u64,
     pub replay_equals_live: Option<bool>,
     /// `cap` or `wall` when the moderator stopped the run.
@@ -425,9 +429,9 @@ pub fn mod_facts(mod_output: &str) -> Result<ModFacts, String> {
     let at = m.state_ms.iter().position(|(s, _)| s == "Planning");
     Ok(ModFacts {
         spec_wall_ms: at.map(|i| m.state_ms[i].1),
-        spec_boundaries: at.map_or(0, |i| i as u64 + 1),
+        spec_boundaries: at.map_or(0, |i| 1 + u64::from(i > 0)),
         replay_equals_live: m.replay_equals_live,
-        stop: None,
+        stop: m.stop,
     })
 }
 
@@ -497,7 +501,7 @@ pub fn facts(
         spec_wall_ms: m.spec_wall_ms,
         spec_boundaries: m.spec_boundaries,
         replay_equals_live: m.replay_equals_live,
-        over_cap: tok.usd_floor.is_some_and(|f| f > cap_usd),
+        over_cap: m.stop.as_deref() == Some("cap") || tok.usd_floor.is_some_and(|f| f > cap_usd),
         tokens: (tok.without_output == 0).then_some(tok.usd).flatten(),
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
@@ -762,7 +766,7 @@ mod tests {
     fn a_null_ratio_outside_the_band_fails_the_gate_and_stops_the_run() {
         let e = evaluate(&nulls([1.0, 1.16, 1.0]), 500);
         assert_eq!(e.noise_gate, Verdict::Fails);
-        assert!(e.decision.starts_with("noise gate failed"));
+        assert!(e.decision == row(0));
         // The band is inclusive at both ends.
         assert_eq!(
             evaluate(&nulls([0.85, 1.15, 1.0]), 500).noise_gate,
@@ -838,7 +842,7 @@ mod tests {
         let e = evaluate(&p, 500);
         assert_eq!(e.c3_parallelism, Verdict::Holds);
         assert_eq!(e.c7_cost, Verdict::Fails);
-        assert!(e.decision.starts_with("3 holds, 7 fails"), "{}", e.decision);
+        assert!(e.decision == row(6), "{}", e.decision);
     }
 
     #[test]
@@ -868,17 +872,16 @@ mod tests {
             [Verdict::Holds; 6],
             "{e:?}"
         );
-        assert!(e.decision.starts_with("1 to 5 and 7 hold"));
-        assert!(e.decision.contains("by hand"));
+        assert_eq!(e.decision, row(9));
     }
 
     #[test]
     fn contention_without_loss_stops_short_of_the_crdt() {
         let e = evaluate(&all([0.5; 5], 1, 0), 500);
         assert_eq!(e.c5_loss, Verdict::Fails);
-        assert!(e.decision.starts_with("3, 7 and 4 hold, 5 fails"));
+        assert!(e.decision == row(8));
         let e = evaluate(&all([0.5; 5], 0, 0), 500);
-        assert!(e.decision.starts_with("3 and 7 hold, 4 fails"));
+        assert!(e.decision == row(7));
     }
 
     #[test]
@@ -888,7 +891,7 @@ mod tests {
         p[i].treatment.overshoot = true;
         let e = evaluate(&p, 500);
         assert_eq!(e.c1_safety, Verdict::Fails);
-        assert!(e.decision.starts_with("1 fails"));
+        assert!(e.decision == row(1));
     }
 
     #[test]
@@ -1077,46 +1080,35 @@ mod tests {
     }
 
     /// One condition per row, in table order, with the text its row starts with.
-    type Row = (&'static str, fn(&mut Evaluation), &'static str);
+    type Row = (&'static str, fn(&mut Evaluation), usize);
     const ROWS: [Row; 9] = [
-        (
-            "noise gate",
-            |e| e.noise_gate = Verdict::Fails,
-            "noise gate failed",
-        ),
-        ("1 fails", |e| e.c1_safety = Verdict::Fails, "1 fails"),
-        ("2 fails", |e| e.c2_comparable = Verdict::Fails, "2 fails"),
+        ("noise gate", |e| e.noise_gate = Verdict::Fails, 0),
+        ("1 fails", |e| e.c1_safety = Verdict::Fails, 1),
+        ("2 fails", |e| e.c2_comparable = Verdict::Fails, 2),
         (
             "3 inconclusive",
             |e| e.c3_parallelism = Verdict::Inconclusive,
-            "3 inconclusive",
+            4,
         ),
-        ("3 fails", |e| e.c3_parallelism = Verdict::Fails, "3 fails"),
-        (
-            "7 fails",
-            |e| e.c7_cost = Verdict::Fails,
-            "3 holds, 7 fails",
-        ),
-        (
-            "4 fails",
-            |e| e.c4_contention = Verdict::Fails,
-            "3 and 7 hold, 4 fails",
-        ),
-        (
-            "5 fails",
-            |e| e.c5_loss = Verdict::Fails,
-            "3, 7 and 4 hold, 5 fails",
-        ),
+        ("3 fails", |e| e.c3_parallelism = Verdict::Fails, 5),
+        ("7 fails", |e| e.c7_cost = Verdict::Fails, 6),
+        ("4 fails", |e| e.c4_contention = Verdict::Fails, 7),
+        ("5 fails", |e| e.c5_loss = Verdict::Fails, 8),
         (
             "incomplete",
             |e| e.c4_contention = Verdict::Inconclusive,
-            "incomplete",
+            10,
         ),
     ];
 
+    /// Row `i` of the note's decision table.
+    fn row(i: usize) -> String {
+        note_actions()[i].clone()
+    }
+
     #[test]
     fn all_holding_builds_after_the_preconditions() {
-        assert!(decide(&all_hold()).starts_with("1 to 5 and 7 hold"));
+        assert_eq!(decide(&all_hold()), row(9));
     }
 
     #[test]
@@ -1124,7 +1116,7 @@ mod tests {
         for (name, cond, want) in ROWS {
             let mut e = all_hold();
             cond(&mut e);
-            assert!(decide(&e).starts_with(want), "{name}: {}", decide(&e));
+            assert_eq!(decide(&e), row(want), "{name}");
         }
     }
 
@@ -1142,7 +1134,7 @@ mod tests {
                 later(&mut e);
             }
             cond(&mut e);
-            assert!(decide(&e).starts_with(want), "{name}: {}", decide(&e));
+            assert_eq!(decide(&e), row(*want), "{name}");
         }
     }
 
@@ -1151,15 +1143,15 @@ mod tests {
         // 3 fails with 4, 5 and 7 all holding is still "3 fails".
         let mut e = all_hold();
         e.c3_parallelism = Verdict::Fails;
-        assert!(decide(&e).starts_with("3 fails"));
+        assert!(decide(&e) == row(5));
         // 3 holding and 7 failing stays "7 fails" whatever 4 and 5 show.
         let mut e = all_hold();
         e.c7_cost = Verdict::Fails;
         e.c4_contention = Verdict::Holds;
-        assert!(decide(&e).starts_with("3 holds, 7 fails"));
+        assert!(decide(&e) == row(6));
         e.c4_contention = Verdict::Fails;
         e.c5_loss = Verdict::Fails;
-        assert!(decide(&e).starts_with("3 holds, 7 fails"));
+        assert!(decide(&e) == row(6));
     }
 
     #[test]
@@ -1173,7 +1165,7 @@ mod tests {
         ] {
             let mut e = all_hold();
             f(&mut e);
-            assert!(decide(&e).starts_with("incomplete"), "{}", decide(&e));
+            assert!(decide(&e).starts_with("Incomplete"), "{}", decide(&e));
         }
     }
 
@@ -1199,7 +1191,7 @@ mod tests {
             (e.c1_safety, e.c2_comparable),
             (Verdict::Inconclusive, Verdict::Inconclusive)
         );
-        assert!(e.decision.starts_with("incomplete"), "{}", e.decision);
+        assert!(e.decision.starts_with("Incomplete"), "{}", e.decision);
     }
 
     #[test]
@@ -1210,7 +1202,7 @@ mod tests {
         }
         let e = evaluate(&p, 500);
         assert_eq!(e.c7_cost, Verdict::Fails);
-        assert!(e.decision.starts_with("incomplete"), "{}", e.decision);
+        assert!(e.decision.starts_with("Incomplete"), "{}", e.decision);
     }
 
     #[test]
@@ -1223,7 +1215,7 @@ mod tests {
             (e.c7_cost, e.c4_contention),
             (Verdict::Inconclusive, Verdict::Fails)
         );
-        assert!(e.decision.starts_with("incomplete"), "{}", e.decision);
+        assert!(e.decision.starts_with("Incomplete"), "{}", e.decision);
     }
 
     // ---- boundaries the review's surviving mutations crossed
@@ -1239,7 +1231,7 @@ mod tests {
         assert_eq!(verdicts_of(&p).c1_safety, Verdict::Inconclusive);
         p[4].treatment.replay_equals_live = Some(false);
         assert_eq!(verdicts_of(&p).c1_safety, Verdict::Fails);
-        assert!(verdicts_of(&p).decision.starts_with("1 fails"));
+        assert!(verdicts_of(&p).decision == row(1));
     }
 
     #[test]
@@ -1565,6 +1557,7 @@ mod tests {
             usage: tokens::Usage::default(),
             usd: None,
             usd_floor: None,
+            log: tokens::scan(stream).0,
             models: if result.is_empty() {
                 tokens::by_model(stream)
             } else {

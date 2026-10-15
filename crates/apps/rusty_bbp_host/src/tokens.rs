@@ -409,6 +409,54 @@ pub fn by_model(stream: &str) -> BTreeMap<String, Usage> {
     out
 }
 
+/// What a harness log holds that a cost can be read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum LogState {
+    /// Nothing printed (yet).
+    Empty,
+    /// Printed, but no assistant or result line a cost can be read from.
+    Unreadable,
+    Readable,
+}
+
+/// How much of a log is stream-json, and whether a line that claims to be JSON
+/// cannot be read as one: its usage would be skipped, so the log cannot be
+/// trusted to bound the spend. Text that is not JSON at all (a harness's stderr
+/// shares the file) is noise.
+pub fn scan(stream: &str) -> (LogState, u64) {
+    let (mut readable, mut bad) = (0, 0);
+    for line in stream.lines().map(str::trim_start) {
+        if !line.starts_with('{') {
+            continue;
+        }
+        match rusty_serde::json::from_str::<Line>(line) {
+            Ok(l) if l.kind == "assistant" || l.kind == "result" => readable += 1,
+            Ok(_) => {}
+            Err(_) => bad += 1,
+        }
+    }
+    let state = match (stream.trim().is_empty(), readable) {
+        (true, _) => LogState::Empty,
+        (false, 0) => LogState::Unreadable,
+        _ => LogState::Readable,
+    };
+    (state, bad)
+}
+
+/// A stream cut after its last `result` line: what the result accounts for,
+/// and what was printed after it.
+fn split_at_last_result(stream: &str) -> (&str, &str) {
+    let mut end = 0;
+    let mut at = 0;
+    for line in stream.split_inclusive('\n') {
+        at += line.len();
+        if rusty_serde::json::from_str::<Line>(line.trim()).is_ok_and(|l| l.kind == "result") {
+            end = at;
+        }
+    }
+    stream.split_at(end)
+}
+
 /// What a turn's output says it cost.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cost {
@@ -505,6 +553,8 @@ pub struct TurnTokens {
     pub usd_floor: Option<f64>,
     /// The tokens per model (from the result when complete).
     pub models: BTreeMap<String, Usage>,
+    /// Whether the turn's log holds stream-json a cost can be read from.
+    pub log: LogState,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -564,11 +614,31 @@ pub fn of(
             all_known = false;
             continue;
         };
+        let (log, bad) = scan(&text);
+        if bad > 0 {
+            return Err(format!(
+                "turn {}: {bad} line(s) of JSON could not be read, so their usage would be skipped",
+                turn.0
+            ));
+        }
         let lower = by_model(&text);
+        // What was printed after the last result is spend that result does not
+        // account for: the turn is not complete, and the floor counts it.
+        let (head, tail) = split_at_last_result(&text);
+        let trailing = by_model(tail);
         let cost = criteria
-            .map(|c| price_turn(&text, c).map_err(|e| format!("turn {}: {e}", turn.0)))
+            .map(|c| {
+                price_turn(if tail.is_empty() { &text } else { head }, c)
+                    .map_err(|e| format!("turn {}: {e}", turn.0))
+            })
             .transpose()?;
         let (complete, unknown, turn_usd, models) = match cost {
+            Some(_) if !trailing.is_empty() => (
+                false,
+                Some("assistant messages after the last result".to_owned()),
+                None,
+                lower.clone(),
+            ),
             Some(Cost::Known { usd, models, .. }) => (true, None, Some(usd), models),
             Some(Cost::Unknown(why)) => (false, Some(why), None, lower.clone()),
             None => {
@@ -587,11 +657,29 @@ pub fn of(
         };
         let usage = models.values().fold(Usage::default(), |a, u| a.plus(*u));
         let turn_floor = match (criteria, turn_usd) {
-            (Some(_), Some(d)) => Some(d),
-            (Some(c), None) => Some(
-                c.dollars(&lower)
+            (Some(c), Some(d)) => Some(
+                d + c
+                    .dollars(&trailing)
                     .map_err(|e| format!("turn {}: {e}", turn.0))?,
             ),
+            (Some(c), None) => {
+                // The result's own account, if it has one, plus what followed it.
+                let head_floor = match price_turn(head, c) {
+                    Ok(Cost::Known { usd, .. }) if !tail.is_empty() => usd,
+                    _ => c
+                        .dollars(&by_model(head))
+                        .map_err(|e| format!("turn {}: {e}", turn.0))?,
+                };
+                let tail_floor = c
+                    .dollars(&trailing)
+                    .map_err(|e| format!("turn {}: {e}", turn.0))?;
+                Some(if tail.is_empty() {
+                    c.dollars(&lower)
+                        .map_err(|e| format!("turn {}: {e}", turn.0))?
+                } else {
+                    head_floor + tail_floor
+                })
+            }
             _ => None,
         };
         let is_revoked = revoked.contains(turn);
@@ -616,6 +704,7 @@ pub fn of(
             usd: turn_usd,
             usd_floor: turn_floor,
             models,
+            log,
         });
     }
     if criteria.is_some() {
