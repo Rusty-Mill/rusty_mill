@@ -368,7 +368,11 @@ two complete builds. In order, no shortcuts:
 
    `gh pr view <PR> --json state,mergeCommit` must report `MERGED` plus a commit sha,
    and that sha must be an ancestor of the base branch
-   (`git merge-base --is-ancestor <sha> origin/<base>`).
+   (`git merge-base --is-ancestor <sha> origin/<base>`). With a merge queue the PR is
+   still OPEN right after the gate exits 0: repeat that same read every 30s for up to
+   10 minutes. Request only `state,mergeCommit`; `isInMergeQueue` is not a
+   `gh pr view --json` field and an invalid field halts the run. Still OPEN after the
+   wait: leave the card in Review, report "queued, not yet merged", stop without a halt.
 4. Only then: close the issue, move card Review → **Done**, post the ✅ comment citing
    the merge commit sha.
 5. Merge refused (failing checks, conflicts, branch protection) → card Review →

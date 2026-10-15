@@ -445,6 +445,11 @@ on the base branch**.
      gh pr view <PR> --json state,mergeCommit -q '.state + " " + (.mergeCommit.oid // "none")'
      Expect: MERGED <sha>.  Then verify the sha is reachable from the base branch:
      git fetch origin <base> && git merge-base --is-ancestor <sha> origin/<base>
+     With a merge queue the PR is still OPEN right after the gate exits 0. Repeat that
+     same read every 30s for up to 10 minutes. Request only `state,mergeCommit`:
+     `isInMergeQueue` and similar names are not `gh pr view --json` fields, and an
+     invalid field halts the run. Still OPEN after the wait: leave the card in Review,
+     report "queued, not yet merged", and stop the lane without a halt.
 4. Only after step 3 passes: close the issue, move card Review → Done, rewrite `status` (`> [!TIP]` ✅ Merged) and append the `history` row, post the `[reviewer] [report] ✅ merged` comment
    citing the merge commit sha.
 5. Merge through the gate, never with a bare `gh pr merge`. Record the head you
