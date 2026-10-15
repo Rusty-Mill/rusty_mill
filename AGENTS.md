@@ -19,21 +19,18 @@ Keep changes focused, preserve unrelated work, and add or update the PR's
 - Validate the affected scope using repository checks; a local `cargo check` alone
   does not establish green CI or merge readiness.
 
-## Super-board — present, inactive
+## Super-board — active under the accepted autonomy policy
 
-The super-board skills, scripts, hooks, workflows and tests are in `.claude/`, but nothing
-activates them. No permission rules and no auto-run hooks are committed; the guard hooks in
-`.claude/settings.json` only deny. The board config is documentation at
-[proposed-config.md](docs/super-board/proposed-config.md), outside the discovery path, so
-`/super-board run` and the merge gate have no config to run from. Do not add one.
+The board robot is governed by [docs/super-board/autonomy-policy.md](docs/super-board/autonomy-policy.md)
+(accepted by the owner, 2026-10-15). In short:
 
-The proposed [permissions and session hook](docs/super-board/proposed-settings.md) are
-proposals, not authority. Their writing standards, ticket format, block templates and
-PR author notes ship with the tooling and are not required by the workflow above. The
-standalone [issue template](docs/agents/issue-tracker.md) is documentation.
+- It takes Ready cards, builds, QAs and reviews them, and **merges its own PRs** into `main`
+  through the merge gate and the merge queue, after a green `required-gate` for the exact head.
+- It never pushes to `main`, `master` or `staging`, never merges a PR that targets another
+  branch, and never runs a database migration. A migration PR waits for a person.
+- Its PRs are exempt from the independent-review expectation above. Human-authored PRs are not.
+- Permission rules are not committed. Each person adds the narrow set from
+  [proposed-settings.md](docs/super-board/proposed-settings.md) to `.claude/settings.local.json`.
+- Stop it with `/super-board stop`. A bad merge is reverted by PR.
 
-These docs do not authorize activation, automatic merges, migrations, permission changes
-or credential operations, including through local copies of the config or settings.
-Activation needs an independent review of the tooling and an explicit bounded owner policy
-decision on autonomy, permissions and migrations. `/super-review` and the super-board merge
-gate stay out of the workflow above until then.
+Tickets: [issue template](docs/agents/issue-tracker.md). The tooling lives in `.claude/`.

@@ -1,6 +1,6 @@
 # rusty_mill — project notes for the proposed board
 
-Super-board is present in `.claude/` but inactive. The
+Super-board is active under the accepted [autonomy policy](autonomy-policy.md). The
 [configuration proposal](proposed-config.md) is inactive documentation; neither
 these notes nor any local tooling copy establishes automatic merge or migration
 authority. See [deferred pre-flight](pre-flight.md).
