@@ -4,10 +4,13 @@
 //! argument boundaries are kept, so prompt text that mentions the flag pins
 //! nothing. A `sh -c` launcher is parsed with shell quoting and comments; every
 //! `claude` command in it must pin; the only other commands allowed are a short
-//! list of setup commands, also inside `$( ... )` substitutions; and anything
-//! whose effective execution cannot be established (a nested shell with or
-//! without a path, `eval`, control flow, a computed command, an unreadable
-//! quote) is an error.
+//! list of setup commands, `git` and `set` in two and one argument forms only
+//! (a command name alone is never taken as proof that nothing else starts: `git`
+//! runs aliases and transports); assignments use names with no special meaning;
+//! `$( ... )` substitutions hold setup commands only; and anything whose
+//! effective execution cannot be established (a nested shell with or without a
+//! path, `eval`, control flow, a computed command, a subshell or process
+//! substitution, an unreadable quote) is an error.
 //! The checks read the file, not the run: `bbp pairs` repeats them on what the
 //! harnesses actually used.
 
@@ -154,8 +157,8 @@ fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
             },
             '$' => lx.dollar(&mut chars)?,
             '`' => return Err("a backtick substitution is not read literally".into()),
-            '(' | ')' if !lx.live => {
-                return Err("a subshell is not read literally".into());
+            '(' | ')' => {
+                return Err("a subshell or process substitution is not read literally".into());
             }
             ';' | '&' | '|' | '\n' => lx.end_command(),
             c if c.is_whitespace() => lx.end_word(),
@@ -167,16 +170,95 @@ fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
 }
 
 /// The commands a launcher may run besides `claude`: setup that starts no
-/// harness. Anything else is refused, so a harness cannot hide behind a command
-/// this reader does not know (a nested shell, `eval`, `xargs`, control flow).
-const SETUP: [&str; 16] = [
-    "set", "cd", "rm", "mkdir", "git", "cp", "mv", "export", "echo", "printf", "true", "false",
-    "sleep", "ls", "cat", "pwd",
+/// program. `git` and `set` only in the argument forms `setup_ok` lists; `git`
+/// can run configured programs (`-c alias.x=!cmd`, `--upload-pack`, `ext::`
+/// URLs), so a name on this list is never taken as proof by itself. Anything
+/// not listed is refused (a nested shell, `eval`, `xargs`, control flow).
+const SETUP: [&str; 15] = [
+    "set", "cd", "rm", "mkdir", "git", "cp", "mv", "echo", "printf", "true", "false", "sleep",
+    "ls", "cat", "pwd",
 ];
+
+/// Literal values assigned earlier in the line, by variable name.
+type Vars = BTreeMap<String, String>;
 
 /// A command word without its directory: `/bin/sh` is `sh`.
 fn base(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
+}
+
+/// A variable name an assignment may use: a lowercase name, or one uppercase
+/// letter. The names the shell, git, the dynamic loader and the like give a
+/// meaning (`PATH`, `IFS`, `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`) are all
+/// longer and upper case, so a line cannot change what runs by assigning one.
+fn plain_name(n: &str) -> bool {
+    let mut c = n.chars();
+    match c.next() {
+        Some(f) if f.is_ascii_uppercase() => n.len() == 1,
+        Some(f) if f.is_ascii_lowercase() => {
+            c.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        }
+        _ => false,
+    }
+}
+
+/// `NAME=value` as one word, when `NAME` reads as a variable name.
+fn assignment(w: &Word) -> Option<(&str, &str)> {
+    let (n, v) = w.text.split_once('=')?;
+    (!n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some((n, v))
+}
+
+/// The value of a command operand that can be known: a literal word, or
+/// `$name` / `${name}` of a variable assigned a literal earlier in the line. It
+/// must not look like an option or a transport (`ext::...`).
+fn operand(w: &Word, vars: &Vars) -> Result<String, String> {
+    let v = if w.dynamic {
+        let name = w
+            .text
+            .strip_prefix('$')
+            .map(|n| n.trim_start_matches('{').trim_end_matches('}'))
+            .ok_or_else(|| format!("the operand {:?} is computed", w.text))?;
+        vars.get(name).cloned().ok_or_else(|| {
+            format!(
+                "the operand {:?} is not a literal assigned in the line",
+                w.text
+            )
+        })?
+    } else {
+        w.text.clone()
+    };
+    if v.is_empty() || v.starts_with('-') || v.contains("::") {
+        return Err(format!("the operand {v:?} is not a plain path"));
+    }
+    Ok(v)
+}
+
+/// The argument forms a listed setup command may take. Only `git` and `set` can
+/// start programs or change what runs, and they are the only ones restricted:
+/// `git clone [-q] SRC DEST` and `git rev-parse HEAD`, `set -e` / `-u` forms.
+fn setup_ok(name: &str, args: &[Word], vars: &Vars) -> Result<(), String> {
+    // A computed word reads as `$`: a literal word cannot, since any `$` makes it computed.
+    let shape: Vec<&str> = args
+        .iter()
+        .map(|w| if w.dynamic { "$" } else { w.text.as_str() })
+        .collect();
+    let operands = |ws: &[Word]| ws.iter().try_for_each(|w| operand(w, vars).map(drop));
+    match (name, shape.as_slice()) {
+        ("git", ["rev-parse", "HEAD"]) => Ok(()),
+        ("git", ["clone", "-q" | "--quiet", _, _]) => operands(&args[2..]),
+        ("git", ["clone", _, _]) => operands(&args[1..]),
+        ("git", _) => {
+            Err("only `git clone [-q] SRC DEST` and `git rev-parse HEAD` are read".into())
+        }
+        ("set", flags) => flags
+            .iter()
+            .all(|f| {
+                f.len() > 1 && f.starts_with('-') && f[1..].chars().all(|c| matches!(c, 'e' | 'u'))
+            })
+            .then_some(())
+            .ok_or_else(|| "only `set -e` and `set -u` are read".into()),
+        _ => Ok(()),
+    }
 }
 
 /// What a simple command runs.
@@ -191,15 +273,21 @@ enum Runs {
 
 /// The command word of a simple command, past `NAME=value` assignments and the
 /// wrappers that run the next word as is (`exec`, `command`, `nohup`, `time`,
-/// `env`, without options of their own). An error for a command word that is
-/// computed, not `claude` and not a listed setup command, or hidden behind a
-/// wrapper's options: what runs cannot be established.
-fn runs(words: &[Word]) -> Result<Runs, String> {
+/// `env`, without options of their own). An assignment must use a plain name;
+/// one that stands alone with a literal value is remembered in `vars`. An error
+/// for a command word that is computed, not `claude` and not a listed setup
+/// command, or hidden behind a wrapper's options: what runs cannot be
+/// established.
+fn runs(words: &[Word], vars: &mut Vars) -> Result<Runs, String> {
+    let mut pending: Vec<(String, String)> = Vec::new();
     for (i, w) in words.iter().enumerate() {
-        let assignment = w.text.split_once('=').is_some_and(|(n, _)| {
-            !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_')
-        });
-        if assignment {
+        if let Some((n, v)) = assignment(w) {
+            if !plain_name(n) {
+                return Err(format!("assigning {n} is not read literally"));
+            }
+            if !w.dynamic {
+                pending.push((n.to_owned(), v.to_owned()));
+            }
             continue;
         }
         let name = base(&w.text);
@@ -214,22 +302,30 @@ fn runs(words: &[Word]) -> Result<Runs, String> {
         }
         return match name {
             "claude" => Ok(Runs::Claude(i)),
-            n if SETUP.contains(&n) => Ok(Runs::Setup),
+            n if SETUP.contains(&n) => {
+                setup_ok(n, &words[i + 1..], vars)?;
+                Ok(Runs::Setup)
+            }
             n => Err(format!(
                 "the command {n:?} is not a supported setup command"
             )),
         };
     }
+    // Only assignments: they now hold for the rest of the line.
+    vars.extend(pending);
     Ok(Runs::Nothing)
 }
 
 /// Every command substitution in a command's words runs before it does, so its
 /// body must itself be setup commands only: `$(claude ...)` starts a harness.
-fn check_substitutions(words: &[Word]) -> Result<(), String> {
+fn check_substitutions(words: &[Word], vars: &Vars) -> Result<(), String> {
     for body in words.iter().flat_map(|w| &w.subst) {
         for inner in shell_commands(body)? {
-            check_substitutions(&inner)?;
-            if !matches!(runs(&inner)?, Runs::Setup | Runs::Nothing) {
+            check_substitutions(&inner, vars)?;
+            if !matches!(
+                runs(&inner, &mut vars.clone())?,
+                Runs::Setup | Runs::Nothing
+            ) {
                 return Err(format!(
                     "the substitution $({body}) starts a harness or an unknown command"
                 ));
@@ -285,9 +381,10 @@ pub fn pinned_model(l: &Launcher) -> Result<Option<String>, String> {
         Some(i) if is_shell(&l.program) => {
             let script = l.args.get(i + 1).map_or("", String::as_str);
             let mut per_command: Vec<Vec<String>> = Vec::new();
+            let mut vars = Vars::new();
             for words in shell_commands(script)? {
-                check_substitutions(&words)?;
-                let Runs::Claude(at) = runs(&words)? else {
+                check_substitutions(&words, &vars)?;
+                let Runs::Claude(at) = runs(&words, &mut vars)? else {
                     continue;
                 };
                 per_command.push(argv_models(
@@ -687,5 +784,96 @@ mod tests {
         assert!(pinned_model(&partial).is_err());
         let bare = launcher("/bin/sh", &["-c", "exec ./claude -p x"]);
         assert_eq!(pinned_model(&bare).unwrap(), None);
+    }
+
+    #[test]
+    fn git_can_run_configured_programs_so_only_two_forms_of_it_are_read() {
+        for script in [
+            // The reported case: a git alias that runs an unpinned harness.
+            r#"git -c alias.bbp="!claude -p task" bbp; exec claude --model m1 -p next"#,
+            r#"X="$(git -c alias.bbp='!claude -p task' bbp)"; exec claude --model m1 -p next"#,
+            // Other ways git starts a program.
+            "git clone --upload-pack='claude -p x' a b; exec claude --model m1 -p x",
+            "git clone -q ext::sh a b; exec claude --model m1 -p x",
+            "git clone -q a ext::sh; exec claude --model m1 -p x",
+            "git clone -q -- a b; exec claude --model m1 -p x",
+            "git log --ext-diff; exec claude --model m1 -p x",
+            "git status; exec claude --model m1 -p x",
+            "git rev-parse --git-dir; exec claude --model m1 -p x",
+            // An operand from the environment, or assigned something unsafe.
+            r#"git clone -q /a "$DEST"; exec claude --model m1 -p x"#,
+            r#"D=--upload-pack=x; git clone -q /a "$D"; exec claude --model m1 -p x"#,
+            r#"D=$(pwd); git clone -q /a "$D"; exec claude --model m1 -p x"#,
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert!(pinned_model(&sh).is_err(), "{script}");
+        }
+        for script in [
+            "git clone /tmp/src /tmp/dest; exec claude --model m1 -p x",
+            "git clone -q /tmp/src /tmp/dest; exec claude --model m1 -p x",
+            r#"D=/tmp/dest; rm -rf "$D"; git clone --quiet /tmp/src "$D"; cd "$D"; exec claude --model m1 -p x"#,
+            "exec claude --model m1 -p \"at $(git rev-parse HEAD)\"",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert_eq!(pinned_model(&sh).unwrap(), Some("m1".into()), "{script}");
+        }
+    }
+
+    #[test]
+    fn a_line_cannot_change_what_runs_by_assigning_a_variable_that_means_something() {
+        for script in [
+            "PATH=/tmp/evil exec claude --model m1 -p x",
+            "PATH=/tmp/evil; exec claude --model m1 -p x",
+            "export PATH=/tmp/evil; exec claude --model m1 -p x",
+            "BASH_ENV=/tmp/x exec claude --model m1 -p x",
+            "GIT_SSH_COMMAND=x; exec claude --model m1 -p x",
+            "LD_PRELOAD=/tmp/x exec claude --model m1 -p x",
+            "IFS=x; exec claude --model m1 -p x",
+            "_=x; exec claude --model m1 -p x",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert!(pinned_model(&sh).is_err(), "{script}");
+        }
+        for script in [
+            "w=/tmp/x; A=1 exec claude --model m1 -p x",
+            "tmp_dir=/tmp/x; exec claude --model m1 -p x",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert_eq!(pinned_model(&sh).unwrap(), Some("m1".into()), "{script}");
+        }
+    }
+
+    #[test]
+    fn a_process_substitution_or_subshell_hides_nothing() {
+        for script in [
+            "cat <(claude -p task); exec claude --model m1 -p x",
+            "echo hi > >(claude -p task); exec claude --model m1 -p x",
+            "(claude -p task); exec claude --model m1 -p x",
+            "exec claude --model m1 -p x; f() { claude -p task; }",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert!(pinned_model(&sh).is_err(), "{script}");
+        }
+    }
+
+    #[test]
+    fn set_is_read_only_in_its_plain_forms() {
+        for ok in ["set -e", "set -eu", "set -u"] {
+            let sh = launcher("sh", &["-c", &format!("{ok}; exec claude --model m1 -p x")]);
+            assert_eq!(pinned_model(&sh).unwrap(), Some("m1".into()), "{ok}");
+        }
+        for bad in [
+            "set -x",
+            "set -o errexit",
+            "set -- a",
+            "set +e",
+            "set $FLAGS",
+        ] {
+            let sh = launcher(
+                "sh",
+                &["-c", &format!("{bad}; exec claude --model m1 -p x")],
+            );
+            assert!(pinned_model(&sh).is_err(), "{bad}");
+        }
     }
 }
