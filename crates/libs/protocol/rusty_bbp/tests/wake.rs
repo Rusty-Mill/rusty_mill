@@ -683,3 +683,38 @@ fn fold_fields_are_derived_from_the_log_alone() {
         assert!(matches!(ended, Some(Event::TurnEnded { .. })), "{role}");
     }
 }
+
+// ---------------------------------------------------------------- the pick rule
+
+fn entry(role: &str, why: WakeReason) -> (RoleId, WakeReason) {
+    (RoleId::from(role), why)
+}
+
+#[test]
+fn pick_from_takes_the_first_entry_that_may_take_a_turn() {
+    let set = [
+        entry("coder", WakeReason::Addressed),
+        entry("reviewer", WakeReason::State),
+    ];
+    assert_eq!(pick_from(&set, 1), Some(&set[0]));
+    // The same set, reversed, picks the other: order is the rule.
+    let rev = [set[1].clone(), set[0].clone()];
+    assert_eq!(pick_from(&rev, 1), Some(&rev[0]));
+}
+
+#[test]
+fn pick_from_skips_observers_at_one_live_turn_and_not_above() {
+    let set = [
+        entry("planner", WakeReason::Observer),
+        entry("tester", WakeReason::State),
+    ];
+    assert_eq!(pick_from(&set, 1), Some(&set[1]));
+    assert_eq!(pick_from(&set, 2), Some(&set[0]));
+}
+
+#[test]
+fn pick_from_has_nothing_to_pick_from_nothing_or_only_observers() {
+    assert_eq!(pick_from(&[], 1), None);
+    let only = [entry("planner", WakeReason::Observer)];
+    assert_eq!(pick_from(&only, 1), None);
+}

@@ -41,7 +41,7 @@ bbp human   --dir D --task T [--rev N] VERB ARGS...
 - `{"Explicit": ...}`: a forced grant that bypassed the policy: `Settlement` (a request was settled), `Consultation` (a yield or `ask`) or `ConsultationReturn`.
 - `{"Unexplained": {"replayed": ...}}`: the replayed rule picks another role, so the reason is not known. This is not a match; it means the log or the build has drifted.
 
-The reason is reconstructed, not recorded, and `wake_rules` is the version of the build that replays, which may be newer than the one that ran. The pick rule is restated in the host (the core's `pick_next` is crate-private); `tests/why.rs` checks it against the engine.
+The reason is reconstructed, not recorded, and `wake_rules` is the version of the build that replays, which may be newer than the one that ran. The pick rule is the core's `pick_from`, the function the engine's `pick_next` calls, so `bbp why` and the engine cannot disagree about it.
 
 `--dir` and `--task` fall back to `BBP_DIR` and `BBP_TASK`. `reject`, `rerun`, `resume` and `cancel` take `--rev N`, the card revision the human saw (`bbp card` prints it), and refuse to run without it; the core answers `stale_rev` when the card has moved on, so a delayed command is refused rather than applied to newer work.
 
