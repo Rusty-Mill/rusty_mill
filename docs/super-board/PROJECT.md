@@ -1,6 +1,6 @@
 # rusty_mill — project notes for the proposed board
 
-Super-board is deferred and unavailable in this checkout. The
+Super-board is present in `.claude/` but inactive. The
 [configuration proposal](proposed-config.md) is inactive documentation; neither
 these notes nor any local tooling copy establishes automatic merge or migration
 authority. See [deferred pre-flight](pre-flight.md).

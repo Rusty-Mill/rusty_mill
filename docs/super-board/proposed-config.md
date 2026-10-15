@@ -14,8 +14,8 @@ check, not a substitute for required CI, review or queue validation.
 
 [CONTRIBUTING](../../CONTRIBUTING.md) remains the active workflow: reviewed,
 green-CI PRs merged with a merge commit through the merge queue. Activation needs
-a separately reviewed implementation addressing the removed tooling's findings
-and an explicit bounded owner decision on autonomy, permissions and migrations.
+an independent review of the tooling (its first-review findings are fixed, with tests,
+but not yet re-reviewed) and an explicit bounded owner decision on autonomy, permissions and migrations.
 This documentation does not approve local copies of the tooling.
 
 ```json

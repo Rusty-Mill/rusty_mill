@@ -47,61 +47,6 @@
           }
         ]
       }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" && python3 .claude/hooks/cleanup-wt.py --auto --fetch 2>/dev/null || true"
-          }
-        ]
-      }
-    ]
-  },
-  "permissions": {
-    "allow": [
-      "Bash(gh project:*)",
-      "Bash(gh issue view:*)",
-      "Bash(gh issue edit:*)",
-      "Bash(gh issue comment:*)",
-      "Bash(gh pr view:*)",
-      "Bash(gh pr diff:*)",
-      "Bash(gh pr checks:*)",
-      "Bash(gh pr comment:*)",
-      "Bash(gh pr create:*)",
-      "Bash(gh pr ready:*)",
-      "Bash(gh project item-edit:*)",
-      "Bash(gh project item-list:*)",
-      "Bash(gh api:*)",
-      "Bash(git worktree:*)",
-      "Bash(.claude/bin/super-board-card.sh:*)",
-      "Bash(git checkout:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(git pull:*)",
-      "Bash(git fetch:*)",
-      "Bash(git blame:*)",
-      "Bash(mkdir:*)",
-      "Bash(pgrep:*)",
-      "Bash(node --check:*)",
-      "Bash(bash .claude/bin/super-board-wave-plan.sh:*)",
-      "Bash(bash .claude/bin/super-board-preflight.sh:*)",
-      "Bash(bash .claude/bin/super-board-usage.sh:*)",
-      "Bash(bash .claude/bin/super-board-throttle.sh:*)",
-      "Bash(bash .claude/bin/super-board-codex-lane.sh:*)",
-      "Bash(bash .claude/bin/super-board-codex-wave.sh:*)",
-      "Bash(bash .claude/bin/super-board-host.sh:*)",
-      "Bash(bash .claude/bin/super-board-pr-body.sh:*)",
-      "Bash(gh pr edit:*)",
-      "Bash(bash .claude/bin/super-board-merge-gate.sh:*)",
-      "Bash(gh pr merge:*)",
-      "Bash(bash .claude/bin/super-board-env-check.sh:*)",
-      "Bash(cargo test:*)",
-      "Bash(cargo check:*)",
-      "Bash(cargo clippy:*)",
-      "Bash(cargo fmt:*)"
     ]
   }
 }
