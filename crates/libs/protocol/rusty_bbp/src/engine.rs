@@ -9,7 +9,7 @@ use crate::record::*;
 use crate::role::*;
 use crate::shadow::{Shadow, ShadowKind};
 use crate::state::*;
-use crate::wake::{wake_set, WAKE_RULES};
+use crate::wake::{pick_from, wake_set, WAKE_RULES};
 
 pub const MAX_ARTIFACT_BYTES: u64 = 2_000_000;
 const RUNNER: &str = "runner";
@@ -1581,10 +1581,8 @@ pub(crate) fn pick_next(st: &TaskState) -> Vec<RoleId> {
     let serving = || st.roster.serving(st.state).into_iter().cloned().collect();
     match st.policy {
         SchedulingPolicy::TurnBased => serving(),
-        SchedulingPolicy::EventDriven => wake_set(st)
-            .into_iter()
-            .find(|(_, why)| why.selectable(st.max_live_turns))
-            .map_or_else(serving, |(role, _)| vec![role]),
+        SchedulingPolicy::EventDriven => pick_from(&wake_set(st), st.max_live_turns)
+            .map_or_else(serving, |(role, _)| vec![role.clone()]),
     }
 }
 
@@ -1753,6 +1751,71 @@ mod tests {
             let got = pick_next(&at(state));
             assert_eq!(got, vec![RoleId::from(holder)], "{state:?}");
         }
+    }
+
+    /// `pick_next` as written before the pick rule became `wake::pick_from`,
+    /// kept here as the oracle for the test below.
+    fn pick_next_before(st: &TaskState) -> Vec<RoleId> {
+        let serving = || st.roster.serving(st.state).into_iter().cloned().collect();
+        match st.policy {
+            SchedulingPolicy::TurnBased => serving(),
+            SchedulingPolicy::EventDriven => wake_set(st)
+                .into_iter()
+                .find(|(_, why)| why.selectable(st.max_live_turns))
+                .map_or_else(serving, |(role, _)| vec![role]),
+        }
+    }
+
+    /// Over every state of the checked-in logs (the one-turn happy path of
+    /// `tests/schema.rs` and the four event-driven runs of `tests/pick_golden.rs`),
+    /// under both policies, `pick_next` returns what it returned before. The
+    /// states include ones where `wake_set` picks a role and ones where it
+    /// falls back; the counts below keep the test from passing on neither.
+    #[test]
+    fn pick_next_is_what_it_was_over_every_state_of_the_golden_logs() {
+        let logs = [
+            ("n1_happy", include_str!("../tests/golden/n1_happy.log")),
+            ("ed_happy", include_str!("../tests/golden/ed_happy.log")),
+            (
+                "ed_question",
+                include_str!("../tests/golden/ed_question.log"),
+            ),
+            (
+                "ed_named_verdict",
+                include_str!("../tests/golden/ed_named_verdict.log"),
+            ),
+            ("ed_quiet", include_str!("../tests/golden/ed_quiet.log")),
+        ];
+        let (mut states, mut picked, mut fell_back) = (0, 0, 0);
+        for (name, text) in logs {
+            let events: Vec<Event> = text
+                .lines()
+                .map(|l| rusty_serde::json::from_str(l).expect("a logged event"))
+                .collect();
+            for n in 0..=events.len() {
+                for policy in [SchedulingPolicy::TurnBased, SchedulingPolicy::EventDriven] {
+                    let mut st = TaskState::fold(TaskId("T1".into()), &events[..n]);
+                    st.policy = policy;
+                    assert_eq!(
+                        pick_next(&st),
+                        pick_next_before(&st),
+                        "{name} after {n} events, {policy:?}"
+                    );
+                    states += 1;
+                    if policy == SchedulingPolicy::EventDriven {
+                        match pick_from(&wake_set(&st), st.max_live_turns) {
+                            Some(_) => picked += 1,
+                            None => fell_back += 1,
+                        }
+                    }
+                }
+            }
+        }
+        assert!(states > 200, "{states} states");
+        assert!(
+            picked > 20 && fell_back > 20,
+            "{picked} picked, {fell_back} fell back"
+        );
     }
 
     #[test]

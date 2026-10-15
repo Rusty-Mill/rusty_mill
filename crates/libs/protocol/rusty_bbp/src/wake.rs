@@ -51,6 +51,18 @@ pub enum WakeReason {
     Observer,
 }
 
+/// The pick of an event-driven policy: the first entry of `set` (best first,
+/// as `wake_set` returns it) whose reason may take a turn when `max_live_turns`
+/// turns may be live. `None` when nothing is selectable, which is where the
+/// policy falls back to the turn-based choice. The one place the rule lives:
+/// `pick_next`, the shadow comparison and `bbp why` all call it.
+pub fn pick_from(
+    set: &[(RoleId, WakeReason)],
+    max_live_turns: u32,
+) -> Option<&(RoleId, WakeReason)> {
+    set.iter().find(|(_, why)| why.selectable(max_live_turns))
+}
+
 impl WakeReason {
     /// May a role woken for this reason take a turn? An observer is recorded
     /// but selectable only when `max_live_turns` allows more than one.

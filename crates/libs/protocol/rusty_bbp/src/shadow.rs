@@ -5,7 +5,7 @@
 
 use crate::ids::*;
 use crate::state::{State, TurnKind};
-use crate::wake::WakeReason;
+use crate::wake::{pick_from, WakeReason};
 use rusty_serde::{Deserialize, Serialize};
 
 /// One shadow record, stamped with the log `rev` of the real `turn_granted`
@@ -63,13 +63,11 @@ impl Shadow {
         match &self.kind {
             // Shadow records exist only at one live turn, where an observer is
             // not selectable.
-            ShadowKind::Auto { granted, would } => {
-                Some(match would.iter().find(|(_, why)| why.selectable(1)) {
-                    None => Comparison::Fallback,
-                    Some((r, _)) if granted.first() == Some(r) => Comparison::Agree,
-                    Some(_) => Comparison::Disagree,
-                })
-            }
+            ShadowKind::Auto { granted, would } => Some(match pick_from(would, 1) {
+                None => Comparison::Fallback,
+                Some((r, _)) if granted.first() == Some(r) => Comparison::Agree,
+                Some(_) => Comparison::Disagree,
+            }),
             ShadowKind::Explicit { .. } => None,
         }
     }

@@ -5,8 +5,9 @@
 //! (scripted by nobody: Claude Code harnesses as the four roles): two
 //! event-driven (`run_a`, `run_b`) and one turn-based with its shadow log. The
 //! replay must reproduce the picks they made. Explicit grants and the pick
-//! rule are exercised on logs the real engine writes, through the core's own
-//! test fixture.
+//! order are exercised on logs the real engine writes, through the core's own
+//! test fixture. The pick rule itself is the core's `pick_from`, called by the
+//! engine and by `bbp why`, so there is no second copy to keep in step.
 
 #[path = "../../../libs/protocol/rusty_bbp/tests/common/mod.rs"]
 mod core_fx;
@@ -319,32 +320,6 @@ fn the_first_of_two_selectable_entries_is_the_pick() {
             ][..]
         )
     );
-}
-
-/// The pick rule is restated in the host. Whatever the engine grants, on either
-/// policy and on a roster with two roles serving a state, the restated rule
-/// must reproduce: this fails if the two drift.
-#[test]
-fn the_restated_pick_rule_never_disagrees_with_the_engine() {
-    for roster in [four_roles(), two_testers()] {
-        for event_driven in [false, true] {
-            let mut fx = if event_driven {
-                Fx::event_driven(roster.clone())
-            } else {
-                Fx::with_roles(roster.clone())
-            };
-            fx.reach_approved();
-            let hows = hows(&fx);
-            assert!(!hows.is_empty());
-            for (r, h) in &hows {
-                assert!(
-                    !matches!(h, How::Unexplained { .. }),
-                    "{} roles, event_driven={event_driven}: {r}: {h:?}",
-                    roster.len()
-                );
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------- the CLI
