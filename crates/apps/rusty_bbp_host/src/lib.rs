@@ -24,6 +24,7 @@ pub mod profiles;
 pub mod report;
 pub mod runner;
 pub mod shadow;
+pub mod tokens;
 
 use rusty_bbp::*;
 use std::path::Path;
