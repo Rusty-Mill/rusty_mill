@@ -20,7 +20,7 @@ pub struct Report {
     pub spec_conflicts: SpecConflicts,
     /// Whether each non-approved spec version's work reached the approved one.
     pub spec_attribution: SpecAttribution,
-    /// Versions that are both a `Conflict` and `Unused` (criterion 4's count).
+    /// Versions that are both a `Conflict` and `Unused`: an upper bound for criterion 4.
     pub unused_conflicts: u64,
     /// `unused_spec_versions` of the 2b gate.
     pub unused_spec_versions: u64,
