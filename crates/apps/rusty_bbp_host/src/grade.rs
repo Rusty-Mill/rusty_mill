@@ -1,6 +1,9 @@
 //! `bbp grade`: blind rubric grading for the 2b run. `pack` writes what the
 //! grader sees (spec text and rubric items under neutral ids, in hash order,
-//! nothing about arm, pair or log) and a key kept apart; `join` opens the key
+//! nothing about arm, pair or log) in two files, `pack.json` (the approved
+//! specs: exactly two per task) and `unused.json` (superseded versions, which
+//! only a treatment run has, so they never share a pack with the approved
+//! ones), and a key kept apart; `join` opens the key
 //! only once the scores cover every id, then reports each run's `rubric_ok`
 //! and the pair's `lost_rubric_items`. Who scores (a person or a model) is not
 //! this tool's business; the scorer is named in the scores file and carried to
@@ -90,9 +93,18 @@ fn neutral_id(seed: &str, s: &Source) -> String {
     h.hex()[..16].to_owned()
 }
 
+/// What `pack` produces: the two packs the grader sees and the key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Packs {
+    pub approved: Vec<PackEntry>,
+    pub unused: Vec<PackEntry>,
+    pub key: Key,
+}
+
 /// Neutral ids and an order that depends only on the seed and the ids' hashes,
-/// so neither arm nor pair is recoverable from position.
-pub fn pack(sources: &[Source], seed: &str) -> (Vec<PackEntry>, Key) {
+/// so neither arm nor pair is recoverable from position. Approved and unused
+/// specs go to separate packs: an entry count per task would name the arm.
+pub fn pack(sources: &[Source], seed: &str) -> Packs {
     let mut keyed: Vec<(String, &Source)> =
         sources.iter().map(|s| (neutral_id(seed, s), s)).collect();
     keyed.sort_by(|a, b| {
@@ -100,14 +112,17 @@ pub fn pack(sources: &[Source], seed: &str) -> (Vec<PackEntry>, Key) {
             .0
             .cmp(&Sha256::of(format!("{seed}|{}", b.0).as_bytes()).0)
     });
-    let pack = keyed
-        .iter()
-        .map(|(id, s)| PackEntry {
-            id: id.clone(),
-            spec: s.spec.clone(),
-            rubric: s.rubric.items.clone(),
-        })
-        .collect();
+    let of = |which: Which| -> Vec<PackEntry> {
+        keyed
+            .iter()
+            .filter(|(_, s)| s.which == which)
+            .map(|(id, s)| PackEntry {
+                id: id.clone(),
+                spec: s.spec.clone(),
+                rubric: s.rubric.items.clone(),
+            })
+            .collect()
+    };
     let entries = keyed
         .iter()
         .map(|(id, s)| KeyEntry {
@@ -121,13 +136,14 @@ pub fn pack(sources: &[Source], seed: &str) -> (Vec<PackEntry>, Key) {
             items: s.rubric.items.len(),
         })
         .collect();
-    (
-        pack,
-        Key {
+    Packs {
+        approved: of(Which::Approved),
+        unused: of(Which::Unused),
+        key: Key {
             seed: seed.to_owned(),
             entries,
         },
-    )
+    }
 }
 
 /// The scores file: the scorer and, per neutral id, which rubric items were met.
@@ -313,29 +329,39 @@ pub fn rubrics_sha256(dir: &Path) -> Result<String, String> {
     Ok(Sha256::of(&all).hex())
 }
 
-/// `bbp grade pack`: write `pack.json` (for the grader) and `key.json` (not).
+/// `bbp grade pack`: write `pack.json` and `unused.json` (for the grader) and
+/// `key.json` (not).
 pub fn write_pack(
     manifest: &Path,
     rubrics: &Path,
     seed: &str,
     out: &Path,
 ) -> Result<String, String> {
-    let (pack, key) = pack(&sources(manifest, rubrics)?, seed);
+    let Packs {
+        approved,
+        unused,
+        key,
+    } = pack(&sources(manifest, rubrics)?, seed);
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let w = |name: &str, text: String| {
         std::fs::write(out.join(name), text).map_err(|e| format!("{name}: {e}"))
     };
     w(
         "pack.json",
-        rusty_serde::json::to_string(&pack).map_err(|e| e.to_string())?,
+        rusty_serde::json::to_string(&approved).map_err(|e| e.to_string())?,
+    )?;
+    w(
+        "unused.json",
+        rusty_serde::json::to_string(&unused).map_err(|e| e.to_string())?,
     )?;
     w(
         "key.json",
         rusty_serde::json::to_string(&key).map_err(|e| e.to_string())?,
     )?;
     Ok(format!(
-        "{{\"entries\":{},\"rubrics_sha256\":\"{}\"}}",
-        key.entries.len(),
+        "{{\"approved\":{},\"unused\":{},\"rubrics_sha256\":\"{}\"}}",
+        approved.len(),
+        unused.len(),
         rubrics_sha256(rubrics)?
     ))
 }
@@ -389,8 +415,8 @@ mod tests {
 
     #[test]
     fn the_pack_carries_nothing_that_names_an_arm_a_pair_or_a_run() {
-        let (pack, _) = pack(&sources(), "s1");
-        let text = rusty_serde::json::to_string(&pack).unwrap();
+        let p = pack(&sources(), "s1");
+        let text = rusty_serde::json::to_string(&[p.approved, p.unused].concat()).unwrap();
         for leak in [
             "auth",
             "cache",
@@ -408,16 +434,15 @@ mod tests {
     fn order_and_ids_do_not_depend_on_the_input_order() {
         let mut rev = sources();
         rev.reverse();
-        assert_eq!(pack(&sources(), "s1").0, pack(&rev, "s1").0);
+        assert_eq!(pack(&sources(), "s1"), pack(&rev, "s1"));
     }
 
     #[test]
     fn the_seed_changes_ids_and_order() {
-        let (a, _) = pack(&sources(), "s1");
-        let (b, _) = pack(&sources(), "s2");
+        let (a, b) = (pack(&sources(), "s1"), pack(&sources(), "s2"));
         assert_ne!(
-            a.iter().map(|e| &e.id).collect::<Vec<_>>(),
-            b.iter().map(|e| &e.id).collect::<Vec<_>>()
+            a.approved.iter().map(|e| &e.id).collect::<Vec<_>>(),
+            b.approved.iter().map(|e| &e.id).collect::<Vec<_>>()
         );
     }
 
@@ -427,8 +452,8 @@ mod tests {
             src("auth", Arm::Control, 2, Which::Approved, "same"),
             src("auth", Arm::Treatment, 2, Which::Approved, "same"),
         ];
-        let (pack, _) = pack(&s, "s");
-        assert_ne!(pack[0].id, pack[1].id);
+        let p = pack(&s, "s").approved;
+        assert_ne!(p[0].id, p[1].id);
     }
 
     fn scores(key: &Key, f: impl Fn(&KeyEntry) -> Vec<bool>) -> Scores {
@@ -447,7 +472,7 @@ mod tests {
 
     #[test]
     fn the_key_stays_sealed_until_every_id_is_scored() {
-        let (_, key) = pack(&sources(), "s");
+        let key = pack(&sources(), "s").key;
         let mut s = scores(&key, |_| vec![true; 3]);
         let drop = key.entries[0].id.clone();
         s.met.remove(&drop);
@@ -457,7 +482,7 @@ mod tests {
 
     #[test]
     fn a_wrong_verdict_count_or_an_unknown_id_is_refused() {
-        let (_, key) = pack(&sources(), "s");
+        let key = pack(&sources(), "s").key;
         let short = scores(&key, |_| vec![true; 2]);
         assert!(join(&key, &short).unwrap_err().contains("verdicts"));
         let mut extra = scores(&key, |_| vec![true; 3]);
@@ -467,7 +492,7 @@ mod tests {
 
     #[test]
     fn pass_mark_is_inclusive_and_lost_items_are_unused_met_and_approved_not() {
-        let (_, key) = pack(&sources(), "s");
+        let key = pack(&sources(), "s").key;
         let auth_t = entry(&key, "auth", Arm::Treatment, Which::Approved)
             .id
             .clone();
@@ -518,21 +543,23 @@ mod tests {
     }
 
     #[test]
-    fn every_task_contributes_the_same_number_of_entries_whatever_its_unused_versions() {
-        // "auth" has an unused version, "cache" has none: if both arms' specs
-        // went into one pack, auth would show 3 entries and cache 2.
-        let (_, key) = pack(&sources(), "s");
+    fn the_approved_pack_has_two_entries_per_task_and_unused_versions_stay_apart() {
+        // "auth" has an unused version, "cache" has none.
+        let p = pack(&sources(), "s");
+        assert_eq!(
+            p.approved.len(),
+            4,
+            "two approved specs for each of two tasks"
+        );
+        assert_eq!(p.unused.len(), 1);
+        let ids: BTreeSet<&str> = p.approved.iter().map(|e| e.id.as_str()).collect();
+        assert!(p.unused.iter().all(|e| !ids.contains(e.id.as_str())));
         let mut per_task: BTreeMap<&str, usize> = BTreeMap::new();
-        for e in key.entries.iter().filter(|e| e.which == Which::Approved) {
+        for e in p.key.entries.iter().filter(|e| ids.contains(e.id.as_str())) {
             *per_task.entry(e.pair.as_str()).or_default() += 1;
         }
-        let (pack_entries, _) = pack(&sources(), "s");
-        // The pack the grader sees first carries exactly the approved specs.
-        assert_eq!(
-            pack_entries.len(),
-            per_task.values().sum::<usize>(),
-            "approved specs only"
-        );
         assert!(per_task.values().all(|n| *n == 2), "{per_task:?}");
+        // The key still covers every id, so join sees the unused version.
+        assert_eq!(p.key.entries.len(), 5);
     }
 }

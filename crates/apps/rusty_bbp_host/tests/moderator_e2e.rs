@@ -86,9 +86,9 @@ fn card(dir: &Path, task: &TaskId) -> Card {
     admin::card(dir, task).expect("card")
 }
 
-#[test]
-fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
-    let dir = tempdir("happy");
+/// Drive one task from open to closed; the run directory is left for the caller.
+fn happy_run(tag: &str) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
+    let dir = tempdir(tag);
     let (repo, base) = repo(&dir);
     let task = TaskId("T1".into());
     admin::open_task(
@@ -210,6 +210,12 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
         std::thread::sleep(Duration::from_millis(100));
     }
     let out = moderator.join().expect("join").expect("moderator");
+    (dir, task, out, seen)
+}
+
+#[test]
+fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
+    let (dir, task, out, seen) = happy_run("happy");
     assert_eq!(out.state, State::Closed);
     assert_eq!(out.turns_launched, 4, "planner, coder, tester, reviewer");
     assert!(out.replay_equals_live, "the log folds to the live state");
@@ -1143,4 +1149,79 @@ fn an_evidence_runs_harness_gets_both_cache_ttl_variables_pinned_to_one_hour() {
     let got = std::fs::read_to_string(dir.join("ttl.txt")).expect("the harness ran");
     assert_eq!(got.trim(), "1h 1h");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `bbp grade pack` and `join` on two real closed run dirs: the approved pack
+/// has one entry per arm, the unused pack is separate, and the key opens only
+/// when every id is scored.
+#[test]
+fn grade_pack_and_join_work_on_real_run_dirs() {
+    use rusty_bbp_host::grade;
+    let (cdir, ctask, _, _) = happy_run("grade-c");
+    let (tdir, ttask, _, _) = happy_run("grade-t");
+    let out = tempdir("grade-out");
+    let rubrics = out.join("rubrics");
+    std::fs::create_dir_all(&rubrics).unwrap();
+    std::fs::write(
+        rubrics.join("p1.json"),
+        r#"{"items":["a","b"],"pass_mark":1}"#,
+    )
+    .unwrap();
+    let run = |d: &Path, t: &TaskId| {
+        format!(
+            r#"{{"dir":"{}","task":"{}","mod_output":"unused"}}"#,
+            d.display(),
+            t.0
+        )
+    };
+    let manifest = out.join("manifest.json");
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"{{"poll_ms":500,"reads_per_turn":8,"cap_usd":5.0,"criteria":"c","repo":"r","pairs":[{{"id":"p1","kind":"separable","control":{},"treatment":{}}}]}}"#,
+            run(&cdir, &ctask),
+            run(&tdir, &ttask)
+        ),
+    )
+    .unwrap();
+    let packed = grade::write_pack(&manifest, &rubrics, "seed", &out.join("pack")).expect("pack");
+    assert!(packed.contains("\"approved\":2"), "{packed}");
+    assert!(packed.contains("\"unused\":0"), "{packed}");
+    let read = |n: &str| std::fs::read_to_string(out.join("pack").join(n)).unwrap();
+    let ids: Vec<String> = read("pack.json")
+        .split("\"id\":\"")
+        .skip(1)
+        .map(|r| r[..16].to_owned())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(read("unused.json"), "[]");
+    for leak in ["control", "treatment", "grade-c", "grade-t"] {
+        assert!(!read("pack.json").contains(leak), "pack leaks {leak}");
+    }
+    let scores = out.join("scores.json");
+    let met = |ids: &[String]| {
+        ids.iter()
+            .map(|i| format!(r#""{i}":[true,false]"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    std::fs::write(
+        &scores,
+        format!(r#"{{"grader":"g","met":{{{}}}}}"#, met(&ids[..1])),
+    )
+    .unwrap();
+    let key = out.join("pack").join("key.json");
+    assert!(grade::join_files(&key, &scores, &rubrics)
+        .unwrap_err()
+        .contains("sealed"));
+    std::fs::write(
+        &scores,
+        format!(r#"{{"grader":"g","met":{{{}}}}}"#, met(&ids)),
+    )
+    .unwrap();
+    let joined = grade::join_files(&key, &scores, &rubrics).expect("join");
+    assert!(joined.contains("\"rubric_ok\":true"), "{joined}");
+    for d in [cdir, tdir, out] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
