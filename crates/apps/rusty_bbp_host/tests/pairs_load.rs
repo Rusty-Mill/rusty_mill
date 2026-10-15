@@ -6,6 +6,7 @@
 mod common;
 
 use rusty_bbp::*;
+use rusty_bbp_host::moderator;
 use rusty_bbp_host::profiles::ProfileSet;
 use rusty_bbp_host::{admin, pairs};
 use std::path::{Path, PathBuf};
@@ -42,8 +43,12 @@ fn checkout(root: &Path) -> (PathBuf, String) {
     (repo, head)
 }
 
-/// An opened task with no turns, and the saved `bbp mod` output of its run.
-fn run(root: &Path, name: &str, mod_output: &str) -> serde_json_like::Run {
+const ASSISTANT: &str = r#"{"type":"assistant","message":{"id":"a","model":"m","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+const RESULT_ONLY: &str = r#"{"type":"result","usage":{"input_tokens":5,"output_tokens":5}}"#;
+
+/// An opened task whose planner was granted turn 1, which printed `turn_log`
+/// (none: no harness output), and the saved `bbp mod` output of its run.
+fn run(root: &Path, name: &str, mod_output: &str, turn_log: Option<&str>) -> serde_json_like::Run {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).unwrap();
     let task = TaskId("T1".into());
@@ -57,6 +62,20 @@ fn run(root: &Path, name: &str, mod_output: &str) -> serde_json_like::Run {
         common::roster(),
     )
     .expect("open");
+    admin::assign(
+        &dir,
+        &task,
+        &RoleId::from("planner"),
+        &PrincipalId("planner".into()),
+        "v",
+    )
+    .expect("assign");
+    admin::tick(&dir, &task).expect("tick");
+    if let Some(text) = turn_log {
+        let log = moderator::log_path(&dir, &task, TurnId(1));
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(log, text).unwrap();
+    }
     let out = root.join(format!("{name}.out.json"));
     std::fs::write(&out, mod_output).unwrap();
     serde_json_like::Run {
@@ -92,6 +111,16 @@ fn mod_out(sha: Option<&str>) -> String {
 /// Load a one-pair manifest whose control and treatment runs reported these
 /// build identities, as an evaluator built from the checkout's HEAD.
 fn load(tag: &str, control: Option<&str>, treatment: Option<&str>) -> Result<(), String> {
+    load_with_logs(tag, control, treatment, Some(ASSISTANT), Some(ASSISTANT))
+}
+
+fn load_with_logs(
+    tag: &str,
+    control: Option<&str>,
+    treatment: Option<&str>,
+    control_log: Option<&str>,
+    treatment_log: Option<&str>,
+) -> Result<(), String> {
     let root = tempdir(tag);
     let (repo, head) = checkout(&root);
     let criteria = root.join("criteria.json");
@@ -103,8 +132,18 @@ fn load(tag: &str, control: Option<&str>, treatment: Option<&str>) -> Result<(),
     )
     .unwrap();
     let sha = |s: Option<&str>| s.map(|s| s.replace("HEAD", &head));
-    let c = run(&root, "control", &mod_out(sha(control).as_deref()));
-    let t = run(&root, "treatment", &mod_out(sha(treatment).as_deref()));
+    let c = run(
+        &root,
+        "control",
+        &mod_out(sha(control).as_deref()),
+        control_log,
+    );
+    let t = run(
+        &root,
+        "treatment",
+        &mod_out(sha(treatment).as_deref()),
+        treatment_log,
+    );
     let manifest = root.join("manifest.json");
     std::fs::write(
         &manifest,
@@ -162,4 +201,36 @@ fn a_build_from_another_commit_is_refused_alone_or_mixed_with_a_good_one() {
     assert!(err.contains(OTHER), "{err}");
     let err = load("mixed", Some("HEAD"), Some(OTHER)).unwrap_err();
     assert!(err.contains("p1/treatment") && err.contains(OTHER), "{err}");
+}
+
+#[test]
+fn a_result_only_turn_log_names_no_model_and_the_evaluation_refuses() {
+    let err = load_with_logs(
+        "result_only",
+        Some("HEAD"),
+        Some("HEAD"),
+        Some(RESULT_ONLY),
+        Some(ASSISTANT),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("p1/control") && err.contains("no model"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_granted_turn_with_no_harness_output_names_no_model_and_the_evaluation_refuses() {
+    let err = load_with_logs(
+        "no_output",
+        Some("HEAD"),
+        Some("HEAD"),
+        Some(ASSISTANT),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("p1/treatment") && err.contains("no model"),
+        "{err}"
+    );
 }

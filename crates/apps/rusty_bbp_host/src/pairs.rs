@@ -58,6 +58,9 @@ pub struct RunFacts {
     pub role_models: BTreeMap<String, BTreeSet<String>>,
     /// The build commit the run's own `bbp mod` reported.
     pub build_sha: String,
+    /// Granted turns with no model observed: no harness output, or output with
+    /// no assistant message (a `result` line alone names no model).
+    pub no_model_turns: u64,
 }
 
 impl RunFacts {
@@ -412,6 +415,21 @@ pub fn spec_wall_ms(mod_output: &str) -> Result<Option<u64>, String> {
         .map(|(_, ms)| ms))
 }
 
+/// What the harness output says about models: per role the models its turns
+/// used, and how many granted turns observed none.
+fn model_evidence(tok: &tokens::TaskTokens) -> (BTreeMap<String, BTreeSet<String>>, u64) {
+    let mut role_models: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut none = tok.without_output;
+    for t in &tok.turns {
+        none += u64::from(t.models.is_empty());
+        role_models
+            .entry(t.role.clone())
+            .or_default()
+            .extend(t.models.keys().cloned());
+    }
+    (role_models, none)
+}
+
 fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
     let task = TaskId(r.task.clone());
     let rep = report::of(Path::new(&r.dir), &task, None)?;
@@ -421,13 +439,7 @@ fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
     let text =
         std::fs::read_to_string(&r.mod_output).map_err(|e| format!("{}: {e}", r.mod_output))?;
     let st = &d.state;
-    let mut role_models: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for t in &tok.turns {
-        role_models
-            .entry(t.role.clone())
-            .or_default()
-            .extend(t.models.keys().cloned());
-    }
+    let (role_models, no_model_turns) = model_evidence(&tok);
     Ok(RunFacts {
         closed: st.state == State::Closed,
         rubric_ok: r.rubric_ok,
@@ -439,6 +451,7 @@ fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
         reads_per_turn: st.budget.reads_per_turn,
         role_models,
         build_sha: build_sha_of(&text)?,
+        no_model_turns,
     })
 }
 
@@ -469,7 +482,9 @@ pub fn check_builds(pairs: &[Pair], head: &str) -> Result<(), String> {
 }
 
 /// Settings every run must share. `reads_per_turn` is what the manifest says
-/// for every run; each role uses exactly one model in a run, the same one in
+/// for every run; each role uses exactly one model in a run, observed (an arm
+/// with no model evidence, or a granted turn that observed none, cannot show
+/// that the arms matched, and its dollars would be zero), the same one in
 /// both arms of a pair, and an extra role of the N=2 arm uses a model the
 /// control arm also used. A run that breaks this is not comparable, so the
 /// evaluation refuses rather than reports.
@@ -480,6 +495,21 @@ pub fn check_settings(pairs: &[Pair], reads_per_turn: u64) -> Result<(), String>
                 return Err(format!(
                     "{}/{arm}: reads_per_turn is {}, the manifest says {reads_per_turn}",
                     p.id, r.reads_per_turn
+                ));
+            }
+            if r.role_models.is_empty() {
+                return Err(format!("{}/{arm}: no model evidence in the run", p.id));
+            }
+            if let Some(role) = r.role_models.iter().find(|(_, ms)| ms.is_empty()) {
+                return Err(format!(
+                    "{}/{arm}: no model observed for role {}",
+                    p.id, role.0
+                ));
+            }
+            if r.no_model_turns > 0 {
+                return Err(format!(
+                    "{}/{arm}: {} granted turn(s) with no model observation",
+                    p.id, r.no_model_turns
                 ));
             }
             if let Some((role, ms)) = r.role_models.iter().find(|(_, ms)| ms.len() > 1) {
@@ -1151,5 +1181,82 @@ mod tests {
         // A run that reported nothing is not a match for any head.
         let none = pair("p", Kind::Separable, built(A), built(""));
         assert!(check_builds(&[none], A).is_err());
+    }
+
+    // ---- model evidence
+
+    #[test]
+    fn an_arm_with_no_model_evidence_refuses() {
+        // Two arms with no roles at all: matching emptiness is not agreement.
+        let none = model_pair(&[], &[]);
+        let err = check_settings(&[none], 30).unwrap_err();
+        assert!(err.contains("no model"), "{err}");
+        // A role present with no model observed.
+        let empty = model_pair(&[("planner", &[])], &[("planner", &[])]);
+        let err = check_settings(&[empty], 30).unwrap_err();
+        assert!(err.contains("no model") && err.contains("planner"), "{err}");
+    }
+
+    #[test]
+    fn a_granted_turn_with_no_model_observation_refuses_even_if_others_have_one() {
+        let mut p = model_pair(&[("planner", &["m1"])], &[("planner", &["m1"])]);
+        assert_eq!(check_settings(&[p.clone()], 30), Ok(()));
+        p.treatment.no_model_turns = 1;
+        let err = check_settings(&[p], 30).unwrap_err();
+        assert!(
+            err.contains("p/treatment") && err.contains("no model"),
+            "{err}"
+        );
+    }
+
+    fn turn(role: &str, stream: &str) -> tokens::TurnTokens {
+        let (usage, complete) = tokens::parse(stream);
+        tokens::TurnTokens {
+            turn: 1,
+            role: role.to_owned(),
+            revoked: false,
+            complete,
+            usage,
+            usd: None,
+            models: tokens::by_model(stream),
+        }
+    }
+
+    fn task_tokens(turns: Vec<tokens::TurnTokens>, without_output: u64) -> tokens::TaskTokens {
+        tokens::TaskTokens {
+            turns,
+            sum: tokens::Usage::default(),
+            usd: None,
+            total: 0,
+            revoked: 0,
+            without_output,
+        }
+    }
+
+    const ASSISTANT: &str = r#"{"type":"assistant","message":{"id":"a","model":"m1","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+    const RESULT_ONLY: &str = r#"{"type":"result","usage":{"input_tokens":5,"output_tokens":5}}"#;
+
+    #[test]
+    fn a_result_only_usage_log_has_tokens_but_no_model() {
+        // The log `tokens::parse` accepts (it has usage) names no model.
+        let t = turn("planner", RESULT_ONLY);
+        assert_eq!(t.usage.total(), 10);
+        assert!(t.models.is_empty());
+        let (models, none) = model_evidence(&task_tokens(vec![t], 0));
+        assert_eq!(none, 1);
+        assert!(models["planner"].is_empty(), "{models:?}");
+    }
+
+    #[test]
+    fn model_evidence_counts_turns_that_observed_no_model_or_left_no_output() {
+        let seen = turn("planner", &format!("{ASSISTANT}\n{RESULT_ONLY}"));
+        let blind = turn("coder", RESULT_ONLY);
+        let (models, none) = model_evidence(&task_tokens(vec![seen, blind], 1));
+        assert_eq!(none, 2, "one result-only turn and one with no output");
+        assert_eq!(
+            models["planner"].iter().collect::<Vec<_>>(),
+            [&"m1".to_owned()]
+        );
+        assert!(models["coder"].is_empty());
     }
 }
