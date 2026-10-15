@@ -68,6 +68,11 @@ impl Launchers {
         self.by_role.get(&role.0)
     }
 
+    /// Every role with its launcher.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Launcher)> {
+        self.by_role.iter().map(|(r, l)| (r.as_str(), l))
+    }
+
     /// The role ids that have a launcher.
     pub fn roles(&self) -> impl Iterator<Item = &str> {
         self.by_role.keys().map(String::as_str)
@@ -296,6 +301,12 @@ fn kill_tree(child: &mut Child) -> Result<(), String> {
 
 /// Run the loop until the task is closed or cancelled, or `max_wall` passes.
 pub fn run(cfg: &Config) -> Result<Outcome, String> {
+    // An evidence run (one with a cost cap and its prices) starts only if every
+    // role pins a priced model.
+    if let Some(cap) = &cfg.cost_cap {
+        crate::pins::check_run(&cfg.launchers, &cap.criteria)
+            .map_err(|e| format!("moderator: refusing to start: {e}"))?;
+    }
     let _lock = lock(&cfg.dir, &cfg.task)?;
     let mut d = open_driver(&cfg.dir, &cfg.task)?;
     let started = Instant::now();
