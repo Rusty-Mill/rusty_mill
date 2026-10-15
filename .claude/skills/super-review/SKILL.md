@@ -286,7 +286,7 @@ will not stack duplicates.
 When invoked by super-board (env `SUPER_BOARD_RUN=1` or invocation contains "super-board run"):
 
 ### State protocol
-- Read from issue + PR comments + PR review threads.
+- Read from issue + PR comments + PR review threads. `reviewThreads` is a GraphQL field, not a `gh pr view --json` field: that call fails and halts the run. Read PR comments with `gh pr view <PR> --json comments`, and inline review comments with `gh api repos/<owner>/<repo>/pulls/<PR>/comments`.
 - **GitHub budget** — every "move card" is `.claude/bin/super-board-card.sh --config <cfg> move <N> <Status>` (1 GraphQL point; `gh project item-list` / `field-list` cost ~100–200). Comments, labels and PR reads go over REST; [rate-limit-etiquette.md](../super-board/references/rate-limit-etiquette.md) → "Price list" has the calls.
 - Respect handed-down worktree at `.claude/worktrees/issue-<N>-review/` and branch `issue-<N>-<slug>`.
 
