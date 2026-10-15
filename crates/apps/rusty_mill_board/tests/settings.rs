@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rusty_mcp_server::{HttpConfig, HttpHandler};
@@ -128,7 +128,7 @@ impl Fixture {
 }
 
 #[cfg(unix)]
-fn mode(path: &Path) -> u32 {
+fn mode(path: &std::path::Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).expect("file").permissions().mode() & 0o777
 }
