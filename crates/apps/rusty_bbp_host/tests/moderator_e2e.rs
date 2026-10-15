@@ -920,6 +920,30 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
 
 // ---- live cost cap
 
+/// A cap of `usd` over one priced model, `priced-model`, at $20 per million
+/// output tokens.
+fn cost_cap(usd: f64) -> moderator::CostCap {
+    moderator::CostCap {
+        usd,
+        criteria: rusty_bbp_host::tokens::Criteria {
+            prices_as_of: "test".into(),
+            models: [(
+                "priced-model".to_owned(),
+                rusty_bbp_host::tokens::Prices {
+                    input: 1.0,
+                    output: 20.0,
+                    cache_creation_5m: 1.0,
+                    cache_creation_1h: 1.0,
+                    cache_read: 1.0,
+                },
+            )]
+            .into(),
+            min_commit: None,
+        },
+        criteria_sha256: "test".into(),
+    }
+}
+
 /// A planner whose harness prints one assistant message (priced by the model it
 /// names) and then idles, under a cost cap.
 fn capped_run(
@@ -961,25 +985,7 @@ fn capped_run(
     }
     let launchers = Launchers::default().with("planner", planner);
     let mut cfg = config(&dir, &task, repo, launchers, wall);
-    cfg.cost_cap = Some(moderator::CostCap {
-        usd: cap_usd,
-        criteria: rusty_bbp_host::tokens::Criteria {
-            prices_as_of: "test".into(),
-            models: [(
-                "priced-model".to_owned(),
-                rusty_bbp_host::tokens::Prices {
-                    input: 1.0,
-                    output: 20.0, // 1M output tokens is $20
-                    cache_creation_5m: 1.0,
-                    cache_creation_1h: 1.0,
-                    cache_read: 1.0,
-                },
-            )]
-            .into(),
-            min_commit: None,
-        },
-        criteria_sha256: "test".into(),
-    });
+    cfg.cost_cap = Some(cost_cap(cap_usd));
     let out = moderator::run(&cfg);
     let _ = std::fs::remove_dir_all(&dir);
     out
@@ -1016,6 +1022,59 @@ fn a_model_with_no_price_stops_the_run_because_the_cap_cannot_be_enforced() {
         err.contains("cannot enforce the cost cap") && err.contains("unpriced-model"),
         "{err}"
     );
+}
+
+/// A task cancelled before the moderator's first poll, whose planner's granted
+/// turn had printed one assistant message of 1M output tokens ($20 at the
+/// priced model) before the cancel: the state the moderator first sees is
+/// terminal, so no poll of the cap precedes it.
+fn cancelled_with_final_output(
+    tag: &str,
+    model_in_output: &str,
+    cap_usd: f64,
+) -> Result<moderator::Outcome, String> {
+    let dir = tempdir(tag);
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    admin::tick(&dir, &task).expect("tick");
+    let line = format!(
+        r#"{{"type":"assistant","message":{{"id":"m1","model":"{model_in_output}","usage":{{"input_tokens":0,"output_tokens":1000000}}}}}}"#
+    );
+    let log = moderator::log_path(&dir, &task, TurnId(1));
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, format!("{line}\n")).unwrap();
+    let c = card(&dir, &task);
+    let r = human::perform(&dir, &task, "cancel", &["stop"], Some(c.rev)).expect("cancel");
+    assert_eq!(r, Response::Ok, "{r:?}");
+    let mut cfg = config(&dir, &task, repo, Launchers::default(), 30);
+    cfg.cost_cap = Some(cost_cap(cap_usd));
+    let out = moderator::run(&cfg);
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn final_output_over_the_cap_on_a_terminal_state_is_not_a_success() {
+    let err = cancelled_with_final_output("cap-term-over", "priced-model", 1.0).unwrap_err();
+    assert!(err.contains("cost cap reached"), "{err}");
+}
+
+#[test]
+fn final_output_of_an_unpriced_model_on_a_terminal_state_is_not_a_success() {
+    let err =
+        cancelled_with_final_output("cap-term-unpriced", "unpriced-model", 1000.0).unwrap_err();
+    assert!(
+        err.contains("cannot enforce the cost cap") && err.contains("unpriced-model"),
+        "{err}"
+    );
+}
+
+#[test]
+fn final_output_under_the_cap_on_a_terminal_state_still_succeeds() {
+    let out = cancelled_with_final_output("cap-term-under", "priced-model", 1000.0)
+        .expect("under the cap");
+    assert_eq!(out.state, State::Cancelled);
 }
 
 #[test]

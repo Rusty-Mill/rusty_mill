@@ -363,6 +363,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         }
         if matches!(state, State::Closed | State::Cancelled) {
             sup.kill_harnesses()?;
+            check_terminal(cfg, &d)?;
             let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
             let replay = TaskState::fold_with(cfg.task.clone(), d.state.master, &events);
             return Ok(Outcome {
@@ -465,6 +466,17 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     }
 }
 
+/// The end of a run is not exempt from the cap: output that arrived since the
+/// last poll, or from a model with no price, must not close as a success.
+/// Called once the harnesses are stopped, with the final usage on disk; a
+/// no-op for a task that is not in a terminal state, whose cap is polled.
+pub fn check_terminal<S: Store>(cfg: &Config, d: &Driver<S>) -> Result<(), String> {
+    match (&cfg.cost_cap, d.state.state) {
+        (Some(cap), State::Closed | State::Cancelled) => enforce_cap(cfg, d, cap),
+        _ => Ok(()),
+    }
+}
+
 /// Fail closed: over the cap, or a model that cannot be priced (so the cap
 /// cannot be enforced), stops the run.
 fn enforce_cap<S: Store>(cfg: &Config, d: &Driver<S>, cap: &CostCap) -> Result<(), String> {
@@ -498,11 +510,7 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
                 .into(),
         ),
         (Some(cap), None) => {
-            if let Some(parent) = file.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(&file, marker_text(cap.usd, &cap.criteria_sha256))
-                .map_err(|e| format!("{}: {e}", file.display()))
+            write_evidence_marker(&cfg.dir, &cfg.task, cap.usd, &cap.criteria_sha256)
         }
         (Some(cap), Some(text)) if text == marker_text(cap.usd, &cap.criteria_sha256) => Ok(()),
         (Some(_), Some(_)) => Err(
@@ -511,6 +519,21 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
                 .into(),
         ),
     }
+}
+
+/// Record that the task is an evidence run under this cap and price file.
+pub fn write_evidence_marker(
+    dir: &Path,
+    task: &TaskId,
+    usd: f64,
+    criteria_sha256: &str,
+) -> Result<(), String> {
+    let file = task_dir(dir, "evidence", task).with_extension("json");
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&file, marker_text(usd, criteria_sha256))
+        .map_err(|e| format!("{}: {e}", file.display()))
 }
 
 fn marker_text(usd: f64, criteria_sha256: &str) -> String {
