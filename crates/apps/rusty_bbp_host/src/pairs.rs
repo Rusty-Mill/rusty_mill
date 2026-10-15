@@ -43,8 +43,9 @@ pub struct RunFacts {
     pub rubric_ok: bool,
     /// The first `planning` visit, from `bbp mod`'s `state_ms`.
     pub spec_wall_ms: Option<u64>,
-    /// Harness tokens, all turns; `None` when any turn left no output.
-    pub tokens: Option<u64>,
+    /// Dollars, all turns (revoked included), priced per model by the
+    /// criteria file; `None` when any turn left no output.
+    pub tokens: Option<f64>,
     /// `spent.messages` or `spent.bytes` above its total.
     pub overshoot: bool,
     pub unused_conflicts: u64,
@@ -121,6 +122,11 @@ pub struct Evaluation {
     pub cost_ratios: Vec<f64>,
     /// The decision table row that applies (first match).
     pub decision: &'static str,
+    /// The sha256 of the criteria file the tokens were priced by; set by `load`.
+    pub criteria_sha256: Option<String>,
+    /// The commit the run was built from; set by `load`, which refuses a dirty
+    /// tree or a commit that does not contain `min_commit`.
+    pub git_sha: Option<String>,
 }
 
 fn median(mut v: Vec<f64>) -> Option<f64> {
@@ -236,7 +242,7 @@ fn c7(pairs: &[&Pair]) -> (Verdict, Vec<f64>) {
     let ratios: Vec<f64> = ok
         .iter()
         .filter_map(|p| match (p.control.tokens, p.treatment.tokens) {
-            (Some(c), Some(t)) if c > 0 => Some(t as f64 / c as f64),
+            (Some(c), Some(t)) if c > 0.0 => Some(t / c),
             _ => None,
         })
         .collect();
@@ -311,6 +317,8 @@ pub fn evaluate(pairs: &[Pair], poll_ms: u64) -> Evaluation {
         c7_cost: c7v,
         cost_ratios,
         decision: "",
+        criteria_sha256: None,
+        git_sha: None,
     };
     e.decision = decide(&e);
     e
@@ -345,6 +353,10 @@ pub struct PairRef {
 pub struct Manifest {
     /// The `--poll-ms` the runs used.
     pub poll_ms: u64,
+    /// The committed criteria file whose prices cost the tokens.
+    pub criteria: String,
+    /// The git checkout the run's binaries were built from.
+    pub repo: String,
     pub pairs: Vec<PairRef>,
 }
 
@@ -362,12 +374,12 @@ pub fn spec_wall_ms(mod_output: &str) -> Result<Option<u64>, String> {
         .map(|(_, ms)| ms))
 }
 
-fn facts(r: &RunRef) -> Result<RunFacts, String> {
+fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
     let task = TaskId(r.task.clone());
     let rep = report::of(Path::new(&r.dir), &task, None)?;
     let d = crate::open_driver(Path::new(&r.dir), &task)?;
     let events = d.store.events(&task, 0).map_err(|e| format!("{e:?}"))?;
-    let tok = tokens::of(Path::new(&r.dir), &task, &events);
+    let tok = tokens::of(Path::new(&r.dir), &task, &events, Some(c))?;
     let text =
         std::fs::read_to_string(&r.mod_output).map_err(|e| format!("{}: {e}", r.mod_output))?;
     let st = &d.state;
@@ -375,11 +387,45 @@ fn facts(r: &RunRef) -> Result<RunFacts, String> {
         closed: st.state == State::Closed,
         rubric_ok: r.rubric_ok,
         spec_wall_ms: spec_wall_ms(&text)?,
-        tokens: (tok.without_output == 0).then_some(tok.total),
+        tokens: (tok.without_output == 0).then_some(tok.usd).flatten(),
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
     })
+}
+
+fn git(repo: &Path, args: &[&str]) -> Result<(bool, String), String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+    ))
+}
+
+/// The commit a run is pinned to: HEAD of `repo`, which must be clean and must
+/// contain `min_commit` (the merge of the verdict-binding fix). A criteria file
+/// with no `min_commit` refuses: the pin is part of the criteria.
+pub fn pin(repo: &Path, min_commit: Option<&str>) -> Result<String, String> {
+    let min =
+        min_commit.ok_or("the criteria file does not pin min_commit (the verdict-binding fix)")?;
+    let (ok, head) = git(repo, &["rev-parse", "HEAD"])?;
+    if !ok {
+        return Err(format!("{}: not a git checkout", repo.display()));
+    }
+    let (_, dirty) = git(repo, &["status", "--porcelain"])?;
+    if !dirty.is_empty() {
+        return Err(format!("{}: the working tree is not clean", repo.display()));
+    }
+    let (contains, _) = git(repo, &["merge-base", "--is-ancestor", min, "HEAD"])?;
+    if !contains {
+        return Err(format!("HEAD {head} does not contain min_commit {min}"));
+    }
+    Ok(head)
 }
 
 /// Read `manifest` and evaluate every pair in it.
@@ -388,6 +434,7 @@ pub fn load(manifest: &Path) -> Result<Evaluation, String> {
         std::fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
     let m: Manifest =
         rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let (c, sha) = tokens::read_criteria(Path::new(&m.criteria))?;
     let pairs = m
         .pairs
         .iter()
@@ -395,13 +442,17 @@ pub fn load(manifest: &Path) -> Result<Evaluation, String> {
             Ok(Pair {
                 id: p.id.clone(),
                 kind: p.kind,
-                control: facts(&p.control)?,
-                treatment: facts(&p.treatment)?,
+                control: facts(&p.control, &c)?,
+                treatment: facts(&p.treatment, &c)?,
                 lost_rubric_items: p.lost_rubric_items,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(evaluate(&pairs, m.poll_ms))
+    let sha_run = pin(Path::new(&m.repo), c.min_commit.as_deref())?;
+    let mut e = evaluate(&pairs, m.poll_ms);
+    e.criteria_sha256 = Some(sha);
+    e.git_sha = Some(sha_run);
+    Ok(e)
 }
 
 /// [`load`] as one line of JSON.
@@ -420,7 +471,7 @@ mod tests {
             closed: true,
             rubric_ok: true,
             spec_wall_ms: Some(wall),
-            tokens: Some(tokens),
+            tokens: Some(tokens as f64),
             ..RunFacts::default()
         }
     }
@@ -563,7 +614,7 @@ mod tests {
     fn three_holding_and_seven_failing_is_its_own_row_whatever_four_and_five_show() {
         let mut p = all([0.5; 5], 0, 0); // 4 and 5 would fail
         for x in p.iter_mut().filter(|x| x.kind != Kind::Null) {
-            x.treatment.tokens = Some(200); // 2.0 times the control
+            x.treatment.tokens = Some(200.0); // 2.0 times the control
         }
         let e = evaluate(&p, 500);
         assert_eq!(e.c3_parallelism, Verdict::Holds);
@@ -575,7 +626,7 @@ mod tests {
     fn cost_at_the_bound_holds_and_unknown_tokens_are_not_a_pass() {
         let mut p = all([0.5; 5], 1, 1);
         for x in p.iter_mut().filter(|x| x.kind != Kind::Null) {
-            x.treatment.tokens = Some(160); // exactly 1.6
+            x.treatment.tokens = Some(160.0); // exactly 1.6
         }
         assert_eq!(evaluate(&p, 500).c7_cost, Verdict::Holds);
         let i = p.iter().position(|x| x.kind == Kind::Shared).unwrap();
@@ -664,5 +715,48 @@ mod tests {
         assert_eq!(spec_wall_ms(out), Ok(Some(4100)));
         assert_eq!(spec_wall_ms(r#"{"state_ms":[["Build",1]]}"#), Ok(None));
         assert!(spec_wall_ms("not json").is_err());
+    }
+
+    /// A scratch git repo with two commits; returns (dir, first sha, second sha).
+    fn repo() -> (std::path::PathBuf, String, String) {
+        let d = std::env::temp_dir().join(format!("pin-{}-{:p}", std::process::id(), &0u8));
+        std::fs::create_dir_all(&d).unwrap();
+        let g = |a: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&d)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(a)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{a:?}");
+            String::from_utf8_lossy(&o.stdout).trim().to_owned()
+        };
+        g(&["init", "-q"]);
+        std::fs::write(d.join("a"), "1").unwrap();
+        g(&["add", "a"]);
+        g(&["commit", "-q", "-m", "one"]);
+        let first = g(&["rev-parse", "HEAD"]);
+        std::fs::write(d.join("a"), "2").unwrap();
+        g(&["commit", "-q", "-am", "two"]);
+        let second = g(&["rev-parse", "HEAD"]);
+        (d, first, second)
+    }
+
+    #[test]
+    fn a_run_is_pinned_to_a_clean_head_that_contains_the_minimum_commit() {
+        let (d, first, second) = repo();
+        assert_eq!(pin(&d, Some(&first)).unwrap(), second);
+        assert_eq!(pin(&d, Some(&second)).unwrap(), second);
+        // A commit HEAD does not contain (here: a made-up sha) refuses.
+        assert!(pin(&d, Some(&"0".repeat(40))).is_err());
+        // No pin in the criteria refuses.
+        assert!(pin(&d, None).unwrap_err().contains("min_commit"));
+        // A dirty tree refuses.
+        std::fs::write(d.join("a"), "dirty").unwrap();
+        assert!(pin(&d, Some(&first)).unwrap_err().contains("not clean"));
+        // Not a repo refuses.
+        assert!(pin(&std::env::temp_dir().join("no-such-repo-dir"), Some(&first)).is_err());
+        std::fs::remove_dir_all(d).unwrap();
     }
 }

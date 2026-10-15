@@ -12,7 +12,7 @@
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | join --key K --scores S --rubrics D   blind rubric grading
-//! bbp tokens  --dir D --task T                             model tokens per turn, from the harness output, as JSON
+//! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N]
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
@@ -134,7 +134,15 @@ fn run() -> Result<String, String> {
             ));
         }
         "metrics" => return report::json(&dir, &task, a.flags.get("owner").map(String::as_str)),
-        "tokens" => return tokens::json(&dir, &task),
+        "tokens" => {
+            let path = |k: &str| a.flags.get(k).map(PathBuf::from);
+            return tokens::json(
+                &dir,
+                &task,
+                path("criteria").as_deref(),
+                path("api-usage").as_deref(),
+            );
+        }
         "shadow" => return shadow::json(&dir, &task),
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
