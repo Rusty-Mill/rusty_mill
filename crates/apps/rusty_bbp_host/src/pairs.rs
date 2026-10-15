@@ -43,8 +43,9 @@ pub struct RunFacts {
     pub rubric_ok: bool,
     /// The first `planning` visit, from `bbp mod`'s `state_ms`.
     pub spec_wall_ms: Option<u64>,
-    /// Harness tokens, all turns; `None` when any turn left no output.
-    pub tokens: Option<u64>,
+    /// Cost-weighted tokens, all turns (revoked included); `None` when any
+    /// turn left no output.
+    pub tokens: Option<f64>,
     /// `spent.messages` or `spent.bytes` above its total.
     pub overshoot: bool,
     pub unused_conflicts: u64,
@@ -121,6 +122,8 @@ pub struct Evaluation {
     pub cost_ratios: Vec<f64>,
     /// The decision table row that applies (first match).
     pub decision: &'static str,
+    /// The sha256 of the criteria file the tokens were weighted by; set by `load`.
+    pub criteria_sha256: Option<String>,
 }
 
 fn median(mut v: Vec<f64>) -> Option<f64> {
@@ -236,7 +239,7 @@ fn c7(pairs: &[&Pair]) -> (Verdict, Vec<f64>) {
     let ratios: Vec<f64> = ok
         .iter()
         .filter_map(|p| match (p.control.tokens, p.treatment.tokens) {
-            (Some(c), Some(t)) if c > 0 => Some(t as f64 / c as f64),
+            (Some(c), Some(t)) if c > 0.0 => Some(t / c),
             _ => None,
         })
         .collect();
@@ -311,6 +314,7 @@ pub fn evaluate(pairs: &[Pair], poll_ms: u64) -> Evaluation {
         c7_cost: c7v,
         cost_ratios,
         decision: "",
+        criteria_sha256: None,
     };
     e.decision = decide(&e);
     e
@@ -345,6 +349,8 @@ pub struct PairRef {
 pub struct Manifest {
     /// The `--poll-ms` the runs used.
     pub poll_ms: u64,
+    /// The committed criteria file whose weights price the tokens.
+    pub criteria: String,
     pub pairs: Vec<PairRef>,
 }
 
@@ -362,7 +368,7 @@ pub fn spec_wall_ms(mod_output: &str) -> Result<Option<u64>, String> {
         .map(|(_, ms)| ms))
 }
 
-fn facts(r: &RunRef) -> Result<RunFacts, String> {
+fn facts(r: &RunRef, w: &tokens::Weights) -> Result<RunFacts, String> {
     let task = TaskId(r.task.clone());
     let rep = report::of(Path::new(&r.dir), &task, None)?;
     let d = crate::open_driver(Path::new(&r.dir), &task)?;
@@ -375,7 +381,8 @@ fn facts(r: &RunRef) -> Result<RunFacts, String> {
         closed: st.state == State::Closed,
         rubric_ok: r.rubric_ok,
         spec_wall_ms: spec_wall_ms(&text)?,
-        tokens: (tok.without_output == 0).then_some(tok.total),
+        tokens: (tok.without_output == 0)
+            .then(|| tok.turns.iter().map(|t| t.usage.weighted(w)).sum()),
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
@@ -388,6 +395,7 @@ pub fn load(manifest: &Path) -> Result<Evaluation, String> {
         std::fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
     let m: Manifest =
         rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let (c, sha) = tokens::read_criteria(Path::new(&m.criteria))?;
     let pairs = m
         .pairs
         .iter()
@@ -395,13 +403,15 @@ pub fn load(manifest: &Path) -> Result<Evaluation, String> {
             Ok(Pair {
                 id: p.id.clone(),
                 kind: p.kind,
-                control: facts(&p.control)?,
-                treatment: facts(&p.treatment)?,
+                control: facts(&p.control, &c.weights)?,
+                treatment: facts(&p.treatment, &c.weights)?,
                 lost_rubric_items: p.lost_rubric_items,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(evaluate(&pairs, m.poll_ms))
+    let mut e = evaluate(&pairs, m.poll_ms);
+    e.criteria_sha256 = Some(sha);
+    Ok(e)
 }
 
 /// [`load`] as one line of JSON.
@@ -420,7 +430,7 @@ mod tests {
             closed: true,
             rubric_ok: true,
             spec_wall_ms: Some(wall),
-            tokens: Some(tokens),
+            tokens: Some(tokens as f64),
             ..RunFacts::default()
         }
     }
@@ -563,7 +573,7 @@ mod tests {
     fn three_holding_and_seven_failing_is_its_own_row_whatever_four_and_five_show() {
         let mut p = all([0.5; 5], 0, 0); // 4 and 5 would fail
         for x in p.iter_mut().filter(|x| x.kind != Kind::Null) {
-            x.treatment.tokens = Some(200); // 2.0 times the control
+            x.treatment.tokens = Some(200.0); // 2.0 times the control
         }
         let e = evaluate(&p, 500);
         assert_eq!(e.c3_parallelism, Verdict::Holds);
@@ -575,7 +585,7 @@ mod tests {
     fn cost_at_the_bound_holds_and_unknown_tokens_are_not_a_pass() {
         let mut p = all([0.5; 5], 1, 1);
         for x in p.iter_mut().filter(|x| x.kind != Kind::Null) {
-            x.treatment.tokens = Some(160); // exactly 1.6
+            x.treatment.tokens = Some(160.0); // exactly 1.6
         }
         assert_eq!(evaluate(&p, 500).c7_cost, Verdict::Holds);
         let i = p.iter().position(|x| x.kind == Kind::Shared).unwrap();

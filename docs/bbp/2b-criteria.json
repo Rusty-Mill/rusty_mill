@@ -1,0 +1,10 @@
+{
+  "status": "proposal, not approved: delete this key when the owner approves",
+  "model": "claude-opus-5-5",
+  "weights": {
+    "input": 1,
+    "output": 5,
+    "cache_creation": 1.25,
+    "cache_read": 0.05
+  }
+}

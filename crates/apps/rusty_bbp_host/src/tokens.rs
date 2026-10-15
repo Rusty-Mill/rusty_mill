@@ -45,6 +45,105 @@ impl Usage {
     }
 }
 
+/// Cost weights in input-token equivalents. Per model, so the criteria file
+/// names the model the harness runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+pub struct Weights {
+    pub input: f64,
+    pub output: f64,
+    pub cache_creation: f64,
+    pub cache_read: f64,
+}
+
+impl Weights {
+    /// Every weight finite and positive: a zero or negative weight would
+    /// make a count free or negative.
+    fn check(&self) -> Result<(), String> {
+        let all = [
+            self.input,
+            self.output,
+            self.cache_creation,
+            self.cache_read,
+        ];
+        if all.iter().all(|w| w.is_finite() && *w > 0.0) {
+            Ok(())
+        } else {
+            Err("weights must be finite and positive".into())
+        }
+    }
+}
+
+impl Usage {
+    /// Cost in input-token equivalents.
+    pub fn weighted(&self, w: &Weights) -> f64 {
+        self.input_tokens as f64 * w.input
+            + self.output_tokens as f64 * w.output
+            + self.cache_creation_input_tokens as f64 * w.cache_creation
+            + self.cache_read_input_tokens as f64 * w.cache_read
+    }
+}
+
+/// The machine-readable part of the 2b criteria, committed and frozen with
+/// them (`docs/bbp/2b-criteria.json`). Unknown keys are ignored.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Criteria {
+    pub model: String,
+    pub weights: Weights,
+}
+
+/// Read the criteria file and its sha256, which the run output records.
+pub fn read_criteria(file: &Path) -> Result<(Criteria, String), String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let c: Criteria =
+        rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    c.weights
+        .check()
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok((c, Sha256::of(&bytes).hex()))
+}
+
+/// Compare the harness's tokens with the API key's usage, part by part. A part
+/// off by more than `tolerance` (a fraction of the API's figure), or a turn
+/// with no harness output, is a mismatch.
+pub fn reconcile(
+    seen: &Usage,
+    api: &Usage,
+    without_output: u64,
+    tolerance: f64,
+) -> Result<(), String> {
+    if without_output > 0 {
+        return Err(format!("{without_output} turn(s) left no harness output"));
+    }
+    let parts = [
+        ("input", seen.input_tokens, api.input_tokens),
+        ("output", seen.output_tokens, api.output_tokens),
+        (
+            "cache_creation",
+            seen.cache_creation_input_tokens,
+            api.cache_creation_input_tokens,
+        ),
+        (
+            "cache_read",
+            seen.cache_read_input_tokens,
+            api.cache_read_input_tokens,
+        ),
+    ];
+    let bad: Vec<String> = parts
+        .iter()
+        .filter(|(_, s, a)| (*s as f64 - *a as f64).abs() > tolerance * *a as f64)
+        .map(|(n, s, a)| format!("{n}: bbp {s}, api {a}"))
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "token capture does not match the API usage: {}",
+            bad.join("; ")
+        ))
+    }
+}
+
 #[derive(Deserialize)]
 struct Message {
     #[rusty_serde(default)]
@@ -99,9 +198,13 @@ pub struct TurnTokens {
     pub usage: Usage,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TaskTokens {
     pub turns: Vec<TurnTokens>,
+    /// The four counts summed over every turn.
+    pub sum: Usage,
+    /// Cost-weighted total, when a criteria file gave weights.
+    pub weighted: Option<f64>,
     /// Every turn, revoked ones included.
     pub total: u64,
     pub revoked: u64,
@@ -124,6 +227,8 @@ pub fn of(dir: &Path, task: &TaskId, events: &[Event]) -> TaskTokens {
         .collect();
     let mut out = TaskTokens {
         turns: Vec::new(),
+        sum: Usage::default(),
+        weighted: None,
         total: 0,
         revoked: 0,
         without_output: 0,
@@ -139,6 +244,7 @@ pub fn of(dir: &Path, task: &TaskId, events: &[Event]) -> TaskTokens {
         let (usage, complete) = parse(&text);
         let revoked = revoked.contains(turn);
         out.total += usage.total();
+        out.sum = out.sum.plus(usage);
         if revoked {
             out.revoked += usage.total();
         }
@@ -153,11 +259,46 @@ pub fn of(dir: &Path, task: &TaskId, events: &[Event]) -> TaskTokens {
     out
 }
 
-/// [`of`] as one line of JSON.
-pub fn json(dir: &Path, task: &TaskId) -> Result<String, String> {
+/// What `bbp tokens` prints: the tokens, and the criteria file they were
+/// weighted by.
+#[derive(Serialize)]
+struct Printed {
+    tokens: TaskTokens,
+    criteria_sha256: Option<String>,
+}
+
+/// The tolerance of the pilot reconciliation (a fraction of the API's figure).
+pub const RECONCILE_TOLERANCE: f64 = 0.02;
+
+/// [`of`] as one line of JSON, weighted by `criteria` when given. With
+/// `api_usage` (a file of the four counts from the key's usage report) it also
+/// reconciles, and a mismatch is an error: the run stops.
+pub fn json(
+    dir: &Path,
+    task: &TaskId,
+    criteria: Option<&Path>,
+    api_usage: Option<&Path>,
+) -> Result<String, String> {
     let d = crate::open_driver(dir, task)?;
     let events = d.store.events(task, 0).map_err(|e| format!("{e:?}"))?;
-    rusty_serde::json::to_string(&of(dir, task, &events)).map_err(|e| e.to_string())
+    let mut t = of(dir, task, &events);
+    let mut sha = None;
+    if let Some(f) = criteria {
+        let (c, h) = read_criteria(f)?;
+        t.weighted = Some(t.turns.iter().map(|x| x.usage.weighted(&c.weights)).sum());
+        sha = Some(h);
+    }
+    if let Some(f) = api_usage {
+        let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
+        let api: Usage =
+            rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", f.display()))?;
+        reconcile(&t.sum, &api, t.without_output, RECONCILE_TOLERANCE)?;
+    }
+    rusty_serde::json::to_string(&Printed {
+        tokens: t,
+        criteria_sha256: sha,
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -242,5 +383,91 @@ mod tests {
             [("planner", false, true), ("coder2", true, false)]
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    const W: Weights = Weights {
+        input: 1.0,
+        output: 5.0,
+        cache_creation: 1.25,
+        cache_read: 0.05,
+    };
+
+    #[test]
+    fn weighted_cost_is_the_sum_of_weighted_parts() {
+        let u = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: 100,
+            cache_read_input_tokens: 1000,
+        };
+        // 10 + 25 + 125 + 50
+        assert_eq!(u.weighted(&W), 210.0);
+        assert_eq!(u.total(), 1115, "the plain sum is unchanged");
+    }
+
+    #[test]
+    fn a_non_positive_or_non_finite_weight_is_refused() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let w = Weights { output: bad, ..W };
+            assert!(w.check().is_err(), "{bad}");
+        }
+        assert!(W.check().is_ok());
+    }
+
+    #[test]
+    fn the_criteria_file_is_read_with_its_hash_and_unknown_keys_ignored() {
+        let f = std::env::temp_dir().join(format!("crit-{}.json", std::process::id()));
+        let body = r#"{"status":"proposal","model":"claude-opus-5-5","weights":{"input":1,"output":5,"cache_creation":1.25,"cache_read":0.05}}"#;
+        std::fs::write(&f, body).unwrap();
+        let (c, h) = read_criteria(&f).unwrap();
+        assert_eq!((c.model.as_str(), c.weights), ("claude-opus-5-5", W));
+        assert_eq!(h, Sha256::of(body.as_bytes()).hex());
+        std::fs::write(&f, body.replace("1.25", "0")).unwrap();
+        assert!(read_criteria(&f).is_err());
+        std::fs::remove_file(f).unwrap();
+    }
+
+    fn usage(i: u64, o: u64, w: u64, r: u64) -> Usage {
+        Usage {
+            input_tokens: i,
+            output_tokens: o,
+            cache_creation_input_tokens: w,
+            cache_read_input_tokens: r,
+        }
+    }
+
+    #[test]
+    fn reconciliation_allows_two_percent_per_part_and_stops_beyond() {
+        let api = usage(1000, 500, 200, 10_000);
+        assert!(reconcile(&usage(1000, 500, 200, 10_000), &api, 0, 0.02).is_ok());
+        assert!(
+            reconcile(&usage(980, 510, 204, 9_800), &api, 0, 0.02).is_ok(),
+            "on the edge"
+        );
+        let err = reconcile(&usage(1000, 500, 200, 9_700), &api, 0, 0.02).unwrap_err();
+        assert!(err.contains("cache_read: bbp 9700, api 10000"), "{err}");
+    }
+
+    #[test]
+    fn a_turn_with_no_output_stops_the_reconciliation_even_if_the_rest_matches() {
+        let u = usage(1, 1, 1, 1);
+        assert!(reconcile(&u, &u, 1, 0.02)
+            .unwrap_err()
+            .contains("no harness output"));
+    }
+
+    #[test]
+    fn a_part_the_api_never_reports_must_be_zero_in_the_capture() {
+        let api = usage(10, 10, 0, 0);
+        assert!(reconcile(&usage(10, 10, 0, 0), &api, 0, 0.02).is_ok());
+        assert!(reconcile(&usage(10, 10, 1, 0), &api, 0, 0.02).is_err());
+    }
+
+    #[test]
+    fn the_committed_criteria_file_parses() {
+        let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/bbp/2b-criteria.json");
+        let (c, h) = read_criteria(&f).unwrap();
+        assert_eq!(c.weights.input, 1.0);
+        assert_eq!(h.len(), 64);
     }
 }
