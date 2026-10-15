@@ -421,6 +421,101 @@ fn a_verdict_is_refused_until_the_judge_has_read_what_was_appended() {
     assert_eq!(fx.st().state, State::Review);
 }
 
+/// The read base of a judge is the entry into the stage. A judge that reads
+/// nothing is refused if another principal appended anything readable in this
+/// stage before its turn was granted (here: its first turn was aborted after the
+/// other tester's finding, so the replacement turn starts after the append).
+#[test]
+fn a_judge_that_reads_nothing_is_bound_to_everything_since_the_stage_began() {
+    let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    let finding = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", finding));
+    let first = fx.st().turn_of(&RoleId("tester".into())).expect("turn").id;
+    fx.run(&Command::AbortTurn { turn: Some(first) });
+    let second = fx
+        .st()
+        .turn_of(&RoleId("tester".into()))
+        .expect("replacement")
+        .id;
+    assert_ne!(
+        first, second,
+        "the replacement is granted after the finding"
+    );
+    assert_eq!(
+        rejected(fx.verdict("tester", VerdictKind::Approve)),
+        Code::StaleSubject,
+        "it read nothing and the finding predates its grant"
+    );
+    let read = AgentAction::Read {
+        after: None,
+        limit: 50,
+    };
+    assert!(matches!(fx.agent("tester", read), Response::Read { .. }));
+    posted(fx.verdict("tester", VerdictKind::Approve));
+}
+
+/// The terminal path: a judge that keeps retrying a refused verdict without
+/// reading reaches its deadline; the expiry regrants through `grant`, the
+/// replacement is refused the same way, and each replacement counts against
+/// the turns budget until the task escalates. No refusal mints a turn; only
+/// the deadline regrants do.
+#[test]
+fn refused_verdict_retries_end_in_expiry_regrant_and_escalation() {
+    let b = Budget {
+        turns: 6,
+        ..default_budget()
+    };
+    let mut fx = Fx::concurrent(two_testers(), 2, b);
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    let finding = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", finding));
+    let mut expiries = 0;
+    for _ in 0..40 {
+        if fx.st().state == State::Escalated {
+            break;
+        }
+        // Retry hard: refusals mint nothing.
+        let minted = fx.st().spent.turns;
+        for _ in 0..5 {
+            drop(fx.verdict("tester", VerdictKind::Approve));
+        }
+        assert_eq!(fx.st().spent.turns, minted, "refusals mint no turn");
+        assert_ne!(fx.st().state, State::Review, "no verdict was accepted");
+        // Then the deadline passes: the expiry regrants through `grant`.
+        let latest = fx
+            .st()
+            .turns
+            .iter()
+            .map(|t| t.deadline)
+            .max()
+            .expect("live");
+        fx.now = latest;
+        fx.tick();
+        expiries += 1;
+    }
+    let st = fx.st();
+    assert_eq!(st.state, State::Escalated, "after {expiries} expiries");
+    assert!(st.exhausted.contains(&BudgetField::Turns));
+    assert!(
+        st.spent.turns <= st.budget.turns + 1,
+        "one crossing, no more"
+    );
+    assert!(st.turns.is_empty(), "an escalated task holds no turn");
+    let log = fx.d.store.events(&st.task, 0).unwrap();
+    assert_eq!(*st, TaskState::fold(st.task.clone(), &log));
+    let m = rusty_bbp::metrics::of(&log);
+    assert_eq!(m.stale_verdicts, 0);
+}
+
 /// One live turn is unchanged: nothing is tracked, nothing refused.
 #[test]
 fn at_one_live_turn_a_verdict_is_never_refused_for_unread_content() {
