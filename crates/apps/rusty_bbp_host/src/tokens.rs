@@ -11,6 +11,15 @@ use rusty_serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+/// The API's split of cache writes by lifetime, when the usage carries it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheCreation {
+    #[rusty_serde(default)]
+    pub ephemeral_5m_input_tokens: u64,
+    #[rusty_serde(default)]
+    pub ephemeral_1h_input_tokens: u64,
+}
+
 /// Tokens as the harness reports them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
@@ -22,6 +31,10 @@ pub struct Usage {
     pub cache_creation_input_tokens: u64,
     #[rusty_serde(default)]
     pub cache_read_input_tokens: u64,
+    /// The breakdown of `cache_creation_input_tokens` by lifetime. Absent when
+    /// the harness does not print it, which reads as all zeros.
+    #[rusty_serde(default)]
+    pub cache_creation: CacheCreation,
 }
 
 impl Usage {
@@ -41,7 +54,25 @@ impl Usage {
             cache_creation_input_tokens: self.cache_creation_input_tokens
                 + o.cache_creation_input_tokens,
             cache_read_input_tokens: self.cache_read_input_tokens + o.cache_read_input_tokens,
+            cache_creation: CacheCreation {
+                ephemeral_5m_input_tokens: self.cache_creation.ephemeral_5m_input_tokens
+                    + o.cache_creation.ephemeral_5m_input_tokens,
+                ephemeral_1h_input_tokens: self.cache_creation.ephemeral_1h_input_tokens
+                    + o.cache_creation.ephemeral_1h_input_tokens,
+            },
         }
+    }
+
+    /// Cache writes split into (5-minute, everything else). Only tokens the
+    /// usage proves were 5-minute writes are priced at the 5-minute rate; the
+    /// rest, including any a missing or short breakdown leaves unexplained, is
+    /// priced at the 1-hour rate, so cost is never understated.
+    pub fn cache_writes(&self) -> (u64, u64) {
+        let five = self
+            .cache_creation
+            .ephemeral_5m_input_tokens
+            .min(self.cache_creation_input_tokens);
+        (five, self.cache_creation_input_tokens - five)
     }
 }
 
@@ -50,7 +81,10 @@ impl Usage {
 pub struct Prices {
     pub input: f64,
     pub output: f64,
-    pub cache_creation: f64,
+    /// Cache write, 5-minute lifetime.
+    pub cache_creation_5m: f64,
+    /// Cache write, 1-hour lifetime (2x input).
+    pub cache_creation_1h: f64,
     pub cache_read: f64,
 }
 
@@ -60,7 +94,8 @@ impl Prices {
         let all = [
             self.input,
             self.output,
-            self.cache_creation,
+            self.cache_creation_5m,
+            self.cache_creation_1h,
             self.cache_read,
         ];
         if all.iter().all(|p| p.is_finite() && *p > 0.0) {
@@ -74,9 +109,11 @@ impl Prices {
 impl Usage {
     /// Dollars at `p` (per million tokens).
     pub fn dollars(&self, p: &Prices) -> f64 {
+        let (five, hour) = self.cache_writes();
         (self.input_tokens as f64 * p.input
             + self.output_tokens as f64 * p.output
-            + self.cache_creation_input_tokens as f64 * p.cache_creation
+            + five as f64 * p.cache_creation_5m
+            + hour as f64 * p.cache_creation_1h
             + self.cache_read_input_tokens as f64 * p.cache_read)
             / 1e6
     }
@@ -158,8 +195,17 @@ pub fn reconcile(
             api.cache_read_input_tokens,
         ),
     ];
+    let split = api.cache_creation.ephemeral_5m_input_tokens
+        + api.cache_creation.ephemeral_1h_input_tokens
+        > 0;
+    let five = (
+        "cache_creation_5m",
+        seen.cache_creation.ephemeral_5m_input_tokens,
+        api.cache_creation.ephemeral_5m_input_tokens,
+    );
     let mut bad: Vec<String> = parts
         .iter()
+        .chain(split.then_some(&five))
         .filter(|(_, s, a)| (*s as f64 - *a as f64).abs() > tolerance * *a as f64)
         .map(|(n, s, a)| format!("{n}: bbp {s}, api {a}"))
         .collect();
@@ -377,6 +423,9 @@ struct ApiUsage {
     output_tokens: u64,
     cache_creation_input_tokens: u64,
     cache_read_input_tokens: u64,
+    /// The report's split of cache writes by lifetime, when it has one.
+    #[rusty_serde(default)]
+    cache_creation: CacheCreation,
     #[rusty_serde(default)]
     cost_usd: Option<f64>,
 }
@@ -402,6 +451,7 @@ pub fn json(
             output_tokens: a.output_tokens,
             cache_creation_input_tokens: a.cache_creation_input_tokens,
             cache_read_input_tokens: a.cache_read_input_tokens,
+            cache_creation: a.cache_creation,
         };
         let cost = a.cost_usd.zip(t.usd);
         // The API reports dollars only if the file has them; both sides or neither.
@@ -503,14 +553,16 @@ mod tests {
     const OPUS: Prices = Prices {
         input: 4.0,
         output: 20.0,
-        cache_creation: 5.0,
+        cache_creation_5m: 5.0,
+        cache_creation_1h: 8.0,
         cache_read: 0.2,
     };
     const SONNET: Prices = Prices {
         input: 2.0,
         output: 10.0,
-        cache_creation: 2.5,
-        cache_read: 0.2,
+        cache_creation_5m: 2.5,
+        cache_creation_1h: 4.0,
+        cache_read: 0.1,
     };
 
     fn criteria() -> Criteria {
@@ -531,15 +583,69 @@ mod tests {
             output_tokens: o,
             cache_creation_input_tokens: w,
             cache_read_input_tokens: r,
+            cache_creation: CacheCreation::default(),
         }
     }
 
     #[test]
     fn dollars_are_price_per_million_times_tokens() {
-        // 1M of each part at Opus prices: 4 + 20 + 5 + 0.2.
+        // 1M of each part at Opus prices. No split is printed, so the cache
+        // writes are priced at the 1-hour rate: 4 + 20 + 8 + 0.2.
         let u = usage(1_000_000, 1_000_000, 1_000_000, 1_000_000);
-        assert!((u.dollars(&OPUS) - 29.2).abs() < 1e-9);
+        assert!((u.dollars(&OPUS) - 32.2).abs() < 1e-9);
         assert_eq!(u.total(), 4_000_000, "the plain sum is unchanged");
+    }
+
+    fn written(total: u64, five: u64, hour: u64) -> Usage {
+        Usage {
+            cache_creation_input_tokens: total,
+            cache_creation: CacheCreation {
+                ephemeral_5m_input_tokens: five,
+                ephemeral_1h_input_tokens: hour,
+            },
+            ..Usage::default()
+        }
+    }
+
+    #[test]
+    fn a_printed_split_prices_five_minute_and_one_hour_writes_separately() {
+        // 1M five-minute at $5 and 1M one-hour at $8 on Opus.
+        let u = written(2_000_000, 1_000_000, 1_000_000);
+        assert!((u.dollars(&OPUS) - 13.0).abs() < 1e-9);
+        assert_eq!(u.cache_writes(), (1_000_000, 1_000_000));
+        // And on Sonnet: 2.5 + 4.
+        assert!((u.dollars(&SONNET) - 6.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn writes_the_split_does_not_explain_are_priced_at_the_one_hour_rate() {
+        // No split at all: everything is 1h (never understated).
+        let none = written(1_000_000, 0, 0);
+        assert_eq!(none.cache_writes(), (0, 1_000_000));
+        assert!((none.dollars(&OPUS) - 8.0).abs() < 1e-9);
+        // A split that accounts for only part of the total: the rest is 1h.
+        let short = written(1_000_000, 300_000, 0);
+        assert_eq!(short.cache_writes(), (300_000, 700_000));
+        // A split claiming more 5m than the total is capped at the total.
+        let over = written(100, 500, 0);
+        assert_eq!(over.cache_writes(), (100, 0));
+        // A split can only lower the price against the 1h-for-all rule.
+        assert!(short.dollars(&OPUS) < none.dollars(&OPUS));
+    }
+
+    #[test]
+    fn the_split_is_read_from_the_usage_object_and_summed_across_messages() {
+        let line = |id: &str, five: u64, hour: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"{id}","model":"claude-opus-5-5","usage":{{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":{},"cache_creation":{{"ephemeral_5m_input_tokens":{five},"ephemeral_1h_input_tokens":{hour}}}}}}}}}"#,
+                five + hour
+            )
+        };
+        let s = [line("a", 100, 0), line("b", 0, 50), line("a", 100, 0)].join("\n");
+        let m = by_model(&s);
+        let u = m["claude-opus-5-5"];
+        assert_eq!(u.cache_creation_input_tokens, 150);
+        assert_eq!(u.cache_writes(), (100, 50));
     }
 
     #[test]
@@ -577,13 +683,13 @@ mod tests {
     #[test]
     fn a_bad_price_or_missing_date_is_refused_and_the_hash_is_recorded() {
         let f = std::env::temp_dir().join(format!("crit-{}.json", std::process::id()));
-        let body = r#"{"status":"proposal","prices_as_of":"2026-10-06","models":{"claude-opus-5-5":{"input":4,"output":20,"cache_creation":5,"cache_read":0.2}}}"#;
+        let body = r#"{"status":"proposal","prices_as_of":"2026-10-06","models":{"claude-opus-5-5":{"input":4,"output":20,"cache_creation_5m":5,"cache_creation_1h":8,"cache_read":0.2}}}"#;
         std::fs::write(&f, body).unwrap();
         let (c, h) = read_criteria(&f).unwrap();
         assert_eq!(c.models["claude-opus-5-5"], OPUS);
         assert_eq!(c.min_commit, None);
         assert_eq!(h, Sha256::of(body.as_bytes()).hex());
-        for bad in [body.replace("\"cache_read\":0.2", "\"cache_read\":0"), body.replace("2026-10-06", " "), body.replace("\"claude-opus-5-5\":{\"input\":4,\"output\":20,\"cache_creation\":5,\"cache_read\":0.2}", "")] {
+        for bad in [body.replace("\"cache_read\":0.2", "\"cache_read\":0"), body.replace("2026-10-06", " "), body.replace("\"cache_creation_1h\":8", "\"cache_creation_1h\":0"), body.replace("\"claude-opus-5-5\":{\"input\":4,\"output\":20,\"cache_creation_5m\":5,\"cache_creation_1h\":8,\"cache_read\":0.2}", "")] {
             std::fs::write(&f, &bad).unwrap();
             assert!(read_criteria(&f).is_err(), "{bad}");
         }

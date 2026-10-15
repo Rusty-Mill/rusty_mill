@@ -924,7 +924,8 @@ fn cost_cap(usd: f64) -> moderator::CostCap {
                 rusty_bbp_host::tokens::Prices {
                     input: 1.0,
                     output: 20.0,
-                    cache_creation: 1.0,
+                    cache_creation_5m: 1.0,
+                    cache_creation_1h: 1.0,
                     cache_read: 1.0,
                 },
             )]
@@ -938,6 +939,7 @@ fn cost_cap(usd: f64) -> moderator::CostCap {
 /// names) and then idles, under a cost cap.
 fn capped_run(
     tag: &str,
+    pin: Option<&str>,
     model_in_output: &str,
     cap_usd: f64,
     wall: u64,
@@ -968,10 +970,11 @@ fn capped_run(
     let line = format!(
         r#"{{"type":"assistant","message":{{"id":"m1","model":"{model_in_output}","usage":{{"input_tokens":0,"output_tokens":1000000}}}}}}"#
     );
-    let launchers = Launchers::default().with(
-        "planner",
-        script(&dir, "planner", &format!("echo '{line}'\nsleep 60")),
-    );
+    let mut planner = script(&dir, "planner", &format!("echo '{line}'\nsleep 60"));
+    if let Some(m) = pin {
+        planner.args.extend(["--model".to_owned(), m.to_owned()]);
+    }
+    let launchers = Launchers::default().with("planner", planner);
     let mut cfg = config(&dir, &task, repo, launchers, wall);
     cfg.cost_cap = Some(cost_cap(cap_usd));
     let out = moderator::run(&cfg);
@@ -982,7 +985,7 @@ fn capped_run(
 #[test]
 fn a_run_over_its_dollar_cap_is_stopped_and_its_harness_killed() {
     let started = Instant::now();
-    let err = capped_run("cap-over", "priced-model", 1.0, 30).unwrap_err();
+    let err = capped_run("cap-over", Some("priced-model"), "priced-model", 1.0, 30).unwrap_err();
     assert!(err.contains("cost cap reached"), "{err}");
     assert!(
         started.elapsed() < Duration::from_secs(15),
@@ -992,13 +995,20 @@ fn a_run_over_its_dollar_cap_is_stopped_and_its_harness_killed() {
 
 #[test]
 fn a_run_under_its_cap_is_left_to_the_wall_limit() {
-    let err = capped_run("cap-under", "priced-model", 1000.0, 3).unwrap_err();
+    let err = capped_run("cap-under", Some("priced-model"), "priced-model", 1000.0, 3).unwrap_err();
     assert!(err.contains("wall limit"), "{err}");
 }
 
 #[test]
 fn a_model_with_no_price_stops_the_run_because_the_cap_cannot_be_enforced() {
-    let err = capped_run("cap-unpriced", "unpriced-model", 1000.0, 30).unwrap_err();
+    let err = capped_run(
+        "cap-unpriced",
+        Some("priced-model"),
+        "unpriced-model",
+        1000.0,
+        30,
+    )
+    .unwrap_err();
     assert!(
         err.contains("cannot enforce the cost cap") && err.contains("unpriced-model"),
         "{err}"
@@ -1056,4 +1066,25 @@ fn final_output_under_the_cap_on_a_terminal_state_still_succeeds() {
     let out = cancelled_with_final_output("cap-term-under", "priced-model", 1000.0)
         .expect("under the cap");
     assert_eq!(out.state, State::Cancelled);
+}
+
+#[test]
+fn an_evidence_run_refuses_to_start_with_an_unpinned_or_unpriced_role() {
+    let unpinned = capped_run("cap-unpinned", None, "priced-model", 1000.0, 30).unwrap_err();
+    assert!(
+        unpinned.contains("refusing to start") && unpinned.contains("planner"),
+        "{unpinned}"
+    );
+    let unpriced = capped_run(
+        "cap-pin-unpriced",
+        Some("other-model"),
+        "priced-model",
+        1000.0,
+        30,
+    )
+    .unwrap_err();
+    assert!(
+        unpriced.contains("refusing to start") && unpriced.contains("other-model"),
+        "{unpriced}"
+    );
 }

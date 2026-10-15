@@ -10,6 +10,7 @@
 //!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
+//! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | join --key K --scores S --rubrics D   blind rubric grading
@@ -21,7 +22,7 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, args::Args, grade, human, mcp, moderator, pairs, profiles, report, response_json,
+    admin, args::Args, grade, human, mcp, moderator, pairs, pins, profiles, report, response_json,
     runner, shadow, tokens, why,
 };
 use std::ffi::OsString;
@@ -31,7 +32,7 @@ use std::process::ExitCode;
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let sub = argv.first().cloned().ok_or(
-        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|grade|why|shadow|mod> ...",
+        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|agents-check|grade|why|shadow|mod> ...",
     )?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
@@ -49,6 +50,23 @@ fn run() -> Result<String, String> {
             "join" => grade::join_files(&p("key")?, &p("scores")?, &p("rubrics")?),
             other => Err(format!("unknown grade action {other} (pack|join)")),
         };
+    }
+    if sub == "agents-check" {
+        let read = |k: &str| moderator::Launchers::read_file(&PathBuf::from(a.flag(k)?));
+        let (c, _) = tokens::read_criteria(&PathBuf::from(a.flag("criteria")?))?;
+        let control =
+            pins::check_run(&read("control")?, &c).map_err(|e| format!("control: {e}"))?;
+        let treatment =
+            pins::check_run(&read("treatment")?, &c).map_err(|e| format!("treatment: {e}"))?;
+        pins::check_arms(&control, &treatment)?;
+        let json = |m: &std::collections::BTreeMap<String, String>| {
+            rusty_serde::json::to_string(m).map_err(|e| e.to_string())
+        };
+        return Ok(format!(
+            "{{\"control\":{},\"treatment\":{}}}",
+            json(&control)?,
+            json(&treatment)?
+        ));
     }
     if sub == "pairs" {
         return pairs::json(&PathBuf::from(a.flag("manifest")?));
