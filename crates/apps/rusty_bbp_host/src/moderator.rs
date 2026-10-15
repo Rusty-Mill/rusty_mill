@@ -98,8 +98,51 @@ pub struct Outcome {
     pub state: State,
     pub turns_launched: u64,
     pub runs: u64,
-    /// Wall clock from the loop's start to its end.
+    /// Wall clock for this invocation, from loop start through successful
+    /// final harness cleanup. Visits stop before that cleanup.
     pub elapsed: Duration,
+    /// Observed state visits for this moderator invocation, in order.
+    /// Transitions between observations are invisible, including departures
+    /// and returns to the same state. Loop work and scheduling delays mean
+    /// measurement error is not bounded by the configured poll interval.
+    /// Restarting starts a fresh series; error and wall-limit exits return no
+    /// Outcome and discard visits. Successful visits end at the terminal-state
+    /// observation, before final harness cleanup (included in `elapsed`).
+    /// The first Planning visit excludes any later replanning; these raw visits
+    /// do not define authoring time for the ultimately approved spec.
+    pub visits: Vec<(State, Duration)>,
+}
+
+/// Ordered state visits, timed by the loop's own clock (the log has none).
+struct Visits {
+    done: Vec<(State, Duration)>,
+    current: (State, Instant),
+}
+
+impl Visits {
+    fn new(state: State, at: Instant) -> Self {
+        Visits {
+            done: Vec::new(),
+            current: (state, at),
+        }
+    }
+
+    /// The loop saw `state` at `at`; a change closes the previous visit.
+    fn observe(&mut self, state: State, at: Instant) {
+        if state == self.current.0 {
+            return;
+        }
+        self.done
+            .push((self.current.0, at.duration_since(self.current.1)));
+        self.current = (state, at);
+    }
+
+    /// Close the last visit.
+    fn finish(mut self, at: Instant) -> Vec<(State, Duration)> {
+        self.done
+            .push((self.current.0, at.duration_since(self.current.1)));
+        self.done
+    }
 }
 
 /// `<dir>/<sub>/<sha256(task id)>`: one directory per task, injective, so
@@ -244,6 +287,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     let _lock = lock(&cfg.dir, &cfg.task)?;
     let mut d = open_driver(&cfg.dir, &cfg.task)?;
     let started = Instant::now();
+    let mut visits = Visits::new(d.state.state, started);
     let mut sup = Supervision {
         harnesses: Vec::new(),
         runner: None,
@@ -277,9 +321,12 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         d.dispatch(&Command::Tick, now())
             .map_err(|e| format!("{e:?}"))?;
         let state = d.state.state;
+        let seen = Instant::now();
+        visits.observe(state, seen);
         if matches!(state, State::Closed | State::Cancelled) {
             sup.kill_harnesses()?;
             return Ok(Outcome {
+                visits: visits.finish(seen),
                 state,
                 turns_launched: launched.len() as u64,
                 runs: ran.len() as u64,
@@ -448,6 +495,48 @@ fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visits_close_on_change_and_keep_order_and_repeats() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut v = Visits::new(State::Planning, t0);
+        v.observe(State::Planning, at(10)); // same state: no new visit
+        v.observe(State::Build, at(40));
+        v.observe(State::Planning, at(100)); // a revisit is its own entry
+        let done = v.finish(at(130));
+        assert_eq!(
+            done,
+            vec![
+                (State::Planning, Duration::from_millis(40)),
+                (State::Build, Duration::from_millis(60)),
+                (State::Planning, Duration::from_millis(30)),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejected_plan_and_replanning_remain_separate_observed_visits() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut v = Visits::new(State::Planning, t0);
+        v.observe(State::PlanGate, at(10));
+        v.observe(State::Planning, at(30)); // rejected draft, then rework
+        v.observe(State::PlanGate, at(70));
+        v.observe(State::Build, at(80)); // eventual approval
+        assert_eq!(
+            v.finish(at(90)),
+            vec![
+                (State::Planning, Duration::from_millis(10)),
+                (State::PlanGate, Duration::from_millis(20)),
+                (State::Planning, Duration::from_millis(40)),
+                (State::PlanGate, Duration::from_millis(10)),
+                (State::Build, Duration::from_millis(10)),
+            ]
+        );
+        // Raw arithmetic only: choosing an authoring-time endpoint is a
+        // separate policy decision; the first visit omits the 40 ms of rework.
+    }
 
     fn proving(file: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -98,12 +98,18 @@ fn run() -> Result<String, String> {
                 max_wall: std::time::Duration::from_secs(num("max-wall-secs", u64::MAX / 1000)?),
             };
             let out = moderator::run(&cfg)?;
+            let visits: Vec<String> = out
+                .visits
+                .iter()
+                .map(|(s, d)| format!("[\"{s:?}\",{}]", d.as_millis()))
+                .collect();
             return Ok(format!(
-                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{}}}",
+                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}]}}",
                 out.state,
                 out.turns_launched,
                 out.runs,
-                out.elapsed.as_millis()
+                out.elapsed.as_millis(),
+                visits.join(",")
             ));
         }
         "metrics" => return report::json(&dir, &task),

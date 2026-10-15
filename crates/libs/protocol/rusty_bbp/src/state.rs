@@ -238,6 +238,10 @@ pub struct TaskState {
     /// The rev of the last event that made the current state's default turn available:
     /// opening, a state change, a final test report, a settled request.
     pub ready_rev: Rev,
+    /// The rev at which the task entered its current state: opening or a state change.
+    pub entered_rev: Rev,
+    /// The rev at which each role was assigned its principal.
+    pub assigned_rev: HashMap<RoleId, Rev>,
 }
 
 impl TaskState {
@@ -291,6 +295,8 @@ impl TaskState {
             msg_rev: Vec::new(),
             art_rev: HashMap::new(),
             ready_rev: Rev(0),
+            entered_rev: Rev(0),
+            assigned_rev: HashMap::new(),
         }
     }
 
@@ -506,6 +512,7 @@ impl TaskState {
                 self.policy = *policy;
                 self.opened = true;
                 self.ready_rev = self.rev;
+                self.entered_rev = self.rev;
                 let h = Principal {
                     id: human.clone(),
                     kind: PrincipalKind::Human,
@@ -514,6 +521,7 @@ impl TaskState {
             }
             Event::Assigned { role, principal } => {
                 self.assigned.insert(role.clone(), principal.id.clone());
+                self.assigned_rev.insert(role.clone(), self.rev);
                 self.principals
                     .insert(principal.id.clone(), principal.clone());
             }
@@ -638,6 +646,7 @@ impl TaskState {
                 }
                 self.state = *to;
                 self.ready_rev = self.rev;
+                self.entered_rev = self.rev;
             }
             Event::HumanApproval { gate, subject, run } => match gate {
                 Gate::Plan => {

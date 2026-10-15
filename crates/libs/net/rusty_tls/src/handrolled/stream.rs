@@ -16,6 +16,8 @@
 //! - The handshake runs lazily on the first read or write, or on
 //!   [`NativeTlsStream::complete_handshake`], and blocks on the socket.
 //! - Both TLS versions are offered ([`ClientHandshakeBoth`]); the peer picks.
+//!   [`NativeTlsStream::tls13_only`] offers TLS 1.3 alone: the TLS 1.2 client
+//!   is then never run, and a peer that will not speak 1.3 is refused.
 //! - Only [`TrustPolicy::System`] and [`TrustPolicy::PinnedAnchors`] are
 //!   supported. Every other policy is refused at construction, because the
 //!   engine has no way to skip or relax verification and this type will not
@@ -38,7 +40,7 @@ use std::io::{self, Read, Write};
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::client::{CipherSuite, ClientConfig, ClientError, Incoming};
+use super::client::{CipherSuite, ClientConfig, ClientError, ClientHandshake, Incoming};
 use super::client12::{CipherSuite12, Incoming12};
 use super::kx::NamedGroup;
 use super::name::ServerName;
@@ -93,6 +95,8 @@ pub struct NativeTlsStream<S> {
     server_name: String,
     anchors: Vec<Vec<u8>>,
     alpn: Vec<Vec<u8>>,
+    /// Offer TLS 1.3 only: the TLS 1.2 client never runs.
+    tls13_only: bool,
     conn: Option<Established>,
     phase: Phase,
     /// This side has sent `close_notify`.
@@ -141,6 +145,7 @@ impl<S: Read + Write> NativeTlsStream<S> {
             server_name: server_name.to_string(),
             anchors,
             alpn: Vec::new(),
+            tls13_only: false,
             conn: None,
             phase: Phase::Pending,
             sent_close: false,
@@ -174,6 +179,26 @@ impl<S: Read + Write> NativeTlsStream<S> {
             ));
         }
         self.alpn = protocols;
+        Ok(self)
+    }
+
+    /// Offer TLS 1.3 only. The ClientHello carries no TLS 1.2 version, suite or
+    /// fallback signal, and the TLS 1.2 client is never run: a peer that will
+    /// not speak TLS 1.3 is refused with `protocol_version`, not negotiated
+    /// down. This is the enforced form of "TLS 1.3 only"; reviewing the TLS 1.2
+    /// code would not have stopped it being negotiated.
+    ///
+    /// Only before the handshake has started: once it has run, the version is
+    /// already chosen, so a late call is `InvalidInput` and consumes the stream
+    /// rather than leave a caller believing a TLS 1.2 connection is 1.3-only.
+    pub fn tls13_only(mut self) -> io::Result<Self> {
+        if self.phase != Phase::Pending {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tls13_only must be set before the handshake starts",
+            ));
+        }
+        self.tls13_only = true;
         Ok(self)
     }
 
@@ -298,25 +323,13 @@ impl<S: Read + Write> NativeTlsStream<S> {
             resumption: None,
             alpn: &alpn,
         };
-        let config = ClientConfigBoth::new(tls13, CipherSuite12::SUPPORTED);
-
-        let (mut handshake, hello) = ClientHandshakeBoth::start(&config).map_err(invalid)?;
-        send(&mut self.sock, &hello)?;
-        while !handshake.is_finished() {
-            let record = read_record(&mut self.sock)?;
-            match handshake.read_record(&record) {
-                Ok(reply) if reply.is_empty() => {}
-                Ok(reply) => send(&mut self.sock, &reply)?,
-                Err(err) => {
-                    // Tell the peer why, best effort, then report it.
-                    if let Some(alert) = handshake.alert_record(&err) {
-                        let _ = send(&mut self.sock, &alert);
-                    }
-                    return Err(invalid(err));
-                }
-            }
+        if self.tls13_only {
+            let (handshake, hello) = ClientHandshake::start(&tls13).map_err(invalid)?;
+            return drive(&mut self.sock, handshake, &hello);
         }
-        handshake.into_connection().map_err(invalid)
+        let config = ClientConfigBoth::new(tls13, CipherSuite12::SUPPORTED);
+        let (handshake, hello) = ClientHandshakeBoth::start(&config).map_err(invalid)?;
+        drive(&mut self.sock, handshake, &hello)
     }
 
     /// Fail the stream for good, after telling the peer why where there is a way to.
@@ -447,6 +460,68 @@ fn step(conn: &mut Established, record: &[u8]) -> Result<Step, ClientError> {
 
 /// Write all of `bytes` and flush, so a buffering transport cannot hold a
 /// handshake or control flight while we wait for the answer.
+/// What `drive` needs of a client handshake, whichever versions it offers.
+trait Machine {
+    fn finished(&self) -> bool;
+    fn read(&mut self, record: &[u8]) -> Result<Vec<u8>, ClientError>;
+    fn alert(&mut self, error: &ClientError) -> Option<Vec<u8>>;
+    fn finish(self) -> Result<Established, ClientError>;
+}
+
+impl Machine for ClientHandshakeBoth<'_> {
+    fn finished(&self) -> bool {
+        self.is_finished()
+    }
+    fn read(&mut self, record: &[u8]) -> Result<Vec<u8>, ClientError> {
+        self.read_record(record)
+    }
+    fn alert(&mut self, error: &ClientError) -> Option<Vec<u8>> {
+        self.alert_record(error)
+    }
+    fn finish(self) -> Result<Established, ClientError> {
+        self.into_connection()
+    }
+}
+
+impl Machine for ClientHandshake<'_> {
+    fn finished(&self) -> bool {
+        self.is_finished()
+    }
+    fn read(&mut self, record: &[u8]) -> Result<Vec<u8>, ClientError> {
+        self.read_record(record)
+    }
+    fn alert(&mut self, error: &ClientError) -> Option<Vec<u8>> {
+        self.alert_record(error)
+    }
+    fn finish(self) -> Result<Established, ClientError> {
+        self.into_connection().map(Established::Tls13)
+    }
+}
+
+/// Send `hello`, then run `handshake` over `sock` until it finishes.
+fn drive<S: Read + Write, M: Machine>(
+    sock: &mut S,
+    mut handshake: M,
+    hello: &[u8],
+) -> io::Result<Established> {
+    send(sock, hello)?;
+    while !handshake.finished() {
+        let record = read_record(sock)?;
+        match handshake.read(&record) {
+            Ok(reply) if reply.is_empty() => {}
+            Ok(reply) => send(sock, &reply)?,
+            Err(err) => {
+                // Tell the peer why, best effort, then report it.
+                if let Some(alert) = handshake.alert(&err) {
+                    let _ = send(sock, &alert);
+                }
+                return Err(invalid(err));
+            }
+        }
+    }
+    handshake.finish().map_err(invalid)
+}
+
 fn send<S: Write>(sock: &mut S, bytes: &[u8]) -> io::Result<()> {
     sock.write_all(bytes)?;
     sock.flush()

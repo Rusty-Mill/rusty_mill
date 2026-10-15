@@ -549,6 +549,16 @@ impl<S: Store> Fx<S> {
     }
 
     pub fn verdict(&mut self, role: impl Into<RoleId>, kind: VerdictKind) -> Response {
+        self.verdict_to(role, kind, vec![Recipient::All])
+    }
+
+    /// A verdict addressed to `to`; `verdict` broadcasts it.
+    pub fn verdict_to(
+        &mut self,
+        role: impl Into<RoleId>,
+        kind: VerdictKind,
+        to: Vec<Recipient>,
+    ) -> Response {
         let cand = self.st().candidate.expect("candidate");
         let (run, _) = self.selected_run();
         let report = self.report_id();
@@ -563,7 +573,7 @@ impl<S: Store> Fx<S> {
         };
         let d = Draft {
             kind: MessageKind::Verdict,
-            to: vec![Recipient::All],
+            to,
             body: Body::Verdict(Verdict {
                 subject: cand,
                 run,
