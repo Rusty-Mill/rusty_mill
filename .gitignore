@@ -11,3 +11,12 @@ __pycache__/
 
 # Runtime SQLite artifacts
 meshed_registry.db
+
+# super-board
+.claude/super-board/active
+.claude/super-board/onboard-answers.json
+.claude/super-board/onboard-staged/
+.claude/super-board/backup/
+.claude/super-board/inflight/
+.claude/super-board/migrations/
+.claude/super-board/upgrade.json
