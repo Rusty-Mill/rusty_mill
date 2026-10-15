@@ -100,7 +100,7 @@ where
 /// them (or repeat them exactly). Without one the board trusts what the
 /// caller says: a workflow guard between cooperating agents.
 #[derive(Deserialize, JsonSchema)]
-struct Who {
+pub(crate) struct Who {
     /// Stable name of the actor, recorded in claims and history.
     actor: Option<String>,
     /// Role name; see `board_roles`.
@@ -109,7 +109,11 @@ struct Who {
 
 /// The acting identity: the credential's if there is one (a disagreeing
 /// `actor`/`role` is refused), else the arguments'.
-fn acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Actor, BoardError> {
+pub(crate) fn acting(
+    b: &Shared,
+    identity: Option<&Identity>,
+    who: &Who,
+) -> Result<Actor, BoardError> {
     match identity {
         Some(i) => {
             let differs = who.actor.as_deref().is_some_and(|a| a != i.actor)

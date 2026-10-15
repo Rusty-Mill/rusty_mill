@@ -33,6 +33,13 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_events`, `card_take`,
   `card_get`, `card_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_comment`. The web API
   exposes the same table, so the two cannot drift.
+- **Settings.** The ⚙ button opens a view to add and remove agents (credentials: name, role, project limit; a
+  token is shown once; "New token" replaces it), edit repositories and their projects, edit roles, and configure
+  the GitHub sync. It needs the `admin` capability (the default `human` role has it). Run with
+  `--settings-dir DIR`: it keeps `identities.json`, `projects.json`, `roles.json` and `github.json` there
+  (secrets owner-only), changes take effect at once, and a first start creates an `admin` credential and
+  prints its token once. Without files the view is read-only. A change that would lock everyone out, or drop a
+  project that still has cards, is refused. Not available over MCP. ADR-0004.
 - **Models connect themselves.** Run one HTTP server with `--identities FILE` (a token per model, bound to an
   actor and role) and register `/mcp` in each model's own client; a model then pulls work with `card_take`,
   comments, and moves it on, using its own subscription session. See

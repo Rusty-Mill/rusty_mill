@@ -61,6 +61,20 @@ pub enum Capability {
     Review,
     /// Merge a reviewed card to Done.
     Merge,
+    /// Change the board's settings: agents and their credentials, repositories, projects, roles.
+    Admin,
+}
+
+impl Capability {
+    /// Every capability, in display order.
+    pub const ALL: [Capability; 6] = [
+        Capability::Triage,
+        Capability::Build,
+        Capability::Qa,
+        Capability::Review,
+        Capability::Merge,
+        Capability::Admin,
+    ];
 }
 
 /// Who is acting, and what they may do.
@@ -214,6 +228,9 @@ pub enum BoardError {
     Invalid(&'static str),
     /// The card belongs to a project this actor may not work in.
     OutOfScope(String),
+    /// A settings change was refused, with the reason (it would lock everyone out, drop a
+    /// project that still has cards, and so on).
+    Refused(String),
     /// The backing store failed.
     Storage(String),
 }
@@ -230,6 +247,7 @@ impl fmt::Display for BoardError {
             Self::Conflict => write!(f, "card changed concurrently; retry"),
             Self::Invalid(why) => write!(f, "invalid input: {why}"),
             Self::OutOfScope(p) => write!(f, "project {p:?} is outside your scope"),
+            Self::Refused(why) => f.write_str(why),
             Self::Storage(why) => write!(f, "storage error: {why}"),
         }
     }

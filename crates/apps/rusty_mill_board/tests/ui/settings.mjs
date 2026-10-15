@@ -1,0 +1,102 @@
+// Browser check of the settings view, against a board started with a settings directory:
+//
+//   D=$(mktemp -d); rusty_mill_board --settings-dir $D --http 127.0.0.1:8798 2>$D/log &
+//   TOKEN=$(grep -o 'shown once: .*' $D/log | cut -d' ' -f3)
+//   node tests/ui/settings.mjs "$(npm root -g)/playwright" http://127.0.0.1:8798 "$TOKEN"
+import { createRequire } from "node:module";
+const { chromium } = createRequire(import.meta.url)(process.argv[2]);
+const [BASE, TOKEN] = [process.argv[3], process.argv[4]];
+
+const failures = [];
+const check = (ok, what) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failures.push(what); };
+const api = async (token, op, args = {}) => {
+  const r = await fetch(`${BASE}/api/${op}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(args) });
+  return { status: r.status, body: await r.json().catch(() => ({})) };
+};
+
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? "/opt/pw-browsers/chromium" });
+const page = await browser.newPage({ viewport: { width: 1300, height: 900 } });
+const errors = [];
+page.on("pageerror", (e) => errors.push(String(e)));
+page.on("dialog", (d) => d.accept());
+await page.goto(`${BASE}/#token=${TOKEN}`);
+await page.waitForSelector("#gear");
+await page.waitForFunction(() => document.querySelector("#actor").value);
+check((await page.inputValue("#actor")) === "admin" && (await page.locator("#actor").isDisabled()), "a per-model token fixes who you are in the header");
+
+await page.click("#gear");
+await page.waitForSelector("#settings[open]");
+const dialog = page.locator("#settings");
+check((await dialog.locator("table tr").count()) === 2, "the Agents tab lists the first admin");
+
+// Agents: add one, see its token once, use it, rotate, remove.
+await dialog.locator("input[placeholder^='new agent']").fill("claude-code");
+await dialog.locator(".row select").first().selectOption("builder");
+await dialog.getByRole("button", { name: "Add agent" }).click();
+await dialog.locator(".secret code").waitFor();
+const token = await dialog.locator(".secret code").innerText();
+check(token.length === 48, "adding an agent shows its token");
+check((await api(token, "board_whoami")).body.actor === "claude-code", "and the token works at once");
+await dialog.getByRole("button", { name: "Repositories" }).click();
+await dialog.getByRole("button", { name: "Agents" }).click();
+check((await dialog.locator(".secret").count()) === 0, "the token is gone once you leave the tab");
+check((await dialog.locator("table tr").count()) === 3, "the agent is listed");
+await dialog.locator("tr", { hasText: "claude-code" }).getByRole("button", { name: "New token" }).click();
+await dialog.locator(".secret code").waitFor();
+const rotated = await dialog.locator(".secret code").innerText();
+check(rotated !== token && (await api(token, "board_whoami")).status === 401, "a new token replaces the old one");
+
+// A refusal is shown, not swallowed.
+await dialog.locator("input[placeholder^='new agent']").fill("claude-code");
+await dialog.getByRole("button", { name: "Add agent" }).click();
+await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.includes("already"));
+check(true, "a duplicate agent is refused with the reason");
+
+// Repositories and projects.
+await dialog.getByRole("button", { name: "Repositories" }).click();
+await dialog.locator("input[placeholder='new repository name']").fill("rusty_mill");
+await dialog.getByRole("button", { name: "+ repository" }).click();
+await dialog.getByRole("button", { name: "+ project" }).last().click();
+await dialog.locator("input[placeholder='project name']").fill("rocket_league");
+await dialog.locator("textarea").fill("crates/apps/rocket_league");
+await dialog.getByRole("button", { name: "Save repositories and projects" }).click();
+await page.waitForFunction(() => !document.querySelector("#settings .err")?.textContent);
+const listed = (await api(rotated, "board_projects")).body.repos;
+check(listed.rusty_mill?.rocket_league?.[0] === "crates/apps/rocket_league", "a repository with a project is saved");
+await dialog.getByRole("button", { name: "Close" }).click();
+await page.locator("#nav1 .item", { hasText: "rusty_mill" }).waitFor({ timeout: 3000 }).catch(() => {});
+check((await page.locator("#nav1 .item", { hasText: "rusty_mill" }).count()) === 1, "and appears in the side panel at once");
+
+// Roles.
+await page.click("#gear");
+await dialog.getByRole("button", { name: "Roles" }).click();
+await dialog.locator("input[placeholder^='new role']").fill("tester");
+await dialog.getByRole("button", { name: "Add role" }).click();
+await dialog.locator("tr", { hasText: "tester" }).waitFor();
+check((await api(rotated, "board_roles")).body.roles.tester !== undefined, "a role is added");
+await page.waitForTimeout(200);
+await dialog.locator("tr", { hasText: "tester" }).locator("input[type=checkbox]").nth(2).check();
+await dialog.getByRole("button", { name: "Save roles" }).click();
+await page.waitForTimeout(400);
+check(JSON.stringify((await api(rotated, "board_roles")).body.roles.tester) === '["qa"]', "its capabilities are saved");
+
+// GitHub: a bad repository is refused; the token is not shown again.
+await dialog.getByRole("button", { name: "GitHub" }).click();
+await dialog.locator("input[placeholder='owner/name']").fill("../nope");
+await dialog.locator("input[type=password]").fill("ghp_secret");
+await dialog.getByRole("button", { name: /Save and start sync/ }).click();
+await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.length > 0);
+check(true, "an invalid GitHub repository is refused");
+check(!(await dialog.innerText()).includes("ghp_secret") && (await dialog.locator("input[type=password]").inputValue()) === "ghp_secret", "the token is only ever in the field you typed it in");
+await dialog.getByRole("button", { name: "Close" }).click();
+
+// A non-admin sees no settings.
+const builder = await api(rotated, "settings_get");
+check(builder.status === 403 || builder.status === 200, "(sanity) the builder token reaches the API");
+const denied = await api(rotated, "settings_agent_remove", { name: "admin" });
+check(denied.status === 403, "an agent without admin cannot change settings");
+
+check(errors.length === 0, `no page errors ${errors.join("; ")}`);
+await browser.close();
+if (failures.length) { console.error(`\n${failures.length} check(s) failed`); process.exit(1); }
+console.log("\nall browser checks passed");

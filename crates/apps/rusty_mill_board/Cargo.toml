@@ -33,6 +33,8 @@ rusty_serve = { workspace = true }
 rusty_http = { workspace = true }
 rusty_oauth = { workspace = true }
 rusty_crypto_key = { workspace = true }
+rusty_rand = { workspace = true }
+rusty_atomic_file = { workspace = true }
 clap = { workspace = true }
 rusty_request = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["rt"] }

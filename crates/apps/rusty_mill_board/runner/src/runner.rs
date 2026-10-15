@@ -388,7 +388,7 @@ mod tests {
             NotFound(_) => 404,
             Conflict | Claimed(_) => 409,
             Forbidden(_) | NotClaimant | OutOfScope(_) => 403,
-            Terminal | NoSuchMove { .. } | Invalid(_) => 422,
+            Terminal | NoSuchMove { .. } | Invalid(_) | Refused(_) => 422,
             Storage(_) => 500,
         };
         ApiError {

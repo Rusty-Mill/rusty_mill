@@ -1,7 +1,7 @@
 //! The HTTP surface: the UI page, `POST /api/<op>`, and `/mcp`, behind one
 //! guard (allowed `Host`, optional bearer token, JSON-only writes).
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use rusty_crypto_key::constant_time_eq;
 use rusty_http::{Method, StatusCode};
@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::api::{CallError, Identity, Op, Shared};
 use crate::domain::BoardError;
 use crate::identities::Credentials;
+use crate::settings::Settings;
 
 const UI: &str = include_str!("ui.html");
 
@@ -45,8 +46,9 @@ pub enum Auth {
     Open,
     /// One shared bearer token; callers state their own actor and role.
     Shared(String),
-    /// A token per model, each bound to an actor and role.
-    Credentials(Credentials),
+    /// A token per model, each bound to an actor and role. Shared with the settings, which
+    /// add and remove agents while the board serves.
+    Credentials(Arc<RwLock<Credentials>>),
 }
 
 impl From<Option<&str>> for Auth {
@@ -63,6 +65,7 @@ pub struct Web {
     mcp_path: String,
     hosts: Vec<String>,
     auth: Auth,
+    settings: Arc<Settings>,
 }
 
 impl Web {
@@ -76,6 +79,7 @@ impl Web {
         auth: Auth,
     ) -> Self {
         Self {
+            settings: Arc::new(Settings::read_only(Arc::clone(&board))),
             board,
             ops: crate::api::ops(),
             mcp,
@@ -83,6 +87,13 @@ impl Web {
             hosts,
             auth,
         }
+    }
+
+    /// Serve `/api/settings_*` from `settings` (read-only settings by default).
+    #[must_use]
+    pub fn with_settings(mut self, settings: Arc<Settings>) -> Self {
+        self.settings = settings;
+        self
     }
 
     fn host_ok(&self, request: &Request<'_>) -> bool {
@@ -108,8 +119,12 @@ impl Web {
                 .map(|_| None)
                 .ok_or(()),
             Auth::Credentials(all) => presented
-                .and_then(|got| all.identify(got))
-                .cloned()
+                .and_then(|got| {
+                    all.read()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .identify(got)
+                        .cloned()
+                })
                 .map(Some)
                 .ok_or(()),
         }
@@ -126,15 +141,22 @@ impl Web {
                 json!({"error": "POST application/json required"}),
             );
         }
+        let args: Value = serde_json::from_slice(request.body).unwrap_or(Value::Null);
+        if let Some(result) = self.settings.call(name, identity, args.clone()) {
+            return answer(result);
+        }
         let Some(op) = self.ops.iter().find(|o| o.name == name) else {
             return reply(StatusCode::NOT_FOUND, json!({"error": "no such operation"}));
         };
-        let args: Value = serde_json::from_slice(request.body).unwrap_or(Value::Null);
-        match op.call(&self.board, identity, args) {
-            Ok(out) => reply(StatusCode::OK, out),
-            Err(CallError::BadArgs(why)) => reply(StatusCode::BAD_REQUEST, json!({"error": why})),
-            Err(CallError::Board(e)) => reply(status_of(&e), json!({"error": e.to_string()})),
-        }
+        answer(op.call(&self.board, identity, args))
+    }
+}
+
+fn answer(result: Result<Value, CallError>) -> Response {
+    match result {
+        Ok(out) => reply(StatusCode::OK, out),
+        Err(CallError::BadArgs(why)) => reply(StatusCode::BAD_REQUEST, json!({"error": why})),
+        Err(CallError::Board(e)) => reply(status_of(&e), json!({"error": e.to_string()})),
     }
 }
 
@@ -151,9 +173,10 @@ fn status_of(e: &BoardError) -> StatusCode {
             StatusCode::FORBIDDEN
         }
         BoardError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        BoardError::Terminal | BoardError::NoSuchMove { .. } | BoardError::Invalid(_) => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
+        BoardError::Terminal
+        | BoardError::NoSuchMove { .. }
+        | BoardError::Invalid(_)
+        | BoardError::Refused(_) => StatusCode::UNPROCESSABLE_ENTITY,
     }
 }
 

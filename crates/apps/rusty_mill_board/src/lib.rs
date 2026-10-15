@@ -8,7 +8,8 @@
 //! - [`store`]: the storage port and an in-memory adapter.
 //! - [`mcp`], [`web`]: the two surfaces over [`api`].
 //! - [`github`]: the GitHub issues adapter.
-//! - [`sync`]: forge reconcile (issues <-> cards) over a `Forge` port.
+//! - [`sync`]: forge reconcile (issues <-> cards) over a `Forge` port; [`syncer`] runs it in the background.
+//! - [`settings`]: admin changes (agents, repositories, projects, roles, GitHub) persisted to files and applied live.
 //! - [`mmdb`]: the durable `rusty_multimodal_db` adapter.
 
 pub mod api;
@@ -20,6 +21,8 @@ pub mod identities;
 pub mod mcp;
 pub mod mmdb;
 pub mod projects;
+pub mod settings;
 pub mod store;
 pub mod sync;
+pub mod syncer;
 pub mod web;

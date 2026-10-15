@@ -173,6 +173,25 @@ impl Projects {
         Self::from_repos(listed)
     }
 
+    /// The JSON a projects file holds for this registry (each repository's own project left out).
+    ///
+    /// # Errors
+    /// If serialisation fails.
+    pub fn file_json(&self) -> Result<String, String> {
+        let repos: BTreeMap<&String, BTreeMap<&String, &Vec<String>>> = self
+            .repos
+            .iter()
+            .map(|(repo, projects)| {
+                (
+                    repo,
+                    projects.iter().filter(|(name, _)| *name != repo).collect(),
+                )
+            })
+            .collect();
+        serde_json::to_string_pretty(&serde_json::json!({ REPOS_KEY: repos }))
+            .map_err(|e| e.to_string())
+    }
+
     /// Whether `name` is a project.
     pub fn contains(&self, name: &str) -> bool {
         self.repo_of(name).is_some()
@@ -350,6 +369,18 @@ mod tests {
             let e = Projects::parse(json).expect_err(json);
             assert!(e.contains(why), "{json}: {e}");
         }
+    }
+
+    #[test]
+    fn the_file_form_round_trips() {
+        let p = Projects::parse(r#"{"repos": {"a": {"x": ["src"], "y": ["docs"]}, "b": {}}}"#)
+            .expect("parse");
+        let json = p.file_json().expect("json");
+        assert!(
+            !json.contains("\"a\": []"),
+            "a repository's own project is implied, not written: {json}"
+        );
+        assert_eq!(Projects::parse(&json).expect("again"), p);
     }
 
     #[test]

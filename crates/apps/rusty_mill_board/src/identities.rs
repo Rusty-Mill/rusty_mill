@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use rusty_crypto_key::constant_time_eq;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::Identity;
 use crate::board::Roles;
@@ -30,8 +30,60 @@ struct Entry {
     projects: Option<Vec<String>>,
 }
 
+/// One credential as the file holds it.
+#[derive(Serialize)]
+struct EntryOut<'a> {
+    token: &'a str,
+    actor: &'a str,
+    role: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projects: &'a Option<Vec<String>>,
+}
+
 /// Token -> identity.
+#[derive(Clone)]
 pub struct Credentials(Vec<(String, Identity)>);
+
+/// Read a file that holds secrets. On Unix it must not be readable by group or others.
+///
+/// # Errors
+/// If it cannot be read or is group/world-accessible.
+pub fn read_private(path: &Path) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "{} holds secrets: chmod 600 it (mode is {:o})",
+                path.display(),
+                mode & 0o777
+            ));
+        }
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// An agent name: plain characters, so it reads well in claims, logs and the UI.
+fn valid_actor(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && name.len() <= 40
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// A fresh random token: 24 bytes of OS randomness as hex.
+///
+/// # Errors
+/// If the OS cannot supply random bytes.
+pub fn new_token() -> Result<String, String> {
+    let mut bytes = [0u8; 24];
+    rusty_rand::fill(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
 
 impl Credentials {
     /// Parse and validate a credentials file's JSON against the board's roles and projects.
@@ -83,28 +135,138 @@ impl Credentials {
         Ok(Self(out))
     }
 
+    /// Wrap for sharing between the web layer and the settings.
+    pub fn shared(self) -> std::sync::Arc<std::sync::RwLock<Self>> {
+        std::sync::Arc::new(std::sync::RwLock::new(self))
+    }
+
     /// Read a credentials file. On Unix it must not be readable by group or others.
     ///
     /// # Errors
     /// If it cannot be read, is group/world-accessible, or does not validate.
     pub fn load(path: &Path, roles: &Roles, projects: &Projects) -> Result<Self, String> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(path)
-                .map_err(|e| format!("{}: {e}", path.display()))?
-                .permissions()
-                .mode();
-            if mode & 0o077 != 0 {
-                return Err(format!(
-                    "{} holds secrets: chmod 600 it (mode is {:o})",
-                    path.display(),
-                    mode & 0o777
-                ));
-            }
+        Self::parse(&read_private(path)?, roles, projects)
+    }
+
+    /// Everyone who holds a credential, without the tokens.
+    pub fn list(&self) -> impl Iterator<Item = &Identity> {
+        self.0.iter().map(|(_, i)| i)
+    }
+
+    /// Whether `actor` holds a credential.
+    pub fn contains(&self, actor: &str) -> bool {
+        self.0.iter().any(|(_, i)| i.actor == actor)
+    }
+
+    /// Add a credential for a new agent; returns its token, which is not kept anywhere else.
+    ///
+    /// # Errors
+    /// If the name is invalid or taken (the role and projects are the caller's to validate).
+    pub fn add(&mut self, identity: Identity) -> Result<String, String> {
+        if !valid_actor(&identity.actor) {
+            return Err(format!(
+                "agent name {:?} must be 1-40 of letters, digits . _ - (starting with a letter or digit)",
+                identity.actor
+            ));
         }
-        let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Self::parse(&json, roles, projects)
+        if self.contains(&identity.actor) {
+            return Err(format!("{:?} already has a credential", identity.actor));
+        }
+        let token = new_token()?;
+        self.0.push((token.clone(), identity));
+        Ok(token)
+    }
+
+    /// Change an agent's role and/or project limit. `projects: Some(None)` lifts the limit.
+    ///
+    /// # Errors
+    /// If there is no such agent.
+    pub fn update(
+        &mut self,
+        actor: &str,
+        role: Option<String>,
+        projects: Option<Option<Vec<String>>>,
+    ) -> Result<(), String> {
+        let (_, i) = self
+            .0
+            .iter_mut()
+            .find(|(_, i)| i.actor == actor)
+            .ok_or_else(|| format!("no agent {actor:?}"))?;
+        if let Some(role) = role {
+            i.role = role;
+        }
+        if let Some(projects) = projects {
+            i.projects = projects;
+        }
+        Ok(())
+    }
+
+    /// Give an agent a new token (the old one stops working); returns it.
+    ///
+    /// # Errors
+    /// If there is no such agent.
+    pub fn rotate(&mut self, actor: &str) -> Result<String, String> {
+        let token = new_token()?;
+        let (old, _) = self
+            .0
+            .iter_mut()
+            .find(|(_, i)| i.actor == actor)
+            .ok_or_else(|| format!("no agent {actor:?}"))?;
+        old.clone_from(&token);
+        Ok(token)
+    }
+
+    /// Take an agent's credential away.
+    ///
+    /// # Errors
+    /// If there is no such agent.
+    pub fn remove(&mut self, actor: &str) -> Result<(), String> {
+        let before = self.0.len();
+        self.0.retain(|(_, i)| i.actor != actor);
+        (self.0.len() < before)
+            .then_some(())
+            .ok_or_else(|| format!("no agent {actor:?}"))
+    }
+
+    /// The file's JSON, tokens included: write it only with owner-only permissions.
+    ///
+    /// # Errors
+    /// If serialisation fails.
+    pub fn to_json(&self) -> Result<String, String> {
+        let entries: Vec<_> = self
+            .0
+            .iter()
+            .map(|(token, i)| EntryOut {
+                token,
+                actor: &i.actor,
+                role: &i.role,
+                projects: &i.projects,
+            })
+            .collect();
+        serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())
+    }
+
+    /// Save to `path`, atomically and readable by the owner only.
+    ///
+    /// # Errors
+    /// If the file cannot be written.
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        rusty_atomic_file::write_private(path, self.to_json()?.as_bytes())
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// A credentials set holding one admin with a fresh token, for a board that has none yet.
+    ///
+    /// # Errors
+    /// If the OS cannot supply random bytes.
+    pub fn first_admin(role: &str) -> Result<(Self, String), String> {
+        let mut creds = Self(Vec::new());
+        let token = creds.add(Identity {
+            actor: "admin".into(),
+            role: role.into(),
+            projects: None,
+        })?;
+        Ok((creds, token))
     }
 
     /// Whose token this is. Compares against every entry, so timing does not

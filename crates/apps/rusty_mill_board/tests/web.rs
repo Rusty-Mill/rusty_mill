@@ -165,7 +165,8 @@ fn per_model() -> SocketAddr {
             &Roles::default(),
             &rusty_mill_board::projects::Projects::default(),
         )
-        .expect("credentials"),
+        .expect("credentials")
+        .shared(),
     ))
 }
 
