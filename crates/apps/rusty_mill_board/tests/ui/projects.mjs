@@ -1,5 +1,5 @@
-// Browser check of the repositories side panel: repositories with counts, a project dropdown for
-// the chosen repository, filtering the board, adding into the selection, and moving a card
+// Browser check of the side panel: repositories (and agents) on the left, the chosen repository's
+// projects in a second pane; filtering the board, adding into the selection, and moving a card
 // between projects from its dialog.
 //
 //   cat > /tmp/p.json <<'J'
@@ -26,6 +26,8 @@ await api("card_add", { title: "RL card", project: "rl" });
 await api("card_add", { title: "Orch card", project: "orch" });
 await api("card_add", { title: "Mill loose card", project: "rusty_mill" });
 await api("card_add", { title: "Skills card", project: "skills" });
+const orch = (await api("board_list", { project: "orch" })).cards[0];
+await api("card_claim", { id: orch.id, actor: "claude", role: "builder" });
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? "/opt/pw-browsers/chromium" });
 const page = await browser.newPage({ viewport: { width: 1300, height: 700 } });
@@ -35,21 +37,23 @@ await page.goto(BASE);
 await page.waitForSelector(".card");
 await page.fill("#actor", "tester");
 const titles = async () => (await page.locator(".card b").allInnerTexts()).sort();
-const repoButtons = async () => (await page.locator("#side .repo").allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
+const items = async (nav) => (await page.locator(`${nav} .item`).allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
+const repoButtons = () => items("#nav1");
 
 check((await titles()).length === 4, "all repositories show every card");
 const rows = await repoButtons();
-check(rows.join("|") === "All repositories 4|rusty_mill 3|super_board 1", `the panel lists repositories with counts (${rows.join("|")}); an empty default repository is hidden`);
-check((await page.locator("#side select").count()) === 0, "no project dropdown until a repository is chosen");
+check(rows.slice(0, 3).join("|") === "All repositories 4|rusty_mill 3|super_board 1", `the panel lists repositories with counts (${rows.join("|")}); an empty default repository is hidden`);
+check(rows.slice(3).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(3).join("|")})`);
+check(await page.locator("#nav2").isHidden(), "no project pane until a repository is chosen");
 
-await page.locator("#side .repo", { hasText: "super_board" }).click();
+await page.locator("#nav1 .item", { hasText: "super_board" }).click();
 check((await titles()).join() === "Skills card", "choosing a repository filters the board");
-await page.locator("#side .repo", { hasText: "rusty_mill" }).click();
+await page.locator("#nav1 .item", { hasText: "rusty_mill" }).click();
 check((await titles()).join() === "Mill loose card,Orch card,RL card", "another repository, its three cards");
-const options = await page.locator("#side select option").allInnerTexts();
-check(options.length === 4 && options[0].startsWith("all projects in rusty_mill"), `the dropdown lists that repository's projects (${options.join("|")})`);
+const options = await items("#nav2");
+check(options.join("|") === "All projects 3|orch 1|rl 1|rusty_mill 1", `the second pane lists that repository's projects (${options.join("|")})`);
 
-await page.locator("#side select").selectOption("rl");
+await page.locator("#nav2 .item", { hasText: "rl" }).click();
 check((await titles()).join() === "RL card", "choosing a project narrows further");
 check((await page.locator(".card .tag.proj").count()) === 0, "no project chip when one project is chosen");
 
@@ -58,7 +62,7 @@ await page.click("#add");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].some((b) => b.textContent === "Added under rl"));
 check((await api("board_list", { project: "rl" })).cards.some((c) => c.title === "Added under rl"), "a card added while a project is chosen belongs to it");
 
-await page.locator("#side select").selectOption("");
+await page.locator("#nav2 .item", { hasText: "All projects" }).click();
 await page.fill("#title", "Added under repo");
 await page.click("#add");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].some((b) => b.textContent === "Added under repo"));
@@ -77,7 +81,11 @@ check(!(await titles()).includes("Added under rl"), "it leaves the filtered view
 
 await page.reload();
 await page.waitForSelector(".card");
-check((await repoButtons()).some((t) => t.startsWith("rusty_mill")) && (await page.locator("#side .repo.on").innerText()).startsWith("rusty_mill"), "the chosen repository is remembered");
+check((await page.locator("#nav1 .item.on", { hasText: "rusty_mill" }).count()) === 1, "the chosen repository is remembered");
+
+await page.locator("#nav1 .item", { hasText: "claude" }).click();
+check((await titles()).join() === "Orch card", "choosing an agent shows only the cards it holds");
+await page.locator("#nav1 .item", { hasText: "Everyone" }).click();
 
 await page.click("#toggle");
 check(!(await page.locator("#side").isVisible()), "the toggle hides the panel");

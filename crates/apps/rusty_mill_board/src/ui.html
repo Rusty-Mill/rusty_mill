@@ -23,17 +23,19 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
-.shell{display:grid;grid-template-columns:230px minmax(0,1fr);min-height:100vh}
+.shell{display:grid;grid-template-columns:auto minmax(0,1fr);min-height:100vh}
 .shell.noside{grid-template-columns:minmax(0,1fr)}.shell.noside #side{display:none}
-#side{background:var(--panel);border-right:1px solid var(--line);padding:12px 8px;overflow-y:auto}
+#side{display:flex;background:var(--panel);border-right:1px solid var(--line)}
+#side nav{width:220px;padding:12px 8px;overflow-y:auto;min-height:100%}
+#side nav+nav{width:210px;border-left:1px solid var(--line)}
 #side h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute);margin:4px 8px 8px}
-#side .repo{display:flex;justify-content:space-between;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 8px;margin-top:2px}
-#side .repo:hover{background:var(--card)}
-#side .repo.on{background:var(--acc);color:#fff}
-#side .repo .n{opacity:.75;font-variant-numeric:tabular-nums}
-#side select{width:100%;margin:2px 0 6px}
+#side h2.sep{margin-top:18px}
+#side .item{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 8px;margin-top:2px;overflow-wrap:anywhere}
+#side .item:hover{background:var(--card)}
+#side .item.on{background:var(--acc);color:#fff}
+#side .item .n{opacity:.75;font-variant-numeric:tabular-nums;white-space:nowrap}
 #toggle{padding:4px 9px}
-@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{border-right:0;border-bottom:1px solid var(--line)}}
+@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}#side nav,#side nav+nav{width:100%;min-height:0;border-left:0}}
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
 dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,92vw)}
 dialog form{display:grid;gap:8px}
@@ -44,7 +46,7 @@ dialog form{display:grid;gap:8px}
 </head>
 <body>
 <div class="shell" id="shell">
-<aside id="side" aria-label="repositories and projects"></aside>
+<aside id="side" aria-label="repositories, projects and agents"><nav id="nav1" aria-label="repositories"></nav><nav id="nav2" aria-label="projects" hidden></nav></aside>
 <div>
 <header>
   <button id="toggle" aria-label="toggle repositories panel" title="Repositories">&#9776;</button>
@@ -63,10 +65,10 @@ dialog form{display:grid;gap:8px}
 const COLS=["backlog","ready","building","qa","review","done","blocked"];
 const tok=new URLSearchParams(location.hash.slice(1)).get("token");
 const $=id=>document.getElementById(id);
-let cards=[],cursor=null,dlg=null,repos={},sel={repo:"",project:""};
+let cards=[],cursor=null,dlg=null,repos={},sel={repo:"",project:"",agent:""};
 const projects=()=>Object.values(repos).flat();
 const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
-const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project);
+const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
 const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{}};
 
@@ -110,25 +112,32 @@ function render(){
   renderSide();syncDialog();
 }
 
-/* The side panel: repositories, and for the chosen one a dropdown of its projects. Both
-   narrow what the board shows; nothing here changes the cards. */
+/* The side panel: repositories (and the agents holding claims) on the left; the chosen
+   repository's projects in a second pane. Everything here only narrows what the board shows. */
 function renderSide(){
-  const s=$("side");s.replaceChildren();
   const names=Object.keys(repos).filter(r=>Object.keys(repos).length===1||count(k=>repoOf(k.project)===r)>0||r===sel.repo);
-  $("shell").classList.toggle("noside",projects().length<2||pref("side")==="0");
-  s.append(el("h2","Repositories"));
-  const row=(label,n,on,fn)=>{const b=el("button",null,"repo"+(on?" on":""));b.type="button";b.append(el("span",label),el("span",String(n),"n"));b.onclick=fn;return b};
-  s.append(row("All repositories",cards.length,!sel.repo,()=>pick("","")));
-  for(const r of names){
-    s.append(row(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
-    if(sel.repo!==r)continue;
-    const d=el("select");d.setAttribute("aria-label","project in "+r);
-    d.append(new Option("all projects in "+r+" ("+count(k=>repoOf(k.project)===r)+")",""));
-    for(const p of repos[r])d.append(new Option(p+" ("+count(k=>k.project===p)+")",p));
-    d.value=sel.project;d.onchange=()=>pick(r,d.value);s.append(d);
+  $("shell").classList.toggle("noside",(projects().length<2&&!cards.some(k=>k.claim))||pref("side")==="0");
+  const item=(label,n,on,fn)=>{const b=el("button",null,"item"+(on?" on":""));b.type="button";b.append(el("span",label),el("span",String(n),"n"));b.onclick=fn;return b};
+  const n1=$("nav1");n1.replaceChildren();
+  if(projects().length>1){
+    n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
+    for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
+  }
+  // Agents: whoever holds a claim, with how many cards. A second filter, independent of the repository.
+  const claims={};cards.forEach(k=>{if(k.claim)claims[k.claim]=(claims[k.claim]||0)+1});
+  const agents=Object.keys(claims).sort();
+  if(agents.length){
+    n1.append(el("h2","Agents","sep"),item("Everyone",cards.filter(k=>k.claim).length,!sel.agent,()=>pickAgent("")));
+    for(const a of agents)n1.append(item(a,claims[a],sel.agent===a,()=>pickAgent(a)));
+  }
+  const n2=$("nav2");n2.hidden=!sel.repo;n2.replaceChildren();
+  if(sel.repo){
+    n2.append(el("h2",sel.repo),item("All projects",count(k=>repoOf(k.project)===sel.repo),!sel.project,()=>pick(sel.repo,"")));
+    for(const p of repos[sel.repo]||[])n2.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(sel.repo,p)));
   }
 }
-function pick(repo,project){sel={repo,project};pref("repo",repo);pref("project",project);render()}
+function pick(repo,project){sel={...sel,repo,project};pref("repo",repo);pref("project",project);render()}
+function pickAgent(agent){sel={...sel,agent};render()}
 
 /* The card dialog is built once and then kept in step with the board without ever
    touching what the person is typing. `dlg.base` is the card as they last saw it. */
