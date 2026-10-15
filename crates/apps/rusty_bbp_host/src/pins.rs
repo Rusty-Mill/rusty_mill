@@ -2,8 +2,10 @@
 //! pinned model has a price, and the two arms of a pair pin the same models.
 //! A pin is the `--model ID` or `--model=ID` argument of the launched program;
 //! argument boundaries are kept, so prompt text that mentions the flag pins
-//! nothing. A `sh -c` launcher is parsed with shell quoting and only its
-//! `claude` commands count; a line that cannot be read literally is an error.
+//! nothing. A `sh -c` launcher is parsed with shell quoting and comments, every
+//! `claude` command in it must pin, and syntax whose effective execution cannot
+//! be established (a nested shell, `eval`, control flow, a computed command, an
+//! unreadable quote) is an error.
 //! The checks read the file, not the run: `bbp pairs` repeats them on what the
 //! harnesses actually used.
 
@@ -90,7 +92,7 @@ impl Lexer {
 
 /// Split a shell command line into simple commands of words, the way a shell
 /// would for the constructs launchers use: single and double quotes, backslash
-/// escapes, and `;` `&` `|` newline between commands. Anything that cannot be
+/// escapes, `#` comments, and `;` `&` `|` newline between commands. Anything that cannot be
 /// read without running the shell (an unterminated quote, a subshell) is an
 /// error: an opaque launcher cannot be shown to pin a model.
 fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
@@ -98,6 +100,11 @@ fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
     let mut chars = script.chars();
     while let Some(c) = chars.next() {
         match c {
+            // A `#` that starts a word comments out the rest of the line.
+            '#' if !lx.live => {
+                let rest = chars.as_str();
+                chars = rest[rest.find('\n').unwrap_or(rest.len())..].chars();
+            }
             '\'' => lx.single_quoted(&mut chars)?,
             '"' => lx.double_quoted(&mut chars)?,
             '\\' => match chars.next() {
@@ -121,19 +128,41 @@ fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
     Ok(lx.commands)
 }
 
-/// The command word of a simple command, past `NAME=value` assignments and
-/// the wrappers that run the next word as is.
-fn command_index(words: &[Word]) -> Option<usize> {
-    words.iter().position(|w| {
+/// Words that run other code or steer control flow, which this reader does not
+/// follow: a `claude` behind any of them would run unseen, or not run.
+const OPAQUE: [&str; 24] = [
+    "eval", "source", ".", "sh", "bash", "dash", "zsh", "ksh", "xargs", "ssh", "su", "sudo", "if",
+    "then", "else", "elif", "fi", "while", "until", "for", "do", "done", "case", "function",
+];
+
+/// The command word of a simple command, past `NAME=value` assignments and the
+/// wrappers that run the next word as is (`exec`, `command`, `nohup`, `time`,
+/// `env`, without options of their own). `Ok(None)` for a command of only
+/// assignments. An error for a command word that is computed, opaque, or hidden
+/// behind a wrapper's options: what runs cannot be established.
+fn command_index(words: &[Word]) -> Result<Option<usize>, String> {
+    for (i, w) in words.iter().enumerate() {
         let assignment = w.text.split_once('=').is_some_and(|(n, _)| {
             !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_')
         });
-        !assignment
-            && !matches!(
-                w.text.as_str(),
-                "exec" | "env" | "command" | "nohup" | "time"
-            )
-    })
+        if assignment {
+            continue;
+        }
+        if matches!(
+            w.text.as_str(),
+            "exec" | "env" | "command" | "nohup" | "time"
+        ) {
+            if words.get(i + 1).is_some_and(|n| n.text.starts_with('-')) {
+                return Err(format!("{} with options is not read literally", w.text));
+            }
+            continue;
+        }
+        if w.dynamic || OPAQUE.contains(&w.text.as_str()) {
+            return Err(format!("the command {:?} is not read literally", w.text));
+        }
+        return Ok(Some(i));
+    }
+    Ok(None)
 }
 
 /// The models named by `--model` in one argv, where each item is one argument
@@ -173,26 +202,32 @@ fn is_shell(program: &str) -> bool {
 /// shell line that cannot be read literally.
 ///
 /// A direct launcher is its argument list: argument boundaries are kept. A
-/// shell launcher (`sh -c SCRIPT`) is parsed with shell quoting, and only the
-/// arguments of a `claude` command in it count, so `--model` inside a quoted
-/// prompt, or in another command, pins nothing.
+/// shell launcher (`sh -c SCRIPT`) is parsed with shell quoting and comments,
+/// and only the arguments of a `claude` command in it count, so `--model`
+/// inside a quoted prompt, a comment or another command pins nothing. Every
+/// `claude` command in the line must pin.
 pub fn pinned_model(l: &Launcher) -> Result<Option<String>, String> {
     let models = match l.args.iter().position(|a| a == "-c") {
         Some(i) if is_shell(&l.program) => {
             let script = l.args.get(i + 1).map_or("", String::as_str);
-            let mut all = Vec::new();
+            let mut per_command: Vec<Vec<String>> = Vec::new();
             for words in shell_commands(script)? {
-                let Some(at) = command_index(&words) else {
+                let Some(at) = command_index(&words)? else {
                     continue;
                 };
                 if words[at].text.rsplit('/').next() != Some("claude") {
                     continue;
                 }
-                all.extend(argv_models(
+                per_command.push(argv_models(
                     words[at + 1..].iter().map(|w| (w.text.as_str(), w.dynamic)),
                 )?);
             }
-            all
+            // Each harness the line starts must pin; one that does not runs on
+            // the default model whatever its neighbours pin.
+            if per_command.iter().any(Vec::is_empty) && per_command.iter().any(|m| !m.is_empty()) {
+                return Err("a claude command in the line pins no model".into());
+            }
+            per_command.concat()
         }
         _ => argv_models(l.args.iter().map(|a| (a.as_str(), false)))?,
     };
@@ -416,7 +451,7 @@ mod tests {
         let env = launcher("sh", &["-c", "A=1 exec claude --model m1 -p x"]);
         assert_eq!(pinned_model(&env).unwrap(), Some("m1".into()));
         let nested = launcher("sh", &["-c", "exec sh -c 'claude --model m1'"]);
-        assert_eq!(pinned_model(&nested).unwrap(), None, "opaque, so no pin");
+        assert!(pinned_model(&nested).is_err(), "a nested shell is opaque");
     }
 
     #[test]
@@ -450,5 +485,79 @@ mod tests {
         for (role, l) in agents.iter() {
             assert_eq!(pinned_model(l).unwrap(), None, "{role}");
         }
+    }
+
+    #[test]
+    fn every_claude_command_in_a_line_must_pin_not_just_one_of_them() {
+        let warm = launcher(
+            "sh",
+            &["-c", "claude --model m1 -p warmup; exec claude -p task"],
+        );
+        let err = pinned_model(&warm).unwrap_err();
+        assert!(err.contains("pins no model"), "{err}");
+        for script in [
+            "exec claude -p task && claude --model m1 -p again",
+            "claude -p a | claude --model m1 -p b",
+            "claude --model m1 -p a\nclaude -p b",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert!(pinned_model(&sh).is_err(), "{script}");
+        }
+        // Every one pinned, to the same model: one pin. To two: an error.
+        let same = launcher(
+            "sh",
+            &["-c", "claude --model m1 -p a; exec claude --model m1 -p b"],
+        );
+        assert_eq!(pinned_model(&same).unwrap(), Some("m1".into()));
+        let two = launcher(
+            "sh",
+            &["-c", "claude --model m1 -p a; exec claude --model m2 -p b"],
+        );
+        assert!(pinned_model(&two).unwrap_err().contains("both"));
+    }
+
+    #[test]
+    fn a_shell_comment_is_not_executed() {
+        // The shell drops everything after an unquoted `#` that starts a word.
+        let commented = launcher(
+            "sh",
+            &["-c", "exec claude -p task # note; claude --model m1"],
+        );
+        assert_eq!(pinned_model(&commented).unwrap(), None);
+        let all = launcher("sh", &["-c", "# claude --model m1\nexec claude -p task"]);
+        assert_eq!(pinned_model(&all).unwrap(), None);
+        // A `#` inside a word or a quote is text, and a later line runs.
+        let word = launcher("sh", &["-c", "exec claude -p a#b --model m1"]);
+        assert_eq!(pinned_model(&word).unwrap(), Some("m1".into()));
+        let quoted = launcher("sh", &["-c", "exec claude -p '# x' --model m1 # tail"]);
+        assert_eq!(pinned_model(&quoted).unwrap(), Some("m1".into()));
+        let next = launcher("sh", &["-c", "# off\nexec claude --model m1 -p x"]);
+        assert_eq!(pinned_model(&next).unwrap(), Some("m1".into()));
+    }
+
+    #[test]
+    fn syntax_whose_effective_execution_cannot_be_established_is_refused() {
+        for script in [
+            "claude --model m1 -p x; sh -c 'claude -p y'", // a nested shell
+            "claude --model m1 -p x; eval \"$CMD\"",       // eval
+            "if true; then claude --model m1 -p x; fi",    // control flow
+            "while true; do claude --model m1 -p x; done",
+            "$(echo claude) --model m1 -p x", // a computed command
+            "env -i claude --model m1 -p x",  // a wrapper with options
+            "xargs claude --model m1",
+            "source ./launch.sh",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert!(pinned_model(&sh).is_err(), "{script}");
+        }
+        // The supported wrappers and the usual setup commands are fine.
+        let ok = launcher(
+            "sh",
+            &[
+                "-c",
+                "set -e; cd /tmp; rm -rf w; A=1 env B=2 exec claude --model m1 -p x",
+            ],
+        );
+        assert_eq!(pinned_model(&ok).unwrap(), Some("m1".into()));
     }
 }
