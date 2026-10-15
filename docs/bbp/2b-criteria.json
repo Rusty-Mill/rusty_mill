@@ -1,10 +1,9 @@
 {
   "status": "proposal, not approved: delete this key when the owner approves",
-  "model": "claude-opus-5-5",
-  "weights": {
-    "input": 1,
-    "output": 5,
-    "cache_creation": 1.25,
-    "cache_read": 0.05
-  }
+  "prices_as_of": "2026-10-06 (from the Claude API documentation; the owner confirms against the price page and updates this date)",
+  "models": {
+    "claude-opus-5-5": { "input": 4.0, "output": 20.0, "cache_creation": 5.0, "cache_read": 0.20 },
+    "claude-sonnet-5-5": { "input": 2.0, "output": 10.0, "cache_creation": 2.5, "cache_read": 0.20 }
+  },
+  "min_commit": null
 }

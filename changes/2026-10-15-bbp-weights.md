@@ -1,10 +1,12 @@
 ---
 category: Added
-changelog: **BBP cost-weighted tokens and pilot reconciliation.** `bbp tokens --criteria FILE` prices the four token counts with the weights in the committed 2b criteria file, `--api-usage FILE` reconciles the capture against the API key's usage and fails on a mismatch, and `bbp pairs` uses the weighted figure for criterion 7.
+changelog: **BBP dollar cost, run pin and pilot reconciliation.** `bbp tokens --criteria FILE` prices each turn's tokens in dollars per model from the committed 2b criteria file, `--api-usage FILE` reconciles tokens and dollars against the API key and fails on a mismatch, and `bbp pairs` uses dollars for criterion 7 and refuses to run unless the repo is a clean checkout containing the pinned minimum commit.
 ---
-## 2026-10-15 - BBP cost-weighted tokens
+## 2026-10-15 - BBP dollar cost, run pin, pilot reconciliation
 
-- **Added:** `docs/bbp/2b-criteria.json` (model and weights; **a proposal, marked as such, not approved**). `tokens::read_criteria` returns it with its sha256 (positive finite weights only; unknown keys ignored). `bbp tokens --criteria FILE` prints the raw parts, the plain sum (`sum`, `total`) and `weighted` side by side, plus the file's sha256. `bbp tokens --api-usage FILE` reconciles the four counts against the key's usage (FILE: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`): a part more than 2% off, or any turn with no harness output, is an error, which is the pilot's stop.
-- **Changed:** `bbp pairs` prices each run with the manifest's `criteria` file (the manifest gains a required `criteria` path) and criterion 7 uses the weighted figure; the output carries `criteria_sha256`.
-- **Why:** raw sums let cache reads dominate a cost they barely carry. The weights are per model, taken from the documented prices (cached 2026-10-06; to be confirmed by the owner), and frozen by being committed with the criteria.
-- **Not done:** the 2% tolerance and the weights are proposals; neither is approved. Not checked against a live usage report.
+- **Added:** `docs/bbp/2b-criteria.json` (a proposal, marked as such): `prices_as_of`, dollars per million tokens per model id (input, output, cache creation, cache read), and `min_commit`. `tokens::read_criteria` returns it with its sha256 (prices finite and positive, a date and at least one model required).
+- **Dollars, per model:** `bbp tokens --criteria FILE` prices each assistant message by its own model (a turn may use a helper model), once per message id, and prints raw parts, the plain sum and `usd` side by side with the file's sha256 and date. **A model with no price is an error, never zero.**
+- **Reconciliation:** `--api-usage FILE` (the four counts, and `cost_usd` when the report has it) is compared with the capture: a part or the dollars more than 2% off, or any turn with no harness output, is an error; the pilot's stop.
+- **Pin:** `bbp pairs` reads `repo` and the criteria's `min_commit` and refuses unless the checkout is clean and its HEAD contains `min_commit` (the merge of the verdict-binding fix); a criteria file with no `min_commit` refuses. The output records `git_sha` and `criteria_sha256`. It pins the checkout the manifest names; it cannot prove the `bbp` binary was built from it.
+- **Changed:** the pairs manifest needs `criteria` and `repo` paths; criterion 7 uses dollars.
+- **Not verified:** prices are from the Claude API documentation (2026-10-06) and need the owner's confirmation; the stream-json line shapes are as I know them, not from a captured log; the reconciliation has hand-made numbers only.
