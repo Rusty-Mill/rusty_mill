@@ -18,6 +18,7 @@ use std::time::Duration;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
+use rusty_tls::handrolled::client12::CipherSuite12;
 use rusty_tls::handrolled::stream::NativeTlsStream;
 use rusty_tls::{Error, TrustPolicy};
 
@@ -713,4 +714,221 @@ fn alpn_offers_at_the_limits_are_accepted() {
         let (result, _) = alpn_result(offer);
         result.unwrap_or_else(|e| panic!("{label}: {e}"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// `tls13_only`: the enforced form of "TLS 1.3 only".
+
+/// Read the ClientHello `stream` sends first, then drop the connection.
+fn first_hello(build: impl FnOnce(TcpStream) -> NativeTlsStream<TcpStream>) -> Vec<u8> {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let server = thread::spawn(move || {
+        let (mut tcp, _) = listener.accept().expect("accept");
+        tcp.set_read_timeout(Some(Duration::from_secs(20))).ok();
+        let mut header = [0u8; 5];
+        tcp.read_exact(&mut header).expect("record header");
+        let mut body = vec![0u8; usize::from(u16::from_be_bytes([header[3], header[4]]))];
+        tcp.read_exact(&mut body).expect("record body");
+        body
+    });
+    let mut stream = build(connect(port));
+    let _ = stream.complete_handshake(); // the "server" never answers
+    drop(stream);
+    server.join().expect("server")
+}
+
+/// The cipher suites and the `supported_versions` list of a ClientHello body.
+fn hello_offer(hello: &[u8]) -> (Vec<u16>, Vec<u16>) {
+    let u16_at = |at: usize| usize::from(u16::from_be_bytes([hello[at], hello[at + 1]]));
+    assert_eq!(hello[0], 1, "a ClientHello");
+    let mut at = 4 + 2 + 32; // handshake header, legacy_version, random
+    at += 1 + usize::from(hello[at]); // legacy_session_id
+    let suites_len = u16_at(at);
+    let suites: Vec<u16> = hello[at + 2..at + 2 + suites_len]
+        .chunks(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .collect();
+    at += 2 + suites_len;
+    at += 1 + usize::from(hello[at]); // legacy_compression_methods
+    let (mut ext, end) = (at + 2, at + 2 + u16_at(at));
+    let mut versions = Vec::new();
+    while ext < end {
+        let (kind, len) = (u16_at(ext), u16_at(ext + 2));
+        if kind == 0x002b {
+            versions = hello[ext + 5..ext + 4 + len]
+                .chunks(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+        }
+        ext += 4 + len;
+    }
+    (suites, versions)
+}
+
+#[test]
+fn a_tls13_only_hello_offers_no_tls12_version_suite_or_fallback_signal() {
+    let pki = pki(NAME);
+    let both = first_hello(|tcp| NativeTlsStream::new(tcp, NAME, &trust(&pki)).expect("builds"));
+    let only = first_hello(|tcp| {
+        NativeTlsStream::new(tcp, NAME, &trust(&pki))
+            .expect("builds")
+            .tls13_only()
+            .expect("before the handshake")
+    });
+
+    // The parse sees what a dual-version hello offers, so the next asserts mean something.
+    let (suites, versions) = hello_offer(&both);
+    assert!(
+        versions.contains(&0x0303),
+        "the default offers 1.2: {versions:x?}"
+    );
+    assert!(CipherSuite12::SUPPORTED
+        .iter()
+        .all(|s| suites.contains(&s.0)));
+
+    let (suites, versions) = hello_offer(&only);
+    assert_eq!(versions, [0x0304], "supported_versions is exactly TLS 1.3");
+    for suite in CipherSuite12::SUPPORTED {
+        assert!(
+            !suites.contains(&suite.0),
+            "no TLS 1.2 suite {:#06x}",
+            suite.0
+        );
+    }
+    assert!(!suites.contains(&0x5600), "no TLS_FALLBACK_SCSV");
+}
+
+#[test]
+fn tls13_only_completes_against_a_tls13_server() {
+    let pki = pki(NAME);
+    let (port, server) = serve(
+        server_config(&pki, &[&rustls::version::TLS13], &[]),
+        Ending::EchoUntilClose,
+    );
+    let mut stream = NativeTlsStream::new(connect(port), NAME, &trust(&pki))
+        .expect("builds")
+        .tls13_only()
+        .expect("before the handshake");
+    stream.write_all(b"hello").expect("writes");
+    assert_eq!(read_exactly(&mut stream, 5), b"hello");
+    stream.shutdown().expect("close_notify");
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest).expect("the peer's close");
+    assert!(server.join().expect("server").clean_close);
+}
+
+#[test]
+fn tls13_only_refuses_a_tls12_only_server_and_stays_failed() {
+    let pki = pki(NAME);
+    let (port, server) = serve(
+        server_config(&pki, &[&rustls::version::TLS12], &[]),
+        Ending::GreetThenCloseNotify,
+    );
+    let mut stream = NativeTlsStream::new(connect(port), NAME, &trust(&pki))
+        .expect("builds")
+        .tls13_only()
+        .expect("before the handshake");
+    let err = stream.complete_handshake().expect_err("no TLS 1.3");
+    assert_eq!(err.kind(), ErrorKind::InvalidData, "{err}");
+    assert!(
+        stream.peer_certificate_der().is_none(),
+        "nothing was established"
+    );
+
+    let mut buf = [0u8; 8];
+    assert!(stream.read(&mut buf).is_err());
+    assert!(stream.write(b"x").is_err());
+    drop(stream);
+    let _ = server.join();
+}
+
+#[test]
+fn tls13_only_after_the_handshake_is_refused_and_does_not_pretend() {
+    let pki = pki(NAME);
+    let (port, server) = serve(
+        server_config(&pki, &[&rustls::version::TLS12], &[]),
+        Ending::EchoUntilClose,
+    );
+    let mut stream = NativeTlsStream::new(connect(port), NAME, &trust(&pki)).expect("builds");
+    stream.complete_handshake().expect("TLS 1.2 handshake");
+    let err = stream.tls13_only().expect_err("too late");
+    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+    let _ = server.join();
+}
+
+/// A transport that serves one script of records and counts how many were read.
+struct Script {
+    records: Vec<Vec<u8>>,
+    next: usize,
+    pending: Vec<u8>,
+}
+
+impl Read for Script {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.pending.is_empty() {
+            let Some(record) = self.records.get(self.next) else {
+                return Err(io::Error::new(ErrorKind::UnexpectedEof, "script ended"));
+            };
+            self.pending = record.clone();
+            self.next += 1;
+        }
+        let n = out.len().min(self.pending.len());
+        out[..n].copy_from_slice(&self.pending[..n]);
+        self.pending.drain(..n);
+        Ok(n)
+    }
+}
+
+impl Write for Script {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn tls13_only_bounds_handshake_reassembly_before_the_server_hello() {
+    // A handshake message that declares ~16 MiB, delivered in legal 16 KiB
+    // records: 02 ff ff ff, then zeros. Nothing here is a valid ServerHello.
+    const RECORD: usize = 1 << 14;
+    const TOTAL: usize = 100; // 1.6 MiB on offer
+    let records: Vec<Vec<u8>> = (0..TOTAL)
+        .map(|i| {
+            let mut body = vec![0u8; RECORD];
+            if i == 0 {
+                body[..4].copy_from_slice(&[2, 0xff, 0xff, 0xff]);
+            }
+            let mut record = vec![22, 3, 3];
+            record.extend_from_slice(&(RECORD as u16).to_be_bytes());
+            record.extend_from_slice(&body);
+            record
+        })
+        .collect();
+    let script = Script {
+        records,
+        next: 0,
+        pending: Vec::new(),
+    };
+    let mut stream = NativeTlsStream::new(script, NAME, &trust(&pki(NAME)))
+        .expect("builds")
+        .tls13_only()
+        .expect("before the handshake");
+
+    let err = stream.complete_handshake().expect_err("oversized");
+    assert_eq!(err.kind(), ErrorKind::InvalidData, "{err}");
+    // 128 KiB is eight records; the ninth crosses the bound. The rest are never read.
+    assert!(
+        stream.get_ref().next <= 9,
+        "read {} of {TOTAL} records before refusing",
+        stream.get_ref().next
+    );
+    let after = stream.get_ref().next;
+    assert!(
+        stream.complete_handshake().is_err(),
+        "the failure is permanent"
+    );
+    assert_eq!(stream.get_ref().next, after, "and reads nothing more");
 }

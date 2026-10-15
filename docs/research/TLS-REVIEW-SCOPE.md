@@ -44,7 +44,8 @@ out. Two ways to make the scope true:
 
 1. **Add a TLS 1.3-only option to `NativeTlsStream`** (small change inside the gated
    module; the consumer sets it). Then the 1.2 client is genuinely not executed. My
-   recommendation.
+   recommendation. **Built** as `NativeTlsStream::tls13_only()`, on the owner's request
+   on 2026-10-14; the scope question below is still the owner's to approve.
 2. **Widen the scope** to the four TLS 1.2 client files (about 2,500 lines).
 
 ## What the reviewer receives
