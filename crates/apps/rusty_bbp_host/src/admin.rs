@@ -3,6 +3,7 @@
 use crate::profiles::{self, ProfileSet};
 use crate::{now, open_driver};
 use rusty_bbp::*;
+use rusty_serde::Serialize;
 use std::path::Path;
 
 /// Read a roster file: a JSON array of roles (see the spec's Role table).
@@ -124,6 +125,23 @@ pub fn assign(
 
 pub fn card(dir: &Path, task: &TaskId) -> Result<Card, String> {
     Ok(open_driver(dir, task)?.state.card())
+}
+
+/// What `bbp card` prints: the core's card and the task's scheduling policy,
+/// which the card does not carry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CardView {
+    #[rusty_serde(flatten)]
+    pub card: Card,
+    pub policy: SchedulingPolicy,
+}
+
+pub fn card_view(dir: &Path, task: &TaskId) -> Result<CardView, String> {
+    let d = open_driver(dir, task)?;
+    Ok(CardView {
+        card: d.state.card(),
+        policy: d.state.policy,
+    })
 }
 
 pub fn tick(dir: &Path, task: &TaskId) -> Result<Response, String> {

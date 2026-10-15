@@ -421,13 +421,230 @@ fn a_verdict_is_refused_until_the_judge_has_read_what_was_appended() {
     assert_eq!(fx.st().state, State::Review);
 }
 
-/// One live turn is unchanged: nothing is tracked, nothing refused.
+/// The read base of a judge is the entry into the stage. A judge that reads
+/// nothing is refused if another principal appended anything readable in this
+/// stage before its turn was granted (here: its first turn was aborted after the
+/// other tester's finding, so the replacement turn starts after the append).
+#[test]
+fn a_judge_that_reads_nothing_is_bound_to_everything_since_the_stage_began() {
+    let mut fx = Fx::concurrent(two_testers(), 2, default_budget());
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    let finding = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", finding));
+    let first = fx.st().turn_of(&RoleId("tester".into())).expect("turn").id;
+    fx.run(&Command::AbortTurn { turn: Some(first) });
+    let second = fx
+        .st()
+        .turn_of(&RoleId("tester".into()))
+        .expect("replacement")
+        .id;
+    assert_ne!(
+        first, second,
+        "the replacement is granted after the finding"
+    );
+    assert_eq!(
+        rejected(fx.verdict("tester", VerdictKind::Approve)),
+        Code::StaleSubject,
+        "it read nothing and the finding predates its grant"
+    );
+    let read = AgentAction::Read {
+        after: None,
+        limit: 50,
+    };
+    assert!(matches!(fx.agent("tester", read), Response::Read { .. }));
+    posted(fx.verdict("tester", VerdictKind::Approve));
+}
+
+/// The terminal path: a judge that keeps retrying a refused verdict without
+/// reading reaches its deadline; the expiry regrants through `grant`, the
+/// replacement is refused the same way, and each replacement counts against
+/// the turns budget until the task escalates. No refusal mints a turn; only
+/// the deadline regrants do.
+#[test]
+fn refused_verdict_retries_end_in_expiry_regrant_and_escalation() {
+    let b = Budget {
+        turns: 6,
+        ..default_budget()
+    };
+    let mut fx = Fx::concurrent(two_testers(), 2, b);
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    let finding = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", finding));
+    let mut expiries = 0;
+    for _ in 0..40 {
+        if fx.st().state == State::Escalated {
+            break;
+        }
+        // Retry hard: refusals mint nothing.
+        let minted = fx.st().spent.turns;
+        for _ in 0..5 {
+            drop(fx.verdict("tester", VerdictKind::Approve));
+        }
+        assert_eq!(fx.st().spent.turns, minted, "refusals mint no turn");
+        assert_ne!(fx.st().state, State::Review, "no verdict was accepted");
+        // Then the deadline passes: the expiry regrants through `grant`.
+        let latest = fx
+            .st()
+            .turns
+            .iter()
+            .map(|t| t.deadline)
+            .max()
+            .expect("live");
+        fx.now = latest;
+        fx.tick();
+        expiries += 1;
+    }
+    let st = fx.st();
+    assert_eq!(st.state, State::Escalated, "after {expiries} expiries");
+    assert!(st.exhausted.contains(&BudgetField::Turns));
+    assert!(
+        st.spent.turns <= st.budget.turns + 1,
+        "one crossing, no more"
+    );
+    assert!(st.turns.is_empty(), "an escalated task holds no turn");
+    let log = fx.d.store.events(&st.task, 0).unwrap();
+    assert_eq!(*st, TaskState::fold(st.task.clone(), &log));
+    let m = rusty_bbp::metrics::of(&log);
+    assert_eq!(m.stale_verdicts, 0);
+}
+
+/// More unread content than a turn can read: the refusal says how much and why,
+/// the turn's own reads run out, the regrants go through `grant`, and the turns
+/// budget escalates. (25 findings are more than one 20-message page, and the
+/// turn may read once.)
+#[test]
+fn unread_content_beyond_reads_per_turn_ends_in_a_clear_refusal_and_escalation() {
+    let b = Budget {
+        turns: 6,
+        reads_per_turn: 1,
+        messages: 200,
+        ..default_budget()
+    };
+    let mut fx = Fx::concurrent(two_testers(), 2, b);
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    for i in 0..25 {
+        let f = Draft::new(MessageKind::Finding, format!("finding {i}"))
+            .refs(vec![Ref::art(cand)])
+            .evidence(vec![Ref::art(report)]);
+        posted(fx.post("tester2", f));
+    }
+    let mut refusals = 0;
+    for _ in 0..40 {
+        if fx.st().state == State::Escalated {
+            break;
+        }
+        // One read: a page of 20, from the start of the unread tail.
+        let first = fx
+            .st()
+            .messages
+            .iter()
+            .rev()
+            .nth(24)
+            .map(|m| MsgId(m.id.0 - 1));
+        let read = AgentAction::Read {
+            after: first,
+            limit: 20,
+        };
+        if !matches!(fx.agent("tester", read.clone()), Response::Read { .. }) {
+            continue; // the turn had already ended; the next loop reads again
+        }
+        match fx.verdict("tester", VerdictKind::Approve) {
+            Response::Rejected(r) => {
+                assert_eq!(r.code, Code::StaleSubject);
+                assert!(
+                    r.detail.contains("item(s) appended in this state")
+                        && r.detail.contains("reads_per_turn is 1"),
+                    "the error says what is unread and why: {}",
+                    r.detail
+                );
+                refusals += 1;
+            }
+            other => panic!("a verdict over 25 unread findings was accepted: {other:?}"),
+        }
+        // The second read exceeds reads_per_turn: the turn ends and is regranted.
+        drop(fx.agent("tester", read));
+    }
+    assert!(refusals >= 1);
+    let st = fx.st();
+    assert_eq!(st.state, State::Escalated, "after {refusals} refusals");
+    assert!(st.exhausted.contains(&BudgetField::Turns));
+    assert!(st.spent.turns <= st.budget.turns + 1, "one crossing");
+    assert!(st.turns.is_empty());
+    let log = fx.d.store.events(&st.task, 0).unwrap();
+    assert_eq!(*st, TaskState::fold(st.task.clone(), &log));
+}
+
+/// A role with scoped reads is bound only by what it can see: another
+/// tester's finding is invisible to it, a human message addressed to it is not.
+#[test]
+fn a_scoped_read_judge_is_bound_only_by_what_it_may_read() {
+    let mut roster = two_testers();
+    roster
+        .iter_mut()
+        .find(|r| r.id.0 == "tester")
+        .expect("tester")
+        .read_messages = ReadScope::Scoped;
+    let mut fx = Fx::concurrent(roster, 2, default_budget());
+    fx.reach_test();
+    stored(fx.report(RunStatus::Passed));
+    let (cand, report) = (fx.st().candidate.expect("candidate"), fx.report_id());
+    // tester2's finding is not visible to the scoped tester: nothing to read.
+    let f = Draft::new(MessageKind::Finding, "no backoff")
+        .refs(vec![Ref::art(cand)])
+        .evidence(vec![Ref::art(report)]);
+    posted(fx.post("tester2", f));
+    let t = fx.st().turn_of(&RoleId("tester".into())).expect("turn");
+    assert!(t.unseen.is_empty(), "invisible content is not unread");
+    // A human message addressed to it is visible, so it is unread until read.
+    let human = posted(fx.human(HumanAction::Post(ask("tester", "mind the retry loop"))));
+    let t = fx.st().turn_of(&RoleId("tester".into())).expect("turn");
+    assert!(t.unseen.contains(&rusty_bbp::state::Unseen::Message(human)));
+    assert_eq!(
+        rejected(fx.verdict("tester", VerdictKind::Approve)),
+        Code::StaleSubject
+    );
+    let read = AgentAction::Read {
+        after: None,
+        limit: 20,
+    };
+    assert!(matches!(fx.agent("tester", read), Response::Read { .. }));
+    posted(fx.verdict("tester", VerdictKind::Approve));
+}
+
+/// One live turn is unchanged: nothing is tracked, nothing refused, whether the
+/// turn is the first or a replacement after an abort.
 #[test]
 fn at_one_live_turn_a_verdict_is_never_refused_for_unread_content() {
     let mut fx = Fx::concurrent(two_testers(), 1, default_budget());
     fx.reach_test();
     stored(fx.report(RunStatus::Passed));
     assert!(fx.st().turns.iter().all(|t| t.unseen.is_empty()));
+    let human = posted(fx.human(HumanAction::Post(ask("tester", "look at the retry loop"))));
+    assert!(
+        fx.st().turns.iter().all(|t| t.unseen.is_empty()),
+        "{human:?}"
+    );
+    let first = fx.st().turn_of(&RoleId("tester".into())).expect("turn").id;
+    fx.run(&Command::AbortTurn { turn: Some(first) });
+    let t = fx
+        .st()
+        .turn_of(&RoleId("tester".into()))
+        .expect("replacement");
+    assert!(
+        t.unseen.is_empty(),
+        "a replacement turn is not seeded at one live turn"
+    );
+    posted(fx.verdict("tester", VerdictKind::Approve));
 }
 
 /// Finalizers are serialized: with two final-decision reviewers and room for

@@ -11,6 +11,7 @@
 //! - [`admin`]: open a task and assign roles.
 //! - [`report`]: the concurrency metrics of a task, from its log.
 //! - [`shadow`]: the shadow records of a task, kept deduped on `rev`, and their tally.
+//! - [`why`]: why each turn was granted, replayed from the log (`bbp why`).
 //! - [`args`]: the small argument parser the `bbp` binary uses.
 
 #![forbid(unsafe_code)]
@@ -26,6 +27,7 @@ pub mod report;
 pub mod runner;
 pub mod shadow;
 pub mod tokens;
+pub mod why;
 
 use rusty_bbp::*;
 use std::path::Path;
