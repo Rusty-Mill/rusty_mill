@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Reproductions of the independent review's findings on the run tooling,
 //! built on real `claude -p --output-format stream-json --verbose` captures in
 //! `fixtures/stream-json/` (captured 2026-10-15 with Claude Code 2.1.300).
@@ -206,7 +207,7 @@ fn five_minute_cache_writes_are_refused_because_the_ttl_was_not_pinned() {
     )
     .unwrap_err();
     assert!(
-        err.contains("5-minute") || err.contains("total_cost_usd"),
+        err.contains("5 minutes") && err.contains("CLAUDE_CODE_PROMPT_CACHE_TTL"),
         "{err}"
     );
 }

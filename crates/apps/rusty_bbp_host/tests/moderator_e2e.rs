@@ -970,6 +970,7 @@ fn capped_run(
             .into(),
             min_commit: None,
         },
+        criteria_sha256: "test".into(),
     });
     let out = moderator::run(&cfg);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1034,12 +1035,15 @@ fn an_evidence_run_refuses_to_start_with_an_unpinned_or_unpriced_role() {
 
 const SONNET_PRICES: &str = r#"{"prices_as_of":"t","models":{"claude-sonnet-5-5":{"input":2.0,"output":10.0,"cache_creation_5m":2.5,"cache_creation_1h":4.0,"cache_read":0.10}}}"#;
 
-fn sonnet_criteria(dir: &Path) -> rusty_bbp_host::tokens::Criteria {
+fn sonnet_cap(dir: &Path, usd: f64) -> moderator::CostCap {
     let f = dir.join("criteria.json");
     std::fs::write(&f, SONNET_PRICES).expect("write criteria");
-    rusty_bbp_host::tokens::read_criteria(&f)
-        .expect("criteria")
-        .0
+    let (criteria, criteria_sha256) = rusty_bbp_host::tokens::read_criteria(&f).expect("criteria");
+    moderator::CostCap {
+        usd,
+        criteria,
+        criteria_sha256,
+    }
 }
 
 fn opened(tag: &str) -> (PathBuf, TaskId, PathBuf) {
@@ -1093,10 +1097,7 @@ fn spend_that_lands_before_the_run_ends_is_still_checked_against_the_cap() {
     let rev = card(&dir, &task).rev;
     human::perform(&dir, &task, "cancel", &["stop"], Some(rev)).expect("cancel");
     let mut cfg = config(&dir, &task, repo, Launchers::default(), 10);
-    cfg.cost_cap = Some(moderator::CostCap {
-        usd: 0.5,
-        criteria: sonnet_criteria(&dir),
-    });
+    cfg.cost_cap = Some(sonnet_cap(&dir, 0.5));
     let err = moderator::run(&cfg).expect_err("over the cap is not a clean finish");
     assert!(err.contains("cost cap reached"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1111,14 +1112,34 @@ fn a_task_started_with_a_cap_cannot_be_resumed_without_one() {
         .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
     let launchers = Launchers::default().with("planner", planner);
     let mut first = config(&dir, &task, repo.clone(), launchers.clone(), 2);
-    first.cost_cap = Some(moderator::CostCap {
-        usd: 1000.0,
-        criteria: sonnet_criteria(&dir),
-    });
+    first.cost_cap = Some(sonnet_cap(&dir, 1000.0));
     let e1 = moderator::run(&first).expect_err("wall limit");
     assert!(e1.contains("wall limit"), "{e1}");
     let second = config(&dir, &task, repo, launchers, 2);
     let e2 = moderator::run(&second).expect_err("refused");
     assert!(e2.contains("refusing to start"), "{e2}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_evidence_runs_harness_gets_both_cache_ttl_variables_pinned_to_one_hour() {
+    let (dir, task, repo) = opened("ttl-env");
+    let mut planner = script(
+        &dir,
+        "planner",
+        "echo \"$CLAUDE_CODE_PROMPT_CACHE_TTL $CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL\" > \"$1/ttl.txt\"\nsleep 30",
+    );
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 3);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    // Even if the environment says otherwise.
+    std::env::set_var("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m");
+    let _ = moderator::run(&cfg);
+    std::env::remove_var("CLAUDE_CODE_PROMPT_CACHE_TTL");
+    let got = std::fs::read_to_string(dir.join("ttl.txt")).expect("the harness ran");
+    assert_eq!(got.trim(), "1h 1h");
     let _ = std::fs::remove_dir_all(&dir);
 }

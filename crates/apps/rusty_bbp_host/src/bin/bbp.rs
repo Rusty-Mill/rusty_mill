@@ -148,6 +148,7 @@ fn run() -> Result<String, String> {
                             .filter(|u: &f64| u.is_finite() && *u > 0.0)
                             .ok_or("--max-usd must be a positive number")?,
                         criteria: tokens::read_criteria(&PathBuf::from(file))?.0,
+                        criteria_sha256: tokens::read_criteria(&PathBuf::from(file))?.1,
                     }),
                     (None, None) => None,
                     _ => return Err("--max-usd and --criteria go together".into()),

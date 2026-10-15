@@ -1,15 +1,36 @@
-//! `bbp tokens`: model tokens per turn, read from the harness output the
-//! moderator already keeps (`agents/<task>/turn-N.log`). The core cannot see
-//! tokens; a launcher that runs `claude -p ... --output-format stream-json`
-//! prints them. A turn whose harness was killed has no final `result` line, so
-//! its tokens are the sum of the assistant messages it printed (a lower bound,
-//! marked `complete: false`).
+//! `bbp tokens`: what each turn cost, read from the harness output the
+//! moderator already keeps (`agents/<task>/turn-N.log`).
+//!
+//! The harness is `claude -p ... --output-format stream-json --verbose`
+//! (Claude Code 2.1.300; real captures are in `tests/fixtures/stream-json/`).
+//! The `result` line is the only complete account of a turn: its `modelUsage`
+//! is per model and includes subagents, its `total_cost_usd` is the harness's
+//! own figure. The per-message `usage` on `assistant` lines is not: its
+//! `output_tokens` is a placeholder from `message_start`, and subagent messages
+//! are not printed at all. So dollars are priced only from a valid final
+//! `result`; a turn without one (a killed harness, a crash, an interrupt, which
+//! prints a result with zeroed usage) has an unknown cost, never a smaller one.
+//! `modelUsage` does not split cache writes by lifetime (the `usage` object
+//! does, but excludes subagents), so cache writes are priced at the 1-hour
+//! rate and the moderator pins both cache TTL variables to 1 hour; a run that
+//! shows 5-minute writes, or whose priced total disagrees with the harness's
+//! `total_cost_usd`, is refused.
 
 use crate::moderator::log_path;
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+
+/// The cache lifetime the moderator pins for the main agent and for subagents.
+pub const PINNED_CACHE_TTL: &str = "1h";
+/// The environment variables that set them.
+pub const CACHE_TTL_ENV: [&str; 2] = [
+    "CLAUDE_CODE_PROMPT_CACHE_TTL",
+    "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
+];
+/// How far the priced total may be from the harness's `total_cost_usd`.
+pub const COST_CROSS_CHECK: f64 = 0.02;
 
 /// The API's split of cache writes by lifetime, when the usage carries it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,8 +52,8 @@ pub struct Usage {
     pub cache_creation_input_tokens: u64,
     #[rusty_serde(default)]
     pub cache_read_input_tokens: u64,
-    /// The breakdown of `cache_creation_input_tokens` by lifetime. Absent when
-    /// the harness does not print it, which reads as all zeros.
+    /// The breakdown of `cache_creation_input_tokens` by lifetime, where a
+    /// source prints it (an API usage report does; `modelUsage` does not).
     #[rusty_serde(default)]
     pub cache_creation: CacheCreation,
 }
@@ -66,7 +87,9 @@ impl Usage {
     /// Cache writes split into (5-minute, everything else). Only tokens the
     /// usage proves were 5-minute writes are priced at the 5-minute rate; the
     /// rest, including any a missing or short breakdown leaves unexplained, is
-    /// priced at the 1-hour rate, so cost is never understated.
+    /// priced at the 1-hour rate, so cost is never understated. (This holds
+    /// while a model's 1-hour price is not below its 5-minute price, which
+    /// [`Prices::check`] enforces.)
     pub fn cache_writes(&self) -> (u64, u64) {
         let five = self
             .cache_creation
@@ -89,7 +112,9 @@ pub struct Prices {
 }
 
 impl Prices {
-    /// Every price finite and positive: a zero price would make a count free.
+    /// Every price finite and positive, and a 1-hour write no cheaper than a
+    /// 5-minute one: a zero price would make a count free, and the rule that a
+    /// missing split can only raise the cost needs the order.
     fn check(&self) -> Result<(), String> {
         let all = [
             self.input,
@@ -98,11 +123,13 @@ impl Prices {
             self.cache_creation_1h,
             self.cache_read,
         ];
-        if all.iter().all(|p| p.is_finite() && *p > 0.0) {
-            Ok(())
-        } else {
-            Err("prices must be finite and positive".into())
+        if !all.iter().all(|p| p.is_finite() && *p > 0.0) {
+            return Err("prices must be finite and positive".into());
         }
+        if self.cache_creation_1h < self.cache_creation_5m {
+            return Err("cache_creation_1h must not be below cache_creation_5m".into());
+        }
+        Ok(())
     }
 }
 
@@ -169,17 +196,20 @@ impl Criteria {
 }
 
 /// Compare the harness's tokens (and, when both sides have it, dollars) with
-/// the API key's usage, part by part. A part off by more than `tolerance` (a fraction of the API's figure), or a turn
-/// with no harness output, is a mismatch.
+/// the API key's usage, part by part. A part off by more than `tolerance` (a
+/// fraction of the API's figure), a non-finite dollar figure, or a turn whose
+/// cost is unknown is a mismatch.
 pub fn reconcile(
     seen: &Usage,
     api: &Usage,
     cost: Option<(f64, f64)>,
-    without_output: u64,
+    unknown_turns: u64,
     tolerance: f64,
 ) -> Result<(), String> {
-    if without_output > 0 {
-        return Err(format!("{without_output} turn(s) left no harness output"));
+    if unknown_turns > 0 {
+        return Err(format!(
+            "{unknown_turns} turn(s) have no usable harness result, so they cannot be reconciled"
+        ));
     }
     let parts = [
         ("input", seen.input_tokens, api.input_tokens),
@@ -195,21 +225,20 @@ pub fn reconcile(
             api.cache_read_input_tokens,
         ),
     ];
-    let split = api.cache_creation.ephemeral_5m_input_tokens
-        + api.cache_creation.ephemeral_1h_input_tokens
-        > 0;
-    let five = (
-        "cache_creation_5m",
-        seen.cache_creation.ephemeral_5m_input_tokens,
-        api.cache_creation.ephemeral_5m_input_tokens,
-    );
     let mut bad: Vec<String> = parts
         .iter()
-        .chain(split.then_some(&five))
         .filter(|(_, s, a)| (*s as f64 - *a as f64).abs() > tolerance * *a as f64)
         .map(|(n, s, a)| format!("{n}: bbp {s}, api {a}"))
         .collect();
+    // The harness's modelUsage does not split cache writes, so there is no
+    // split on this side to compare with the report's; the dollars below carry
+    // the lifetime (a 5-minute write is priced lower).
     if let Some((seen_usd, api_usd)) = cost {
+        if !seen_usd.is_finite() || !api_usd.is_finite() {
+            return Err(format!(
+                "cost is not a finite number (bbp {seen_usd}, api {api_usd})"
+            ));
+        }
         if (seen_usd - api_usd).abs() > tolerance * api_usd {
             bad.push(format!("cost: bbp ${seen_usd:.4}, api ${api_usd:.4}"));
         }
@@ -222,6 +251,47 @@ pub fn reconcile(
             bad.join("; ")
         ))
     }
+}
+
+// ---------------------------------------------------------------- parsing
+
+/// A `modelUsage` entry of a `result` line.
+#[derive(Deserialize)]
+struct ModelUsageLine {
+    #[rusty_serde(rename = "inputTokens", default)]
+    input: u64,
+    #[rusty_serde(rename = "outputTokens", default)]
+    output: u64,
+    #[rusty_serde(rename = "cacheReadInputTokens", default)]
+    cache_read: u64,
+    #[rusty_serde(rename = "cacheCreationInputTokens", default)]
+    cache_creation: u64,
+}
+
+impl ModelUsageLine {
+    fn usage(&self) -> Usage {
+        Usage {
+            input_tokens: self.input,
+            output_tokens: self.output,
+            cache_creation_input_tokens: self.cache_creation,
+            cache_read_input_tokens: self.cache_read,
+            cache_creation: CacheCreation::default(),
+        }
+    }
+}
+
+/// The `usage` object of a `result` line, where the harness reports how the
+/// requests were served.
+#[derive(Deserialize)]
+struct ResultUsage {
+    #[rusty_serde(default)]
+    speed: Option<String>,
+    #[rusty_serde(default)]
+    service_tier: Option<String>,
+    #[rusty_serde(default)]
+    inference_geo: Option<String>,
+    #[rusty_serde(default)]
+    cache_creation: CacheCreation,
 }
 
 #[derive(Deserialize)]
@@ -239,45 +309,73 @@ struct Line {
     #[rusty_serde(rename = "type")]
     kind: String,
     #[rusty_serde(default)]
-    usage: Option<Usage>,
-    #[rusty_serde(default)]
     message: Option<Message>,
+    #[rusty_serde(default)]
+    is_error: bool,
+    #[rusty_serde(default)]
+    terminal_reason: Option<String>,
+    #[rusty_serde(default)]
+    total_cost_usd: Option<f64>,
+    #[rusty_serde(default)]
+    fast_mode_state: Option<String>,
+    #[rusty_serde(default)]
+    usage: Option<ResultUsage>,
+    #[rusty_serde(rename = "modelUsage", default)]
+    model_usage: BTreeMap<String, ModelUsageLine>,
 }
 
-/// The tokens one harness printed and whether its final `result` line was
-/// there. Lines that are not JSON, or carry no usage, are skipped. Assistant
-/// messages are counted once per message id (a message is printed once per
-/// content block).
-pub fn parse(stream: &str) -> (Usage, bool) {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut assistant = Usage::default();
-    for line in stream.lines() {
-        let Ok(l) = rusty_serde::json::from_str::<Line>(line) else {
-            continue;
-        };
-        match (l.kind.as_str(), l.usage, l.message) {
-            ("result", Some(u), _) => return (u, true),
-            (
-                "assistant",
-                _,
-                Some(Message {
-                    id, usage: Some(u), ..
-                }),
-            ) => {
-                if id.is_none_or(|id| seen.insert(id)) {
-                    assistant = assistant.plus(u);
-                }
+/// A final `result` line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResultInfo {
+    pub is_error: bool,
+    pub terminal_reason: Option<String>,
+    pub total_cost_usd: Option<f64>,
+    /// Per model, subagents included.
+    pub models: BTreeMap<String, Usage>,
+    speed: Option<String>,
+    service_tier: Option<String>,
+    inference_geo: Option<String>,
+    fast_mode_state: Option<String>,
+    /// 5-minute cache writes the main agent's `usage` reports.
+    five_minute_writes: u64,
+}
+
+/// The last `result` line of a harness's output. A log can hold several (a
+/// background task starts another turn); the last is the account of the whole
+/// session. Lines that are not JSON are skipped.
+pub fn last_result(stream: &str) -> Option<ResultInfo> {
+    stream
+        .lines()
+        .rev()
+        .filter_map(|l| rusty_serde::json::from_str::<Line>(l).ok())
+        .find(|l| l.kind == "result")
+        .map(|l| {
+            let u = l.usage;
+            ResultInfo {
+                is_error: l.is_error,
+                terminal_reason: l.terminal_reason,
+                total_cost_usd: l.total_cost_usd,
+                models: l
+                    .model_usage
+                    .iter()
+                    .map(|(m, u)| (m.clone(), u.usage()))
+                    .collect(),
+                fast_mode_state: l.fast_mode_state,
+                speed: u.as_ref().and_then(|u| u.speed.clone()),
+                service_tier: u.as_ref().and_then(|u| u.service_tier.clone()),
+                inference_geo: u.as_ref().and_then(|u| u.inference_geo.clone()),
+                five_minute_writes: u
+                    .as_ref()
+                    .map_or(0, |u| u.cache_creation.ephemeral_5m_input_tokens),
             }
-            _ => {}
-        }
-    }
-    (assistant, false)
+        })
 }
 
-/// The assistant messages' usage per model, once per message id. Dollars are
-/// priced from this, not from the `result` line, because a turn can use more
-/// than one model (a helper agent) and the `result` line does not say which
-/// tokens were whose. A message that names no model is filed under `unknown`.
+/// The assistant messages' usage per model, once per message id. A lower bound
+/// only: each message's `output_tokens` is a placeholder from `message_start`
+/// and subagent messages are not printed. Used for the live cap and for what a
+/// turn without a result is known to have spent. A message that names no model
+/// is filed under `unknown`.
 pub fn by_model(stream: &str) -> BTreeMap<String, Usage> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: BTreeMap<String, Usage> = BTreeMap::new();
@@ -296,6 +394,12 @@ pub fn by_model(stream: &str) -> BTreeMap<String, Usage> {
         else {
             continue;
         };
+        // Claude Code files its own error messages (an unrecognized model, an
+        // API failure) under the model name `<synthetic>`, with zero usage. It
+        // is not a model anyone can be billed for.
+        if model.as_deref() == Some("<synthetic>") {
+            continue;
+        }
         if id.is_none_or(|id| seen.insert(id)) {
             let m = model.unwrap_or_else(|| "unknown".into());
             let e = out.entry(m).or_default();
@@ -305,6 +409,82 @@ pub fn by_model(stream: &str) -> BTreeMap<String, Usage> {
     out
 }
 
+/// What a turn's output says it cost.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cost {
+    /// A valid final result, priced and cross-checked.
+    Known {
+        usd: f64,
+        usage: Usage,
+        models: BTreeMap<String, Usage>,
+    },
+    /// No usable result: why.
+    Unknown(String),
+}
+
+/// Price a harness's output. `Err` means the output is refusable (a model with
+/// no price, fast mode, a priority tier, regional inference, 5-minute cache
+/// writes, or a total that disagrees with the harness's own `total_cost_usd`);
+/// `Ok(Unknown)` means there is nothing to price.
+pub fn price_turn(stream: &str, c: &Criteria) -> Result<Cost, String> {
+    let Some(r) = last_result(stream) else {
+        return Ok(Cost::Unknown("no result line".into()));
+    };
+    if r.is_error || r.terminal_reason.as_deref() != Some("completed") {
+        return Ok(Cost::Unknown(format!(
+            "result is not a completed turn (is_error {}, terminal_reason {:?})",
+            r.is_error, r.terminal_reason
+        )));
+    }
+    let usage = r.models.values().fold(Usage::default(), |a, u| a.plus(*u));
+    if r.models.is_empty() || usage.total() == 0 {
+        return Ok(Cost::Unknown("the result reports no usage".into()));
+    }
+    for (what, got, ok) in [
+        ("speed", &r.speed, "standard"),
+        ("service_tier", &r.service_tier, "standard"),
+        ("fast_mode_state", &r.fast_mode_state, "off"),
+    ] {
+        if let Some(v) = got {
+            if v != ok {
+                return Err(format!(
+                    "{what} is {v:?}, which the price file does not price"
+                ));
+            }
+        }
+    }
+    if let Some(g) = &r.inference_geo {
+        if !g.is_empty() && g != "global" {
+            return Err(format!(
+                "inference_geo is {g:?}, which the price file does not price"
+            ));
+        }
+    }
+    if r.five_minute_writes > 0 {
+        return Err(format!(
+            "{} cache tokens were written for 5 minutes; {} must be pinned to {}",
+            r.five_minute_writes,
+            CACHE_TTL_ENV.join(" and "),
+            PINNED_CACHE_TTL
+        ));
+    }
+    let usd = c.dollars(&r.models)?;
+    let total = r
+        .total_cost_usd
+        .filter(|t| t.is_finite())
+        .ok_or("the result has no total_cost_usd to cross-check")?;
+    if (usd - total).abs() > COST_CROSS_CHECK * total + 1e-9 {
+        return Err(format!(
+            "priced ${usd:.6} but the harness reports total_cost_usd ${total:.6}: the price file or the cache TTL does not match what ran"
+        ));
+    }
+    Ok(Cost::Known {
+        usd,
+        usage,
+        models: r.models,
+    })
+}
+
 /// One turn's tokens.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TurnTokens {
@@ -312,12 +492,18 @@ pub struct TurnTokens {
     pub role: String,
     /// The turn was revoked: its work was thrown away.
     pub revoked: bool,
-    /// The harness printed a final `result`; false is a lower bound.
+    /// The turn has a valid final result; false means its cost is unknown and
+    /// `usage` is only what the printed assistant messages show.
     pub complete: bool,
+    /// Why the cost is unknown, when it is.
+    pub unknown: Option<String>,
     pub usage: Usage,
-    /// Dollars, when a criteria file priced it.
+    /// Dollars, when a criteria file priced a complete turn.
     pub usd: Option<f64>,
-    /// The assistant messages' tokens per model (what `usd` is priced from).
+    /// A floor on the dollars: the complete turn's cost, or what its printed
+    /// assistant messages add up to. For the live cap, never for criteria.
+    pub usd_floor: Option<f64>,
+    /// The tokens per model (from the result when complete).
     pub models: BTreeMap<String, Usage>,
 }
 
@@ -326,14 +512,18 @@ pub struct TaskTokens {
     pub turns: Vec<TurnTokens>,
     /// The four counts summed over every turn.
     pub sum: Usage,
-    /// Dollars over every turn, when a criteria file priced them.
+    /// Dollars over every turn: known only if every turn is.
     pub usd: Option<f64>,
+    /// A floor on the dollars over every turn.
+    pub usd_floor: Option<f64>,
     /// Every turn, revoked ones included.
     pub total: u64,
     pub revoked: u64,
     /// Turns that were granted but left no harness output (no launcher, or it
     /// never started): their cost is unknown, not zero.
     pub without_output: u64,
+    /// Turns with output but no usable result.
+    pub unknown_turns: u64,
 }
 
 /// Per-turn tokens of `task`, from its log and the harness output under `dir`.
@@ -357,49 +547,80 @@ pub fn of(
         turns: Vec::new(),
         sum: Usage::default(),
         usd: None,
+        usd_floor: None,
         total: 0,
         revoked: 0,
         without_output: 0,
+        unknown_turns: 0,
     };
+    let (mut usd, mut floor) = (0.0, 0.0);
+    let mut all_known = true;
     for e in events {
         let Event::TurnGranted { role, turn, .. } = e else {
             continue;
         };
         let Ok(text) = std::fs::read_to_string(log_path(dir, task, *turn)) else {
             out.without_output += 1;
+            all_known = false;
             continue;
         };
-        let (usage, complete) = parse(&text);
-        let revoked = revoked.contains(turn);
+        let lower = by_model(&text);
+        let cost = criteria
+            .map(|c| price_turn(&text, c).map_err(|e| format!("turn {}: {e}", turn.0)))
+            .transpose()?;
+        let (complete, unknown, turn_usd, models) = match cost {
+            Some(Cost::Known { usd, models, .. }) => (true, None, Some(usd), models),
+            Some(Cost::Unknown(why)) => (false, Some(why), None, lower.clone()),
+            None => {
+                // No prices given: the tokens only, from the result if there is
+                // one, else the printed messages.
+                match last_result(&text).filter(|r| !r.is_error && !r.models.is_empty()) {
+                    Some(r) => (true, None, None, r.models),
+                    None => (
+                        false,
+                        Some("no usable result line".into()),
+                        None,
+                        lower.clone(),
+                    ),
+                }
+            }
+        };
+        let usage = models.values().fold(Usage::default(), |a, u| a.plus(*u));
+        let turn_floor = match (criteria, turn_usd) {
+            (Some(_), Some(d)) => Some(d),
+            (Some(c), None) => Some(
+                c.dollars(&lower)
+                    .map_err(|e| format!("turn {}: {e}", turn.0))?,
+            ),
+            _ => None,
+        };
+        let is_revoked = revoked.contains(turn);
         out.total += usage.total();
         out.sum = out.sum.plus(usage);
-        if revoked {
+        if is_revoked {
             out.revoked += usage.total();
         }
-        let models = by_model(&text);
-        let usd = criteria
-            .map(|c| {
-                c.dollars(&models)
-                    .map_err(|e| format!("turn {}: {e}", turn.0))
-            })
-            .transpose()?;
-        out.usd = match (out.usd, usd) {
-            (Some(a), Some(b)) => Some(a + b),
-            (None, Some(b)) => Some(b),
-            (a, None) => a,
-        };
+        if !complete {
+            out.unknown_turns += 1;
+            all_known = false;
+        }
+        usd += turn_usd.unwrap_or(0.0);
+        floor += turn_floor.unwrap_or(0.0);
         out.turns.push(TurnTokens {
             turn: turn.0,
             role: role.0.clone(),
-            revoked,
+            revoked: is_revoked,
             complete,
+            unknown,
             usage,
-            usd,
+            usd: turn_usd,
+            usd_floor: turn_floor,
             models,
         });
     }
-    if criteria.is_some() && out.usd.is_none() {
-        out.usd = Some(0.0);
+    if criteria.is_some() {
+        out.usd_floor = Some(floor);
+        out.usd = all_known.then_some(usd);
     }
     Ok(out)
 }
@@ -453,10 +674,24 @@ pub fn json(
             cache_read_input_tokens: a.cache_read_input_tokens,
             cache_creation: a.cache_creation,
         };
-        let cost = a.cost_usd.zip(t.usd);
-        // The API reports dollars only if the file has them; both sides or neither.
-        let cost = cost.map(|(api_usd, seen)| (seen, api_usd));
-        reconcile(&t.sum, &api, cost, t.without_output, RECONCILE_TOLERANCE)?;
+        // The report's dollars need ours: with no prices or an unknown turn
+        // the dollar check cannot run, and silently skipping it would pass.
+        let cost = match a.cost_usd {
+            None => None,
+            Some(api_usd) => Some((
+                t.usd.ok_or(
+                    "the API report has a cost, but this capture has no priced total (pass --criteria, and every turn needs a result)",
+                )?,
+                api_usd,
+            )),
+        };
+        reconcile(
+            &t.sum,
+            &api,
+            cost,
+            t.without_output + t.unknown_turns,
+            RECONCILE_TOLERANCE,
+        )?;
     }
     rusty_serde::json::to_string(&Printed {
         tokens: t,
@@ -470,85 +705,6 @@ pub fn json(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-
-    const RESULT: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"server_tool_use":{"web_search_requests":0}},"total_cost_usd":0.1}"#;
-
-    fn assistant(id: &str, input: u64, output: u64) -> String {
-        format!(
-            r#"{{"type":"assistant","message":{{"id":"{id}","usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#
-        )
-    }
-
-    #[test]
-    fn the_result_line_is_authoritative() {
-        let s = format!("{}\nnot json\n{RESULT}\n", assistant("m1", 1, 1));
-        let (u, complete) = parse(&s);
-        assert!(complete);
-        assert_eq!((u.input_tokens, u.output_tokens, u.total()), (10, 5, 1115));
-    }
-
-    #[test]
-    fn a_killed_harness_is_summed_from_assistant_messages_once_per_id() {
-        // The same message printed twice (two content blocks) counts once.
-        let s = [
-            assistant("m1", 3, 2),
-            assistant("m1", 3, 2),
-            assistant("m2", 4, 1),
-        ]
-        .join("\n");
-        let (u, complete) = parse(&s);
-        assert!(!complete);
-        assert_eq!((u.input_tokens, u.output_tokens), (7, 3));
-    }
-
-    #[test]
-    fn output_with_no_usage_is_zero_and_incomplete() {
-        assert_eq!(
-            parse("hello\n{\"type\":\"system\"}\n"),
-            (Usage::default(), false)
-        );
-    }
-
-    #[test]
-    fn a_task_sums_every_turn_and_marks_revoked_and_missing_output() {
-        let dir = std::env::temp_dir().join(format!("bbp-tokens-{}", std::process::id()));
-        let task = TaskId("T".into());
-        let t = |n| TurnId(n);
-        let granted = |n, role: &str| Event::TurnGranted {
-            role: RoleId(role.into()),
-            turn: t(n),
-            kind: TurnKind::Default,
-            deadline: Time(0),
-            return_to: None,
-            slice: None,
-        };
-        for (n, body) in [(1, RESULT.to_owned()), (2, assistant("m", 7, 3))] {
-            let p = log_path(&dir, &task, t(n));
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, body).unwrap();
-        }
-        let events = [
-            granted(1, "planner"),
-            granted(2, "coder2"),
-            granted(3, "tester"), // no output
-            Event::TurnEnded {
-                turn: t(2),
-                cause: TurnEnd::Revoked,
-            },
-        ];
-        let got = of(&dir, &task, &events, None).unwrap();
-        assert_eq!(got.total, 1115 + 10);
-        assert_eq!(got.revoked, 10);
-        assert_eq!(got.without_output, 1);
-        assert_eq!(
-            got.turns
-                .iter()
-                .map(|x| (x.role.as_str(), x.revoked, x.complete))
-                .collect::<Vec<_>>(),
-            [("planner", false, true), ("coder2", true, false)]
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 
     const OPUS: Prices = Prices {
         input: 4.0,
@@ -587,15 +743,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dollars_are_price_per_million_times_tokens() {
-        // 1M of each part at Opus prices. No split is printed, so the cache
-        // writes are priced at the 1-hour rate: 4 + 20 + 8 + 0.2.
-        let u = usage(1_000_000, 1_000_000, 1_000_000, 1_000_000);
-        assert!((u.dollars(&OPUS) - 32.2).abs() < 1e-9);
-        assert_eq!(u.total(), 4_000_000, "the plain sum is unchanged");
-    }
-
     fn written(total: u64, five: u64, hour: u64) -> Usage {
         Usage {
             cache_creation_input_tokens: total,
@@ -608,44 +755,33 @@ mod tests {
     }
 
     #[test]
+    fn dollars_are_price_per_million_times_tokens() {
+        // No split is printed, so cache writes are priced at the 1-hour rate:
+        // 4 + 20 + 8 + 0.2 for 1M of each part.
+        let u = usage(1_000_000, 1_000_000, 1_000_000, 1_000_000);
+        assert!((u.dollars(&OPUS) - 32.2).abs() < 1e-9);
+        assert_eq!(u.total(), 4_000_000, "the plain sum is unchanged");
+    }
+
+    #[test]
     fn a_printed_split_prices_five_minute_and_one_hour_writes_separately() {
-        // 1M five-minute at $5 and 1M one-hour at $8 on Opus.
         let u = written(2_000_000, 1_000_000, 1_000_000);
         assert!((u.dollars(&OPUS) - 13.0).abs() < 1e-9);
-        assert_eq!(u.cache_writes(), (1_000_000, 1_000_000));
-        // And on Sonnet: 2.5 + 4.
         assert!((u.dollars(&SONNET) - 6.5).abs() < 1e-9);
     }
 
     #[test]
     fn writes_the_split_does_not_explain_are_priced_at_the_one_hour_rate() {
-        // No split at all: everything is 1h (never understated).
         let none = written(1_000_000, 0, 0);
         assert_eq!(none.cache_writes(), (0, 1_000_000));
-        assert!((none.dollars(&OPUS) - 8.0).abs() < 1e-9);
-        // A split that accounts for only part of the total: the rest is 1h.
         let short = written(1_000_000, 300_000, 0);
         assert_eq!(short.cache_writes(), (300_000, 700_000));
-        // A split claiming more 5m than the total is capped at the total.
-        let over = written(100, 500, 0);
-        assert_eq!(over.cache_writes(), (100, 0));
-        // A split can only lower the price against the 1h-for-all rule.
+        assert_eq!(
+            written(100, 500, 0).cache_writes(),
+            (100, 0),
+            "capped at the total"
+        );
         assert!(short.dollars(&OPUS) < none.dollars(&OPUS));
-    }
-
-    #[test]
-    fn the_split_is_read_from_the_usage_object_and_summed_across_messages() {
-        let line = |id: &str, five: u64, hour: u64| {
-            format!(
-                r#"{{"type":"assistant","message":{{"id":"{id}","model":"claude-opus-5-5","usage":{{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":{},"cache_creation":{{"ephemeral_5m_input_tokens":{five},"ephemeral_1h_input_tokens":{hour}}}}}}}}}"#,
-                five + hour
-            )
-        };
-        let s = [line("a", 100, 0), line("b", 0, 50), line("a", 100, 0)].join("\n");
-        let m = by_model(&s);
-        let u = m["claude-opus-5-5"];
-        assert_eq!(u.cache_creation_input_tokens, 150);
-        assert_eq!(u.cache_writes(), (100, 50));
     }
 
     #[test]
@@ -662,22 +798,40 @@ mod tests {
         );
     }
 
+    fn assistant(id: &str, model: Option<&str>, i: u64) -> String {
+        let m = model.map_or(String::new(), |m| format!(r#""model":"{m}","#));
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{id}",{m}"usage":{{"input_tokens":{i},"output_tokens":0}}}}}}"#
+        )
+    }
+
     #[test]
-    fn by_model_prices_each_message_by_its_own_model_once_per_id() {
-        let line = |id: &str, model: &str, i: u64| {
-            format!(
-                r#"{{"type":"assistant","message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":{i},"output_tokens":0}}}}}}"#
-            )
-        };
+    fn by_model_files_each_message_under_its_model_once_per_id_and_keeps_unnamed_ones() {
         let s = [
-            line("m1", "claude-opus-5-5", 10),
-            line("m1", "claude-opus-5-5", 10),
-            line("m2", "claude-sonnet-5-5", 7),
+            assistant("m1", Some("claude-opus-5-5"), 10),
+            assistant("m1", Some("claude-opus-5-5"), 10),
+            assistant("m2", Some("claude-sonnet-5-5"), 7),
+            assistant("m3", None, 5),
         ]
         .join("\n");
         let got = by_model(&s);
         assert_eq!(got["claude-opus-5-5"].input_tokens, 10);
         assert_eq!(got["claude-sonnet-5-5"].input_tokens, 7);
+        // A message with no model is kept (and later refused as unpriced), not dropped.
+        assert_eq!(got["unknown"].input_tokens, 5);
+        assert!(criteria().dollars(&got).is_err());
+    }
+
+    #[test]
+    fn the_last_result_line_is_chosen_and_non_json_lines_are_skipped() {
+        let line = |cost: f64| {
+            format!(
+                r#"{{"type":"result","is_error":false,"terminal_reason":"completed","total_cost_usd":{cost},"modelUsage":{{"m":{{"inputTokens":1,"outputTokens":1,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}}}}"#
+            )
+        };
+        let s = format!("garbage\n{}\nnot json\n{}\n", line(1.0), line(2.0));
+        assert_eq!(last_result(&s).unwrap().total_cost_usd, Some(2.0));
+        assert_eq!(last_result("nothing\n"), None);
     }
 
     #[test]
@@ -689,10 +843,25 @@ mod tests {
         assert_eq!(c.models["claude-opus-5-5"], OPUS);
         assert_eq!(c.min_commit, None);
         assert_eq!(h, Sha256::of(body.as_bytes()).hex());
-        for bad in [body.replace("\"cache_read\":0.2", "\"cache_read\":0"), body.replace("2026-10-06", " "), body.replace("\"cache_creation_1h\":8", "\"cache_creation_1h\":0"), body.replace("\"claude-opus-5-5\":{\"input\":4,\"output\":20,\"cache_creation_5m\":5,\"cache_creation_1h\":8,\"cache_read\":0.2}", "")] {
+        for bad in [
+            body.replace("\"cache_read\":0.2", "\"cache_read\":0"),
+            body.replace("2026-10-06", " "),
+            body.replace("\"cache_creation_1h\":8", "\"cache_creation_1h\":0"),
+            // A 1-hour write cheaper than a 5-minute write breaks the rule
+            // that a missing split can only raise the price.
+            body.replace("\"cache_creation_1h\":8", "\"cache_creation_1h\":4"),
+            body.replace("\"claude-opus-5-5\":{\"input\":4,\"output\":20,\"cache_creation_5m\":5,\"cache_creation_1h\":8,\"cache_read\":0.2}", ""),
+        ] {
             std::fs::write(&f, &bad).unwrap();
             assert!(read_criteria(&f).is_err(), "{bad}");
         }
+        // Equal 5-minute and 1-hour prices are allowed.
+        std::fs::write(
+            &f,
+            body.replace("\"cache_creation_1h\":8", "\"cache_creation_1h\":5"),
+        )
+        .unwrap();
+        assert!(read_criteria(&f).is_ok());
         std::fs::remove_file(f).unwrap();
     }
 
@@ -706,22 +875,39 @@ mod tests {
         );
         let err = reconcile(&usage(1000, 500, 200, 9_700), &api, None, 0, 0.02).unwrap_err();
         assert!(err.contains("cache_read: bbp 9700, api 10000"), "{err}");
+        // Each part, on its own, is compared.
+        for (name, bad) in [
+            ("input", usage(900, 500, 200, 10_000)),
+            ("output", usage(1000, 400, 200, 10_000)),
+            ("cache_creation", usage(1000, 500, 100, 10_000)),
+        ] {
+            assert!(
+                reconcile(&bad, &api, None, 0, 0.02)
+                    .unwrap_err()
+                    .contains(name),
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn dollars_are_reconciled_too_when_the_api_reports_them() {
+    fn dollars_are_reconciled_too_and_only_when_finite() {
         let u = usage(1, 1, 1, 1);
         assert!(reconcile(&u, &u, Some((10.0, 10.1)), 0, 0.02).is_ok());
-        let err = reconcile(&u, &u, Some((10.0, 10.5)), 0, 0.02).unwrap_err();
-        assert!(err.contains("cost:"), "{err}");
+        assert!(reconcile(&u, &u, Some((10.0, 10.5)), 0, 0.02)
+            .unwrap_err()
+            .contains("cost:"));
+        for (a, b) in [(f64::NAN, 1.0), (1.0, f64::NAN), (1.0, f64::INFINITY)] {
+            assert!(reconcile(&u, &u, Some((a, b)), 0, 0.02).is_err(), "{a} {b}");
+        }
     }
 
     #[test]
-    fn a_turn_with_no_output_stops_the_reconciliation_even_if_the_rest_matches() {
+    fn a_turn_with_no_usable_result_stops_the_reconciliation_even_if_the_rest_matches() {
         let u = usage(1, 1, 1, 1);
         assert!(reconcile(&u, &u, None, 1, 0.02)
             .unwrap_err()
-            .contains("no harness output"));
+            .contains("no usable"));
     }
 
     #[test]
@@ -737,5 +923,57 @@ mod tests {
         let (c, h) = read_criteria(&f).unwrap();
         assert!(c.models.contains_key("claude-opus-5-5"));
         assert_eq!(h.len(), 64);
+    }
+
+    fn log_dir(tag: &str) -> (std::path::PathBuf, TaskId) {
+        let d = std::env::temp_dir().join(format!("tok-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        (d, TaskId("T".into()))
+    }
+
+    fn granted(n: u64, role: &str) -> Event {
+        Event::TurnGranted {
+            role: RoleId(role.into()),
+            turn: TurnId(n),
+            kind: TurnKind::Default,
+            deadline: Time(0),
+            return_to: None,
+            slice: None,
+        }
+    }
+
+    #[test]
+    fn a_task_with_no_turns_has_a_zero_priced_total_and_a_revoked_turn_is_counted() {
+        let (dir, task) = log_dir("none");
+        let none = of(&dir, &task, &[], Some(&criteria())).unwrap();
+        assert_eq!(
+            (none.usd, none.unknown_turns, none.without_output),
+            (Some(0.0), 0, 0)
+        );
+        let p = log_path(&dir, &task, TurnId(1));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let line = r#"{"type":"result","is_error":false,"terminal_reason":"completed","total_cost_usd":0.000008,"modelUsage":{"claude-sonnet-5-5":{"inputTokens":4,"outputTokens":0,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}"#;
+        std::fs::write(&p, line).unwrap();
+        let events = [
+            granted(1, "coder2"),
+            Event::TurnEnded {
+                turn: TurnId(1),
+                cause: TurnEnd::Revoked,
+            },
+        ];
+        let t = of(&dir, &task, &events, Some(&criteria())).unwrap();
+        assert!(
+            t.turns[0].revoked && t.revoked == 4,
+            "a revoked turn's tokens are counted"
+        );
+        assert!((t.usd.unwrap() - 0.000008).abs() < 1e-12, "and its dollars");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_turn_with_no_log_file_is_unknown_and_makes_the_task_unknown() {
+        let (dir, task) = log_dir("nolog");
+        let t = of(&dir, &task, &[granted(1, "planner")], Some(&criteria())).unwrap();
+        assert_eq!((t.without_output, t.usd), (1, None));
     }
 }

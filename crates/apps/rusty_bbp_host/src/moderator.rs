@@ -108,6 +108,9 @@ pub struct Config {
 pub struct CostCap {
     pub usd: f64,
     pub criteria: crate::tokens::Criteria,
+    /// The sha256 of the criteria file, recorded with the cap when the task
+    /// starts so a resume must use the same prices and the same cap.
+    pub criteria_sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -307,6 +310,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         crate::pins::check_run(&cfg.launchers, &cap.criteria)
             .map_err(|e| format!("moderator: refusing to start: {e}"))?;
     }
+    check_evidence_marker(cfg)?;
     let _lock = lock(&cfg.dir, &cfg.task)?;
     let mut d = open_driver(&cfg.dir, &cfg.task)?;
     let started = Instant::now();
@@ -346,6 +350,14 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         let state = d.state.state;
         let seen = Instant::now();
         visits.observe(state, seen);
+        // Before the terminal return, so spend that lands between the last poll
+        // and the close is still held against the cap.
+        if let Some(cap) = &cfg.cost_cap {
+            if let Err(e) = enforce_cap(cfg, &d, cap) {
+                sup.kill_harnesses()?;
+                return Err(e);
+            }
+        }
         if matches!(state, State::Closed | State::Cancelled) {
             sup.kill_harnesses()?;
             return Ok(Outcome {
@@ -359,12 +371,6 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         if started.elapsed() > cfg.max_wall {
             sup.kill_harnesses()?;
             return Err(format!("moderator: wall limit reached in state {state:?}"));
-        }
-        if let Some(cap) = &cfg.cost_cap {
-            if let Err(e) = enforce_cap(cfg, &d, cap) {
-                sup.kill_harnesses()?;
-                return Err(e);
-            }
         }
 
         // The runner works on its own thread so the loop keeps ticking,
@@ -459,7 +465,10 @@ fn enforce_cap<S: Store>(cfg: &Config, d: &Driver<S>, cap: &CostCap) -> Result<(
     let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
     let t = crate::tokens::of(&cfg.dir, &cfg.task, &events, Some(&cap.criteria))
         .map_err(|e| format!("moderator: cannot enforce the cost cap: {e}"))?;
-    let usd = t.usd.unwrap_or(0.0);
+    // The floor: a complete turn's cost, and for a turn still running what its
+    // printed messages show. It can only rise, so crossing the cap on it is
+    // crossing the cap.
+    let usd = t.usd_floor.unwrap_or(0.0);
     if usd > cap.usd {
         return Err(format!(
             "moderator: cost cap reached (${usd:.4} over ${:.4})",
@@ -467,6 +476,41 @@ fn enforce_cap<S: Store>(cfg: &Config, d: &Driver<S>, cap: &CostCap) -> Result<(
         ));
     }
     Ok(())
+}
+
+/// A task first started with a cap is an evidence run: every later start or
+/// resume must carry the same cap and the same price file, or it is refused,
+/// so a cap cannot be dropped by restarting.
+fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
+    let file = task_dir(&cfg.dir, "evidence", &cfg.task).with_extension("json");
+    let recorded = std::fs::read_to_string(&file).ok();
+    match (&cfg.cost_cap, recorded) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(
+            "moderator: refusing to start: this task was started as an evidence run; \
+             resume it with the same --max-usd and --criteria"
+                .into(),
+        ),
+        (Some(cap), None) => {
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&file, marker_text(cap)).map_err(|e| format!("{}: {e}", file.display()))
+        }
+        (Some(cap), Some(text)) if text == marker_text(cap) => Ok(()),
+        (Some(_), Some(_)) => Err(
+            "moderator: refusing to start: this task was started with a different --max-usd or \
+             price file"
+                .into(),
+        ),
+    }
+}
+
+fn marker_text(cap: &CostCap) -> String {
+    format!(
+        "{{\"max_usd\":{},\"criteria_sha256\":\"{}\"}}\n",
+        cap.usd, cap.criteria_sha256
+    )
 }
 
 fn run_once(cfg: &Config) -> Result<Response, String> {
@@ -528,9 +572,16 @@ fn spawn(
         .env("BBP_ROLE", role_name)
         .env("BBP_BIN", bbp)
         .env("BBP_MCP_CONFIG", &mcp)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err));
+        .stdin(Stdio::null());
+    // An evidence run pins the cache lifetime for the main agent and for
+    // subagents: they default to different lifetimes, and the price file
+    // prices cache writes at the 1-hour rate.
+    if cfg.cost_cap.is_some() {
+        for var in crate::tokens::CACHE_TTL_ENV {
+            cmd.env(var, crate::tokens::PINNED_CACHE_TTL);
+        }
+    }
+    cmd.stdout(Stdio::from(log)).stderr(Stdio::from(err));
     // Its own process group, so everything the harness forks dies with it.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
