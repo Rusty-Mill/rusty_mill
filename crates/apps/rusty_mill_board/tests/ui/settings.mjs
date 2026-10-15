@@ -96,6 +96,24 @@ check(builder.status === 403 || builder.status === 200, "(sanity) the builder to
 const denied = await api(rotated, "settings_agent_remove", { name: "admin" });
 check(denied.status === 403, "an agent without admin cannot change settings");
 
+// The administrator rotates their own token: the page must carry on with the new one.
+await page.click("#gear");
+await page.waitForFunction(() => document.querySelector("#settings").open);
+await dialog.locator("tr", { hasText: "admin" }).first().getByRole("button", { name: "New token" }).click();
+await dialog.locator(".secret code").waitFor();
+const adminToken = await dialog.locator(".secret code").innerText();
+check(adminToken !== TOKEN && adminToken.length === 48, "rotating your own token shows the new one");
+check((await api(TOKEN, "board_whoami")).status === 401, "the old admin token stops working");
+check((await api(adminToken, "settings_get")).status === 200, "the new admin token works");
+check((await dialog.locator("table tr").count()) >= 3, "the settings view refreshed with the new token");
+check((await page.evaluate(() => location.hash)).includes(adminToken), "and a reload would keep working");
+const before = await page.locator(".card").count();
+await dialog.getByRole("button", { name: "Close" }).click();
+await page.fill("#title", "after rotation");
+await page.click("#add");
+await page.waitForFunction((n) => document.querySelectorAll(".card").length === n + 1, before);
+check(true, "card calls succeed after self-rotation");
+
 check(errors.length === 0, `no page errors ${errors.join("; ")}`);
 await browser.close();
 if (failures.length) { console.error(`\n${failures.length} check(s) failed`); process.exit(1); }

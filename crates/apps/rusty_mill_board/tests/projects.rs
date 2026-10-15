@@ -4,6 +4,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, mpsc};
+use std::thread;
+use std::time::Duration;
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{
@@ -261,4 +264,189 @@ fn a_card_reassigned_after_the_read_is_refused_not_half_taken() {
         (now.project.as_str(), now.column, now.claim),
         ("orch", Column::Ready, None)
     );
+}
+
+// ---- the registry and the cards that depend on it change under one lock
+
+/// A store whose writes pause once armed: it says it has reached the write, then waits to be released.
+struct Gated {
+    inner: MemStore,
+    armed: Arc<AtomicBool>,
+    reached: Mutex<mpsc::Sender<()>>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl Gated {
+    fn pause(&self) {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.reached.lock().expect("lock").send(()).expect("send");
+            self.release.lock().expect("lock").recv().expect("release");
+        }
+    }
+}
+
+impl Store for Gated {
+    fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
+        self.inner.get(id)
+    }
+    fn list(&self) -> Result<Vec<Card>, BoardError> {
+        self.inner.list()
+    }
+    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+        self.pause();
+        self.inner.insert(card, event)
+    }
+    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+        self.pause();
+        self.inner.replace(card, event)
+    }
+    fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {
+        self.inner.events_since(after, limit)
+    }
+    fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
+        self.inner.last_event_id()
+    }
+}
+
+/// A board over a gated store; `go` lets the paused write continue.
+/// The `armed` flag pauses the next write; `at_write` says it has paused.
+fn gated_board() -> (
+    Arc<Board<Gated>>,
+    Arc<AtomicBool>,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let armed = Arc::new(AtomicBool::new(false));
+    let (reached, at_write) = mpsc::channel();
+    let (go, release) = mpsc::channel();
+    let store = Gated {
+        inner: MemStore::default(),
+        armed: armed.clone(),
+        reached: Mutex::new(reached),
+        release: Mutex::new(release),
+    };
+    let board = Board::new(store, Roles::default()).with_projects(projects());
+    (Arc::new(board), armed, at_write, go)
+}
+
+fn without_rl() -> Projects {
+    Projects::parse(r#"{"orch": ["crates/apps/rusty_orch"]}"#).expect("projects")
+}
+
+const SOON: Duration = Duration::from_millis(200);
+
+#[test]
+fn a_project_cannot_be_removed_while_a_card_is_being_added_to_it() {
+    let (b, armed, at_write, go) = gated_board();
+    let human = actor(&b, "nano", "human", None);
+    armed.store(true, Ordering::SeqCst);
+    let adding = {
+        let (b, human) = (b.clone(), human.clone());
+        thread::spawn(move || b.add_in(&human, "rl", "late", "", vec![]))
+    };
+    at_write.recv().expect("the add reached its write");
+
+    let (done, finished) = mpsc::channel();
+    let removing = {
+        let b = b.clone();
+        thread::spawn(move || {
+            let r = b.set_projects(without_rl(), |_| Ok(()));
+            done.send(()).expect("send");
+            r
+        })
+    };
+    assert!(
+        finished.recv_timeout(SOON).is_err(),
+        "the removal waits for the add in flight"
+    );
+    go.send(()).expect("go");
+    assert!(adding.join().expect("add").is_ok());
+    let removed = removing.join().expect("remove");
+    assert!(matches!(removed, Err(BoardError::Refused(m)) if m.contains("still has cards")));
+    assert!(
+        b.projects().contains("rl"),
+        "the project and its card stay together"
+    );
+    assert_eq!(b.list(None).expect("list").len(), 1);
+}
+
+#[test]
+fn a_project_cannot_be_removed_while_a_card_is_being_assigned_to_it() {
+    let (b, armed, at_write, go) = gated_board();
+    let human = actor(&b, "nano", "human", None);
+    let card = b.add(&human, "x", "", vec![]).expect("add").id;
+    armed.store(true, Ordering::SeqCst);
+    let assigning = {
+        let (b, human) = (b.clone(), human.clone());
+        thread::spawn(move || b.assign(card, "rl", &human))
+    };
+    at_write.recv().expect("the assign reached its write");
+
+    let (done, finished) = mpsc::channel();
+    let removing = {
+        let b = b.clone();
+        thread::spawn(move || {
+            let r = b.set_projects(without_rl(), |_| Ok(()));
+            done.send(()).expect("send");
+            r
+        })
+    };
+    assert!(finished.recv_timeout(SOON).is_err(), "the removal waits");
+    go.send(()).expect("go");
+    assert!(assigning.join().expect("assign").is_ok());
+    assert!(removing.join().expect("remove").is_err());
+    assert_eq!(b.get(card).expect("card").project, "rl");
+    assert!(b.projects().contains("rl"));
+}
+
+#[test]
+fn a_failed_save_of_a_new_project_leaves_no_card_in_it_and_changes_nothing() {
+    let (b, ..) = gated_board();
+    let human = actor(&b, "nano", "human", None);
+    let with_new = Projects::parse(
+        r#"{"rl": ["crates/apps/rocket_league"], "orch": ["crates/apps/rusty_orch"], "fresh": ["x"]}"#,
+    )
+    .expect("projects");
+
+    let (saving, at_save) = mpsc::channel();
+    let (fail, failing) = mpsc::channel::<()>();
+    let setting = {
+        let b = b.clone();
+        thread::spawn(move || {
+            b.set_projects(with_new, |_| {
+                saving.send(()).expect("send");
+                failing.recv().expect("fail");
+                Err("disk full".into())
+            })
+        })
+    };
+    at_save.recv().expect("the registry is being saved");
+
+    let (done, finished) = mpsc::channel();
+    let adding = {
+        let (b, human) = (b.clone(), human.clone());
+        thread::spawn(move || {
+            let r = b.add_in(&human, "fresh", "early", "", vec![]);
+            done.send(()).expect("send");
+            r
+        })
+    };
+    assert!(
+        finished.recv_timeout(SOON).is_err(),
+        "a project that is not durable yet takes no cards"
+    );
+    fail.send(()).expect("fail");
+    assert_eq!(
+        setting.join().expect("set"),
+        Err(BoardError::Refused("disk full".into()))
+    );
+    assert_eq!(
+        adding.join().expect("add").map(|c| c.title),
+        Err(BoardError::Invalid("unknown project"))
+    );
+    assert!(
+        !b.projects().contains("fresh"),
+        "live registry is the old one"
+    );
+    assert!(b.list(None).expect("list").is_empty(), "no orphan card");
 }

@@ -89,7 +89,7 @@ dialog form{display:grid;gap:8px}
 <div id="toast" role="alert"></div>
 <script>
 const COLS=["backlog","ready","building","qa","review","done","blocked"];
-const tok=new URLSearchParams(location.hash.slice(1)).get("token");
+let tok=new URLSearchParams(location.hash.slice(1)).get("token");
 const $=id=>document.getElementById(id);
 let cards=[],cursor=null,dlg=null,repos={},sel={repo:"",project:"",agent:""};
 const projects=()=>Object.values(repos).flat();
@@ -282,7 +282,7 @@ function drawSettings(){
   d.replaceChildren(box);
 }
 /* After a change: re-read the settings, the board's roles and projects, and redraw. */
-async function changed(){cfg=await setting("settings_get");await loadMeta();drawSettings();render()}
+async function changed(){try{cfg=await setting("settings_get");await loadMeta()}catch(e){toast(e.message)}drawSettings();render()}
 function guard(errBox,fn){return async()=>{errBox.textContent="";try{await fn();await changed()}catch(e){errBox.textContent=e.message;errBox.scrollIntoView?.({block:"nearest"})}}}
 const field=(tag,props={})=>Object.assign(el(tag),props);
 const unwritable=what=>el("p","This is not kept in a file, so it is read-only here. Start the board with --settings-dir DIR (or "+what+") to manage it from this view.","note");
@@ -317,7 +317,8 @@ function agentsTab(){
     const role=roleSelect(a.role),pick=projectPicker(a.projects),acts=el("td");
     const save=el("button","Save"),rot=el("button","New token"),del=el("button","Remove");[save,rot,del].forEach(b=>{b.type="button"});
     save.onclick=guard(err,()=>setting("settings_agent_update",{agent:{name:a.actor,role:role.value,projects:pick.value()}}));
-    rot.onclick=guard(err,async()=>{const r=await setting("settings_agent_rotate",{name:a.actor});secret={name:a.actor,token:r.token}});
+    rot.onclick=guard(err,async()=>{const r=await setting("settings_agent_rotate",{name:a.actor});secret={name:a.actor,token:r.token};
+      if(a.actor===who().actor){tok=r.token;try{history.replaceState(null,"","#token="+r.token)}catch(e){}}});
     del.onclick=guard(err,async()=>{if(!confirm("Remove "+a.actor+"? Its token stops working."))return;await setting("settings_agent_remove",{name:a.actor});secret=null});
     acts.append(save," ",rot," ",del);
     const r=el("td"),p=el("td");r.append(role);p.append(pick);tr.append(name,r,p,acts);tbl.append(tr);

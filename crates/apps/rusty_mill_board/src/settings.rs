@@ -449,17 +449,12 @@ impl Settings {
                 )));
             }
         }
-        let old = self.board.projects();
-        self.board.set_projects(new.clone())?;
-        let written = new.file_json().and_then(|json| {
+        // Persisted inside the board's critical section: live and disk change together or not at all.
+        self.board.set_projects(new.clone(), |projects| {
+            let json = projects.file_json()?;
             rusty_atomic_file::write(&path, json.as_bytes())
                 .map_err(|e| format!("{}: {e}", path.display()))
-        });
-        if let Err(why) = written {
-            // Put back what was running: nothing changed on disk.
-            let _ = self.board.set_projects(old);
-            return Err(refused(why));
-        }
+        })?;
         Ok(json!({ "repos": new }))
     }
 

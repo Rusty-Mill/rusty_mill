@@ -114,13 +114,7 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
     /// A message naming the stage and the first problem found.
     pub fn validate(&self) -> Result<(), String> {
         let roles = self.board.roles().map_err(|e| e.to_string())?;
-        if self.scope.is_none() && self.board.project_count().map_err(|e| e.to_string())? > 1 {
-            return Err(
-                "the board has several projects: pass --project NAME so this runner only \
-                 works (and may only change) one application"
-                    .into(),
-            );
-        }
+        self.check_scope()?;
         for s in &self.stages {
             let caps = roles
                 .get(&s.role)
@@ -149,12 +143,34 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
         Ok(())
     }
 
+    /// The board's projects can change while this runner lives: before taking work and before
+    /// committing it, check the runner's scope still fits. A runner without a project needs a
+    /// board with one project; one with a project needs it to exist and be this credential's.
+    fn check_scope(&self) -> Result<(), String> {
+        let err = |e: ApiError| e.to_string();
+        match &self.scope {
+            None if self.board.project_count().map_err(err)? > 1 => Err(
+                "the board has several projects: pass --project NAME so this runner only \
+                 works (and may only change) one application"
+                    .into(),
+            ),
+            None => Ok(()),
+            Some(scope) => self
+                .board
+                .foreign(&scope.project, &[])
+                .map(drop)
+                .map_err(err),
+        }
+    }
+
     /// One pass: up to `max_parallel` cards, each worked to the end of its stage.
     /// Later stages and later columns are served first, oldest card first.
     ///
     /// # Errors
     /// If the board cannot be listed.
     pub fn tick(&self) -> Result<Vec<Step>, ApiError> {
+        self.check_scope()
+            .map_err(|message| ApiError { status: 0, message })?;
         let mut jobs: Vec<(&Stage, Card)> = Vec::new();
         let mut taken = HashSet::new();
         // Finish work in progress before starting new: later stages first, and
@@ -295,6 +311,7 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
 impl<B: BoardApi, W: Work> Runner<B, W> {
     /// The changed files this runner's project may not change, if there are any.
     fn stray_changes(&self, dir: &std::path::Path) -> Result<Option<Vec<String>>, String> {
+        self.check_scope()?;
         let Some(scope) = &self.scope else {
             return Ok(None);
         };
@@ -866,6 +883,59 @@ mod tests {
         assert_eq!(r.work.commits.load(Ordering::Relaxed), 1);
         assert_eq!(r.work.discards.load(Ordering::Relaxed), 0);
         assert_eq!(column(&r, rl), Qa);
+    }
+
+    #[test]
+    fn a_path_moved_to_another_project_mid_stage_is_not_committed() {
+        let fake = Fake::default().then("build", Ok(true));
+        *fake.changed.lock().expect("lock") = vec!["crates/apps/rocket_league/src/lib.rs".into()];
+        let (r, cards) = setup_projects(fake);
+        let r = r.with_scope(scope("rl"));
+        // While the stage runs, settings give rocket_league's path to the other project.
+        let board = r.board.0.clone();
+        *r.work.before_run.lock().expect("lock") = Some(Box::new(move || {
+            let moved = rusty_mill_board::projects::Projects::parse(
+                r#"{"rl": ["crates/apps/rl_new"], "orch": ["crates/apps/rusty_orch", "crates/apps/rocket_league"]}"#,
+            )
+            .expect("projects");
+            board.set_projects(moved, |_| Ok(())).expect("moved");
+        }));
+        r.tick().expect("tick");
+        assert_eq!(
+            r.work.commits.load(Ordering::Relaxed),
+            0,
+            "stale scope committed"
+        );
+        assert_eq!(r.work.discards.load(Ordering::Relaxed), 1);
+        let rl = cards.iter().find(|(p, _)| p == "rl").expect("card").1;
+        assert_eq!(column(&r, rl), Blocked);
+    }
+
+    #[test]
+    fn an_unscoped_runner_stops_when_the_board_gains_projects() {
+        let board: Arc<Shared> = Arc::new(Board::with_clock(
+            Box::new(MemStore::default()) as Box<dyn rusty_mill_board::store::Store>,
+            BoardRoles::default(),
+            tick_clock,
+        ));
+        let human = board.roles().actor("nano", "human").expect("role");
+        let card = board.add(&human, "t", "do it", vec![]).expect("add");
+        board.move_card(card.id, Ready, &human).expect("ready");
+        let r = Runner::new(
+            Local(board.clone()),
+            Fake::default().then("build", Ok(true)),
+            parse(STAGES).expect("stages"),
+            "mill-runner",
+            1,
+            vec![],
+        );
+        r.validate().expect("one project: no scope needed");
+        board
+            .set_projects(projects(), |_| Ok(()))
+            .expect("more projects");
+        let e = r.tick().expect_err("now it needs a project");
+        assert!(e.message.contains("several projects"), "{e}");
+        assert_eq!(column(&r, card.id), Ready, "no work was taken");
     }
 
     #[test]

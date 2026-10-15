@@ -14,6 +14,10 @@ Adding an agent meant editing a file and restarting; nothing could be changed fr
 - **Validate, write, then apply.** Every change is checked, written atomically (`rusty_atomic_file`; files
   with secrets owner-only), and only then swapped into the running board: credentials, roles and projects
   take effect at once, the GitHub sync is restarted. A write that fails changes nothing.
+  The project registry is the exception to "then": cards depend on it, so `Board::set_projects` writes the file
+  *inside* its write lock, after checking no card would be orphaned and before publishing. `add_in` and `assign` hold
+  the registry's read lock through their store write, so a project is never removed under a card being added or
+  assigned, and never receives one before it is durable.
 - **A new `Admin` capability** gates every settings operation; the default `human` role holds it. On a board
   with no per-model credentials the caller's claimed role is trusted, as for every other action.
 - **They are not MCP tools.** The operations are `POST /api/settings_*` only: a model should not mint credentials.
