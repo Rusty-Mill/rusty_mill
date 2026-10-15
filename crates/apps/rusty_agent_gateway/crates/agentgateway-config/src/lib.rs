@@ -249,10 +249,18 @@ pub struct GlobalConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TracingConfig {
-    /// OTLP/gRPC endpoint. Falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then
-    /// to the OpenTelemetry default of `http://localhost:4317`.
+    /// OTLP/gRPC endpoint for **spans**. Falls back to
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT`, then to the OpenTelemetry default of
+    /// `http://localhost:4317`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+
+    /// OTLP/HTTP URL for **metrics**, including the `/v1/metrics` path. Falls
+    /// back to `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, then to
+    /// `http://localhost:4318/v1/metrics`. Metrics are pushed as OTLP/HTTP JSON,
+    /// so this is not the gRPC `endpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_endpoint: Option<String>,
 
     /// `service.name` on every span. The first thing anyone filters by.
     #[serde(default, skip_serializing_if = "Option::is_none")]

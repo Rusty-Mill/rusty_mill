@@ -153,6 +153,10 @@ Each item is one PR, with its own tests and a change fragment.
    *Done when:* the four OpenTelemetry crates are gone; the `otel_export` and
    `otel_metrics` tests pass; the cardinality guard still holds on the wire.
    Needs D2 and D3.
+   **In progress (2026-10-15), by signal rather than (a)/(b)/(c):** PR 1,
+   metrics (atomic instruments, OTLP/HTTP JSON, push thread on `rusty_request`);
+   PR 2, spans (span model, batching, a `tracing` layer); PR 3, remove the
+   four crates and the SDK-typed public API.
 10. **Policy and docs.** `check_workspace_deps.py` accepts `rusty-mcp` as
     Tier S except the named exceptions (`http`, `tower-layer`, `tower-service`,
     `tokio` in the adapter, `tracing`, D3: keep). ADR-0002 Amendment 1

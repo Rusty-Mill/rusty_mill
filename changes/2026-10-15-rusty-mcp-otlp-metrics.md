@@ -1,0 +1,16 @@
+---
+category: Changed
+changelog: "**Breaking, `rusty-mcp` `otel`:** metrics are no longer exported through the OpenTelemetry SDK. They are recorded on atomics and pushed as OTLP/HTTP JSON with `rusty_request`, to a new `metrics_endpoint` (default `http://localhost:4318/v1/metrics`) instead of the gRPC endpoint. `OtelGuard::meter_provider()` and `Instruments::new(&Meter)` are gone."
+---
+## 2026-10-15 - rusty-mcp: first-party OTLP metrics (sovereignty item 9, PR 1 of 3)
+
+- **Why:** item 9 replaces the four OpenTelemetry crates with a first-party OTLP exporter (decisions D2 and D3), a signal at a time. Metrics go first because they need no `tracing` integration: the instruments and the exporter are self-contained.
+- **Added:** atomic counters, up/down counters and histograms (`otel::instrument`); the OTLP/HTTP JSON encoding of metrics (`otel::otlp`), with 64-bit integers as strings, cumulative temporality and explicit histogram bounds; a push thread that POSTs the current values every `metrics_interval` through `rusty_request` on a small `rusty_tokio` runtime (`otel::push`). `OtelConfig::with_metrics_endpoint` and the `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` variable choose the URL. The gateway gains an additive `tracing.metricsEndpoint` setting.
+- **Changed (breaking for direct users of `rusty_mcp::otel`):**
+  - Metrics are pushed over **HTTP/JSON**, not gRPC. They no longer follow `OtelConfig::endpoint` (still the gRPC endpoint for **spans**, until PR 2): they go to `metrics_endpoint`, then `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, then `http://localhost:4318/v1/metrics`. A collector that only takes OTLP/gRPC on 4317 will not receive metrics.
+  - `OtelGuard::meter_provider()` is removed, and `Instruments::new(&Meter)` is no longer public (the pipeline builds them).
+  - A `metrics_endpoint` that is not an `http(s)://` URL is refused at start with `OtelError::MetricsEndpoint`.
+  - Nothing is pushed until something has been recorded.
+- **Not changed:** the instrument names, units, histogram buckets, attribute keys and values, and the cardinality guard; spans (still gRPC through `opentelemetry-otlp`); `McpMetricsLayer`'s API.
+- **Verified:** unit tests for the instruments (inclusive buckets, cumulative values, clamping, concurrent recording) and the encoding; `otel_metrics` rewritten against a fake HTTP collector that parses the JSON, covering the cardinality guard on the wire, cumulative pushes, the timer push, a collector that refuses, an unreachable collector and a bad endpoint. Each of these mutations failed a test: `asInt` as a number, exclusive bucket bounds, in-flight never decremented, the counter losing its outcome, always pushing when empty, the endpoint scheme unchecked, delta temporality, the histogram sum dropped, non-finite values recorded, flush not waiting, a wrong URL, the abandoned count ignoring the number. The in-flight gauge is now tested directly (the earlier byte-scanning tests could not read it).
+- **Known limitations:** a failed push is dropped, not retried (values are cumulative, so the next push repairs it). Histograms keep no min or max. The `otel` feature still depends on `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp` and `tracing-opentelemetry` for spans; PRs 2 and 3 remove them. Between this PR and PR 2, metrics and spans use different endpoints and protocols.

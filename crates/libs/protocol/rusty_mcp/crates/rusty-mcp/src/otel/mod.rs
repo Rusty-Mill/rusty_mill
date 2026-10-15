@@ -38,44 +38,64 @@
 //! we; if it did not, we stay quiet. Deciding independently is how traces end
 //! up half-recorded, with gaps exactly where a service made its own choice.
 
+mod instrument;
 mod labels;
 pub mod metrics;
+mod otlp;
+mod push;
 
 use std::{sync::Arc, time::Duration};
 
-use opentelemetry::{KeyValue, metrics::MeterProvider as _, trace::TracerProvider as _};
-use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig as _};
+use opentelemetry::{KeyValue, trace::TracerProvider as _};
+use opentelemetry_otlp::{SpanExporter, WithExportConfig as _};
 use opentelemetry_sdk::{
     Resource,
-    metrics::{PeriodicReader, SdkMeterProvider},
     trace::{Sampler, SdkTracerProvider},
 };
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use crate::otel::metrics::Instruments;
+use crate::otel::{
+    metrics::Instruments,
+    push::{PushSettings, Pusher},
+};
 
 /// Instrumentation scope name for this crate's instruments.
 const SCOPE: &str = "rusty-mcp";
+
+/// Where metrics go when nothing else says: OTLP/HTTP on the standard port.
+const DEFAULT_METRICS_ENDPOINT: &str = "http://localhost:4318/v1/metrics";
 
 /// Starting an OTLP pipeline failed.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum OtelError {
-    /// The exporter could not be built — usually a malformed endpoint.
+    /// The span exporter could not be built — usually a malformed endpoint.
     Exporter(opentelemetry_otlp::ExporterBuildError),
+    /// The metrics endpoint is not an `http://` or `https://` URL.
+    MetricsEndpoint(String),
+    /// The thread that pushes metrics could not be started.
+    MetricsThread(std::io::Error),
 }
 
 impl std::fmt::Display for OtelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self::Exporter(e) = self;
-        write!(f, "could not build the OTLP span exporter: {e}")
+        match self {
+            Self::Exporter(e) => write!(f, "could not build the OTLP span exporter: {e}"),
+            Self::MetricsEndpoint(url) => {
+                write!(f, "the OTLP metrics endpoint `{url}` is not an http(s) URL")
+            }
+            Self::MetricsThread(e) => write!(f, "could not start the metrics push thread: {e}"),
+        }
     }
 }
 
 impl std::error::Error for OtelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        let Self::Exporter(e) = self;
-        Some(e)
+        match self {
+            Self::Exporter(e) => Some(e),
+            Self::MetricsEndpoint(_) => None,
+            Self::MetricsThread(e) => Some(e),
+        }
     }
 }
 
@@ -93,9 +113,15 @@ pub struct OtelConfig {
     pub service_name: String,
     /// `service.version`, if you want releases distinguishable in traces.
     pub service_version: Option<String>,
-    /// OTLP/gRPC endpoint. `None` falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`,
-    /// then the OTel default of `http://localhost:4317`.
+    /// OTLP/gRPC endpoint for **spans**. `None` falls back to
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT`, then the OTel default of
+    /// `http://localhost:4317`. Metrics have their own, see
+    /// [`OtelConfig::metrics_endpoint`].
     pub endpoint: Option<String>,
+    /// OTLP/HTTP endpoint for **metrics**, the full URL including `/v1/metrics`.
+    /// `None` falls back to `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, then
+    /// `http://localhost:4318/v1/metrics`.
+    pub metrics_endpoint: Option<String>,
     /// Fraction of *root* traces to record, 0.0 to 1.0.
     ///
     /// Only consulted when there is no parent decision to follow; a sampled
@@ -121,6 +147,7 @@ impl OtelConfig {
             service_name: service_name.into(),
             service_version: None,
             endpoint: None,
+            metrics_endpoint: None,
             sample_ratio: 1.0,
             shutdown_timeout: Duration::from_secs(5),
             metrics: true,
@@ -146,7 +173,13 @@ impl OtelConfig {
         self
     }
 
-    /// Point at a specific OTLP/gRPC endpoint.
+    /// Point metrics at a specific OTLP/HTTP URL (`.../v1/metrics`).
+    pub fn with_metrics_endpoint(mut self, url: impl Into<String>) -> Self {
+        self.metrics_endpoint = Some(url.into());
+        self
+    }
+
+    /// Point spans at a specific OTLP/gRPC endpoint.
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = Some(endpoint.into());
         self
@@ -162,6 +195,29 @@ impl OtelConfig {
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
         self
+    }
+
+    /// Where metrics are pushed: explicit, then the environment, then the default.
+    fn metrics_url(&self) -> Result<String, OtelError> {
+        let url = self
+            .metrics_endpoint
+            .clone()
+            .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").ok())
+            .unwrap_or_else(|| DEFAULT_METRICS_ENDPOINT.to_owned());
+        if url.starts_with("http://") || url.starts_with("https://") {
+            Ok(url)
+        } else {
+            Err(OtelError::MetricsEndpoint(url))
+        }
+    }
+
+    /// The resource attributes metrics carry.
+    fn resource_attributes(&self) -> Vec<(String, String)> {
+        let mut attributes = vec![("service.name".to_owned(), self.service_name.clone())];
+        if let Some(version) = &self.service_version {
+            attributes.push(("service.version".to_owned(), version.clone()));
+        }
+        attributes
     }
 
     fn resource(&self) -> Resource {
@@ -181,7 +237,7 @@ impl OtelConfig {
 #[derive(Debug)]
 pub struct OtelGuard {
     provider: SdkTracerProvider,
-    meters: Option<SdkMeterProvider>,
+    pusher: Option<Pusher>,
     instruments: Option<Arc<Instruments>>,
     timeout: Duration,
 }
@@ -196,10 +252,10 @@ impl OtelGuard {
             // otherwise looks like the code was never instrumented.
             tracing::error!(%err, "failed to flush spans before shutdown");
         }
-        if let Some(meters) = &self.meters
-            && let Err(err) = meters.shutdown_with_timeout(self.timeout)
+        if let Some(pusher) = &self.pusher
+            && !pusher.shutdown(self.timeout)
         {
-            tracing::error!(%err, "failed to flush metrics before shutdown");
+            tracing::error!("failed to flush metrics before shutdown");
         }
     }
 
@@ -208,10 +264,10 @@ impl OtelGuard {
         if let Err(err) = self.provider.force_flush() {
             tracing::warn!(%err, "failed to flush spans");
         }
-        if let Some(meters) = &self.meters
-            && let Err(err) = meters.force_flush()
+        if let Some(pusher) = &self.pusher
+            && !pusher.flush(self.timeout)
         {
-            tracing::warn!(%err, "failed to flush metrics");
+            tracing::warn!("failed to flush metrics");
         }
     }
 
@@ -222,12 +278,6 @@ impl OtelGuard {
     /// nothing records to exports nothing.
     pub fn instruments(&self) -> Option<&Arc<Instruments>> {
         self.instruments.as_ref()
-    }
-
-    /// The underlying meter provider, for instruments this crate does not
-    /// define.
-    pub fn meter_provider(&self) -> Option<&SdkMeterProvider> {
-        self.meters.as_ref()
     }
 
     /// A closure that flushes and shuts the pipeline down, for the process's
@@ -272,8 +322,8 @@ impl Drop for OtelGuard {
         // Best effort. An explicit `shutdown()` is better because it can report
         // failure; this only catches the case where nobody called it.
         let _ = self.provider.shutdown_with_timeout(self.timeout);
-        if let Some(meters) = &self.meters {
-            let _ = meters.shutdown_with_timeout(self.timeout);
+        if let Some(pusher) = &self.pusher {
+            let _ = pusher.shutdown(self.timeout);
         }
     }
 }
@@ -319,26 +369,18 @@ pub fn pipeline(
 
     let tracer = provider.tracer(config.service_name.clone());
 
-    let (meters, instruments) = if config.metrics {
-        let exporter = {
-            let mut builder = MetricExporter::builder().with_tonic();
-            if let Some(endpoint) = &config.endpoint {
-                builder = builder.with_endpoint(endpoint.clone());
-            }
-            builder.build()?
-        };
-
-        let reader = PeriodicReader::builder(exporter)
-            .with_interval(config.metrics_interval)
-            .build();
-
-        let meters = SdkMeterProvider::builder()
-            .with_reader(reader)
-            .with_resource(config.resource())
-            .build();
-
-        let instruments = Arc::new(Instruments::new(&meters.meter(SCOPE)));
-        (Some(meters), Some(instruments))
+    let (pusher, instruments) = if config.metrics {
+        let instruments = Arc::new(Instruments::new());
+        let pusher = Pusher::spawn(PushSettings {
+            endpoint: config.metrics_url()?,
+            resource: config.resource_attributes(),
+            scope: SCOPE,
+            interval: config.metrics_interval,
+            request_timeout: config.shutdown_timeout,
+            registry: Arc::clone(instruments.registry()),
+        })
+        .map_err(OtelError::MetricsThread)?;
+        (Some(pusher), Some(instruments))
     } else {
         (None, None)
     };
@@ -346,7 +388,7 @@ pub fn pipeline(
     Ok((
         OtelGuard {
             provider,
-            meters,
+            pusher,
             instruments,
             timeout: config.shutdown_timeout,
         },

@@ -11915,6 +11915,7 @@ dependencies = [
  "rusty_oauth",
  "rusty_percent",
  "rusty_request",
+ "rusty_tokio",
  "rusty_url",
  "tokio",
  "tower-layer",
