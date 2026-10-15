@@ -62,8 +62,9 @@ tasks inside a `tauri` command handler.
 `rusty_gpu`).** Rejected for now. It is a rewrite of three apps' front ends,
 not a dependency swap: the shells are web UIs, and the first-party stack has
 no web view, no tray or menu-bar layer, no global shortcut and no installer
-bundler (the stack is a window and event layer, not an HTML host). It also does not remove the platform's own web view or window
-system from the trust base.
+bundler (the stack is a window and event layer, not an HTML host). A native
+rewrite would drop the platform web view from the trust base, but the shells
+would still rely on the operating system's window system.
 
 **Write a first-party web-view host over the operating system's web view.**
 Rejected for now. It would replace `tauri` and `wry` with code that does the
