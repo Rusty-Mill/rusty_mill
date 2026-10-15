@@ -327,6 +327,10 @@ impl SpecAttribution {
 
 /// The unused versions that also conflict with the approved spec: the
 /// quantity 2b criterion 4 asks for ("an unused spec version has a conflict").
+///
+/// An upper bound, not a count: the conflict base and the attribution base are
+/// both assumed from storage order, not read from what the author saw (the log
+/// does not record it), so a flagged version is confirmed by reading it.
 pub fn unused_conflicts(conflicts: &SpecConflicts, attribution: &SpecAttribution) -> u64 {
     conflicts
         .pairs

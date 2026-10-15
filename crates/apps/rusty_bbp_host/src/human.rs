@@ -133,6 +133,31 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
     })
 }
 
+/// Who answered when the op carries no label.
+pub const UNLABELLED: &str = "unlabelled";
+
+/// The op id for a human action answered by `by`: `by:<by>/<fresh>`. The log
+/// records only that the task's human principal acted, so the answerer is
+/// written into the op, which the log keeps and replay checks.
+pub fn labelled_op(by: &str) -> Result<OpId, String> {
+    let ok = !by.is_empty()
+        && by.len() <= 32
+        && by
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !ok {
+        return Err("--as must be 1 to 32 characters of letters, digits, - _ .".into());
+    }
+    Ok(OpId(format!("by:{by}/{}", fresh_op().0)))
+}
+
+/// Who an op says answered: the label of [`labelled_op`], else [`UNLABELLED`].
+pub fn answered_by(op: &OpId) -> &str {
+    op.0.strip_prefix("by:")
+        .and_then(|r| r.split_once('/'))
+        .map_or(UNLABELLED, |(by, _)| by)
+}
+
 /// Run one human action against the store. `rev` is the card revision the
 /// human saw, required by the actions that fence on it.
 pub fn perform(
@@ -142,14 +167,42 @@ pub fn perform(
     args: &[&str],
     rev: Option<Rev>,
 ) -> Result<Response, String> {
+    perform_as(dir, task, verb, args, rev, UNLABELLED)
+}
+
+/// [`perform`], with the answer attributed to `by` (see [`labelled_op`]).
+pub fn perform_as(
+    dir: &Path,
+    task: &TaskId,
+    verb: &str,
+    args: &[&str],
+    rev: Option<Rev>,
+    by: &str,
+) -> Result<Response, String> {
     let act = action(verb, args, rev)?;
+    let op = labelled_op(by)?;
     let mut d = open_driver(dir, task)?;
-    d.dispatch(
-        &Command::Human {
-            op: fresh_op(),
-            action: act,
-        },
-        now(),
-    )
-    .map_err(|e| format!("{e:?}"))
+    d.dispatch(&Command::Human { op, action: act }, now())
+        .map_err(|e| format!("{e:?}"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_label_round_trips_through_the_op() {
+        let op = labelled_op("owner").unwrap();
+        assert_eq!(answered_by(&op), "owner");
+        assert_eq!(answered_by(&OpId("auto-00".into())), UNLABELLED);
+        assert_eq!(answered_by(&OpId("by:x".into())), UNLABELLED);
+    }
+
+    #[test]
+    fn a_label_that_could_break_the_op_is_refused() {
+        for bad in ["", "a/b", "a b", &"x".repeat(33)] {
+            assert!(labelled_op(bad).is_err(), "{bad:?}");
+        }
+    }
 }
