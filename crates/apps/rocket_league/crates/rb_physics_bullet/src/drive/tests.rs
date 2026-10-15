@@ -509,11 +509,24 @@ fn boost_accelerates_an_airborne_car_faster_than_a_grounded_one() {
 #[test]
 fn boost_drains_the_tank_over_time_and_clamps_at_zero() {
     let mut c = car();
-    let mut boost = MAX_BOOST;
+    let mut state = DriveState::new();
     for _ in 0..600 {
-        step_with_input(&mut c, &full_boost(), false, &mut boost, 1.0 / 60.0);
+        c.clear_forces();
+        apply_driven_forces(
+            &mut c,
+            &full_boost(),
+            &NO_WHEEL_CONTACTS,
+            None,
+            &mut state,
+            1.0 / 60.0,
+        );
+        integrate::integrate_velocities(&mut c, 1.0 / 60.0);
+        clamp_velocity(&mut c);
     }
-    assert_eq!(boost, 0.0, "expected a full tank to run out within 10s");
+    assert_eq!(
+        state.boost_amount, 0.0,
+        "expected a full tank to run out within 10s"
+    );
 }
 
 #[test]
@@ -528,21 +541,142 @@ fn boost_has_no_effect_when_the_tank_is_empty() {
 #[test]
 fn boost_still_drains_at_max_speed_even_though_it_stops_accelerating() {
     let mut c = car();
-    let mut boost = MAX_BOOST;
+    // A burn already running (the activation tick is free).
+    let mut state = DriveState::new();
+    state.boosting = true;
     c.linear_velocity = Vec3::new(MAX_CAR_SPEED, 0.0, 0.0);
-    step_with_input(&mut c, &full_boost(), false, &mut boost, 1.0 / 60.0);
+    c.clear_forces();
+    apply_driven_forces(
+        &mut c,
+        &full_boost(),
+        &NO_WHEEL_CONTACTS,
+        None,
+        &mut state,
+        1.0 / 60.0,
+    );
+    integrate::integrate_velocities(&mut c, 1.0 / 60.0);
     assert!(
         (c.linear_velocity.x - MAX_CAR_SPEED).abs() < 1e-4,
         "expected boost to stop pushing past MAX_CAR_SPEED, got {}",
         c.linear_velocity.x
     );
     assert!(
-        boost < MAX_BOOST,
+        state.boost_amount < MAX_BOOST,
         "expected held boost to still drain even at max speed"
     );
 }
 
 const TICK: f32 = 1.0 / 120.0;
+
+/// One airborne 120 Hz drive tick with `state` carried between calls.
+fn boost_tick(car: &mut RigidBody, state: &mut DriveState, held: bool) {
+    let input = ControllerInput {
+        boost: held,
+        ..Default::default()
+    };
+    car.clear_forces();
+    apply_driven_forces(car, &input, &NO_WHEEL_CONTACTS, None, state, TICK);
+    integrate::integrate_velocities(car, TICK);
+}
+
+/// The activation tick applies its force with no drain, and drain starts the
+/// next tick, before that tick's force. Captures agree: across 20 airborne
+/// press edges forward acceleration starts one tick before the first tank drop.
+#[test]
+fn the_boost_activation_tick_pushes_without_draining() {
+    let mut c = car();
+    let mut state = DriveState::new();
+    boost_tick(&mut c, &mut state, true);
+    assert_eq!(state.boost_amount, MAX_BOOST, "no drain on activation");
+    assert_close(
+        c.linear_velocity.x,
+        BOOST_ACCELERATION_AIR * TICK,
+        "activation tick force",
+    );
+}
+
+#[test]
+fn boost_drains_from_the_second_tick_before_that_ticks_push() {
+    let mut c = car();
+    let mut state = DriveState::new();
+    boost_tick(&mut c, &mut state, true);
+    boost_tick(&mut c, &mut state, true);
+    assert_close(
+        state.boost_amount,
+        MAX_BOOST - BOOST_USED_PER_SECOND * TICK,
+        "one drain after two active ticks",
+    );
+    assert_close(
+        c.linear_velocity.x,
+        2.0 * BOOST_ACCELERATION_AIR * TICK,
+        "both ticks push",
+    );
+}
+
+#[test]
+fn a_full_tank_burns_for_361_pushing_ticks_at_120_hz() {
+    let mut c = car();
+    let mut state = DriveState::new();
+    let mut pushing = 0;
+    for _ in 0..500 {
+        boost_tick(&mut c, &mut state, true);
+        c.linear_velocity = Vec3::ZERO;
+        if state.boosting {
+            pushing += 1;
+        }
+    }
+    assert_eq!(state.boost_amount, 0.0);
+    assert_eq!(pushing, 361, "activation tick plus 360 drained ticks");
+}
+
+#[test]
+fn the_tick_that_empties_the_tank_does_not_push() {
+    let mut c = car();
+    let mut state = DriveState::new();
+    state.boost_amount = BOOST_USED_PER_SECOND * TICK * 1.5;
+    boost_tick(&mut c, &mut state, true);
+    boost_tick(&mut c, &mut state, true);
+    let after_two = c.linear_velocity.x;
+    assert_close(
+        after_two,
+        2.0 * BOOST_ACCELERATION_AIR * TICK,
+        "two pushing ticks",
+    );
+    boost_tick(&mut c, &mut state, true);
+    assert_eq!(state.boost_amount, 0.0);
+    assert!(!state.boosting, "deactivated before this tick's force");
+    assert_close(
+        c.linear_velocity.x,
+        after_two,
+        "no push on the emptying tick",
+    );
+}
+
+/// Air throttle is suppressed only while boost actually pushes, so the
+/// emptying tick has it back.
+#[test]
+fn air_throttle_returns_on_the_tick_that_empties_the_tank() {
+    let mut c = car();
+    let mut state = DriveState::new();
+    state.boost_amount = BOOST_USED_PER_SECOND * TICK * 1.5;
+    let input = ControllerInput {
+        boost: true,
+        throttle: 1.0,
+        ..Default::default()
+    };
+    for _ in 0..3 {
+        c.clear_forces();
+        apply_driven_forces(&mut c, &input, &NO_WHEEL_CONTACTS, None, &mut state, TICK);
+        integrate::integrate_velocities(&mut c, TICK);
+    }
+    let boosted = 2.0 * BOOST_ACCELERATION_AIR * TICK;
+    let air_throttle = THROTTLE_AIR_ACCELERATION * TICK;
+    assert_close(
+        c.linear_velocity.x,
+        boosted + air_throttle,
+        "boost on ticks 1 and 2, air throttle alone on the emptying tick 3",
+    );
+}
 
 /// Angular velocity after a dodge press tick at 120 Hz: the flip torque
 /// acts on the press tick itself, with air control already off
@@ -601,6 +735,80 @@ fn slip_ratio_is_zero_at_the_lateral_threshold_and_one_when_purely_sideways() {
     assert_eq!(slip_ratio(1000.0, SLIP_LATERAL_SPEED_THRESHOLD), 0.0);
     assert_eq!(slip_ratio(0.0, -300.0), 1.0);
     assert_close(slip_ratio(-300.0, 100.0), 0.25, "mixed slip");
+}
+
+/// `|throttle| <= 0.01` coasts (inputs are 1/127-quantized, so 0.0079 is the
+/// smallest nonzero value and 0.0157 the next); RocketSim's 0.001 would drive
+/// on 0.0079.
+#[test]
+fn throttle_inside_one_percent_coasts_like_the_game() {
+    let coast = (0.0, COASTING_BRAKE_FACTOR);
+    for t in [0.0079, -0.0079, 0.01, -0.01] {
+        assert_eq!(pedals(t, 1000.0, false), coast, "throttle {t} coasts");
+    }
+    assert_eq!(pedals(0.0157, 1000.0, false), (0.0157, 0.0), "drives");
+    assert_eq!(pedals(-0.0157, 1000.0, false), (0.0, 1.0), "reverse brakes");
+}
+
+/// The game round-trips every analog input through a byte before the car
+/// sees it: `f = v < 0 ? max(v * 128, -128) : min(v * 127, 127)`,
+/// `byte = floor(f + 128 + 0.5)`, decoded `(byte - 128) / 128` below 128 and
+/// `/ 127` from 128 up. Confirmed on 18 captures: the spin from +0.5 over the
+/// spin from -0.5 is 1.0079 on roll.
+#[test]
+fn analog_inputs_round_trip_through_a_byte_like_the_game() {
+    assert_eq!(quantize_analog(0.0), 0.0);
+    assert_eq!(quantize_analog(1.0), 1.0);
+    assert_eq!(quantize_analog(-1.0), -1.0);
+    assert_close(quantize_analog(0.5), 64.0 / 127.0, "+0.5 reads 64/127");
+    assert_eq!(quantize_analog(-0.5), -0.5, "-0.5 is exact");
+    assert_close(
+        quantize_analog(1.0 / 127.0),
+        1.0 / 127.0,
+        "one positive step",
+    );
+    assert_close(
+        quantize_analog(-1.0 / 128.0),
+        -1.0 / 128.0,
+        "one negative step",
+    );
+    assert_eq!(
+        quantize_analog(0.001),
+        0.0,
+        "below half a step rounds to zero"
+    );
+    assert_eq!(quantize_analog(-0.003), 0.0);
+}
+
+#[test]
+fn quantizing_clamps_out_of_range_inputs_and_survives_nan() {
+    assert_eq!(quantize_analog(3.0), 1.0);
+    assert_eq!(quantize_analog(-3.0), -1.0);
+    assert_eq!(quantize_analog(f32::NAN), 0.0);
+}
+
+#[test]
+fn quantizing_a_controller_input_leaves_buttons_and_missing_sticks_alone() {
+    let input = ControllerInput {
+        throttle: 0.5,
+        steer: -0.5,
+        pitch: Some(0.5),
+        yaw: None,
+        roll: Some(-1.0),
+        jump: true,
+        boost: true,
+        handbrake: true,
+    };
+    let q = quantize_input(input);
+    assert_close(q.throttle, 64.0 / 127.0, "throttle");
+    assert_eq!(q.steer, -0.5);
+    assert_close(q.pitch.unwrap_or(f32::NAN), 64.0 / 127.0, "pitch");
+    assert_eq!(
+        q.yaw, None,
+        "a stick the source cannot recover stays missing"
+    );
+    assert_eq!(q.roll, Some(-1.0));
+    assert!(q.jump && q.boost && q.handbrake);
 }
 
 #[test]
@@ -726,10 +934,21 @@ fn opposing_throttle_brakes_at_full_brake_deceleration() {
     assert_close(v.x, 1000.0 - BRAKE_DECELERATION * TICK, "braking");
 }
 
+/// The real game's brake has no effective-mass term: each wheel removes
+/// `113.73963 * 60 * dt * v` of impulse below its clamp, so four wheels on a
+/// 180-mass car remove `1 - 4 * 113.73963 * 60 * dt / 180 = -0.2638` of the
+/// speed per 120 Hz tick: a slow coasting car overshoots zero and rings.
+/// Measured on the owner's captures: mean -0.2632 over 227 ticks (flat
+/// grounded coasting, 5 < |v| <= 10 uu/s).
 #[test]
-fn a_slow_coasting_car_brakes_to_a_stop_without_reversing() {
-    let v = ground_tick(Vec3::new(20.0, 0.0, 0.0), 0.0, 0.0);
-    assert_eq!(v.x, 0.0);
+fn a_slow_coasting_car_overshoots_zero_by_a_quarter_each_tick() {
+    for speed in [6.0_f32, 8.0, 10.0] {
+        let ratio = ground_tick(Vec3::new(speed, 0.0, 0.0), 0.0, 0.0).x / speed;
+        assert!(
+            (ratio - -0.2638).abs() < 0.01,
+            "speed {speed}: v(k+1)/v(k) = {ratio}, expected about -0.2638"
+        );
+    }
 }
 
 #[test]
@@ -2488,9 +2707,10 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
 #[test]
 fn apply_driven_forces_updates_every_drive_state_field_it_owns() {
     // One grounded step with jump + boost pressed: jump_held latches, the
-    // hold window arms, and boost drains.
+    // hold window arms, and a running boost burn drains.
     let mut car = car();
     let mut state = DriveState::new();
+    state.boosting = true;
     state.double_jump_available = false;
     let input = ControllerInput {
         jump: true,
