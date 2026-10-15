@@ -18,6 +18,7 @@
 
 pub mod admin;
 pub mod args;
+pub mod grade;
 pub mod human;
 pub mod mcp;
 pub mod moderator;
