@@ -110,7 +110,7 @@ fn a_subagents_cost_is_counted_when_its_model_is_priced() {
     // Reported by the harness: 0.030979375. Priced here at the 1-hour write
     // rate for every cache write, so never below it.
     let usd = t.usd.expect("known");
-    assert!(usd >= 0.030979375 - 1e-9 && usd < 0.0312, "{usd}");
+    assert!((0.030979375 - 1e-9..0.0312).contains(&usd), "{usd}");
 }
 
 // ---- finding 3 and 4: no usable result line means unknown cost, not zero

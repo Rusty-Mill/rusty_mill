@@ -161,12 +161,13 @@ fn run() -> Result<String, String> {
                 .map(|(s, d)| format!("[\"{s:?}\",{}]", d.as_millis()))
                 .collect();
             return Ok(format!(
-                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}],\"bbp_build_sha\":\"{}\"}}",
+                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}],\"replay_equals_live\":{},\"bbp_build_sha\":\"{}\"}}",
                 out.state,
                 out.turns_launched,
                 out.runs,
                 out.elapsed.as_millis(),
                 visits.join(","),
+                out.replay_equals_live,
                 rusty_bbp_host::BUILD_SHA
             ));
         }

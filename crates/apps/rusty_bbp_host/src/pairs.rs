@@ -52,6 +52,14 @@ pub struct RunFacts {
     pub unused_conflicts: u64,
     /// `unused_share` as (unused bytes, all spec bytes).
     pub unused_bytes: (u64, u64),
+    /// The moderator's live state equalled the replay of the log at the end
+    /// of the run (`bbp mod` prints it); `None` when the run did not say.
+    pub replay_equals_live: Option<bool>,
+    /// State boundaries up to and including the end of the first `Planning`
+    /// visit, each observed to within one poll.
+    pub spec_boundaries: u64,
+    /// The run's harnesses cost more than the per-run cap.
+    pub over_cap: bool,
     /// The task's `reads_per_turn`, from its card.
     pub reads_per_turn: u64,
     /// The models each role's turns used, from the harness output.
@@ -60,7 +68,7 @@ pub struct RunFacts {
 
 impl RunFacts {
     fn succeeded(&self) -> bool {
-        self.closed && self.rubric_ok
+        self.closed && self.rubric_ok && !self.over_cap
     }
 }
 
@@ -167,6 +175,21 @@ fn noise_gate(pairs: &[Pair]) -> (Verdict, Vec<f64>) {
     (v, ratios)
 }
 
+/// Safety: no N=2 run overshot a budget, and the moderator's live state equalled
+/// the replay of the log in every run. Known only with all ten pairs in.
+fn c1(pairs: &[&Pair]) -> Verdict {
+    let runs = || pairs.iter().flat_map(|p| [&p.control, &p.treatment]);
+    if pairs.iter().any(|p| p.treatment.overshoot)
+        || runs().any(|r| r.replay_equals_live == Some(false))
+    {
+        Verdict::Fails
+    } else if pairs.len() >= PAIRS && runs().all(|r| r.replay_equals_live == Some(true)) {
+        Verdict::Holds
+    } else {
+        Verdict::Inconclusive
+    }
+}
+
 fn c2(pairs: &[&Pair]) -> Verdict {
     let ok = pairs.iter().filter(|p| p.ok()).count();
     let fail = |f: fn(&Pair) -> &RunFacts| pairs.iter().filter(|p| !f(p).succeeded()).count();
@@ -186,10 +209,13 @@ fn c2(pairs: &[&Pair]) -> Verdict {
     }
 }
 
-/// `poll` must be at most [`POLL_ERROR_MAX`] of the control's `spec_wall`.
+/// The poll error, `poll x (boundaries in both arms' windows)`, must be at most
+/// [`POLL_ERROR_MAX`] of the control's `spec_wall`.
 fn measurable(p: &Pair, poll_ms: u64) -> Option<f64> {
     let c = p.control.spec_wall_ms?;
-    if !p.ok() || poll_ms as f64 > POLL_ERROR_MAX * c as f64 {
+    // Each state boundary in either arm's window is seen to within one poll.
+    let bound = poll_ms * (p.control.spec_boundaries + p.treatment.spec_boundaries);
+    if !p.ok() || bound as f64 > POLL_ERROR_MAX * c as f64 {
         return None;
     }
     p.wall_ratio()
@@ -265,6 +291,7 @@ fn c7(pairs: &[&Pair]) -> (Verdict, Vec<f64>) {
 /// The decision table of the criteria note, first match.
 fn decide(e: &Evaluation) -> &'static str {
     use self::Verdict::*;
+    const INCOMPLETE: &str = "incomplete: some criteria are not yet measurable; no decision";
     if e.noise_gate == Fails {
         return "noise gate failed: stop; no phase 2 run; the owner decides";
     }
@@ -274,26 +301,25 @@ fn decide(e: &Evaluation) -> &'static str {
     if e.c2_comparable == Fails {
         return "2 fails: inconclusive; no decision; rerun with a corrected rubric or task set";
     }
+    // Without 8 of 10 pairs succeeding and a clean safety result "the screen is
+    // inconclusive and no decision is taken": no later row is reachable.
+    if e.c1_safety != Holds || e.c2_comparable != Holds {
+        return INCOMPLETE;
+    }
     if e.c3_parallelism == Inconclusive {
         return "3 inconclusive: no decision (noise, measurement error or too few measurable pairs)";
     }
     if e.c3_parallelism == Fails {
         return "3 fails: stop concurrency work; max_live_turns = 1 stays the default";
     }
-    if e.c7_cost == Fails {
-        return "3 holds, 7 fails: parallelism pays in time but not in cost; no CRDT";
+    // Each row below names criteria that must hold, not merely not fail.
+    match (e.c7_cost, e.c4_contention, e.c5_loss) {
+        (Fails, _, _) => "3 holds, 7 fails: parallelism pays in time but not in cost; no CRDT",
+        (Holds, Fails, _) => "3 and 7 hold, 4 fails: 2a alone is enough for spec authoring; no CRDT",
+        (Holds, Holds, Fails) => "3, 7 and 4 hold, 5 fails: section leases or 2a; no CRDT",
+        (Holds, Holds, Holds) => "1 to 5 and 7 hold: build rusty_crdt and 2b, after criterion 6's precondition (verdict binding landed); criterion 4 still needs the flagged versions read by hand",
+        _ => INCOMPLETE,
     }
-    if e.c4_contention == Fails {
-        return "3 and 7 hold, 4 fails: 2a alone is enough for spec authoring; no CRDT";
-    }
-    if e.c5_loss == Fails {
-        return "3, 7 and 4 hold, 5 fails: section leases or 2a; no CRDT";
-    }
-    let all = [e.c2_comparable, e.c4_contention, e.c5_loss, e.c7_cost];
-    if all.iter().all(|v| *v == Holds) && e.c1_safety == Holds {
-        return "1 to 5 and 7 hold: build rusty_crdt and 2b, after criterion 6's precondition (verdict binding landed); criterion 4 still needs the flagged versions read by hand";
-    }
-    "incomplete: some criteria are not yet measurable; no decision"
 }
 
 /// Evaluate the criteria over `pairs` with the run's poll interval.
@@ -302,13 +328,7 @@ pub fn evaluate(pairs: &[Pair], poll_ms: u64) -> Evaluation {
     let phase2: Vec<&Pair> = pairs.iter().filter(|p| p.kind != Kind::Null).collect();
     let of = |k| -> Vec<&Pair> { phase2.iter().copied().filter(|p| p.kind == k).collect() };
     let (separable, shared) = (of(Kind::Separable), of(Kind::Shared));
-    let c1 = if phase2.iter().any(|p| p.treatment.overshoot) {
-        Verdict::Fails
-    } else if phase2.len() >= PAIRS {
-        Verdict::Holds
-    } else {
-        Verdict::Inconclusive
-    };
+    let c1 = c1(&phase2);
     let (c3v, separable_ratios) = c3(&separable, gate, poll_ms);
     let (c5v, median_unused_share) = c5(&shared);
     let (c7v, cost_ratios) = c7(&phase2);
@@ -364,6 +384,9 @@ pub struct Manifest {
     pub poll_ms: u64,
     /// The `reads_per_turn` every run must have been opened with.
     pub reads_per_turn: u64,
+    /// The per-run cost cap C the runs used (`bbp mod --max-usd`). A run whose
+    /// harnesses cost more than this counts as failed.
+    pub cap_usd: f64,
     /// The committed criteria file whose prices cost the tokens.
     pub criteria: String,
     /// The git checkout the run's binaries were built from.
@@ -374,18 +397,36 @@ pub struct Manifest {
 #[derive(Deserialize)]
 struct ModOut {
     state_ms: Vec<(String, u64)>,
+    #[rusty_serde(default)]
+    replay_equals_live: Option<bool>,
+}
+
+/// What `bbp mod` printed that the criteria use.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModFacts {
+    /// The first `Planning` visit, in ms.
+    pub spec_wall_ms: Option<u64>,
+    /// State boundaries up to and including the end of that visit.
+    pub spec_boundaries: u64,
+    pub replay_equals_live: Option<bool>,
+}
+
+pub fn mod_facts(mod_output: &str) -> Result<ModFacts, String> {
+    let m: ModOut = rusty_serde::json::from_str(mod_output).map_err(|e| e.to_string())?;
+    let at = m.state_ms.iter().position(|(s, _)| s == "Planning");
+    Ok(ModFacts {
+        spec_wall_ms: at.map(|i| m.state_ms[i].1),
+        spec_boundaries: at.map_or(0, |i| i as u64 + 1),
+        replay_equals_live: m.replay_equals_live,
+    })
 }
 
 /// The first `Planning` visit of a `bbp mod` output, in ms.
 pub fn spec_wall_ms(mod_output: &str) -> Result<Option<u64>, String> {
-    let m: ModOut = rusty_serde::json::from_str(mod_output).map_err(|e| e.to_string())?;
-    Ok(m.state_ms
-        .into_iter()
-        .find(|(s, _)| s == "Planning")
-        .map(|(_, ms)| ms))
+    Ok(mod_facts(mod_output)?.spec_wall_ms)
 }
 
-fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
+fn facts(r: &RunRef, c: &tokens::Criteria, cap_usd: f64) -> Result<RunFacts, String> {
     let task = TaskId(r.task.clone());
     let rep = report::of(Path::new(&r.dir), &task, None)?;
     let d = crate::open_driver(Path::new(&r.dir), &task)?;
@@ -393,6 +434,7 @@ fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
     let tok = tokens::of(Path::new(&r.dir), &task, &events, Some(c))?;
     let text =
         std::fs::read_to_string(&r.mod_output).map_err(|e| format!("{}: {e}", r.mod_output))?;
+    let m = mod_facts(&text)?;
     let st = &d.state;
     let mut role_models: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for t in &tok.turns {
@@ -404,7 +446,10 @@ fn facts(r: &RunRef, c: &tokens::Criteria) -> Result<RunFacts, String> {
     Ok(RunFacts {
         closed: st.state == State::Closed,
         rubric_ok: r.rubric_ok,
-        spec_wall_ms: spec_wall_ms(&text)?,
+        spec_wall_ms: m.spec_wall_ms,
+        spec_boundaries: m.spec_boundaries,
+        replay_equals_live: m.replay_equals_live,
+        over_cap: tok.usd_floor.is_some_and(|f| f > cap_usd),
         tokens: (tok.without_output == 0).then_some(tok.usd).flatten(),
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
@@ -510,8 +555,8 @@ pub fn load(manifest: &Path) -> Result<Evaluation, String> {
             Ok(Pair {
                 id: p.id.clone(),
                 kind: p.kind,
-                control: facts(&p.control, &c)?,
-                treatment: facts(&p.treatment, &c)?,
+                control: facts(&p.control, &c, m.cap_usd)?,
+                treatment: facts(&p.treatment, &c, m.cap_usd)?,
                 lost_rubric_items: p.lost_rubric_items,
             })
         })
@@ -545,6 +590,8 @@ mod tests {
             closed: true,
             rubric_ok: true,
             spec_wall_ms: Some(wall),
+            spec_boundaries: 1,
+            replay_equals_live: Some(true),
             tokens: Some(tokens as f64),
             ..RunFacts::default()
         }
@@ -1059,7 +1106,11 @@ mod tests {
 
     #[test]
     fn probe_d_four_separable_pairs_with_a_cost_failure_is_not_a_decision() {
-        let e = evaluate(&partial(4, 0.5, 2.0), 500);
+        let mut p = partial(4, 0.5, 2.0);
+        for x in p.iter_mut().filter(|x| x.kind != Kind::Null) {
+            x.treatment.tokens = Some(200.0);
+        }
+        let e = evaluate(&p, 500);
         assert_eq!(e.c7_cost, Verdict::Fails);
         assert!(e.decision.starts_with("incomplete"), "{}", e.decision);
     }
@@ -1081,6 +1132,44 @@ mod tests {
 
     fn verdicts_of(p: &[Pair]) -> Evaluation {
         evaluate(p, 500)
+    }
+
+    #[test]
+    fn criterion_one_needs_the_replay_to_equal_the_live_state_in_every_run() {
+        let mut p = all([0.5; 5], 1, 1);
+        p[4].control.replay_equals_live = None;
+        assert_eq!(verdicts_of(&p).c1_safety, Verdict::Inconclusive);
+        p[4].treatment.replay_equals_live = Some(false);
+        assert_eq!(verdicts_of(&p).c1_safety, Verdict::Fails);
+        assert!(verdicts_of(&p).decision.starts_with("1 fails"));
+    }
+
+    #[test]
+    fn a_run_over_the_cap_is_a_failed_run() {
+        let mut r = run(1, 1);
+        assert!(r.succeeded());
+        r.over_cap = true;
+        assert!(!r.succeeded());
+        let mut p = all([0.5; 5], 1, 1);
+        for x in p.iter_mut().filter(|x| x.kind == Kind::Shared) {
+            x.treatment.over_cap = true;
+        }
+        assert_eq!(verdicts_of(&p).c2_comparable, Verdict::Fails);
+    }
+
+    #[test]
+    fn the_poll_bound_counts_the_boundaries_of_both_arms() {
+        let mut p = all([0.5; 5], 1, 1);
+        for x in p.iter_mut().filter(|x| x.kind == Kind::Separable) {
+            x.control.spec_wall_ms = Some(20_000);
+            x.treatment.spec_wall_ms = Some(10_000);
+        }
+        assert_eq!(verdicts_of(&p).separable_ratios.len(), 5);
+        // One more boundary on the treatment side: 1500 ms > 5% of 20 s.
+        for x in p.iter_mut().filter(|x| x.kind == Kind::Separable) {
+            x.treatment.spec_boundaries = 2;
+        }
+        assert_eq!(verdicts_of(&p).c3_parallelism, Verdict::Inconclusive);
     }
 
     #[test]
@@ -1160,21 +1249,24 @@ mod tests {
 
     #[test]
     fn a_poll_of_exactly_five_percent_of_the_control_is_still_measurable() {
-        // 500 ms poll against a 10 s control: exactly 5%.
+        // One boundary a side at 500 ms: 1000 ms against a 20 s control is 5%.
         let mut p = all([0.5; 5], 1, 1);
         for x in p.iter_mut().filter(|x| x.kind == Kind::Separable) {
-            x.control.spec_wall_ms = Some(10_000);
-            x.treatment.spec_wall_ms = Some(5_000);
+            x.control.spec_wall_ms = Some(20_000);
+            x.treatment.spec_wall_ms = Some(10_000);
         }
         assert_eq!(verdicts_of(&p).separable_ratios.len(), 5);
-        // Just under: 9_999 ms makes every pair unmeasurable.
+        // Just under: 19_999 ms makes every pair unmeasurable.
         for x in p.iter_mut().filter(|x| x.kind == Kind::Separable) {
-            x.control.spec_wall_ms = Some(9_999);
+            x.control.spec_wall_ms = Some(19_999);
         }
         assert_eq!(verdicts_of(&p).c3_parallelism, Verdict::Inconclusive);
     }
 
-    fn shared_with(spec: &[(bool, u64, Option<u64>, (u64, u64))]) -> Vec<Pair> {
+    /// (succeeded, unused conflicts, lost rubric items, unused/all spec bytes)
+    type SharedSpec = (bool, u64, Option<u64>, (u64, u64));
+
+    fn shared_with(spec: &[SharedSpec]) -> Vec<Pair> {
         spec.iter()
             .enumerate()
             .map(|(i, (ok, conflicts, lost, bytes))| {

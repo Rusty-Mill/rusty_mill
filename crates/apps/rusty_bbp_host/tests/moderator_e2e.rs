@@ -212,6 +212,7 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
     let out = moderator.join().expect("join").expect("moderator");
     assert_eq!(out.state, State::Closed);
     assert_eq!(out.turns_launched, 4, "planner, coder, tester, reviewer");
+    assert!(out.replay_equals_live, "the log folds to the live state");
     assert_eq!(out.runs, 1);
     assert_eq!(
         seen,

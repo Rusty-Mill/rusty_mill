@@ -131,6 +131,9 @@ pub struct Outcome {
     /// The first Planning visit excludes any later replanning; these raw visits
     /// do not define authoring time for the ultimately approved spec.
     pub visits: Vec<(State, Duration)>,
+    /// Folding the whole log reproduces the live state at the terminal
+    /// observation: the replay a metric is computed from is the run it saw.
+    pub replay_equals_live: bool,
 }
 
 /// Ordered state visits, timed by the loop's own clock (the log has none).
@@ -360,7 +363,10 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         }
         if matches!(state, State::Closed | State::Cancelled) {
             sup.kill_harnesses()?;
+            let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
+            let replay = TaskState::fold_with(cfg.task.clone(), d.state.master, &events);
             return Ok(Outcome {
+                replay_equals_live: replay == d.state,
                 visits: visits.finish(seen),
                 state,
                 turns_launched: launched.len() as u64,
