@@ -1,0 +1,10 @@
+doc rows: 112 actual crates: 112
+in actual, missing from doc: []
+in doc, not in actual: []
+totals: {'serde': 68, 'serde_json': 102, 'toml': 9, 'serde_yaml': 3}
+dep-column mismatches: []
+engine users per metadata (in doc set): ['orch-store', 'remind_me_core', 'remind_me_hub', 'rleval-app', 'rusty_fair_play', 'rusty_fair_play_domain', 'rusty_mill_board', 'rusty_multimodal_db', 'rusty_tick']
+engine flag missing: []
+engine flag extra: ['remind_me_api', 'remind_me_mcp', 'remind_me_remote', 'rusty-remind-me', 'rusty_mill_runner']
+tickets: Counter({'#748': 16, '#737': 12, '#749': 10, '#739': 9, '#738': 8, '#747': 8, '#746': 6, '#740': 6, '#741': 6, '#744': 6, '#751': 5, '#750': 5, '#743': 5, '#742': 4, '#745': 3, '#729': 1, 'none (dev oracle)': 1, '#728': 1})
+engine crates' tickets: {'orch-store': '#746', 'remind_me_api': '#741', 'remind_me_core': '#741', 'remind_me_hub': '#741', 'remind_me_mcp': '#741', 'remind_me_remote': '#741', 'rleval-app': '#737', 'rusty-remind-me': '#741', 'rusty_fair_play': '#746', 'rusty_fair_play_domain': '#746', 'rusty_mill_board': '#746', 'rusty_mill_runner': '#746', 'rusty_multimodal_db': '#746', 'rusty_tick': '#729'}
