@@ -11908,6 +11908,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rsa",
  "rusty_base64",
+ "rusty_http",
  "rusty_json",
  "rusty_mcp_axum",
  "rusty_mcp_server",
