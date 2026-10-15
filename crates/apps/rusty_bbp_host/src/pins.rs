@@ -3,14 +3,16 @@
 //! A pin is the `--model ID` or `--model=ID` argument of the launched program;
 //! argument boundaries are kept, so prompt text that mentions the flag pins
 //! nothing. A `sh -c` launcher is parsed with shell quoting and comments; every
-//! `claude` command in it must pin; the only other commands allowed are a short
-//! list of setup commands, `git` and `set` in two and one argument forms only
-//! (a command name alone is never taken as proof that nothing else starts: `git`
-//! runs aliases and transports); assignments use names with no special meaning;
-//! `$( ... )` substitutions hold setup commands only; and anything whose
+//! `claude` command in it must pin; the only other commands allowed are `set`,
+//! `cd`, `rm` and `git` (what the shipped coder launcher uses), `git` and `set`
+//! in a few argument forms only, since `git` runs aliases and transports;
+//! `exec` is the one wrapper; assignments use names with no special meaning;
+//! `$( ... )` substitutions hold those commands only; and anything whose
 //! effective execution cannot be established (a nested shell with or without a
 //! path, `eval`, control flow, a computed command, a subshell or process
 //! substitution, an unreadable quote) is an error.
+//! The check guards against an accidentally unpinned harness, not a launcher
+//! author who means harm; a human reads the launcher once before an evidence run.
 //! The checks read the file, not the run: `bbp pairs` repeats them on what the
 //! harnesses actually used.
 
@@ -169,15 +171,16 @@ fn shell_commands(script: &str) -> Result<Vec<Vec<Word>>, String> {
     Ok(lx.commands)
 }
 
-/// The commands a launcher may run besides `claude`: setup that starts no
-/// program. `git` and `set` only in the argument forms `setup_ok` lists; `git`
-/// can run configured programs (`-c alias.x=!cmd`, `--upload-pack`, `ext::`
-/// URLs), so a name on this list is never taken as proof by itself. Anything
-/// not listed is refused (a nested shell, `eval`, `xargs`, control flow).
-const SETUP: [&str; 15] = [
-    "set", "cd", "rm", "mkdir", "git", "cp", "mv", "echo", "printf", "true", "false", "sleep",
-    "ls", "cat", "pwd",
-];
+/// The commands a launcher may run besides `claude`: what the shipped coder
+/// launcher uses, and nothing else. `git` and `set` only in the argument forms
+/// `setup_ok` lists; `git` can run configured programs (`-c alias.x=!cmd`,
+/// `--upload-pack`, `ext::` URLs), so a name on this list is never taken as proof
+/// by itself. `rm` can delete or, with `cd`, reach any file the launcher can
+/// write, and the check does not look at what it touches. Anything not listed is
+/// refused (a nested shell, `eval`, `xargs`, control flow, `cp`, `mv`, `env`).
+/// A launcher that needs another command is refused until it is added here, with
+/// a reason.
+const SETUP: [&str; 4] = ["set", "cd", "rm", "git"];
 
 /// Literal values assigned earlier in the line, by variable name.
 type Vars = BTreeMap<String, String>;
@@ -263,7 +266,7 @@ fn setup_ok(name: &str, args: &[Word], vars: &Vars) -> Result<(), String> {
 
 /// What a simple command runs.
 enum Runs {
-    /// Only assignments (or a wrapper with nothing after it).
+    /// Only assignments (or `exec` with nothing after it).
     Nothing,
     /// A listed setup command.
     Setup,
@@ -272,11 +275,10 @@ enum Runs {
 }
 
 /// The command word of a simple command, past `NAME=value` assignments and the
-/// wrappers that run the next word as is (`exec`, `command`, `nohup`, `time`,
-/// `env`, without options of their own). An assignment must use a plain name;
+/// `exec` wrapper (without options of its own). An assignment must use a plain name;
 /// one that stands alone with a literal value is remembered in `vars`. An error
 /// for a command word that is computed, not `claude` and not a listed setup
-/// command, or hidden behind a wrapper's options: what runs cannot be
+/// command, or hidden behind `exec`'s options: what runs cannot be
 /// established.
 fn runs(words: &[Word], vars: &mut Vars) -> Result<Runs, String> {
     let mut pending: Vec<(String, String)> = Vec::new();
@@ -291,7 +293,7 @@ fn runs(words: &[Word], vars: &mut Vars) -> Result<Runs, String> {
             continue;
         }
         let name = base(&w.text);
-        if matches!(name, "exec" | "env" | "command" | "nohup" | "time") {
+        if name == "exec" {
             if words.get(i + 1).is_some_and(|n| n.text.starts_with('-')) {
                 return Err(format!("{name} with options is not read literally"));
             }
@@ -615,8 +617,8 @@ mod tests {
 
     #[test]
     fn only_a_claude_command_in_a_shell_line_can_pin() {
-        let echo = launcher("sh", &["-c", "echo --model m1; exec claude -p x"]);
-        assert_eq!(pinned_model(&echo).unwrap(), None);
+        let setup = launcher("sh", &["-c", "set -e; rm -rf w; cd w; exec claude -p x"]);
+        assert_eq!(pinned_model(&setup).unwrap(), None);
         let env = launcher("sh", &["-c", "A=1 exec claude --model m1 -p x"]);
         assert_eq!(pinned_model(&env).unwrap(), Some("m1".into()));
         let nested = launcher("sh", &["-c", "exec sh -c 'claude --model m1'"]);
@@ -719,12 +721,12 @@ mod tests {
             let sh = launcher("sh", &["-c", script]);
             assert!(pinned_model(&sh).is_err(), "{script}");
         }
-        // The supported wrappers and the usual setup commands are fine.
+        // The exec wrapper and the setup commands the shipped launcher uses are fine.
         let ok = launcher(
             "sh",
             &[
                 "-c",
-                "set -e; cd /tmp; rm -rf w; A=1 env B=2 exec claude --model m1 -p x",
+                "set -e; cd /tmp; rm -rf w; A=1 B=2 exec claude --model m1 -p x",
             ],
         );
         assert_eq!(pinned_model(&ok).unwrap(), Some("m1".into()));
@@ -750,7 +752,7 @@ mod tests {
         for script in [
             r#"X="$(claude -p task)"; exec claude --model m1 -p next"#,
             "X=$(claude -p task); exec claude --model m1 -p next",
-            r#"echo "$(claude -p task)"; exec claude --model m1 -p next"#,
+            r#"rm -rf "$(claude -p task)"; exec claude --model m1 -p next"#,
             r#"exec claude --model m1 -p "$(claude -p task)""#,
             "X=$(echo $(claude -p task)); exec claude --model m1 -p next", // nested
             "X=$(sh -c 'claude -p task'); exec claude --model m1 -p next",
@@ -762,8 +764,8 @@ mod tests {
         // A substitution of setup commands only is fine, in any of those places.
         for script in [
             r#"X="$(git rev-parse HEAD)"; exec claude --model m1 -p "at $X""#,
-            r#"exec claude --model m1 -p "at $(git rev-parse HEAD) in $(pwd)""#,
-            "cd $(pwd); exec claude --model m1 -p x",
+            r#"exec claude --model m1 -p "at $(git rev-parse HEAD) in $PWD""#,
+            "cd $(git rev-parse HEAD); exec claude --model m1 -p x",
         ] {
             let sh = launcher("sh", &["-c", script]);
             assert_eq!(pinned_model(&sh).unwrap(), Some("m1".into()), "{script}");
@@ -803,7 +805,7 @@ mod tests {
             // An operand from the environment, or assigned something unsafe.
             r#"git clone -q /a "$DEST"; exec claude --model m1 -p x"#,
             r#"D=--upload-pack=x; git clone -q /a "$D"; exec claude --model m1 -p x"#,
-            r#"D=$(pwd); git clone -q /a "$D"; exec claude --model m1 -p x"#,
+            r#"D=$(git rev-parse HEAD); git clone -q /a "$D"; exec claude --model m1 -p x"#,
         ] {
             let sh = launcher("sh", &["-c", script]);
             assert!(pinned_model(&sh).is_err(), "{script}");
@@ -875,5 +877,57 @@ mod tests {
             );
             assert!(pinned_model(&sh).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn only_what_the_shipped_launcher_uses_is_allowed_and_each_other_command_is_refused() {
+        // claude, set, cd, rm, git and the exec wrapper. Every other command is
+        // refused as a command word, as a wrapper and inside a substitution.
+        for cmd in [
+            "cp a b",
+            "mv a b",
+            "ls",
+            "cat f",
+            "printf x",
+            "sleep 1",
+            "mkdir d",
+            "echo x",
+            "true",
+            "false",
+            "pwd",
+            "export A=1",
+            "env A=1",
+            "command true",
+            "nohup true",
+            "time true",
+        ] {
+            for script in [
+                format!("{cmd}; exec claude --model m1 -p x"),
+                format!("{cmd} && exec claude --model m1 -p x"),
+                format!("X=$({cmd}); exec claude --model m1 -p x"),
+            ] {
+                let sh = launcher("sh", &["-c", &script]);
+                assert!(pinned_model(&sh).is_err(), "{script}");
+            }
+        }
+        // The wrappers other than exec do not run claude either.
+        for script in [
+            "env claude --model m1 -p x",
+            "nohup claude --model m1 -p x",
+            "command claude --model m1 -p x",
+            "time claude --model m1 -p x",
+        ] {
+            let sh = launcher("sh", &["-c", script]);
+            assert!(pinned_model(&sh).is_err(), "{script}");
+        }
+        // What the shipped coder launcher uses still reads.
+        let sh = launcher(
+            "sh",
+            &[
+                "-c",
+                r#"set -e; W=/tmp/w; rm -rf "$W"; git clone -q /tmp/t "$W"; cd "$W"; exec claude --model m1 -p "at $(git rev-parse HEAD)""#,
+            ],
+        );
+        assert_eq!(pinned_model(&sh).unwrap(), Some("m1".into()));
     }
 }

@@ -53,6 +53,12 @@ A run must never look cheap because a model was missing from the price table.
 3. The cost cap re-reads harness output each poll. Find an input where the cap fails to stop a run that has spent more than the cap: output the parser skips, a model name that prices, a message printed after the check, a harness that writes elsewhere.
 4. Cache writes: confirm that pricing every write at the 1-hour rate can only raise the price relative to the printed split (`modelUsage` has none), and that the 5-minute and 1-hour prices in `docs/bbp/2b-criteria.json` are the ones the price page lists.
 
+## Known limits of the pin check (claims to test, not to accept)
+
+- **Accidents, not malice.** The pin check guards against an accidentally unpinned harness. It does not guard against a launcher author who means harm: `rm`, and `cd` with it, can replace the `claude` binary or edit `~/.claude/settings.json`, which the check cannot see. A human reads the launcher once before an evidence run. Try to find an accident (not a deliberate trick) the check misses.
+- **What is refused.** A launcher that exports an API key or a `CLAUDE_*` variable, or uses `env -i` or `env VAR=x`, is refused: the allowed commands are `claude`, `set`, `cd`, `rm`, `git` (two argument forms) and the `exec` wrapper, and assignments may only use a lowercase name or a single uppercase letter. Add a command or a variable to the list only with a reason.
+- **When to stop adding rules.** If another bypass is found in the shell reader, do not add another rule. Replace the reader by pinning the launcher file by hash, with a human reviewing that one file. Say in your findings whether the bypass you found is of that kind.
+
 ## What to hand back
 
 A list of findings, most serious first, each with file:line, reproduction, and expected behaviour; then, per task, the mutations you ran and which survived. Say plainly if you ran out of time on an item.
