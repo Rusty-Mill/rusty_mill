@@ -18,6 +18,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rusty-mcp/0.6.0")]
 
+pub(crate) mod admission;
 pub mod auth;
 pub mod limits;
 #[cfg(feature = "otel")]

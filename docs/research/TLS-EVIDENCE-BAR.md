@@ -1,6 +1,6 @@
 # TLS native engine: evidence bar proposal (owner to approve)
 
-Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; `anyExtendedKeyUsage` aligned 2026-10-12 and the two `nc-dos` cases bounded 2026-10-13; the two other native-accept/webpki-reject limbo cases are accepted exceptions (see "Accepted exceptions"; owner acceptance recorded 2026-10-13). Follows
+Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Open: reviewer (item 4); review scope draft awaiting approval; first consumer named and Amendment 1 accepted 2026-10-14 (wiring still gated on the unmet Tier 1 items); `anyExtendedKeyUsage` aligned 2026-10-12 and the two `nc-dos` cases bounded 2026-10-13; the two other native-accept/webpki-reject limbo cases are accepted exceptions (see "Accepted exceptions"; owner acceptance recorded 2026-10-13). Follows
 `TLS-ENGINE-ASSESSMENT.md` section 6, which this narrows and updates. The engine's default,
 both gates and every consumer are unchanged. The bar, replacing `ring`, and superseding
 ADR-0002 are the owner's decisions.
@@ -71,17 +71,17 @@ proposed to start until Tier 1 has been in use.
 ## Questions for you (answers recorded 2026-10-10)
 
 1. Tier 1: **approved**, fuzz length left to the reviewer.
-2. Candidate: `rleval-app` OIDC transport is **my recommendation, not a chosen consumer**; the owner has not confirmed it.
-3. ADR: amendment before any wiring (my recommendation); **text not yet written or approved.**
+2. Candidate: `rleval-app` OIDC transport (client only, TLS 1.3, named hosts) **chosen by the owner on 2026-10-14**, in the working session ("3 approved recommendation"). Naming it wires nothing.
+3. ADR: amendment before any wiring. **Amendment 1 accepted by the owner on 2026-10-14** (same session message).
 4. Reviewer: **open.** Without one Tier 1 stalls at item 4.
 5. `ring`: keep (my recommendation).
 6. **Proposed, pending confirmation:** leave it. Tier 1 item 1 counts *scheduled* runs and the only
    scheduled CI run today is weekly (Mondays 03:17 UTC), so the criterion takes 10 weeks as
    written. No schedule is added and the criterion is unchanged.
 7. **Smaller review scope:** drafted in `TLS-REVIEW-SCOPE.md` for the owner's approval.
-8. **ADR amendment:** approach and text **pending confirmation**; proposed as Amendment 1 in
+8. **ADR amendment:** approach and text **accepted by the owner on 2026-10-14**; Amendment 1 in
    `crates/libs/net/rusty_tls/docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md`
-   (marked Proposed; it adds no default, wires nothing and is not operative).
+   (it adds no default and wires nothing; wiring is a separate change that must cite met Tier 1 evidence).
 
 ## Limits
 

@@ -17,11 +17,12 @@ pub mod policy;
 pub mod record;
 pub mod role;
 pub mod shadow;
+pub mod spec_metrics;
 pub mod state;
 pub mod store;
 pub mod wake;
 
-pub use codec::{decode_artifact, encode_artifact, SpecFile};
+pub use codec::{decode_artifact, encode_artifact, spec_markdown, SpecFile};
 pub use command::{AgentAction, Code, Command, HumanAction, OpenTask, Rejection, Response};
 pub use engine::{handle, Handled};
 pub use event::{
@@ -36,4 +37,4 @@ pub use role::*;
 pub use shadow::{Comparison, Shadow, ShadowKind};
 pub use state::{Budget, BudgetField, Card, Gate, Slice, State, TaskState, Turn, TurnKind};
 pub use store::{Driver, MemStore, ShadowSink, Store, StoreError};
-pub use wake::{can_act, wake_set, WakeReason};
+pub use wake::{can_act, wake_set, WakeReason, WAKE_RULES};

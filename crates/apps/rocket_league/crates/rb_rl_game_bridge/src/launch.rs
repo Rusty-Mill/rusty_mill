@@ -31,6 +31,22 @@ pub fn rlbot_args(port: u16) -> [String; 4] {
     ]
 }
 
+/// Whether `executable` is in an Epic Games install (a directory named `Epic Games`, in either
+/// path style). Such a game started directly has no login arguments and does not connect: they
+/// come from a launch through the Epic launcher (see the README's "Starting the game in RLBot
+/// mode (Epic, Windows)"), which [`GameLaunch`] does not do.
+pub fn needs_epic_login(executable: &Path) -> bool {
+    executable
+        .to_string_lossy()
+        .split(['/', '\\'])
+        .any(|part| part.eq_ignore_ascii_case("Epic Games"))
+}
+
+/// What `rb_rl_bridge --launch` says about an Epic install.
+pub const EPIC_LAUNCH_WARNING: &str = "warning: this looks like an Epic install; --launch starts \
+the game without Epic's login arguments, so it will probably not connect. Start it through the \
+Epic launcher instead (rusty_bullet/tools/rl_live_test/run-live-test.ps1 does the whole sequence)";
+
 /// A game executable and the controller port it should dial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameLaunch {
@@ -58,7 +74,8 @@ impl GameLaunch {
     }
 
     /// Starts the game. Launching through Steam or Epic, which RLBotCS also supports, needs
-    /// those launchers' own protocols and is not done here: this starts the executable.
+    /// those launchers' own protocols and is not done here: this starts the executable (for an
+    /// Epic install, see [`needs_epic_login`]).
     pub fn spawn(&self) -> io::Result<Child> {
         self.command().spawn()
     }
@@ -87,6 +104,26 @@ mod tests {
         let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
         assert_eq!(args[0], "-rlbot");
         assert_eq!(args[1], "RLBot_ControllerURL=127.0.0.1:5000");
+    }
+
+    #[test]
+    fn an_epic_games_directory_is_an_epic_install_in_either_path_style() {
+        for path in [
+            r"C:\Program Files\Epic Games\rocketleague\Binaries\Win64\RocketLeague.exe",
+            "D:/epic games/rocketleague/Binaries/Win64/RocketLeague.exe",
+            "Epic Games/RocketLeague.exe",
+        ] {
+            assert!(needs_epic_login(Path::new(path)), "{path}");
+        }
+        for path in [
+            r"C:\Program Files (x86)\Steam\steamapps\common\rocketleague\Binaries\Win64\RocketLeague.exe",
+            // Only a whole directory name counts, not a part of one or the file itself.
+            r"C:\Not Epic Games Here\RocketLeague.exe",
+            r"C:\games\Epic Games.exe",
+            "RocketLeague.exe",
+        ] {
+            assert!(!needs_epic_login(Path::new(path)), "{path}");
+        }
     }
 
     #[test]

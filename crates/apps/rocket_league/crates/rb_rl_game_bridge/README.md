@@ -131,7 +131,11 @@ its state setting becomes a ball placement.
   on Windows succeeds while something holds `127.0.0.1:port`, exactly where `GameListener`
   listens. A test found this.
 - `GameLaunch` starts the executable directly (as `Epic.Windows.cs:55-62` does); Steam, Epic,
-  legendary and Heroic launchers are not driven.
+  legendary and Heroic launchers are not driven. For an Epic install `--launch` says so (a
+  warning line) and carries on: that game gets no login arguments and will probably not connect.
+  The Epic sequence is done by `rusty_bullet/tools/rl_live_test`, which also checks that the
+  game it closes is the one it started; it is not ported into the bridge (that needs a process
+  handle, which the crate's `unsafe_code = "forbid"` and the standard library do not give).
 
 ## Verified
 

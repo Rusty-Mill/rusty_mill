@@ -131,6 +131,8 @@ Each item is one PR, with its own tests and a change fragment.
 5. **Sans-IO cores** for `auth`, `limits` and metrics recording, on `rusty_http`
    types; the existing layers become tower adapters over them. No behaviour
    change. *Done when:* the cores have unit tests with no `tokio` or `axum`.
+   **`limits` core done (2026-10-14):** crate-private `admission` (`Admission`,
+   `Permit`, `Rejection`); `auth` and metrics remain.
    **`auth` core done (2026-10-14):** crate-private `auth::decision`
    (`bearer_token`, `from_validation`, `check_claims`, `Refusal`); metrics remain.
 6. **Drop `axum`** from the adapters (generic body, `http::Response`). *Done
@@ -139,7 +141,8 @@ Each item is one PR, with its own tests and a change fragment.
 7. **`rusty_serve` adapter** for the cores, so a blocking server can use auth
    and limits without tower. One test per layer against `rusty_serve`.
 8. **`limits` without `tokio::sync`**: an atomic admission counter; keep
-   `tokio::time` only in the tower adapter's timeout.
+   `tokio::time` only in the tower adapter's timeout. **Done (2026-10-14)**
+   with the `limits` core: `Admission` is a compare-and-swap counter.
 9. **OTLP exporter**, in three PRs: (a) instruments and a span model on atomics
    with an exporter trait; (b) the OTLP/HTTP-JSON encoder and sender on
    `rusty_request`, tested against the fake collector the tests already have;

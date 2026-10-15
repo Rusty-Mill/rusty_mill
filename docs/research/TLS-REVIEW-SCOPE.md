@@ -2,7 +2,7 @@
 
 Date: 2026-10-11. Status: **draft, nothing approved.** Supports Tier 1 item 4 of
 `TLS-EVIDENCE-BAR.md`. The owner asked for a smaller scope than a review of the whole
-engine. This is the code the Tier 1 candidate (`rleval-app` OIDC, a TLS 1.3 client to
+engine. This is the code the Tier 1 consumer (`rleval-app` OIDC, named by the owner on 2026-10-14, a TLS 1.3 client to
 named Google hosts) actually executes, and what is left out and why.
 
 ## In scope: about 9,000 lines (client path only)
@@ -44,7 +44,8 @@ out. Two ways to make the scope true:
 
 1. **Add a TLS 1.3-only option to `NativeTlsStream`** (small change inside the gated
    module; the consumer sets it). Then the 1.2 client is genuinely not executed. My
-   recommendation.
+   recommendation. **Built** as `NativeTlsStream::tls13_only()`, on the owner's request
+   on 2026-10-14; the scope question below is still the owner's to approve.
 2. **Widen the scope** to the four TLS 1.2 client files (about 2,500 lines).
 
 ## What the reviewer receives

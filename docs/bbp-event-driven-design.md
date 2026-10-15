@@ -17,7 +17,7 @@ The note was written before the v0.5 engine landed (#643, #644, #645). The secti
 - **A.** `wake_set(st: &TaskState) -> Vec<(RoleId, WakeReason)>`. The roster is `st.roster`, so no second argument.
 - **B.** `pick_next` is the best role in `wake_set`, else the state's `default_holder`. Without the fallback a passing default holder is never woken again (the watermark suppresses the state trigger) and the task stalls with no live turn.
 - **C.** Shadow decisions are returned from `handle()` in `Handled.shadow` and are **not logged**: a log event would change `rev` on every trace. The host logs them, deduped on `rev`, so real runs give evidence and not only tests.
-- **D.** Priority: `Addressed` > `Artifact` > `State`; ties by `turn_order`; applied after self-exclusion, cooldown, visibility and capability gating.
+- **D.** Priority: `Addressed` > `State` > `Artifact` > `Observer`; ties by `turn_order`; applied after self-exclusion, cooldown, visibility and capability gating. (Revised after the shadow comparison; the first order was `Addressed` > `Artifact` > `State`. See "Decisions after the shadow comparison".)
 - **E.** T-final is dropped, and T-consult and T-reply are explicit grants that bypass `pick_next`.
 - **Sequencing:** one PR per step, no stacking: this reconciliation and `wake_set` in parallel from `main`; the `SchedulingPolicy` seam, then shadow mode with host logging, each after the previous merge. Live mode waits for the owner's approval of the shadow comparison.
 
@@ -29,13 +29,13 @@ What changed against the original text:
 | T-state: `build` needs `write ∋ candidate`; `review` needs `verdict_at ∋ review` | `REQUIREMENTS` is richer: `planning` also needs `post ∋ request_decision`; `build` needs `write ⊇ {diff, candidate}`; `test` and `review` need `post ∋ verdict`; `review` needs `final_decision` | T-state reuses `Requirement::served_by` |
 | T-final | Redundant: the task enters `review` exactly when a test approve exists, and the `review` row already requires `final_decision` | Dropped (E) |
 | T-consult and T-reply are triggers | Yield, human `ask`, request settlement and the consultation return are direct `grant()` calls that never pass `schedule()`; T-reply is not derivable from state because the request is cleared on settle | Explicit grants (E) |
-| `seen_rev` "derivable from `turn_ended`, no new record" | True for the log, but `TaskState` held no per-role turn-end rev, no append rev per message or artifact, and `TurnEnded` has no role | Four fold-derived fields (not logged): `last_turn_end`, `msg_rev`, `art_rev`, `ready_rev` |
+| `seen_rev` "derivable from `turn_ended`, no new record" | True for the log, but `TaskState` held no per-role turn-end rev, no append rev per message or artifact, and `TurnEnded` has no role | Four fold-derived fields (not logged): `last_turn_end`, `msg_rev`, `art_rev`, `ready_rev`; later extended by `entered_rev` and `assigned_rev` (see "Decisions after the shadow comparison") |
 | `pick_next` "highest priority" | Undefined | D and B |
 | `SchedulingPolicy` in `task_opened` | Verified: a field marked `#[rusty_serde(default)]` on an enum variant deserializes when absent, so the field is additive, needs no schema bump, and old logs replay as `TurnBased` | Spec gets a short paragraph in the seam PR |
 | Capability gating "reuses R5" | `state_accepts` is private to `engine.rs` | Made `pub(crate)` |
 | `Command::Tick` | Calls `schedule()` on every moderator poll | Shadow logging dedupes on `rev` |
 
-To measure in shadow mode (not decided): `seen_rev` is 0 for a role that has had no turn, so every earlier artifact counts as new for it; with `Artifact` above `State` the eligible set is wide early in a task. Alternatives for the baseline are the role's assignment rev or the current state's entry rev.
+Decided after the shadow comparison: see "Decisions after the shadow comparison" below.
 
 ## Recommendation
 
@@ -71,24 +71,25 @@ The turn loop exists because separate model processes share no runtime or bus. T
 
 An agent is *eligible* when board state matches a trigger derived from its capability set. Triggers use only the nine Role fields, so BBP names no role (consistent with v0.5: roles are roster data).
 
-| Trigger | Fires when | Role fields | Maps to today's code |
+| Trigger (best first) | Fires when | Role fields | Maps to today's code |
 | --- | --- | --- | --- |
-| Addressed | A message whose `to` contains the role's id or `*`, newer than the role's last turn end, authored by someone else, not a `pass`. | `id`, `read_messages` | R9 recipient check; `visible()` |
-| Artifact | A spec, diff, candidate or test report of a kind in `read_artifacts` was stored, newer than the role's last turn end, by someone else. | `read_artifacts` | `get_artifact` read capability |
-| State | The role serves the current working state (`Requirement::served_by`: the capabilities of its `REQUIREMENTS` row) and that state's turn became available since the role's last turn end. | `write`, `post`, `verdict_at`, `final_decision` | `Roster::default_holder`; the `test` run guard in `schedule()` |
+| Addressed | A message that **names the role** in `to` (a `Role` recipient; `to: [all]` names no one and addresses nobody for scheduling), newer than the role's last turn end (0 if it has had none), authored by someone else, not a `pass`, and readable by the role. | `id`, `read_messages` | R9 recipient check; `visible()` |
+| State | The role serves the current working state (`Requirement::served_by`: the capabilities of its `REQUIREMENTS` row) and that state's turn became available since the role's last turn end: `max(ready_rev, assigned_rev) > last_turn_end`. Being assigned makes the state's turn available to its server. | `write`, `post`, `verdict_at`, `final_decision` | `Roster::default_holder`; the `test` run guard in `schedule()` |
+| Artifact | A spec, diff, candidate or test report of a kind in `read_artifacts` was stored by someone else, in the **current state**, after the later of the role's last turn end and (if it has never had a turn) its assignment, and the role serves the state. | `read_artifacts` | `get_artifact` read capability |
+| Observer | The same as Artifact, for a role that does **not** serve the state. Recorded in the set as evidence; selectable only when `max_live_turns` is above one. | `read_artifacts` | none |
 
 Explicit grants are not triggers. A yield, a human `ask`, a settled request and a consultation return name their grantee directly, bypass `schedule()` and so bypass `pick_next`. The request-settlement regrant cannot be derived from state anyway, because the request is cleared when it settles.
 
 Rules that keep a trigger honest:
 
 - **Visibility first.** A trigger fires only on records the role may read. A `scoped` reader is never woken by a message it cannot read; otherwise the wake leaks the existence of hidden records (spec Goal 4, fresh reviews by construction).
-- **Capability-gated, not curiosity-gated.** Addressed and Artifact wake a role only if it can *act*: it holds some `post` kind other than `pass` that the current state accepts (`state_accepts`, the by-state table). A `verdict` counts only if the role also holds `verdict_at` for the current stage, the same admission as `check_verdict` (R6); a post-only role would be woken and then rejected. A role whose every postable kind would be rejected is not eligible.
-- **Watermark.** Each role has a `seen_rev`, the card `rev` of the event that ended its last turn (0 if it has had none). A trigger counts only for events with `rev > seen_rev`. `TaskState` derives it, with the append rev of every message and artifact and `ready_rev` (the rev of the last event that made the state's turn available), while folding the log. They are not logged, so the log format is unchanged.
+- **Capability-gated, not curiosity-gated.** Addressed, Artifact and Observer wake a role only if it can *act*: it holds some `post` kind other than `pass` that the current state accepts (`state_accepts`, the by-state table). A `verdict` counts only if the role also holds `verdict_at` for the current stage, the same admission as `check_verdict` (R6); a post-only role would be woken and then rejected. A role whose every postable kind would be rejected is not eligible.
+- **Watermark.** Each role has a last turn end, the card `rev` of the event that ended its last turn. `Addressed` counts messages with `rev` above it (0 if the role has had no turn, so a message sent before it was assigned still addresses it). `State` compares `max(ready_rev, assigned_rev)` with it. `Artifact` and `Observer` count artifacts above the later of the role's last turn end (or, with none, its assignment rev) and the current state's entry rev, so artifacts from before the state began, or before the role was assigned, are history. `TaskState` derives all of these (`last_turn_end`, `msg_rev`, `art_rev`, `ready_rev`, `entered_rev`, `assigned_rev`) while folding the log. They are not logged, so the log format is unchanged.
 - **Human gates dominate.** In `plan_gate`, `merge_gate`, `approved` and `escalated` there is no default turn (spec "Turns"), so `wake_set` is empty; a human `ask` is an explicit grant. Event-driven mode does not change that.
 
-Order: `Addressed` > `Artifact` > `State`, ties by `turn_order`, one entry per role (its best reason).
+Order: `Addressed` > `State` > `Artifact` > `Observer`, ties by `turn_order`, one entry per role (its best reason).
 
-`WakeReason` is a closed enum with three variants, in priority order. It is computed, not stored, so the log format is unaffected.
+`WakeReason` is a closed enum with four variants, in priority order. It is computed, not stored, so the log format is unaffected.
 
 ## b. Two separate concerns
 
@@ -292,4 +293,16 @@ Resolved on 2026-10-13: the policy lives in `task_opened` (question 2); `max_cha
 
 1. Is "interrupt the schedule" (one live turn, event-chosen) enough, or is true concurrent authoring a requirement? Superseded by `docs/bbp-concurrency-design.md`, which treats concurrent authoring as a separate design.
 2. Who owns the log-tail delivery loop: `rusty_bbp_host` (next to the engine) or orch (per the BBP/orch boundary)? Host-side shadow logging is in scope for phase 1c; the production delivery loop is not.
-3. What baseline should `seen_rev` have for a role with no turn yet (0, its assignment rev, or the state's entry rev)? Decide from the shadow comparison.
+3. ~~What baseline should `seen_rev` have for a role with no turn yet?~~ Decided; see "Decisions after the shadow comparison" (assignment rev for artifacts and state, floored at the state's entry; `Addressed` keeps the raw end of the last turn).
+
+## Decisions after the shadow comparison
+
+The first comparison over the 31 traces (53 automatic grants) was 26 agree, 2 fallback, 25 disagree. In 24 of the 25 the granted role was eligible but outranked, almost always by the lowest-`turn_order` role, which had seen nothing yet and so counted every earlier artifact and broadcast as new. The owner decided:
+
+1. **Baseline.** A role that has never had a turn has an assignment rev as its baseline for `Artifact` and `Observer` wakes, not 0 (`Addressed` still counts from the raw end of the last turn, 0 if none). `Artifact` and `Observer` wakes are also floored at the current state's entry rev: only an artifact stored in this state, after the role's last turn end (or assignment), counts. `Addressed` uses the raw end of the last turn (0 if none), so a message sent before a role was assigned still addresses it. `State` needs no floor, because `ready_rev` is never before the state's entry; being assigned makes the state's turn available to its server, so a server assigned after the state began is still woken.
+2. **Priority.** `Addressed` > `State` > `Artifact` > `Observer`, ties by `turn_order`.
+3. **Observers.** An `Artifact` wake of a role that does not serve the current state is recorded as `Observer`. It is in the set, as evidence, but is not selectable (`WakeReason::selectable`) unless `max_live_turns` is above one. If no selectable entry exists, the rule falls back to the default holder.
+
+Result on the same 31 traces: 39 agree, 3 fallback, 11 disagree. All 11 had one cause: a message addressed to `all` (the draft default, which includes every `verdict`) addressed every role that can act, so the planner and coder outranked the reviewer at `review`. The owner then decided question 4:
+
+4. **`all` addresses no one.** Only named recipients are `Addressed`; `to: [all]` addresses no one for scheduling. This is scheduling only: who may read a message (visibility, read scope) is unchanged. Result: 50 agree, 3 fallback, 0 disagree over the same 31 traces. Read that with care: on these scripted, one-role-at-a-time runs the rule now matches turn-based everywhere, so the traces confirm it does not misfire, not that it helps. The cases that differ are the targeted ones in `tests/shadow.rs`: a question to a non-default role, and a verdict that names its recipient.
