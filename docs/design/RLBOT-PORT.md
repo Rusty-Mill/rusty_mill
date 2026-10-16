@@ -141,8 +141,10 @@ Build order, each its own PR:
    real-time pacing and a binary; the slice's done-criteria are not yet tested (see below).
 4. `rb_rlbot_launch` and `rb_rlbot_match`: start bots from a `bot.toml` and a `match.toml`. **Not started**;
    neither crate exists, so bots are started by hand.
-5. Boost pads, scores and match phases in the packets; `DesiredGameState`. **Partly:** desired state is applied
-   and bounds-checked in `rb_rlbot_core`; the packet contents were not checked for this note.
+5. Boost pads, scores and match phases in the packets; `DesiredGameState`. **Built**: `Simulation::packet`
+   emits boost-pad states and timers, scores and match phases (`sim.rs`), with unit tests, and desired state
+   is applied and bounds-checked. The one gap is match info (gravity, game speed), which `rb_env` cannot change
+   and the core ignores. Not verified at runtime or against the game.
 6. Stretch: stock v5 bots unmodified (a Python bot, a Rust bot, a script, a hivemind). **Not started.**
 7. Later: option A's manager, launcher and GUI. **Not started.**
 
@@ -153,8 +155,10 @@ ball is touched within a fixed number of seconds and two runs produce identical 
 dependency; the bot already exists and has run against the real core.
 
 Status of the slice (2026-10-15): `rb_rlbot_core` runs with `rb_chaser_bot` (its README has the recipe), but
-the bot is started by hand in a second shell, not launched by core, and no test yet asserts the ball touch or
-the identical frames of two lockstep runs.
+the bot is started by hand in a second shell, not launched by core. Repeatability is covered at component
+level: `the_same_bot_gives_the_same_match_every_time` (`tests/core.rs`) compares two 900-packet runs through
+the real socket `Core` and client with a fixed-input test bot. Not covered: a process-level test that the
+`rb_chaser_bot` executable touches the ball within a fixed time, which the slice's done-criteria still need.
 
 ## 7. Risks
 
