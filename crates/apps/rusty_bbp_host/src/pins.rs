@@ -551,11 +551,42 @@ fn no_subagents(args: &[Arg]) -> bool {
 /// cannot start a subagent (which would run on a model nobody pinned).
 pub fn check_harness(l: &Launcher) -> Result<(), String> {
     let commands = claude_commands(l)?;
-    if commands.is_empty() {
-        return Err("the launcher starts no claude command".into());
+    if commands.len() != 1 {
+        return Err(format!(
+            "the launcher starts {} claude commands; an evidence launcher is exactly one session, since sessions share one log and the last result accounts for the last session only",
+            commands.len()
+        ));
     }
     for args in &commands {
         let args = flags(args);
+        // A flag whose value the shell computes is not read: `--tools "$t"`
+        // may hold anything.
+        for (i, a) in args.iter().enumerate() {
+            let (flag, inline) = flag_of(&a.text);
+            let checked = [
+                "--tools",
+                "--disallowedTools",
+                "--disallowed-tools",
+                "--output-format",
+                "--setting-sources",
+            ];
+            if !checked.contains(&flag) {
+                continue;
+            }
+            let computed = if inline.is_some() {
+                a.dynamic
+            } else {
+                args[i + 1..]
+                    .iter()
+                    .take_while(|n| !n.text.starts_with('-'))
+                    .any(|n| n.dynamic)
+            };
+            if computed {
+                return Err(format!(
+                    "the value of {flag} is computed by the shell, not a literal: it cannot be read"
+                ));
+            }
+        }
         if args.iter().any(|a| a.redirect) {
             return Err("a claude command's output is redirected or piped, so the log the cap reads would not hold it".into());
         }

@@ -369,8 +369,9 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         crate::pins::check_run(&cfg.launchers, &cap.criteria)
             .map_err(|e| format!("moderator: refusing to start: {e}"))?;
     }
-    check_evidence_marker(cfg)?;
+    // The lock first: a startup refused for it must not leave a marker behind.
     let _lock = lock(&cfg.dir, &cfg.task)?;
+    check_evidence_marker(cfg)?;
     let mut d = open_driver(&cfg.dir, &cfg.task)?;
     let started = Instant::now();
     let mut visits = Visits::new(d.state.state, started);
@@ -568,6 +569,14 @@ fn enforce_cap<S: Store>(
         return Err(format!(
             "moderator: cost cap reached (${usd:.4} over ${:.4})",
             cap.usd
+        ));
+    }
+    // A turn granted but never launched has no log yet; at the end that is a
+    // turn nothing can say the cost of.
+    if terminal && t.without_output > 0 {
+        return Err(format!(
+            "moderator: cannot enforce the cost cap: {} granted turn(s) have no log",
+            t.without_output
         ));
     }
     for turn in &t.turns {

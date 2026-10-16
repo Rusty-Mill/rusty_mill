@@ -59,9 +59,26 @@ fn config(dir: &Path, task: &TaskId, cost_cap: Option<CostCap>) -> Config {
     }
 }
 
-/// A task that reached `closed`, whose first turn printed one assistant message
-/// of 1M output tokens ($20 at the priced model) of `model`.
+/// [`closed_task_bare`], and every later turn's harness printed a completed
+/// turn that cost a millionth of a dollar: a finished run has a log for each
+/// turn it granted.
 fn closed_task(dir: &Path, model: &str) -> Fx {
+    let fx = closed_task_bare(dir, model);
+    for e in fx.d.store.events(&fx.st().task, 0).unwrap() {
+        if let Event::TurnGranted { turn, .. } = e {
+            if turn != TurnId(1) {
+                let log = moderator::log_path(dir, &fx.st().task, turn);
+                std::fs::write(log, format!("{SMALL_RESULT}\n")).unwrap();
+            }
+        }
+    }
+    fx
+}
+
+/// A task that reached `closed`, whose first turn printed one assistant message
+/// of 1M output tokens ($20 at the priced model) of `model`, and whose later
+/// turns left no log.
+fn closed_task_bare(dir: &Path, model: &str) -> Fx {
     let mut fx = Fx::new();
     let cand = fx.reach_approved();
     ok(fx.human(HumanAction::MergeReceipt {
@@ -107,8 +124,12 @@ fn a_closed_task_under_the_cap_or_with_no_cap_succeeds() {
     let fx = closed_task(&dir, "priced-model");
     let under = config(&dir, &fx.st().task, Some(cap(1000.0)));
     assert_eq!(moderator::check_terminal(&under, &fx.d), Ok(()));
-    // Exactly at the cap is not over it.
-    let at = config(&dir, &fx.st().task, Some(cap(20.0)));
+    // At the total ($20 and a millionth for each of the three later turns) is
+    // not over it; a hair below is.
+    let total = 20.0 + 3e-6;
+    let below = config(&dir, &fx.st().task, Some(cap(total - 1e-7)));
+    assert!(moderator::check_terminal(&below, &fx.d).is_err());
+    let at = config(&dir, &fx.st().task, Some(cap(total + 1e-9)));
     assert_eq!(moderator::check_terminal(&at, &fx.d), Ok(()));
     let none = config(&dir, &fx.st().task, None);
     assert_eq!(moderator::check_terminal(&none, &fx.d), Ok(()));
@@ -205,7 +226,7 @@ fn a_log_that_cannot_be_read_is_not_skipped() {
 #[test]
 fn a_granted_turn_with_no_log_at_the_end_cannot_be_checked_against_the_cap() {
     let dir = tempdir("missing");
-    let fx = closed_task(&dir, "priced-model");
+    let fx = closed_task_bare(&dir, "priced-model");
     // `closed_task` logs turn 1 only; the task has later granted turns.
     let granted =
         fx.d.store

@@ -635,10 +635,17 @@ pub fn of(
         let Event::TurnGranted { role, turn, .. } = e else {
             continue;
         };
-        let Ok(text) = std::fs::read_to_string(log_path(dir, task, *turn)) else {
-            out.without_output += 1;
-            all_known = false;
-            continue;
+        let text = match std::fs::read_to_string(log_path(dir, task, *turn)) {
+            Ok(t) => t,
+            // Not created: the turn was granted and never launched (or has not
+            // printed yet). Any other failure is a log that exists and cannot
+            // be read, which is not "no output".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                out.without_output += 1;
+                all_known = false;
+                continue;
+            }
+            Err(e) => return Err(format!("turn {}: its log cannot be read: {e}", turn.0)),
         };
         let (log, bad) = scan(&text);
         if bad > 0 {
