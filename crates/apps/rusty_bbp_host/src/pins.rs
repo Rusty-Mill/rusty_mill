@@ -1343,4 +1343,50 @@ mod tests {
         );
         assert_eq!(check_harness(&sh), Ok(()));
     }
+
+    // ---- review comments on #763 (baileyrd, fa4a8a8a)
+
+    fn full(extra: &str) -> Launcher {
+        launcher(
+            "sh",
+            &[
+                "-c",
+                &format!("exec claude --model m1 --output-format stream-json --setting-sources '' {extra} -p task"),
+            ],
+        )
+    }
+
+    #[test]
+    fn an_evidence_launcher_is_one_harness_session() {
+        // Two sequential sessions write one log, and the last result accounts
+        // for the last session only.
+        let two = launcher(
+            "sh",
+            &[
+                "-c",
+                "claude --model m1 --output-format stream-json --setting-sources '' --disallowedTools Agent,Task -p warmup; exec claude --model m1 --output-format stream-json --setting-sources '' --disallowedTools Agent,Task -p task",
+            ],
+        );
+        assert!(
+            pinned_model(&two).is_ok(),
+            "both pin: the pin check alone allows it"
+        );
+        let err = check_harness(&two).unwrap_err();
+        assert!(err.contains("one"), "{err}");
+        assert_eq!(check_harness(&full("--disallowedTools Agent,Task")), Ok(()));
+    }
+
+    #[test]
+    fn a_computed_tool_list_or_format_is_not_read_as_a_literal() {
+        for (what, line) in [
+            ("tools", "t=Agent,Task; exec claude --model m1 --output-format stream-json --setting-sources '' --tools \"$t\" -p task"),
+            ("disallowed", "t=Agent,Task; exec claude --model m1 --output-format stream-json --setting-sources '' --disallowedTools \"$t\" -p task"),
+            ("format", "f=stream-json; exec claude --model m1 --output-format \"$f\" --setting-sources '' --disallowedTools Agent,Task -p task"),
+            ("sources", "s=''; exec claude --model m1 --output-format stream-json --setting-sources \"$s\" --disallowedTools Agent,Task -p task"),
+        ] {
+            let l = launcher("sh", &["-c", line]);
+            let err = check_harness(&l).unwrap_err();
+            assert!(err.contains("computed"), "{what}: {err}");
+        }
+    }
 }

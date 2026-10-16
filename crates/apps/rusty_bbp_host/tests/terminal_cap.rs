@@ -179,3 +179,47 @@ fn a_usage_line_that_does_not_parse_is_not_skipped() {
     let noisy = format!("warning: slow\n{SMALL_RESULT}\n");
     assert_eq!(terminal("noisy", &noisy), Ok(()));
 }
+
+// ---- review comments on #763 (baileyrd, fa4a8a8a): read failures are not "no output"
+
+#[test]
+fn a_log_that_cannot_be_read_is_not_skipped() {
+    // Invalid UTF-8 in a log, and a directory where the log should be.
+    let dir = tempdir("bad-utf8");
+    let fx = closed_task(&dir, "priced-model");
+    let log = moderator::log_path(&dir, &fx.st().task, TurnId(1));
+    std::fs::write(&log, [b'{', 0xff, 0xfe, b'\n']).unwrap();
+    let cfg = config(&dir, &fx.st().task, Some(cap(1000.0)));
+    let err = moderator::check_terminal(&cfg, &fx.d).unwrap_err();
+    assert!(err.contains("cannot enforce the cost cap"), "utf-8: {err}");
+    std::fs::remove_file(&log).unwrap();
+    std::fs::create_dir(&log).unwrap();
+    let err = moderator::check_terminal(&cfg, &fx.d).unwrap_err();
+    assert!(
+        err.contains("cannot enforce the cost cap"),
+        "directory: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_granted_turn_with_no_log_at_the_end_cannot_be_checked_against_the_cap() {
+    let dir = tempdir("missing");
+    let fx = closed_task(&dir, "priced-model");
+    // `closed_task` logs turn 1 only; the task has later granted turns.
+    let granted =
+        fx.d.store
+            .events(&fx.st().task, 0)
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, Event::TurnGranted { .. }))
+            .count();
+    assert!(granted > 1, "the fixture has later turns");
+    let cfg = config(&dir, &fx.st().task, Some(cap(1000.0)));
+    let err = moderator::check_terminal(&cfg, &fx.d).unwrap_err();
+    assert!(
+        err.contains("cannot enforce the cost cap") && err.contains("no log"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

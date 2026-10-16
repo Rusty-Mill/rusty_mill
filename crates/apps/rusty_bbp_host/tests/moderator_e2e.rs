@@ -1658,3 +1658,34 @@ fn agents_check_as_a_binary_accepts_a_matched_pair_and_refuses_the_rest() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- review comments on #763 (baileyrd, fa4a8a8a): the marker waits for the lock
+
+#[test]
+fn a_capped_startup_refused_for_the_lock_leaves_no_marker() {
+    let (dir, task, repo) = opened("lock-marker");
+    let path = moderator::lock_path(&dir, &task);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    let holder = std::fs::File::create(&path).expect("create");
+    holder.lock().expect("lock");
+    let mut planner = script(&dir, "planner", "sleep 1");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let mut cfg = config(
+        &dir,
+        &task,
+        repo,
+        Launchers::default().with("planner", planner),
+        2,
+    );
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let err = moderator::run(&cfg).unwrap_err();
+    assert!(err.contains("another moderator"), "{err}");
+    let sha = cfg.cost_cap.as_ref().unwrap().criteria_sha256.clone();
+    assert!(
+        moderator::require_evidence_marker(&dir, &task, 1000.0, &sha).is_err(),
+        "a refused startup must not make the task an evidence run"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
