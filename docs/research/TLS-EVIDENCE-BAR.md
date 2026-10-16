@@ -27,7 +27,7 @@ and still fall back to rustls with one switch. The risk differs, so the bar shou
 | Certificate differential | **Partial, much improved 2026-10-11.** x509-limbo (9,802 cases, pinned by sha256) now runs against both engines: 9,777 compared. It found three real looser-than-webpki defects (fixed, see below). Remaining: the BetterTLS and limbo `pedantic` classes and CRLs are not enforced by either engine; the two name-constraint DoS cases are now bounded by a comparison budget (see below), but two other limbo cases where we accept and webpki refuses still need a named-owner decision. No generated-chain corpus at scale yet |
 | Fuzz targets | **Exist** (certificate, DER, TLS 1.2 record, schedule, client and server, version negotiation). **Smoke job added 2026-10-10** (30 s per target, on the same planner selection as the engine job; passed once on a runner, run 38094570843). No long run recorded. No target for TLS 1.3 handshake messages or the 1.3 machines beyond negotiation |
 | Live internet | **One runner run, three Google hosts, TLS 1.3, one network.** The step is non-blocking and runs wherever the engine job runs (same planner selection) |
-| Independent review | **None** |
+| Independent review | **Scope approved and reviewer named (David Bailey) by the owner, 2026-10-16; review not started, nothing reviewed yet.** Item 4 stays unmet until findings are closed |
 | Soak in a real consumer | **None** |
 | Mutation testing as a CI number | **None** (mutants are checked by hand per change) |
 | RSA PKCS#1 v1.5 signing | **Not supported** (touches `sign.rs`) |
