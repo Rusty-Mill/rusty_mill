@@ -1,12 +1,13 @@
 //! The deterministic loop that drives a [`Plan`] to completion.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU32;
 
 use orch_core::board::{Author, Board, BoardError, EntryKind, NewEntry};
 use orch_core::goal::Goal;
 use orch_core::task::{Agent, Plan, PlanError, Role, Status, Task, TaskState};
-use orch_core::{EntryId, TaskId, Text};
+use orch_core::{EntryId, Ref, TaskId, Text};
 
 use crate::{AgentError, AgentRunner, ClassifiedError, Ledger, Output, Routing};
 
@@ -104,6 +105,8 @@ pub enum Outcome {
     /// These cards wait on open questions. Answer them on the board and
     /// call `run` again.
     Blocked(Vec<TaskId>),
+    /// Hosted tasks are still working; checkpoint and poll in a later run.
+    Waiting(Vec<TaskId>),
 }
 
 /// Drives one goal's plan: route, check, start, count, run, record.
@@ -120,12 +123,29 @@ pub enum Outcome {
 pub struct Dispatcher<R> {
     routing: Routing,
     runner: R,
+    host: Option<Box<dyn crate::TaskHost>>,
 }
 
 impl<R: AgentRunner> Dispatcher<R> {
     /// A dispatcher over `routing` and `runner`.
     pub fn new(routing: Routing, runner: R) -> Self {
-        Self { routing, runner }
+        Self {
+            routing,
+            runner,
+            host: None,
+        }
+    }
+
+    /// Enable long-lived hosting for Implement cards. Other roles keep their runner.
+    pub fn with_host(mut self, host: impl crate::TaskHost + 'static) -> Self {
+        self.host = Some(Box::new(host));
+        self
+    }
+
+    /// Supply an optional host at a composition root.
+    pub fn with_boxed_host(mut self, host: Option<Box<dyn crate::TaskHost>>) -> Self {
+        self.host = host;
+        self
     }
 
     /// The runner, e.g. to inspect a fake in tests.
@@ -147,9 +167,42 @@ impl<R: AgentRunner> Dispatcher<R> {
         board: &mut Board,
         ledger: &mut Ledger,
     ) -> Result<Outcome, DispatchError> {
+        if self.host.is_none() {
+            for task in plan.tasks() {
+                if crate::hosted_handle(board, task.id()).is_none() {
+                    continue;
+                }
+                let agent = match task.state() {
+                    TaskState::Running { agent } | TaskState::Blocked { agent, .. } => *agent,
+                    _ => continue,
+                };
+                return Err(DispatchError::Agent {
+                    task: task.id(),
+                    agent,
+                    source: AgentError("hosted task requires its TaskHost configuration".into()),
+                });
+            }
+        }
+        let mut polled = HashSet::new();
         loop {
+            self.poll_hosted(plan, board, &mut polled)?;
             resume_answered(plan, board)?;
-            let Some(id) = next_task(plan) else {
+            let Some(id) = next_task(plan, board) else {
+                let waiting: Vec<_> = plan
+                    .tasks()
+                    .iter()
+                    .filter(|t| t.state().status() == Status::Running)
+                    .filter(|t| crate::hosted_handle(board, t.id()).is_some())
+                    .map(Task::id)
+                    .collect();
+                if !waiting.is_empty()
+                    && !plan
+                        .tasks()
+                        .iter()
+                        .any(|t| t.state().status() == Status::Blocked)
+                {
+                    return Ok(Outcome::Waiting(waiting));
+                }
                 return outcome(plan);
             };
             self.step(goal, id, plan, board, ledger)?;
@@ -180,6 +233,9 @@ impl<R: AgentRunner> Dispatcher<R> {
         };
         let status = task.state().status();
         let role = task.spec().role;
+        if role == Role::Implement && self.host.is_some() {
+            return self.open_hosted(goal, id, agent, plan, board, ledger);
+        }
         if !self.runner.supports(agent, role) {
             let refused = DispatchError::UnsupportedRole {
                 task: id,
@@ -223,6 +279,120 @@ impl<R: AgentRunner> Dispatcher<R> {
         match first_question(board, &ids) {
             Some(question) => plan.block(id, question)?,
             None => plan.complete(id, ids)?,
+        }
+        Ok(())
+    }
+
+    fn open_hosted(
+        &mut self,
+        goal: &Goal,
+        id: TaskId,
+        agent: Agent,
+        plan: &mut Plan,
+        board: &mut Board,
+        ledger: &mut Ledger,
+    ) -> Result<(), DispatchError> {
+        let task = plan.get(id).ok_or(PlanError::UnknownTask(id))?;
+        ledger.check(goal, task)?;
+        if task.state().status() == Status::Pending {
+            plan.start(id, agent)?;
+        }
+        let task = plan.get(id).ok_or(PlanError::UnknownTask(id))?;
+        let Some(host) = self.host.as_mut() else {
+            return Err(DispatchError::Stuck);
+        };
+        let handle = host
+            .open(task, board)
+            .map_err(|e| host_error(plan, id, agent, e))?;
+        append_atomically(
+            board,
+            id,
+            agent,
+            vec![Output {
+                kind: EntryKind::Artifact,
+                body: Text::new("hosted task").ok_or(DispatchError::Stuck)?,
+                refs: vec![Ref::Url(handle.0)],
+                supersedes: None,
+            }],
+        )?;
+        // A failed/uncertain open is adopted on retry; only the durable handle is charged.
+        ledger.count(id);
+        Ok(())
+    }
+
+    fn poll_hosted(
+        &mut self,
+        plan: &mut Plan,
+        board: &mut Board,
+        polled: &mut HashSet<TaskId>,
+    ) -> Result<(), DispatchError> {
+        let Some(host) = self.host.as_mut() else {
+            return Ok(());
+        };
+        let tasks: Vec<_> = plan
+            .tasks()
+            .iter()
+            .filter_map(|t| {
+                let agent = match t.state() {
+                    TaskState::Running { agent } | TaskState::Blocked { agent, .. } => *agent,
+                    _ => return None,
+                };
+                Some((t.id(), agent, crate::hosted_handle(board, t.id())?))
+            })
+            .collect();
+        for (id, agent, handle) in tasks {
+            if !polled.insert(id) {
+                continue;
+            }
+            let state = plan
+                .get(id)
+                .ok_or(PlanError::UnknownTask(id))?
+                .state()
+                .clone();
+            let mut supersedes = None;
+            let progress = if let TaskState::Blocked { question, .. } = state {
+                let gate = board.get(question).ok_or(DispatchError::Stuck)?;
+                let answer = board.live().find(|e| {
+                    e.content().author == Author::Human
+                        && e.content().kind == EntryKind::Answer { to: question }
+                });
+                let Some(answer) = answer else {
+                    // Supervise without replacing the persisted question's fence.
+                    let progress = host
+                        .poll(&handle)
+                        .map_err(|e| host_error(plan, id, agent, e))?;
+                    if matches!(
+                        progress,
+                        crate::Progress::Closed { .. } | crate::Progress::Cancelled { .. }
+                    ) {
+                        board.append(NewEntry {
+                            task: Some(id),
+                            author: Author::Agent(agent),
+                            kind: EntryKind::Answer { to: question },
+                            body: Text::new("host recorded terminal outcome")
+                                .ok_or(DispatchError::Stuck)?,
+                            refs: vec![Ref::Url(handle.0.clone())],
+                            supersedes: None,
+                        })?;
+                        plan.resume(id)?;
+                        apply_progress(plan, board, id, agent, &handle, progress, None)?;
+                    }
+                    continue;
+                };
+                let relayed = host
+                    .relay(&handle, gate, &answer.content().body)
+                    .map_err(|e| host_error(plan, id, agent, e))?;
+                supersedes = Some(question);
+                plan.resume(id)?;
+                match relayed {
+                    crate::Relayed::Applied => host.poll(&handle),
+                    crate::Relayed::Stale(p) => Ok(p),
+                }
+            } else {
+                host.poll(&handle)
+            }
+            .map_err(|e| host_error(plan, id, agent, e))?;
+            apply_progress(plan, board, id, agent, &handle, progress, supersedes)?;
         }
         Ok(())
     }
@@ -287,7 +457,11 @@ fn resume_answered(plan: &mut Plan, board: &Board) -> Result<(), DispatchError> 
         .tasks()
         .iter()
         .filter_map(|t| match t.state() {
-            TaskState::Blocked { question, .. } if !open.contains(question) => Some(t.id()),
+            TaskState::Blocked { question, .. }
+                if !open.contains(question) && crate::hosted_handle(board, t.id()).is_none() =>
+            {
+                Some(t.id())
+            }
             _ => None,
         })
         .collect();
@@ -298,11 +472,12 @@ fn resume_answered(plan: &mut Plan, board: &Board) -> Result<(), DispatchError> 
 }
 
 /// Lowest id among resumed (`Running`) and ready cards.
-fn next_task(plan: &Plan) -> Option<TaskId> {
+fn next_task(plan: &Plan, board: &Board) -> Option<TaskId> {
     let running = plan
         .tasks()
         .iter()
-        .filter(|t| t.state().status() == Status::Running);
+        .filter(|t| t.state().status() == Status::Running)
+        .filter(|t| crate::hosted_handle(board, t.id()).is_none());
     running.chain(plan.ready()).map(Task::id).min()
 }
 
@@ -354,4 +529,70 @@ fn first_question(board: &Board, ids: &[EntryId]) -> Option<EntryId> {
     ids.iter()
         .copied()
         .find(|id| board.get(*id).map(|e| e.content().kind) == Some(EntryKind::Question))
+}
+
+fn host_error(plan: &mut Plan, id: TaskId, agent: Agent, e: ClassifiedError) -> DispatchError {
+    let permanent = matches!(e, ClassifiedError::Permanent(_));
+    let error = DispatchError::Agent {
+        task: id,
+        agent,
+        source: e.into_error(),
+    };
+    if permanent {
+        if matches!(
+            plan.get(id).map(Task::state),
+            Some(TaskState::Blocked { .. })
+        ) {
+            if let Err(e) = plan.resume(id) {
+                return e.into();
+            }
+        }
+        if let Err(e) = fail_terminal(plan, id, &error) {
+            return e;
+        }
+    }
+    error
+}
+
+fn apply_progress(
+    plan: &mut Plan,
+    board: &mut Board,
+    id: TaskId,
+    agent: Agent,
+    handle: &crate::HostHandle,
+    progress: crate::Progress,
+    supersedes: Option<EntryId>,
+) -> Result<(), DispatchError> {
+    match progress {
+        crate::Progress::Working => Ok(()),
+        crate::Progress::Gate(gate) => {
+            let rev = Text::new(&format!("host:rev:{}", gate.rev)).ok_or(DispatchError::Stuck)?;
+            let mut refs = vec![Ref::Url(handle.0.clone()), Ref::Url(rev)];
+            refs.extend(gate.ids.into_iter().map(Ref::Url));
+            let ids = append_atomically(
+                board,
+                id,
+                agent,
+                vec![Output {
+                    kind: EntryKind::Question,
+                    body: gate.prompt,
+                    refs,
+                    supersedes,
+                }],
+            )?;
+            let question = *ids.first().ok_or(DispatchError::Stuck)?;
+            plan.block(id, question)?;
+            Ok(())
+        }
+        crate::Progress::Closed { outputs } => {
+            let ids = append_atomically(board, id, agent, outputs)?;
+            Ok(plan.complete(id, ids)?)
+        }
+        crate::Progress::Cancelled { reason } => Err(host_error(
+            plan,
+            id,
+            agent,
+            ClassifiedError::Permanent(AgentError(reason.as_str().into())),
+        )),
+    }
 }

@@ -43,3 +43,10 @@ See [SECURITY.md](./SECURITY.md).
 
 ## License
 Internal — not for external distribution.
+
+## BBP implementation tasks
+
+`rusty_orch run goal.json --bbp bbp.json --state /srv/orch/state` hosts Implement
+cards on the existing BBP host. Its roster and provider pool are explicit and
+frozen per task. Research and design retain their current adapters. See
+[configuration, recovery and validation](crates/orch-bbp/README.md).

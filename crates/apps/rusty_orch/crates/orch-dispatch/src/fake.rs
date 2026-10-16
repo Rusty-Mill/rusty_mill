@@ -62,3 +62,57 @@ fn output(kind: EntryKind) -> Result<Output, AgentError> {
         supersedes: None,
     })
 }
+
+/// Scripted long-lived host. Clones share operations and counters, so tests
+/// can replace dispatchers at arbitrary interruption boundaries.
+#[derive(Debug, Clone, Default)]
+pub struct FakeHost(pub std::rc::Rc<std::cell::RefCell<HostScript>>);
+/// Host responses and observed operations, independent of dispatcher lifetime.
+#[derive(Debug, Default)]
+pub struct HostScript {
+    pub opens: usize,
+    pub polls: usize,
+    pub answers: Vec<(orch_core::board::Entry, orch_core::Text)>,
+    pub progress: std::collections::VecDeque<Result<crate::Progress, crate::ClassifiedError>>,
+    pub relays: std::collections::VecDeque<Result<crate::Relayed, crate::ClassifiedError>>,
+}
+impl crate::TaskHost for FakeHost {
+    fn open(
+        &mut self,
+        _task: &orch_core::task::Task,
+        _board: &orch_core::board::Board,
+    ) -> Result<crate::HostHandle, crate::ClassifiedError> {
+        self.0.borrow_mut().opens += 1;
+        Ok(crate::HostHandle(
+            orch_core::Text::new("fake:durable-task").ok_or_else(|| {
+                crate::ClassifiedError::Permanent(crate::AgentError(
+                    "invalid fixture handle".into(),
+                ))
+            })?,
+        ))
+    }
+    fn poll(
+        &mut self,
+        _handle: &crate::HostHandle,
+    ) -> Result<crate::Progress, crate::ClassifiedError> {
+        let mut state = self.0.borrow_mut();
+        state.polls += 1;
+        state
+            .progress
+            .pop_front()
+            .unwrap_or(Ok(crate::Progress::Working))
+    }
+    fn relay(
+        &mut self,
+        _handle: &crate::HostHandle,
+        gate: &orch_core::board::Entry,
+        answer: &orch_core::Text,
+    ) -> Result<crate::Relayed, crate::ClassifiedError> {
+        let mut state = self.0.borrow_mut();
+        state.answers.push((gate.clone(), answer.clone()));
+        state
+            .relays
+            .pop_front()
+            .unwrap_or(Ok(crate::Relayed::Applied))
+    }
+}

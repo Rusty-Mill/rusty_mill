@@ -829,3 +829,211 @@ fn repeated_agent_failure_exhausts_retries_and_strands_dependents() {
         &TaskState::Pending
     );
 }
+
+fn gate(rev: u64) -> orch_dispatch::Progress {
+    orch_dispatch::Progress::Gate(orch_dispatch::GateContext {
+        prompt: text("approve-plan art:2"),
+        rev,
+        ids: vec![text("art:2")],
+    })
+}
+
+#[test]
+fn hosted_cards_resume_gates_and_complete_once_without_runner_calls() {
+    use orch_dispatch::{fake::FakeHost, Progress, Relayed};
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let id = plan.add(spec(Role::Implement, vec![], 1)).unwrap();
+    let mut board = Board::new(plan.goal());
+    let mut ledger = Ledger::new();
+    let host = FakeHost::default();
+    host.0
+        .borrow_mut()
+        .progress
+        .extend([Ok(Progress::Working), Ok(gate(10))]);
+    let make_dispatcher = || {
+        Dispatcher::new(
+            routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
+            FakeAgent::new([]),
+        )
+        .with_host(host.clone())
+    };
+    let mut dispatcher = make_dispatcher();
+    assert_eq!(
+        dispatcher.run(&goal(1), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Waiting(vec![id]))
+    );
+    assert_eq!(ledger.calls(), 1);
+    // Drop all dispatcher state; only the caller-owned snapshot survives.
+    drop(dispatcher);
+    let mut dispatcher = make_dispatcher();
+    assert_eq!(
+        dispatcher.run(&goal(1), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Blocked(vec![id]))
+    );
+    let old = board.open_questions()[0].id();
+    board
+        .append(NewEntry {
+            task: Some(id),
+            author: Author::Human,
+            kind: EntryKind::Answer { to: old },
+            body: text("approve-plan art:2"),
+            refs: vec![],
+            supersedes: None,
+        })
+        .unwrap();
+    host.0
+        .borrow_mut()
+        .relays
+        .push_back(Ok(Relayed::Stale(gate(20))));
+    assert_eq!(
+        dispatcher.run(&goal(1), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Blocked(vec![id]))
+    );
+    let fresh = board.open_questions()[0].id();
+    assert_ne!(old, fresh);
+    assert!(board.is_superseded(old));
+    let recorded = host.0.borrow().answers[0].0.clone();
+    assert!(recorded
+        .content()
+        .refs
+        .iter()
+        .any(|r| matches!(r, orch_core::Ref::Url(t) if t.as_str() == "host:rev:10")));
+    board
+        .append(NewEntry {
+            task: Some(id),
+            author: Author::Human,
+            kind: EntryKind::Answer { to: fresh },
+            body: text("approve-plan art:2"),
+            refs: vec![],
+            supersedes: None,
+        })
+        .unwrap();
+    host.0.borrow_mut().progress.push_back(Ok(Progress::Closed {
+        outputs: vec![Output {
+            kind: EntryKind::Artifact,
+            body: text("receipt"),
+            refs: vec![orch_core::Ref::Commit(text("abc"))],
+            supersedes: None,
+        }],
+    }));
+    assert_eq!(
+        dispatcher.run(&goal(1), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Finished)
+    );
+    assert_eq!(host.0.borrow().opens, 1);
+    assert_eq!(ledger.calls(), 1);
+}
+
+#[test]
+fn hosted_failure_or_empty_completion_does_not_finish_a_card() {
+    use orch_dispatch::{fake::FakeHost, Progress};
+    for progress in [
+        Progress::Closed { outputs: vec![] },
+        Progress::Cancelled {
+            reason: text("cancelled by owner"),
+        },
+    ] {
+        let mut plan = Plan::new(GoalId::from_raw(1));
+        let id = plan.add(spec(Role::Implement, vec![], 1)).unwrap();
+        let mut board = Board::new(plan.goal());
+        let mut ledger = Ledger::new();
+        let host = FakeHost::default();
+        host.0.borrow_mut().progress.push_back(Ok(progress));
+        let mut d = Dispatcher::new(
+            routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
+            FakeAgent::new([]),
+        )
+        .with_host(host);
+        assert!(d.run(&goal(1), &mut plan, &mut board, &mut ledger).is_err());
+        assert_ne!(plan.get(id).unwrap().state().status(), Status::Done);
+        assert_eq!(ledger.calls(), 1);
+    }
+}
+
+#[test]
+fn hosting_does_not_reroute_research_or_design() {
+    use orch_dispatch::fake::FakeHost;
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    plan.add(spec(Role::Research, vec![], 1)).unwrap();
+    plan.add(spec(Role::Design, vec![], 1)).unwrap();
+    let mut board = Board::new(plan.goal());
+    let mut ledger = Ledger::new();
+    let host = FakeHost::default();
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
+        FakeAgent::new([Reply::Write(vec![finding()]), Reply::Write(vec![finding()])]),
+    )
+    .with_host(host.clone());
+    assert_eq!(
+        d.run(&goal(2), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Finished)
+    );
+    assert_eq!(host.0.borrow().opens, 0);
+    assert_eq!(ledger.calls(), 2);
+}
+
+#[test]
+fn an_agent_answer_cannot_approve_a_hosted_task() {
+    use orch_dispatch::fake::FakeHost;
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let id = plan.add(spec(Role::Implement, vec![], 1)).unwrap();
+    let mut board = Board::new(plan.goal());
+    let mut ledger = Ledger::new();
+    let host = FakeHost::default();
+    host.0.borrow_mut().progress.push_back(Ok(gate(1)));
+    let mut dispatcher = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
+        FakeAgent::new([]),
+    )
+    .with_host(host.clone());
+    assert_eq!(
+        dispatcher.run(&goal(1), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Blocked(vec![id]))
+    );
+    let question = board.open_questions()[0].id();
+    board
+        .append(NewEntry {
+            task: Some(id),
+            author: Author::Agent(Agent::Claude),
+            kind: EntryKind::Answer { to: question },
+            body: text("approve-plan art:2"),
+            refs: vec![],
+            supersedes: None,
+        })
+        .unwrap();
+    assert_eq!(
+        dispatcher.run(&goal(1), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Blocked(vec![id]))
+    );
+    assert!(host.0.borrow().answers.is_empty());
+}
+
+#[test]
+fn a_saved_host_handle_cannot_fall_back_to_a_one_call_runner() {
+    use orch_dispatch::{fake::FakeHost, Progress};
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let id = plan.add(spec(Role::Implement, vec![], 1)).unwrap();
+    let mut board = Board::new(plan.goal());
+    let mut ledger = Ledger::new();
+    let host = FakeHost::default();
+    host.0
+        .borrow_mut()
+        .progress
+        .push_back(Ok(Progress::Working));
+    let route = routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]);
+    Dispatcher::new(route.clone(), FakeAgent::new([]))
+        .with_host(host)
+        .run(&goal(1), &mut plan, &mut board, &mut ledger)
+        .unwrap();
+    let result = Dispatcher::new(route, FakeAgent::new([])).run(
+        &goal(1),
+        &mut plan,
+        &mut board,
+        &mut ledger,
+    );
+    assert!(
+        matches!(result,Err(DispatchError::Agent{source,..}) if source.0.contains("requires its TaskHost"))
+    );
+    assert_eq!(ledger.calls(), 1);
+    assert_eq!(plan.get(id).unwrap().state().status(), Status::Running);
+}

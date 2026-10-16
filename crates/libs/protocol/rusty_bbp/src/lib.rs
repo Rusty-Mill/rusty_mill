@@ -38,3 +38,6 @@ pub use shadow::{Comparison, Shadow, ShadowKind};
 pub use state::{Budget, BudgetField, Card, Gate, Slice, State, TaskState, Turn, TurnKind};
 pub use store::{Driver, MemStore, ShadowSink, Store, StoreError};
 pub use wake::{can_act, pick_from, wake_set, WakeReason, WAKE_RULES};
+
+pub mod view;
+pub use view::TaskView;

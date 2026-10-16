@@ -1,0 +1,21 @@
+[package]
+name = "orch-bbp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "TaskHost adapter over the existing BBP CLI and moderator"
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+orch-core = { workspace = true }
+orch-dispatch = { workspace = true }
+orch-cli = { workspace = true }
+rusty_bbp = { workspace = true }
+rusty_serde = { workspace = true }
+rusty_atomic_file = { workspace = true }
+
+[dev-dependencies]
+orch-cli = { workspace = true, features = ["fake"] }

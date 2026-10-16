@@ -150,6 +150,17 @@ pub fn tick(dir: &Path, task: &TaskId) -> Result<Response, String> {
         .map_err(|e| format!("{e:?}"))
 }
 
+/// Human gate details and terminal facts from a single log prefix.
+/// A missing task is represented by null, distinct from an I/O failure.
+pub fn show(dir: &Path, task: &TaskId) -> Result<Option<TaskView>, String> {
+    if !log_path_for(dir, task).exists() {
+        return Ok(None);
+    }
+    let d = open_driver(dir, task)?;
+    let events = d.store.events(task, 0).map_err(|e| format!("{e:?}"))?;
+    Ok(Some(TaskView::from_events(task.clone(), &events)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

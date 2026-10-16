@@ -186,6 +186,36 @@ pub fn perform_as(
         .map_err(|e| format!("{e:?}"))
 }
 
+/// Human action with an optional transactional revision fence and retry op.
+/// The host's existing unfenced CLI behavior remains available to direct users.
+#[allow(clippy::too_many_arguments)]
+pub fn perform_fenced(
+    dir: &Path,
+    task: &TaskId,
+    verb: &str,
+    args: &[&str],
+    rev: Option<Rev>,
+    by: &str,
+    fence: Option<Rev>,
+    op: Option<OpId>,
+) -> Result<Response, String> {
+    let action = action(verb, args, rev)?;
+    let action = match fence {
+        Some(expected_rev) => HumanAction::Fenced {
+            expected_rev,
+            action: Box::new(action),
+        },
+        None => action,
+    };
+    let op = match op {
+        Some(op) => op,
+        None => labelled_op(by)?,
+    };
+    open_driver(dir, task)?
+        .dispatch(&Command::Human { op, action }, now())
+        .map_err(|e| format!("{e:?}"))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

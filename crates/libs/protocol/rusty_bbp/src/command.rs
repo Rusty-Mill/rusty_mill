@@ -81,6 +81,12 @@ pub enum AgentAction {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HumanAction {
+    /// Apply any human action only to the exact public revision shown.
+    /// Checked inside the transactional driver, including conflict retries.
+    Fenced {
+        expected_rev: Rev,
+        action: Box<HumanAction>,
+    },
     Approve {
         gate: Gate,
         subject: ArtId,

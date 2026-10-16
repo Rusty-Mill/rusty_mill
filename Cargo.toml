@@ -202,6 +202,7 @@ members = [
     "crates/apps/rusty_orch/crates/orch-core",
     "crates/apps/rusty_orch/crates/orch-dispatch",
     "crates/apps/rusty_orch/crates/orch-cli",
+    "crates/apps/rusty_orch/crates/orch-bbp",
     "crates/apps/rusty_orch/crates/orch-ollama",
     "crates/apps/rusty_orch/crates/orch-codex",
     "crates/apps/rusty_orch/crates/orch-claude",
@@ -645,6 +646,7 @@ skillopt-envs = { path = "crates/apps/rusty_skillopt/crates/skillopt-envs" }
 # rust-version 1.75) -- rusty_db treatment.
 orch-core = { path = "crates/apps/rusty_orch/crates/orch-core" }
 orch-dispatch = { path = "crates/apps/rusty_orch/crates/orch-dispatch" }
+orch-bbp = { path = "crates/apps/rusty_orch/crates/orch-bbp" }
 orch-cli = { path = "crates/apps/rusty_orch/crates/orch-cli" }
 orch-ollama = { path = "crates/apps/rusty_orch/crates/orch-ollama" }
 orch-codex = { path = "crates/apps/rusty_orch/crates/orch-codex" }

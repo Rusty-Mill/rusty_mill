@@ -97,3 +97,18 @@ Run once by hand with Claude Code 2.1.295 as the planner (`claude -p … --mcp-c
 ## The master secret
 
 `bbp open` creates `<dir>/master`, 32 random bytes from `rusty_rand`, owner-readable only, published with a no-clobber link so two first opens racing each other both come back with the key on disk and no later process overwrites a key an earlier one already uses. Every execution token and run secret is a digest keyed by it, and neither ever enters the log. A process that can read the log but not the master cannot forge a token; the agent harness sees neither, only the per-turn `bbp mcp` server, which derives the token for its own turn.
+
+### Structured task-host reads and retryable human actions
+
+`bbp show --dir D --task T` returns a public `rusty_bbp::TaskView`, or JSON null
+when the task has no log. It includes the card, immutable roster, assigned
+principals, proposed spec, pending request body, merge receipt, cancellation
+reason and escalation. It does not expose tokens, the master key or run secrets.
+`bbp card` remains unchanged.
+
+`bbp human --dir D --task T --fence REV --op OP [--rev REV] VERB ...` applies any
+human verb only to the displayed revision inside the driver's transaction.
+Successful retries with the same OP and payload replay before fence/terminal
+checks. Destructive verbs still require `--rev`. Existing unfenced direct CLI
+usage remains available; Orch always supplies the extra fence and stable op.
+Approval still does not close a task: merge externally, then record the receipt.
