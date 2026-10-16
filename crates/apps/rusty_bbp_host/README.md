@@ -112,3 +112,15 @@ Successful retries with the same OP and payload replay before fence/terminal
 checks. Destructive verbs still require `--rev`. Existing unfenced direct CLI
 usage remains available; Orch always supplies the extra fence and stable op.
 Approval still does not close a task: merge externally, then record the receipt.
+
+Malformed fenced human input returns `Rejected { code: BadHumanInput, ... }`
+without dispatching a command. This allows task hosts to show a correctable new
+question. I/O errors remain process failures; they are not human-input refusals.
+
+The moderator runs `bbp runner --supervised yes` with a private stdin ownership
+pipe, in a separate process group. EOF cancels its workload using the existing
+sandbox job handle and waits for reaping. The worker retains the task's runner
+lock through cleanup/reporting, including after moderator death. Thus a new
+moderator may retry a pending run only after the old worker releases that lock.
+Normal wall-limit, cancellation, and error exits wait for the worker to finish.
+The standalone unsupervised runner CLI remains available for direct trusted use.

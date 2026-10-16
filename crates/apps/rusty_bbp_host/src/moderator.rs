@@ -17,7 +17,7 @@
 //! is in its own process group and is killed, group and all, on every exit
 //! path, the error ones included.
 
-use crate::runner::{self, Confinement, Unconfined};
+use crate::runner::Confinement;
 use crate::{now, open_driver};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
@@ -25,7 +25,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Proc, Stdio};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How to start one role's agent harness. Every argument may use the
@@ -227,12 +226,31 @@ struct Harness {
 
 /// Every process the loop started. Dropping it kills the harness and its
 /// whole process group, so an error path cleans up like a normal one.
+struct ActiveRun {
+    run: RunId,
+    child: Child,
+}
+
 struct Supervision {
     harnesses: Vec<Harness>,
-    runner: Option<JoinHandle<Result<Response, String>>>,
+    runner: Option<ActiveRun>,
 }
 
 impl Supervision {
+    /// Cancel and join before releasing the moderator lock, even on error paths.
+    fn stop_runner(&mut self) -> Result<(), String> {
+        let Some(mut runner) = self.runner.take() else {
+            return Ok(());
+        };
+        // EOF is cancellation, including when this moderator is killed abruptly.
+        drop(runner.child.stdin.take());
+        runner
+            .child
+            .wait()
+            .map(|_| ())
+            .map_err(|e| format!("runner cleanup: {e}"))
+    }
+
     /// Kill every harness's process group and reap them, reporting the first failure.
     fn kill_harnesses(&mut self) -> Result<(), String> {
         let mut first = Ok(());
@@ -257,8 +275,8 @@ impl Drop for Supervision {
         if let Err(e) = self.kill_harnesses() {
             eprintln!("bbp mod: harness not cleaned up: {e}");
         }
-        if self.runner.is_some() {
-            eprintln!("bbp mod: a run is still executing; its wall limit bounds it");
+        if let Err(error) = self.stop_runner() {
+            eprintln!("bbp mod: runner not cleaned up: {error}");
         }
     }
 }
@@ -325,6 +343,7 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         visits.observe(state, seen);
         if matches!(state, State::Closed | State::Cancelled) {
             sup.kill_harnesses()?;
+            sup.stop_runner()?;
             return Ok(Outcome {
                 visits: visits.finish(seen),
                 state,
@@ -338,16 +357,31 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             return Err(format!("moderator: wall limit reached in state {state:?}"));
         }
 
-        // The runner works on its own thread so the loop keeps ticking,
-        // honouring cancellation and the wall limit while a profile runs.
-        if sup.runner.as_ref().is_some_and(JoinHandle::is_finished) {
-            if let Some(j) = sup.runner.take() {
-                match j.join() {
-                    Ok(Ok(r)) => eprintln!("bbp mod: run served: {r:?}"),
-                    Ok(Err(e)) => eprintln!("bbp mod: run not served: {e}"),
-                    Err(_) => eprintln!("bbp mod: runner thread panicked"),
+        // A runner process owns its workload and wall timer. Its stdin pipe
+        // is this moderator's lease; dropping it cancels and reaps the job.
+        if let Some(runner) = sup.runner.as_mut() {
+            if let Some(status) = runner
+                .child
+                .try_wait()
+                .map_err(|e| format!("runner wait: {e}"))?
+            {
+                let run = runner.run;
+                sup.runner.take();
+                eprintln!("bbp mod: runner for run {} exited: {status}", run.0);
+                // A process/transport failure with no report is retryable. The
+                // runner's task lock serializes cleanup and recovery attempts.
+                if d.state
+                    .selected_run()
+                    .is_some_and(|r| r.id == run && r.status.is_none())
+                {
+                    ran.remove(&run);
                 }
             }
+        }
+        if sup.runner.as_ref().is_some_and(|runner| {
+            state != State::Test || d.state.selected_run().is_none_or(|r| r.id != runner.run)
+        }) {
+            sup.stop_runner()?;
         }
         // A selected run with no report yet: the runner's job, once per run.
         let pending = (state == State::Test && sup.runner.is_none())
@@ -357,8 +391,10 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             .map(|r| r.id);
         if let Some(run) = pending {
             ran.insert(run);
-            let cfg = cfg.clone();
-            sup.runner = Some(std::thread::spawn(move || run_once(&cfg)));
+            sup.runner = Some(ActiveRun {
+                run,
+                child: spawn_runner(cfg)?,
+            });
         }
 
         let live: Vec<(TurnId, RoleId)> = d
@@ -424,28 +460,33 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     }
 }
 
-fn run_once(cfg: &Config) -> Result<Response, String> {
-    match cfg.confinement {
-        Confinement::Unconfined => runner::run_once(
-            &cfg.dir,
-            &cfg.task,
-            &cfg.repo,
-            &cfg.work,
-            &Unconfined,
-            Confinement::Unconfined,
-        ),
-        Confinement::Sandboxed => {
-            let exec = runner::sandboxed(&cfg.dir.join("sandbox-state"))?;
-            runner::run_once(
-                &cfg.dir,
-                &cfg.task,
-                &cfg.repo,
-                &cfg.work,
-                &exec,
-                Confinement::Sandboxed,
-            )
-        }
+fn spawn_runner(cfg: &Config) -> Result<Child, String> {
+    let mut command = Proc::new(&cfg.bbp);
+    command
+        .arg("runner")
+        .arg("--dir")
+        .arg(&cfg.dir)
+        .arg("--task")
+        .arg(&cfg.task.0)
+        .arg("--repo-path")
+        .arg(&cfg.repo)
+        .arg("--work")
+        .arg(&cfg.work)
+        .arg("--confine")
+        .arg(match cfg.confinement {
+            Confinement::Sandboxed => "sandbox",
+            Confinement::Unconfined => "none",
+        })
+        .args(["--supervised", "yes"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
+    command.spawn().map_err(|e| format!("starting runner: {e}"))
 }
 
 fn spawn(

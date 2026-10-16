@@ -110,3 +110,26 @@ open step, persisted CLI resumes, moderator lock/restart, and a two-role MCP
 workflow through runner evidence, independent review, approval and receipt.
 Only the scripted full-workflow fixture explicitly uses `--confine none` for
 its test workload; production confinement is not configurable through Orch.
+
+### Review corrections
+
+Runner work is isolated under `work/<sha256(task id)>/run-N`; restart/adoption
+uses the same task root. Invalid human syntax or a subject outside the displayed
+gate now supersedes the answered question with an explanatory question. It does
+not fail the card or retry immutable bad input. Transport failures remain
+retryable with the original operation id. An expired request stays visible at
+its escalation gate, with its body and message id, so the human can settle it
+before separately confirming resume.
+
+BBP moderation now invokes the existing runner as a separate process. The
+moderator alone holds the runner's ownership pipe. Closing that pipe, including
+on abrupt moderator death, cancels the active profile; the runner owns the wall
+timer and reaps the workload. An exclusive runner lock remains held through
+cleanup and report publication, preventing a replacement from preparing the
+same checkout too early. Normal moderator exit waits for cleanup before
+releasing its own lock. This hosted-card call budget is not a monetary cap;
+PR #763's run guards remain a separate review and change.
+
+Manifest publication keeps the Unix directory fsync and avoids unsupported
+Windows directory opens. Injected-seam tests are portable; production hosting
+still rejects unsupported platforms. Native Windows checks run in repository CI.

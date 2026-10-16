@@ -27,6 +27,8 @@ pub enum Progress {
 pub enum Relayed {
     Applied,
     Stale(Progress),
+    /// Invalid human input: replace the answered question so the human can correct it.
+    Rejected(Progress),
 }
 /// Idempotent, crash-recoverable task boundary. Poll and relay are unmetered.
 pub trait TaskHost: std::fmt::Debug {

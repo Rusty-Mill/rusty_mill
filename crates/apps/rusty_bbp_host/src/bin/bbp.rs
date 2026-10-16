@@ -159,6 +159,21 @@ fn run() -> Result<String, String> {
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
             let work = PathBuf::from(a.flag("work")?);
+            if a.flags.get("supervised").is_some_and(|v| v == "yes") {
+                let confinement = match a.flags.get("confine").map(String::as_str) {
+                    Some("none") => runner::Confinement::Unconfined,
+                    None | Some("sandbox") => runner::Confinement::Sandboxed,
+                    Some(other) => return Err(format!("unknown confinement {other}")),
+                };
+                return rusty_bbp_host::run_control::supervised(
+                    &dir,
+                    &task,
+                    &repo,
+                    &work,
+                    confinement,
+                )
+                .map(|response| response_json(&response));
+            }
             match a.flags.get("confine").map(String::as_str) {
                 Some("none") => runner::run_once(
                     &dir,

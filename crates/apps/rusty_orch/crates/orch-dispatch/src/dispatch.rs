@@ -386,7 +386,7 @@ impl<R: AgentRunner> Dispatcher<R> {
                 plan.resume(id)?;
                 match relayed {
                     crate::Relayed::Applied => host.poll(&handle),
-                    crate::Relayed::Stale(p) => Ok(p),
+                    crate::Relayed::Stale(p) | crate::Relayed::Rejected(p) => Ok(p),
                 }
             } else {
                 host.poll(&handle)

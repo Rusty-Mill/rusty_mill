@@ -329,13 +329,18 @@ fn relay_uses_saved_fence_and_stable_op_and_rejects_subject_or_flag_injection() 
         "retry reuses the exact operation"
     );
     let n = cmd.calls.borrow().len();
-    assert!(host
-        .relay(&handle, &gate, &txt("approve-plan art:99"))
-        .is_err());
-    assert!(host
-        .relay(&handle, &gate, &txt("cancel --dir /other"))
-        .is_err());
-    assert_eq!(cmd.calls.borrow().len(), n);
+    for invalid in ["approve-plan art:99", "cancel --dir /other"] {
+        cmd.replies
+            .borrow_mut()
+            .push_back(json(&Some(view(&c, State::PlanGate))));
+        assert!(
+            matches!(host.relay(&handle, &gate, &txt(invalid)), Ok(Relayed::Rejected(Progress::Gate(g))) if g.prompt.as_str().contains("Answer rejected"))
+        );
+    }
+    assert!(
+        cmd.calls.borrow()[n..].iter().all(|argv| argv[1] == "show"),
+        "bad input never reaches the human command"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

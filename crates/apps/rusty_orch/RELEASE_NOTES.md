@@ -7,6 +7,7 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 ## BBP task hosting implemented
 **2026-10-16** · Issue #767
 
+- Review corrections isolate task work, re-prompt rejected input, preserve expired requests, and retain runner ownership through cancellation/restart.
 - Added `TaskHost` and `orch-bbp`, opt-in goal/CLI configuration, durable handles,
   frozen pool/roster/profile inputs, moderator supervision and crash adoption.
 - Human gates persist revision/subject fences; stable operations replay after a

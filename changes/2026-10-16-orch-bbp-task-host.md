@@ -15,3 +15,10 @@ changelog: Integrate Orch Implement cards with the existing BBP task host, durab
 - **Known limitations:** production hosting requires Linux sandbox support.
   Scripted end-to-end workload explicitly runs unconfined; real provider login,
   model behavior and real merges are not exercised.
+
+- **Fixed in review:** per-task work isolation; correctable rejected human input;
+  expired-request recovery; Unix-only manifest directory fsync; supervised runner
+  cancellation/reaping and serialization across moderator timeout, cancellation
+  and abrupt death. Added concurrent-task, corrected-answer, expired-request and
+  process-level running-workload regressions. Call accounting is not a cost cap;
+  PR #763 remains separate.

@@ -154,6 +154,8 @@ impl Rejection {
 /// Every rejection code in the spec, plus `forbidden` for authentication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Code {
+    /// Human CLI syntax was invalid; no command was dispatched.
+    BadHumanInput,
     Forbidden,
     Terminal,
     OpConflict,

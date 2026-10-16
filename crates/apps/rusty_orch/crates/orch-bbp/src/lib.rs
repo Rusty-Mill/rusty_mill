@@ -211,6 +211,9 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
         let _ = std::fs::remove_file(tmp);
         match published {
             Ok(()) => {
+                // Match rusty_atomic_file's platform contract: directory
+                // fsync is supported on Unix, not std File::open on Windows.
+                #[cfg(unix)]
                 std::fs::File::open(&dir)
                     .and_then(|d| d.sync_all())
                     .map_err(transient)?;
@@ -266,6 +269,22 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             .map_err(transient)?;
         Ok(())
     }
+    fn rejected_answer(
+        &self,
+        h: &Handle,
+        config: &Config,
+        reason: &str,
+    ) -> Result<Relayed, ClassifiedError> {
+        let view = self
+            .show(config, h)?
+            .ok_or_else(|| transient("hosted task missing"))?;
+        let mut progress = Self::progress(view)?;
+        if let Progress::Gate(gate) = &mut progress {
+            gate.prompt = text(&format!("Answer rejected: {reason}\n{}", gate.prompt))?;
+        }
+        Ok(Relayed::Rejected(progress))
+    }
+
     fn progress(view: TaskView) -> Result<Progress, ClassifiedError> {
         let c = &view.card;
         let mut ids = Vec::new();
@@ -330,10 +349,17 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
                     )
                 }
             }
-            State::Escalated => format!(
-                "Escalated: {:?}. resume STATE | extend FIELD LIMIT | cancel REASON",
-                view.escalation
-            ),
+            State::Escalated => {
+                let mut prompt = format!(
+                    "Escalated: {:?}. resume STATE | extend FIELD LIMIT | cancel REASON",
+                    view.escalation
+                );
+                if let Some(request) = &view.request {
+                    ids.push(text(&format!("msg:{}", request.id.0))?);
+                    prompt.push_str(&format!("\n{}\nSettle the outstanding request before resuming: answer msg:{} TEXT | decision msg:{} accept|reject NOTE", request_display(request)?, request.id.0, request.id.0));
+                }
+                prompt
+            }
             _ => match view.request {
                 Some(request) => {
                     ids.push(text(&format!("msg:{}", request.id.0))?);
@@ -473,29 +499,30 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
             .find_map(|r| r.strip_prefix("host:rev:"))
             .ok_or_else(|| permanent("question lacks revision fence"))?;
         let words: Vec<_> = answer.as_str().split_whitespace().collect();
-        let verb = words
-            .first()
-            .copied()
-            .ok_or_else(|| permanent("empty human action"))?;
+        let Some(verb) = words.first().copied() else {
+            return self.rejected_answer(&h, &frozen.config, "empty human action");
+        };
         // No flags may enter BBP's flag parser from an answer, even in free text.
         if words.iter().any(|s| s.starts_with("--")) {
-            return Err(permanent("flags are not human answers"));
+            return self.rejected_answer(&h, &frozen.config, "flags are not human answers");
         }
         let subjects: &[(&str, usize)] = match verb {
             "approve-plan" | "receipt" | "rerun" => &[("art:", 1)],
             "approve-merge" => &[("art:", 1), ("run:", 2)],
             "answer" | "decision" => &[("msg:", 1)],
             "reject" | "resume" | "cancel" | "extend" => &[],
-            _ => return Err(permanent("unsupported human answer verb")),
+            _ => return self.rejected_answer(&h, &frozen.config, "unsupported human answer verb"),
         };
         for (prefix, position) in subjects {
-            let subject = words
-                .get(*position)
-                .ok_or_else(|| permanent("missing subject"))?;
+            let Some(subject) = words.get(*position) else {
+                return self.rejected_answer(&h, &frozen.config, "missing subject");
+            };
             if !subject.starts_with(prefix) || !refs.contains(subject) {
-                return Err(permanent(
+                return self.rejected_answer(
+                    &h,
+                    &frozen.config,
                     "answer names a subject outside the displayed gate",
-                ));
+                );
             }
         }
         // Stable op permits a crash after BBP applied the answer but before Orch
@@ -523,6 +550,15 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
                 ) =>
             {
                 Ok(Relayed::Stale(self.poll(handle)?))
+            }
+            Response::Rejected(r)
+                if !matches!(r.code, Code::Forbidden | Code::OpConflict | Code::NotOpen) =>
+            {
+                self.rejected_answer(
+                    &h,
+                    &frozen.config,
+                    &format!("BBP {:?}: {}", r.code, r.detail),
+                )
             }
             response => {
                 Self::accepted(response)?;

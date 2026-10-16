@@ -199,7 +199,16 @@ pub fn perform_fenced(
     fence: Option<Rev>,
     op: Option<OpId>,
 ) -> Result<Response, String> {
-    let action = action(verb, args, rev)?;
+    let action = match action(verb, args, rev) {
+        Ok(action) => action,
+        Err(detail) if fence.is_some() => {
+            return Ok(Response::Rejected(Rejection::new(
+                Code::BadHumanInput,
+                detail,
+            )))
+        }
+        Err(error) => return Err(error),
+    };
     let action = match fence {
         Some(expected_rev) => HumanAction::Fenced {
             expected_rev,

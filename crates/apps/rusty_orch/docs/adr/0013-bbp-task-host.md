@@ -28,6 +28,14 @@ supervisor observes BBP's lock, not its pid, and production always requests the
 sandbox. See the [adapter documentation](../../crates/orch-bbp/README.md) for
 configuration, supported platforms, tests and limitations.
 
+Review corrections add `Relayed::Rejected(Progress)` for correctable human input,
+preserve pending request subjects at escalation, and namespace runner work by
+task. Moderator recovery also depends on supervised runner cleanup: an owner
+pipe and separate runner process retain the workload wall timer across moderator
+death, and a task runner lock fences replacement through cleanup/reporting.
+Unix manifest publication retains directory fsync; injected Windows test seams
+do not attempt the unsupported directory open. Production remains Linux-only.
+
 ## Context
 The BBP decision record (`crates/libs/protocol/rusty_bbp/docs/review/orch-core-relationship.md`, 2026-10-08) fixed the layering: rusty_orch sits above BBP, a code-producing card becomes one BBP task, and the orch Board retires for such cards once adapters post to BBP instead of returning `Output`. It left one question for BBP stage 3: do the CLI adapters become BBP agents under a BBP MCP server, or does the dispatcher become a BBP principal that proxies them? Stage 3 has landed (`rusty_bbp_host`: per-turn MCP server, human channel, sandboxed runner, moderator, PRs #553 to #601), the first proving run has executed, and its environment faults are fixed. This ADR answers that question and is the design for roadmap Phase 1.
 

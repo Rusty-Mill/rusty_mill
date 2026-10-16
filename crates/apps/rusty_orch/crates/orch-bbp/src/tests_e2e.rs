@@ -142,7 +142,7 @@ fn start(c: &Config, h: &Handle) -> Moderator {
             .args(["--task", &h.task, "--repo-path"])
             .arg(&c.repo)
             .arg("--work")
-            .arg(&c.work)
+            .arg(supervisor::task_work(c, &h.task))
             .arg("--agents")
             .arg(BbpHost::<StdCommand, FakeSupervisor>::manifest(h).join("agents.json"))
             // Explicit test-only unconfined runner: production always uses sandbox.
@@ -235,11 +235,8 @@ fn answer<S: Supervisor>(
     question
 }
 
-#[test]
-#[ignore = "requires built bbp at BBP_TEST_BIN; scripted unconfined runner"]
-fn scripted_task_restarts_moderator_then_records_receipt_and_closes() {
+fn scripted_config() -> (PathBuf, Config) {
     let (dir, mut c) = setup();
-    let (task, mut board) = task();
     let base = Command::new("git")
         .arg("-C")
         .arg(&c.repo)
@@ -270,6 +267,14 @@ fn scripted_task_restarts_moderator_then_records_receipt_and_closes() {
     c.pool.get_mut("writer").unwrap().args = vec![maker.to_string_lossy().into()];
     c.pool.get_mut("judge").unwrap().program = "/bin/sh".into();
     c.pool.get_mut("judge").unwrap().args = vec![auditor.to_string_lossy().into()];
+    (dir, c)
+}
+
+#[test]
+#[ignore = "requires built bbp at BBP_TEST_BIN; scripted unconfined runner"]
+fn scripted_task_restarts_moderator_then_records_receipt_and_closes() {
+    let (dir, c) = scripted_config();
+    let (task, mut board) = task();
     let supervisor = ScriptSupervisor::default();
     let mut host = BbpHost::with_seams(
         c.clone(),
@@ -520,5 +525,273 @@ fn orch_binary_reopens_its_durable_goal_without_opening_or_charging_twice() {
         .unwrap();
     assert!(cancel.status.success());
     std::thread::sleep(Duration::from_millis(600));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires BBP_TEST_BIN; full dispatcher correction path"]
+fn dispatcher_allows_invalid_subject_and_missing_receipt_to_be_corrected() {
+    use orch_core::goal::{Goal, GoalDraft, StopRule};
+    use orch_core::task::Plan;
+    use orch_core::GoalId;
+    use orch_dispatch::{fake::FakeAgent, Dispatcher, Ledger, Outcome, Routing, RoutingConfig};
+    let (dir, c) = scripted_config();
+    let (task, _) = task();
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let id = plan.add(task.spec().clone()).unwrap();
+    let mut board = Board::new(plan.goal());
+    let mut ledger = Ledger::new();
+    let goal = Goal::try_from(GoalDraft {
+        outcome: Some("flag".into()),
+        done_when: vec!["tested".into()],
+        out_of_scope: Some(vec![]),
+        wall_clock_secs: Some(60),
+        max_calls: Some(1),
+        stop: Some(StopRule::Checkpoint),
+        ..GoalDraft::default()
+    })
+    .unwrap();
+    let route = Routing::try_from(RoutingConfig {
+        research: orch_core::task::Agent::Codex,
+        design: orch_core::task::Agent::Codex,
+        implement: orch_core::task::Agent::Codex,
+        triage: orch_core::task::Agent::Local,
+        reviewers: vec![
+            orch_core::task::Agent::Claude,
+            orch_core::task::Agent::Codex,
+        ],
+    })
+    .unwrap();
+    let supervisor = ScriptSupervisor::default();
+    let host = BbpHost::with_seams(
+        c,
+        "corrections".into(),
+        "flag".into(),
+        StdCommand,
+        supervisor.clone(),
+    )
+    .unwrap();
+    let mut dispatcher = Dispatcher::new(route, FakeAgent::new([])).with_host(host);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut invalid_plan = false;
+    let mut invalid_receipt = false;
+    let mut corrected_plan = false;
+    let mut corrected_receipt = false;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "dispatcher stalled: {:?}",
+            plan.get(id).unwrap().state()
+        );
+        let outcome = dispatcher
+            .run(&goal, &mut plan, &mut board, &mut ledger)
+            .unwrap();
+        if outcome == Outcome::Finished {
+            break;
+        }
+        if matches!(outcome, Outcome::Blocked(_)) {
+            let question = board.open_questions()[0];
+            let qid = question.id();
+            let prompt = question.content().body.as_str();
+            let body = if prompt.contains("approve-plan") {
+                if !invalid_plan {
+                    invalid_plan = true;
+                    "approve-plan art:99"
+                } else {
+                    assert!(prompt.contains("Answer rejected"));
+                    corrected_plan = true;
+                    "approve-plan art:2"
+                }
+            } else if prompt.contains("approve-merge") {
+                "approve-merge art:4 run:1"
+            } else if prompt.contains("receipt") {
+                if !invalid_receipt {
+                    invalid_receipt = true;
+                    "receipt art:4"
+                } else {
+                    assert!(prompt.contains("BadHumanInput"));
+                    corrected_receipt = true;
+                    "receipt art:4 merged"
+                }
+            } else {
+                panic!("unexpected gate {prompt}")
+            };
+            board
+                .append(NewEntry {
+                    task: Some(id),
+                    author: Author::Human,
+                    kind: EntryKind::Answer { to: qid },
+                    body: txt(body),
+                    refs: vec![],
+                    supersedes: None,
+                })
+                .unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(corrected_plan && corrected_receipt);
+    assert_eq!(ledger.calls(), 1);
+    assert!(board.open_questions().is_empty());
+    drop(dispatcher);
+    drop(supervisor);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires BBP_TEST_BIN; concurrent workspaces and adoption"]
+fn concurrent_tasks_keep_run_one_checkouts_isolated_during_adoption() {
+    let (dir, c) = scripted_config();
+    let (task, board) = task();
+    let mut profile = std::fs::read_to_string(&c.profiles).unwrap();
+    profile = profile.replace(
+        "test \\\"$(cat flag)",
+        "echo $$ > running.pid; sleep 2; test \\\"$(cat flag)",
+    );
+    std::fs::write(&c.profiles, profile).unwrap();
+    let sa = ScriptSupervisor::default();
+    let sb = ScriptSupervisor::default();
+    let make = |namespace: &str, s: ScriptSupervisor| {
+        BbpHost::with_seams(c.clone(), namespace.into(), "flag".into(), StdCommand, s).unwrap()
+    };
+    let mut a = make("a", sa.clone());
+    let mut b = make("b", sb.clone());
+    let ha = a.open(&task, &board).unwrap();
+    let hb = b.open(&task, &board).unwrap();
+    let da = a.handle(&ha).unwrap();
+    let db = b.handle(&hb).unwrap();
+    let wa = supervisor::task_work(&c, &da.task).join("run-1");
+    let wb = supervisor::task_work(&c, &db.task).join("run-1");
+    assert_ne!(wa, wb);
+    let mut ba = board.clone();
+    let mut bb = board.clone();
+    let ga = wait_gate(&mut a, &ha, "approve-plan");
+    answer(&mut a, &ha, &mut ba, ga, "approve-plan art:2");
+    let gb = wait_gate(&mut b, &hb, "approve-plan");
+    answer(&mut b, &hb, &mut bb, gb, "approve-plan art:2");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !wa.join("running.pid").exists() || !wb.join("running.pid").exists() {
+        assert!(Instant::now() < deadline, "both workloads did not overlap");
+        a.poll(&ha).unwrap();
+        b.poll(&hb).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(wa.join("sentinel"), "a").unwrap();
+    std::fs::write(wb.join("sentinel"), "b").unwrap();
+    drop(a);
+    let mut a = make("a", sa.clone());
+    assert_eq!(a.open(&task, &board).unwrap(), ha);
+    assert_eq!(std::fs::read_to_string(wa.join("sentinel")).unwrap(), "a");
+    assert_eq!(std::fs::read_to_string(wb.join("sentinel")).unwrap(), "b");
+    let ga = wait_gate(&mut a, &ha, "approve-merge");
+    let gb = wait_gate(&mut b, &hb, "approve-merge");
+    answer(&mut a, &ha, &mut ba, ga, "approve-merge art:4 run:1");
+    answer(&mut b, &hb, &mut bb, gb, "approve-merge art:4 run:1");
+    let ga = wait_gate(&mut a, &ha, "receipt");
+    let gb = wait_gate(&mut b, &hb, "receipt");
+    answer(&mut a, &ha, &mut ba, ga, "receipt art:4 a");
+    answer(&mut b, &hb, &mut bb, gb, "receipt art:4 b");
+    assert!(matches!(a.poll(&ha).unwrap(), Progress::Closed { .. }));
+    assert!(matches!(b.poll(&hb).unwrap(), Progress::Closed { .. }));
+    drop(a);
+    drop(b);
+    drop(sa);
+    drop(sb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires BBP_TEST_BIN; expired request recovery through real host"]
+fn expired_build_request_can_be_settled_before_resuming() {
+    use rusty_bbp::{Command as BbpCommand, Driver, State as BbpState, TaskState, Time};
+    let (dir, c) = scripted_config();
+    let (task, mut board) = task();
+    let maker = dir.join("maker.sh");
+    let script = std::fs::read_to_string(&maker).unwrap();
+    let request = r#"if [ ! -f "$BBP_DIR/requested" ]; then
+        touch "$BBP_DIR/requested"
+        "$BBP_BIN" mcp <<'RPC'
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"script","version":"0"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"post","arguments":{"op":"question","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Which flag value?","gate":false}}}
+RPC
+        exit 0
+    fi
+"#;
+    let needle = "*'\"Build\"'*) ";
+    assert!(script.contains(needle));
+    std::fs::write(
+        maker,
+        script.replace(needle, &format!("{needle}\n{request}")),
+    )
+    .unwrap();
+    let supervisor = ScriptSupervisor::default();
+    let mut host = BbpHost::with_seams(
+        c,
+        "expiry".into(),
+        "flag".into(),
+        StdCommand,
+        supervisor.clone(),
+    )
+    .unwrap();
+    let handle = host.open(&task, &board).unwrap();
+    let h = host.handle(&handle).unwrap();
+    let gate = wait_gate(&mut host, &handle, "approve-plan");
+    answer(&mut host, &handle, &mut board, gate, "approve-plan art:2");
+    let gate = wait_gate(&mut host, &handle, "Which flag value?");
+    let request_id = gate
+        .ids
+        .iter()
+        .find(|s| s.as_str().starts_with("msg:"))
+        .unwrap()
+        .as_str()
+        .to_owned();
+    let task_id = rusty_bbp::TaskId(h.task.clone());
+    let state = TaskState::fold(task_id.clone(), &events(&h));
+    assert_eq!(state.state, BbpState::Build);
+    let expires = state.pending_request.unwrap().deadline.unwrap();
+    let mut driver = Driver::new(FsStore::open(&h.dir).unwrap(), task_id);
+    driver.reload().unwrap();
+    driver
+        .dispatch(&BbpCommand::Tick, Time(expires.0 + 1))
+        .unwrap();
+    let gate = wait_gate(&mut host, &handle, "Escalated");
+    assert!(gate.prompt.as_str().contains("Which flag value?"));
+    assert!(gate.ids.iter().any(|id| id.as_str() == request_id));
+    answer(
+        &mut host,
+        &handle,
+        &mut board,
+        gate,
+        &format!("decision {request_id} accept ok"),
+    );
+    // Settling a request grants the requester a consultation turn. Let this
+    // fixture's empty escalated-state harness forfeit it before displaying
+    // the separate resume confirmation, so its fence is not already obsolete.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !TaskState::fold(rusty_bbp::TaskId(h.task.clone()), &events(&h))
+        .turns
+        .is_empty()
+    {
+        assert!(Instant::now() < deadline);
+        host.poll(&handle).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let gate = wait_gate(&mut host, &handle, "resume STATE");
+    answer(&mut host, &handle, &mut board, gate, "resume build");
+    let gate = wait_gate(&mut host, &handle, "approve-merge");
+    answer(
+        &mut host,
+        &handle,
+        &mut board,
+        gate,
+        "approve-merge art:4 run:1",
+    );
+    let gate = wait_gate(&mut host, &handle, "receipt");
+    answer(&mut host, &handle, &mut board, gate, "receipt art:4 merged");
+    assert!(matches!(
+        host.poll(&handle).unwrap(),
+        Progress::Closed { .. }
+    ));
+    drop(host);
+    drop(supervisor);
     std::fs::remove_dir_all(dir).unwrap();
 }

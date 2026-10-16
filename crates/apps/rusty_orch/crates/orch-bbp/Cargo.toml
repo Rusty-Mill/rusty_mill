@@ -18,4 +18,5 @@ rusty_serde = { workspace = true }
 rusty_atomic_file = { workspace = true }
 
 [dev-dependencies]
+orch-dispatch = { workspace = true, features = ["fake"] }
 orch-cli = { workspace = true, features = ["fake"] }

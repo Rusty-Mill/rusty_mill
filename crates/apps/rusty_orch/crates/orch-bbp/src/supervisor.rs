@@ -49,7 +49,7 @@ impl Supervisor for StdSupervisor {
             .args(["--task", task, "--repo-path"])
             .arg(&config.repo)
             .arg("--work")
-            .arg(&config.work)
+            .arg(task_work(config, task))
             .arg("--agents")
             .arg(agents)
             .args([
@@ -101,4 +101,11 @@ impl Supervisor for StdSupervisor {
             .map_err(|e| e.to_string())?;
         Ok(Supervised::Started)
     }
+}
+
+/// Stable per-task root: BBP run ids are local to a task, not the pool.
+pub(crate) fn task_work(config: &Config, task: &str) -> std::path::PathBuf {
+    config
+        .work
+        .join(rusty_bbp::Sha256::of(task.as_bytes()).hex())
 }
