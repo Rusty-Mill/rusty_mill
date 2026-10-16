@@ -417,6 +417,23 @@ fn worst(a: RunStatus, b: RunStatus) -> RunStatus {
     }
 }
 
+/// Hold through startup, workload cleanup and report publication.
+pub(crate) fn lock_task(dir: &Path, task: &TaskId) -> Result<std::fs::File, String> {
+    // The worker retains this lock through workload wait, group cleanup and
+    // report publication, even if its owning moderator dies in the meantime.
+    let locks = dir.join("runners");
+    std::fs::create_dir_all(&locks).map_err(|e| e.to_string())?;
+    let lock = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(locks.join(format!("{}.lock", Sha256::of(task.0.as_bytes()).hex())))
+        .map_err(|e| e.to_string())?;
+    lock.try_lock()
+        .map_err(|e| format!("runner already active or lock unavailable: {e}"))?;
+    Ok(lock)
+}
+
 /// Serve the task's selected run once. `repo` is a local path to the task's
 /// repository; `work_root` holds one checkout per run.
 pub fn run_once<E: Executor>(
@@ -430,18 +447,7 @@ pub fn run_once<E: Executor>(
 where
     E::Error: std::fmt::Display,
 {
-    // The worker retains this lock through workload wait, group cleanup and
-    // report publication, even if its owning moderator dies in the meantime.
-    let locks = dir.join("runners");
-    std::fs::create_dir_all(&locks).map_err(|e| e.to_string())?;
-    let lock = std::fs::File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(locks.join(format!("{}.lock", Sha256::of(task.0.as_bytes()).hex())))
-        .map_err(|e| e.to_string())?;
-    lock.try_lock()
-        .map_err(|e| format!("runner already active or lock unavailable: {e}"))?;
+    let _lock = lock_task(dir, task)?;
     let mut d = open_driver(dir, task)?;
     let st = &d.state;
     let run = st

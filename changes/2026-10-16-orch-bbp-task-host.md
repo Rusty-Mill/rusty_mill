@@ -22,3 +22,9 @@ changelog: Integrate Orch Implement cards with the existing BBP task host, durab
   and abrupt death. Added concurrent-task, corrected-answer, expired-request and
   process-level running-workload regressions. Call accounting is not a cost cap;
   PR #763 remains separate.
+- **Fixed in safety review:** the shared sandbox executor now owns every spawned
+  helper through setup failure, containment and reaping. BBP registers owner-EOF
+  cancellation before setup polling. Delayed-helper regressions cover forced
+  startup timeout, registration/resolution/status failures, unwaited-job cleanup,
+  and owner EOF with task-lock retention and no later workload launch. The
+  production setup deadline and confinement policies are unchanged.

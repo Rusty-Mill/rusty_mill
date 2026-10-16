@@ -124,3 +124,10 @@ lock through cleanup/reporting, including after moderator death. Thus a new
 moderator may retry a pending run only after the old worker releases that lock.
 Normal wall-limit, cancellation, and error exits wait for the worker to finish.
 The standalone unsupervised runner CLI remains available for direct trusted use.
+
+Runner cancellation is registered before sandbox setup polling, so owner-pipe
+EOF also kills a helper that has not exec'd its workload yet. Startup errors
+retain executor ownership through group containment and reaping; only then may
+the runner report an error and release its task lock. A delayed-helper test
+covers EOF during setup, cancellation latched before registration, lock
+retention and a forbidden later workload launch.

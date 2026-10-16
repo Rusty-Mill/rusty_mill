@@ -108,8 +108,8 @@ cargo clippy -p orch-bbp -p orch-dispatch -p orch-store -p rusty_orch \
 The explicit end-to-end tests exercise real binaries, lost replies after each
 open step, persisted CLI resumes, moderator lock/restart, and a two-role MCP
 workflow through runner evidence, independent review, approval and receipt.
-Only the scripted full-workflow fixture explicitly uses `--confine none` for
-its test workload; production confinement is not configurable through Orch.
+Scripted workflow and running-workload lifecycle fixtures explicitly use
+`--confine none` for their test workloads; production confinement is not configurable through Orch.
 
 ### Review corrections
 
