@@ -588,7 +588,7 @@ async fn a_metrics_endpoint_that_is_not_http_is_refused_at_start() {
         panic!("a schemeless metrics endpoint should be refused");
     };
     assert!(
-        err.to_string().contains("not an http(s) URL"),
+        err.to_string().contains("not a valid http(s) URL"),
         "unexpected error: {err}"
     );
 }

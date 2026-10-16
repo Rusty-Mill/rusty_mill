@@ -43,6 +43,7 @@ mod labels;
 pub mod metrics;
 mod otlp;
 mod push;
+mod redact;
 
 use std::{sync::Arc, time::Duration};
 
@@ -71,8 +72,10 @@ const DEFAULT_METRICS_ENDPOINT: &str = "http://localhost:4318/v1/metrics";
 pub enum OtelError {
     /// The span exporter could not be built — usually a malformed endpoint.
     Exporter(opentelemetry_otlp::ExporterBuildError),
-    /// The metrics endpoint is not an `http://` or `https://` URL.
-    MetricsEndpoint(String),
+    /// The metrics endpoint is not a valid `http://` or `https://` URL.
+    ///
+    /// The URL is deliberately not carried: it may hold a credential.
+    MetricsEndpoint,
     /// The thread that pushes metrics could not be started.
     MetricsThread(std::io::Error),
 }
@@ -81,9 +84,11 @@ impl std::fmt::Display for OtelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Exporter(e) => write!(f, "could not build the OTLP span exporter: {e}"),
-            Self::MetricsEndpoint(url) => {
-                write!(f, "the OTLP metrics endpoint `{url}` is not an http(s) URL")
-            }
+            Self::MetricsEndpoint => write!(
+                f,
+                "the OTLP metrics endpoint is not a valid http(s) URL without embedded credentials \
+                 (it is not shown, as it may hold a secret)"
+            ),
             Self::MetricsThread(e) => write!(f, "could not start the metrics push thread: {e}"),
         }
     }
@@ -93,7 +98,7 @@ impl std::error::Error for OtelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Exporter(e) => Some(e),
-            Self::MetricsEndpoint(_) => None,
+            Self::MetricsEndpoint => None,
             Self::MetricsThread(e) => Some(e),
         }
     }
@@ -106,7 +111,7 @@ impl From<opentelemetry_otlp::ExporterBuildError> for OtelError {
 }
 
 /// How to talk to the collector, and what to call ourselves.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OtelConfig {
     /// `service.name` on every span. Required by the OTel semantic conventions
     /// and the first thing you filter by in a collector.
@@ -138,6 +143,23 @@ pub struct OtelConfig {
     pub metrics: bool,
     /// How often metrics are pushed to the collector.
     pub metrics_interval: Duration,
+}
+
+// By hand, so that logging a config cannot print a credential held in an endpoint.
+impl std::fmt::Debug for OtelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let origin = |url: &Option<String>| url.as_deref().map(redact::origin);
+        f.debug_struct("OtelConfig")
+            .field("service_name", &self.service_name)
+            .field("service_version", &self.service_version)
+            .field("endpoint", &origin(&self.endpoint))
+            .field("metrics_endpoint", &origin(&self.metrics_endpoint))
+            .field("sample_ratio", &self.sample_ratio)
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .field("metrics", &self.metrics)
+            .field("metrics_interval", &self.metrics_interval)
+            .finish()
+    }
 }
 
 impl OtelConfig {
@@ -204,18 +226,27 @@ impl OtelConfig {
             .clone()
             .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").ok())
             .unwrap_or_else(|| DEFAULT_METRICS_ENDPOINT.to_owned());
-        if url.starts_with("http://") || url.starts_with("https://") {
-            Ok(url)
-        } else {
-            Err(OtelError::MetricsEndpoint(url))
+        // Parsed, not just prefix-checked: a malformed URL must fail here, where the
+        // error can stay silent about it, not later inside an HTTP client's error.
+        match rusty_http::Url::parse(&url) {
+            Ok(_) => Ok(url),
+            Err(_) => Err(OtelError::MetricsEndpoint),
         }
     }
 
-    /// The resource attributes metrics carry.
+    /// The resource attributes metrics carry: the process environment's
+    /// `OTEL_RESOURCE_ATTRIBUTES`, then this config's `service.name` and
+    /// `service.version` over them, as the span resource is built.
     fn resource_attributes(&self) -> Vec<(String, String)> {
-        let mut attributes = vec![("service.name".to_owned(), self.service_name.clone())];
+        let from_environment = std::env::var(RESOURCE_ATTRIBUTES_VAR).ok();
+        self.resource_attributes_from(from_environment.as_deref())
+    }
+
+    fn resource_attributes_from(&self, declared: Option<&str>) -> Vec<(String, String)> {
+        let mut attributes = parse_resource_attributes(declared.unwrap_or_default());
+        set_attribute(&mut attributes, "service.name", &self.service_name);
         if let Some(version) = &self.service_version {
-            attributes.push(("service.version".to_owned(), version.clone()));
+            set_attribute(&mut attributes, "service.version", version);
         }
         attributes
     }
@@ -226,6 +257,29 @@ impl OtelConfig {
             builder = builder.with_attribute(KeyValue::new("service.version", version.clone()));
         }
         builder.build()
+    }
+}
+
+const RESOURCE_ATTRIBUTES_VAR: &str = "OTEL_RESOURCE_ATTRIBUTES";
+
+/// `key1=value1,key2=value2`, read as the SDK's resource detector does: an entry
+/// without `=` is skipped, keys and values are trimmed, and a repeated key keeps
+/// its last value.
+fn parse_resource_attributes(text: &str) -> Vec<(String, String)> {
+    let mut attributes = Vec::new();
+    for entry in text.split_terminator(',') {
+        if let Some((key, value)) = entry.split_once('=') {
+            set_attribute(&mut attributes, key.trim(), value.trim());
+        }
+    }
+    attributes
+}
+
+/// Set `key`, replacing an earlier value in place.
+fn set_attribute(attributes: &mut Vec<(String, String)>, key: &str, value: &str) {
+    match attributes.iter_mut().find(|(k, _)| k == key) {
+        Some(existing) => existing.1 = value.to_owned(),
+        None => attributes.push((key.to_owned(), value.to_owned())),
     }
 }
 
@@ -426,7 +480,7 @@ pub fn init(config: OtelConfig, filter: &str) -> Result<OtelGuard, OtelError> {
 
     tracing::info!(
         service = %service_name,
-        endpoint = endpoint.as_deref().unwrap_or("<default>"),
+        endpoint = endpoint.as_deref().map_or_else(|| "<default>".to_owned(), redact::origin),
         sample_ratio,
         "exporting spans over OTLP"
     );
@@ -437,6 +491,52 @@ pub fn init(config: OtelConfig, filter: &str) -> Result<OtelGuard, OtelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_environment_resource_is_parsed_like_the_sdk_does() {
+        let attributes = parse_resource_attributes(" a = 1 ,b=2,no-equals,a=3,c=x=y");
+        assert_eq!(
+            attributes,
+            [("a", "3"), ("b", "2"), ("c", "x=y")].map(|(k, v)| (k.to_owned(), v.to_owned()))
+        );
+        assert!(parse_resource_attributes("").is_empty());
+    }
+
+    #[test]
+    fn the_config_wins_over_the_environment_resource() {
+        let attributes = OtelConfig::new("mine")
+            .with_service_version("2.0")
+            .resource_attributes_from(Some(
+                "service.instance.id=i-1,service.name=theirs,service.version=1.0",
+            ));
+        let get = |key: &str| {
+            attributes
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("service.name"), Some("mine"));
+        assert_eq!(get("service.version"), Some("2.0"));
+        assert_eq!(get("service.instance.id"), Some("i-1"));
+        assert_eq!(
+            attributes
+                .iter()
+                .filter(|(k, _)| k == "service.name")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn metrics_refuse_an_unparseable_endpoint_without_naming_it() {
+        for url in ["localhost:4318", "ftp://h/x", "http://u:SECRET@h/x"] {
+            let err = OtelConfig::new("s")
+                .with_metrics_endpoint(url)
+                .metrics_url()
+                .expect_err(url);
+            assert!(!err.to_string().contains("SECRET"), "{err}");
+        }
+    }
 
     #[test]
     fn the_sample_ratio_is_clamped() {

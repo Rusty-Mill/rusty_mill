@@ -23,7 +23,7 @@ use std::{
 
 use super::{
     instrument::{Metric, Registry},
-    otlp,
+    otlp, redact,
 };
 
 /// Everything the push thread needs.
@@ -59,10 +59,19 @@ pub(crate) struct Pusher {
 impl Pusher {
     /// Start the push thread.
     pub(crate) fn spawn(settings: PushSettings) -> io::Result<Self> {
+        Self::spawn_with(settings, |_| {})
+    }
+
+    /// [`Self::spawn`], with a hook that sees the thread's runtime before the
+    /// loop starts (so a test can put work on its blocking pool).
+    fn spawn_with(
+        settings: PushSettings,
+        setup: impl FnOnce(&rusty_tokio::Runtime) + Send + 'static,
+    ) -> io::Result<Self> {
         let (commands, inbox) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("rusty-mcp-otlp-metrics".to_owned())
-            .spawn(move || run(&settings, &inbox))?;
+            .spawn(move || run(&settings, &inbox, setup))?;
         Ok(Self {
             commands,
             thread: Mutex::new(Some(thread)),
@@ -108,7 +117,16 @@ impl Drop for Pusher {
 }
 
 /// The push thread's loop.
-fn run(settings: &PushSettings, inbox: &mpsc::Receiver<Command>) {
+///
+/// A shutdown is acknowledged only after the runtime is gone. Dropping it waits
+/// for its blocking pool, and a DNS lookup that outlived its request timeout can
+/// still be in there; acknowledging first would let `shutdown` report done, and
+/// join, while that wait is still ahead.
+fn run(
+    settings: &PushSettings,
+    inbox: &mpsc::Receiver<Command>,
+    setup: impl FnOnce(&rusty_tokio::Runtime),
+) {
     let runtime = match rusty_tokio::Builder::new_current_thread().build() {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -116,13 +134,14 @@ fn run(settings: &PushSettings, inbox: &mpsc::Receiver<Command>) {
             return;
         }
     };
+    setup(&runtime);
     let client = rusty_request::Client::builder()
         .timeout(settings.request_timeout)
         .no_retry()
         .build();
     let started = now_nanos();
 
-    loop {
+    let ack = loop {
         match inbox.recv_timeout(settings.interval) {
             Err(RecvTimeoutError::Timeout) => push(&runtime, &client, settings, started),
             Ok(Command::Flush(ack)) => {
@@ -131,15 +150,19 @@ fn run(settings: &PushSettings, inbox: &mpsc::Receiver<Command>) {
             }
             Ok(Command::Shutdown(ack)) => {
                 push(&runtime, &client, settings, started);
-                let _ = ack.send(());
-                return;
+                break Some(ack);
             }
             // Every handle is gone without a shutdown: push once more and stop.
             Err(RecvTimeoutError::Disconnected) => {
                 push(&runtime, &client, settings, started);
-                return;
+                break None;
             }
         }
+    };
+    drop(client);
+    drop(runtime);
+    if let Some(ack) = ack {
+        let _ = ack.send(());
     }
 }
 
@@ -171,7 +194,12 @@ fn push(
             .error_for_status()
     });
     if let Err(err) = result {
-        tracing::warn!(%err, endpoint = %settings.endpoint, "failed to push metrics");
+        // The endpoint can carry a credential, and so can the error's text.
+        tracing::warn!(
+            endpoint = %redact::origin(&settings.endpoint),
+            reason = %redact::reason(&err),
+            "failed to push metrics"
+        );
     }
 }
 
@@ -181,4 +209,74 @@ fn now_nanos() -> u64 {
         .map_or(0, |elapsed| {
             u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        time::Instant,
+    };
+
+    use super::*;
+
+    fn settings() -> PushSettings {
+        PushSettings {
+            endpoint: "http://127.0.0.1:1/v1/metrics".to_owned(),
+            resource: Vec::new(),
+            scope: "test",
+            interval: Duration::from_secs(3600),
+            request_timeout: Duration::from_secs(1),
+            registry: Arc::new(Registry::default()),
+        }
+    }
+
+    /// Run `f` on a thread and say whether it finished within `limit`.
+    fn finishes_within<T: Send + 'static>(
+        limit: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done.send(f());
+        });
+        finished.recv_timeout(limit).ok()
+    }
+
+    #[test]
+    fn a_shutdown_stops_waiting_when_the_runtime_cannot_drain() {
+        // Work on the runtime's blocking pool that does not finish: what a DNS
+        // lookup that outlived its request timeout looks like. Dropping the
+        // runtime waits for it, so the thread cannot acknowledge, and
+        // `shutdown` must give up at its own deadline instead of joining.
+        let release = Arc::new(Barrier::new(2));
+        let held = Arc::clone(&release);
+        let pusher = Pusher::spawn_with(settings(), move |runtime| {
+            runtime.spawn_blocking(move || {
+                held.wait();
+            });
+        })
+        .expect("spawn");
+
+        let started = Instant::now();
+        let outcome = finishes_within(Duration::from_secs(10), move || {
+            let done = pusher.shutdown(Duration::from_millis(200));
+            (pusher, done)
+        });
+        let (pusher, done) = outcome.expect("shutdown overran its deadline");
+        assert!(!done, "reported done while the runtime could not drain");
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        // Let the stuck work finish; the thread then exits on its own.
+        release.wait();
+        drop(pusher);
+    }
+
+    #[test]
+    fn a_shutdown_with_nothing_outstanding_reports_done() {
+        let pusher = Pusher::spawn(settings()).expect("spawn");
+        assert!(pusher.shutdown(Duration::from_secs(5)));
+        // Idempotent.
+        assert!(pusher.shutdown(Duration::from_secs(5)));
+    }
 }
