@@ -194,13 +194,18 @@ fn push(
             .error_for_status()
     });
     if let Err(err) = result {
-        // The endpoint can carry a credential, and so can the error's text.
-        tracing::warn!(
-            endpoint = %redact::origin(&settings.endpoint),
-            reason = %redact::reason(&err),
-            "failed to push metrics"
-        );
+        tracing::warn!("{}", failure_message(&settings.endpoint, &err));
     }
+}
+
+/// The log line for a failed push. The endpoint can carry a credential, and so
+/// can the error's text, so it names the origin and the kind of failure only.
+fn failure_message(endpoint: &str, err: &rusty_request::Error) -> String {
+    format!(
+        "failed to push metrics to {}: {}",
+        redact::origin(endpoint),
+        redact::reason(err)
+    )
 }
 
 fn now_nanos() -> u64 {
@@ -270,6 +275,14 @@ mod tests {
         // Let the stuck work finish; the thread then exits on its own.
         release.wait();
         drop(pusher);
+    }
+
+    #[test]
+    fn a_failure_message_quotes_neither_the_endpoint_nor_the_error_text() {
+        let err = rusty_request::Error::InvalidUrl("https://h/?token=SECRET_IN_ERROR".to_owned());
+        let said = failure_message("https://collector:4318/v1/p?token=SECRET_IN_URL", &err);
+        assert!(!said.contains("SECRET"), "{said}");
+        assert!(said.contains("https://collector:4318"), "{said}");
     }
 
     #[test]
