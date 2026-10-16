@@ -1,6 +1,6 @@
-# TLS native engine: smaller independent review scope (draft for owner approval)
+# TLS native engine: smaller independent review scope (approved 2026-10-16; review not started)
 
-Date: 2026-10-11. Status: **scope approved by the owner 2026-10-16; reviewer named: David Bailey; review not started.** (Originally a draft; the approval is the owner's own message in the working session.) Supports Tier 1 item 4 of
+Date: 2026-10-11. Status: **scope approved by the owner 2026-10-16; reviewer nominated: David Bailey; review not started.** Recorded from the owner's message in the working session (originally a draft). Still open: whether the nominee meets "independent" (the owner's call), the time box, the fuzz long-run length (the reviewer's) and the review itself. Nominating a reviewer is not a review and authorizes no wiring. Supports Tier 1 item 4 of
 `TLS-EVIDENCE-BAR.md`. The owner asked for a smaller scope than a review of the whole
 engine. This is the code the Tier 1 consumer (`rleval-app` OIDC, named by the owner on 2026-10-14, a TLS 1.3 client to
 named Google hosts) actually executes, and what is left out and why.
@@ -30,13 +30,13 @@ machine's CertificateVerify and Finished handling, then `stream.rs`.
 | Area | Lines | Reason |
 | --- | --- | --- |
 | Server: `server.rs`, `server12.rs` | 2132 + 842 | The candidate is a client |
-| TLS 1.2: `client12.rs`, `handshake12.rs`, `record12.rs`, `schedule12.rs` | 1289 + 453 + 431 + 320 | See the open point below |
+| TLS 1.2: `client12.rs`, `handshake12.rs`, `record12.rs`, `schedule12.rs` | 1289 + 453 + 431 + 320 | Kept out by `NativeTlsStream::tls13_only()`; see the resolved point below |
 | Tickets and resumption: `ticket.rs` | 459 | The candidate makes one request per connection; resumption is not used |
 | Signing: `sign.rs` | 245 | Only the server and client-auth sign; a client without client certificates does not |
 | Exporters: `export.rs` | 122 | Not used |
 | Version negotiation: `negotiate.rs` | 590 | Read only the part that rejects a downgrade sentinel if time allows |
 
-## One open point the owner should decide (found while scoping)
+## Resolved point (found while scoping; decided 2026-10-14 and 2026-10-16)
 
 `NativeTlsStream` currently negotiates both TLS 1.3 and TLS 1.2 (it drives the dual-version
 client). A peer that answers with 1.2 would run the 1.2 client code, which this scope leaves
