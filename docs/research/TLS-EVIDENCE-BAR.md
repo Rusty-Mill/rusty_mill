@@ -1,6 +1,6 @@
 # TLS native engine: evidence bar proposal (owner to approve)
 
-Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Review scope approved and reviewer nominated (David Bailey) by the owner on 2026-10-16, recorded from the owner's session message; still open: whether the nominee meets "independent", the review's time box, and the review itself, which has not started (item 4); first consumer named and Amendment 1 accepted 2026-10-14 (wiring still gated on the unmet Tier 1 items); `anyExtendedKeyUsage` aligned 2026-10-12 and the two `nc-dos` cases bounded 2026-10-13; the two other native-accept/webpki-reject limbo cases are accepted exceptions (see "Accepted exceptions"; owner acceptance recorded 2026-10-13). Follows
+Date: 2026-10-10. Status: **Tier 1 approved by the owner on 2026-10-10 (with the fuzz-length change below); Tier 2 not approved.** Review scope approved and reviewer nominated (David Bailey) by the owner on 2026-10-16, recorded from the owner's session message; on 2026-10-17 the owner confirmed the nominee as the independent reviewer; still open: the review's time box and the review itself, which has not started (item 4); first consumer named and Amendment 1 accepted 2026-10-14 (wiring still gated on the unmet Tier 1 items); `anyExtendedKeyUsage` aligned 2026-10-12 and the two `nc-dos` cases bounded 2026-10-13; the two other native-accept/webpki-reject limbo cases are accepted exceptions (see "Accepted exceptions"; owner acceptance recorded 2026-10-13). Follows
 `TLS-ENGINE-ASSESSMENT.md` section 6, which this narrows and updates. The engine's default,
 both gates and every consumer are unchanged. The bar, replacing `ring`, and superseding
 ADR-0002 are the owner's decisions.
@@ -78,9 +78,9 @@ proposed to start until Tier 1 has been in use.
 1. Tier 1: **approved**, fuzz length left to the reviewer.
 2. Candidate: `rleval-app` OIDC transport (client only, TLS 1.3, named hosts) **chosen by the owner on 2026-10-14**, in the working session ("3 approved recommendation"). Naming it wires nothing.
 3. ADR: amendment before any wiring. **Amendment 1 accepted by the owner on 2026-10-14** (same session message).
-4. Reviewer: **nominated**, David Bailey, by the owner on 2026-10-16. Open: whether the nominee meets "independent" (the owner's call), the time box, and the review itself. Tier 1 item 4 stays unmet.
+4. Reviewer: **David Bailey**, nominated by the owner on 2026-10-16 and **confirmed by the owner as independent on 2026-10-17** (session message: "1 yes"). Open: the time box and the review itself. Tier 1 item 4 stays unmet.
 5. `ring`: keep (my recommendation).
-6. **Proposed, pending confirmation:** leave it. Tier 1 item 1 counts *scheduled* runs and the only
+6. **Leave it, confirmed by the owner on 2026-10-17** (session message: "3 confirmed"). Tier 1 item 1 counts *scheduled* runs and the only
    scheduled CI run today is weekly (Mondays 03:17 UTC), so the criterion takes 10 weeks as
    written. No schedule is added and the criterion is unchanged.
 7. **Smaller review scope:** `TLS-REVIEW-SCOPE.md` **approved by the owner on 2026-10-16** (session message); it is the authoritative scope for item 4.
