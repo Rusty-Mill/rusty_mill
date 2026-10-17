@@ -74,11 +74,8 @@ impl Telemetry {
             otel = otel.without_metrics();
         }
 
+        // `init` says where it is exporting, naming the collector's origin only.
         let guard = rusty_mcp::otel::init(otel, &filter)?;
-        tracing::info!(
-            endpoint = tracing_config.endpoint.as_deref().unwrap_or("<default>"),
-            "exporting traces over OTLP"
-        );
 
         Ok(Telemetry {
             guard: Some(Arc::new(guard)),
