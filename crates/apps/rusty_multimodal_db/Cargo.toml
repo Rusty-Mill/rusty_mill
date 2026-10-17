@@ -511,7 +511,8 @@ rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 # `docs/decisions/ADR-0015-external-database-benchmark.md`), accepted for the same
 # reproducibility reason as rusqlite's "bundled" above. Paid only when `external-db-bench` is
 # explicitly enabled — never by a default `cargo build`/`cargo test`/`cargo check`.
-duckdb = { version = "1", features = ["bundled"], optional = true }
+# 1.10506.1 updates libduckdb-sys's build dependency to patched ZIP 9.
+duckdb = { version = "1.10506.1", features = ["bundled"], optional = true }
 # The only one of the three that isn't embedded: a real client talking over a real socket to a
 # locally-run `postgres` server process the benchmark does not manage itself (see that ADR's
 # "Setup" section) — this is a deliberate, honestly-reported part of what Postgres costs, not an
