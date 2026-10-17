@@ -499,3 +499,62 @@ fn stderr_text_that_starts_with_a_brace_is_noise() {
     )
     .is_err());
 }
+
+#[test]
+fn every_byte_of_unicode_json_can_be_polled_without_losing_known_costs() {
+    let dir = scratch("unicode-poll");
+    let task = TaskId("T".into());
+    let c = criteria("unicode-poll-c", SONNET_ONLY);
+    let events = vec![Event::TurnGranted {
+        role: RoleId("planner".into()),
+        turn: TurnId(1),
+        kind: TurnKind::Default,
+        deadline: Time(0),
+        return_to: None,
+        slice: None,
+    }];
+    let path = log_path(&dir, &task, TurnId(1));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let head = fixture("completed-default-ttl");
+    let record = r#"{"type":"assistant","message":{"id":"new","model":"claude-sonnet-5-5","content":"café 日本語 🦀🙂","usage":{"input_tokens":1000000,"output_tokens":1}}}"#;
+    let mut prefix = format!("{head}\n").into_bytes();
+    let base = prefix.len();
+    prefix.extend(record.as_bytes());
+    for end in base + 1..prefix.len() {
+        std::fs::write(&path, &prefix[..end]).unwrap();
+        let t = tokens::of_live(&dir, &task, &events, Some(&c))
+            .unwrap_or_else(|e| panic!("byte {}: {e}", end - base));
+        assert!(t.usd_floor.unwrap() >= 0.0086289);
+        assert_eq!(t.usd, None);
+        assert_eq!(t.unknown_turns, 1);
+    }
+    std::fs::write(&path, &prefix).unwrap();
+    let t = tokens::of_live(&dir, &task, &events, Some(&c)).unwrap();
+    assert!(t.usd_floor.unwrap() > 2.0);
+    assert_eq!(
+        t.usd, None,
+        "a result followed by assistant usage is incomplete"
+    );
+
+    for bytes in [&[0xff][..], &[0xe2, 0x28, 0xa1], &[0xf0, 0x9f, b'\n']] {
+        let mut bad = format!("{head}\n").into_bytes();
+        bad.extend(bytes);
+        std::fs::write(&path, bad).unwrap();
+        assert!(tokens::of_live(&dir, &task, &events, Some(&c)).is_err());
+        assert!(tokens::of(&dir, &task, &events, Some(&c)).is_err());
+    }
+    // Incomplete UTF-8 at terminal output still fails even after a valid result.
+    for tail in [&[0xc3][..], &[0xe6, 0x97], &[0xf0, 0x9f, 0xa6]] {
+        let mut bad = format!("{head}\n{{\"type\":\"assistant\",\"text\":\"").into_bytes();
+        bad.extend(tail);
+        std::fs::write(&path, bad).unwrap();
+        assert!(tokens::of_live(&dir, &task, &events, Some(&c)).is_ok());
+        assert!(tokens::of(&dir, &task, &events, Some(&c)).is_err());
+        let t = tokens::of_stopped(&dir, &task, &events, &c);
+        assert!(t.usd.is_none());
+        assert_eq!(t.unknown_turns, 1);
+        assert!(!t.errors.is_empty());
+        assert!(t.usd_floor.unwrap() >= 0.0086289);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

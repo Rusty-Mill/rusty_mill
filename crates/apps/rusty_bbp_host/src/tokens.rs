@@ -706,7 +706,7 @@ fn read_tokens(
         let Event::TurnGranted { role, turn, .. } = e else {
             continue;
         };
-        let text = match std::fs::read_to_string(log_path(dir, task, *turn)) {
+        let bytes = match std::fs::read(log_path(dir, task, *turn)) {
             Ok(t) => t,
             // Not created: the turn was granted and never launched (or has not
             // printed yet). Any other failure is a log that exists and cannot
@@ -718,7 +718,23 @@ fn read_tokens(
             }
             Err(e) => return Err(format!("turn {}: its log cannot be read: {e}", turn.0)),
         };
-        let mut deferred = false;
+        // A poll may land inside a UTF-8 character as well as inside JSON.
+        // Only an incomplete final sequence is deferrable; invalid sequences
+        // and all terminal truncation remain accounting errors.
+        let (text, mut deferred, decode_error) = match std::str::from_utf8(&bytes) {
+            Ok(text) => (text.to_owned(), false, None),
+            Err(error) if live && error.error_len().is_none() => {
+                let prefix = std::str::from_utf8(&bytes[..error.valid_up_to()])
+                    .map_err(|e| format!("turn {}: its log cannot be read: {e}", turn.0))?;
+                (prefix.to_owned(), true, None)
+            }
+            Err(error) if tolerate => (
+                String::from_utf8_lossy(&bytes[..error.valid_up_to()]).into_owned(),
+                false,
+                Some(format!("turn {}: its log cannot be read: {error}", turn.0)),
+            ),
+            Err(error) => return Err(format!("turn {}: its log cannot be read: {error}", turn.0)),
+        };
         let text = if live && !text.ends_with('\n') {
             let at = text.rfind('\n').map_or(0, |i| i + 1);
             let tail = &text[at..];
@@ -734,9 +750,12 @@ fn read_tokens(
         } else {
             text
         };
-        let (log, bad) = scan(&text);
+        let (log, parsed_bad) = scan(&text);
+        let bad = parsed_bad + u64::from(decode_error.is_some());
         if bad > 0 {
-            let error = format!("turn {}: {bad} malformed accounting record(s)", turn.0);
+            let error = decode_error.unwrap_or_else(|| {
+                format!("turn {}: {bad} malformed accounting record(s)", turn.0)
+            });
             if !tolerate {
                 return Err(error);
             }
