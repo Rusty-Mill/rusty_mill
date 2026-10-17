@@ -532,20 +532,34 @@ pub fn facts(
     let rep = report::of(Path::new(&r.dir), &task, None)?;
     let d = crate::open_driver(Path::new(&r.dir), &task)?;
     let events = d.store.events(&task, 0).map_err(|e| format!("{e:?}"))?;
-    let tok = tokens::of(Path::new(&r.dir), &task, &events, Some(c))?;
     let text =
         std::fs::read_to_string(&r.mod_output).map_err(|e| format!("{}: {e}", r.mod_output))?;
     let m = mod_facts(&text)?;
+    let stopped = m.stop.is_some();
+    // A run the moderator stopped is a failed run whatever its log holds: a log
+    // the tool cannot read (which may be why the cap stopped it) must not drop
+    // the manifest. Any other run's log has to read.
+    let tok = match tokens::of(Path::new(&r.dir), &task, &events, Some(c)) {
+        Ok(t) => Some(t),
+        Err(_) if stopped => None,
+        Err(e) => return Err(e),
+    };
     let st = &d.state;
-    let (role_models, no_model_turns) = model_evidence(&tok);
+    let (role_models, no_model_turns) = tok.as_ref().map_or_else(Default::default, model_evidence);
     Ok(RunFacts {
         closed: st.state == State::Closed,
         rubric_ok: r.rubric_ok,
         spec_wall_ms: m.spec_wall_ms,
         spec_boundaries: m.spec_boundaries,
         replay_equals_live: m.replay_equals_live,
-        over_cap: m.stop.as_deref() == Some("cap") || tok.usd_floor.is_some_and(|f| f > cap_usd),
-        tokens: (tok.without_output == 0).then_some(tok.usd).flatten(),
+        over_cap: m.stop.as_deref() == Some("cap")
+            || tok
+                .as_ref()
+                .and_then(|t| t.usd_floor)
+                .is_some_and(|f| f > cap_usd),
+        tokens: tok
+            .as_ref()
+            .and_then(|t| (t.without_output == 0).then_some(t.usd).flatten()),
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
@@ -553,9 +567,9 @@ pub fn facts(
         role_models,
         build_sha: build_sha_of(&text)?,
         no_model_turns,
-        killed_turns: tok.unknown_turns,
-        stopped: false,
-        usd_floor: tok.usd_floor,
+        killed_turns: tok.as_ref().map_or(0, |t| t.unknown_turns),
+        stopped,
+        usd_floor: tok.as_ref().and_then(|t| t.usd_floor),
     })
 }
 
@@ -601,6 +615,11 @@ pub fn check_settings(pairs: &[Pair], reads_per_turn: u64) -> Result<(), String>
                     p.id, r.reads_per_turn
                 ));
             }
+            // A stopped run is a failed run and may have printed nothing a model
+            // can be read from; every other run must show its models.
+            if r.stopped {
+                continue;
+            }
             if r.role_models.is_empty() {
                 return Err(format!("{}/{arm}: no model evidence in the run", p.id));
             }
@@ -622,6 +641,9 @@ pub fn check_settings(pairs: &[Pair], reads_per_turn: u64) -> Result<(), String>
                     p.id
                 ));
             }
+        }
+        if p.control.stopped || p.treatment.stopped {
+            continue;
         }
         let control: BTreeSet<&String> = p.control.role_models.values().flatten().collect();
         for (role, ms) in &p.treatment.role_models {

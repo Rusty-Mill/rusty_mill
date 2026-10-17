@@ -439,21 +439,31 @@ pub enum LogState {
 /// trusted to bound the spend. Text that is not JSON at all (a harness's stderr
 /// shares the file) is noise.
 pub fn scan(stream: &str) -> (LogState, u64) {
+    use rusty_serde::value::Value;
     let (mut readable, mut other, mut bad) = (0, 0, 0);
     for line in stream.lines().map(str::trim_start) {
-        if !line.starts_with('{') {
+        // Not valid JSON at all is not a record: stderr text (a Node-style
+        // `{ code: ... }` dump), or a line still being written or cut off by a
+        // kill (no prefix of an object is JSON). Its usage, if any, is a loss
+        // the floor already is a lower bound for.
+        if !line.starts_with('{') || rusty_serde::json::from_str::<Value>(line).is_err() {
             continue;
         }
+        // Valid JSON that the tool cannot read as a stream-json line is a
+        // record whose usage would be skipped: refused.
         match rusty_serde::json::from_str::<Line>(line) {
             Ok(l) if l.kind == "assistant" || l.kind == "result" => readable += 1,
             Ok(_) => other += 1,
             Err(_) => bad += 1,
         }
     }
-    let state = match (stream.trim().is_empty(), readable, other) {
-        (true, _, _) => LogState::Empty,
+    // Text with no newline yet is a line still being written: until it ends it
+    // proves nothing, so a log holding only that has printed nothing.
+    let finished = stream.rfind('\n').map_or("", |at| &stream[..at]);
+    let state = match (finished.trim().is_empty(), readable, other) {
+        (true, 0, 0) => LogState::Empty,
         (false, 0, 0) => LogState::Unreadable,
-        (false, 0, _) => LogState::Started,
+        (_, 0, _) => LogState::Started,
         _ => LogState::Readable,
     };
     (state, bad)
