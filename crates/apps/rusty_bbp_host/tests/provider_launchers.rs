@@ -326,3 +326,52 @@ fn reviewer_refuses_a_same_vendor_candidate_writer_before_provider_start() {
     assert!(!f.command().status().unwrap().success());
     assert!(!f.dir.join("args").exists());
 }
+
+#[test]
+fn inherited_git_context_cannot_redirect_author_commands_or_external_index() {
+    let f = Fixture::new(false);
+    let external_index = f.dir.join("external.index");
+    let original = std::fs::read(f.repo.join(".git/index")).unwrap();
+    std::fs::write(&external_index, &original).unwrap();
+    let mut command = f.command();
+    std::fs::write(
+        f.dir.join("provider.sh"),
+        r#"#!/bin/sh
+set -eu
+test -z "${GIT_DIR-}${GIT_WORK_TREE-}${GIT_INDEX_FILE-}${GIT_CONFIG_COUNT-}"
+test "$GIT_CONFIG_NOSYSTEM" = 1
+test "$GIT_CONFIG_GLOBAL" = /dev/null
+git rev-parse --show-toplevel > "$CAPTURE_CWD"
+printf 'changed\n' > flag
+git diff -- flag > "$CAPTURE_DIFF"
+git add flag
+"#,
+    )
+    .unwrap();
+    let output = command
+        .env("GIT_DIR", f.repo.join(".git"))
+        .env("GIT_WORK_TREE", &f.repo)
+        .env("GIT_INDEX_FILE", &external_index)
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.worktree")
+        .env("GIT_CONFIG_VALUE_0", &f.repo)
+        .env("CAPTURE_DIFF", f.dir.join("diff"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cwd = PathBuf::from(std::fs::read_to_string(f.dir.join("cwd")).unwrap().trim());
+    assert_ne!(cwd, f.repo);
+    assert!(cwd.starts_with(f.dir.join("harness")));
+    assert!(std::fs::read_to_string(f.dir.join("diff"))
+        .unwrap()
+        .contains("+changed"));
+    assert_eq!(std::fs::read(&external_index).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("flag")).unwrap(),
+        "no\n"
+    );
+}

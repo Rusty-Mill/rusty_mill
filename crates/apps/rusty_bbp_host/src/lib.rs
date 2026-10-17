@@ -23,6 +23,7 @@ pub mod human;
 pub mod launchers;
 pub mod mcp;
 pub mod moderator;
+pub mod moderator_health;
 pub mod pairs;
 pub mod profiles;
 pub mod report;

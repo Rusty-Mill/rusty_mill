@@ -89,6 +89,69 @@ cargo test --locked -p orch-bbp --lib \
   -- --ignored --exact --nocapture
 ```
 
-The four deterministic confined acceptance cases remain required CI. Successful
+The five deterministic confined acceptance cases are required CI. Successful
 offline contracts do not establish successful live-provider behavior; report
 the smoke's actual result separately.
+
+## Pilot recovery and bounded retries
+
+Codex's `approval_policy="never"` refuses interactive escalation; each of the
+five enabled BBP agent tools has an explicit `approval_mode="approve"`. No human
+command is an MCP tool. Shell execution keeps the workspace-write sandbox.
+Inherited `GIT_*` context is removed before both clone preparation and provider
+execution; shell exclusions do the same and set only fixed Git configuration
+isolation values. The author cannot accidentally use an external worktree/index.
+
+The moderator stops after three no-progress forfeits/timeouts for a role. It
+replays the existing BBP event log: reads and accepted-operation replays do not
+count as publishing progress; an artifact/message resets that role's streak.
+A paused moderator starts no more providers after an Orch or host restart.
+Orch reports the diagnostic as a retryable host error and retains its task and
+ledger. This is a launch-loop guard, not a model-token or monetary cap. A provider
+that publishes actions or stays alive can still consume its ordinary BBP budget.
+PR #763's cost/run guards remain separate.
+
+Inspect and recover explicitly after repairing the launcher:
+
+```sh
+bbp mod-health --dir STORE --task TASK
+bbp show --dir STORE --task TASK
+bbp mod-health --dir STORE --task TASK --reset yes --rev DISPLAYED_REV
+```
+
+Reset takes the moderator lock, refuses stale revisions, and records only an
+owner-acknowledged replay boundary in `mod/<task hash>.retry`. It does not edit
+BBP events, refund turns, change a roster/profile, answer a human gate or restart
+a provider. Invoke Orch again to adopt the same task. A changed launcher on disk
+can be repaired without changing the task's frozen program/argument configuration;
+changes to a pool/roster/profile belong to a new task.
+
+## Rust workloads using LLD
+
+Generate this profile **before opening the task**, then name it in the BBP config:
+
+```sh
+bbp profiles rust-lld --sysroot "$(rustc --print sysroot)" > profiles.json
+```
+
+It compiles `src/lib.rs` as tests with `-C link-arg=-Wl,--threads=1`, then executes
+`.bbp-tests`, under the existing 1 GiB address-space cap and confinement. This
+profile requires a Linux Rust toolchain using LLD (the modern x86_64 Linux Rust
+default); it is not a flag for BFD/other linkers. Read roots name the resolved
+Rust sysroot and system libraries, never the user's credential/Cargo home.
+No environment variables or credentials are copied into the workload.
+The ordinary generic shell profile is unchanged. The frozen profile and digest
+are never edited during recovery. For an existing task, the live pilot instead
+narrowed CPU affinity and requested a new run of the unchanged candidate/profile.
+
+The required acceptance collector now records a fifth `rust-lld` case. It must
+compile and pass seven tests with enforced confinement and the 1 GiB cap;
+Landlock refusal or missing completion evidence fails that case.
+
+Live pilot evidence supplied by the owner used Codex 0.163.0 and Claude Code
+2.1.302 with external Python launchers: seven tests passed, an environmental
+linker failure recovered without changing the profile/candidate tree, a stale
+human answer was rejected, and receipt commit
+`6d70d6509de82d930f990e33de49348949bc809e` completed the disposable fixture.
+That evidence validates the integration pattern; it is not an execution claim
+for these packaged Rust launcher binaries. Their live smoke remains opt-in.

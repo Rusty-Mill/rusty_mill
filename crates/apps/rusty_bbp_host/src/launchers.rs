@@ -239,12 +239,16 @@ fn arguments(
             .map(|(k, v)| Ok(format!("{}={}", json(k)?, json(v)?)))
             .collect::<Result<Vec<_>, String>>()?
             .join(",");
+        let tools = ["task_card", "read", "get_artifact", "put_artifact", "post"]
+            .map(|name| format!("{name}={{approval_mode=\"approve\"}}"))
+            .join(",");
         for option in [
             "approval_policy=\"never\"".to_owned(),
             "features.hooks=false".into(), "features.plugins=false".into(), "features.multi_agent=false".into(),
             format!("projects.{}.trust_level=\"untrusted\"", json(&cwd.to_string_lossy())?),
-            "shell_environment_policy.exclude=[\"BBP_*\",\"GH_TOKEN\",\"GITHUB_TOKEN\",\"OPENAI_API_KEY\",\"ANTHROPIC_API_KEY\"]".into(),
-            format!("mcp_servers={{bbp={{command={},args=[\"mcp\"],env={{{env}}},required=true,enabled_tools=[\"task_card\",\"read\",\"get_artifact\",\"put_artifact\",\"post\"],default_tools_approval_mode=\"approve\"}}}}", json(&bbp.to_string_lossy())?),
+            "shell_environment_policy.exclude=[\"BBP_*\",\"GIT_*\",\"GH_TOKEN\",\"GITHUB_TOKEN\",\"OPENAI_API_KEY\",\"ANTHROPIC_API_KEY\"]".into(),
+            "shell_environment_policy.set={GIT_CONFIG_NOSYSTEM=\"1\",GIT_CONFIG_GLOBAL=\"/dev/null\"}".into(),
+            format!("mcp_servers={{bbp={{command={},args=[\"mcp\"],env={{{env}}},required=true,enabled_tools=[\"task_card\",\"read\",\"get_artifact\",\"put_artifact\",\"post\"],tools={{{tools}}}}}}}", json(&bbp.to_string_lossy())?),
         ] { args.extend(["-c".into(), option]); }
     } else {
         args.push(config.to_string_lossy().into_owned());
@@ -353,7 +357,9 @@ pub fn run(provider: Provider) -> Result<(), String> {
         )?)
         .current_dir(cwd)
         .stdin(Stdio::null());
-    for (name, _) in std::env::vars_os().filter(|(k, _)| k.to_string_lossy().starts_with("BBP_")) {
+    for (name, _) in std::env::vars_os().filter(|(k, _)| {
+        k.to_string_lossy().starts_with("BBP_") || k.to_string_lossy().starts_with("GIT_")
+    }) {
         command.env_remove(name);
     }
     for name in [
@@ -371,7 +377,10 @@ pub fn run(provider: Provider) -> Result<(), String> {
     ] {
         command.env_remove(name);
     }
-    command.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+    command
+        .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

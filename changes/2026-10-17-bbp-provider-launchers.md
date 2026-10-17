@@ -15,3 +15,11 @@ changelog: Add turn-bound Codex author and MCP-only Claude reviewer launchers, o
   confined validation, independent review and a test-only receipt. No real merge.
 - **Known limitations:** Linux launchers, compatible authenticated provider CLIs
   required; deterministic contracts do not claim successful live model behavior.
+- **Fixed:** per-tool Codex MCP approval rules and inherited Git repository/index
+  contamination, with provider-stub regressions.
+- **Added:** replay-derived, provider-neutral no-progress launch protection;
+  pauses survive moderator/Orch restarts and require a current-revision owner
+  reset. No event-log/schema changes; only an acknowledged reset revision is
+  host metadata. Added process and real-Orch recovery regressions.
+- **Added:** a pre-task Rust/LLD profile generator with one linker thread under
+  the existing 1 GiB cap, plus a fifth required confined acceptance case.

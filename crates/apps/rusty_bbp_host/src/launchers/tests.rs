@@ -190,3 +190,28 @@ fn config_decoding_is_order_independent_but_rejects_extra_server_fields() {
     );
     assert!(rusty_serde::json::from_str::<McpConfig>(&extra).is_err());
 }
+
+#[test]
+fn author_preapproves_only_named_bbp_agent_tools_and_scrubs_git_context() {
+    let args = arguments(
+        Provider::Codex,
+        &binding(),
+        Path::new("/bbp"),
+        Path::new("/mcp"),
+        Path::new("/clone"),
+        None,
+    )
+    .unwrap();
+    let config = args.iter().find(|a| a.starts_with("mcp_servers=")).unwrap();
+    for tool in ["task_card", "read", "get_artifact", "put_artifact", "post"] {
+        assert!(config.contains(&format!("{tool}={{approval_mode=\"approve\"}}")));
+    }
+    assert!(!config.contains("default_tools_approval_mode"));
+    assert!(args.iter().any(|a| a == "approval_policy=\"never\""));
+    assert!(args
+        .iter()
+        .any(|a| a.starts_with("shell_environment_policy.exclude=") && a.contains("GIT_*")));
+    assert!(args
+        .iter()
+        .any(|a| a.contains("GIT_CONFIG_GLOBAL=\"/dev/null\"")));
+}

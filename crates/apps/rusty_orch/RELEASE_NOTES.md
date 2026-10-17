@@ -7,6 +7,10 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 ## BBP provider launchers
 **2026-10-17**
 
+- No-progress launcher loops pause across restarts; owner reset is revision-fenced.
+  Codex MCP approvals are scoped per tool, inherited Git context is scrubbed,
+  and an explicit Rust/LLD profile bounds linker threads before task creation.
+
 - The example roster now uses shipped Codex author and Claude reviewer launchers.
   Author turns use private clones; reviewer turns have no built-in tools and only
   their bound BBP MCP server. Startup validates active turn, principal and policy.

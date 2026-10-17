@@ -309,9 +309,9 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
     };
     let first = card(&dir, &task);
     let out = moderator::run(&cfg);
-    // The loop ran to its wall limit (the task never closes), but the first
-    // turn was aborted and a new planner turn granted along the way.
-    assert!(out.is_err(), "the loop stops at the wall limit: {out:?}");
+    // No-progress forfeits move to another turn, then pause before exhausting
+    // the task budget rather than billing launch attempts until the wall limit.
+    assert!(out.unwrap_err().contains("moderator paused"));
     let d = open_driver(&dir, &task).expect("driver");
     assert!(
         d.state.next_turn > 2,
@@ -1120,4 +1120,92 @@ fn confined_cancel_recovery() {
 fn confined_kill_recovery() {
     assert!(running_workload_recovery("sandbox", "kill", true));
     println!("BBP_ACCEPTANCE PASS kill");
+}
+
+#[test]
+fn no_progress_pause_survives_process_restart_and_requires_fenced_owner_reset() {
+    let dir = tempdir("idle-guard");
+    let (repo, _) = repo(&dir);
+    let task = TaskId("idle-guard".into());
+    open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    // Reproduce an approval-denied CLI that exits zero after card/read attempts.
+    let launchers = Launchers::default().with(
+        "planner",
+        harness(
+            &dir,
+            "idle",
+            &[
+                r#"{"name":"task_card","arguments":{}}"#,
+                r#"{"name":"get_artifact","arguments":{"id":1}}"#,
+            ],
+        ),
+    );
+    let agents = dir.join("agents.json");
+    std::fs::write(
+        &agents,
+        rusty_serde::json::to_string(&std::collections::BTreeMap::from([(
+            "planner",
+            launchers.for_role(&"planner".into()).unwrap(),
+        )]))
+        .unwrap(),
+    )
+    .unwrap();
+    let invoke = || {
+        Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["mod", "--dir"])
+            .arg(&dir)
+            .args(["--task", &task.0, "--repo-path"])
+            .arg(&repo)
+            .arg("--work")
+            .arg(dir.join("work"))
+            .arg("--agents")
+            .arg(&agents)
+            .args(["--max-wall-secs", "5", "--poll-ms", "5"])
+            .output()
+            .unwrap()
+    };
+    let first = invoke();
+    assert!(!first.status.success());
+    assert!(String::from_utf8_lossy(&first.stderr).contains("moderator paused"));
+    let launches = String::from_utf8_lossy(&first.stderr)
+        .matches("launching planner")
+        .count();
+    assert_eq!(launches, 3);
+    let view = open_driver(&dir, &task).unwrap().state;
+    assert_eq!(
+        view.spent.reads, 3,
+        "reads alone do not reset the failure count"
+    );
+    let rev = view.rev;
+    let second = invoke();
+    assert!(!second.status.success());
+    assert!(!String::from_utf8_lossy(&second.stderr).contains("launching planner"));
+    assert_eq!(
+        open_driver(&dir, &task).unwrap().state.rev,
+        rev,
+        "restart neither grants nor aborts a turn while paused"
+    );
+    assert!(moderator::reset_failures(&dir, &task, Rev(rev.0 - 1)).is_err());
+    assert!(rusty_bbp_host::moderator_health::read(&dir, &task)
+        .unwrap()
+        .paused
+        .is_some());
+    moderator::reset_failures(&dir, &task, rev).unwrap();
+    assert!(rusty_bbp_host::moderator_health::read(&dir, &task)
+        .unwrap()
+        .paused
+        .is_none());
+    let third = invoke();
+    assert!(!third.status.success());
+    // Cleanup of an old unused turn is outside the newly acknowledged streak;
+    // permit exactly three fresh attempts and retain the task budget.
+    assert!(String::from_utf8_lossy(&third.stderr).contains("moderator paused"));
+    assert_eq!(
+        String::from_utf8_lossy(&third.stderr)
+            .matches("launching planner")
+            .count(),
+        3
+    );
+    assert!(open_driver(&dir, &task).unwrap().state.spent.turns < 10);
+    std::fs::remove_dir_all(dir).unwrap();
 }

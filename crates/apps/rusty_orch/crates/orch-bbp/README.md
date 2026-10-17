@@ -123,8 +123,8 @@ in `required-gate`. It builds real `rusty_orch` and `bbp` binaries, then runs
 Linux runs, first build those binaries and the `orch-bbp` library tests and
 `rusty_bbp_host --test moderator_e2e`, then set `BBP_TEST_BIN` and `ORCH_TEST_BIN`
 to their absolute paths. The collector requires exactly one executed test and
-a completion marker for each of lifecycle, timeout, cancel and kill. It attempts
-all four cases and retains logs, JSON results and a Markdown summary on failure.
+a completion marker for each of lifecycle, Rust/LLD linking, timeout, cancel and kill. It attempts
+all five cases and retains logs, JSON results and a Markdown summary on failure.
 
 The lifecycle uses the real Orch CLI, persisted state and production supervisor;
 its workload must pass with `landlock+seccomp:no-endpoints` recorded in the BBP
@@ -158,3 +158,12 @@ PR #763's run guards remain a separate review and change.
 Manifest publication keeps the Unix directory fsync and avoids unsupported
 Windows directory opens. Injected-seam tests are portable; production hosting
 still rejects unsupported platforms. Native Windows checks run in repository CI.
+
+
+A repeated no-progress launcher fault is a retryable host diagnostic, not a
+permanent task failure. The BBP host replays its existing log to keep the pause
+across Orch processes. Inspect `bbp mod-health`; after repairing the launcher,
+use its explicit current-revision reset and poll the same goal/state again.
+No new hosted-card charge, protocol event schema or `orch-core` change is needed.
+For Rust/LLD workloads, generate `bbp profiles rust-lld --sysroot PATH` before
+opening the task; see the host's provider-launcher guide for resource limits.
