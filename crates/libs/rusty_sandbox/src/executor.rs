@@ -141,6 +141,48 @@ impl ProcessExecutor {
         stdin: Stdio,
         sockets: Sockets,
     ) -> Result<Job, Error> {
+        self.start_registered(spec, program, args, stdin, sockets, |_| Ok(()))
+    }
+
+    /// Like [`Self::start`], registering the job's cancellation handle immediately
+    /// after spawn, before any fallible setup check or polling. A registration or
+    /// setup error kills, contains and reaps the job before returning. Dropping a
+    /// returned job without waiting also cleans it up.
+    ///
+    /// # Errors
+    /// As [`Self::start`], or the error returned by `register`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_registered(
+        &self,
+        spec: &SandboxSpec,
+        program: &str,
+        args: &[String],
+        stdin: Stdio,
+        sockets: Sockets,
+        register: impl FnOnce(JobHandle) -> Result<(), Error>,
+    ) -> Result<Job, Error> {
+        self.start_setup(
+            spec,
+            program,
+            args,
+            stdin,
+            sockets,
+            register,
+            SETUP_DEADLINE,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_setup(
+        &self,
+        spec: &SandboxSpec,
+        program: &str,
+        args: &[String],
+        stdin: Stdio,
+        sockets: Sockets,
+        register: impl FnOnce(JobHandle) -> Result<(), Error>,
+        setup_deadline: Duration,
+    ) -> Result<Job, Error> {
         let state_dir = canonical(&self.state_dir)?;
         if spec.can_reach(&state_dir) {
             return Err(Error::Sandbox(format!(
@@ -165,22 +207,33 @@ impl ProcessExecutor {
             args: args.iter().map(OsString::from).collect(),
         };
         let mut job = spawn(self, &request, stdin)?;
-        // The helper either failed setup (and exited with the reason in the
-        // status file) or exec'd the program (and the file stays empty).
-        // Either way the file is closed on exec, so once the helper is past
-        // setup there is nothing more to read: poll until it is gone or the
-        // process has ended.
-        let helper = self
-            .helper
-            .canonicalize()
-            .map_err(|e| Error::io("resolving the helper", e))?;
-        let setup_error = job.setup_error(&status, &helper)?;
-        let removed = std::fs::remove_file(&status);
-        if !setup_error.is_empty() {
-            let _ = job.handle().kill();
-            return Err(Error::Sandbox(setup_error));
+        let checked = (|| {
+            register(job.handle())?;
+            // The helper either failed setup (and exited with the reason in the
+            // status file) or exec'd the program (and the file stays empty).
+            // Either way the file is closed on exec, so once the helper is past
+            // setup there is nothing more to read: poll until it is gone or the
+            // process has ended.
+            let helper = self
+                .helper
+                .canonicalize()
+                .map_err(|e| Error::io("resolving the helper", e))?;
+            let setup_error = job.setup_error(&status, &helper, setup_deadline)?;
+            let removed = std::fs::remove_file(&status);
+            if !setup_error.is_empty() {
+                return Err(Error::Sandbox(setup_error));
+            }
+            removed.map_err(|e| Error::io("removing the status file", e))?;
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            return match job.cleanup() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(Error::Sandbox(format!(
+                    "{error}; cleanup failed: {cleanup}"
+                ))),
+            };
         }
-        removed.map_err(|e| Error::io("removing the status file", e))?;
         Ok(job)
     }
 }
@@ -207,7 +260,8 @@ fn canonical(path: &Path) -> Result<PathBuf, Error> {
 /// A sandboxed process group that has been started and not yet reaped.
 ///
 /// Owned by whoever started it; [`Job::wait`] reaps it, and a
-/// [`JobHandle`] can kill it from anywhere.
+/// [`JobHandle`] can kill it from anywhere. Dropping an unwaited job kills,
+/// contains and reaps it before returning.
 #[derive(Debug)]
 pub struct Job {
     #[cfg(target_os = "linux")]
@@ -256,6 +310,10 @@ impl Job {
         JobHandle { group: 0 }
     }
 
+    fn cleanup(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// Never constructed off Linux.
     pub fn wait(self, _wall: Duration) -> Result<ExecOutcome, Error> {
         Err(Error::Sandbox(
@@ -263,7 +321,12 @@ impl Job {
         ))
     }
 
-    fn setup_error(&mut self, _status: &Path, _helper: &Path) -> Result<String, Error> {
+    fn setup_error(
+        &mut self,
+        _status: &Path,
+        _helper: &Path,
+        _deadline: Duration,
+    ) -> Result<String, Error> {
         Ok(String::new())
     }
 }
@@ -289,23 +352,45 @@ fn spawn(executor: &ProcessExecutor, request: &HelperRequest, stdin: Stdio) -> R
         .process_group(0)
         .spawn()
         .map_err(|e| Error::io("starting the sandbox helper", e))?;
-    let group = i32::try_from(child.id())
-        .map_err(|_| Error::Sandbox("child process id out of range".into()))?;
-    let stdout = capture(child.stdout.take(), executor.capture_bytes);
-    let stderr = capture(child.stderr.take(), executor.capture_bytes);
-    Ok(Job {
+    let group = match i32::try_from(child.id()) {
+        Ok(group) => group,
+        Err(error) => {
+            // No group id is representable, but we still own and must reap
+            // the spawned child. Linux pids normally fit in i32.
+            child
+                .kill()
+                .map_err(|e| Error::io("killing the helper", e))?;
+            child
+                .wait()
+                .map_err(|e| Error::io("reaping the helper", e))?;
+            return Err(Error::Sandbox(format!(
+                "child process id out of range: {error}"
+            )));
+        }
+    };
+    // Arm ownership before starting capture threads too: a thread-spawn panic
+    // must not abandon a helper already running.
+    let mut job = Job {
         inner: linux::Running {
             child,
             group,
-            stdout,
-            stderr,
+            stdout: Capture(None),
+            stderr: Capture(None),
             start,
+            cleaned: false,
         },
-    })
+    };
+    job.inner.stdout = capture(job.inner.child.stdout.take(), executor.capture_bytes);
+    job.inner.stderr = capture(job.inner.child.stderr.take(), executor.capture_bytes);
+    Ok(job)
 }
 
 #[cfg(target_os = "linux")]
 impl Job {
+    fn cleanup(&mut self) -> Result<(), Error> {
+        self.inner.cleanup()
+    }
+
     /// A handle that can kill this job from another thread.
     #[must_use]
     pub fn handle(&self) -> JobHandle {
@@ -320,21 +405,18 @@ impl Job {
     /// # Errors
     /// [`Error::Io`] when the process cannot be waited on; [`Error::Sandbox`]
     /// when a member of the group survives being killed.
-    pub fn wait(self, wall: Duration) -> Result<ExecOutcome, Error> {
+    pub fn wait(mut self, wall: Duration) -> Result<ExecOutcome, Error> {
         use std::os::unix::process::ExitStatusExt;
 
         use crate::spec::Termination;
 
-        let linux::Running {
-            mut child,
-            group,
-            stdout,
-            stderr,
-            start,
-        } = self.inner;
+        let running = &mut self.inner;
+        let group = running.group;
+        let start = running.start;
         let mut timed_out = false;
         let status = loop {
-            if let Some(status) = child
+            if let Some(status) = running
+                .child
                 .try_wait()
                 .map_err(|e| Error::io("waiting for the sandboxed process", e))?
             {
@@ -343,7 +425,8 @@ impl Job {
             if start.elapsed() >= wall {
                 timed_out = true;
                 kill_group(group)?;
-                break child
+                break running
+                    .child
                     .wait()
                     .map_err(|e| Error::io("reaping the timed-out process", e))?;
             }
@@ -353,6 +436,7 @@ impl Job {
         // Anything the program left running dies with it. The sandbox forbids
         // leaving the group (helper::group_lock), so the group is the job.
         contain(group)?;
+        running.cleaned = true;
 
         let termination = match (timed_out, status.code(), status.signal()) {
             (true, _, _) => Termination::TimedOut,
@@ -364,8 +448,8 @@ impl Job {
         };
         Ok(ExecOutcome {
             termination,
-            stdout: stdout.finish(),
-            stderr: stderr.finish(),
+            stdout: running.stdout.finish(),
+            stderr: running.stderr.finish(),
             wall: elapsed,
         })
     }
@@ -374,8 +458,13 @@ impl Job {
     /// exec'd the program (its image is no longer `helper`) or exited.
     /// Polls until one of those; a helper that has not opened the file yet
     /// must not find it gone.
-    fn setup_error(&mut self, status: &Path, helper: &Path) -> Result<String, Error> {
-        let deadline = std::time::Instant::now() + SETUP_DEADLINE;
+    fn setup_error(
+        &mut self,
+        status: &Path,
+        helper: &Path,
+        timeout: Duration,
+    ) -> Result<String, Error> {
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             let ended = self
                 .inner
@@ -399,7 +488,6 @@ impl Job {
 
 /// How long a helper gets to confine itself and `exec` before the job is
 /// refused.
-#[cfg(target_os = "linux")]
 const SETUP_DEADLINE: Duration = Duration::from_secs(10);
 
 #[cfg(target_os = "linux")]
@@ -415,6 +503,38 @@ mod linux {
         pub(super) stdout: Capture,
         pub(super) stderr: Capture,
         pub(super) start: std::time::Instant,
+        pub(super) cleaned: bool,
+    }
+
+    impl Running {
+        pub(super) fn cleanup(&mut self) -> Result<(), super::Error> {
+            if self.cleaned {
+                return Ok(());
+            }
+            // Attempt all cleanup operations even if an earlier one fails.
+            let killed = super::kill_group(self.group);
+            let contained = super::contain(self.group);
+            let reaped = self
+                .child
+                .wait()
+                .map_err(|e| super::Error::io("reaping the helper", e));
+            let _stdout = self.stdout.finish();
+            let _stderr = self.stderr.finish();
+            killed.and(contained).and(reaped)?;
+            self.cleaned = true;
+            Ok(())
+        }
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            // Armed before startup checks and on errors from wait(). Explicit
+            // startup cleanup propagates failures; Drop also covers unwinding
+            // and callers that abandon a successfully started job.
+            if let Err(error) = self.cleanup() {
+                eprintln!("sandbox cleanup: {error}");
+            }
+        }
     }
 
     /// Whether the group leader has replaced the helper's image: its
@@ -541,8 +661,8 @@ fn capture<R: std::io::Read + Send + 'static>(stream: Option<R>, limit: usize) -
 impl Capture {
     /// The captured bytes, or a note when the pipe was held open by a
     /// process that escaped the group.
-    fn finish(self) -> Vec<u8> {
-        let Some(receiver) = self.0 else {
+    fn finish(&mut self) -> Vec<u8> {
+        let Some(receiver) = self.0.take() else {
             return Vec::new();
         };
         receiver.recv_timeout(DRAIN_GRACE).unwrap_or_else(|_| {
@@ -636,6 +756,206 @@ mod tests {
             "ended by the kill, not the wall"
         );
         std::fs::remove_dir_all(&base).expect("cleanup");
+    }
+
+    // Synthetic helpers exercise the real spawn/setup/contain/reap path even
+    // when the host kernel cannot enforce Landlock. They deliberately postpone
+    // exec, then would launch a workload if the executor abandoned them.
+    #[cfg(target_os = "linux")]
+    fn delayed_helper(name: &str) -> (PathBuf, ProcessExecutor, SandboxSpec) {
+        let base = std::env::temp_dir().join(format!(
+            "sandbox-start-{name}-{}-{}",
+            std::process::id(),
+            NEXT_RUN.fetch_add(1, Ordering::Relaxed)
+        ));
+        let root = canonical(&base.join("work")).expect("work");
+        let helper = base.join("helper");
+        std::os::unix::fs::symlink("/bin/sh", &helper).expect("helper link");
+        let executor = ProcessExecutor::new(helper, vec![
+            "-c".into(),
+            "echo $$ > \"$1/helper.pid\"; sleep 30 & echo $! > \"$1/child.pid\"; while [ ! -f \"$1/launch\" ]; do sleep 0.005; done; echo late > \"$1/launched\"; exec sleep 30".into(),
+            "helper".into(), root.clone().into_os_string(),
+        ], base.join("state"));
+        (base, executor, spec(&root))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn helper_ready(root: &Path) -> Vec<i32> {
+        let until = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let pids: Option<Vec<i32>> = ["helper.pid", "child.pid"]
+                .iter()
+                .map(|file| {
+                    std::fs::read_to_string(root.join(file))
+                        .ok()?
+                        .trim()
+                        .parse()
+                        .ok()
+                })
+                .collect();
+            if let Some(pids) = pids {
+                return pids;
+            }
+            assert!(std::time::Instant::now() < until, "helper did not start");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_start_cleaned(pids: &[i32], root: &Path) {
+        assert!(live_members(pids[0]).expect("members").is_empty());
+        // The direct helper must have been reaped, not merely killed.
+        assert!(
+            !Path::new(&format!("/proc/{}", pids[0])).exists(),
+            "helper was not reaped"
+        );
+        std::fs::write(root.join("launch"), "").expect("allow delayed launch");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !root.join("launched").exists(),
+            "workload launched after failure"
+        );
+        assert!(live_members(pids[0]).expect("members").is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_timeout_contains_and_reaps_before_returning() {
+        let (base, executor, spec) = delayed_helper("timeout");
+        let mut pids = vec![];
+        let result = executor.start_setup(
+            &spec,
+            "unused",
+            &[],
+            Stdio::null(),
+            Sockets::NoEndpoints,
+            |_| {
+                pids = helper_ready(spec.cwd());
+                Ok(())
+            },
+            Duration::from_millis(50),
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("did not finish setting up"));
+        assert_start_cleaned(&pids, spec.cwd());
+        std::fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn post_spawn_registration_and_resolution_errors_clean_up() {
+        for resolution in [false, true] {
+            let (base, executor, spec) = delayed_helper(if resolution {
+                "resolution"
+            } else {
+                "registration"
+            });
+            let mut pids = vec![];
+            let result = executor.start_registered(
+                &spec,
+                "unused",
+                &[],
+                Stdio::null(),
+                Sockets::NoEndpoints,
+                |_| {
+                    pids = helper_ready(spec.cwd());
+                    if resolution {
+                        std::fs::remove_file(&executor.helper).expect("remove helper link");
+                        Ok(())
+                    } else {
+                        Err(Error::Sandbox("forced registration error".into()))
+                    }
+                },
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains(if resolution {
+                    "resolving the helper"
+                } else {
+                    "forced registration error"
+                }),
+                "{error}"
+            );
+            assert_start_cleaned(&pids, spec.cwd());
+            std::fs::remove_dir_all(base).expect("cleanup");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn status_read_and_setup_refusal_errors_contain_descendants() {
+        for missing_status in [false, true] {
+            let (base, mut executor, spec) = delayed_helper(if missing_status {
+                "status-read"
+            } else {
+                "setup-refused"
+            });
+            executor.helper_args[1] = r#"echo $$ > "$1/helper.pid"; (while [ ! -f "$1/launch" ]; do sleep 0.005; done; echo late > "$1/launched"; sleep 30) & echo $! > "$1/child.pid"; while [ ! -f "$1/release" ]; do sleep 0.005; done; exit 1"#.into();
+            let mut pids = vec![];
+            let result = executor.start_registered(
+                &spec,
+                "unused",
+                &[],
+                Stdio::null(),
+                Sockets::NoEndpoints,
+                |_| {
+                    pids = helper_ready(spec.cwd());
+                    let status = std::fs::read_dir(&executor.state_dir)
+                        .expect("state")
+                        .next()
+                        .expect("status entry")
+                        .expect("entry")
+                        .path();
+                    if missing_status {
+                        std::fs::remove_file(status).expect("remove status");
+                    } else {
+                        std::fs::write(status, "forced setup refusal").expect("setup reason");
+                    }
+                    std::fs::write(spec.cwd().join("release"), "").expect("release helper");
+                    Ok(())
+                },
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains(if missing_status {
+                    "reading the status file"
+                } else {
+                    "forced setup refusal"
+                }),
+                "{error}"
+            );
+            assert_start_cleaned(&pids, spec.cwd());
+            std::fs::remove_dir_all(base).expect("cleanup");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_a_started_job_contains_and_reaps_it() {
+        let (base, executor, spec) = delayed_helper("drop");
+        let status = executor.status_file().expect("status");
+        let request = HelperRequest {
+            status,
+            cwd: spec.cwd().clone(),
+            cpu_secs: 1,
+            memory_bytes: 1 << 28,
+            file_bytes: 1 << 20,
+            open_files: 32,
+            processes: 16,
+            read: vec![],
+            write: vec![],
+            env: vec![],
+            sockets: Sockets::NoEndpoints,
+            program: "unused".into(),
+            args: vec![],
+        };
+        let job = spawn(&executor, &request, Stdio::null()).expect("spawn");
+        let pids = helper_ready(spec.cwd());
+        drop(job);
+        assert_start_cleaned(&pids, spec.cwd());
+        std::fs::remove_dir_all(base).expect("cleanup");
     }
 
     #[test]

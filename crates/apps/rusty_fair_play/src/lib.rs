@@ -7,5 +7,6 @@
 
 pub mod api;
 pub mod dto;
+pub mod marks;
 pub mod server;
 pub mod service;

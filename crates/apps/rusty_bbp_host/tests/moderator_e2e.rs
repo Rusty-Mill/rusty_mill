@@ -1741,3 +1741,265 @@ fn a_harness_caught_in_the_middle_of_writing_a_line_is_left_to_the_wall_limit() 
     assert_eq!(stop.kind, moderator::StopKind::Wall, "{}", stop.reason);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn pending_slow_run(dir: &Path, command: &str) -> (PathBuf, TaskId) {
+    let (repo, base) = repo(dir);
+    let task = TaskId("T1".into());
+    open_assigned(dir, &task, &ProfileSet::shell("slow", command));
+    admin::tick(dir, &task).unwrap();
+    let turn = open_driver(dir, &task).unwrap().state.turn().unwrap().id.0;
+    let mut planner = Mcp::spawn(dir, &task, "planner", turn);
+    assert!(
+        !planner
+            .call(
+                "put_artifact",
+                r##"{"op":"p1","kind":"spec","brief":1,"body":"# Spec"}"##
+            )
+            .1
+    );
+    assert!(!planner.call("post",r#"{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}"#).1);
+    human::perform(dir, &task, "approve-plan", &["2"], None).unwrap();
+    let turn = open_driver(dir, &task).unwrap().state.turn().unwrap().id.0;
+    let mut coder = Mcp::spawn(dir, &task, "coder", turn);
+    let diff = r"--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n";
+    assert!(
+        !coder
+            .call(
+                "put_artifact",
+                &format!(r#"{{"op":"c1","kind":"diff","body":"{diff}"}}"#)
+            )
+            .1
+    );
+    assert!(
+        !coder
+            .call(
+                "put_artifact",
+                &format!(
+                    r#"{{"op":"c2","kind":"candidate","base":"{base}","diffs":[3],"body":""}}"#
+                )
+            )
+            .1
+    );
+    assert_eq!(card(dir, &task).state, State::Test);
+    (repo, task)
+}
+
+struct ModProcess(Child);
+impl Drop for ModProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn process_mod(dir: &Path, repo: &Path, task: &TaskId, wall: &str, confine: &str) -> ModProcess {
+    std::fs::write(dir.join("agents.json"), "{}").unwrap();
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("process-mod.log"))
+        .unwrap();
+    ModProcess(
+        Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["mod", "--dir"])
+            .arg(dir)
+            .args(["--task", &task.0, "--repo-path"])
+            .arg(repo)
+            .arg("--work")
+            .arg(dir.join("work"))
+            .arg("--agents")
+            .arg(dir.join("agents.json"))
+            .args([
+                "--max-wall-secs",
+                wall,
+                "--poll-ms",
+                "10",
+                "--confine",
+                confine,
+            ])
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn process_exit_cancels_reaps_and_serializes_a_running_workload_before_restart() {
+    for confine in ["sandbox", "none"] {
+        for mode in ["timeout", "cancel", "kill"] {
+            if !running_workload_recovery(confine, mode, false) {
+                break;
+            }
+        }
+    }
+}
+
+// The ordinary suite retains fail-closed coverage on unsupported kernels. The
+// required CI cases below must execute a confined workload in every mode.
+#[cfg(target_os = "linux")]
+fn running_workload_recovery(confine: &str, mode: &str, required: bool) -> bool {
+    let dir = tempdir(&format!("process-{confine}-{mode}"));
+    let (repo, task) = pending_slow_run(
+        &dir,
+        "echo $$ > leader.pid; sleep 30 & echo $! > child.pid; wait",
+    );
+    let mut moderator = process_mod(
+        &dir,
+        &repo,
+        &task,
+        if mode == "timeout" { "2" } else { "20" },
+        confine,
+    );
+    let leader = dir.join("work/run-1/leader.pid");
+    let descendant = dir.join("work/run-1/child.pid");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !leader.exists() || !descendant.exists() {
+        if moderator.0.try_wait().unwrap().is_some() {
+            let driver = open_driver(&dir, &task).unwrap();
+            let run = driver.state.selected_run().unwrap();
+            let log = driver.state.artifacts.get(&run.log.unwrap()).unwrap();
+            let bytes = driver.store.blob_get(&log.blob.sha).unwrap();
+            let log = String::from_utf8_lossy(&bytes);
+            if confine == "sandbox"
+                && log.contains("Landlock filesystem confinement is NotEnforced")
+            {
+                assert!(!required, "required sandbox refused in {mode}: {log}");
+                assert_eq!(run.status, Some(RunStatus::Error));
+                assert!(!leader.exists() && !descendant.exists());
+                eprintln!("sandbox lifecycle cases unavailable on this kernel; verified fail-closed refusal: {log}");
+                drop(moderator);
+                std::fs::remove_dir_all(&dir).unwrap();
+                return false;
+            }
+            panic!("moderator exited before workload: {log}");
+        }
+        assert!(Instant::now() < deadline, "workload not started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let leader = std::fs::read_to_string(leader).unwrap();
+    let descendant = std::fs::read_to_string(descendant).unwrap();
+    assert!(alive(leader.trim()) && alive(descendant.trim()));
+    let stopped = Instant::now();
+    if mode == "cancel" {
+        let c = card(&dir, &task);
+        assert_eq!(
+            human::perform(&dir, &task, "cancel", &["stop"], Some(c.rev)).unwrap(),
+            Response::Ok
+        );
+    }
+    if mode == "kill" {
+        moderator.0.kill().unwrap();
+    }
+    while moderator.0.try_wait().unwrap().is_none() {
+        assert!(
+            stopped.elapsed() < Duration::from_secs(6),
+            "moderator failed to exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Restart immediately: the previous worker may still be observing
+    // EOF. Its task lock must prevent any overlapping execution.
+    let mut replacement = process_mod(&dir, &repo, &task, "1", confine);
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while alive(leader.trim()) || alive(descendant.trim()) {
+        assert!(
+            Instant::now() < deadline,
+            "old workload survived moderator/restart: {mode}/{confine}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    while replacement.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let d = open_driver(&dir, &task).unwrap();
+    let logs = d.store.events(&task, 0).unwrap();
+    assert!(matches!(d.state.state, State::Cancelled | State::Escalated));
+    assert!(d
+        .state
+        .selected_run()
+        .is_none_or(|r| r.status != Some(RunStatus::Passed)));
+    assert_eq!(
+        logs.iter()
+            .filter(|e| matches!(e, Event::RunStarted { .. }))
+            .count(),
+        1
+    );
+    drop(moderator);
+    drop(replacement);
+    std::fs::remove_dir_all(dir).unwrap();
+    true
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn confined_timeout_recovery() {
+    assert!(running_workload_recovery("sandbox", "timeout", true));
+    println!("BBP_ACCEPTANCE PASS timeout");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn confined_cancel_recovery() {
+    assert!(running_workload_recovery("sandbox", "cancel", true));
+    println!("BBP_ACCEPTANCE PASS cancel");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn confined_kill_recovery() {
+    assert!(running_workload_recovery("sandbox", "kill", true));
+    println!("BBP_ACCEPTANCE PASS kill");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_cap_stop_reaps_the_owned_runner_before_returning_its_account() {
+    let dir = tempdir("cap-owned-runner");
+    let (repo, task) = pending_slow_run(
+        &dir,
+        "echo $$ > leader.pid; sleep 30 & echo $! > child.pid; wait",
+    );
+    let leader = dir.join("work/run-1/leader.pid");
+    let descendant = dir.join("work/run-1/child.pid");
+    let log = moderator::log_path(&dir, &task, TurnId(1));
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let leader_wait = leader.clone();
+    let descendant_wait = descendant.clone();
+    let writer = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !leader_wait.exists() || !descendant_wait.exists() {
+            assert!(Instant::now() < deadline, "runner did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(log, "{\"type\":\"assistant\",\"message\":{\"id\":\"a\",\"model\":\"priced-model\",\"usage\":{\"output_tokens\":1000000}}}\n").unwrap();
+    });
+    moderator::write_evidence_marker(&dir, &task, 1.0, "test").unwrap();
+    let mut cfg = config(&dir, &task, repo, Launchers::default(), 20);
+    cfg.cost_cap = Some(cost_cap(1.0));
+    let out = moderator::run_to_stop(&cfg).unwrap();
+    writer.join().unwrap();
+    assert_eq!(out.stop.unwrap().kind, moderator::StopKind::Cap);
+    assert!(out.replay_equals_live);
+    assert!(!alive(std::fs::read_to_string(leader).unwrap().trim()));
+    let descendant = std::fs::read_to_string(descendant).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while alive(descendant.trim()) {
+        assert!(
+            Instant::now() < deadline,
+            "runner descendant survived cleanup"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(open_driver(&dir, &task)
+        .unwrap()
+        .state
+        .selected_run()
+        .is_none_or(|r| r.status != Some(RunStatus::Passed)));
+    let _ = std::fs::remove_dir_all(dir);
+}

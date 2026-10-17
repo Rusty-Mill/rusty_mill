@@ -40,7 +40,7 @@ describe('derived views', () => {
   })
 
   it('stops on a cycle instead of looping', () => {
-    const base = { number: null, suit: 'Home' as const, position: 0, ownerId: null, conception: '', planning: '', execution: '', minimumStandardOfCare: [], notes: '', origin: 'family' as const, baselineId: null, state: 'custom' as const, etag: '0', treeEtag: '0', inPlay: true }
+    const base = { number: null, suit: 'Home' as const, position: 0, ownerId: null, conception: '', planning: '', execution: '', minimumStandardOfCare: [], notes: '', origin: 'family' as const, baselineId: null, state: 'custom' as const, etag: '0', treeEtag: '0', inPlay: true, points: null, suggestedPoints: 1 as const, suggestedFrequency: 'As needed' as const, frequency: null }
     const index = indexCards([
       { ...base, id: 'a', name: 'A', parentCardId: 'b' },
       { ...base, id: 'b', name: 'B', parentCardId: 'a' },
@@ -59,6 +59,19 @@ describe('derived views', () => {
     expect(ada.bySuit.Home).toEqual({ all: 3, leaves: 2 })
     expect(ada.bySuit.Out).toEqual({ all: 0, leaves: 0 })
     expect(bob.bySuit.Home).toEqual({ all: 1, leaves: 0 })
+  })
+
+  it('sums points and counts frequencies over leaf cards, using the suggestion where none is assigned', () => {
+    const base = { number: null, suit: 'Home' as const, position: 0, ownerId: 'p', conception: '', planning: '', execution: '', minimumStandardOfCare: [], notes: '', origin: 'family' as const, baselineId: null, state: 'custom' as const, etag: '0', treeEtag: '0', inPlay: true, points: null, suggestedPoints: 2 as const, suggestedFrequency: 'Monthly' as const, frequency: null }
+    const cards = [
+      { ...base, id: 'parent', name: 'Parent', parentCardId: null, points: 8 as const, frequency: 'Daily' as const }, // split: not counted
+      { ...base, id: 'a', name: 'A', parentCardId: 'parent', points: 5 as const, frequency: 'Weekly' as const },
+      { ...base, id: 'b', name: 'B', parentCardId: 'parent' }, // suggestions: 2 points, Monthly
+      { ...base, id: 'c', name: 'C', parentCardId: null, frequency: 'Weekly' as const }, // suggestion (2)
+    ]
+    const [row] = balance(indexCards(cards), cards, [{ id: 'p', name: 'P', player: 1 }])
+    expect(row!.points).toBe(5 + 2 + 2)
+    expect(row!.byFrequency).toEqual({ Daily: 0, Weekly: 2, Monthly: 1, Seasonal: 0, Yearly: 0, 'As needed': 0 })
   })
 
   it('lists the undealt as unowned leaves only', async () => {

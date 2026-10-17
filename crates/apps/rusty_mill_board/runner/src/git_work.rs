@@ -113,6 +113,23 @@ impl GitWork {
     }
 }
 
+/// The paths in `git status --porcelain=v1 -z` output: `XY path\0`, and for a rename or
+/// copy the original path follows as its own field. Both sides count.
+fn parse_status(out: &str) -> Vec<String> {
+    let mut fields = out.split('\0').filter(|f| !f.is_empty());
+    let mut paths = Vec::new();
+    while let Some(entry) = fields.next() {
+        let (Some(status), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        paths.push(path.to_owned());
+        if status.contains(['R', 'C']) {
+            paths.extend(fields.next().map(str::to_owned));
+        }
+    }
+    paths
+}
+
 impl Work for GitWork {
     fn prepare(&self, card: &Card) -> Result<PathBuf, String> {
         let id8 = Self::id8(card);
@@ -219,6 +236,34 @@ impl Work for GitWork {
         })
     }
 
+    fn changed(&self, dir: &Path) -> Result<Vec<String>, String> {
+        let gitdir = self.gitdir(dir)?;
+        let out = git(&[
+            os("--git-dir"),
+            gitdir.as_os_str(),
+            os("--work-tree"),
+            dir.as_os_str(),
+            os("status"),
+            os("--porcelain=v1"),
+            os("-z"),
+            os("--untracked-files=all"),
+        ])?;
+        Ok(parse_status(&out))
+    }
+
+    fn discard(&self, dir: &Path) -> Result<(), String> {
+        let gitdir = self.gitdir(dir)?;
+        let base = [
+            os("--git-dir"),
+            gitdir.as_os_str(),
+            os("--work-tree"),
+            dir.as_os_str(),
+        ];
+        git(&[&base[..], &[os("reset"), os("--hard"), os("-q")]].concat())?;
+        git(&[&base[..], &[os("clean"), os("-fdq")]].concat())?;
+        Ok(())
+    }
+
     fn commit(&self, dir: &Path, message: &str) -> Result<bool, String> {
         let gitdir = self.gitdir(dir)?;
         let base = [
@@ -248,5 +293,22 @@ impl Work for GitWork {
             os(message),
         ])?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_status;
+
+    #[test]
+    fn status_paths_include_both_sides_of_a_rename_and_odd_names() {
+        let out = " M src/a.rs\0?? new dir/b.rs\0R  to.rs\0from.rs\0A  c.rs\0";
+        assert_eq!(
+            parse_status(out),
+            ["src/a.rs", "new dir/b.rs", "to.rs", "from.rs", "c.rs"]
+        );
+        assert!(parse_status("").is_empty());
+        // A truncated entry is skipped rather than invented.
+        assert_eq!(parse_status("x\0 M ok.rs\0"), ["ok.rs"]);
     }
 }

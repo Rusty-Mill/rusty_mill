@@ -88,6 +88,16 @@ impl BoardApi for HttpBoard {
         serde_json::from_value(out["roles"].clone()).map_err(transport)
     }
 
+    fn project_count(&self) -> Result<usize, ApiError> {
+        let out = self.call("board_projects", json!({}))?;
+        serde_json::from_value(out["count"].clone()).map_err(transport)
+    }
+
+    fn foreign(&self, project: &str, files: &[String]) -> Result<Vec<String>, ApiError> {
+        let out = self.call("board_owns", json!({ "project": project, "files": files }))?;
+        serde_json::from_value(out["foreign"].clone()).map_err(transport)
+    }
+
     fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError> {
         self.act("card_move", role, json!({ "id": id, "to": to }))
     }

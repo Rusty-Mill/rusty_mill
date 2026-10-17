@@ -160,8 +160,13 @@ fn per_model() -> SocketAddr {
         r#"[{{"token":"{CLAUDE_TOKEN}","actor":"claude","role":"builder"}},{{"token":"{CODEX_TOKEN}","actor":"codex","role":"reviewer"}}]"#
     );
     start_auth(Auth::Credentials(
-        rusty_mill_board::identities::Credentials::parse(&json, &Roles::default())
-            .expect("credentials"),
+        rusty_mill_board::identities::Credentials::parse(
+            &json,
+            &Roles::default(),
+            &rusty_mill_board::projects::Projects::default(),
+        )
+        .expect("credentials")
+        .shared(),
     ))
 }
 

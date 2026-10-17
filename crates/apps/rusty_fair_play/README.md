@@ -51,7 +51,7 @@ when a descendant is edited, added or reordered. A mismatch is 412
 | POST | `/api/v1/seed` | (re)load the embedded deck: inserts any missing deck card, never touches an existing one (so it also restores a deleted deck card); `{"cardDefaults":{created,existing},"cards":{…}}` |
 | GET, POST | `/api/v1/people` | POST `{"name"}` → 201 Person; 409 if the name exists |
 | GET, PATCH, DELETE | `/api/v1/people/{id}` | PATCH `{"name"}`; DELETE → 204, 409 while the person holds a card |
-| GET, PATCH, DELETE | `/api/v1/cards/{id}` | DELETE → 204, 409 while the card has children; PATCH any of `name`, `suit`, `conception`, `planning`, `execution`, `minimumStandardOfCare`, `notes`, `ownerId`, `parentCardId`, `position`, `inPlay`; absent = keep, `null` clears `ownerId`/`parentCardId`; `inPlay: false` sets the card aside, `true` adds it back |
+| GET, PATCH, DELETE | `/api/v1/cards/{id}` | DELETE → 204, 409 while the card has children; PATCH any of `name`, `suit`, `conception`, `planning`, `execution`, `minimumStandardOfCare`, `notes`, `ownerId`, `parentCardId`, `position`, `inPlay`, `points`, `frequency`; absent = keep, `null` clears `ownerId`/`parentCardId`/`points`/`frequency`; `inPlay: false` sets the card aside, `true` adds it back |
 | POST | `/api/v1/cards` | `{"id"?,"name","suit","parentCardId"?,"ownerId"?,"conception"?,"planning"?,"execution"?,"minimumStandardOfCare"?,"notes"?}` → 201 Card |
 | POST | `/api/v1/cards/{id}/split` | `{"children":[{"id"?,"name","ownerId"?,…}],"ownerId"?,"notes"?}` → 201 `{"parent":Card,"children":[Card]}` |
 | POST | `/api/v1/cards/{id}/reset` | the six text fields back to the baseline; owner, parent, position and notes kept |
@@ -79,6 +79,10 @@ interface Card {
   etag: string                     // send back as If-Match
   treeEtag: string                 // the same over the card and its whole subtree
   inPlay: boolean                  // in the family's deck; false = set aside
+  points: 1 | 2 | 3 | 5 | 8 | null // assigned by the family; null until then
+  suggestedPoints: 1 | 2 | 3 | 5 | 8 // from the card's text; shown until points are assigned
+  suggestedFrequency: 'Daily' | 'Weekly' | 'Monthly' | 'Seasonal' | 'Yearly' | 'As needed' // named by the card's text, else 'As needed'
+  frequency: 'Daily' | 'Weekly' | 'Monthly' | 'Seasonal' | 'Yearly' | 'As needed' | null
 }
 interface Baseline { id; number; name; suit; conception; planning; execution; minimumStandardOfCare }
 ```
@@ -91,6 +95,14 @@ of the six text fields makes a deck card `edited`, while owner, parent,
 position and notes never do. Deletes keep the tree and the ownership
 well-formed: a leaf card and a person holding nothing can go; a parent
 goes through `unsplit`; a holder's cards are reassigned first.
+
+Points and frequency are the family's own marks, kept like the set-aside list
+in a small file, `card-marks.json` beside the stores (no migration, and a
+damaged file refuses to open). Points are on a Fibonacci scale (1, 2, 3, 5, 8;
+anything else is 422). Until a card has points it shows `suggestedPoints`: the
+words in its Conception, Planning and Execution plus 8 per standard of care,
+cut at 36, 42, 48 and 56. Both marks are part of the card's `etag`, and a
+deleted card drops its marks. `suggestedFrequency` is the period the card's text names most often ("daily", "each week", "seasonal", "annually"…), else `As needed`. The deck filters by frequency in the UI, by the assigned frequency or else the suggested one. The Balance page adds each person's points and a count of their cards by frequency (leaf cards only, using the suggestions where none is assigned).
 
 A family plays with the cards it chooses. `PATCH {"inPlay": false}` sets a card
 aside: it is taken back from its owner in the same write, and from then on it

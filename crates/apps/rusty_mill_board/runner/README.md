@@ -40,3 +40,19 @@ mill-runner --stages stages.json --repo ~/src/app --work ~/mill-work \
 
 Linux only (Landlock). Layout: `config` (stages) / `ports` (board, workspace traits) / `runner`
 (stage loop, pure) / `http_board`, `git_work` (adapters).
+
+## Projects (monorepos)
+
+On a board with several projects (`--projects` on the board), start one runner per application:
+`mill-runner --project rocket_league ...`. Without `--project` the runner refuses to start on such a board.
+A scoped runner
+
+- only picks up cards of its project;
+- after a stage's command succeeds, lists every changed path in the worktree (`git status`, both sides of a
+  renames) and, if any is outside the project's paths and the shared ones (`--shared-path`, default
+  `changes` and `Cargo.lock`), discards **all** uncommitted work of that run, commits nothing and fails
+  the stage with the offending paths in the card's comment.
+
+The sandbox's write scope is still the whole worktree (a build needs `target/` and caches there), so the
+paths are enforced when the work is committed, not while it runs: a command can write elsewhere in its own
+worktree, but that never reaches the card's branch.

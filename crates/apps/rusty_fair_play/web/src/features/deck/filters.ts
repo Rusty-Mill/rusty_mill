@@ -14,6 +14,7 @@ export function applyFilters(cards: Card[], index: CardIndex, filters: Filters, 
     if (!choosing && c.inPlay === filters.setAside) return false
     if (filters.suits.length && !filters.suits.includes(c.suit)) return false
     if (filters.owners.length && !filters.owners.includes(c.ownerId ?? UNASSIGNED)) return false
+    if (filters.frequencies.length && !filters.frequencies.includes(c.frequency ?? c.suggestedFrequency)) return false
     if (filters.state !== 'all' && c.state !== filters.state) return false
     if (filters.leavesOnly && !index.leafIds.has(c.id)) return false
     if (q && !c.name.toLowerCase().includes(q)) return false
@@ -21,4 +22,4 @@ export function applyFilters(cards: Card[], index: CardIndex, filters: Filters, 
   })
 }
 
-export const isFiltering = (f: Filters): boolean => f.suits.length > 0 || f.owners.length > 0 || f.state !== 'all' || f.leavesOnly || f.setAside || f.search.trim() !== ''
+export const isFiltering = (f: Filters): boolean => f.suits.length > 0 || f.owners.length > 0 || f.frequencies.length > 0 || f.state !== 'all' || f.leavesOnly || f.setAside || f.search.trim() !== ''

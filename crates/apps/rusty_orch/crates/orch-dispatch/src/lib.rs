@@ -19,6 +19,7 @@ mod agent;
 mod dispatch;
 #[cfg(feature = "fake")]
 pub mod fake;
+mod host;
 mod ledger;
 mod routing;
 
@@ -26,3 +27,5 @@ pub use agent::{AgentError, AgentRunner, ClassifiedError, Output};
 pub use dispatch::{Ceiling, DispatchError, Dispatcher, Outcome};
 pub use ledger::Ledger;
 pub use routing::{Routing, RoutingConfig, RoutingError};
+
+pub use host::{hosted_handle, GateContext, HostHandle, Progress, Relayed, TaskHost};

@@ -1,6 +1,6 @@
-# TLS native engine: smaller independent review scope (draft for owner approval)
+# TLS native engine: smaller independent review scope (approved 2026-10-16; review not started)
 
-Date: 2026-10-11. Status: **draft, nothing approved.** Supports Tier 1 item 4 of
+Date: 2026-10-11. Status: **scope approved by the owner 2026-10-16; reviewer: David Bailey, confirmed independent by the owner 2026-10-17; review not started.** Recorded from the owner's message in the working session (originally a draft). Time box set by the owner 2026-10-17: three weeks, about 40 hours of review effort, in the priority order below; open findings at the end leave the item unmet. Still open: the fuzz long-run length (the reviewer's) and the review itself. Naming a reviewer is not a review and authorizes no wiring. Supports Tier 1 item 4 of
 `TLS-EVIDENCE-BAR.md`. The owner asked for a smaller scope than a review of the whole
 engine. This is the code the Tier 1 consumer (`rleval-app` OIDC, named by the owner on 2026-10-14, a TLS 1.3 client to
 named Google hosts) actually executes, and what is left out and why.
@@ -30,13 +30,13 @@ machine's CertificateVerify and Finished handling, then `stream.rs`.
 | Area | Lines | Reason |
 | --- | --- | --- |
 | Server: `server.rs`, `server12.rs` | 2132 + 842 | The candidate is a client |
-| TLS 1.2: `client12.rs`, `handshake12.rs`, `record12.rs`, `schedule12.rs` | 1289 + 453 + 431 + 320 | See the open point below |
+| TLS 1.2: `client12.rs`, `handshake12.rs`, `record12.rs`, `schedule12.rs` | 1289 + 453 + 431 + 320 | Kept out by `NativeTlsStream::tls13_only()`; see the resolved point below |
 | Tickets and resumption: `ticket.rs` | 459 | The candidate makes one request per connection; resumption is not used |
 | Signing: `sign.rs` | 245 | Only the server and client-auth sign; a client without client certificates does not |
 | Exporters: `export.rs` | 122 | Not used |
 | Version negotiation: `negotiate.rs` | 590 | Read only the part that rejects a downgrade sentinel if time allows |
 
-## One open point the owner should decide (found while scoping)
+## Resolved point (found while scoping; decided 2026-10-14 and 2026-10-16)
 
 `NativeTlsStream` currently negotiates both TLS 1.3 and TLS 1.2 (it drives the dual-version
 client). A peer that answers with 1.2 would run the 1.2 client code, which this scope leaves
@@ -45,7 +45,8 @@ out. Two ways to make the scope true:
 1. **Add a TLS 1.3-only option to `NativeTlsStream`** (small change inside the gated
    module; the consumer sets it). Then the 1.2 client is genuinely not executed. My
    recommendation. **Built** as `NativeTlsStream::tls13_only()`, on the owner's request
-   on 2026-10-14; the scope question below is still the owner's to approve.
+   on 2026-10-14 (merged in #716). The owner approved this scope on 2026-10-16, which holds only while
+   the consumer sets `tls13_only()` when it is wired.
 2. **Widen the scope** to the four TLS 1.2 client files (about 2,500 lines).
 
 ## What the reviewer receives
@@ -59,9 +60,9 @@ out. Two ways to make the scope true:
 
 ## Questions for the owner
 
-1. Approve this scope as the Tier 1 review, or change it?
-2. TLS 1.3-only option (1) or widen the scope (2)?
-3. Who reviews, and how long (the fuzz long-run length is theirs to set)?
+1. Approve this scope as the Tier 1 review, or change it? **Approved 2026-10-16.**
+2. TLS 1.3-only option (1) or widen the scope (2)? **Option 1**, built as `NativeTlsStream::tls13_only()` (merged in #716). The four TLS 1.2 client files stay out of scope, on condition that the consumer sets the option when it is wired.
+3. Who reviews, and how long (the fuzz long-run length is theirs to set)? **Reviewer: David Bailey** (named by the owner 2026-10-16, confirmed independent 2026-10-17). **Time box: three weeks, about 40 hours** (owner, 2026-10-17). The fuzz long-run length is the reviewer's to set at the start.
 
 ## Limits
 

@@ -32,3 +32,22 @@ Modular monolith inside the `rusty_mill` workspace. `orch-dispatch` is the appli
 
 ## Key decisions
 See [docs/adr/](./docs/adr/).
+
+## Optional BBP task hosting
+
+With an explicit BBP configuration, Implement cards use `orch-dispatch::TaskHost`
+instead of `AgentRunner`. `orch-bbp` drives the existing host CLI without a
+cross-family app dependency. Research/design/triage/review retain the Board and
+one-call adapters. `orch-core` and its lifecycle invariants are unchanged.
+
+The hosted Board contains the handle, human questions/answers and terminal
+artifacts. BBP owns discussion, capabilities, runner evidence and the immutable
+per-task roster. `orch-store` persists the handle, question fence and single
+hosted-card charge together. `Waiting` yields while BBP works; future invocations
+poll without another model-call charge. Approvals use the persisted human view,
+and only a recorded merge receipt completes the Orch card.
+
+Configuration and executable validation commands live in
+[`orch-bbp`](crates/orch-bbp/README.md). It accepts provider-neutral pools and
+capability rosters, with independent final-review policy; the four-role and
+fixed-vendor assumptions in ADR-0013's original sketch are not requirements.

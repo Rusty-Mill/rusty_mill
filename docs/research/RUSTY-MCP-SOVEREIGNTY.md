@@ -143,6 +143,10 @@ Each item is one PR, with its own tests and a change fragment.
    its 24 suites pass. Needs D1.
 7. **`rusty_serve` adapter** for the cores, so a blocking server can use auth
    and limits without tower. One test per layer against `rusty_serve`.
+   **Done (2026-10-15)**, behind a `serve` feature: `serve::LimitedHandler` and
+   `serve::AuthorizedHandler` for a `SharedHandler`. Limits have no timeout (a
+   blocking handler cannot be cancelled) and the validator runs on a `std`
+   executor with no reactor, so the JWKS-backed validator needs the tower layers.
 8. **`limits` without `tokio::sync`**: an atomic admission counter; keep
    `tokio::time` only in the tower adapter's timeout. **Done (2026-10-14)**
    with the `limits` core: `Admission` is a compare-and-swap counter.
@@ -153,6 +157,10 @@ Each item is one PR, with its own tests and a change fragment.
    *Done when:* the four OpenTelemetry crates are gone; the `otel_export` and
    `otel_metrics` tests pass; the cardinality guard still holds on the wire.
    Needs D2 and D3.
+   **In progress (2026-10-15), by signal rather than (a)/(b)/(c):** PR 1,
+   metrics (atomic instruments, OTLP/HTTP JSON, push thread on `rusty_request`);
+   PR 2, spans (span model, batching, a `tracing` layer); PR 3, remove the
+   four crates and the SDK-typed public API.
 10. **Policy and docs.** `check_workspace_deps.py` accepts `rusty-mcp` as
     Tier S except the named exceptions (`http`, `tower-layer`, `tower-service`,
     `tokio` in the adapter, `tracing`, D3: keep). ADR-0002 Amendment 1

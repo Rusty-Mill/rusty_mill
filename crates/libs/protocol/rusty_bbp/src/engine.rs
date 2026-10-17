@@ -1091,6 +1091,18 @@ fn check_rev(st: &TaskState, expected: Rev) -> R<()> {
 
 fn human(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
     match a {
+        HumanAction::Fenced {
+            expected_rev,
+            action,
+        } => {
+            if w.st.rev != *expected_rev {
+                return Err(rej(Code::StaleRev, "human view changed"));
+            }
+            if matches!(**action, HumanAction::Fenced { .. }) {
+                return Err(rej(Code::Forbidden, "nested fence"));
+            }
+            human(w, action, now)
+        }
         HumanAction::Approve {
             gate: Gate::Plan,
             subject,

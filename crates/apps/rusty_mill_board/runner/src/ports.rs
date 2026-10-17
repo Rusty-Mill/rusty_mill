@@ -44,6 +44,11 @@ pub trait BoardApi: Sync {
     fn get(&self, id: Uuid) -> Result<Card, ApiError>;
     /// The board's roles.
     fn roles(&self) -> Result<Roles, ApiError>;
+    /// How many projects the board has (whatever this credential may see).
+    fn project_count(&self) -> Result<usize, ApiError>;
+    /// The `files` that `project` does not own, by the board's whole registry. Also the check
+    /// that `project` exists and this credential may work in it.
+    fn foreign(&self, project: &str, files: &[String]) -> Result<Vec<String>, ApiError>;
     /// Move a card as `role`.
     fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError>;
     /// Claim a card as `role`.
@@ -84,6 +89,17 @@ pub trait Work: Sync {
         dir: &Path,
         env: &[(String, String)],
     ) -> Result<Outcome, String>;
+    /// Every repository path with uncommitted changes in `dir` (`/`-separated, from the
+    /// repository root; both sides of a rename).
+    ///
+    /// # Errors
+    /// A message if the state could not be read.
+    fn changed(&self, dir: &Path) -> Result<Vec<String>, String>;
+    /// Throw away everything uncommitted in `dir`: the stage's work is not wanted.
+    ///
+    /// # Errors
+    /// A message if the directory could not be restored.
+    fn discard(&self, dir: &Path) -> Result<(), String>;
     /// Commit what the stage changed. `Ok(false)` when there was nothing to commit.
     ///
     /// # Errors
