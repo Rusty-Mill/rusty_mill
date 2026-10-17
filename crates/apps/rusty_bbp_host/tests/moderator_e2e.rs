@@ -1689,3 +1689,32 @@ fn a_capped_startup_refused_for_the_lock_leaves_no_marker() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- third review, finding 1: the live cap must not kill a harness that is still starting
+
+#[test]
+fn a_harness_that_has_only_printed_its_preamble_is_left_to_the_wall_limit() {
+    let (dir, task, repo) = opened("preamble");
+    let preamble = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/stream-json/system-lines-before-the-first-message.jsonl"),
+    )
+    .expect("fixture");
+    std::fs::write(dir.join("preamble.jsonl"), preamble).expect("write");
+    // The preamble, a pause longer than several polls, then a small message.
+    let mut planner = script(
+        &dir,
+        "planner",
+        "cat \"$1/preamble.jsonl\"\nsleep 2\necho '{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"model\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}'\nsleep 60",
+    );
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 5);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let out = moderator::run_to_stop(&cfg).expect("an outcome");
+    let stop = out.stop.expect("stopped");
+    assert_eq!(stop.kind, moderator::StopKind::Wall, "{}", stop.reason);
+    let _ = std::fs::remove_dir_all(&dir);
+}

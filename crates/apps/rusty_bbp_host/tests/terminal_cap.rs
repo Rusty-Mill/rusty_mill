@@ -244,3 +244,20 @@ fn a_granted_turn_with_no_log_at_the_end_cannot_be_checked_against_the_cap() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- third review, finding 1
+
+/// The lines a real harness prints before its first message (captured).
+fn preamble() -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/stream-json/system-lines-before-the-first-message.jsonl"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_log_with_only_a_preamble_at_the_end_cannot_be_checked_against_the_cap() {
+    let err = terminal("preamble", &preamble()).unwrap_err();
+    assert!(err.contains("cannot enforce the cost cap"), "{err}");
+}

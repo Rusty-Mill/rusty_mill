@@ -399,3 +399,14 @@ fn the_effective_cache_lifetime_is_logged_per_turn_and_per_run() {
     .unwrap();
     assert_eq!(mixed.cache_ttl.as_deref(), Some("mixed"));
 }
+
+// ---- third review, finding 1: a harness's preamble is not blindness
+
+#[test]
+fn the_lines_a_real_harness_prints_before_its_first_message_are_not_unreadable() {
+    // Captured: hook_started, hook_response, active_goal, autocompact_state and
+    // the system init line come before the first assistant message.
+    let state = tokens::scan(&fixture("system-lines-before-the-first-message")).0;
+    assert_ne!(state, tokens::LogState::Unreadable);
+    assert_ne!(state, tokens::LogState::Readable, "no cost can be read yet");
+}
