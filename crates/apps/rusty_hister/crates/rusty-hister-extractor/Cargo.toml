@@ -20,7 +20,8 @@ rusty_json.workspace = true
 # `docs/PROJECT-STATUS.md`'s open item for the sovereignty-loop pass this
 # went through before adding a new external dependency.
 scraper = "0.21"
-ammonia = "4"
+# RUSTSEC-2026-0373: stay on the patched 4.1 line; 4.2.0-4.2.3 are also affected.
+ammonia = "~4.1.8"
 # Timestamp parsing/formatting for extractors' `published`-style metadata
 # (StackExchange's `dateCreated`, and future extractors with similar
 # fields). Already an approved workspace dependency (root `Cargo.toml`,
