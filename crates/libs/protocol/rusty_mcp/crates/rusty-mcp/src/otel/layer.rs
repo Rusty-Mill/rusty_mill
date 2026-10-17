@@ -508,8 +508,7 @@ mod tests {
     fn run(ratio: f64, body: impl FnOnce()) -> Vec<FinishedSpan> {
         let (collected, layer) = collecting(ratio, true);
         under(layer, body);
-        let spans = collected.lock().expect("lock").clone();
-        spans
+        collected.lock().expect("lock").clone()
     }
 
     /// The installed layer, from inside a `with_default`.
