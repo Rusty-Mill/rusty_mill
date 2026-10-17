@@ -30,10 +30,14 @@ The configuration contains:
 
 See the [two-role configuration](../../docs/examples/bbp.json) and BBP's
 [proving configuration](../../../rusty_bbp_host/docs/proving/agents.json).
-The two-role example deliberately uses custom MCP harness programs: substitute
-installed, authenticated provider harnesses implementing that contract. Existing
-Orch one-call adapters are not BBP harnesses; raw `ollama run` alone does not
-implement MCP. There are no implicit provider-specific launch templates.
+The two-role example uses `codex-bbp-harness` and `claude-bbp-harness`, built
+by `cargo build -p rusty_bbp_host`. Put all three host binaries on PATH, or
+use absolute paths. Authenticate the installed Codex and Claude CLIs with their
+subscription logins first. Optional launcher `--model MODEL` pins a provider
+model; `--provider-bin PATH` selects an installed provider executable. No other
+provider flags are forwarded. See the [launcher contract](../../../rusty_bbp_host/docs/provider-launchers.md).
+Existing Orch one-call adapters are not BBP harnesses; raw `ollama run` alone
+does not implement MCP. Other providers still use explicit custom launchers.
 
 Final reviewers must use scoped message reads, no write capabilities, no raw
 logs and no built-in tools. Their configured pool member and vendor must differ
@@ -100,7 +104,7 @@ cargo test -p orch-core -p orch-dispatch -p orch-cli -p orch-store \
 cargo build -p rusty_orch -p rusty_bbp_host
 BBP_TEST_BIN="$PWD/target/debug/bbp" \
 ORCH_TEST_BIN="$PWD/target/debug/rusty_orch" \
-cargo test -p orch-bbp --lib -- --ignored
+cargo test -p orch-bbp --lib tests_e2e:: -- --ignored
 cargo clippy -p orch-bbp -p orch-dispatch -p orch-store -p rusty_orch \
   -p rusty_bbp -p rusty_bbp_host --all-targets -- -D warnings
 ```
@@ -119,8 +123,8 @@ in `required-gate`. It builds real `rusty_orch` and `bbp` binaries, then runs
 Linux runs, first build those binaries and the `orch-bbp` library tests and
 `rusty_bbp_host --test moderator_e2e`, then set `BBP_TEST_BIN` and `ORCH_TEST_BIN`
 to their absolute paths. The collector requires exactly one executed test and
-a completion marker for each of lifecycle, timeout, cancel and kill. It attempts
-all four cases and retains logs, JSON results and a Markdown summary on failure.
+a completion marker for each of lifecycle, Rust/LLD linking, timeout, cancel and kill. It attempts
+all five cases and retains logs, JSON results and a Markdown summary on failure.
 
 The lifecycle uses the real Orch CLI, persisted state and production supervisor;
 its workload must pass with `landlock+seccomp:no-endpoints` recorded in the BBP
@@ -154,3 +158,12 @@ PR #763's run guards remain a separate review and change.
 Manifest publication keeps the Unix directory fsync and avoids unsupported
 Windows directory opens. Injected-seam tests are portable; production hosting
 still rejects unsupported platforms. Native Windows checks run in repository CI.
+
+
+A repeated no-progress launcher fault is a retryable host diagnostic, not a
+permanent task failure. The BBP host replays its existing log to keep the pause
+across Orch processes. Inspect `bbp mod-health`; after repairing the launcher,
+use its explicit current-revision reset and poll the same goal/state again.
+No new hosted-card charge, protocol event schema or `orch-core` change is needed.
+For Rust/LLD workloads, generate `bbp profiles rust-lld --sysroot PATH` before
+opening the task; see the host's provider-launcher guide for resource limits.

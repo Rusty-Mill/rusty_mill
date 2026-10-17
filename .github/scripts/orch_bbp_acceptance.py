@@ -28,6 +28,8 @@ class Case:
 CASES = (
     Case("lifecycle", "orch-bbp", ("--lib",),
          "tests_confined::confined_orch_cli_lifecycle_resumes_and_records_receipt"),
+    Case("rust-lld", "rusty_bbp_host", ("--test", "rust_lld_profile"),
+         "confined_rust_lld_profile_passes_under_one_gib"),
     *(Case(mode, "rusty_bbp_host", ("--test", "moderator_e2e"),
            f"confined_{mode}_recovery") for mode in ("timeout", "cancel", "kill")),
 )

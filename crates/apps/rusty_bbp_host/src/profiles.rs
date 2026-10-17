@@ -64,6 +64,49 @@ impl ProfileSet {
         }
     }
 
+    /// Linux Rust test profile for a toolchain using the LLD linker.
+    /// Limits linker parallelism explicitly before the task freezes this profile.
+    /// `sysroot` is `rustc --print sysroot`, never a credential-bearing home root.
+    pub fn rust_lld_tests(sysroot: &Path) -> Result<ProfileSet, String> {
+        let sysroot = sysroot.canonicalize().map_err(|e| e.to_string())?;
+        let compiler = sysroot.join("bin/rustc");
+        if !compiler.is_file() {
+            return Err("Rust sysroot must contain bin/rustc".into());
+        }
+        let compiler = compiler.to_str().ok_or("non-UTF8 Rust compiler path")?;
+        let mut set = Self::shell("unused", "unused");
+        set.profiles = vec![
+            Profile {
+                name: "compile-tests-lld".into(),
+                program: compiler.into(),
+                args: [
+                    "--test",
+                    "src/lib.rs",
+                    "-C",
+                    "link-arg=-Wl,--threads=1",
+                    "-o",
+                    ".bbp-tests",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            },
+            Profile {
+                name: "test".into(),
+                program: "./.bbp-tests".into(),
+                args: vec![],
+            },
+        ];
+        set.read_roots
+            .push(sysroot.to_str().ok_or("non-UTF8 Rust sysroot")?.into());
+        set.env = vec![(
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", sysroot.join("bin").display()),
+        )];
+        set.limits.cpu_secs = 10;
+        set.limits.wall_secs = 30;
+        Ok(set)
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         rusty_serde::json::to_string(self)
             .map(String::into_bytes)

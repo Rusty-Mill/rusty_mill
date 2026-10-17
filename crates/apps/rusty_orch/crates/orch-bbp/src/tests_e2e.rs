@@ -32,7 +32,7 @@ impl CommandRunner for LostReply {
         Ok(out)
     }
 }
-fn setup() -> (PathBuf, Config) {
+pub(super) fn setup() -> (PathBuf, Config) {
     let dir = temp();
     let mut c = config(&dir);
     c.binary = std::env::var_os("BBP_TEST_BIN")
@@ -793,5 +793,147 @@ RPC
     ));
     drop(host);
     drop(supervisor);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires built bbp at BBP_TEST_BIN and rusty_orch at ORCH_TEST_BIN"]
+fn no_progress_pause_survives_orch_processes_without_duplicate_task_or_charge() {
+    let (dir, mut c) = setup();
+    c.pool.get_mut("writer").unwrap().program = "/bin/sh".into();
+    c.pool.get_mut("writer").unwrap().args = vec!["-c".into(), "exit 0".into()];
+    std::fs::write(
+        dir.join("bbp.json"),
+        rusty_serde::json::to_string(&c).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("goal.json"), r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#).unwrap();
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    let invoke = || {
+        Command::new(&orch)
+            .arg("run")
+            .arg(dir.join("goal.json"))
+            .arg("--bbp")
+            .arg(dir.join("bbp.json"))
+            .arg("--state")
+            .arg(dir.join("orch-state"))
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let first = invoke();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let report: rusty_serde::json::Value =
+        rusty_serde::json::from_str(std::str::from_utf8(&first.stdout).unwrap()).unwrap();
+    assert_eq!(
+        report
+            .get("calls")
+            .and_then(rusty_serde::json::Value::as_u64),
+        Some(1)
+    );
+    let entries = report.get("entries").unwrap().as_seq().unwrap();
+    let pointer = entries[0].get("refs").unwrap().as_seq().unwrap()[0]
+        .as_str()
+        .unwrap()
+        .strip_prefix("url:bbp:")
+        .unwrap();
+    let h: Handle = rusty_serde::json::from_str(pointer).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let health = Command::new(&c.binary)
+            .args(["mod-health", "--dir"])
+            .arg(&c.dir)
+            .args(["--task", &h.task, "--check", "yes"])
+            .output()
+            .unwrap();
+        if !health.status.success() {
+            assert!(String::from_utf8_lossy(&health.stderr).contains("moderator paused"));
+            break;
+        }
+        assert!(Instant::now() < deadline, "moderator did not pause");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let before = events(&h);
+    for _ in 0..2 {
+        let resumed = invoke();
+        assert!(!resumed.status.success());
+        let report: rusty_serde::json::Value =
+            rusty_serde::json::from_str(std::str::from_utf8(&resumed.stdout).unwrap()).unwrap();
+        assert_eq!(report["ended"]["kind"].as_str(), Some("failed"));
+        assert!(report["ended"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("moderator paused"));
+        assert_eq!(report["calls"].as_u64(), Some(1));
+        assert_eq!(report["tasks"][0]["status"].as_str(), Some("running"));
+        assert_eq!(
+            events(&h),
+            before,
+            "polling a paused task must not spend turns or create a task"
+        );
+    }
+    assert_eq!(
+        before
+            .iter()
+            .filter(|e| matches!(e, Event::TaskOpened { .. }))
+            .count(),
+        1
+    );
+    // Retry is explicit and revision-fenced. A later poll adopts the same task;
+    // the writer is still broken, so it pauses again within the same budget.
+    let rev = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &before)
+        .card
+        .rev
+        .0;
+    let reset = Command::new(&c.binary)
+        .args(["mod-health", "--dir"])
+        .arg(&c.dir)
+        .args([
+            "--task",
+            &h.task,
+            "--reset",
+            "yes",
+            "--rev",
+            &rev.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    let retry = invoke();
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let report: rusty_serde::json::Value =
+        rusty_serde::json::from_str(std::str::from_utf8(&retry.stdout).unwrap()).unwrap();
+    assert_eq!(
+        report
+            .get("calls")
+            .and_then(rusty_serde::json::Value::as_u64),
+        Some(1)
+    );
+    let key = Sha256::of(h.task.as_bytes()).hex();
+    // Let its bounded moderator pause before removing its private fixture.
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .open(c.dir.join("mod").join(format!("{key}.lock")))
+            .unwrap();
+        if lock.try_lock().is_ok() {
+            break;
+        }
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(10));
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
