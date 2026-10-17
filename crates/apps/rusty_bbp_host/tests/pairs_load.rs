@@ -312,3 +312,16 @@ fn a_run_with_a_turn_that_never_printed_a_result_fails_and_keeps_its_known_cost(
     );
     assert!(!f.succeeded());
 }
+
+// ---- third review, finding 2: a log the cap could not read still loads, as a failed run
+
+#[test]
+fn a_run_stopped_over_a_log_the_tool_cannot_read_loads_as_a_failed_run() {
+    // A usage line that is valid JSON but not a shape the tool reads: the cap
+    // stopped the run, and `bbp pairs` must not drop the whole manifest.
+    let bad = r#"{"type":"assistant","message":{"id":"a","model":"m","usage":{"input_tokens":1,"output_tokens":1,"cache_creation":null}}}"#;
+    let f = facts_with_log("unreadable-stop", "cap", Some(bad));
+    assert!(f.over_cap);
+    assert!(f.stopped);
+    assert!(!f.succeeded());
+}

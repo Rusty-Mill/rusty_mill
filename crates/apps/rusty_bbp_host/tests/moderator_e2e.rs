@@ -1718,3 +1718,26 @@ fn a_harness_that_has_only_printed_its_preamble_is_left_to_the_wall_limit() {
     assert_eq!(stop.kind, moderator::StopKind::Wall, "{}", stop.reason);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- third review, finding 2: the live cap must not stop a harness mid-write
+
+#[test]
+fn a_harness_caught_in_the_middle_of_writing_a_line_is_left_to_the_wall_limit() {
+    let (dir, task, repo) = opened("midwrite");
+    // Half a line, no newline, held for several polls; then the rest.
+    let mut planner = script(
+        &dir,
+        "planner",
+        "printf '{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"mod'\nsleep 2\nprintf 'el\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\\n'\nsleep 60",
+    );
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 5);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let out = moderator::run_to_stop(&cfg).expect("an outcome");
+    let stop = out.stop.expect("stopped");
+    assert_eq!(stop.kind, moderator::StopKind::Wall, "{}", stop.reason);
+    let _ = std::fs::remove_dir_all(&dir);
+}

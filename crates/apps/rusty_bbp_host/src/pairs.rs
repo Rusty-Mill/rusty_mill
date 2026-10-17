@@ -72,6 +72,9 @@ pub struct RunFacts {
     /// Turns that ended with no valid result (killed, interrupted, crashed):
     /// their cost is only known from below.
     pub killed_turns: u64,
+    /// The moderator stopped the run (cap or wall limit): it may have printed
+    /// little or nothing a model can be read from.
+    pub stopped: bool,
     /// The dollars the run is known to have cost, at least: complete turns at
     /// their result, the rest at what their printed messages show.
     pub usd_floor: Option<f64>,
@@ -551,6 +554,7 @@ pub fn facts(
         build_sha: build_sha_of(&text)?,
         no_model_turns,
         killed_turns: tok.unknown_turns,
+        stopped: false,
         usd_floor: tok.usd_floor,
     })
 }
@@ -1807,5 +1811,20 @@ mod tests {
 
     fn near_f(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    // ---- third review, finding 2: a stopped run is a failed run, not a refusal
+
+    #[test]
+    fn a_stopped_run_needs_no_model_evidence_to_load() {
+        let mut p = model_pair(&[("planner", &["m1"])], &[("planner", &["m1"])]);
+        // The treatment was stopped before it printed a message.
+        p.treatment.stopped = true;
+        p.treatment.role_models.clear();
+        p.treatment.no_model_turns = 1;
+        assert_eq!(check_settings(&[p.clone()], 30), Ok(()));
+        // A run that was not stopped still needs it.
+        p.treatment.stopped = false;
+        assert!(check_settings(&[p], 30).is_err());
     }
 }

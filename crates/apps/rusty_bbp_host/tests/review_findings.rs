@@ -409,3 +409,41 @@ fn the_lines_a_real_harness_prints_before_its_first_message_are_not_unreadable()
     let state = tokens::scan(&fixture("system-lines-before-the-first-message")).0;
     assert_eq!(state, tokens::LogState::Started);
 }
+
+// ---- third review, finding 2: cut-off lines and stderr noise are not unreadable usage
+
+#[test]
+fn a_line_still_being_written_or_cut_off_by_a_kill_is_not_an_error() {
+    let whole = r#"{"type":"assistant","message":{"id":"a","model":"claude-sonnet-5-5","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+    let cut = &whole[..60];
+    let c = criteria("cut", SONNET_ONLY);
+    // No trailing newline: the harness is mid-write (or was killed mid-write).
+    let t = tokens_of("cut1", &[("planner", format!("{whole}\n{cut}"))], &c)
+        .expect("a cut-off last line is skipped");
+    assert_eq!(t.turns.len(), 1);
+    assert_eq!(t.turns[0].log, tokens::LogState::Readable);
+}
+
+#[test]
+fn stderr_text_that_starts_with_a_brace_is_noise() {
+    let whole = r#"{"type":"assistant","message":{"id":"a","model":"claude-sonnet-5-5","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+    let log = format!("{{ code: 'ECONNRESET', syscall: 'read' }}\n{whole}\n");
+    let t = tokens_of(
+        "brace",
+        &[("planner", log)],
+        &criteria("brace", SONNET_ONLY),
+    )
+    .expect("noise is skipped");
+    assert_eq!(t.turns[0].log, tokens::LogState::Readable);
+    // Valid JSON the tool cannot read is still refused: its usage would be lost.
+    let broken = whole.replace(
+        r#""output_tokens":1"#,
+        r#""output_tokens":1,"cache_creation":null"#,
+    );
+    assert!(tokens_of(
+        "brace2",
+        &[("planner", format!("{broken}\n"))],
+        &criteria("brace2", SONNET_ONLY)
+    )
+    .is_err());
+}
