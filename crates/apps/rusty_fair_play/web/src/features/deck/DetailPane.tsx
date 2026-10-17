@@ -75,7 +75,7 @@ function CardDetail({ card }: { card: Card }) {
   const navigate = useNavigate()
   const people = useData((s) => s.people)
   const index = useData((s) => s.index)
-  const { updateCard, reorderChildren, deleteCard, unsplit, setInPlay } = useActions()
+  const { updateCard, updateMarks, reorderChildren, deleteCard, unsplit, setInPlay } = useActions()
   const [draft, setDraft] = useState<Draft>(() => draftOf(card))
   // Equality with the previous server value cannot tell an untouched field from a real edit
   // back to that value. Generations make that distinction, including while Save is in flight.
@@ -96,7 +96,7 @@ function CardDetail({ card }: { card: Card }) {
   // refresh, another tab), so a save is judged against what the user actually saw.
   const [draftBase, setDraftBase] = useState(card.etag)
   const [saving, setSaving] = useState(false)
-  const [markSaving, setMarkSaving] = useState(false)
+  const markSaving = useData((s) => s.pendingMarks.includes(card.id))
   const [splitOpen, setSplitOpen] = useState(false)
   const [confirm, setConfirm] = useState<'delete' | 'unsplit' | 'aside' | null>(null)
   const [asideSelection, setAsideSelection] = useState<Card | null>(null)
@@ -181,11 +181,7 @@ function CardDetail({ card }: { card: Card }) {
 
   /** Both selectors share a lock: concurrent marks would use the same rendered etag. */
   const mark = (patch: Pick<CardPatch, 'points' | 'frequency'>): void => {
-    if (markSaving) return
-    setMarkSaving(true)
-    void updateCard(card.id, patch, card.etag)
-      .catch(() => undefined) // Toasted by the store; the controlled selects keep the stored values.
-      .finally(() => setMarkSaving(false))
+    void updateMarks(card.id, patch, card.etag).catch(() => undefined) // Toasted by the store.
   }
 
   /** Move child `i` by `delta` as one order request. */

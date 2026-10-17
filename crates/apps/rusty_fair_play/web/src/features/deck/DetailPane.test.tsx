@@ -9,6 +9,41 @@ const cleaningOf = async (api: MemoryAdapter) => (await api.snapshot()).cards.fi
 const pane = () => screen.getByRole('complementary', { name: 'Card details' })
 
 describe('the detail pane', () => {
+  it.each(['success', 'failure'])('keeps marks locked through A → B → A until %s, then unlocks', async (outcome) => {
+    const user = userEvent.setup()
+    const { api, services } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /^Dishes/ }))
+    const dishes = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    const real = api.updateCard.bind(api)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const update = vi.spyOn(api, 'updateCard').mockImplementationOnce(async (id, patch, etag) => {
+      await gate
+      if (outcome === 'failure') throw new Error('Save failed')
+      return real(id, patch, etag)
+    })
+    await user.selectOptions(within(pane()).getByLabelText('Points'), '5')
+    await user.click(screen.getByRole('link', { name: /^Cleaning/ }))
+    expect(within(pane()).getByLabelText('Points')).toBeEnabled()
+    expect(within(pane()).getByLabelText('Frequency')).toBeEnabled()
+    await user.click(screen.getByRole('link', { name: /^Dishes/ }))
+    expect(within(pane()).getByLabelText('Points')).toBeDisabled()
+    expect(within(pane()).getByLabelText('Frequency')).toBeDisabled()
+    await user.selectOptions(within(pane()).getByLabelText('Frequency'), 'Weekly')
+    expect(update).toHaveBeenCalledTimes(1)
+    await act(async () => release())
+    await waitFor(() => expect(within(pane()).getByLabelText('Points')).toBeEnabled())
+    expect(within(pane()).getByLabelText('Frequency')).toBeEnabled()
+    expect(within(pane()).getByLabelText('Points')).toHaveValue(outcome === 'success' ? '5' : '')
+    const saved = await api.getCard(dishes.id)
+    await user.selectOptions(within(pane()).getByLabelText('Frequency'), 'Weekly')
+    await waitFor(() => expect(within(pane()).getByLabelText('Frequency')).toHaveValue('Weekly'))
+    expect(update).toHaveBeenLastCalledWith(dishes.id, { frequency: 'Weekly' }, saved.etag)
+    expect(await api.getCard(dishes.id)).toMatchObject({ points: outcome === 'success' ? 5 : null, frequency: 'Weekly' })
+    expect(services.store.getState().toasts.some((toast) => toast.message === STALE_MESSAGE)).toBe(false)
+    if (outcome === 'failure') expect(services.store.getState().toasts.at(-1)?.message).toContain('Save failed')
+  })
+
   it.each(['Frequency', 'Points'])('blocks a rapid second %s edit until the marks save settles', async (second) => {
     const user = userEvent.setup()
     const { api, services } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
