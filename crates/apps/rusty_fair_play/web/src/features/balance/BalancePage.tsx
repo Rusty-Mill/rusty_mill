@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { SUITS } from '@/api/types'
+import { FREQUENCIES, SUITS } from '@/api/types'
 import { PATHS } from '@/app/paths'
 import { useActions, useData } from '@/app/services'
 import { initial, suitBg, suitText } from '@/components/badges'
@@ -16,12 +16,13 @@ export function BalancePage() {
   const left = useMemo(() => bySuit(undealt(index, cards)), [index, cards])
   const leftCount = SUITS.reduce((n, s) => n + left[s].length, 0)
   const maxAll = Math.max(1, ...rows.map((r) => r.all))
+  const maxPoints = Math.max(1, ...rows.map((r) => r.points))
 
   return (
     <main className="flex min-w-0 flex-1 flex-col" aria-label="Balance">
       <header className="px-5 pt-4">
         <h1 className="text-h1 font-semibold">Balance</h1>
-        <p className="text-s text-grey">Leaf cards count the work once: a split parent and its children are not both counted.</p>
+        <p className="text-s text-grey">Leaf cards count the work once: a split parent and its children are not both counted. Points and frequencies count leaf cards, using the suggested points and frequency where none are assigned.</p>
       </header>
       <div className="scroll-thin flex-1 overflow-y-auto px-5 pb-8 pt-4">
         {people.length === 0 ? (
@@ -44,6 +45,14 @@ export function BalancePage() {
                 </div>
                 <Bar label="All cards" value={row.all} max={maxAll} />
                 <Bar label="Leaf cards" value={row.leaves} max={maxAll} muted />
+                <Bar label="Points" value={row.points} max={maxPoints} testId="count-points" />
+                <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-grey" aria-label={`${row.person.name} by frequency`}>
+                  {FREQUENCIES.map((f) => (
+                    <span key={f} data-testid={`freq-${f}`}>
+                      {f} {row.byFrequency[f]}
+                    </span>
+                  ))}
+                </div>
                 <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-grey" aria-label={`${row.person.name} by suit`}>
                   {SUITS.map((s) => (
                     <span key={s} className="inline-flex items-center gap-1">
@@ -97,14 +106,14 @@ export function BalancePage() {
   )
 }
 
-function Bar({ label, value, max, muted = false }: { label: string; value: number; max: number; muted?: boolean }) {
+function Bar({ label, value, max, muted = false, testId }: { label: string; value: number; max: number; muted?: boolean; testId?: string }) {
   return (
     <div className="flex items-center gap-2 text-s">
       <span className="w-20 shrink-0 text-grey">{label}</span>
       <div className="h-3 flex-1 overflow-hidden rounded-full bg-selected" role="img" aria-label={`${label}: ${value}`}>
         <div className={`h-full rounded-full ${muted ? 'bg-primary/40' : 'bg-primary'}`} style={{ width: `${(value / max) * 100}%` }} />
       </div>
-      <span className="w-8 shrink-0 text-right font-medium" data-testid={label === 'All cards' ? 'count-all' : 'count-leaves'}>
+      <span className="w-8 shrink-0 text-right font-medium" data-testid={testId ?? (label === 'All cards' ? 'count-all' : 'count-leaves')}>
         {value}
       </span>
     </div>

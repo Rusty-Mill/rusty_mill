@@ -3,6 +3,14 @@
 export const SUITS = ['Home', 'Out', 'Caregiving', 'Magic', 'Wild', 'Unicorn Space'] as const
 export type Suit = (typeof SUITS)[number]
 
+/** The values a card's points may take. */
+export const POINT_SCALE = [1, 2, 3, 5, 8] as const
+export type Points = (typeof POINT_SCALE)[number]
+
+/** How often a card's work comes round, most frequent first. */
+export const FREQUENCIES = ['Daily', 'Weekly', 'Monthly', 'Seasonal', 'Yearly', 'As needed'] as const
+export type Frequency = (typeof FREQUENCIES)[number]
+
 export type CardState = 'original' | 'edited' | 'custom'
 export type Origin = 'deck' | 'family'
 
@@ -39,6 +47,14 @@ export interface Card {
   treeEtag: string
   /** In the family's deck. A card set aside has no owner and no children, and is out of the undealt list and the balance. */
   inPlay: boolean
+  /** Points the family assigned; null until they pick one. */
+  points: Points | null
+  /** What the card's text suggests, shown until points are assigned. */
+  suggestedPoints: Points
+  /** What the card's text recommends, shown until a frequency is assigned. */
+  suggestedFrequency: Frequency
+  /** How often the work comes round; null until the family picks one. */
+  frequency: Frequency | null
 }
 
 export interface Baseline {
@@ -86,6 +102,10 @@ export interface CardPatch {
   position?: number
   /** `false` sets the card aside (taking it back from its owner); `true` adds it back. */
   inPlay?: boolean
+  /** null clears the assigned points (the suggestion shows again). */
+  points?: Points | null
+  /** null clears the frequency. */
+  frequency?: Frequency | null
 }
 
 export interface NewCard {

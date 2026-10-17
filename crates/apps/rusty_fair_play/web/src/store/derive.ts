@@ -3,7 +3,7 @@
  * the chain to the root), per-person balance in both variants, and counts.
  * Pure functions over the snapshot's arrays; the store memoises the index.
  */
-import { SUITS, type Card, type CardState, type Person, type Suit } from '@/api/types'
+import { FREQUENCIES, SUITS, type Card, type CardState, type Frequency, type Person, type Suit } from '@/api/types'
 
 export interface CardIndex {
   byId: Map<string, Card>
@@ -72,15 +72,24 @@ export interface Balance {
   person: Person
   all: number
   leaves: number
+  /** Points on leaf cards: the assigned value, else the card's suggestion. */
+  points: number
+  /** Leaf cards by frequency: the assigned one, else the suggested. */
+  byFrequency: Record<Frequency, number>
   bySuit: Record<Suit, { all: number; leaves: number }>
 }
+
+export const emptyFrequencies = (): Record<Frequency, number> => Object.fromEntries(FREQUENCIES.map((f) => [f, 0])) as Record<Frequency, number>
+
+/** What a card counts for: its assigned points, else its suggestion. */
+export const pointsOf = (c: Pick<Card, 'points' | 'suggestedPoints'>): number => c.points ?? c.suggestedPoints
 
 const emptySuits = (): Record<Suit, { all: number; leaves: number }> =>
   Object.fromEntries(SUITS.map((s) => [s, { all: 0, leaves: 0 }])) as Record<Suit, { all: number; leaves: number }>
 
-/** Cards held per person: every card, and leaf cards only (a split parent plus its children would double-count). */
+/** Cards held per person: every card, and leaf cards only (a split parent plus its children would double-count). Points and frequencies count leaves only, for the same reason. */
 export function balance(index: CardIndex, cards: Card[], people: Person[]): Balance[] {
-  const rows = new Map(people.map((p) => [p.id, { person: p, all: 0, leaves: 0, bySuit: emptySuits() } satisfies Balance]))
+  const rows = new Map(people.map((p) => [p.id, { person: p, all: 0, leaves: 0, points: 0, byFrequency: emptyFrequencies(), bySuit: emptySuits() } satisfies Balance]))
   for (const c of cards) {
     const row = c.ownerId ? rows.get(c.ownerId) : undefined
     if (!row) continue
@@ -88,6 +97,8 @@ export function balance(index: CardIndex, cards: Card[], people: Person[]): Bala
     row.bySuit[c.suit].all++
     if (index.leafIds.has(c.id)) {
       row.leaves++
+      row.points += pointsOf(c)
+      row.byFrequency[c.frequency ?? c.suggestedFrequency]++
       row.bySuit[c.suit].leaves++
     }
   }

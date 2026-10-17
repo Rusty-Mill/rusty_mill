@@ -1,6 +1,6 @@
 import { Plus, Search, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { SUITS } from '@/api/types'
+import { FREQUENCIES, SUITS } from '@/api/types'
 import { useData } from '@/app/services'
 import { initial, suitBg } from '@/components/badges'
 import { useUi, type StateFilter } from '@/store/ui'
@@ -19,7 +19,7 @@ export function FilterBar() {
   const people = useData((s) => s.people)
   const asideCount = useData((s) => s.cards.filter((c) => !c.inPlay).length)
   const filters = useUi((s) => s.filters)
-  const { toggleSuit, toggleOwner, setFilters, clearFilters } = useUi.getState()
+  const { toggleSuit, toggleOwner, toggleFrequency, setFilters, clearFilters } = useUi.getState()
   const searchFocus = useUi((s) => s.searchFocus)
   const searchRef = useRef<HTMLInputElement>(null)
   const [newOpen, setNewOpen] = useState(false)
@@ -95,6 +95,17 @@ export function FilterBar() {
           <button type="button" aria-pressed={filters.owners.includes(UNASSIGNED)} onClick={() => toggleOwner(UNASSIGNED)} className={`chip ${filters.owners.includes(UNASSIGNED) ? 'chip-on' : 'text-grey'}`}>
             Unassigned
           </button>
+        </div>
+        <span aria-hidden className="h-4 w-px bg-line" />
+        <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Frequency">
+          {FREQUENCIES.map((frequency) => {
+            const on = filters.frequencies.includes(frequency)
+            return (
+              <button key={frequency} type="button" aria-pressed={on} onClick={() => toggleFrequency(frequency)} className={`chip ${on ? 'chip-on' : ''}`}>
+                {frequency}
+              </button>
+            )
+          })}
         </div>
       </div>
       {newOpen && <NewCardDialog open onClose={() => setNewOpen(false)} />}
