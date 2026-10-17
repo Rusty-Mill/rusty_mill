@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Required confined BBP acceptance
+**2026-10-17**
+
+- CI now requires the real Orch CLI lifecycle under production Linux confinement,
+  including persisted resume, moderator restart, independent scripted review,
+  merge approval and recorded receipt without performing a merge.
+- Timeout, cancel and kill recovery have separate strict tests and retained
+  per-mode results. Sandbox refusal or missing execution evidence fails the job.
+
+---
+
 ## BBP task hosting implemented
 **2026-10-16** · Issue #767
 

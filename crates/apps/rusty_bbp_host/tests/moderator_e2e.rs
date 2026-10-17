@@ -993,96 +993,131 @@ fn process_mod(dir: &Path, repo: &Path, task: &TaskId, wall: &str, confine: &str
 #[cfg(target_os = "linux")]
 fn process_exit_cancels_reaps_and_serializes_a_running_workload_before_restart() {
     for confine in ["sandbox", "none"] {
-        'cases: for mode in ["timeout", "cancel", "kill"] {
-            let dir = tempdir(&format!("process-{confine}-{mode}"));
-            let (repo, task) = pending_slow_run(
-                &dir,
-                "echo $$ > leader.pid; sleep 30 & echo $! > child.pid; wait",
-            );
-            let mut moderator = process_mod(
-                &dir,
-                &repo,
-                &task,
-                if mode == "timeout" { "2" } else { "20" },
-                confine,
-            );
-            let leader = dir.join("work/run-1/leader.pid");
-            let descendant = dir.join("work/run-1/child.pid");
-            let deadline = Instant::now() + Duration::from_secs(8);
-            while !leader.exists() || !descendant.exists() {
-                if moderator.0.try_wait().unwrap().is_some() {
-                    let driver = open_driver(&dir, &task).unwrap();
-                    let run = driver.state.selected_run().unwrap();
-                    let log = driver.state.artifacts.get(&run.log.unwrap()).unwrap();
-                    let bytes = driver.store.blob_get(&log.blob.sha).unwrap();
-                    let log = String::from_utf8_lossy(&bytes);
-                    if confine == "sandbox"
-                        && log.contains("Landlock filesystem confinement is NotEnforced")
-                    {
-                        assert_eq!(run.status, Some(RunStatus::Error));
-                        assert!(!leader.exists() && !descendant.exists());
-                        eprintln!("sandbox lifecycle cases unavailable on this kernel; verified fail-closed refusal: {log}");
-                        drop(moderator);
-                        std::fs::remove_dir_all(&dir).unwrap();
-                        break 'cases;
-                    }
-                    panic!("moderator exited before workload: {log}");
-                }
-                assert!(Instant::now() < deadline, "workload not started");
-                std::thread::sleep(Duration::from_millis(10));
+        for mode in ["timeout", "cancel", "kill"] {
+            if !running_workload_recovery(confine, mode, false) {
+                break;
             }
-            let leader = std::fs::read_to_string(leader).unwrap();
-            let descendant = std::fs::read_to_string(descendant).unwrap();
-            assert!(alive(leader.trim()) && alive(descendant.trim()));
-            let stopped = Instant::now();
-            if mode == "cancel" {
-                let c = card(&dir, &task);
-                assert_eq!(
-                    human::perform(&dir, &task, "cancel", &["stop"], Some(c.rev)).unwrap(),
-                    Response::Ok
-                );
-            }
-            if mode == "kill" {
-                moderator.0.kill().unwrap();
-            }
-            while moderator.0.try_wait().unwrap().is_none() {
-                assert!(
-                    stopped.elapsed() < Duration::from_secs(6),
-                    "moderator failed to exit"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            // Restart immediately: the previous worker may still be observing
-            // EOF. Its task lock must prevent any overlapping execution.
-            let mut replacement = process_mod(&dir, &repo, &task, "1", confine);
-            let deadline = Instant::now() + Duration::from_secs(6);
-            while alive(leader.trim()) || alive(descendant.trim()) {
-                assert!(
-                    Instant::now() < deadline,
-                    "old workload survived moderator/restart: {mode}/{confine}"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            while replacement.0.try_wait().unwrap().is_none() {
-                assert!(Instant::now() < deadline);
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let d = open_driver(&dir, &task).unwrap();
-            let logs = d.store.events(&task, 0).unwrap();
-            assert!(matches!(d.state.state, State::Cancelled | State::Escalated));
-            assert!(d
-                .state
-                .selected_run()
-                .is_none_or(|r| r.status != Some(RunStatus::Passed)));
-            assert_eq!(
-                logs.iter()
-                    .filter(|e| matches!(e, Event::RunStarted { .. }))
-                    .count(),
-                1
-            );
-            drop(moderator);
-            drop(replacement);
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
+}
+
+// The ordinary suite retains fail-closed coverage on unsupported kernels. The
+// required CI cases below must execute a confined workload in every mode.
+#[cfg(target_os = "linux")]
+fn running_workload_recovery(confine: &str, mode: &str, required: bool) -> bool {
+    let dir = tempdir(&format!("process-{confine}-{mode}"));
+    let (repo, task) = pending_slow_run(
+        &dir,
+        "echo $$ > leader.pid; sleep 30 & echo $! > child.pid; wait",
+    );
+    let mut moderator = process_mod(
+        &dir,
+        &repo,
+        &task,
+        if mode == "timeout" { "2" } else { "20" },
+        confine,
+    );
+    let leader = dir.join("work/run-1/leader.pid");
+    let descendant = dir.join("work/run-1/child.pid");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !leader.exists() || !descendant.exists() {
+        if moderator.0.try_wait().unwrap().is_some() {
+            let driver = open_driver(&dir, &task).unwrap();
+            let run = driver.state.selected_run().unwrap();
+            let log = driver.state.artifacts.get(&run.log.unwrap()).unwrap();
+            let bytes = driver.store.blob_get(&log.blob.sha).unwrap();
+            let log = String::from_utf8_lossy(&bytes);
+            if confine == "sandbox"
+                && log.contains("Landlock filesystem confinement is NotEnforced")
+            {
+                assert!(!required, "required sandbox refused in {mode}: {log}");
+                assert_eq!(run.status, Some(RunStatus::Error));
+                assert!(!leader.exists() && !descendant.exists());
+                eprintln!("sandbox lifecycle cases unavailable on this kernel; verified fail-closed refusal: {log}");
+                drop(moderator);
+                std::fs::remove_dir_all(&dir).unwrap();
+                return false;
+            }
+            panic!("moderator exited before workload: {log}");
+        }
+        assert!(Instant::now() < deadline, "workload not started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let leader = std::fs::read_to_string(leader).unwrap();
+    let descendant = std::fs::read_to_string(descendant).unwrap();
+    assert!(alive(leader.trim()) && alive(descendant.trim()));
+    let stopped = Instant::now();
+    if mode == "cancel" {
+        let c = card(&dir, &task);
+        assert_eq!(
+            human::perform(&dir, &task, "cancel", &["stop"], Some(c.rev)).unwrap(),
+            Response::Ok
+        );
+    }
+    if mode == "kill" {
+        moderator.0.kill().unwrap();
+    }
+    while moderator.0.try_wait().unwrap().is_none() {
+        assert!(
+            stopped.elapsed() < Duration::from_secs(6),
+            "moderator failed to exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Restart immediately: the previous worker may still be observing
+    // EOF. Its task lock must prevent any overlapping execution.
+    let mut replacement = process_mod(&dir, &repo, &task, "1", confine);
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while alive(leader.trim()) || alive(descendant.trim()) {
+        assert!(
+            Instant::now() < deadline,
+            "old workload survived moderator/restart: {mode}/{confine}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    while replacement.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let d = open_driver(&dir, &task).unwrap();
+    let logs = d.store.events(&task, 0).unwrap();
+    assert!(matches!(d.state.state, State::Cancelled | State::Escalated));
+    assert!(d
+        .state
+        .selected_run()
+        .is_none_or(|r| r.status != Some(RunStatus::Passed)));
+    assert_eq!(
+        logs.iter()
+            .filter(|e| matches!(e, Event::RunStarted { .. }))
+            .count(),
+        1
+    );
+    drop(moderator);
+    drop(replacement);
+    std::fs::remove_dir_all(dir).unwrap();
+    true
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn confined_timeout_recovery() {
+    assert!(running_workload_recovery("sandbox", "timeout", true));
+    println!("BBP_ACCEPTANCE PASS timeout");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn confined_cancel_recovery() {
+    assert!(running_workload_recovery("sandbox", "cancel", true));
+    println!("BBP_ACCEPTANCE PASS cancel");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn confined_kill_recovery() {
+    assert!(running_workload_recovery("sandbox", "kill", true));
+    println!("BBP_ACCEPTANCE PASS kill");
 }
