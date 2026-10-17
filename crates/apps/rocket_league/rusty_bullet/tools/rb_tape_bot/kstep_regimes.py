@@ -14,6 +14,7 @@ speed threshold dominates a bucket's mean. Meant for the fuzz tapes
 on the 48 fuzz tapes of 2026-10-07 only full steer with boost under 300 uu/s
 stood out (median 9.5 uu/s, one brake-to-engine switch at |forward speed| 25).
 """
+import os
 import collections
 import json
 import pathlib
@@ -23,7 +24,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+VERIFY = pathlib.Path(os.environ.get("RB_VERIFY") or ROOT / "target" / "release" / "rb-verify.exe")
 LINE = re.compile(
     r"t=\s*([\d.]+)s car=0 \| thr\s+(-?[\d.]+) str\s+(-?[\d.]+) p\s+(-?[\d.]+) y\s+(-?[\d.]+) r\s+(-?[\d.]+) (\S+) \| err vel\s+([\d.]+)"
 )

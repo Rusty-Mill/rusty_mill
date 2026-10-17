@@ -62,9 +62,18 @@ if ($ScoreOnly) {
 
 if (-not (Test-Path $verify)) {
     Push-Location $root
-    cargo build --release -p rb_verify_cli --color never
-    Pop-Location
+    try {
+        cargo build --release -p rb_verify_cli --color never
+        # In the monorepo the binary is in the workspace's target directory, not next to these tools.
+        $targetDir = (cargo metadata --format-version 1 --no-deps 2>$null | ConvertFrom-Json).target_directory
+    } finally {
+        Pop-Location
+    }
+    $built = if ($targetDir) { Join-Path (Join-Path $targetDir "release") "rb-verify.exe" } else { "" }
+    if ($built -and (Test-Path $built)) { $verify = $built }
 }
+# The Python tools (score_dir.py, fuzz_report.py, ...) read this instead of guessing the path.
+$env:RB_VERIFY = $verify
 
 # Frame count and largest gap between consecutive timestamps of a capture.
 function Get-CaptureStats([string]$path) {

@@ -9,6 +9,7 @@ the error passes `threshold_uu` (default 10) with what the car was doing there
 mechanic. A summary line gives the mean over all tapes and how many stay under
 the threshold for the whole tape.
 """
+import os
 import json
 import pathlib
 import re
@@ -17,7 +18,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+VERIFY = pathlib.Path(os.environ.get("RB_VERIFY") or ROOT / "target" / "release" / "rb-verify.exe")
 TAPE_TICKS = 720  # a 6 s tape
 EXP = ROOT / "tools" / "rb_tape_bot" / "experiments"
 

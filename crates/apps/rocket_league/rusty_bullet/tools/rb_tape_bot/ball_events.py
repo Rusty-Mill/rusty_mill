@@ -3,6 +3,7 @@
     python -I tools/rb_tape_bot/ball_events.py replays/batch_<stamp> [name-prefix] [threshold]
 
 For each capture runs `rb-verify --seed-first-frame --self-onestep` (the port stepped once
+import os
 from each recorded frame, so a row's error is that tick's model error alone), clusters the
 ticks whose ball velocity error passes `threshold` (default 5 uu/s) into events, and prints the
 worst tick of each event with the car-ball distance, the ball's recorded speed change and the
@@ -16,7 +17,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+VERIFY = pathlib.Path(os.environ.get("RB_VERIFY") or ROOT / "target" / "release" / "rb-verify.exe")
 LINE = re.compile(
     r"t=\s*([\d.]+)s car=0 \| thr\s+([-\d.]+) str\s+([-\d.]+) p\s+([-\d.]+) y\s+([-\d.]+) r\s+([-\d.]+) (\S+) \| "
     r"err vel\s+([\d.]+) spin\s+([\d.]+) ball\s+([\d.]+)"
