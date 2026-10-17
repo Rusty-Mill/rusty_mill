@@ -423,7 +423,13 @@ pub fn by_model(stream: &str) -> BTreeMap<String, Usage> {
 pub enum LogState {
     /// Nothing printed (yet).
     Empty,
-    /// Printed, but no assistant or result line a cost can be read from.
+    /// Well-formed stream-json lines, but no assistant or result line yet: the
+    /// preamble a real harness prints first (hooks, goal and compaction state,
+    /// the `system` init line). No cost can be read, and none has been spent
+    /// that the log could show.
+    Started,
+    /// Printed, but no line of stream-json at all (plain text): the log cannot
+    /// be read.
     Unreadable,
     Readable,
 }
@@ -433,20 +439,21 @@ pub enum LogState {
 /// trusted to bound the spend. Text that is not JSON at all (a harness's stderr
 /// shares the file) is noise.
 pub fn scan(stream: &str) -> (LogState, u64) {
-    let (mut readable, mut bad) = (0, 0);
+    let (mut readable, mut other, mut bad) = (0, 0, 0);
     for line in stream.lines().map(str::trim_start) {
         if !line.starts_with('{') {
             continue;
         }
         match rusty_serde::json::from_str::<Line>(line) {
             Ok(l) if l.kind == "assistant" || l.kind == "result" => readable += 1,
-            Ok(_) => {}
+            Ok(_) => other += 1,
             Err(_) => bad += 1,
         }
     }
-    let state = match (stream.trim().is_empty(), readable) {
-        (true, _) => LogState::Empty,
-        (false, 0) => LogState::Unreadable,
+    let state = match (stream.trim().is_empty(), readable, other) {
+        (true, _, _) => LogState::Empty,
+        (false, 0, 0) => LogState::Unreadable,
+        (false, 0, _) => LogState::Started,
         _ => LogState::Readable,
     };
     (state, bad)

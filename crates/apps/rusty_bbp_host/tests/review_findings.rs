@@ -407,6 +407,5 @@ fn the_lines_a_real_harness_prints_before_its_first_message_are_not_unreadable()
     // Captured: hook_started, hook_response, active_goal, autocompact_state and
     // the system init line come before the first assistant message.
     let state = tokens::scan(&fixture("system-lines-before-the-first-message")).0;
-    assert_ne!(state, tokens::LogState::Unreadable);
-    assert_ne!(state, tokens::LogState::Readable, "no cost can be read yet");
+    assert_eq!(state, tokens::LogState::Started);
 }

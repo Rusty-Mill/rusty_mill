@@ -583,7 +583,9 @@ fn enforce_cap<S: Store>(
         let blind = match turn.log {
             LogState::Readable => false,
             LogState::Unreadable => true,
-            LogState::Empty => terminal,
+            // Not printed anything the cap can read yet: fine while the run is
+            // live (a harness takes a moment to start), blind at the end.
+            LogState::Empty | LogState::Started => terminal,
         };
         if blind {
             return Err(format!(
