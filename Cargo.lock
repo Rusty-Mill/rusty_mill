@@ -8579,6 +8579,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-bbp"
+version = "0.1.0"
+dependencies = [
+ "orch-cli",
+ "orch-core",
+ "orch-dispatch",
+ "rusty_atomic_file",
+ "rusty_bbp",
+ "rusty_serde",
+]
+
+[[package]]
 name = "orch-claude"
 version = "0.1.0"
 dependencies = [
@@ -12826,6 +12838,7 @@ dependencies = [
 name = "rusty_orch"
 version = "0.1.0"
 dependencies = [
+ "orch-bbp",
  "orch-claude",
  "orch-cli",
  "orch-codex",
@@ -12833,7 +12846,9 @@ dependencies = [
  "orch-dispatch",
  "orch-ollama",
  "orch-store",
+ "rusty_bbp",
  "rusty_json",
+ "rusty_serde",
 ]
 
 [[package]]

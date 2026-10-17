@@ -18,6 +18,7 @@ const GOAL: &str = r#"{"goal":"g","done_when":["d"],"out_of_scope":[],"wall_cloc
 
 fn args(interactive: bool, json: bool) -> Args {
     Args {
+        bbp: None,
         goal: PathBuf::from("goal.json"),
         ollama_model: "m".into(),
         repo: PathBuf::from("."),
@@ -375,4 +376,14 @@ fn run_with_builds_the_runner_from_the_goals_stop_rule() {
     assert_eq!(code, EXIT_FINISHED);
     let json = Value::parse(&String::from_utf8(stdout).expect("utf8")).expect("one JSON document");
     assert_eq!(json.get("calls").and_then(|c| c.as_u64()), Some(1));
+}
+
+#[test]
+fn inline_bbp_configuration_requires_durable_state_before_any_invocation() {
+    let c = include_str!("../../../docs/examples/bbp.json");
+    let goal = GOAL.trim_end().strip_suffix('}').unwrap();
+    let goal = format!("{goal},\"bbp\":{c}}}");
+    let result = run_goal(&args(false, true), &goal, FakeAgent::new([]), "");
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("requires --state"), "{error}");
 }

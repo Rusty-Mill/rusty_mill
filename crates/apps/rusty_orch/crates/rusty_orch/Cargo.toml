@@ -15,6 +15,9 @@ name = "rusty_orch"
 path = "src/main.rs"
 
 [dependencies]
+orch-bbp = { workspace = true }
+rusty_serde = { workspace = true }
+rusty_bbp = { workspace = true }
 orch-core = { workspace = true }
 orch-dispatch = { workspace = true }
 orch-cli = { workspace = true }

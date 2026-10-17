@@ -3,6 +3,39 @@
 - **Status:** Proposed
 - **Date:** 2026-10-10 (amended the same day after design review: crash-recoverable open, persisted gate fence, `bbp show`, the `approved` gate, decoded replies, the supervisor seam)
 
+## Implementation reconciliation (2026-10-16, Issue #767)
+
+The implementation is delivered together, rather than through the five PRs
+sketched below. The original text remains design history. BBP v0.5's supplied
+capability roster supersedes its fixed four-role assumptions. `orch-bbp` accepts
+an explicit provider pool, roster, assignments and existing ProfileSet file;
+it does not synthesize vendor launchers or reuse one-call adapters as MCP agents.
+Each task freezes these inputs before opening. Independent final review is
+validated against candidate writers, including scoped reads and no built-in tools.
+
+The port's stale relay carries `Progress` so races to terminal or working states
+are representable. Generic dispatcher refs use `host:rev:N`. `bbp show` projects
+`TaskView` (including public roster, principals, proposal, pending request and
+terminal facts), or null for absence. A typed `HumanAction::Fenced` adds a driver-
+transaction revision guard to *all* human actions, including subject-guarded
+approvals. `--fence` and `--op` expose this through the existing human CLI.
+Successful answer replay precedes fence checking, preserving crash retries.
+
+Only successful open/adopt plus handle publication charges a hosted card;
+uncertain opens recover by adoption before charging. Human-only relay prevents
+an agent-authored Board answer from becoming a human approval. The Linux
+supervisor observes BBP's lock, not its pid, and production always requests the
+sandbox. See the [adapter documentation](../../crates/orch-bbp/README.md) for
+configuration, supported platforms, tests and limitations.
+
+Review corrections add `Relayed::Rejected(Progress)` for correctable human input,
+preserve pending request subjects at escalation, and namespace runner work by
+task. Moderator recovery also depends on supervised runner cleanup: an owner
+pipe and separate runner process retain the workload wall timer across moderator
+death, and a task runner lock fences replacement through cleanup/reporting.
+Unix manifest publication retains directory fsync; injected Windows test seams
+do not attempt the unsupported directory open. Production remains Linux-only.
+
 ## Context
 The BBP decision record (`crates/libs/protocol/rusty_bbp/docs/review/orch-core-relationship.md`, 2026-10-08) fixed the layering: rusty_orch sits above BBP, a code-producing card becomes one BBP task, and the orch Board retires for such cards once adapters post to BBP instead of returning `Output`. It left one question for BBP stage 3: do the CLI adapters become BBP agents under a BBP MCP server, or does the dispatcher become a BBP principal that proxies them? Stage 3 has landed (`rusty_bbp_host`: per-turn MCP server, human channel, sandboxed runner, moderator, PRs #553 to #601), the first proving run has executed, and its environment faults are fixed. This ADR answers that question and is the design for roadmap Phase 1.
 

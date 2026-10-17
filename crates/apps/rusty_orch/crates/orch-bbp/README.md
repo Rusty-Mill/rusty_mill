@@ -1,0 +1,135 @@
+# orch-bbp
+
+A synchronous `orch_dispatch::TaskHost` adapter over the existing `bbp`
+CLI. BBP continues to own the protocol, event store, MCP server, runner,
+turn scheduling and moderator. This crate never links `rusty_bbp_host`.
+
+Enable hosting with `rusty_orch run goal.json --bbp bbp.json --state .orch`.
+`ORCH_BBP` supplies the same configuration-file path. Alternatively place the
+configuration object under `bbp` in the goal file. Without either, existing
+research/design/triage/review and agent workflows continue unchanged.
+Hosting requires `--state`; keep the BBP store, runner work, and state outside
+of the source checkout and outside workload read roots.
+
+The configuration contains:
+
+- `binary`: built `bbp` binary (or `bbp` on PATH).
+- `dir`, `repo`, `work`: BBP store, source Git repository, runner work directory.
+- `profiles`: existing BBP ProfileSet JSON file, including commands, read roots,
+  explicit workload environment and resource limits. For Cargo, include the
+  toolchain and cached dependencies required by the offline sandbox. No
+  environment or credentials are automatically copied into the workload.
+- `pool`: any number of named agents, each with `vendor`, `program`, `args`.
+  Launchers must speak BBP MCP. BBP expands `{bbp}`, `{dir}`, `{task}`, `{role}`,
+  `{principal}`, `{turn}` and `{mcp_config}`; Orch does not render agent prompts.
+  Codex, Claude, Ollama and future providers use the same configuration surface.
+- `roster`: BBP v0.5 capability records, not vendor names or fixed roles.
+- `assignments`: roster role id to `{agent: POOL_MEMBER, builtin_tools: BOOL}`.
+- `live_turns`: positive concurrent turn cap within the roster size.
+- `max_wall_secs`: positive lifetime bound for each moderator invocation.
+
+See the [two-role configuration](../../docs/examples/bbp.json) and BBP's
+[proving configuration](../../../rusty_bbp_host/docs/proving/agents.json).
+The two-role example deliberately uses custom MCP harness programs: substitute
+installed, authenticated provider harnesses implementing that contract. Existing
+Orch one-call adapters are not BBP harnesses; raw `ollama run` alone does not
+implement MCP. There are no implicit provider-specific launch templates.
+
+Final reviewers must use scoped message reads, no write capabilities, no raw
+logs and no built-in tools. Their configured pool member and vendor must differ
+from every candidate writer. BBP starts fresh harnesses per turn and enforces
+roster visibility. This is configuration policy; Orch cannot attest what a
+user-supplied launcher actually executes. No provider credentials are required
+for the scripted tests.
+
+## Durable lifecycle
+
+The task id hashes the goal bytes and goal/card ids. Identical goal bytes in the same BBP store
+intentionally adopt the same task; use a separate store for an independent repeat. Before any host command,
+Orch publishes a private, no-clobber manifest under `dir/orch/<task hash>`.
+It freezes the brief, pool, roster, assignments and profile bytes. Adoption
+finishes missing assignments and refuses mismatched existing tasks; it never
+reassigns an active role. External configuration files may change between tasks;
+an already frozen task keeps its original configuration. Inline changes alter
+the goal fingerprint and require fresh Orch state, as with existing goals.
+
+The dispatcher persists one opaque host pointer with the plan and ledger through
+`orch-store`. A successful open/adopt is charged once; failed or uncertain opens
+are retried through that id without charging another hosted card. Polls, human
+responses, and resumed tasks consume no additional Orch calls. BBP meters its
+own internal turns and resource budgets. `waiting` exits 0: invoke Orch again to
+poll; it does not install a polling daemon.
+
+Human gates carry the exact displayed revision and subject ids in Board refs.
+Only human-authored answers are relayed. Answers are BBP verb lines, for example
+`approve-plan art:2`, `approve-merge art:4 run:1`, or `receipt art:4 COMMIT`.
+Destructive commands also carry the saved revision. All verbs get an additional
+transactional revision fence and a stable operation id; crash retries replay
+successful answers without applying them twice. Stale answers produce a new
+question. Flags in answer text and subjects outside the displayed gate are
+refused. Invalid host/protocol responses surface as failures; they are never
+accepted solely because the process exited zero.
+
+Approval is a receipt gate, not completion. Orch completes only on BBP `Closed`
+with its recorded receipt, retaining candidate and merged revision artifacts.
+Cancellation fails the card with its reason. Pending requests and escalations
+also become resumable human questions.
+
+The Linux supervisor observes BBP's existing exclusive moderator lock, starts a
+separate process group with private task configuration, appends logs, and records
+a diagnostic pid. Orch exit leaves the moderator running. Later polls restart
+lost moderators; BBP itself revokes inherited turns. Pids are not the liveness
+or ownership authority. Errors are surfaced, with details in the moderator log.
+A moderator lifetime is bounded by `max_wall_secs`; a later Orch invocation may
+start another lifetime for a still-active task.
+
+Production always passes `--confine sandbox`. Windows and other unsupported
+platforms fail closed. Windows parity requires a supported confined BBP runner
+and process supervision; no unconfined fallback is provided. Provider login,
+model quality, real merges, and Windows execution have not been exercised by
+these deterministic tests.
+
+## Validation
+
+From the workspace root:
+
+```sh
+cargo test -p orch-core -p orch-dispatch -p orch-cli -p orch-store \
+  -p orch-codex -p orch-claude -p orch-ollama -p rusty_orch \
+  -p orch-bbp -p rusty_bbp -p rusty_bbp_host
+cargo build -p rusty_orch -p rusty_bbp_host
+BBP_TEST_BIN="$PWD/target/debug/bbp" \
+ORCH_TEST_BIN="$PWD/target/debug/rusty_orch" \
+cargo test -p orch-bbp --lib -- --ignored
+cargo clippy -p orch-bbp -p orch-dispatch -p orch-store -p rusty_orch \
+  -p rusty_bbp -p rusty_bbp_host --all-targets -- -D warnings
+```
+
+The explicit end-to-end tests exercise real binaries, lost replies after each
+open step, persisted CLI resumes, moderator lock/restart, and a two-role MCP
+workflow through runner evidence, independent review, approval and receipt.
+Scripted workflow and running-workload lifecycle fixtures explicitly use
+`--confine none` for their test workloads; production confinement is not configurable through Orch.
+
+### Review corrections
+
+Runner work is isolated under `work/<sha256(task id)>/run-N`; restart/adoption
+uses the same task root. Invalid human syntax or a subject outside the displayed
+gate now supersedes the answered question with an explanatory question. It does
+not fail the card or retry immutable bad input. Transport failures remain
+retryable with the original operation id. An expired request stays visible at
+its escalation gate, with its body and message id, so the human can settle it
+before separately confirming resume.
+
+BBP moderation now invokes the existing runner as a separate process. The
+moderator alone holds the runner's ownership pipe. Closing that pipe, including
+on abrupt moderator death, cancels the active profile; the runner owns the wall
+timer and reaps the workload. An exclusive runner lock remains held through
+cleanup and report publication, preventing a replacement from preparing the
+same checkout too early. Normal moderator exit waits for cleanup before
+releasing its own lock. This hosted-card call budget is not a monetary cap;
+PR #763's run guards remain a separate review and change.
+
+Manifest publication keeps the Unix directory fsync and avoids unsupported
+Windows directory opens. Injected-seam tests are portable; production hosting
+still rejects unsupported platforms. Native Windows checks run in repository CI.

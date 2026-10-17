@@ -58,6 +58,7 @@ pub fn run_with<R: AgentRunner>(
     streams: &mut Streams<'_>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let spec = input::parse(goal_json)?;
+    let host = task_host(args, goal_json)?;
     let runner = make_runner(spec.goal.budget().stop());
     let mut console = Stdio {
         interactive: args.interactive,
@@ -72,7 +73,7 @@ pub fn run_with<R: AgentRunner>(
         store,
         fingerprint: orch_store::fingerprint(goal_json),
     });
-    let summary = run::execute_resumable(spec, runner, &mut console, Instant::now, resume)?;
+    let summary = run::execute_hosted(spec, runner, &mut console, Instant::now, resume, host)?;
     if args.json {
         writeln!(
             streams.stdout,
@@ -83,7 +84,7 @@ pub fn run_with<R: AgentRunner>(
         write!(streams.stdout, "{}", report::text(&summary))?;
     }
     Ok(match summary.ended {
-        Ended::Finished => EXIT_FINISHED,
+        Ended::Finished | Ended::Waiting(_) => EXIT_FINISHED,
         Ended::Blocked(_) => EXIT_BLOCKED,
         Ended::Failed(_) | Ended::WallClock(_) => EXIT_FAILED,
     })
@@ -112,4 +113,49 @@ impl Console for Stdio<'_> {
         let read = self.stdin.read_line(&mut line)?;
         Ok((read > 0 && !line.trim().is_empty()).then_some(line))
     }
+}
+
+/// Configuration stays at the I/O composition root; orch-core remains pure.
+fn task_host(
+    args: &Args,
+    goal_json: &str,
+) -> Result<Option<Box<dyn orch_dispatch::TaskHost>>, Box<dyn std::error::Error>> {
+    let root: rusty_serde::json::Value = rusty_serde::json::from_str(goal_json)?;
+    let config: Option<orch_bbp::Config> = match &args.bbp {
+        Some(file) => Some(rusty_serde::json::from_str(&std::fs::read_to_string(
+            file,
+        )?)?),
+        None => root
+            .get("bbp")
+            .filter(|v| !v.is_null())
+            .map(|v| {
+                rusty_serde::json::to_string(v).and_then(|json| rusty_serde::json::from_str(&json))
+            })
+            .transpose()?,
+    };
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    if args.state.is_none() {
+        return Err("BBP task hosting requires --state for recovery".into());
+    }
+    let spec = input::parse(goal_json)?;
+    let lines = |values: &[orch_core::Text]| {
+        values
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n- ")
+    };
+    let context = format!(
+        "Goal: {}\nDONE WHEN:\n- {}\nConstraints:\n- {}\nIn scope:\n- {}\nOut of scope:\n- {}\nGoal references:\n- {}",
+        spec.goal.outcome(), lines(spec.goal.done_when()), lines(spec.goal.constraints()),
+        lines(spec.goal.in_scope()), lines(spec.goal.out_of_scope()), lines(spec.goal.refs())
+    );
+    let host = orch_bbp::BbpHost::new(
+        config,
+        rusty_bbp::Sha256::of(goal_json.as_bytes()).hex(),
+        context,
+    )?;
+    Ok(Some(Box::new(host)))
 }

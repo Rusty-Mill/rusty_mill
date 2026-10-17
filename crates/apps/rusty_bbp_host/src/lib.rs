@@ -25,6 +25,7 @@ pub mod moderator;
 pub mod pairs;
 pub mod profiles;
 pub mod report;
+pub mod run_control;
 pub mod runner;
 pub mod shadow;
 pub mod tokens;
