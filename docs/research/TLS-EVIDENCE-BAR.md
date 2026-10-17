@@ -53,8 +53,10 @@ All hard gates unless marked. "Candidate" is `rleval-app`'s OIDC transport (Goog
    `NativeTlsStream::tls13_only()`, which the consumer must set), tickets and exporters
    excluded. The file list first proposed here (`x509`, `verify`, `name`, `sign` and the 1.3
    client state machine) is superseded by it; in particular `sign.rs` is not required. *This
-   session cannot supply the review.* A nominee is named (see question 4); independence,
-   time box and the review itself remain open, and nominating a reviewer is not a review.
+   session cannot supply the review.* The reviewer is David Bailey, confirmed independent by
+   the owner on 2026-10-17, with a time box of three weeks and about 40 hours of review
+   effort (question 4). The review itself and its findings remain open, and naming a
+   reviewer is not a review.
 5. **Switch.** The consumer's native path is a normal off-by-default cargo feature in that app,
    with a one-line way back to rustls and a changelog note. No library default moves.
 6. **Scope statement.** The consumer is client-only, TLS 1.3 against named hosts. RSA
