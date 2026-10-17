@@ -544,6 +544,21 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 self.assertIn("    needs: [plan, fmt]\n", self.job_text(job))
         self.assertNotIn("    needs: fmt\n", self.workflow)
 
+    def test_orch_bbp_acceptance_is_required_and_cannot_be_planned_out(self) -> None:
+        job = self.job_text("orch-bbp-acceptance")
+        self.assertIn("runs-on: ubuntu-latest", job)
+        self.assertIn("needs: [plan, fmt]", job)
+        self.assertNotIn("continue-on-error", job)
+        self.assertNotIn("if: needs.plan.outputs", job)
+        self.assertIn("cargo build --locked -p rusty_orch -p rusty_bbp_host", job)
+        self.assertIn("orch_bbp_acceptance.py --output acceptance-results", job)
+        self.assertIn('export BBP_TEST_BIN="$PWD/target/debug/bbp"', job)
+        self.assertIn('export ORCH_TEST_BIN="$PWD/target/debug/rusty_orch"', job)
+        self.assertEqual(job.count("if: always()"), 2)
+        self.assertIn("path: acceptance-results/", job)
+        gate = self.workflow.split("  required-gate:\n", 1)[1]
+        self.assertIn("      - orch-bbp-acceptance\n", gate)
+
     def test_workflows_default_to_read_only_token(self) -> None:
         for path in (WORKFLOW, BASELINE_WORKFLOW):
             with self.subTest(workflow=path.name):
