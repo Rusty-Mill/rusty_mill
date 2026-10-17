@@ -261,3 +261,72 @@ fn a_log_with_only_a_preamble_at_the_end_cannot_be_checked_against_the_cap() {
     let err = terminal("preamble", &preamble()).unwrap_err();
     assert!(err.contains("cannot enforce the cost cap"), "{err}");
 }
+
+#[test]
+fn valid_result_does_not_hide_malformed_complete_record_or_terminal_tail() {
+    for (tag, tail) in [
+        ("truncated", "{\"type\":\"assistant\","),
+        ("malformed", "{\"type\":\"assistant\",bad}\n"),
+    ] {
+        assert!(terminal(tag, &format!("{SMALL_RESULT}\n{tail}"))
+            .unwrap_err()
+            .contains("cannot enforce"));
+    }
+}
+
+#[test]
+fn saved_wall_stop_remains_failed_after_task_closes_and_preserves_mixed_costs() {
+    use rusty_bbp_host::{pairs, tokens};
+    let dir = tempdir("wall-closed-mixed");
+    let fx = closed_task(&dir, "priced-model");
+    let task = fx.st().task.clone();
+    let events = fx.d.store.events(&task, 0).unwrap();
+    rusty_bbp_host::master::ensure(&dir).unwrap();
+    let mut disk = FsStore::open(&dir).unwrap();
+    disk.append(&task, Rev(0), &events).unwrap();
+    let first = moderator::log_path(&dir, &task, TurnId(1));
+    std::fs::write(&first, r#"{"type":"result","is_error":false,"terminal_reason":"completed","total_cost_usd":10,"modelUsage":{"priced-model":{"inputTokens":10000000}}}"#).unwrap();
+    let second = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::TurnGranted { turn, .. } if *turn != TurnId(1) => Some(*turn),
+            _ => None,
+        })
+        .next()
+        .unwrap();
+    std::fs::write(moderator::log_path(&dir, &task, second), [0xff]).unwrap();
+    let out = dir.join("mod.json");
+    std::fs::write(
+        &out,
+        format!(
+            r#"{{"state_ms":[],"stop":"wall","bbp_build_sha":"{}"}}"#,
+            "a".repeat(40)
+        ),
+    )
+    .unwrap();
+    moderator::write_evidence_marker(&dir, &task, 1000.0, "test").unwrap();
+    let f = pairs::facts(
+        &pairs::RunRef {
+            dir: dir.display().to_string(),
+            task: task.0.clone(),
+            mod_output: out.display().to_string(),
+            rubric_ok: true,
+        },
+        &cap(1000.0).criteria,
+        "test",
+        1000.0,
+    )
+    .unwrap();
+    assert!(f.closed && f.stopped && !f.over_cap);
+    assert!(!f.succeeded());
+    assert_eq!(f.killed_turns, 1);
+    assert_eq!(f.accounting_errors.len(), 1);
+    assert!(f.usd_floor.unwrap() >= 10.0);
+    assert_eq!(f.tokens, None);
+    let partial = tokens::of_stopped(&dir, &task, &events, &cap(1000.0).criteria);
+    assert_eq!(f.usd_floor, partial.usd_floor);
+    for stop in ["", "unknown", "Wall"] {
+        assert!(pairs::mod_facts(&format!(r#"{{"state_ms":[],"stop":"{stop}"}}"#)).is_err());
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

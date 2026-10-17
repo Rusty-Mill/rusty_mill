@@ -439,18 +439,23 @@ pub enum LogState {
 /// trusted to bound the spend. Text that is not JSON at all (a harness's stderr
 /// shares the file) is noise.
 pub fn scan(stream: &str) -> (LogState, u64) {
-    use rusty_serde::value::Value;
     let (mut readable, mut other, mut bad) = (0, 0, 0);
     for line in stream.lines().map(str::trim_start) {
-        // Not valid JSON at all is not a record: stderr text (a Node-style
-        // `{ code: ... }` dump), or a line still being written or cut off by a
-        // kill (no prefix of an object is JSON). Its usage, if any, is a loss
-        // the floor already is a lower bound for.
-        if !line.starts_with('{') || rusty_serde::json::from_str::<Value>(line).is_err() {
+        // JSON objects begin with a quoted key. Node's unquoted stderr
+        // objects are supported noise; a broken JSON record is not.
+        if !line.starts_with('{') {
             continue;
         }
-        // Valid JSON that the tool cannot read as a stream-json line is a
-        // record whose usage would be skipped: refused.
+        let rest = line[1..].trim_start();
+        if ["code:", "errno:", "syscall:"]
+            .iter()
+            .any(|key| rest.starts_with(key))
+            && !line.contains("usage")
+            && !line.contains("assistant")
+            && !line.contains("result")
+        {
+            continue;
+        }
         match rusty_serde::json::from_str::<Line>(line) {
             Ok(l) if l.kind == "assistant" || l.kind == "result" => readable += 1,
             Ok(_) => other += 1,
@@ -467,6 +472,30 @@ pub fn scan(stream: &str) -> (LogState, u64) {
         _ => LogState::Readable,
     };
     (state, bad)
+}
+
+// The local JSON parser exposes syntax errors as text. Recognize EOF errors,
+// and prefixes of literals/numbers/escapes by completing only their token and
+// checking that parsing then reaches EOF. Earlier malformed syntax still fails.
+fn incomplete_json(text: &str) -> bool {
+    let eof = |error: &rusty_serde::json::Error| {
+        let message = error.to_string();
+        message.contains("unexpected end of input")
+            || message.contains("unterminated string")
+            || message.contains("unterminated escape")
+    };
+    match rusty_serde::json::from_str::<rusty_serde::value::Value>(text) {
+        Ok(_) => false,
+        Err(e) if eof(&e) => true,
+        Err(_) => [
+            "0", "e", "ue", "rue", "alse", "lse", "se", "ull", "ll", "l", "0000", "\\uDC00",
+        ]
+        .iter()
+        .any(|suffix| {
+            rusty_serde::json::from_str::<rusty_serde::value::Value>(&format!("{text}{suffix}"))
+                .is_err_and(|e| eof(&e))
+        }),
+    }
 }
 
 /// A stream cut after its last `result` line: what the result accounts for,
@@ -596,8 +625,10 @@ pub struct TurnTokens {
     pub cache_ttl: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct TaskTokens {
+    /// Accounting failures retained when loading a stopped run.
+    pub errors: Vec<String>,
     pub turns: Vec<TurnTokens>,
     /// The four counts summed over every turn.
     pub sum: Usage,
@@ -611,7 +642,8 @@ pub struct TaskTokens {
     /// Turns that were granted but left no harness output (no launcher, or it
     /// never started): their cost is unknown, not zero.
     pub without_output: u64,
-    /// Turns with output but no usable result.
+    /// Turns with output but no usable result. Stopped-run accounting also
+    /// counts missing or unreadable output, so absence cannot prove completion.
     pub unknown_turns: u64,
     /// The cache lifetime of the run's writes: `1h`, `5m` or `mixed`; none
     /// when nothing was written.
@@ -625,6 +657,27 @@ pub fn of(
     events: &[Event],
     criteria: Option<&Criteria>,
 ) -> Result<TaskTokens, String> {
+    read_tokens(dir, task, events, criteria, false, false)
+}
+
+/// Live polling defers an unterminated, incomplete JSON tail only.
+pub fn of_live(
+    dir: &Path,
+    task: &TaskId,
+    events: &[Event],
+    criteria: Option<&Criteria>,
+) -> Result<TaskTokens, String> {
+    read_tokens(dir, task, events, criteria, true, false)
+}
+
+fn read_tokens(
+    dir: &Path,
+    task: &TaskId,
+    events: &[Event],
+    criteria: Option<&Criteria>,
+    live: bool,
+    tolerate: bool,
+) -> Result<TaskTokens, String> {
     let revoked: HashSet<TurnId> = events
         .iter()
         .filter_map(|e| match e {
@@ -636,6 +689,7 @@ pub fn of(
         })
         .collect();
     let mut out = TaskTokens {
+        errors: Vec::new(),
         turns: Vec::new(),
         sum: Usage::default(),
         usd: None,
@@ -664,12 +718,29 @@ pub fn of(
             }
             Err(e) => return Err(format!("turn {}: its log cannot be read: {e}", turn.0)),
         };
+        let mut deferred = false;
+        let text = if live && !text.ends_with('\n') {
+            let at = text.rfind('\n').map_or(0, |i| i + 1);
+            let tail = &text[at..];
+            // Parsing a complete JSON value without a newline is safe. Only
+            // an EOF syntax error can be a record still being written.
+            let incomplete = tail.trim_start().starts_with('{') && incomplete_json(tail);
+            if incomplete {
+                deferred = true;
+                text[..at].to_owned()
+            } else {
+                text
+            }
+        } else {
+            text
+        };
         let (log, bad) = scan(&text);
         if bad > 0 {
-            return Err(format!(
-                "turn {}: {bad} line(s) of JSON could not be read, so their usage would be skipped",
-                turn.0
-            ));
+            let error = format!("turn {}: {bad} malformed accounting record(s)", turn.0);
+            if !tolerate {
+                return Err(error);
+            }
+            out.errors.push(error);
         }
         let lower = by_model(&text);
         // What was printed after the last result is spend that result does not
@@ -683,6 +754,18 @@ pub fn of(
             })
             .transpose()?;
         let (complete, unknown, turn_usd, models) = match cost {
+            _ if deferred => (
+                false,
+                Some("incomplete live JSON tail".into()),
+                None,
+                lower.clone(),
+            ),
+            _ if bad > 0 => (
+                false,
+                Some("malformed accounting records".into()),
+                None,
+                lower.clone(),
+            ),
             Some(_) if !trailing.is_empty() => (
                 false,
                 Some("assistant messages after the last result".to_owned()),
@@ -715,7 +798,7 @@ pub fn of(
             (Some(c), None) => {
                 // The result's own account, if it has one, plus what followed it.
                 let head_floor = match price_turn(head, c) {
-                    Ok(Cost::Known { usd, .. }) if !tail.is_empty() => usd,
+                    Ok(Cost::Known { usd, .. }) => usd,
                     _ => c
                         .dollars(&by_model(head))
                         .map_err(|e| format!("turn {}: {e}", turn.0))?,
@@ -723,12 +806,7 @@ pub fn of(
                 let tail_floor = c
                     .dollars(&trailing)
                     .map_err(|e| format!("turn {}: {e}", turn.0))?;
-                Some(if tail.is_empty() {
-                    c.dollars(&lower)
-                        .map_err(|e| format!("turn {}: {e}", turn.0))?
-                } else {
-                    head_floor + tail_floor
-                })
+                Some(head_floor + tail_floor)
             }
             _ => None,
         };
@@ -775,6 +853,48 @@ pub fn of(
         out.usd = all_known.then_some(usd);
     }
     Ok(out)
+}
+
+/// Account for a stopped run without dropping readable turns when another
+/// turn cannot be read. Errors and unknown turns remain explicit.
+pub fn of_stopped(dir: &Path, task: &TaskId, events: &[Event], criteria: &Criteria) -> TaskTokens {
+    let mut out = TaskTokens {
+        usd: Some(0.0),
+        usd_floor: Some(0.0),
+        ..TaskTokens::default()
+    };
+    for event in events
+        .iter()
+        .filter(|e| matches!(e, Event::TurnGranted { .. }))
+    {
+        let mut one = vec![event.clone()];
+        one.extend(
+            events
+                .iter()
+                .filter(|e| matches!(e, Event::TurnEnded { .. }))
+                .cloned(),
+        );
+        match read_tokens(dir, task, &one, Some(criteria), false, true) {
+            Ok(t) => {
+                out.sum = out.sum.plus(t.sum);
+                out.total += t.total;
+                out.revoked += t.revoked;
+                out.without_output += t.without_output;
+                out.unknown_turns += t.unknown_turns + t.without_output;
+                out.usd = out.usd.zip(t.usd).map(|(a, b)| a + b);
+                out.usd_floor = Some(out.usd_floor.unwrap_or(0.0) + t.usd_floor.unwrap_or(0.0));
+                out.turns.extend(t.turns);
+                out.errors.extend(t.errors);
+            }
+            Err(e) => {
+                out.errors.push(e);
+                out.unknown_turns += 1;
+                out.without_output += 1;
+                out.usd = None;
+            }
+        }
+    }
+    out
 }
 
 /// What `bbp tokens` prints: the tokens, and the criteria file they were
@@ -1127,5 +1247,16 @@ mod tests {
         let (dir, task) = log_dir("nolog");
         let t = of(&dir, &task, &[granted(1, "planner")], Some(&criteria())).unwrap();
         assert_eq!((t.without_output, t.usd), (1, None));
+    }
+    #[test]
+    fn json_prefixes_wait_only_for_missing_bytes() {
+        let record = r#"{"type":"assistant","flag":false,"n":-1.2e+3,"escaped":"\u1234","nil":null,"yes":true}"#;
+        for at in 1..record.len() {
+            assert!(incomplete_json(&record[..at]), "prefix {}", &record[..at]);
+        }
+        assert!(!incomplete_json(record));
+        for broken in [r#"{"type":"assistant",bad}"#, r#"{"x":truX"#, r#"{"x":1eX"#] {
+            assert!(!incomplete_json(broken), "{broken}");
+        }
     }
 }

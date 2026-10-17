@@ -444,21 +444,21 @@ fn claude_commands(l: &Launcher) -> Result<Vec<Vec<Arg>>, String> {
         dynamic: false,
         redirect: false,
     };
-    let Some(i) = l
-        .args
-        .iter()
-        .position(|a| a == "-c")
-        .filter(|_| is_shell(&l.program))
-    else {
+    if !is_shell(&l.program) {
         if l.program != "claude" {
             return Err(format!(
-                "the program is {:?}, not `claude`: only a direct `claude` or `sh -c` launcher can be read",
+                "the program is {:?}: only direct claude or sh -c is supported",
                 l.program
             ));
         }
         return Ok(vec![l.args.iter().map(plain).collect()]);
-    };
-    let script = l.args.get(i + 1).map_or("", String::as_str);
+    }
+    // Accept only shell command mode. An operand before -c selects script
+    // mode, so checking a later argument would validate a command never run.
+    if l.args.len() != 2 || l.args[0] != "-c" {
+        return Err("shell launcher must have exactly -c SCRIPT arguments".into());
+    }
+    let script = &l.args[1];
     let mut out = Vec::new();
     let mut vars = Vars::new();
     for words in shell_commands(script)? {
@@ -1419,5 +1419,13 @@ mod tests {
             let err = check_harness(&l).unwrap_err();
             assert!(err.contains("computed"), "{what}: {err}");
         }
+    }
+    #[test]
+    fn shell_script_operand_before_c_is_refused() {
+        let command = "exec claude --model m1 --output-format stream-json --setting-sources '' --disallowedTools Agent,Task -p task";
+        assert!(check_harness(&launcher("sh", &["-c", command])).is_ok());
+        let bad = launcher("sh", &["/tmp/wrapper.sh", "-c", command]);
+        assert!(check_harness(&bad).is_err());
+        assert!(pinned_model(&bad).is_err());
     }
 }

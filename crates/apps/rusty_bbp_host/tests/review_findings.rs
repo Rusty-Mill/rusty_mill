@@ -413,15 +413,67 @@ fn the_lines_a_real_harness_prints_before_its_first_message_are_not_unreadable()
 // ---- third review, finding 2: cut-off lines and stderr noise are not unreadable usage
 
 #[test]
-fn a_line_still_being_written_or_cut_off_by_a_kill_is_not_an_error() {
-    let whole = r#"{"type":"assistant","message":{"id":"a","model":"claude-sonnet-5-5","usage":{"input_tokens":1,"output_tokens":1}}}"#;
-    let cut = &whole[..60];
-    let c = criteria("cut", SONNET_ONLY);
-    // No trailing newline: the harness is mid-write (or was killed mid-write).
-    let t = tokens_of("cut1", &[("planner", format!("{whole}\n{cut}"))], &c)
-        .expect("a cut-off last line is skipped");
-    assert_eq!(t.turns.len(), 1);
-    assert_eq!(t.turns[0].log, tokens::LogState::Readable);
+fn live_tail_is_deferred_but_terminal_and_complete_malformed_records_fail() {
+    let dir = scratch("poll-tail");
+    let task = TaskId("T".into());
+    let events = vec![Event::TurnGranted {
+        role: RoleId("planner".into()),
+        turn: TurnId(1),
+        kind: TurnKind::Default,
+        deadline: Time(0),
+        return_to: None,
+        slice: None,
+    }];
+    let log = log_path(&dir, &task, TurnId(1));
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let c = criteria("poll-tail-c", SONNET_ONLY);
+    let result = fixture("completed-default-ttl");
+    let whole = r#"{"type":"assistant","message":{"id":"new","model":"claude-sonnet-5-5","usage":{"input_tokens":1000000,"output_tokens":1}}}"#;
+    for cut in 1..whole.len() {
+        std::fs::write(&log, format!("{result}\n{}", &whole[..cut])).unwrap();
+        let live = tokens::of_live(&dir, &task, &events, Some(&c)).unwrap();
+        assert!(live.usd_floor.unwrap() >= 0.0086289);
+        assert_eq!(live.usd, None);
+        assert_eq!(live.unknown_turns, 1);
+        assert!(tokens::of(&dir, &task, &events, Some(&c)).is_err());
+    }
+    std::fs::write(&log, format!("{result}\n{whole}\n")).unwrap();
+    let done = tokens::of_live(&dir, &task, &events, Some(&c)).unwrap();
+    assert!(done.usd.is_none());
+    assert!(done.usd_floor.unwrap() > 2.0);
+    std::fs::write(&log, format!("{result}\n{{\"type\":\"assistant\",bad}}\n")).unwrap();
+    assert!(tokens::of_live(&dir, &task, &events, Some(&c)).is_err());
+    assert!(tokens::of(&dir, &task, &events, Some(&c)).is_err());
+}
+
+#[test]
+fn stopped_accounting_retains_ten_dollars_before_an_unreadable_turn() {
+    let dir = scratch("mixed-bad");
+    let task = TaskId("T".into());
+    let c = criteria("mixed-bad-c", SONNET_ONLY);
+    let mut events = Vec::new();
+    for n in 1..=2 {
+        events.push(Event::TurnGranted {
+            role: RoleId("planner".into()),
+            turn: TurnId(n),
+            kind: TurnKind::Default,
+            deadline: Time(0),
+            return_to: None,
+            slice: None,
+        });
+        let log = log_path(&dir, &task, TurnId(n));
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        if n == 1 {
+            std::fs::write(log, r#"{"type":"result","is_error":false,"terminal_reason":"completed","total_cost_usd":10,"modelUsage":{"claude-sonnet-5-5":{"inputTokens":5000000}}}"#).unwrap();
+        } else {
+            std::fs::write(log, [0xff]).unwrap();
+        }
+    }
+    let t = tokens::of_stopped(&dir, &task, &events, &c);
+    assert_eq!(t.usd_floor, Some(10.0));
+    assert_eq!(t.usd, None);
+    assert_eq!(t.unknown_turns, 1);
+    assert_eq!(t.errors.len(), 1);
 }
 
 #[test]

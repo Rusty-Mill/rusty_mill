@@ -559,7 +559,12 @@ fn enforce_cap<S: Store>(
 ) -> Result<(), String> {
     use crate::tokens::LogState;
     let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
-    let t = crate::tokens::of(&cfg.dir, &cfg.task, &events, Some(&cap.criteria))
+    let read = if terminal {
+        crate::tokens::of
+    } else {
+        crate::tokens::of_live
+    };
+    let t = read(&cfg.dir, &cfg.task, &events, Some(&cap.criteria))
         .map_err(|e| format!("moderator: cannot enforce the cost cap: {e}"))?;
     // The floor: a complete turn's cost, and for a turn still running what its
     // printed messages show. It can only rise, so crossing the cap on it is
