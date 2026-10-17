@@ -20,6 +20,7 @@ pub mod admin;
 pub mod args;
 pub mod grade;
 pub mod human;
+pub mod launchers;
 pub mod mcp;
 pub mod moderator;
 pub mod pairs;

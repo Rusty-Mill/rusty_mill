@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## BBP provider launchers
+**2026-10-17**
+
+- The example roster now uses shipped Codex author and Claude reviewer launchers.
+  Author turns use private clones; reviewer turns have no built-in tools and only
+  their bound BBP MCP server. Startup validates active turn, principal and policy.
+- Added offline contracts and an opt-in Linux subscription-provider smoke through
+  validation, independent review, approval and a test-only receipt without merging.
+
+---
+
 ## Required confined BBP acceptance
 **2026-10-17**
 

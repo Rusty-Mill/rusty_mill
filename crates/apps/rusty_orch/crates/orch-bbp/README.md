@@ -30,10 +30,14 @@ The configuration contains:
 
 See the [two-role configuration](../../docs/examples/bbp.json) and BBP's
 [proving configuration](../../../rusty_bbp_host/docs/proving/agents.json).
-The two-role example deliberately uses custom MCP harness programs: substitute
-installed, authenticated provider harnesses implementing that contract. Existing
-Orch one-call adapters are not BBP harnesses; raw `ollama run` alone does not
-implement MCP. There are no implicit provider-specific launch templates.
+The two-role example uses `codex-bbp-harness` and `claude-bbp-harness`, built
+by `cargo build -p rusty_bbp_host`. Put all three host binaries on PATH, or
+use absolute paths. Authenticate the installed Codex and Claude CLIs with their
+subscription logins first. Optional launcher `--model MODEL` pins a provider
+model; `--provider-bin PATH` selects an installed provider executable. No other
+provider flags are forwarded. See the [launcher contract](../../../rusty_bbp_host/docs/provider-launchers.md).
+Existing Orch one-call adapters are not BBP harnesses; raw `ollama run` alone
+does not implement MCP. Other providers still use explicit custom launchers.
 
 Final reviewers must use scoped message reads, no write capabilities, no raw
 logs and no built-in tools. Their configured pool member and vendor must differ
@@ -100,7 +104,7 @@ cargo test -p orch-core -p orch-dispatch -p orch-cli -p orch-store \
 cargo build -p rusty_orch -p rusty_bbp_host
 BBP_TEST_BIN="$PWD/target/debug/bbp" \
 ORCH_TEST_BIN="$PWD/target/debug/rusty_orch" \
-cargo test -p orch-bbp --lib -- --ignored
+cargo test -p orch-bbp --lib tests_e2e:: -- --ignored
 cargo clippy -p orch-bbp -p orch-dispatch -p orch-store -p rusty_orch \
   -p rusty_bbp -p rusty_bbp_host --all-targets -- -D warnings
 ```

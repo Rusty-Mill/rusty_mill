@@ -1,5 +1,9 @@
 # rusty_bbp_host
 
+The package also builds [`codex-bbp-harness` and `claude-bbp-harness`](docs/provider-launchers.md):
+a turn-bound author and an MCP-only independent reviewer for Orch's two-role
+example. Their contract tests are offline; the Linux real-provider smoke is opt-in.
+
 Host commands for the Blackboard Protocol over a `rusty_bbp` file store. Stage 3 of the implementation plan: the per-turn MCP server, the human channel, the sandboxed runner and the moderator loop.
 
 ## The process is the invocation

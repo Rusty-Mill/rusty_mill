@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Runnable Codex author/Claude reviewer BBP launchers in the host package, per-turn MCP contracts and an opt-in Linux real-provider smoke. Reviewer built-in tools are removed by fixed launcher arguments.
 - Required Linux CI acceptance for the confined Orch CLI lifecycle, durable moderator restart and receipt-only completion, plus separately recorded timeout/cancel/kill recovery modes. Sandbox refusal cannot satisfy acceptance.
 - Review fixes for hosted tasks: isolated work roots, replaceable bad answers, expired-request recovery, portable manifest publication, and owned runner cleanup before restart.
 - Optional BBP TaskHost integration (#767): provider-neutral pools, frozen task rosters, durable open/adopt, unmetered resume, fenced human gates, moderator recovery and receipt-only completion.

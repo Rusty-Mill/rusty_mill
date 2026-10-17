@@ -5,8 +5,8 @@
   "work": "/srv/orch/work",
   "profiles": "/srv/orch/profiles.json",
   "pool": {
-    "builder": {"vendor": "codex", "program": "codex-bbp-harness", "args": ["{mcp_config}"]},
-    "judge": {"vendor": "claude", "program": "claude-bbp-harness", "args": ["{mcp_config}"]}
+    "builder": {"vendor": "codex", "program": "codex-bbp-harness", "args": ["--mcp-config", "{mcp_config}"]},
+    "judge": {"vendor": "claude", "program": "claude-bbp-harness", "args": ["--mcp-config", "{mcp_config}"]}
   },
   "roster": [
     {
@@ -24,7 +24,7 @@
     }
   ],
   "assignments": {
-    "maker": {"agent": "builder", "builtin_tools": false},
+    "maker": {"agent": "builder", "builtin_tools": true},
     "auditor": {"agent": "judge", "builtin_tools": false}
   },
   "live_turns": 1,

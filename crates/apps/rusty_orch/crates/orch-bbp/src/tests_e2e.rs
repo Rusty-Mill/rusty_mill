@@ -32,7 +32,7 @@ impl CommandRunner for LostReply {
         Ok(out)
     }
 }
-fn setup() -> (PathBuf, Config) {
+pub(super) fn setup() -> (PathBuf, Config) {
     let dir = temp();
     let mut c = config(&dir);
     c.binary = std::env::var_os("BBP_TEST_BIN")
