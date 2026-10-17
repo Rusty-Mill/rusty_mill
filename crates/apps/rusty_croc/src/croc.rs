@@ -600,7 +600,7 @@ fn unzip_directory(dest: &Path, zip_path: &Path) -> Result<()> {
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let Some(rel) = entry.enclosed_name() else {
-            return Err(format!("unsafe zip entry: {}", entry.name()).into());
+            return Err(format!("unsafe zip entry: {}", entry.name()?).into());
         };
         let out = dest.join(&rel);
         // `enclosed_name` is lexical only; existing (or earlier-extracted)
@@ -2493,6 +2493,50 @@ mod tests {
         drop(st);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zip_directory_round_trip_preserves_layout_and_contents() {
+        let base = std::env::temp_dir().join(format!(
+            "rusty-croc-zip-round-trip-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let source = base.join("source");
+        std::fs::create_dir_all(source.join("nested/empty")).unwrap();
+        std::fs::write(source.join("nested/file.bin"), b"\0zip payload\xff").unwrap();
+        std::fs::write(source.join("empty.txt"), b"").unwrap();
+        let archive = base.join("transfer.zip");
+        zip_directory(&archive, &source).unwrap();
+        let dest = base.join("received");
+        unzip_directory(&dest, &archive).unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("source/nested/file.bin")).unwrap(),
+            b"\0zip payload\xff"
+        );
+        assert_eq!(std::fs::read(dest.join("source/empty.txt")).unwrap(), b"");
+        assert!(dest.join("source/nested/empty").is_dir());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn zip_extraction_rejects_parent_traversal() {
+        let base = std::env::temp_dir().join(format!(
+            "rusty-croc-zip-traversal-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let archive = base.join("transfer.zip");
+        let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
+        writer
+            .start_file("../outside.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"escape").unwrap();
+        writer.finish().unwrap();
+        assert!(unzip_directory(&base.join("received"), &archive).is_err());
+        assert!(!base.join("outside.txt").exists());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[cfg(unix)]
