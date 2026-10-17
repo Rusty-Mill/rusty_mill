@@ -3,7 +3,7 @@
  * Small, global, and partly remembered across reloads.
  */
 import { create } from 'zustand'
-import type { CardState, Suit } from '@/api/types'
+import type { CardState, Frequency, Suit } from '@/api/types'
 
 const KEY = 'fair-play:ui:v1'
 
@@ -14,13 +14,15 @@ export interface Filters {
   /** Person ids, plus `'unassigned'`. Empty = everyone. */
   owners: string[]
   state: StateFilter
+  /** By the assigned frequency, else the suggested one. Empty = any. */
+  frequencies: Frequency[]
   leavesOnly: boolean
   /** Show the cards set aside instead of the family's deck. */
   setAside: boolean
   search: string
 }
 
-export const emptyFilters: Filters = { suits: [], owners: [], state: 'all', leavesOnly: false, setAside: false, search: '' }
+export const emptyFilters: Filters = { suits: [], owners: [], state: 'all', frequencies: [], leavesOnly: false, setAside: false, search: '' }
 
 interface Persisted {
   collapsedSuits: Record<string, boolean>
@@ -47,6 +49,7 @@ export interface UiState extends Persisted {
   setFilters(patch: Partial<Filters>): void
   toggleSuit(suit: Suit): void
   toggleOwner(id: string): void
+  toggleFrequency(frequency: Frequency): void
   clearFilters(): void
   focusSearch(): void
   toggleSuitCollapsed(suit: Suit): void
@@ -72,6 +75,7 @@ export const useUi = create<UiState>()((set, get) => {
     setFilters: (patch) => set((s) => ({ filters: { ...s.filters, ...patch } })),
     toggleSuit: (suit) => set((s) => ({ filters: { ...s.filters, suits: toggle(s.filters.suits, suit) as Suit[] } })),
     toggleOwner: (id) => set((s) => ({ filters: { ...s.filters, owners: toggle(s.filters.owners, id) } })),
+    toggleFrequency: (frequency) => set((s) => ({ filters: { ...s.filters, frequencies: toggle(s.filters.frequencies, frequency) as Frequency[] } })),
     clearFilters: () => set({ filters: emptyFilters }),
     focusSearch: () => set((s) => ({ searchFocus: s.searchFocus + 1 })),
     toggleSuitCollapsed: (suit) => {

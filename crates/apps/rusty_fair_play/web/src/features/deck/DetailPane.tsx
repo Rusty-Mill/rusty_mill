@@ -2,7 +2,7 @@ import { ArrowDown, ArrowUp, ChevronRight, ChevronsLeft, ChevronsRight, Merge, S
 import { useMemo, useRef, useState } from 'react'
 import { StaleError } from '@/api/errors'
 import { Link, useNavigate } from 'react-router-dom'
-import { SUITS, type Card, type CardPatch, type Suit } from '@/api/types'
+import { FREQUENCIES, POINT_SCALE, SUITS, type Card, type CardPatch, type Frequency, type Points, type Suit } from '@/api/types'
 import { PATHS } from '@/app/paths'
 import { useActions, useData } from '@/app/services'
 import { OwnerChip, ownerOf, StateBadge, suitBg, suitText } from '@/components/badges'
@@ -178,6 +178,11 @@ function CardDetail({ card }: { card: Card }) {
     void updateCard(card.id, { ownerId: value || null }, card.etag).catch(() => undefined)
   }
 
+  /** Points and frequency save at once, like dealing; they are not part of the draft. */
+  const mark = (patch: Pick<CardPatch, 'points' | 'frequency'>): void => {
+    void updateCard(card.id, patch, card.etag).catch(() => undefined)
+  }
+
   /** Move child `i` by `delta` as one order request. */
   const move = (i: number, delta: number): void => {
     const ids = children.map((c) => c.id)
@@ -273,6 +278,31 @@ function CardDetail({ card }: { card: Card }) {
           </select>
           <OwnerChip owner={owner} />
         </label>
+
+        <div className="grid grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1.5 text-s">
+          <span className="text-grey">Points</span>
+          <div className="flex items-center gap-2">
+            <select aria-label="Points" value={card.points ?? ''} onChange={(e) => mark({ points: e.target.value ? (Number(e.target.value) as Points) : null })} className="field h-8 w-auto">
+              <option value="">Suggested: {card.suggestedPoints}</option>
+              {POINT_SCALE.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+            {card.points === null && <span className="text-grey">from the card's text; pick one to set it</span>}
+          </div>
+          <span className="text-grey">Frequency</span>
+          <select aria-label="Frequency" value={card.frequency ?? ''} onChange={(e) => mark({ frequency: e.target.value ? (e.target.value as Frequency) : null })} className="field h-8 w-auto">
+            <option value="">Suggested: {card.suggestedFrequency}</option>
+            {FREQUENCIES.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+        </div>
+        {(card.points === null || card.frequency === null) && <p className="m-0 text-xs text-grey">Points and frequency are suggested from the card's text until you pick them.</p>}
 
         {(['conception', 'planning', 'execution'] as const).map((field) => (
           <label key={field} className="flex flex-col gap-1">
