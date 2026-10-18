@@ -50,7 +50,7 @@ class VerifyPath(unittest.TestCase):
                         self.assertEqual(Path(module.VERIFY), Path(expected))
                         def intercept(argv: list, **kwargs: object) -> None:
                             self.assertIsInstance(argv, list)
-                            self.assertEqual(str(argv[0]), expected)
+                            self.assertEqual(Path(argv[0]), Path(expected))
                             self.assertGreater(len(argv), 1)
                             self.assertFalse(kwargs.get('shell', False))
                             raise CalledVerifier
