@@ -62,7 +62,11 @@ fn events(h: &Handle) -> Vec<Event> {
 }
 
 fn wait_state(dir: &Path, h: &Handle, expected: State) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    wait_state_for(dir, h, expected, Duration::from_secs(30))
+}
+
+fn wait_state_for(dir: &Path, h: &Handle, expected: State, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
     loop {
         let report = invoke(dir, "");
         let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &events(h));
@@ -89,6 +93,102 @@ fn wait_state(dir: &Path, h: &Handle, expected: State) -> Value {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+#[ignore = "live subscription providers: BBP_LIVE_SMOKE=1, BBP_CODEX_MODEL, BBP_CLAUDE_MODEL, BBP_TEST_BIN, ORCH_TEST_BIN; Linux sandbox required"]
+fn opt_in_codex_author_claude_reviewer_smoke() {
+    assert_eq!(
+        std::env::var("BBP_LIVE_SMOKE").as_deref(),
+        Ok("1"),
+        "explicit BBP_LIVE_SMOKE=1 required; this test makes model calls"
+    );
+    let codex_model = std::env::var("BBP_CODEX_MODEL").expect("pin BBP_CODEX_MODEL");
+    let claude_model = std::env::var("BBP_CLAUDE_MODEL").expect("pin BBP_CLAUDE_MODEL");
+    let (dir, mut c) = super::tests_e2e::setup();
+    let bin = c.binary.parent().unwrap();
+    for (member, vendor, executable, model) in [
+        ("writer", "codex", "codex-bbp-harness", codex_model),
+        ("judge", "claude", "claude-bbp-harness", claude_model),
+    ] {
+        let agent = c.pool.get_mut(member).unwrap();
+        agent.vendor = vendor.into();
+        agent.program = bin.join(executable).to_str().unwrap().into();
+        agent.args = vec![
+            "--mcp-config".into(),
+            "{mcp_config}".into(),
+            "--model".into(),
+            model,
+        ];
+    }
+    c.assignments.get_mut("maker").unwrap().builtin_tools = true;
+    c.max_wall_secs = 600;
+    std::fs::write(
+        dir.join("bbp.json"),
+        rusty_serde::json::to_string(&c).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("goal.json"), r#"{"goal":"Change tracked file flag from no to ok","done_when":["flag contains exactly ok followed by a newline; confined validation passes; independent review approves"],"out_of_scope":["all other source changes","pushes and real merges"],"wall_clock_secs":600,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Replace no with ok in the tracked file flag, preserving its newline. Change no other file. Submit a nonempty candidate diff through BBP and judge the selected test report.","acceptance":["flag contains ok followed by a newline","no other source file changed"],"max_calls":1}]}"#).unwrap();
+    let h = handle(&invoke(&dir, ""));
+    let timeout = Duration::from_secs(480);
+    wait_state_for(&dir, &h, State::PlanGate, timeout);
+    let view = || TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &events(&h));
+    invoke(
+        &dir,
+        &format!("approve-plan art:{}", view().proposal.unwrap().0),
+    );
+    wait_state_for(&dir, &h, State::MergeGate, timeout);
+    let card = view().card;
+    let candidate = card.candidate.unwrap();
+    let run = card.run.unwrap().0;
+    assert!(events(&h).iter().any(|e| matches!(e, Event::MessageAppended(m) if m.from.0 == "orch-auditor" && matches!(&m.draft.body, rusty_bbp::Body::Verdict(v) if v.subject == candidate && v.run == run && v.verdict == rusty_bbp::VerdictKind::Approve))));
+    let store = FsStore::open(&h.dir).unwrap();
+    let log = events(&h);
+    let report_id = log
+        .iter()
+        .find_map(|e| match e {
+            Event::TestReportStored {
+                run: r,
+                status: rusty_bbp::RunStatus::Passed,
+                report,
+                ..
+            } if *r == run => Some(*report),
+            _ => None,
+        })
+        .expect("selected run passed");
+    let artifact = log
+        .iter()
+        .find_map(|e| match e {
+            Event::ArtifactStored(a) if a.id == report_id => Some(a),
+            _ => None,
+        })
+        .unwrap();
+    let rusty_bbp::ArtifactPayload::TestReport(report) = rusty_bbp::decode_artifact(
+        rusty_bbp::ArtifactKind::TestReport,
+        &store.blob_get(&artifact.blob.sha).unwrap(),
+    )
+    .unwrap() else {
+        panic!("test report expected")
+    };
+    assert_eq!(report.sandbox, "landlock+seccomp:no-endpoints");
+    invoke(
+        &dir,
+        &format!("approve-merge art:{} run:{}", candidate.0, run.0),
+    );
+    wait_state_for(&dir, &h, State::Approved, timeout);
+    assert!(view().receipt.is_none());
+    // Test-only receipt: no Git merge/push command is run by the fixture.
+    invoke(
+        &dir,
+        &format!("receipt art:{} smoke-receipt-no-real-merge", candidate.0),
+    );
+    wait_state_for(&dir, &h, State::Closed, timeout);
+    assert_eq!(
+        view().receipt,
+        Some((candidate, "smoke-receipt-no-real-merge".into()))
+    );
+    println!("BBP_LIVE_SMOKE PASS codex-author/claude-reviewer");
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

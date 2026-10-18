@@ -60,11 +60,28 @@ if ($ScoreOnly) {
     }
 }
 
-if (-not (Test-Path $verify)) {
+if (-not (Test-Path -LiteralPath $verify -PathType Leaf)) {
     Push-Location $root
-    cargo build --release -p rb_verify_cli --color never
-    Pop-Location
+    try {
+        cargo build --release -p rb_verify_cli --color never
+        if ($LASTEXITCODE -ne 0) { throw "cargo build rb_verify_cli failed (exit $LASTEXITCODE)" }
+        # In the monorepo the binary is in the workspace's target directory, not next to these tools.
+        $metadataJson = cargo metadata --format-version 1 --no-deps
+        if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed (exit $LASTEXITCODE)" }
+        $targetDir = ($metadataJson -join "`n" | ConvertFrom-Json -ErrorAction Stop).target_directory
+        if ($targetDir -isnot [string] -or [string]::IsNullOrWhiteSpace($targetDir)) {
+            throw "cargo metadata did not return a valid target_directory"
+        }
+    } finally {
+        Pop-Location
+    }
+    $verify = Join-Path (Join-Path $targetDir "release") "rb-verify.exe"
+    if (-not (Test-Path -LiteralPath $verify -PathType Leaf)) {
+        throw "cargo build succeeded but rb-verify executable is missing: $verify"
+    }
 }
+# Available to Python tools invoked later in this PowerShell process (not a parent of -File).
+$env:RB_VERIFY = $verify
 
 # Frame count and largest gap between consecutive timestamps of a capture.
 function Get-CaptureStats([string]$path) {

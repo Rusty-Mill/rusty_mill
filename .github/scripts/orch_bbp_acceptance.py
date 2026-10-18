@@ -1,4 +1,4 @@
-"""Run strict Linux acceptance cases and retain a result for every mode."""
+"""Run Linux acceptance cases and retain a result for every mode."""
 
 from __future__ import annotations
 
@@ -28,6 +28,10 @@ class Case:
 CASES = (
     Case("lifecycle", "orch-bbp", ("--lib",),
          "tests_confined::confined_orch_cli_lifecycle_resumes_and_records_receipt"),
+    Case("pause-adoption", "orch-bbp", ("--lib",),
+         "tests_e2e::no_progress_pause_survives_orch_processes_without_duplicate_task_or_charge"),
+    Case("rust-lld", "rusty_bbp_host", ("--test", "rust_lld_profile"),
+         "confined_rust_lld_profile_passes_under_one_gib"),
     *(Case(mode, "rusty_bbp_host", ("--test", "moderator_e2e"),
            f"confined_{mode}_recovery") for mode in ("timeout", "cancel", "kill")),
 )
@@ -52,7 +56,7 @@ def assess(mode: str, returncode: int, output: str) -> Result:
         return Result(mode, False, "expected exactly one executed test")
     if f"BBP_ACCEPTANCE PASS {mode}" not in output.splitlines():
         return Result(mode, False, "missing completion evidence")
-    return Result(mode, True, "confined assertions completed")
+    return Result(mode, True, "acceptance assertions completed")
 
 
 def run_case(case: Case, directory: Path) -> Result:

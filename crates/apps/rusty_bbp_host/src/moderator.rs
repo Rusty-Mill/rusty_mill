@@ -391,6 +391,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
     let _lock = lock(&cfg.dir, &cfg.task)?;
     check_evidence_marker(cfg)?;
     let mut d = open_driver(&cfg.dir, &cfg.task)?;
+    crate::moderator_health::inspect(&d, &cfg.dir, &cfg.task)?.check()?;
     let started = Instant::now();
     let mut visits = Visits::new(d.state.state, started);
     let mut sup = Supervision {
@@ -423,6 +424,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
 
     loop {
         d.sync().map_err(|e| format!("{e:?}"))?;
+        crate::moderator_health::inspect(&d, &cfg.dir, &cfg.task)?.check()?;
         d.dispatch(&Command::Tick, now())
             .map_err(|e| format!("{e:?}"))?;
         let state = d.state.state;
@@ -575,6 +577,17 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         }
         std::thread::sleep(cfg.poll);
     }
+}
+
+/// Explicit owner acknowledgement after repairing a no-progress launcher.
+/// Requires the moderator lock and the current displayed BBP revision.
+pub fn reset_failures(dir: &Path, task: &TaskId, expected: Rev) -> Result<(), String> {
+    let _lock = lock(dir, task)?;
+    let d = open_driver(dir, task)?;
+    if d.state.rev != expected {
+        return Err("stale moderator reset revision; inspect bbp show again".into());
+    }
+    crate::moderator_health::acknowledge(dir, task, expected)
 }
 
 /// The end of a run is not exempt from the cap: output that arrived since the

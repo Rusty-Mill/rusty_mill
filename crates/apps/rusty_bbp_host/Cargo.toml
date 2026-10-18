@@ -30,6 +30,14 @@ rusty_libc = { workspace = true, features = ["std"] }
 name = "bbp"
 path = "src/bin/bbp.rs"
 
+[[bin]]
+name = "codex-bbp-harness"
+path = "src/bin/codex_bbp_harness.rs"
+
+[[bin]]
+name = "claude-bbp-harness"
+path = "src/bin/claude_bbp_harness.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

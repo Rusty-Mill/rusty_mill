@@ -1,5 +1,9 @@
 # rusty_bbp_host
 
+The package also builds [`codex-bbp-harness` and `claude-bbp-harness`](docs/provider-launchers.md):
+a turn-bound author and an MCP-only independent reviewer for Orch's two-role
+example. Their contract tests are offline; the Linux real-provider smoke is opt-in.
+
 Host commands for the Blackboard Protocol over a `rusty_bbp` file store. Stage 3 of the implementation plan: the per-turn MCP server, the human channel, the sandboxed runner and the moderator loop.
 
 ## The process is the invocation
@@ -131,3 +135,12 @@ retain executor ownership through group containment and reaping; only then may
 the runner report an error and release its task lock. A delayed-helper test
 covers EOF during setup, cancellation latched before registration, lock
 retention and a forbidden later workload launch.
+
+Provider launch-loop protection is replayed from the existing event log: three
+no-progress forfeits/timeouts for one role pause automatic launches across
+restarts. `bbp mod-health` reports the fault; after repairing it, the owner resets
+with `--reset yes --rev DISPLAYED_REV` under the moderator lock. Orch retains its
+hosted task and call ledger on this diagnostic. See
+[provider launchers](docs/provider-launchers.md) for recovery and the generated
+`bbp profiles rust-lld --sysroot PATH` profile, which bounds linker threads before
+task creation without increasing memory limits or changing frozen profiles.

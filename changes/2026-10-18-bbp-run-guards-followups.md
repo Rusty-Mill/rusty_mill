@@ -10,3 +10,4 @@ changelog: **BBP run guards, follow-ups to #763.** `--tools default` and a check
 - **Changed:** `docs/bbp/2b-criteria.json` pins `min_commit` to `735f1b25e8479424181733756307e0bba8eef200`, the merge commit that contains both the verdict-binding fix (#727) and the run tooling (#763). `prices_as_of` and `status` are unchanged; the criteria and the run remain unapproved.
 - **Tests:** a test for each of the third review's surviving mutations: the end-of-run stop kind is `cap`, the `--disallowed-tools` alias, overshoot counted in N=2 runs only, and a message after the last result leaves the turn incomplete.
 - Host and docs only: no engine, schema or log path.
+- **Review follow-up:** retain both the cap-stop regressions and main's deadline/restart guard test when integrating main. Correct the rationale: Cap and Wall stops both fail the `!stopped` success guard; the cap assertions preserve accounting classification.

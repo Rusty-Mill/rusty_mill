@@ -338,9 +338,9 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
     };
     let first = card(&dir, &task);
     let out = moderator::run(&cfg);
-    // The loop ran to its wall limit (the task never closes), but the first
-    // turn was aborted and a new planner turn granted along the way.
-    assert!(out.is_err(), "the loop stops at the wall limit: {out:?}");
+    // No-progress forfeits move to another turn, then pause before exhausting
+    // the task budget rather than billing launch attempts until the wall limit.
+    assert!(out.unwrap_err().contains("moderator paused"));
     let d = open_driver(&dir, &task).expect("driver");
     assert!(
         d.state.next_turn > 2,
@@ -1967,6 +1967,94 @@ fn confined_kill_recovery() {
 }
 
 #[test]
+fn no_progress_pause_survives_process_restart_and_requires_fenced_owner_reset() {
+    let dir = tempdir("idle-guard");
+    let (repo, _) = repo(&dir);
+    let task = TaskId("idle-guard".into());
+    open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    // Reproduce an approval-denied CLI that exits zero after card/read attempts.
+    let launchers = Launchers::default().with(
+        "planner",
+        harness(
+            &dir,
+            "idle",
+            &[
+                r#"{"name":"task_card","arguments":{}}"#,
+                r#"{"name":"get_artifact","arguments":{"id":1}}"#,
+            ],
+        ),
+    );
+    let agents = dir.join("agents.json");
+    std::fs::write(
+        &agents,
+        rusty_serde::json::to_string(&std::collections::BTreeMap::from([(
+            "planner",
+            launchers.for_role(&"planner".into()).unwrap(),
+        )]))
+        .unwrap(),
+    )
+    .unwrap();
+    let invoke = || {
+        Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["mod", "--dir"])
+            .arg(&dir)
+            .args(["--task", &task.0, "--repo-path"])
+            .arg(&repo)
+            .arg("--work")
+            .arg(dir.join("work"))
+            .arg("--agents")
+            .arg(&agents)
+            .args(["--max-wall-secs", "5", "--poll-ms", "5"])
+            .output()
+            .unwrap()
+    };
+    let first = invoke();
+    assert!(!first.status.success());
+    assert!(String::from_utf8_lossy(&first.stderr).contains("moderator paused"));
+    let launches = String::from_utf8_lossy(&first.stderr)
+        .matches("launching planner")
+        .count();
+    assert_eq!(launches, 3);
+    let view = open_driver(&dir, &task).unwrap().state;
+    assert_eq!(
+        view.spent.reads, 3,
+        "reads alone do not reset the failure count"
+    );
+    let rev = view.rev;
+    let second = invoke();
+    assert!(!second.status.success());
+    assert!(!String::from_utf8_lossy(&second.stderr).contains("launching planner"));
+    assert_eq!(
+        open_driver(&dir, &task).unwrap().state.rev,
+        rev,
+        "restart neither grants nor aborts a turn while paused"
+    );
+    assert!(moderator::reset_failures(&dir, &task, Rev(rev.0 - 1)).is_err());
+    assert!(rusty_bbp_host::moderator_health::read(&dir, &task)
+        .unwrap()
+        .paused
+        .is_some());
+    moderator::reset_failures(&dir, &task, rev).unwrap();
+    assert!(rusty_bbp_host::moderator_health::read(&dir, &task)
+        .unwrap()
+        .paused
+        .is_none());
+    let third = invoke();
+    assert!(!third.status.success());
+    // Cleanup of an old unused turn is outside the newly acknowledged streak;
+    // permit exactly three fresh attempts and retain the task budget.
+    assert!(String::from_utf8_lossy(&third.stderr).contains("moderator paused"));
+    assert_eq!(
+        String::from_utf8_lossy(&third.stderr)
+            .matches("launching planner")
+            .count(),
+        3
+    );
+    assert!(open_driver(&dir, &task).unwrap().state.spent.turns < 10);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn a_cap_stop_reaps_the_owned_runner_before_returning_its_account() {
     let dir = tempdir("cap-owned-runner");
@@ -2039,8 +2127,8 @@ fn cancelled_with_log(tag: &str, log: &str) -> moderator::Outcome {
 #[test]
 fn a_run_that_ends_with_a_log_the_cap_could_not_read_is_a_cap_stop_not_a_wall_stop() {
     // The live poll lets an empty log pass (the harness may be starting); the
-    // end-of-run check does not. `bbp pairs` reads `stop: cap` as over the cap,
-    // so a `Wall` here would let the run load as a success.
+    // end-of-run check does not. Both Cap and Wall stops fail the `!stopped`
+    // success guard in `bbp pairs`; Cap also records the accounting failure.
     let out = cancelled_with_log("end-empty", "");
     let stop = out.stop.expect("stopped at the end");
     assert_eq!(stop.kind, moderator::StopKind::Cap, "{}", stop.reason);
@@ -2050,11 +2138,113 @@ fn a_run_that_ends_with_a_log_the_cap_could_not_read_is_a_cap_stop_not_a_wall_st
 
 #[test]
 fn a_run_that_closes_over_the_cap_is_a_cap_stop_not_a_wall_stop() {
-    // Over the cap at the end: `bbp pairs` reads `stop: cap` as `over_cap`, so a
-    // `Wall` here would let the run load as a success.
+    // Both Cap and Wall stops fail the `!stopped` success guard in `bbp pairs`.
+    // An over-cap closing run must also retain its `over_cap` classification.
     let out = cancelled_by("cap-term-kind", "priced-model", 1.0, moderator::run_to_stop)
         .expect("an outcome");
     let stop = out.stop.expect("stopped");
     assert_eq!(stop.kind, moderator::StopKind::Cap, "{}", stop.reason);
     assert!(out.state.terminal(), "the run did reach its end");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn no_progress_deadlines_pause_live_harnesses_and_survive_restart() {
+    let dir = tempdir("deadline-guard");
+    let (repo, _) = repo(&dir);
+    let task = TaskId("deadline-guard".into());
+    // Open through the real driver with short immutable turn deadlines. No
+    // synthetic TurnEnded events or edited log: moderator ticks expire them.
+    let master = rusty_bbp_host::master::ensure(&dir).unwrap();
+    let mut d = Driver::new(FsStore::open(&dir).unwrap(), task.clone()).with_master(master);
+    let profile_digest =
+        rusty_bbp_host::profiles::freeze(&dir, &task, &ProfileSet::shell("test", "true")).unwrap();
+    let brief = d.store.blob_put(b"wait without publishing");
+    assert_eq!(
+        d.dispatch(
+            &Command::Open(OpenTask {
+                task: task.clone(),
+                roster: common::roster(),
+                repo: "local".into(),
+                profile_digest,
+                budget: Budget {
+                    messages: 40,
+                    bytes: 5_000_000,
+                    reads: 150,
+                    reads_per_turn: 30,
+                    turns: 60,
+                    iterations: 4
+                },
+                turn_ms: 1_000,
+                request_ms: 60_000,
+                max_live_turns: 1,
+                brief,
+                human: "human".into(),
+                policy: SchedulingPolicy::TurnBased,
+            }),
+            rusty_bbp_host::now()
+        )
+        .unwrap(),
+        Response::Stored(ArtId(1))
+    );
+    for role in Who::ALL {
+        admin::assign(
+            &dir,
+            &task,
+            &role.id(),
+            &PrincipalId(role.name().into()),
+            "v",
+        )
+        .unwrap();
+    }
+    let launcher = Launcher {
+        program: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            r#"echo $$ > "$BBP_DIR/live-$BBP_TURN.pid"; exec sleep 30"#.into(),
+        ],
+        builtin_tools: false,
+    };
+    let mut cfg = config(
+        &dir,
+        &task,
+        repo,
+        Launchers::default().with("planner", launcher),
+        10,
+    );
+    cfg.poll = Duration::from_millis(10);
+    assert!(moderator::run(&cfg)
+        .unwrap_err()
+        .contains("moderator paused"));
+    let driver = open_driver(&dir, &task).unwrap();
+    let events = driver.store.events(&task, 0).unwrap();
+    let ended: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TurnEnded { turn, cause } => Some((*turn, *cause)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended.len(), 3);
+    for (turn, cause) in ended {
+        assert_eq!(cause, TurnEnd::Deadline, "must expire rather than forfeit");
+        let pid = std::fs::read_to_string(dir.join(format!("live-{}.pid", turn.0))).unwrap();
+        assert!(
+            !alive(pid.trim()),
+            "deadline harness survived moderator cleanup"
+        );
+    }
+    assert_eq!(
+        rusty_bbp_host::moderator_health::read(&dir, &task)
+            .unwrap()
+            .consecutive
+            .get("planner"),
+        Some(&3)
+    );
+    let rev = driver.state.rev;
+    assert!(moderator::run(&cfg)
+        .unwrap_err()
+        .contains("moderator paused"));
+    assert_eq!(open_driver(&dir, &task).unwrap().state.rev, rev);
+    std::fs::remove_dir_all(dir).unwrap();
 }

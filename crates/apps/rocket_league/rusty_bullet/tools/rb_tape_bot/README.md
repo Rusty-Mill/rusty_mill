@@ -455,3 +455,28 @@ step 4 passed; scoring the captures was not run. The tie-up and overtime
 commands of step 3 were run without `--length five`, so those paths were not
 exercised. Pass an absolute path to `rb_run_tapes --out`: the capture plugin
 resolves a relative path against the game's working directory, not yours.
+
+### Verifier discovery and regression checks
+
+In the monorepo, `run_batch.ps1` checks the verifier build result before using
+`cargo metadata` to locate the release executable, including `CARGO_TARGET_DIR`.
+It stops on build failure, invalid metadata, or a missing executable.
+
+The batch script scores directly; it does not invoke the Python report tools.
+`powershell -File` runs in a child process and cannot set the caller's environment.
+For direct Python use, set `RB_VERIFY` explicitly in the same shell (from the
+monorepo root; adjust the binary path if `CARGO_TARGET_DIR` is overridden):
+
+```powershell
+$env:RB_VERIFY = (Resolve-Path 'target/release/rb-verify.exe').Path
+python -I crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot/score_dir.py 'path to batch'
+```
+
+Unset or empty `RB_VERIFY` retains the standalone `rusty_bullet/target/release`
+default. Paths with spaces are passed as a single subprocess argument.
+Run the deterministic discovery tests without launching a game:
+
+```powershell
+python -I -m unittest discover -s crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot -p 'test_verify_path.py' -v
+pwsh -NoProfile -File crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot/test-run-batch.ps1
+```

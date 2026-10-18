@@ -10,6 +10,7 @@ the number of wheels touching, the throttle sign, boost, handbrake and steer, an
 labels are ranked by the velocity error they accumulate (the sum of the per-tick errors),
 which is what grows into a position error.
 """
+import os
 import collections
 import pathlib
 import re
@@ -17,7 +18,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+VERIFY = pathlib.Path(os.environ.get("RB_VERIFY") or ROOT / "target" / "release" / "rb-verify.exe")
 LINE = re.compile(
     r"t=\s*([\d.]+)s \| thr\s+(-?[\d.]+) str\s+(-?[\d.]+) p\s+(-?[\d.]+) y\s+(-?[\d.]+) r\s+(-?[\d.]+) (\S+) .*?"
     r"dv err \(\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\) \|\s*([\d.]+)\|"
