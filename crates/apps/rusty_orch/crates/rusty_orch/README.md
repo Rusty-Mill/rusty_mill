@@ -48,3 +48,45 @@ cargo test -p rusty_orch
 ```
 
 Unit tests cover the argument parser. Integration tests drive the goal-file parser through every rejection, the run loop through finished, blocked, answered, blank answer, wall clock, dispatcher failure, and a partial answer round whose second read fails. Repeated entry-point calls in one test process cover resume logic over `orch_dispatch::fake::FakeAgent`; a separate subprocess test executes the built binary twice with a scripted local CLI and reopens the state directory. The deterministic store fault test exercises error/drop/reopen recovery, not an OS process crash.
+
+## Repository intelligence (Milestone 1)
+
+```sh
+cargo run --locked -p rusty_orch -- inspect --repo /path/to/rusty_mill
+```
+
+`inspect` prints one JSON document to stdout; omit `--repo` to inspect the current
+directory's Cargo workspace. It does not use goal-run environment variables,
+providers, BBP configuration or state. Requires Cargo and Python 3.11+ on PATH,
+a current Cargo.lock, and dependencies already cached (prepare those separately
+with normal Cargo tooling). `cargo metadata --all-features --frozen` forbids
+network access and lockfile changes. No workspace code is compiled or executed.
+Repository Cargo configuration and PATH executables are trusted local tooling.
+Inspection success exits 0 even with findings; prerequisite, discovery and
+analysis failures exit 1 with stderr and no partial JSON report; usage errors exit 2.
+The architecture policy expects Rusty Mill's `crates/<layer>/<family>` layout
+(including its legacy family paths) and per-package `rusty_mill.layer` metadata.
+
+Schema version 1 contains:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version`, `workspace_root`, `analysis` | Format version, snapshot root, metadata command, scope and limitations. |
+| `crates` | Cargo package IDs, names, relative manifests, declared layers, product families, direct dependencies and direct reverse dependencies. |
+| `dependency_edges` | Caller and dependency package IDs, Cargo alias, dependency kinds (`null` means normal) and target conditions. |
+| `findings` | Deterministically ordered records with `id`, `rule`, `severity`, `affected_crates`, `evidence`, `recommendation`, and `impact`. |
+
+Crate references use Cargo package IDs within this snapshot. Evidence identifies
+manifest fields/declarations or canonical CI validation diagnostics. `impact`
+includes affected crates and every transitive workspace dependent in
+`crates_to_validate`; it estimates validation scope, not implementation effort.
+Finding IDs hash rule and evidence (workspace-root normalized); they change when
+the evidence changes. Repeated scans of an unchanged workspace are identical.
+
+Rules reuse the existing CI layer/family and dependency-policy checks. Duplicate
+explicit external declarations are a warning suggesting review for hoisting;
+only identical versions, features, sources, kinds and targets are grouped.
+Inherited/path declarations are excluded. These findings can later seed Orch
+cards and BBP maintenance tasks; this command never creates or executes tasks.
+Static validation does not infer build/test/CI results. Reports exceeding the
+existing process seam's 1 MiB limit fail explicitly. See [ADR-0014](../../docs/adr/0014-repository-intelligence.md).

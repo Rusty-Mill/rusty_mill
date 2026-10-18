@@ -13,6 +13,10 @@ use rusty_orch::cli::{self, Streams};
 const OLLAMA_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn main() -> ExitCode {
+    let mut argv = std::env::args().skip(1);
+    if argv.next().as_deref() == Some("inspect") {
+        return inspect(argv);
+    }
     let cwd = std::env::current_dir().unwrap_or_default();
     let parsed = args::parse(std::env::args().skip(1), |k| std::env::var(k).ok(), cwd);
     let args = match parsed {
@@ -55,6 +59,38 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             let _ = writeln!(streams.stderr, "rusty_orch: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn inspect(argv: impl IntoIterator<Item = String>) -> ExitCode {
+    use rusty_orch::inspect;
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("rusty_orch: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let repo = match inspect::parse(argv, cwd) {
+        Ok(repo) => repo,
+        Err(ArgsError::Help) => {
+            println!("{}", inspect::USAGE);
+            return ExitCode::SUCCESS;
+        }
+        Err(ArgsError::Usage(message)) => {
+            eprintln!("rusty_orch: {message}\n{}", inspect::USAGE);
+            return ExitCode::from(2);
+        }
+    };
+    match inspect::inspect(&repo, &orch_cli::StdCommand) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("rusty_orch: {error}");
             ExitCode::from(1)
         }
     }
