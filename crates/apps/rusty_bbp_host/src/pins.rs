@@ -1465,4 +1465,28 @@ mod tests {
         assert!(check_harness(&bad).is_err());
         assert!(pinned_model(&bad).is_err());
     }
+
+    // ---- third review, finding 4: a redirect after `--` still redirects
+
+    #[test]
+    fn a_redirect_or_pipe_is_seen_wherever_it_is_on_the_command() {
+        let flags = "--model m1 --output-format stream-json --setting-sources '' --disallowedTools Agent,Task";
+        let good = |tail: &str| launcher("sh", &["-c", &format!("exec claude {flags} {tail}")]);
+        // Nothing else is wrong with any of these: only the redirect or pipe.
+        assert_eq!(check_harness(&good("-p task")), Ok(()));
+        assert_eq!(check_harness(&good("-p -- 'do it'")), Ok(()));
+        for (what, tail) in [
+            ("before --", "-p task > /tmp/x"),
+            ("after --", "-p -- 'do it' > /tmp/x"),
+            ("stderr after --", "-p -- 'do it' 2>/dev/null"),
+            ("append after --", "-p -- 'do it' >> /tmp/x"),
+            ("both after --", "-p -- 'do it' &> /tmp/x"),
+            ("pipe after --", "-p -- 'do it' | tee /tmp/x"),
+            ("pipe before --", "-p task | tee /tmp/x"),
+            ("input redirect after --", "-p -- 'do it' < /tmp/in"),
+        ] {
+            let err = check_harness(&good(tail)).unwrap_err();
+            assert!(err.contains("redirected or piped"), "{what}: {err}");
+        }
+    }
 }
