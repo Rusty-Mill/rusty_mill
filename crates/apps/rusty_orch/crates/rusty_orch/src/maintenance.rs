@@ -137,7 +137,7 @@ struct DryRun {
     mode: String,
     selected: Option<Selection>,
     excluded: Vec<Exclusion>,
-    state: Option<Journal>,
+    state: Option<Value>,
 }
 
 fn relative_manifest(path: &str) -> bool {
@@ -291,6 +291,52 @@ struct Journal {
     schema_version: u32,
     repo: String,
     attempts: Vec<Attempt>,
+}
+
+fn public_state(journal: &Journal) -> Result<Value> {
+    // Freeze execution inputs privately for recovery, but never print launcher
+    // arguments or the configured workload environment in a public report.
+    let attempts = journal
+        .attempts
+        .iter()
+        .map(|attempt| {
+            Ok(Value::Map(vec![
+                (
+                    "selection".into(),
+                    json::from_str(&json::to_string(&attempt.selection)?)?,
+                ),
+                ("base".into(), Value::String(attempt.base.clone())),
+                ("namespace".into(), Value::String(attempt.namespace.clone())),
+                (
+                    "handle".into(),
+                    attempt
+                        .handle
+                        .clone()
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                ),
+                ("status".into(), Value::String(attempt.status.clone())),
+                ("detail".into(), Value::String(attempt.detail.clone())),
+                (
+                    "pr_url".into(),
+                    attempt
+                        .pr_url
+                        .clone()
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "last_card".into(),
+                    attempt.last_card.clone().unwrap_or(Value::Null),
+                ),
+            ]))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Value::Map(vec![
+        ("schema_version".into(), Value::UInt(1)),
+        ("repo".into(), Value::String(journal.repo.clone())),
+        ("attempts".into(), Value::Seq(attempts)),
+    ]))
 }
 
 fn command(runner: &impl CommandRunner, repo: &Path, args: &[String]) -> Result<String> {
@@ -500,7 +546,7 @@ pub fn execute(options: &Options, runner: &impl CommandRunner) -> Result<String>
                 mode: "dry-run: recovery pending".into(),
                 selected: None,
                 excluded: vec![],
-                state: Some(journal),
+                state: Some(public_state(&journal)?),
             })?);
         }
         advance(&mut journal, index, &journal_path, &state_dir)?;
@@ -512,7 +558,7 @@ pub fn execute(options: &Options, runner: &impl CommandRunner) -> Result<String>
             &journal_path,
             &state_dir,
         )?;
-        return Ok(json::to_string(&journal)?);
+        return Ok(json::to_string(&public_state(&journal)?)?);
     }
     let inspected_base = git(runner, &source, &["rev-parse", "HEAD"])?;
     let inspection: Inspection = json::from_str(&crate::inspect::inspect(&source, runner)?)?;
@@ -616,7 +662,7 @@ pub fn execute(options: &Options, runner: &impl CommandRunner) -> Result<String>
         &state_dir,
     )?;
     drop(lock);
-    Ok(json::to_string(&journal)?)
+    Ok(json::to_string(&public_state(&journal)?)?)
 }
 
 fn advance(journal: &mut Journal, index: usize, path: &Path, state_dir: &Path) -> Result<()> {

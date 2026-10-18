@@ -512,3 +512,86 @@ fn publication_uses_real_git_worktree_and_recovers_without_duplicate_commit_or_p
     );
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn public_reports_exclude_frozen_configuration_and_environment() {
+    let mut attempt = attempt();
+    attempt.profiles = "private-profile-marker".into();
+    attempt.config.binary = "private-launcher-marker".into();
+    let journal = Journal {
+        schema_version: 1,
+        repo: "/repo".into(),
+        attempts: vec![attempt],
+    };
+    let report = json::to_string(&public_state(&journal).unwrap()).unwrap();
+    assert!(!report.contains("private-profile-marker"));
+    assert!(!report.contains("private-launcher-marker"));
+    assert!(report.contains("opening") && report.contains("durable"));
+}
+
+#[test]
+fn linked_worktrees_recover_one_journal_and_exclude_concurrent_cycles() {
+    use std::process::Command;
+    let dir = temp();
+    let repo = dir.join("repo");
+    let linked = dir.join("linked");
+    fs::create_dir_all(&repo).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.invalid"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fs::write(repo.join("flag"), "base\n").unwrap();
+    git(&StdCommand, &repo, &["add", "."]).unwrap();
+    git(&StdCommand, &repo, &["commit", "-qm", "base"]).unwrap();
+    git(
+        &StdCommand,
+        &repo,
+        &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
+    )
+    .unwrap();
+    let common = repo.join(".git").canonicalize().unwrap();
+    let state = common.join("rusty-orch-maintenance");
+    fs::create_dir_all(&state).unwrap();
+    let mut pending = attempt();
+    pending.profiles = "private-workload-environment".into();
+    let journal = Journal {
+        schema_version: 1,
+        repo: common.to_string_lossy().into(),
+        attempts: vec![pending],
+    };
+    save(&state.join("journal.json"), &journal).unwrap();
+    let mut options = Options {
+        repo: repo.clone(),
+        bbp: None,
+        execute: false,
+        publish_pr: false,
+        benefits: BTreeMap::new(),
+    };
+    let first = execute(&options, &StdCommand).unwrap();
+    options.repo = linked;
+    assert_eq!(execute(&options, &StdCommand).unwrap(), first);
+    assert!(first.contains("recovery pending") && first.contains("durable"));
+    assert!(!first.contains("private-workload-environment"));
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    options.execute = true;
+    assert!(execute(&options, &StdCommand)
+        .unwrap_err()
+        .to_string()
+        .contains("another maintenance cycle"));
+    drop(lock);
+    fs::remove_dir_all(dir).unwrap();
+}

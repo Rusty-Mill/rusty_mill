@@ -113,7 +113,14 @@ fn cycle(options: &Options, expected: &str) -> Journal {
             }
             panic!("maintenance fixture failed: {error}");
         }
-        let j: Journal = json::from_str(&result.unwrap()).unwrap();
+        result.unwrap();
+        let j = load(
+            &options
+                .repo
+                .join(".git/rusty-orch-maintenance/journal.json"),
+            &options.repo.join(".git"),
+        )
+        .unwrap();
         assert_eq!(j.attempts.len(), 1);
         if j.attempts[0].status == expected {
             return j;
@@ -161,9 +168,9 @@ fn sandboxed_maintenance_recovers_and_prepares_reviewed_pr_without_merging() {
     let sysroot = process(&repo, "rustc", &["--print", "sysroot"]);
     let input_profiles = root.join("profiles.json");
     let profiles = format!(
-        r#"{{"profiles":[{{"name":"fixture","program":"git","args":["status","--porcelain"]}}],"read_roots":["/bin","/usr","/lib","/lib64",{}],"env":[["PATH",{}],["CARGO_HOME",".maintenance-cargo"],["RUSTFLAGS","-C link-arg=-Wl,--threads=1"]],"limits":{{"cpu_secs":60,"wall_secs":60,"memory_bytes":1073741824,"file_bytes":268435456,"open_files":256,"processes":4096}},"tree":"sha256(git write-tree id)"}}"#,
+        r#"{{"profiles":[{{"name":"fixture","program":"git","args":["status","--porcelain"]}}],"read_roots":["/bin","/usr","/lib","/lib64",{}],"env":[["PATH",{}],["GIT_CONFIG_NOSYSTEM","1"],["GIT_CONFIG_GLOBAL","/dev/null"],["CARGO_HOME",".maintenance-cargo"],["RUSTFLAGS","-C link-arg=-Wl,--threads=1"]],"limits":{{"cpu_secs":60,"wall_secs":60,"memory_bytes":1073741824,"file_bytes":268435456,"open_files":256,"processes":4096}},"tree":"sha256(git write-tree id)"}}"#,
         json::to_string(&sysroot).unwrap(),
-        json::to_string(&format!("{sysroot}/bin:/usr/local/bin:/usr/bin:/bin")).unwrap()
+        json::to_string(&format!("{sysroot}/bin:/usr/bin:/bin")).unwrap()
     );
     fs::write(&input_profiles, profiles).unwrap();
     let init = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"maintenance-fixture","version":"1"}}}"#;
@@ -326,8 +333,8 @@ fn sandboxed_maintenance_recovers_and_prepares_reviewed_pr_without_merging() {
             .count(),
         1
     );
-    let repeated = execute(&options, &LocalPullRequests).unwrap();
-    let repeated: Journal = json::from_str(&repeated).unwrap();
+    execute(&options, &LocalPullRequests).unwrap();
+    let repeated = load(&state_dir.join("journal.json"), &repo.join(".git")).unwrap();
     assert_eq!(repeated.attempts.len(), 1);
     process(
         &repo,

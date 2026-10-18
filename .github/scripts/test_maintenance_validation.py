@@ -1,5 +1,6 @@
 """Exercise the frozen BBP maintenance scope gate against real Git candidates."""
 import pathlib
+import os
 import subprocess
 import tempfile
 import unittest
@@ -30,10 +31,10 @@ class ScopeGate(unittest.TestCase):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(text)
 
-    def check(self, selection):
+    def check(self, selection, environment=None):
         import json
         self.git("add", ".")
-        return subprocess.run(["python3", "-I", str(PROGRAM), json.dumps(selection)], cwd=self.repo, capture_output=True)
+        return subprocess.run(["python3", "-I", str(PROGRAM), json.dumps(selection)], cwd=self.repo, capture_output=True, env=environment)
 
     def layer(self):
         return {"rule": "layer-classification", "allowed_paths": ["crates/apps/a/Cargo.toml"]}
@@ -49,6 +50,15 @@ class ScopeGate(unittest.TestCase):
         path = self.repo / "crates/apps/a/Cargo.toml"
         path.write_text(path.read_text().replace('version = "0.1.0"', 'version = "0.2.0"'))
         self.assertNotEqual(self.check(self.layer()).returncode, 0)
+
+    def test_scope_does_not_depend_on_machine_git_configuration(self):
+        self.repair_layer()
+        with tempfile.NamedTemporaryFile(mode="w") as config:
+            config.write("[invalid Git config\n")
+            config.flush()
+            environment = dict(os.environ, GIT_CONFIG_SYSTEM=config.name, GIT_CONFIG_GLOBAL=config.name)
+            result = self.check(self.layer(), environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_wrong_layer_out_of_scope_and_deletion_are_refused(self):
         self.repair_layer()

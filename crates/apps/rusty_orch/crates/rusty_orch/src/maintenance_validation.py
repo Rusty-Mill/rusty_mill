@@ -5,6 +5,7 @@ repository code is imported. Git HEAD is the candidate's recorded base.
 """
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -12,7 +13,10 @@ import tomllib
 
 
 def git(*args):
-    return subprocess.check_output(["git", *args])
+    # Inspection concerns the candidate, not machine/user Git configuration.
+    # System config may also be deliberately unreadable inside the sandbox.
+    environment = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+    return subprocess.check_output(["git", *args], env=environment)
 
 
 def before(path):

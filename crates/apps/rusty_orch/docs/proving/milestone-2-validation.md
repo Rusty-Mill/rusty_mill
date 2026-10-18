@@ -1,72 +1,70 @@
 # Milestone 2 implementation validation — 2026-10-18
 
-Base: `25dd95173a1fee869411565092e63c2eacf01f40` (PR #783), verified against
-GitHub's current `main` at implementation start. Toolchain: Rust/Cargo 1.98.1;
-Python 3.12. This is an honest local checkpoint, **not a claim of green CI or a
-completed sandboxed/live-provider proving run**.
+Implementation base: `25dd95173a1fee869411565092e63c2eacf01f40` (PR #783), verified
+against current `main` at task start. Toolchain: Rust/Cargo 1.98.1; Python 3.12.
+This records actual results; it does not claim green CI or a passing sandboxed
+maintenance workflow while that acceptance case is unresolved.
 
-## Executed results
+## Executed in the original repository checkout
 
 | Check | Observed result |
 | --- | --- |
-| Maintenance module, recovery/identity/approval/publication tests, existing argument and inspection unit tests | 19 passed; sandboxed end-to-end case ignored pending host prerequisites |
-| Real Cargo/Git maintenance integration | 2 passed: deterministic read-only discovery; open-PR conflict refuses before configuration/task creation |
-| Actual Git draft-publication path | Included above: private worktree, exact candidate tree, commit and push to local bare origin, GitHub CLI seam, second invocation adopts the same commit/PR |
-| Frozen Python scope gate against real staged Git patches | 4 passed: beneficial layer repair and identical hoist accepted; unrelated/version/feature/deletion/wrong-layer changes refused |
-| BBP durable store and fenced human actions | 12 passed, including reopened task inventory, interrupted log recovery, competing writers and approval/receipt replay |
-| Orch BBP/Claude/CLI regression invocation | 34 passed, 1 failed, 11 ignored; process-group failure described below |
-| Remaining Orch core/dispatch/Codex/Ollama regression invocation | 92 passed, 4 ignored |
-| Clippy on the maintenance library/integration target | Passed with `-D warnings` |
-| Repository metadata, without resolving dependencies | `cargo metadata --no-deps --format-version 1 --offline` passed on the actual full workspace |
-| Repository intelligence Python suite | 12 passed, 1 platform-specific skip |
-| Existing layer/dependency policy Python suites | 15 and 17 passed |
-| Acceptance collector tests / workflow contract tests | 3 and 60 passed |
-| Formatting / change fragments / whitespace | Passed |
+| `cargo test --locked --offline -p rusty_orch -p orch-store` | Passed: original command composition, store, unit/integration and subprocess-resumption tests; opt-in sandbox workflow remains ignored here |
+| `cargo clippy --locked --offline -p rusty_orch --all-targets -- -D warnings` | Passed |
+| Original core, dispatcher, BBP, Codex, Claude and Ollama adapter suites | 116 passed, 15 opt-in cases ignored |
+| Real Cargo/Git maintenance integration | Dry-run makes no writes; current PR conflict prevents task creation |
+| Real linked Git worktrees | Both recover the same private journal; the shared lock excludes a concurrent cycle |
+| Real Git draft-publication fixture | Creates private worktree, verifies candidate tree, commits/pushes to a local bare origin; repeat adopts same commit/PR through a GitHub CLI seam |
+| Public report boundary | Frozen profiles, launcher configuration and environment remain private |
+| Python scope gate against staged Git candidates | 5 passed: layer repair and exact hoist accepted; unrelated/version/feature/deletion/wrong-layer edits refused; machine/user Git configuration excluded |
+| Formatting, fragments, whitespace | Passed |
 
-The Rust results above use a separate offline validation checkout containing the
-first-party dependency scope. Its Cargo workspace excludes unrelated
-members, removes uncached external *dev* oracles, and excludes `orch-store` and its
-uncached embedded-engine dependencies from the command library's composition.
-The actual maintenance/inspection/argument modules, BBP adapter/protocol/store,
-and tested core/provider adapters are copied unchanged. No production store or
-adapter was stubbed in the repository. This checks the new code and existing
-adapter contracts; it does **not** establish that the original complete binary,
-store composition or full workspace compiled. See commands below and the CI
-acceptance lane for the required complete-environment verification.
+Additional focused checks: 12 BBP durable-store/human-fence tests passed. The
+existing real CLI uncertain-open test passed across every injected lost reply
+and froze the original provider pool. Earlier offline checks used a copied
+first-party dependency scope; the original command and store were subsequently
+built/tested directly after a scoped dependency-fetch retry succeeded. No
+production implementation or store was stubbed in the repository.
 
 The unchanged `orch-cli::timeout_kills_the_whole_group_and_joins_within_the_bound`
-test timed out/killed its process group correctly, then failed its final liveness
-assertion. `ps` showed both remaining `sleep` processes in zombie state with
-PPID 1 (PGID 6674), rather than executing children. This container's PID 1 had not
-reaped them. The failure is retained as a failure; the test was not weakened or
-silently counted as passing.
+failed in the initial local regression run after killing its processes: `ps`
+showed only PID-1-owned zombie `sleep` processes. The test explicitly delegates
+orphan reaping to init. Its failure was retained, and no process-runner behavior
+or assertion was weakened. CI's original workspace test lanes passed.
 
-## Blocked or unexecuted
+## Real BBP acceptance and remaining limitations
 
-- Full workspace tests fail dependency resolution: cached `boxcars` is missing.
-- Complete focused Orch composition requires uncached registry dependencies
-  (`proptest` at resolution, then the embedded engine's serde/bincode/etc.).
-- Building the real BBP host in the offline scope requires uncached `libc`.
-- Git fetch and package fetch cannot reach the configured proxy. A requested
-  network-enabled build was not executed: automatic approval review failed to
-  initialize its session (`thread-store` metadata recovery deadline). This was
-  a review infrastructure failure, not a determination that the command was
-  unsafe. No network-policy bypass or sandbox weakening was used.
-- The sandboxed end-to-end maintenance case is implemented, typechecked and
-  registered in the existing unconditional Linux BBP acceptance lane. It has
-  **not run locally**. The lane installs fmt/clippy, builds the real host and
-  runs the exact case, requiring one executed test and a completion marker;
-  its logs/results are uploaded by the existing acceptance collector.
-- Codex, Claude and Ollama live-provider tests remain opt-in and unexecuted.
-  Provider contract tests passing does not verify subscription login or live
-  provider functionality. No credentials were configured in this environment.
-- Remote draft-publication behavior uses a GitHub CLI seam in local tests. Real
-  Git branching, tree verification, committing, local push and retry adoption
-  execute; no maintenance candidate was published or merged remotely.
+The initial PR CI run built the actual host and original Orch command and passed
+workspace build/test/clippy, formatting, policy and workflow tests. Its failures
+were the generated workspace map (fixed for the new atomic-file dependency) and
+the new maintenance acceptance fixture. Existing confined lifecycle,
+pause/adoption, Rust/LLD, timeout, cancellation and kill acceptance modes passed.
+
+The maintenance fixture reached BBP's no-progress protection after a rejected
+provider turn. Diagnostic agent/reporter logs were added; the diagnostic run was
+queued behind broad workspace jobs. Machine Git configuration is now excluded
+from scope checks, and the fixture uses the system Python/Git path plus the
+explicit Rust toolchain. These changes do not relax BBP approval, health or
+sandbox gates. A passing exact-head `BBP_ACCEPTANCE PASS maintenance` marker is
+still required before calling the milestone fully validated.
+
+Local execution of that same production-sandbox workflow reaches the plan gate,
+recovers after moderator death, receives a separately issued human approval and
+opens its validation run. The host then refuses execution because Landlock is
+`NotEnforced` in this environment. The same refusal occurs outside the outer
+tool sandbox. No unconfined result is counted as acceptance evidence. The
+frozen scope/fmt/test/clippy commands pass separately in our trusted generated
+fixture; that is diagnostic evidence, not a sandboxed end-to-end pass.
+
+The Codex CLI is installed and reports a ChatGPT login. Automatic approval
+rejected the proposed repository-content live smoke because it would transmit
+repository instructions to the external provider. The safer retry used only a
+synthetic fixture and nonce, and was approved; it failed before a model reply
+because the CLI could not initialize its app-server state on a read-only
+filesystem. Claude and Ollama CLIs are absent. Live-provider behavior therefore
+remains unverified; passing adapter contracts is not a live-provider pass.
 
 ## Reproduction
-
-In a complete checkout with dependencies cached or network access restored:
 
 ```sh
 cargo fmt -p rusty_orch -p rusty_bbp -- --check
@@ -81,9 +79,7 @@ BBP_TEST_BIN="$PWD/target/debug/bbp" cargo test --locked -p rusty_orch --lib \
   -- --ignored --exact --nocapture
 ```
 
-The local offline run used `--manifest-path
-/workspace/maintenance-validation/Cargo.toml --offline` with the Rust target
-flags above. Detailed local logs are retained in that checkout as
-`maintenance-tests.log`, `bbp-durable.log`, `orch-regression.log`,
-`orch-remaining-regression.log` and `ci-workflow.log`. Merge readiness still
-requires green checks for the actual PR head and human review.
+The existing required Linux `orch-bbp-acceptance` lane runs that exact case,
+requires one executed test and its completion marker, and uploads per-mode logs.
+No maintenance candidate was merged. No independent approval or post-green
+self-review is claimed; exact-head CI and human review remain required.
