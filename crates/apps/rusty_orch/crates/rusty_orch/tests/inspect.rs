@@ -75,7 +75,14 @@ fn cargo_workspace_discovery_reports_all_feature_edges_without_changes() {
         .expect("app");
     assert_eq!(app["dependencies"].as_array().expect("edges").len(), 1);
     assert!(report["findings"].as_array().expect("findings").is_empty());
-    assert_eq!(first.stdout, scan(&workspace.0).stdout);
+    let second = scan(&workspace.0);
+    assert!(
+        second.status.success(),
+        "repeated inspection failed ({}): {}",
+        second.status,
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout);
     assert_eq!(
         lock,
         fs::read(workspace.0.join("Cargo.lock")).expect("unchanged lock")

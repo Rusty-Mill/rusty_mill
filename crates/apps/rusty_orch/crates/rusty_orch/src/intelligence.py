@@ -5,7 +5,7 @@ from the inspected repository. Requires Python 3.11+ (stdlib only).
 """
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePath
 import subprocess
 import sys
 import tomllib
@@ -30,8 +30,34 @@ def closure(seeds: list[str], reverse: dict[str, set[str]]) -> list[str]:
         if member in seen:
             continue
         seen.add(member)
-        pending.extend(reverse[member] - seen)
+        pending.extend(reverse.get(member, set()) - seen)
     return sorted(seen)
+
+
+def canonical_path(value: str) -> Path:
+    """Resolve boundaries using one spelling for Windows extended-length paths."""
+    path = str(Path(value).resolve())
+    if sys.platform == "win32":
+        path = ("\\\\" + path[8:]) if path.startswith("\\\\?\\UNC\\") else path.removeprefix("\\\\?\\")
+    return Path(path)
+
+
+def finding_identity(rule: str, evidence: list[dict], root: PurePath) -> str:
+    """Normalize native paths and Cargo file URLs before JSON escaping, for IDs only."""
+    variants = sorted({str(root), root.as_posix(), root.as_uri()}, key=len, reverse=True)
+
+    def normalize(value: object) -> object:
+        if isinstance(value, str):
+            for variant in variants:
+                value = value.replace(variant, "<workspace>")
+            return value
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        return value
+
+    return json.dumps([rule, normalize(evidence)], sort_keys=True, separators=(",", ":"))
 
 
 def analyze(metadata: dict) -> dict:
@@ -42,13 +68,20 @@ def analyze(metadata: dict) -> dict:
     nodes = (metadata.get("resolve") or {}).get("nodes", [])
     if not set(packages).issubset({n["id"] for n in nodes}):
         raise ValueError("complete Cargo resolve graph required; --no-deps is insufficient")
-    root = Path(metadata["workspace_root"]).resolve()
+    root = canonical_path(metadata["workspace_root"])
     # Validate manifest boundaries before reading any manifest. A workspace
     # member outside the root is unsupported rather than silently omitted.
     manifests = {
-        key: str(Path(pkg["manifest_path"]).resolve().relative_to(root))
+        key: str(canonical_path(pkg["manifest_path"]).relative_to(root))
         for key, pkg in packages.items()
     }
+    # Cargo may mix ordinary and extended-length Windows paths in one result.
+    # Feed the policy helpers the same canonical spelling used for boundaries.
+    metadata = dict(metadata, workspace_root=str(root), packages=[
+        dict(pkg, manifest_path=str(root / manifests[pkg["id"]])) if pkg["id"] in packages else pkg
+        for pkg in metadata["packages"]
+    ])
+    packages = workspace_packages(metadata)
     reverse = reverse_dependencies(metadata, packages)
     edges = workspace_edges(metadata)
     dependency_details = {
@@ -63,7 +96,7 @@ def analyze(metadata: dict) -> dict:
 
     def finding(rule: str, ids: list[str], evidence: list[dict], recommendation: str) -> None:
         ids = sorted(set(ids))
-        identity = json.dumps([rule, evidence], sort_keys=True, separators=(",", ":")).replace(str(root), "<workspace>")
+        identity = finding_identity(rule, evidence, root)
         findings.append({
             "id": rule + ":" + hashlib.sha256(identity.encode()).hexdigest()[:20],
             "rule": rule,
@@ -99,12 +132,15 @@ def analyze(metadata: dict) -> dict:
                 "manifest": manifests[caller], "dependency": target,
                 "declaration": dependency_details[caller, target], "message": message}],
                 "Remove or invert the forbidden dependency; preserve product-family boundaries (ADR-0003).")
+    resolve_reverse: dict[str, set[str]] = {}
+    for node in nodes:
+        for dep in node["deps"]:
+            resolve_reverse.setdefault(dep["pkg"], set()).add(node["id"])
     for message in git_shadowed_workspace_members(metadata):
         name = message.split(" (resolved from ", 1)[0]
         shadow_ids = {p["id"] for p in metadata["packages"]
                       if p["name"] == name and p["id"] not in packages}
-        consumers = [n["id"] for n in nodes if n["id"] in packages
-                     and any(d["pkg"] in shadow_ids for d in n["deps"])]
+        consumers = [key for key in closure(list(shadow_ids), resolve_reverse) if key in packages]
         ids = consumers + [k for k, p in packages.items() if p["name"] == name]
         finding("first-party-git-shadow", ids, [{"message": message}],
                 "Resolve the first-party dependency through the local workspace (ATLAS-RWC-0050).")

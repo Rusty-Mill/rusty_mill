@@ -1,7 +1,10 @@
 """Exercise Orch's bundled analyzer against CI policy fixtures and real manifests."""
 import importlib.util
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PureWindowsPath
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -77,6 +80,107 @@ class IntelligenceTests(unittest.TestCase):
         md["packages"][0]["manifest_path"] = "/outside/Cargo.toml"
         with self.assertRaises(ValueError):
             MODULE.analyze(md)
+
+    def test_git_shadow_impact_traverses_external_nodes_and_cycles(self) -> None:
+        md = self.fixture([("local", "foundation", "local"), ("app", "apps", "app"),
+                           ("cli", "tools", "cli"), ("unrelated", "libs", "unrelated")],
+                          [("cli", "app")])
+        md["packages"].append({"id": "git-copy", "name": "local", "source": "git+https://example.test/local"})
+        md["resolve"]["nodes"][1]["deps"] = [{"pkg": "adapter", "name": "adapter"}]
+        md["resolve"]["nodes"].extend([
+            {"id": "adapter", "deps": [{"pkg": "bridge"}]},
+            {"id": "bridge", "deps": [{"pkg": "adapter"}, {"pkg": "git-copy"}]},
+            {"id": "git-copy", "deps": []},
+        ])
+        shadow, = MODULE.analyze(md)["findings"]
+        self.assertEqual(shadow["affected_crates"], ["app", "cli", "local"])
+        self.assertEqual(shadow["impact"]["crates_to_validate"], ["app", "cli", "local"])
+
+    def test_finding_ids_survive_relocation_with_cargo_file_urls(self) -> None:
+        reports = []
+        for location in ("first checkout", "second checkout"):
+            md = self.fixture([("base", "foundation", "base"), ("app", "apps", "app")], [("base", "app")])
+            root = Path(md["workspace_root"])
+            relocated = root / location
+            relocated.mkdir()
+            (root / "crates").rename(relocated / "crates")
+            md["workspace_root"] = str(relocated)
+            ids = {pkg["id"]: "path+" + (relocated / "crates" / pkg["name"]).as_uri() + "#0.1.0"
+                   for pkg in md["packages"]}
+            md["workspace_members"] = [ids[key] for key in md["workspace_members"]]
+            for pkg in md["packages"]:
+                pkg["id"] = ids[pkg["id"]]
+                pkg["manifest_path"] = str(relocated / Path(pkg["manifest_path"]).relative_to(root))
+            for node in md["resolve"]["nodes"]:
+                node["id"] = ids[node["id"]]
+                for dep in node["deps"]:
+                    dep["pkg"] = ids[dep["pkg"]]
+            reports.append(MODULE.analyze(md))
+        self.assertEqual(reports[0]["findings"][0]["id"], reports[1]["findings"][0]["id"])
+        self.assertNotEqual(reports[0]["findings"][0]["evidence"], reports[1]["findings"][0]["evidence"])
+
+    def test_identity_normalizes_windows_paths_before_json_escaping(self) -> None:
+        roots = [PureWindowsPath("C:/first checkout"), PureWindowsPath("D:/second checkout")]
+        identities = [MODULE.finding_identity("rule", [{"path": str(root / "crate"),
+                       "id": "path+" + root.as_uri() + "/crate#0.1.0"}], root) for root in roots]
+        self.assertEqual(*identities)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows extended-length paths")
+    def test_mixed_windows_path_spellings_are_equivalent(self) -> None:
+        md = self.fixture([("base", "foundation", "base"), ("app", "apps", "app")], [("base", "app")])
+        expected = MODULE.analyze(md)
+        md["workspace_root"] = "\\\\?\\" + md["workspace_root"]
+        md["packages"][0]["manifest_path"] = "\\\\?\\" + md["packages"][0]["manifest_path"]
+        self.assertEqual(MODULE.analyze(md), expected)
+
+    def test_real_cargo_git_shadow_through_non_workspace_adapter(self) -> None:
+        md = self.fixture([("local", "foundation", "local"), ("app", "apps", "app"),
+                           ("cli", "tools", "cli")], [])
+        root = Path(md["workspace_root"])
+
+        def write(relative: str, contents: str) -> None:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents, encoding="utf-8")
+
+        def run(*argv: str, cwd: Path = root) -> str:
+            result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=90,
+                                    env=dict(os.environ, CARGO_HOME=str(root / "cargo-cache")))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        members = [str(Path(pkg["manifest_path"]).parent.relative_to(root)).replace("\\", "/")
+                   for pkg in md["packages"]]
+        write("Cargo.toml", '[workspace]\nresolver = "2"\nmembers = ' + json.dumps(members)
+              + '\nexclude = ["vendor/adapter", "vendor/shadow"]\n')
+        for pkg in md["packages"]:
+            directory = Path(pkg["manifest_path"]).parent
+            (directory / "src").mkdir()
+            (directory / "src/lib.rs").write_text("", encoding="utf-8")
+            with Path(pkg["manifest_path"]).open("a", encoding="utf-8") as manifest:
+                manifest.write('[package.metadata.rusty_mill]\nlayer = "'
+                               + pkg["metadata"]["rusty_mill"]["layer"] + '"\n')
+        write("vendor/shadow/Cargo.toml", '[package]\nname = "local"\nversion = "0.1.0"\n')
+        write("vendor/shadow/src/lib.rs", "")
+        origin = root / "vendor/shadow"
+        run("git", "init", cwd=origin)
+        run("git", "add", ".", cwd=origin)
+        run("git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "-c", "commit.gpgsign=false", "commit", "-m", "fixture", cwd=origin)
+        write("vendor/adapter/Cargo.toml", '[package]\nname = "adapter"\nversion = "0.1.0"\n'
+              + '[dependencies]\nlocal = { git = "' + origin.as_uri() + '" }\n')
+        write("vendor/adapter/src/lib.rs", "")
+        for index, dependency in [(1, 'adapter = { path = "' + (root / "vendor/adapter").as_posix() + '" }'),
+                                  (2, 'app = { path = "' + Path(md["packages"][1]["manifest_path"]).parent.as_posix() + '" }')]:
+            with Path(md["packages"][index]["manifest_path"]).open("a", encoding="utf-8") as manifest:
+                manifest.write("[dependencies]\n" + dependency + "\n")
+        run("cargo", "generate-lockfile")  # Only the local file:// git fixture is fetched.
+        resolved = json.loads(run("cargo", "metadata", "--format-version=1", "--all-features", "--frozen"))
+        report = MODULE.analyze(resolved)
+        shadow, = report["findings"]
+        names = {pkg["id"]: pkg["name"] for pkg in resolved["packages"]}
+        self.assertEqual({names[key] for key in shadow["affected_crates"]}, {"local", "app", "cli"})
+        self.assertEqual(shadow["impact"]["crates_to_validate"], shadow["affected_crates"])
 
     def test_invalid_metadata_fails_instead_of_reporting_clean(self):
         md = self.fixture([("a", "foundation", "a")], [])
