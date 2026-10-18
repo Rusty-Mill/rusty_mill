@@ -1,6 +1,9 @@
 //! `bbp grade`: blind rubric grading for the 2b run. `pack` writes what the
 //! grader sees (spec text and rubric items under neutral ids, in hash order,
-//! nothing about arm, pair or log) and a key kept apart; `join` opens the key
+//! nothing about arm, pair or log) in two files, `pack.json` (the approved
+//! specs: exactly two per task) and `unused.json` (superseded versions, which
+//! only a treatment run has, so they never share a pack with the approved
+//! ones), and a key kept apart; `join` opens the key
 //! only once the scores cover every id, then reports each run's `rubric_ok`
 //! and the pair's `lost_rubric_items`. Who scores (a person or a model) is not
 //! this tool's business; the scorer is named in the scores file and carried to
@@ -90,9 +93,18 @@ fn neutral_id(seed: &str, s: &Source) -> String {
     h.hex()[..16].to_owned()
 }
 
+/// What `pack` produces: the two packs the grader sees and the key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Packs {
+    pub approved: Vec<PackEntry>,
+    pub unused: Vec<PackEntry>,
+    pub key: Key,
+}
+
 /// Neutral ids and an order that depends only on the seed and the ids' hashes,
-/// so neither arm nor pair is recoverable from position.
-pub fn pack(sources: &[Source], seed: &str) -> (Vec<PackEntry>, Key) {
+/// so neither arm nor pair is recoverable from position. Approved and unused
+/// specs go to separate packs: an entry count per task would name the arm.
+pub fn pack(sources: &[Source], seed: &str) -> Packs {
     let mut keyed: Vec<(String, &Source)> =
         sources.iter().map(|s| (neutral_id(seed, s), s)).collect();
     keyed.sort_by(|a, b| {
@@ -100,14 +112,17 @@ pub fn pack(sources: &[Source], seed: &str) -> (Vec<PackEntry>, Key) {
             .0
             .cmp(&Sha256::of(format!("{seed}|{}", b.0).as_bytes()).0)
     });
-    let pack = keyed
-        .iter()
-        .map(|(id, s)| PackEntry {
-            id: id.clone(),
-            spec: s.spec.clone(),
-            rubric: s.rubric.items.clone(),
-        })
-        .collect();
+    let of = |which: Which| -> Vec<PackEntry> {
+        keyed
+            .iter()
+            .filter(|(_, s)| s.which == which)
+            .map(|(id, s)| PackEntry {
+                id: id.clone(),
+                spec: s.spec.clone(),
+                rubric: s.rubric.items.clone(),
+            })
+            .collect()
+    };
     let entries = keyed
         .iter()
         .map(|(id, s)| KeyEntry {
@@ -121,13 +136,14 @@ pub fn pack(sources: &[Source], seed: &str) -> (Vec<PackEntry>, Key) {
             items: s.rubric.items.len(),
         })
         .collect();
-    (
-        pack,
-        Key {
+    Packs {
+        approved: of(Which::Approved),
+        unused: of(Which::Unused),
+        key: Key {
             seed: seed.to_owned(),
             entries,
         },
-    )
+    }
 }
 
 /// The scores file: the scorer and, per neutral id, which rubric items were met.
@@ -313,44 +329,189 @@ pub fn rubrics_sha256(dir: &Path) -> Result<String, String> {
     Ok(Sha256::of(&all).hex())
 }
 
-/// `bbp grade pack`: write `pack.json` (for the grader) and `key.json` (not).
+/// `bbp grade pack`: write `pack.json` and `unused.json` (for the grader) and
+/// `key.json` (not).
 pub fn write_pack(
     manifest: &Path,
     rubrics: &Path,
     seed: &str,
     out: &Path,
 ) -> Result<String, String> {
-    let (pack, key) = pack(&sources(manifest, rubrics)?, seed);
+    let Packs {
+        approved,
+        unused,
+        key,
+    } = pack(&sources(manifest, rubrics)?, seed);
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let w = |name: &str, text: String| {
         std::fs::write(out.join(name), text).map_err(|e| format!("{name}: {e}"))
     };
     w(
         "pack.json",
-        rusty_serde::json::to_string(&pack).map_err(|e| e.to_string())?,
+        rusty_serde::json::to_string(&approved).map_err(|e| e.to_string())?,
+    )?;
+    // Held back: released only once the approved scores are sealed.
+    w(
+        "unused.held.json",
+        rusty_serde::json::to_string(&unused).map_err(|e| e.to_string())?,
     )?;
     w(
         "key.json",
         rusty_serde::json::to_string(&key).map_err(|e| e.to_string())?,
     )?;
     Ok(format!(
-        "{{\"entries\":{},\"rubrics_sha256\":\"{}\"}}",
-        key.entries.len(),
+        "{{\"approved\":{},\"unused\":{},\"rubrics_sha256\":\"{}\"}}",
+        approved.len(),
+        unused.len(),
         rubrics_sha256(rubrics)?
     ))
 }
 
-/// `bbp grade join`.
-pub fn join_files(key: &Path, scores: &Path, rubrics: &Path) -> Result<String, String> {
+/// `bbp grade release`: check the approved scores are complete, record their
+/// immutable hash in `release.json` and only then write `unused.json` for the
+/// grader. Identical retries are allowed; changed scores or released packs fail.
+pub fn release_files(key: &Path, held: &Path, scores: &Path, out: &Path) -> Result<String, String> {
     let read = |p: &Path| std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()));
     let key: Key = rusty_serde::json::from_str(&read(key)?).map_err(|e| e.to_string())?;
-    let scores: Scores = rusty_serde::json::from_str(&read(scores)?).map_err(|e| e.to_string())?;
-    let joined = join(&key, &scores)?;
+    let sha = seal(&key, &read(scores)?)?;
+    let unused = read(held)?;
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let record = format!("{{\"approved_scores_sha256\":\"{sha}\"}}");
+    // The record first: an `unused.json` never exists without one.
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(out.join("release.json"))
+    {
+        Ok(mut file) => file
+            .write_all(record.as_bytes())
+            .map_err(|e| format!("release.json: {e}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if read(&out.join("release.json"))? != record {
+                return Err("release seal is immutable: approved scores changed".into());
+            }
+            if out.join("unused.json").exists() && read(&out.join("unused.json"))? != unused {
+                return Err("released unused pack is immutable".into());
+            }
+        }
+        Err(e) => return Err(format!("release.json: {e}")),
+    }
+    std::fs::write(out.join("unused.json"), unused).map_err(|e| format!("unused.json: {e}"))?;
+    Ok(record)
+}
+
+#[derive(Deserialize)]
+struct Release {
+    approved_scores_sha256: String,
+}
+
+/// `bbp grade join`.
+pub fn join_files(
+    key: &Path,
+    scores: &Path,
+    unused_scores: &Path,
+    release: &Path,
+    rubrics: &Path,
+) -> Result<String, String> {
+    let read = |p: &Path| std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()));
+    let key: Key = rusty_serde::json::from_str(&read(key)?).map_err(|e| e.to_string())?;
+    let rel: Release = rusty_serde::json::from_str(&read(release)?)
+        .map_err(|e| format!("{}: {e}", release.display()))?;
+    let joined = join_sealed(
+        &key,
+        &read(scores)?,
+        &read(unused_scores)?,
+        &rel.approved_scores_sha256,
+    )?;
     Ok(format!(
-        "{{\"rubrics_sha256\":\"{}\",\"graded\":{}}}",
+        "{{\"rubrics_sha256\":\"{}\",\"approved_scores_sha256\":\"{}\",\"graded\":{}}}",
         rubrics_sha256(rubrics)?,
+        rel.approved_scores_sha256,
         rusty_serde::json::to_string(&joined).map_err(|e| e.to_string())?
     ))
+}
+
+/// Score text, parsed.
+fn parse_scores(text: &str) -> Result<Scores, String> {
+    rusty_serde::json::from_str(text).map_err(|e| format!("scores: {e}"))
+}
+
+fn ids_of(key: &Key, which: Which) -> BTreeSet<&str> {
+    key.entries
+        .iter()
+        .filter(|e| e.which == which)
+        .map(|e| e.id.as_str())
+        .collect()
+}
+
+/// `scores` cover exactly the `which` ids of `key`, one verdict per rubric item,
+/// and name no other id.
+fn covers(key: &Key, scores: &Scores, which: Which, what: &str) -> Result<(), String> {
+    let want = ids_of(key, which);
+    if let Some(extra) = scores.met.keys().find(|k| !want.contains(k.as_str())) {
+        let kind = if ids_of(key, Which::Unused).contains(extra.as_str()) {
+            "an unused version, scored before the release"
+        } else {
+            "an id that is not one of the approved specs"
+        };
+        return Err(format!("the {what} scores name {kind}: {extra}"));
+    }
+    for e in key.entries.iter().filter(|e| e.which == which) {
+        let got = scores
+            .met
+            .get(&e.id)
+            .ok_or_else(|| format!("no {what} score for {}: nothing is released", e.id))?;
+        if got.len() != e.items {
+            return Err(format!(
+                "{} has {} verdicts for {} rubric items",
+                e.id,
+                got.len(),
+                e.items
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Seal the approved scores: they cover exactly the approved ids, with one
+/// verdict per rubric item, and name no unused id (that would be scoring the
+/// unused versions with the approved ones in view). Returns the sha256 of the
+/// scores text, which the release records.
+pub fn seal(key: &Key, scores_text: &str) -> Result<String, String> {
+    covers(
+        key,
+        &parse_scores(scores_text)?,
+        Which::Approved,
+        "approved",
+    )?;
+    Ok(Sha256::of(scores_text.as_bytes()).hex())
+}
+
+/// [`join`] over the sealed approved scores and the unused scores, once the
+/// approved scores still hash to what the release recorded.
+pub fn join_sealed(
+    key: &Key,
+    approved_text: &str,
+    unused_text: &str,
+    recorded_sha256: &str,
+) -> Result<Joined, String> {
+    if Sha256::of(approved_text.as_bytes()).hex() != recorded_sha256 {
+        return Err("the approved scores changed after the release recorded their hash".into());
+    }
+    let approved = parse_scores(approved_text)?;
+    let unused = parse_scores(unused_text)?;
+    covers(key, &approved, Which::Approved, "approved")?;
+    covers(key, &unused, Which::Unused, "unused")?;
+    let mut met = approved.met;
+    met.extend(unused.met);
+    join(
+        key,
+        &Scores {
+            grader: approved.grader,
+            met,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -389,8 +550,8 @@ mod tests {
 
     #[test]
     fn the_pack_carries_nothing_that_names_an_arm_a_pair_or_a_run() {
-        let (pack, _) = pack(&sources(), "s1");
-        let text = rusty_serde::json::to_string(&pack).unwrap();
+        let p = pack(&sources(), "s1");
+        let text = rusty_serde::json::to_string(&[p.approved, p.unused].concat()).unwrap();
         for leak in [
             "auth",
             "cache",
@@ -408,16 +569,15 @@ mod tests {
     fn order_and_ids_do_not_depend_on_the_input_order() {
         let mut rev = sources();
         rev.reverse();
-        assert_eq!(pack(&sources(), "s1").0, pack(&rev, "s1").0);
+        assert_eq!(pack(&sources(), "s1"), pack(&rev, "s1"));
     }
 
     #[test]
     fn the_seed_changes_ids_and_order() {
-        let (a, _) = pack(&sources(), "s1");
-        let (b, _) = pack(&sources(), "s2");
+        let (a, b) = (pack(&sources(), "s1"), pack(&sources(), "s2"));
         assert_ne!(
-            a.iter().map(|e| &e.id).collect::<Vec<_>>(),
-            b.iter().map(|e| &e.id).collect::<Vec<_>>()
+            a.approved.iter().map(|e| &e.id).collect::<Vec<_>>(),
+            b.approved.iter().map(|e| &e.id).collect::<Vec<_>>()
         );
     }
 
@@ -427,8 +587,8 @@ mod tests {
             src("auth", Arm::Control, 2, Which::Approved, "same"),
             src("auth", Arm::Treatment, 2, Which::Approved, "same"),
         ];
-        let (pack, _) = pack(&s, "s");
-        assert_ne!(pack[0].id, pack[1].id);
+        let p = pack(&s, "s").approved;
+        assert_ne!(p[0].id, p[1].id);
     }
 
     fn scores(key: &Key, f: impl Fn(&KeyEntry) -> Vec<bool>) -> Scores {
@@ -447,7 +607,7 @@ mod tests {
 
     #[test]
     fn the_key_stays_sealed_until_every_id_is_scored() {
-        let (_, key) = pack(&sources(), "s");
+        let key = pack(&sources(), "s").key;
         let mut s = scores(&key, |_| vec![true; 3]);
         let drop = key.entries[0].id.clone();
         s.met.remove(&drop);
@@ -457,7 +617,7 @@ mod tests {
 
     #[test]
     fn a_wrong_verdict_count_or_an_unknown_id_is_refused() {
-        let (_, key) = pack(&sources(), "s");
+        let key = pack(&sources(), "s").key;
         let short = scores(&key, |_| vec![true; 2]);
         assert!(join(&key, &short).unwrap_err().contains("verdicts"));
         let mut extra = scores(&key, |_| vec![true; 3]);
@@ -467,7 +627,7 @@ mod tests {
 
     #[test]
     fn pass_mark_is_inclusive_and_lost_items_are_unused_met_and_approved_not() {
-        let (_, key) = pack(&sources(), "s");
+        let key = pack(&sources(), "s").key;
         let auth_t = entry(&key, "auth", Arm::Treatment, Which::Approved)
             .id
             .clone();
@@ -515,5 +675,123 @@ mod tests {
         assert!(rubric(0, 1).check().is_err());
         assert!(rubric(3, 0).check().is_err());
         assert!(rubric(3, 4).check().is_err());
+    }
+
+    #[test]
+    fn the_approved_pack_has_two_entries_per_task_and_unused_versions_stay_apart() {
+        // "auth" has an unused version, "cache" has none.
+        let p = pack(&sources(), "s");
+        assert_eq!(
+            p.approved.len(),
+            4,
+            "two approved specs for each of two tasks"
+        );
+        assert_eq!(p.unused.len(), 1);
+        let ids: BTreeSet<&str> = p.approved.iter().map(|e| e.id.as_str()).collect();
+        assert!(p.unused.iter().all(|e| !ids.contains(e.id.as_str())));
+        let mut per_task: BTreeMap<&str, usize> = BTreeMap::new();
+        for e in p.key.entries.iter().filter(|e| ids.contains(e.id.as_str())) {
+            *per_task.entry(e.pair.as_str()).or_default() += 1;
+        }
+        assert!(per_task.values().all(|n| *n == 2), "{per_task:?}");
+        // The key still covers every id, so join sees the unused version.
+        assert_eq!(p.key.entries.len(), 5);
+    }
+
+    // ---- the unused versions are released only after the approved scores are sealed
+
+    fn scores_text(key: &Key, which: Which, f: impl Fn(&KeyEntry) -> Vec<bool>) -> String {
+        let met: Vec<String> = key
+            .entries
+            .iter()
+            .filter(|e| e.which == which)
+            .map(|e| format!("\"{}\":{:?}", e.id, f(e)))
+            .collect();
+        format!(r#"{{"grader":"g","met":{{{}}}}}"#, met.join(","))
+    }
+
+    #[test]
+    fn sealing_needs_every_approved_score_and_no_unused_one() {
+        let key = pack(&sources(), "s").key;
+        let ok = scores_text(&key, Which::Approved, |_| vec![true; 3]);
+        let sha = seal(&key, &ok).unwrap();
+        assert_eq!(sha, Sha256::of(ok.as_bytes()).hex());
+        // A missing approved id.
+        let first = key
+            .entries
+            .iter()
+            .find(|e| e.which == Which::Approved)
+            .unwrap();
+        let partial = format!(
+            r#"{{"grader":"g","met":{{"{}":[true,true,true]}}}}"#,
+            first.id
+        );
+        assert!(seal(&key, &partial).unwrap_err().contains("approved"));
+        // The wrong number of verdicts.
+        let short = scores_text(&key, Which::Approved, |_| vec![true; 2]);
+        assert!(seal(&key, &short).unwrap_err().contains("verdicts"));
+        // An unused id scored before the release.
+        let unused = key
+            .entries
+            .iter()
+            .find(|e| e.which == Which::Unused)
+            .unwrap();
+        let peek = ok.replacen(
+            r#""met":{"#,
+            &format!(r#""met":{{"{}":[true,true,true],"#, unused.id),
+            1,
+        );
+        assert!(seal(&key, &peek).unwrap_err().contains("unused"));
+    }
+
+    #[test]
+    fn joining_needs_the_approved_scores_to_be_the_sealed_ones() {
+        let key = pack(&sources(), "s").key;
+        let approved = scores_text(&key, Which::Approved, |_| vec![true, true, false]);
+        let sha = seal(&key, &approved).unwrap();
+        let unused = scores_text(&key, Which::Unused, |_| vec![false, true, true]);
+        let joined = join_sealed(&key, &approved, &unused, &sha).unwrap();
+        assert!(joined.runs.iter().all(|r| r.rubric_ok));
+        // Approved scores edited after the release: refused.
+        let edited = scores_text(&key, Which::Approved, |_| vec![true, true, true]);
+        let err = join_sealed(&key, &edited, &unused, &sha).unwrap_err();
+        assert!(err.contains("after the release"), "{err}");
+        // Unused scores that miss an id, or that re-score an approved one.
+        let none = r#"{"grader":"g","met":{}}"#;
+        assert!(join_sealed(&key, &approved, none, &sha).is_err());
+        let both = scores_text(&key, Which::Approved, |_| vec![true; 3]);
+        assert!(join_sealed(&key, &approved, &both, &sha).is_err());
+    }
+    #[test]
+    fn release_retry_cannot_reseal_edited_scores() {
+        let dir = std::env::temp_dir().join(format!("bbp-release-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = pack(&sources(), "s").key;
+        let approved = scores_text(&key, Which::Approved, |_| vec![true, true, false]);
+        let edited = scores_text(&key, Which::Approved, |_| vec![true, true, true]);
+        let unused = scores_text(&key, Which::Unused, |_| vec![false, true, true]);
+        let k = dir.join("key.json");
+        let h = dir.join("held.json");
+        let s = dir.join("scores.json");
+        std::fs::write(&k, rusty_serde::json::to_string(&key).unwrap()).unwrap();
+        std::fs::write(&h, "[]").unwrap();
+        std::fs::write(&s, &approved).unwrap();
+        let record = release_files(&k, &h, &s, &dir).unwrap();
+        assert_eq!(release_files(&k, &h, &s, &dir).unwrap(), record);
+        std::fs::write(&s, &edited).unwrap();
+        assert!(release_files(&k, &h, &s, &dir).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("release.json")).unwrap(),
+            record
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("unused.json")).unwrap(),
+            "[]"
+        );
+        let rel: Release = rusty_serde::json::from_str(&record).unwrap();
+        assert!(join_sealed(&key, &edited, &unused, &rel.approved_scores_sha256).is_err());
+        assert!(join_sealed(&key, &approved, &unused, &rel.approved_scores_sha256).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
