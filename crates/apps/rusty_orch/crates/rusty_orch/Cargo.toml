@@ -15,6 +15,7 @@ name = "rusty_orch"
 path = "src/main.rs"
 
 [dependencies]
+rusty_atomic_file = { workspace = true }
 orch-bbp = { workspace = true }
 rusty_serde = { workspace = true }
 rusty_bbp = { workspace = true }

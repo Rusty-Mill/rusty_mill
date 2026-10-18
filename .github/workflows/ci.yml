@@ -1775,6 +1775,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: orch-bbp-acceptance
@@ -1782,6 +1783,7 @@ jobs:
         run: |
           cargo build --locked -p rusty_orch -p rusty_bbp_host
           cargo test --locked -p orch-bbp --lib --no-run
+          cargo test --locked -p rusty_orch --lib --no-run
           cargo test --locked -p rusty_bbp_host --test moderator_e2e --test rust_lld_profile --no-run
       - name: Confined execution, lifecycle and durable pause/adoption recovery
         shell: bash

@@ -12778,6 +12778,7 @@ dependencies = [
  "orch-dispatch",
  "orch-ollama",
  "orch-store",
+ "rusty_atomic_file",
  "rusty_bbp",
  "rusty_json",
  "rusty_serde",

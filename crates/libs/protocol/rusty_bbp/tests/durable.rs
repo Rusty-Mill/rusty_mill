@@ -40,6 +40,7 @@ fn append_is_durable_across_reopen() {
     let task = fx.st().task.clone();
     let live = fx.st().clone();
     drop(fx);
+    assert_eq!(open(&dir).task_ids(), vec![task.clone()]);
     let back = reopened_state(&dir, &task);
     assert_eq!(back, live, "fold of the on-disk log equals the live state");
     assert_eq!(back.rev, live.rev);

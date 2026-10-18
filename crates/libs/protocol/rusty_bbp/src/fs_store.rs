@@ -178,6 +178,14 @@ impl FsStore {
         Ok(store)
     }
 
+    /// Stable inventory of durable tasks loaded by this store. Refresh or reopen
+    /// the store to observe tasks created by another process.
+    pub fn task_ids(&self) -> Vec<TaskId> {
+        let mut ids: Vec<_> = self.logs.keys().cloned().collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        ids
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

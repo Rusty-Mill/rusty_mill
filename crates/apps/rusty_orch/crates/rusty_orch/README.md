@@ -90,3 +90,12 @@ Inherited/path declarations are excluded. These findings can later seed Orch
 cards and BBP maintenance tasks; this command never creates or executes tasks.
 Static validation does not infer build/test/CI results. Reports exceeding the
 existing process seam's 1 MiB limit fail explicitly. See [ADR-0014](../../docs/adr/0014-repository-intelligence.md).
+
+## Opt-in autonomous maintenance
+
+`rusty_orch maintain --repo /repo` previews one bounded maintenance opportunity
+from the same versioned `inspect` findings. Add `--bbp CONFIG --execute` to host
+it through BBP, retaining human approval and sandboxed independent review.
+See [maintenance operations and validation](MAINTENANCE.md) for recovery,
+conflict prevention and explicitly authorized draft PR publication. No command
+automatically merges.
