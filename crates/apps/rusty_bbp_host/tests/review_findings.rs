@@ -604,3 +604,32 @@ fn a_message_printed_after_the_last_result_makes_the_turn_incomplete_with_a_floo
     );
     assert_eq!(t.unknown_turns, 1);
 }
+
+// ---- third review, finding 8: say why a turn is unknown
+
+#[test]
+fn a_turn_with_messages_and_no_result_says_no_result_not_after_the_last_result() {
+    let msg = r#"{"type":"assistant","message":{"id":"a","model":"claude-sonnet-5-5","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+    let t = tokens_of(
+        "noresult",
+        &[("planner", format!("{msg}\n"))],
+        &criteria("noresult", SONNET_ONLY),
+    )
+    .unwrap();
+    let why = t.turns[0].unknown.as_deref().unwrap();
+    assert!(why.contains("no result"), "{why}");
+    assert!(!why.contains("after the last result"), "{why}");
+    // With a result, a message after it is what is said.
+    let done = fixture("completed-default-ttl");
+    let t = tokens_of(
+        "after-r",
+        &[("planner", format!("{done}{msg}\n"))],
+        &criteria("after-r", SONNET_ONLY),
+    )
+    .unwrap();
+    assert!(t.turns[0]
+        .unknown
+        .as_deref()
+        .unwrap()
+        .contains("after the last result"));
+}
