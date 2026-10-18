@@ -4,7 +4,7 @@ Scope: the `rusty-mcp` crate (`crates/libs/protocol/rusty_mcp/crates/rusty-mcp`,
 about 3.7k lines) after A6's `rmcp` half. It is the gateway-support crate:
 `auth`, `limits`, `otel`, `trace`. This is step A6, second half, of
 `MCP-NATIVE-PLAN.md`: replace what is still external with first-party crates.
-Facts below were read from the code on 2026-10-10; nothing here is built yet.
+Facts below were read from the code on 2026-10-10, before any of it was built; the ordered list in section 3 records what is done.
 
 ## 1. What is still external, and what replaces it
 
@@ -20,7 +20,7 @@ Facts below were read from the code on 2026-10-10; nothing here is built yet.
 | `http` | request/response types | `rusty_http` | the gateway speaks `http` types through axum. Keep at the adapter boundary only | exception |
 | `tokio` | `Semaphore`, `RwLock`, `time` in `limits`, `auth/jwt`, `auth/token` | `rusty_tokio`, or `std` atomics | `limits` needs no semaphore (a CAS counter is enough); the timeout needs a runtime timer, so the tower adapter keeps `tokio::time` | small, then exception |
 | `tracing`, `tracing-subscriber` | spans in `trace`/`layer`/`limits`; subscriber setup in `otel/mod.rs` | none in-house | the log facade is used workspace-wide (74 crates). A decision, not a task (D3) | decision |
-| `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry` | OTLP trace and metrics pipeline, `McpMetricsLayer` instruments (`otel/mod.rs` 418, `otel/metrics.rs` 551, `trace.rs`) | a first-party OTLP exporter: instruments as atomics, spans from a `tracing` `Layer`, encoding with `rusty_json` (OTLP/HTTP+JSON) over `rusty_request` | no in-house OTLP, no protobuf, no gRPC client. This is the largest item (D2) | large |
+| `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry` | OTLP trace and metrics pipeline, `McpMetricsLayer` instruments (`otel/mod.rs` 418, `otel/metrics.rs` 551, `trace.rs`) | a first-party OTLP exporter: instruments as atomics, spans from a `tracing` `Layer`, encoding with `rusty_json` (OTLP/HTTP+JSON) over `rusty_request` | no in-house OTLP, no protobuf, no gRPC client. This was the largest item (D2) | done (2026-10-18): metrics and spans are first-party and the four crates are gone from `rusty-mcp` |
 | already first-party | `rusty_url`, `rusty_base64` | | | done |
 
 ## 2. Decisions
@@ -157,17 +157,26 @@ Each item is one PR, with its own tests and a change fragment.
    *Done when:* the four OpenTelemetry crates are gone; the `otel_export` and
    `otel_metrics` tests pass; the cardinality guard still holds on the wire.
    Needs D2 and D3.
-   **In progress (2026-10-15), by signal rather than (a)/(b)/(c):** PR 1,
-   metrics (atomic instruments, OTLP/HTTP JSON, push thread on `rusty_request`),
-   **done (2026-10-16)**; PR 2, spans (span model, batching, `SpanLayer`
-   replacing `tracing-opentelemetry`), which also removes the four crates and
-   the SDK-typed public API, since nothing uses them once spans move, so it is
-   the last code change; PR 3 is the `rusty-mcp` version bump and the policy
-   and docs of item 10.
-10. **Policy and docs.** `check_workspace_deps.py` accepts `rusty-mcp` as
-    Tier S except the named exceptions (`http`, `tower-layer`, `tower-service`,
-    `tokio` in the adapter, `tracing`, D3: keep). ADR-0002 Amendment 1
-    status line and `MCP-NATIVE-PLAN.md` A6 updated.
+   **Done (2026-10-18), by signal rather than (a)/(b)/(c):** PR 1, metrics
+   (atomic instruments, OTLP/HTTP JSON, push thread on `rusty_request`);
+   PR 2, spans (`SpanLayer` replacing `tracing-opentelemetry`, a batching
+   exporter on the same worker, `otel::set_attribute`), which also removed the
+   four crates and the SDK-typed public API, since nothing used them once
+   spans moved; PR 3, the `rusty-mcp` 0.10.0 bump and item 10.
+10. **Policy and docs.** **Done (2026-10-18).** `check_workspace_deps.py` did
+    not classify tiers (it only failed on git copies of workspace members;
+    ADR-0002 leaves a tier ledger as follow-up), so there was no Tier S check to
+    teach about `rusty-mcp`. What it now does is pin the crate's direct external
+    dependencies (normal and build, any feature; dev is exempt) to a list with a
+    reason per entry: `axum`, `http`, `tower-layer`, `tower-service`, `tokio`
+    (the tower adapter's timeout), `tracing` and `tracing-subscriber` (D3: keep).
+    A dependency off the list fails the `dependency policy` CI job, and so does
+    an entry the crate no longer uses, so the list only shrinks: item 6 deletes
+    `axum`, item 12 deletes the two `tracing` lines. ADR-0002 Amendment 1's
+    status line and `MCP-NATIVE-PLAN.md` A6 are updated. `rusty-mcp` is 0.10.0
+    for item 9's breaking changes (OTLP over HTTP and its endpoints, the
+    SDK-typed API removed); items 5, 7 and 8 kept the public API or only added
+    to it.
 11. **More JWT algorithms** (after item 4): PS256, ES384, EdDSA, one PR each,
     on the `rusty_pk` primitives. Same negative-test bar as item 4, plus the
     algorithm whitelist stays explicit (nothing is accepted by default).

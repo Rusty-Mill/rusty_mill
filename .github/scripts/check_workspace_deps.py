@@ -13,10 +13,68 @@ Reads `cargo metadata --format-version=1 --all-features` JSON from the path
 given as argv[1] and prints one violation per matching non-workspace
 package resolved from a git source whose name collides with a workspace
 member's name.
+
+It also pins the direct external dependencies of the crates in
+`PINNED_EXTERNAL_DEPENDENCIES` (ADR-0002, sovereignty list item 10).
 """
 import json
 import sys
 from pathlib import Path
+
+
+# Crates whose direct external dependencies (normal or build, any feature;
+# dev-dependencies are exempt, ADR-0002) are an explicit list, each with the
+# reason it stays. The list only shrinks: a dependency that is not on it is a
+# violation, and so is an entry the crate no longer depends on, so finishing
+# a migration means deleting its line here.
+#
+# `rusty-mcp` is Tier T under ADR-0002 Amendment 1: sovereign except for these.
+PINNED_EXTERNAL_DEPENDENCIES: dict[str, dict[str, str]] = {
+    "rusty-mcp": {
+        "axum": "the tower layers return axum responses; goes with sovereignty item 6, "
+        "which changes public body types and needs the owner's sign-off",
+        "http": "request and response types of the tower layers; adapter boundary only (D4)",
+        "tower-layer": "the Layer impls of the tower adapters, until the gateway leaves axum",
+        "tower-service": "the Service impls of the tower adapters, until the gateway leaves axum",
+        "tokio": "tokio::time in the tower adapter's timeout; the layers run on the gateway's runtime",
+        "tracing": "D3: the log facade is workspace-wide; replaced by the in-house facade (item 12)",
+        "tracing-subscriber": "D3: subscriber setup in otel::init and the SpanLayer's Layer impl (item 12)",
+    },
+}
+
+
+def pinned_dependency_violations(
+    metadata: dict,
+    pinned: dict[str, dict[str, str]] = PINNED_EXTERNAL_DEPENDENCIES,
+) -> list[str]:
+    """Return sorted descriptions of pinned crates whose external dependencies
+    differ from their allow-list.
+
+    A dependency is external when it has a `source` (a registry or git
+    package; path dependencies have none) and its kind is normal or build.
+    """
+    workspace_ids = set(metadata["workspace_members"])
+    violations = []
+    for pkg in metadata["packages"]:
+        allowed = pinned.get(pkg["name"])
+        if allowed is None or pkg["id"] not in workspace_ids:
+            continue
+        actual = {
+            dep["name"]
+            for dep in pkg.get("dependencies", [])
+            if dep.get("source") and dep.get("kind") in (None, "build")
+        }
+        for name in sorted(actual - allowed.keys()):
+            violations.append(
+                f"{pkg['name']}: external dependency `{name}` is not on its allow-list; "
+                "remove it, or add it to PINNED_EXTERNAL_DEPENDENCIES with the reason it stays"
+            )
+        for name in sorted(allowed.keys() - actual):
+            violations.append(
+                f"{pkg['name']}: `{name}` is on the allow-list but is no longer a dependency; "
+                "delete its entry from PINNED_EXTERNAL_DEPENDENCIES"
+            )
+    return sorted(violations)
 
 
 def git_shadowed_workspace_members(metadata: dict) -> list[str]:
@@ -45,22 +103,35 @@ def git_shadowed_workspace_members(metadata: dict) -> list[str]:
 
 def main() -> None:
     metadata = json.loads(Path(sys.argv[1]).read_text())
-    violations = git_shadowed_workspace_members(metadata)
+    failed = False
 
-    if not violations:
-        return
+    shadowed = git_shadowed_workspace_members(metadata)
+    if shadowed:
+        failed = True
+        print(
+            "ATLAS-RWC-0050 violation: the following crates are both a workspace "
+            "member (resolved via a path dependency) and pinned elsewhere as a "
+            "git dependency. Point the consuming manifest at the workspace copy "
+            "instead (a path dependency, or `crate = { workspace = true }` if it "
+            "is also listed under [workspace.dependencies]):",
+            file=sys.stderr,
+        )
+        for violation in shadowed:
+            print(f"  - {violation}", file=sys.stderr)
 
-    print(
-        "ATLAS-RWC-0050 violation: the following crates are both a workspace "
-        "member (resolved via a path dependency) and pinned elsewhere as a "
-        "git dependency. Point the consuming manifest at the workspace copy "
-        "instead (a path dependency, or `crate = { workspace = true }` if it "
-        "is also listed under [workspace.dependencies]):",
-        file=sys.stderr,
-    )
-    for violation in violations:
-        print(f"  - {violation}", file=sys.stderr)
-    sys.exit(1)
+    pinned = pinned_dependency_violations(metadata)
+    if pinned:
+        failed = True
+        print(
+            "Pinned external dependencies (ADR-0002, sovereignty list item 10) "
+            "differ from the manifests:",
+            file=sys.stderr,
+        )
+        for violation in pinned:
+            print(f"  - {violation}", file=sys.stderr)
+
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

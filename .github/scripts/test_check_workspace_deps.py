@@ -5,7 +5,11 @@ Run from the repo root:
 """
 import unittest
 
-from check_workspace_deps import git_shadowed_workspace_members
+from check_workspace_deps import (
+    PINNED_EXTERNAL_DEPENDENCIES,
+    git_shadowed_workspace_members,
+    pinned_dependency_violations,
+)
 
 
 def metadata(workspace: list[str], external: list[tuple[str, str, str | None]]) -> dict:
@@ -70,6 +74,82 @@ class GitShadowedWorkspaceMembersTests(unittest.TestCase):
         violations = git_shadowed_workspace_members(md)
         self.assertEqual(len(violations), 2)
         self.assertEqual(violations, sorted(violations))
+
+
+REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
+
+
+def crate_metadata(name: str, dependencies: list[dict]) -> dict:
+    """The subset of `cargo metadata` the pinned-dependency check reads."""
+    return {
+        "workspace_members": [name],
+        "packages": [{"id": name, "name": name, "dependencies": dependencies}],
+    }
+
+
+def dep(name: str, kind: str | None = None, source: str | None = REGISTRY) -> dict:
+    return {"name": name, "kind": kind, **({"source": source} if source else {})}
+
+
+class PinnedDependencyTests(unittest.TestCase):
+    PINNED = {"c": {"axum": "why", "tracing": "why"}}
+
+    def check(self, dependencies: list[dict]) -> list[str]:
+        return pinned_dependency_violations(crate_metadata("c", dependencies), self.PINNED)
+
+    def test_exactly_the_allow_list_is_clean(self) -> None:
+        self.assertEqual(self.check([dep("axum"), dep("tracing")]), [])
+
+    def test_a_new_external_dependency_is_flagged_with_its_name(self) -> None:
+        violations = self.check([dep("axum"), dep("tracing"), dep("opentelemetry")])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("`opentelemetry`", violations[0])
+        self.assertIn("not on its allow-list", violations[0])
+
+    def test_a_new_build_dependency_is_flagged_too(self) -> None:
+        violations = self.check([dep("axum"), dep("tracing"), dep("cc", kind="build")])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("`cc`", violations[0])
+
+    def test_dev_dependencies_are_exempt(self) -> None:
+        self.assertEqual(self.check([dep("axum"), dep("tracing"), dep("reqwest", kind="dev")]), [])
+
+    def test_workspace_path_dependencies_are_not_external(self) -> None:
+        self.assertEqual(
+            self.check([dep("axum"), dep("tracing"), dep("rusty_json", source=None)]), []
+        )
+
+    def test_a_git_dependency_is_external(self) -> None:
+        violations = self.check(
+            [dep("axum"), dep("tracing"), dep("fork", source="git+https://example.invalid/fork")]
+        )
+        self.assertEqual(len(violations), 1)
+
+    def test_an_entry_the_crate_no_longer_uses_must_be_removed(self) -> None:
+        violations = self.check([dep("tracing")])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("`axum`", violations[0])
+        self.assertIn("no longer a dependency", violations[0])
+
+    def test_an_optional_dependency_still_counts(self) -> None:
+        optional = {**dep("opentelemetry"), "optional": True}
+        self.assertEqual(len(self.check([dep("axum"), dep("tracing"), optional])), 1)
+
+    def test_a_crate_that_is_not_pinned_is_ignored(self) -> None:
+        md = crate_metadata("other", [dep("anything")])
+        self.assertEqual(pinned_dependency_violations(md, self.PINNED), [])
+
+    def test_a_same_named_package_outside_the_workspace_is_ignored(self) -> None:
+        md = {
+            "workspace_members": [],
+            "packages": [{"id": "c 1.0 (registry)", "name": "c", "dependencies": [dep("x")]}],
+        }
+        self.assertEqual(pinned_dependency_violations(md, self.PINNED), [])
+
+    def test_every_pinned_entry_states_a_reason(self) -> None:
+        for crate, allowed in PINNED_EXTERNAL_DEPENDENCIES.items():
+            for name, reason in allowed.items():
+                self.assertTrue(reason.strip(), f"{crate}: `{name}` has no reason")
 
 
 if __name__ == "__main__":
