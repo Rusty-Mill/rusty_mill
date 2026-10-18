@@ -9,6 +9,7 @@ worst tick of each event with the car-ball distance, the ball's recorded speed c
 car's input. Events are sorted worst first across the batch; a summary gives how many
 events pass each size.
 """
+import os
 import json
 import pathlib
 import re
@@ -16,7 +17,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+VERIFY = pathlib.Path(os.environ.get("RB_VERIFY") or ROOT / "target" / "release" / "rb-verify.exe")
 LINE = re.compile(
     r"t=\s*([\d.]+)s car=0 \| thr\s+([-\d.]+) str\s+([-\d.]+) p\s+([-\d.]+) y\s+([-\d.]+) r\s+([-\d.]+) (\S+) \| "
     r"err vel\s+([\d.]+) spin\s+([\d.]+) ball\s+([\d.]+)"

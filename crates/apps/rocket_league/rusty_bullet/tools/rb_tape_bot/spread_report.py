@@ -17,6 +17,7 @@ than the larger of the spread mean and `FLOOR_UU` (the 5 uu probe bar), which
 is the parity criterion for a tape the game itself does not repeat.
 Scenario files are looked up in `scenarios/` then `experiments/`.
 """
+import os
 import itertools
 import json
 import pathlib
@@ -26,7 +27,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+VERIFY = pathlib.Path(os.environ.get("RB_VERIFY") or ROOT / "target" / "release" / "rb-verify.exe")
 BOT = ROOT / "tools" / "rb_tape_bot"
 STEP_SECS = 1.0 / 120.0
 HORIZON_SECS = 6.0

@@ -8,13 +8,14 @@ inside the window. A steady force bias is absorbed by the suspension within a wi
 a mean error that rises with the changes is a force difference at the crossings; a flat
 one says the facets are not the cause.
 """
+import os
 import re
 import statistics
 import subprocess
 import sys
 
 ROOT = __file__.replace("\\", "/").rsplit("/tools/", 1)[0]
-VERIFY = ROOT + "/target/release/rb-verify.exe"
+VERIFY = os.environ.get("RB_VERIFY") or ROOT + "/target/release/rb-verify.exe"
 LINE = re.compile(
     r"window front\s+(\d+) rear\s+(\d+) touching (\d) \| pos err \(\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\) \|\s*([\d.]+)\| "
     r"vel err \(\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\) \|\s*([\d.]+)\|"

@@ -9,6 +9,7 @@ rotation, and grouped by which wheels touch. Prints per group the tick count and
 error per tick on each axis, so a missing force with a fixed direction in the car frame
 (a suspension term) stands out from one in the world frame (gravity, the sticky force).
 """
+import os
 import collections
 import json
 import pathlib
@@ -17,7 +18,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-VERIFY = ROOT / "target" / "release" / "rb-verify.exe"
+VERIFY = pathlib.Path(os.environ.get("RB_VERIFY") or ROOT / "target" / "release" / "rb-verify.exe")
 LINE = re.compile(
     r"t=\s*([\d.]+)s \| thr\s+(-?[\d.]+) str\s+(-?[\d.]+) p\s+(-?[\d.]+) y\s+(-?[\d.]+) r\s+(-?[\d.]+) (\S+) .*?"
     r"dv err \(\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\) \|\s*([\d.]+)\|"
