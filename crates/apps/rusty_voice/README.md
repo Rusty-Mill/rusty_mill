@@ -48,3 +48,5 @@ cargo test
 - No streaming/incremental transcription (`rusty_whisper::transcribe::Stream`
   exists for that) — this app does one batch `transcribe()` call when
   TRANSCRIBE is clicked, not live captions while recording.
+
+<!-- CI scoping probe (Mill Board card #16): throwaway, close unmerged. -->
