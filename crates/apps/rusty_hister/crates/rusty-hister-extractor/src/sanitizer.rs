@@ -684,6 +684,42 @@ mod tests {
     }
 
     #[test]
+    fn sanitizer_checks_quoted_css_url_schemes_case_insensitively() {
+        // RUSTSEC-2026-0373: quoted URL functions must pass through the
+        // scheme filter regardless of CSS function-name casing. Exercise
+        // both production policies without allowing network-image styles.
+        for function in ["url", "URL", "uRl", "Url"] {
+            for denied in [
+                "ftp://tracking.example.invalid/pixel",
+                "javascript:alert(1)",
+            ] {
+                let html =
+                    format!("<p style='color:{function}(\"{denied}\");font-weight:bold'>text</p>");
+                for sanitize in [sanitize_html, sanitize_trusted_html] {
+                    assert_eq!(
+                        sanitize(&html),
+                        r#"<p style="">text</p>"#,
+                        "{function}: {denied}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sanitizer_normalizes_allowed_mixed_case_css_urls_without_widening_properties() {
+        let html = r#"<p style='color:URL("data:text/plain,safe");position:fixed;background-image:URL("https://tracking.example.invalid/pixel")'>text</p>"#;
+        assert_eq!(
+            sanitize_html(html),
+            r#"<p style="color:url(&quot;data:text/plain,safe&quot;)">text</p>"#
+        );
+        assert_eq!(
+            sanitize_trusted_html(html),
+            r#"<p style="color:url(&quot;data:text/plain,safe&quot;);position:fixed">text</p>"#
+        );
+    }
+
+    #[test]
     fn sanitizer_preserves_safe_styles_and_policy_boundaries() {
         let html = r#"<p style="color:red;font-weight:bold;position:fixed;background-image:url(https://example.com/image.png)">text</p>"#;
         assert_eq!(
