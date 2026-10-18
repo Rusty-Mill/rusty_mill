@@ -235,7 +235,7 @@ fn answer<S: Supervisor>(
     question
 }
 
-fn scripted_config() -> (PathBuf, Config) {
+pub(super) fn scripted_config() -> (PathBuf, Config) {
     let (dir, mut c) = setup();
     let base = Command::new("git")
         .arg("-C")

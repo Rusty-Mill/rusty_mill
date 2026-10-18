@@ -573,3 +573,6 @@ mod tests;
 
 #[cfg(test)]
 mod tests_e2e;
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests_confined;

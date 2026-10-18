@@ -111,6 +111,27 @@ workflow through runner evidence, independent review, approval and receipt.
 Scripted workflow and running-workload lifecycle fixtures explicitly use
 `--confine none` for their test workloads; production confinement is not configurable through Orch.
 
+### Required Linux acceptance
+
+The root CI workflow runs `orch-bbp-acceptance` on every event and includes it
+in `required-gate`. It builds real `rusty_orch` and `bbp` binaries, then runs
+`.github/scripts/orch_bbp_acceptance.py --output acceptance-results`. For local
+Linux runs, first build those binaries and the `orch-bbp` library tests and
+`rusty_bbp_host --test moderator_e2e`, then set `BBP_TEST_BIN` and `ORCH_TEST_BIN`
+to their absolute paths. The collector requires exactly one executed test and
+a completion marker for each of lifecycle, timeout, cancel and kill. It attempts
+all four cases and retains logs, JSON results and a Markdown summary on failure.
+
+The lifecycle uses the real Orch CLI, persisted state and production supervisor;
+its workload must pass with `landlock+seccomp:no-endpoints` recorded in the BBP
+report. It restarts the moderator at a plan gate, checks one task and one hosted
+charge across process invocations, and requires approval followed by a separate
+receipt before Orch finishes. Recovery cases require actual confined workloads
+and descendants before interruption and verify cleanup before replacement.
+Sandbox refusal fails these opt-in acceptance tests. The ordinary portable
+suite still checks fail-closed refusal on unsupported kernels. Agent behavior is
+scripted MCP; live provider credentials and real merges remain outside this test.
+
 ### Review corrections
 
 Runner work is isolated under `work/<sha256(task id)>/run-N`; restart/adoption
