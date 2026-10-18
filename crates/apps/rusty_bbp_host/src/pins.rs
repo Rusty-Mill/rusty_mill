@@ -1420,4 +1420,42 @@ mod tests {
             assert!(err.contains("computed"), "{what}: {err}");
         }
     }
+
+    // ---- third review, finding 3: `-c` after a script file is the script's argument
+
+    #[test]
+    fn a_dash_c_after_a_script_file_is_an_argument_of_that_script() {
+        let line = "exec claude --model m1 --output-format stream-json --setting-sources '' --disallowedTools Agent,Task -p task";
+        for (what, l) in [
+            ("sh wrapper", launcher("sh", &["./wrapper.sh", "-c", line])),
+            (
+                "bash -e wrapper",
+                launcher("bash", &["-e", "./wrapper.sh", "-c", line]),
+            ),
+            (
+                "sh -- wrapper",
+                launcher("sh", &["--", "./wrapper.sh", "-c", line]),
+            ),
+            (
+                "sh -o errexit",
+                launcher("sh", &["-o", "errexit", "-c", line]),
+            ),
+        ] {
+            let err = pinned_model(&l).unwrap_err();
+            assert!(
+                err.contains("script file") || err.contains("-c"),
+                "{what}: {err}"
+            );
+            assert!(check_harness(&l).is_err(), "{what}");
+        }
+        // Options before `-c` are fine.
+        for l in [
+            launcher("sh", &["-c", line]),
+            launcher("sh", &["-e", "-c", line]),
+            launcher("bash", &["-eu", "-c", line]),
+        ] {
+            assert_eq!(pinned_model(&l).unwrap(), Some("m1".into()), "{l:?}");
+            assert_eq!(check_harness(&l), Ok(()), "{l:?}");
+        }
+    }
 }
