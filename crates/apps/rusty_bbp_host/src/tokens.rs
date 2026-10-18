@@ -785,7 +785,9 @@ fn read_tokens(
                 None,
                 lower.clone(),
             ),
-            Some(_) if !trailing.is_empty() => (
+            // Only a turn that has a result can have messages after it; with
+            // none, `price_turn` says so below.
+            Some(_) if !head.is_empty() && !trailing.is_empty() => (
                 false,
                 Some("assistant messages after the last result".to_owned()),
                 None,
@@ -809,11 +811,8 @@ fn read_tokens(
         };
         let usage = models.values().fold(Usage::default(), |a, u| a.plus(*u));
         let turn_floor = match (criteria, turn_usd) {
-            (Some(c), Some(d)) => Some(
-                d + c
-                    .dollars(&trailing)
-                    .map_err(|e| format!("turn {}: {e}", turn.0))?,
-            ),
+            // A complete turn has nothing after its result.
+            (Some(_), Some(d)) => Some(d),
             (Some(c), None) => {
                 // The result's own account, if it has one, plus what followed it.
                 let head_floor = match price_turn(head, c) {

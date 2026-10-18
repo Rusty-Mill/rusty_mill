@@ -1075,6 +1075,15 @@ fn cancelled_with_final_output(
     model_in_output: &str,
     cap_usd: f64,
 ) -> Result<moderator::Outcome, String> {
+    cancelled_by(tag, model_in_output, cap_usd, moderator::run)
+}
+
+fn cancelled_by(
+    tag: &str,
+    model_in_output: &str,
+    cap_usd: f64,
+    run: fn(&Config) -> Result<moderator::Outcome, String>,
+) -> Result<moderator::Outcome, String> {
     let dir = tempdir(tag);
     let (repo, _) = repo(&dir);
     let task = TaskId("T1".into());
@@ -1093,7 +1102,7 @@ fn cancelled_with_final_output(
     assert_eq!(r, Response::Ok, "{r:?}");
     let mut cfg = config(&dir, &task, repo, Launchers::default(), 30);
     cfg.cost_cap = Some(cost_cap(cap_usd));
-    let out = moderator::run(&cfg);
+    let out = run(&cfg);
     let _ = std::fs::remove_dir_all(&dir);
     out
 }
@@ -2090,6 +2099,52 @@ fn a_cap_stop_reaps_the_owned_runner_before_returning_its_account() {
         .selected_run()
         .is_none_or(|r| r.status != Some(RunStatus::Passed)));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+// ---- third review, finding 7: what kind of stop a closing run gets
+
+/// A cancelled task whose first turn's log is exactly `log`, under a cap of $1000
+/// at one priced model: only the end-of-run check can object to it.
+fn cancelled_with_log(tag: &str, log: &str) -> moderator::Outcome {
+    let dir = tempdir(tag);
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    moderator::write_evidence_marker(&dir, &task, 1000.0, "test").expect("marker");
+    admin::tick(&dir, &task).expect("tick");
+    let path = moderator::log_path(&dir, &task, TurnId(1));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, log).unwrap();
+    let c = card(&dir, &task);
+    human::perform(&dir, &task, "cancel", &["stop"], Some(c.rev)).expect("cancel");
+    let mut cfg = config(&dir, &task, repo, Launchers::default(), 30);
+    cfg.cost_cap = Some(cost_cap(1000.0));
+    let out = moderator::run_to_stop(&cfg).expect("an outcome");
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn a_run_that_ends_with_a_log_the_cap_could_not_read_is_a_cap_stop_not_a_wall_stop() {
+    // The live poll lets an empty log pass (the harness may be starting); the
+    // end-of-run check does not. Both Cap and Wall stops fail the `!stopped`
+    // success guard in `bbp pairs`; Cap also records the accounting failure.
+    let out = cancelled_with_log("end-empty", "");
+    let stop = out.stop.expect("stopped at the end");
+    assert_eq!(stop.kind, moderator::StopKind::Cap, "{}", stop.reason);
+    assert!(stop.reason.contains("cannot enforce"), "{}", stop.reason);
+    assert!(out.state.terminal());
+}
+
+#[test]
+fn a_run_that_closes_over_the_cap_is_a_cap_stop_not_a_wall_stop() {
+    // Both Cap and Wall stops fail the `!stopped` success guard in `bbp pairs`.
+    // An over-cap closing run must also retain its `over_cap` classification.
+    let out = cancelled_by("cap-term-kind", "priced-model", 1.0, moderator::run_to_stop)
+        .expect("an outcome");
+    let stop = out.stop.expect("stopped");
+    assert_eq!(stop.kind, moderator::StopKind::Cap, "{}", stop.reason);
+    assert!(out.state.terminal(), "the run did reach its end");
 }
 
 #[test]

@@ -558,3 +558,78 @@ fn every_byte_of_unicode_json_can_be_polled_without_losing_known_costs() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ---- third review, finding 5: captured with `--tools default`
+
+#[test]
+fn with_tools_default_the_harness_starts_a_subagent() {
+    // Claude Code 2.1.301, `--setting-sources "" --tools default`, asked for a
+    // subagent: the Agent tool was used. `default` is every tool.
+    assert!(fixture("tools-default-starts-a-subagent").contains(r#""name":"Agent""#));
+}
+
+// ---- the pin the criteria carry
+
+#[test]
+fn the_committed_criteria_pin_min_commit_to_a_full_commit_id() {
+    let min = real_criteria()
+        .min_commit
+        .expect("min_commit is set once the fixes are merged");
+    assert!(
+        min.len() == 40 && min.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{min:?}"
+    );
+}
+
+// ---- third review, finding 7: a message after the last result leaves the turn incomplete
+
+#[test]
+fn a_message_printed_after_the_last_result_makes_the_turn_incomplete_with_a_floor() {
+    let done = fixture("completed-default-ttl");
+    let c = criteria("after", SONNET_ONLY);
+    let plain = tokens_of("after1", &[("planner", done.clone())], &c).unwrap();
+    assert!(plain.turns[0].complete);
+    let more = r#"{"type":"assistant","message":{"id":"zz","model":"claude-sonnet-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}"#;
+    let t = tokens_of("after2", &[("planner", format!("{done}{more}\n"))], &c).unwrap();
+    assert!(
+        !t.turns[0].complete,
+        "its result does not account for what followed"
+    );
+    assert_eq!(t.turns[0].usd, None);
+    // The floor is the result's own cost plus a million input tokens at $2.
+    assert!(
+        near(t.usd_floor.unwrap(), plain.usd.unwrap() + 2.0),
+        "{:?}",
+        t.usd_floor
+    );
+    assert_eq!(t.unknown_turns, 1);
+}
+
+// ---- third review, finding 8: say why a turn is unknown
+
+#[test]
+fn a_turn_with_messages_and_no_result_says_no_result_not_after_the_last_result() {
+    let msg = r#"{"type":"assistant","message":{"id":"a","model":"claude-sonnet-5-5","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+    let t = tokens_of(
+        "noresult",
+        &[("planner", format!("{msg}\n"))],
+        &criteria("noresult", SONNET_ONLY),
+    )
+    .unwrap();
+    let why = t.turns[0].unknown.as_deref().unwrap();
+    assert!(why.contains("no result"), "{why}");
+    assert!(!why.contains("after the last result"), "{why}");
+    // With a result, a message after it is what is said.
+    let done = fixture("completed-default-ttl");
+    let t = tokens_of(
+        "after-r",
+        &[("planner", format!("{done}{msg}\n"))],
+        &criteria("after-r", SONNET_ONLY),
+    )
+    .unwrap();
+    assert!(t.turns[0]
+        .unknown
+        .as_deref()
+        .unwrap()
+        .contains("after the last result"));
+}

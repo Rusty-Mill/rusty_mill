@@ -528,7 +528,8 @@ fn list_values(args: &[Arg], names: &[&str]) -> Option<Vec<String>> {
 }
 
 /// Whether one `claude` command cannot start a subagent: a `--tools` list
-/// without `Agent` and `Task`, or a `--disallowedTools` list with both.
+/// without `Agent`, `Task` or `default` (which means every tool), or a
+/// `--disallowedTools` list with both `Agent` and `Task`.
 fn no_subagents(args: &[Arg]) -> bool {
     let named = |v: Vec<String>| -> Vec<String> {
         v.iter()
@@ -536,14 +537,26 @@ fn no_subagents(args: &[Arg]) -> bool {
             .collect()
     };
     if let Some(v) = list_values(args, &["--tools"]) {
+        // `claude --help`: "" is no tools, "default" is all of them, the Agent
+        // tool included.
         let t = named(v);
-        return !t.iter().any(|n| n == "Agent" || n == "Task");
+        return !t
+            .iter()
+            .any(|n| n == "Agent" || n == "Task" || n.eq_ignore_ascii_case("default"));
     }
     list_values(args, &["--disallowedTools", "--disallowed-tools"]).is_some_and(|v| {
         let t = named(v);
         ["Agent", "Task"].iter().all(|n| t.iter().any(|x| x == n))
     })
 }
+
+/// The flags `check_harness` reads a value of.
+const CHECKED_FLAGS: [&str; 4] = [
+    "--tools",
+    "--disallowedTools",
+    "--output-format",
+    "--setting-sources",
+];
 
 /// What an evidence run needs of every harness a launcher starts, beyond its
 /// pin: it prints `--output-format stream-json` to its log, unredirected and
@@ -564,18 +577,25 @@ pub fn check_harness(l: &Launcher) -> Result<(), String> {
             return Err("a claude command's output is redirected or piped, so the log the cap reads would not hold it".into());
         }
         let args = flags(args);
+        // A flag given twice is read once here and may be read last (or merged)
+        // by `claude`: the two would disagree about what the launcher says.
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for a in args {
+            let flag = match flag_of(&a.text).0 {
+                "--disallowed-tools" => "--disallowedTools",
+                f => f,
+            };
+            if CHECKED_FLAGS.contains(&flag) && !seen.insert(flag) {
+                return Err(format!(
+                    "{flag} is given more than once: the launcher would say two things"
+                ));
+            }
+        }
         // A flag whose value the shell computes is not read: `--tools "$t"`
         // may hold anything.
         for (i, a) in args.iter().enumerate() {
             let (flag, inline) = flag_of(&a.text);
-            let checked = [
-                "--tools",
-                "--disallowedTools",
-                "--disallowed-tools",
-                "--output-format",
-                "--setting-sources",
-            ];
-            if !checked.contains(&flag) {
+            if !CHECKED_FLAGS.contains(&flag) && flag != "--disallowed-tools" {
                 continue;
             }
             let computed = if inline.is_some() {
@@ -1493,5 +1513,102 @@ mod tests {
         // `&>` splits at the `&`: the redirect becomes a command of its own,
         // which is refused as an unsupported command.
         assert!(check_harness(&good("-p -- 'do it' &> /tmp/x")).is_err());
+    }
+
+    // ---- third review, finding 5: `--tools default` is every tool
+
+    #[test]
+    fn a_tools_list_that_says_default_allows_the_agent_tool() {
+        // `claude --help`: `--tools` takes tool names, "" for none, and "default"
+        // for all of them, the Agent tool included.
+        let with = |tools: &[&str]| {
+            let mut a = vec![
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--setting-sources",
+                "",
+            ];
+            a.extend(tools);
+            launcher("claude", &a)
+        };
+        for ok in [
+            &["--tools", "Bash,Read"][..],
+            &["--tools", ""],
+            &["--tools=Bash"],
+        ] {
+            assert_eq!(check_harness(&with(ok)), Ok(()), "{ok:?}");
+        }
+        for bad in [
+            &["--tools", "default"][..],
+            &["--tools=default"],
+            &["--tools", "Bash,default"],
+            &["--tools", "Bash default"],
+            &["--tools", "DEFAULT"],
+        ] {
+            let err = check_harness(&with(bad)).unwrap_err();
+            assert!(err.contains("subagent"), "{bad:?}: {err}");
+        }
+    }
+
+    // ---- third review, finding 6: a flag given twice is read once
+
+    #[test]
+    fn a_checked_flag_given_twice_is_refused() {
+        let base = [
+            "--model",
+            "m1",
+            "--output-format",
+            "stream-json",
+            "--setting-sources",
+            "",
+            "--disallowedTools",
+            "Agent,Task",
+        ];
+        assert_eq!(check_harness(&launcher("claude", &base)), Ok(()));
+        let with = |extra: &[&str]| {
+            let mut a = base.to_vec();
+            a.extend(extra);
+            launcher("claude", &a)
+        };
+        for (what, extra) in [
+            ("format", &["--output-format", "text"][..]),
+            ("format=", &["--output-format=text"]),
+            ("sources", &["--setting-sources", "user,project"]),
+            ("sources=", &["--setting-sources=project"]),
+            ("tools", &["--tools", "Bash", "--tools", "default"]),
+            ("disallowed", &["--disallowedTools", "Bash"]),
+            ("alias", &["--disallowed-tools", "Bash"]),
+        ] {
+            let err = check_harness(&with(extra)).unwrap_err();
+            assert!(err.contains("more than once"), "{what}: {err}");
+        }
+        // After `--` it is prompt text, not a flag.
+        assert_eq!(
+            check_harness(&with(&["-p", "--", "--output-format", "text"])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_hyphenated_disallowed_tools_alias_counts_the_same() {
+        let with = |tools: &[&str]| {
+            let mut a = vec![
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--setting-sources",
+                "",
+            ];
+            a.extend(tools);
+            launcher("claude", &a)
+        };
+        assert_eq!(
+            check_harness(&with(&["--disallowed-tools", "Agent,Task"])),
+            Ok(())
+        );
+        assert!(check_harness(&with(&["--disallowed-tools", "Task"])).is_err());
     }
 }

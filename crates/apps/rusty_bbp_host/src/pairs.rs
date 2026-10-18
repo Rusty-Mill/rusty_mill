@@ -1883,4 +1883,17 @@ mod tests {
         assert_eq!(e.failed_pair_costs[0].accounting_errors.len(), 1);
         assert_eq!(e.total_usd_at_least, 10.0);
     }
+
+    #[test]
+    fn criterion_one_counts_overshoot_in_the_n2_runs_only() {
+        let mut p = all([0.5; 5], 1, 1);
+        let null = p.iter().position(|x| x.kind == Kind::Null).unwrap();
+        // A null pair's repeat is an N=1 run: a budget overshoot there is not
+        // the N=2 safety property.
+        p[null].treatment.overshoot = true;
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Holds);
+        let shared = p.iter().position(|x| x.kind == Kind::Shared).unwrap();
+        p[shared].treatment.overshoot = true;
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Fails);
+    }
 }
