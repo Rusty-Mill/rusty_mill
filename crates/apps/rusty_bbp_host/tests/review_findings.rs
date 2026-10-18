@@ -567,3 +567,16 @@ fn with_tools_default_the_harness_starts_a_subagent() {
     // subagent: the Agent tool was used. `default` is every tool.
     assert!(fixture("tools-default-starts-a-subagent").contains(r#""name":"Agent""#));
 }
+
+// ---- the pin the criteria carry
+
+#[test]
+fn the_committed_criteria_pin_min_commit_to_a_full_commit_id() {
+    let min = real_criteria()
+        .min_commit
+        .expect("min_commit is set once the fixes are merged");
+    assert!(
+        min.len() == 40 && min.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{min:?}"
+    );
+}
