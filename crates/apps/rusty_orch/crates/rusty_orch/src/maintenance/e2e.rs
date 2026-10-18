@@ -55,10 +55,65 @@ fn current(config: &orch_bbp::Config, attempt: &Attempt) -> rusty_bbp::TaskView 
     store.refresh(&id).unwrap();
     rusty_bbp::TaskView::from_events(id.clone(), &store.events(&id, 0).unwrap())
 }
+fn dump_logs(path: &Path) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            dump_logs(&path);
+        } else if path.extension().is_some_and(|extension| extension == "log") {
+            eprintln!(
+                "Fixture log {}:\n{}",
+                path.display(),
+                fs::read_to_string(&path).unwrap()
+            );
+        }
+    }
+}
+
 fn cycle(options: &Options, expected: &str) -> Journal {
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        let j: Journal = json::from_str(&execute(options, &LocalPullRequests).unwrap()).unwrap();
+        let result = execute(options, &LocalPullRequests);
+        if let Err(error) = &result {
+            // Fixture-only diagnostics: never weaken a failed sandbox run or
+            // hide launcher refusals behind the moderator's health summary.
+            let config: orch_bbp::Config =
+                json::from_str(&fs::read_to_string(options.bbp.as_ref().unwrap()).unwrap())
+                    .unwrap();
+            for category in ["agents", "mod"] {
+                dump_logs(&config.dir.join(category));
+            }
+            let journal_path = options
+                .repo
+                .join(".git/rusty-orch-maintenance/journal.json");
+            if let Ok(journal) = fs::read_to_string(journal_path)
+                .and_then(|s| json::from_str::<Journal>(&s).map_err(std::io::Error::other))
+            {
+                if let Some(attempt) = journal.attempts.last() {
+                    eprintln!("Fixture card: {:?}", attempt.last_card);
+                    if let Some(handle) = &attempt.handle {
+                        let h: Value =
+                            json::from_str(handle.strip_prefix("bbp:").unwrap()).unwrap();
+                        let task = rusty_bbp::TaskId(h["task"].as_str().unwrap().into());
+                        let store = FsStore::open(&config.dir).unwrap();
+                        let state = TaskState::fold(task.clone(), &store.events(&task, 0).unwrap());
+                        for record in state
+                            .artifacts
+                            .values()
+                            .filter(|a| a.kind == rusty_bbp::ArtifactKind::Log)
+                        {
+                            let bytes = store.blob_get(&record.blob.sha).unwrap();
+                            eprintln!("Fixture runner log: {}", String::from_utf8_lossy(&bytes));
+                        }
+                    }
+                }
+            }
+            panic!("maintenance fixture failed: {error}");
+        }
+        let j: Journal = json::from_str(&result.unwrap()).unwrap();
         assert_eq!(j.attempts.len(), 1);
         if j.attempts[0].status == expected {
             return j;
