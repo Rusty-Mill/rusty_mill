@@ -1,6 +1,6 @@
 [package]
 name = "rusty-mcp"
-version = "0.10.0"
+version = "0.11.0"
 description = "Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry"
 keywords = ["mcp", "model-context-protocol", "ai", "llm"]
 categories = ["network-programming", "development-tools"]
@@ -25,7 +25,6 @@ todo = "warn"
 unwrap_used = "warn"
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Pagination cursors are base64 so clients treat them as opaque.
 rusty_base64 = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
@@ -52,6 +51,7 @@ rusty_serve = { workspace = true, optional = true }
 rusty_rand = { workspace = true, optional = true }
 
 [dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 rand = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusty_mcp_server = { workspace = true, features = ["http"] }

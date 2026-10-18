@@ -31,8 +31,6 @@ from pathlib import Path
 # `rusty-mcp` is Tier T under ADR-0002 Amendment 1: sovereign except for these.
 PINNED_EXTERNAL_DEPENDENCIES: dict[str, dict[str, str]] = {
     "rusty-mcp": {
-        "axum": "the tower layers return axum responses; goes with sovereignty item 6, "
-        "which changes public body types and needs the owner's sign-off",
         "http": "request and response types of the tower layers; adapter boundary only (D4)",
         "tower-layer": "the Layer impls of the tower adapters, until the gateway leaves axum",
         "tower-service": "the Service impls of the tower adapters, until the gateway leaves axum",

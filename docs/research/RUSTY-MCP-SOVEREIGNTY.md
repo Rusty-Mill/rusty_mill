@@ -141,6 +141,13 @@ Each item is one PR, with its own tests and a change fragment.
 6. **Drop `axum`** from the adapters (generic body, `http::Response`). *Done
    when:* `axum` is gone from `[dependencies]`; the gateway still compiles and
    its 24 suites pass. Needs D1.
+   **Done (2026-10-18):** `LimitsLayer`, `RequireAuthLayer` and `McpMetricsLayer`
+   are generic over the response body (`Service<Request<_>, Response =
+   http::Response<B>>`, with `B: From<String>` where the layer writes a
+   refusal). `axum` moved to `[dev-dependencies]`, for the tests that mount the
+   layers on a router. The gateway needed no change; its suites pass. Breaking:
+   a service that returned anything but an `http::Response` (an `IntoResponse`
+   tuple) no longer fits; `rusty-mcp` is 0.11.0.
 7. **`rusty_serve` adapter** for the cores, so a blocking server can use auth
    and limits without tower. One test per layer against `rusty_serve`.
    **Done (2026-10-15)**, behind a `serve` feature: `serve::LimitedHandler` and
@@ -168,11 +175,11 @@ Each item is one PR, with its own tests and a change fragment.
     ADR-0002 leaves a tier ledger as follow-up), so there was no Tier S check to
     teach about `rusty-mcp`. What it now does is pin the crate's direct external
     dependencies (normal and build, any feature; dev is exempt) to a list with a
-    reason per entry: `axum`, `http`, `tower-layer`, `tower-service`, `tokio`
+    reason per entry: `http`, `tower-layer`, `tower-service`, `tokio`
     (the tower adapter's timeout), `tracing` and `tracing-subscriber` (D3: keep).
     A dependency off the list fails the `dependency policy` CI job, and so does
-    an entry the crate no longer uses, so the list only shrinks: item 6 deletes
-    `axum`, item 12 deletes the two `tracing` lines. ADR-0002 Amendment 1's
+    an entry the crate no longer uses, so the list only shrinks: item 6 deleted
+    `axum` (2026-10-18), item 12 deletes the two `tracing` lines. ADR-0002 Amendment 1's
     status line and `MCP-NATIVE-PLAN.md` A6 are updated. `rusty-mcp` is 0.10.0
     for item 9's breaking changes (OTLP over HTTP and its endpoints, the
     SDK-typed API removed); items 5, 7 and 8 kept the public API or only added

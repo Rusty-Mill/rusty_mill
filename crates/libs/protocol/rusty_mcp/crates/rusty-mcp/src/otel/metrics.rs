@@ -58,8 +58,7 @@ use std::{
     time::Instant,
 };
 
-use axum::response::{IntoResponse, Response};
-use http::Request;
+use http::{Request, Response};
 use rusty_http::StatusCode;
 
 use super::instrument::{Counter, Histogram, Meta, Registry, UpDownCounter};
@@ -247,16 +246,19 @@ pub struct McpMetrics<S> {
     known_names: Arc<KnownNames>,
 }
 
-impl<S, ReqBody> tower_service::Service<Request<ReqBody>> for McpMetrics<S>
+impl<S, ReqBody, ResBody> tower_service::Service<Request<ReqBody>> for McpMetrics<S>
 where
-    S: tower_service::Service<Request<ReqBody>, Error = Infallible> + Clone + Send + 'static,
-    S::Response: IntoResponse,
+    S: tower_service::Service<Request<ReqBody>, Response = Response<ResBody>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
     S::Future: Send + 'static,
     ReqBody: Send + 'static,
+    ResBody: Send + 'static,
 {
-    type Response = Response;
+    type Response = Response<ResBody>;
     type Error = Infallible;
-    type Future = Pin<Box<dyn Future<Output = Result<Response, Infallible>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<ResBody>, Infallible>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -278,7 +280,7 @@ where
             instruments.request_started(&method);
             let started = Instant::now();
 
-            let response = inner.call(request).await?.into_response();
+            let response = inner.call(request).await?;
 
             instruments.request_finished(
                 &method,

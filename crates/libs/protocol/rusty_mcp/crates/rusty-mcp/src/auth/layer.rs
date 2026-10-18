@@ -8,9 +8,8 @@ use std::{
     task::{Context, Poll},
 };
 
-use axum::response::{IntoResponse, Response};
 use http::{
-    Request, StatusCode,
+    Request, Response, StatusCode,
     header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
 };
 
@@ -87,16 +86,19 @@ pub struct RequireAuth<S> {
     config: Arc<AuthConfig>,
 }
 
-impl<S, ReqBody> tower_service::Service<Request<ReqBody>> for RequireAuth<S>
+impl<S, ReqBody, ResBody> tower_service::Service<Request<ReqBody>> for RequireAuth<S>
 where
-    S: tower_service::Service<Request<ReqBody>, Error = Infallible> + Clone + Send + 'static,
-    S::Response: IntoResponse,
+    S: tower_service::Service<Request<ReqBody>, Response = Response<ResBody>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
     S::Future: Send + 'static,
     ReqBody: Send + 'static,
+    ResBody: From<String> + Send + 'static,
 {
-    type Response = Response;
+    type Response = Response<ResBody>;
     type Error = Infallible;
-    type Future = Pin<Box<dyn Future<Output = Result<Response, Infallible>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<ResBody>, Infallible>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -120,7 +122,7 @@ where
             // context, which is how per-tool scope checks are written.
             request.extensions_mut().insert(token);
 
-            inner.call(request).await.map(IntoResponse::into_response)
+            inner.call(request).await
         })
     }
 }
@@ -147,10 +149,15 @@ fn authorization_header(header: Option<&http::HeaderValue>) -> AuthorizationHead
 }
 
 /// Turn a refusal into a response.
-fn into_response(refusal: Refusal) -> Response {
+fn into_response<B: From<String>>(refusal: Refusal) -> Response<B> {
     let status =
         StatusCode::from_u16(refusal.status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut response = (status, [(CONTENT_TYPE, "application/json")], refusal.body).into_response();
+    let mut response = Response::new(B::from(refusal.body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
     if let Some(challenge) = refusal.challenge {
         match challenge.parse() {
             Ok(value) => {
@@ -238,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_becomes_a_json_response_with_its_challenge() {
         let config = config_with(StaticTokenValidator::new());
-        let response = into_response(Rejection::Missing.refusal(&config));
+        let response: Response<String> = into_response(Rejection::Missing.refusal(&config));
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
@@ -248,16 +255,13 @@ mod tests {
                 .expect("text")
                 .starts_with("Bearer")
         );
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        assert_eq!(&body[..], br#"{"error":"unauthorized"}"#);
+        assert_eq!(response.into_body(), r#"{"error":"unauthorized"}"#);
     }
 
     #[tokio::test]
     async fn a_challenge_free_refusal_sets_no_www_authenticate() {
         let config = config_with(StaticTokenValidator::new());
-        let response = into_response(Rejection::Unavailable.refusal(&config));
+        let response: Response<String> = into_response(Rejection::Unavailable.refusal(&config));
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(response.headers().get(WWW_AUTHENTICATE).is_none());

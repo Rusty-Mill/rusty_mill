@@ -59,8 +59,7 @@ use std::{
     time::Duration,
 };
 
-use axum::response::{IntoResponse, Response};
-use http::{Request, StatusCode, header::RETRY_AFTER};
+use http::{Request, Response, StatusCode, header::RETRY_AFTER};
 
 use crate::admission::{Admission, Rejection};
 
@@ -141,16 +140,19 @@ pub struct Limited<S> {
     timeout: Option<Duration>,
 }
 
-impl<S, ReqBody> tower_service::Service<Request<ReqBody>> for Limited<S>
+impl<S, ReqBody, ResBody> tower_service::Service<Request<ReqBody>> for Limited<S>
 where
-    S: tower_service::Service<Request<ReqBody>, Error = Infallible> + Clone + Send + 'static,
-    S::Response: IntoResponse,
+    S: tower_service::Service<Request<ReqBody>, Response = Response<ResBody>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
     S::Future: Send + 'static,
     ReqBody: Send + 'static,
+    ResBody: From<String> + Send + 'static,
 {
-    type Response = Response;
+    type Response = Response<ResBody>;
     type Error = Infallible;
-    type Future = Pin<Box<dyn Future<Output = Result<Response, Infallible>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<ResBody>, Infallible>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         // Deliberately *not* where the limit is applied. Returning `Pending`
@@ -184,11 +186,11 @@ where
             let call = inner.call(request);
 
             let Some(timeout) = timeout else {
-                return Ok(call.await?.into_response());
+                return call.await;
             };
 
             match tokio::time::timeout(timeout, call).await {
-                Ok(response) => Ok(response?.into_response()),
+                Ok(response) => response,
                 Err(_) => {
                     tracing::warn!(
                         timeout_ms = timeout.as_millis() as u64,
@@ -203,10 +205,11 @@ where
     }
 }
 
-fn respond(rejection: Rejection) -> Response {
+fn respond<B: From<String>>(rejection: Rejection) -> Response<B> {
     let status = StatusCode::from_u16(rejection.status.as_u16())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut response = (status, rejection.body).into_response();
+    let mut response = Response::new(B::from(rejection.body.to_owned()));
+    *response.status_mut() = status;
     if let Some(secs) = rejection.retry_after_secs {
         response.headers_mut().insert(RETRY_AFTER, secs.into());
     }
@@ -225,9 +228,9 @@ mod tests {
     struct Slow(Duration);
 
     impl<B: Send + 'static> tower_service::Service<Request<B>> for Slow {
-        type Response = Response;
+        type Response = Response<String>;
         type Error = Infallible;
-        type Future = Pin<Box<dyn Future<Output = Result<Response, Infallible>> + Send>>;
+        type Future = Pin<Box<dyn Future<Output = Result<Response<String>, Infallible>> + Send>>;
 
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
@@ -237,15 +240,13 @@ mod tests {
             let delay = self.0;
             Box::pin(async move {
                 tokio::time::sleep(delay).await;
-                Ok(StatusCode::OK.into_response())
+                Ok(Response::new(String::new()))
             })
         }
     }
 
-    fn request() -> Request<axum::body::Body> {
-        Request::builder()
-            .body(axum::body::Body::empty())
-            .expect("request")
+    fn request() -> Request<String> {
+        Request::new(String::new())
     }
 
     #[tokio::test]
