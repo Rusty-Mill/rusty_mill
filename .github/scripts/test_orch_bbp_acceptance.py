@@ -39,7 +39,9 @@ class AcceptanceTests(unittest.TestCase):
             with patch("sys.argv", ["acceptance", "--output", directory]), \
                  patch.object(acceptance, "run_case", side_effect=results) as run:
                 self.assertEqual(acceptance.main(), 1)
-            self.assertEqual(run.call_count, 4)
+            self.assertEqual(run.call_count, len(acceptance.CASES))
+            self.assertIn("| pause-adoption | PASS |", (Path(directory) / "summary.md").read_text())
+            self.assertIn("| rust-lld | PASS |", (Path(directory) / "summary.md").read_text())
             self.assertIn('"mode": "kill"', (Path(directory) / "results.json").read_text())
             self.assertIn("| timeout | FAIL |", (Path(directory) / "summary.md").read_text())
 

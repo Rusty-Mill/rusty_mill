@@ -22,6 +22,33 @@ impl Supervisor for StdSupervisor {
         if !cfg!(target_os = "linux") {
             return Err("BBP sandboxed hosting requires Linux".into());
         }
+        // Host health replays BBP's existing log. A paused launch loop must not
+        // restart on a new Orch process; finite CLI diagnostics preserve the card.
+        let argv = vec![
+            config.binary.to_string_lossy().into_owned(),
+            "mod-health".into(),
+            "--dir".into(),
+            config.dir.to_string_lossy().into_owned(),
+            "--task".into(),
+            task.into(),
+            "--check".into(),
+            "yes".into(),
+        ];
+        let health = orch_cli::CommandRunner::run_in(
+            &orch_cli::StdCommand,
+            None,
+            &argv,
+            b"",
+            std::time::Duration::from_secs(5),
+            SCRUB,
+        )
+        .map_err(|e| e.to_string())?;
+        if health.status != 0 {
+            return Err(format!(
+                "BBP moderator health: {}",
+                String::from_utf8_lossy(&health.stderr)
+            ));
+        }
         let key = rusty_bbp::Sha256::of(task.as_bytes()).hex();
         let dir = config.dir.join("mod");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

@@ -9,6 +9,8 @@
 //! bbp human   --dir D --task T [--rev N] [--as WHO] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
+//! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
+//! bbp profiles rust-lld --sysroot PATH     pre-task, bounded Rust/LLD test profile
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
@@ -41,6 +43,14 @@ fn run() -> Result<String, String> {
         std::process::exit(i32::from(rusty_sandbox::SETUP_FAILED));
     }
     let a = Args::parse(argv.into_iter().skip(1));
+    if sub == "profiles" {
+        if a.pos(0)? != "rust-lld" {
+            return Err("usage: bbp profiles rust-lld --sysroot PATH".into());
+        }
+        return profiles::ProfileSet::rust_lld_tests(&PathBuf::from(a.flag("sysroot")?))?
+            .to_bytes()
+            .and_then(|bytes| String::from_utf8(bytes).map_err(|e| e.to_string()));
+    }
     if sub == "grade" {
         let p = |k: &str| a.flag(k).map(PathBuf::from);
         return match a.pos(0)? {
@@ -91,6 +101,20 @@ fn run() -> Result<String, String> {
         ("why", Some(t)) => TaskId(t.clone()),
         _ => TaskId(a.flag_or_env("task", "BBP_TASK")?),
     };
+    if sub == "mod-health" {
+        if a.flags.get("reset").is_some_and(|value| value == "yes") {
+            let rev = a
+                .flag("rev")?
+                .parse()
+                .map_err(|_| "--rev must be a number")?;
+            moderator::reset_failures(&dir, &task, Rev(rev))?;
+        }
+        let health = rusty_bbp_host::moderator_health::read(&dir, &task)?;
+        if a.flags.get("check").is_some_and(|value| value == "yes") {
+            health.check()?;
+        }
+        return rusty_serde::json::to_string(&health).map_err(|e| e.to_string());
+    }
     let resp = match sub.as_str() {
         "open" => {
             let brief = std::fs::read(a.flag("brief")?).map_err(|e| e.to_string())?;

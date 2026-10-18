@@ -1743,8 +1743,8 @@ jobs:
         run: |
           cargo build --locked -p rusty_orch -p rusty_bbp_host
           cargo test --locked -p orch-bbp --lib --no-run
-          cargo test --locked -p rusty_bbp_host --test moderator_e2e --no-run
-      - name: Confined lifecycle and timeout/cancel/kill recovery
+          cargo test --locked -p rusty_bbp_host --test moderator_e2e --test rust_lld_profile --no-run
+      - name: Confined execution, lifecycle and durable pause/adoption recovery
         shell: bash
         run: |
           set -euo pipefail
