@@ -8,14 +8,14 @@
 import type { ApiClient } from './client'
 import { DEMO_DECK } from './demoDeck'
 import { ConflictError, InvalidError, NotFoundError, StaleError } from './errors'
-import { SUITS, type Baseline, type BaselineResponse, type Card, type CardPatch, type CardState, type DiffField, type FieldDiff, type NewCard, type Person, type SeedResult, type Snapshot, type SplitInput, type SplitResult, type Suit, type UnsplitResult } from './types'
+import { FREQUENCIES, POINT_SCALE, SUITS, type Baseline, type BaselineResponse, type Card, type CardPatch, type CardState, type DiffField, type FieldDiff, type NewCard, type Frequency, type Person, type Points, type SeedResult, type Snapshot, type SplitInput, type SplitResult, type Suit, type UnsplitResult } from './types'
 import { newId } from '@/lib/id'
 
 const MAX_TEXT_LEN = 10_000
 const MAX_STANDARDS = 50
 
-/** A card as stored: everything but the derived `state`, `etag` and `treeEtag`. */
-type Stored = Omit<Card, 'state' | 'etag' | 'treeEtag'>
+/** A card as stored: everything but the derived `state`, `etag`, `treeEtag` and the suggestions. */
+type Stored = Omit<Card, 'state' | 'etag' | 'treeEtag' | 'suggestedPoints' | 'suggestedFrequency'>
 
 interface Data {
   people: Person[]
@@ -54,7 +54,7 @@ export class MemoryAdapter implements ApiClient {
       if (raw) {
         const data = JSON.parse(raw) as Data
         // Older saves predate deck membership: every card was in the deck.
-        this.data = { ...data, cards: data.cards.map((c) => ({ ...c, inPlay: c.inPlay ?? true })) }
+        this.data = { ...data, cards: data.cards.map((c) => ({ ...c, inPlay: c.inPlay ?? true, points: c.points ?? null, frequency: c.frequency ?? null })) }
       }
     } catch {
       /* unreadable: start empty */
@@ -87,7 +87,7 @@ export class MemoryAdapter implements ApiClient {
   private view(card: Stored): Card {
     const baseline = this.baselineOf(card)
     const state: CardState = card.origin === 'family' ? 'custom' : diff(card, baseline!).length === 0 ? 'original' : 'edited'
-    return { ...clone(card), state, etag: etagOf(card), treeEtag: this.treeEtagOf(card) }
+    return { ...clone(card), state, etag: etagOf(card), treeEtag: this.treeEtagOf(card), suggestedPoints: suggestPoints(card), suggestedFrequency: suggestFrequency(card) }
   }
 
   /** Over the card and its whole subtree in tree order, as the server's. */
@@ -188,6 +188,8 @@ export class MemoryAdapter implements ApiClient {
           origin: 'deck',
           baselineId: b.id,
           inPlay: true,
+          points: null,
+          frequency: null,
         })
         result.cards.created++
       }
@@ -238,6 +240,14 @@ export class MemoryAdapter implements ApiClient {
     if (patch.execution !== undefined) next.execution = cleanText(patch.execution)
     if (patch.minimumStandardOfCare !== undefined) next.minimumStandardOfCare = cleanStandards(patch.minimumStandardOfCare)
     if (patch.notes !== undefined) next.notes = cleanText(patch.notes)
+    if (patch.points !== undefined) {
+      if (patch.points !== null && !POINT_SCALE.includes(patch.points)) throw invalid(`points must be one of ${POINT_SCALE.join(', ')}`)
+      next.points = patch.points
+    }
+    if (patch.frequency !== undefined) {
+      if (patch.frequency !== null && !FREQUENCIES.includes(patch.frequency)) throw invalid(`frequency must be one of ${FREQUENCIES.join(', ')}`)
+      next.frequency = patch.frequency
+    }
     if (patch.ownerId !== undefined) {
       this.checkOwner(patch.ownerId)
       if (patch.ownerId && patch.inPlay === false) throw invalid('a card that is set aside cannot be dealt')
@@ -275,6 +285,8 @@ export class MemoryAdapter implements ApiClient {
       origin: 'family',
       baselineId: null,
       inPlay: true,
+      points: null,
+      frequency: null,
     }
     if (this.data.cards.some((c) => c.id === card.id)) throw new ConflictError('a card with that id already exists')
     this.checkParent(card)
@@ -309,6 +321,8 @@ export class MemoryAdapter implements ApiClient {
         origin: 'family',
         baselineId: null,
         inPlay: true,
+        points: null,
+        frequency: null,
       })
     }
     if (input.ownerId !== undefined) this.checkOwner(input.ownerId)
@@ -386,6 +400,35 @@ export class MemoryAdapter implements ApiClient {
 // ---- rules shared with the server ---------------------------------------
 
 /** FNV-1a over the stored record: 16 hex chars, like the server's SHA-256 prefix; new whenever the card changes. */
+/** The server's suggestion (`marks::suggest`): words in the three fields plus 8 per standard, against fixed ceilings. */
+export function suggestPoints(card: Pick<Stored, 'conception' | 'planning' | 'execution' | 'minimumStandardOfCare'>): Points {
+  const words = [card.conception, card.planning, card.execution].reduce((n, t) => n + t.split(/\s+/).filter(Boolean).length, 0)
+  const score = words + card.minimumStandardOfCare.length * 8
+  const ceilings = [36, 42, 48, 56]
+  const i = ceilings.findIndex((ceiling) => score <= ceiling)
+  return POINT_SCALE[i === -1 ? POINT_SCALE.length - 1 : i]!
+}
+
+const FREQUENCY_CUES: ReadonlyArray<readonly [Frequency, readonly string[]]> = [
+  ['Daily', ['daily', 'each day', 'every day', 'per day', 'before bed', 'bedtime', 'each night', 'every night', 'every morning']],
+  ['Weekly', ['weekly', 'each week', 'every week', 'per week', 'pickup day']],
+  ['Monthly', ['monthly', 'each month', 'every month', 'per month']],
+  ['Seasonal', ['season', 'quarterly']],
+  ['Yearly', ['annual', 'yearly', 'each year', 'every year', 'per year']],
+]
+
+/** The server's `marks::suggest_frequency`: the period the text names most often (a tie to the more frequent), else 'As needed'. */
+export function suggestFrequency(card: Pick<Stored, 'name' | 'conception' | 'planning' | 'execution' | 'minimumStandardOfCare'>): Frequency {
+  const text = [card.name, card.conception, card.planning, card.execution, ...card.minimumStandardOfCare].join('\n').toLowerCase()
+  let best: Frequency = 'As needed'
+  let bestHits = 0
+  for (const [frequency, cues] of FREQUENCY_CUES) {
+    const hits = cues.reduce((n, cue) => n + text.split(cue).length - 1, 0)
+    if (hits > bestHits) [best, bestHits] = [frequency, hits]
+  }
+  return best
+}
+
 function etagOf(card: Stored): string {
   return fnv(JSON.stringify(card))
 }

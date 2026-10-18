@@ -2,7 +2,7 @@ import { ArrowDown, ArrowUp, ChevronRight, ChevronsLeft, ChevronsRight, Merge, S
 import { useMemo, useRef, useState } from 'react'
 import { StaleError } from '@/api/errors'
 import { Link, useNavigate } from 'react-router-dom'
-import { SUITS, type Card, type CardPatch, type Suit } from '@/api/types'
+import { FREQUENCIES, POINT_SCALE, SUITS, type Card, type CardPatch, type Frequency, type Points, type Suit } from '@/api/types'
 import { PATHS } from '@/app/paths'
 import { useActions, useData } from '@/app/services'
 import { OwnerChip, ownerOf, StateBadge, suitBg, suitText } from '@/components/badges'
@@ -75,7 +75,7 @@ function CardDetail({ card }: { card: Card }) {
   const navigate = useNavigate()
   const people = useData((s) => s.people)
   const index = useData((s) => s.index)
-  const { updateCard, reorderChildren, deleteCard, unsplit, setInPlay } = useActions()
+  const { updateCard, updateMarks, reorderChildren, deleteCard, unsplit, setInPlay } = useActions()
   const [draft, setDraft] = useState<Draft>(() => draftOf(card))
   // Equality with the previous server value cannot tell an untouched field from a real edit
   // back to that value. Generations make that distinction, including while Save is in flight.
@@ -96,6 +96,7 @@ function CardDetail({ card }: { card: Card }) {
   // refresh, another tab), so a save is judged against what the user actually saw.
   const [draftBase, setDraftBase] = useState(card.etag)
   const [saving, setSaving] = useState(false)
+  const markSaving = useData((s) => s.pendingMarks.includes(card.id))
   const [splitOpen, setSplitOpen] = useState(false)
   const [confirm, setConfirm] = useState<'delete' | 'unsplit' | 'aside' | null>(null)
   const [asideSelection, setAsideSelection] = useState<Card | null>(null)
@@ -176,6 +177,11 @@ function CardDetail({ card }: { card: Card }) {
 
   const deal = (value: string): void => {
     void updateCard(card.id, { ownerId: value || null }, card.etag).catch(() => undefined)
+  }
+
+  /** Both selectors share a lock: concurrent marks would use the same rendered etag. */
+  const mark = (patch: Pick<CardPatch, 'points' | 'frequency'>): void => {
+    void updateMarks(card.id, patch, card.etag).catch(() => undefined) // Toasted by the store.
   }
 
   /** Move child `i` by `delta` as one order request. */
@@ -273,6 +279,31 @@ function CardDetail({ card }: { card: Card }) {
           </select>
           <OwnerChip owner={owner} />
         </label>
+
+        <div className="grid grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1.5 text-s">
+          <span className="text-grey">Points</span>
+          <div className="flex items-center gap-2">
+            <select aria-label="Points" value={card.points ?? ''} disabled={markSaving} onChange={(e) => mark({ points: e.target.value ? (Number(e.target.value) as Points) : null })} className="field h-8 w-auto disabled:opacity-50">
+              <option value="">Suggested: {card.suggestedPoints}</option>
+              {POINT_SCALE.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+            {card.points === null && <span className="text-grey">from the card's text; pick one to set it</span>}
+          </div>
+          <span className="text-grey">Frequency</span>
+          <select aria-label="Frequency" value={card.frequency ?? ''} disabled={markSaving} onChange={(e) => mark({ frequency: e.target.value ? (e.target.value as Frequency) : null })} className="field h-8 w-auto disabled:opacity-50">
+            <option value="">Suggested: {card.suggestedFrequency}</option>
+            {FREQUENCIES.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+        </div>
+        {(card.points === null || card.frequency === null) && <p className="m-0 text-xs text-grey">Points and frequency are suggested from the card's text until you pick them.</p>}
 
         {(['conception', 'planning', 'execution'] as const).map((field) => (
           <label key={field} className="flex flex-col gap-1">

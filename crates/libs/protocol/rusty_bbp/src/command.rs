@@ -81,6 +81,12 @@ pub enum AgentAction {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HumanAction {
+    /// Apply any human action only to the exact public revision shown.
+    /// Checked inside the transactional driver, including conflict retries.
+    Fenced {
+        expected_rev: Rev,
+        action: Box<HumanAction>,
+    },
     Approve {
         gate: Gate,
         subject: ArtId,
@@ -148,6 +154,8 @@ impl Rejection {
 /// Every rejection code in the spec, plus `forbidden` for authentication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Code {
+    /// Human CLI syntax was invalid; no command was dispatched.
+    BadHumanInput,
     Forbidden,
     Terminal,
     OpConflict,

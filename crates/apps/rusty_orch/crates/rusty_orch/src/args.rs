@@ -20,15 +20,18 @@ options:
   --interactive           answer open questions from stdin and keep going
   --state <dir>           save the plan, board, and ledger there and resume
                           from it on the next run      [env RUSTY_ORCH_STATE]
+  --bbp <config.json>     enable BBP task hosting (requires --state) [env ORCH_BBP]
   --json                  print the report as one JSON object
   -h, --help              this text
 
-exit status: 0 finished, 3 blocked on questions, 4 budget or agent failure, 2 usage, 1 other error";
+exit status: 0 finished or hosted work running, 3 blocked on questions, 4 budget or agent failure, 2 usage, 1 other error";
 
 /// What the user asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub goal: PathBuf,
+    /// Optional BBP configuration file; requires durable --state.
+    pub bbp: Option<PathBuf>,
     pub ollama_model: String,
     /// The repository the CLI agents read, as their working directory.
     pub repo: PathBuf,
@@ -72,6 +75,7 @@ pub fn parse(
     let mut claude_model = None;
     let mut interactive = false;
     let mut json = false;
+    let mut bbp = env("ORCH_BBP").map(PathBuf::from);
     let mut state = env("RUSTY_ORCH_STATE").map(PathBuf::from);
     while let Some(arg) = argv.next() {
         match arg.as_str() {
@@ -81,6 +85,7 @@ pub fn parse(
             "--claude-model" => claude_model = Some(value(&arg, argv.next())?),
             "--interactive" => interactive = true,
             "--json" => json = true,
+            "--bbp" => bbp = Some(PathBuf::from(value(&arg, argv.next())?)),
             "--state" => state = Some(PathBuf::from(value(&arg, argv.next())?)),
             "-h" | "--help" => return Err(ArgsError::Help),
             flag if flag.starts_with('-') => return Err(usage(format!("unknown option {flag:?}"))),
@@ -89,6 +94,7 @@ pub fn parse(
         }
     }
     Ok(Args {
+        bbp,
         goal: goal.ok_or_else(|| usage("missing <goal.json>".to_owned()))?,
         ollama_model: ollama_model.unwrap_or_else(|| "llama3.2".to_owned()),
         repo: repo.unwrap_or(cwd),

@@ -1,0 +1,93 @@
+"""Run strict Linux acceptance cases and retain a result for every mode."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass
+import json
+from pathlib import Path
+import re
+import subprocess
+
+
+@dataclass(frozen=True)
+class Case:
+    """One exact Rust test and the evidence it must emit after its assertions."""
+
+    mode: str
+    package: str
+    target: tuple[str, ...]
+    test: str
+
+    def command(self) -> list[str]:
+        """Select exactly one opt-in test, without swallowing its output."""
+        return ["cargo", "test", "--locked", "-p", self.package, *self.target,
+                self.test, "--", "--ignored", "--exact", "--nocapture"]
+
+
+CASES = (
+    Case("lifecycle", "orch-bbp", ("--lib",),
+         "tests_confined::confined_orch_cli_lifecycle_resumes_and_records_receipt"),
+    *(Case(mode, "rusty_bbp_host", ("--test", "moderator_e2e"),
+           f"confined_{mode}_recovery") for mode in ("timeout", "cancel", "kill")),
+)
+
+
+@dataclass(frozen=True)
+class Result:
+    """Portable per-mode evidence, including failure rather than just exit status."""
+
+    mode: str
+    passed: bool
+    detail: str
+
+
+def assess(mode: str, returncode: int, output: str) -> Result:
+    """Reject refusal, zero/skipped tests, and missing completion evidence."""
+    if returncode != 0:
+        return Result(mode, False, f"test exited {returncode}")
+    if "NotEnforced" in output:
+        return Result(mode, False, "sandbox refusal")
+    if not re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored;", output):
+        return Result(mode, False, "expected exactly one executed test")
+    if f"BBP_ACCEPTANCE PASS {mode}" not in output.splitlines():
+        return Result(mode, False, "missing completion evidence")
+    return Result(mode, True, "confined assertions completed")
+
+
+def run_case(case: Case, directory: Path) -> Result:
+    """Run one case with a deadline and preserve output even on failure."""
+    try:
+        completed = subprocess.run(case.command(), stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, timeout=180, check=False)
+        output = completed.stdout.decode("utf-8", errors="replace")
+        result = assess(case.mode, completed.returncode, output)
+    except subprocess.TimeoutExpired as error:
+        output = (error.stdout or b"").decode("utf-8", errors="replace")
+        result = Result(case.mode, False, "acceptance deadline exceeded")
+    except OSError as error:
+        output = str(error)
+        result = Result(case.mode, False, f"could not start test: {error}")
+    (directory / f"{case.mode}.log").write_text(output, encoding="utf-8")
+    print(output, flush=True)
+    print(f"{case.mode}: {'PASS' if result.passed else 'FAIL'} ({result.detail})", flush=True)
+    return result
+
+
+def main() -> int:
+    """Attempt every mode, write machine/human results, and fail on any gap."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    args.output.mkdir(parents=True, exist_ok=True)
+    results = [run_case(case, args.output) for case in CASES]
+    (args.output / "results.json").write_text(
+        json.dumps([asdict(result) for result in results], indent=2) + "\n", encoding="utf-8")
+    rows = ["| Mode | Result | Evidence |", "| --- | --- | --- |"]
+    rows.extend(f"| {r.mode} | {'PASS' if r.passed else 'FAIL'} | {r.detail} |" for r in results)
+    (args.output / "summary.md").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return 0 if all(result.passed for result in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

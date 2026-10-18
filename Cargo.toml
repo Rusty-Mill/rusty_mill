@@ -202,6 +202,7 @@ members = [
     "crates/apps/rusty_orch/crates/orch-core",
     "crates/apps/rusty_orch/crates/orch-dispatch",
     "crates/apps/rusty_orch/crates/orch-cli",
+    "crates/apps/rusty_orch/crates/orch-bbp",
     "crates/apps/rusty_orch/crates/orch-ollama",
     "crates/apps/rusty_orch/crates/orch-codex",
     "crates/apps/rusty_orch/crates/orch-claude",
@@ -645,6 +646,7 @@ skillopt-envs = { path = "crates/apps/rusty_skillopt/crates/skillopt-envs" }
 # rust-version 1.75) -- rusty_db treatment.
 orch-core = { path = "crates/apps/rusty_orch/crates/orch-core" }
 orch-dispatch = { path = "crates/apps/rusty_orch/crates/orch-dispatch" }
+orch-bbp = { path = "crates/apps/rusty_orch/crates/orch-bbp" }
 orch-cli = { path = "crates/apps/rusty_orch/crates/orch-cli" }
 orch-ollama = { path = "crates/apps/rusty_orch/crates/orch-ollama" }
 orch-codex = { path = "crates/apps/rusty_orch/crates/orch-codex" }
@@ -979,7 +981,8 @@ trash = "5"
 tempfile = "3"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 csv = "1.3"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# ZIP 9 fixes RUSTSEC-2026-0367/0368/0369; keep the extraction fixes in 9.0.4.
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 clap_complete = "4.5"
 comfy-table = "7"
 ctrlc = "3.5"

@@ -433,32 +433,6 @@ fn is_shell(program: &str) -> bool {
     matches!(name, "sh" | "bash" | "dash" | "zsh" | "ksh")
 }
 
-/// Where `-c` is in a shell launcher's arguments, when it is the shell's own:
-/// every argument before it is an option. A non-option argument before it is a
-/// script file, which the shell runs with `-c` and the rest as that script's
-/// arguments (`sh ./wrapper.sh -c 'claude ...'`), so the line after `-c` is
-/// never what runs. `Ok(None)` when there is no `-c` at all.
-fn shell_dash_c(l: &Launcher) -> Result<Option<usize>, String> {
-    if !is_shell(&l.program) {
-        return Ok(None);
-    }
-    for (i, a) in l.args.iter().enumerate() {
-        match a.as_str() {
-            "-c" => return Ok(Some(i)),
-            // An option, or a cluster of them (`-eu`), but not `-` / `--`, and
-            // not one that takes a value (`-o errexit` reads `errexit` as a
-            // script file below).
-            o if o.starts_with('-') && o.len() > 1 && o != "--" => {}
-            other => {
-                return Err(format!(
-                    "{other:?} comes before `-c` and would run as a script file, not as the line after `-c`"
-                ))
-            }
-        }
-    }
-    Ok(None)
-}
-
 /// The `claude` commands a launcher runs, each as its arguments. A direct
 /// launcher is the program `claude` itself, by that name; anything else is an
 /// error, since what it runs cannot be shown to pin or to print what the cap
@@ -470,17 +444,21 @@ fn claude_commands(l: &Launcher) -> Result<Vec<Vec<Arg>>, String> {
         dynamic: false,
         redirect: false,
     };
-    let shell = is_shell(&l.program);
-    let Some(i) = shell_dash_c(l)?.filter(|_| shell) else {
+    if !is_shell(&l.program) {
         if l.program != "claude" {
             return Err(format!(
-                "the program is {:?}, not `claude`: only a direct `claude` or `sh -c` launcher can be read",
+                "the program is {:?}: only direct claude or sh -c is supported",
                 l.program
             ));
         }
         return Ok(vec![l.args.iter().map(plain).collect()]);
-    };
-    let script = l.args.get(i + 1).map_or("", String::as_str);
+    }
+    // Accept only shell command mode. An operand before -c selects script
+    // mode, so checking a later argument would validate a command never run.
+    if l.args.len() != 2 || l.args[0] != "-c" {
+        return Err("shell launcher must have exactly -c SCRIPT arguments".into());
+    }
+    let script = &l.args[1];
     let mut out = Vec::new();
     let mut vars = Vars::new();
     for words in shell_commands(script)? {
@@ -1464,20 +1442,27 @@ mod tests {
             ),
         ] {
             let err = pinned_model(&l).unwrap_err();
-            assert!(
-                err.contains("script file") || err.contains("-c"),
-                "{what}: {err}"
-            );
+            assert!(err.contains("-c"), "{what}: {err}");
             assert!(check_harness(&l).is_err(), "{what}");
         }
-        // Options before `-c` are fine.
+        // Only exactly `-c SCRIPT` is read; options before `-c` are refused too.
+        let plain = launcher("sh", &["-c", line]);
+        assert_eq!(pinned_model(&plain).unwrap(), Some("m1".into()));
+        assert_eq!(check_harness(&plain), Ok(()));
         for l in [
-            launcher("sh", &["-c", line]),
             launcher("sh", &["-e", "-c", line]),
             launcher("bash", &["-eu", "-c", line]),
         ] {
-            assert_eq!(pinned_model(&l).unwrap(), Some("m1".into()), "{l:?}");
-            assert_eq!(check_harness(&l), Ok(()), "{l:?}");
+            assert!(pinned_model(&l).is_err(), "{l:?}");
         }
+    }
+
+    #[test]
+    fn shell_script_operand_before_c_is_refused() {
+        let command = "exec claude --model m1 --output-format stream-json --setting-sources '' --disallowedTools Agent,Task -p task";
+        assert!(check_harness(&launcher("sh", &["-c", command])).is_ok());
+        let bad = launcher("sh", &["/tmp/wrapper.sh", "-c", command]);
+        assert!(check_harness(&bad).is_err());
+        assert!(pinned_model(&bad).is_err());
     }
 }

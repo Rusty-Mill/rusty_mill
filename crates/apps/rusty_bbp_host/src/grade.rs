@@ -368,7 +368,8 @@ pub fn write_pack(
 }
 
 /// `bbp grade release`: check the approved scores are complete, record their
-/// hash in `release.json` and only then write `unused.json` for the grader.
+/// immutable hash in `release.json` and only then write `unused.json` for the
+/// grader. Identical retries are allowed; changed scores or released packs fail.
 pub fn release_files(key: &Path, held: &Path, scores: &Path, out: &Path) -> Result<String, String> {
     let read = |p: &Path| std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()));
     let key: Key = rusty_serde::json::from_str(&read(key)?).map_err(|e| e.to_string())?;
@@ -377,7 +378,25 @@ pub fn release_files(key: &Path, held: &Path, scores: &Path, out: &Path) -> Resu
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let record = format!("{{\"approved_scores_sha256\":\"{sha}\"}}");
     // The record first: an `unused.json` never exists without one.
-    std::fs::write(out.join("release.json"), &record).map_err(|e| format!("release.json: {e}"))?;
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(out.join("release.json"))
+    {
+        Ok(mut file) => file
+            .write_all(record.as_bytes())
+            .map_err(|e| format!("release.json: {e}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if read(&out.join("release.json"))? != record {
+                return Err("release seal is immutable: approved scores changed".into());
+            }
+            if out.join("unused.json").exists() && read(&out.join("unused.json"))? != unused {
+                return Err("released unused pack is immutable".into());
+            }
+        }
+        Err(e) => return Err(format!("release.json: {e}")),
+    }
     std::fs::write(out.join("unused.json"), unused).map_err(|e| format!("unused.json: {e}"))?;
     Ok(record)
 }
@@ -742,5 +761,37 @@ mod tests {
         assert!(join_sealed(&key, &approved, none, &sha).is_err());
         let both = scores_text(&key, Which::Approved, |_| vec![true; 3]);
         assert!(join_sealed(&key, &approved, &both, &sha).is_err());
+    }
+    #[test]
+    fn release_retry_cannot_reseal_edited_scores() {
+        let dir = std::env::temp_dir().join(format!("bbp-release-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = pack(&sources(), "s").key;
+        let approved = scores_text(&key, Which::Approved, |_| vec![true, true, false]);
+        let edited = scores_text(&key, Which::Approved, |_| vec![true, true, true]);
+        let unused = scores_text(&key, Which::Unused, |_| vec![false, true, true]);
+        let k = dir.join("key.json");
+        let h = dir.join("held.json");
+        let s = dir.join("scores.json");
+        std::fs::write(&k, rusty_serde::json::to_string(&key).unwrap()).unwrap();
+        std::fs::write(&h, "[]").unwrap();
+        std::fs::write(&s, &approved).unwrap();
+        let record = release_files(&k, &h, &s, &dir).unwrap();
+        assert_eq!(release_files(&k, &h, &s, &dir).unwrap(), record);
+        std::fs::write(&s, &edited).unwrap();
+        assert!(release_files(&k, &h, &s, &dir).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("release.json")).unwrap(),
+            record
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("unused.json")).unwrap(),
+            "[]"
+        );
+        let rel: Release = rusty_serde::json::from_str(&record).unwrap();
+        assert!(join_sealed(&key, &edited, &unused, &rel.approved_scores_sha256).is_err());
+        assert!(join_sealed(&key, &approved, &unused, &rel.approved_scores_sha256).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

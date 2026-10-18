@@ -78,7 +78,7 @@
 
 mod challenge;
 mod config;
-mod decision;
+pub(crate) mod decision;
 #[cfg(feature = "jwt")]
 mod jwt;
 mod layer;

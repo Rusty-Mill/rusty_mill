@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::board::Board;
-use crate::domain::{Actor, BoardError, Column};
+use crate::domain::{Actor, BoardError, Card, Column, DEFAULT_PROJECT};
 use crate::store::Store;
 
 /// The board every surface shares.
@@ -21,6 +21,9 @@ pub struct Identity {
     pub actor: String,
     /// Role name; see `board_roles`.
     pub role: String,
+    /// Projects this credential may work in; `None` is all of them.
+    #[serde(default)]
+    pub projects: Option<Vec<String>>,
 }
 
 /// Why a call failed.
@@ -97,7 +100,7 @@ where
 /// them (or repeat them exactly). Without one the board trusts what the
 /// caller says: a workflow guard between cooperating agents.
 #[derive(Deserialize, JsonSchema)]
-struct Who {
+pub(crate) struct Who {
     /// Stable name of the actor, recorded in claims and history.
     actor: Option<String>,
     /// Role name; see `board_roles`.
@@ -106,7 +109,11 @@ struct Who {
 
 /// The acting identity: the credential's if there is one (a disagreeing
 /// `actor`/`role` is refused), else the arguments'.
-fn acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Actor, BoardError> {
+pub(crate) fn acting(
+    b: &Shared,
+    identity: Option<&Identity>,
+    who: &Who,
+) -> Result<Actor, BoardError> {
     match identity {
         Some(i) => {
             let differs = who.actor.as_deref().is_some_and(|a| a != i.actor)
@@ -116,7 +123,9 @@ fn acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Actor, B
                     "actor and role are fixed by your credential; omit them",
                 ));
             }
-            b.roles().actor(&i.actor, &i.role)
+            let mut actor = b.roles().actor(&i.actor, &i.role)?;
+            actor.projects = i.projects.as_ref().map(|p| p.iter().cloned().collect());
+            Ok(actor)
         }
         None => {
             let actor = who
@@ -141,12 +150,34 @@ struct TakeArgs {
     who: Who,
     /// Take this card instead of the next one for your role.
     id: Option<String>,
+    /// Only cards of this project (see `board_projects`).
+    project: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct ListArgs {
     /// Only this column.
     column: Option<Column>,
+    /// Only this project (see `board_projects`).
+    project: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct OwnsArgs {
+    /// The project (see `board_projects`).
+    project: String,
+    /// Repository paths to classify.
+    files: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct AssignArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Card id.
+    id: String,
+    /// The project to move it to (see `board_projects`).
+    project: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -165,6 +196,8 @@ struct AddArgs {
     body: Option<String>,
     /// Labels.
     tags: Option<Vec<String>>,
+    /// The project the card belongs to (default: `default`; see `board_projects`).
+    project: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -228,7 +261,32 @@ fn id(raw: &str) -> Result<Uuid, BoardError> {
     Uuid::parse_str(raw).map_err(|_| BoardError::Invalid("id is not a UUID"))
 }
 
-fn card(c: crate::domain::Card) -> Result<Value, BoardError> {
+/// The projects a credential is limited to; `None` when unrestricted or unauthenticated.
+fn scope(identity: Option<&Identity>) -> Option<&[String]> {
+    identity.and_then(|i| i.projects.as_deref())
+}
+
+fn in_scope(scope: Option<&[String]>, project: &str) -> bool {
+    scope.is_none_or(|s| s.iter().any(|p| p == project))
+}
+
+/// `project` as a known project the caller may see, or an error.
+fn checked_project(
+    b: &Shared,
+    scope: Option<&[String]>,
+    project: Option<&str>,
+) -> Result<(), BoardError> {
+    let Some(p) = project else { return Ok(()) };
+    if !b.projects().contains(p) {
+        return Err(BoardError::Invalid("unknown project"));
+    }
+    if !in_scope(scope, p) {
+        return Err(BoardError::OutOfScope(p.to_owned()));
+    }
+    Ok(())
+}
+
+fn card(c: Card) -> Result<Value, BoardError> {
     serde_json::to_value(json!({ "card": c })).map_err(|e| BoardError::Storage(e.to_string()))
 }
 
@@ -241,8 +299,46 @@ pub fn ops() -> Vec<Op> {
     vec![
         op(
             "board_list",
-            "List cards, optionally one column. Columns: backlog, ready, building, qa, review, done, blocked.",
-            |b, _, a: ListArgs| to_json(json!({ "cards": b.list(a.column)? })),
+            "List cards, optionally one column and/or one project. Columns: backlog, ready, building, qa, review, done, blocked. A credential limited to some projects only sees those.",
+            |b, i, a: ListArgs| {
+                checked_project(b, scope(i), a.project.as_deref())?;
+                let mut cards = b.list(a.column)?;
+                cards.retain(|c| {
+                    in_scope(scope(i), &c.project)
+                        && a.project.as_deref().is_none_or(|p| c.project == p)
+                });
+                to_json(json!({ "cards": cards }))
+            },
+        ),
+        op(
+            "board_projects",
+            "List the repositories this board serves, their projects (applications) and the repository paths each project may change: {repos: {repo: {project: [paths]}}}. Cards belong to one project; a repository's own project (named like it) owns every path no other project of that repository does.",
+            |b, i, _: Nothing| {
+                // A limited credential is told only about the projects it may work in.
+                let mut repos = serde_json::to_value(b.projects())
+                    .map_err(|e| BoardError::Storage(e.to_string()))?;
+                if let (Some(scope), Some(map)) = (scope(i), repos.as_object_mut()) {
+                    map.values_mut().for_each(|projects| {
+                        if let Some(p) = projects.as_object_mut() {
+                            p.retain(|name, _| scope.iter().any(|s| s == name));
+                        }
+                    });
+                    map.retain(|_, projects| projects.as_object().is_some_and(|p| !p.is_empty()));
+                }
+                to_json(json!({
+                    "repos": repos,
+                    "default": DEFAULT_PROJECT,
+                    "count": b.projects().names().count(),
+                }))
+            },
+        ),
+        op(
+            "board_owns",
+            "Which of `files` (repository paths, `/`-separated) the project does NOT own: those belonging to another project of its repository. Answers from the whole registry, so a runner limited to one project can still tell when work strays into a sibling's paths: {foreign: [paths]}.",
+            |b, i, a: OwnsArgs| {
+                checked_project(b, scope(i), Some(&a.project))?;
+                to_json(json!({ "foreign": b.projects().not_owned_by(&a.project, &a.files) }))
+            },
         ),
         op(
             "board_roles",
@@ -287,25 +383,40 @@ pub fn ops() -> Vec<Op> {
             |b, i, a: TakeArgs| {
                 let who = acting(b, i, &a.who)?;
                 let id = a.id.as_deref().map(id).transpose()?;
-                to_json(json!({ "card": b.take(&who, id)? }))
+                to_json(json!({ "card": b.take_in(&who, id, a.project.as_deref())? }))
             },
         ),
         op(
             "card_get",
             "Fetch one card with its comments.",
-            |b, _, a: GetArgs| card(b.get(id(&a.id)?)?),
+            |b, i, a: GetArgs| {
+                let c = b.get(id(&a.id)?)?;
+                if !in_scope(scope(i), &c.project) {
+                    return Err(BoardError::OutOfScope(c.project));
+                }
+                card(c)
+            },
         ),
         op(
             "card_add",
             "Create a card in Backlog.",
             |b, i, a: AddArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.add(
+                card(b.add_in(
                     &who,
+                    a.project.as_deref().unwrap_or(DEFAULT_PROJECT),
                     &a.title,
                     a.body.as_deref().unwrap_or(""),
                     a.tags.unwrap_or_default(),
                 )?)
+            },
+        ),
+        op(
+            "card_assign",
+            "Move a card to another project (needs Triage). Drops any claim.",
+            |b, i, a: AssignArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.assign(id(&a.id)?, &a.project, &who)?)
             },
         ),
         op(
@@ -426,6 +537,7 @@ mod tests {
 
     fn ident(actor: &str, role: &str) -> Identity {
         Identity {
+            projects: None,
             actor: actor.into(),
             role: role.into(),
         }
@@ -621,6 +733,95 @@ mod tests {
                 json!({"id": id, "title": "three"})
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_credential_limited_to_projects_sees_and_takes_only_those() {
+        use crate::projects::Projects;
+        let projects = Projects::parse(
+            r#"{"rl": ["crates/apps/rocket_league"], "orch": ["crates/apps/rusty_orch"]}"#,
+        )
+        .expect("projects");
+        let board: Shared = Board::new(
+            Box::new(MemStore::default()) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(projects);
+        let human = ident("nano", "human");
+        let mut dev = ident("claude", "builder");
+        dev.projects = Some(vec!["rl".into()]);
+        let mut ids = Vec::new();
+        for (project, title) in [("rl", "rl card"), ("orch", "orch card")] {
+            let out = call_as(
+                &board,
+                Some(&human),
+                "card_add",
+                json!({"title": title, "project": project}),
+            )
+            .expect("add");
+            let id = out["card"]["id"].as_str().expect("id").to_owned();
+            call_as(
+                &board,
+                Some(&human),
+                "card_move",
+                json!({"id": id, "to": "ready"}),
+            )
+            .expect("ready");
+            ids.push(id);
+        }
+
+        let titles = |who: &Identity, args: Value| -> Vec<String> {
+            let out = call_as(&board, Some(who), "board_list", args).expect("list");
+            out["cards"]
+                .as_array()
+                .expect("cards")
+                .iter()
+                .map(|c| c["title"].as_str().expect("t").to_owned())
+                .collect()
+        };
+        assert_eq!(
+            titles(&dev, json!({})),
+            ["rl card"],
+            "the other project is invisible"
+        );
+        assert_eq!(titles(&human, json!({})).len(), 2);
+        assert_eq!(titles(&human, json!({"project": "orch"})), ["orch card"]);
+        assert!(matches!(
+            call_as(&board, Some(&dev), "board_list", json!({"project": "orch"})),
+            Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
+        assert!(matches!(
+            call_as(&board, Some(&dev), "card_get", json!({"id": ids[1]})),
+            Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
+        assert!(matches!(
+            call_as(&board, Some(&dev), "card_take", json!({"id": ids[1]})),
+            Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
+        let taken = call_as(&board, Some(&dev), "card_take", json!({})).expect("take");
+        assert_eq!(taken["card"]["title"], "rl card");
+        let listed = call_as(&board, Some(&dev), "board_projects", json!({})).expect("projects");
+        assert_eq!(listed["default"], "default");
+        let repos = listed["repos"].as_object().expect("repos");
+        assert_eq!(
+            repos.len(),
+            1,
+            "a limited credential hears of no other project: {repos:?}"
+        );
+        assert_eq!(repos["default"].as_object().expect("projects").len(), 1);
+        let everything =
+            call_as(&board, Some(&human), "board_projects", json!({})).expect("projects");
+        assert_eq!(
+            everything["repos"]["default"]
+                .as_object()
+                .expect("projects")
+                .len(),
+            3
+        );
+        assert_eq!(
+            listed["repos"]["default"]["rl"],
+            json!(["crates/apps/rocket_league"])
         );
     }
 }

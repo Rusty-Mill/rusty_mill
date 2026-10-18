@@ -40,6 +40,21 @@ export function SplitBadge({ count }: { count: number }) {
   return <span className="rounded-full bg-selected px-1.5 text-xs text-grey">split · {count}</span>
 }
 
+/** Assigned points in solid, the suggestion (until one is picked) dashed with a `~`; the frequency beside it, the same way. */
+export function PointsBadge({ card }: { card: Pick<Card, 'points' | 'suggestedPoints' | 'frequency' | 'suggestedFrequency'> }) {
+  const assigned = card.points !== null
+  return (
+    <>
+      <span title={assigned ? 'Points' : 'Suggested points'} className={assigned ? 'rounded-full bg-selected px-1.5 text-xs font-medium' : 'rounded-full border border-dashed border-line px-1.5 text-xs text-grey'}>
+        {assigned ? card.points : `~${card.suggestedPoints}`} pts
+      </span>
+      <span title={card.frequency ? 'Frequency' : 'Suggested frequency'} className={card.frequency ? 'rounded-full bg-selected px-1.5 text-xs text-grey' : 'rounded-full border border-dashed border-line px-1.5 text-xs text-grey'}>
+        {card.frequency ?? `~${card.suggestedFrequency}`}
+      </span>
+    </>
+  )
+}
+
 export const initial = (name: string): string => (name.trim()[0] ?? '?').toUpperCase()
 
 /** Who holds the card: an initial and the name, or "Unassigned" in a muted style. */

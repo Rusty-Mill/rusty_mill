@@ -219,6 +219,21 @@ fn run() -> Result<String, String> {
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
             let work = PathBuf::from(a.flag("work")?);
+            if a.flags.get("supervised").is_some_and(|v| v == "yes") {
+                let confinement = match a.flags.get("confine").map(String::as_str) {
+                    Some("none") => runner::Confinement::Unconfined,
+                    None | Some("sandbox") => runner::Confinement::Sandboxed,
+                    Some(other) => return Err(format!("unknown confinement {other}")),
+                };
+                return rusty_bbp_host::run_control::supervised(
+                    &dir,
+                    &task,
+                    &repo,
+                    &work,
+                    confinement,
+                )
+                .map(|response| response_json(&response));
+            }
             match a.flags.get("confine").map(String::as_str) {
                 Some("none") => runner::run_once(
                     &dir,
@@ -249,6 +264,10 @@ fn run() -> Result<String, String> {
             &PrincipalId(a.flag("principal")?.to_owned()),
             a.flag("vendor")?,
         )?,
+        "show" => {
+            return rusty_serde::json::to_string(&admin::show(&dir, &task)?)
+                .map_err(|e| e.to_string())
+        }
         "card" => {
             return rusty_serde::json::to_string(&admin::card_view(&dir, &task)?)
                 .map_err(|e| e.to_string())
@@ -266,13 +285,22 @@ fn run() -> Result<String, String> {
                         .map_err(|_| "--rev must be a number".to_owned())
                 })
                 .transpose()?;
-            human::perform_as(
+            human::perform_fenced(
                 &dir,
                 &task,
                 verb,
                 &rest,
                 rev,
                 a.flags.get("as").map_or(human::UNLABELLED, String::as_str),
+                a.flags
+                    .get("fence")
+                    .map(|r| {
+                        r.parse()
+                            .map(Rev)
+                            .map_err(|_| "--fence must be a revision".to_owned())
+                    })
+                    .transpose()?,
+                a.flags.get("op").map(|s| OpId(s.clone())),
             )?
         }
         other => return Err(format!("unknown subcommand {other}")),

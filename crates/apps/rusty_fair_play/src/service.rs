@@ -3,6 +3,7 @@
 //! domain's own types plus the derived state. The router (`api`) turns
 //! these into JSON; nothing here knows about HTTP.
 
+use crate::marks::{self, Frequency, Marks};
 use rusty_fair_play_domain::seed::{self, SeedData, SeedError, SeedReport};
 use rusty_fair_play_domain::{
     baseline_diff, baseline_of, card_state, card_tree, create_custom_card, delete_card,
@@ -19,7 +20,7 @@ use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
 use rusty_multimodal_db_engine::generic::{DeleteError, InsertError, ReplaceError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -32,6 +33,9 @@ pub const DECK_MARKER: &str = "deck.loaded";
 /// record keeps its layout (no migration) and the choice is the family's
 /// configuration, not part of the deck. Written by rename.
 pub const SET_ASIDE_FILE: &str = "set-aside.json";
+/// The family's points and frequency per card; a sidecar for the same
+/// reason as [`SET_ASIDE_FILE`] (no migration of the stored record).
+pub const MARKS_FILE: &str = "card-marks.json";
 /// Longest text a single field accepts; a card is a card, not a document.
 pub const MAX_TEXT_LEN: usize = 10_000;
 /// Most standards one card lists.
@@ -107,6 +111,12 @@ pub struct CardView {
     /// In the family's deck. A card set aside is out of play: no owner, no
     /// children, and left out of the undealt list and the balance.
     pub in_play: bool,
+    /// The points and frequency the family assigned, if any.
+    pub marks: Marks,
+    /// What the card's text suggests; shown until points are assigned.
+    pub suggested_points: u8,
+    /// What the card's text recommends; shown until a frequency is assigned.
+    pub suggested_frequency: Frequency,
     etag: String,
 }
 
@@ -121,13 +131,19 @@ impl CardView {
 
 /// The etag of a card in play; see [`CardView::etag`].
 pub fn card_etag(card: &Card) -> String {
-    etag_of(card, true)
+    etag_of(card, true, Marks::default())
 }
 
-fn etag_of(card: &Card, in_play: bool) -> String {
+fn etag_of(card: &Card, in_play: bool, marks: Marks) -> String {
     let mut text = rusty_json::to_string(card).unwrap_or_default();
     if !in_play {
         text.push_str("\u{0}set-aside");
+    }
+    if let Some(points) = marks.points {
+        text.push_str(&format!("\u{0}points={points}"));
+    }
+    if let Some(frequency) = marks.frequency {
+        text.push_str(&format!("\u{0}frequency={}", frequency.as_str()));
     }
     let digest = Sha256::digest(text.as_bytes());
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
@@ -157,6 +173,11 @@ pub struct CardPatch {
     /// `Some(false)` sets the card aside (taking it back from its owner);
     /// `Some(true)` adds it back to the family's deck.
     pub in_play: Option<bool>,
+    /// `Some(None)` clears the assigned points; a value must be on
+    /// [`marks::SCALE`].
+    pub points: Option<Option<u8>>,
+    /// `Some(None)` clears the frequency.
+    pub frequency: Option<Option<Frequency>>,
 }
 
 /// A brand-new family card.
@@ -208,11 +229,24 @@ pub struct Service {
     defaults: CardDefaultProductionStack,
     cards: CardProductionStack,
     set_aside: BTreeSet<Uuid>,
+    marks: BTreeMap<Uuid, Marks>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 struct SetAsideFile {
     cards: Vec<Uuid>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MarkEntry {
+    id: Uuid,
+    points: Option<u8>,
+    frequency: Option<Frequency>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct MarksFile {
+    cards: Vec<MarkEntry>,
 }
 
 impl Service {
@@ -221,8 +255,10 @@ impl Service {
     pub fn open(dir: &Path) -> Result<Self> {
         let lock = DirLock::acquire(dir, LOCK_FILE)?;
         let set_aside = read_set_aside(dir)?;
+        let marks = read_marks(dir)?;
         Ok(Self {
             set_aside,
+            marks,
             dir: dir.to_path_buf(),
             _lock: lock,
             people: open_or_create_person_production_stack(&dir.join(PERSON_FILE))?,
@@ -236,12 +272,18 @@ impl Service {
         let state = card_state(&card, baseline.as_ref())?;
         let tree_etag = self.tree_etag(card.id);
         let in_play = self.in_play(card.id);
-        let etag = etag_of(&card, in_play);
+        let marks = self.marks(card.id);
+        let etag = etag_of(&card, in_play, marks);
+        let suggested_points = marks::suggest(&card);
+        let suggested_frequency = marks::suggest_frequency(&card);
         Ok(CardView {
             card,
             state,
             tree_etag,
             in_play,
+            marks,
+            suggested_points,
+            suggested_frequency,
             etag,
         })
     }
@@ -249,6 +291,30 @@ impl Service {
     /// Whether the card is in the family's deck.
     pub fn in_play(&self, id: Uuid) -> bool {
         !self.set_aside.contains(&id)
+    }
+
+    /// The family's points and frequency for a card (empty when none).
+    pub fn marks(&self, id: Uuid) -> Marks {
+        self.marks.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Write the marks (sorted by id) by rename.
+    fn save_marks(&mut self, next: BTreeMap<Uuid, Marks>) -> Result<()> {
+        let file = MarksFile {
+            cards: next
+                .iter()
+                .map(|(id, m)| MarkEntry {
+                    id: *id,
+                    points: m.points,
+                    frequency: m.frequency,
+                })
+                .collect(),
+        };
+        let text = rusty_json::to_string(&file)
+            .map_err(|e| ServiceError::Storage(format!("{MARKS_FILE}: {e}")))?;
+        write_by_rename(&self.dir, MARKS_FILE, text.as_bytes())?;
+        self.marks = next;
+        Ok(())
     }
 
     /// Write the set-aside ids (sorted) by rename.
@@ -263,11 +329,16 @@ impl Service {
         Ok(())
     }
 
-    /// A deleted card is no longer set aside.
+    /// A deleted card is no longer set aside and carries no marks.
     fn forget(&mut self, ids: &[Uuid]) -> Result<()> {
         let mut next = self.set_aside.clone();
+        let mut marks = self.marks.clone();
         for id in ids {
             next.remove(id);
+            marks.remove(id);
+        }
+        if marks != self.marks {
+            self.save_marks(marks)?;
         }
         if next == self.set_aside {
             return Ok(());
@@ -292,7 +363,7 @@ impl Service {
         };
         let mut hash = Sha256::new();
         for card in tree.flatten() {
-            hash.update(etag_of(card, self.in_play(card.id)).as_bytes());
+            hash.update(etag_of(card, self.in_play(card.id), self.marks(card.id)).as_bytes());
         }
         hash.finalize()[..8]
             .iter()
@@ -396,6 +467,7 @@ impl Service {
 
     pub fn patch_card(&mut self, id: Uuid, patch: CardPatch) -> Result<CardView> {
         let mut card = self.cards.get(id).ok_or(ServiceError::NotFound("card"))?;
+        let marks_next = self.marks_after(id, &patch)?;
         if let Some(name) = patch.name {
             card.name = clean_name(&name)?;
         }
@@ -466,7 +538,35 @@ impl Service {
             }
             self.save_set_aside(next)?;
         }
+        if marks_next != self.marks(id) {
+            let mut next = self.marks.clone();
+            if marks_next.is_empty() {
+                next.remove(&id);
+            } else {
+                next.insert(id, marks_next);
+            }
+            self.save_marks(next)?;
+        }
         self.card_view(id)
+    }
+
+    /// The card's marks once `patch` is applied; a bad value is refused
+    /// before anything is written.
+    fn marks_after(&self, id: Uuid, patch: &CardPatch) -> Result<Marks> {
+        let mut marks = self.marks(id);
+        if let Some(points) = patch.points {
+            if points.is_some_and(|p| !marks::is_valid(p)) {
+                return Err(ServiceError::Invalid(format!(
+                    "points must be one of {:?}",
+                    marks::SCALE
+                )));
+            }
+            marks.points = points;
+        }
+        if let Some(frequency) = patch.frequency {
+            marks.frequency = frequency;
+        }
+        Ok(marks)
     }
 
     pub fn create_card(&mut self, new: NewCard) -> Result<CardView> {
@@ -638,6 +738,32 @@ fn now_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
+}
+
+fn read_marks(dir: &Path) -> Result<BTreeMap<Uuid, Marks>> {
+    let path = dir.join(MARKS_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(ServiceError::Storage(format!("{}: {e}", path.display()))),
+    };
+    // A damaged file is an error, not "no marks": reading it as empty would
+    // quietly drop every point and frequency the family assigned.
+    let file: MarksFile = rusty_json::from_slice(&bytes)
+        .map_err(|e| ServiceError::Storage(format!("{}: {e}", path.display())))?;
+    Ok(file
+        .cards
+        .into_iter()
+        .map(|e| {
+            (
+                e.id,
+                Marks {
+                    points: e.points,
+                    frequency: e.frequency,
+                },
+            )
+        })
+        .collect())
 }
 
 fn read_set_aside(dir: &Path) -> Result<BTreeSet<Uuid>> {
@@ -1118,6 +1244,106 @@ mod tests {
             !file().contains(&b.to_string()),
             "so is one removed by an unsplit"
         );
+    }
+
+    fn marked(points: Option<Option<u8>>, frequency: Option<Option<Frequency>>) -> CardPatch {
+        CardPatch {
+            points,
+            frequency,
+            ..CardPatch::default()
+        }
+    }
+
+    #[test]
+    fn points_and_frequency_are_assigned_cleared_and_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Service::open(dir.path()).unwrap();
+        s.seed_deck().unwrap();
+        let (dishes, mail) = (deck_card_id(3), deck_card_id(14));
+
+        let fresh = s.card(dishes).unwrap();
+        assert_eq!(fresh.marks, Marks::default());
+        assert!((1..=8).contains(&fresh.suggested_points));
+        assert_eq!(fresh.suggested_frequency, Frequency::Daily); // "Dishwasher run and unloaded daily"
+
+        let before = fresh.etag();
+        let set = s
+            .patch_card(dishes, marked(Some(Some(5)), Some(Some(Frequency::Weekly))))
+            .unwrap();
+        assert_eq!(set.marks.points, Some(5));
+        assert_eq!(set.marks.frequency, Some(Frequency::Weekly));
+        assert_ne!(set.etag(), before, "marks are part of the etag");
+        assert_eq!(s.card(mail).unwrap().marks, Marks::default());
+        drop(s);
+
+        let mut s = Service::open(dir.path()).unwrap();
+        assert_eq!(s.card(dishes).unwrap().marks, set.marks);
+        // `None` keeps what is there; `Some(None)` clears just that mark.
+        let kept = s.patch_card(dishes, marked(None, Some(None))).unwrap();
+        assert_eq!(kept.marks.points, Some(5));
+        assert_eq!(kept.marks.frequency, None);
+        let cleared = s.patch_card(dishes, marked(Some(None), None)).unwrap();
+        assert_eq!(cleared.marks, Marks::default());
+        assert_eq!(
+            cleared.etag(),
+            before,
+            "no marks, same etag as never marked"
+        );
+    }
+
+    #[test]
+    fn points_off_the_scale_are_refused_and_change_nothing() {
+        let (_d, mut s) = service();
+        let dishes = deck_card_id(3);
+        for bad in [0, 4, 6, 13] {
+            let both = CardPatch {
+                name: Some("Renamed".into()),
+                points: Some(Some(bad)),
+                ..CardPatch::default()
+            };
+            assert!(matches!(
+                s.patch_card(dishes, both),
+                Err(ServiceError::Invalid(_))
+            ));
+        }
+        let card = s.card(dishes).unwrap();
+        assert_ne!(card.card.name, "Renamed");
+        assert_eq!(card.marks, Marks::default());
+    }
+
+    #[test]
+    fn a_deleted_card_takes_its_marks_with_it() {
+        let (dir, mut s) = service();
+        let id = s
+            .create_card(NewCard {
+                id: None,
+                name: "Water plants".into(),
+                suit: Suit::Home,
+                parent_card_id: None,
+                owner_id: None,
+                conception: String::new(),
+                planning: String::new(),
+                execution: String::new(),
+                minimum_standard_of_care: vec![],
+                notes: String::new(),
+            })
+            .unwrap()
+            .card
+            .id;
+        s.patch_card(id, marked(Some(Some(2)), Some(Some(Frequency::Daily))))
+            .unwrap();
+        s.delete_card(id).unwrap();
+        assert!(!read_marks(dir.path()).unwrap().contains_key(&id));
+    }
+
+    #[test]
+    fn a_damaged_marks_file_refuses_to_open_rather_than_reading_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(MARKS_FILE), b"{not json").unwrap();
+        assert!(matches!(
+            Service::open(dir.path()),
+            Err(ServiceError::Storage(_))
+        ));
     }
 
     #[test]

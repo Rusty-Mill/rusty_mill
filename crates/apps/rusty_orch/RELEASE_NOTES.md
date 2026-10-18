@@ -4,6 +4,31 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Required confined BBP acceptance
+**2026-10-17**
+
+- CI now requires the real Orch CLI lifecycle under production Linux confinement,
+  including persisted resume, moderator restart, independent scripted review,
+  merge approval and recorded receipt without performing a merge.
+- Timeout, cancel and kill recovery have separate strict tests and retained
+  per-mode results. Sandbox refusal or missing execution evidence fails the job.
+
+---
+
+## BBP task hosting implemented
+**2026-10-16** · Issue #767
+
+- Review corrections isolate task work, re-prompt rejected input, preserve expired requests, and retain runner ownership through cancellation/restart.
+- Added `TaskHost` and `orch-bbp`, opt-in goal/CLI configuration, durable handles,
+  frozen pool/roster/profile inputs, moderator supervision and crash adoption.
+- Human gates persist revision/subject fences; stable operations replay after a
+  lost checkpoint. Completion requires a recorded receipt, not merge approval.
+- Existing research/design and one-call adapter paths remain available.
+- Linux sandboxing stays mandatory in production; Windows parity and real
+  provider/login validation remain outstanding. See `crates/orch-bbp/README.md`.
+
+---
+
 ## BBP task host designed: ADR-0013
 **2026-10-10** · (link once pushed) · [ADR-0013](docs/adr/0013-bbp-task-host.md)
 

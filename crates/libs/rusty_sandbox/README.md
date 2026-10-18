@@ -30,3 +30,15 @@ from birth. Any binary that hands its arguments to `run_helper` will do;
 First-party only: `rusty_err`, and on Linux `platform`, `platform-linux`
 (Landlock and seccomp) and `rusty_libc` (rlimits, signals, the raw
 `prctl`).
+
+`start_registered` supplies the cancellation handle immediately after spawn,
+including while setup is still pending. The executor retains the job through
+all setup checks: a timeout, registration error, helper-resolution error, or
+status-file read/removal error kills, contains and reaps before returning.
+Dropping an unwaited `Job` also performs cleanup; `wait` retains the same guard
+on errors. The production setup deadline remains ten seconds.
+
+Startup regressions use deliberately delayed synthetic helpers through the
+actual process executor. They verify containment/reaping and forbid a delayed
+launch after timeout or rejection without depending on Landlock availability.
+These tests do not establish supported-kernel sandbox enforcement.

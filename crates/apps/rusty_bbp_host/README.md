@@ -97,3 +97,37 @@ Run once by hand with Claude Code 2.1.295 as the planner (`claude -p … --mcp-c
 ## The master secret
 
 `bbp open` creates `<dir>/master`, 32 random bytes from `rusty_rand`, owner-readable only, published with a no-clobber link so two first opens racing each other both come back with the key on disk and no later process overwrites a key an earlier one already uses. Every execution token and run secret is a digest keyed by it, and neither ever enters the log. A process that can read the log but not the master cannot forge a token; the agent harness sees neither, only the per-turn `bbp mcp` server, which derives the token for its own turn.
+
+### Structured task-host reads and retryable human actions
+
+`bbp show --dir D --task T` returns a public `rusty_bbp::TaskView`, or JSON null
+when the task has no log. It includes the card, immutable roster, assigned
+principals, proposed spec, pending request body, merge receipt, cancellation
+reason and escalation. It does not expose tokens, the master key or run secrets.
+`bbp card` remains unchanged.
+
+`bbp human --dir D --task T --fence REV --op OP [--rev REV] VERB ...` applies any
+human verb only to the displayed revision inside the driver's transaction.
+Successful retries with the same OP and payload replay before fence/terminal
+checks. Destructive verbs still require `--rev`. Existing unfenced direct CLI
+usage remains available; Orch always supplies the extra fence and stable op.
+Approval still does not close a task: merge externally, then record the receipt.
+
+Malformed fenced human input returns `Rejected { code: BadHumanInput, ... }`
+without dispatching a command. This allows task hosts to show a correctable new
+question. I/O errors remain process failures; they are not human-input refusals.
+
+The moderator runs `bbp runner --supervised yes` with a private stdin ownership
+pipe, in a separate process group. EOF cancels its workload using the existing
+sandbox job handle and waits for reaping. The worker retains the task's runner
+lock through cleanup/reporting, including after moderator death. Thus a new
+moderator may retry a pending run only after the old worker releases that lock.
+Normal wall-limit, cancellation, and error exits wait for the worker to finish.
+The standalone unsupervised runner CLI remains available for direct trusted use.
+
+Runner cancellation is registered before sandbox setup polling, so owner-pipe
+EOF also kills a helper that has not exec'd its workload yet. Startup errors
+retain executor ownership through group containment and reaping; only then may
+the runner report an error and release its task lock. A delayed-helper test
+covers EOF during setup, cancellation latched before registration, lock
+retention and a forbidden later workload launch.

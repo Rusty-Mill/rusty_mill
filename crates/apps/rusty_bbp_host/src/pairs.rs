@@ -38,6 +38,8 @@ pub enum Kind {
 /// What one run measured. Built by [`load`]; the tests build it by hand.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunFacts {
+    /// Accounting failures that prevent a stopped run from being complete.
+    pub accounting_errors: Vec<String>,
     /// Reached `closed`.
     pub closed: bool,
     /// The grader's verdict against the frozen rubric and pass mark.
@@ -85,11 +87,15 @@ pub struct RunFacts {
 pub struct FailedCost {
     pub pair: String,
     pub usd_at_least: f64,
+    /// Some turn costs are unknown; the reported dollars are only a lower bound.
+    pub incomplete: bool,
+    /// Failures encountered while retaining readable turns.
+    pub accounting_errors: Vec<String>,
 }
 
 impl RunFacts {
     pub fn succeeded(&self) -> bool {
-        self.closed && self.rubric_ok && !self.over_cap && self.killed_turns == 0
+        self.closed && self.rubric_ok && !self.over_cap && !self.stopped && self.killed_turns == 0
     }
 }
 
@@ -356,12 +362,19 @@ fn failed_pair_costs(pairs: &[Pair]) -> Vec<FailedCost> {
         .filter(|p| !p.ok())
         .map(|p| FailedCost {
             pair: p.id.clone(),
+            incomplete: [&p.control, &p.treatment]
+                .iter()
+                .any(|r| r.tokens.is_none() || r.killed_turns > 0),
+            accounting_errors: [&p.control, &p.treatment]
+                .iter()
+                .flat_map(|r| r.accounting_errors.clone())
+                .collect(),
             usd_at_least: [&p.control, &p.treatment]
                 .iter()
                 .filter_map(|r| r.usd_floor)
                 .sum(),
         })
-        .filter(|f| f.usd_at_least > 0.0)
+        .filter(|f| f.usd_at_least > 0.0 || f.incomplete)
         .collect()
 }
 
@@ -469,6 +482,12 @@ pub struct ModFacts {
 
 pub fn mod_facts(mod_output: &str) -> Result<ModFacts, String> {
     let m: ModOut = rusty_serde::json::from_str(mod_output).map_err(|e| e.to_string())?;
+    if m.stop
+        .as_deref()
+        .is_some_and(|s| !matches!(s, "cap" | "wall"))
+    {
+        return Err("invalid moderator stop: expected cap or wall".into());
+    }
     let at = m.state_ms.iter().position(|(s, _)| s == "Planning");
     Ok(ModFacts {
         spec_wall_ms: at.map(|i| m.state_ms[i].1),
@@ -539,27 +558,22 @@ pub fn facts(
     // A run the moderator stopped is a failed run whatever its log holds: a log
     // the tool cannot read (which may be why the cap stopped it) must not drop
     // the manifest. Any other run's log has to read.
-    let tok = match tokens::of(Path::new(&r.dir), &task, &events, Some(c)) {
-        Ok(t) => Some(t),
-        Err(_) if stopped => None,
-        Err(e) => return Err(e),
+    let tok = if stopped {
+        tokens::of_stopped(Path::new(&r.dir), &task, &events, c)
+    } else {
+        tokens::of(Path::new(&r.dir), &task, &events, Some(c))?
     };
     let st = &d.state;
-    let (role_models, no_model_turns) = tok.as_ref().map_or_else(Default::default, model_evidence);
+    let (role_models, no_model_turns) = model_evidence(&tok);
     Ok(RunFacts {
+        accounting_errors: tok.errors.clone(),
         closed: st.state == State::Closed,
         rubric_ok: r.rubric_ok,
         spec_wall_ms: m.spec_wall_ms,
         spec_boundaries: m.spec_boundaries,
         replay_equals_live: m.replay_equals_live,
-        over_cap: m.stop.as_deref() == Some("cap")
-            || tok
-                .as_ref()
-                .and_then(|t| t.usd_floor)
-                .is_some_and(|f| f > cap_usd),
-        tokens: tok
-            .as_ref()
-            .and_then(|t| (t.without_output == 0).then_some(t.usd).flatten()),
+        over_cap: m.stop.as_deref() == Some("cap") || tok.usd_floor.is_some_and(|f| f > cap_usd),
+        tokens: (tok.without_output == 0).then_some(tok.usd).flatten(),
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
@@ -567,9 +581,9 @@ pub fn facts(
         role_models,
         build_sha: build_sha_of(&text)?,
         no_model_turns,
-        killed_turns: tok.as_ref().map_or(0, |t| t.unknown_turns),
+        killed_turns: tok.unknown_turns,
         stopped,
-        usd_floor: tok.as_ref().and_then(|t| t.usd_floor),
+        usd_floor: tok.usd_floor,
     })
 }
 
@@ -1637,6 +1651,7 @@ mod tests {
 
     fn task_tokens(turns: Vec<tokens::TurnTokens>, without_output: u64) -> tokens::TaskTokens {
         tokens::TaskTokens {
+            errors: Vec::new(),
             turns,
             sum: tokens::Usage::default(),
             usd: None,
@@ -1820,7 +1835,9 @@ mod tests {
             e.failed_pair_costs,
             vec![FailedCost {
                 pair: id,
-                usd_at_least: 4.0
+                usd_at_least: 4.0,
+                incomplete: true,
+                accounting_errors: Vec::new()
             }]
         );
         // The killed run's cost is in the total all the same.
@@ -1848,5 +1865,22 @@ mod tests {
         // A run that was not stopped still needs it.
         p.treatment.stopped = false;
         assert!(check_settings(&[p], 30).is_err());
+    }
+    #[test]
+    fn unreadable_turn_does_not_erase_failed_pair_spend() {
+        let mut stopped = run(1, 0);
+        stopped.stopped = true;
+        stopped.killed_turns = 1;
+        stopped.tokens = None;
+        stopped.usd_floor = Some(10.0);
+        stopped
+            .accounting_errors
+            .push("turn 2: unreadable log".into());
+        let p = pair("mixed", Kind::Shared, run(1, 0), stopped);
+        let e = evaluate(&[p], 500);
+        assert_eq!(e.failed_pair_costs[0].usd_at_least, 10.0);
+        assert!(e.failed_pair_costs[0].incomplete);
+        assert_eq!(e.failed_pair_costs[0].accounting_errors.len(), 1);
+        assert_eq!(e.total_usd_at_least, 10.0);
     }
 }

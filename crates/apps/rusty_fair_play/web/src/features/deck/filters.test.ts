@@ -22,6 +22,25 @@ describe('board filters', () => {
     expect(isFiltering(emptyFilters)).toBe(false)
   })
 
+  it('filters by frequency: the assigned one, else the suggested one', async () => {
+    const { cards, index } = await fixture()
+    const api = new MemoryAdapter()
+    await api.seed()
+    const [a, b] = (await api.snapshot()).cards
+    await api.updateCard(a!.id, { frequency: 'Daily' })
+    await api.updateCard(b!.id, { frequency: 'Yearly' })
+    const marked = (await api.snapshot()).cards
+    const idx = indexCards(marked)
+    const daily = applyFilters(marked, idx, { ...emptyFilters, frequencies: ['Daily'] })
+    expect(daily.map((c) => c.id)).toContain(a!.id) // assigned
+    expect(daily.every((c) => (c.frequency ?? c.suggestedFrequency) === 'Daily')).toBe(true) // or suggested
+    expect(applyFilters(marked, idx, { ...emptyFilters, frequencies: ['Yearly'] }).map((c) => c.id)).toContain(b!.id)
+    // An assigned frequency overrides the suggestion.
+    expect(daily.some((c) => c.id === b!.id)).toBe(false)
+    expect(applyFilters(cards, index, { ...emptyFilters, frequencies: [] })).toHaveLength(101)
+    expect(isFiltering({ ...emptyFilters, frequencies: ['Daily'] })).toBe(true)
+  })
+
   it('filters by suit, owner, state, leaves and search, combined', async () => {
     const { cards, index, ada } = await fixture()
     expect(applyFilters(cards, index, { ...emptyFilters, suits: ['Home'] })).toHaveLength(23)

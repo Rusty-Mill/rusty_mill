@@ -298,3 +298,83 @@ fn the_fingerprint_follows_the_text() {
     assert_ne!(fingerprint("a"), fingerprint("a "));
     let _ = EntryId::from_raw(1);
 }
+
+#[test]
+fn hosted_handle_gate_fence_and_charge_survive_a_store_reopen() {
+    use orch_core::goal::{Goal, GoalDraft, StopRule};
+    use orch_dispatch::{
+        fake::{FakeAgent, FakeHost},
+        Dispatcher, GateContext, Outcome, Progress, Routing, RoutingConfig,
+    };
+    let dir = dir("hosted");
+    let goal = Goal::try_from(GoalDraft {
+        outcome: Some("ship".into()),
+        done_when: vec!["tests pass".into()],
+        out_of_scope: Some(vec![]),
+        max_calls: Some(1),
+        wall_clock_secs: Some(60),
+        stop: Some(StopRule::Checkpoint),
+        ..GoalDraft::default()
+    })
+    .unwrap();
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let id = plan.add(spec(Role::Implement, &[])).unwrap();
+    let mut board = Board::new(plan.goal());
+    let mut ledger = Ledger::new();
+    let host = FakeHost::default();
+    host.0
+        .borrow_mut()
+        .progress
+        .push_back(Ok(Progress::Gate(GateContext {
+            prompt: text("approve-plan art:2"),
+            rev: 42,
+            ids: vec![text("art:2")],
+        })));
+    let route = Routing::try_from(RoutingConfig {
+        research: Agent::Codex,
+        design: Agent::Codex,
+        implement: Agent::Codex,
+        triage: Agent::Local,
+        reviewers: vec![Agent::Local, Agent::Codex],
+    })
+    .unwrap();
+    let make = || Dispatcher::new(route.clone(), FakeAgent::new([])).with_host(host.clone());
+    let mut dispatcher = make();
+    assert_eq!(
+        dispatcher.run(&goal, &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Blocked(vec![id]))
+    );
+    let original = GoalState {
+        fingerprint: 42,
+        plan,
+        board,
+        ledger,
+    };
+    {
+        let mut store = Store::open(&dir).unwrap();
+        store.save(&original).unwrap();
+    }
+    drop(dispatcher);
+    let mut loaded = Store::open(&dir)
+        .unwrap()
+        .load(GoalId::from_raw(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded, original);
+    let question = loaded.board.open_questions()[0].content();
+    assert!(question.refs.contains(&Ref::Url(text("host:rev:42"))));
+    assert_eq!(loaded.ledger.calls(), 1);
+    let mut dispatcher = make();
+    assert_eq!(
+        dispatcher.run(
+            &goal,
+            &mut loaded.plan,
+            &mut loaded.board,
+            &mut loaded.ledger
+        ),
+        Ok(Outcome::Blocked(vec![id]))
+    );
+    assert_eq!(host.0.borrow().opens, 1);
+    assert_eq!(loaded.ledger.calls(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}

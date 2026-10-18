@@ -1,6 +1,7 @@
 # RLBot application port: scope
 
-Status: **scope only, no code.** Written 2026-10-11. Complements
+Status: **scope written 2026-10-11; build order steps 1 to 3 are on main** (checked 2026-10-15, see
+section 6 for what is and is not built). Complements
 `crates/apps/rocket_league/rlbot/PLAN.md`, which covered only the bot-side client (stages 1 to 5, all
 merged). This note covers the application itself: launcher, GUI, core server and match config.
 
@@ -133,19 +134,31 @@ Crates, under `crates/apps/rocket_league/crates/` (names are proposals; `rb_rlbo
 
 Build order, each its own PR:
 
-1. Server-side messages in `rb_rlbot_wire`, with golden vectors.
-2. `rb_rlbot_server` against the existing client tests (replace the fake core).
-3. `rb_rlbot_core`: `Env` to `GamePacket`; **first vertical slice** below.
-4. `rb_rlbot_launch` and `rb_rlbot_match`: start bots from a `bot.toml` and a `match.toml`.
-5. Boost pads, scores and match phases in the packets; `DesiredGameState`.
-6. Stretch: stock v5 bots unmodified (a Python bot, a Rust bot, a script, a hivemind).
-7. Later: option A's manager, launcher and GUI.
+1. Server-side messages in `rb_rlbot_wire`, with golden vectors. **Built** (#621).
+2. `rb_rlbot_server` against the existing client tests (replace the fake core). **Built, but not as its own
+   crate:** the socket server is the `Core` in `rb_rlbot_core`, so `rb_rlbot_server` does not exist.
+3. `rb_rlbot_core`: `Env` to `GamePacket`; **first vertical slice** below. **Built**, with lockstep and
+   real-time pacing and a binary; the slice's done-criteria are not yet tested (see below).
+4. `rb_rlbot_launch` and `rb_rlbot_match`: start bots from a `bot.toml` and a `match.toml`. **Not started**;
+   neither crate exists, so bots are started by hand.
+5. Boost pads, scores and match phases in the packets; `DesiredGameState`. **Built**: `Simulation::packet`
+   emits boost-pad states and timers, scores and match phases (`sim.rs`), with unit tests, and desired state
+   is applied and bounds-checked. The one gap is match info (gravity, game speed), which `rb_env` cannot change
+   and the core ignores. Not verified at runtime or against the game.
+6. Stretch: stock v5 bots unmodified (a Python bot, a Rust bot, a script, a hivemind). **Not started.**
+7. Later: option A's manager, launcher and GUI. **Not started.**
 
 **First slice:** start `rb_rlbot_core`, which launches the existing `rb_chaser_bot` binary with
 `RLBOT_SERVER_PORT` and `RLBOT_AGENT_ID` set, as core does; the bot connects, handshakes, receives a
 `GamePacket` every tick, and sends a `PlayerInput`; the car drives at the ball in `rb_env`. Done when the
 ball is touched within a fixed number of seconds and two runs produce identical frames. No new
 dependency; the bot already exists and has run against the real core.
+
+Status of the slice (2026-10-15): `rb_rlbot_core` runs with `rb_chaser_bot` (its README has the recipe), but
+the bot is started by hand in a second shell, not launched by core. Repeatability is covered at component
+level: `the_same_bot_gives_the_same_match_every_time` (`tests/core.rs`) compares two 900-packet runs through
+the real socket `Core` and client with a fixed-input test bot. Not covered: a process-level test that the
+`rb_chaser_bot` executable touches the ball within a fixed time, which the slice's done-criteria still need.
 
 ## 7. Risks
 
