@@ -1494,4 +1494,41 @@ mod tests {
         // which is refused as an unsupported command.
         assert!(check_harness(&good("-p -- 'do it' &> /tmp/x")).is_err());
     }
+
+    // ---- third review, finding 5: `--tools default` is every tool
+
+    #[test]
+    fn a_tools_list_that_says_default_allows_the_agent_tool() {
+        // `claude --help`: `--tools` takes tool names, "" for none, and "default"
+        // for all of them, the Agent tool included.
+        let with = |tools: &[&str]| {
+            let mut a = vec![
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--setting-sources",
+                "",
+            ];
+            a.extend(tools);
+            launcher("claude", &a)
+        };
+        for ok in [
+            &["--tools", "Bash,Read"][..],
+            &["--tools", ""],
+            &["--tools=Bash"],
+        ] {
+            assert_eq!(check_harness(&with(ok)), Ok(()), "{ok:?}");
+        }
+        for bad in [
+            &["--tools", "default"][..],
+            &["--tools=default"],
+            &["--tools", "Bash,default"],
+            &["--tools", "Bash default"],
+            &["--tools", "DEFAULT"],
+        ] {
+            let err = check_harness(&with(bad)).unwrap_err();
+            assert!(err.contains("subagent"), "{bad:?}: {err}");
+        }
+    }
 }
