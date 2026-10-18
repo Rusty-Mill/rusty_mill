@@ -292,7 +292,7 @@ config:
     maxConcurrentRequests: 256
     requestTimeout: 30s
   tracing:
-    endpoint: http://localhost:4317
+    endpoint: http://localhost:4318
     serviceName: gw
     sampleRatio: 0.1
 binds:
@@ -313,7 +313,7 @@ binds:
     );
 
     let tracing = global.tracing.as_ref().expect("tracing");
-    assert_eq!(tracing.endpoint.as_deref(), Some("http://localhost:4317"));
+    assert_eq!(tracing.endpoint.as_deref(), Some("http://localhost:4318"));
     assert_eq!(tracing.sample_ratio, Some(0.1));
 }
 

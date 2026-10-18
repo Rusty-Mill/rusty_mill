@@ -128,7 +128,7 @@ fn parse_request(raw: &[u8]) -> Option<Push> {
 }
 
 fn pipeline_to(addr: SocketAddr) -> OtelGuard {
-    let (guard, _tracer) = rusty_mcp::otel::pipeline(
+    let (guard, _layer) = rusty_mcp::otel::pipeline(
         OtelConfig::new("test-server")
             .with_metrics_endpoint(format!("http://{addr}/v1/metrics"))
             // Long enough that nothing is pushed on a timer: every assertion
@@ -425,7 +425,7 @@ async fn task_outcomes_are_counted() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn metrics_can_be_turned_off() {
-    let (guard, _tracer) = rusty_mcp::otel::pipeline(
+    let (guard, _layer) = rusty_mcp::otel::pipeline(
         OtelConfig::new("test-server")
             .with_endpoint("http://127.0.0.1:1")
             .without_metrics(),
@@ -545,7 +545,7 @@ async fn metrics_are_pushed_on_the_timer_without_a_flush() {
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let addr = spawn_collector(Arc::clone(&received), 200).await;
 
-    let (guard, _tracer) = rusty_mcp::otel::pipeline(
+    let (guard, _layer) = rusty_mcp::otel::pipeline(
         OtelConfig::new("test-server")
             .with_metrics_endpoint(format!("http://{addr}/v1/metrics"))
             .with_metrics_interval(Duration::from_millis(100)),
@@ -596,7 +596,7 @@ async fn a_metrics_endpoint_that_is_not_http_is_refused_at_start() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_collector_does_not_break_request_handling() {
     // Telemetry is not load-bearing.
-    let (guard, _tracer) = rusty_mcp::otel::pipeline(
+    let (guard, _layer) = rusty_mcp::otel::pipeline(
         OtelConfig::new("test-server")
             .with_endpoint("http://127.0.0.1:1")
             // Port 1 is reliably closed.

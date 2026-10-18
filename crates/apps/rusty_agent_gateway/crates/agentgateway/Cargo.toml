@@ -69,7 +69,6 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 prost = { workspace = true }
-tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }
 prost-types = { workspace = true }
 http-body-util = { workspace = true }

@@ -3,19 +3,22 @@
 //! Built from the [`rusty_json::Value`] tree, following the OTLP spec's JSON
 //! mapping of the protobuf messages rather than any SDK's types:
 //!
-//! - 64-bit integers (`asInt`, `count`, `bucketCounts`, the `*UnixNano` times)
-//!   are decimal **strings**, since JSON numbers cannot hold them exactly;
+//! - 64-bit integers (`asInt`, `intValue`, `count`, `bucketCounts`, the
+//!   `*UnixNano` times) are decimal **strings**, since JSON numbers cannot hold
+//!   them exactly;
+//! - trace and span ids are lowercase **hex**, not base64;
 //! - enums are their integer values (`aggregationTemporality` is `2`, for
 //!   cumulative);
 //! - field names are lowerCamelCase.
 //!
-//! This is the body of a `POST /v1/metrics` with `Content-Type:
-//! application/json`.
+//! These are the bodies of `POST /v1/metrics` and `POST /v1/traces` with
+//! `Content-Type: application/json`.
 
 use rusty_json::{Value, json};
 
 use super::instrument::{Data, HistogramPoint, Int, Metric};
 use super::labels::Label;
+use super::span::{Attribute, AttributeValue, Event, FinishedSpan, hex};
 
 /// `AGGREGATION_TEMPORALITY_CUMULATIVE`.
 const CUMULATIVE: u32 = 2;
@@ -44,6 +47,86 @@ pub(crate) fn metrics_request(
             }],
         }],
     })
+}
+
+/// An `ExportTraceServiceRequest` carrying `spans`.
+///
+/// `resource` describes the process and `scope` names the instrumentation.
+pub(crate) fn traces_request(
+    resource: &[(String, String)],
+    scope: &str,
+    spans: &[FinishedSpan],
+) -> Value {
+    let spans: Vec<Value> = spans.iter().map(encode_span).collect();
+    json!({
+        "resourceSpans": [{
+            "resource": { "attributes": attributes(resource.iter().map(|(k, v)| (k.as_str(), v.as_str()))) },
+            "scopeSpans": [{
+                "scope": { "name": scope },
+                "spans": spans,
+            }],
+        }],
+    })
+}
+
+fn encode_span(span: &FinishedSpan) -> Value {
+    let mut encoded = json!({
+        "traceId": hex(&span.trace_id),
+        "spanId": hex(&span.span_id),
+        "name": span.name.as_str(),
+        "kind": span.kind.code(),
+        "startTimeUnixNano": span.start_nanos.to_string(),
+        "endTimeUnixNano": span.end_nanos.to_string(),
+        "attributes": typed_attributes(&span.attributes),
+        "events": span.events.iter().map(encode_event).collect::<Vec<Value>>(),
+    });
+    let Some(object) = encoded.as_object_mut() else {
+        return encoded;
+    };
+    if let Some(parent) = &span.parent_span_id {
+        object.insert("parentSpanId".to_owned(), Value::from(hex(parent)));
+    }
+    if let Some(state) = &span.trace_state {
+        object.insert("traceState".to_owned(), Value::from(state.as_str()));
+    }
+    if span.status.code() != 0 {
+        let mut status = json!({ "code": span.status.code() });
+        if let (Some(message), Some(map)) = (&span.status_message, status.as_object_mut()) {
+            map.insert("message".to_owned(), Value::from(message.as_str()));
+        }
+        object.insert("status".to_owned(), status);
+    }
+    encoded
+}
+
+fn encode_event(event: &Event) -> Value {
+    json!({
+        "timeUnixNano": event.time_nanos.to_string(),
+        "name": event.name.as_str(),
+        "attributes": typed_attributes(&event.attributes),
+    })
+}
+
+fn typed_attributes(attributes: &[Attribute]) -> Value {
+    let list: Vec<Value> = attributes
+        .iter()
+        .map(|(key, value)| json!({ "key": key.as_str(), "value": any_value(value) }))
+        .collect();
+    Value::from(list)
+}
+
+/// An OTLP `AnyValue`.
+fn any_value(value: &AttributeValue) -> Value {
+    match value {
+        AttributeValue::String(text) => json!({ "stringValue": text.as_str() }),
+        AttributeValue::Bool(flag) => json!({ "boolValue": *flag }),
+        AttributeValue::Int(int) => json!({ "intValue": int.to_string() }),
+        // JSON has no NaN or infinity; say what it was as text instead of null.
+        AttributeValue::Float(float) if !float.is_finite() => {
+            json!({ "stringValue": float.to_string() })
+        }
+        AttributeValue::Float(float) => json!({ "doubleValue": *float }),
+    }
 }
 
 fn encode_metric(metric: &Metric, start_nanos: u64, now_nanos: u64) -> Value {
@@ -135,6 +218,7 @@ fn attributes<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::otel::span::{Kind, Status};
 
     fn resource() -> Vec<(String, String)> {
         vec![("service.name".to_owned(), "svc".to_owned())]
@@ -303,5 +387,111 @@ mod tests {
             names,
             ["mcp.server.requests", "mcp.server.request.duration"]
         );
+    }
+
+    fn span() -> FinishedSpan {
+        FinishedSpan {
+            trace_id: [0xab; 16],
+            span_id: [0xcd; 8],
+            parent_span_id: Some([0xef; 8]),
+            trace_state: Some("vendor=opaque".to_owned()),
+            name: "tools/call".to_owned(),
+            kind: Kind::Server,
+            start_nanos: 10,
+            end_nanos: 20,
+            attributes: vec![
+                ("s".to_owned(), "text".into()),
+                ("b".to_owned(), true.into()),
+                ("i".to_owned(), AttributeValue::Int(-7)),
+                ("f".to_owned(), AttributeValue::Float(1.5)),
+            ],
+            events: vec![Event {
+                time_nanos: 15,
+                name: "retry".to_owned(),
+                attributes: vec![("attempt".to_owned(), AttributeValue::Int(2))],
+            }],
+            status: Status::Error,
+            status_message: Some("boom".to_owned()),
+        }
+    }
+
+    fn encoded_span(span: &FinishedSpan) -> Value {
+        let request = traces_request(&resource(), "rusty-mcp", std::slice::from_ref(span));
+        request["resourceSpans"][0]["scopeSpans"][0]["spans"][0].clone()
+    }
+
+    #[test]
+    fn a_span_has_hex_ids_string_times_and_an_integer_kind() {
+        let request = traces_request(&resource(), "rusty-mcp", &[span()]);
+        let resource = &request["resourceSpans"][0]["resource"]["attributes"][0];
+        assert_eq!(resource["key"].as_str(), Some("service.name"));
+        let scope = &request["resourceSpans"][0]["scopeSpans"][0]["scope"];
+        assert_eq!(scope["name"].as_str(), Some("rusty-mcp"));
+
+        let span = encoded_span(&span());
+        assert_eq!(span["traceId"].as_str(), Some("ab".repeat(16).as_str()));
+        assert_eq!(span["spanId"].as_str(), Some("cd".repeat(8).as_str()));
+        assert_eq!(span["parentSpanId"].as_str(), Some("ef".repeat(8).as_str()));
+        assert_eq!(span["traceState"].as_str(), Some("vendor=opaque"));
+        assert_eq!(span["name"].as_str(), Some("tools/call"));
+        assert_eq!(span["kind"].as_u64(), Some(2));
+        assert_eq!(span["startTimeUnixNano"].as_str(), Some("10"));
+        assert_eq!(span["endTimeUnixNano"].as_str(), Some("20"));
+    }
+
+    #[test]
+    fn attribute_values_use_their_otlp_forms() {
+        let span = encoded_span(&span());
+        let attribute = |n: usize| &span["attributes"][n]["value"];
+        assert_eq!(attribute(0)["stringValue"].as_str(), Some("text"));
+        assert_eq!(attribute(1)["boolValue"].as_bool(), Some(true));
+        // 64-bit integers are strings.
+        assert_eq!(attribute(2)["intValue"].as_str(), Some("-7"));
+        assert_eq!(attribute(3)["doubleValue"].as_f64(), Some(1.5));
+    }
+
+    #[test]
+    fn a_non_finite_float_is_text_not_null() {
+        let mut span = span();
+        span.attributes = vec![("f".to_owned(), AttributeValue::Float(f64::NAN))];
+        let encoded = encoded_span(&span);
+        assert_eq!(
+            encoded["attributes"][0]["value"]["stringValue"].as_str(),
+            Some("NaN")
+        );
+    }
+
+    #[test]
+    fn events_and_status_are_encoded() {
+        let span = encoded_span(&span());
+        let event = &span["events"][0];
+        assert_eq!(event["name"].as_str(), Some("retry"));
+        assert_eq!(event["timeUnixNano"].as_str(), Some("15"));
+        assert_eq!(
+            event["attributes"][0]["value"]["intValue"].as_str(),
+            Some("2")
+        );
+        assert_eq!(span["status"]["code"].as_u64(), Some(2));
+        assert_eq!(span["status"]["message"].as_str(), Some("boom"));
+    }
+
+    #[test]
+    fn a_root_span_has_no_parent_and_an_unset_status_is_omitted() {
+        let mut root = span();
+        root.parent_span_id = None;
+        root.trace_state = None;
+        root.status = Status::Unset;
+        root.status_message = None;
+        let encoded = encoded_span(&root);
+        assert!(encoded.get("parentSpanId").is_none());
+        assert!(encoded.get("traceState").is_none());
+        assert!(encoded.get("status").is_none());
+    }
+
+    #[test]
+    fn the_traces_request_round_trips_through_text() {
+        let request = traces_request(&resource(), "rusty-mcp", &[span(), span()]);
+        let parsed = Value::parse(&request.to_json_string()).expect("valid json");
+        assert_eq!(parsed, request);
     }
 }
