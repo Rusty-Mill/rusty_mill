@@ -580,3 +580,27 @@ fn the_committed_criteria_pin_min_commit_to_a_full_commit_id() {
         "{min:?}"
     );
 }
+
+// ---- third review, finding 7: a message after the last result leaves the turn incomplete
+
+#[test]
+fn a_message_printed_after_the_last_result_makes_the_turn_incomplete_with_a_floor() {
+    let done = fixture("completed-default-ttl");
+    let c = criteria("after", SONNET_ONLY);
+    let plain = tokens_of("after1", &[("planner", done.clone())], &c).unwrap();
+    assert!(plain.turns[0].complete);
+    let more = r#"{"type":"assistant","message":{"id":"zz","model":"claude-sonnet-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}"#;
+    let t = tokens_of("after2", &[("planner", format!("{done}{more}\n"))], &c).unwrap();
+    assert!(
+        !t.turns[0].complete,
+        "its result does not account for what followed"
+    );
+    assert_eq!(t.turns[0].usd, None);
+    // The floor is the result's own cost plus a million input tokens at $2.
+    assert!(
+        near(t.usd_floor.unwrap(), plain.usd.unwrap() + 2.0),
+        "{:?}",
+        t.usd_floor
+    );
+    assert_eq!(t.unknown_turns, 1);
+}

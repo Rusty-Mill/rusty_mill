@@ -550,6 +550,14 @@ fn no_subagents(args: &[Arg]) -> bool {
     })
 }
 
+/// The flags `check_harness` reads a value of.
+const CHECKED_FLAGS: [&str; 4] = [
+    "--tools",
+    "--disallowedTools",
+    "--output-format",
+    "--setting-sources",
+];
+
 /// What an evidence run needs of every harness a launcher starts, beyond its
 /// pin: it prints `--output-format stream-json` to its log, unredirected and
 /// unpiped (the cap reads that log), loads no settings source (`--setting-sources ""`), and
@@ -569,18 +577,25 @@ pub fn check_harness(l: &Launcher) -> Result<(), String> {
             return Err("a claude command's output is redirected or piped, so the log the cap reads would not hold it".into());
         }
         let args = flags(args);
+        // A flag given twice is read once here and may be read last (or merged)
+        // by `claude`: the two would disagree about what the launcher says.
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for a in args {
+            let flag = match flag_of(&a.text).0 {
+                "--disallowed-tools" => "--disallowedTools",
+                f => f,
+            };
+            if CHECKED_FLAGS.contains(&flag) && !seen.insert(flag) {
+                return Err(format!(
+                    "{flag} is given more than once: the launcher would say two things"
+                ));
+            }
+        }
         // A flag whose value the shell computes is not read: `--tools "$t"`
         // may hold anything.
         for (i, a) in args.iter().enumerate() {
             let (flag, inline) = flag_of(&a.text);
-            let checked = [
-                "--tools",
-                "--disallowedTools",
-                "--disallowed-tools",
-                "--output-format",
-                "--setting-sources",
-            ];
-            if !checked.contains(&flag) {
+            if !CHECKED_FLAGS.contains(&flag) && flag != "--disallowed-tools" {
                 continue;
             }
             let computed = if inline.is_some() {
@@ -1574,5 +1589,26 @@ mod tests {
             check_harness(&with(&["-p", "--", "--output-format", "text"])),
             Ok(())
         );
+    }
+
+    #[test]
+    fn the_hyphenated_disallowed_tools_alias_counts_the_same() {
+        let with = |tools: &[&str]| {
+            let mut a = vec![
+                "--model",
+                "m1",
+                "--output-format",
+                "stream-json",
+                "--setting-sources",
+                "",
+            ];
+            a.extend(tools);
+            launcher("claude", &a)
+        };
+        assert_eq!(
+            check_harness(&with(&["--disallowed-tools", "Agent,Task"])),
+            Ok(())
+        );
+        assert!(check_harness(&with(&["--disallowed-tools", "Task"])).is_err());
     }
 }
