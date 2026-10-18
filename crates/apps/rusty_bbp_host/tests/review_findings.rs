@@ -558,3 +558,12 @@ fn every_byte_of_unicode_json_can_be_polled_without_losing_known_costs() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ---- third review, finding 5: captured with `--tools default`
+
+#[test]
+fn with_tools_default_the_harness_starts_a_subagent() {
+    // Claude Code 2.1.301, `--setting-sources "" --tools default`, asked for a
+    // subagent: the Agent tool was used. `default` is every tool.
+    assert!(fixture("tools-default-starts-a-subagent").contains(r#""name":"Agent""#));
+}

@@ -528,7 +528,8 @@ fn list_values(args: &[Arg], names: &[&str]) -> Option<Vec<String>> {
 }
 
 /// Whether one `claude` command cannot start a subagent: a `--tools` list
-/// without `Agent` and `Task`, or a `--disallowedTools` list with both.
+/// without `Agent`, `Task` or `default` (which means every tool), or a
+/// `--disallowedTools` list with both `Agent` and `Task`.
 fn no_subagents(args: &[Arg]) -> bool {
     let named = |v: Vec<String>| -> Vec<String> {
         v.iter()
@@ -536,8 +537,12 @@ fn no_subagents(args: &[Arg]) -> bool {
             .collect()
     };
     if let Some(v) = list_values(args, &["--tools"]) {
+        // `claude --help`: "" is no tools, "default" is all of them, the Agent
+        // tool included.
         let t = named(v);
-        return !t.iter().any(|n| n == "Agent" || n == "Task");
+        return !t
+            .iter()
+            .any(|n| n == "Agent" || n == "Task" || n.eq_ignore_ascii_case("default"));
     }
     list_values(args, &["--disallowedTools", "--disallowed-tools"]).is_some_and(|v| {
         let t = named(v);
