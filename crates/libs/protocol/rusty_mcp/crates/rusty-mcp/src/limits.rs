@@ -59,7 +59,10 @@ use std::{
     time::Duration,
 };
 
-use http::{Request, Response, StatusCode, header::RETRY_AFTER};
+use http::{
+    HeaderValue, Request, Response, StatusCode,
+    header::{CONTENT_TYPE, RETRY_AFTER},
+};
 
 use crate::admission::{Admission, Rejection};
 
@@ -210,6 +213,12 @@ fn respond<B: From<String>>(rejection: Rejection) -> Response<B> {
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut response = Response::new(B::from(rejection.body.to_owned()));
     *response.status_mut() = status;
+    // What axum's string responses sent, which clients of the 503 and 504 saw
+    // before the body became generic.
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
     if let Some(secs) = rejection.retry_after_secs {
         response.headers_mut().insert(RETRY_AFTER, secs.into());
     }
@@ -249,6 +258,18 @@ mod tests {
         Request::new(String::new())
     }
 
+    /// A refusal as clients see it: plain text with the reason in the body.
+    fn assert_plain_text(response: &Response<String>, body: &str) {
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        assert_eq!(response.body(), body);
+    }
+
     #[tokio::test]
     async fn no_limits_configured_changes_nothing() {
         let mut service = LimitsLayer::new().layer(Slow(Duration::ZERO));
@@ -271,6 +292,7 @@ mod tests {
         let waited = started.elapsed();
 
         assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_plain_text(&shed, Rejection::OVERLOADED.body);
         assert_eq!(
             shed.headers()
                 .get(RETRY_AFTER)
@@ -336,6 +358,8 @@ mod tests {
 
         let response = service.call(request()).await.expect("infallible");
         assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_plain_text(&response, Rejection::TIMED_OUT.body);
+        assert!(response.headers().get(RETRY_AFTER).is_none());
     }
 
     #[tokio::test]
