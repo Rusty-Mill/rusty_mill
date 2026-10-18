@@ -249,16 +249,16 @@ pub struct GlobalConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TracingConfig {
-    /// OTLP/gRPC endpoint for **spans**. Falls back to
-    /// `OTEL_EXPORTER_OTLP_ENDPOINT`, then to the OpenTelemetry default of
-    /// `http://localhost:4317`.
+    /// The collector's OTLP/HTTP base URL, such as `http://localhost:4318`;
+    /// `/v1/traces` and `/v1/metrics` are added to it. Falls back to
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT`, then to `http://localhost:4318`. This is
+    /// OTLP over HTTP with JSON bodies, not gRPC: port 4318, not 4317.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
 
-    /// OTLP/HTTP URL for **metrics**, including the `/v1/metrics` path. Falls
-    /// back to `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, then to
-    /// `http://localhost:4318/v1/metrics`. Metrics are pushed as OTLP/HTTP JSON,
-    /// so this is not the gRPC `endpoint`.
+    /// The full OTLP/HTTP URL for **metrics**, including `/v1/metrics`, when it
+    /// differs from `endpoint`'s. Falls back to
+    /// `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, then to `endpoint`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_endpoint: Option<String>,
 

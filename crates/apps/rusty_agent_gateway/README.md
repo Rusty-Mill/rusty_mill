@@ -2174,7 +2174,7 @@ something that severs live subscriptions.
 ```yaml
 config:
   tracing:
-    endpoint: http://localhost:4317
+    endpoint: http://localhost:4318
     serviceName: rusty-agent-gateway
     sampleRatio: 1.0
   limits:

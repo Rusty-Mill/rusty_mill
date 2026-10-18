@@ -1,233 +1,306 @@
-//! OTLP export tests.
+//! OTLP span export tests.
 //!
-//! The unit tests cover configuration. What matters here is the part that only
-//! shows up end to end: that spans actually leave the process, that the flush
-//! on shutdown is what makes them arrive, and that a remote parent produces one
-//! joined trace rather than two disconnected ones.
+//! The unit tests cover how spans are built and encoded. What matters here is
+//! the part that only shows up end to end: that spans actually leave the process
+//! as OTLP/JSON, that the flush on shutdown is what makes them arrive, and that
+//! a remote parent produces one joined trace rather than two disconnected ones.
 
 #![cfg(feature = "otel")]
 
-use std::{
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+mod otel_support;
 
+use std::{sync::Arc, time::Duration};
+
+use otel_support::Collector;
+use rusty_json::Value;
 use rusty_mcp::{
     otel::{OtelConfig, OtelGuard},
     trace::TraceContext,
 };
+use tracing_subscriber::prelude::*;
 
+const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
+const PARENT: &str = "00f067aa0ba902b7";
 const TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01";
+const UNSAMPLED: &str = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-00";
 
-/// Spans the fake collector received, as (trace_id hex, parent_span_id hex).
-type Received = Arc<Mutex<Vec<(String, String)>>>;
-
-/// A minimal OTLP/gRPC trace service that records what it is sent.
-///
-/// Decoding protobuf by hand would be its own project, so this reads the two
-/// fields the tests care about straight out of the wire format: span records
-/// carry a 16-byte trace id and an 8-byte parent span id, and the ids we look
-/// for are distinctive enough to find by scanning.
-mod collector {
-    use super::*;
-
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    /// Start the collector and return its address.
-    pub async fn spawn(received: Received) -> SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind collector");
-        let addr = listener.local_addr().expect("addr");
-
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    return;
-                };
-                let received = Arc::clone(&received);
-
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 64 * 1024];
-                    let mut seen = Vec::new();
-
-                    // Read whatever the exporter sends; we only need the bytes.
-                    loop {
-                        match tokio::time::timeout(
-                            Duration::from_millis(400),
-                            socket.read(&mut buf),
-                        )
-                        .await
-                        {
-                            Ok(Ok(0)) | Err(_) => break,
-                            Ok(Ok(n)) => seen.extend_from_slice(&buf[..n]),
-                            Ok(Err(_)) => break,
-                        }
-                    }
-
-                    if !seen.is_empty() {
-                        record(&seen, &received);
-                        // A gRPC client waits for a response; an HTTP/2 GOAWAY
-                        // is enough to let it finish rather than hang.
-                        let _ = socket.shutdown().await;
-                    }
-                });
-            }
-        });
-
-        addr
-    }
-
-    /// Pull trace/parent ids out of the raw payload.
-    fn record(bytes: &[u8], received: &Received) {
-        let expected_trace = hex(&TRACEPARENT[3..35]);
-        let expected_parent = hex(&TRACEPARENT[36..52]);
-
-        let mut hits = Vec::new();
-        if find(bytes, &expected_trace).is_some() {
-            let parent = if find(bytes, &expected_parent).is_some() {
-                TRACEPARENT[36..52].to_string()
-            } else {
-                String::new()
-            };
-            hits.push((TRACEPARENT[3..35].to_string(), parent));
-        } else if !bytes.is_empty() {
-            // A span arrived, but on a trace of its own.
-            hits.push((String::new(), String::new()));
-        }
-
-        if !hits.is_empty() {
-            received.lock().expect("lock").extend(hits);
-        }
-    }
-
-    fn hex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-            .collect()
-    }
-
-    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        if needle.is_empty() || haystack.len() < needle.len() {
-            return None;
-        }
-        haystack.windows(needle.len()).position(|w| w == needle)
-    }
-}
-
-/// Build a pipeline pointed at `addr` and run `body` with a subscriber feeding
-/// it.
+/// Build a pipeline pointed at `collector` and run `body` with a subscriber
+/// feeding it.
 ///
 /// Scoped rather than global on purpose: `init` installs a global subscriber
 /// and only the first call in a process wins, so several tests in one binary
 /// would leave all but one exporting nothing. `pipeline` exists precisely for
 /// callers that bring their own subscriber, and that is what is exercised here.
-fn with_pipeline<F: FnOnce()>(addr: SocketAddr, body: F) -> OtelGuard {
-    use tracing_subscriber::prelude::*;
-
-    let (guard, tracer) = rusty_mcp::otel::pipeline(
-        OtelConfig::new("test-server")
-            .with_endpoint(format!("http://{addr}"))
-            .with_shutdown_timeout(Duration::from_secs(2)),
-    )
-    .expect("pipeline starts");
-
-    let subscriber =
-        tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
-
-    tracing::subscriber::with_default(subscriber, body);
-
+fn with_pipeline(config: OtelConfig, body: impl FnOnce()) -> OtelGuard {
+    let (guard, layer) = rusty_mcp::otel::pipeline(config).expect("pipeline starts");
+    tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), body);
     guard
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn spans_reach_the_collector_after_a_flush() {
-    let received: Received = Arc::new(Mutex::new(Vec::new()));
-    let addr = collector::spawn(Arc::clone(&received)).await;
+fn config_for(collector: &Collector) -> OtelConfig {
+    OtelConfig::new("test-server")
+        .with_endpoint(collector.url())
+        .without_metrics()
+        .with_shutdown_timeout(Duration::from_secs(2))
+}
 
-    let guard = with_pipeline(addr, || {
-        let span = tracing::info_span!("a-span");
+fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+fn named<'a>(spans: &'a [Value], name: &str) -> &'a Value {
+    spans
+        .iter()
+        .find(|span| string(span, "name") == Some(name))
+        .unwrap_or_else(|| panic!("no span named {name} in {spans:?}"))
+}
+
+#[test]
+fn spans_reach_the_collector_after_a_flush() {
+    let collector = Collector::start(200);
+
+    let guard = with_pipeline(config_for(&collector).with_service_version("1.2.3"), || {
+        let span = tracing::info_span!("a-span", answer = 42);
         let _entered = span.enter();
         tracing::info!("inside");
     });
 
     // The flush is what sends them; without it the buffer dies with the guard.
     guard.shutdown();
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    assert!(
-        !received.lock().expect("lock").is_empty(),
-        "the collector should have received at least one span"
+    let pushes = collector.pushes();
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    assert_eq!(pushes[0].path, "/v1/traces");
+    assert_eq!(pushes[0].content_type, "application/json");
+
+    let resource = &pushes[0].body["resourceSpans"][0]["resource"]["attributes"];
+    let attributes: Vec<_> = resource
+        .as_array()
+        .expect("attributes")
+        .iter()
+        .map(|a| (string(a, "key"), string(&a["value"], "stringValue")))
+        .collect();
+    assert!(attributes.contains(&(Some("service.name"), Some("test-server"))));
+    assert!(attributes.contains(&(Some("service.version"), Some("1.2.3"))));
+    assert_eq!(
+        string(
+            &pushes[0].body["resourceSpans"][0]["scopeSpans"][0]["scope"],
+            "name"
+        ),
+        Some("rusty-mcp")
     );
+
+    let spans = collector.spans();
+    let span = named(&spans, "a-span");
+    assert_eq!(string(&span["attributes"][0], "key"), Some("answer"));
+    assert_eq!(
+        string(&span["attributes"][0]["value"], "intValue"),
+        Some("42")
+    );
+    assert_eq!(string(&span["events"][0], "name"), Some("inside"));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_remote_parent_joins_the_callers_trace() {
-    let received: Received = Arc::new(Mutex::new(Vec::new()));
-    let addr = collector::spawn(Arc::clone(&received)).await;
+#[test]
+fn a_remote_parent_joins_the_callers_trace() {
+    let collector = Collector::start(200);
 
-    let guard = with_pipeline(addr, || {
-        let context = TraceContext::from_parts(TRACEPARENT, None, None).expect("valid");
+    let guard = with_pipeline(config_for(&collector), || {
+        let context =
+            TraceContext::from_parts(TRACEPARENT, Some("vendor=opaque"), None).expect("valid");
+        // `span()` records the ids as fields; the layer turns them into a parent.
         let span = context.span("tools/call");
-        // The line that turns two disconnected traces into one.
-        context.attach_parent(&span);
-
         let _entered = span.enter();
         tracing::info!("handling");
     });
 
     guard.shutdown();
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let seen = received.lock().expect("lock").clone();
-    assert!(!seen.is_empty(), "no spans arrived");
+    let spans = collector.spans();
+    let span = named(&spans, "tools/call");
+    assert_eq!(string(span, "traceId"), Some(TRACE));
+    assert_eq!(string(span, "parentSpanId"), Some(PARENT));
+    assert_eq!(string(span, "traceState"), Some("vendor=opaque"));
+    // The ids are the span's own now, not attributes beside it.
+    let keys: Vec<_> = span["attributes"]
+        .as_array()
+        .expect("attributes")
+        .iter()
+        .filter_map(|a| string(a, "key"))
+        .collect();
     assert!(
-        seen.iter()
-            .any(|(trace, _)| trace == "0af7651916cd43dd8448eb211c80319c"),
-        "the exported span should carry the caller's trace id, got {seen:?}"
+        !keys.contains(&"trace_id") && !keys.contains(&"parent_span_id"),
+        "{keys:?}"
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn shutdown_is_idempotent() {
-    let received: Received = Arc::new(Mutex::new(Vec::new()));
-    let addr = collector::spawn(Arc::clone(&received)).await;
+#[test]
+fn a_span_without_a_remote_parent_starts_its_own_trace() {
+    // The control for the test above: no caller context, so no caller's trace.
+    let collector = Collector::start(200);
 
-    let guard = with_pipeline(addr, || {});
+    let guard = with_pipeline(config_for(&collector), || {
+        drop(tracing::info_span!("tools/call"));
+    });
+
+    guard.shutdown();
+
+    let spans = collector.spans();
+    let span = named(&spans, "tools/call");
+    assert_ne!(string(span, "traceId"), Some(TRACE));
+    assert!(span.get("parentSpanId").is_none(), "{span:?}");
+}
+
+#[test]
+fn spans_in_one_request_form_a_tree_under_the_callers_span() {
+    let collector = Collector::start(200);
+
+    let guard = with_pipeline(config_for(&collector), || {
+        let context = TraceContext::from_parts(TRACEPARENT, None, None).expect("valid");
+        let request = context.span("tools/call");
+        let _entered = request.enter();
+        let inner = tracing::info_span!("backend");
+        drop(inner);
+    });
+
+    guard.shutdown();
+
+    let spans = collector.spans();
+    let request = named(&spans, "tools/call");
+    let backend = named(&spans, "backend");
+    assert_eq!(string(backend, "traceId"), Some(TRACE));
+    assert_eq!(string(backend, "parentSpanId"), string(request, "spanId"));
+}
+
+#[test]
+fn a_caller_that_did_not_sample_gets_no_spans() {
+    let collector = Collector::start(200);
+
+    let guard = with_pipeline(config_for(&collector), || {
+        let context = TraceContext::from_parts(UNSAMPLED, None, None).expect("valid");
+        let request = context.span("tools/call");
+        let _entered = request.enter();
+        drop(tracing::info_span!("backend"));
+    });
+
+    guard.shutdown();
+
+    assert!(collector.spans().is_empty(), "{:?}", collector.spans());
+    assert!(collector.pushes().is_empty(), "nothing should even be sent");
+}
+
+#[test]
+fn root_spans_are_sampled_by_the_configured_ratio() {
+    let collector = Collector::start(200);
+
+    let guard = with_pipeline(config_for(&collector).with_sample_ratio(0.0), || {
+        drop(tracing::info_span!("never"));
+    });
+
+    guard.shutdown();
+    assert!(collector.spans().is_empty());
+}
+
+#[test]
+fn a_full_batch_is_sent_without_waiting_for_a_flush() {
+    let collector = Collector::start(200);
+
+    let (guard, layer) = rusty_mcp::otel::pipeline(config_for(&collector)).expect("pipeline");
+    tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+        for _ in 0..700 {
+            drop(tracing::info_span!("busy"));
+        }
+    });
+
+    // 512 make a batch; no flush, and the interval is far off.
+    assert!(
+        collector.wait_until(Duration::from_secs(10), |c| !c.spans().is_empty()),
+        "a full batch should be sent on its own"
+    );
+    guard.shutdown();
+    assert_eq!(collector.spans().len(), 700, "the rest goes at shutdown");
+}
+
+#[test]
+fn spans_set_after_creation_reach_the_collector() {
+    let collector = Collector::start(200);
+
+    let guard = with_pipeline(config_for(&collector), || {
+        let span = tracing::info_span!("mcp.request");
+        rusty_mcp::otel::set_attribute(&span, "mcpGuardrails.rule", "rule-9b2e");
+        rusty_mcp::otel::set_attribute(&span, "mcpGuardrails.score", 0.75);
+    });
+
+    guard.shutdown();
+
+    let spans = collector.spans();
+    let attributes = named(&spans, "mcp.request")["attributes"]
+        .as_array()
+        .expect("attributes")
+        .clone();
+    let value = |key: &str| {
+        attributes
+            .iter()
+            .find(|a| string(a, "key") == Some(key))
+            .map(|a| a["value"].clone())
+    };
+    assert_eq!(
+        value("mcpGuardrails.rule").and_then(|v| v["stringValue"].as_str().map(str::to_owned)),
+        Some("rule-9b2e".to_owned())
+    );
+    assert_eq!(
+        value("mcpGuardrails.score").and_then(|v| v["doubleValue"].as_f64()),
+        Some(0.75)
+    );
+}
+
+#[test]
+fn shutdown_is_idempotent() {
+    let collector = Collector::start(200);
+
+    let guard = with_pipeline(config_for(&collector), || {});
     guard.shutdown();
     // A shutdown hook may fire alongside `Drop`; neither may panic.
     guard.shutdown();
     guard.flush();
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn an_unreachable_collector_does_not_break_the_server() {
+#[test]
+fn an_unreachable_collector_does_not_break_the_server() {
     // Telemetry is not load-bearing: a collector that is down must not take
     // request handling with it.
-    let (guard, _tracer) = rusty_mcp::otel::pipeline(
+    let dead = otel_support::dead_address();
+    let guard = with_pipeline(
         OtelConfig::new("test-server")
-            // Port 1 is reliably closed.
-            .with_endpoint("http://127.0.0.1:1")
-            .with_shutdown_timeout(Duration::from_millis(200)),
-    )
-    .expect("the pipeline starts even if the collector is unreachable");
-
-    let span = tracing::info_span!("still-works");
-    let _entered = span.enter();
-    tracing::info!("the handler carries on");
-    drop(_entered);
+            .with_endpoint(format!("http://{dead}"))
+            .without_metrics()
+            .with_shutdown_timeout(Duration::from_millis(500)),
+        || {
+            let span = tracing::info_span!("still-works");
+            let _entered = span.enter();
+            tracing::info!("the handler carries on");
+        },
+    );
 
     guard.shutdown();
 }
 
+#[test]
+fn a_collector_that_rejects_the_batch_does_not_break_anything() {
+    let collector = Collector::start(503);
+
+    let guard = with_pipeline(config_for(&collector), || {
+        drop(tracing::info_span!("refused"));
+    });
+
+    guard.shutdown();
+    assert_eq!(collector.spans().len(), 1, "it was sent, and refused");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_shutdown_hook_flushes() {
-    let received: Received = Arc::new(Mutex::new(Vec::new()));
-    let addr = collector::spawn(Arc::clone(&received)).await;
+    let collector = Collector::start(200);
 
-    let guard = Arc::new(with_pipeline(addr, || {
+    let guard = Arc::new(with_pipeline(config_for(&collector), || {
         let span = tracing::info_span!("hooked");
         let _entered = span.enter();
         tracing::info!("inside");
@@ -237,40 +310,8 @@ async fn the_shutdown_hook_flushes() {
     let hook = guard.shutdown_hook();
     hook().await;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
-        !received.lock().expect("lock").is_empty(),
+        collector.wait_until(Duration::from_secs(5), |c| !c.spans().is_empty()),
         "the shutdown hook should have flushed the buffer"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn without_attach_parent_the_span_starts_its_own_trace() {
-    // The control for `a_remote_parent_joins_the_callers_trace`. Same context,
-    // same span — the only difference is the missing `attach_parent`. If this
-    // also carried the caller's trace id, that test would be proving nothing.
-    let received: Received = Arc::new(Mutex::new(Vec::new()));
-    let addr = collector::spawn(Arc::clone(&received)).await;
-
-    let guard = with_pipeline(addr, || {
-        let context = TraceContext::from_parts(TRACEPARENT, None, None).expect("valid");
-        // `span()` records the ids as *fields*, which correlates logs but does
-        // not create a parent edge.
-        let span = context.span("tools/call");
-
-        let _entered = span.enter();
-        tracing::info!("handling");
-    });
-
-    guard.shutdown();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let seen = received.lock().expect("lock").clone();
-    assert!(!seen.is_empty(), "a span should still have been exported");
-    assert!(
-        !seen
-            .iter()
-            .any(|(trace, _)| trace == "0af7651916cd43dd8448eb211c80319c"),
-        "without attach_parent the span must be on its own trace, got {seen:?}"
     );
 }
