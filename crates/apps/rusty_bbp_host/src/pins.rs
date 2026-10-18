@@ -558,6 +558,11 @@ pub fn check_harness(l: &Launcher) -> Result<(), String> {
         ));
     }
     for args in &commands {
+        // The shell redirects whatever follows `--` too: it is prompt text to
+        // `claude`, not to the shell.
+        if args.iter().any(|a| a.redirect) {
+            return Err("a claude command's output is redirected or piped, so the log the cap reads would not hold it".into());
+        }
         let args = flags(args);
         // A flag whose value the shell computes is not read: `--tools "$t"`
         // may hold anything.
@@ -586,9 +591,6 @@ pub fn check_harness(l: &Launcher) -> Result<(), String> {
                     "the value of {flag} is computed by the shell, not a literal: it cannot be read"
                 ));
             }
-        }
-        if args.iter().any(|a| a.redirect) {
-            return Err("a claude command's output is redirected or piped, so the log the cap reads would not hold it".into());
         }
         let format = args
             .iter()
@@ -1480,13 +1482,16 @@ mod tests {
             ("after --", "-p -- 'do it' > /tmp/x"),
             ("stderr after --", "-p -- 'do it' 2>/dev/null"),
             ("append after --", "-p -- 'do it' >> /tmp/x"),
-            ("both after --", "-p -- 'do it' &> /tmp/x"),
-            ("pipe after --", "-p -- 'do it' | tee /tmp/x"),
-            ("pipe before --", "-p task | tee /tmp/x"),
+            // `cd` is an allowed command, so only the pipe can be at fault.
+            ("pipe after --", "-p -- 'do it' | cd /tmp"),
+            ("pipe before --", "-p task | cd /tmp"),
             ("input redirect after --", "-p -- 'do it' < /tmp/in"),
         ] {
             let err = check_harness(&good(tail)).unwrap_err();
             assert!(err.contains("redirected or piped"), "{what}: {err}");
         }
+        // `&>` splits at the `&`: the redirect becomes a command of its own,
+        // which is refused as an unsupported command.
+        assert!(check_harness(&good("-p -- 'do it' &> /tmp/x")).is_err());
     }
 }
