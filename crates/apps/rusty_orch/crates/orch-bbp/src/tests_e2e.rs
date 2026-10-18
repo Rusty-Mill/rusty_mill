@@ -936,4 +936,5 @@ fn no_progress_pause_survives_orch_processes_without_duplicate_task_or_charge() 
         std::thread::sleep(Duration::from_millis(10));
     }
     std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS pause-adoption");
 }

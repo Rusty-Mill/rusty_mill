@@ -123,8 +123,11 @@ in `required-gate`. It builds real `rusty_orch` and `bbp` binaries, then runs
 Linux runs, first build those binaries and the `orch-bbp` library tests and
 `rusty_bbp_host --test moderator_e2e`, then set `BBP_TEST_BIN` and `ORCH_TEST_BIN`
 to their absolute paths. The collector requires exactly one executed test and
-a completion marker for each of lifecycle, Rust/LLD linking, timeout, cancel and kill. It attempts
-all five cases and retains logs, JSON results and a Markdown summary on failure.
+a completion marker for each of lifecycle, Rust/LLD linking, timeout, cancel and
+kill, plus the separate `pause-adoption` regression. It attempts all six cases
+and retains logs, JSON results and a Markdown summary on failure. The pause case
+uses no workload: it verifies a durable failure pause across real Orch processes,
+one task and one hosted-card charge, and adoption after an explicit owner reset.
 
 The lifecycle uses the real Orch CLI, persisted state and production supervisor;
 its workload must pass with `landlock+seccomp:no-endpoints` recorded in the BBP
@@ -153,7 +156,7 @@ timer and reaps the workload. An exclusive runner lock remains held through
 cleanup and report publication, preventing a replacement from preparing the
 same checkout too early. Normal moderator exit waits for cleanup before
 releasing its own lock. This hosted-card call budget is not a monetary cap;
-PR #763's run guards remain a separate review and change.
+the run guards merged in PR #763 independently enforce configured cost caps.
 
 Manifest publication keeps the Unix directory fsync and avoids unsupported
 Windows directory opens. Injected-seam tests are portable; production hosting

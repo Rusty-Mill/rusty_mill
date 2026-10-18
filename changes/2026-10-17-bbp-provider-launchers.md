@@ -23,3 +23,6 @@ changelog: Add turn-bound Codex author and MCP-only Claude reviewer launchers, o
   host metadata. Added process and real-Orch recovery regressions.
 - **Added:** a pre-task Rust/LLD profile generator with one linker thread under
   the existing 1 GiB cap, plus a fifth required confined acceptance case.
+- **Validation:** real deadline expiry pauses and reaps live harnesses, retaining
+  that pause on restart. Required CI explicitly runs the Orch pause/adoption
+  regression and records its evidence separately from the five confined cases.

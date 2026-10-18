@@ -7,6 +7,8 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 ## BBP provider launchers
 **2026-10-17**
 
+- Required Linux CI executes the pause/adoption/ledger regression separately
+  from confined workloads. Deadline expiry is covered with live harness cleanup.
 - No-progress launcher loops pause across restarts; owner reset is revision-fenced.
   Codex MCP approvals are scoped per tool, inherited Git context is scrubbed,
   and an explicit Rust/LLD profile bounds linker threads before task creation.

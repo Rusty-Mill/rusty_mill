@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Required CI evidence for pause/adoption across Orch processes; real deadline-ending launch-loop recovery coverage.
 - Durable provider-neutral launcher failure pauses across Orch restarts, explicit owner reset, scoped MCP tool approvals and an LLD profile with bounded linker parallelism.
 - Runnable Codex author/Claude reviewer BBP launchers in the host package, per-turn MCP contracts and an opt-in Linux real-provider smoke. Reviewer built-in tools are removed by fixed launcher arguments.
 - Required Linux CI acceptance for the confined Orch CLI lifecycle, durable moderator restart and receipt-only completion, plus separately recorded timeout/cancel/kill recovery modes. Sandbox refusal cannot satisfy acceptance.

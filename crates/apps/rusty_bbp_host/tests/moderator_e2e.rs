@@ -2091,3 +2091,105 @@ fn a_cap_stop_reaps_the_owned_runner_before_returning_its_account() {
         .is_none_or(|r| r.status != Some(RunStatus::Passed)));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn no_progress_deadlines_pause_live_harnesses_and_survive_restart() {
+    let dir = tempdir("deadline-guard");
+    let (repo, _) = repo(&dir);
+    let task = TaskId("deadline-guard".into());
+    // Open through the real driver with short immutable turn deadlines. No
+    // synthetic TurnEnded events or edited log: moderator ticks expire them.
+    let master = rusty_bbp_host::master::ensure(&dir).unwrap();
+    let mut d = Driver::new(FsStore::open(&dir).unwrap(), task.clone()).with_master(master);
+    let profile_digest =
+        rusty_bbp_host::profiles::freeze(&dir, &task, &ProfileSet::shell("test", "true")).unwrap();
+    let brief = d.store.blob_put(b"wait without publishing");
+    assert_eq!(
+        d.dispatch(
+            &Command::Open(OpenTask {
+                task: task.clone(),
+                roster: common::roster(),
+                repo: "local".into(),
+                profile_digest,
+                budget: Budget {
+                    messages: 40,
+                    bytes: 5_000_000,
+                    reads: 150,
+                    reads_per_turn: 30,
+                    turns: 60,
+                    iterations: 4
+                },
+                turn_ms: 1_000,
+                request_ms: 60_000,
+                max_live_turns: 1,
+                brief,
+                human: "human".into(),
+                policy: SchedulingPolicy::TurnBased,
+            }),
+            rusty_bbp_host::now()
+        )
+        .unwrap(),
+        Response::Stored(ArtId(1))
+    );
+    for role in Who::ALL {
+        admin::assign(
+            &dir,
+            &task,
+            &role.id(),
+            &PrincipalId(role.name().into()),
+            "v",
+        )
+        .unwrap();
+    }
+    let launcher = Launcher {
+        program: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            r#"echo $$ > "$BBP_DIR/live-$BBP_TURN.pid"; exec sleep 30"#.into(),
+        ],
+        builtin_tools: false,
+    };
+    let mut cfg = config(
+        &dir,
+        &task,
+        repo,
+        Launchers::default().with("planner", launcher),
+        10,
+    );
+    cfg.poll = Duration::from_millis(10);
+    assert!(moderator::run(&cfg)
+        .unwrap_err()
+        .contains("moderator paused"));
+    let driver = open_driver(&dir, &task).unwrap();
+    let events = driver.store.events(&task, 0).unwrap();
+    let ended: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TurnEnded { turn, cause } => Some((*turn, *cause)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended.len(), 3);
+    for (turn, cause) in ended {
+        assert_eq!(cause, TurnEnd::Deadline, "must expire rather than forfeit");
+        let pid = std::fs::read_to_string(dir.join(format!("live-{}.pid", turn.0))).unwrap();
+        assert!(
+            !alive(pid.trim()),
+            "deadline harness survived moderator cleanup"
+        );
+    }
+    assert_eq!(
+        rusty_bbp_host::moderator_health::read(&dir, &task)
+            .unwrap()
+            .consecutive
+            .get("planner"),
+        Some(&3)
+    );
+    let rev = driver.state.rev;
+    assert!(moderator::run(&cfg)
+        .unwrap_err()
+        .contains("moderator paused"));
+    assert_eq!(open_driver(&dir, &task).unwrap().state.rev, rev);
+    std::fs::remove_dir_all(dir).unwrap();
+}

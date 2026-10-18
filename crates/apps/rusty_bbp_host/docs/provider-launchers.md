@@ -89,7 +89,11 @@ cargo test --locked -p orch-bbp --lib \
   -- --ignored --exact --nocapture
 ```
 
-The five deterministic confined acceptance cases are required CI. Successful
+The five deterministic confined acceptance cases and the separate pause/adoption
+regression are required CI. The latter checks repeated Orch processes retain one
+task and charge while paused, then adopt after an owner reset; it makes no claim
+of confined workload execution. A real deadline-expiry regression also verifies
+live harness cleanup and persistent pause after three expired turns. Successful
 offline contracts do not establish successful live-provider behavior; report
 the smoke's actual result separately.
 
@@ -109,7 +113,8 @@ A paused moderator starts no more providers after an Orch or host restart.
 Orch reports the diagnostic as a retryable host error and retains its task and
 ledger. This is a launch-loop guard, not a model-token or monetary cap. A provider
 that publishes actions or stays alive can still consume its ordinary BBP budget.
-PR #763's cost/run guards remain separate.
+The cost/run guards merged in PR #763 remain in force when configured; this
+launch-loop guard does not replace their accounting or enforcement.
 
 Inspect and recover explicitly after repairing the launcher:
 
