@@ -1536,4 +1536,43 @@ mod tests {
             assert!(err.contains("subagent"), "{bad:?}: {err}");
         }
     }
+
+    // ---- third review, finding 6: a flag given twice is read once
+
+    #[test]
+    fn a_checked_flag_given_twice_is_refused() {
+        let base = [
+            "--model",
+            "m1",
+            "--output-format",
+            "stream-json",
+            "--setting-sources",
+            "",
+            "--disallowedTools",
+            "Agent,Task",
+        ];
+        assert_eq!(check_harness(&launcher("claude", &base)), Ok(()));
+        let with = |extra: &[&str]| {
+            let mut a = base.to_vec();
+            a.extend(extra);
+            launcher("claude", &a)
+        };
+        for (what, extra) in [
+            ("format", &["--output-format", "text"][..]),
+            ("format=", &["--output-format=text"]),
+            ("sources", &["--setting-sources", "user,project"]),
+            ("sources=", &["--setting-sources=project"]),
+            ("tools", &["--tools", "Bash", "--tools", "default"]),
+            ("disallowed", &["--disallowedTools", "Bash"]),
+            ("alias", &["--disallowed-tools", "Bash"]),
+        ] {
+            let err = check_harness(&with(extra)).unwrap_err();
+            assert!(err.contains("more than once"), "{what}: {err}");
+        }
+        // After `--` it is prompt text, not a flag.
+        assert_eq!(
+            check_harness(&with(&["-p", "--", "--output-format", "text"])),
+            Ok(())
+        );
+    }
 }
