@@ -17,7 +17,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rpath | rpath | Path translation and normalization engine for MSYS2/Git Bash/POSIX to Windows interop | 5 |
 | foundation | rusty_aead | rusty_aead | Dependency-free ChaCha20-Poly1305 (RFC 8439) AEAD. Portable, no unsafe, no allocation. Stage 3 of the native ring replacement plan. | 0 |
 | foundation | rusty_ansder | rusty_ansder | ASN.1 BER/DER TLV encoder and decoder for Rusty Mill, built on rusty_wire | 0 |
-| foundation | rusty_atomic_file | rusty_atomic_file | Replace a file crash-atomically: sibling temp file, fsync, rename, directory fsync. The one std-path helper the workspace's whole-file writers share. | 9 |
+| foundation | rusty_atomic_file | rusty_atomic_file | Replace a file crash-atomically: sibling temp file, fsync, rename, directory fsync. The one std-path helper the workspace's whole-file writers share. | 10 |
 | foundation | rusty_base64 | rusty_base64 | Hand-rolled, dependency-free Base64 (RFC 4648) -- standard and URL-safe alphabets, encode and decode -- extracted from rusty_oauth's own encoding module so rusty_acp, rusty-mcp, and rusty_a2a can depend on it instead of the external base64 crate. | 20 |
 | foundation | rusty_codec | rusty_codec | A #![no_std] + alloc sovereign TOML configuration parser and binary buffer serialization crate | 2 |
 | foundation | rusty_compress | rusty_compress | A sans-IO stream compression and decompression abstraction crate for DEFLATE, Gzip, Zlib, and LZMA | 2 |
@@ -38,11 +38,11 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
 | foundation | rusty_percent | rusty_percent | Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space). | 10 |
 | foundation | rusty_pk | rusty_pk | Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, X25519, ECDH on P-256 and P-384. Portable, no unsafe. Stages 2 and 4 and gap 2 of the native ring replacement plan. | 0 |
-| foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 9 |
+| foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 10 |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 5 |
 | foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. | 8 |
 | foundation | rusty_rsa | rusty_rsa | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256 -- the primitives rusty_oauth and rusty_rdp each independently reimplemented for their own RSA public-key verification/encryption. Named for the primary use case; BigUint is general-purpose (rusty_oauth's own ECC/ES256 code also builds on it) and SHA-256 is a general hash, not RSA-specific -- see lib.rs. | 6 |
-| foundation | rusty_serde | rusty_serde | A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format. | 12 |
+| foundation | rusty_serde | rusty_serde | A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format. | 14 |
 | foundation | rusty_serde | rusty_serde_derive | Hand-written #[derive(Serialize, Deserialize)] proc-macro for rusty_serde, built directly on proc_macro (no syn/quote). | 1 |
 | foundation | rusty_serde | rusty_serde_erased | A minimal, isolated unsafe primitive for erasing a serializer/deserializer's associated Ok type across an object-safe (dyn-compatible) boundary - internal to rusty_serde, not a public API. | 1 |
 | foundation | rusty_sha1 | rusty_sha1 | A zero-dependency SHA-1 (FIPS 180-1) implementation, shared by rusty_git's object hashing and rusty_term's WebSocket handshake | 3 |
@@ -94,7 +94,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 7 |
 | libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 2 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
-| libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. | 1 |
+| libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. | 3 |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary | 0 |
 | libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters | 1 |
 | libs | rusty_db | rusty-db | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core | 1 |
@@ -150,7 +150,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
 | libs | rusty_term | rusty_term_l13 | rusty_term's L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP + LSP/ACP negotiation, addressed against a narrow TerminalState trait rather than rusty_term's own Grid type. | 1 |
 | libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 7 |
-| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 18 |
+| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 19 |
 | libs | rusty_tokio | rusty_tokio-macros | Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports. | 1 |
 | libs | rusty_ttf_parser | rusty-ttf-parser | A #![no_std], allocation-free, zero-dependency TrueType/OpenType reader: cmap, GSUB lookups and PNG colour bitmaps | 1 |
 | libs | rusty_vulkan | rusty_vulkan | A #![no_std] + alloc sovereign raw Vulkan / Metal hardware command buffer and GPU surface layer | 1 |
@@ -229,11 +229,12 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_mill_board | rusty_mill_board | Mill Board: a capability-gated kanban board for humans and agents, served over MCP and a live web UI. | 1 |
 | apps | rusty_mill_board | rusty_mill_runner | Optional runner for Mill Board: works cards through stages by running a configured agent command per column, sandboxed in a git worktree. | 0 |
 | apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
+| apps | rusty_orch | orch-bbp | TaskHost adapter over the existing BBP CLI and moderator | 1 |
 | apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. | 1 |
-| apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 4 |
+| apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 5 |
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. | 1 |
-| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 7 |
-| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 6 |
+| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 8 |
+| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 7 |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. | 2 |
 | apps | rusty_orch | orch-store | Orchestrator persistence: one snapshot record per goal (plan, board, ledger) in the embedded rusty_multimodal_db engine, so a blocked run resumes in a later process. | 1 |
 | apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex, Claude, and Ollama adapters and prints the board. | 0 |

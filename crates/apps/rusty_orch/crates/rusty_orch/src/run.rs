@@ -40,6 +40,8 @@ pub trait Console {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ended {
     Finished,
+    /// Hosted tasks are still running in BBP.
+    Waiting(Vec<TaskId>),
     /// These cards wait on questions nobody answered.
     Blocked(Vec<TaskId>),
     /// The dispatcher stopped with a typed error.
@@ -52,6 +54,7 @@ impl fmt::Display for Ended {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Finished => f.write_str("finished"),
+            Self::Waiting(ids) => write!(f, "waiting on {} hosted card(s)", ids.len()),
             Self::Blocked(ids) => write!(f, "blocked on {} card(s)", ids.len()),
             Self::Failed(e) => write!(f, "failed: {e}"),
             Self::WallClock(d) => write!(f, "wall clock of {}s exceeded", d.as_secs()),
@@ -152,7 +155,19 @@ pub fn execute_resumable<R: AgentRunner>(
     runner: R,
     console: &mut dyn Console,
     now: impl Fn() -> Instant,
+    resume: Option<Resume<'_>>,
+) -> Result<Summary, RunError> {
+    execute_hosted(spec, runner, console, now, resume, None)
+}
+
+/// Resumable execution with an optional long-lived task host.
+pub fn execute_hosted<R: AgentRunner>(
+    spec: Spec,
+    runner: R,
+    console: &mut dyn Console,
+    now: impl Fn() -> Instant,
     mut resume: Option<Resume<'_>>,
+    host: Option<Box<dyn orch_dispatch::TaskHost>>,
 ) -> Result<Summary, RunError> {
     let goal_id = GoalId::from_raw(1);
     let saved = match &resume {
@@ -168,7 +183,7 @@ pub fn execute_resumable<R: AgentRunner>(
         ),
     };
     let routing = Routing::try_from(spec.routing).map_err(RunError::Routing)?;
-    let mut dispatcher = Dispatcher::new(routing, runner);
+    let mut dispatcher = Dispatcher::new(routing, runner).with_boxed_host(host);
     let goal = spec.goal;
     let budget = goal.budget().wall_clock();
     let started = now();
@@ -186,8 +201,9 @@ pub fn execute_resumable<R: AgentRunner>(
         ));
         match outcome {
             Ok(Outcome::Finished) => break Ended::Finished,
+            Ok(Outcome::Waiting(ids)) => break Ended::Waiting(ids),
             Ok(Outcome::Blocked(ids)) => {
-                let answers = answer_questions(&mut board, console);
+                let answers = answer_questions(&mut board, &plan, console);
                 // `ask` can fail after earlier answers were appended. Always
                 // attempt to persist the round before returning that error.
                 // A checkpoint error wins because it means the caller cannot
@@ -231,6 +247,7 @@ fn checkpoint(
 fn progress(outcome: &Result<Outcome, DispatchError>) -> String {
     match outcome {
         Ok(Outcome::Finished) => "finished".to_owned(),
+        Ok(Outcome::Waiting(ids)) => format!("waiting on {} hosted card(s)", ids.len()),
         Ok(Outcome::Blocked(ids)) => format!("blocked on {} card(s)", ids.len()),
         Err(DispatchError::Plan(_)) => "stopped: plan error (see report)".to_owned(),
         Err(DispatchError::Board(_)) => "stopped: board refused an entry (see report)".to_owned(),
@@ -263,9 +280,32 @@ enum Answers {
 
 /// Offer every open question to the console, in board order. A `None`
 /// from the console stops the round at once, whatever came before.
-fn answer_questions(board: &mut Board, console: &mut dyn Console) -> io::Result<Answers> {
-    let open: Vec<(EntryId, Option<TaskId>, String)> = board
-        .open_questions()
+fn answer_questions(
+    board: &mut Board,
+    plan: &Plan,
+    console: &mut dyn Console,
+) -> io::Result<Answers> {
+    let mut questions = board.open_questions();
+    for task in plan.tasks() {
+        let orch_core::task::TaskState::Blocked { question, .. } = task.state() else {
+            continue;
+        };
+        if orch_dispatch::hosted_handle(board, task.id()).is_none() {
+            continue;
+        }
+        let human_answered = board.live().any(|e| {
+            e.content().author == Author::Human
+                && e.content().kind == EntryKind::Answer { to: *question }
+        });
+        if human_answered || questions.iter().any(|q| q.id() == *question) {
+            continue;
+        }
+        if let Some(question) = board.get(*question) {
+            questions.push(question);
+        }
+    }
+    questions.sort_by_key(|q| q.id());
+    let open: Vec<(EntryId, Option<TaskId>, String)> = questions
         .iter()
         .map(|e| {
             (

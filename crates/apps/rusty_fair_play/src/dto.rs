@@ -53,6 +53,14 @@ pub struct CardDto {
     pub tree_etag: String,
     /// In the family's deck; `false` for a card set aside.
     pub in_play: bool,
+    /// Points the family assigned (1, 2, 3, 5 or 8); `null` until then.
+    pub points: Option<u8>,
+    /// What the card's text suggests, shown until points are assigned.
+    pub suggested_points: u8,
+    /// What the card's text recommends, shown until a frequency is assigned.
+    pub suggested_frequency: &'static str,
+    /// How often the work comes round; `null` when unset.
+    pub frequency: Option<&'static str>,
 }
 
 pub fn state_name(state: CardState) -> &'static str {
@@ -68,6 +76,9 @@ impl From<CardView> for CardDto {
         let etag = v.etag();
         let tree_etag = v.tree_etag;
         let in_play = v.in_play;
+        let marks = v.marks;
+        let suggested_points = v.suggested_points;
+        let suggested_frequency = v.suggested_frequency.as_str();
         let c: Card = v.card;
         Self {
             id: c.id,
@@ -91,6 +102,10 @@ impl From<CardView> for CardDto {
             etag,
             tree_etag,
             in_play,
+            points: marks.points,
+            suggested_points,
+            suggested_frequency,
+            frequency: marks.frequency.map(|f| f.as_str()),
         }
     }
 }
@@ -233,6 +248,10 @@ pub struct PatchCard {
     pub parent_card_id: Option<Option<Uuid>>,
     pub position: Option<u32>,
     pub in_play: Option<bool>,
+    #[serde(deserialize_with = "nullable")]
+    pub points: Option<Option<u8>>,
+    #[serde(deserialize_with = "nullable")]
+    pub frequency: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]

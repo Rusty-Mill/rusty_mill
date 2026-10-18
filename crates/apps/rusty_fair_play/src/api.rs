@@ -418,6 +418,11 @@ fn route_cards(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 parent_card_id: input.parent_card_id,
                 position: input.position,
                 in_play: input.in_play,
+                points: input.points,
+                frequency: input
+                    .frequency
+                    .map(|f| f.as_deref().map(frequency).transpose())
+                    .transpose()?,
             };
             let view = service.patch_card(parse_id(id)?, patch)?;
             Ok(Response::json(StatusCode::OK, &CardDto::from(view)))
@@ -511,6 +516,14 @@ fn suit(text: &str) -> Result<rusty_fair_play_domain::Suit> {
     parse_suit(text).ok_or_else(|| {
         ApiError::Invalid(
             "suit must be one of Home, Out, Caregiving, Magic, Wild, Unicorn Space".into(),
+        )
+    })
+}
+
+fn frequency(text: &str) -> Result<crate::marks::Frequency> {
+    crate::marks::Frequency::parse(text).ok_or_else(|| {
+        ApiError::Invalid(
+            "frequency must be one of Daily, Weekly, Monthly, Seasonal, Yearly, As needed".into(),
         )
     })
 }

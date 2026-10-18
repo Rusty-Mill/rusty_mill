@@ -17,7 +17,7 @@
 //! is in its own process group and is killed, group and all, on every exit
 //! path, the error ones included.
 
-use crate::runner::{self, Confinement, Unconfined};
+use crate::runner::Confinement;
 use crate::{now, open_driver};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
@@ -25,7 +25,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Proc, Stdio};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How to start one role's agent harness. Every argument may use the
@@ -68,6 +67,11 @@ impl Launchers {
         self.by_role.get(&role.0)
     }
 
+    /// Every role with its launcher.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Launcher)> {
+        self.by_role.iter().map(|(r, l)| (r.as_str(), l))
+    }
+
     /// The role ids that have a launcher.
     pub fn roles(&self) -> impl Iterator<Item = &str> {
         self.by_role.keys().map(String::as_str)
@@ -91,6 +95,21 @@ pub struct Config {
     pub poll: Duration,
     /// Give up after this long; the task is left where it stands.
     pub max_wall: Duration,
+    /// Stop the run when its harnesses have cost more than this.
+    pub cost_cap: Option<CostCap>,
+}
+
+/// A live dollar cap on one run. Checked each poll from the harness output the
+/// moderator keeps, so it lags by a poll and by what a harness has printed: it
+/// cuts a run short, it does not bound spend exactly. The API key's spend limit
+/// is the hard stop.
+#[derive(Clone, Debug)]
+pub struct CostCap {
+    pub usd: f64,
+    pub criteria: crate::tokens::Criteria,
+    /// The sha256 of the criteria file, recorded with the cap when the task
+    /// starts so a resume must use the same prices and the same cap.
+    pub criteria_sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +130,54 @@ pub struct Outcome {
     /// The first Planning visit excludes any later replanning; these raw visits
     /// do not define authoring time for the ultimately approved spec.
     pub visits: Vec<(State, Duration)>,
+    /// Folding the whole log reproduces the live state at the terminal
+    /// observation: the replay a metric is computed from is the run it saw.
+    pub replay_equals_live: bool,
+    /// Why the run was stopped before it ended, when it was.
+    pub stop: Option<Stop>,
+}
+
+/// A run the moderator stopped: over its dollar cap, or past its wall limit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopKind {
+    Cap,
+    Wall,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stop {
+    pub kind: StopKind,
+    pub reason: String,
+}
+
+/// What a finished or stopped invocation reports.
+struct Tally {
+    launched: u64,
+    ran: u64,
+    started: Instant,
+}
+
+/// The outcome at `state`: the visits, and whether the log still folds to the
+/// live state. A stopped run gets the same account as a finished one.
+fn outcome<S: Store>(
+    cfg: &Config,
+    d: &Driver<S>,
+    visits: Visits,
+    seen: Instant,
+    tally: &Tally,
+    stop: Option<Stop>,
+) -> Result<Outcome, String> {
+    let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
+    let replay = TaskState::fold_with(cfg.task.clone(), d.state.master, &events);
+    Ok(Outcome {
+        replay_equals_live: replay == d.state,
+        visits: visits.finish(seen),
+        state: d.state.state,
+        turns_launched: tally.launched,
+        runs: tally.ran,
+        elapsed: tally.started.elapsed(),
+        stop,
+    })
 }
 
 /// Ordered state visits, timed by the loop's own clock (the log has none).
@@ -227,12 +294,31 @@ struct Harness {
 
 /// Every process the loop started. Dropping it kills the harness and its
 /// whole process group, so an error path cleans up like a normal one.
+struct ActiveRun {
+    run: RunId,
+    child: Child,
+}
+
 struct Supervision {
     harnesses: Vec<Harness>,
-    runner: Option<JoinHandle<Result<Response, String>>>,
+    runner: Option<ActiveRun>,
 }
 
 impl Supervision {
+    /// Cancel and join before releasing the moderator lock, even on error paths.
+    fn stop_runner(&mut self) -> Result<(), String> {
+        let Some(mut runner) = self.runner.take() else {
+            return Ok(());
+        };
+        // EOF is cancellation, including when this moderator is killed abruptly.
+        drop(runner.child.stdin.take());
+        runner
+            .child
+            .wait()
+            .map(|_| ())
+            .map_err(|e| format!("runner cleanup: {e}"))
+    }
+
     /// Kill every harness's process group and reap them, reporting the first failure.
     fn kill_harnesses(&mut self) -> Result<(), String> {
         let mut first = Ok(());
@@ -257,8 +343,8 @@ impl Drop for Supervision {
         if let Err(e) = self.kill_harnesses() {
             eprintln!("bbp mod: harness not cleaned up: {e}");
         }
-        if self.runner.is_some() {
-            eprintln!("bbp mod: a run is still executing; its wall limit bounds it");
+        if let Err(error) = self.stop_runner() {
+            eprintln!("bbp mod: runner not cleaned up: {error}");
         }
     }
 }
@@ -282,9 +368,28 @@ fn kill_tree(child: &mut Child) -> Result<(), String> {
     child.wait().map(|_| ()).map_err(|e| format!("wait: {e}"))
 }
 
-/// Run the loop until the task is closed or cancelled, or `max_wall` passes.
+/// [`run_to_stop`], with a stop as the error: the reason.
 pub fn run(cfg: &Config) -> Result<Outcome, String> {
+    let out = run_to_stop(cfg)?;
+    match out.stop {
+        Some(s) => Err(s.reason),
+        None => Ok(out),
+    }
+}
+
+/// Run the loop until the task is closed or cancelled, or `max_wall` passes.
+/// A run the cap or the wall limit stops is an `Ok` outcome carrying the stop,
+/// so the caller can still print what happened; [`run`] turns it into an error.
+pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
+    // An evidence run (one with a cost cap and its prices) starts only if every
+    // role pins a priced model.
+    if let Some(cap) = &cfg.cost_cap {
+        crate::pins::check_run(&cfg.launchers, &cap.criteria)
+            .map_err(|e| format!("moderator: refusing to start: {e}"))?;
+    }
+    // The lock first: a startup refused for it must not leave a marker behind.
     let _lock = lock(&cfg.dir, &cfg.task)?;
+    check_evidence_marker(cfg)?;
     let mut d = open_driver(&cfg.dir, &cfg.task)?;
     let started = Instant::now();
     let mut visits = Visits::new(d.state.state, started);
@@ -323,31 +428,77 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
         let state = d.state.state;
         let seen = Instant::now();
         visits.observe(state, seen);
+        // Before the terminal return, so spend that lands between the last poll
+        // and the close is still held against the cap.
+        if let Some(cap) = &cfg.cost_cap {
+            if let Err(reason) = enforce_cap(cfg, &d, cap, false) {
+                sup.kill_harnesses()?;
+                sup.stop_runner()?;
+                d.sync().map_err(|e| format!("{e:?}"))?;
+                let tally = Tally {
+                    launched: launched.len() as u64,
+                    ran: ran.len() as u64,
+                    started,
+                };
+                let stop = Stop {
+                    kind: StopKind::Cap,
+                    reason,
+                };
+                return outcome(cfg, &d, visits, seen, &tally, Some(stop));
+            }
+        }
+        let tally = || Tally {
+            launched: launched.len() as u64,
+            ran: ran.len() as u64,
+            started,
+        };
         if matches!(state, State::Closed | State::Cancelled) {
             sup.kill_harnesses()?;
-            return Ok(Outcome {
-                visits: visits.finish(seen),
-                state,
-                turns_launched: launched.len() as u64,
-                runs: ran.len() as u64,
-                elapsed: started.elapsed(),
+            sup.stop_runner()?;
+            d.sync().map_err(|e| format!("{e:?}"))?;
+            let stop = check_terminal(cfg, &d).err().map(|reason| Stop {
+                kind: StopKind::Cap,
+                reason,
             });
+            return outcome(cfg, &d, visits, seen, &tally(), stop);
         }
         if started.elapsed() > cfg.max_wall {
             sup.kill_harnesses()?;
-            return Err(format!("moderator: wall limit reached in state {state:?}"));
+            sup.stop_runner()?;
+            d.sync().map_err(|e| format!("{e:?}"))?;
+            let reason = format!("moderator: wall limit reached in state {state:?}");
+            let stop = Stop {
+                kind: StopKind::Wall,
+                reason,
+            };
+            return outcome(cfg, &d, visits, seen, &tally(), Some(stop));
         }
 
-        // The runner works on its own thread so the loop keeps ticking,
-        // honouring cancellation and the wall limit while a profile runs.
-        if sup.runner.as_ref().is_some_and(JoinHandle::is_finished) {
-            if let Some(j) = sup.runner.take() {
-                match j.join() {
-                    Ok(Ok(r)) => eprintln!("bbp mod: run served: {r:?}"),
-                    Ok(Err(e)) => eprintln!("bbp mod: run not served: {e}"),
-                    Err(_) => eprintln!("bbp mod: runner thread panicked"),
+        // A runner process owns its workload and wall timer. Its stdin pipe
+        // is this moderator's lease; dropping it cancels and reaps the job.
+        if let Some(runner) = sup.runner.as_mut() {
+            if let Some(status) = runner
+                .child
+                .try_wait()
+                .map_err(|e| format!("runner wait: {e}"))?
+            {
+                let run = runner.run;
+                sup.runner.take();
+                eprintln!("bbp mod: runner for run {} exited: {status}", run.0);
+                // A process/transport failure with no report is retryable. The
+                // runner's task lock serializes cleanup and recovery attempts.
+                if d.state
+                    .selected_run()
+                    .is_some_and(|r| r.id == run && r.status.is_none())
+                {
+                    ran.remove(&run);
                 }
             }
+        }
+        if sup.runner.as_ref().is_some_and(|runner| {
+            state != State::Test || d.state.selected_run().is_none_or(|r| r.id != runner.run)
+        }) {
+            sup.stop_runner()?;
         }
         // A selected run with no report yet: the runner's job, once per run.
         let pending = (state == State::Test && sup.runner.is_none())
@@ -357,8 +508,10 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
             .map(|r| r.id);
         if let Some(run) = pending {
             ran.insert(run);
-            let cfg = cfg.clone();
-            sup.runner = Some(std::thread::spawn(move || run_once(&cfg)));
+            sup.runner = Some(ActiveRun {
+                run,
+                child: spawn_runner(cfg)?,
+            });
         }
 
         let live: Vec<(TurnId, RoleId)> = d
@@ -424,28 +577,175 @@ pub fn run(cfg: &Config) -> Result<Outcome, String> {
     }
 }
 
-fn run_once(cfg: &Config) -> Result<Response, String> {
-    match cfg.confinement {
-        Confinement::Unconfined => runner::run_once(
-            &cfg.dir,
-            &cfg.task,
-            &cfg.repo,
-            &cfg.work,
-            &Unconfined,
-            Confinement::Unconfined,
-        ),
-        Confinement::Sandboxed => {
-            let exec = runner::sandboxed(&cfg.dir.join("sandbox-state"))?;
-            runner::run_once(
-                &cfg.dir,
-                &cfg.task,
-                &cfg.repo,
-                &cfg.work,
-                &exec,
-                Confinement::Sandboxed,
-            )
+/// The end of a run is not exempt from the cap: output that arrived since the
+/// last poll, or from a model with no price, must not close as a success.
+/// Called once the harnesses are stopped, with the final usage on disk; a
+/// no-op for a task that is not in a terminal state, whose cap is polled.
+pub fn check_terminal<S: Store>(cfg: &Config, d: &Driver<S>) -> Result<(), String> {
+    match (&cfg.cost_cap, d.state.state) {
+        (Some(cap), State::Closed | State::Cancelled) => enforce_cap(cfg, d, cap, true),
+        _ => Ok(()),
+    }
+}
+
+/// Fail closed: over the cap, a model that cannot be priced, or a harness log
+/// the cap cannot read, stops the run. A harness that has printed nothing yet
+/// is let alone while the run is live (it may be starting) but not at the end,
+/// and a log with no stream-json in it never is: the cap would be blind to it.
+fn enforce_cap<S: Store>(
+    cfg: &Config,
+    d: &Driver<S>,
+    cap: &CostCap,
+    terminal: bool,
+) -> Result<(), String> {
+    use crate::tokens::LogState;
+    let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
+    let read = if terminal {
+        crate::tokens::of
+    } else {
+        crate::tokens::of_live
+    };
+    let t = read(&cfg.dir, &cfg.task, &events, Some(&cap.criteria))
+        .map_err(|e| format!("moderator: cannot enforce the cost cap: {e}"))?;
+    // The floor: a complete turn's cost, and for a turn still running what its
+    // printed messages show. It can only rise, so crossing the cap on it is
+    // crossing the cap.
+    let usd = t.usd_floor.unwrap_or(0.0);
+    if usd > cap.usd {
+        return Err(format!(
+            "moderator: cost cap reached (${usd:.4} over ${:.4})",
+            cap.usd
+        ));
+    }
+    // A turn granted but never launched has no log yet; at the end that is a
+    // turn nothing can say the cost of.
+    if terminal && t.without_output > 0 {
+        return Err(format!(
+            "moderator: cannot enforce the cost cap: {} granted turn(s) have no log",
+            t.without_output
+        ));
+    }
+    for turn in &t.turns {
+        let blind = match turn.log {
+            LogState::Readable => false,
+            LogState::Unreadable => true,
+            // Not printed anything the cap can read yet: fine while the run is
+            // live (a harness takes a moment to start), blind at the end.
+            LogState::Empty | LogState::Started => terminal,
+        };
+        if blind {
+            return Err(format!(
+                "moderator: cannot enforce the cost cap: turn {} ({}) printed no stream-json the cap can read",
+                turn.turn, turn.role
+            ));
         }
     }
+    Ok(())
+}
+
+/// A task first started with a cap is an evidence run: every later start or
+/// resume must carry the same cap and the same price file, or it is refused,
+/// so a cap cannot be dropped by restarting.
+fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
+    let file = task_dir(&cfg.dir, "evidence", &cfg.task).with_extension("json");
+    let recorded = std::fs::read_to_string(&file).ok();
+    match (&cfg.cost_cap, recorded) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(
+            "moderator: refusing to start: this task was started as an evidence run; \
+             resume it with the same --max-usd and --criteria"
+                .into(),
+        ),
+        (Some(cap), None) => {
+            // Only a task nothing has run on is an evidence run: a segment run
+            // without a cap, or without the pre-run checks, would be counted.
+            let d = open_driver(&cfg.dir, &cfg.task)?;
+            let events = d.store.events(&cfg.task, 0).map_err(|e| format!("{e:?}"))?;
+            if events
+                .iter()
+                .any(|e| matches!(e, Event::TurnGranted { .. }))
+            {
+                return Err("moderator: refusing to start: this task already ran without a cap, so it is not an evidence run; open a new task for the run".into());
+            }
+            write_evidence_marker(&cfg.dir, &cfg.task, cap.usd, &cap.criteria_sha256)
+        }
+        (Some(cap), Some(text)) if text == marker_text(cap.usd, &cap.criteria_sha256) => Ok(()),
+        (Some(_), Some(_)) => Err(
+            "moderator: refusing to start: this task was started with a different --max-usd or \
+             price file"
+                .into(),
+        ),
+    }
+}
+
+/// Record that the task is an evidence run under this cap and price file.
+pub fn write_evidence_marker(
+    dir: &Path,
+    task: &TaskId,
+    usd: f64,
+    criteria_sha256: &str,
+) -> Result<(), String> {
+    let file = task_dir(dir, "evidence", task).with_extension("json");
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&file, marker_text(usd, criteria_sha256))
+        .map_err(|e| format!("{}: {e}", file.display()))
+}
+
+fn marker_text(usd: f64, criteria_sha256: &str) -> String {
+    format!("{{\"max_usd\":{usd},\"criteria_sha256\":\"{criteria_sha256}\"}}\n")
+}
+
+/// The run was started as an evidence run under exactly this cap and price
+/// file. A run started without a cap has no marker, so it cannot be counted.
+pub fn require_evidence_marker(
+    dir: &Path,
+    task: &TaskId,
+    usd: f64,
+    criteria_sha256: &str,
+) -> Result<(), String> {
+    let file = task_dir(dir, "evidence", task).with_extension("json");
+    match std::fs::read_to_string(&file) {
+        Ok(t) if t == marker_text(usd, criteria_sha256) => Ok(()),
+        Ok(_) => Err(format!(
+            "{}: started under a different cap or price file",
+            task.0
+        )),
+        Err(_) => Err(format!(
+            "{}: not started as an evidence run (no cap)",
+            task.0
+        )),
+    }
+}
+
+fn spawn_runner(cfg: &Config) -> Result<Child, String> {
+    let mut command = Proc::new(&cfg.bbp);
+    command
+        .arg("runner")
+        .arg("--dir")
+        .arg(&cfg.dir)
+        .arg("--task")
+        .arg(&cfg.task.0)
+        .arg("--repo-path")
+        .arg(&cfg.repo)
+        .arg("--work")
+        .arg(&cfg.work)
+        .arg("--confine")
+        .arg(match cfg.confinement {
+            Confinement::Sandboxed => "sandbox",
+            Confinement::Unconfined => "none",
+        })
+        .args(["--supervised", "yes"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn().map_err(|e| format!("starting runner: {e}"))
 }
 
 fn spawn(
@@ -483,9 +783,21 @@ fn spawn(
         .env("BBP_ROLE", role_name)
         .env("BBP_BIN", bbp)
         .env("BBP_MCP_CONFIG", &mcp)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err));
+        .stdin(Stdio::null());
+    // An evidence run pins the cache lifetime for the main agent and for
+    // subagents: they default to different lifetimes, and the price file
+    // prices cache writes at the 1-hour rate.
+    if cfg.cost_cap.is_some() {
+        for var in crate::tokens::CACHE_TTL_ENV {
+            cmd.env(var, crate::tokens::PINNED_CACHE_TTL);
+        }
+        // A subagent, if one starts despite the launcher's restrictions, runs
+        // on the role's own model, which is priced.
+        if let Ok(Some(model)) = crate::pins::pinned_model(l) {
+            cmd.env("CLAUDE_CODE_SUBAGENT_MODEL", model);
+        }
+    }
+    cmd.stdout(Stdio::from(log)).stderr(Stdio::from(err));
     // Its own process group, so everything the harness forks dies with it.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);

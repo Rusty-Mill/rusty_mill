@@ -4,7 +4,7 @@
 //! Everything else about this feature can be tested by inspecting values in
 //! memory, and is. What cannot is the part that matters to an operator: that
 //! the values a processor returned actually arrive at a collector. So this
-//! stands up a fake OTLP endpoint, runs a real call through a real gateway
+//! stands up a fake OTLP/HTTP endpoint, runs a real call through a real gateway
 //! with a real gRPC processor in front of it, flushes, and looks for the
 //! values in the bytes that were sent.
 //!
@@ -35,11 +35,12 @@ const RULE_ID: &str = "rule-9b2e";
 /// Everything the fake collector was sent, concatenated.
 type Received = Arc<Mutex<Vec<u8>>>;
 
-/// A TCP listener that keeps whatever the OTLP exporter writes at it.
+/// An HTTP listener that keeps whatever the OTLP exporter POSTs at it, and
+/// answers `200`.
 ///
-/// Decoding OTLP protobuf properly would be its own project. The values under
-/// test are distinctive strings, and a string only reaches these bytes by
-/// having been put on a span, so scanning is enough to prove what it needs to.
+/// The body is OTLP/JSON, so the values under test are distinctive strings
+/// that only reach these bytes by having been put on a span; scanning for them
+/// is enough to prove what this test needs to.
 async fn collector(received: Received) -> SocketAddr {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -56,24 +57,41 @@ async fn collector(received: Received) -> SocketAddr {
             let received = Arc::clone(&received);
 
             tokio::spawn(async move {
+                let mut request = Vec::new();
                 let mut buf = vec![0u8; 64 * 1024];
-                loop {
-                    match tokio::time::timeout(Duration::from_millis(400), socket.read(&mut buf))
-                        .await
+                while !request_is_complete(&request) {
+                    match tokio::time::timeout(Duration::from_secs(2), socket.read(&mut buf)).await
                     {
-                        Ok(Ok(0)) | Err(_) => break,
-                        Ok(Ok(n)) => received.lock().expect("lock").extend_from_slice(&buf[..n]),
-                        Ok(Err(_)) => break,
+                        Ok(Ok(0) | Err(_)) | Err(_) => break,
+                        Ok(Ok(n)) => request.extend_from_slice(&buf[..n]),
                     }
                 }
-                // A gRPC client waits for a reply; closing is enough to let the
-                // exporter finish rather than hang on shutdown.
+                received.lock().expect("lock").extend_from_slice(&request);
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    )
+                    .await;
                 let _ = socket.shutdown().await;
             });
         }
     });
 
     addr
+}
+
+/// Whether `raw` holds a whole request: the head, and `Content-Length` bytes.
+fn request_is_complete(raw: &[u8]) -> bool {
+    let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+    let length: usize = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0);
+    raw.len() >= end + 4 + length
 }
 
 /// A gRPC `ExtMcp` processor that passes every call and annotates it.
@@ -172,23 +190,20 @@ async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
 
     // `pipeline` rather than `init`, so this test brings its own subscriber
     // instead of racing for the process-wide one.
-    let (guard, tracer) = rusty_mcp::otel::pipeline(
+    let (guard, layer) = rusty_mcp::otel::pipeline(
         OtelConfig::new("span-attribute-test")
             .with_endpoint(format!("http://{collector_addr}"))
+            .without_metrics()
             .with_shutdown_timeout(Duration::from_secs(3)),
     )
     .expect("the pipeline should start");
 
-    // Without a filter the exporter's own h2 traffic produces TRACE events,
-    // which become spans, which are exported over h2 -- a feedback loop that
-    // buries the one span this test is about.
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(tracer))
-            .with(tracing_subscriber::EnvFilter::new(
-                "warn,agentgateway_mcp=info",
-            )),
-    )
+    // Without a filter the HTTP stack's own TRACE events become spans, which
+    // are exported over that stack -- a feedback loop that buries the one span
+    // this test is about.
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer).with(
+        tracing_subscriber::EnvFilter::new("warn,agentgateway_mcp=info"),
+    ))
     .expect("this binary holds one test, so nothing else has installed one");
 
     let (processor_host, stop_processor) = processor().await;
@@ -270,8 +285,8 @@ binds:
          `otel.name` renames it from the `tracing` name `mcp.request`"
     );
     assert!(
-        contains(&bytes, "agentgateway_mcp::span"),
-        "and it should be the span this crate opened, not something incidental"
+        contains(&bytes, "POST /v1/traces"),
+        "and it should have gone to the OTLP/HTTP traces path"
     );
     assert!(
         contains(&bytes, "mcpGuardrails.classification"),

@@ -10,18 +10,19 @@
 //!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
+//! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
-//! bbp grade   pack --manifest M --rubrics D --seed S --out O | join --key K --scores S --rubrics D   blind rubric grading
+//! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
-//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N]
+//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--max-usd C --criteria FILE]
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, args::Args, grade, human, mcp, moderator, pairs, profiles, report, response_json,
+    admin, args::Args, grade, human, mcp, moderator, pairs, pins, profiles, report, response_json,
     runner, shadow, tokens, why,
 };
 use std::ffi::OsString;
@@ -31,7 +32,7 @@ use std::process::ExitCode;
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let sub = argv.first().cloned().ok_or(
-        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|grade|why|shadow|mod> ...",
+        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|agents-check|grade|why|shadow|mod> ...",
     )?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
@@ -46,9 +47,33 @@ fn run() -> Result<String, String> {
             "pack" => {
                 grade::write_pack(&p("manifest")?, &p("rubrics")?, a.flag("seed")?, &p("out")?)
             }
-            "join" => grade::join_files(&p("key")?, &p("scores")?, &p("rubrics")?),
-            other => Err(format!("unknown grade action {other} (pack|join)")),
+            "release" => grade::release_files(&p("key")?, &p("held")?, &p("scores")?, &p("out")?),
+            "join" => grade::join_files(
+                &p("key")?,
+                &p("scores")?,
+                &p("unused-scores")?,
+                &p("release")?,
+                &p("rubrics")?,
+            ),
+            other => Err(format!("unknown grade action {other} (pack|release|join)")),
         };
+    }
+    if sub == "agents-check" {
+        let read = |k: &str| moderator::Launchers::read_file(&PathBuf::from(a.flag(k)?));
+        let (c, _) = tokens::read_criteria(&PathBuf::from(a.flag("criteria")?))?;
+        let control =
+            pins::check_run(&read("control")?, &c).map_err(|e| format!("control: {e}"))?;
+        let treatment =
+            pins::check_run(&read("treatment")?, &c).map_err(|e| format!("treatment: {e}"))?;
+        pins::check_arms(&control, &treatment)?;
+        let json = |m: &std::collections::BTreeMap<String, String>| {
+            rusty_serde::json::to_string(m).map_err(|e| e.to_string())
+        };
+        return Ok(format!(
+            "{{\"control\":{},\"treatment\":{}}}",
+            json(&control)?,
+            json(&treatment)?
+        ));
     }
     if sub == "pairs" {
         return pairs::json(&PathBuf::from(a.flag("manifest")?));
@@ -122,21 +147,56 @@ fn run() -> Result<String, String> {
                 confinement,
                 poll: std::time::Duration::from_millis(num("poll-ms", 500)?),
                 max_wall: std::time::Duration::from_secs(num("max-wall-secs", u64::MAX / 1000)?),
+                cost_cap: match (a.flags.get("max-usd"), a.flags.get("criteria")) {
+                    (Some(usd), Some(file)) => Some(moderator::CostCap {
+                        usd: usd
+                            .parse()
+                            .ok()
+                            .filter(|u: &f64| u.is_finite() && *u > 0.0)
+                            .ok_or("--max-usd must be a positive number")?,
+                        criteria: tokens::read_criteria(&PathBuf::from(file))?.0,
+                        criteria_sha256: tokens::read_criteria(&PathBuf::from(file))?.1,
+                    }),
+                    (None, None) => None,
+                    _ => return Err("--max-usd and --criteria go together".into()),
+                },
             };
-            let out = moderator::run(&cfg)?;
+            let out = moderator::run_to_stop(&cfg)?;
             let visits: Vec<String> = out
                 .visits
                 .iter()
                 .map(|(s, d)| format!("[\"{s:?}\",{}]", d.as_millis()))
                 .collect();
-            return Ok(format!(
-                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}]}}",
+            // A stopped run still prints what it has, with the reason, so
+            // `bbp pairs` can load it as a failed run; the exit is non-zero.
+            let stop = match &out.stop {
+                None => String::new(),
+                Some(s) => format!(
+                    ",\"stop\":\"{}\",\"stop_reason\":{}",
+                    match s.kind {
+                        moderator::StopKind::Cap => "cap",
+                        moderator::StopKind::Wall => "wall",
+                    },
+                    rusty_serde::json::to_string(&s.reason).map_err(|e| e.to_string())?
+                ),
+            };
+            let json = format!(
+                "{{\"state\":\"{:?}\",\"turns_launched\":{},\"runs\":{},\"elapsed_ms\":{},\"state_ms\":[{}],\"replay_equals_live\":{},\"bbp_build_sha\":\"{}\"{stop}}}",
                 out.state,
                 out.turns_launched,
                 out.runs,
                 out.elapsed.as_millis(),
-                visits.join(",")
-            ));
+                visits.join(","),
+                out.replay_equals_live,
+                rusty_bbp_host::BUILD_SHA
+            );
+            return match out.stop {
+                None => Ok(json),
+                Some(s) => {
+                    println!("{json}");
+                    Err(s.reason)
+                }
+            };
         }
         "metrics" => return report::json(&dir, &task, a.flags.get("owner").map(String::as_str)),
         "tokens" => {
@@ -159,6 +219,21 @@ fn run() -> Result<String, String> {
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
             let work = PathBuf::from(a.flag("work")?);
+            if a.flags.get("supervised").is_some_and(|v| v == "yes") {
+                let confinement = match a.flags.get("confine").map(String::as_str) {
+                    Some("none") => runner::Confinement::Unconfined,
+                    None | Some("sandbox") => runner::Confinement::Sandboxed,
+                    Some(other) => return Err(format!("unknown confinement {other}")),
+                };
+                return rusty_bbp_host::run_control::supervised(
+                    &dir,
+                    &task,
+                    &repo,
+                    &work,
+                    confinement,
+                )
+                .map(|response| response_json(&response));
+            }
             match a.flags.get("confine").map(String::as_str) {
                 Some("none") => runner::run_once(
                     &dir,
@@ -189,6 +264,10 @@ fn run() -> Result<String, String> {
             &PrincipalId(a.flag("principal")?.to_owned()),
             a.flag("vendor")?,
         )?,
+        "show" => {
+            return rusty_serde::json::to_string(&admin::show(&dir, &task)?)
+                .map_err(|e| e.to_string())
+        }
         "card" => {
             return rusty_serde::json::to_string(&admin::card_view(&dir, &task)?)
                 .map_err(|e| e.to_string())
@@ -206,13 +285,22 @@ fn run() -> Result<String, String> {
                         .map_err(|_| "--rev must be a number".to_owned())
                 })
                 .transpose()?;
-            human::perform_as(
+            human::perform_fenced(
                 &dir,
                 &task,
                 verb,
                 &rest,
                 rev,
                 a.flags.get("as").map_or(human::UNLABELLED, String::as_str),
+                a.flags
+                    .get("fence")
+                    .map(|r| {
+                        r.parse()
+                            .map(Rev)
+                            .map_err(|_| "--fence must be a revision".to_owned())
+                    })
+                    .transpose()?,
+                a.flags.get("op").map(|s| OpId(s.clone())),
             )?
         }
         other => return Err(format!("unknown subcommand {other}")),

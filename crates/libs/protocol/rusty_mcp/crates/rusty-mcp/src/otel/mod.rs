@@ -1,18 +1,21 @@
-//! Exporting spans to an OpenTelemetry collector over OTLP.
+//! Exporting spans and metrics to an OpenTelemetry collector over OTLP/HTTP.
 //!
 //! Enabled by the `otel` feature. [`crate::trace`] extracts the caller's trace
 //! context and records the ids on `tracing` spans, which is enough to correlate
-//! logs. This module goes the rest of the way: it stands up a real OTLP
-//! pipeline, and — with [`crate::trace::TraceContext::attach_parent`] — makes
-//! this server's spans genuine **children** of the caller's, so a trace renders
-//! as one tree across services rather than several disconnected ones.
+//! logs. This module goes the rest of the way: [`SpanLayer`] turns those spans
+//! into OpenTelemetry spans and makes the ones that carry a caller's ids genuine
+//! **children** of the caller's, so a trace renders as one tree across services
+//! rather than several disconnected ones.
+//!
+//! Nothing here uses the OpenTelemetry SDK. Spans and metrics are encoded as
+//! OTLP/JSON and POSTed with `rusty_request` from a thread of their own.
 //!
 //! ```no_run
 //! use rusty_mcp::otel::OtelConfig;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let guard = rusty_mcp::otel::init(
-//!     OtelConfig::new("my-mcp-server").with_endpoint("http://localhost:4317"),
+//!     OtelConfig::new("my-mcp-server").with_endpoint("http://localhost:4318"),
 //!     "info",
 //! )?;
 //!
@@ -24,10 +27,20 @@
 //! # }
 //! ```
 //!
+//! # Where telemetry goes
+//!
+//! Each signal has its own URL, resolved as the OpenTelemetry specification
+//! says: the signal's own setting (`metrics_endpoint`, or
+//! `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`),
+//! taken as the full URL; else a base URL (`endpoint`, or
+//! `OTEL_EXPORTER_OTLP_ENDPOINT`) with `/v1/traces` or `/v1/metrics` added; else
+//! `http://localhost:4318`. This is OTLP over HTTP, so the port is 4318, not the
+//! gRPC port 4317.
+//!
 //! # Flush before exiting
 //!
 //! Spans are batched, so whatever is still in the buffer is lost if the process
-//! exits without shutting the provider down. That is the single most common way
+//! exits without shutting the exporter down. That is the single most common way
 //! to end up staring at an empty collector while insisting the code is
 //! instrumented. [`OtelGuard::shutdown_hook`] gives a closure to run
 //! from your graceful-shutdown path so it happens on SIGTERM.
@@ -38,64 +51,141 @@
 //! we; if it did not, we stay quiet. Deciding independently is how traces end
 //! up half-recorded, with gaps exactly where a service made its own choice.
 
+mod batch;
+mod instrument;
 mod labels;
+mod layer;
 pub mod metrics;
+mod otlp;
+mod push;
+mod redact;
+mod span;
+mod worker;
 
 use std::{sync::Arc, time::Duration};
 
-use opentelemetry::{KeyValue, metrics::MeterProvider as _, trace::TracerProvider as _};
-use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig as _};
-use opentelemetry_sdk::{
-    Resource,
-    metrics::{PeriodicReader, SdkMeterProvider},
-    trace::{Sampler, SdkTracerProvider},
-};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use crate::otel::metrics::Instruments;
+pub use self::{layer::SpanLayer, span::AttributeValue};
+use crate::otel::{
+    batch::{ExportSettings, SpanExporter},
+    metrics::Instruments,
+    push::{PushSettings, Pusher},
+};
 
-/// Instrumentation scope name for this crate's instruments.
+/// Instrumentation scope name for this crate's spans and instruments.
 const SCOPE: &str = "rusty-mcp";
+
+/// Where OTLP/HTTP is served when nothing else says.
+const DEFAULT_BASE_ENDPOINT: &str = "http://localhost:4318";
+
+/// How long finished spans wait for company before they are sent anyway.
+const SPAN_BATCH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Set an attribute on `span`, for a key only known after the span was created.
+///
+/// A `tracing` field has to be declared when its span is opened; this is for
+/// everything else, such as values a policy returns mid-request. It does
+/// nothing if the span is not recorded: no [`SpanLayer`] is installed, the span
+/// was not sampled, or it has closed. Anything beyond the per-span attribute
+/// limit is dropped.
+pub fn set_attribute(span: &tracing::Span, key: &str, value: impl Into<AttributeValue>) {
+    let value = value.into();
+    span.with_subscriber(|(id, dispatch)| {
+        if let Some(layer) = dispatch.downcast_ref::<SpanLayer>() {
+            layer.set_attribute(id, key, value);
+        }
+    });
+}
+
+/// A kind of telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// Spans.
+    Traces,
+    /// Metrics.
+    Metrics,
+}
+
+impl Signal {
+    /// The path OTLP/HTTP serves the signal on.
+    fn path(self) -> &'static str {
+        match self {
+            Self::Traces => "/v1/traces",
+            Self::Metrics => "/v1/metrics",
+        }
+    }
+
+    /// The signal-specific environment variable naming its full URL.
+    fn variable(self) -> &'static str {
+        match self {
+            Self::Traces => "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            Self::Metrics => "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        }
+    }
+}
+
+impl std::fmt::Display for Signal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Traces => "traces",
+            Self::Metrics => "metrics",
+        })
+    }
+}
 
 /// Starting an OTLP pipeline failed.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum OtelError {
-    /// The exporter could not be built — usually a malformed endpoint.
-    Exporter(opentelemetry_otlp::ExporterBuildError),
+    /// A signal's endpoint is not a valid `http://` or `https://` URL.
+    ///
+    /// The URL is deliberately not carried: it may hold a credential.
+    Endpoint(Signal),
+    /// The thread that exports a signal could not be started.
+    Thread(Signal, std::io::Error),
 }
 
 impl std::fmt::Display for OtelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self::Exporter(e) = self;
-        write!(f, "could not build the OTLP span exporter: {e}")
+        match self {
+            Self::Endpoint(signal) => write!(
+                f,
+                "the OTLP {signal} endpoint is not a valid http(s) URL without embedded credentials \
+                 (it is not shown, as it may hold a secret)"
+            ),
+            Self::Thread(signal, e) => {
+                write!(f, "could not start the {signal} export thread: {e}")
+            }
+        }
     }
 }
 
 impl std::error::Error for OtelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        let Self::Exporter(e) = self;
-        Some(e)
-    }
-}
-
-impl From<opentelemetry_otlp::ExporterBuildError> for OtelError {
-    fn from(e: opentelemetry_otlp::ExporterBuildError) -> Self {
-        Self::Exporter(e)
+        match self {
+            Self::Endpoint(_) => None,
+            Self::Thread(_, e) => Some(e),
+        }
     }
 }
 
 /// How to talk to the collector, and what to call ourselves.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OtelConfig {
-    /// `service.name` on every span. Required by the OTel semantic conventions
-    /// and the first thing you filter by in a collector.
+    /// `service.name` on every span and metric. Required by the OTel semantic
+    /// conventions and the first thing you filter by in a collector.
     pub service_name: String,
     /// `service.version`, if you want releases distinguishable in traces.
     pub service_version: Option<String>,
-    /// OTLP/gRPC endpoint. `None` falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`,
-    /// then the OTel default of `http://localhost:4317`.
+    /// The collector's OTLP/HTTP base URL, such as `http://localhost:4318`.
+    /// `/v1/traces` and `/v1/metrics` are added to it. `None` falls back to
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4318`.
     pub endpoint: Option<String>,
+    /// The full URL for **metrics**, `/v1/metrics` included, when it differs
+    /// from the base. `None` falls back to `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`,
+    /// then the base.
+    pub metrics_endpoint: Option<String>,
     /// Fraction of *root* traces to record, 0.0 to 1.0.
     ///
     /// Only consulted when there is no parent decision to follow; a sampled
@@ -114,6 +204,23 @@ pub struct OtelConfig {
     pub metrics_interval: Duration,
 }
 
+// By hand, so that logging a config cannot print a credential held in an endpoint.
+impl std::fmt::Debug for OtelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let origin = |url: &Option<String>| url.as_deref().map(redact::origin);
+        f.debug_struct("OtelConfig")
+            .field("service_name", &self.service_name)
+            .field("service_version", &self.service_version)
+            .field("endpoint", &origin(&self.endpoint))
+            .field("metrics_endpoint", &origin(&self.metrics_endpoint))
+            .field("sample_ratio", &self.sample_ratio)
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .field("metrics", &self.metrics)
+            .field("metrics_interval", &self.metrics_interval)
+            .finish()
+    }
+}
+
 impl OtelConfig {
     /// Config for a service called `service_name`, sampling everything.
     pub fn new(service_name: impl Into<String>) -> Self {
@@ -121,6 +228,7 @@ impl OtelConfig {
             service_name: service_name.into(),
             service_version: None,
             endpoint: None,
+            metrics_endpoint: None,
             sample_ratio: 1.0,
             shutdown_timeout: Duration::from_secs(5),
             metrics: true,
@@ -146,7 +254,13 @@ impl OtelConfig {
         self
     }
 
-    /// Point at a specific OTLP/gRPC endpoint.
+    /// Point metrics at a specific OTLP/HTTP URL (`.../v1/metrics`).
+    pub fn with_metrics_endpoint(mut self, url: impl Into<String>) -> Self {
+        self.metrics_endpoint = Some(url.into());
+        self
+    }
+
+    /// Point telemetry at a collector's OTLP/HTTP base URL.
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = Some(endpoint.into());
         self
@@ -164,12 +278,112 @@ impl OtelConfig {
         self
     }
 
-    fn resource(&self) -> Resource {
-        let mut builder = Resource::builder().with_service_name(self.service_name.clone());
+    /// Where `signal` is sent, resolved as the module docs describe.
+    fn endpoint_for(&self, signal: Signal) -> Result<String, OtelError> {
+        let variable = |name: &str| std::env::var(name).ok();
+        let explicit = match signal {
+            Signal::Metrics => self.metrics_endpoint.clone(),
+            Signal::Traces => None,
+        };
+        resolve_endpoint(
+            signal,
+            &Sources {
+                explicit,
+                signal_variable: variable(signal.variable()),
+                base: self.endpoint.clone(),
+                base_variable: variable("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            },
+        )
+    }
+
+    /// The resource attributes spans and metrics carry: the process
+    /// environment's `OTEL_RESOURCE_ATTRIBUTES`, then this config's
+    /// `service.name` and `service.version` over them.
+    fn resource_attributes(&self) -> Vec<(String, String)> {
+        let from_environment = std::env::var(RESOURCE_ATTRIBUTES_VAR).ok();
+        self.resource_attributes_from(from_environment.as_deref())
+    }
+
+    fn resource_attributes_from(&self, declared: Option<&str>) -> Vec<(String, String)> {
+        let mut attributes = parse_resource_attributes(declared.unwrap_or_default());
+        set_attribute_pair(&mut attributes, "service.name", &self.service_name);
         if let Some(version) = &self.service_version {
-            builder = builder.with_attribute(KeyValue::new("service.version", version.clone()));
+            set_attribute_pair(&mut attributes, "service.version", version);
         }
-        builder.build()
+        attributes
+    }
+}
+
+/// The places a signal's URL can come from, most specific first.
+struct Sources {
+    /// A URL set in code for this signal alone.
+    explicit: Option<String>,
+    /// The signal's own environment variable.
+    signal_variable: Option<String>,
+    /// A base URL set in code.
+    base: Option<String>,
+    /// The base-URL environment variable.
+    base_variable: Option<String>,
+}
+
+/// Pick the URL for `signal`: a full URL as given, a base with the signal's path
+/// added, or the default base. Any of them must parse as an `http(s)` URL.
+fn resolve_endpoint(signal: Signal, sources: &Sources) -> Result<String, OtelError> {
+    let full = sources
+        .explicit
+        .as_ref()
+        .or(sources.signal_variable.as_ref());
+    if let Some(url) = full {
+        // Parsed, not just prefix-checked: a malformed URL must fail here, where
+        // the error can stay silent about it, not later inside an HTTP client.
+        return rusty_http::Url::parse(url)
+            .map(|_| url.clone())
+            .map_err(|_| OtelError::Endpoint(signal));
+    }
+    let base = sources
+        .base
+        .as_deref()
+        .or(sources.base_variable.as_deref())
+        .unwrap_or(DEFAULT_BASE_ENDPOINT);
+    with_path(base, signal.path()).ok_or(OtelError::Endpoint(signal))
+}
+
+/// `base` with `path` added to its own path, keeping any query.
+fn with_path(base: &str, path: &str) -> Option<String> {
+    let url = rusty_http::Url::parse(base).ok()?;
+    let prefix = url.path.trim_end_matches('/');
+    let query = url
+        .query
+        .as_ref()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    Some(format!(
+        "{}://{}{prefix}{path}{query}",
+        url.scheme,
+        url.host_header()
+    ))
+}
+
+const RESOURCE_ATTRIBUTES_VAR: &str = "OTEL_RESOURCE_ATTRIBUTES";
+
+/// `key1=value1,key2=value2`, read as the OpenTelemetry SDKs' environment
+/// resource detector does: an entry without `=` is skipped, keys and values are
+/// trimmed, and a repeated key keeps its last value.
+fn parse_resource_attributes(text: &str) -> Vec<(String, String)> {
+    let mut attributes = Vec::new();
+    for entry in text.split_terminator(',') {
+        if let Some((key, value)) = entry.split_once('=') {
+            set_attribute_pair(&mut attributes, key.trim(), value.trim());
+        }
+    }
+    attributes
+}
+
+/// Set `key`, replacing an earlier value in place.
+fn set_attribute_pair(attributes: &mut Vec<(String, String)>, key: &str, value: &str) {
+    match attributes.iter_mut().find(|(k, _)| k == key) {
+        Some(existing) => existing.1 = value.to_owned(),
+        None => attributes.push((key.to_owned(), value.to_owned())),
     }
 }
 
@@ -180,8 +394,8 @@ impl OtelConfig {
 /// blocking flush is the only version that reports failure.
 #[derive(Debug)]
 pub struct OtelGuard {
-    provider: SdkTracerProvider,
-    meters: Option<SdkMeterProvider>,
+    spans: Arc<SpanExporter>,
+    pusher: Option<Pusher>,
     instruments: Option<Arc<Instruments>>,
     timeout: Duration,
 }
@@ -191,27 +405,27 @@ impl OtelGuard {
     ///
     /// Idempotent, and safe to call from a shutdown hook.
     pub fn shutdown(&self) {
-        if let Err(err) = self.provider.shutdown_with_timeout(self.timeout) {
+        if !self.spans.shutdown(self.timeout) {
             // Worth a loud line: it means telemetry was silently dropped, which
             // otherwise looks like the code was never instrumented.
-            tracing::error!(%err, "failed to flush spans before shutdown");
+            tracing::error!("failed to flush spans before shutdown");
         }
-        if let Some(meters) = &self.meters
-            && let Err(err) = meters.shutdown_with_timeout(self.timeout)
+        if let Some(pusher) = &self.pusher
+            && !pusher.shutdown(self.timeout)
         {
-            tracing::error!(%err, "failed to flush metrics before shutdown");
+            tracing::error!("failed to flush metrics before shutdown");
         }
     }
 
     /// Flush without stopping, for a checkpoint mid-run.
     pub fn flush(&self) {
-        if let Err(err) = self.provider.force_flush() {
-            tracing::warn!(%err, "failed to flush spans");
+        if !self.spans.flush(self.timeout) {
+            tracing::warn!("failed to flush spans");
         }
-        if let Some(meters) = &self.meters
-            && let Err(err) = meters.force_flush()
+        if let Some(pusher) = &self.pusher
+            && !pusher.flush(self.timeout)
         {
-            tracing::warn!(%err, "failed to flush metrics");
+            tracing::warn!("failed to flush metrics");
         }
     }
 
@@ -222,12 +436,6 @@ impl OtelGuard {
     /// nothing records to exports nothing.
     pub fn instruments(&self) -> Option<&Arc<Instruments>> {
         self.instruments.as_ref()
-    }
-
-    /// The underlying meter provider, for instruments this crate does not
-    /// define.
-    pub fn meter_provider(&self) -> Option<&SdkMeterProvider> {
-        self.meters.as_ref()
     }
 
     /// A closure that flushes and shuts the pipeline down, for the process's
@@ -260,118 +468,104 @@ impl OtelGuard {
             })
         }
     }
-
-    /// The underlying provider, for anything this wrapper does not cover.
-    pub fn provider(&self) -> &SdkTracerProvider {
-        &self.provider
-    }
 }
 
 impl Drop for OtelGuard {
     fn drop(&mut self) {
         // Best effort. An explicit `shutdown()` is better because it can report
-        // failure; this only catches the case where nobody called it.
-        let _ = self.provider.shutdown_with_timeout(self.timeout);
-        if let Some(meters) = &self.meters {
-            let _ = meters.shutdown_with_timeout(self.timeout);
+        // failure; this only catches the case where nobody called it. The span
+        // exporter is shared with the layer, so it would not stop on its own.
+        let _ = self.spans.shutdown(self.timeout);
+        if let Some(pusher) = &self.pusher {
+            let _ = pusher.shutdown(self.timeout);
         }
     }
 }
 
-/// Start an OTLP pipeline and hand back its tracer, installing nothing.
+/// Start an OTLP pipeline and hand back the layer that feeds it, installing
+/// nothing.
 ///
 /// Use this when the process already builds its own subscriber — a common case,
 /// since [`init`] can only win once per process and a second call would leave
-/// the second provider fed by nothing:
+/// the second pipeline fed by nothing:
 ///
 /// ```no_run
 /// use tracing_subscriber::prelude::*;
 /// # use rusty_mcp::otel::OtelConfig;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let (guard, tracer) = rusty_mcp::otel::pipeline(OtelConfig::new("my-server"))?;
+/// let (guard, layer) = rusty_mcp::otel::pipeline(OtelConfig::new("my-server"))?;
 ///
 /// tracing_subscriber::registry()
 ///     .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-///     .with(tracing_opentelemetry::layer().with_tracer(tracer))
+///     .with(layer)
 ///     .init();
 /// # let _ = guard;
 /// # Ok(())
 /// # }
 /// ```
-pub fn pipeline(
-    config: OtelConfig,
-) -> Result<(OtelGuard, opentelemetry_sdk::trace::SdkTracer), OtelError> {
-    let mut exporter = SpanExporter::builder().with_tonic();
-    if let Some(endpoint) = &config.endpoint {
-        exporter = exporter.with_endpoint(endpoint.clone());
-    }
-    let exporter = exporter.build()?;
+pub fn pipeline(config: OtelConfig) -> Result<(OtelGuard, SpanLayer), OtelError> {
+    let resource = config.resource_attributes();
 
-    let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
-        .with_resource(config.resource())
-        // Parent-based: honour the caller's decision, and fall back to the
-        // ratio only for traces that start here.
-        .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
-            config.sample_ratio,
-        ))))
-        .build();
+    let spans = Arc::new(
+        batch::spawn(ExportSettings {
+            endpoint: config.endpoint_for(Signal::Traces)?,
+            resource: resource.clone(),
+            scope: SCOPE,
+            interval: SPAN_BATCH_INTERVAL,
+            request_timeout: config.shutdown_timeout,
+        })
+        .map_err(|e| OtelError::Thread(Signal::Traces, e))?,
+    );
+    let layer = SpanLayer::new(config.sample_ratio, {
+        let spans = Arc::clone(&spans);
+        Box::new(move |span| spans.submit(span))
+    });
 
-    let tracer = provider.tracer(config.service_name.clone());
-
-    let (meters, instruments) = if config.metrics {
-        let exporter = {
-            let mut builder = MetricExporter::builder().with_tonic();
-            if let Some(endpoint) = &config.endpoint {
-                builder = builder.with_endpoint(endpoint.clone());
-            }
-            builder.build()?
-        };
-
-        let reader = PeriodicReader::builder(exporter)
-            .with_interval(config.metrics_interval)
-            .build();
-
-        let meters = SdkMeterProvider::builder()
-            .with_reader(reader)
-            .with_resource(config.resource())
-            .build();
-
-        let instruments = Arc::new(Instruments::new(&meters.meter(SCOPE)));
-        (Some(meters), Some(instruments))
+    let (pusher, instruments) = if config.metrics {
+        let instruments = Arc::new(Instruments::new());
+        let pusher = push::spawn(PushSettings {
+            endpoint: config.endpoint_for(Signal::Metrics)?,
+            resource,
+            scope: SCOPE,
+            interval: config.metrics_interval,
+            request_timeout: config.shutdown_timeout,
+            registry: Arc::clone(instruments.registry()),
+        })
+        .map_err(|e| OtelError::Thread(Signal::Metrics, e))?;
+        (Some(pusher), Some(instruments))
     } else {
         (None, None)
     };
 
     Ok((
         OtelGuard {
-            provider,
-            meters,
+            spans,
+            pusher,
             instruments,
             timeout: config.shutdown_timeout,
         },
-        tracer,
+        layer,
     ))
 }
 
 /// Start an OTLP pipeline and install a subscriber that feeds it.
 ///
 /// Installs the global subscriber, with both a stderr layer (so stdio servers
-/// still log where they should) and the OpenTelemetry layer.
+/// still log where they should) and the [`SpanLayer`].
 ///
 /// `filter` is the fallback log directive; `RUST_LOG` wins when set.
 pub fn init(config: OtelConfig, filter: &str) -> Result<OtelGuard, OtelError> {
     let service_name = config.service_name.clone();
-    let endpoint = config.endpoint.clone();
+    let endpoint = config.endpoint_for(Signal::Traces)?;
     let sample_ratio = config.sample_ratio;
 
-    let (guard, tracer) = pipeline(config)?;
+    let (guard, layer) = pipeline(config)?;
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
 
     let installed = tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr).with_ansi(false))
-        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .with(layer)
         .with(env_filter)
         .try_init();
 
@@ -384,7 +578,7 @@ pub fn init(config: OtelConfig, filter: &str) -> Result<OtelGuard, OtelError> {
 
     tracing::info!(
         service = %service_name,
-        endpoint = endpoint.as_deref().unwrap_or("<default>"),
+        endpoint = %redact::origin(&endpoint),
         sample_ratio,
         "exporting spans over OTLP"
     );
@@ -395,6 +589,178 @@ pub fn init(config: OtelConfig, filter: &str) -> Result<OtelGuard, OtelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sources() -> Sources {
+        Sources {
+            explicit: None,
+            signal_variable: None,
+            base: None,
+            base_variable: None,
+        }
+    }
+
+    fn resolved(signal: Signal, sources: &Sources) -> String {
+        resolve_endpoint(signal, sources).expect("a valid endpoint")
+    }
+
+    #[test]
+    fn the_default_is_otlp_http_on_4318() {
+        assert_eq!(
+            resolved(Signal::Traces, &sources()),
+            "http://localhost:4318/v1/traces"
+        );
+        assert_eq!(
+            resolved(Signal::Metrics, &sources()),
+            "http://localhost:4318/v1/metrics"
+        );
+    }
+
+    #[test]
+    fn a_base_url_gets_the_signals_path_added() {
+        let base = Sources {
+            base: Some("https://collector.example:4318/otlp/".to_owned()),
+            ..sources()
+        };
+        assert_eq!(
+            resolved(Signal::Traces, &base),
+            "https://collector.example:4318/otlp/v1/traces"
+        );
+        assert_eq!(
+            resolved(Signal::Metrics, &base),
+            "https://collector.example:4318/otlp/v1/metrics"
+        );
+    }
+
+    #[test]
+    fn a_base_urls_query_stays_after_the_path() {
+        let base = Sources {
+            base: Some("http://h:1/?tenant=a".to_owned()),
+            ..sources()
+        };
+        assert_eq!(
+            resolved(Signal::Traces, &base),
+            "http://h:1/v1/traces?tenant=a"
+        );
+    }
+
+    #[test]
+    fn a_full_url_is_used_as_given() {
+        let sources = Sources {
+            signal_variable: Some("http://h:1/custom/traces".to_owned()),
+            base: Some("http://ignored:1".to_owned()),
+            ..sources()
+        };
+        assert_eq!(
+            resolved(Signal::Traces, &sources),
+            "http://h:1/custom/traces"
+        );
+    }
+
+    #[test]
+    fn the_most_specific_source_wins() {
+        let all = Sources {
+            explicit: Some("http://explicit/v1/metrics".to_owned()),
+            signal_variable: Some("http://signal-env/v1/metrics".to_owned()),
+            base: Some("http://base".to_owned()),
+            base_variable: Some("http://base-env".to_owned()),
+        };
+        assert_eq!(
+            resolved(Signal::Metrics, &all),
+            "http://explicit/v1/metrics"
+        );
+
+        let without_explicit = Sources {
+            explicit: None,
+            ..all
+        };
+        assert_eq!(
+            resolved(Signal::Metrics, &without_explicit),
+            "http://signal-env/v1/metrics"
+        );
+
+        let without_signal = Sources {
+            signal_variable: None,
+            ..without_explicit
+        };
+        assert_eq!(
+            resolved(Signal::Metrics, &without_signal),
+            "http://base/v1/metrics"
+        );
+
+        let only_env = Sources {
+            base: None,
+            ..without_signal
+        };
+        assert_eq!(
+            resolved(Signal::Metrics, &only_env),
+            "http://base-env/v1/metrics"
+        );
+    }
+
+    #[test]
+    fn a_bad_endpoint_is_refused_without_naming_it() {
+        let bad = [
+            "localhost:4318",
+            "ftp://h/x",
+            "http://u:SECRET@h/x",
+            "SECRET",
+        ];
+        for url in bad {
+            for sources in [
+                Sources {
+                    explicit: Some(url.to_owned()),
+                    ..sources()
+                },
+                Sources {
+                    signal_variable: Some(url.to_owned()),
+                    ..sources()
+                },
+                Sources {
+                    base: Some(url.to_owned()),
+                    ..sources()
+                },
+            ] {
+                let err = resolve_endpoint(Signal::Metrics, &sources).expect_err(url);
+                assert!(matches!(err, OtelError::Endpoint(Signal::Metrics)));
+                assert!(!err.to_string().contains("SECRET"), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_environment_resource_is_parsed_like_the_sdks_do() {
+        let attributes = parse_resource_attributes(" a = 1 ,b=2,no-equals,a=3,c=x=y");
+        assert_eq!(
+            attributes,
+            [("a", "3"), ("b", "2"), ("c", "x=y")].map(|(k, v)| (k.to_owned(), v.to_owned()))
+        );
+        assert!(parse_resource_attributes("").is_empty());
+    }
+
+    #[test]
+    fn the_config_wins_over_the_environment_resource() {
+        let attributes = OtelConfig::new("mine")
+            .with_service_version("2.0")
+            .resource_attributes_from(Some(
+                "service.instance.id=i-1,service.name=theirs,service.version=1.0",
+            ));
+        let get = |key: &str| {
+            attributes
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("service.name"), Some("mine"));
+        assert_eq!(get("service.version"), Some("2.0"));
+        assert_eq!(get("service.instance.id"), Some("i-1"));
+        assert_eq!(
+            attributes
+                .iter()
+                .filter(|(k, _)| k == "service.name")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn the_sample_ratio_is_clamped() {
@@ -413,24 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn the_resource_carries_the_service_name() {
-        let resource = OtelConfig::new("my-server")
-            .with_service_version("1.2.3")
-            .resource();
-
-        let name = resource
-            .get(&opentelemetry::Key::from_static_str("service.name"))
-            .map(|v| v.to_string());
-        assert_eq!(name.as_deref(), Some("my-server"));
-
-        let version = resource
-            .get(&opentelemetry::Key::from_static_str("service.version"))
-            .map(|v| v.to_string());
-        assert_eq!(version.as_deref(), Some("1.2.3"));
-    }
-
-    #[test]
-    fn defaults_sample_everything_and_use_the_env_endpoint() {
+    fn defaults_sample_everything_and_defer_to_the_environment_for_the_endpoint() {
         let config = OtelConfig::new("s");
         assert_eq!(config.sample_ratio, 1.0);
         assert!(config.endpoint.is_none(), "None means fall back to the env");

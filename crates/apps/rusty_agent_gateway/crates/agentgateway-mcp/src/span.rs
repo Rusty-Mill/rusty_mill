@@ -11,16 +11,16 @@
 //!
 //! There was not one before. `tracing` fields have to be declared when a span
 //! is opened, so arbitrary processor-supplied keys cannot be recorded as
-//! fields at all; they go on as OpenTelemetry attributes, which need an
-//! OpenTelemetry span to go on. Opening one per request is what makes that
-//! possible, and it is worth having on its own — a `tools/call` that took four
-//! seconds is not visible anywhere otherwise.
+//! fields at all; they go on as span attributes, which need a span to go on.
+//! Opening one per request is what makes that possible, and it is worth having
+//! on its own — a `tools/call` that took four seconds is not visible anywhere
+//! otherwise.
 //!
 //! # The span is not entered
 //!
 //! It is created and held for the length of the call, never `enter()`ed. The
-//! OpenTelemetry layer times a span from creation to close rather than from
-//! enter to exit, so the duration is right either way — and entering would be
+//! span layer times a span from creation to close rather than from enter to
+//! exit, so the duration is right either way — and entering would be
 //! actively wrong here. `Span::enter` returns a guard tied to the thread, and
 //! holding one across an `.await` in a server that multiplexes tasks onto a
 //! thread pool attributes another request's events to this span.
@@ -32,9 +32,9 @@
 //!
 //! # When no collector is configured
 //!
-//! Setting an attribute is a no-op unless the OpenTelemetry layer is
-//! installed, which it is only when `config.tracing` names a collector. The
-//! span itself still exists, so log lines inside it are still correlated.
+//! Setting an attribute is a no-op unless the span layer is installed, which it
+//! is only when `config.tracing` names a collector. The span itself still
+//! exists, so log lines inside it are still correlated.
 
 use rusty_mcp_server::CallContext;
 use tracing::Span;
@@ -67,37 +67,36 @@ pub fn request(method: &'static str, context: &CallContext) -> Span {
     }
 }
 
-/// Put a processor's annotations on `span` as OpenTelemetry attributes.
+/// Put a processor's annotations on `span` as attributes.
 ///
 /// Scalars go on natively so a trace viewer can filter on them. Anything
-/// nested is rendered as JSON: OpenTelemetry attribute values are scalars and
-/// homogeneous arrays, and flattening an arbitrary object into dotted keys
-/// would invent structure the processor did not ask for.
+/// nested is rendered as JSON: attribute values are scalars, and flattening an
+/// arbitrary object into dotted keys would invent structure the processor did
+/// not ask for.
 pub fn annotate(span: &Span, annotations: &Annotations) {
     if annotations.is_empty() {
         return;
     }
 
-    use opentelemetry::Value;
-    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    use rusty_mcp::otel::AttributeValue;
 
     for (key, value) in annotations.iter() {
         let value = match value {
-            serde_json::Value::String(text) => Value::String(text.clone().into()),
-            serde_json::Value::Bool(flag) => Value::Bool(*flag),
+            serde_json::Value::String(text) => AttributeValue::String(text.clone()),
+            serde_json::Value::Bool(flag) => AttributeValue::Bool(*flag),
             serde_json::Value::Number(number) => match number.as_i64() {
-                Some(int) => Value::I64(int),
+                Some(int) => AttributeValue::Int(int),
                 None => match number.as_f64() {
-                    Some(float) => Value::F64(float),
-                    None => Value::String(number.to_string().into()),
+                    Some(float) => AttributeValue::Float(float),
+                    None => AttributeValue::String(number.to_string()),
                 },
             },
             // Null has no attribute form; the empty string is the closest
             // honest rendering and keeps the key visible.
-            serde_json::Value::Null => Value::String("".into()),
-            nested => Value::String(nested.to_string().into()),
+            serde_json::Value::Null => AttributeValue::String(String::new()),
+            nested => AttributeValue::String(nested.to_string()),
         };
-        span.set_attribute(format!("{PREFIX}{key}"), value);
+        rusty_mcp::otel::set_attribute(span, &format!("{PREFIX}{key}"), value);
     }
 }
 

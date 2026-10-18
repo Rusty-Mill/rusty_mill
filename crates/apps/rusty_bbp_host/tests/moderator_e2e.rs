@@ -21,7 +21,27 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
+/// A `claude` on PATH that runs the role's script from `agents-bin/`, so test
+/// launchers can be what an evidence run requires: the program `claude`.
+fn fake_claude_on_path() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let bin = std::env::temp_dir().join(format!("bbp_fake_claude_{}", std::process::id()));
+        std::fs::create_dir_all(&bin).expect("mkdir");
+        let claude = bin.join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nexec sh \"$BBP_DIR/agents-bin/$BBP_ROLE.sh\" \"$@\"\n",
+        )
+        .expect("write claude");
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+    });
+}
+
 fn tempdir(tag: &str) -> PathBuf {
+    fake_claude_on_path();
     let dir = std::env::temp_dir().join(format!("bbp_mod_{}_{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
@@ -86,9 +106,9 @@ fn card(dir: &Path, task: &TaskId) -> Card {
     admin::card(dir, task).expect("card")
 }
 
-#[test]
-fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
-    let dir = tempdir("happy");
+/// Drive one task from open to closed; the run directory is left for the caller.
+fn happy_run(tag: &str) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
+    let dir = tempdir(tag);
     let (repo, base) = repo(&dir);
     let task = TaskId("T1".into());
     admin::open_task(
@@ -158,6 +178,7 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(90),
+        cost_cap: None,
     };
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
 
@@ -209,8 +230,15 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
         std::thread::sleep(Duration::from_millis(100));
     }
     let out = moderator.join().expect("join").expect("moderator");
+    (dir, task, out, seen)
+}
+
+#[test]
+fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
+    let (dir, task, out, seen) = happy_run("happy");
     assert_eq!(out.state, State::Closed);
     assert_eq!(out.turns_launched, 4, "planner, coder, tester, reviewer");
+    assert!(out.replay_equals_live, "the log folds to the live state");
     assert_eq!(out.runs, 1);
     assert_eq!(
         seen,
@@ -306,6 +334,7 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(5),
+        cost_cap: None,
     };
     let first = card(&dir, &task);
     let out = moderator::run(&cfg);
@@ -369,6 +398,7 @@ fn config(dir: &Path, task: &TaskId, repo: PathBuf, launchers: Launchers, wall: 
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(wall),
+        cost_cap: None,
     }
 }
 
@@ -692,9 +722,21 @@ fn script(dir: &Path, name: &str, body: &str) -> Launcher {
     let path = bin.join(format!("{name}.sh"));
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // What an evidence run requires of a launcher, less the pin the test adds.
     Launcher {
-        program: path.to_string_lossy().into_owned(),
-        args: vec!["{dir}".into()],
+        program: "claude".into(),
+        args: [
+            "{dir}",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--disallowedTools",
+            "Agent,Task",
+            "--setting-sources",
+            "",
+        ]
+        .map(String::from)
+        .into(),
         builtin_tools: false,
     }
 }
@@ -905,4 +947,1059 @@ fn two_builders_run_in_parallel_and_the_candidate_kills_the_other_harness() {
     }
     assert!(out.elapsed > Duration::ZERO && out.elapsed < Duration::from_secs(60));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- live cost cap
+
+/// A cap of `usd` over one priced model, `priced-model`, at $20 per million
+/// output tokens.
+fn cost_cap(usd: f64) -> moderator::CostCap {
+    moderator::CostCap {
+        usd,
+        criteria: rusty_bbp_host::tokens::Criteria {
+            prices_as_of: "test".into(),
+            models: [(
+                "priced-model".to_owned(),
+                rusty_bbp_host::tokens::Prices {
+                    input: 1.0,
+                    output: 20.0,
+                    cache_creation_5m: 1.0,
+                    cache_creation_1h: 1.0,
+                    cache_read: 1.0,
+                },
+            )]
+            .into(),
+            min_commit: None,
+        },
+        criteria_sha256: "test".into(),
+    }
+}
+
+/// A planner whose harness prints one assistant message (priced by the model it
+/// names) and then idles, under a cost cap.
+fn capped_run(
+    tag: &str,
+    pin: Option<&str>,
+    model_in_output: &str,
+    cap_usd: f64,
+    wall: u64,
+) -> Result<moderator::Outcome, String> {
+    capped_run_by(tag, pin, model_in_output, cap_usd, wall, moderator::run)
+}
+
+fn capped_run_by(
+    tag: &str,
+    pin: Option<&str>,
+    model_in_output: &str,
+    cap_usd: f64,
+    wall: u64,
+    run: fn(&Config) -> Result<moderator::Outcome, String>,
+) -> Result<moderator::Outcome, String> {
+    let dir = tempdir(tag);
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    admin::open_task(
+        &dir,
+        &task,
+        "local",
+        b"brief",
+        &PrincipalId("human".into()),
+        &ProfileSet::shell("test", "true"),
+        common::roster(),
+    )
+    .expect("open");
+    for role in Who::ALL {
+        admin::assign(
+            &dir,
+            &task,
+            &role.id(),
+            &PrincipalId(role.name().into()),
+            "v",
+        )
+        .expect("assign");
+    }
+    let line = format!(
+        r#"{{"type":"assistant","message":{{"id":"m1","model":"{model_in_output}","usage":{{"input_tokens":0,"output_tokens":1000000}}}}}}"#
+    );
+    let mut planner = script(&dir, "planner", &format!("echo '{line}'\nsleep 60"));
+    if let Some(m) = pin {
+        planner.args.extend(["--model".to_owned(), m.to_owned()]);
+    }
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, wall);
+    cfg.cost_cap = Some(cost_cap(cap_usd));
+    let out = run(&cfg);
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn a_run_over_its_dollar_cap_is_stopped_and_its_harness_killed() {
+    let started = Instant::now();
+    let err = capped_run("cap-over", Some("priced-model"), "priced-model", 1.0, 30).unwrap_err();
+    assert!(err.contains("cost cap reached"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "stopped by the cap, not by the wall limit or the harness's own sleep"
+    );
+}
+
+#[test]
+fn a_run_under_its_cap_is_left_to_the_wall_limit() {
+    let err = capped_run("cap-under", Some("priced-model"), "priced-model", 1000.0, 3).unwrap_err();
+    assert!(err.contains("wall limit"), "{err}");
+}
+
+#[test]
+fn a_model_with_no_price_stops_the_run_because_the_cap_cannot_be_enforced() {
+    let err = capped_run(
+        "cap-unpriced",
+        Some("priced-model"),
+        "unpriced-model",
+        1000.0,
+        30,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("cannot enforce the cost cap") && err.contains("unpriced-model"),
+        "{err}"
+    );
+}
+
+/// A task cancelled before the moderator's first poll, whose planner's granted
+/// turn had printed one assistant message of 1M output tokens ($20 at the
+/// priced model) before the cancel: the state the moderator first sees is
+/// terminal, so no poll of the cap precedes it.
+fn cancelled_with_final_output(
+    tag: &str,
+    model_in_output: &str,
+    cap_usd: f64,
+) -> Result<moderator::Outcome, String> {
+    let dir = tempdir(tag);
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+    // The earlier, capped segment that granted the turn and saw it print.
+    moderator::write_evidence_marker(&dir, &task, cap_usd, "test").expect("marker");
+    admin::tick(&dir, &task).expect("tick");
+    let line = format!(
+        r#"{{"type":"assistant","message":{{"id":"m1","model":"{model_in_output}","usage":{{"input_tokens":0,"output_tokens":1000000}}}}}}"#
+    );
+    let log = moderator::log_path(&dir, &task, TurnId(1));
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, format!("{line}\n")).unwrap();
+    let c = card(&dir, &task);
+    let r = human::perform(&dir, &task, "cancel", &["stop"], Some(c.rev)).expect("cancel");
+    assert_eq!(r, Response::Ok, "{r:?}");
+    let mut cfg = config(&dir, &task, repo, Launchers::default(), 30);
+    cfg.cost_cap = Some(cost_cap(cap_usd));
+    let out = moderator::run(&cfg);
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn final_output_over_the_cap_on_a_terminal_state_is_not_a_success() {
+    let err = cancelled_with_final_output("cap-term-over", "priced-model", 1.0).unwrap_err();
+    assert!(err.contains("cost cap reached"), "{err}");
+}
+
+#[test]
+fn final_output_of_an_unpriced_model_on_a_terminal_state_is_not_a_success() {
+    let err =
+        cancelled_with_final_output("cap-term-unpriced", "unpriced-model", 1000.0).unwrap_err();
+    assert!(
+        err.contains("cannot enforce the cost cap") && err.contains("unpriced-model"),
+        "{err}"
+    );
+}
+
+#[test]
+fn final_output_under_the_cap_on_a_terminal_state_still_succeeds() {
+    let out = cancelled_with_final_output("cap-term-under", "priced-model", 1000.0)
+        .expect("under the cap");
+    assert_eq!(out.state, State::Cancelled);
+}
+
+#[test]
+fn an_evidence_run_refuses_to_start_with_an_unpinned_or_unpriced_role() {
+    let unpinned = capped_run("cap-unpinned", None, "priced-model", 1000.0, 30).unwrap_err();
+    assert!(
+        unpinned.contains("refusing to start") && unpinned.contains("planner"),
+        "{unpinned}"
+    );
+    let unpriced = capped_run(
+        "cap-pin-unpriced",
+        Some("other-model"),
+        "priced-model",
+        1000.0,
+        30,
+    )
+    .unwrap_err();
+    assert!(
+        unpriced.contains("refusing to start") && unpriced.contains("other-model"),
+        "{unpriced}"
+    );
+}
+
+// ---- review findings 9 and 13
+
+const SONNET_PRICES: &str = r#"{"prices_as_of":"t","models":{"claude-sonnet-5-5":{"input":2.0,"output":10.0,"cache_creation_5m":2.5,"cache_creation_1h":4.0,"cache_read":0.10}}}"#;
+
+fn sonnet_cap(dir: &Path, usd: f64) -> moderator::CostCap {
+    let f = dir.join("criteria.json");
+    std::fs::write(&f, SONNET_PRICES).expect("write criteria");
+    let (criteria, criteria_sha256) = rusty_bbp_host::tokens::read_criteria(&f).expect("criteria");
+    moderator::CostCap {
+        usd,
+        criteria,
+        criteria_sha256,
+    }
+}
+
+fn opened(tag: &str) -> (PathBuf, TaskId, PathBuf) {
+    let dir = tempdir(tag);
+    let (repo, _) = repo(&dir);
+    let task = TaskId("T1".into());
+    admin::open_task(
+        &dir,
+        &task,
+        "local",
+        b"brief",
+        &PrincipalId("human".into()),
+        &ProfileSet::shell("test", "true"),
+        common::roster(),
+    )
+    .expect("open");
+    for role in Who::ALL {
+        admin::assign(
+            &dir,
+            &task,
+            &role.id(),
+            &PrincipalId(role.name().into()),
+            "v",
+        )
+        .expect("assign");
+    }
+    (dir, task, repo)
+}
+
+#[test]
+fn spend_that_lands_before_the_run_ends_is_still_checked_against_the_cap() {
+    // A real completed result costing about $1.01, written before the
+    // moderator starts, and a task that is already over (cancelled): the loop
+    // sees the terminal state on its first pass, before any later check.
+    let (dir, task, repo) = opened("final-poll");
+    let cap = sonnet_cap(&dir, 0.5);
+    moderator::write_evidence_marker(&dir, &task, 0.5, &cap.criteria_sha256).expect("marker");
+    admin::tick(&dir, &task).expect("tick grants the planner its turn");
+    let log = rusty_bbp_host::moderator::log_path(&dir, &task, TurnId(1));
+    std::fs::create_dir_all(log.parent().expect("parent")).expect("mkdir");
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/stream-json/completed-default-ttl.jsonl"),
+    )
+    .expect("fixture")
+    .replace("\"outputTokens\":4", "\"outputTokens\":100000")
+    .replace(
+        "\"total_cost_usd\":0.0086289",
+        "\"total_cost_usd\":1.0085889",
+    )
+    .replace("\"costUSD\":0.0086289", "\"costUSD\":1.0085889");
+    std::fs::write(&log, text).expect("write log");
+    let rev = card(&dir, &task).rev;
+    human::perform(&dir, &task, "cancel", &["stop"], Some(rev)).expect("cancel");
+    let mut cfg = config(&dir, &task, repo, Launchers::default(), 10);
+    cfg.cost_cap = Some(cap);
+    let err = moderator::run(&cfg).expect_err("over the cap is not a clean finish");
+    assert!(err.contains("cost cap reached"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_task_started_with_a_cap_cannot_be_resumed_without_one() {
+    let (dir, task, repo) = opened("resume-uncapped");
+    let mut planner = script(&dir, "planner", "sleep 60");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut first = config(&dir, &task, repo.clone(), launchers.clone(), 2);
+    first.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let e1 = moderator::run(&first).expect_err("wall limit");
+    assert!(e1.contains("wall limit"), "{e1}");
+    let second = config(&dir, &task, repo, launchers, 2);
+    let e2 = moderator::run(&second).expect_err("refused");
+    assert!(e2.contains("refusing to start"), "{e2}");
+    // `bbp pairs` counts only runs that carry the marker of the manifest's cap.
+    let sha = first.cost_cap.as_ref().unwrap().criteria_sha256.clone();
+    assert!(moderator::require_evidence_marker(&dir, &task, 1000.0, &sha).is_ok());
+    assert!(moderator::require_evidence_marker(&dir, &task, 999.0, &sha).is_err());
+    assert!(
+        moderator::require_evidence_marker(&dir, &TaskId("other".into()), 1000.0, &sha).is_err()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_evidence_runs_harness_gets_both_cache_ttl_variables_pinned_to_one_hour() {
+    let (dir, task, repo) = opened("ttl-env");
+    let mut planner = script(
+        &dir,
+        "planner",
+        "echo \"$CLAUDE_CODE_PROMPT_CACHE_TTL $CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL\" > \"$1/ttl.txt\"\nsleep 30",
+    );
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 3);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    // Even if the environment says otherwise.
+    std::env::set_var("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m");
+    let _ = moderator::run(&cfg);
+    std::env::remove_var("CLAUDE_CODE_PROMPT_CACHE_TTL");
+    let got = std::fs::read_to_string(dir.join("ttl.txt")).expect("the harness ran");
+    assert_eq!(got.trim(), "1h 1h");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `bbp grade pack` and `join` on two real closed run dirs: the approved pack
+/// has one entry per arm, the unused pack is separate, and the key opens only
+/// when every id is scored.
+#[test]
+fn grade_pack_and_join_work_on_real_run_dirs() {
+    let (cdir, ctask, _, _) = happy_run("grade-c");
+    let (tdir, ttask, _, _) = happy_run("grade-t");
+    let out = tempdir("grade-out");
+    let rubrics = out.join("rubrics");
+    std::fs::create_dir_all(&rubrics).unwrap();
+    std::fs::write(
+        rubrics.join("p1.json"),
+        r#"{"items":["a","b"],"pass_mark":1}"#,
+    )
+    .unwrap();
+    let run = |d: &Path, t: &TaskId| {
+        format!(
+            r#"{{"dir":"{}","task":"{}","mod_output":"unused"}}"#,
+            d.display(),
+            t.0
+        )
+    };
+    let manifest = out.join("manifest.json");
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"{{"poll_ms":500,"reads_per_turn":8,"cap_usd":5.0,"criteria":"c","repo":"r","pairs":[{{"id":"p1","kind":"separable","control":{},"treatment":{}}}]}}"#,
+            run(&cdir, &ctask),
+            run(&tdir, &ttask)
+        ),
+    )
+    .unwrap();
+    // Through the binary, as a person runs it.
+    let bbp = |args: &[&Path]| {
+        let o = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .arg("grade")
+            .args(args)
+            .output()
+            .expect("run bbp grade");
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let flag = |f: &'static str| Path::new(f);
+    let pack_dir = out.join("pack");
+    let (ok, packed, err) = bbp(&[
+        flag("pack"),
+        flag("--manifest"),
+        &manifest,
+        flag("--rubrics"),
+        &rubrics,
+        flag("--seed"),
+        flag("seed"),
+        flag("--out"),
+        &pack_dir,
+    ]);
+    assert!(ok, "bbp grade pack: {err}");
+    assert!(packed.contains("\"approved\":2"), "{packed}");
+    assert!(packed.contains("\"unused\":0"), "{packed}");
+    let read = |n: &str| std::fs::read_to_string(out.join("pack").join(n)).unwrap();
+    let ids: Vec<String> = read("pack.json")
+        .split("\"id\":\"")
+        .skip(1)
+        .map(|r| r[..16].to_owned())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    // The unused versions are held back until the approved scores are sealed.
+    assert!(!out.join("pack").join("unused.json").exists());
+    assert_eq!(read("unused.held.json"), "[]");
+    for leak in ["control", "treatment", "grade-c", "grade-t"] {
+        assert!(!read("pack.json").contains(leak), "pack leaks {leak}");
+    }
+    let scores = out.join("scores.json");
+    let met = |ids: &[String]| {
+        ids.iter()
+            .map(|i| format!(r#""{i}":[true,false]"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    std::fs::write(
+        &scores,
+        format!(r#"{{"grader":"g","met":{{{}}}}}"#, met(&ids[..1])),
+    )
+    .unwrap();
+    let key = out.join("pack").join("key.json");
+    let held = out.join("pack").join("unused.held.json");
+    let release_dir = out.join("release");
+    let release = || {
+        bbp(&[
+            flag("release"),
+            flag("--key"),
+            &key,
+            flag("--held"),
+            &held,
+            flag("--scores"),
+            &scores,
+            flag("--out"),
+            &release_dir,
+        ])
+    };
+    // Partial approved scores do not release anything.
+    let (ok, _, err) = release();
+    assert!(!ok && err.contains("approved"), "{err}");
+    assert!(!release_dir.join("unused.json").exists());
+    std::fs::write(
+        &scores,
+        format!(r#"{{"grader":"g","met":{{{}}}}}"#, met(&ids)),
+    )
+    .unwrap();
+    let (ok, released, err) = release();
+    assert!(ok, "bbp grade release: {err}");
+    assert!(released.contains("approved_scores_sha256"), "{released}");
+    assert_eq!(
+        std::fs::read_to_string(release_dir.join("unused.json")).unwrap(),
+        "[]"
+    );
+    let unused_scores = out.join("unused-scores.json");
+    std::fs::write(&unused_scores, r#"{"grader":"g","met":{}}"#).unwrap();
+    let record = release_dir.join("release.json");
+    let join = || {
+        bbp(&[
+            flag("join"),
+            flag("--key"),
+            &key,
+            flag("--scores"),
+            &scores,
+            flag("--unused-scores"),
+            &unused_scores,
+            flag("--release"),
+            &record,
+            flag("--rubrics"),
+            &rubrics,
+        ])
+    };
+    let (ok, joined, err) = join();
+    assert!(ok, "bbp grade join: {err}");
+    assert!(joined.contains("\"rubric_ok\":true"), "{joined}");
+    // The approved scores were edited after the release: refused.
+    std::fs::write(
+        &scores,
+        format!(
+            r#"{{"grader":"g","met":{{{}}}}}"#,
+            met(&ids).replace("false", "true")
+        ),
+    )
+    .unwrap();
+    let (ok, _, err) = join();
+    assert!(!ok && err.contains("after the release"), "{err}");
+    for d in [cdir, tdir, out] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+// ---- second review: findings 1, 2, 4, 5
+
+#[test]
+fn a_run_stopped_by_the_cap_is_an_outcome_with_its_stop_and_its_replay() {
+    let out = capped_run_by(
+        "stop-cap",
+        Some("priced-model"),
+        "priced-model",
+        1.0,
+        30,
+        moderator::run_to_stop,
+    )
+    .expect("a cap stop is reported, not lost");
+    let stop = out.stop.expect("stop");
+    assert_eq!(stop.kind, moderator::StopKind::Cap);
+    assert!(stop.reason.contains("cost cap reached"), "{}", stop.reason);
+    assert!(out.replay_equals_live, "the replay is still checked");
+    assert!(!out.state.terminal());
+}
+
+#[test]
+fn a_run_stopped_by_the_wall_limit_is_an_outcome_with_its_stop() {
+    let out = capped_run_by(
+        "stop-wall",
+        Some("priced-model"),
+        "priced-model",
+        1000.0,
+        3,
+        moderator::run_to_stop,
+    )
+    .expect("a wall stop is reported, not lost");
+    assert_eq!(out.stop.expect("stop").kind, moderator::StopKind::Wall);
+}
+
+/// Everything `bbp mod` needs for a capped run of a planner that prints `body`.
+fn mod_cli(tag: &str, body: &str) -> (std::process::Output, PathBuf) {
+    let (dir, task, repo) = opened(tag);
+    let planner = script(&dir, "planner", body);
+    let mut l = planner;
+    l.args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let agents = dir.join("agents.json");
+    std::fs::write(
+        &agents,
+        format!(
+            r#"{{"planner":{{"program":"claude","args":{},"builtin_tools":false}}}}"#,
+            rusty_serde::json::to_string(&l.args).expect("args")
+        ),
+    )
+    .expect("agents");
+    let criteria = dir.join("criteria.json");
+    std::fs::write(&criteria, SONNET_PRICES).expect("criteria");
+    let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["mod", "--dir"])
+        .arg(&dir)
+        .args(["--task", &task.0, "--repo-path"])
+        .arg(&repo)
+        .arg("--work")
+        .arg(dir.join("work"))
+        .arg("--agents")
+        .arg(&agents)
+        .args([
+            "--confine",
+            "none",
+            "--poll-ms",
+            "50",
+            "--max-wall-secs",
+            "30",
+            "--max-usd",
+            "1",
+        ])
+        .arg("--criteria")
+        .arg(&criteria)
+        .output()
+        .expect("run bbp mod");
+    (out, dir)
+}
+
+const TEN_DOLLARS: &str = r#"echo '{"type":"assistant","message":{"id":"m1","model":"claude-sonnet-5-5","usage":{"input_tokens":0,"output_tokens":1000000}}}'
+sleep 60"#;
+
+#[test]
+fn bbp_mod_prints_its_json_with_the_stop_reason_when_the_cap_stops_the_run() {
+    let (out, dir) = mod_cli("cli-cap", TEN_DOLLARS);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "a stopped run is not a success");
+    assert!(stdout.contains("\"stop\":\"cap\""), "stdout: {stdout:?}");
+    let facts = rusty_bbp_host::pairs::mod_facts(&stdout).expect("loads");
+    assert_eq!(facts.stop.as_deref(), Some("cap"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_task_started_uncapped_cannot_be_resumed_with_a_cap_and_counted() {
+    let (dir, task, repo) = opened("uncapped-first");
+    let mut planner = script(&dir, "planner", "sleep 60");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let first = config(&dir, &task, repo.clone(), launchers.clone(), 2);
+    let e1 = moderator::run(&first).expect_err("wall limit");
+    assert!(e1.contains("wall limit"), "{e1}");
+    let mut second = config(&dir, &task, repo, launchers, 2);
+    second.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let e2 = moderator::run(&second).expect_err("a capped resume of an uncapped task is refused");
+    assert!(e2.contains("refusing to start"), "{e2}");
+    let sha = second.cost_cap.as_ref().unwrap().criteria_sha256.clone();
+    assert!(moderator::require_evidence_marker(&dir, &task, 1000.0, &sha).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_harness_that_prints_garbage_stops_a_capped_run() {
+    let started = Instant::now();
+    let (out, dir) = mod_cli("garbage", "echo 'this is not stream-json'\nsleep 60");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot enforce the cost cap"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "stopped by the cap check, not the wall"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_harness_that_has_printed_nothing_yet_is_left_to_the_wall_limit() {
+    let (dir, task, repo) = opened("silent");
+    let mut planner = script(&dir, "planner", "sleep 60");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 3);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let err = moderator::run(&cfg).expect_err("wall limit");
+    assert!(err.contains("wall limit"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_evidence_runs_harness_gets_the_subagent_model_pinned_to_the_roles_model() {
+    let (dir, task, repo) = opened("subagent-env");
+    let mut planner = script(
+        &dir,
+        "planner",
+        "echo \"$CLAUDE_CODE_SUBAGENT_MODEL\" > \"$1/subagent.txt\"\nsleep 30",
+    );
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 3);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    std::env::set_var("CLAUDE_CODE_SUBAGENT_MODEL", "claude-haiku-5-5");
+    let _ = moderator::run(&cfg);
+    std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL");
+    let seen = std::fs::read_to_string(dir.join("subagent.txt")).expect("the harness ran");
+    assert_eq!(seen.trim(), "claude-sonnet-5-5");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `bbp agents-check` as a person runs it: two agents files and a price file.
+#[test]
+fn agents_check_as_a_binary_accepts_a_matched_pair_and_refuses_the_rest() {
+    let dir = tempdir("agents-check");
+    let launcher = |model: &str, extra: &[&str]| {
+        let mut args: Vec<String> = [
+            "-p",
+            "do the task",
+            "--model",
+            model,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--disallowedTools",
+            "Agent,Task",
+            "--setting-sources",
+            "",
+        ]
+        .map(String::from)
+        .into();
+        args.extend(extra.iter().map(|s| (*s).to_owned()));
+        format!(
+            r#"{{"program":"claude","args":{},"builtin_tools":false}}"#,
+            rusty_serde::json::to_string(&args).unwrap()
+        )
+    };
+    let write = |name: &str, planner: &str| {
+        let f = dir.join(name);
+        std::fs::write(&f, format!(r#"{{"planner":{planner}}}"#)).unwrap();
+        f
+    };
+    let criteria = dir.join("criteria.json");
+    std::fs::write(&criteria, SONNET_PRICES).unwrap();
+    let run = |c: &Path, t: &Path| {
+        Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["agents-check", "--control"])
+            .arg(c)
+            .arg("--treatment")
+            .arg(t)
+            .arg("--criteria")
+            .arg(&criteria)
+            .output()
+            .expect("run bbp agents-check")
+    };
+    let good = write("good.json", &launcher("claude-sonnet-5-5", &[]));
+    let ok = run(&good, &good);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("claude-sonnet-5-5"));
+    // Each way a launcher can be wrong is a refusal that names the role.
+    for (what, planner) in [
+        (
+            "fallback model",
+            launcher("claude-sonnet-5-5", &["--fallback-model", "x"]),
+        ),
+        (
+            "settings",
+            launcher("claude-sonnet-5-5", &["--settings", "x.json"]),
+        ),
+        ("unpriced model", launcher("claude-haiku-5-5", &[])),
+        (
+            "not claude",
+            launcher("claude-sonnet-5-5", &[]).replace("\"claude\"", "\"/usr/bin/true\""),
+        ),
+    ] {
+        let bad = write("bad.json", &planner);
+        let o = run(&good, &bad);
+        assert!(!o.status.success(), "{what}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("treatment"), "{what}: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- review comments on #763 (baileyrd, fa4a8a8a): the marker waits for the lock
+
+#[test]
+fn a_capped_startup_refused_for_the_lock_leaves_no_marker() {
+    let (dir, task, repo) = opened("lock-marker");
+    let path = moderator::lock_path(&dir, &task);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    let holder = std::fs::File::create(&path).expect("create");
+    holder.lock().expect("lock");
+    let mut planner = script(&dir, "planner", "sleep 1");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let mut cfg = config(
+        &dir,
+        &task,
+        repo,
+        Launchers::default().with("planner", planner),
+        2,
+    );
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let err = moderator::run(&cfg).unwrap_err();
+    assert!(err.contains("another moderator"), "{err}");
+    let sha = cfg.cost_cap.as_ref().unwrap().criteria_sha256.clone();
+    assert!(
+        moderator::require_evidence_marker(&dir, &task, 1000.0, &sha).is_err(),
+        "a refused startup must not make the task an evidence run"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- third review, finding 1: the live cap must not kill a harness that is still starting
+
+#[test]
+fn a_harness_that_has_only_printed_its_preamble_is_left_to_the_wall_limit() {
+    let (dir, task, repo) = opened("preamble");
+    let preamble = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/stream-json/system-lines-before-the-first-message.jsonl"),
+    )
+    .expect("fixture");
+    std::fs::write(dir.join("preamble.jsonl"), preamble).expect("write");
+    // The preamble, a pause longer than several polls, then a small message.
+    let mut planner = script(
+        &dir,
+        "planner",
+        "cat \"$1/preamble.jsonl\"\nsleep 2\necho '{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"model\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}'\nsleep 60",
+    );
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 5);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let out = moderator::run_to_stop(&cfg).expect("an outcome");
+    let stop = out.stop.expect("stopped");
+    assert_eq!(stop.kind, moderator::StopKind::Wall, "{}", stop.reason);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- third review, finding 2: the live cap must not stop a harness mid-write
+
+#[test]
+fn a_harness_caught_in_the_middle_of_writing_a_line_is_left_to_the_wall_limit() {
+    let (dir, task, repo) = opened("midwrite");
+    // Half a line, no newline, held for several polls; then the rest.
+    let mut planner = script(
+        &dir,
+        "planner",
+        "printf '{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"mod'\nsleep 2\nprintf 'el\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\\n'\nsleep 60",
+    );
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut cfg = config(&dir, &task, repo, launchers, 5);
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let out = moderator::run_to_stop(&cfg).expect("an outcome");
+    let stop = out.stop.expect("stopped");
+    assert_eq!(stop.kind, moderator::StopKind::Wall, "{}", stop.reason);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn pending_slow_run(dir: &Path, command: &str) -> (PathBuf, TaskId) {
+    let (repo, base) = repo(dir);
+    let task = TaskId("T1".into());
+    open_assigned(dir, &task, &ProfileSet::shell("slow", command));
+    admin::tick(dir, &task).unwrap();
+    let turn = open_driver(dir, &task).unwrap().state.turn().unwrap().id.0;
+    let mut planner = Mcp::spawn(dir, &task, "planner", turn);
+    assert!(
+        !planner
+            .call(
+                "put_artifact",
+                r##"{"op":"p1","kind":"spec","brief":1,"body":"# Spec"}"##
+            )
+            .1
+    );
+    assert!(!planner.call("post",r#"{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}"#).1);
+    human::perform(dir, &task, "approve-plan", &["2"], None).unwrap();
+    let turn = open_driver(dir, &task).unwrap().state.turn().unwrap().id.0;
+    let mut coder = Mcp::spawn(dir, &task, "coder", turn);
+    let diff = r"--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n";
+    assert!(
+        !coder
+            .call(
+                "put_artifact",
+                &format!(r#"{{"op":"c1","kind":"diff","body":"{diff}"}}"#)
+            )
+            .1
+    );
+    assert!(
+        !coder
+            .call(
+                "put_artifact",
+                &format!(
+                    r#"{{"op":"c2","kind":"candidate","base":"{base}","diffs":[3],"body":""}}"#
+                )
+            )
+            .1
+    );
+    assert_eq!(card(dir, &task).state, State::Test);
+    (repo, task)
+}
+
+struct ModProcess(Child);
+impl Drop for ModProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn process_mod(dir: &Path, repo: &Path, task: &TaskId, wall: &str, confine: &str) -> ModProcess {
+    std::fs::write(dir.join("agents.json"), "{}").unwrap();
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("process-mod.log"))
+        .unwrap();
+    ModProcess(
+        Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["mod", "--dir"])
+            .arg(dir)
+            .args(["--task", &task.0, "--repo-path"])
+            .arg(repo)
+            .arg("--work")
+            .arg(dir.join("work"))
+            .arg("--agents")
+            .arg(dir.join("agents.json"))
+            .args([
+                "--max-wall-secs",
+                wall,
+                "--poll-ms",
+                "10",
+                "--confine",
+                confine,
+            ])
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn process_exit_cancels_reaps_and_serializes_a_running_workload_before_restart() {
+    for confine in ["sandbox", "none"] {
+        for mode in ["timeout", "cancel", "kill"] {
+            if !running_workload_recovery(confine, mode, false) {
+                break;
+            }
+        }
+    }
+}
+
+// The ordinary suite retains fail-closed coverage on unsupported kernels. The
+// required CI cases below must execute a confined workload in every mode.
+#[cfg(target_os = "linux")]
+fn running_workload_recovery(confine: &str, mode: &str, required: bool) -> bool {
+    let dir = tempdir(&format!("process-{confine}-{mode}"));
+    let (repo, task) = pending_slow_run(
+        &dir,
+        "echo $$ > leader.pid; sleep 30 & echo $! > child.pid; wait",
+    );
+    let mut moderator = process_mod(
+        &dir,
+        &repo,
+        &task,
+        if mode == "timeout" { "2" } else { "20" },
+        confine,
+    );
+    let leader = dir.join("work/run-1/leader.pid");
+    let descendant = dir.join("work/run-1/child.pid");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !leader.exists() || !descendant.exists() {
+        if moderator.0.try_wait().unwrap().is_some() {
+            let driver = open_driver(&dir, &task).unwrap();
+            let run = driver.state.selected_run().unwrap();
+            let log = driver.state.artifacts.get(&run.log.unwrap()).unwrap();
+            let bytes = driver.store.blob_get(&log.blob.sha).unwrap();
+            let log = String::from_utf8_lossy(&bytes);
+            if confine == "sandbox"
+                && log.contains("Landlock filesystem confinement is NotEnforced")
+            {
+                assert!(!required, "required sandbox refused in {mode}: {log}");
+                assert_eq!(run.status, Some(RunStatus::Error));
+                assert!(!leader.exists() && !descendant.exists());
+                eprintln!("sandbox lifecycle cases unavailable on this kernel; verified fail-closed refusal: {log}");
+                drop(moderator);
+                std::fs::remove_dir_all(&dir).unwrap();
+                return false;
+            }
+            panic!("moderator exited before workload: {log}");
+        }
+        assert!(Instant::now() < deadline, "workload not started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let leader = std::fs::read_to_string(leader).unwrap();
+    let descendant = std::fs::read_to_string(descendant).unwrap();
+    assert!(alive(leader.trim()) && alive(descendant.trim()));
+    let stopped = Instant::now();
+    if mode == "cancel" {
+        let c = card(&dir, &task);
+        assert_eq!(
+            human::perform(&dir, &task, "cancel", &["stop"], Some(c.rev)).unwrap(),
+            Response::Ok
+        );
+    }
+    if mode == "kill" {
+        moderator.0.kill().unwrap();
+    }
+    while moderator.0.try_wait().unwrap().is_none() {
+        assert!(
+            stopped.elapsed() < Duration::from_secs(6),
+            "moderator failed to exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Restart immediately: the previous worker may still be observing
+    // EOF. Its task lock must prevent any overlapping execution.
+    let mut replacement = process_mod(&dir, &repo, &task, "1", confine);
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while alive(leader.trim()) || alive(descendant.trim()) {
+        assert!(
+            Instant::now() < deadline,
+            "old workload survived moderator/restart: {mode}/{confine}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    while replacement.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let d = open_driver(&dir, &task).unwrap();
+    let logs = d.store.events(&task, 0).unwrap();
+    assert!(matches!(d.state.state, State::Cancelled | State::Escalated));
+    assert!(d
+        .state
+        .selected_run()
+        .is_none_or(|r| r.status != Some(RunStatus::Passed)));
+    assert_eq!(
+        logs.iter()
+            .filter(|e| matches!(e, Event::RunStarted { .. }))
+            .count(),
+        1
+    );
+    drop(moderator);
+    drop(replacement);
+    std::fs::remove_dir_all(dir).unwrap();
+    true
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn confined_timeout_recovery() {
+    assert!(running_workload_recovery("sandbox", "timeout", true));
+    println!("BBP_ACCEPTANCE PASS timeout");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn confined_cancel_recovery() {
+    assert!(running_workload_recovery("sandbox", "cancel", true));
+    println!("BBP_ACCEPTANCE PASS cancel");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn confined_kill_recovery() {
+    assert!(running_workload_recovery("sandbox", "kill", true));
+    println!("BBP_ACCEPTANCE PASS kill");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_cap_stop_reaps_the_owned_runner_before_returning_its_account() {
+    let dir = tempdir("cap-owned-runner");
+    let (repo, task) = pending_slow_run(
+        &dir,
+        "echo $$ > leader.pid; sleep 30 & echo $! > child.pid; wait",
+    );
+    let leader = dir.join("work/run-1/leader.pid");
+    let descendant = dir.join("work/run-1/child.pid");
+    let log = moderator::log_path(&dir, &task, TurnId(1));
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let leader_wait = leader.clone();
+    let descendant_wait = descendant.clone();
+    let writer = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !leader_wait.exists() || !descendant_wait.exists() {
+            assert!(Instant::now() < deadline, "runner did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(log, "{\"type\":\"assistant\",\"message\":{\"id\":\"a\",\"model\":\"priced-model\",\"usage\":{\"output_tokens\":1000000}}}\n").unwrap();
+    });
+    moderator::write_evidence_marker(&dir, &task, 1.0, "test").unwrap();
+    let mut cfg = config(&dir, &task, repo, Launchers::default(), 20);
+    cfg.cost_cap = Some(cost_cap(1.0));
+    let out = moderator::run_to_stop(&cfg).unwrap();
+    writer.join().unwrap();
+    assert_eq!(out.stop.unwrap().kind, moderator::StopKind::Cap);
+    assert!(out.replay_equals_live);
+    assert!(!alive(std::fs::read_to_string(leader).unwrap().trim()));
+    let descendant = std::fs::read_to_string(descendant).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while alive(descendant.trim()) {
+        assert!(
+            Instant::now() < deadline,
+            "runner descendant survived cleanup"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(open_driver(&dir, &task)
+        .unwrap()
+        .state
+        .selected_run()
+        .is_none_or(|r| r.status != Some(RunStatus::Passed)));
+    let _ = std::fs::remove_dir_all(dir);
 }

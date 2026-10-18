@@ -26,6 +26,9 @@ describe('balance', () => {
     expect(within(rows[0]!).getByTestId('count-leaves')).toHaveTextContent('1')
     expect(within(rows[1]!).getByTestId('count-all')).toHaveTextContent('2') // Floors + Auto
     expect(within(rows[1]!).getByTestId('count-leaves')).toHaveTextContent('2')
+    // Nothing assigned yet: every leaf counts its suggestion, and every one counts its suggested frequency.
+    expect(Number(within(rows[0]!).getByTestId('count-points').textContent)).toBeGreaterThan(0)
+    expect(within(rows[0]!).getByLabelText('Ada by frequency')).toHaveTextContent('Weekly')
     expect(within(rows[0]!).getByLabelText('Ada by suit')).toHaveTextContent('Home 2(1)')
     expect(within(rows[1]!).getByLabelText('Bob by suit')).toHaveTextContent('Out 1')
 

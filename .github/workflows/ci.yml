@@ -1718,6 +1718,56 @@ jobs:
           python3 -I crates/foundation/rusty_pk/scripts/test_verdict_sites.py
           sh crates/foundation/rusty_ct_check/scripts/test_taint_lib.sh
 
+  # Small, unconditional acceptance lane: source/planner filters must not
+  # silently omit this Linux confinement contract, including on merge_group.
+  orch-bbp-acceptance:
+    concurrency:
+      group: ci-${{ github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-orch-bbp-acceptance
+      queue: max
+      cancel-in-progress: false
+    name: Orch BBP confined acceptance (Linux)
+    needs: [plan, fmt]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: orch-bbp-acceptance
+      - name: Build real host and Orch binaries and acceptance tests
+        run: |
+          cargo build --locked -p rusty_orch -p rusty_bbp_host
+          cargo test --locked -p orch-bbp --lib --no-run
+          cargo test --locked -p rusty_bbp_host --test moderator_e2e --no-run
+      - name: Confined lifecycle and timeout/cancel/kill recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BBP_TEST_BIN="$PWD/target/debug/bbp"
+          export ORCH_TEST_BIN="$PWD/target/debug/rusty_orch"
+          python3 .github/scripts/orch_bbp_acceptance.py --output acceptance-results
+      - name: Publish each mode's result
+        if: always()
+        shell: bash
+        run: |
+          if [ -f acceptance-results/summary.md ]; then
+            cat acceptance-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Acceptance did not reach test execution; see build logs.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: orch-bbp-confined-acceptance
+          path: acceptance-results/
+          if-no-files-found: warn
+
   # ---------------------------------------------------------------------------
   required-gate:
     # The one check branch protection requires (ADR-0009). Planned-out jobs
@@ -1737,6 +1787,7 @@ jobs:
       - plan
       - clippy
       - ci-smoke
+      - orch-bbp-acceptance
       - test
       - data-mesh-monitor
       - rusty-term-web

@@ -60,14 +60,11 @@ use std::{
 
 use axum::response::{IntoResponse, Response};
 use http::Request;
-use opentelemetry::{
-    KeyValue,
-    metrics::{Counter, Histogram, Meter, UpDownCounter},
-};
 use rusty_http::StatusCode;
 
+use super::instrument::{Counter, Histogram, Meta, Registry, UpDownCounter};
 use super::labels::{
-    self, HEADER_MCP_METHOD, HEADER_MCP_NAME, KnownNames, Label, decode_header, in_flight_labels,
+    self, HEADER_MCP_METHOD, HEADER_MCP_NAME, KnownNames, decode_header, in_flight_labels,
     request_labels, task_labels,
 };
 pub use super::labels::{Outcome, TaskOutcome};
@@ -83,52 +80,83 @@ const LATENCY_BUCKETS: &[f64] = &[
 
 /// The instruments this crate records to.
 ///
-/// Build one per process and share it — `Arc` it into the layer.
-#[derive(Debug, Clone)]
+/// Built by the pipeline and shared by `Arc`: hand [`OtelGuard::instruments`]
+/// to the [`McpMetricsLayer`]. Recording is atomic adds; the pipeline's push
+/// thread reads the same values and sends them to the collector.
+///
+/// [`OtelGuard::instruments`]: super::OtelGuard::instruments
 pub struct Instruments {
-    requests: Counter<u64>,
-    duration: Histogram<f64>,
-    in_flight: UpDownCounter<i64>,
-    tasks_started: Counter<u64>,
-    tasks_finished: Counter<u64>,
+    requests: Arc<Counter>,
+    duration: Arc<Histogram>,
+    in_flight: Arc<UpDownCounter>,
+    tasks_started: Arc<Counter>,
+    tasks_finished: Arc<Counter>,
+    registry: Arc<Registry>,
+}
+
+impl std::fmt::Debug for Instruments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Instruments").finish_non_exhaustive()
+    }
 }
 
 impl Instruments {
-    /// Define the instruments on `meter`.
-    pub fn new(meter: &Meter) -> Self {
+    /// Define the instruments and register them for export.
+    pub(crate) fn new() -> Self {
+        let registry = Arc::new(Registry::default());
+        let requests = Arc::new(Counter::new(Meta {
+            name: "mcp.server.requests",
+            description: "MCP requests handled, by method and outcome.",
+            unit: "{request}",
+        }));
+        let duration = Arc::new(Histogram::new(
+            Meta {
+                name: "mcp.server.request.duration",
+                description: "Time to handle an MCP request.",
+                unit: "s",
+            },
+            LATENCY_BUCKETS,
+        ));
+        let in_flight = Arc::new(UpDownCounter::new(Meta {
+            name: "mcp.server.requests.in_flight",
+            description: "MCP requests currently being handled.",
+            unit: "{request}",
+        }));
+        let tasks_started = Arc::new(Counter::new(Meta {
+            name: "mcp.server.tasks.started",
+            description: "Tasks spawned under the tasks extension.",
+            unit: "{task}",
+        }));
+        let tasks_finished = Arc::new(Counter::new(Meta {
+            name: "mcp.server.tasks.finished",
+            description: "Tasks that settled, by outcome.",
+            unit: "{task}",
+        }));
+
+        registry.register(&requests);
+        registry.register(&duration);
+        registry.register(&in_flight);
+        registry.register(&tasks_started);
+        registry.register(&tasks_finished);
+
         Self {
-            requests: meter
-                .u64_counter("mcp.server.requests")
-                .with_description("MCP requests handled, by method and outcome.")
-                .with_unit("{request}")
-                .build(),
-            duration: meter
-                .f64_histogram("mcp.server.request.duration")
-                .with_description("Time to handle an MCP request.")
-                .with_unit("s")
-                .with_boundaries(LATENCY_BUCKETS.to_vec())
-                .build(),
-            in_flight: meter
-                .i64_up_down_counter("mcp.server.requests.in_flight")
-                .with_description("MCP requests currently being handled.")
-                .with_unit("{request}")
-                .build(),
-            tasks_started: meter
-                .u64_counter("mcp.server.tasks.started")
-                .with_description("Tasks spawned under the tasks extension.")
-                .with_unit("{task}")
-                .build(),
-            tasks_finished: meter
-                .u64_counter("mcp.server.tasks.finished")
-                .with_description("Tasks that settled, by outcome.")
-                .with_unit("{task}")
-                .build(),
+            requests,
+            duration,
+            in_flight,
+            tasks_started,
+            tasks_finished,
+            registry,
         }
+    }
+
+    /// What the push thread reads.
+    pub(crate) fn registry(&self) -> &Arc<Registry> {
+        &self.registry
     }
 
     /// A request has started. Pair with [`Instruments::request_finished`].
     pub fn request_started(&self, method: &str) {
-        self.in_flight.add(1, &key_values(in_flight_labels(method)));
+        self.in_flight.add(1, &in_flight_labels(method));
     }
 
     /// A request has finished.
@@ -139,12 +167,10 @@ impl Instruments {
         outcome: Outcome,
         seconds: f64,
     ) {
-        self.in_flight
-            .add(-1, &key_values(in_flight_labels(method)));
+        self.in_flight.add(-1, &in_flight_labels(method));
         self.duration
-            .record(seconds, &key_values(labels::duration_labels(method, name)));
-        self.requests
-            .add(1, &key_values(request_labels(method, name, outcome)));
+            .record(seconds, &labels::duration_labels(method, name));
+        self.requests.add(1, &request_labels(method, name, outcome));
     }
 
     /// A task was spawned.
@@ -154,27 +180,16 @@ impl Instruments {
 
     /// A task settled.
     pub fn task_finished(&self, outcome: TaskOutcome) {
-        self.tasks_finished
-            .add(1, &key_values(task_labels(outcome)));
+        self.tasks_finished.add(1, &task_labels(outcome));
     }
 
     /// Several tasks were abandoned at once, as at the end of a drain.
     pub fn tasks_abandoned(&self, count: usize) {
         if count > 0 {
-            self.tasks_finished.add(
-                count as u64,
-                &key_values(task_labels(TaskOutcome::Abandoned)),
-            );
+            self.tasks_finished
+                .add(count as u64, &task_labels(TaskOutcome::Abandoned));
         }
     }
-}
-
-/// Hand the core's labels to the backend.
-fn key_values(labels: Vec<Label>) -> Vec<KeyValue> {
-    labels
-        .into_iter()
-        .map(|(key, value)| KeyValue::new(key, value))
-        .collect()
 }
 
 /// Records request metrics for the service it wraps.
@@ -327,5 +342,82 @@ mod tests {
         assert_eq!(text_header(&request, "mcp-method"), Some("tools/call"));
         assert_eq!(text_header(&request, "mcp-name"), None, "not text");
         assert_eq!(text_header(&request, "absent"), None);
+    }
+
+    use crate::otel::instrument::Data;
+
+    /// Sum of every `in_flight` data point right now.
+    fn in_flight(instruments: &Instruments) -> i64 {
+        instruments
+            .registry()
+            .collect()
+            .iter()
+            .filter(|metric| metric.name == "mcp.server.requests.in_flight")
+            .map(|metric| match &metric.data {
+                Data::Sum { points, .. } => points.iter().map(|(_, value)| value).sum::<i64>(),
+                other => panic!("unexpected aggregation: {other:?}"),
+            })
+            .sum()
+    }
+
+    #[test]
+    fn in_flight_is_one_while_a_request_is_open_and_zero_after() {
+        // A gauge that only ever climbed would pass every other test.
+        let instruments = Instruments::new();
+
+        instruments.request_started("tools/call");
+        assert_eq!(in_flight(&instruments), 1);
+
+        instruments.request_finished("tools/call", None, Outcome::Ok, 0.01);
+        assert_eq!(in_flight(&instruments), 0);
+    }
+
+    #[test]
+    fn a_finished_request_is_counted_and_timed_under_the_same_labels() {
+        let instruments = Instruments::new();
+        instruments.request_started("ping");
+        instruments.request_finished("ping", None, Outcome::Ok, 0.2);
+
+        let metrics = instruments.registry().collect();
+        let counted = metrics
+            .iter()
+            .find(|m| m.name == "mcp.server.requests")
+            .expect("requests");
+        let timed = metrics
+            .iter()
+            .find(|m| m.name == "mcp.server.request.duration")
+            .expect("duration");
+        match (&counted.data, &timed.data) {
+            (
+                Data::Sum { points: counts, .. },
+                Data::Histogram {
+                    points: timings, ..
+                },
+            ) => {
+                assert_eq!(counts[0].1, 1);
+                assert_eq!(timings[0].count, 1);
+                // The outcome is on the counter and not on the histogram.
+                assert_eq!(counts[0].0.len(), timings[0].attributes.len() + 1);
+            }
+            other => panic!("unexpected shapes: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn abandoned_tasks_are_counted_in_bulk_and_zero_is_ignored() {
+        let instruments = Instruments::new();
+        instruments.tasks_abandoned(0);
+        instruments.tasks_abandoned(3);
+
+        let finished = instruments
+            .registry()
+            .collect()
+            .into_iter()
+            .find(|m| m.name == "mcp.server.tasks.finished")
+            .expect("finished");
+        match finished.data {
+            Data::Sum { points, .. } => assert_eq!(points.len(), 1),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

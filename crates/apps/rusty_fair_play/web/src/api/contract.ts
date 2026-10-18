@@ -260,5 +260,28 @@ export function runApiContract(label: string, make: () => Promise<ApiClient>): v
       expect(back.inPlay).toBe(true)
       expect((await api.updateCard(dishes.id, { ownerId: ada.id })).ownerId).toBe(ada.id)
     })
+
+    it('assigns points on a Fibonacci scale over a suggestion, and a frequency; both are part of the version', async () => {
+      const { api } = await setup()
+      const dishes = (await api.snapshot()).cards.find((x) => x.number === 3)!
+      expect(dishes).toMatchObject({ points: null, frequency: null })
+      expect([1, 2, 3, 5, 8]).toContain(dishes.suggestedPoints)
+      expect(dishes.suggestedFrequency).toBe('Daily') // "Dishwasher run and unloaded daily"
+
+      const set = await api.updateCard(dishes.id, { points: 5, frequency: 'Weekly' })
+      expect(set).toMatchObject({ points: 5, frequency: 'Weekly', suggestedPoints: dishes.suggestedPoints })
+      expect(set.etag).not.toBe(dishes.etag)
+      expect(await card(api, dishes.id)).toMatchObject({ points: 5, frequency: 'Weekly' })
+
+      await expect(api.updateCard(dishes.id, { points: 4 as never })).rejects.toBeInstanceOf(InvalidError)
+      await expect(api.updateCard(dishes.id, { frequency: 'Hourly' as never })).rejects.toBeInstanceOf(InvalidError)
+      expect(await card(api, dishes.id)).toMatchObject({ points: 5, frequency: 'Weekly' }) // refused, so unchanged
+
+      const kept = await api.updateCard(dishes.id, { frequency: null }) // absent keeps, null clears
+      expect(kept).toMatchObject({ points: 5, frequency: null })
+      const cleared = await api.updateCard(dishes.id, { points: null })
+      expect(cleared).toMatchObject({ points: null, frequency: null })
+      expect(cleared.etag).toBe(dishes.etag)
+    })
   })
 }

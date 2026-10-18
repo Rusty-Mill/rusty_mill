@@ -41,6 +41,8 @@ export interface DataState {
   cards: Card[]
   index: CardIndex
   toasts: Toast[]
+  /** Marks saves belong to the store so leaving and reopening a card retains its lock. */
+  pendingMarks: string[]
 }
 
 export interface DataActions {
@@ -54,6 +56,8 @@ export interface DataActions {
 
   /** `base`: the card's `etag` as the edit was started from, not as the store has it now. */
   updateCard(id: string, patch: CardPatch, base: string): Promise<Card>
+  /** Save marks once per card at a time; release its lock on success or failure. */
+  updateMarks(id: string, patch: Pick<CardPatch, 'points' | 'frequency'>, base: string): Promise<void>
   createCard(input: NewCard): Promise<Card>
   split(id: string, input: SplitInput): Promise<SplitResult>
   reset(id: string): Promise<Card>
@@ -146,6 +150,7 @@ export function createDataStore({ api }: DataOptions): DataStore {
       cards: [],
       index: indexCards([]),
       toasts: [],
+      pendingMarks: [],
 
       async boot() {
         set({ status: 'loading', error: null })
@@ -204,6 +209,15 @@ export function createDataStore({ api }: DataOptions): DataStore {
           },
           hasParent(id) || patch.parentCardId != null,
         ),
+      async updateMarks(id, patch, base) {
+        if (get().pendingMarks.includes(id)) return
+        set((s) => ({ pendingMarks: [...s.pendingMarks, id] }))
+        try {
+          await get().updateCard(id, patch, base)
+        } finally {
+          set((s) => ({ pendingMarks: s.pendingMarks.filter((pending) => pending !== id) }))
+        }
+      },
       createCard: (input) =>
         write(
           async () => {

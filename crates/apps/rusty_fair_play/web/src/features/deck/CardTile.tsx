@@ -2,7 +2,7 @@ import { Check } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import type { Card, Person } from '@/api/types'
 import { PATHS } from '@/app/paths'
-import { OwnerChip, ownerOf, SplitBadge, StateBadge, suitText } from '@/components/badges'
+import { OwnerChip, ownerOf, PointsBadge, SplitBadge, StateBadge, suitText } from '@/components/badges'
 
 interface Props {
   card: Card
@@ -40,6 +40,7 @@ export function CardTile({ card, people, childCount, selected, choosing = false,
             <OwnerChip owner={ownerOf(card, people)} />
             <StateBadge state={card.state} />
             <SplitBadge count={childCount} />
+            <PointsBadge card={card} />
           </>
         ) : (
           <span className="rounded-full border border-dashed border-grey/60 px-1.5 text-xs text-grey">set aside</span>

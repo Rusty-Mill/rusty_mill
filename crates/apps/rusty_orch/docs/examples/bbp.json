@@ -1,0 +1,32 @@
+{
+  "binary": "bbp",
+  "dir": "/srv/orch/bbp",
+  "repo": "/srv/source/project",
+  "work": "/srv/orch/work",
+  "profiles": "/srv/orch/profiles.json",
+  "pool": {
+    "builder": {"vendor": "codex", "program": "codex-bbp-harness", "args": ["{mcp_config}"]},
+    "judge": {"vendor": "claude", "program": "claude-bbp-harness", "args": ["{mcp_config}"]}
+  },
+  "roster": [
+    {
+      "id": "maker", "turn_order": 0,
+      "post": ["Ask", "Answer", "Propose", "Finding", "Verdict", "RequestDecision", "Pass"],
+      "write": ["Spec", "Diff", "Candidate"],
+      "read_artifacts": ["Brief", "Spec", "Diff", "Candidate", "TestReport"],
+      "read_messages": "All", "verdict_at": ["Test"], "final_decision": false, "consultable": true
+    },
+    {
+      "id": "auditor", "turn_order": 1,
+      "post": ["Answer", "Finding", "Verdict", "Pass"], "write": [],
+      "read_artifacts": ["Brief", "Spec", "Diff", "Candidate", "TestReport"],
+      "read_messages": "Scoped", "verdict_at": ["Review"], "final_decision": true, "consultable": false
+    }
+  ],
+  "assignments": {
+    "maker": {"agent": "builder", "builtin_tools": false},
+    "auditor": {"agent": "judge", "builtin_tools": false}
+  },
+  "live_turns": 1,
+  "max_wall_secs": 3600
+}

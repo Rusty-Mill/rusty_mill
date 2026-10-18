@@ -91,13 +91,14 @@ fn ended_json(e: &Ended) -> Value {
     let mut m = Map::new();
     let kind = match e {
         Ended::Finished => "finished",
+        Ended::Waiting(_) => "waiting",
         Ended::Blocked(_) => "blocked",
         Ended::Failed(_) => "failed",
         Ended::WallClock(_) => "wall_clock",
     };
     m.insert("kind".into(), kind.into());
     match e {
-        Ended::Blocked(ids) => {
+        Ended::Blocked(ids) | Ended::Waiting(ids) => {
             m.insert(
                 "tasks".into(),
                 ids.iter()
