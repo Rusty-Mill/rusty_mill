@@ -433,6 +433,32 @@ fn is_shell(program: &str) -> bool {
     matches!(name, "sh" | "bash" | "dash" | "zsh" | "ksh")
 }
 
+/// Where `-c` is in a shell launcher's arguments, when it is the shell's own:
+/// every argument before it is an option. A non-option argument before it is a
+/// script file, which the shell runs with `-c` and the rest as that script's
+/// arguments (`sh ./wrapper.sh -c 'claude ...'`), so the line after `-c` is
+/// never what runs. `Ok(None)` when there is no `-c` at all.
+fn shell_dash_c(l: &Launcher) -> Result<Option<usize>, String> {
+    if !is_shell(&l.program) {
+        return Ok(None);
+    }
+    for (i, a) in l.args.iter().enumerate() {
+        match a.as_str() {
+            "-c" => return Ok(Some(i)),
+            // An option, or a cluster of them (`-eu`), but not `-` / `--`, and
+            // not one that takes a value (`-o errexit` reads `errexit` as a
+            // script file below).
+            o if o.starts_with('-') && o.len() > 1 && o != "--" => {}
+            other => {
+                return Err(format!(
+                    "{other:?} comes before `-c` and would run as a script file, not as the line after `-c`"
+                ))
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// The `claude` commands a launcher runs, each as its arguments. A direct
 /// launcher is the program `claude` itself, by that name; anything else is an
 /// error, since what it runs cannot be shown to pin or to print what the cap
@@ -444,12 +470,8 @@ fn claude_commands(l: &Launcher) -> Result<Vec<Vec<Arg>>, String> {
         dynamic: false,
         redirect: false,
     };
-    let Some(i) = l
-        .args
-        .iter()
-        .position(|a| a == "-c")
-        .filter(|_| is_shell(&l.program))
-    else {
+    let shell = is_shell(&l.program);
+    let Some(i) = shell_dash_c(l)?.filter(|_| shell) else {
         if l.program != "claude" {
             return Err(format!(
                 "the program is {:?}, not `claude`: only a direct `claude` or `sh -c` launcher can be read",
