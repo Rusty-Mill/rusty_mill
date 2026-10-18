@@ -60,19 +60,27 @@ if ($ScoreOnly) {
     }
 }
 
-if (-not (Test-Path $verify)) {
+if (-not (Test-Path -LiteralPath $verify -PathType Leaf)) {
     Push-Location $root
     try {
         cargo build --release -p rb_verify_cli --color never
+        if ($LASTEXITCODE -ne 0) { throw "cargo build rb_verify_cli failed (exit $LASTEXITCODE)" }
         # In the monorepo the binary is in the workspace's target directory, not next to these tools.
-        $targetDir = (cargo metadata --format-version 1 --no-deps 2>$null | ConvertFrom-Json).target_directory
+        $metadataJson = cargo metadata --format-version 1 --no-deps
+        if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed (exit $LASTEXITCODE)" }
+        $targetDir = ($metadataJson -join "`n" | ConvertFrom-Json -ErrorAction Stop).target_directory
+        if ($targetDir -isnot [string] -or [string]::IsNullOrWhiteSpace($targetDir)) {
+            throw "cargo metadata did not return a valid target_directory"
+        }
     } finally {
         Pop-Location
     }
-    $built = if ($targetDir) { Join-Path (Join-Path $targetDir "release") "rb-verify.exe" } else { "" }
-    if ($built -and (Test-Path $built)) { $verify = $built }
+    $verify = Join-Path (Join-Path $targetDir "release") "rb-verify.exe"
+    if (-not (Test-Path -LiteralPath $verify -PathType Leaf)) {
+        throw "cargo build succeeded but rb-verify executable is missing: $verify"
+    }
 }
-# The Python tools (score_dir.py, fuzz_report.py, ...) read this instead of guessing the path.
+# Available to Python tools invoked later in this PowerShell process (not a parent of -File).
 $env:RB_VERIFY = $verify
 
 # Frame count and largest gap between consecutive timestamps of a capture.

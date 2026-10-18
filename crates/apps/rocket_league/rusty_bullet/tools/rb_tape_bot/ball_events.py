@@ -3,13 +3,13 @@
     python -I tools/rb_tape_bot/ball_events.py replays/batch_<stamp> [name-prefix] [threshold]
 
 For each capture runs `rb-verify --seed-first-frame --self-onestep` (the port stepped once
-import os
 from each recorded frame, so a row's error is that tick's model error alone), clusters the
 ticks whose ball velocity error passes `threshold` (default 5 uu/s) into events, and prints the
 worst tick of each event with the car-ball distance, the ball's recorded speed change and the
 car's input. Events are sorted worst first across the batch; a summary gives how many
 events pass each size.
 """
+import os
 import json
 import pathlib
 import re
