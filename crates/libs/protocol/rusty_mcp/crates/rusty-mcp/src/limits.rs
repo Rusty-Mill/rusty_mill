@@ -59,8 +59,10 @@ use std::{
     time::Duration,
 };
 
-use axum::response::{IntoResponse, Response};
-use http::{Request, StatusCode, header::RETRY_AFTER};
+use http::{
+    HeaderValue, Request, Response, StatusCode,
+    header::{CONTENT_TYPE, RETRY_AFTER},
+};
 
 use crate::admission::{Admission, Rejection};
 
@@ -141,16 +143,19 @@ pub struct Limited<S> {
     timeout: Option<Duration>,
 }
 
-impl<S, ReqBody> tower_service::Service<Request<ReqBody>> for Limited<S>
+impl<S, ReqBody, ResBody> tower_service::Service<Request<ReqBody>> for Limited<S>
 where
-    S: tower_service::Service<Request<ReqBody>, Error = Infallible> + Clone + Send + 'static,
-    S::Response: IntoResponse,
+    S: tower_service::Service<Request<ReqBody>, Response = Response<ResBody>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
     S::Future: Send + 'static,
     ReqBody: Send + 'static,
+    ResBody: From<String> + Send + 'static,
 {
-    type Response = Response;
+    type Response = Response<ResBody>;
     type Error = Infallible;
-    type Future = Pin<Box<dyn Future<Output = Result<Response, Infallible>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<ResBody>, Infallible>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         // Deliberately *not* where the limit is applied. Returning `Pending`
@@ -184,11 +189,11 @@ where
             let call = inner.call(request);
 
             let Some(timeout) = timeout else {
-                return Ok(call.await?.into_response());
+                return call.await;
             };
 
             match tokio::time::timeout(timeout, call).await {
-                Ok(response) => Ok(response?.into_response()),
+                Ok(response) => response,
                 Err(_) => {
                     tracing::warn!(
                         timeout_ms = timeout.as_millis() as u64,
@@ -203,10 +208,17 @@ where
     }
 }
 
-fn respond(rejection: Rejection) -> Response {
+fn respond<B: From<String>>(rejection: Rejection) -> Response<B> {
     let status = StatusCode::from_u16(rejection.status.as_u16())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut response = (status, rejection.body).into_response();
+    let mut response = Response::new(B::from(rejection.body.to_owned()));
+    *response.status_mut() = status;
+    // What axum's string responses sent, which clients of the 503 and 504 saw
+    // before the body became generic.
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
     if let Some(secs) = rejection.retry_after_secs {
         response.headers_mut().insert(RETRY_AFTER, secs.into());
     }
@@ -225,9 +237,9 @@ mod tests {
     struct Slow(Duration);
 
     impl<B: Send + 'static> tower_service::Service<Request<B>> for Slow {
-        type Response = Response;
+        type Response = Response<String>;
         type Error = Infallible;
-        type Future = Pin<Box<dyn Future<Output = Result<Response, Infallible>> + Send>>;
+        type Future = Pin<Box<dyn Future<Output = Result<Response<String>, Infallible>> + Send>>;
 
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
@@ -237,15 +249,25 @@ mod tests {
             let delay = self.0;
             Box::pin(async move {
                 tokio::time::sleep(delay).await;
-                Ok(StatusCode::OK.into_response())
+                Ok(Response::new(String::new()))
             })
         }
     }
 
-    fn request() -> Request<axum::body::Body> {
-        Request::builder()
-            .body(axum::body::Body::empty())
-            .expect("request")
+    fn request() -> Request<String> {
+        Request::new(String::new())
+    }
+
+    /// A refusal as clients see it: plain text with the reason in the body.
+    fn assert_plain_text(response: &Response<String>, body: &str) {
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        assert_eq!(response.body(), body);
     }
 
     #[tokio::test]
@@ -270,6 +292,7 @@ mod tests {
         let waited = started.elapsed();
 
         assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_plain_text(&shed, Rejection::OVERLOADED.body);
         assert_eq!(
             shed.headers()
                 .get(RETRY_AFTER)
@@ -335,6 +358,8 @@ mod tests {
 
         let response = service.call(request()).await.expect("infallible");
         assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_plain_text(&response, Rejection::TIMED_OUT.body);
+        assert!(response.headers().get(RETRY_AFTER).is_none());
     }
 
     #[tokio::test]
