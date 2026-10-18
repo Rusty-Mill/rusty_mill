@@ -318,7 +318,7 @@ Raw token sums mislead because the four counts are priced very differently, and 
 
 ### Pinning the run to a commit
 
-The run uses a commit that contains the verdict-binding fix (#727). `min_commit` in the criteria file names the merge commit of that fix; `bbp pairs` refuses a criteria file with no `min_commit`, a checkout whose HEAD does not contain it, or a working tree that is not clean, and records `git_sha` (HEAD) and `criteria_sha256` in its output. It pins the checkout the manifest names, and every run's `bbp mod` output records the commit its binary was built from (`bbp_build_sha`, recomputed on every build, `-dirty` or `unknown` when not clean); `bbp pairs` refuses a run whose build is not that clean HEAD.
+The run uses a commit that contains the verdict-binding fix (#727). `min_commit` in the criteria file names the merge commit that contains both that fix and the run tooling (#763): `735f1b25`; `bbp pairs` refuses a criteria file with no `min_commit`, a checkout whose HEAD does not contain it, or a working tree that is not clean, and records `git_sha` (HEAD) and `criteria_sha256` in its output. It pins the checkout the manifest names, and every run's `bbp mod` output records the commit its binary was built from (`bbp_build_sha`, recomputed on every build, `-dirty` or `unknown` when not clean); `bbp pairs` refuses a run whose build is not that clean HEAD.
 
 ### Pilot reconciliation
 
