@@ -19,7 +19,7 @@ use std::{
         mpsc::{self, RecvTimeoutError, Sender},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rusty_json::Value;
@@ -30,7 +30,8 @@ use super::redact;
 pub(crate) struct Settings {
     /// The full URL of the signal's endpoint (`/v1/metrics`, `/v1/traces`).
     pub(crate) endpoint: String,
-    /// How long the thread waits for an item before it sends what is pending.
+    /// The longest anything pending waits: the thread sends at least this often,
+    /// however steadily items arrive.
     pub(crate) interval: Duration,
     /// How long one POST may take before it is abandoned.
     pub(crate) request_timeout: Duration,
@@ -228,15 +229,26 @@ fn run<I: Send + 'static>(
         endpoint: settings.endpoint.clone(),
     };
 
+    // An absolute deadline, not a timeout restarted per message: with one item a
+    // second and a five-second interval, a fresh timeout would never expire.
+    let mut deadline = Instant::now() + settings.interval;
     let ack = loop {
-        match inbox.recv_timeout(settings.interval) {
-            Err(RecvTimeoutError::Timeout) => job.send_pending(&post),
+        match inbox.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Err(RecvTimeoutError::Timeout) => {
+                job.send_pending(&post);
+                deadline = Instant::now() + settings.interval;
+            }
             Ok(Message::Item(item)) => {
                 waiting.fetch_sub(1, Ordering::AcqRel);
                 job.accept(item, &post);
+                if Instant::now() >= deadline {
+                    job.send_pending(&post);
+                    deadline = Instant::now() + settings.interval;
+                }
             }
             Ok(Message::Flush(ack)) => {
                 job.send_pending(&post);
+                deadline = Instant::now() + settings.interval;
                 let _ = ack.send(());
             }
             Ok(Message::Shutdown(ack)) => {
@@ -332,6 +344,36 @@ mod tests {
         // Let the stuck work finish; the thread then exits on its own.
         release.wait();
         drop(worker);
+    }
+
+    #[test]
+    fn a_steady_trickle_is_still_sent_on_the_interval() {
+        // Items arrive faster than the interval and never fill a batch, so the
+        // thread is never idle for a whole interval. A timeout restarted per
+        // message would never fire; an absolute deadline does.
+        let job = Counting::default();
+        let sent = Arc::clone(&job.sent);
+        let worker = Worker::<u32>::spawn(
+            Settings {
+                interval: Duration::from_millis(100),
+                ..settings(64)
+            },
+            job,
+        )
+        .expect("spawn");
+
+        for n in 0..40 {
+            assert!(worker.submit(n));
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        // About 800 ms of traffic at a 100 ms interval; no flush was asked for.
+        assert!(
+            sent.load(Ordering::SeqCst) >= 3,
+            "sent {} times without ever being idle",
+            sent.load(Ordering::SeqCst)
+        );
+        assert!(worker.shutdown(Duration::from_secs(5)));
     }
 
     #[test]
