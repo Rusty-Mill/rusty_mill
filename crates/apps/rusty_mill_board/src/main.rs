@@ -24,6 +24,7 @@ use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::backup::Backups;
 use rusty_mill_board::board::{Board, Roles};
+use rusty_mill_board::drain::{InFlight, serve_until_drained};
 use rusty_mill_board::mcp;
 use rusty_mill_board::mmdb::MmdbStore;
 use rusty_mill_board::projects::Projects;
@@ -232,7 +233,8 @@ fn run(cli: Cli) -> Result<(), String> {
         syncer.start(config, &file.repo, Duration::from_secs(file.interval_secs))?;
     }
 
-    let server = mcp::server(board.clone()).map_err(|e| e.to_string())?;
+    let in_flight: Arc<InFlight> = Arc::default();
+    let server = mcp::server_with(board.clone(), in_flight.clone()).map_err(|e| e.to_string())?;
     let Some(addr) = cli.http else {
         let _settings = Settings::new(board, files, None, syncer, github);
         return serve_stdio(server).map_err(|e| format!("stdio failed: {e}"));
@@ -273,8 +275,8 @@ fn run(cli: Cli) -> Result<(), String> {
         cli.allowed_hosts,
         auth,
     )
-    .with_settings(settings.clone());
-    let in_flight = web.in_flight();
+    .with_settings(settings.clone())
+    .with_in_flight(in_flight.clone());
     let http = rusty_serve::Server::bind_shared(addr, web)
         .map_err(|e| format!("cannot bind {addr}: {e}"))?;
     if let Some(dir) = cli.backup_dir {
@@ -293,16 +295,20 @@ fn run(cli: Cli) -> Result<(), String> {
     }
     stop_on_signal(http.shutdown_handle().map_err(|e| e.to_string())?)?;
     tracing::info!(%addr, "Mill Board listening");
-    let served = http.run().map_err(|e| format!("HTTP server failed: {e}"));
-    // The accept loop has ended. Let the requests and the backup in progress finish, then exit:
-    // a commit whose reply is cut off is durable but looks failed to its caller.
-    if !in_flight.close_and_wait(DRAIN) {
-        tracing::warn!(
-            secs = DRAIN.as_secs(),
-            "work still running at the deadline; stopping it"
-        );
+    // The accept loop ends on a signal. Then the requests being answered, the tool calls running
+    // and a backup under way get one bounded wait: a commit whose reply is cut off is durable but
+    // looks failed to its caller, who may then repeat it.
+    match serve_until_drained(http, &in_flight, DRAIN) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            tracing::warn!(
+                secs = DRAIN.as_secs(),
+                "work still running at the deadline; stopping it"
+            );
+            Ok(())
+        }
+        Err(e) => Err(format!("HTTP server failed: {e}")),
     }
-    served
 }
 
 fn main() -> ExitCode {

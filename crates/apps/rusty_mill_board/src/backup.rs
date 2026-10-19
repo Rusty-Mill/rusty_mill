@@ -13,7 +13,10 @@ use std::time::Duration;
 use crate::api::Shared;
 use crate::board::system_ms;
 use crate::drain::InFlight;
+use crate::mmdb::MmdbStore;
+use crate::projects::Projects;
 use crate::settings::Settings;
+use crate::store::Store;
 
 const PREFIX: &str = "board-";
 /// A backup under construction: never mistaken for a finished one, and swept up if a run died.
@@ -46,6 +49,48 @@ fn sync_dir(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Open the copied store as a restore would, in a scratch directory (opening folds the append log,
+/// and the copy itself must stay as it was written), and check that every card belongs to a
+/// project of the copied registry. A backup that does not open, or that holds a card whose
+/// project the copied settings lack, is no backup.
+fn verify(store: &Path, settings: &Path, scratch: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(scratch).map_err(|e| text(scratch, e))?;
+    let result = check_restored(store, settings, scratch);
+    let _ = std::fs::remove_dir_all(scratch);
+    result
+}
+
+fn check_restored(store: &Path, settings: &Path, scratch: &Path) -> Result<(), String> {
+    let mut main = None;
+    for entry in std::fs::read_dir(store).map_err(|e| text(store, e))? {
+        let from = entry.map_err(|e| text(store, e))?.path();
+        let name = from
+            .file_name()
+            .ok_or_else(|| text(&from, "no file name"))?;
+        std::fs::copy(&from, scratch.join(name)).map_err(|e| text(&from, e))?;
+        let name = name.to_string_lossy();
+        if !name.ends_with(".records") && !name.ends_with(".inserts") {
+            main = Some(scratch.join(&*name));
+        }
+    }
+    let main = main.ok_or_else(|| text(store, "no store file was copied"))?;
+    let registry = settings.join("projects.json");
+    let projects = if registry.exists() {
+        Projects::load(&registry)?
+    } else {
+        Projects::default()
+    };
+    let restored = MmdbStore::open(&main).map_err(|e| format!("the copy does not open: {e}"))?;
+    let cards = restored.list().map_err(|e| e.to_string())?;
+    match cards.iter().find(|c| !projects.contains(&c.project)) {
+        Some(card) => Err(format!(
+            "the copy holds card {} in project {:?}, which the copied settings lack",
+            card.id, card.project
+        )),
+        None => Ok(()),
+    }
+}
+
 impl Backups {
     /// Keep the newest `keep` (at least one) backups in `dir`.
     pub fn new(dir: PathBuf, keep: usize) -> Self {
@@ -66,6 +111,21 @@ impl Backups {
     /// # Errors
     /// A message naming the file or step that failed; the previous backups are untouched.
     pub fn run(&self, board: &Shared, settings: &Settings) -> Result<PathBuf, String> {
+        self.run_with(board, settings, &mut || {})
+    }
+
+    /// [`Backups::run`], calling `after_store` once the store is copied, with the settings lock
+    /// still held. For tests that need a change to arrive between the two copies.
+    ///
+    /// # Errors
+    /// See [`Backups::run`].
+    #[doc(hidden)]
+    pub fn run_with(
+        &self,
+        board: &Shared,
+        settings: &Settings,
+        after_store: &mut dyn FnMut(),
+    ) -> Result<PathBuf, String> {
         board
             .health()
             .map_err(|e| format!("not taking a backup: {e}"))?;
@@ -77,7 +137,7 @@ impl Backups {
             self.dir.join(format!("{TEMP_PREFIX}{stamp}")),
             self.dir.join(format!("{PREFIX}{stamp}")),
         );
-        self.build(board, settings, &tmp)
+        self.build(board, settings, &tmp, after_store)
             .inspect_err(|_| {
                 let _ = std::fs::remove_dir_all(&tmp);
             })
@@ -90,16 +150,27 @@ impl Backups {
         Ok(done)
     }
 
-    /// Fill `tmp` and make it durable. The store goes first: a project with cards cannot be removed,
-    /// so settings read after the store still name every project its cards belong to. The two never
-    /// hold their locks together (the settings lock is taken and released, then the commit lock).
-    fn build(&self, board: &Shared, settings: &Settings, tmp: &Path) -> Result<(), String> {
+    /// Fill `tmp`, check it, and make it durable. The settings lock is held across the copy of
+    /// the store and of the settings, in that order (settings lock, then the store's commit lock,
+    /// as every settings change takes them): no project can be removed, or an agent's role
+    /// changed, between the cards being copied and the registry they belong to.
+    fn build(
+        &self,
+        board: &Shared,
+        settings: &Settings,
+        tmp: &Path,
+        after_store: &mut dyn FnMut(),
+    ) -> Result<(), String> {
         let (store, set) = (tmp.join("store"), tmp.join("settings"));
         for dir in [&store, &set] {
             std::fs::create_dir_all(dir).map_err(|e| text(dir, e))?;
         }
-        board.backup(&store).map_err(|e| e.to_string())?;
-        settings.snapshot(&set)?;
+        settings.snapshot_with(&set, &mut || {
+            board.backup(&store).map_err(|e| e.to_string())?;
+            after_store();
+            Ok(())
+        })?;
+        verify(&store, &set, &tmp.join("verify"))?;
         for dir in [&store, &set, tmp] {
             sync_dir(dir)?;
         }

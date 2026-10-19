@@ -64,6 +64,26 @@ impl Drop for Running<'_> {
     }
 }
 
+/// Serve until [`rusty_serve::ShutdownHandle::shutdown`], then spend at most `within` letting the work
+/// finish: first the requests being answered (until their last byte is written), then whatever
+/// `flight` still counts (MCP calls running on detached workers, a backup). `Ok(true)` if all of it
+/// finished; `Ok(false)` if the deadline ended it. One deadline for both, so a stop is bounded.
+///
+/// # Errors
+/// If the listener fails, after the work has been given its time.
+pub fn serve_until_drained(
+    server: rusty_serve::Server,
+    flight: &InFlight,
+    within: Duration,
+) -> std::io::Result<bool> {
+    let handle = server.shutdown_handle()?;
+    let served = server.run();
+    let end = Instant::now() + within;
+    let answered = handle.wait_idle(within);
+    let finished = flight.close_and_wait(end.saturating_duration_since(Instant::now()));
+    served.map(|()| answered && finished)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

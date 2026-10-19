@@ -48,6 +48,18 @@ fn backups_in(dir: &Path) -> Vec<String> {
     names
 }
 
+/// Wait until a settings change is waiting for the lock the caller holds.
+fn wait_for_waiter(settings: &Settings) {
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while settings.waiting() == 0 {
+        assert!(
+            std::time::Instant::now() < end,
+            "no settings change reached the lock: it did not wait for the copy"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 fn no_settings(board: &Arc<Shared>) -> Settings {
     Settings::read_only(Arc::clone(board))
 }
@@ -93,27 +105,27 @@ fn a_backup_opens_as_the_board_stood_and_old_ones_are_pruned() {
 #[test]
 fn a_backup_keeps_settings_that_share_a_file_name_with_each_other_and_with_the_store() {
     let dir = dir("collide");
-    let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
-    for d in [&a, &b, &c] {
+    let (a, b, c, d) = (dir.join("a"), dir.join("b"), dir.join("c"), dir.join("d"));
+    for d in [&a, &b, &c, &d] {
         std::fs::create_dir_all(d).expect("dir");
     }
     let board = board_at(&c.join("board.mmap"));
     add_cards(&board, 2);
-    // Identities and roles are both `config.json`; the projects file is named like the store.
+    // Identities and roles are both `config.json`; the projects file is `board.mmap`, like the store.
     let roles = Roles::default();
     std::fs::write(
         b.join("config.json"),
         serde_json::to_string(&roles).expect("roles"),
     )
     .expect("roles file");
-    std::fs::write(c.join("projects"), "{}").expect("projects file");
+    std::fs::write(d.join("board.mmap"), "{}").expect("projects file");
     let (creds, _) =
         open_credentials(&a.join("config.json"), &roles, &Projects::default()).expect("creds");
     drop(creds);
     let files = Files {
         identities: Some(a.join("config.json")),
         roles: Some(b.join("config.json")),
-        projects: Some(c.join("projects")),
+        projects: Some(d.join("board.mmap")),
         github: None,
     };
     let settings = Settings::new(board.clone(), files, None, Syncer::new(board.clone()), None);
@@ -200,7 +212,7 @@ fn a_backup_never_sees_a_settings_change_half_way() {
     let out = dir.join("copy");
     std::fs::create_dir_all(&out).expect("dir");
     settings
-        .snapshot_between(&out, &mut || {
+        .snapshot_between(&out, &mut || Ok(()), &mut || {
             if change.is_some() {
                 return;
             }
@@ -223,10 +235,10 @@ fn a_backup_never_sees_a_settings_change_half_way() {
                 kept.as_object_mut().expect("map").remove("old");
                 run("settings_roles_set", json!({"roles": kept}));
             }));
-            std::thread::sleep(Duration::from_millis(300));
+            wait_for_waiter(&settings);
             assert!(
                 !change.as_ref().is_some_and(|c| c.is_finished()),
-                "the change must wait for the copy, not slip in between its files"
+                "the change reached the lock and must wait for the copy, not slip in between its files"
             );
         })
         .expect("a consistent set that loads");
@@ -242,6 +254,135 @@ fn a_backup_never_sees_a_settings_change_half_way() {
         !std::fs::read_to_string(again.join("roles.json"))
             .expect("roles")
             .contains("\"old\"")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The copy of the cards and the copy of the registry they belong to are one moment: a project
+/// emptied and removed between the two copies would leave a card in a project the backup lacks.
+#[test]
+fn a_project_removed_between_the_two_copies_cannot_leave_a_card_without_its_project() {
+    let dir = dir("race");
+    let projects_file = dir.join("projects.json");
+    std::fs::write(
+        &projects_file,
+        json!({"alpha": ["crates/apps/alpha"], "beta": ["crates/apps/beta"]}).to_string(),
+    )
+    .expect("projects");
+    let roles = Roles::default();
+    let projects = Projects::load(&projects_file).expect("projects");
+    let board: Arc<Shared> = Arc::new(
+        Board::new(
+            Box::new(MmdbStore::open(&dir.join("board.mmap")).expect("open")) as Box<dyn Store>,
+            roles.clone(),
+        )
+        .with_projects(projects.clone()),
+    );
+    let files = Files::in_dir(&dir);
+    let (creds, token) = open_credentials(
+        files.identities.as_deref().expect("path"),
+        &roles,
+        &projects,
+    )
+    .expect("creds");
+    let creds = creds.shared();
+    let admin: Identity = creds
+        .read()
+        .expect("lock")
+        .identify(&token.expect("first admin"))
+        .cloned()
+        .expect("admin");
+    let settings = Arc::new(Settings::new(
+        board.clone(),
+        files,
+        Some(creds),
+        Syncer::new(board.clone()),
+        None,
+    ));
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board
+        .add_in(&human, "alpha", "t", "", vec![])
+        .expect("card");
+
+    let mut removal = None;
+    let done = Backups::new(dir.join("backups"), 3)
+        .run_with(&board, &settings, &mut || {
+            // The store is copied (the card is in alpha). Now move the card out and try to drop alpha.
+            board.assign(card.id, "beta", &human).expect("assign");
+            let (s, admin) = (Arc::clone(&settings), admin.clone());
+            removal = Some(std::thread::spawn(move || {
+                s.call(
+                    "settings_projects_set",
+                    Some(&admin),
+                    json!({"repos": {"default": {"beta": ["crates/apps/beta"]}}}),
+                )
+                .expect("a settings operation")
+            }));
+            wait_for_waiter(&settings);
+        })
+        .expect("the backup holds together");
+    removal
+        .expect("the removal ran")
+        .join()
+        .expect("removal")
+        .expect("it is allowed once the backup is done");
+
+    // The backup is the board as it stood: the card in alpha, with alpha in the registry.
+    let copied =
+        std::fs::read_to_string(done.join("settings").join("projects.json")).expect("projects");
+    assert!(copied.contains("alpha"), "{copied}");
+    let restored = board_at(&done.join("store").join("board.mmap"));
+    assert_eq!(restored.get(card.id).expect("card").project, "alpha");
+    // Live, the removal took effect after the backup.
+    assert_eq!(board.get(card.id).expect("card").project, "beta");
+    assert!(
+        !std::fs::read_to_string(&projects_file)
+            .expect("live")
+            .contains("alpha")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A backup is checked by opening it: cards against the copied registry.
+#[test]
+fn a_backup_whose_cards_do_not_fit_its_settings_is_refused_and_not_published() {
+    let dir = dir("misfit");
+    let projects_file = dir.join("projects.json");
+    // The board serves alpha and beta; the file on disk (the copy's source) knows only beta.
+    std::fs::write(
+        &projects_file,
+        json!({"beta": ["crates/apps/beta"]}).to_string(),
+    )
+    .expect("file");
+    let served = Projects::parse(
+        &json!({"alpha": ["crates/apps/alpha"], "beta": ["crates/apps/beta"]}).to_string(),
+    )
+    .expect("projects");
+    let board: Arc<Shared> = Arc::new(
+        Board::new(
+            Box::new(MmdbStore::open(&dir.join("board.mmap")).expect("open")) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(served),
+    );
+    let human = board.roles().actor("nano", "human").expect("role");
+    board
+        .add_in(&human, "alpha", "t", "", vec![])
+        .expect("card");
+    let files = Files {
+        projects: Some(projects_file),
+        ..Files::default()
+    };
+    let settings = Settings::new(board.clone(), files, None, Syncer::new(board.clone()), None);
+
+    let out = dir.join("backups");
+    let why = Backups::new(out.clone(), 3)
+        .run(&board, &settings)
+        .expect_err("a card without its project");
+    assert!(why.contains("which the copied settings lack"), "{why}");
+    assert!(
+        backups_in(&out).is_empty(),
+        "nothing published, no leftovers"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

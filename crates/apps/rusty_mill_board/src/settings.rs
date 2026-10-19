@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -271,6 +272,8 @@ pub struct Settings {
     github: Mutex<Option<GithubFile>>,
     /// One change at a time.
     changing: Mutex<()>,
+    /// Changes waiting for `changing`, so a test can tell one has reached the lock.
+    waiting: AtomicUsize,
 }
 
 impl Settings {
@@ -290,7 +293,14 @@ impl Settings {
             syncer,
             github: Mutex::new(github),
             changing: Mutex::new(()),
+            waiting: AtomicUsize::new(0),
         }
+    }
+
+    /// Changes now waiting for another to finish.
+    #[doc(hidden)]
+    pub fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
     }
 
     /// Settings with nothing configured: every change is refused with the way to enable it.
@@ -305,23 +315,44 @@ impl Settings {
     /// check that the copy loads together. It holds the lock every change holds, so an agent
     /// cannot be copied with a role that the copy of the roles then lacks.
     ///
-    /// Lock order: this lock first, and the caller takes the store's commit lock only after it
-    /// is released. It never waits for a settings change while holding the commit lock.
-    ///
     /// # Errors
     /// If a file cannot be read or written, or the copied set does not load.
     pub fn snapshot(&self, dir: &Path) -> Result<(), String> {
-        self.snapshot_between(dir, &mut || {})
+        self.snapshot_with(dir, &mut || Ok(()))
     }
 
-    /// [`Settings::snapshot`], calling `between` after each file is copied, still holding the lock.
-    /// For tests that need a change to arrive mid-copy.
+    /// [`Settings::snapshot`], running `store` first, with the lock held: the store's own copy.
+    /// Holding the settings lock across both is what keeps the two coherent: a project cannot be
+    /// removed (nor an agent's role changed) between the cards being copied and the registry
+    /// they belong to.
+    ///
+    /// Lock order: this lock first, then whatever `store` takes (the store's commit lock). Nothing
+    /// takes the commit lock and then waits for this one.
     ///
     /// # Errors
-    /// See [`Settings::snapshot`].
+    /// If `store` fails, or see [`Settings::snapshot`].
+    pub fn snapshot_with(
+        &self,
+        dir: &Path,
+        store: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.snapshot_between(dir, store, &mut || {})
+    }
+
+    /// [`Settings::snapshot_with`], calling `between` after each settings file is copied, still
+    /// holding the lock. For tests that need a change to arrive mid-copy.
+    ///
+    /// # Errors
+    /// See [`Settings::snapshot_with`].
     #[doc(hidden)]
-    pub fn snapshot_between(&self, dir: &Path, between: &mut dyn FnMut()) -> Result<(), String> {
+    pub fn snapshot_between(
+        &self,
+        dir: &Path,
+        store: &mut dyn FnMut() -> Result<(), String>,
+        between: &mut dyn FnMut(),
+    ) -> Result<(), String> {
         let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
+        store()?;
         let live = [
             (&self.files.identities, IDENTITIES),
             (&self.files.projects, PROJECTS),
@@ -377,7 +408,9 @@ impl Settings {
         if !actor.caps.contains(&Capability::Admin) {
             return Err(BoardError::Forbidden(Capability::Admin).into());
         }
+        self.waiting.fetch_add(1, Ordering::SeqCst);
         let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
         run(self, &actor, args).map_err(CallError::Board)
     }
 

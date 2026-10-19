@@ -19,14 +19,22 @@ went to stderr, which a service keeps in its journal. `rusty_remind_me` already 
   (the reopen replays the log); systemd's `Restart=always` plus this probe is the contract, and the
   process does not exit on its own.
 - **Clean stop.** SIGTERM and SIGINT stop the accept loop (`rusty_serve`'s `ShutdownHandle`; no new
-  crate, tokio's `signal` feature is already in the workspace graph). Then the process waits, to a
-  10 second deadline, for the requests inside their handlers and for a backup under way, and exits 0.
-  `InFlight` counts them; once a stop has closed it, a request is answered 503 without running, so
-  nothing starts that the stop cannot wait for. A commit whose reply is cut off is durable but looks
-  failed to its caller, who may then repeat a `card_add`: that is what the wait prevents. Idle
-  keep-alive connections and long streams are not waited for; the deadline and the exit end them.
-  `rusty_serve` still detaches its connection threads (it predates this change); the wait is at
-  the handler, which is where the board's work happens.
+  crate, tokio's `signal` feature is already in the workspace graph). Then the process spends at most
+  10 seconds, in total, on three things: the requests being answered, the MCP tool calls running, and
+  a backup under way. A commit whose reply is cut off is durable but looks failed to its caller, who
+  may then repeat a `card_add`; that is what the wait prevents.
+  - *Requests until the last byte is written.* `rusty_serve` counts a request from its head being read
+    to its response being written in full (handler returned, deferred job run, body or event stream
+    sent), and `ShutdownHandle::wait_idle` waits for that count. Counting at the handler's return
+    is not enough: the MCP layer runs a tool call on a worker of its own and answers with an event
+    stream when the call outlives 250 ms, so the handler has long returned while the mutation is
+    still running and the reply is still unsent. Connections idle between requests are not counted.
+  - *Tool calls.* Each tool call also holds an `InFlight` guard for as long as it runs, so a call
+    whose client has gone away (the worker carries on without it) is still waited for.
+  - *Then nothing new.* Once the wait has begun the counter is closed: a request is answered 503
+    unrun, a tool call is refused, no backup starts.
+  `serve_until_drained` is that sequence, one deadline for all of it; `main` and the tests call the same
+  function. Long streams that never end are not waited for beyond the deadline.
 - **Backups run inside the process** (`--backup-dir`, `--backup-secs`, `--backup-keep`), not from a
   timer that copies files. The store copies its files while holding its commit lock, so the copy is one
   moment of the board; an external `cp` of a live file has no such guarantee, and stopping the service
@@ -35,14 +43,18 @@ went to stderr, which a service keeps in its journal. `rusty_remind_me` already 
   `github.json`, whatever they are called on the host), so settings that share a file name, or
   share one with the store, cannot overwrite one another; restoring puts each back where its flag
   points.
-- **Settings are copied as a set.** `Settings::snapshot` holds the lock every settings change holds,
-  copies the files, and loads the copy as a restore would (roles, projects, then the agents against
-  them, then the GitHub sync); a set that does not load fails the backup. Otherwise an agent could
-  be copied with a role that the copy of the roles, taken after an admin changed both, lacks. The store
-  is copied first and the settings after: a project with cards cannot be removed, so settings read
-  later still name every project the copied cards belong to. The settings lock and the store's commit
-  lock are never held together; the order is settings lock first, and no code waits for it while holding
-  the commit lock.
+- **Store and settings are copied as one moment.** `Settings::snapshot_with` takes the lock every
+  settings change takes and holds it across both the store's copy and the settings copy: store first, then
+  the files, loaded back as a restore would (roles, projects, then the agents against them, then the
+  GitHub sync). While it is held no project can be removed and no agent's role changed. Without that, a
+  card could be copied in project A, moved to B, A removed from the settings, and the settings copied
+  without A. Lock order is settings lock, then the store's commit lock, which is what every settings change
+  does; nothing takes the commit lock and then waits for the settings lock. A card move or assignment is
+  not a settings change and goes on, but cannot make a project disappear.
+- **A backup is opened before it is published.** The copied store is opened in a scratch directory (the
+  open folds the append log, and the backup must stay as written) and every card must belong to a project
+  of the copied registry; a copy that does not open, or does not fit, fails the backup and is not
+  published.
 - **Publication is durable before anything is retired.** A backup is built under `.board-<ms>`, its
   directories are fsynced, it is renamed to `board-<ms>`, the backup root is fsynced, and only
   then are older backups pruned. A run that died leaves a `.board-*` directory, which the next run
