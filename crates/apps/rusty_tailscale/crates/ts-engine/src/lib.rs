@@ -356,11 +356,11 @@ impl Engine {
         let control =
             ControlClient::connect(&config.control_url, state.machine.clone(), hostinfo).await?;
         control.register(node_key, &config.authkey).await?;
-        tracing::info!("engine: registered with control server");
+        rusty_log::info!("engine: registered with control server");
 
         let derp = DerpClient::connect(&config.derp_url, &state.node).await?;
         let derp_tx = derp.sender();
-        tracing::info!(server_key = %derp.server_key(), "engine: connected to DERP");
+        rusty_log::info!(server_key = %derp.server_key(), "engine: connected to DERP");
 
         // Resolve the control server's IP for local-endpoint discovery.
         let control_ip = resolve_host_ip(&config.control_url);
@@ -378,7 +378,7 @@ impl Engine {
             if let Some(cip) = control_ip {
                 ms.set_local_endpoints(cip, reflexive);
             }
-            tracing::info!(
+            rusty_log::info!(
                 udp_port = ms.port(),
                 "engine: magicsock up (direct paths enabled)"
             );
@@ -400,9 +400,9 @@ impl Engine {
                 .update_endpoints(node_key, disco_key, endpoints.clone())
                 .await
             {
-                tracing::warn!("engine: endpoint update failed: {e}");
+                rusty_log::warn!("engine: endpoint update failed: {e}");
             } else {
-                tracing::info!(?endpoints, "engine: reported endpoints to control");
+                rusty_log::info!(?endpoints, "engine: reported endpoints to control");
             }
         }
 
@@ -420,7 +420,7 @@ impl Engine {
                 })
                 .await;
             if let Err(e) = r {
-                tracing::warn!("engine: netmap poll ended: {e}");
+                rusty_log::warn!("engine: netmap poll ended: {e}");
             }
         });
 
@@ -469,7 +469,7 @@ impl Engine {
                 maybe_pkt = self.derp.recv() => match maybe_pkt {
                     Some(pkt) => self.on_derp_packet(pkt.peer, pkt.payload).await,
                     None => {
-                        tracing::warn!("engine: DERP connection closed; stopping");
+                        rusty_log::warn!("engine: DERP connection closed; stopping");
                         break;
                     }
                 },
@@ -477,12 +477,12 @@ impl Engine {
                 _ = tick.tick() => self.on_tick().await,
                 res = recv_tun(&tun), if tun.is_some() => match res {
                     Some(Ok(pkt)) => self.on_tun_packet(pkt).await,
-                    Some(Err(e)) => tracing::warn!("engine: TUN read error: {e}"),
+                    Some(Err(e)) => rusty_log::warn!("engine: TUN read error: {e}"),
                     None => {}
                 },
                 res = recv_udp(&udp), if udp.is_some() => match res {
                     Some(Ok((buf, src))) => self.on_udp_packet(buf, src).await,
-                    Some(Err(e)) => tracing::trace!("engine: UDP read error: {e}"),
+                    Some(Err(e)) => rusty_log::trace!("engine: UDP read error: {e}"),
                     None => {}
                 },
                 Some(pkt) = recv_opt(&mut self.stack_rx) => self.route_outbound(pkt, false).await,
@@ -523,7 +523,7 @@ impl Engine {
             return; // IPv6 / non-IP: not handled
         };
         let Some(&key) = self.index.ip_to_key.get(&ip.dst) else {
-            tracing::trace!(dst = %ip.dst, "engine: no peer for outbound packet, dropping");
+            rusty_log::trace!(dst = %ip.dst, "engine: no peer for outbound packet, dropping");
             return;
         };
         if fix_checksum {
@@ -549,7 +549,7 @@ impl Engine {
             for ip in ipv4_addrs(&node.addresses) {
                 if !self.our_ips.contains(&ip) {
                     self.our_ips.push(ip);
-                    tracing::info!(%ip, "engine: local tailnet address");
+                    rusty_log::info!(%ip, "engine: local tailnet address");
                     self.ensure_tun(ip);
                 }
             }
@@ -587,7 +587,7 @@ impl Engine {
                 }
             }
             self.filter = Filter::new(&rules);
-            tracing::info!(
+            rusty_log::info!(
                 rules = self.filter.rule_count(),
                 "engine: packet filter updated"
             );
@@ -678,7 +678,7 @@ impl Engine {
         // ping us, kicking off direct-path discovery (Phase 5).
         if let Some(ms) = &mut self.magicsock {
             for (node, disco) in &new_disco {
-                tracing::debug!(peer = %node, peer_disco = %disco, our_disco = %self.state.disco.public(), "engine: registering peer disco key");
+                rusty_log::debug!(peer = %node, peer_disco = %disco, our_disco = %self.state.disco.public(), "engine: registering peer disco key");
                 ms.add_peer(*node, *disco);
             }
             for (node, _) in &new_disco {
@@ -710,10 +710,10 @@ impl Engine {
         };
         match Tun::create(&name, ip, TAILNET_PREFIX_LEN, ts_tun::DEFAULT_MTU) {
             Ok(tun) => {
-                tracing::info!(device = %name, %ip, "engine: TUN device up");
+                rusty_log::info!(device = %name, %ip, "engine: TUN device up");
                 self.tun = Some(tun);
             }
-            Err(e) => tracing::error!("engine: failed to create TUN {name}: {e}"),
+            Err(e) => rusty_log::error!("engine: failed to create TUN {name}: {e}"),
         }
     }
 
@@ -745,7 +745,7 @@ impl Engine {
         let existing = std::fs::read_to_string(path).unwrap_or_default();
         let merged = ts_tun::magicdns::merge_into(&existing, &entries);
         if let Err(e) = std::fs::write(path, merged) {
-            tracing::warn!("engine: failed to write MagicDNS hosts {path:?}: {e}");
+            rusty_log::warn!("engine: failed to write MagicDNS hosts {path:?}: {e}");
         }
     }
 
@@ -761,7 +761,7 @@ impl Engine {
         }
         let before = self.dns_entries.len();
         self.dns_entries.retain(|ip, _| !owned.contains(ip));
-        tracing::info!(peer = %key, "engine: peer removed from the netmap");
+        rusty_log::info!(peer = %key, "engine: peer removed from the netmap");
         self.dns_entries.len() != before
     }
 
@@ -771,7 +771,7 @@ impl Engine {
             self.next_index += 1;
             self.sessions
                 .insert(key, BoringWgPeer::new(&self.state.node, key, index));
-            tracing::debug!(peer = %key, "engine: created WireGuard session");
+            rusty_log::debug!(peer = %key, "engine: created WireGuard session");
         }
         self.sessions.get_mut(&key).expect("just inserted")
     }
@@ -796,7 +796,7 @@ impl Engine {
         // traffic used to allocate one for any key -- including a peer the
         // netmap had just removed.
         if !self.index.meta.contains_key(&peer) {
-            tracing::debug!(%peer, "engine: dropping WireGuard from a key outside the netmap");
+            rusty_log::debug!(%peer, "engine: dropping WireGuard from a key outside the netmap");
             return;
         }
         let actions = self.ensure_session(peer).decapsulate(payload);
@@ -814,7 +814,7 @@ impl Engine {
                     // netmap-assigned addresses (cryptokey routing), and
                     // anything we can't confidently classify (e.g. IPv6).
                     if !self.filter_allows_inbound(peer, &ip_pkt) {
-                        tracing::debug!("engine: inbound packet denied by ACL");
+                        rusty_log::debug!("engine: inbound packet denied by ACL");
                         continue;
                     }
                     if let Some(stack_tx) = &self.stack_tx {
@@ -824,7 +824,7 @@ impl Engine {
                     } else if let Some(tun) = &self.tun {
                         // Phase 4: hand the decrypted packet to the OS stack.
                         if let Err(e) = tun.send(&ip_pkt).await {
-                            tracing::warn!("engine: TUN write error: {e}");
+                            rusty_log::warn!("engine: TUN write error: {e}");
                         }
                     } else {
                         // Phase 3 fallback: userspace ICMP echo.
@@ -898,7 +898,7 @@ impl Engine {
             Command::SetWantRunning { want, reply } => {
                 if self.want_running != want {
                     self.want_running = want;
-                    tracing::info!(want_running = want, "engine: WantRunning changed");
+                    rusty_log::info!(want_running = want, "engine: WantRunning changed");
                 }
                 let _ = reply.send(());
             }
@@ -1041,7 +1041,7 @@ impl Engine {
             Some(ms) => ms.send_wg(peer, datagram).await,
             None => {
                 if let Err(e) = self.derp_tx.send(peer, datagram).await {
-                    tracing::debug!(peer = %peer, "engine: DERP send failed: {e}");
+                    rusty_log::debug!(peer = %peer, "engine: DERP send failed: {e}");
                 }
             }
         }
@@ -1115,11 +1115,11 @@ fn forward_to_stack(stack_tx: &mpsc::Sender<Vec<u8>>, ip_pkt: Vec<u8>) -> bool {
     match stack_tx.try_send(ip_pkt) {
         Ok(()) => true,
         Err(mpsc::error::TrySendError::Full(_)) => {
-            tracing::debug!("engine: userspace stack queue full; dropping packet");
+            rusty_log::debug!("engine: userspace stack queue full; dropping packet");
             false
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
-            tracing::debug!("engine: userspace stack gone; dropping");
+            rusty_log::debug!("engine: userspace stack gone; dropping");
             false
         }
     }

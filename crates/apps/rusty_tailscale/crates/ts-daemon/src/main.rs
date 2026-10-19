@@ -121,9 +121,9 @@ options:
 
     #[tokio::main(flavor = "current_thread")]
     pub async fn main() -> ExitCode {
-        tracing_subscriber::fmt()
+        rusty_log::tracing_subscriber::fmt()
             .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
+                rusty_log::tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| "info".into()),
             )
             .with_target(false)
@@ -143,7 +143,7 @@ options:
         match run(args).await {
             Ok(code) => code,
             Err(err) => {
-                tracing::error!("{err}");
+                rusty_log::error!("{err}");
                 ExitCode::FAILURE
             }
         }
@@ -152,7 +152,7 @@ options:
     async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         let state = NodeState::load_or_generate(&args.state_dir)?;
         let hostname = args.hostname.unwrap_or_else(default_hostname);
-        tracing::info!(node_key = %state.node.public(), hostname = %hostname, "identity loaded");
+        rusty_log::info!(node_key = %state.node.public(), hostname = %hostname, "identity loaded");
 
         let tun_mode = args.tun.is_some();
         let control_url = args.login_server.clone();
@@ -179,7 +179,7 @@ options:
                 let socket = args.socket.clone();
                 tokio::spawn(async move {
                     if let Err(e) = ts_localapi::serve(&socket, backend).await {
-                        tracing::error!("localapi: {e}");
+                        rusty_log::error!("localapi: {e}");
                     }
                 });
 
@@ -193,7 +193,7 @@ options:
                     args.socket.display()
                 );
                 wait_for_shutdown().await;
-                tracing::info!("ts-daemon: shutting down");
+                rusty_log::info!("ts-daemon: shutting down");
                 let _ = std::fs::remove_file(&args.socket);
                 Ok(ExitCode::SUCCESS)
             }
@@ -205,7 +205,7 @@ options:
         let mut term = match signal(SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!("ts-daemon: cannot handle SIGTERM ({e}); Ctrl-C only");
+                rusty_log::warn!("ts-daemon: cannot handle SIGTERM ({e}); Ctrl-C only");
                 tokio::signal::ctrl_c().await.ok();
                 return;
             }

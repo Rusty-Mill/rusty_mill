@@ -193,7 +193,7 @@ Each item is one PR, with its own tests and a change fragment.
     Tier A exception of `rusty-mcp`.
     **In progress (2026-10-19):** option B of `TRACING-FACADE-PLAN.md` (a `rusty_log`
     re-export crate, then one migration PR per area). `rusty-mcp`, the agent gateway
-    crates (eight) the protocol, adk and runtime crates (seven) and the app crates (eight) are migrated; the tailscale family (seven) is left.
+    crates (eight) the protocol, adk and runtime crates (seven) the app crates (eight) and the tailscale family (seven) are migrated; the baseline is empty and the strict rule is the last step.
 
 ## 4. Risks
 

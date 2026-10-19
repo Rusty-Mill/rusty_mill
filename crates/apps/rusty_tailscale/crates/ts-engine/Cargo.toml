@@ -21,7 +21,7 @@ ts-disco.workspace = true
 ts-filter.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 thiserror.workspace = true
-tracing.workspace = true
+rusty_log = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
