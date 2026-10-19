@@ -2,7 +2,8 @@
 name = "rusty_log"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.88"
+# The floor of `tracing` 0.1 and `tracing-subscriber` 0.3 (both 1.65): a facade must not raise its consumers' declared rust-version.
+rust-version = "1.65"
 description = "The workspace's single door to `tracing`: re-exports the logging and span API, and (feature `subscriber`) the subscriber kit, so that one crate owns the third-party dependency."
 license = "MIT OR Apache-2.0"
 publish = false
