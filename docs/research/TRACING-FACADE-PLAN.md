@@ -31,9 +31,9 @@ Context: `RUSTY-MCP-SOVEREIGNTY.md` item 12 and D3; ADR-0002.
 
 If B is approved, the order is:
 
-1. `rusty_log` crate (library layer), re-exports only, with the policy check that forbids `tracing*` outside it. One PR.
-2. Migrate `rusty-mcp` first (it owns the `Layer` and the span code), then the gateway crates, then provider, tailscale and croc, then the remaining crates. One PR per area; each must pass its own suite, and none changes a log line.
-3. Replace the `tracing` and `tracing-subscriber` entries in the `rusty-mcp` pin list with the path dependency `rusty_log` (a workspace crate is not external), then close sovereignty item 12 as "chokepoint done; implementation stays third-party until the HTTP stack leaves".
+1. `rusty_log` crate (library layer), re-exports only, plus a **baseline** policy check, not a ban. The check covers workspace members only (Nexus is excluded and frozen; third-party transitive dependencies are out of scope). It records the workspace crates that depend directly on `tracing` or `tracing-subscriber` today. It fails if a crate outside the baseline adds such a dependency (the fix is to use `rusty_log`), and fails if a crate on the baseline no longer has one (delete its entry), the same both-ways rule as `PINNED_EXTERNAL_DEPENDENCIES`, so the baseline can only shrink. `rusty_log` itself is exempt. One PR, and it passes its own check because it adds no consumer.
+2. Migrate, one PR per area; each must pass its own suite, and none changes a log line. `rusty-mcp` first (it owns the `Layer` and the span code), then the gateway crates, then provider, tailscale and croc, then the remaining crates. Each PR also deletes the migrated crates from the baseline. `rusty-mcp`'s PR also deletes its `tracing` and `tracing-subscriber` entries from `PINNED_EXTERNAL_DEPENDENCIES` in the same change, because the checker rejects a stale entry and counts only dependencies with a `source`. `rusty_log` is a path dependency, so it is **not** added to that list; it only goes into the manifests and `[workspace.dependencies]`.
+3. Last PR: the baseline is empty, so replace it with the strict rule (`tracing*` appears only in `rusty_log`), delete the baseline machinery, and close sovereignty item 12 as "chokepoint done; implementation stays third-party until the HTTP stack leaves".
 
 ## Decision (2026-10-19)
 
