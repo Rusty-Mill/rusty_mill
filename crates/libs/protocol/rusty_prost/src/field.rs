@@ -19,20 +19,29 @@ pub fn push_message<M: Message>(items: &mut Vec<M>, f: &Field<'_>) -> Result<()>
     Ok(())
 }
 
-/// Reads one map entry (key is field 1, value field 2, either may be absent and then takes its
-/// default) and inserts it; a repeated key replaces the earlier one.
+/// Merges one occurrence of a message-typed field into `value`. For a map entry's value this is
+/// what `|v, f| ...` should do, so a value split across occurrences ends up as one message.
+pub fn merge_message<M: Message>(value: &mut M, f: &Field<'_>) -> Result<()> {
+    value.merge(f.message()?)
+}
+
+/// Reads one map entry and inserts it. The key is field 1 and the value field 2, and either may
+/// be absent (then it is the default). `key` and `value` each merge **one occurrence** into the
+/// entry's key or value, so a scalar's last occurrence wins and a message value that is split
+/// across occurrences merges into one, as in the reference. A repeated *entry* with a key already
+/// in the map replaces it: entries do not merge.
 pub fn map_entry<K: Default + Ord, V: Default>(
     map: &mut BTreeMap<K, V>,
     f: &Field<'_>,
-    key: impl Fn(&Field<'_>) -> Result<K>,
-    value: impl Fn(&Field<'_>) -> Result<V>,
+    key: impl Fn(&mut K, &Field<'_>) -> Result<()>,
+    value: impl Fn(&mut V, &Field<'_>) -> Result<()>,
 ) -> Result<()> {
     let (mut k, mut v) = (K::default(), V::default());
     for e in f.message()? {
         let e = e?;
         match e.number {
-            1 => k = key(&e)?,
-            2 => v = value(&e)?,
+            1 => key(&mut k, &e)?,
+            2 => value(&mut v, &e)?,
             _ => {}
         }
     }

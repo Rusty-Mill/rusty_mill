@@ -204,7 +204,18 @@ impl Message for All {
             }
             18 => self.strs.push(f.str()?.to_owned()),
             19 => field::push_message(&mut self.inners, &f)?,
-            20 => field::map_entry(&mut self.m, &f, |k| Ok(k.str()?.to_owned()), |v| v.int32())?,
+            20 => field::map_entry(
+                &mut self.m,
+                &f,
+                |k, f| {
+                    *k = f.str()?.to_owned();
+                    Ok(())
+                },
+                |v, f| {
+                    *v = f.int32()?;
+                    Ok(())
+                },
+            )?,
             21 => self.one = Some(One::Int(f.int32()?)),
             22 => self.one = Some(One::Str(f.str()?.to_owned())),
             23 => self.e = f.int32()?,

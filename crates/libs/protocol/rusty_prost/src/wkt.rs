@@ -51,6 +51,11 @@ pub struct Struct {
     pub fields: BTreeMap<String, Value>,
 }
 
+/// The message name in a type URL: what follows the last `/`.
+fn type_name(url: &str) -> Option<&str> {
+    url.rsplit_once('/').map(|(_, name)| name)
+}
+
 impl Any {
     /// Packs `m` under its [`Name::TYPE_URL`].
     pub fn pack<M: Message + Name>(m: &M) -> Result<Any> {
@@ -60,13 +65,45 @@ impl Any {
         })
     }
 
-    /// Unpacks the message if the URL is `M`'s, or `Ok(None)` if it names another type.
+    /// Whether the URL names `M`. Only the last path segment counts (the part after the final
+    /// `/` is the message's full name), so a different prefix still matches. A URL with no `/`
+    /// names no type, and neither does one whose name is empty or dotted, because no `M` has
+    /// such a name.
+    pub fn is<M: Name>(&self) -> bool {
+        match (type_name(&self.type_url), type_name(M::TYPE_URL)) {
+            (Some(actual), Some(wanted)) => actual == wanted,
+            _ => false,
+        }
+    }
+
+    /// Unpacks the message if the URL names `M` (see [`Any::is`]), or `Ok(None)` if it names
+    /// another type or is malformed.
     pub fn unpack<M: Message + Name>(&self) -> Result<Option<M>> {
-        if self.type_url != M::TYPE_URL {
+        if !self.is::<M>() {
             return Ok(None);
         }
         M::decode(&self.value).map(Some)
     }
+}
+
+impl Name for Empty {
+    const TYPE_URL: &'static str = "type.googleapis.com/google.protobuf.Empty";
+}
+
+impl Name for Timestamp {
+    const TYPE_URL: &'static str = "type.googleapis.com/google.protobuf.Timestamp";
+}
+
+impl Name for Any {
+    const TYPE_URL: &'static str = "type.googleapis.com/google.protobuf.Any";
+}
+
+impl Name for Struct {
+    const TYPE_URL: &'static str = "type.googleapis.com/google.protobuf.Struct";
+}
+
+impl Name for Value {
+    const TYPE_URL: &'static str = "type.googleapis.com/google.protobuf.Value";
 }
 
 impl Message for Empty {
@@ -187,12 +224,11 @@ impl Message for Struct {
             field::map_entry(
                 &mut self.fields,
                 &f,
-                |k| Ok(k.str()?.to_owned()),
-                |v| {
-                    let mut value = Value::default();
-                    value.merge(v.message()?)?;
-                    Ok(value)
+                |k, f| {
+                    *k = f.str()?.to_owned();
+                    Ok(())
                 },
+                field::merge_message,
             )?;
         }
         Ok(())

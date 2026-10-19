@@ -8,6 +8,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::Lcg;
+use prost::Message as _;
 use rusty_prost::wkt::{Struct, Timestamp, Value};
 use rusty_prost::{field, Field, Message, Result, Writer};
 
@@ -309,12 +310,11 @@ impl Message for SecurityRequirement {
             field::map_entry(
                 &mut self.schemes,
                 &f,
-                |k| Ok(k.str()?.to_owned()),
-                |v| {
-                    let mut l = StringList::default();
-                    l.merge(v.message()?)?;
-                    Ok(l)
+                |k, f| {
+                    *k = f.str()?.to_owned();
+                    Ok(())
                 },
+                field::merge_message,
             )?;
         }
         Ok(())
@@ -460,4 +460,17 @@ fn a_data_part_holds_any_json_value() {
     // field 4, a Value holding number_value 0 (written, not omitted)
     assert_eq!(bytes, [0x22, 0x09, 0x11, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(Part::decode(&bytes).unwrap(), p);
+}
+
+#[test]
+fn a_security_requirement_entry_merges_a_split_value() {
+    // key "s"; value StringList{["a"]} then StringList{["b"]}: one list, appended
+    let bytes = [
+        0x0a, 0x0d, 0x0a, 0x01, b's', 0x12, 0x03, 0x0a, 0x01, b'a', 0x12, 0x03, 0x0a, 0x01, b'b',
+    ];
+    let ours = SecurityRequirement::decode(&bytes).unwrap();
+    assert_eq!(ours.schemes["s"].list, ["a", "b"]);
+    let theirs = oracle::SecurityRequirement::decode(bytes.as_slice()).unwrap();
+    assert_eq!(theirs.schemes["s"].list, ["a", "b"]);
+    assert_eq!(ours.encode_to_vec().unwrap(), theirs.encode_to_vec());
 }

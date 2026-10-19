@@ -343,3 +343,96 @@ fn timestamp_and_any_bytes_match_prost_types() {
         assert_eq!(any.encode_to_vec().unwrap(), theirs.encode_to_vec());
     }
 }
+
+// ---- Any identity (review findings on 49830e7e) ----
+
+fn any_with(url: &str) -> Any {
+    Any {
+        type_url: url.into(),
+        value: ErrorInfo {
+            reason: "R".into(),
+            ..Default::default()
+        }
+        .encode_to_vec()
+        .unwrap(),
+    }
+}
+
+#[test]
+fn any_matches_the_final_path_segment_whatever_the_prefix() {
+    for url in [
+        "type.googleapis.com/google.rpc.ErrorInfo",
+        "example.com/google.rpc.ErrorInfo",
+        "/google.rpc.ErrorInfo",
+        "a/b/c/google.rpc.ErrorInfo",
+    ] {
+        let got = any_with(url).unpack::<ErrorInfo>().unwrap();
+        assert_eq!(got.map(|e| e.reason), Some("R".to_string()), "{url}");
+    }
+}
+
+#[test]
+fn any_with_another_final_name_is_not_this_type() {
+    for url in [
+        "type.googleapis.com/google.rpc.Status",
+        "type.googleapis.com/google.rpc.errorinfo",
+        "type.googleapis.com/x.google.rpc.ErrorInfo",
+        "type.googleapis.com/google.rpc.ErrorInfo.Extra",
+    ] {
+        assert_eq!(any_with(url).unpack::<ErrorInfo>().unwrap(), None, "{url}");
+    }
+}
+
+#[test]
+fn a_malformed_type_url_names_no_type() {
+    // no slash, a trailing slash, an empty name, a name with a leading dot
+    for url in [
+        "",
+        "google.rpc.ErrorInfo",
+        "type.googleapis.com/",
+        "type.googleapis.com/.google.rpc.ErrorInfo",
+    ] {
+        assert_eq!(
+            any_with(url).unpack::<ErrorInfo>().unwrap(),
+            None,
+            "{url:?}"
+        );
+    }
+}
+
+#[test]
+fn the_built_in_types_can_be_packed_in_an_any() {
+    let ts = Timestamp {
+        seconds: 5,
+        nanos: 6,
+    };
+    let a = Any::pack(&ts).unwrap();
+    assert_eq!(a.type_url, "type.googleapis.com/google.protobuf.Timestamp");
+    assert_eq!(a.unpack::<Timestamp>().unwrap(), Some(ts));
+    for (url, got) in [
+        (
+            "type.googleapis.com/google.protobuf.Empty",
+            Any::pack(&Empty).unwrap().type_url,
+        ),
+        (
+            "type.googleapis.com/google.protobuf.Any",
+            Any::pack(&Any::default()).unwrap().type_url,
+        ),
+        (
+            "type.googleapis.com/google.protobuf.Struct",
+            Any::pack(&Struct::default()).unwrap().type_url,
+        ),
+        (
+            "type.googleapis.com/google.protobuf.Value",
+            Any::pack(&Value::Null).unwrap().type_url,
+        ),
+    ] {
+        assert_eq!(got, url);
+    }
+    // and prost-types agrees with the names
+    use prost::Name as _;
+    assert_eq!(
+        prost_types::Timestamp::type_url(),
+        "type.googleapis.com/google.protobuf.Timestamp"
+    );
+}

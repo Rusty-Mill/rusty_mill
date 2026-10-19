@@ -233,22 +233,29 @@ mod ours {
             }
         }
 
-        /// Reads field 1, 2 or 3 into the oneof; any other number is not a member.
+        /// Reads field 1, 2 or 3 into the oneof; any other number is not a member. A message
+        /// member that repeats merges into the one already there; a different member replaces it.
         fn merge_field(slot: &mut Option<Outcome>, f: &Field<'_>) -> Result<bool> {
-            *slot = Some(match f.number {
+            match f.number {
                 1 => {
-                    let mut p = None;
+                    let mut p = match slot.take() {
+                        Some(Outcome::Pass(p)) => Some(p),
+                        _ => None,
+                    };
                     field::message(&mut p, f)?;
-                    Outcome::Pass(p.unwrap_or_default())
+                    *slot = Some(Outcome::Pass(p.unwrap_or_default()));
                 }
-                2 => Outcome::Mutated(f.bytes()?.to_vec()),
+                2 => *slot = Some(Outcome::Mutated(f.bytes()?.to_vec())),
                 3 => {
-                    let mut e = None;
+                    let mut e = match slot.take() {
+                        Some(Outcome::Error(e)) => Some(e),
+                        _ => None,
+                    };
                     field::message(&mut e, f)?;
-                    Outcome::Error(e.unwrap_or_default())
+                    *slot = Some(Outcome::Error(e.unwrap_or_default()));
                 }
                 _ => return Ok(false),
-            });
+            }
             Ok(true)
         }
     }
@@ -552,4 +559,47 @@ fn a_oneof_keeps_its_last_member() {
         theirs.result,
         Some(oracle::response_result::Result::Error(ref e)) if e.code == 3
     ));
+}
+
+// ---- oneof members that are messages (review finding on 49830e7e) ----
+
+/// `1a0208031a03120178`: the Error member twice, `{code: 3}` then `{reason: "x"}`. Same variant,
+/// so the second occurrence merges into the first.
+#[test]
+fn a_repeated_message_member_of_a_oneof_merges() {
+    let bytes = [0x1a, 0x02, 0x08, 0x03, 0x1a, 0x03, 0x12, 0x01, b'x'];
+    let Some(Outcome::Error(e)) = McpResponseResult::decode(&bytes).unwrap().result else {
+        panic!("expected the Error member")
+    };
+    assert_eq!((e.code, e.reason.as_str()), (3, "x"));
+    let theirs = oracle::McpResponseResult::decode(bytes.as_slice()).unwrap();
+    let Some(oracle::response_result::Result::Error(t)) = theirs.result else {
+        panic!()
+    };
+    assert_eq!((t.code, t.reason.as_str()), (3, "x"));
+}
+
+/// A different member in between resets it: `Error{code: 3}`, `Mutated`, `Error{reason: "x"}`.
+#[test]
+fn a_member_that_changed_in_between_starts_fresh() {
+    let bytes = [
+        0x1a, 0x02, 0x08, 0x03, 0x12, 0x01, b'm', 0x1a, 0x03, 0x12, 0x01, b'x',
+    ];
+    let ours = McpResponseResult::decode(&bytes).unwrap();
+    let Some(Outcome::Error(e)) = &ours.result else {
+        panic!("{ours:?}")
+    };
+    assert_eq!((e.code, e.reason.as_str()), (0, "x"));
+    let theirs = oracle::McpResponseResult::decode(bytes.as_slice()).unwrap();
+    assert_eq!(ours.encode_to_vec().unwrap(), theirs.encode_to_vec());
+}
+
+#[test]
+fn the_request_result_merges_its_oneof_the_same_way() {
+    let bytes = [
+        0x1a, 0x02, 0x08, 0x03, 0x1a, 0x03, 0x12, 0x01, b'x', 0x2a, 0x00,
+    ];
+    let ours = McpRequestResult::decode(&bytes).unwrap();
+    let theirs = oracle::McpRequestResult::decode(bytes.as_slice()).unwrap();
+    assert_eq!(ours.encode_to_vec().unwrap(), theirs.encode_to_vec());
 }

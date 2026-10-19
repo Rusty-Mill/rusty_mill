@@ -20,6 +20,7 @@ rusty_protobuf = { workspace = true }
 [dev-dependencies]
 # Independent oracle only (never shipped): every type is compared with `prost` 0.14,
 # which the gateway and rusty_a2a use today (ADR-0002 Tier S allows dev-only oracles).
+# The library builds on rust-version 1.75 (checked); the tests need 1.85, prost's floor.
 prost = { workspace = true }
 prost-types = { workspace = true }
 

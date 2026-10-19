@@ -83,8 +83,14 @@ impl Message for ErrorInfo {
             3 => field::map_entry(
                 &mut self.metadata,
                 &f,
-                |k| Ok(k.str()?.to_owned()),
-                |v| Ok(v.str()?.to_owned()),
+                |k, f| {
+                    *k = f.str()?.to_owned();
+                    Ok(())
+                },
+                |v, f| {
+                    *v = f.str()?.to_owned();
+                    Ok(())
+                },
             )?,
             _ => {}
         }

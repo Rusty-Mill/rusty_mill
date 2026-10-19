@@ -190,3 +190,57 @@ fn decode_with_depth_counts_levels_below_the_message() {
         rusty_prost::Error::DepthExceeded
     );
 }
+
+// ---- map entries (review findings on 49830e7e) ----
+
+/// `Struct.fields` entry `k` whose value field appears twice: each occurrence merges into the
+/// same `Value`, as the reference and prost do.
+const SPLIT_VALUE: &str = "0a130a016b120632040a022001120632040a022000";
+
+fn struct_from(hex: &str) -> (Struct, prost_types::Struct) {
+    let buf = unhex(hex);
+    (
+        Struct::decode(&buf).unwrap(),
+        prost_types::Struct::decode(buf.as_slice()).unwrap(),
+    )
+}
+
+fn same_bytes(ours: &Struct, theirs: &prost_types::Struct) {
+    assert_eq!(ours.encode_to_vec().unwrap(), theirs.encode_to_vec());
+}
+
+#[test]
+fn a_map_entry_merges_repeated_message_values() {
+    let (ours, theirs) = struct_from(SPLIT_VALUE);
+    assert_eq!(
+        ours.fields["k"],
+        Value::List(vec![Value::Bool(true), Value::Bool(false)])
+    );
+    same_bytes(&ours, &theirs);
+}
+
+#[test]
+fn a_later_empty_value_leaves_the_earlier_one_in_place() {
+    // value occurrence 1 = list [true]; occurrence 2 = an empty message
+    let (ours, theirs) = struct_from("0a0d0a016b120632040a0220011200");
+    assert_eq!(ours.fields["k"], Value::List(vec![Value::Bool(true)]));
+    same_bytes(&ours, &theirs);
+}
+
+#[test]
+fn the_same_key_in_two_entries_keeps_only_the_last_entry() {
+    // entry 1: k -> list [true]; entry 2: k -> list [false]. Entries replace, they do not merge.
+    let (ours, theirs) = struct_from("0a0b0a016b120632040a0220010a0b0a016b120632040a022000");
+    assert_eq!(ours.fields["k"], Value::List(vec![Value::Bool(false)]));
+    same_bytes(&ours, &theirs);
+}
+
+#[test]
+fn scalar_map_halves_are_last_wins_within_an_entry() {
+    // value twice (1 then 2) -> 2; key twice ("a" then "b") with one value -> "b"
+    let m = read("a201070a016110011002");
+    assert_eq!(m.m.get("a"), Some(&2));
+    let m = read("a201080a01610a01621005");
+    assert_eq!(m.m.get("b"), Some(&5));
+    assert_eq!(m.m.get("a"), None);
+}
