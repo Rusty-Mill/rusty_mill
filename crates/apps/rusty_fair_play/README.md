@@ -138,3 +138,4 @@ owner, a blank name, a reset on a custom card — are 422.
 the three stacks), which sits over `rusty_fair_play_domain`.
 `server` binds `Api` to `rusty_serve`, the blocking HTTP server shared
 with `rusty_tick`, which also serves `web/dist`.
+
