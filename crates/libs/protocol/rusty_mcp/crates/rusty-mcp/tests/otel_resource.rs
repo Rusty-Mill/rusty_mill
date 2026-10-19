@@ -14,8 +14,8 @@ use std::{process::Command, time::Duration};
 
 use otel_support::Collector;
 use rusty_json::Value;
+use rusty_log::tracing_subscriber::prelude::*;
 use rusty_mcp::otel::{OtelConfig, metrics::Outcome};
-use tracing_subscriber::prelude::*;
 
 const CHILD_MARKER: &str = "RUSTY_MCP_RESOURCE_CHILD";
 
@@ -54,9 +54,12 @@ fn child_exports_and_checks() {
             .with_metrics_interval(Duration::from_secs(3600)),
     )
     .expect("pipeline");
-    tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
-        drop(tracing::info_span!("work"));
-    });
+    rusty_log::subscriber::with_default(
+        rusty_log::tracing_subscriber::registry().with(layer),
+        || {
+            drop(rusty_log::info_span!("work"));
+        },
+    );
     let instruments = guard.instruments().expect("metrics on");
     instruments.request_started("ping");
     instruments.request_finished("ping", None, Outcome::Ok, 0.001);

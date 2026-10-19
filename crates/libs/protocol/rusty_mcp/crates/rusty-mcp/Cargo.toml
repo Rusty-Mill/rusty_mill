@@ -33,8 +33,8 @@ http = { workspace = true }
 rusty_http = { workspace = true }
 rusty_json = { workspace = true }
 tower-service = "0.3"
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+# The workspace's one door to `tracing` (docs/research/TRACING-FACADE-PLAN.md).
+rusty_log = { workspace = true, features = ["subscriber"] }
 rusty_url = { workspace = true }
 tower-layer = "0.3"
 # JWT signature and claim verification (RS256, ES256).

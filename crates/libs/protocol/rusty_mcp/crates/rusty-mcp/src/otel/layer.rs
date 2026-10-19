@@ -44,12 +44,12 @@ use std::{
     time::Instant,
 };
 
-use tracing::{
+use rusty_log::tracing_subscriber::{Layer, layer::Context};
+use rusty_log::{
     Event as TracingEvent, Id, Subscriber,
     field::{Field, Visit},
     span::{Attributes, Record},
 };
-use tracing_subscriber::{Layer, layer::Context};
 
 use super::span::{
     Attribute, AttributeValue, Event, FinishedSpan, Kind, MAX_EVENTS, SpanId, Status, TraceId,
@@ -171,13 +171,13 @@ impl SpanLayer {
         let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
         // At 1, 2, 4, 8, ...: loud enough to notice, not a line per span.
         if dropped.is_power_of_two() {
-            tracing::warn!(dropped, "dropping spans: the exporter is behind or stopped");
+            rusty_log::warn!(dropped, "dropping spans: the exporter is behind or stopped");
         }
     }
 
     fn note_ids_failed(&self) {
         if !self.ids_failed.swap(true, Ordering::Relaxed) {
-            tracing::error!("could not get random span ids; spans will not be exported");
+            rusty_log::error!("could not get random span ids; spans will not be exported");
         }
     }
 }
@@ -475,7 +475,7 @@ impl Visit for Fields {
 mod tests {
     use std::sync::Arc;
 
-    use tracing_subscriber::prelude::*;
+    use rusty_log::tracing_subscriber::prelude::*;
 
     use super::*;
     use crate::otel::set_attribute;
@@ -500,8 +500,8 @@ mod tests {
     }
 
     fn under(layer: SpanLayer, body: impl FnOnce()) {
-        let subscriber = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(subscriber, body);
+        let subscriber = rusty_log::tracing_subscriber::registry().with(layer);
+        rusty_log::subscriber::with_default(subscriber, body);
     }
 
     /// Run `body` under a layer sampling at `ratio`; return what it exported.
@@ -515,7 +515,7 @@ mod tests {
     fn with_installed<T>(f: impl FnOnce(&SpanLayer) -> T) -> T {
         let mut f = Some(f);
         let mut out = None;
-        tracing::dispatcher::get_default(|dispatch| {
+        rusty_log::dispatcher::get_default(|dispatch| {
             let layer = dispatch
                 .downcast_ref::<SpanLayer>()
                 .expect("a SpanLayer is installed");
@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn a_root_span_is_exported_with_its_name_and_typed_fields() {
         let spans = run(1.0, || {
-            let span = tracing::info_span!(
+            let span = rusty_log::info_span!(
                 "work",
                 text = "hello",
                 flag = true,
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn otel_fields_set_the_name_kind_and_status_and_are_not_attributes() {
         let spans = run(1.0, || {
-            let span = tracing::info_span!(
+            let span = rusty_log::info_span!(
                 "mcp.request",
                 otel.name = "tools/call",
                 otel.kind = "server",
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn a_field_recorded_later_reaches_the_span() {
         let spans = run(1.0, || {
-            let span = tracing::info_span!("work", late = tracing::field::Empty);
+            let span = rusty_log::info_span!("work", late = rusty_log::field::Empty);
             span.record("late", "now");
             drop(span);
         });
@@ -594,9 +594,9 @@ mod tests {
     #[test]
     fn a_child_shares_its_parents_trace_and_names_it_as_parent() {
         let spans = run(1.0, || {
-            let parent = tracing::info_span!("parent");
+            let parent = rusty_log::info_span!("parent");
             let _entered = parent.enter();
-            let child = tracing::info_span!("child");
+            let child = rusty_log::info_span!("child");
             drop(child);
         });
         let child = spans.iter().find(|s| s.name == "child").expect("child");
@@ -609,10 +609,10 @@ mod tests {
     #[test]
     fn an_explicit_parent_is_honoured_over_the_current_span() {
         let spans = run(1.0, || {
-            let a = tracing::info_span!("a");
-            let b = tracing::info_span!("b");
+            let a = rusty_log::info_span!("a");
+            let b = rusty_log::info_span!("b");
             let _entered = b.enter();
-            let child = tracing::info_span!(parent: &a, "child");
+            let child = rusty_log::info_span!(parent: &a, "child");
             drop(child);
         });
         let child = spans.iter().find(|s| s.name == "child").expect("child");
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn a_remote_parent_is_adopted_and_its_fields_are_not_attributes() {
         let spans = run(1.0, || {
-            let span = tracing::info_span!(
+            let span = rusty_log::info_span!(
                 "mcp.request",
                 trace_id = TRACE,
                 parent_span_id = PARENT,
@@ -648,9 +648,9 @@ mod tests {
     #[test]
     fn a_remote_parent_wins_over_a_local_one() {
         let spans = run(1.0, || {
-            let local = tracing::info_span!("local");
+            let local = rusty_log::info_span!("local");
             let _entered = local.enter();
-            let span = tracing::info_span!("request", trace_id = TRACE, parent_span_id = PARENT);
+            let span = rusty_log::info_span!("request", trace_id = TRACE, parent_span_id = PARENT);
             drop(span);
         });
         let request = spans.iter().find(|s| s.name == "request").expect("request");
@@ -660,14 +660,14 @@ mod tests {
     #[test]
     fn a_remote_parent_that_was_not_sampled_exports_nothing_below_it() {
         let spans = run(1.0, || {
-            let span = tracing::info_span!(
+            let span = rusty_log::info_span!(
                 "request",
                 trace_id = TRACE,
                 parent_span_id = PARENT,
                 sampled = false
             );
             let _entered = span.enter();
-            let child = tracing::info_span!("child");
+            let child = rusty_log::info_span!("child");
             drop(child);
         });
         assert!(spans.is_empty(), "{spans:?}");
@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn a_malformed_remote_parent_is_ignored_and_the_fields_stay_attributes() {
         let spans = run(1.0, || {
-            let span = tracing::info_span!("request", trace_id = "nope", parent_span_id = PARENT);
+            let span = rusty_log::info_span!("request", trace_id = "nope", parent_span_id = PARENT);
             drop(span);
         });
         let [span] = &spans[..] else {
@@ -689,16 +689,16 @@ mod tests {
     #[test]
     fn root_spans_follow_the_sample_ratio_and_children_follow_their_root() {
         let none = run(0.0, || {
-            let root = tracing::info_span!("root");
+            let root = rusty_log::info_span!("root");
             let _entered = root.enter();
-            drop(tracing::info_span!("child"));
+            drop(rusty_log::info_span!("child"));
         });
         assert!(none.is_empty(), "{none:?}");
 
         let all = run(1.0, || {
-            let root = tracing::info_span!("root");
+            let root = rusty_log::info_span!("root");
             let _entered = root.enter();
-            drop(tracing::info_span!("child"));
+            drop(rusty_log::info_span!("child"));
         });
         assert_eq!(all.len(), 2);
     }
@@ -706,9 +706,9 @@ mod tests {
     #[test]
     fn events_become_span_events_named_by_their_message() {
         let spans = run(1.0, || {
-            let span = tracing::info_span!("work");
+            let span = rusty_log::info_span!("work");
             let _entered = span.enter();
-            tracing::info!(attempt = 2, "retrying");
+            rusty_log::info!(attempt = 2, "retrying");
         });
         let [span] = &spans[..] else {
             panic!("{spans:?}")
@@ -726,17 +726,17 @@ mod tests {
 
     #[test]
     fn an_event_outside_any_span_is_ignored() {
-        let spans = run(1.0, || tracing::info!("nobody home"));
+        let spans = run(1.0, || rusty_log::info!("nobody home"));
         assert!(spans.is_empty());
     }
 
     #[test]
     fn events_and_attributes_are_capped() {
         let spans = run(1.0, || {
-            let span = tracing::info_span!("work");
+            let span = rusty_log::info_span!("work");
             let _entered = span.enter();
             for _ in 0..(MAX_EVENTS * 2) {
-                tracing::info!("again");
+                rusty_log::info!("again");
             }
             for n in 0..300 {
                 set_attribute(&span, &format!("k{n}"), n as i64);
@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn set_attribute_reaches_the_layer_through_the_subscriber() {
         let spans = run(1.0, || {
-            let span = tracing::info_span!("work");
+            let span = rusty_log::info_span!("work");
             set_attribute(&span, "dynamic.key", "value");
             set_attribute(&span, "number", 7_i64);
         });
@@ -765,9 +765,9 @@ mod tests {
 
     #[test]
     fn set_attribute_without_a_layer_or_a_span_does_nothing() {
-        set_attribute(&tracing::Span::none(), "k", "v");
+        set_attribute(&rusty_log::Span::none(), "k", "v");
         // A real span, but no subscriber at all.
-        let span = tracing::info_span!("orphan");
+        let span = rusty_log::info_span!("orphan");
         set_attribute(&span, "k", "v");
     }
 
@@ -775,8 +775,8 @@ mod tests {
     fn a_span_the_sink_refuses_is_counted() {
         let (collected, layer) = collecting(1.0, false);
         under(layer, || {
-            drop(tracing::info_span!("a"));
-            drop(tracing::info_span!("b"));
+            drop(rusty_log::info_span!("a"));
+            drop(rusty_log::info_span!("b"));
             assert_eq!(with_installed(SpanLayer::dropped), 2);
         });
         assert_eq!(collected.lock().expect("lock").len(), 2);
@@ -786,7 +786,7 @@ mod tests {
     fn a_closed_span_is_forgotten() {
         let (_, layer) = collecting(1.0, true);
         under(layer, || {
-            drop(tracing::info_span!("a"));
+            drop(rusty_log::info_span!("a"));
             let leaked = with_installed(|layer| layer.lock().len());
             assert_eq!(leaked, 0, "the layer is leaking open spans");
         });
@@ -796,8 +796,8 @@ mod tests {
     fn spans_that_are_not_sampled_are_forgotten_too() {
         let (_, layer) = collecting(0.0, true);
         under(layer, || {
-            let root = tracing::info_span!("root");
-            drop(tracing::info_span!(parent: &root, "child"));
+            let root = rusty_log::info_span!("root");
+            drop(rusty_log::info_span!(parent: &root, "child"));
             drop(root);
             let leaked = with_installed(|layer| layer.lock().len());
             assert_eq!(leaked, 0, "unsampled spans are leaking");

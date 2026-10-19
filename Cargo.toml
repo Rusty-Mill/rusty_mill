@@ -466,6 +466,7 @@ rusty_lsp = { path = "crates/libs/protocol/rusty_lsp" }
 rusty_opnsense = { path = "crates/libs/homelab/rusty_opnsense" }
 rusty_proxmox = { path = "crates/libs/homelab/rusty_proxmox" }
 rusty_rand = { path = "crates/foundation/rusty_rand" }
+rusty_log = { path = "crates/libs/rusty_log" }
 rusty_regx = { path = "crates/foundation/rusty_regx", version = "0.5.0" }
 rusty_request = { path = "crates/libs/net/rusty_request" }
 rusty_atomic_file = { path = "crates/foundation/rusty_atomic_file" }

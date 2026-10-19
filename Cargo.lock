@@ -11806,6 +11806,7 @@ dependencies = [
  "rusty_base64",
  "rusty_http",
  "rusty_json",
+ "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
@@ -11818,8 +11819,6 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

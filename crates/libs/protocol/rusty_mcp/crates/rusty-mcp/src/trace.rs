@@ -19,9 +19,9 @@
 //!     .as_object()
 //!     .and_then(TraceContext::from_meta)
 //!     .map(|tc| tc.span("tools/call"))
-//!     .unwrap_or_else(|| tracing::info_span!("tools/call"));
+//!     .unwrap_or_else(|| rusty_log::info_span!("tools/call"));
 //! let _guard = span.enter();
-//! tracing::info!("handling the call");
+//! rusty_log::info!("handling the call");
 //! ```
 //!
 //! Every log line inside that span carries `trace_id` and `parent_span_id`, so
@@ -176,8 +176,8 @@ impl TraceContext {
     /// parent. With the `otel` feature and a `otel::SpanLayer`
     /// installed, the same fields make the exported span a genuine child of the
     /// caller's, so the trace renders as one tree across services.
-    pub fn span(&self, name: &'static str) -> tracing::Span {
-        tracing::info_span!(
+    pub fn span(&self, name: &'static str) -> rusty_log::Span {
+        rusty_log::info_span!(
             "mcp.request",
             otel.name = name,
             trace_id = %self.trace_id,
@@ -258,13 +258,13 @@ impl Baggage {
         let mut entries = BTreeMap::new();
 
         if value.len() > MAX_BAGGAGE_BYTES {
-            tracing::debug!(len = value.len(), "ignoring oversized baggage header");
+            rusty_log::debug!(len = value.len(), "ignoring oversized baggage header");
             return Self { entries };
         }
 
         for member in value.split(',') {
             if entries.len() >= MAX_BAGGAGE_ENTRIES {
-                tracing::debug!("baggage entry limit reached, ignoring the rest");
+                rusty_log::debug!("baggage entry limit reached, ignoring the rest");
                 break;
             }
 
