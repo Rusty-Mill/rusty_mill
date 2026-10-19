@@ -173,7 +173,7 @@ async fn store_artifact(
     {
         Ok(version) => Some((filename, version)),
         Err(error) => {
-            tracing::warn!(%filename, %error, "could not store an artifact from a remote agent");
+            rusty_log::warn!(%filename, %error, "could not store an artifact from a remote agent");
             None
         }
     }

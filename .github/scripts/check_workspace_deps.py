@@ -49,20 +49,13 @@ PINNED_EXTERNAL_DEPENDENCIES: dict[str, dict[str, str]] = {
 # Covers workspace members only: Nexus is excluded and frozen, and third-party
 # crates keep their own `tracing` dependency.
 TRACING_BASELINE: dict[str, frozenset[str]] = {
-    "adk-a2a": frozenset({"tracing"}),
-    "adk-graph": frozenset({"tracing"}),
-    "adk-mcp": frozenset({"tracing"}),
     "inventory-core": frozenset({"tracing"}),
     "rp-mcp": frozenset({"tracing"}),
     "rp-router": frozenset({"tracing"}),
     "rp-server": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty-acp": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty_a2a": frozenset({"tracing"}),
     "rusty_homelab_mcp": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty_lsp": frozenset({"tracing"}),
     "rusty_mill_board": frozenset({"tracing", "tracing-subscriber"}),
     "rusty_mill_runner": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty_tokio": frozenset({"tracing"}),
     "skillopt-cli": frozenset({"tracing-subscriber"}),
     "ts-daemon": frozenset({"tracing", "tracing-subscriber"}),
     "ts-derp": frozenset({"tracing"}),

@@ -150,7 +150,7 @@ fn asking_agent() -> Result<impl rusty_acp::server::Agent, Error> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_env_filter("info,rusty_acp=debug").init();
+    rusty_log::tracing_subscriber::fmt().with_env_filter("info,rusty_acp=debug").init();
 
     // One store, shared. Without it a drain would have nobody to hand back to.
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::default());

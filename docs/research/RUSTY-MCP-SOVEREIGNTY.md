@@ -192,8 +192,8 @@ Each item is one PR, with its own tests and a change fragment.
     plan and owner sign-off before any code; until then `tracing` is a named
     Tier A exception of `rusty-mcp`.
     **In progress (2026-10-19):** option B of `TRACING-FACADE-PLAN.md` (a `rusty_log`
-    re-export crate, then one migration PR per area). `rusty-mcp` and the agent gateway
-    crates (eight) are migrated.
+    re-export crate, then one migration PR per area). `rusty-mcp`, the agent gateway
+    crates (eight) and the protocol, adk and runtime crates (seven) are migrated.
 
 ## 4. Risks
 

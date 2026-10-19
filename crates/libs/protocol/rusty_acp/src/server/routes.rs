@@ -161,7 +161,7 @@ where
             Ok(Json(value)) => Ok(AcpJson(value)),
             Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
                 let limit = server.max_request_bytes();
-                tracing::debug!(limit, "refusing a request body over the limit");
+                rusty_log::debug!(limit, "refusing a request body over the limit");
                 Err((
                     StatusCode::PAYLOAD_TOO_LARGE,
                     format!(
@@ -232,13 +232,13 @@ async fn trace_context(mut request: Request, next: Next) -> Response {
     // outlives this span.
     request.extensions_mut().insert(context);
 
-    let span = tracing::info_span!(
+    let span = rusty_log::info_span!(
         "acp.request",
         method = %request.method(),
         path = %request.uri().path(),
         trace_id = %context.trace_id(),
     );
-    tracing::Instrument::instrument(next.run(request), span).await
+    rusty_log::Instrument::instrument(next.run(request), span).await
 }
 
 /// Open discovery: the registered manifests as YAML at the well-known location.
@@ -397,7 +397,7 @@ async fn create_run(
     // to read, reap or clean up. The slot is held by the run from here until it
     // finishes.
     let Some(slot) = server.admit() else {
-        tracing::warn!(
+        rusty_log::warn!(
             executing = server.executing(),
             limit = ?server.max_concurrent_runs(),
             "refusing a run: at capacity"
@@ -517,7 +517,7 @@ async fn wait_until_settled(
                 _ = tokio::time::sleep_until(deadline) => {
                     // Not an error: the run is still going, and the caller gets
                     // an honest snapshot of where it got to.
-                    tracing::debug!(%run_id, "sync request timed out; returning the run as it stands");
+                    rusty_log::debug!(%run_id, "sync request timed out; returning the run as it stands");
                     return Ok(());
                 }
             },
@@ -713,7 +713,7 @@ async fn list_run_events(
     // complete — the silent loss this whole path exists to avoid.
     let earliest = server.store().earliest_event(run_id).await.map_err(ApiError::from)?;
     if from < earliest {
-        tracing::warn!(%run_id, from, earliest, "refusing to resume from events that were dropped");
+        rusty_log::warn!(%run_id, from, earliest, "refusing to resume from events that were dropped");
         return Err(ApiError::EventsGone { from, earliest });
     }
 

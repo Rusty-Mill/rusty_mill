@@ -35,7 +35,7 @@ tokio-util = { version = "0.7", optional = true }
 async-stream = { workspace = true, optional = true }
 
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"], optional = true }
-tracing = { workspace = true }
+rusty_log = { workspace = true }
 
 # signing feature (Agent Card JWS signing/verification)
 p256 = { version = "0.14", features = ["ecdsa"], optional = true }

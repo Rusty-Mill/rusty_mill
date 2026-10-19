@@ -18,9 +18,9 @@ use std::sync::{Arc, Mutex};
 use rusty_acp::client::AcpClient;
 use rusty_acp::server::{agent_fn, AcpServer, RunContext};
 use rusty_acp::types::{AgentManifest, AgentName, Message, RunStatus, SessionId};
-use tracing::subscriber::DefaultGuard;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Layer;
+use rusty_log::subscriber::DefaultGuard;
+use rusty_log::tracing_subscriber::layer::SubscriberExt;
+use rusty_log::tracing_subscriber::Layer;
 
 /// One span, flattened to its name and fields.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,24 +50,24 @@ struct SpanCollector {
 
 struct FieldVisitor(Vec<(String, String)>);
 
-impl tracing::field::Visit for FieldVisitor {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+impl rusty_log::field::Visit for FieldVisitor {
+    fn record_debug(&mut self, field: &rusty_log::field::Field, value: &dyn std::fmt::Debug) {
         self.0.push((field.name().to_string(), format!("{value:?}").trim_matches('"').to_string()));
     }
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+    fn record_str(&mut self, field: &rusty_log::field::Field, value: &str) {
         self.0.push((field.name().to_string(), value.to_string()));
     }
 }
 
 impl<S> Layer<S> for SpanCollector
 where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    S: rusty_log::Subscriber + for<'a> rusty_log::tracing_subscriber::registry::LookupSpan<'a>,
 {
     fn on_new_span(
         &self,
-        attrs: &tracing::span::Attributes<'_>,
-        id: &tracing::span::Id,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
+        attrs: &rusty_log::span::Attributes<'_>,
+        id: &rusty_log::span::Id,
+        ctx: rusty_log::tracing_subscriber::layer::Context<'_, S>,
     ) {
         let mut visitor = FieldVisitor(Vec::new());
         attrs.record(&mut visitor);
@@ -84,9 +84,9 @@ where
 
     fn on_record(
         &self,
-        id: &tracing::span::Id,
-        values: &tracing::span::Record<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
+        id: &rusty_log::span::Id,
+        values: &rusty_log::span::Record<'_>,
+        ctx: rusty_log::tracing_subscriber::layer::Context<'_, S>,
     ) {
         let mut visitor = FieldVisitor(Vec::new());
         values.record(&mut visitor);
@@ -106,7 +106,11 @@ where
         }
     }
 
-    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+    fn on_event(
+        &self,
+        event: &rusty_log::Event<'_>,
+        ctx: rusty_log::tracing_subscriber::layer::Context<'_, S>,
+    ) {
         let mut visitor = FieldVisitor(Vec::new());
         event.record(&mut visitor);
         let message = visitor
@@ -130,9 +134,9 @@ struct FieldStore(Vec<(String, String)>);
 fn collect() -> (Spans, EventScopes, DefaultGuard) {
     let spans: Spans = Arc::new(Mutex::new(Vec::new()));
     let at_event: EventScopes = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry()
+    let subscriber = rusty_log::tracing_subscriber::registry()
         .with(SpanCollector { spans: Arc::clone(&spans), at_event: Arc::clone(&at_event) });
-    let guard = tracing::subscriber::set_default(subscriber);
+    let guard = rusty_log::subscriber::set_default(subscriber);
     (spans, at_event, guard)
 }
 
@@ -142,7 +146,7 @@ async fn start_server() -> AcpClient {
         |ctx: RunContext| async move {
             // The line that matters: emitted from inside the agent, and only
             // useful to an operator if it lands under the run's span.
-            tracing::info!("agent speaking");
+            rusty_log::info!("agent speaking");
             ctx.reply_text(ctx.input_text()).await?;
             Ok(())
         },

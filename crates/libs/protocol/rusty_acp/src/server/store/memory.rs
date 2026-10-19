@@ -217,7 +217,7 @@ impl InMemoryStore {
             // Warn, because the consequence is silent: the next request for
             // this session gets a fresh one, and an agent's conversation starts
             // over with nothing to say it did.
-            tracing::warn!(
+            rusty_log::warn!(
                 %session_id,
                 max_sessions = self.max_sessions,
                 "evicted the least recently used session; its history and state are gone"
@@ -315,7 +315,7 @@ impl Store for InMemoryStore {
             // Warn, and once per trim rather than once per event, because the
             // consequence is only visible to a client that later tries to
             // resume from what is now gone.
-            tracing::warn!(
+            rusty_log::warn!(
                 %run_id,
                 dropped,
                 first_index = entry.first_index(),

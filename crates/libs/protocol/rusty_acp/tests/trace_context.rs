@@ -23,9 +23,9 @@ use rusty_acp::server::store::InMemoryStore;
 use rusty_acp::server::{agent_fn, AcpServer, RunContext};
 use rusty_acp::trace::{TraceContext, TRACEPARENT_HEADER};
 use rusty_acp::types::{AgentManifest, AgentName, Message};
-use tracing::subscriber::DefaultGuard;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Layer;
+use rusty_log::subscriber::DefaultGuard;
+use rusty_log::tracing_subscriber::layer::SubscriberExt;
+use rusty_log::tracing_subscriber::Layer;
 
 /// A span, flattened to its name and fields.
 #[derive(Debug, Clone)]
@@ -46,24 +46,24 @@ struct Collector(Spans);
 
 struct Fields(Vec<(String, String)>);
 
-impl tracing::field::Visit for Fields {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+impl rusty_log::field::Visit for Fields {
+    fn record_debug(&mut self, field: &rusty_log::field::Field, value: &dyn std::fmt::Debug) {
         self.0.push((field.name().to_string(), format!("{value:?}").trim_matches('"').to_string()));
     }
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+    fn record_str(&mut self, field: &rusty_log::field::Field, value: &str) {
         self.0.push((field.name().to_string(), value.to_string()));
     }
 }
 
 impl<S> Layer<S> for Collector
 where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    S: rusty_log::Subscriber + for<'a> rusty_log::tracing_subscriber::registry::LookupSpan<'a>,
 {
     fn on_new_span(
         &self,
-        attrs: &tracing::span::Attributes<'_>,
-        id: &tracing::Id,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
+        attrs: &rusty_log::span::Attributes<'_>,
+        id: &rusty_log::Id,
+        ctx: rusty_log::tracing_subscriber::layer::Context<'_, S>,
     ) {
         let mut fields = Fields(Vec::new());
         attrs.record(&mut fields);
@@ -80,9 +80,9 @@ where
 
     fn on_record(
         &self,
-        id: &tracing::Id,
-        values: &tracing::span::Record<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
+        id: &rusty_log::Id,
+        values: &rusty_log::span::Record<'_>,
+        ctx: rusty_log::tracing_subscriber::layer::Context<'_, S>,
     ) {
         let mut fields = Fields(Vec::new());
         values.record(&mut fields);
@@ -102,8 +102,8 @@ where
 
 fn collecting() -> (Spans, DefaultGuard) {
     let spans: Spans = Arc::default();
-    let subscriber = tracing_subscriber::registry().with(Collector(Arc::clone(&spans)));
-    (spans, tracing::subscriber::set_default(subscriber))
+    let subscriber = rusty_log::tracing_subscriber::registry().with(Collector(Arc::clone(&spans)));
+    (spans, rusty_log::subscriber::set_default(subscriber))
 }
 
 async fn server() -> String {

@@ -1,7 +1,7 @@
 //! Optional `tracing` instrumentation, feature-gated behind the
 //! `tracing` Cargo feature (off by default -- see that feature's
 //! Cargo.toml comment for why it's opt-in). When enabled, every spawned
-//! task gets a [`tracing::Span`] shaped exactly the way real (unstable,
+//! task gets a [`rusty_log::Span`] shaped exactly the way real (unstable,
 //! `tokio_unstable`-gated) tokio's own instrumentation shapes it, so the
 //! real `console-subscriber`/`tokio-console` tool -- built against that
 //! wire format, not this crate specifically -- works against this
@@ -18,8 +18,8 @@
 //! that span's fields for display. Poll count and busy/idle time come
 //! for free from ordinary span enter/exit -- `console-subscriber`'s
 //! `Layer` hooks `on_enter`/`on_exit` the same way any
-//! `tracing_subscriber::Layer` would, so wrapping the spawned future in
-//! [`tracing::Instrument::instrument`] (a standard, non-console-specific
+//! `rusty_log::tracing_subscriber::Layer` would, so wrapping the spawned future in
+//! [`rusty_log::Instrument::instrument`] (a standard, non-console-specific
 //! part of the `tracing` crate -- this module adds no bespoke enter/exit
 //! plumbing of its own) is all that's needed for that half.
 //!
@@ -52,16 +52,16 @@
 
 #[cfg(feature = "tracing")]
 mod imp {
-    use tracing::instrument::{Instrument, Instrumented};
+    use rusty_log::instrument::{Instrument, Instrumented};
 
     #[track_caller]
     pub(crate) fn spawn_span(
         kind: &'static str,
         name: Option<&str>,
         task_id: u64,
-    ) -> tracing::Span {
+    ) -> rusty_log::Span {
         let location = std::panic::Location::caller();
-        tracing::trace_span!(
+        rusty_log::trace_span!(
             target: "tokio::task",
             parent: None,
             "runtime.spawn",
@@ -75,9 +75,9 @@ mod imp {
     }
 
     #[track_caller]
-    pub(crate) fn blocking_span(name: Option<&str>, task_id: u64) -> tracing::Span {
+    pub(crate) fn blocking_span(name: Option<&str>, task_id: u64) -> rusty_log::Span {
         let location = std::panic::Location::caller();
-        tracing::trace_span!(
+        rusty_log::trace_span!(
             target: "tokio::task::blocking",
             parent: None,
             "runtime.spawn",
@@ -92,7 +92,7 @@ mod imp {
 
     pub(crate) fn instrument<F: std::future::Future>(
         future: F,
-        span: tracing::Span,
+        span: rusty_log::Span,
     ) -> Instrumented<F> {
         future.instrument(span)
     }
@@ -101,7 +101,7 @@ mod imp {
     /// around the actual synchronous execution of a blocking-pool
     /// closure, which (unlike a spawned future) is called once rather
     /// than polled repeatedly, so there's no `Future` to `.instrument()`.
-    pub(crate) fn enter(span: &tracing::Span) -> tracing::span::Entered<'_> {
+    pub(crate) fn enter(span: &rusty_log::Span) -> rusty_log::span::Entered<'_> {
         span.enter()
     }
 }

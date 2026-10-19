@@ -57,9 +57,9 @@ impl Agent for Echo {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
+    rusty_log::tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
+            rusty_log::tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,rusty_acp=debug".into()),
         )
         .init();
@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_router();
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await?;
-    tracing::info!("ACP server listening on http://localhost:8000");
+    rusty_log::info!("ACP server listening on http://localhost:8000");
     axum::serve(listener, router).await?;
     Ok(())
 }

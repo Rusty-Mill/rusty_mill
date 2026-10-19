@@ -54,7 +54,7 @@
 //!   the calling worker thread, first handing that thread's other queued
 //!   work off to a freshly spawned replacement so the rest of the pool
 //!   doesn't stall waiting on it. Also, behind the off-by-default
-//!   `tracing` Cargo feature: every spawned task gets a `tracing::Span`
+//!   `tracing` Cargo feature: every spawned task gets a `rusty_log::Span`
 //!   shaped exactly the way real (unstable) tokio's own instrumentation
 //!   shapes it, so the real `console-subscriber`/`tokio-console` tool --
 //!   built against that wire format, not this crate specifically --
