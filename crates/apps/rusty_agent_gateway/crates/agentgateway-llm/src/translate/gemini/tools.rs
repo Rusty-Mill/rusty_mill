@@ -86,7 +86,7 @@ pub fn definitions_for(tools: &Value) -> Option<Value> {
             match tool.get("type").and_then(Value::as_str) {
                 Some("function") | None => {}
                 Some(other) => {
-                    tracing::debug!(kind = other, "dropping a tool kind Gemini has no shape for");
+                    rusty_log::debug!(kind = other, "dropping a tool kind Gemini has no shape for");
                     return None;
                 }
             }
@@ -124,7 +124,7 @@ pub fn schema_for(schema: &Value) -> Value {
     let mut out = Map::new();
     for (key, value) in object {
         if !SCHEMA_FIELDS.contains(&key.as_str()) {
-            tracing::debug!(field = %key, "dropping a schema field Gemini does not accept");
+            rusty_log::debug!(field = %key, "dropping a schema field Gemini does not accept");
             continue;
         }
         let value = match key.as_str() {

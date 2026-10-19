@@ -399,6 +399,7 @@ dependencies = [
  "rsa",
  "rusty-mcp",
  "rusty_base64",
+ "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "serde_json",
@@ -408,8 +409,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -421,9 +420,9 @@ dependencies = [
  "regex",
  "reqwest 0.13.4",
  "rusty_a2a",
+ "rusty_log",
  "serde_json",
  "thiserror 2.0.20",
- "tracing",
 ]
 
 [[package]]
@@ -437,10 +436,10 @@ dependencies = [
  "http-body",
  "http-body-util",
  "rusty_agui",
+ "rusty_log",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -456,11 +455,11 @@ dependencies = [
  "rusty-mcp",
  "rusty_base64",
  "rusty_json",
+ "rusty_log",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -502,10 +501,10 @@ dependencies = [
  "hyper",
  "regex",
  "reqwest 0.13.4",
+ "rusty_log",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
  "wiremock",
 ]
 
@@ -524,6 +523,7 @@ dependencies = [
  "regex",
  "rusty-mcp",
  "rusty_json",
+ "rusty_log",
  "rusty_mcp_client_native",
  "rusty_mcp_server",
  "rusty_serve",
@@ -533,7 +533,6 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-prost",
- "tracing",
 ]
 
 [[package]]
@@ -549,10 +548,10 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rusty_log",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -564,11 +563,11 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "rusty_log",
  "rusty_tls",
  "rusty_tokio",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]

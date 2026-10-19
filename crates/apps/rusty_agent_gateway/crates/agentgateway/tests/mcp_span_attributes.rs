@@ -183,7 +183,7 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
-    use tracing_subscriber::prelude::*;
+    use rusty_log::tracing_subscriber::prelude::*;
 
     let received: Received = Arc::new(Mutex::new(Vec::new()));
     let collector_addr = collector(Arc::clone(&received)).await;
@@ -201,9 +201,11 @@ async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
     // Without a filter the HTTP stack's own TRACE events become spans, which
     // are exported over that stack -- a feedback loop that buries the one span
     // this test is about.
-    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer).with(
-        tracing_subscriber::EnvFilter::new("warn,agentgateway_mcp=info"),
-    ))
+    rusty_log::subscriber::set_global_default(
+        rusty_log::tracing_subscriber::registry().with(layer).with(
+            rusty_log::tracing_subscriber::EnvFilter::new("warn,agentgateway_mcp=info"),
+        ),
+    )
     .expect("this binary holds one test, so nothing else has installed one");
 
     let (processor_host, stop_processor) = processor().await;

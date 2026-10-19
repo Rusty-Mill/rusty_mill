@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     // before serving, so an operator learns it from startup rather than from
     // a policy quietly not applying in production.
     for finding in config.lint() {
-        tracing::warn!("{finding}");
+        rusty_log::warn!("{finding}");
     }
 
     let gateway = Gateway::build(&config, telemetry.instruments()).await?;
@@ -89,7 +89,7 @@ fn limits(config: &Config) -> LimitsLayer {
 
     if let Some(max) = limits.max_concurrent_requests {
         layer = layer.with_max_concurrent(max);
-        tracing::info!(max_concurrent = max, "shedding above the concurrency limit");
+        rusty_log::info!(max_concurrent = max, "shedding above the concurrency limit");
     }
     // The per-route timeout in the data plane is the one that produces a 504
     // with the route named. This is the outer backstop for anything that

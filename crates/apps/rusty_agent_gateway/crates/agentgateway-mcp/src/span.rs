@@ -36,8 +36,8 @@
 //! is only when `config.tracing` names a collector. The span itself still
 //! exists, so log lines inside it are still correlated.
 
+use rusty_log::Span;
 use rusty_mcp_server::CallContext;
-use tracing::Span;
 
 use crate::guardrails::Annotations;
 
@@ -63,7 +63,7 @@ pub fn request(method: &'static str, context: &CallContext) -> Span {
         rusty_mcp::trace::TraceContext::from_parts(parent, text("tracestate"), text("baggage"))
     }) {
         Some(trace) => trace.span(method),
-        None => tracing::info_span!("mcp.request", otel.name = method),
+        None => rusty_log::info_span!("mcp.request", otel.name = method),
     }
 }
 

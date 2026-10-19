@@ -155,11 +155,11 @@ impl HeaderChanges {
 
         for header in mutation.set {
             let Ok(name) = HeaderName::try_from(header.key.as_str()) else {
-                tracing::warn!(key = %header.key, "a processor sent an invalid header name; skipping");
+                rusty_log::warn!(key = %header.key, "a processor sent an invalid header name; skipping");
                 continue;
             };
             let Ok(value) = HeaderValue::from_bytes(&header.value) else {
-                tracing::warn!(key = %name, "a processor sent an invalid header value; skipping");
+                rusty_log::warn!(key = %name, "a processor sent an invalid header value; skipping");
                 continue;
             };
 
@@ -177,7 +177,7 @@ impl HeaderChanges {
 
         for key in mutation.remove {
             let Ok(name) = HeaderName::try_from(key.as_str()) else {
-                tracing::warn!(%key, "a processor asked to remove an invalid header name; skipping");
+                rusty_log::warn!(%key, "a processor asked to remove an invalid header name; skipping");
                 continue;
             };
             self.set.retain(|(existing, _)| *existing != name);
@@ -256,7 +256,7 @@ impl Annotations {
     fn merge(&mut self, metadata: prost_types::Struct) {
         for (key, value) in metadata.fields {
             let Some(value) = wire::proto_to_json(value) else {
-                tracing::debug!(
+                rusty_log::debug!(
                     key,
                     "a processor sent an annotation with no JSON form; skipping"
                 );
@@ -265,7 +265,7 @@ impl Annotations {
 
             let value = match &value {
                 serde_json::Value::String(text) if text.len() > MAX_ANNOTATION_BYTES => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         key,
                         len = text.len(),
                         "a processor sent an oversized annotation; truncating"
@@ -284,7 +284,7 @@ impl Annotations {
                 Some(at) => self.0[at].1 = value,
                 None if self.0.len() < MAX_ANNOTATIONS => self.0.push((key, value)),
                 None => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         key,
                         max = MAX_ANNOTATIONS,
                         "a processor sent more annotations than a span will carry; dropping"
@@ -527,7 +527,7 @@ impl Guardrails {
                 Some(request_result::Result::Pass(_)) | None => {}
                 Some(request_result::Result::Mutated(body)) => {
                     if current.is_none() {
-                        tracing::debug!(
+                        rusty_log::debug!(
                             method,
                             "a processor rewrote a request that carries no params; discarding"
                         );
@@ -678,7 +678,7 @@ impl Compiled {
                     wire::cel_to_json(value).map(|json| (key.clone(), wire::to_proto_value(json)))
                 }
                 Err(err) => {
-                    tracing::debug!(key, %err, "a guardrail metadata expression failed; skipping");
+                    rusty_log::debug!(key, %err, "a guardrail metadata expression failed; skipping");
                     None
                 }
             })
@@ -726,7 +726,7 @@ impl Compiled {
     /// `Some(reject)` refuses the call; `None` carries on to the next
     /// processor, which is what `failOpen` means.
     fn on_failure(&self, rpc: &str, status: &tonic::Status) -> Option<Outcome> {
-        tracing::warn!(
+        rusty_log::warn!(
             endpoints = self.endpoints.len(),
             rpc,
             code = ?status.code(),
@@ -757,7 +757,7 @@ fn reject(error: AuthorizationError) -> Outcome {
     let data = error.mcp_error.as_deref().and_then(|raw| {
         serde_json::from_slice(raw)
             .map_err(|err| {
-                tracing::warn!(%err, "ignoring an unparseable mcp_error payload from a processor");
+                rusty_log::warn!(%err, "ignoring an unparseable mcp_error payload from a processor");
             })
             .ok()
     });

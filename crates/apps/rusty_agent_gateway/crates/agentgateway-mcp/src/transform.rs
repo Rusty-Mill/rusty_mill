@@ -258,7 +258,7 @@ impl Transform {
 }
 
 fn unresolved(name: &HeaderName) {
-    tracing::debug!(
+    rusty_log::debug!(
         header = %name,
         "a header template referenced a guardrail value that is not set; dropping the header"
     );

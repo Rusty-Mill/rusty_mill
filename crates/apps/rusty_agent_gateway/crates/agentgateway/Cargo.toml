@@ -64,12 +64,10 @@ tower = { workspace = true, features = ["util"] }
 bytes = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+rusty_log = { workspace = true, features = ["subscriber"] }
 
 [dev-dependencies]
 prost = { workspace = true }
-tracing-subscriber = { workspace = true }
 prost-types = { workspace = true }
 http-body-util = { workspace = true }
 rmcp = { workspace = true, features = [

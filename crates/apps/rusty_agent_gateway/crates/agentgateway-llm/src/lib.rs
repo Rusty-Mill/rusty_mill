@@ -191,7 +191,7 @@ impl LlmBackend {
             _ => None,
         };
         if key.is_none() {
-            tracing::warn!(
+            rusty_log::warn!(
                 route = %at,
                 "no `backendAuth.key` on an `ai` route; the provider will almost certainly \
                  reject every request"
@@ -248,7 +248,7 @@ impl LlmBackend {
             &format!("{at}.ai.promptGuard"),
         )?;
         if guard.as_ref().is_some_and(Guard::guards_response) {
-            tracing::info!(
+            rusty_log::info!(
                 route = %at,
                 "a `promptGuard` response rule buffers streamed answers on this route: a \
                  pattern can straddle a chunk boundary, and text already sent cannot be recalled"
@@ -341,7 +341,7 @@ impl LlmBackend {
                     if !retry_this {
                         return Ok(response);
                     }
-                    tracing::debug!(
+                    rusty_log::debug!(
                         provider = self.provider.name(),
                         status,
                         attempt = attempt + 1,
@@ -350,7 +350,7 @@ impl LlmBackend {
                     last = Some(response);
                 }
                 Err(err) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         provider = self.provider.name(),
                         %err,
                         "provider request failed"
@@ -430,14 +430,14 @@ impl LlmBackend {
         if let Some(guard) = &self.guard {
             match guard.check_request(&mut body, &context).await {
                 Decision::Rejected(rejection) => {
-                    tracing::info!(
+                    rusty_log::info!(
                         provider = self.provider.name(),
                         status = rejection.status,
                         "refusing a request: a `promptGuard` rule matched"
                     );
                     return refuse(&rejection);
                 }
-                Decision::Masked => tracing::debug!("masked the prompt"),
+                Decision::Masked => rusty_log::debug!("masked the prompt"),
                 Decision::Allowed => {}
             }
         }
@@ -515,7 +515,7 @@ impl LlmBackend {
         if let Some(limiter) = &self.tokens
             && let Err(wait) = limiter.admit()
         {
-            tracing::info!(
+            rusty_log::info!(
                 provider = self.provider.name(),
                 retry_after_s = wait.seconds(),
                 "refusing a request: the token budget is spent"
@@ -550,14 +550,14 @@ impl LlmBackend {
             let body = match read_capped(response, MAX_RESPONSE_BYTES).await {
                 Ok(body) => body,
                 Err(err) => {
-                    tracing::warn!(%err, "reading the provider's error response failed");
+                    rusty_log::warn!(%err, "reading the provider's error response failed");
                     return error(
                         StatusCode::BAD_GATEWAY,
                         "the provider response was too large or truncated",
                     );
                 }
             };
-            tracing::warn!(
+            rusty_log::warn!(
                 provider = self.provider.name(),
                 %status,
                 "provider returned an error"
@@ -588,7 +588,7 @@ impl LlmBackend {
         let bytes = match read_capped(response, MAX_RESPONSE_BYTES).await {
             Ok(bytes) => bytes,
             Err(err) => {
-                tracing::warn!(%err, "reading the provider response failed");
+                rusty_log::warn!(%err, "reading the provider response failed");
                 return error(
                     StatusCode::BAD_GATEWAY,
                     "the provider response was too large or truncated",
@@ -619,7 +619,7 @@ impl LlmBackend {
             let mut text = answer_text(&body).unwrap_or_default();
             match guard.check_text(&mut text, context).await {
                 Decision::Rejected(rejection) => {
-                    tracing::info!(
+                    rusty_log::info!(
                         provider = self.provider.name(),
                         status = rejection.status,
                         "refusing an answer: a `promptGuard` rule matched"
@@ -659,7 +659,7 @@ impl LlmBackend {
         let bytes = match read_capped(response, MAX_RESPONSE_BYTES).await {
             Ok(bytes) => bytes,
             Err(err) => {
-                tracing::warn!(%err, "reading the provider response failed");
+                rusty_log::warn!(%err, "reading the provider response failed");
                 return error(
                     StatusCode::BAD_GATEWAY,
                     "the provider response was too large or truncated",
@@ -675,7 +675,7 @@ impl LlmBackend {
         let events = match parser.push(&bytes) {
             Ok(events) => events,
             Err(err) => {
-                tracing::warn!(%err, "reading the provider response failed");
+                rusty_log::warn!(%err, "reading the provider response failed");
                 return error(
                     StatusCode::BAD_GATEWAY,
                     "the provider response was too large or truncated",
@@ -707,7 +707,7 @@ impl LlmBackend {
         if let Some(guard) = &self.guard {
             match guard.check_text(&mut text, context).await {
                 Decision::Rejected(rejection) => {
-                    tracing::info!(
+                    rusty_log::info!(
                         provider = self.provider.name(),
                         status = rejection.status,
                         "refusing a streamed answer: a `promptGuard` rule matched"
@@ -769,7 +769,7 @@ impl LlmBackend {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(err) => {
-                        tracing::warn!(provider, %err, "provider stream failed");
+                        rusty_log::warn!(provider, %err, "provider stream failed");
                         break;
                     }
                 };
@@ -781,7 +781,7 @@ impl LlmBackend {
                     let events = match parser.push(&chunk) {
                         Ok(events) => events,
                         Err(err) => {
-                            tracing::warn!(provider, %err, "provider stream buffer overflowed");
+                            rusty_log::warn!(provider, %err, "provider stream buffer overflowed");
                             break;
                         }
                     };
@@ -800,7 +800,7 @@ impl LlmBackend {
                 let events = match parser.push(&chunk) {
                     Ok(events) => events,
                     Err(err) => {
-                        tracing::warn!(provider, %err, "provider stream buffer overflowed");
+                        rusty_log::warn!(provider, %err, "provider stream buffer overflowed");
                         break;
                     }
                 };
@@ -1045,7 +1045,7 @@ fn limited(wait: RetryAfter) -> Response<LlmBody> {
 /// is the shape a log pipeline can aggregate without a metrics backend being
 /// taken down by a client inventing model names.
 fn record_usage(provider: &str, model: &str, usage: Usage, streamed: bool) {
-    tracing::info!(
+    rusty_log::info!(
         provider,
         model,
         streamed,
