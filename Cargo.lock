@@ -12592,6 +12592,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_log"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rusty_lsp"
 version = "0.6.2"
 dependencies = [

@@ -129,6 +129,7 @@ members = [
     "crates/foundation/rusty_aead",
     "crates/foundation/rusty_percent",
     "crates/foundation/rusty_rand",
+    "crates/libs/rusty_log",
     "crates/foundation/rusty_atomic_file",
     "crates/foundation/rusty_confined_fs",
     "crates/foundation/rusty_ip",

@@ -1,0 +1,29 @@
+[package]
+name = "rusty_log"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "The workspace's single door to `tracing`: re-exports the logging and span API, and (feature `subscriber`) the subscriber kit, so that one crate owns the third-party dependency."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+tracing = { workspace = true }
+# Optional: only entry points and the span layers need it.
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+default = []
+# Re-export `tracing_subscriber` (`EnvFilter`, `fmt`, `Layer`, `Registry`, ...).
+subscriber = ["dep:tracing-subscriber"]
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[[test]]
+name = "facade"
+required-features = ["subscriber"]

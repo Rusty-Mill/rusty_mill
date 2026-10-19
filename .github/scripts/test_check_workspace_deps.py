@@ -7,8 +7,11 @@ import unittest
 
 from check_workspace_deps import (
     PINNED_EXTERNAL_DEPENDENCIES,
+    TRACING_BASELINE,
+    TRACING_FACADE,
     git_shadowed_workspace_members,
     pinned_dependency_violations,
+    tracing_baseline_violations,
 )
 
 
@@ -150,6 +153,68 @@ class PinnedDependencyTests(unittest.TestCase):
         for crate, allowed in PINNED_EXTERNAL_DEPENDENCIES.items():
             for name, reason in allowed.items():
                 self.assertTrue(reason.strip(), f"{crate}: `{name}` has no reason")
+
+
+class TracingBaselineTests(unittest.TestCase):
+    BASELINE = {"old": frozenset({"tracing", "tracing-subscriber"})}
+
+    def check(self, name: str, dependencies: list[dict]) -> list[str]:
+        return tracing_baseline_violations(
+            crate_metadata(name, dependencies), self.BASELINE, "facade"
+        )
+
+    def test_exactly_the_baseline_is_clean(self) -> None:
+        self.assertEqual(self.check("old", [dep("tracing"), dep("tracing-subscriber")]), [])
+
+    def test_a_crate_off_the_baseline_that_adds_tracing_is_told_to_use_the_facade(self) -> None:
+        violations = self.check("new", [dep("tracing")])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("new: depends on `tracing` directly", violations[0])
+        self.assertIn("use `facade`", violations[0])
+
+    def test_any_tracing_crate_counts_not_only_the_two_in_use(self) -> None:
+        self.assertEqual(len(self.check("new", [dep("tracing-appender")])), 1)
+        self.assertEqual(len(self.check("new", [dep("tracing-opentelemetry")])), 1)
+
+    def test_a_name_that_only_starts_with_tracing_is_not_a_tracing_crate(self) -> None:
+        self.assertEqual(self.check("new", [dep("tracingly"), dep("tracing_core_shim")]), [])
+
+    def test_every_dependency_kind_and_source_counts(self) -> None:
+        for kind in (None, "dev", "build"):
+            self.assertEqual(len(self.check("new", [dep("tracing", kind=kind)])), 1, kind)
+        self.assertEqual(len(self.check("new", [dep("tracing", source=None)])), 1)
+
+    def test_a_baseline_crate_gaining_another_tracing_crate_is_flagged(self) -> None:
+        violations = self.check("old", [dep("tracing"), dep("tracing-subscriber"), dep("tracing-log")])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("`tracing-log`", violations[0])
+
+    def test_a_stale_entry_is_flagged_so_the_baseline_only_shrinks(self) -> None:
+        violations = self.check("old", [dep("tracing")])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("`tracing-subscriber` is on TRACING_BASELINE", violations[0])
+        self.assertIn("delete it from the baseline", violations[0])
+
+    def test_a_migrated_crate_must_leave_the_baseline(self) -> None:
+        violations = self.check("old", [dep("facade", source=None)])
+        self.assertEqual(len(violations), 2)
+
+    def test_the_facade_itself_is_exempt(self) -> None:
+        self.assertEqual(self.check("facade", [dep("tracing"), dep("tracing-subscriber")]), [])
+
+    def test_a_package_outside_the_workspace_is_ignored(self) -> None:
+        outside = {
+            "workspace_members": [],
+            "packages": [{"id": "x", "name": "new", "dependencies": [dep("tracing")]}],
+        }
+        self.assertEqual(tracing_baseline_violations(outside, self.BASELINE, "facade"), [])
+
+    def test_the_real_baseline_lists_only_tracing_crates_and_not_the_facade(self) -> None:
+        self.assertNotIn(TRACING_FACADE, TRACING_BASELINE)
+        for crate, names in TRACING_BASELINE.items():
+            self.assertTrue(names, crate)
+            for name in names:
+                self.assertTrue(name == "tracing" or name.startswith("tracing-"), (crate, name))
 
 
 if __name__ == "__main__":

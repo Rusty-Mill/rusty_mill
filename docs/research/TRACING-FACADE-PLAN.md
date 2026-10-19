@@ -1,6 +1,6 @@
 # Plan: `tracing` facade (sovereignty list item 12)
 
-Status: **option B approved by the owner (2026-10-19)**; no code yet. Option C is not approved and is not planned.
+Status: **option B approved by the owner (2026-10-19)**. Step 1 (the `rusty_log` crate and the baseline check) is in progress; no crate is migrated yet. Option C is not approved and is not planned.
 Context: `RUSTY-MCP-SOVEREIGNTY.md` item 12 and D3; ADR-0002.
 
 ## What was measured (2026-10-18, `cargo metadata --all-features`, main at `25dd9517`)
@@ -37,7 +37,7 @@ If B is approved, the order is:
 
 ## Decision (2026-10-19)
 
-Option B. The questions below were put to the owner; B is chosen, the home for `rusty_log` is still to be confirmed in the PR that adds it.
+Option B. The questions below were put to the owner; B is chosen, `rusty_log` is added under `crates/libs/` (the `libs` layer; the owner can ask for a move in review).
 
 ## Decision as asked
 
