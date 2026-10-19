@@ -901,11 +901,14 @@ mod tests {
         stop.shutdown();
     }
 
-    /// Every request waits, in its deferred job, until the test opens the gate.
+    /// `/api/a` waits, in its deferred job, until the test opens the gate; anything else is answered at once.
     struct Gated(Arc<(Mutex<bool>, std::sync::Condvar)>);
 
     impl SharedHandler for Gated {
-        fn handle(&self, _: &Request<'_>) -> Response {
+        fn handle(&self, request: &Request<'_>) -> Response {
+            if request.target != "/api/a" {
+                return Response::json(StatusCode::OK, br#"{"quick":true}"#.to_vec());
+            }
             let gate = Arc::clone(&self.0);
             Response::deferred(move || {
                 let (open, opened) = &*gate;
@@ -933,7 +936,7 @@ mod tests {
         let client = std::thread::spawn(move || {
             exchange(
                 addr,
-                "GET /api/x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+                "GET /api/a HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
             )
         });
         std::thread::sleep(Duration::from_millis(150));
@@ -976,7 +979,19 @@ mod tests {
         let stop = server.shutdown_handle().unwrap();
         let accepting = std::thread::spawn(move || server.run().unwrap());
 
-        // Keep-alive connection A: a request held in its job when the stop begins.
+        // Connection B is open and has been served once, so it is established before the stop.
+        let mut b = TcpStream::connect(addr).unwrap();
+        b.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        b.write_all(b"GET /api/b0 HTTP/1.1\r\nHost: t\r\n\r\n")
+            .unwrap();
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while !seen.ends_with(br#"{"quick":true}"#) {
+            assert_eq!(b.read(&mut byte).unwrap(), 1, "closed early");
+            seen.push(byte[0]);
+        }
+
+        // Connection A: a request held in its job when the stop begins.
         let mut a = TcpStream::connect(addr).unwrap();
         a.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         a.write_all(b"GET /api/a HTTP/1.1\r\nHost: t\r\n\r\n")
@@ -985,15 +1000,13 @@ mod tests {
         stop.shutdown();
         accepting.join().unwrap();
 
-        // Connection B was open before the stop and asks for more work after it.
-        let mut b = TcpStream::connect(addr);
-        if let Ok(b) = b.as_mut() {
-            b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let _ = b.write_all(b"GET /api/b HTTP/1.1\r\nHost: t\r\n\r\n");
-            let mut got = String::new();
-            let _ = b.read_to_string(&mut got);
-            assert!(got.is_empty(), "not served after the stop: {got}");
-        }
+        // B asks for more work after the stop. It would be answered at once if it were served;
+        // the connection is closed instead, with nothing written.
+        b.write_all(b"GET /api/b1 HTTP/1.1\r\nHost: t\r\n\r\n")
+            .unwrap();
+        let mut got = String::new();
+        let _ = b.read_to_string(&mut got);
+        assert!(got.is_empty(), "not served after the stop: {got}");
 
         open(&gate);
         let mut reply = String::new();

@@ -117,6 +117,21 @@ fn lock(path: &Path) -> Result<DirLock, BoardError> {
     DirLock::acquire(dir, &format!("{}.lock", name.to_string_lossy())).map_err(storage)
 }
 
+/// Copy `from` into `dir` under its own name and flush the copy. Fails if `from` is missing.
+fn copy_synced(from: &Path, dir: &Path) -> Result<(), BoardError> {
+    let name = from
+        .file_name()
+        .ok_or_else(|| storage(format!("{} names no file", from.display())))?;
+    let to = dir.join(name);
+    std::fs::copy(from, &to).map_err(|e| storage(format!("copy {}: {e}", from.display())))?;
+    // Opened for writing: Windows refuses to flush a handle that cannot write.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&to)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| storage(format!("sync {}: {e}", to.display())))
+}
+
 impl MmdbStore {
     /// Open the store at `path`, creating it if absent, and rebuild the
     /// board's state from its commit records.
@@ -227,23 +242,15 @@ impl Store for MmdbStore {
         // could retire the last copies from before the failure.
         let _log = self.log.lock().map_err(poisoned)?;
         self.settled()?;
-        for from in [
-            self.path.clone(),
-            blob_path(&self.path),
-            log_path(&self.path),
-        ] {
-            let Some(name) = from.file_name().filter(|_| from.exists()) else {
-                continue;
-            };
-            let to = dir.join(name);
-            std::fs::copy(&from, &to)
-                .map_err(|e| storage(format!("copy {}: {e}", from.display())))?;
-            // Opened for writing: Windows refuses to flush a handle that cannot write.
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&to)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| storage(format!("sync {}: {e}", to.display())))?;
+        // The main file and its record blob always exist; a store without them is damaged (the
+        // mapping can outlive a file removed from under it), and a backup of that is no backup.
+        // Only the append log is optional: it is absent until the first commit and after a compaction.
+        for required in [self.path.clone(), blob_path(&self.path)] {
+            copy_synced(&required, dir)?;
+        }
+        let log = log_path(&self.path);
+        if log.exists() {
+            copy_synced(&log, dir)?;
         }
         self.path
             .file_name()

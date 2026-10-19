@@ -63,6 +63,11 @@ went to stderr, which a service keeps in its journal. `rusty_remind_me` already 
 - **A backup is opened before it is published.** The store adapter names the main file it copied
   (`Store::backup` returns it): the companions are named after it (`<name>.records`, `<name>.inserts`), so a
   store called `board.records` has a main file that looks like a companion and cannot be found by its name.
+  The main file and the record blob must be copied (only the append log is optional: it does not exist
+  before the first commit or after a compaction), and the main file must be in the copy before anything
+  is opened, because opening a store that is not there creates an empty one that would pass for the
+  backup of an empty board, be published, and let retention delete the last good copy. On Unix the
+  live mapping outlives a main file removed from under it, so this is reachable.
   The copied store is opened in a scratch directory (the
   open folds the append log, and the backup must stay as written) and every card must belong to a project
   of the copied registry; a copy that does not open, or does not fit, fails the backup and is not

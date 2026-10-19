@@ -67,6 +67,14 @@ fn check_restored(
     primary: &OsStr,
     scratch: &Path,
 ) -> Result<(), String> {
+    // `MmdbStore::open` creates an empty store where there is none, which would pass for a valid
+    // backup of an empty board: the main file must be there before anything is opened.
+    if !store.join(primary).is_file() {
+        return Err(text(
+            &store.join(primary),
+            "the copy lacks the store's main file",
+        ));
+    }
     for entry in std::fs::read_dir(store).map_err(|e| text(store, e))? {
         let from = entry.map_err(|e| text(store, e))?.path();
         let name = from

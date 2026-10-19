@@ -410,6 +410,75 @@ fn a_store_named_with_a_companion_suffix_backs_up_and_restores() {
     }
 }
 
+/// A store that has lost its main file must not become an empty backup that retires the last good one.
+#[cfg(unix)]
+#[test]
+fn a_store_whose_main_file_is_gone_is_not_backed_up_and_the_last_good_copy_stays() {
+    let dir = dir("gone");
+    let (path, out) = (dir.join("board.mmap"), dir.join("backups"));
+    let board = board_at(&path);
+    add_cards(&board, 2);
+    let settings = no_settings(&board);
+    let backups = Backups::new(out.clone(), 1);
+    let good = backups
+        .run(&board, &settings)
+        .expect("backup while healthy");
+    let kept = [good
+        .file_name()
+        .expect("name")
+        .to_string_lossy()
+        .into_owned()];
+
+    // The mapping outlives the file: the live store keeps answering with its main file removed.
+    std::fs::remove_file(&path).expect("remove the live main file");
+    assert_eq!(board.list(None).expect("still readable").len(), 2);
+    let why = backups
+        .run(&board, &settings)
+        .expect_err("a store without its main file");
+    assert!(why.contains("copy"), "{why}");
+    assert_eq!(backups_in(&out), kept, "the previous backup stays");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_copy_that_loses_its_main_file_before_it_is_checked_is_not_published() {
+    let dir = dir("lost");
+    let (path, out) = (dir.join("board.mmap"), dir.join("backups"));
+    let board = board_at(&path);
+    add_cards(&board, 2);
+    let settings = no_settings(&board);
+    let backups = Backups::new(out.clone(), 1);
+    let good = backups
+        .run(&board, &settings)
+        .expect("backup while healthy");
+    let kept = [good
+        .file_name()
+        .expect("name")
+        .to_string_lossy()
+        .into_owned()];
+    std::thread::sleep(Duration::from_millis(3));
+
+    let why = backups
+        .run_with(&board, &settings, &mut || {
+            // After the store was copied, before the copy is opened: its main file goes missing.
+            for entry in std::fs::read_dir(&out).expect("backups") {
+                let entry = entry.expect("entry");
+                if entry.file_name().to_string_lossy().starts_with(".board-") {
+                    std::fs::remove_file(entry.path().join("store").join("board.mmap"))
+                        .expect("remove the copied main file");
+                }
+            }
+        })
+        .expect_err("an empty store must not pass for a backup");
+    assert!(why.contains("lacks the store's main file"), "{why}");
+    assert_eq!(
+        backups_in(&out),
+        kept,
+        "no empty backup, and the good one is not retired"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn a_backup_that_died_part_way_is_swept_and_never_counted_as_finished() {
     let dir = dir("sweep");
