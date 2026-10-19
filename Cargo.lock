@@ -12807,6 +12807,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_protobuf"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_proxmox"
 version = "0.1.0"
 dependencies = [

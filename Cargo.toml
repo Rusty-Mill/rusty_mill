@@ -80,6 +80,7 @@ members = [
     "crates/libs/protocol/rusty_routine",
     "crates/libs/protocol/rusty_bbp",
     "crates/libs/protocol/rusty_flatbuffers",
+    "crates/libs/protocol/rusty_protobuf",
     "crates/apps/rusty_bbp_host",
     "crates/libs/rusty_sandbox",
     "crates/libs/rusty_bot",
