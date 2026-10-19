@@ -9,6 +9,7 @@
 //! in-memory update, so ids are in commit order and a failed write changes nothing.
 //! The cost is that the whole log is held in memory, which suits a board.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -220,7 +221,7 @@ impl Store for MmdbStore {
         self.settled()
     }
 
-    fn backup(&self, dir: &Path) -> Result<(), BoardError> {
+    fn backup(&self, dir: &Path) -> Result<OsString, BoardError> {
         // Holding the commit lock keeps every append out while the files are copied. Not while
         // unsettled: the copy would hold an event the state lacks, and a rotation of backups
         // could retire the last copies from before the failure.
@@ -244,7 +245,10 @@ impl Store for MmdbStore {
                 .and_then(|f| f.sync_all())
                 .map_err(|e| storage(format!("sync {}: {e}", to.display())))?;
         }
-        Ok(())
+        self.path
+            .file_name()
+            .map(OsString::from)
+            .ok_or_else(|| storage(format!("{} names no file", self.path.display())))
     }
 
     fn compact(&self) -> Result<(), BoardError> {

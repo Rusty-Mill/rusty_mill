@@ -31,8 +31,17 @@ went to stderr, which a service keeps in its journal. `rusty_remind_me` already 
     still running and the reply is still unsent. Connections idle between requests are not counted.
   - *Tool calls.* Each tool call also holds an `InFlight` guard for as long as it runs, so a call
     whose client has gone away (the worker carries on without it) is still waited for.
-  - *Then nothing new.* Once the wait has begun the counter is closed: a request is answered 503
-    unrun, a tool call is refused, no backup starts.
+  - *Admission closes first.* `begin_stop` closes the `InFlight` counter and only then tells the listener
+    to stop; `serve_until_drained` closes it again, without waiting, before either wait (a caller that
+    stopped the listener some other way is covered). From then on a request is answered 503 unrun, a
+    tool call is refused and no backup starts, so neither wait can be outrun by work that begins after it
+    saw the count at zero. Waiting first and closing afterwards left exactly that gap: a request on an
+    existing keep-alive connection could be admitted in between and finish after the stop had returned.
+  - *The transport agrees.* After a stop begins `rusty_serve` serves no further request: one that arrives on
+    a connection already open is counted, sees the stop flag and is dropped unanswered (the client sees the
+    connection close), and an answer still being written says `Connection: close`. The request is counted
+    before the flag is read, so a request that finds it clear was counted before the stop began and the
+    wait for idle sees it. The idle count therefore only falls once a stop has begun.
   `serve_until_drained` is that sequence, one deadline for all of it; `main` and the tests call the same
   function. Long streams that never end are not waited for beyond the deadline.
 - **Backups run inside the process** (`--backup-dir`, `--backup-secs`, `--backup-keep`), not from a
@@ -51,7 +60,10 @@ went to stderr, which a service keeps in its journal. `rusty_remind_me` already 
   without A. Lock order is settings lock, then the store's commit lock, which is what every settings change
   does; nothing takes the commit lock and then waits for the settings lock. A card move or assignment is
   not a settings change and goes on, but cannot make a project disappear.
-- **A backup is opened before it is published.** The copied store is opened in a scratch directory (the
+- **A backup is opened before it is published.** The store adapter names the main file it copied
+  (`Store::backup` returns it): the companions are named after it (`<name>.records`, `<name>.inserts`), so a
+  store called `board.records` has a main file that looks like a companion and cannot be found by its name.
+  The copied store is opened in a scratch directory (the
   open folds the append log, and the backup must stay as written) and every card must belong to a project
   of the copied registry; a copy that does not open, or does not fit, fails the backup and is not
   published.

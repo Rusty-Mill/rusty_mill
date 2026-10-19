@@ -24,7 +24,7 @@ use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::backup::Backups;
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::drain::{InFlight, serve_until_drained};
+use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::mcp;
 use rusty_mill_board::mmdb::MmdbStore;
 use rusty_mill_board::projects::Projects;
@@ -156,7 +156,10 @@ fn announce_first_admin(creds: &Path, secret: &str) -> Result<(), String> {
 
 /// Stop `server` on SIGTERM or SIGINT (Ctrl+C elsewhere), so a service stop or restart ends the
 /// accept loop and the process exits, instead of dying mid-request.
-fn stop_on_signal(server: rusty_serve::ShutdownHandle) -> Result<(), String> {
+fn stop_on_signal(
+    server: rusty_serve::ShutdownHandle,
+    in_flight: Arc<InFlight>,
+) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -180,7 +183,7 @@ fn stop_on_signal(server: rusty_serve::ShutdownHandle) -> Result<(), String> {
                 let _ = tokio::signal::ctrl_c().await;
             });
             tracing::info!("signal received, shutting down");
-            server.shutdown();
+            begin_stop(&server, &in_flight);
         })
         .map(drop)
         .map_err(|e| format!("signal thread: {e}"))
@@ -293,7 +296,10 @@ fn run(cli: Cli) -> Result<(), String> {
             Duration::from_secs(cli.backup_secs),
         )?;
     }
-    stop_on_signal(http.shutdown_handle().map_err(|e| e.to_string())?)?;
+    stop_on_signal(
+        http.shutdown_handle().map_err(|e| e.to_string())?,
+        in_flight.clone(),
+    )?;
     tracing::info!(%addr, "Mill Board listening");
     // The accept loop ends on a signal. Then the requests being answered, the tool calls running
     // and a backup under way get one bounded wait: a commit whose reply is cut off is durable but

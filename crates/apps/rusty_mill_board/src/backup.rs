@@ -6,6 +6,7 @@
 //! called or wherever they live on the host). To restore, put `store/*` where `--store` points and
 //! each settings file where its flag (or `--settings-dir`) points.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,27 +54,27 @@ fn sync_dir(dir: &Path) -> Result<(), String> {
 /// and the copy itself must stay as it was written), and check that every card belongs to a
 /// project of the copied registry. A backup that does not open, or that holds a card whose
 /// project the copied settings lack, is no backup.
-fn verify(store: &Path, settings: &Path, scratch: &Path) -> Result<(), String> {
+fn verify(store: &Path, settings: &Path, primary: &OsStr, scratch: &Path) -> Result<(), String> {
     std::fs::create_dir_all(scratch).map_err(|e| text(scratch, e))?;
-    let result = check_restored(store, settings, scratch);
+    let result = check_restored(store, settings, primary, scratch);
     let _ = std::fs::remove_dir_all(scratch);
     result
 }
 
-fn check_restored(store: &Path, settings: &Path, scratch: &Path) -> Result<(), String> {
-    let mut main = None;
+fn check_restored(
+    store: &Path,
+    settings: &Path,
+    primary: &OsStr,
+    scratch: &Path,
+) -> Result<(), String> {
     for entry in std::fs::read_dir(store).map_err(|e| text(store, e))? {
         let from = entry.map_err(|e| text(store, e))?.path();
         let name = from
             .file_name()
             .ok_or_else(|| text(&from, "no file name"))?;
         std::fs::copy(&from, scratch.join(name)).map_err(|e| text(&from, e))?;
-        let name = name.to_string_lossy();
-        if !name.ends_with(".records") && !name.ends_with(".inserts") {
-            main = Some(scratch.join(&*name));
-        }
     }
-    let main = main.ok_or_else(|| text(store, "no store file was copied"))?;
+    let main = scratch.join(primary);
     let registry = settings.join("projects.json");
     let projects = if registry.exists() {
         Projects::load(&registry)?
@@ -165,12 +166,14 @@ impl Backups {
         for dir in [&store, &set] {
             std::fs::create_dir_all(dir).map_err(|e| text(dir, e))?;
         }
+        let mut primary = None;
         settings.snapshot_with(&set, &mut || {
-            board.backup(&store).map_err(|e| e.to_string())?;
+            primary = Some(board.backup(&store).map_err(|e| e.to_string())?);
             after_store();
             Ok(())
         })?;
-        verify(&store, &set, &tmp.join("verify"))?;
+        let primary = primary.ok_or("the store did not name its main file")?;
+        verify(&store, &set, &primary, &tmp.join("verify"))?;
         for dir in [&store, &set, tmp] {
             sync_dir(dir)?;
         }

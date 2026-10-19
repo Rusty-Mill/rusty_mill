@@ -35,11 +35,21 @@ impl InFlight {
         Some(Running(self))
     }
 
+    /// Refuse new work from now on, without waiting. Work already running is unaffected.
+    pub fn close(&self) {
+        self.state().closed = true;
+    }
+
     /// Refuse new work, then wait up to `within` for the work running to finish. `true` if it all did.
     pub fn close_and_wait(&self, within: Duration) -> bool {
+        self.close();
+        self.wait(within)
+    }
+
+    /// Wait up to `within` for the work running to finish. `true` if none is left.
+    pub fn wait(&self, within: Duration) -> bool {
         let end = Instant::now() + within;
         let mut state = self.state();
-        state.closed = true;
         while state.running > 0 {
             let Some(left) = end.checked_duration_since(Instant::now()) else {
                 return false;
@@ -64,7 +74,7 @@ impl Drop for Running<'_> {
     }
 }
 
-/// Serve until [`rusty_serve::ShutdownHandle::shutdown`], then spend at most `within` letting the work
+/// Serve until a stop begins ([`begin_stop`]), then spend at most `within` letting the work
 /// finish: first the requests being answered (until their last byte is written), then whatever
 /// `flight` still counts (MCP calls running on detached workers, a backup). `Ok(true)` if all of it
 /// finished; `Ok(false)` if the deadline ended it. One deadline for both, so a stop is bounded.
@@ -78,10 +88,21 @@ pub fn serve_until_drained(
 ) -> std::io::Result<bool> {
     let handle = server.shutdown_handle()?;
     let served = server.run();
+    // Admission first, and without waiting: from here nothing new starts, so neither wait below
+    // can be outrun by a request or a tool call that begins after it has seen the count at zero.
+    flight.close();
     let end = Instant::now() + within;
     let answered = handle.wait_idle(within);
-    let finished = flight.close_and_wait(end.saturating_duration_since(Instant::now()));
+    let finished = flight.wait(end.saturating_duration_since(Instant::now()));
     served.map(|()| answered && finished)
+}
+
+/// Begin a stop: close admission, then stop accepting. In that order and from one place (the signal
+/// handler and the tests both call it), so no request or tool call is admitted after the listener
+/// has been told to stop.
+pub fn begin_stop(stop: &rusty_serve::ShutdownHandle, flight: &InFlight) {
+    flight.close();
+    stop.shutdown();
 }
 
 #[cfg(test)]

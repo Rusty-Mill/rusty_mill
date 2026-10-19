@@ -1,6 +1,7 @@
 //! The storage port and an in-memory adapter.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -37,11 +38,13 @@ pub trait Store: Send + Sync {
         Ok(())
     }
     /// Copy a consistent image of the store into the existing directory `dir`: no commit
-    /// lands while it is copied, so the copy opens as the board stood at one moment.
+    /// lands while it is copied, so the copy opens as the board stood at one moment. Returns the
+    /// file name of the store's main file as copied (its companions are named after it, so the
+    /// main one cannot be told from them by looking at the names).
     ///
     /// # Errors
     /// [`BoardError::Storage`] if the store is not durable or a file cannot be copied.
-    fn backup(&self, _dir: &Path) -> Result<(), BoardError> {
+    fn backup(&self, _dir: &Path) -> Result<OsString, BoardError> {
         Err(BoardError::Storage("this store is not durable".into()))
     }
     /// Fold the store's append log into its main files; reads and state are unchanged.
@@ -188,7 +191,7 @@ impl<T: Store + ?Sized> Store for Box<T> {
     fn health(&self) -> Result<(), BoardError> {
         (**self).health()
     }
-    fn backup(&self, dir: &Path) -> Result<(), BoardError> {
+    fn backup(&self, dir: &Path) -> Result<OsString, BoardError> {
         (**self).backup(dir)
     }
     fn compact(&self) -> Result<(), BoardError> {

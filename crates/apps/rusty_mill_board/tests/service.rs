@@ -387,6 +387,29 @@ fn a_backup_whose_cards_do_not_fit_its_settings_is_refused_and_not_published() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `--store` may be named with either companion suffix; the backup must still find the main file.
+#[test]
+fn a_store_named_with_a_companion_suffix_backs_up_and_restores() {
+    for name in ["board.records", "board.inserts"] {
+        let dir = dir(&format!("suffix_{}", name.replace('.', "_")));
+        let board = board_at(&dir.join(name));
+        add_cards(&board, 2);
+        let done = Backups::new(dir.join("backups"), 1)
+            .run(&board, &no_settings(&board))
+            .unwrap_or_else(|why| panic!("{name}: {why}"));
+        let mut copied = backups_in(&done.join("store"));
+        copied.sort();
+        assert_eq!(
+            copied,
+            [name, &format!("{name}.inserts"), &format!("{name}.records")].map(String::from),
+            "{name}"
+        );
+        let restored = board_at(&done.join("store").join(name));
+        assert_eq!(restored.list(None).expect("list").len(), 2, "{name}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 #[test]
 fn a_backup_that_died_part_way_is_swept_and_never_counted_as_finished() {
     let dir = dir("sweep");
