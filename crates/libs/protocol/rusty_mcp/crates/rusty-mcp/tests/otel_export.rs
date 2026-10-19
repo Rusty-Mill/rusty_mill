@@ -13,11 +13,11 @@ use std::{sync::Arc, time::Duration};
 
 use otel_support::Collector;
 use rusty_json::Value;
+use rusty_log::tracing_subscriber::prelude::*;
 use rusty_mcp::{
     otel::{OtelConfig, OtelGuard},
     trace::TraceContext,
 };
-use tracing_subscriber::prelude::*;
 
 const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
 const PARENT: &str = "00f067aa0ba902b7";
@@ -33,7 +33,10 @@ const UNSAMPLED: &str = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-00
 /// callers that bring their own subscriber, and that is what is exercised here.
 fn with_pipeline(config: OtelConfig, body: impl FnOnce()) -> OtelGuard {
     let (guard, layer) = rusty_mcp::otel::pipeline(config).expect("pipeline starts");
-    tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), body);
+    rusty_log::subscriber::with_default(
+        rusty_log::tracing_subscriber::registry().with(layer),
+        body,
+    );
     guard
 }
 
@@ -60,9 +63,9 @@ fn spans_reach_the_collector_after_a_flush() {
     let collector = Collector::start(200);
 
     let guard = with_pipeline(config_for(&collector).with_service_version("1.2.3"), || {
-        let span = tracing::info_span!("a-span", answer = 42);
+        let span = rusty_log::info_span!("a-span", answer = 42);
         let _entered = span.enter();
-        tracing::info!("inside");
+        rusty_log::info!("inside");
     });
 
     // The flush is what sends them; without it the buffer dies with the guard.
@@ -110,7 +113,7 @@ fn a_remote_parent_joins_the_callers_trace() {
         // `span()` records the ids as fields; the layer turns them into a parent.
         let span = context.span("tools/call");
         let _entered = span.enter();
-        tracing::info!("handling");
+        rusty_log::info!("handling");
     });
 
     guard.shutdown();
@@ -139,7 +142,7 @@ fn a_span_without_a_remote_parent_starts_its_own_trace() {
     let collector = Collector::start(200);
 
     let guard = with_pipeline(config_for(&collector), || {
-        drop(tracing::info_span!("tools/call"));
+        drop(rusty_log::info_span!("tools/call"));
     });
 
     guard.shutdown();
@@ -158,7 +161,7 @@ fn spans_in_one_request_form_a_tree_under_the_callers_span() {
         let context = TraceContext::from_parts(TRACEPARENT, None, None).expect("valid");
         let request = context.span("tools/call");
         let _entered = request.enter();
-        let inner = tracing::info_span!("backend");
+        let inner = rusty_log::info_span!("backend");
         drop(inner);
     });
 
@@ -179,7 +182,7 @@ fn a_caller_that_did_not_sample_gets_no_spans() {
         let context = TraceContext::from_parts(UNSAMPLED, None, None).expect("valid");
         let request = context.span("tools/call");
         let _entered = request.enter();
-        drop(tracing::info_span!("backend"));
+        drop(rusty_log::info_span!("backend"));
     });
 
     guard.shutdown();
@@ -193,7 +196,7 @@ fn root_spans_are_sampled_by_the_configured_ratio() {
     let collector = Collector::start(200);
 
     let guard = with_pipeline(config_for(&collector).with_sample_ratio(0.0), || {
-        drop(tracing::info_span!("never"));
+        drop(rusty_log::info_span!("never"));
     });
 
     guard.shutdown();
@@ -205,11 +208,14 @@ fn a_full_batch_is_sent_without_waiting_for_a_flush() {
     let collector = Collector::start(200);
 
     let (guard, layer) = rusty_mcp::otel::pipeline(config_for(&collector)).expect("pipeline");
-    tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
-        for _ in 0..700 {
-            drop(tracing::info_span!("busy"));
-        }
-    });
+    rusty_log::subscriber::with_default(
+        rusty_log::tracing_subscriber::registry().with(layer),
+        || {
+            for _ in 0..700 {
+                drop(rusty_log::info_span!("busy"));
+            }
+        },
+    );
 
     // 512 make a batch; no flush, and the interval is far off.
     assert!(
@@ -225,7 +231,7 @@ fn spans_set_after_creation_reach_the_collector() {
     let collector = Collector::start(200);
 
     let guard = with_pipeline(config_for(&collector), || {
-        let span = tracing::info_span!("mcp.request");
+        let span = rusty_log::info_span!("mcp.request");
         rusty_mcp::otel::set_attribute(&span, "mcpGuardrails.rule", "rule-9b2e");
         rusty_mcp::otel::set_attribute(&span, "mcpGuardrails.score", 0.75);
     });
@@ -275,9 +281,9 @@ fn an_unreachable_collector_does_not_break_the_server() {
             .without_metrics()
             .with_shutdown_timeout(Duration::from_millis(500)),
         || {
-            let span = tracing::info_span!("still-works");
+            let span = rusty_log::info_span!("still-works");
             let _entered = span.enter();
-            tracing::info!("the handler carries on");
+            rusty_log::info!("the handler carries on");
         },
     );
 
@@ -289,7 +295,7 @@ fn a_collector_that_rejects_the_batch_does_not_break_anything() {
     let collector = Collector::start(503);
 
     let guard = with_pipeline(config_for(&collector), || {
-        drop(tracing::info_span!("refused"));
+        drop(rusty_log::info_span!("refused"));
     });
 
     guard.shutdown();
@@ -301,9 +307,9 @@ async fn the_shutdown_hook_flushes() {
     let collector = Collector::start(200);
 
     let guard = Arc::new(with_pipeline(config_for(&collector), || {
-        let span = tracing::info_span!("hooked");
+        let span = rusty_log::info_span!("hooked");
         let _entered = span.enter();
-        tracing::info!("inside");
+        rusty_log::info!("inside");
     }));
 
     // Exactly what `ServerConfig::with_shutdown_hook` will call.

@@ -71,7 +71,7 @@ impl Poster {
                 .error_for_status()
         });
         if let Err(err) = result {
-            tracing::warn!("{}", failure_message(&self.endpoint, &err));
+            rusty_log::warn!("{}", failure_message(&self.endpoint, &err));
         }
     }
 }
@@ -214,7 +214,7 @@ fn run<I: Send + 'static>(
     let runtime = match rusty_tokio::Builder::new_current_thread().build() {
         Ok(runtime) => runtime,
         Err(err) => {
-            tracing::error!(%err, "could not start the telemetry runtime; nothing will be exported");
+            rusty_log::error!(%err, "could not start the telemetry runtime; nothing will be exported");
             return;
         }
     };

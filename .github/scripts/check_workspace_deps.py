@@ -37,8 +37,6 @@ PINNED_EXTERNAL_DEPENDENCIES: dict[str, dict[str, str]] = {
         "tower-layer": "the Layer impls of the tower adapters, until the gateway leaves axum",
         "tower-service": "the Service impls of the tower adapters, until the gateway leaves axum",
         "tokio": "tokio::time in the tower adapter's timeout; the layers run on the gateway's runtime",
-        "tracing": "D3: the log facade is workspace-wide; replaced by the in-house facade (item 12)",
-        "tracing-subscriber": "D3: subscriber setup in otel::init and the SpanLayer's Layer impl (item 12)",
     },
 }
 
@@ -67,7 +65,6 @@ TRACING_BASELINE: dict[str, frozenset[str]] = {
     "rp-router": frozenset({"tracing"}),
     "rp-server": frozenset({"tracing", "tracing-subscriber"}),
     "rusty-acp": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty-mcp": frozenset({"tracing", "tracing-subscriber"}),
     "rusty_a2a": frozenset({"tracing"}),
     "rusty_homelab_mcp": frozenset({"tracing", "tracing-subscriber"}),
     "rusty_lsp": frozenset({"tracing"}),

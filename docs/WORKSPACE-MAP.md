@@ -115,7 +115,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
-| libs | rusty_log | rusty_log | The workspace's single door to \`tracing\`: re-exports the logging and span API, and (feature \`subscriber\`) the subscriber kit, so that one crate owns the third-party dependency. | 0 |
+| libs | rusty_log | rusty_log | The workspace's single door to \`tracing\`: re-exports the logging and span API, and (feature \`subscriber\`) the subscriber kit, so that one crate owns the third-party dependency. | 1 |
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. | 1 |
 | libs | rusty_mcp | rusty-mcp | Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry | 3 |
 | libs | rusty_mcp | rusty-mcp-client | Protocol-only MCP client: stdio child process and Streamable HTTP, with API-key, bearer and OAuth client-credentials auth | 4 |

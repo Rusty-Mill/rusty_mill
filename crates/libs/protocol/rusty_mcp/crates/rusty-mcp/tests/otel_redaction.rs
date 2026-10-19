@@ -16,8 +16,8 @@ use std::{
 };
 
 use otel_support::{Collector, dead_address};
+use rusty_log::tracing_subscriber::{fmt::MakeWriter, prelude::*};
 use rusty_mcp::otel::{OtelConfig, OtelError, Signal, metrics::Outcome};
-use tracing_subscriber::{fmt::MakeWriter, prelude::*};
 
 /// Everything logged so far, as text.
 #[derive(Clone, Default)]
@@ -52,10 +52,10 @@ fn logs() -> &'static Captured {
     static LOGS: OnceLock<Captured> = OnceLock::new();
     LOGS.get_or_init(|| {
         let captured = Captured::default();
-        tracing_subscriber::fmt()
+        rusty_log::tracing_subscriber::fmt()
             .with_writer(captured.clone())
             .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(rusty_log::Level::WARN)
             .init();
         captured
     })
@@ -73,9 +73,12 @@ fn send_that_fails(base: String, metrics_endpoint: String) -> String {
     )
     .expect("pipeline");
     // Scoped to this thread, so the global capture subscriber is not replaced.
-    tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
-        drop(tracing::info_span!("work"));
-    });
+    rusty_log::subscriber::with_default(
+        rusty_log::tracing_subscriber::registry().with(layer),
+        || {
+            drop(rusty_log::info_span!("work"));
+        },
+    );
     let instruments = guard.instruments().expect("metrics on");
     instruments.request_started("ping");
     instruments.request_finished("ping", None, Outcome::Ok, 0.001);

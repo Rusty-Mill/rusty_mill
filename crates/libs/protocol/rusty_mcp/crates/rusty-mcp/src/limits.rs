@@ -180,7 +180,7 @@ where
             let _permit = match admission.as_ref().map(Admission::try_admit) {
                 Some(Ok(permit)) => Some(permit),
                 Some(Err(rejection)) => {
-                    tracing::warn!("shedding a request: the concurrency limit is reached");
+                    rusty_log::warn!("shedding a request: the concurrency limit is reached");
                     return Ok(respond(rejection));
                 }
                 None => None,
@@ -195,7 +195,7 @@ where
             match tokio::time::timeout(timeout, call).await {
                 Ok(response) => response,
                 Err(_) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         timeout_ms = timeout.as_millis() as u64,
                         "a request produced no response within the timeout"
                     );
