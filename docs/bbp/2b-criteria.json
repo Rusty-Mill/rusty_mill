@@ -1,6 +1,6 @@
 {
   "status": "proposal, not approved: delete this key when the owner approves",
-  "prices_as_of": "2026-10-06 (from the Claude API documentation; the owner confirms against the price page and updates this date)",
+  "prices_as_of": "2026-10-19 (owner checked against the Claude Platform Docs model pricing page)",
   "models": {
     "claude-opus-5-5": { "input": 4.0, "output": 20.0, "cache_creation_5m": 5.0, "cache_creation_1h": 8.0, "cache_read": 0.20 },
     "claude-sonnet-5-5": { "input": 2.0, "output": 10.0, "cache_creation_5m": 2.5, "cache_creation_1h": 4.0, "cache_read": 0.10 }
