@@ -95,9 +95,16 @@ fn spans_are_created_and_instrument_runs_a_future_inside_one() {
 
 /// Polls a future that is ready on its first poll; enough for `ready()`.
 fn block_on_ready<F: std::future::Future>(future: F) -> F::Output {
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll, Wake, Waker};
 
-    let mut cx = Context::from_waker(Waker::noop());
+    // `Waker::noop` is 1.85; this crate declares the 1.65 floor of `tracing`.
+    struct Noop;
+    impl Wake for Noop {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    let waker = Waker::from(Arc::new(Noop));
+    let mut cx = Context::from_waker(&waker);
     let mut future = Box::pin(future);
     match future.as_mut().poll(&mut cx) {
         Poll::Ready(value) => value,
