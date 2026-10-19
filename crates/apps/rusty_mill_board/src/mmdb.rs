@@ -232,7 +232,10 @@ impl Store for MmdbStore {
             let to = dir.join(name);
             std::fs::copy(&from, &to)
                 .map_err(|e| storage(format!("copy {}: {e}", from.display())))?;
-            std::fs::File::open(&to)
+            // Opened for writing: Windows refuses to flush a handle that cannot write.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&to)
                 .and_then(|f| f.sync_all())
                 .map_err(|e| storage(format!("sync {}: {e}", to.display())))?;
         }

@@ -1,10 +1,7 @@
 //! Running the board as a service: one owner per store, backups, a clean stop.
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::backup::Backups;
@@ -118,109 +115,120 @@ fn a_board_that_cannot_back_up_leaves_no_partial_backup() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-fn get(port: u16, path: &str) -> Option<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    )
-    .ok()?;
-    let mut out = String::new();
-    stream.read_to_string(&mut out).ok()?;
-    Some(out)
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
-
-fn spawn(store: &Path, settings: &Path, port: u16) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_rusty_mill_board"))
-        .arg("--store")
-        .arg(store)
-        .arg("--settings-dir")
-        .arg(settings)
-        .arg("--http")
-        .arg(format!("127.0.0.1:{port}"))
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn")
-}
-
-fn wait_exit(child: &mut Child, within: Duration) -> Option<std::process::ExitStatus> {
-    let end = Instant::now() + within;
-    while Instant::now() < end {
-        if let Some(status) = child.try_wait().expect("wait") {
-            return Some(status);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    None
-}
-
+/// The real binary as a child process: signals and file modes are Unix, so it is Unix-only.
 #[cfg(unix)]
-#[test]
-fn the_server_reports_health_keeps_its_first_credential_off_stderr_and_stops_on_sigterm() {
-    use std::os::unix::fs::PermissionsExt;
+mod process {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
 
-    let dir = dir("process");
-    let (store, settings, port) = (dir.join("board.mmap"), dir.join("settings"), free_port());
-    let mut server = spawn(&store, &settings, port);
+    use super::dir;
 
-    let up = Instant::now() + Duration::from_secs(20);
-    let health = loop {
-        match get(port, "/health") {
-            Some(r) if r.starts_with("HTTP/1.1 200") => break r,
-            _ if Instant::now() > up => panic!("never became healthy"),
-            _ => std::thread::sleep(Duration::from_millis(100)),
+    fn get(port: u16, path: &str) -> Option<String> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        .ok()?;
+        let mut out = String::new();
+        stream.read_to_string(&mut out).ok()?;
+        Some(out)
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port()
+    }
+
+    fn spawn(store: &Path, settings: &Path, port: u16) -> Child {
+        Command::new(env!("CARGO_BIN_EXE_rusty_mill_board"))
+            .arg("--store")
+            .arg(store)
+            .arg("--settings-dir")
+            .arg(settings)
+            .arg("--http")
+            .arg(format!("127.0.0.1:{port}"))
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn")
+    }
+
+    fn wait_exit(child: &mut Child, within: Duration) -> Option<std::process::ExitStatus> {
+        let end = Instant::now() + within;
+        while Instant::now() < end {
+            if let Some(status) = child.try_wait().expect("wait") {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-    };
-    assert!(health.contains(r#""ok":true"#), "{health}");
+        None
+    }
 
-    // A second process on the same store is refused, and says why.
-    let mut second = spawn(&store, &dir.join("settings2"), free_port());
-    let status = wait_exit(&mut second, Duration::from_secs(20)).expect("second exits");
-    let mut stderr = String::new();
-    second
-        .stderr
-        .take()
-        .expect("stderr")
-        .read_to_string(&mut stderr)
-        .expect("read");
-    assert!(!status.success() && stderr.contains("in use"), "{stderr}");
+    #[test]
+    fn the_server_reports_health_keeps_its_first_credential_off_stderr_and_stops_on_sigterm() {
+        use std::os::unix::fs::PermissionsExt;
 
-    // The first admin's credential is in an owner-only file, not in the log.
-    let file = settings.join("first-admin.token");
-    let mode = std::fs::metadata(&file)
-        .expect("credential file")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600);
+        let dir = dir("process");
+        let (store, settings, port) = (dir.join("board.mmap"), dir.join("settings"), free_port());
+        let mut server = spawn(&store, &settings, port);
 
-    let killed = Command::new("kill")
-        .args(["-TERM", &server.id().to_string()])
-        .status()
-        .expect("kill");
-    assert!(killed.success());
-    let status = wait_exit(&mut server, Duration::from_secs(10)).expect("exits on SIGTERM");
-    assert!(status.success(), "{status:?}");
+        let up = Instant::now() + Duration::from_secs(20);
+        let health = loop {
+            match get(port, "/health") {
+                Some(r) if r.starts_with("HTTP/1.1 200") => break r,
+                _ if Instant::now() > up => panic!("never became healthy"),
+                _ => std::thread::sleep(Duration::from_millis(100)),
+            }
+        };
+        assert!(health.contains(r#""ok":true"#), "{health}");
 
-    let mut log = String::new();
-    server
-        .stderr
-        .take()
-        .expect("stderr")
-        .read_to_string(&mut log)
-        .expect("read");
-    let secret = std::fs::read_to_string(&file).expect("read credential");
-    assert!(
-        !secret.trim().is_empty() && !log.contains(secret.trim()),
-        "{log}"
-    );
-    std::fs::remove_dir_all(&dir).ok();
+        // A second process on the same store is refused, and says why.
+        let mut second = spawn(&store, &dir.join("settings2"), free_port());
+        let status = wait_exit(&mut second, Duration::from_secs(20)).expect("second exits");
+        let mut stderr = String::new();
+        second
+            .stderr
+            .take()
+            .expect("stderr")
+            .read_to_string(&mut stderr)
+            .expect("read");
+        assert!(!status.success() && stderr.contains("in use"), "{stderr}");
+
+        // The first admin's credential is in an owner-only file, not in the log.
+        let file = settings.join("first-admin.token");
+        let mode = std::fs::metadata(&file)
+            .expect("credential file")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let killed = Command::new("kill")
+            .args(["-TERM", &server.id().to_string()])
+            .status()
+            .expect("kill");
+        assert!(killed.success());
+        let status = wait_exit(&mut server, Duration::from_secs(10)).expect("exits on SIGTERM");
+        assert!(status.success(), "{status:?}");
+
+        let mut log = String::new();
+        server
+            .stderr
+            .take()
+            .expect("stderr")
+            .read_to_string(&mut log)
+            .expect("read");
+        let secret = std::fs::read_to_string(&file).expect("read credential");
+        assert!(
+            !secret.trim().is_empty() && !log.contains(secret.trim()),
+            "{log}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
