@@ -33,7 +33,7 @@ http = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde_json = { workspace = true }
 thiserror = "2"
-tracing = { workspace = true }
+rusty_log = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -44,7 +44,7 @@ prost-types = { workspace = true }
 # Spans for MCP requests, and the attributes a guardrail writes on them.
 rusty-mcp = { workspace = true, default-features = false, features = ["otel"] }
 thiserror = "2"
-tracing = { workspace = true }
+rusty_log = { workspace = true }
 
 [dev-dependencies]
 rusty_mcp_server = { workspace = true, features = ["http"] }

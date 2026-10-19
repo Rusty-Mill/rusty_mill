@@ -39,7 +39,7 @@ http = { workspace = true }
 http-body = { workspace = true }
 bytes = { workspace = true }
 thiserror = "2"
-tracing = { workspace = true }
+rusty_log = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }

@@ -51,7 +51,7 @@ pub fn definitions_to_anthropic(tools: &Value) -> Option<Value> {
             match tool.get("type").and_then(Value::as_str) {
                 Some("function") | None => {}
                 Some(other) => {
-                    tracing::debug!(
+                    rusty_log::debug!(
                         kind = other,
                         "dropping a tool kind Anthropic has no shape for"
                     );

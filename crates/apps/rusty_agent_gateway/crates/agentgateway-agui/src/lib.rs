@@ -76,11 +76,11 @@ impl Rule {
         match self.program.execute(context) {
             Ok(cel::Value::Bool(value)) => value,
             Ok(other) => {
-                tracing::debug!(expression = %self.expression, result = ?other, "a rule produced a non-boolean; treating it as false");
+                rusty_log::debug!(expression = %self.expression, result = ?other, "a rule produced a non-boolean; treating it as false");
                 false
             }
             Err(err) => {
-                tracing::debug!(expression = %self.expression, %err, "a rule could not be evaluated; treating it as false");
+                rusty_log::debug!(expression = %self.expression, %err, "a rule could not be evaluated; treating it as false");
                 false
             }
         }

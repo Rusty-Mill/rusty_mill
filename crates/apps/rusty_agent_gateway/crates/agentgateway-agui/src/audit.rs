@@ -33,7 +33,7 @@ pub fn record_decision(route: &str, summary: Option<&RunSummary>, permitted: boo
         ),
         None => ("", "", "", String::new(), 0),
     };
-    tracing::info!(
+    rusty_log::info!(
         target: TARGET,
         route,
         decision = if permitted { "permit" } else { "refuse" },
@@ -65,7 +65,7 @@ pub struct RunReport {
 
 /// Record how a run ended.
 pub fn record_outcome(route: &str, summary: &RunSummary, status: u16, report: &RunReport) {
-    tracing::info!(
+    rusty_log::info!(
         target: TARGET,
         route,
         thread_id = %summary.thread_id,
