@@ -1,0 +1,31 @@
+[package]
+name = "rusty_prost"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Dependency-free Protobuf message layer on rusty_protobuf: a Message trait for hand-written schemas, and the well-known types (Timestamp, Any, Struct, Value, ...) plus google.rpc Status and ErrorInfo. No derive, no code generation."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["protobuf", "serialization", "protocol"]
+categories = ["encoding"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+rusty_protobuf = { workspace = true }
+
+[dev-dependencies]
+# Independent oracle only (never shipped): every type is compared with `prost` 0.14,
+# which the gateway and rusty_a2a use today (ADR-0002 Tier S allows dev-only oracles).
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"

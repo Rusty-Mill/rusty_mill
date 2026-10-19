@@ -12807,6 +12807,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_prost"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "rusty_protobuf",
+]
+
+[[package]]
 name = "rusty_protobuf"
 version = "0.1.0"
 
