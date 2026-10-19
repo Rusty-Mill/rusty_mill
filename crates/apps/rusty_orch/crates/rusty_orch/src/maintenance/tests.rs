@@ -347,6 +347,12 @@ fn lost_publication_reply_adopts_same_commit_and_pr_without_push_or_creation() {
     )
     .unwrap();
     let runner = Replies(RefCell::new(vec![
+        ("git remote get-url --push origin".into(), "https://github.com/example/repo.git".into()),
+        ("gh repo view https://github.com/example/repo.git --json nameWithOwner,defaultBranchRef".into(), r#"{"nameWithOwner":"example/repo","defaultBranchRef":{"name":"main"}}"#.into()),
+        ("git check-ref-format refs/heads/main".into(), "".into()),
+        ("git fetch --no-tags -- https://github.com/example/repo.git refs/heads/main".into(), "".into()),
+        ("git rev-parse FETCH_HEAD".into(), "tip".into()),
+        ("git merge-base --is-ancestor base tip".into(), "".into()),
         (
             "git symbolic-ref --short HEAD".into(),
             "maintenance/durable".into(),
@@ -357,7 +363,7 @@ fn lost_publication_reply_adopts_same_commit_and_pr_without_push_or_creation() {
         ("git rev-parse HEAD".into(), "commit".into()),
         ("git rev-parse HEAD^{tree}".into(), "tree".into()),
         (
-            "gh pr list --head maintenance/durable --state all --json url,headRefOid".into(),
+            "gh pr list --repo example/repo --head maintenance/durable --state all --json url,headRefOid".into(),
             r#"[{"url":"https://github.com/example/repo/pull/1","headRefOid":"commit"}]"#.into(),
         ),
     ]));
@@ -371,6 +377,15 @@ fn lost_publication_reply_adopts_same_commit_and_pr_without_push_or_creation() {
 
 #[test]
 fn publication_uses_real_git_worktree_and_recovers_without_duplicate_commit_or_pr() {
+    publication_fixture(false);
+}
+
+#[test]
+fn publication_refuses_unmerged_feature_base_before_worktree_push_or_pr() {
+    publication_fixture(true);
+}
+
+fn publication_fixture(unmerged_feature: bool) {
     use std::cell::RefCell;
     use std::process::Command;
     struct LocalGithub {
@@ -390,9 +405,12 @@ fn publication_uses_real_git_worktree_and_recovers_without_duplicate_commit_or_p
             if argv[0] != "gh" {
                 return StdCommand.run_in(cwd, argv, stdin, timeout, scrub);
             }
+            if argv[1] == "pr" {
+                assert!(argv.windows(2).any(|a| a == ["--repo", "fixture/repo"]));
+            }
             let stdout = match (argv[1].as_str(),argv[2].as_str()) {
                 ("pr","list") => self.commit.borrow().as_ref().map(|c| format!(r#"[{{"url":"https://github.com/fixture/repo/pull/1","headRefOid":"{c}"}}]"#)).unwrap_or_else(|| "[]".into()),
-                ("repo","view") => r#"{"defaultBranchRef":{"name":"main"}}"#.into(),
+                ("repo","view") => r#"{"nameWithOwner":"fixture/repo","defaultBranchRef":{"name":"main"}}"#.into(),
                 ("pr","create") => {
                     self.creates.set(self.creates.get()+1);
                     let commit = git(&StdCommand,&self.source,&["rev-parse","refs/heads/maintenance/durable"]).unwrap();
@@ -418,6 +436,7 @@ fn publication_uses_real_git_worktree_and_recovers_without_duplicate_commit_or_p
         vec!["init", "-qb", "main"],
         vec!["config", "user.name", "Test"],
         vec!["config", "user.email", "test@example.invalid"],
+        vec!["config", "core.autocrlf", "false"],
     ] {
         assert!(Command::new("git")
             .args(args)
@@ -426,7 +445,10 @@ fn publication_uses_real_git_worktree_and_recovers_without_duplicate_commit_or_p
             .unwrap()
             .success());
     }
-    fs::write(repo.join("Cargo.toml"), "old\n").unwrap();
+    let original = "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[package.metadata.rusty_mill]\nlayer = \"invalid\"\n";
+    let manifest = repo.join("crates/apps/a/Cargo.toml");
+    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    fs::write(&manifest, original).unwrap();
     git(&StdCommand, &repo, &["add", "."]).unwrap();
     git(&StdCommand, &repo, &["commit", "-qm", "base"]).unwrap();
     a.base = git(&StdCommand, &repo, &["rev-parse", "HEAD"]).unwrap();
@@ -435,7 +457,7 @@ fn publication_uses_real_git_worktree_and_recovers_without_duplicate_commit_or_p
     let patch = bundle.join("candidate.patch");
     fs::write(
         &patch,
-        "--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -1 +1 @@\n-old\n+new\n",
+        "--- a/crates/apps/a/Cargo.toml\n+++ b/crates/apps/a/Cargo.toml\n@@ -4,3 +4,3 @@\n edition = \"2021\"\n [package.metadata.rusty_mill]\n-layer = \"invalid\"\n+layer = \"apps\"\n",
     )
     .unwrap();
     git(
@@ -480,13 +502,74 @@ fn publication_uses_real_git_worktree_and_recovers_without_duplicate_commit_or_p
         &["remote", "add", "origin", remote.to_str().unwrap()],
     )
     .unwrap();
+    git(&StdCommand, &repo, &["push", "origin", "main"]).unwrap();
+    if unmerged_feature {
+        git(&StdCommand, &repo, &["checkout", "-qb", "feature"]).unwrap();
+        fs::write(repo.join("unrelated.rs"), "unrelated feature change\n").unwrap();
+        git(&StdCommand, &repo, &["add", "."]).unwrap();
+        git(&StdCommand, &repo, &["commit", "-qm", "unrelated feature"]).unwrap();
+        a.base = git(&StdCommand, &repo, &["rev-parse", "HEAD"]).unwrap();
+        // Record the exact candidate tree on feature B, not on default A.
+        git(
+            &StdCommand,
+            &repo,
+            &["apply", "--index", patch.to_str().unwrap()],
+        )
+        .unwrap();
+        let feature_tree = git(&StdCommand, &repo, &["write-tree"]).unwrap();
+        let mut feature_report = report.clone();
+        feature_report.tree = Some(Sha256::of(feature_tree.as_bytes()));
+        fs::write(
+            bundle.join("report.json"),
+            json::to_string(&feature_report).unwrap(),
+        )
+        .unwrap();
+        git(
+            &StdCommand,
+            &repo,
+            &["apply", "-R", "--index", patch.to_str().unwrap()],
+        )
+        .unwrap();
+    }
     let runner = LocalGithub {
         commit: RefCell::new(None),
         creates: std::cell::Cell::new(0),
         source: repo.clone(),
     };
+    if unmerged_feature {
+        assert!(publish(&a, &runner, &dir)
+            .unwrap_err()
+            .to_string()
+            .contains("not in publication target history"));
+        assert_eq!(runner.creates.get(), 0);
+        assert!(!a.config.work.join("maintenance-pr/durable").exists());
+        assert!(git(
+            &StdCommand,
+            &remote,
+            &["show-ref", "--verify", "refs/heads/maintenance/durable"]
+        )
+        .is_err());
+        assert!(git(&StdCommand, &repo, &["status", "--porcelain"])
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(dir).unwrap();
+        return;
+    }
     let url = publish(&a, &runner, &dir).unwrap();
     let commit = git(&StdCommand, &repo, &["rev-parse", "maintenance/durable"]).unwrap();
+    // Recovery must use the original publication target even if local remote
+    // configuration changes after a lost PR reply.
+    git(
+        &StdCommand,
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "unreachable-after-publication",
+        ],
+    )
+    .unwrap();
     assert_eq!(publish(&a, &runner, &dir).unwrap(), url);
     assert_eq!(runner.creates.get(), 1);
     assert_eq!(
@@ -497,10 +580,7 @@ fn publication_uses_real_git_worktree_and_recovers_without_duplicate_commit_or_p
         git(&StdCommand, &repo, &["rev-parse", "HEAD"]).unwrap(),
         a.base
     );
-    assert_eq!(
-        fs::read_to_string(repo.join("Cargo.toml")).unwrap(),
-        "old\n"
-    );
+    assert_eq!(fs::read_to_string(&manifest).unwrap(), original);
     assert_eq!(
         git(
             &StdCommand,
@@ -557,6 +637,17 @@ fn linked_worktrees_recover_one_journal_and_exclude_concurrent_cycles() {
         &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
     )
     .unwrap();
+    let mut config = attempt().config;
+    config.repo = linked.clone();
+    config.dir = dir.join("shared-store");
+    persist_task(&config.dir, "active", &repo, false);
+    assert_eq!(active_bbp_task(&config).unwrap().as_deref(), Some("active"));
+    // Terminal tasks must not require a checkout to remain on disk.
+    let deleted = dir.join("deleted");
+    fs::create_dir_all(&deleted).unwrap();
+    persist_task(&config.dir, "old", &deleted, true);
+    fs::remove_dir_all(&deleted).unwrap();
+    assert_eq!(active_bbp_task(&config).unwrap().as_deref(), Some("active"));
     let common = repo.join(".git").canonicalize().unwrap();
     let state = common.join("rusty-orch-maintenance");
     fs::create_dir_all(&state).unwrap();
@@ -588,10 +679,63 @@ fn linked_worktrees_recover_one_journal_and_exclude_concurrent_cycles() {
         .unwrap();
     lock.try_lock().unwrap();
     options.execute = true;
-    assert!(execute(&options, &StdCommand)
-        .unwrap_err()
-        .to_string()
-        .contains("another maintenance cycle"));
+    let error = execute(&options, &StdCommand).unwrap_err().to_string();
+    assert!(error.contains(if cfg!(target_os = "linux") {
+        "another maintenance cycle"
+    } else {
+        "maintenance execution requires sandboxed Linux BBP"
+    }));
     drop(lock);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn persist_task(dir: &Path, name: &str, repo: &Path, terminal: bool) {
+    use rusty_bbp::{Budget, Event, PrincipalId, Rev, SchedulingPolicy, TaskId, LOG_SCHEMA};
+    let task = TaskId(name.into());
+    let mut events = vec![Event::TaskOpened {
+        schema: LOG_SCHEMA,
+        roster: vec![],
+        task: task.clone(),
+        repo: repo.to_str().unwrap().into(),
+        profile_digest: Sha256::of(b"profiles"),
+        budget: Budget {
+            messages: 10,
+            bytes: 1000,
+            reads: 10,
+            reads_per_turn: 10,
+            turns: 10,
+            iterations: 10,
+        },
+        turn_ms: 1000,
+        request_ms: 1000,
+        max_live_turns: 1,
+        human: PrincipalId("human".into()),
+        policy: SchedulingPolicy::default(),
+    }];
+    if terminal {
+        events.push(Event::StateChanged {
+            from: State::Planning,
+            to: State::Cancelled,
+        });
+        events.push(Event::Cancelled {
+            reason: "completed historical fixture".into(),
+        });
+    }
+    FsStore::open(dir)
+        .unwrap()
+        .append(&task, Rev(0), &events)
+        .unwrap();
+}
+
+#[test]
+fn deleted_terminal_checkout_does_not_block_an_unrelated_repository() {
+    let dir = temp();
+    let mut config = attempt().config;
+    config.dir = dir.join("store");
+    config.repo = dir.join("current");
+    fs::create_dir_all(&config.repo).unwrap();
+    git(&StdCommand, &config.repo, &["init", "-q"]).unwrap();
+    persist_task(&config.dir, "old", &dir.join("already-deleted"), true);
+    assert!(active_bbp_task(&config).unwrap().is_none());
     fs::remove_dir_all(dir).unwrap();
 }

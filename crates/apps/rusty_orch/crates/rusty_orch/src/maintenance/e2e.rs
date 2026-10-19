@@ -3,7 +3,7 @@
 #![cfg(target_os = "linux")]
 use super::*;
 use orch_cli::{CommandRunner, ExecError, Exit};
-use rusty_bbp::{ArtifactKind::*, MessageKind::*, Role as BbpRole, Stage};
+
 use std::process::Command;
 use std::time::Instant;
 
@@ -191,62 +191,24 @@ fn sandboxed_maintenance_recovers_and_prepares_reviewed_pr_without_merging() {
         format!("set -e\n\"$BBP_BIN\" mcp <<'RPC'\n{init}\n{verdict}\nRPC\n"),
     )
     .unwrap();
-    let config = orch_bbp::Config {
-        binary: binary.clone(),
-        dir: root.join("bbp"),
-        repo: repo.clone(),
-        work: root.join("work"),
-        profiles: input_profiles,
-        pool: BTreeMap::from([
-            (
-                "worker".into(),
-                orch_bbp::Agent {
-                    vendor: "fixture-one".into(),
-                    program: "/bin/sh".into(),
-                    args: vec![maker.to_string_lossy().into()],
-                },
-            ),
-            (
-                "checker".into(),
-                orch_bbp::Agent {
-                    vendor: "fixture-two".into(),
-                    program: "/bin/sh".into(),
-                    args: vec![auditor.to_string_lossy().into()],
-                },
-            ),
-        ]),
-        roster: vec![
-            BbpRole::new("repairer", 0)
-                .post(&[RequestDecision, Verdict, Pass])
-                .write(&[Spec, Diff, Candidate])
-                .read_artifacts(&[Brief, Spec, Diff, Candidate, TestReport])
-                .verdict_at(&[Stage::Test]),
-            BbpRole::new("independent", 1)
-                .post(&[Verdict, Pass])
-                .read_artifacts(&[Brief, Spec, Diff, Candidate, TestReport])
-                .scoped()
-                .verdict_at(&[Stage::Review])
-                .final_decision(),
-        ],
-        assignments: BTreeMap::from([
-            (
-                "repairer".into(),
-                orch_bbp::Assignment {
-                    agent: "worker".into(),
-                    builtin_tools: false,
-                },
-            ),
-            (
-                "independent".into(),
-                orch_bbp::Assignment {
-                    agent: "checker".into(),
-                    builtin_tools: false,
-                },
-            ),
-        ]),
-        live_turns: 1,
-        max_wall_secs: 120,
-    };
+    // Keep the shipped Codex author/Claude reviewer capability policy intact;
+    // only provider processes and machine paths become offline fixtures.
+    let mut config: orch_bbp::Config =
+        json::from_str(include_str!("../../../../docs/examples/bbp.json")).unwrap();
+    config.binary = binary.clone();
+    config.dir = root.join("bbp");
+    config.repo = repo.clone();
+    config.work = root.join("work");
+    config.profiles = input_profiles;
+    config.max_wall_secs = 120;
+    for (name, script) in [("builder", &maker), ("judge", &auditor)] {
+        let agent = config.pool.get_mut(name).unwrap();
+        agent.program = "/bin/sh".into();
+        agent.args = vec![script.to_string_lossy().into()];
+    }
+    config.validate().unwrap();
+    assert!(config.assignments["maker"].builtin_tools);
+    assert!(!config.assignments["auditor"].builtin_tools);
     let file = root.join("bbp.json");
     fs::write(&file, json::to_string(&config).unwrap()).unwrap();
     let options = Options {

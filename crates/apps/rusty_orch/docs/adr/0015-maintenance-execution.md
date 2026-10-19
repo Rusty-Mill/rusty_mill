@@ -12,7 +12,9 @@ policy repair first, then validation scope, edit scope, and portable finding ID.
 Maintenance uses `orch-dispatch::TaskHost` and `orch-bbp::BbpHost` directly for its
 single Implement card. It does not route a one-call implementation agent: all
 providers, capabilities, writers and independent reviewers come from the supplied
-BBP configuration. Built-in tools are disabled. Existing moderator supervision,
+BBP configuration. The Codex author may use built-in tools in the launcher's
+isolated clone; independent final reviewers remain without built-in tools.
+Candidate artifacts and confined validation remain mandatory. Existing moderator supervision,
 Linux confinement, budgets and human gates remain authoritative.
 
 A private atomic JSON journal under the common Git directory records intent
@@ -35,5 +37,9 @@ scope and Cargo profiles, sandbox evidence and inspected base, then prepares a
 patch, PR description and report. Explicit `--execute --publish-pr` authorizes
 publication of that exact validated tree from a private worktree as a draft PR.
 A stable branch and current PR head check recover uncertain push/create replies.
+The publication bundle freezes the push destination, GitHub repository and base
+branch. The inspected revision must be an ancestor of that destination's fetched
+default-branch history before any publication worktree or remote write, so
+unmerged feature commits cannot be included alongside the validated repair.
 Maintenance never relays approvals, grants a merge gate or merges a PR. The
 existing human CLI and receipt lifecycle remain unchanged.

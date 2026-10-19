@@ -362,6 +362,14 @@ fn git(runner: &impl CommandRunner, repo: &Path, args: &[&str]) -> Result<String
             .collect::<Vec<_>>(),
     )
 }
+fn repository_identity(runner: &impl CommandRunner, repo: &Path) -> Result<PathBuf> {
+    Ok(PathBuf::from(git(
+        runner,
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?)
+    .canonicalize()?)
+}
 fn save(path: &Path, journal: &Journal) -> Result<()> {
     rusty_atomic_file::write_private(path, json::to_string(journal)?.as_bytes())?;
     Ok(())
@@ -376,7 +384,7 @@ fn load(path: &Path, repo: &Path) -> Result<Journal> {
             attempts: vec![],
         }
     };
-    if state.schema_version != 1 || state.repo != repo.to_string_lossy() {
+    if state.schema_version != 1 || Path::new(&state.repo).canonicalize()? != repo.canonicalize()? {
         return Err("maintenance journal schema/repository mismatch".into());
     }
     Ok(state)
@@ -453,24 +461,29 @@ fn task(selected: &Selection) -> Result<(Task, Board)> {
 }
 
 fn open_pr_conflicts(runner: &impl CommandRunner, repo: &Path) -> Result<BTreeSet<String>> {
+    open_pr_conflicts_in(runner, repo, None)
+}
+fn open_pr_conflicts_in(
+    runner: &impl CommandRunner,
+    repo: &Path,
+    repository: Option<&str>,
+) -> Result<BTreeSet<String>> {
     // Authentication remains the gh CLI's own; credentials are not passed to BBP.
-    let exit = runner.run_in(
-        Some(repo),
-        &[
-            "gh".into(),
-            "pr".into(),
-            "list".into(),
-            "--state".into(),
-            "open".into(),
-            "--limit".into(),
-            "1000".into(),
-            "--json".into(),
-            "files,headRefName,url".into(),
-        ],
-        &[],
-        Duration::from_secs(30),
-        &[],
-    )?;
+    let mut argv = vec![
+        "gh".into(),
+        "pr".into(),
+        "list".into(),
+        "--state".into(),
+        "open".into(),
+        "--limit".into(),
+        "1000".into(),
+        "--json".into(),
+        "files,headRefName,url".into(),
+    ];
+    if let Some(repository) = repository {
+        argv.extend(["--repo".into(), repository.into()]);
+    }
+    let exit = runner.run_in(Some(repo), &argv, &[], Duration::from_secs(30), &[])?;
     if exit.status != 0 {
         return Err(format!(
             "cannot establish current PR state: {}",
@@ -506,11 +519,7 @@ fn open_pr_conflicts(runner: &impl CommandRunner, repo: &Path) -> Result<BTreeSe
 /// Run one cycle. Dry-run reads no provider configuration and creates no files.
 pub fn execute(options: &Options, runner: &impl CommandRunner) -> Result<String> {
     let repo = options.repo.canonicalize()?;
-    let common = PathBuf::from(git(
-        runner,
-        &repo,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?);
+    let common = repository_identity(runner, &repo)?;
     // Resolve the inspected checkout separately from the shared Git identity.
     let source =
         PathBuf::from(git(runner, &repo, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
@@ -604,11 +613,9 @@ pub fn execute(options: &Options, runner: &impl CommandRunner) -> Result<String>
     if config.repo.canonicalize()? != source {
         return Err("BBP config repository differs from inspection".into());
     }
-    if config.assignments.values().any(|a| a.builtin_tools) {
-        return Err(
-            "maintenance agents must use BBP artifacts; built-in tools must be disabled".into(),
-        );
-    }
+    // Config::validate enforces the independent reviewer's tool restrictions.
+    // Authors may use tools in the launcher's isolated clone; BBP artifacts and
+    // confined validation remain the only route to a publishable candidate.
     for manifest in &selected.allowed_paths {
         let path = source.join(manifest);
         if !path.canonicalize()?.starts_with(&source)
@@ -870,14 +877,16 @@ fn active_bbp_task(config: &orch_bbp::Config) -> Result<Option<String>> {
         return Ok(None);
     }
     let store = FsStore::open(&config.dir)?;
+    let repository = repository_identity(&StdCommand, &config.repo)?;
     for task in store.task_ids() {
         let events = store
             .events(&task, 0)
             .map_err(|e| format!("BBP task inventory: {e:?}"))?;
         let state = TaskState::fold(task.clone(), &events);
-        if Path::new(&state.repo).canonicalize()? == config.repo.canonicalize()?
-            && !state.state.terminal()
-        {
+        if state.state.terminal() {
+            continue;
+        }
+        if repository_identity(&StdCommand, Path::new(&state.repo))? == repository {
             return Ok(Some(task.0));
         }
     }
@@ -967,6 +976,82 @@ fn gh(runner: &impl CommandRunner, repo: &Path, args: &[String]) -> Result<Strin
     Ok(String::from_utf8(out.stdout)?.trim().into())
 }
 
+#[derive(Serialize, Deserialize)]
+struct PublicationTarget {
+    remote: String,
+    repository: String,
+    branch: String,
+}
+
+fn publication_target(
+    attempt: &Attempt,
+    runner: &impl CommandRunner,
+    bundle: &Path,
+) -> Result<PublicationTarget> {
+    let source = &attempt.config.repo;
+    let path = bundle.join("publication-target.json");
+    let target: PublicationTarget = if path.exists() {
+        json::from_str(&fs::read_to_string(&path)?)?
+    } else {
+        // Resolve GitHub from the actual push destination, not a mutable gh
+        // default or a different fetch remote. Freeze it before publication.
+        let remote = git(runner, source, &["remote", "get-url", "--push", "origin"])?;
+        let repo: Value = json::from_str(&gh(
+            runner,
+            source,
+            &[
+                "repo".into(),
+                "view".into(),
+                remote.clone(),
+                "--json".into(),
+                "nameWithOwner,defaultBranchRef".into(),
+            ],
+        )?)?;
+        let target = PublicationTarget {
+            remote,
+            repository: repo["nameWithOwner"]
+                .as_str()
+                .ok_or("publication repository missing")?
+                .into(),
+            branch: repo["defaultBranchRef"]["name"]
+                .as_str()
+                .ok_or("default branch missing")?
+                .into(),
+        };
+        rusty_atomic_file::write_private(&path, json::to_string(&target)?.as_bytes())?;
+        target
+    };
+    git(
+        runner,
+        source,
+        &["check-ref-format", &format!("refs/heads/{}", target.branch)],
+    )?;
+    git(
+        runner,
+        source,
+        &[
+            "fetch",
+            "--no-tags",
+            "--",
+            &target.remote,
+            &format!("refs/heads/{}", target.branch),
+        ],
+    )?;
+    // A candidate validated on an unmerged feature HEAD would otherwise carry
+    // every unrelated feature commit into a PR against the default branch.
+    let tip = git(runner, source, &["rev-parse", "FETCH_HEAD"])?;
+    if git(
+        runner,
+        source,
+        &["merge-base", "--is-ancestor", &attempt.base, &tip],
+    )
+    .is_err()
+    {
+        return Err("maintenance base is not in publication target history; re-inspect and validate on the target branch".into());
+    }
+    Ok(target)
+}
+
 fn publish(attempt: &Attempt, runner: &impl CommandRunner, state_dir: &Path) -> Result<String> {
     // prepare() has verified the current BBP gate, scoped profiles, sandbox,
     // independent review and exact base. No Git mutation occurs before this.
@@ -974,6 +1059,7 @@ fn publish(attempt: &Attempt, runner: &impl CommandRunner, state_dir: &Path) -> 
     let report: rusty_bbp::Report =
         json::from_str(&fs::read_to_string(bundle.join("report.json"))?)?;
     let expected = report.tree.ok_or("missing validated tree")?;
+    let target = publication_target(attempt, runner, &bundle)?;
     let branch = format!("maintenance/{}", attempt.namespace);
     let checkout = attempt
         .config
@@ -1049,6 +1135,8 @@ fn publish(attempt: &Attempt, runner: &impl CommandRunner, state_dir: &Path) -> 
         &[
             "pr".into(),
             "list".into(),
+            "--repo".into(),
+            target.repository.clone(),
             "--head".into(),
             branch.clone(),
             "--state".into(),
@@ -1063,7 +1151,7 @@ fn publish(attempt: &Attempt, runner: &impl CommandRunner, state_dir: &Path) -> 
         }
         return Ok(pr["url"].as_str().ok_or("PR URL missing")?.into());
     }
-    let conflicts = open_pr_conflicts(runner, source)?;
+    let conflicts = open_pr_conflicts_in(runner, source, Some(&target.repository))?;
     if attempt
         .selection
         .allowed_paths
@@ -1079,34 +1167,24 @@ fn publish(attempt: &Attempt, runner: &impl CommandRunner, state_dir: &Path) -> 
         &[
             "git".into(),
             "push".into(),
-            "origin".into(),
+            "--".into(),
+            target.remote,
             format!("{commit}:refs/heads/{branch}"),
         ],
     )?;
-    let repo: Value = json::from_str(&gh(
-        runner,
-        source,
-        &[
-            "repo".into(),
-            "view".into(),
-            "--json".into(),
-            "defaultBranchRef".into(),
-        ],
-    )?)?;
-    let base = repo["defaultBranchRef"]["name"]
-        .as_str()
-        .ok_or("default branch missing")?;
     gh(
         runner,
         source,
         &[
             "pr".into(),
             "create".into(),
+            "--repo".into(),
+            target.repository,
             "--draft".into(),
             "--head".into(),
             branch,
             "--base".into(),
-            base.into(),
+            target.branch,
             "--title".into(),
             format!("maintenance: {}", attempt.selection.finding_id),
             "--body-file".into(),

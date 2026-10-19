@@ -61,39 +61,20 @@ impl Fixture {
             .unwrap()
             .success());
         let task = TaskId("task".into());
-        let roster = vec![
-            Role::new("maker", 0)
-                .post(&[
-                    MessageKind::RequestDecision,
-                    MessageKind::Verdict,
-                    MessageKind::Pass,
-                ])
-                .write(&[
-                    ArtifactKind::Spec,
-                    ArtifactKind::Diff,
-                    ArtifactKind::Candidate,
-                ])
-                .read_artifacts(&[
-                    ArtifactKind::Brief,
-                    ArtifactKind::Spec,
-                    ArtifactKind::Diff,
-                    ArtifactKind::Candidate,
-                    ArtifactKind::TestReport,
-                ])
-                .verdict_at(&[Stage::Test]),
-            Role::new("auditor", 1)
-                .post(&[MessageKind::Verdict, MessageKind::Pass])
-                .scoped()
-                .read_artifacts(&[
-                    ArtifactKind::Brief,
-                    ArtifactKind::Spec,
-                    ArtifactKind::Diff,
-                    ArtifactKind::Candidate,
-                    ArtifactKind::TestReport,
-                ])
-                .verdict_at(&[Stage::Review])
-                .final_decision(),
-        ];
+        let config: rusty_serde::json::Value =
+            rusty_serde::json::from_str(include_str!("../../rusty_orch/docs/examples/bbp.json"))
+                .unwrap();
+        assert_eq!(
+            config["assignments"]["maker"]["builtin_tools"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            config["assignments"]["auditor"]["builtin_tools"].as_bool(),
+            Some(false)
+        );
+        let roster: Vec<Role> =
+            rusty_serde::json::from_str(&rusty_serde::json::to_string(&config["roster"]).unwrap())
+                .unwrap();
         assert_eq!(
             admin::open_task(
                 &dir,
@@ -218,6 +199,10 @@ fn author_execs_in_an_isolated_clone_and_preserves_provider_exit_status() {
     assert_eq!(f.command().status().unwrap().code(), Some(42));
     let cwd = PathBuf::from(std::fs::read_to_string(f.dir.join("cwd")).unwrap().trim());
     assert_ne!(cwd, f.repo);
+    assert!(f
+        .captured_args()
+        .windows(2)
+        .any(|args| args == ["--sandbox", "workspace-write"]));
     assert_eq!(std::fs::read_to_string(cwd.join("flag")).unwrap(), "no\n");
     assert!(Proc::new("git")
         .arg("-C")

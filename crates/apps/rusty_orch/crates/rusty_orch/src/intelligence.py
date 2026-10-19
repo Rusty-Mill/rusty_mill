@@ -72,7 +72,7 @@ def analyze(metadata: dict) -> dict:
     # Validate manifest boundaries before reading any manifest. A workspace
     # member outside the root is unsupported rather than silently omitted.
     manifests = {
-        key: str(canonical_path(pkg["manifest_path"]).relative_to(root))
+        key: canonical_path(pkg["manifest_path"]).relative_to(root).as_posix()
         for key, pkg in packages.items()
     }
     # Cargo may mix ordinary and extended-length Windows paths in one result.

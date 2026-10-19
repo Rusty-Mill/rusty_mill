@@ -16,13 +16,21 @@ installed fmt/clippy components, cached dependencies and a current lockfile.
 state cannot be established. Configure the existing BBP profiles' read roots,
 limits, environment and PATH to include Git/Python and the Rust toolchain.
 Maintenance preserves those profiles and adds its own required validation.
-All assignments must disable built-in tools so candidates travel through BBP
-artifacts and the sandbox, rather than editing the source checkout directly.
+The packaged Codex author may use built-in tools in its isolated clone, which
+has no push remote. Final reviewers remain scoped, read-only and without
+built-in tools. Candidates still travel through BBP artifacts and confined
+validation; author tools do not grant writes to the source checkout.
 
 Dry-run performs inspection and reports one selection plus reasons for every
 exclusion. It reads existing maintenance state, but creates no journal, task,
 provider process, build or PR. Current PR/task conflict checks run at execution.
 No `ORCH_*` variable can opt into maintenance or publication.
+
+Publication freezes the push destination, GitHub repository and default branch
+in the private PR bundle. Before creating a publication worktree, it fetches
+that branch and requires the inspected base to belong to its history. A repair
+validated on an unmerged feature commit is refused: repeat discovery and
+validation on the target branch. Recovery uses the same frozen destination.
 
 The first policy permits directory-layer metadata repairs and identical external
 dependency hoists. A hoist remains advisory until a human confirms its benefit:
