@@ -97,7 +97,7 @@ fn spans_are_created_and_instrument_runs_a_future_inside_one() {
 fn block_on_ready<F: std::future::Future>(future: F) -> F::Output {
     use std::task::{Context, Poll, Wake, Waker};
 
-    // `Waker::noop` is 1.85; this crate declares the 1.65 floor of `tracing`.
+    // `Waker::noop` is 1.85, above this crate's declared rust-version.
     struct Noop;
     impl Wake for Noop {
         fn wake(self: Arc<Self>) {}
