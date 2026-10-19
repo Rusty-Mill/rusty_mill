@@ -13096,6 +13096,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_tonic"
+version = "0.1.0"
+dependencies = [
+ "rusty_base64",
+ "rusty_percent",
+ "rusty_prost",
+ "tonic",
+]
+
+[[package]]
 name = "rusty_url"
 version = "0.1.0"
 dependencies = [

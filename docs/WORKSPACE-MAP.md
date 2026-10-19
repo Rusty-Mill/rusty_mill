@@ -18,7 +18,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_aead | rusty_aead | Dependency-free ChaCha20-Poly1305 (RFC 8439) AEAD. Portable, no unsafe, no allocation. Stage 3 of the native ring replacement plan. | 0 |
 | foundation | rusty_ansder | rusty_ansder | ASN.1 BER/DER TLV encoder and decoder for Rusty Mill, built on rusty_wire | 0 |
 | foundation | rusty_atomic_file | rusty_atomic_file | Replace a file crash-atomically: sibling temp file, fsync, rename, directory fsync. The one std-path helper the workspace's whole-file writers share. | 11 |
-| foundation | rusty_base64 | rusty_base64 | Hand-rolled, dependency-free Base64 (RFC 4648) -- standard and URL-safe alphabets, encode and decode -- extracted from rusty_oauth's own encoding module so rusty_acp, rusty-mcp, and rusty_a2a can depend on it instead of the external base64 crate. | 20 |
+| foundation | rusty_base64 | rusty_base64 | Hand-rolled, dependency-free Base64 (RFC 4648) -- standard and URL-safe alphabets, encode and decode -- extracted from rusty_oauth's own encoding module so rusty_acp, rusty-mcp, and rusty_a2a can depend on it instead of the external base64 crate. | 21 |
 | foundation | rusty_codec | rusty_codec | A #![no_std] + alloc sovereign TOML configuration parser and binary buffer serialization crate | 2 |
 | foundation | rusty_compress | rusty_compress | A sans-IO stream compression and decompression abstraction crate for DEFLATE, Gzip, Zlib, and LZMA | 2 |
 | foundation | rusty_config | rusty_config | A zero-dependency, no_std INI and Key-Value configuration file parser for Rust | 0 |
@@ -36,7 +36,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
-| foundation | rusty_percent | rusty_percent | Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space). | 10 |
+| foundation | rusty_percent | rusty_percent | Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space). | 11 |
 | foundation | rusty_pk | rusty_pk | Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, X25519, ECDH on P-256 and P-384. Portable, no unsafe. Stages 2 and 4 and gap 2 of the native ring replacement plan. | 0 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 10 |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 5 |
@@ -127,7 +127,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 9 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 13 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
-| libs | rusty_prost | rusty_prost | Dependency-free Protobuf message layer on rusty_protobuf: a Message trait for hand-written schemas, and the well-known types (Timestamp, Any, Struct, Value, ...) plus google.rpc Status and ErrorInfo. No derive, no code generation. | 0 |
+| libs | rusty_prost | rusty_prost | Dependency-free Protobuf message layer on rusty_protobuf: a Message trait for hand-written schemas, and the well-known types (Timestamp, Any, Struct, Value, ...) plus google.rpc Status and ErrorInfo. No derive, no code generation. | 1 |
 | libs | rusty_protobuf | rusty_protobuf | Dependency-free Protobuf wire-format runtime: a zero-copy reader that returns errors instead of panicking on hostile input, and a length-fixing writer. No code generation; schemas are hand-written on top. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
 | libs | rusty_rag | rusty_rag | Sovereign AI Retrieval-Augmented Generation (RAG) &amp; Question Answering Engine for Rusty Mill | 0 |
@@ -155,6 +155,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 7 |
 | libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 19 |
 | libs | rusty_tokio | rusty_tokio-macros | Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports. | 1 |
+| libs | rusty_tonic | rusty_tonic | Dependency-free gRPC protocol core: status codes and error details, validated metadata, message framing with a receive limit, grpc-timeout, and request/response header lists. Sans-IO; no async, no HTTP/2, no code generation. | 0 |
 | libs | rusty_ttf_parser | rusty-ttf-parser | A #![no_std], allocation-free, zero-dependency TrueType/OpenType reader: cmap, GSUB lookups and PNG colour bitmaps | 1 |
 | libs | rusty_vulkan | rusty_vulkan | A #![no_std] + alloc sovereign raw Vulkan / Metal hardware command buffer and GPU surface layer | 1 |
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) | 1 |
