@@ -7,6 +7,7 @@ use std::path::PathBuf;
 /// Printed for `--help` and on a usage error.
 pub const USAGE: &str = "\
 usage: rusty_orch run <goal.json> [options]
+       rusty_orch maintain [--repo <dir>] [--bbp <config>] [--execute] (default dry-run)
        rusty_orch inspect [--repo <dir>] (read-only JSON findings)
 
 Runs the goal file through the dispatcher and prints the board.

@@ -52,6 +52,13 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual({f["rule"] for f in findings}, {"layer-classification", "dependency-layer"})
         self.assertTrue(any("cross-family" in f["evidence"][0]["message"] for f in findings))
 
+    def test_manifest_paths_use_portable_slashes_for_maintenance(self):
+        md = self.fixture([("a", "unknown", "a")], [])
+        report = MODULE.analyze(md)
+        expected = "crates/a/crates/a/Cargo.toml"
+        self.assertEqual(report["crates"][0]["manifest"], expected)
+        self.assertEqual(report["findings"][0]["evidence"][0]["manifest"], expected)
+
     def test_duplicate_declarations_are_exact_and_ignore_inheritance_and_paths(self):
         md = self.fixture([("a", "libs", "a"), ("b", "libs", "b")], [])
         for pkg in md["packages"]:

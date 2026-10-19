@@ -32,6 +32,8 @@ CASES = (
          "tests_e2e::no_progress_pause_survives_orch_processes_without_duplicate_task_or_charge"),
     Case("rust-lld", "rusty_bbp_host", ("--test", "rust_lld_profile"),
          "confined_rust_lld_profile_passes_under_one_gib"),
+    Case("maintenance", "rusty_orch", ("--lib",),
+         "maintenance::e2e::sandboxed_maintenance_recovers_and_prepares_reviewed_pr_without_merging"),
     *(Case(mode, "rusty_bbp_host", ("--test", "moderator_e2e"),
            f"confined_{mode}_recovery") for mode in ("timeout", "cancel", "kill")),
 )

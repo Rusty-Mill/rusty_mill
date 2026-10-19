@@ -14,8 +14,10 @@ const OLLAMA_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn main() -> ExitCode {
     let mut argv = std::env::args().skip(1);
-    if argv.next().as_deref() == Some("inspect") {
-        return inspect(argv);
+    match argv.next().as_deref() {
+        Some("inspect") => return inspect(argv),
+        Some("maintain") => return maintain(argv),
+        _ => {}
     }
     let cwd = std::env::current_dir().unwrap_or_default();
     let parsed = args::parse(std::env::args().skip(1), |k| std::env::var(k).ok(), cwd);
@@ -85,6 +87,38 @@ fn inspect(argv: impl IntoIterator<Item = String>) -> ExitCode {
         }
     };
     match inspect::inspect(&repo, &orch_cli::StdCommand) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("rusty_orch: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn maintain(argv: impl IntoIterator<Item = String>) -> ExitCode {
+    use rusty_orch::maintenance;
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("rusty_orch: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let options = match maintenance::parse(argv, cwd) {
+        Ok(options) => options,
+        Err(ArgsError::Help) => {
+            println!("{}", maintenance::USAGE);
+            return ExitCode::SUCCESS;
+        }
+        Err(ArgsError::Usage(message)) => {
+            eprintln!("{message}\n{}", maintenance::USAGE);
+            return ExitCode::from(2);
+        }
+    };
+    match maintenance::run(&options) {
         Ok(report) => {
             println!("{report}");
             ExitCode::SUCCESS
