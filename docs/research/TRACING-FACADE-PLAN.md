@@ -1,6 +1,6 @@
 # Plan: `tracing` facade (sovereignty list item 12)
 
-Status: **option B approved by the owner (2026-10-19)**. Step 1 (the `rusty_log` crate and the baseline check) is done. Step 2 is in progress: `rusty-mcp`, the eight agent gateway crates the seven protocol, adk and runtime crates, and the eight provider, homelab, board, inventory and skillopt crates are migrated; and the seven tailscale crates are migrated, so the baseline is empty. What remains is step 3: the strict rule. Option C is not approved and is not planned.
+Status: **option B approved by the owner (2026-10-19); done (2026-10-19).** Step 1 (the `rusty_log` crate and the baseline check), step 2 (all 31 crates migrated, in five areas: `rusty-mcp`, the eight agent gateway crates, seven protocol, adk and runtime crates, eight app crates, seven tailscale crates) and step 3 (the strict rule) have all landed. Option C is not approved and is not planned.
 Context: `RUSTY-MCP-SOVEREIGNTY.md` item 12 and D3; ADR-0002.
 
 ## What was measured (2026-10-18, `cargo metadata --all-features`, main at `25dd9517`)
