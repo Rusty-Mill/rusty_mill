@@ -1,0 +1,10 @@
+---
+category: Added
+changelog: "`rusty_log`, the workspace's single door to `tracing` (a pass-through re-export, no behaviour change), and a shrinking baseline in the `dependency policy` job that stops new crates depending on `tracing` directly."
+---
+## 2026-10-19 - rusty_log: the `tracing` facade, step 1 of the plan
+
+- **Added:** `crates/libs/rusty_log` (`libs` layer). It re-exports the whole `tracing` API (`rusty_log::info!`, `info_span!`, `Instrument`, `Level`, `Subscriber`, ...) and, with the `subscriber` feature, `tracing_subscriber`. Every item is the `tracing` item, so a crate moved onto it changes no behaviour and no log line. Two tests show events at every level, spans and `Instrument` reaching a subscriber through the facade. `#[instrument]` still needs `tracing` in the using crate (its expansion names the crate); the doc says to replace such uses with a span and `Instrument` when migrating.
+- **Policy:** `.github/scripts/check_workspace_deps.py` gains `TRACING_BASELINE`, the 31 workspace crates that depend on `tracing` or a `tracing-*` crate directly today (any dependency kind). The `dependency policy` job fails when a crate off the baseline adds one (the message says to use `rusty_log`) and when a baseline crate no longer has one (delete its entry), so the baseline only shrinks. `rusty_log` is exempt; Nexus (excluded, frozen) and third-party crates are out of scope. 11 unit tests, and each rule was checked by removing it and seeing a test fail.
+- **Not changed:** no crate is migrated yet, and `rusty_log` has no `[workspace.dependencies]` entry yet (`cargo shear` rejects an unused one); the first migration PR adds it. Per `docs/research/TRACING-FACADE-PLAN.md` the migrations follow one area at a time, `rusty-mcp` first (with its two `PINNED_EXTERNAL_DEPENDENCIES` entries), and the last PR replaces the baseline with the strict rule.
+- **Known limitations:** the baseline covers direct dependencies of workspace crates, not the transitive graph; `tracing` stays in the build graph through `axum`, `h2`, `sqlx`, the `aws-*` crates and others.
