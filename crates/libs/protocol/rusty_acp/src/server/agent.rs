@@ -381,7 +381,7 @@ impl RunContext {
                 // whoever reads the log hunting for a bug in their agent, when
                 // what happened is that nobody answered.
                 let waited = self.await_timeout.unwrap_or_default();
-                tracing::info!(
+                rusty_log::info!(
                     run_id = %self.run_id,
                     ?waited,
                     "failing a run nobody answered"

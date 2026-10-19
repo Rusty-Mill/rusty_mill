@@ -104,8 +104,8 @@ use std::{
 };
 
 use axum::{http::HeaderMap, Router};
+use rusty_log::Instrument;
 use tokio::sync::watch;
-use tracing::Instrument;
 
 use crate::trace::TraceContext;
 use crate::types::{
@@ -717,7 +717,7 @@ impl AcpServer {
         let readiness = match self.store.check_health().await {
             Ok(()) => Readiness::Ready,
             Err(error) => {
-                tracing::warn!(%error, "readiness: the store is unreachable");
+                rusty_log::warn!(%error, "readiness: the store is unreachable");
                 Readiness::StoreUnreachable(error.to_string())
             }
         };
@@ -748,7 +748,7 @@ impl AcpServer {
         if !self.in_flight.accepting.swap(false, Ordering::SeqCst) {
             return;
         }
-        tracing::info!(
+        rusty_log::info!(
             replica = %self.replica_id,
             in_flight = self.in_flight.len(),
             "no longer accepting new runs"
@@ -777,11 +777,11 @@ impl AcpServer {
         let (unfinished, parked) = self.in_flight.snapshot();
 
         if finished && parked.is_empty() {
-            tracing::info!(replica = %self.replica_id, "drained cleanly");
+            rusty_log::info!(replica = %self.replica_id, "drained cleanly");
             return Drained::default();
         }
         if !finished {
-            tracing::warn!(
+            rusty_log::warn!(
                 replica = %self.replica_id,
                 count = unfinished.len(),
                 ?deadline,
@@ -789,7 +789,7 @@ impl AcpServer {
             );
         }
         if !parked.is_empty() {
-            tracing::info!(
+            rusty_log::info!(
                 replica = %self.replica_id,
                 count = parked.len(),
                 "handing back conversations parked awaiting a client"
@@ -810,7 +810,7 @@ impl AcpServer {
                 // is the signal that this run needs a new owner, and losing it
                 // costs a client the whole lease TTL of waiting on a run nobody
                 // is executing.
-                tracing::warn!(%run_id, %error, "failed to release a drained run's lease");
+                rusty_log::warn!(%run_id, %error, "failed to release a drained run's lease");
             }
         }
         Drained { unfinished, parked }
@@ -828,7 +828,7 @@ impl AcpServer {
             Ok(Some(record)) => record,
             Ok(None) => return,
             Err(error) => {
-                tracing::warn!(%run_id, %error, "failed to read a recovery record while draining");
+                rusty_log::warn!(%run_id, %error, "failed to read a recovery record while draining");
                 return;
             }
         };
@@ -837,7 +837,7 @@ impl AcpServer {
         }
         let marked = RecoveryRecord { handed_off: true, ..record };
         if let Err(error) = self.store.put_recovery_record(run_id, Some(&marked)).await {
-            tracing::warn!(%run_id, %error, "failed to mark a run as handed off while draining");
+            rusty_log::warn!(%run_id, %error, "failed to mark a run as handed off while draining");
         }
     }
 
@@ -1122,7 +1122,7 @@ impl AcpServer {
             .await?;
 
         telemetry::recovery_started(abandoned.agent_name.as_str());
-        tracing::info!(
+        rusty_log::info!(
             abandoned = %abandoned.run_id,
             %replacement,
             attempt = record.attempt + 1,
@@ -1243,7 +1243,7 @@ async fn renew_lease_until_dropped(
             // before the lease lapses. The counter is what turns "one of these
             // scrolled past" into "this is happening more than it used to".
             telemetry::lease_renew_failed();
-            tracing::warn!(%run_id, %error, "failed to renew run lease");
+            rusty_log::warn!(%run_id, %error, "failed to renew run lease");
         }
     }
 }
@@ -1276,7 +1276,7 @@ pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Resu
     // stop. Leaving it alone costs nothing: the run stays unowned, and the next
     // replica to read it does the same check with a different answer.
     if !server.is_accepting() {
-        tracing::debug!(run_id = %run.run_id, "draining; leaving an abandoned run for another replica");
+        rusty_log::debug!(run_id = %run.run_id, "draining; leaving an abandoned run for another replica");
         return Ok(run);
     }
 
@@ -1300,7 +1300,7 @@ pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Resu
     // Instrumented rather than entered: the work below awaits, and a sync span
     // guard held across an await attributes whatever else the executor runs to
     // this span.
-    let span = tracing::info_span!(
+    let span = rusty_log::info_span!(
         "acp.reap",
         run_id = %run_id,
         agent = %run.agent_name,
@@ -1313,7 +1313,7 @@ pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Resu
 async fn reap_claimed(server: &Arc<AcpServer>, run_id: RunId) -> Result<Run, Error> {
     let store = &server.store;
 
-    tracing::warn!(%run_id, "run has no live lease; failing it as abandoned");
+    rusty_log::warn!(%run_id, "run has no live lease; failing it as abandoned");
 
     // Winning the claim is not the same as the run still needing to be failed.
     // `run` was read before the lease check, and the executing replica may have
@@ -1338,14 +1338,14 @@ async fn reap_claimed(server: &Arc<AcpServer>, run_id: RunId) -> Result<Run, Err
                 Err(error) => {
                     // A failed replacement must not stop the original being
                     // failed, or the client is back to waiting forever.
-                    tracing::error!(%run_id, %error, "failed to start a replacement run");
+                    rusty_log::error!(%run_id, %error, "failed to start a replacement run");
                     None
                 }
             }
         }
         Some(record) => {
             telemetry::recovery_exhausted(run.agent_name.as_str());
-            tracing::warn!(
+            rusty_log::warn!(
                 %run_id,
                 attempt = record.attempt,
                 "not replacing the run: the recovery attempt budget is spent"
@@ -1411,7 +1411,7 @@ async fn execute(
 ) {
     let run_id = handle.run_id();
 
-    let span = tracing::info_span!(
+    let span = rusty_log::info_span!(
         "acp.run",
         run_id = %run_id,
         agent = %ctx.agent_name(),
@@ -1420,17 +1420,17 @@ async fn execute(
         // than made a child of the request span, because an `async` or
         // `stream` run outlives the request that created it and cannot be the
         // child of a span that has already closed.
-        trace_id = tracing::field::Empty,
+        trace_id = rusty_log::field::Empty,
         // Recorded below rather than inline: most runs have no session, and a
         // field that is sometimes the string "None" is worse than one that is
         // sometimes absent.
-        session_id = tracing::field::Empty,
+        session_id = rusty_log::field::Empty,
     );
     if let Some(session_id) = session_id {
-        span.record("session_id", tracing::field::display(session_id));
+        span.record("session_id", rusty_log::field::display(session_id));
     }
     if let Some(trace) = trace {
-        span.record("trace_id", tracing::field::display(trace.trace_id()));
+        span.record("trace_id", rusty_log::field::display(trace.trace_id()));
     }
 
     run_to_terminal(server, agent, ctx, handle, session_id, base_url, run_id).instrument(span).await
@@ -1455,7 +1455,7 @@ async fn run_to_terminal(
     ));
 
     if let Err(error) = handle.set_in_progress().await {
-        tracing::error!(%run_id, %error, "failed to start run");
+        rusty_log::error!(%run_id, %error, "failed to start run");
         renewal.abort();
         return;
     }
@@ -1484,12 +1484,12 @@ async fn run_to_terminal(
     // the agent's own log lines fall outside `acp.run` and the correlation #16
     // exists for is gone.
     let mut agent_task =
-        tokio::spawn(async move { agent.run(ctx).await }.instrument(tracing::Span::current()));
+        tokio::spawn(async move { agent.run(ctx).await }.instrument(rusty_log::Span::current()));
 
     let outcome = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
-            tracing::debug!(%run_id, "run cancelled");
+            rusty_log::debug!(%run_id, "run cancelled");
             agent_task.abort();
             // Awaited, not just aborted. Dropping the future in place used to
             // stop the agent synchronously; an abort only takes effect at the
@@ -1502,7 +1502,7 @@ async fn run_to_terminal(
         result = &mut agent_task => match result {
             Ok(Ok(())) => Outcome::Completed,
             Ok(Err(error)) => {
-                tracing::warn!(%run_id, %error, "agent run failed");
+                rusty_log::warn!(%run_id, %error, "agent run failed");
                 Outcome::Failed(error)
             }
             Err(join_error) if join_error.is_panic() => {
@@ -1511,7 +1511,7 @@ async fn run_to_terminal(
                 // place an operator can find out what actually went wrong, and
                 // the one place a remote caller has no business reading — panic
                 // messages carry paths, values and whatever else was in scope.
-                tracing::error!(%run_id, panic = panic_message(&*payload), "agent panicked");
+                rusty_log::error!(%run_id, panic = panic_message(&*payload), "agent panicked");
                 Outcome::Failed(Error::server_error(
                     "the agent panicked; see the server logs for the cause",
                 ))
@@ -1533,7 +1533,7 @@ async fn run_to_terminal(
         // Same reasoning as emitting: a storage outage should fail the run
         // rather than leave it looking finished with its output missing.
         Err(error) => {
-            tracing::error!(%run_id, %error, "failed to append run output to session");
+            rusty_log::error!(%run_id, %error, "failed to append run output to session");
             Outcome::Failed(error)
         }
     };
@@ -1544,7 +1544,7 @@ async fn run_to_terminal(
         Outcome::Failed(error) => handle.set_failed(error).await,
     };
     if let Err(error) = recorded {
-        tracing::error!(%run_id, %error, "failed to record run outcome");
+        rusty_log::error!(%run_id, %error, "failed to record run outcome");
     }
 
     // Read back rather than inferred from `outcome`: a terminal transition is
@@ -1566,11 +1566,11 @@ async fn run_to_terminal(
         // depends on this succeeding — a reaper that finds the stale lease will
         // see a terminal run and leave it alone. Warning here would put a line
         // an operator cannot act on next to ones they must.
-        tracing::debug!(%run_id, %error, "failed to release run lease");
+        rusty_log::debug!(%run_id, %error, "failed to release run lease");
     }
     // A finished run will never be replayed, so stop holding its input.
     if let Err(error) = server.store.put_recovery_record(run_id, None).await {
-        tracing::warn!(%run_id, %error, "failed to clear the recovery record");
+        rusty_log::warn!(%run_id, %error, "failed to clear the recovery record");
     }
 }
 

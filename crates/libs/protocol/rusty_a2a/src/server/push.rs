@@ -3,7 +3,7 @@
 //! whenever its status or artifacts change.
 //!
 //! Delivery is best-effort and fire-and-forget: a slow, unreachable, or
-//! error-returning webhook is logged (`tracing::warn!`) and otherwise has
+//! error-returning webhook is logged (`rusty_log::warn!`) and otherwise has
 //! no effect on task processing - in particular, it never blocks or fails
 //! the [`AgentExecutor`](super::AgentExecutor) invocation that produced
 //! the update.
@@ -85,7 +85,7 @@ impl PushNotifier {
             let addrs = match validate_webhook_url(&config.url).await {
                 Ok(addrs) => addrs,
                 Err(reason) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         task_id = %task.id,
                         url = %config.url,
                         %reason,
@@ -97,7 +97,7 @@ impl PushNotifier {
             match pinned_client(&config.url, &addrs) {
                 Ok(client) => client,
                 Err(reason) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         task_id = %task.id,
                         url = %config.url,
                         %reason,
@@ -118,7 +118,7 @@ impl PushNotifier {
             match self.attempt_delivery(&client, config, &payload).await {
                 Ok(()) => return,
                 Err(DeliveryFailure::Permanent(reason)) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         task_id = %task.id,
                         url = %config.url,
                         %reason,
@@ -127,7 +127,7 @@ impl PushNotifier {
                     return;
                 }
                 Err(DeliveryFailure::Retryable(reason)) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         task_id = %task.id,
                         url = %config.url,
                         %reason,
@@ -136,7 +136,7 @@ impl PushNotifier {
                         "push notification delivery attempt failed"
                     );
                     if attempt == MAX_DELIVERY_ATTEMPTS {
-                        tracing::warn!(
+                        rusty_log::warn!(
                             task_id = %task.id,
                             url = %config.url,
                             "giving up on push notification delivery after {attempt} attempts"

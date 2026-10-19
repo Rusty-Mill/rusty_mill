@@ -30,7 +30,7 @@ default = []
 # `Server::from_tcp`: serve an accepted tokio TCP connection.
 tcp = ["tokio/net"]
 # Wire-level instrumentation via the `tracing` crate.
-tracing = ["dep:tracing"]
+tracing = ["dep:rusty_log"]
 # Sovereign async runtime adapter support via `rusty_tokio`.
 rusty-tokio = ["dep:rusty_tokio"]
 # Sovereign JSON support via `rusty_json`.
@@ -41,7 +41,7 @@ rusty_percent = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
 serde = { workspace = true }
 serde_json = "1"
-tracing = { workspace = true, optional = true }
+rusty_log = { workspace = true, optional = true }
 # Sovereign async runtime support over `rusty_tokio`; already merged into
 # this workspace at crates/rusty_tokio, so a plain path dependency.
 rusty_tokio = { workspace = true, optional = true }

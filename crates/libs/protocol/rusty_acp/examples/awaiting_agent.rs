@@ -37,7 +37,7 @@ struct Answer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_env_filter("info,rusty_acp=debug").init();
+    rusty_log::tracing_subscriber::fmt().with_env_filter("info,rusty_acp=debug").init();
 
     let greeter = agent_fn(
         AgentManifest::new(AgentName::new("greeter")?, "Asks for your name, then greets you by it"),
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let router = AcpServer::builder().agent(greeter).build()?.into_router();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await?;
-    tracing::info!("ACP server listening on http://localhost:8000");
+    rusty_log::info!("ACP server listening on http://localhost:8000");
     axum::serve(listener, router).await?;
     Ok(())
 }

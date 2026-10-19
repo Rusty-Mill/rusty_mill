@@ -121,13 +121,13 @@ fn unsatisfiable_non_rest_api_key_schemes(card: &AgentCard) -> Vec<&str> {
         .collect()
 }
 
-/// Logs a [`tracing::warn!`] for every scheme
+/// Logs a [`rusty_log::warn!`] for every scheme
 /// [`unsatisfiable_non_rest_api_key_schemes`] flags, so a misconfigured
 /// `AgentCard` fails loud instead of silently leaving JSON-RPC/gRPC
 /// callers unable to ever satisfy that scheme.
 fn warn_about_unsatisfiable_api_key_schemes(card: &AgentCard) {
     for name in unsatisfiable_non_rest_api_key_schemes(card) {
-        tracing::warn!(
+        rusty_log::warn!(
             scheme_name = name,
             "AgentCard declares apiKey security scheme {name:?} with a query/cookie location \
              alongside a non-REST interface (JSON-RPC/gRPC); the A2A spec only defines \
@@ -479,7 +479,7 @@ impl Engine {
             let mut first_event = true;
             while let Some(evt) = rx.recv().await {
                 if is_empty_artifact_update(&evt) {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         task_id = %bg_task_id,
                         "ignoring an artifact update with no parts (spec Section 4.1.7 requires at least one)"
                     );
@@ -551,7 +551,7 @@ impl Engine {
                     .await;
                     let _ = bus.send((seq, failure));
                 } else {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         task_id = %bg_task_id,
                         "AgentExecutor::execute returned without reaching a terminal/interrupted \
                          state or replying with a message"
@@ -880,7 +880,7 @@ impl Engine {
         let bus = self.buses.lock().await.get(&req.id).cloned();
         while let Ok(evt) = rx.try_recv() {
             if is_empty_artifact_update(&evt) {
-                tracing::warn!(
+                rusty_log::warn!(
                     task_id = %req.id,
                     "ignoring an artifact update with no parts (spec Section 4.1.7 requires at least one)"
                 );

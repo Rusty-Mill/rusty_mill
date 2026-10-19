@@ -24,7 +24,7 @@ adk-core.workspace = true
 adk-tools.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
+rusty_log = { workspace = true }
 # The workspace's first-party MCP stack: the wire protocol, handshake and
 # transports. This crate keeps only the ADK mapping.
 rusty_mcp_server = { workspace = true }

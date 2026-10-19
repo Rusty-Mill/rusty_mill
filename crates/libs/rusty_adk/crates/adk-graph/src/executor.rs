@@ -216,7 +216,7 @@ impl Graph {
                         return (Err(err), ctx, rx);
                     }
                     attempt += 1;
-                    tracing::warn!(
+                    rusty_log::warn!(
                         node = node.name(),
                         attempt,
                         error = %err,

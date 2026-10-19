@@ -163,10 +163,10 @@ dependencies = [
  "futures",
  "rusty_a2a",
  "rusty_base64",
+ "rusty_log",
  "serde_json",
  "tokio",
  "tokio-test",
- "tracing",
 ]
 
 [[package]]
@@ -225,11 +225,11 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures",
+ "rusty_log",
  "serde",
  "serde_json",
  "tokio",
  "tokio-test",
- "tracing",
 ]
 
 [[package]]
@@ -256,11 +256,11 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "rusty-mcp-client",
+ "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -11576,6 +11576,7 @@ dependencies = [
  "redis",
  "reqwest 0.13.4",
  "rusty_base64",
+ "rusty_log",
  "rusty_retry",
  "serde",
  "serde_json",
@@ -11584,8 +11585,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -12179,6 +12178,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rusty_base64",
  "rusty_ip",
+ "rusty_log",
  "rusty_retry",
  "rusty_uuid",
  "serde",
@@ -12192,7 +12192,6 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tonic-types",
- "tracing",
 ]
 
 [[package]]
@@ -12603,12 +12602,12 @@ version = "0.6.2"
 dependencies = [
  "criterion 0.5.1",
  "rusty_json",
+ "rusty_log",
  "rusty_percent",
  "rusty_tokio",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -13077,8 +13076,8 @@ dependencies = [
  "platform-bsd",
  "platform-linux",
  "platform-windows",
+ "rusty_log",
  "rusty_tokio-macros",
- "tracing",
  "windows-sys 0.59.0",
 ]
 

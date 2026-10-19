@@ -170,7 +170,7 @@ impl AdkAgentExecutor {
                 Ok(Some(part)) => part,
                 Ok(None) => continue,
                 Err(error) => {
-                    tracing::warn!(%filename, %error, "could not load artifact for an A2A peer");
+                    rusty_log::warn!(%filename, %error, "could not load artifact for an A2A peer");
                     continue;
                 }
             };
