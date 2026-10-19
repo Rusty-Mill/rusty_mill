@@ -153,13 +153,20 @@ impl MmdbStore {
         })
     }
 
-    fn commit(&self, card: &Card, event: Event, is_insert: bool) -> Result<(), BoardError> {
-        let mut log = self.log.lock().map_err(poisoned)?;
+    /// `Err` after a failed append of unknown outcome. The durable log may then hold an event the
+    /// in-memory state lacks; only a reopen replays it, so nothing may rewrite or retire it first.
+    fn settled(&self) -> Result<(), BoardError> {
         if self.unsettled.load(Ordering::SeqCst) {
             return Err(storage(
-                "an earlier write failed with an unknown outcome; reopen the store to settle it",
+                "an earlier write failed with an unknown outcome; restart the service to reopen the store and settle it",
             ));
         }
+        Ok(())
+    }
+
+    fn commit(&self, card: &Card, event: Event, is_insert: bool) -> Result<(), BoardError> {
+        let mut log = self.log.lock().map_err(poisoned)?;
+        self.settled()?;
         log.check(card, is_insert)?;
         let event = log.stamp(event);
         let row = Row {
@@ -210,17 +217,15 @@ impl Store for MmdbStore {
     }
 
     fn health(&self) -> Result<(), BoardError> {
-        if self.unsettled.load(Ordering::SeqCst) {
-            return Err(storage(
-                "an earlier write failed with an unknown outcome; restart to settle it",
-            ));
-        }
-        Ok(())
+        self.settled()
     }
 
     fn backup(&self, dir: &Path) -> Result<(), BoardError> {
-        // Holding the commit lock keeps every append out while the files are copied.
+        // Holding the commit lock keeps every append out while the files are copied. Not while
+        // unsettled: the copy would hold an event the state lacks, and a rotation of backups
+        // could retire the last copies from before the failure.
         let _log = self.log.lock().map_err(poisoned)?;
+        self.settled()?;
         for from in [
             self.path.clone(),
             blob_path(&self.path),
@@ -243,7 +248,10 @@ impl Store for MmdbStore {
     }
 
     fn compact(&self) -> Result<(), BoardError> {
+        // Under the commit lock, and refused while unsettled: compaction writes the in-memory
+        // records and clears the append log, which would erase the one event a reopen recovers.
         let _log = self.log.lock().map_err(poisoned)?;
+        self.settled()?;
         self.db.compact().map(drop).map_err(storage)
     }
 }

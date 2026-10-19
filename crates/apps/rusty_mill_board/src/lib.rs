@@ -12,11 +12,13 @@
 //! - [`settings`]: admin changes (agents, repositories, projects, roles, GitHub) persisted to files and applied live.
 //! - [`mmdb`]: the durable `rusty_multimodal_db` adapter.
 //! - [`backup`]: scheduled, pruned backups of the store and settings.
+//! - [`drain`]: work in flight, so a stop can wait for it.
 
 pub mod api;
 pub mod backup;
 pub mod board;
 pub mod domain;
+pub mod drain;
 pub mod github;
 pub mod http;
 pub mod identities;

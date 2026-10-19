@@ -11,7 +11,7 @@ loopback bind, bearer tokens in owner-only files.
 | Data | `~/.mill-board/board.mmap` (+ `.records`, `.inserts`, `.lock`), `settings/`, `backups/` |
 | Port | 8787, loopback by default |
 | Health | `GET /health`: 200 while the store can commit, 503 once it needs a restart |
-| Stop | SIGTERM (`systemctl stop`) ends the accept loop; the process exits cleanly |
+| Stop | SIGTERM (`systemctl stop`) stops accepting, waits up to 10 s for running requests and a backup, then exits 0 |
 
 ## Install
 
@@ -53,20 +53,34 @@ what really committed.
 
 ## Backups and restore
 
-With `MILL_BOARD_BACKUP_DIR` set the service copies the store and the settings files into
-`backups/board-<unix ms>/` every `MILL_BOARD_BACKUP_SECS` and keeps the newest
-`MILL_BOARD_BACKUP_KEEP`. No commit lands while the store files are copied, so a backup opens as the
-board stood at one moment, and a backup is renamed into place only when complete. The store is
-compacted after each backup. The settings files are copied owner-only: they hold the tokens.
+With `MILL_BOARD_BACKUP_DIR` set the service writes `backups/board-<unix ms>/` every
+`MILL_BOARD_BACKUP_SECS` and keeps the newest `MILL_BOARD_BACKUP_KEEP`:
+
+```text
+board-<unix ms>/
+  store/      board.mmap, board.mmap.records, board.mmap.inserts   (the store's files)
+  settings/   identities.json, projects.json, roles.json, github.json   (fixed names; owner-only)
+```
+
+No commit lands while the store files are copied, so the store copy is the board at one moment. The
+settings are copied together under the lock every settings change takes and loaded back to check they
+fit, so a restore never meets an agent whose role is missing. A backup is renamed into place only when
+complete and synced before older ones are removed; one that died part way is swept at the next run. The
+store is compacted after each backup.
+
+While the store reports an append of unknown outcome (`/health` is 503) no backup is taken and nothing
+is rotated out or compacted, so the copies from before the failure stay put. Restart the service.
+
 Copy `backups/` off the host so a lost disk does not take both.
 
-Restore:
+Restore (the settings files go where `--settings-dir`, or each file's own flag, points):
 
 ```sh
 sudo systemctl stop mill-board
 cd ~/.mill-board && mkdir -p replaced && mv board.mmap* replaced/
-cp -p backups/board-<time>/board.mmap* .
-# settings: only if they were lost; the backup holds identities.json, projects.json, ...
+cp -p backups/board-<time>/store/board.mmap* .
+# only if the settings were lost:
+cp -p backups/board-<time>/settings/*.json settings/
 sudo systemctl start mill-board
 ```
 

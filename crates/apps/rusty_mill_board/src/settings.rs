@@ -233,6 +233,34 @@ fn refused(why: impl Into<String>) -> BoardError {
     BoardError::Refused(why.into())
 }
 
+/// The settings files' names inside a snapshot.
+const IDENTITIES: &str = "identities.json";
+const PROJECTS: &str = "projects.json";
+const ROLES: &str = "roles.json";
+const GITHUB: &str = "github.json";
+
+/// Load a snapshot as a restore would: roles and projects (the defaults where absent, as at
+/// start), then the agents against them, then the GitHub sync.
+fn check_set(dir: &Path) -> Result<(), String> {
+    let roles_file = dir.join(ROLES);
+    let roles = if roles_file.exists() {
+        load_roles(&roles_file)?
+    } else {
+        Roles::default()
+    };
+    let projects_file = dir.join(PROJECTS);
+    let projects = if projects_file.exists() {
+        Projects::load(&projects_file)?
+    } else {
+        Projects::default()
+    };
+    let identities = dir.join(IDENTITIES);
+    if identities.exists() {
+        Credentials::load(&identities, &roles, &projects)?;
+    }
+    load_github(&dir.join(GITHUB)).map(drop)
+}
+
 /// The settings service.
 pub struct Settings {
     board: Arc<Shared>,
@@ -269,6 +297,48 @@ impl Settings {
     pub fn read_only(board: Arc<Shared>) -> Self {
         let syncer = Syncer::new(Arc::clone(&board));
         Self::new(board, Files::default(), None, syncer, None)
+    }
+
+    /// Copy the settings files into the existing directory `dir` as one consistent set, each under
+    /// a fixed name (`identities.json`, `projects.json`, `roles.json`, `github.json`) whatever it
+    /// is called here, so two files that share a name elsewhere cannot overwrite one another. Then
+    /// check that the copy loads together. It holds the lock every change holds, so an agent
+    /// cannot be copied with a role that the copy of the roles then lacks.
+    ///
+    /// Lock order: this lock first, and the caller takes the store's commit lock only after it
+    /// is released. It never waits for a settings change while holding the commit lock.
+    ///
+    /// # Errors
+    /// If a file cannot be read or written, or the copied set does not load.
+    pub fn snapshot(&self, dir: &Path) -> Result<(), String> {
+        self.snapshot_between(dir, &mut || {})
+    }
+
+    /// [`Settings::snapshot`], calling `between` after each file is copied, still holding the lock.
+    /// For tests that need a change to arrive mid-copy.
+    ///
+    /// # Errors
+    /// See [`Settings::snapshot`].
+    #[doc(hidden)]
+    pub fn snapshot_between(&self, dir: &Path, between: &mut dyn FnMut()) -> Result<(), String> {
+        let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
+        let live = [
+            (&self.files.identities, IDENTITIES),
+            (&self.files.projects, PROJECTS),
+            (&self.files.roles, ROLES),
+            (&self.files.github, GITHUB),
+        ];
+        for (from, name) in live {
+            let Some(from) = from.as_deref().filter(|p| p.exists()) else {
+                continue;
+            };
+            let bytes = std::fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+            let to = dir.join(name);
+            rusty_atomic_file::write_private(&to, &bytes)
+                .map_err(|e| format!("{}: {e}", to.display()))?;
+            between();
+        }
+        check_set(dir)
     }
 
     /// Run a settings operation, or `None` if `name` is not one.

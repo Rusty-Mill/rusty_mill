@@ -34,6 +34,9 @@ use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
 use rusty_mill_board::web::{Auth, Web, check_bind};
 
+/// How long a stop waits for requests and a running backup before it ends them.
+const DRAIN: Duration = Duration::from_secs(10);
+
 /// Mill Board: kanban for humans and agents.
 #[derive(Parser)]
 struct Cli {
@@ -262,40 +265,44 @@ fn run(cli: Cli) -> Result<(), String> {
         (None, None) => Auth::Open,
     };
     check_bind(addr, &auth, cli.accept_unauthenticated_public)?;
+    let settings = Arc::new(Settings::new(board.clone(), files, creds, syncer, github));
+    let web = Web::new(
+        board.clone(),
+        HttpHandler::new(server, config),
+        mcp_path,
+        cli.allowed_hosts,
+        auth,
+    )
+    .with_settings(settings.clone());
+    let in_flight = web.in_flight();
+    let http = rusty_serve::Server::bind_shared(addr, web)
+        .map_err(|e| format!("cannot bind {addr}: {e}"))?;
     if let Some(dir) = cli.backup_dir {
         if cli.store.is_none() {
             return Err(
                 "--backup-dir needs --store: an in-memory board has nothing to keep".into(),
             );
         }
-        let extras = [
-            &files.identities,
-            &files.projects,
-            &files.roles,
-            &files.github,
-        ]
-        .into_iter()
-        .flatten()
-        .cloned()
-        .collect();
         let keep = usize::try_from(cli.backup_keep).map_err(|e| e.to_string())?;
-        Backups::new(dir, keep, extras)
-            .start(board.clone(), Duration::from_secs(cli.backup_secs))?;
+        Backups::new(dir, keep).start(
+            board,
+            settings,
+            in_flight.clone(),
+            Duration::from_secs(cli.backup_secs),
+        )?;
     }
-    let settings = Arc::new(Settings::new(board.clone(), files, creds, syncer, github));
-    let web = Web::new(
-        board,
-        HttpHandler::new(server, config),
-        mcp_path,
-        cli.allowed_hosts,
-        auth,
-    )
-    .with_settings(settings);
-    let http = rusty_serve::Server::bind_shared(addr, web)
-        .map_err(|e| format!("cannot bind {addr}: {e}"))?;
     stop_on_signal(http.shutdown_handle().map_err(|e| e.to_string())?)?;
     tracing::info!(%addr, "Mill Board listening");
-    http.run().map_err(|e| format!("HTTP server failed: {e}"))
+    let served = http.run().map_err(|e| format!("HTTP server failed: {e}"));
+    // The accept loop has ended. Let the requests and the backup in progress finish, then exit:
+    // a commit whose reply is cut off is durable but looks failed to its caller.
+    if !in_flight.close_and_wait(DRAIN) {
+        tracing::warn!(
+            secs = DRAIN.as_secs(),
+            "work still running at the deadline; stopping it"
+        );
+    }
+    served
 }
 
 fn main() -> ExitCode {

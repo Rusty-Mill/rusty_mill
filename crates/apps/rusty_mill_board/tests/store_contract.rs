@@ -138,6 +138,9 @@ fn an_append_that_fails_after_the_log_write_is_unsettled_until_reopened() {
         matches!(unhealthy, Err(BoardError::Storage(ref m)) if m.contains("restart")),
         "health says a restart is needed: {unhealthy:?}"
     );
+    // The log holds an event the state lacks: neither a copy nor a compaction may touch it.
+    assert!(board.backup(&dir).is_err(), "no backup while unsettled");
+    assert!(board.compact().is_err(), "no compaction while unsettled");
     let refused = board.comment(card.id, &human, "later");
     assert!(
         matches!(refused, Err(BoardError::Storage(ref m)) if m.contains("reopen")),

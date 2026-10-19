@@ -7,6 +7,7 @@ use std::sync::Arc;
 use rusty_mcp_server::{HttpConfig, HttpHandler};
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::board::{Board, Roles};
+use rusty_mill_board::drain::InFlight;
 use rusty_mill_board::mcp;
 use rusty_mill_board::store::MemStore;
 use rusty_mill_board::web::{Auth, Web};
@@ -16,6 +17,10 @@ fn start(token: Option<&str>) -> SocketAddr {
 }
 
 fn start_auth(auth: Auth) -> SocketAddr {
+    start_web(auth).0
+}
+
+fn start_web(auth: Auth) -> (SocketAddr, Arc<InFlight>) {
     let board: Arc<Shared> = Arc::new(Board::new(Box::new(MemStore::default()), Roles::default()));
     let config = HttpConfig {
         allowed_hosts: vec!["127.0.0.1".into()],
@@ -24,13 +29,14 @@ fn start_auth(auth: Auth) -> SocketAddr {
     let path = config.path.clone();
     let mcp = HttpHandler::new(mcp::server(board.clone()).expect("server"), config);
     let web = Web::new(board, mcp, path, vec!["127.0.0.1".into()], auth);
+    let in_flight = web.in_flight();
     let server =
         rusty_serve::Server::bind_shared("127.0.0.1:0".parse().expect("addr"), web).expect("bind");
     let addr = server.local_addr().expect("addr");
     std::thread::spawn(move || {
         let _ = server.run();
     });
-    addr
+    (addr, in_flight)
 }
 
 /// (status, body) of one request.
@@ -69,6 +75,42 @@ fn send(
 }
 
 const JSON: (&str, &str) = ("Content-Type", "application/json");
+
+#[test]
+fn once_a_stop_begins_requests_wait_for_the_running_ones_and_new_ones_are_refused() {
+    let (addr, in_flight) = start_web(Auth::from(Some("tok")));
+    let auth = ("Authorization", "Bearer tok");
+    assert_eq!(
+        send(addr, "POST", "/api/board_list", &[JSON, auth], "{}").0,
+        200
+    );
+
+    // A request is inside its handler (held here) when the stop begins: it is waited for, to a deadline.
+    let running = std::thread::spawn({
+        let flight = Arc::clone(&in_flight);
+        move || {
+            let held = flight.enter().expect("open");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(held);
+        }
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(
+        !in_flight.close_and_wait(std::time::Duration::from_millis(20)),
+        "still running at a short deadline"
+    );
+    assert_eq!(
+        send(addr, "POST", "/api/board_list", &[JSON, auth], "{}").0,
+        503
+    );
+    assert_eq!(
+        send(addr, "GET", "/health", &[], "").0,
+        503,
+        "draining is not healthy"
+    );
+    running.join().expect("held request");
+    assert!(in_flight.close_and_wait(std::time::Duration::from_secs(5)));
+}
 
 #[test]
 fn health_answers_without_a_token_on_any_host() {

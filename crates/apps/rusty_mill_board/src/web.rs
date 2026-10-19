@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use crate::api::{CallError, Identity, Op, Shared};
 use crate::domain::BoardError;
+use crate::drain::InFlight;
 use crate::identities::Credentials;
 use crate::settings::Settings;
 
@@ -66,6 +67,7 @@ pub struct Web {
     hosts: Vec<String>,
     auth: Auth,
     settings: Arc<Settings>,
+    in_flight: Arc<InFlight>,
 }
 
 impl Web {
@@ -86,7 +88,14 @@ impl Web {
             mcp_path,
             hosts,
             auth,
+            in_flight: Arc::default(),
         }
+    }
+
+    /// The requests being served now. A stop closes it and waits for them: once closed, every
+    /// request is answered 503 without being run.
+    pub fn in_flight(&self) -> Arc<InFlight> {
+        Arc::clone(&self.in_flight)
     }
 
     /// Serve `/api/settings_*` from `settings` (read-only settings by default).
@@ -186,6 +195,12 @@ fn reply(status: StatusCode, body: Value) -> Response {
 
 impl SharedHandler for Web {
     fn handle(&self, request: &Request<'_>) -> Response {
+        let Some(_running) = self.in_flight.enter() else {
+            return reply(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "shutting down"}),
+            );
+        };
         let path = request.target.split('?').next().unwrap_or("");
         if path == self.mcp_path {
             return match self.identify(request) {
