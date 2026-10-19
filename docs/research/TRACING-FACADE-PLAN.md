@@ -1,6 +1,6 @@
 # Plan: `tracing` facade (sovereignty list item 12)
 
-Status: **proposal, no code**. Needs owner sign-off on the decision at the end.
+Status: **option B approved by the owner (2026-10-19)**; no code yet. Option C is not approved and is not planned.
 Context: `RUSTY-MCP-SOVEREIGNTY.md` item 12 and D3; ADR-0002.
 
 ## What was measured (2026-10-18, `cargo metadata --all-features`, main at `25dd9517`)
@@ -35,7 +35,11 @@ If B is approved, the order is:
 2. Migrate `rusty-mcp` first (it owns the `Layer` and the span code), then the gateway crates, then provider, tailscale and croc, then the remaining crates. One PR per area; each must pass its own suite, and none changes a log line.
 3. Replace the `tracing` and `tracing-subscriber` entries in the `rusty-mcp` pin list with the path dependency `rusty_log` (a workspace crate is not external), then close sovereignty item 12 as "chokepoint done; implementation stays third-party until the HTTP stack leaves".
 
-## Decision requested
+## Decision (2026-10-19)
+
+Option B. The questions below were put to the owner; B is chosen, the home for `rusty_log` is still to be confirmed in the PR that adds it.
+
+## Decision as asked
 
 - **B only (recommended)**, **A (do nothing)**, or **C**?
 - If B: is a new crate under `crates/libs/` (alongside `rusty_tokio`) the right home?
