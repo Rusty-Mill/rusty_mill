@@ -1,6 +1,7 @@
 //! The storage port and an in-memory adapter.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Mutex;
 
 use uuid::Uuid;
@@ -28,6 +29,28 @@ pub trait Store: Send + Sync {
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError>;
     /// The id of the newest committed event: a cursor that has seen everything so far.
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError>;
+    /// `Err` once the store can no longer commit and must be reopened.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] naming why.
+    fn health(&self) -> Result<(), BoardError> {
+        Ok(())
+    }
+    /// Copy a consistent image of the store into the existing directory `dir`: no commit
+    /// lands while it is copied, so the copy opens as the board stood at one moment.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if the store is not durable or a file cannot be copied.
+    fn backup(&self, _dir: &Path) -> Result<(), BoardError> {
+        Err(BoardError::Storage("this store is not durable".into()))
+    }
+    /// Fold the store's append log into its main files; reads and state are unchanged.
+    ///
+    /// # Errors
+    /// [`BoardError::Storage`] if the files cannot be rewritten.
+    fn compact(&self) -> Result<(), BoardError> {
+        Ok(())
+    }
 }
 
 /// The committed state both adapters keep in memory: cards by id and the
@@ -161,5 +184,14 @@ impl<T: Store + ?Sized> Store for Box<T> {
     }
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
         (**self).last_event_id()
+    }
+    fn health(&self) -> Result<(), BoardError> {
+        (**self).health()
+    }
+    fn backup(&self, dir: &Path) -> Result<(), BoardError> {
+        (**self).backup(dir)
+    }
+    fn compact(&self) -> Result<(), BoardError> {
+        (**self).compact()
     }
 }

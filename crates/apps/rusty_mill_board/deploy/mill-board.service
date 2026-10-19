@@ -1,0 +1,33 @@
+# systemd unit: Mill Board as a standing service.
+# Install to /etc/systemd/system/mill-board.service (see README.md in this directory).
+# Settings come from board.env; change User= and the paths below if the account differs.
+[Unit]
+Description=Mill Board
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting: a start that races the network must retry, not
+# trip systemd's default limit (5 starts in 10 s) and stay down. The hub of
+# rusty_remind_me was down six days that way.
+StartLimitIntervalSec=0
+
+[Service]
+User=baileyrd
+EnvironmentFile=/home/baileyrd/.mill-board/board.env
+ExecStart=/usr/local/bin/rusty_mill_board
+Restart=always
+RestartSec=5
+# SIGTERM stops the accept loop and the process exits; commits are atomic, so a
+# kill at any point loses nothing, and this only avoids dying mid-request.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+MemoryMax=1G
+
+# The board writes only under its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/baileyrd/.mill-board
+
+[Install]
+WantedBy=multi-user.target

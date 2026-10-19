@@ -71,6 +71,18 @@ fn send(
 const JSON: (&str, &str) = ("Content-Type", "application/json");
 
 #[test]
+fn health_answers_without_a_token_on_any_host() {
+    let addr = start(Some("tok"));
+    let (status, body) = send(addr, "GET", "/health", &[("Host", "other.lan")], "");
+    assert_eq!((status, body.as_str()), (200, r#"{"ok":true}"#));
+    assert_eq!(
+        send(addr, "POST", "/health", &[JSON], "{}").0,
+        404,
+        "GET only"
+    );
+}
+
+#[test]
 fn guard_and_api() {
     let addr = start(Some("tok"));
     let auth = ("Authorization", "Bearer tok");

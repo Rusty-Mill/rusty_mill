@@ -7,10 +7,14 @@
 //! Add `--github-repo owner/name` (and `GITHUB_TOKEN`) to mirror cards to issues.
 //! Add `--identities FILE` for a token per model, each bound to an actor and role.
 //! The HTTP mode serves the UI at `/`, the web API at `/api/<op>` and MCP at
-//! `/mcp`; open `http://127.0.0.1:8787/#token=S` for the UI.
+//! `/mcp`; open `http://127.0.0.1:8787/#token=S` for the UI. `GET /health` answers
+//! 200 while the store can commit and 503 once it needs a restart. SIGTERM and
+//! SIGINT stop the server cleanly. `--backup-dir DIR` takes a pruned backup
+//! of the store and settings every `--backup-secs`.
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +22,7 @@ use std::time::Duration;
 use clap::Parser;
 use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
 use rusty_mill_board::api::Shared;
+use rusty_mill_board::backup::Backups;
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::mcp;
 use rusty_mill_board::mmdb::MmdbStore;
@@ -81,12 +86,23 @@ struct Cli {
     /// Seconds between sync runs.
     #[arg(long, env = "MILL_BOARD_GITHUB_SECS", default_value_t = 60, value_parser = clap::value_parser!(u64).range(5..))]
     github_secs: u64,
+    /// Take a backup of the store and the settings files into this directory (HTTP mode, durable
+    /// store only): one `board-<time>` folder each time, the newest `--backup-keep` kept. The
+    /// store is compacted after each.
+    #[arg(long, env = "MILL_BOARD_BACKUP_DIR")]
+    backup_dir: Option<PathBuf>,
+    /// Seconds between backups.
+    #[arg(long, env = "MILL_BOARD_BACKUP_SECS", default_value_t = 86_400, value_parser = clap::value_parser!(u64).range(60..))]
+    backup_secs: u64,
+    /// Backups to keep.
+    #[arg(long, env = "MILL_BOARD_BACKUP_KEEP", default_value_t = 14, value_parser = clap::value_parser!(u64).range(1..))]
+    backup_keep: u64,
     /// Serve with no authentication on a non-loopback address. Anyone who can reach the
     /// port can act as any role, including human. Almost never what you want.
     #[arg(long)]
     accept_unauthenticated_public: bool,
     /// Accepted Host names (HTTP only).
-    #[arg(long = "allowed-host", value_delimiter = ',', default_values_t = ["127.0.0.1".to_owned(), "localhost".to_owned(), "[::1]".to_owned()])]
+    #[arg(long = "allowed-host", env = "MILL_BOARD_ALLOWED_HOSTS", value_delimiter = ',', default_values_t = ["127.0.0.1".to_owned(), "localhost".to_owned(), "[::1]".to_owned()])]
     allowed_hosts: Vec<String>,
 }
 
@@ -110,6 +126,60 @@ fn required(flag: &Option<PathBuf>, name: &str) -> Result<(), String> {
         Some(path) if !path.exists() => Err(format!("{name}: {} does not exist", path.display())),
         _ => Ok(()),
     }
+}
+
+/// Tell the operator the first admin's credential. On a terminal it is printed once; anywhere
+/// else (a service's journal keeps stderr) it goes to an owner-only file beside the
+/// credentials, and only the path is printed.
+fn announce_first_admin(creds: &Path, secret: &str) -> Result<(), String> {
+    if std::io::stderr().is_terminal() {
+        eprintln!(
+            "rusty_mill_board: created {} with a first admin, named admin. Its token, shown once: {secret}",
+            creds.display()
+        );
+        return Ok(());
+    }
+    let file = creds.with_file_name("first-admin.token");
+    rusty_atomic_file::write_private(&file, format!("{secret}\n").as_bytes())
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    eprintln!(
+        "rusty_mill_board: created {} with a first admin, named admin. Its token is in {}; read it, then delete the file",
+        creds.display(),
+        file.display()
+    );
+    Ok(())
+}
+
+/// Stop `server` on SIGTERM or SIGINT (Ctrl+C elsewhere), so a service stop or restart ends the
+/// accept loop and the process exits, instead of dying mid-request.
+fn stop_on_signal(server: rusty_serve::ShutdownHandle) -> Result<(), String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("signal runtime: {e}"))?;
+    #[cfg(unix)]
+    let mut term = {
+        let _enter = rt.enter();
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| format!("SIGTERM handler: {e}"))?
+    };
+    std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || {
+            rt.block_on(async {
+                #[cfg(unix)]
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+                #[cfg(not(unix))]
+                let _ = tokio::signal::ctrl_c().await;
+            });
+            tracing::info!("signal received, shutting down");
+            server.shutdown();
+        })
+        .map(drop)
+        .map_err(|e| format!("signal thread: {e}"))
 }
 
 fn run(cli: Cli) -> Result<(), String> {
@@ -179,11 +249,8 @@ fn run(cli: Cli) -> Result<(), String> {
     let creds = match &files.identities {
         Some(path) => {
             let (creds, first) = open_credentials(path, &roles, &projects)?;
-            if let Some(token) = first {
-                eprintln!(
-                    "rusty_mill_board: created {} with a first admin, named admin. Its token, shown once: {token}",
-                    path.display()
-                );
+            if let Some(secret) = first {
+                announce_first_admin(path, &secret)?;
             }
             Some(creds.shared())
         }
@@ -195,6 +262,26 @@ fn run(cli: Cli) -> Result<(), String> {
         (None, None) => Auth::Open,
     };
     check_bind(addr, &auth, cli.accept_unauthenticated_public)?;
+    if let Some(dir) = cli.backup_dir {
+        if cli.store.is_none() {
+            return Err(
+                "--backup-dir needs --store: an in-memory board has nothing to keep".into(),
+            );
+        }
+        let extras = [
+            &files.identities,
+            &files.projects,
+            &files.roles,
+            &files.github,
+        ]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+        let keep = usize::try_from(cli.backup_keep).map_err(|e| e.to_string())?;
+        Backups::new(dir, keep, extras)
+            .start(board.clone(), Duration::from_secs(cli.backup_secs))?;
+    }
     let settings = Arc::new(Settings::new(board.clone(), files, creds, syncer, github));
     let web = Web::new(
         board,
@@ -206,6 +293,7 @@ fn run(cli: Cli) -> Result<(), String> {
     .with_settings(settings);
     let http = rusty_serve::Server::bind_shared(addr, web)
         .map_err(|e| format!("cannot bind {addr}: {e}"))?;
+    stop_on_signal(http.shutdown_handle().map_err(|e| e.to_string())?)?;
     tracing::info!(%addr, "Mill Board listening");
     http.run().map_err(|e| format!("HTTP server failed: {e}"))
 }

@@ -1,0 +1,10 @@
+---
+category: Added
+changelog: **`rusty_mill_board`** can run as a standing service - a store lock, `/health`, clean SIGTERM stop, in-process pruned backups with compaction, and a systemd unit.
+---
+## 2026-10-19 - Mill Board: run as a service
+
+- **Added:** `deploy/` (a systemd unit, `board.env.example`, a README with install, restart, backup, restore and rollback), modelled on how `rusty_remind_me` is supervised. `GET /health` (200, or 503 once the store refuses writes until reopened). SIGTERM and SIGINT now stop the HTTP server and exit 0. `--backup-dir`, `--backup-secs` (default 86400), `--backup-keep` (default 14): a copy of the store taken under its commit lock plus the settings files (owner-only), renamed into place when complete, pruned to the newest few, then the store is compacted. `--allowed-host` reads `MILL_BOARD_ALLOWED_HOSTS`. ADR-0005.
+- **Changed:** a store is held by one process: `MmdbStore::open` takes `<path>.lock` and refuses with "in use by another process", so a stray second instance can no longer diverge from the running one. `Store` gains `health`, `backup` and `compact`, with defaults, so other adapters are unaffected. A first admin's token is written to `first-admin.token` (mode 600) beside `identities.json` when stderr is not a terminal; on a terminal it is printed once as before.
+- **Tests:** `tests/service.rs` - one owner until dropped, a backup that opens as the same board and is pruned, compaction that keeps the board, a memory board refusing to back up without leaving a partial one, and the real binary answering `/health`, refusing a second process on its store, keeping the credential out of stderr and exiting 0 on SIGTERM; `/health` over a socket; `health` after a failed append and after the reopen.
+- **Known limitations:** no TLS (plain HTTP, so beyond loopback a proxy is needed). A store that needs reopening is reported by `/health` but not restarted by the process. Backups live on the store's disk until copied off the host. SIGTERM is handled on Unix only.

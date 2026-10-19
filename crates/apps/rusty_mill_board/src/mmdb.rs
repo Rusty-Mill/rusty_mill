@@ -9,12 +9,15 @@
 //! in-memory update, so ids are in commit order and a failed write changes nothing.
 //! The cost is that the whole log is held in memory, which suits a board.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rusty_multimodal_db_engine::dir_lock::DirLock;
+use rusty_multimodal_db_engine::generic::insert_log::log_path;
 use rusty_multimodal_db_engine::generic::mmap_store::GenericMmapStore;
 use rusty_multimodal_db_engine::generic::production::GenericProductionStore;
+use rusty_multimodal_db_engine::generic::record_blob::blob_path;
 use rusty_multimodal_db_engine::generic::traits::{
     IndexedField, Record, ScannableField, SchemaTag,
 };
@@ -76,13 +79,17 @@ impl ScannableField<Rev> for Row {
 
 type Db = GenericProductionStore<GenericMmapStore<Row, Kind, Rev>>;
 
-/// A [`Store`] persisted at a path (two files: `<path>` and `<path>.records`).
+/// A [`Store`] persisted at a path (`<path>`, `<path>.records` and the append log
+/// `<path>.inserts`), owned by one process at a time: it holds `<path>.lock` while open.
 ///
 /// A failed durable append is *ambiguous*: the record may or may not have reached the log
 /// (the engine can fail after writing it). The store cannot tell, so it stops accepting
 /// writes (`BoardError::Storage`) rather than guess; reads keep serving the last state it
 /// knows. Reopening replays the log and settles the question either way.
 pub struct MmdbStore {
+    path: PathBuf,
+    /// Never read: the lock lasts as long as the store.
+    _lock: DirLock,
     db: Db,
     log: Mutex<Log>,
     /// Set by a failed append; cleared only by reopening.
@@ -97,13 +104,27 @@ fn poisoned<T>(_: T) -> BoardError {
     BoardError::Storage("lock poisoned".into())
 }
 
+/// Take `<path>.lock`, so a second process cannot open the same board and diverge from this one.
+fn lock(path: &Path) -> Result<DirLock, BoardError> {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| storage(format!("{} names no file", path.display())))?;
+    DirLock::acquire(dir, &format!("{}.lock", name.to_string_lossy())).map_err(storage)
+}
+
 impl MmdbStore {
     /// Open the store at `path`, creating it if absent, and rebuild the
     /// board's state from its commit records.
     ///
     /// # Errors
-    /// If the files cannot be created or read back, or a record does not decode.
+    /// If another process has the store open, the files cannot be created or read back,
+    /// or a record does not decode.
     pub fn open(path: &Path) -> Result<Self, BoardError> {
+        let lock = lock(path)?;
         let core = if path.exists() {
             GenericMmapStore::open_portable(path)
         } else {
@@ -124,6 +145,8 @@ impl MmdbStore {
             log.replay(c.card, c.event);
         }
         Ok(Self {
+            path: path.to_path_buf(),
+            _lock: lock,
             db,
             log: Mutex::new(log),
             unsettled: AtomicBool::new(false),
@@ -184,5 +207,40 @@ impl Store for MmdbStore {
 
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
         Ok(self.log.lock().map_err(poisoned)?.last_id())
+    }
+
+    fn health(&self) -> Result<(), BoardError> {
+        if self.unsettled.load(Ordering::SeqCst) {
+            return Err(storage(
+                "an earlier write failed with an unknown outcome; restart to settle it",
+            ));
+        }
+        Ok(())
+    }
+
+    fn backup(&self, dir: &Path) -> Result<(), BoardError> {
+        // Holding the commit lock keeps every append out while the files are copied.
+        let _log = self.log.lock().map_err(poisoned)?;
+        for from in [
+            self.path.clone(),
+            blob_path(&self.path),
+            log_path(&self.path),
+        ] {
+            let Some(name) = from.file_name().filter(|_| from.exists()) else {
+                continue;
+            };
+            let to = dir.join(name);
+            std::fs::copy(&from, &to)
+                .map_err(|e| storage(format!("copy {}: {e}", from.display())))?;
+            std::fs::File::open(&to)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| storage(format!("sync {}: {e}", to.display())))?;
+        }
+        Ok(())
+    }
+
+    fn compact(&self) -> Result<(), BoardError> {
+        let _log = self.log.lock().map_err(poisoned)?;
+        self.db.compact().map(drop).map_err(storage)
     }
 }

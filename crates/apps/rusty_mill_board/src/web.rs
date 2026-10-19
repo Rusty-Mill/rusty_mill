@@ -195,6 +195,16 @@ impl SharedHandler for Web {
                 Err(()) => reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"})),
             };
         }
+        if path == "/health" && request.method == &Method::Get {
+            // Open to probes on any Host: it says only whether the store can still commit.
+            return match self.board.health() {
+                Ok(()) => reply(StatusCode::OK, json!({"ok": true})),
+                Err(e) => reply(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"ok": false, "error": e.to_string()}),
+                ),
+            };
+        }
         if !self.host_ok(request) {
             return reply(StatusCode::FORBIDDEN, json!({"error": "host not allowed"}));
         }

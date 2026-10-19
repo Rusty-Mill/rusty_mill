@@ -133,6 +133,11 @@ fn an_append_that_fails_after_the_log_write_is_unsettled_until_reopened() {
         Column::Backlog,
         "memory keeps the last known state"
     );
+    let unhealthy = board.health();
+    assert!(
+        matches!(unhealthy, Err(BoardError::Storage(ref m)) if m.contains("restart")),
+        "health says a restart is needed: {unhealthy:?}"
+    );
     let refused = board.comment(card.id, &human, "later");
     assert!(
         matches!(refused, Err(BoardError::Storage(ref m)) if m.contains("reopen")),
@@ -147,5 +152,6 @@ fn an_append_that_fails_after_the_log_write_is_unsettled_until_reopened() {
     board
         .comment(card.id, &human, "now fine")
         .expect("writable again");
+    assert_eq!(board.health(), Ok(()));
     let _ = std::fs::remove_dir_all(&dir);
 }
