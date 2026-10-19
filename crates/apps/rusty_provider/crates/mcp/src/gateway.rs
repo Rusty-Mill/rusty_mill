@@ -176,7 +176,7 @@ impl McpGateway {
         for upstream in upstreams {
             match Pool::connect(upstream, size, timeout).await {
                 Ok(pool) => {
-                    tracing::info!(upstream = %upstream.name, "connected MCP upstream");
+                    rusty_log::info!(upstream = %upstream.name, "connected MCP upstream");
                     let pool = Arc::new(pool);
                     peers
                         .write()
@@ -192,7 +192,7 @@ impl McpGateway {
                     );
                 }
                 Err(error) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         upstream = %upstream.name,
                         %error,
                         "failed to connect MCP upstream; its tools won't be available until restart"
@@ -223,10 +223,10 @@ impl McpGateway {
                     }
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(upstream = %name, %error, "failed to list tools from MCP upstream");
+                    rusty_log::warn!(upstream = %name, %error, "failed to list tools from MCP upstream");
                 }
                 Err(_elapsed) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         upstream = %name,
                         timeout_secs = self.timeout.as_secs(),
                         "MCP upstream tools/list call timed out"
@@ -370,7 +370,7 @@ fn spawn_supervisor(
             if pool.is_alive().await {
                 continue;
             }
-            tracing::warn!(
+            rusty_log::warn!(
                 upstream = %upstream.name,
                 "MCP upstream connection ended; attempting to reconnect"
             );
@@ -380,7 +380,7 @@ fn spawn_supervisor(
             let mut attempts: u32 = 0;
             let reconnected = loop {
                 if should_give_up(attempts, policy.max_attempts) {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         upstream = %upstream.name,
                         attempts,
                         "giving up reconnecting to MCP upstream; its tools will stay unavailable until restart"
@@ -391,11 +391,11 @@ fn spawn_supervisor(
                 attempts += 1;
                 match Pool::connect(&upstream, size, call_timeout).await {
                     Ok(new_pool) => {
-                        tracing::info!(upstream = %upstream.name, attempts, "reconnected MCP upstream");
+                        rusty_log::info!(upstream = %upstream.name, attempts, "reconnected MCP upstream");
                         break Some(Arc::new(new_pool));
                     }
                     Err(error) => {
-                        tracing::warn!(
+                        rusty_log::warn!(
                             upstream = %upstream.name,
                             %error,
                             attempts,

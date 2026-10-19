@@ -29,8 +29,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 clap = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+rusty_log = { workspace = true, features = ["subscriber"] }
 
 [dev-dependencies]
 rusty_mcp_server = { workspace = true, features = ["http"] }

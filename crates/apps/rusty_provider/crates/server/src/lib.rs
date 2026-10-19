@@ -34,7 +34,7 @@ fn build_cors_layer(cors_allowed_origins: &Option<Vec<String>>) -> CorsLayer {
         .filter_map(|origin| match origin.parse() {
             Ok(value) => Some(value),
             Err(e) => {
-                tracing::warn!(origin, error = %e, "skipping invalid cors_allowed_origins entry");
+                rusty_log::warn!(origin, error = %e, "skipping invalid cors_allowed_origins entry");
                 None
             }
         })

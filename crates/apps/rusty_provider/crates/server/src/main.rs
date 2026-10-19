@@ -8,9 +8,9 @@ use rp_server::state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
+    rusty_log::tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
+            rusty_log::tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("rp_server=info".parse()?),
         )
         .init();
@@ -22,9 +22,9 @@ async fn main() -> anyhow::Result<()> {
     let router = Arc::new(ProviderRouter::from_config(&config).await);
     let configured: Vec<&str> = router.configured_providers().collect();
     if configured.is_empty() {
-        tracing::warn!("no providers configured (check that their api_key_env vars are set) — every request will fail");
+        rusty_log::warn!("no providers configured (check that their api_key_env vars are set) — every request will fail");
     } else {
-        tracing::info!(providers = ?configured, "providers ready");
+        rusty_log::info!(providers = ?configured, "providers ready");
     }
 
     // Design review 3.1: a configured credential that does not resolve is a
@@ -39,16 +39,16 @@ async fn main() -> anyhow::Result<()> {
     );
     if api_key.is_none() && client_keys.is_empty() && jwt.is_none() {
         if config.server.allow_unauthenticated {
-            tracing::warn!("no caller authentication configured and server.allow_unauthenticated is set: /v1 is open to anyone who can reach it");
+            rusty_log::warn!("no caller authentication configured and server.allow_unauthenticated is set: /v1 is open to anyone who can reach it");
         } else {
-            tracing::warn!("no caller authentication configured: /v1 answers 401 until a client is added (or set server.allow_unauthenticated)");
+            rusty_log::warn!("no caller authentication configured: /v1 answers 401 until a client is added (or set server.allow_unauthenticated)");
         }
     }
     if !client_keys.is_empty() {
-        tracing::info!(clients = ?config.clients.iter().map(|c| &c.name).collect::<Vec<_>>(), "named clients ready");
+        rusty_log::info!(clients = ?config.clients.iter().map(|c| &c.name).collect::<Vec<_>>(), "named clients ready");
     }
     if jwt.is_some() {
-        tracing::info!("JWT auth enabled");
+        rusty_log::info!("JWT auth enabled");
     }
 
     let admin_key = config
@@ -57,17 +57,17 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .and_then(|var| std::env::var(var).ok());
     if admin_key.is_none() && config.server.admin_key_env.is_some() {
-        tracing::warn!(
+        rusty_log::warn!(
             "server.admin_key_env is set in config but the env var isn't — the admin API stays disabled"
         );
     } else if admin_key.is_some() {
-        tracing::info!("admin API enabled");
+        rusty_log::info!("admin API enabled");
     }
 
     let mcp = match &config.mcp {
         Some(mcp_config) if mcp_config.enabled => {
             let handler = rp_mcp::build(mcp_config, Arc::clone(&router)).await?;
-            tracing::info!(path = %mcp_config.path, upstreams = mcp_config.upstreams.len(), "MCP endpoint enabled");
+            rusty_log::info!(path = %mcp_config.path, upstreams = mcp_config.upstreams.len(), "MCP endpoint enabled");
             Some(handler)
         }
         _ => None,
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "/mcp".to_string());
 
     let concurrency_limiter = config.server.max_concurrent_requests.map(|max| {
-        tracing::info!(max, "global concurrency cap enabled");
+        rusty_log::info!(max, "global concurrency cap enabled");
         Arc::new(tokio::sync::Semaphore::new(max))
     });
 
@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         let Some(mcp) = state.mcp.clone() else {
             anyhow::bail!("MCP_STDIO is set but [mcp].enabled is not true in config");
         };
-        tracing::info!("serving MCP over stdio (MCP_STDIO set)");
+        rusty_log::info!("serving MCP over stdio (MCP_STDIO set)");
         // The server's handlers block, so serve from a thread of its own.
         tokio::task::spawn_blocking(move || rusty_mcp_server::serve_stdio(mcp)).await??;
         return Ok(());
@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!(%addr, "rusty_provider listening");
+    rusty_log::info!(%addr, "rusty_provider listening");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
