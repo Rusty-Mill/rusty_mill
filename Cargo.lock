@@ -6319,13 +6319,13 @@ dependencies = [
  "keyring",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
+ "rusty_log",
  "rusty_sqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
- "tracing",
  "walkdir",
 ]
 
@@ -11084,6 +11084,7 @@ dependencies = [
  "rp-core",
  "rp-router",
  "rusty-mcp-client",
+ "rusty_log",
  "rusty_mcp_server",
  "rusty_retry",
  "rusty_serve",
@@ -11091,7 +11092,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -11127,6 +11127,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rusty_ansi",
+ "rusty_log",
  "rusty_retry",
  "rusty_sqlite",
  "serde",
@@ -11136,7 +11137,6 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "toml 0.8.2",
- "tracing",
  "wiremock",
 ]
 
@@ -11154,6 +11154,7 @@ dependencies = [
  "rp-core",
  "rp-mcp",
  "rp-router",
+ "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
@@ -11161,8 +11162,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-http",
- "tracing",
- "tracing-subscriber",
  "wiremock",
 ]
 
@@ -12489,6 +12488,7 @@ dependencies = [
  "rusty_crypto_key",
  "rusty_fedora",
  "rusty_http",
+ "rusty_log",
  "rusty_mcp_server",
  "rusty_oauth",
  "rusty_opnsense",
@@ -12500,8 +12500,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml 0.8.2",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -12677,6 +12675,7 @@ dependencies = [
  "rusty_atomic_file",
  "rusty_crypto_key",
  "rusty_http",
+ "rusty_log",
  "rusty_mcp_server",
  "rusty_multimodal_db_engine",
  "rusty_oauth",
@@ -12687,8 +12686,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -12697,14 +12694,13 @@ name = "rusty_mill_runner"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "rusty_log",
  "rusty_mcp_server",
  "rusty_mill_board",
  "rusty_sandbox",
  "rusty_serve",
  "serde",
  "serde_json",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -13986,12 +13982,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rusty_log",
  "serde_json",
  "skillopt-core",
  "skillopt-envs",
  "skillopt-model",
  "tokio",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -206,12 +206,12 @@ fn run(cli: Cli) -> Result<(), String> {
     .with_settings(settings);
     let http = rusty_serve::Server::bind_shared(addr, web)
         .map_err(|e| format!("cannot bind {addr}: {e}"))?;
-    tracing::info!(%addr, "Mill Board listening");
+    rusty_log::info!(%addr, "Mill Board listening");
     http.run().map_err(|e| format!("HTTP server failed: {e}"))
 }
 
 fn main() -> ExitCode {
-    let _ = tracing_subscriber::fmt()
+    let _ = rusty_log::tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .try_init();

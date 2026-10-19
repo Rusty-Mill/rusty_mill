@@ -60,9 +60,9 @@ impl Syncer {
                                     if r.is_quiet()
                                         && r.drift.is_empty()
                                         && r.missing.is_empty() => {}
-                                Ok(r) => tracing::info!(?r, "github sync"),
+                                Ok(r) => rusty_log::info!(?r, "github sync"),
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "github sync failed; will retry")
+                                    rusty_log::warn!(error = %e, "github sync failed; will retry")
                                 }
                             }
                         }

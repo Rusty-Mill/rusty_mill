@@ -805,7 +805,7 @@ impl Inventory {
 impl Drop for Inventory {
     fn drop(&mut self) {
         if let Err(e) = self.checkpoint() {
-            tracing::error!("failed to seal the index on exit: {e}");
+            rusty_log::error!("failed to seal the index on exit: {e}");
         }
     }
 }

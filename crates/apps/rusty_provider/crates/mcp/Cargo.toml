@@ -16,7 +16,7 @@ rusty-mcp-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tracing.workspace = true
+rusty_log = { workspace = true }
 anyhow.workspace = true
 thiserror = "2"
 

@@ -53,11 +53,11 @@ async fn main() {
     }
     serve::init_logging(&cli.mcp.log);
     if cli.auth_resource_url.is_some() {
-        tracing::warn!("--auth-resource-url has no effect any more and is ignored");
+        rusty_log::warn!("--auth-resource-url has no effect any more and is ignored");
     }
 
     if proxmox_config.is_none() && opnsense_config.is_none() && fedora_hosts.is_empty() {
-        tracing::warn!(
+        rusty_log::warn!(
             "no backend is configured -- every tool call will fail until PROXMOX_*, \
              OPNSENSE_*, and/or FEDORA_AGENT_URL/FEDORA_HOSTS_FILE flags or environment \
              variables are set"

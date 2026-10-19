@@ -201,7 +201,7 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
 
     fn say(&self, stage: &Stage, id: Uuid, text: &str) {
         if let Err(e) = self.board.comment(&stage.role, id, text) {
-            tracing::warn!(card = %id, error = %e, "could not comment");
+            rusty_log::warn!(card = %id, error = %e, "could not comment");
         }
     }
 
@@ -211,7 +211,7 @@ impl<B: BoardApi, W: Work> Runner<B, W> {
             Ok(r) => r,
             Err(e) if e.is_contention() => Step::Skipped(id),
             Err(e) => {
-                tracing::warn!(card = %id, stage = %stage.name, error = %e, "stage failed");
+                rusty_log::warn!(card = %id, stage = %stage.name, error = %e, "stage failed");
                 Step::Skipped(id)
             }
         }
