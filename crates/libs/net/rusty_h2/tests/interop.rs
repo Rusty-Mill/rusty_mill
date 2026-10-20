@@ -73,6 +73,7 @@ fn h2_echo_server(rt: &tokio::runtime::Runtime) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     rt.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
+        tcp.set_nodelay(true).unwrap();
         let Ok(mut conn) = h2::server::handshake(tcp).await else {
             return;
         };
@@ -129,6 +130,7 @@ async fn h2_call(
 
 async fn ours_client(addr: SocketAddr) -> ClientHandle {
     let tcp = rusty_tokio::io::TcpStream::connect(addr).await.unwrap();
+    tcp.set_nodelay(true).unwrap();
     let (handle, drv) = driver::client(tcp, ClientBuilder::new());
     rusty_tokio::spawn(drv);
     handle
@@ -164,6 +166,7 @@ fn ours_echo_server(rt: &rusty_tokio::Runtime) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     rt.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
+        tcp.set_nodelay(true).unwrap();
         let (mut acceptor, drv) = driver::server(tcp, ServerBuilder::new());
         rusty_tokio::spawn(drv);
         while let Some(Ok((mut req, respond))) = acceptor.accept().await {
@@ -308,6 +311,7 @@ fn an_h2_reset_fails_our_response_with_its_reason() {
     let addr = listener.local_addr().unwrap();
     theirs.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
+        tcp.set_nodelay(true).unwrap();
         let Ok(mut conn) = h2::server::handshake(tcp).await else {
             return;
         };
@@ -337,6 +341,7 @@ fn a_trailers_only_response_from_h2_has_headers_and_no_body() {
     let addr = listener.local_addr().unwrap();
     theirs.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
+        tcp.set_nodelay(true).unwrap();
         let Ok(mut conn) = h2::server::handshake(tcp).await else {
             return;
         };
@@ -373,6 +378,7 @@ fn our_reset_reaches_h2_as_cancel() {
     let (tx, rx) = std::sync::mpsc::channel();
     theirs.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
+        tcp.set_nodelay(true).unwrap();
         let Ok(mut conn) = h2::server::handshake(tcp).await else {
             return;
         };
@@ -420,6 +426,7 @@ fn an_h2_graceful_shutdown_ends_our_driver_and_refuses_new_calls() {
     let addr = listener.local_addr().unwrap();
     theirs.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
+        tcp.set_nodelay(true).unwrap();
         let Ok(mut conn) = h2::server::handshake(tcp).await else {
             return;
         };
@@ -428,6 +435,7 @@ fn an_h2_graceful_shutdown_ends_our_driver_and_refuses_new_calls() {
     });
     within(&ours, 10, async {
         let tcp = rusty_tokio::io::TcpStream::connect(addr).await.unwrap();
+        tcp.set_nodelay(true).unwrap();
         let (h, drv) = driver::client(tcp, ClientBuilder::new());
         let task = rusty_tokio::spawn(drv);
         assert!(task.await.unwrap().is_ok(), "the driver ends cleanly");
@@ -443,6 +451,7 @@ fn an_h2_graceful_shutdown_ends_our_driver_and_refuses_new_calls() {
 fn h2_client(rt: &tokio::runtime::Runtime, addr: SocketAddr) -> h2::client::SendRequest<Bytes> {
     rt.block_on(async {
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tcp.set_nodelay(true).unwrap();
         let (client, conn) = h2::client::handshake(tcp).await.unwrap();
         tokio::spawn(async move {
             let _ = conn.await;
@@ -531,6 +540,7 @@ fn an_h2_reset_reaches_our_server_body_as_cancel() {
     let (tx, rx) = std::sync::mpsc::channel();
     ours.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
+        tcp.set_nodelay(true).unwrap();
         let (mut acceptor, drv) = driver::server(tcp, ServerBuilder::new());
         rusty_tokio::spawn(drv);
         if let Some(Ok((mut req, _respond))) = acceptor.accept().await {

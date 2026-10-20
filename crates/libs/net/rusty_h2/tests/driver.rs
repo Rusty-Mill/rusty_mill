@@ -11,8 +11,17 @@ use rusty_h2::frame::{DataFrame, Frame, HeadersFrame, SettingsFrame};
 use rusty_h2::hpack::{Encoder, HeaderField};
 use rusty_h2::server::builder::Builder as ServerBuilder;
 use rusty_h2::CONNECTION_PREFACE;
-use rusty_tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, TcpListener, TcpStream};
 use rusty_tokio::time::timeout;
+
+/// A connected pair of loopback sockets. (Not `duplex`: dropping one half of
+/// a `DuplexStream` can deadlock, see the PR description.)
+async fn pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (a, b) = rusty_tokio::join!(TcpStream::connect(addr), listener.accept());
+    (a.unwrap(), b.unwrap().0)
+}
 
 fn hf(n: &str, v: &str) -> HeaderField {
     HeaderField::new(n, v)
@@ -48,8 +57,8 @@ async fn drain(
 
 /// A server that answers every request with its own body echoed back, then
 /// `grpc-status: 0` trailers. Returns the client handle.
-fn echo_pair(client: ClientBuilder, server: ServerBuilder) -> ClientHandle {
-    let (a, b) = duplex(64 * 1024);
+async fn echo_pair(client: ClientBuilder, server: ServerBuilder) -> ClientHandle {
+    let (a, b) = pair().await;
     let (handle, cdrv) = driver::client(a, client);
     let (mut acceptor, sdrv) = driver::server(b, server);
     rusty_tokio::spawn(cdrv);
@@ -87,7 +96,7 @@ async fn call(
 
 #[rusty_tokio::test]
 async fn a_unary_call_returns_headers_body_and_trailers_in_order() {
-    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new());
+    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new()).await;
     let (headers, body, trailers) = call(&h, "/svc/Echo", b"hello".to_vec()).await;
     assert_eq!(headers, ok_response());
     assert_eq!(body, b"hello");
@@ -96,7 +105,7 @@ async fn a_unary_call_returns_headers_body_and_trailers_in_order() {
 
 #[rusty_tokio::test]
 async fn a_request_without_a_body_is_answered() {
-    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new());
+    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new()).await;
     let (_send, resp) = h.send_request(request("/svc/Empty"), true).await.unwrap();
     let mut resp = resp.await.unwrap();
     let (body, trailers) = drain(&mut resp.body).await.unwrap();
@@ -106,7 +115,7 @@ async fn a_request_without_a_body_is_answered() {
 
 #[rusty_tokio::test]
 async fn many_concurrent_calls_do_not_mix_up_their_bodies() {
-    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new());
+    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new()).await;
     let mut tasks = Vec::new();
     for i in 0..64u8 {
         let h = h.clone();
@@ -117,13 +126,13 @@ async fn many_concurrent_calls_do_not_mix_up_their_bodies() {
         }));
     }
     for t in tasks {
-        t.await.unwrap();
+        timeout(Duration::from_secs(10), t).await.unwrap().unwrap();
     }
 }
 
 #[rusty_tokio::test]
 async fn a_body_far_larger_than_the_window_flows_both_ways() {
-    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new());
+    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new()).await;
     let body: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
     let (_, got, _) = timeout(Duration::from_secs(20), call(&h, "/svc/Echo", body.clone()))
         .await
@@ -133,7 +142,7 @@ async fn a_body_far_larger_than_the_window_flows_both_ways() {
 
 #[rusty_tokio::test]
 async fn ping_is_acknowledged() {
-    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new());
+    let h = echo_pair(ClientBuilder::new(), ServerBuilder::new()).await;
     timeout(Duration::from_secs(5), h.ping())
         .await
         .unwrap()
@@ -144,7 +153,7 @@ async fn ping_is_acknowledged() {
 async fn requests_beyond_the_peers_stream_limit_wait_their_turn() {
     let mut sb = ServerBuilder::new();
     sb.max_concurrent_streams(2);
-    let h = echo_pair(ClientBuilder::new(), sb);
+    let h = echo_pair(ClientBuilder::new(), sb).await;
     let mut tasks = Vec::new();
     for i in 0..10u8 {
         let h = h.clone();
@@ -162,7 +171,7 @@ async fn requests_beyond_the_peers_stream_limit_wait_their_turn() {
 
 #[rusty_tokio::test]
 async fn a_receiver_that_does_not_read_stalls_the_sender() {
-    let (a, b) = duplex(1 << 20);
+    let (a, b) = pair().await;
     let (h, cdrv) = driver::client(a, ClientBuilder::new());
     let (mut acceptor, sdrv) = driver::server(b, ServerBuilder::new());
     rusty_tokio::spawn(cdrv);
@@ -193,7 +202,7 @@ async fn a_receiver_that_does_not_read_stalls_the_sender() {
 
 #[rusty_tokio::test]
 async fn a_client_reset_reaches_the_server_body() {
-    let (a, b) = duplex(1 << 16);
+    let (a, b) = pair().await;
     let (h, cdrv) = driver::client(a, ClientBuilder::new());
     let (mut acceptor, sdrv) = driver::server(b, ServerBuilder::new());
     rusty_tokio::spawn(cdrv);
@@ -213,7 +222,7 @@ async fn a_client_reset_reaches_the_server_body() {
 
 #[rusty_tokio::test]
 async fn a_server_reset_fails_the_response() {
-    let (a, b) = duplex(1 << 16);
+    let (a, b) = pair().await;
     let (h, cdrv) = driver::client(a, ClientBuilder::new());
     let (mut acceptor, sdrv) = driver::server(b, ServerBuilder::new());
     rusty_tokio::spawn(cdrv);
@@ -234,7 +243,7 @@ async fn a_server_reset_fails_the_response() {
 
 #[rusty_tokio::test]
 async fn graceful_shutdown_finishes_in_flight_calls_and_refuses_new_ones() {
-    let (a, b) = duplex(1 << 16);
+    let (a, b) = pair().await;
     let (h, cdrv) = driver::client(a, ClientBuilder::new());
     let (mut acceptor, sdrv) = driver::server(b, ServerBuilder::new());
     let client_task = rusty_tokio::spawn(cdrv);
@@ -270,7 +279,7 @@ async fn graceful_shutdown_finishes_in_flight_calls_and_refuses_new_ones() {
 
 #[rusty_tokio::test]
 async fn dropping_every_client_handle_closes_the_connection_cleanly() {
-    let (a, b) = duplex(1 << 16);
+    let (a, b) = pair().await;
     let (h, cdrv) = driver::client(a, ClientBuilder::new());
     let (mut acceptor, sdrv) = driver::server(b, ServerBuilder::new());
     let client_task = rusty_tokio::spawn(cdrv);
@@ -294,9 +303,16 @@ async fn dropping_every_client_handle_closes_the_connection_cleanly() {
 
 #[rusty_tokio::test]
 async fn a_transport_that_dies_fails_pending_calls() {
-    let (a, b) = duplex(1 << 16);
+    let (a, b) = pair().await;
     let (h, cdrv) = driver::client(a, ClientBuilder::new());
     rusty_tokio::spawn(cdrv);
+    // A peer that says hello, takes the request, then vanishes.
+    b.write_all(&wire(&Frame::Settings(SettingsFrame {
+        ack: false,
+        settings: vec![],
+    })))
+    .await
+    .unwrap();
     let (_send, resp) = h.send_request(request("/svc/Echo"), true).await.unwrap();
     drop(b);
     assert!(timeout(Duration::from_secs(5), resp)
@@ -324,9 +340,11 @@ async fn read_frame<R: AsyncReadExt + Unpin + Send>(r: &mut R) -> Option<Frame> 
 }
 
 /// A raw client that has said hello to a driven server.
-async fn raw_client() -> (rusty_tokio::io::DuplexStream, driver::Acceptor) {
-    let (mut raw, b) = duplex(1 << 20);
-    let (acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+async fn raw_client() -> (TcpStream, driver::Acceptor) {
+    let (raw, b) = pair().await;
+    let mut small = ServerBuilder::new();
+    small.initial_window_size(10_000);
+    let (acceptor, sdrv) = driver::server(b, small);
     rusty_tokio::spawn(sdrv);
     raw.write_all(CONNECTION_PREFACE).await.unwrap();
     raw.write_all(&wire(&Frame::Settings(SettingsFrame {
@@ -386,10 +404,7 @@ async fn data_beyond_the_advertised_window_resets_only_that_stream() {
 
 #[rusty_tokio::test]
 async fn garbage_instead_of_the_preface_is_refused_and_closed() {
-    let (mut raw, b) = {
-        let (a, b) = duplex(1 << 16);
-        (a, b)
-    };
+    let (raw, b) = pair().await;
     let (_acceptor, sdrv) = driver::server(b, ServerBuilder::new());
     let task = rusty_tokio::spawn(sdrv);
     raw.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -404,7 +419,7 @@ async fn garbage_instead_of_the_preface_is_refused_and_closed() {
 
 #[rusty_tokio::test]
 async fn a_protocol_violation_sends_goaway_and_ends_the_driver() {
-    let (mut raw, b) = duplex(1 << 16);
+    let (mut raw, b) = pair().await;
     let (_acceptor, sdrv) = driver::server(b, ServerBuilder::new());
     let task = rusty_tokio::spawn(sdrv);
     raw.write_all(CONNECTION_PREFACE).await.unwrap();
@@ -438,28 +453,107 @@ async fn a_protocol_violation_sends_goaway_and_ends_the_driver() {
 }
 
 #[rusty_tokio::test]
-async fn a_flood_of_pings_does_not_wedge_the_driver() {
-    let (mut raw, _acceptor) = raw_client().await;
+async fn a_flood_of_pings_stalls_the_peer_instead_of_growing_memory() {
+    let (raw, _acceptor) = raw_client().await;
     let ping = wire(&Frame::Ping(rusty_h2::frame::PingFrame {
         ack: false,
         opaque_data: [7; 8],
     }));
-    // The peer never reads our acks; the driver must not buffer them forever.
-    let sent = timeout(Duration::from_secs(10), async {
-        let mut n = 0u32;
-        loop {
-            if raw.write_all(&ping).await.is_err() {
-                return n;
-            }
-            n += 1;
-            if n == 200_000 {
-                return n;
+    let flood = ping.repeat(4_000_000); // 68 MB of pings; more acks than any socket buffers hold
+    let (mut rd, mut wr) = raw.into_split();
+    let mut writer = rusty_tokio::spawn(async move {
+        wr.write_all(&flood).await.unwrap();
+        wr
+    });
+    assert!(
+        timeout(Duration::from_secs(2), &mut writer).await.is_err(),
+        "the driver must stop reading while its acks are unread"
+    );
+    // Reading the acks lets the flood through.
+    let drain = rusty_tokio::spawn(async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        while rd.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+    });
+    timeout(Duration::from_secs(20), writer)
+        .await
+        .unwrap()
+        .unwrap();
+    drain.abort();
+}
+
+#[rusty_tokio::test]
+async fn streams_the_server_never_processed_fail_with_goaway_and_earlier_ones_finish() {
+    let (a, raw) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    rusty_tokio::spawn(cdrv);
+    raw.write_all(&wire(&Frame::Settings(SettingsFrame {
+        ack: false,
+        settings: vec![],
+    })))
+    .await
+    .unwrap();
+    let (_s1, r1) = h.send_request(request("/svc/One"), true).await.unwrap();
+    let (_s3, r3) = h.send_request(request("/svc/Three"), true).await.unwrap();
+    // The server processed stream 1 only.
+    raw.write_all(&wire(&Frame::GoAway(rusty_h2::frame::GoAwayFrame {
+        last_stream_id: 1,
+        error_code: ErrorCode::NoError,
+        debug_data: vec![],
+    })))
+    .await
+    .unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), r3).await.unwrap(),
+        Err(Error::GoAway(ErrorCode::NoError))
+    ));
+    // Stream 1 still gets its answer.
+    let mut enc = Encoder::default();
+    let mut block = Vec::new();
+    enc.encode(&[hf(":status", "200")], &mut block);
+    raw.write_all(&wire(&Frame::Headers(HeadersFrame {
+        stream_id: 1,
+        end_stream: true,
+        end_headers: true,
+        priority: None,
+        header_block_fragment: block,
+    })))
+    .await
+    .unwrap();
+    assert!(timeout(Duration::from_secs(5), r1).await.unwrap().is_ok());
+}
+
+#[rusty_tokio::test]
+async fn a_server_in_graceful_shutdown_refuses_streams_it_did_not_see_coming() {
+    let (mut raw, mut acceptor) = raw_client().await;
+    raw.write_all(&wire(&raw_headers(1, true))).await.unwrap();
+    let (_req, _respond) = acceptor.accept().await.unwrap().unwrap();
+    acceptor.graceful_shutdown();
+    // The client had not yet seen the GOAWAY when it started stream 3.
+    let mut enc = Encoder::default();
+    let mut block = Vec::new();
+    enc.encode(&request("/svc/Late"), &mut block);
+    raw.write_all(&wire(&Frame::Headers(HeadersFrame {
+        stream_id: 3,
+        end_stream: true,
+        end_headers: true,
+        priority: None,
+        header_block_fragment: block,
+    })))
+    .await
+    .unwrap();
+    let reset = timeout(Duration::from_secs(5), async {
+        while let Some(f) = read_frame(&mut raw).await {
+            if let Frame::RstStream(r) = f {
+                return Some(r);
             }
         }
+        None
     })
-    .await;
-    assert!(
-        sent.is_ok(),
-        "the driver either keeps up or closes the connection"
+    .await
+    .unwrap()
+    .expect("RST_STREAM for the late stream");
+    assert_eq!(
+        (reset.stream_id, reset.error_code),
+        (3, ErrorCode::RefusedStream)
     );
 }
