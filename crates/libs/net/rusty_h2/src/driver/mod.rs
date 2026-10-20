@@ -84,7 +84,8 @@ impl RecvStream {
                 if s.remote_closed {
                     return Poll::Ready(None);
                 }
-                s.recv_waker = Some(cx.waker().clone());
+                let old = s.recv_waker.replace(cx.waker().clone());
+                sh.trash.extend(old);
                 return Poll::Pending;
             };
             let out = match item {
@@ -247,7 +248,8 @@ impl Future for ResponseFuture {
             sh.settle(id);
             return Poll::Ready(Err(e));
         }
-        s.headers_waker = Some(cx.waker().clone());
+        let old = s.headers_waker.replace(cx.waker().clone());
+        sh.trash.extend(old);
         Poll::Pending
     }
 }
@@ -355,23 +357,40 @@ impl ClientHandle {
             })]);
             key
         };
+        // However this future ends (answered, closed, or dropped early), the
+        // ping stops being tracked.
+        let _tracked = PingGuard {
+            shared: self.shared.clone(),
+            key,
+        };
         poll_fn(|cx| {
             let mut sh = lock(&self.shared);
-            let acked = sh.pings.get(&key).is_some_and(|p| p.acked);
-            if acked {
-                sh.pings.remove(&key);
+            if sh.pings.get(&key).is_some_and(|p| p.acked) {
                 return Poll::Ready(Ok(()));
             }
             if sh.closed {
-                sh.pings.remove(&key);
                 return Poll::Ready(Err(Error::Closed));
             }
-            if let Some(p) = sh.pings.get_mut(&key) {
-                p.waker = Some(cx.waker().clone());
-            }
+            let old = sh
+                .pings
+                .get_mut(&key)
+                .and_then(|p| p.waker.replace(cx.waker().clone()));
+            sh.trash.extend(old);
             Poll::Pending
         })
         .await
+    }
+}
+
+/// Forgets a ping when its future ends or is dropped.
+struct PingGuard {
+    shared: Handle,
+    key: u64,
+}
+
+impl Drop for PingGuard {
+    fn drop(&mut self) {
+        lock(&self.shared).forget_ping(self.key);
     }
 }
 
@@ -467,7 +486,8 @@ impl Acceptor {
             if sh.closed || sh.closing || sh.conn.goaway_received().is_some() {
                 return Poll::Ready(None);
             }
-            sh.accept_waker = Some(cx.waker().clone());
+            let old = sh.accept_waker.replace(cx.waker().clone());
+            sh.trash.extend(old);
             Poll::Pending
         })
         .await
@@ -575,6 +595,8 @@ mod tests {
         flags: Arc<Flags>,
     }
 
+    // Not `Waker::noop()`: the point is what happens when it is destroyed.
+    #[allow(clippy::manual_noop_waker)]
     impl Wake for Probe {
         fn wake(self: Arc<Self>) {}
     }

@@ -63,10 +63,12 @@ impl Drop for Guard<'_> {
             return;
         };
         let wakes = std::mem::take(&mut inner.wakes);
+        let trash = std::mem::take(&mut inner.trash);
         drop(inner);
         for w in wakes {
             w.wake();
         }
+        drop(trash);
     }
 }
 
@@ -139,6 +141,9 @@ pub(super) struct Shared {
     pub(super) closed: bool,
     /// Wakers to run once the lock is released (see [`Guard`]).
     pub(super) wakes: Vec<Waker>,
+    /// Wakers displaced or forgotten while the lock was held; their
+    /// destructors may lock it, so they are dropped after it is released.
+    pub(super) trash: Vec<Waker>,
 }
 
 pub(super) fn register(list: &mut Vec<Waker>, w: &Waker) {
@@ -168,6 +173,7 @@ impl Shared {
             last_peer_stream: 0,
             closed: false,
             wakes: Vec::new(),
+            trash: Vec::new(),
         };
         if preface {
             s.out.extend_from_slice(crate::CONNECTION_PREFACE);
@@ -253,7 +259,24 @@ impl Shared {
         }
         let s = &self.streams[&id];
         if s.counted_done && s.headers_taken && (s.recv_dropped || s.inbox.is_empty()) {
-            self.streams.remove(&id);
+            self.forget_stream(id);
+        }
+    }
+
+    /// Stops tracking a stream. Unread body is thrown away first, so the
+    /// connection credit it held goes back to the peer exactly once.
+    pub(super) fn forget_stream(&mut self, id: u32) {
+        self.discard(id);
+        if let Some(mut s) = self.streams.remove(&id) {
+            self.trash.extend(s.recv_waker.take());
+            self.trash.extend(s.headers_waker.take());
+        }
+    }
+
+    /// Stops tracking a ping, wherever it got to.
+    pub(super) fn forget_ping(&mut self, key: u64) {
+        if let Some(mut p) = self.pings.remove(&key) {
+            self.trash.extend(p.waker.take());
         }
     }
 
@@ -304,7 +327,7 @@ impl Shared {
         // A request that ended before the application accepted it is never
         // offered: reclaim it and its place in the accept queue.
         if self.server && self.streams.get(&id).is_some_and(|s| !s.headers_taken) {
-            self.streams.remove(&id);
+            self.forget_stream(id);
             self.accept_queue.retain(|queued| *queued != id);
         }
     }
@@ -576,6 +599,8 @@ mod tests {
             free: Arc<AtomicBool>,
             dropped: Arc<AtomicBool>,
         }
+        // Not `Waker::noop()`: the point is what happens when it is destroyed.
+        #[allow(clippy::manual_noop_waker)]
         impl Wake for Probe {
             fn wake(self: Arc<Self>) {}
         }

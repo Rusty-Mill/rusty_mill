@@ -204,6 +204,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
         }
     }
 
+    /// Whether `e` is only the peer having hung up first: it reached the end
+    /// of its input or announced GOAWAY, and the error says it is gone.
+    fn peer_closed_first(&self, e: &std::io::Error) -> bool {
+        peer_gone(e) && (self.eof || lock(&self.shared).conn.goaway_received().is_some())
+    }
+
+    fn peer_closed_first_err(&self, e: &Error) -> bool {
+        matches!(e, Error::Io(io) if self.peer_closed_first(io))
+    }
+
     fn fail(&mut self, e: Error) {
         let mut sh = lock(&self.shared);
         if let Error::Protocol(H2Error::Connection(code, _)) = &e {
@@ -219,7 +229,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Future for ConnectionDr
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
-        lock(&this.shared).driver_waker = Some(cx.waker().clone());
+        {
+            let mut sh = lock(&this.shared);
+            let old = sh.driver_waker.replace(cx.waker().clone());
+            sh.trash.extend(old);
+        }
         if this.finishing.is_none() {
             if let Err(e) = this.read(cx) {
                 this.fail(e);
@@ -230,10 +244,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Future for ConnectionDr
         // (acks, window updates) goes out in the same turn.
         let written = this.flush(cx);
         if let Poll::Ready(Err(e)) = written {
-            if this.finishing.is_none() {
-                this.fail(e);
-            }
-            return Poll::Ready(this.finishing.take().unwrap_or(Ok(())));
+            // An earlier failure stands; otherwise a failed final write or
+            // flush fails the connection, unless the peer had already gone.
+            let benign = this.peer_closed_first_err(&e);
+            let outcome = match this.finishing.take() {
+                Some(Err(first)) => Err(first),
+                Some(Ok(())) if benign => Ok(()),
+                _ => {
+                    lock(&this.shared).close_all();
+                    Err(e)
+                }
+            };
+            return Poll::Ready(outcome);
         }
         if this.finishing.is_some() && matches!(written, Poll::Ready(Ok(()))) {
             // Finish only once the transport has shut down; a failure to do
@@ -245,7 +267,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Future for ConnectionDr
             let outcome = this.finishing.take().unwrap_or(Ok(()));
             return Poll::Ready(match (outcome, closed) {
                 // A peer that already hung up leaves nothing to shut down.
-                (Ok(()), Err(e)) if !peer_gone(&e) => Err(Error::Io(e)),
+                (Ok(()), Err(e)) if !this.peer_closed_first(&e) => Err(Error::Io(e)),
                 (outcome, _) => outcome,
             });
         }

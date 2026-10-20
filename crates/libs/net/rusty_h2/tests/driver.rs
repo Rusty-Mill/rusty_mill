@@ -845,8 +845,20 @@ async fn refusing_unaccepted_requests_on_acceptor_drop_returns_their_credit_once
         "nothing is returned while it waits"
     );
     drop(acceptor);
-    assert_eq!(barrier(&mut raw).await, 5_000);
-    assert_eq!(barrier(&mut raw).await, 0, "and nothing more later");
+    // The connection now winds down, so read it to its end rather than ping it.
+    let mut credit = 0;
+    timeout(Duration::from_secs(5), async {
+        while let Some(f) = read_frame(&mut raw).await {
+            if let Frame::WindowUpdate(w) = f {
+                if w.stream_id == 0 {
+                    credit += w.window_size_increment;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the connection ends");
+    assert_eq!(credit, 5_000, "returned once, in full");
 }
 
 #[rusty_tokio::test]
