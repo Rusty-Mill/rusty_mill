@@ -528,6 +528,11 @@ fn driver<T>(io: T, shared: Handle, server: bool, max_frame: u32) -> ConnectionD
         max_frame,
         stalled: false,
         needs_flush: false,
+        wbuf: Vec::new(),
+        wpos: 0,
+        accepted: 0,
+        flushed: 0,
+        final_mark: None,
     }
 }
 

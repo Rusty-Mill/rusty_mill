@@ -41,6 +41,15 @@ pub struct ConnectionDriver<T> {
     pub(super) stalled: bool,
     /// Bytes were written since the transport was last flushed.
     pub(super) needs_flush: bool,
+    /// Output taken from the shared state and being written.
+    pub(super) wbuf: Vec<u8>,
+    pub(super) wpos: usize,
+    /// Bytes the transport has accepted, and of those, flushed.
+    pub(super) accepted: u64,
+    pub(super) flushed: u64,
+    /// Bytes queued before the connection began to close: everything the
+    /// peer needs of this connection lies before it.
+    pub(super) final_mark: Option<u64>,
 }
 
 impl<T> Drop for ConnectionDriver<T> {
@@ -74,42 +83,53 @@ fn parse(buf: &[u8], max: u32) -> Result<Option<(Frame, usize)>, H2Error> {
 
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
     /// Writes queued output until the transport would block. `Ready(Err)`
-    /// is a transport failure.
+    /// is a transport failure. The transport is only ever polled with the
+    /// shared lock released: registering its waker may destroy a previous
+    /// one, whose owner can lock the shared state.
     fn flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         loop {
-            let mut sh = lock(&self.shared);
-            if sh.out_pos == sh.out.len() {
-                sh.out.clear();
-                sh.out_pos = 0;
-                drop(sh);
-                // Queued bytes are only with the transport; a buffered one
-                // keeps them until it is flushed.
-                if self.needs_flush {
-                    match Pin::new(&mut self.io).poll_flush(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
-                        Poll::Ready(Ok(())) => self.needs_flush = false,
-                    }
+            if self.wpos == self.wbuf.len() {
+                self.wbuf.clear();
+                self.wpos = 0;
+                let mut sh = lock(&self.shared);
+                if sh.out.is_empty() {
+                    sh.inflight = 0;
+                    break;
                 }
-                return Poll::Ready(Ok(()));
+                std::mem::swap(&mut sh.out, &mut self.wbuf);
+                sh.inflight = self.wbuf.len();
             }
-            let start = sh.out_pos;
-            let polled = Pin::new(&mut self.io).poll_write(cx, &sh.out[start..]);
-            match polled {
+            match Pin::new(&mut self.io).poll_write(cx, &self.wbuf[self.wpos..]) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(Error::Io(std::io::ErrorKind::WriteZero.into())))
                 }
                 Poll::Ready(Ok(n)) => {
+                    self.wpos += n;
+                    self.accepted += n as u64;
                     self.needs_flush = true;
-                    sh.out_pos += n;
+                    let mut sh = lock(&self.shared);
+                    sh.inflight = self.wbuf.len() - self.wpos;
                     if sh.backlog() < OUT_HIGH / 2 {
                         sh.wake_waiters();
                     }
                 }
             }
         }
+        // Queued bytes are only with the transport; a buffered one keeps
+        // them until it is flushed.
+        if self.needs_flush {
+            match Pin::new(&mut self.io).poll_flush(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
+                Poll::Ready(Ok(())) => {
+                    self.needs_flush = false;
+                    self.flushed = self.accepted;
+                }
+            }
+        }
+        Poll::Ready(Ok(()))
     }
 
     /// Reads and applies what is available. Returns once the transport
@@ -187,6 +207,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
         }
         let mut sh = lock(&self.shared);
         if self.eof {
+            self.final_mark = Some(sh.queued_total);
             let clean = sh.active == 0;
             sh.close_all();
             self.finishing = Some(if clean {
@@ -198,20 +219,27 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
         }
         let wound_down = sh.closing || sh.conn.goaway_received().is_some();
         if wound_down && sh.active == 0 && sh.accept_queue.is_empty() {
+            self.final_mark = Some(sh.queued_total);
             sh.send_goaway(ErrorCode::NoError);
             sh.close_all();
             self.finishing = Some(Ok(()));
         }
     }
 
-    /// Whether `e` is only the peer having hung up first: it reached the end
-    /// of its input or announced GOAWAY, and the error says it is gone.
+    /// Whether `e` from a shutdown is only the peer having hung up first: it
+    /// reached the end of its input or announced GOAWAY, and the error says
+    /// it is gone. Everything had been flushed by then.
     fn peer_closed_first(&self, e: &std::io::Error) -> bool {
         peer_gone(e) && (self.eof || lock(&self.shared).conn.goaway_received().is_some())
     }
 
-    fn peer_closed_first_err(&self, e: &Error) -> bool {
-        matches!(e, Error::Io(io) if self.peer_closed_first(io))
+    /// Whether a failed write or flush lost nothing the peer needed: it is the
+    /// peer having hung up first, and everything queued before the closing
+    /// GOAWAY was already flushed. A GOAWAY does not acknowledge delivery
+    /// (RFC 9113 §6.8), so an undelivered response is a failure.
+    fn only_the_closing_goaway_was_lost(&self, e: &Error) -> bool {
+        let Error::Io(io) = e else { return false };
+        self.peer_closed_first(io) && self.final_mark.is_some_and(|mark| self.flushed >= mark)
     }
 
     fn fail(&mut self, e: Error) {
@@ -246,7 +274,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Future for ConnectionDr
         if let Poll::Ready(Err(e)) = written {
             // An earlier failure stands; otherwise a failed final write or
             // flush fails the connection, unless the peer had already gone.
-            let benign = this.peer_closed_first_err(&e);
+            let benign = this.only_the_closing_goaway_was_lost(&e);
             let outcome = match this.finishing.take() {
                 Some(Err(first)) => Err(first),
                 Some(Ok(())) if benign => Ok(()),

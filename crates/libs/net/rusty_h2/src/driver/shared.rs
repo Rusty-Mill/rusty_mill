@@ -120,7 +120,11 @@ pub(super) struct Shared {
     pub(super) conn: Connection,
     pub(super) server: bool,
     pub(super) out: Vec<u8>,
-    pub(super) out_pos: usize,
+    /// Bytes the driver has taken out of `out` and not yet written.
+    pub(super) inflight: usize,
+    /// Every byte ever queued: lets the driver tell whether what it failed
+    /// to deliver was only the closing GOAWAY.
+    pub(super) queued_total: u64,
     pub(super) driver_waker: Option<Waker>,
     pub(super) streams: HashMap<u32, Stream>,
     /// Streams not yet closed in both directions.
@@ -158,7 +162,8 @@ impl Shared {
             conn,
             server,
             out: Vec::new(),
-            out_pos: 0,
+            inflight: 0,
+            queued_total: 0,
             driver_waker: None,
             streams: HashMap::new(),
             active: 0,
@@ -177,20 +182,24 @@ impl Shared {
         };
         if preface {
             s.out.extend_from_slice(crate::CONNECTION_PREFACE);
+            s.queued_total += crate::CONNECTION_PREFACE.len() as u64;
         }
         let settings = s.conn.settings_frame();
         s.queue([settings]);
         s
     }
 
+    /// Output queued or in the driver's hands and not yet written.
     pub(super) fn backlog(&self) -> usize {
-        self.out.len() - self.out_pos
+        self.out.len() + self.inflight
     }
 
     pub(super) fn queue(&mut self, frames: impl IntoIterator<Item = Frame>) {
+        let before = self.out.len();
         for f in frames {
             f.encode(&mut self.out);
         }
+        self.queued_total += (self.out.len() - before) as u64;
         self.wake_driver();
     }
 
