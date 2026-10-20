@@ -380,21 +380,21 @@ pub fn main() {
         // every frame while recording is active -- previously this only
         // ever happened once, on the RECORD click itself, so the buffer
         // never grew beyond whatever had already queued up by that instant.
-        if state == AppState::Recording {
-            if let Some(cap) = audio_capture.as_mut() {
-                match cap.read_samples() {
-                    Ok(new_samples) if !new_samples.is_empty() => {
-                        recorded_samples.extend_from_slice(&new_samples);
-                        transcription_text = format!(
-                            "RECORDING AUDIO: {} SAMPLES (~{:.1}s)",
-                            recorded_samples.len(),
-                            recorded_samples.len() as f32 / spec.sample_rate as f32
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("rusty_voice: read_samples failed: {e:?}");
-                    }
+        if state == AppState::Recording
+            && let Some(cap) = audio_capture.as_mut()
+        {
+            match cap.read_samples() {
+                Ok(new_samples) if !new_samples.is_empty() => {
+                    recorded_samples.extend_from_slice(&new_samples);
+                    transcription_text = format!(
+                        "RECORDING AUDIO: {} SAMPLES (~{:.1}s)",
+                        recorded_samples.len(),
+                        recorded_samples.len() as f32 / spec.sample_rate as f32
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("rusty_voice: read_samples failed: {e:?}");
                 }
             }
         }
