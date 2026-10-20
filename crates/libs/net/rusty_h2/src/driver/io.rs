@@ -156,16 +156,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
             self.preface_seen = n;
             lock(&self.shared).conn.mark_preface_seen();
         }
+        // One lock for everything this read delivered: the application sees
+        // the frames of a read as a unit, never half applied.
+        let mut sh = lock(&self.shared);
         loop {
             match parse(&self.rbuf[self.rpos..], self.max_frame) {
                 Ok(Some((frame, used))) => {
                     self.rpos += used;
-                    lock(&self.shared).on_frame(frame)?;
+                    sh.on_frame(frame)?;
                 }
                 Ok(None) => break,
                 Err(e) => return Err(Error::Protocol(e)),
             }
         }
+        drop(sh);
         if self.rpos > 0 && self.rpos == self.rbuf.len() {
             self.rbuf.clear();
             self.rpos = 0;
