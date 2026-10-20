@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -233,6 +234,34 @@ fn refused(why: impl Into<String>) -> BoardError {
     BoardError::Refused(why.into())
 }
 
+/// The settings files' names inside a snapshot.
+const IDENTITIES: &str = "identities.json";
+const PROJECTS: &str = "projects.json";
+const ROLES: &str = "roles.json";
+const GITHUB: &str = "github.json";
+
+/// Load a snapshot as a restore would: roles and projects (the defaults where absent, as at
+/// start), then the agents against them, then the GitHub sync.
+fn check_set(dir: &Path) -> Result<(), String> {
+    let roles_file = dir.join(ROLES);
+    let roles = if roles_file.exists() {
+        load_roles(&roles_file)?
+    } else {
+        Roles::default()
+    };
+    let projects_file = dir.join(PROJECTS);
+    let projects = if projects_file.exists() {
+        Projects::load(&projects_file)?
+    } else {
+        Projects::default()
+    };
+    let identities = dir.join(IDENTITIES);
+    if identities.exists() {
+        Credentials::load(&identities, &roles, &projects)?;
+    }
+    load_github(&dir.join(GITHUB)).map(drop)
+}
+
 /// The settings service.
 pub struct Settings {
     board: Arc<Shared>,
@@ -243,6 +272,8 @@ pub struct Settings {
     github: Mutex<Option<GithubFile>>,
     /// One change at a time.
     changing: Mutex<()>,
+    /// Changes waiting for `changing`, so a test can tell one has reached the lock.
+    waiting: AtomicUsize,
 }
 
 impl Settings {
@@ -262,13 +293,83 @@ impl Settings {
             syncer,
             github: Mutex::new(github),
             changing: Mutex::new(()),
+            waiting: AtomicUsize::new(0),
         }
+    }
+
+    /// Changes now waiting for another to finish.
+    #[doc(hidden)]
+    pub fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
     }
 
     /// Settings with nothing configured: every change is refused with the way to enable it.
     pub fn read_only(board: Arc<Shared>) -> Self {
         let syncer = Syncer::new(Arc::clone(&board));
         Self::new(board, Files::default(), None, syncer, None)
+    }
+
+    /// Copy the settings files into the existing directory `dir` as one consistent set, each under
+    /// a fixed name (`identities.json`, `projects.json`, `roles.json`, `github.json`) whatever it
+    /// is called here, so two files that share a name elsewhere cannot overwrite one another. Then
+    /// check that the copy loads together. It holds the lock every change holds, so an agent
+    /// cannot be copied with a role that the copy of the roles then lacks.
+    ///
+    /// # Errors
+    /// If a file cannot be read or written, or the copied set does not load.
+    pub fn snapshot(&self, dir: &Path) -> Result<(), String> {
+        self.snapshot_with(dir, &mut || Ok(()))
+    }
+
+    /// [`Settings::snapshot`], running `store` first, with the lock held: the store's own copy.
+    /// Holding the settings lock across both is what keeps the two coherent: a project cannot be
+    /// removed (nor an agent's role changed) between the cards being copied and the registry
+    /// they belong to.
+    ///
+    /// Lock order: this lock first, then whatever `store` takes (the store's commit lock). Nothing
+    /// takes the commit lock and then waits for this one.
+    ///
+    /// # Errors
+    /// If `store` fails, or see [`Settings::snapshot`].
+    pub fn snapshot_with(
+        &self,
+        dir: &Path,
+        store: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.snapshot_between(dir, store, &mut || {})
+    }
+
+    /// [`Settings::snapshot_with`], calling `between` after each settings file is copied, still
+    /// holding the lock. For tests that need a change to arrive mid-copy.
+    ///
+    /// # Errors
+    /// See [`Settings::snapshot_with`].
+    #[doc(hidden)]
+    pub fn snapshot_between(
+        &self,
+        dir: &Path,
+        store: &mut dyn FnMut() -> Result<(), String>,
+        between: &mut dyn FnMut(),
+    ) -> Result<(), String> {
+        let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
+        store()?;
+        let live = [
+            (&self.files.identities, IDENTITIES),
+            (&self.files.projects, PROJECTS),
+            (&self.files.roles, ROLES),
+            (&self.files.github, GITHUB),
+        ];
+        for (from, name) in live {
+            let Some(from) = from.as_deref().filter(|p| p.exists()) else {
+                continue;
+            };
+            let bytes = std::fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+            let to = dir.join(name);
+            rusty_atomic_file::write_private(&to, &bytes)
+                .map_err(|e| format!("{}: {e}", to.display()))?;
+            between();
+        }
+        check_set(dir)
     }
 
     /// Run a settings operation, or `None` if `name` is not one.
@@ -307,7 +408,9 @@ impl Settings {
         if !actor.caps.contains(&Capability::Admin) {
             return Err(BoardError::Forbidden(Capability::Admin).into());
         }
+        self.waiting.fetch_add(1, Ordering::SeqCst);
         let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
         run(self, &actor, args).map_err(CallError::Board)
     }
 

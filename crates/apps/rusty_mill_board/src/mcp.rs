@@ -7,6 +7,7 @@ use rusty_mcp_server::proto::{CallToolResult, ContentBlock, ErrorCode, ErrorData
 use rusty_mcp_server::{BuildError, Server};
 
 use crate::api::{CallError, Identity, Shared, ops};
+use crate::drain::InFlight;
 
 fn wire(v: &serde_json::Value) -> Result<WireValue, ErrorData> {
     WireValue::from_json_str(&v.to_string())
@@ -18,6 +19,17 @@ fn wire(v: &serde_json::Value) -> Result<WireValue, ErrorData> {
 /// # Errors
 /// If the tool set is invalid (a duplicate name).
 pub fn server(board: Arc<Shared>) -> Result<Arc<Server>, BuildError> {
+    server_with(board, Arc::default())
+}
+
+/// [`server`], counting every tool call in `flight` for as long as it runs. The HTTP layer runs a
+/// call on a worker of its own and may answer with a stream while it works, so the request
+/// counting alone does not see a call whose client has gone; this does. Once `flight` is closed a
+/// call is refused.
+///
+/// # Errors
+/// If the tool set is invalid (a duplicate name).
+pub fn server_with(board: Arc<Shared>, flight: Arc<InFlight>) -> Result<Arc<Server>, BuildError> {
     let mut builder = Server::builder(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).instructions(
         "Kanban board shared by humans and models. Start with board_whoami. If it says you are \
          authenticated, your actor and role are fixed: omit them. Otherwise pass `actor` and `role` on \
@@ -33,8 +45,15 @@ pub fn server(board: Arc<Shared>) -> Result<Arc<Server>, BuildError> {
             .unwrap_or_else(|_| WireValue::object());
         let mut tool = Tool::new(op.name, input);
         tool.description = Some(op.description.to_owned());
-        let board = Arc::clone(&board);
+        let (board, flight) = (Arc::clone(&board), Arc::clone(&flight));
         builder = builder.tool(tool, move |ctx, params| {
+            let Some(_running) = flight.enter() else {
+                return Ok(CallToolResult {
+                    content: vec![ContentBlock::text("the board is shutting down")],
+                    is_error: Some(true),
+                    ..CallToolResult::default()
+                });
+            };
             let identity: Option<Identity> = ctx
                 .caller()
                 .principal

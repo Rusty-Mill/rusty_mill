@@ -33,7 +33,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 /// Largest request body accepted.
@@ -278,6 +278,8 @@ pub struct Server<H = ()> {
     listener: TcpListener,
     app: Arc<App>,
     stop: Arc<AtomicBool>,
+    /// Requests being served now, from the head read to the last byte written.
+    busy: Arc<AtomicUsize>,
     limits: Limits,
     handler: PhantomData<fn() -> H>,
 }
@@ -286,6 +288,7 @@ pub struct Server<H = ()> {
 #[derive(Clone)]
 pub struct ShutdownHandle {
     stop: Arc<AtomicBool>,
+    busy: Arc<AtomicUsize>,
     addr: SocketAddr,
 }
 
@@ -294,6 +297,42 @@ impl ShutdownHandle {
         self.stop.store(true, Ordering::SeqCst);
         // Wake the blocking `accept` so the loop sees the flag.
         let _ = TcpStream::connect(self.addr);
+    }
+
+    /// Wait up to `within` for every request being served to be fully answered: handler
+    /// returned, deferred job run, last byte of the body or stream written. `true` if none is
+    /// left. Connections idle between requests do not count. Call it after [`Server::run`]
+    /// has returned (it stops accepting; the connection threads outlive it).
+    ///
+    /// Once [`ShutdownHandle::shutdown`] has been called no further request is served: one
+    /// that arrives on a connection that was already open is dropped unanswered and the
+    /// connection closed, and an answer still being written says `Connection: close`. So the
+    /// count only falls from then on, and a `true` stays true.
+    pub fn wait_idle(&self, within: Duration) -> bool {
+        let end = Instant::now() + within;
+        while self.busy.load(Ordering::SeqCst) > 0 {
+            if Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+}
+
+/// Counts one request in [`Server::busy`] for as long as it is held.
+struct Busy<'a>(&'a AtomicUsize);
+
+impl<'a> Busy<'a> {
+    fn enter(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -323,6 +362,7 @@ impl<H> Server<H> {
                 web_dir: None,
             }),
             stop: Arc::new(AtomicBool::new(false)),
+            busy: Arc::new(AtomicUsize::new(0)),
             limits: Limits::default(),
             handler: PhantomData,
         })
@@ -353,6 +393,7 @@ impl<H> Server<H> {
     pub fn shutdown_handle(&self) -> io::Result<ShutdownHandle> {
         Ok(ShutdownHandle {
             stop: Arc::clone(&self.stop),
+            busy: Arc::clone(&self.busy),
             addr: self.local_addr()?,
         })
     }
@@ -371,8 +412,9 @@ impl<H> Server<H> {
             }
             active.fetch_add(1, Ordering::SeqCst);
             let (app, active, limits) = (Arc::clone(&self.app), Arc::clone(&active), self.limits);
+            let (busy, stop) = (Arc::clone(&self.busy), Arc::clone(&self.stop));
             std::thread::spawn(move || {
-                let _ = serve_connection(stream, &app, limits);
+                let _ = serve_connection(stream, &app, limits, &busy, &stop);
                 active.fetch_sub(1, Ordering::SeqCst);
             });
         }
@@ -392,7 +434,13 @@ fn refuse(stream: TcpStream) {
     );
 }
 
-fn serve_connection(stream: TcpStream, app: &App, limits: Limits) -> TransportResult<()> {
+fn serve_connection(
+    stream: TcpStream,
+    app: &App,
+    limits: Limits,
+    busy: &AtomicUsize,
+    stop: &AtomicBool,
+) -> TransportResult<()> {
     stream.set_read_timeout(Some(limits.idle_timeout))?;
     stream.set_write_timeout(Some(limits.idle_timeout))?;
     let mut transport = SyncTransport::new(stream);
@@ -412,6 +460,14 @@ fn serve_connection(stream: TcpStream, app: &App, limits: Limits) -> TransportRe
             }
             Err(e) => return Err(e),
         };
+        // Busy until this iteration ends, which is after the response is written. Counted
+        // *before* the stop flag is read: a request that finds the flag clear was therefore
+        // counted before the stop began, so the wait for idle (which starts after it) sees it;
+        // one that finds it set is dropped unserved, and the client sees the connection close.
+        let _busy = Busy::enter(busy);
+        if stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let body = match request_framing(&head.headers) {
             Ok(Framing::None) => Vec::new(),
             Ok(Framing::ContentLength(len)) if len <= limits.max_body_bytes => {
@@ -464,30 +520,46 @@ fn serve_connection(stream: TcpStream, app: &App, limits: Limits) -> TransportRe
         };
         let response = app.handler.call(&request);
         let extra = &response.headers;
-        match response.body {
+        // Whether the connection stays open is decided as the answer is written, not when the
+        // request came in: a stop may have begun since (a deferred job can take a long time).
+        let keep_alive = match response.body {
             Body::Json(body) => {
+                let keep_alive = stay_open(keep_alive, stop);
                 write_response(&mut transport, response.status, &body, keep_alive, extra)?;
+                keep_alive
             }
             Body::Deferred(job) => {
                 let (status, body) = job();
+                let keep_alive = stay_open(keep_alive, stop);
                 write_response(&mut transport, status, &body, keep_alive, extra)?;
+                keep_alive
             }
             Body::Stream {
                 content_type,
                 chunks,
-            } => write_stream(
-                &mut transport,
-                response.status,
-                content_type,
-                chunks,
-                keep_alive,
-                extra,
-            )?,
-        }
+            } => {
+                let keep_alive = stay_open(keep_alive, stop);
+                write_stream(
+                    &mut transport,
+                    response.status,
+                    content_type,
+                    chunks,
+                    keep_alive,
+                    extra,
+                )?;
+                keep_alive
+            }
+        };
         if !keep_alive {
             return Ok(());
         }
     }
+}
+
+/// A connection stays open for another request unless the client asked otherwise or a stop has
+/// begun: a connection does not outlive a stop by taking more requests.
+fn stay_open(wanted: bool, stop: &AtomicBool) -> bool {
+    wanted && !stop.load(Ordering::SeqCst)
 }
 
 /// Send a streamed body as chunked transfer encoding, one chunk per
@@ -826,6 +898,138 @@ mod tests {
         let slow = slow.join().unwrap();
         assert_eq!(status(&slow), 202, "the job's own status is what is sent");
         assert!(slow.ends_with(r#"{"slow":true}"#), "{slow}");
+        stop.shutdown();
+    }
+
+    /// `/api/a` waits, in its deferred job, until the test opens the gate; anything else is answered at once.
+    struct Gated(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+    impl SharedHandler for Gated {
+        fn handle(&self, request: &Request<'_>) -> Response {
+            if request.target != "/api/a" {
+                return Response::json(StatusCode::OK, br#"{"quick":true}"#.to_vec());
+            }
+            let gate = Arc::clone(&self.0);
+            Response::deferred(move || {
+                let (open, opened) = &*gate;
+                let _held = opened
+                    .wait_while(open.lock().unwrap(), |open| !*open)
+                    .unwrap();
+                (StatusCode::OK, br#"{"done":true}"#.to_vec())
+            })
+        }
+    }
+
+    fn open(gate: &(Mutex<bool>, std::sync::Condvar)) {
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
+    #[test]
+    fn wait_idle_waits_for_a_response_being_served_and_gives_up_at_its_deadline() {
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let server =
+            Server::bind_shared("127.0.0.1:0".parse().unwrap(), Gated(Arc::clone(&gate))).unwrap();
+        let addr = server.local_addr().unwrap();
+        let stop = server.shutdown_handle().unwrap();
+        let accepting = std::thread::spawn(move || server.run().unwrap());
+        let client = std::thread::spawn(move || {
+            exchange(
+                addr,
+                "GET /api/a HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+            )
+        });
+        std::thread::sleep(Duration::from_millis(150));
+
+        stop.shutdown();
+        accepting.join().unwrap();
+        let started = Instant::now();
+        assert!(
+            !stop.wait_idle(Duration::from_millis(100)),
+            "a request still in its job is not idle"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "it gave up at the deadline"
+        );
+
+        let release = Arc::clone(&gate);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            open(&release);
+        });
+        assert!(
+            stop.wait_idle(Duration::from_secs(10)),
+            "idle once it is answered"
+        );
+        let reply = client.join().unwrap();
+        assert_eq!(status(&reply), 200, "{reply}");
+        assert!(
+            reply.ends_with(r#"{"done":true}"#),
+            "answered in full: {reply}"
+        );
+    }
+
+    #[test]
+    fn after_a_stop_an_open_connection_is_not_served_again_and_an_answer_in_progress_closes_it() {
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let server =
+            Server::bind_shared("127.0.0.1:0".parse().unwrap(), Gated(Arc::clone(&gate))).unwrap();
+        let addr = server.local_addr().unwrap();
+        let stop = server.shutdown_handle().unwrap();
+        let accepting = std::thread::spawn(move || server.run().unwrap());
+
+        // Connection B is open and has been served once, so it is established before the stop.
+        let mut b = TcpStream::connect(addr).unwrap();
+        b.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        b.write_all(b"GET /api/b0 HTTP/1.1\r\nHost: t\r\n\r\n")
+            .unwrap();
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while !seen.ends_with(br#"{"quick":true}"#) {
+            assert_eq!(b.read(&mut byte).unwrap(), 1, "closed early");
+            seen.push(byte[0]);
+        }
+
+        // Connection A: a request held in its job when the stop begins.
+        let mut a = TcpStream::connect(addr).unwrap();
+        a.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        a.write_all(b"GET /api/a HTTP/1.1\r\nHost: t\r\n\r\n")
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        stop.shutdown();
+        accepting.join().unwrap();
+
+        // B asks for more work after the stop. It would be answered at once if it were served;
+        // the connection is closed instead, with nothing written.
+        b.write_all(b"GET /api/b1 HTTP/1.1\r\nHost: t\r\n\r\n")
+            .unwrap();
+        let mut got = String::new();
+        let _ = b.read_to_string(&mut got);
+        assert!(got.is_empty(), "not served after the stop: {got}");
+
+        open(&gate);
+        let mut reply = String::new();
+        let _ = a.read_to_string(&mut reply);
+        assert_eq!(status(&reply), 200, "{reply}");
+        assert!(
+            reply.to_ascii_lowercase().contains("connection: close"),
+            "an answer written during a stop closes its connection: {reply}"
+        );
+        assert!(stop.wait_idle(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn wait_idle_does_not_wait_for_a_connection_idle_between_requests() {
+        let (addr, stop) = start(None);
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(b"GET /api/fast HTTP/1.1\r\nHost: t\r\n\r\n")
+            .unwrap();
+        let mut seen = [0u8; 64];
+        let _ = stream.read(&mut seen).unwrap();
+        // The connection stays open (keep-alive) with nothing in flight.
+        assert!(stop.wait_idle(Duration::from_secs(2)));
         stop.shutdown();
     }
 
