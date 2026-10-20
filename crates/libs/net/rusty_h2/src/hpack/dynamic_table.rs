@@ -12,7 +12,7 @@ fn entry_size(name: &[u8], value: &[u8]) -> usize {
 
 /// A single encoder/decoder's dynamic table. Front of the deque is the most
 /// recently inserted entry (combined index `STATIC_TABLE.len() + 1`).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DynamicTable {
     entries: VecDeque<(Vec<u8>, Vec<u8>)>,
     size: usize,
