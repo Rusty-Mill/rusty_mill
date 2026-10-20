@@ -11,3 +11,4 @@ changelog: "46 crates now declare the `rust-version` their dependencies already 
 - **Docs:** `rusty-acp`'s README, `CLAUDE.md`, `ARCHITECTURE.md` and `CONTRIBUTING.md` said 1.86 and that optional dependencies do not raise the floor; they now say 1.88 and why. `rusty_rdp`'s README says 1.75.
 - **Owner decision:** `rusty-acp` moves from its previously documented 1.86 floor to 1.88, as explicitly chosen by the owner. This decision applies to `rusty-acp`; it does not establish a broader workspace MSRV policy.
 - **Not changed:** crates that declare nothing; the dependencies' own floors (lowering `rusty_rand` or `rusty_win32` from 1.88 would lower the floor of more than 20 crates and is a separate decision).
+- **Lockfile:** `Cargo.lock` carries the same six-line patch bump as #811 (`webpki-roots` and `webpki-root-certs` 1.0.10, `rustls-webpki` 0.103.16), so `cargo-deny` passes here while RUSTSEC-2026-0381/0382/0383 fail on `main`. It becomes a no-op once #811 merges.
