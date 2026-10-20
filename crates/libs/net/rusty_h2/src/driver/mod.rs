@@ -553,3 +553,174 @@ where
         driver(io, shared, true, max_frame),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Wake, Waker};
+
+    /// What a waker saw when it was destroyed.
+    #[derive(Default)]
+    struct Flags {
+        dropped: AtomicBool,
+        lock_was_free: AtomicBool,
+    }
+
+    /// A waker whose destruction checks that the shared mutex is free: a real
+    /// waker can own a handle whose `Drop` locks it.
+    struct Probe {
+        shared: Handle,
+        flags: Arc<Flags>,
+    }
+
+    impl Wake for Probe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.flags
+                .lock_was_free
+                .store(self.shared.try_lock().is_ok(), Ordering::SeqCst);
+            self.flags.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn handle() -> Handle {
+        let conn = Connection::new(ServerSettings::default(), PeerType::Server);
+        Arc::new(Mutex::new(Shared::new(conn, true, false)))
+    }
+
+    fn probe(shared: &Handle) -> (Waker, Arc<Flags>) {
+        let flags = Arc::new(Flags::default());
+        let waker = Waker::from(Arc::new(Probe {
+            shared: shared.clone(),
+            flags: flags.clone(),
+        }));
+        (waker, flags)
+    }
+
+    fn assert_dropped_unlocked(flags: &Flags, what: &str) {
+        assert!(flags.dropped.load(Ordering::SeqCst), "{what}: not dropped");
+        assert!(
+            flags.lock_was_free.load(Ordering::SeqCst),
+            "{what}: dropped while the shared mutex was held"
+        );
+    }
+
+    /// Polls `fut` once with `waker`.
+    fn poll_once<F: Future + Unpin>(fut: &mut F, waker: &Waker) -> Poll<F::Output> {
+        Pin::new(fut).poll(&mut Context::from_waker(waker))
+    }
+
+    #[test]
+    fn a_replaced_reader_waker_is_dropped_outside_the_lock() {
+        let shared = handle();
+        lock(&shared).add_stream(1, false);
+        let mut body = RecvStream {
+            shared: shared.clone(),
+            id: 1,
+        };
+        let mut next = Box::pin(body.next());
+        let (waker, flags) = probe(&shared);
+        assert!(poll_once(&mut next, &waker).is_pending());
+        drop(waker); // the stream now holds the only reference
+        assert!(poll_once(&mut next, Waker::noop()).is_pending());
+        assert_dropped_unlocked(&flags, "reader waker");
+    }
+
+    #[test]
+    fn a_replaced_response_waker_is_dropped_outside_the_lock() {
+        let shared = handle();
+        lock(&shared).add_stream(1, true);
+        let mut resp = ResponseFuture {
+            shared: shared.clone(),
+            id: 1,
+            taken: false,
+        };
+        let (waker, flags) = probe(&shared);
+        assert!(poll_once(&mut resp, &waker).is_pending());
+        drop(waker);
+        assert!(poll_once(&mut resp, Waker::noop()).is_pending());
+        assert_dropped_unlocked(&flags, "response waker");
+    }
+
+    #[test]
+    fn a_replaced_accept_waker_is_dropped_outside_the_lock() {
+        let shared = handle();
+        let mut acceptor = Acceptor {
+            shared: shared.clone(),
+        };
+        let mut accept = Box::pin(acceptor.accept());
+        let (waker, flags) = probe(&shared);
+        assert!(poll_once(&mut accept, &waker).is_pending());
+        drop(waker);
+        assert!(poll_once(&mut accept, Waker::noop()).is_pending());
+        assert_dropped_unlocked(&flags, "accept waker");
+    }
+
+    fn client_handle(shared: &Handle) -> ClientHandle {
+        ClientHandle {
+            shared: shared.clone(),
+            _token: Arc::new(Token(shared.clone())),
+        }
+    }
+
+    #[test]
+    fn a_replaced_ping_waker_is_dropped_outside_the_lock() {
+        let shared = handle();
+        let client = client_handle(&shared);
+        let mut ping = Box::pin(client.ping());
+        let (waker, flags) = probe(&shared);
+        assert!(poll_once(&mut ping, &waker).is_pending());
+        drop(waker);
+        assert!(poll_once(&mut ping, Waker::noop()).is_pending());
+        assert_dropped_unlocked(&flags, "ping waker");
+    }
+
+    #[test]
+    fn a_ping_cancelled_before_its_ack_is_forgotten() {
+        let shared = handle();
+        let client = client_handle(&shared);
+        {
+            let mut ping = Box::pin(client.ping());
+            assert!(poll_once(&mut ping, Waker::noop()).is_pending());
+            assert_eq!(lock(&shared).pings.len(), 1);
+        } // cancelled
+        assert!(lock(&shared).pings.is_empty());
+    }
+
+    #[test]
+    fn a_ping_acked_but_never_repolled_is_forgotten() {
+        let shared = handle();
+        let client = client_handle(&shared);
+        {
+            let mut ping = Box::pin(client.ping());
+            assert!(poll_once(&mut ping, Waker::noop()).is_pending());
+            let key = *lock(&shared).pings.keys().next().unwrap();
+            lock(&shared)
+                .on_frame(Frame::Ping(PingFrame {
+                    ack: true,
+                    opaque_data: key.to_be_bytes(),
+                }))
+                .unwrap();
+            assert!(lock(&shared).pings[&key].acked);
+        } // dropped after the ACK, before it was polled again
+        assert!(lock(&shared).pings.is_empty());
+    }
+
+    #[test]
+    fn a_ping_cancelled_with_a_stored_waker_drops_it_outside_the_lock() {
+        let shared = handle();
+        let client = client_handle(&shared);
+        let (waker, flags) = probe(&shared);
+        {
+            let mut ping = Box::pin(client.ping());
+            assert!(poll_once(&mut ping, &waker).is_pending());
+            drop(waker);
+        }
+        assert_dropped_unlocked(&flags, "cancelled ping's waker");
+    }
+}

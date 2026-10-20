@@ -733,19 +733,53 @@ async fn an_aborted_driver_fails_every_pending_operation() {
     assert!(timeout(five, pending_accept).await.unwrap().unwrap());
 }
 
-#[rusty_tokio::test]
-async fn a_stream_reset_before_it_is_accepted_is_reclaimed() {
-    let (raw, mut acceptor) = raw_client().await;
-    // One write, so the driver applies all three frames before the
-    // application can look: otherwise the first request may be accepted
-    // before its reset arrives.
-    let mut burst = wire(&raw_headers(1, false));
-    burst.extend(wire(&Frame::RstStream(rusty_h2::frame::RstStreamFrame {
-        stream_id: 1,
+/// Waits until the server has applied every frame sent so far: a PING is
+/// answered in order, so its ACK means the earlier frames are done. Returns the
+/// connection-level credit (WINDOW_UPDATE on stream 0) seen on the way.
+async fn barrier(raw: &mut TcpStream) -> u32 {
+    let marker = [9u8; 8];
+    raw.write_all(&wire(&Frame::Ping(rusty_h2::frame::PingFrame {
+        ack: false,
+        opaque_data: marker,
+    })))
+    .await
+    .unwrap();
+    let mut credit = 0;
+    read_until(raw, |f| match f {
+        Frame::WindowUpdate(w) if w.stream_id == 0 => {
+            credit += w.window_size_increment;
+            None
+        }
+        Frame::Ping(p) if p.ack && p.opaque_data == marker => Some(()),
+        _ => None,
+    })
+    .await
+    .expect("the PING barrier is acknowledged");
+    credit
+}
+
+fn raw_rst(id: u32) -> Frame {
+    Frame::RstStream(rusty_h2::frame::RstStreamFrame {
+        stream_id: id,
         error_code: ErrorCode::Cancel,
-    })));
+    })
+}
+
+async fn reset_before_accept(split: bool) {
+    let (mut raw, mut acceptor) = raw_client().await;
+    let mut burst = wire(&raw_headers(1, false));
+    burst.extend(wire(&raw_rst(1)));
     burst.extend(wire(&raw_headers(3, true)));
-    raw.write_all(&burst).await.unwrap();
+    if split {
+        // However the bytes are cut up, the result is the same.
+        for byte in &burst {
+            raw.write_all(&[*byte]).await.unwrap();
+        }
+    } else {
+        raw.write_all(&burst).await.unwrap();
+    }
+    // Accept only once the reset has been applied.
+    barrier(&mut raw).await;
     let (req, _respond) = timeout(Duration::from_secs(5), acceptor.accept())
         .await
         .unwrap()
@@ -764,6 +798,55 @@ async fn a_stream_reset_before_it_is_accepted_is_reclaimed() {
             .is_err(),
         "the reset stream must not be offered later"
     );
+}
+
+#[rusty_tokio::test]
+async fn a_stream_reset_before_it_is_accepted_is_reclaimed() {
+    reset_before_accept(false).await;
+}
+
+#[rusty_tokio::test]
+async fn a_reset_stream_is_reclaimed_however_the_bytes_are_split() {
+    reset_before_accept(true).await;
+}
+
+#[rusty_tokio::test]
+async fn reclaiming_an_incomplete_unaccepted_request_returns_its_connection_credit_once() {
+    let (mut raw, _acceptor) = raw_client().await;
+    let mut burst = wire(&raw_headers(1, false));
+    burst.extend(wire(&Frame::Data(DataFrame::new(1, vec![0; 5_000], false))));
+    burst.extend(wire(&raw_rst(1)));
+    raw.write_all(&burst).await.unwrap();
+    assert_eq!(barrier(&mut raw).await, 5_000);
+    assert_eq!(barrier(&mut raw).await, 0, "and nothing more later");
+}
+
+#[rusty_tokio::test]
+async fn reclaiming_a_complete_unaccepted_request_returns_its_connection_credit_once() {
+    let (mut raw, _acceptor) = raw_client().await;
+    // The whole request arrives, then is reset before anyone accepts it.
+    let mut burst = wire(&raw_headers(1, false));
+    burst.extend(wire(&Frame::Data(DataFrame::new(1, vec![0; 5_000], true))));
+    burst.extend(wire(&raw_rst(1)));
+    raw.write_all(&burst).await.unwrap();
+    assert_eq!(barrier(&mut raw).await, 5_000);
+    assert_eq!(barrier(&mut raw).await, 0, "and nothing more later");
+}
+
+#[rusty_tokio::test]
+async fn refusing_unaccepted_requests_on_acceptor_drop_returns_their_credit_once() {
+    let (mut raw, acceptor) = raw_client().await;
+    let mut burst = wire(&raw_headers(1, false));
+    burst.extend(wire(&Frame::Data(DataFrame::new(1, vec![0; 5_000], true))));
+    raw.write_all(&burst).await.unwrap();
+    assert_eq!(
+        barrier(&mut raw).await,
+        0,
+        "nothing is returned while it waits"
+    );
+    drop(acceptor);
+    assert_eq!(barrier(&mut raw).await, 5_000);
+    assert_eq!(barrier(&mut raw).await, 0, "and nothing more later");
 }
 
 #[rusty_tokio::test]
@@ -842,13 +925,22 @@ async fn a_response_that_cannot_be_encoded_resets_the_stream() {
         .is_ok());
 }
 
-/// A transport that buffers writes until flushed and can misbehave on shutdown.
+/// Switches a test flips on a [`Buffered`] transport from outside.
+#[derive(Clone, Default)]
+struct Knobs {
+    shut_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    fail_flush: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    fail_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    flush_pending_once: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A transport that buffers writes until flushed and can misbehave.
 struct Buffered {
     inner: TcpStream,
     buf: Vec<u8>,
     shutdown_pending_once: bool,
     shutdown_error: bool,
-    shut_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    knobs: Knobs,
 }
 
 impl Buffered {
@@ -858,7 +950,7 @@ impl Buffered {
             buf: Vec::new(),
             shutdown_pending_once: false,
             shutdown_error: false,
-            shut_down: Default::default(),
+            knobs: Knobs::default(),
         }
     }
 
@@ -892,6 +984,13 @@ impl rusty_tokio::io::AsyncWrite for Buffered {
         _cx: &mut std::task::Context<'_>,
         data: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
+        if self
+            .knobs
+            .fail_write
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return std::task::Poll::Ready(Err(std::io::Error::other("write failed")));
+        }
         self.buf.extend_from_slice(data);
         std::task::Poll::Ready(Ok(data.len()))
     }
@@ -900,6 +999,14 @@ impl rusty_tokio::io::AsyncWrite for Buffered {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.knobs.fail_flush.load(SeqCst) {
+            return std::task::Poll::Ready(Err(std::io::Error::other("flush failed")));
+        }
+        if self.knobs.flush_pending_once.swap(false, SeqCst) {
+            cx.waker().wake_by_ref();
+            return std::task::Poll::Pending;
+        }
         self.drain(cx)
     }
 
@@ -921,7 +1028,8 @@ impl rusty_tokio::io::AsyncWrite for Buffered {
         }
         let done = std::pin::Pin::new(&mut self.inner).poll_shutdown(cx);
         if done.is_ready() {
-            self.shut_down
+            self.knobs
+                .shut_down
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         done
@@ -953,7 +1061,7 @@ async fn the_driver_waits_for_shutdown_to_complete() {
     let (a, b) = pair().await;
     let mut transport = Buffered::new(a);
     transport.shutdown_pending_once = true;
-    let shut_down = transport.shut_down.clone();
+    let shut_down = transport.knobs.shut_down.clone();
     let (h, cdrv) = driver::client(transport, ClientBuilder::new());
     let (_acceptor, sdrv) = driver::server(b, ServerBuilder::new());
     rusty_tokio::spawn(sdrv);
@@ -985,4 +1093,68 @@ async fn a_failed_shutdown_is_reported() {
         .unwrap()
         .unwrap();
     assert!(matches!(result, Err(Error::Io(_))), "{result:?}");
+}
+
+/// A client over a buffered transport whose handshake has finished, and the
+/// task running its driver. The peer is a normal server.
+async fn buffered_client() -> (
+    ClientHandle,
+    rusty_tokio::JoinHandle<Result<(), Error>>,
+    Knobs,
+) {
+    let (a, b) = pair().await;
+    let transport = Buffered::new(a);
+    let knobs = transport.knobs.clone();
+    let (h, cdrv) = driver::client(transport, ClientBuilder::new());
+    let (acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    rusty_tokio::spawn(sdrv);
+    std::mem::forget(acceptor); // keep the server side alive without a handle
+    let task = rusty_tokio::spawn(cdrv);
+    timeout(Duration::from_secs(5), h.ping())
+        .await
+        .unwrap()
+        .unwrap();
+    (h, task, knobs)
+}
+
+#[rusty_tokio::test]
+async fn a_final_flush_error_turns_a_clean_finish_into_a_failure() {
+    let (h, task, knobs) = buffered_client().await;
+    knobs
+        .fail_flush
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    drop(h); // the connection winds down cleanly; its last bytes cannot be flushed
+    let result = timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(Error::Io(_))), "{result:?}");
+}
+
+#[rusty_tokio::test]
+async fn a_final_write_error_turns_a_clean_finish_into_a_failure() {
+    let (h, task, knobs) = buffered_client().await;
+    knobs
+        .fail_write
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    drop(h);
+    let result = timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(Error::Io(_))), "{result:?}");
+}
+
+#[rusty_tokio::test]
+async fn a_pending_final_flush_is_resumed_and_the_finish_stays_clean() {
+    let (h, task, knobs) = buffered_client().await;
+    knobs
+        .flush_pending_once
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    drop(h);
+    let result = timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok(), "{result:?}");
 }

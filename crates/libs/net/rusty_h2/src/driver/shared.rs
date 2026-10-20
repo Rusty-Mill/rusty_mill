@@ -567,4 +567,48 @@ mod tests {
         assert!(probe.woken.load(Ordering::SeqCst));
         assert!(probe.lock_was_free.load(Ordering::SeqCst), "accept wake");
     }
+
+    #[test]
+    fn a_forgotten_streams_wakers_are_dropped_outside_the_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Probe {
+            shared: Handle,
+            free: Arc<AtomicBool>,
+            dropped: Arc<AtomicBool>,
+        }
+        impl Wake for Probe {
+            fn wake(self: Arc<Self>) {}
+        }
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.free
+                    .store(self.shared.try_lock().is_ok(), Ordering::SeqCst);
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+        let (shared, _) = probe();
+        let (free, dropped) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        {
+            let mut sh = lock(&shared);
+            sh.add_stream(1, true);
+            let s = sh.streams.get_mut(&1).unwrap();
+            s.remote_closed = true;
+            s.headers_taken = true;
+            s.recv_waker = Some(Waker::from(Arc::new(Probe {
+                shared: shared.clone(),
+                free: free.clone(),
+                dropped: dropped.clone(),
+            })));
+            sh.settle(1); // both halves closed and nothing to read: forgotten
+            assert!(!sh.streams.contains_key(&1));
+        }
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(
+            free.load(Ordering::SeqCst),
+            "dropped while the mutex was held"
+        );
+    }
 }
