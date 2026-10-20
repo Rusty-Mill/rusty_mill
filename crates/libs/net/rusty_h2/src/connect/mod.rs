@@ -465,10 +465,6 @@ impl Connection {
                 value: s.header_table_size,
             },
             Setting {
-                id: SettingId::EnablePush,
-                value: u32::from(s.enable_push),
-            },
-            Setting {
                 id: SettingId::InitialWindowSize,
                 value: s.initial_window_size,
             },
@@ -477,6 +473,14 @@ impl Connection {
                 value: s.max_frame_size,
             },
         ];
+        // RFC 9113 §6.5.2: only a client announces ENABLE_PUSH; a client must
+        // treat a server's ENABLE_PUSH = 1 as a protocol error.
+        if self.peer_type == PeerType::Client {
+            settings.push(Setting {
+                id: SettingId::EnablePush,
+                value: u32::from(s.enable_push),
+            });
+        }
         if let Some(v) = s.max_concurrent_streams {
             settings.push(Setting {
                 id: SettingId::MaxConcurrentStreams,

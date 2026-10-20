@@ -294,11 +294,11 @@ async fn dropping_every_client_handle_closes_the_connection_cleanly() {
         .unwrap()
         .unwrap()
         .is_ok());
-    assert!(timeout(Duration::from_secs(5), server_task)
+    let server_result = timeout(Duration::from_secs(5), server_task)
         .await
         .unwrap()
-        .unwrap()
-        .is_ok());
+        .unwrap();
+    assert!(server_result.is_ok(), "{server_result:?}");
 }
 
 #[rusty_tokio::test]
@@ -704,8 +704,6 @@ async fn an_aborted_driver_fails_every_pending_operation() {
 
     let pending_resp = rusty_tokio::spawn(resp);
     let pending_body = rusty_tokio::spawn(async move { req.body.next().await });
-    let h2 = h.clone();
-    let pending_ping = rusty_tokio::spawn(async move { h2.ping().await });
     let pending_accept = rusty_tokio::spawn(async move { acceptor.accept().await.is_none() });
     rusty_tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -717,8 +715,17 @@ async fn an_aborted_driver_fails_every_pending_operation() {
         timeout(five, pending_body).await.unwrap().unwrap(),
         Some(Err(_)) | None
     ));
+
+    // A ping nobody answers: the peer is a raw socket that never replies.
+    let (c, quiet) = pair().await;
+    let (hp, pdrv) = driver::client(c, ClientBuilder::new());
+    let ping_task = rusty_tokio::spawn(pdrv);
+    let pending_ping = rusty_tokio::spawn(async move { hp.ping().await });
+    rusty_tokio::time::sleep(Duration::from_millis(150)).await;
+    ping_task.abort();
     let ping = timeout(five, pending_ping).await.unwrap().unwrap();
     assert!(ping.is_err());
+    drop(quiet);
     assert!(timeout(five, pending_accept).await.unwrap().unwrap());
 }
 

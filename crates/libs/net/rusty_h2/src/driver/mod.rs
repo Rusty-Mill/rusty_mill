@@ -397,8 +397,9 @@ impl Respond {
         fields: Vec<HeaderField>,
         end_stream: bool,
     ) -> Result<SendStream, Error> {
-        self.used = true;
         let mut sh = lock(&self.shared);
+        // On failure `self` is dropped unused, which resets the stream and
+        // so tells the peer; only a sent response disarms that.
         SendStream::check(&sh, self.id)?;
         let frame = sh
             .conn
@@ -409,6 +410,7 @@ impl Respond {
             sh.close_local(self.id);
         }
         drop(sh);
+        self.used = true;
         Ok(SendStream {
             shared: self.shared.clone(),
             id: self.id,
@@ -483,6 +485,13 @@ impl Acceptor {
 impl Drop for Acceptor {
     fn drop(&mut self) {
         self.graceful_shutdown();
+        // Nobody will accept what is still queued: refuse it, so the
+        // connection can finish.
+        let mut sh = lock(&self.shared);
+        let queued: Vec<u32> = sh.accept_queue.drain(..).collect();
+        for id in queued {
+            sh.reset(id, ErrorCode::RefusedStream);
+        }
     }
 }
 
@@ -498,6 +507,7 @@ fn driver<T>(io: T, shared: Handle, server: bool, max_frame: u32) -> ConnectionD
         finishing: None,
         max_frame,
         stalled: false,
+        needs_flush: false,
     }
 }
 

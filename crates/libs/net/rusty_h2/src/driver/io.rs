@@ -16,6 +16,12 @@ use crate::CONNECTION_PREFACE;
 
 const READ_CHUNK: usize = 64 * 1024;
 
+/// Errors a shutdown reports when the peer closed first.
+fn peer_gone(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionReset, NotConnected};
+    matches!(e.kind(), NotConnected | BrokenPipe | ConnectionReset)
+}
+
 /// The connection's task: spawn it, or await it to run the connection to
 /// its end. Resolves when the connection closes.
 #[must_use = "the connection only makes progress while this is polled"]
@@ -33,6 +39,16 @@ pub struct ConnectionDriver<T> {
     pub(super) max_frame: u32,
     /// Reading paused because too much output was waiting.
     pub(super) stalled: bool,
+    /// Bytes were written since the transport was last flushed.
+    pub(super) needs_flush: bool,
+}
+
+impl<T> Drop for ConnectionDriver<T> {
+    /// A driver that is dropped, aborted or never polled ends the
+    /// connection: every handle and pending operation is woken and fails.
+    fn drop(&mut self) {
+        lock(&self.shared).close_all();
+    }
 }
 
 fn parse(buf: &[u8], max: u32) -> Result<Option<(Frame, usize)>, H2Error> {
@@ -65,6 +81,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
             if sh.out_pos == sh.out.len() {
                 sh.out.clear();
                 sh.out_pos = 0;
+                drop(sh);
+                // Queued bytes are only with the transport; a buffered one
+                // keeps them until it is flushed.
+                if self.needs_flush {
+                    match Pin::new(&mut self.io).poll_flush(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
+                        Poll::Ready(Ok(())) => self.needs_flush = false,
+                    }
+                }
                 return Poll::Ready(Ok(()));
             }
             let start = sh.out_pos;
@@ -76,6 +102,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
                     return Poll::Ready(Err(Error::Io(std::io::ErrorKind::WriteZero.into())))
                 }
                 Poll::Ready(Ok(n)) => {
+                    self.needs_flush = true;
                     sh.out_pos += n;
                     if sh.backlog() < OUT_HIGH / 2 {
                         sh.wake_waiters();
@@ -205,8 +232,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Future for ConnectionDr
             return Poll::Ready(this.finishing.take().unwrap_or(Ok(())));
         }
         if this.finishing.is_some() && matches!(written, Poll::Ready(Ok(()))) {
-            let _ = Pin::new(&mut this.io).poll_shutdown(cx);
-            return Poll::Ready(this.finishing.take().unwrap_or(Ok(())));
+            // Finish only once the transport has shut down; a failure to do
+            // so is reported unless the connection had already failed.
+            let closed = match Pin::new(&mut this.io).poll_shutdown(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(r) => r,
+            };
+            let outcome = this.finishing.take().unwrap_or(Ok(()));
+            return Poll::Ready(match (outcome, closed) {
+                // A peer that already hung up leaves nothing to shut down.
+                (Ok(()), Err(e)) if !peer_gone(&e) => Err(Error::Io(e)),
+                (outcome, _) => outcome,
+            });
         }
         // Output that kept us from reading has now gone out: read again.
         if this.stalled && written.is_ready() {

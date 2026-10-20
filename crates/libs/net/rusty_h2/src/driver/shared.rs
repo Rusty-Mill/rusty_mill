@@ -17,6 +17,11 @@ use crate::hpack::HeaderField;
 /// for without limit.
 pub(super) const OUT_HIGH: usize = 512 * 1024;
 
+/// Requests received and not yet accepted. Beyond this the server refuses
+/// new streams, so an application that is slow to accept (or never does)
+/// cannot be made to hold an unbounded backlog.
+pub(super) const MAX_PENDING_ACCEPT: usize = 256;
+
 pub(super) type Handle = Arc<Mutex<Shared>>;
 
 pub(super) fn lock(h: &Handle) -> MutexGuard<'_, Shared> {
@@ -180,6 +185,11 @@ impl Shared {
     fn close_remote(&mut self, id: u32) {
         if let Some(s) = self.streams.get_mut(&id) {
             s.remote_closed = true;
+            // A reader waiting for more must see the end, whatever the
+            // final frame carried (an empty DATA ends a body too).
+            if let Some(w) = s.recv_waker.take() {
+                w.wake();
+            }
         }
         self.settle(id);
     }
@@ -246,6 +256,12 @@ impl Shared {
             }
         }
         self.settle(id);
+        // A request that ended before the application accepted it is never
+        // offered: reclaim it and its place in the accept queue.
+        if self.server && self.streams.get(&id).is_some_and(|s| !s.headers_taken) {
+            self.streams.remove(&id);
+            self.accept_queue.retain(|queued| *queued != id);
+        }
     }
 
     /// Resets `id` toward the peer and fails it here.
@@ -397,7 +413,9 @@ impl Shared {
 
     fn on_headers(&mut self, id: u32, fields: Vec<HeaderField>, end_stream: bool) {
         if self.server {
-            let refused = self.closing || self.goaway_sent.is_some_and(|last| id > last);
+            let refused = self.closing
+                || self.goaway_sent.is_some_and(|last| id > last)
+                || self.accept_queue.len() >= MAX_PENDING_ACCEPT;
             if refused {
                 self.reset(id, ErrorCode::RefusedStream);
                 return;
