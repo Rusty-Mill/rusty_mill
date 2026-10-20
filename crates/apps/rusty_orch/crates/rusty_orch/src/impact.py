@@ -41,14 +41,14 @@ def cargo_metadata_digest(metadata: dict) -> str:
     sort_field(normalized, 'workspace_members')
     sort_field(normalized, 'workspace_default_members')
     for package in normalized.get('packages', []):
-        sort_field(package, 'dependencies')
-        sort_field(package, 'targets')
         for dependency in package.get('dependencies', []):
             sort_field(dependency, 'features')
         for target in package.get('targets', []):
             sort_field(target, 'kind')
             sort_field(target, 'crate_types')
             sort_field(target, 'required-features')
+        sort_field(package, 'dependencies')
+        sort_field(package, 'targets')
         for enabled_by in package.get('features', {}).values():
             if isinstance(enabled_by, list):
                 enabled_by.sort(key=canonical)
@@ -57,10 +57,10 @@ def cargo_metadata_digest(metadata: dict) -> str:
     if isinstance(resolve, dict):
         for node in resolve.get('nodes', []):
             sort_field(node, 'dependencies')
-            sort_field(node, 'deps')
             sort_field(node, 'features')
             for dependency in node.get('deps', []):
                 sort_field(dependency, 'dep_kinds')
+            sort_field(node, 'deps')
         sort_field(resolve, 'nodes')
     return digest(normalized)
 

@@ -110,6 +110,36 @@ class ChangeImpactTests(unittest.TestCase):
                 self.assertNotEqual(MODULE.cargo_metadata_digest(self.md), baseline)
                 subject[field] = original
 
+    def test_cargo_metadata_digest_normalizes_children_before_records(self):
+        package = self.md['packages'][0]
+        package.update(
+            dependencies=[{'name': 'alpha', 'features': ['z', 'a']},
+                          {'name': 'beta', 'features': ['m']}],
+            targets=[{'name': 'alpha', 'kind': ['z', 'a'], 'crate_types': ['z', 'a'],
+                      'required-features': ['z', 'a']},
+                     {'name': 'beta', 'kind': ['m'], 'crate_types': ['m'],
+                      'required-features': ['m']}],
+        )
+        node = self.md['resolve']['nodes'][0]
+        node['deps'] = [
+            {'name': 'alpha', 'pkg': 'alpha', 'dep_kinds': [
+                {'kind': 'z', 'target': None}, {'kind': 'a', 'target': None}]},
+            {'name': 'beta', 'pkg': 'beta', 'dep_kinds': [
+                {'kind': 'm', 'target': None}]},
+        ]
+        equivalent = copy.deepcopy(self.md)
+        equivalent_package = equivalent['packages'][0]
+        for dependency in equivalent_package['dependencies']:
+            dependency['features'].sort()
+        for target in equivalent_package['targets']:
+            for field in ('kind', 'crate_types', 'required-features'):
+                target[field].sort()
+        for dependency in equivalent['resolve']['nodes'][0]['deps']:
+            dependency['dep_kinds'].sort(key=lambda kind: kind['kind'])
+
+        self.assertEqual(MODULE.cargo_metadata_digest(self.md),
+                         MODULE.cargo_metadata_digest(equivalent))
+
     def test_rank_never_omits_binding_inactive_requirements(self):
         self.projects['repos']['mill']['dormant'] = ['scripts/dormant']
         self.snapshot['records'] = [self.requirement(projects=['dormant'], packages=['rusty_atomic_file'],
