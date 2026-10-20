@@ -234,7 +234,10 @@ def analyze_impact(metadata: dict, request: dict, projects_data: dict, snapshot:
     packages_to_validate = set(affected)
     if broad:
         packages_to_validate.update(crates)
-    elif validation_projects - affected_projects:
+    else:
+        # A requirement can introduce a project that already entered the
+        # affected set above. Expand every selected project to its owned Cargo
+        # packages rather than using set difference as a proxy for provenance.
         packages_to_validate.update(k for k, c in crates.items() if owner(projects, repository, c['manifest']) in validation_projects)
     return {'schema_version': 1, 'report_kind': 'change-impact', 'source_revision': source_revision,
             'repository': repository, 'changes': changes,

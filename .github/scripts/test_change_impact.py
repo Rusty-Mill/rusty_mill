@@ -19,12 +19,14 @@ class ChangeImpactTests(unittest.TestCase):
         self.md = self.fixture([
             ('rusty_atomic_file', 'foundation', 'atomic'), ('orch', 'apps', 'orch'),
             ('remind-core', 'apps', 'remind'), ('remind-cli', 'apps', 'remind'),
-            ('board', 'apps', 'board'), ('other', 'apps', 'other')],
+            ('board', 'apps', 'board'), ('other', 'apps', 'other'),
+            ('spare', 'apps', 'spare')],
             [('orch', 'rusty_atomic_file'), ('remind-core', 'rusty_atomic_file'),
              ('remind-cli', 'remind-core'), ('board', 'rusty_atomic_file')])
         self.projects = {'repos': {'mill': {
             name: [f'crates/{family}'] for name, family in
-            [('Orch'.lower(), 'orch'), ('remindme', 'remind'), ('millboard', 'board'), ('unrelated', 'other')]
+            [('Orch'.lower(), 'orch'), ('remindme', 'remind'), ('millboard', 'board'),
+             ('unrelated', 'other'), ('spare', 'spare')]
         }}}
         self.request = {'schema_version': 1, 'repository': 'mill', 'changes': [{'package': 'rusty_atomic_file'}]}
         self.snapshot = {'schema_version': 1, 'source': 'remind_me', 'complete': True,
@@ -59,6 +61,15 @@ class ChangeImpactTests(unittest.TestCase):
         self.assertEqual(report['requirements'][0]['lifecycle']['status'], 'archived')
         self.assertEqual(report['validation']['required_checks'], ['dormant compatibility suite'])
         self.assertEqual(report['retrieved_context'], [])
+
+    def test_requirement_linked_cargo_project_expands_validation_packages(self):
+        self.snapshot['records'] = [self.requirement(projects=['unrelated'],
+                                                     packages=['rusty_atomic_file'])]
+        report = self.report()
+        self.assertIn('unrelated', report['affected_applications'])
+        self.assertIn('other', report['validation']['packages'])
+        self.assertNotIn('spare', report['validation']['packages'])
+        self.assertNotIn('spare', report['validation']['projects'])
 
     def test_revision_scope_content_withdrawal_and_removal_changes_detected(self):
         self.snapshot['records'] = [self.requirement(projects=['orch'])]

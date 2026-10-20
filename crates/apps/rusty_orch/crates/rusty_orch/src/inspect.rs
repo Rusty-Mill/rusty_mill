@@ -98,6 +98,9 @@ fn bundled_program() -> Result<String, Box<dyn std::error::Error>> {
     Ok(program)
 }
 
+const STDIN_PROGRAM: &str =
+    "import sys; exec(compile(sys.stdin.buffer.read(), '<rusty_orch>', 'exec'))";
+
 /// Discover and analyze with the existing bounded process seam. Failure returns
 /// no partial report; findings themselves are a successful inspection result.
 pub fn inspect(
@@ -119,7 +122,7 @@ pub fn inspect_with_impact(
         "python3".to_owned(),
         "-I".to_owned(),
         "-c".to_owned(),
-        bundled_program()?,
+        STDIN_PROGRAM.to_owned(),
         repo.to_str()
             .ok_or("repository path must be UTF-8")?
             .to_owned(),
@@ -133,7 +136,17 @@ pub fn inspect_with_impact(
                 .to_owned(),
         );
     }
-    let exit = runner.run_in(Some(&repo), &argv, &[], Duration::from_secs(120), &[])?;
+    // Keep the bundled first-party implementation out of argv: Windows has a
+    // much smaller command-line limit than the maximum supported program size.
+    // Isolated mode still prevents imports from the inspected repository.
+    let program = bundled_program()?;
+    let exit = runner.run_in(
+        Some(&repo),
+        &argv,
+        program.as_bytes(),
+        Duration::from_secs(120),
+        &[],
+    )?;
     if exit.status != 0 {
         return Err(format!("repository inspection: {}", excerpt(&exit.stderr)).into());
     }
@@ -168,6 +181,12 @@ mod tests {
         let runner = FakeCommand::new(Ok(exit(1, "", "cargo metadata failed")));
         let error = inspect(&std::env::current_dir().expect("cwd"), &runner).expect_err("failure");
         assert!(error.to_string().contains("cargo metadata failed"));
+        let calls = runner.calls.lock().expect("calls");
+        assert_eq!(calls[0].0[1..4], ["-I", "-c", STDIN_PROGRAM]);
+        assert!(calls[0].0.iter().all(|argument| argument.len() < 1_024));
+        assert!(std::str::from_utf8(&calls[0].1)
+            .expect("program")
+            .contains("repository_intelligence"));
     }
 
     #[test]

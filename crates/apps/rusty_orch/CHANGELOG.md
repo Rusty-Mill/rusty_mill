@@ -5,7 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
-- Stage 1 revision-bound proposed-change impact through `inspect --impact`, joining CI dependency evidence, Millboard ownership and complete RemindMe durable requirements; detects requirement revision changes (ADR-0016).
+- Stage 1 revision-bound proposed-change impact through `inspect --impact`, joining CI dependency evidence, Millboard ownership and complete RemindMe durable requirements; detects requirement revision changes, expands requirement-linked projects to their Cargo packages, and transports bundled inspection code outside the bounded child argv (ADR-0016).
 - Opt-in `maintain` connects versioned repository findings to one sandboxed BBP task, with deterministic scope, durable recovery, human approvals, reverse-dependency validation and explicit draft PR publication (ADR-0015).
 - Required CI evidence for pause/adoption across Orch processes; real deadline-ending launch-loop recovery coverage.
 - Durable provider-neutral launcher failure pauses across Orch restarts, explicit owner reset, scoped MCP tool approvals and an LLD profile with bounded linker parallelism.
