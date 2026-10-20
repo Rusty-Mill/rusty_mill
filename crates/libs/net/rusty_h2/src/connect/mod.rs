@@ -13,7 +13,7 @@ use crate::frame::{
     DataFrame, Frame, GoAwayFrame, RstStreamFrame, SettingsFrame, WindowUpdateFrame,
 };
 use crate::hpack::{Decoder, Encoder, HeaderField, DEFAULT_HEADER_TABLE_SIZE};
-use crate::stream::{Event, Stream};
+use crate::stream::{Event, Stream, StreamState};
 
 /// Which side of the connection this endpoint is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,10 +84,10 @@ struct FlowControl {
 }
 
 impl FlowControl {
-    fn new(initial_window: u32) -> Self {
+    fn new(send: u32, recv: u32) -> Self {
         FlowControl {
-            send_window: initial_window as i64,
-            recv_window: initial_window as i64,
+            send_window: i64::from(send),
+            recv_window: i64::from(recv),
         }
     }
 
@@ -133,6 +133,40 @@ impl FlowControl {
     }
 }
 
+/// The highest stream id (RFC 9113 §5.1.1: 31 bits).
+const MAX_STREAM_ID: u32 = i32::MAX as u32;
+
+/// RFC 9113 §8.2.1 / §8.3: names are lowercase, pseudo-headers are known,
+/// come first and never appear in trailers.
+fn validate_fields(
+    fields: &[HeaderField],
+    trailers: bool,
+) -> core::result::Result<(), &'static str> {
+    let mut regular = false;
+    for field in fields {
+        if field.name.iter().any(u8::is_ascii_uppercase) {
+            return Err("header field name has uppercase letters");
+        }
+        if field.name.first() != Some(&b':') {
+            regular = true;
+            continue;
+        }
+        if trailers {
+            return Err("pseudo-header in trailers");
+        }
+        if regular {
+            return Err("pseudo-header after a regular header field");
+        }
+        if !matches!(
+            field.name.as_slice(),
+            b":method" | b":scheme" | b":authority" | b":path" | b":status"
+        ) {
+            return Err("unknown pseudo-header");
+        }
+    }
+    Ok(())
+}
+
 /// The largest flow-control window RFC 9113 §6.9.1 allows (2^31 - 1).
 const MAX_WINDOW: u32 = i32::MAX as u32;
 
@@ -156,6 +190,9 @@ pub const MAX_CONTINUATION_FRAMES: usize = 64;
 struct StreamEntry {
     stream: Stream,
     flow: FlowControl,
+    /// A header block has gone out / come in, so the next one is trailers.
+    headers_sent: bool,
+    headers_received: bool,
 }
 
 /// The still-buffering state of a HEADERS or PUSH_PROMISE frame whose
@@ -251,6 +288,7 @@ pub struct Connection {
     close_reason: Option<H2Error>,
     seen_preface: bool,
     pending_header_block: Option<PendingHeaderBlock>,
+    inbound: Vec<Inbound>,
 }
 
 // `Encoder`/`Decoder` don't implement `Debug` (their internal HPACK
@@ -282,7 +320,7 @@ impl Connection {
         Connection {
             local_settings: settings,
             remote_settings: ServerSettings::default(),
-            conn_flow: FlowControl::new(65_535),
+            conn_flow: FlowControl::new(65_535, 65_535),
             encoder: Encoder::new(settings.header_table_size as usize),
             decoder: Decoder::new(DEFAULT_HEADER_TABLE_SIZE),
             streams: BTreeMap::new(),
@@ -291,6 +329,7 @@ impl Connection {
             close_reason: None,
             seen_preface: false,
             pending_header_block: None,
+            inbound: Vec::new(),
         }
     }
 
@@ -310,7 +349,14 @@ impl Connection {
             .entry(stream_id)
             .or_insert_with(|| StreamEntry {
                 stream: Stream::new(stream_id),
-                flow: FlowControl::new(self.remote_settings.initial_window_size),
+                // Sending is limited by what the peer advertised, receiving
+                // by what this endpoint did (RFC 9113 §6.9.2).
+                flow: FlowControl::new(
+                    self.remote_settings.initial_window_size,
+                    self.local_settings.initial_window_size,
+                ),
+                headers_sent: false,
+                headers_received: false,
             })
     }
 
@@ -395,7 +441,7 @@ impl Connection {
 
     /// Drains what the frames applied so far delivered to the application.
     pub fn take_inbound(&mut self) -> Vec<Inbound> {
-        todo!()
+        std::mem::take(&mut self.inbound)
     }
 
     /// Starts a stream: allocates the next stream id (odd for a client) and
@@ -407,8 +453,17 @@ impl Connection {
         fields: &[HeaderField],
         end_stream: bool,
     ) -> Result<(u32, Frame)> {
-        let _ = (fields, end_stream);
-        todo!()
+        let stream_id = self.next_stream_id;
+        let next = stream_id
+            .checked_add(2)
+            .filter(|n| *n <= MAX_STREAM_ID)
+            .ok_or(H2Error::Connection(
+                ErrorCode::RefusedStream,
+                "stream ids are exhausted",
+            ))?;
+        let frame = self.send_headers(stream_id, fields, end_stream)?;
+        self.next_stream_id = next;
+        Ok((stream_id, frame))
     }
 
     /// The HEADERS frame for `fields` on an existing stream (a response).
@@ -418,8 +473,9 @@ impl Connection {
         fields: &[HeaderField],
         end_stream: bool,
     ) -> Result<Frame> {
-        let _ = (stream_id, fields, end_stream);
-        todo!()
+        let frame = self.headers_frame(stream_id, fields, end_stream)?;
+        self.send_frame(&frame)?;
+        Ok(frame)
     }
 
     /// DATA frames for `data`, split at the peer's maximum frame size, each
@@ -431,14 +487,72 @@ impl Connection {
         data: &[u8],
         end_stream: bool,
     ) -> Result<Vec<Frame>> {
-        let _ = (stream_id, data, end_stream);
-        todo!()
+        let entry = self.streams.get(&stream_id).ok_or(H2Error::Stream(
+            stream_id,
+            ErrorCode::StreamClosed,
+            "DATA on a stream that is not open",
+        ))?;
+        let len = i64::try_from(data.len()).unwrap_or(i64::MAX);
+        if len > entry.flow.send_window || len > self.conn_flow.send_window {
+            return Err(H2Error::Stream(
+                stream_id,
+                ErrorCode::FlowControlError,
+                "DATA exceeds the send window",
+            ));
+        }
+        let max = (self.remote_settings.max_frame_size as usize).max(1);
+        let mut frames = Vec::new();
+        let mut chunks = data.chunks(max).peekable();
+        if chunks.peek().is_none() {
+            frames.push(Frame::Data(DataFrame::new(
+                stream_id,
+                Vec::new(),
+                end_stream,
+            )));
+        }
+        while let Some(chunk) = chunks.next() {
+            let last = chunks.peek().is_none();
+            frames.push(Frame::Data(DataFrame::new(
+                stream_id,
+                chunk.to_vec(),
+                end_stream && last,
+            )));
+        }
+        for frame in &frames {
+            self.send_frame(frame)?;
+        }
+        Ok(frames)
     }
 
     /// The trailing HEADERS frame (it ends the stream).
     pub fn send_trailers(&mut self, stream_id: u32, fields: &[HeaderField]) -> Result<Frame> {
-        let _ = (stream_id, fields);
-        todo!()
+        let frame = self.headers_frame(stream_id, fields, true)?;
+        self.send_frame(&frame)?;
+        Ok(frame)
+    }
+
+    /// Encodes `fields` into one HEADERS frame (not yet recorded as sent).
+    fn headers_frame(
+        &mut self,
+        stream_id: u32,
+        fields: &[HeaderField],
+        end_stream: bool,
+    ) -> Result<Frame> {
+        let header_block_fragment = self.encode_headers(fields);
+        if header_block_fragment.len() > self.remote_settings.max_frame_size as usize {
+            return Err(H2Error::Stream(
+                stream_id,
+                ErrorCode::InternalError,
+                "header block exceeds the peer's maximum frame size",
+            ));
+        }
+        Ok(Frame::Headers(crate::frame::HeadersFrame {
+            stream_id,
+            end_stream,
+            end_headers: true,
+            priority: None,
+            header_block_fragment,
+        }))
     }
 
     /// Alias kept for callers written against the earlier stub API.
@@ -460,7 +574,15 @@ impl Connection {
         match frame {
             Frame::Headers(h) => {
                 let entry = self.stream_entry(h.stream_id);
-                entry.stream.apply(Event::SendHeaders)?;
+                if !entry.headers_sent
+                    && matches!(
+                        entry.stream.state,
+                        StreamState::Idle | StreamState::ReservedLocal
+                    )
+                {
+                    entry.stream.apply(Event::SendHeaders)?;
+                }
+                entry.headers_sent = true;
                 if h.end_stream {
                     entry.stream.apply(Event::SendEndStream)?;
                 }
@@ -570,12 +692,27 @@ impl Connection {
             // Peer acknowledged settings we sent; nothing further to do.
             return Ok(vec![]);
         }
+        let old = i64::from(self.remote_settings.initial_window_size);
         self.remote_settings.apply(&settings.settings);
-        // Any already-open stream's send window is defined relative to
-        // the *current* SETTINGS_INITIAL_WINDOW_SIZE (RFC 9113 §6.9.2);
-        // this driver doesn't retroactively rewrite existing streams'
-        // windows on a mid-connection change -- a known, narrow gap
-        // (new streams do pick up the new value, see `stream_entry`).
+        // RFC 9113 §6.9.2: a change to SETTINGS_INITIAL_WINDOW_SIZE moves
+        // every open stream's send window by the difference, which can
+        // leave one negative.
+        if self.remote_settings.initial_window_size > MAX_WINDOW {
+            return Err(H2Error::Connection(
+                ErrorCode::FlowControlError,
+                "SETTINGS_INITIAL_WINDOW_SIZE is above the maximum window",
+            ));
+        }
+        let delta = i64::from(self.remote_settings.initial_window_size) - old;
+        for entry in self.streams.values_mut() {
+            entry.flow.send_window += delta;
+            if entry.flow.send_window > i64::from(MAX_WINDOW) {
+                return Err(H2Error::Connection(
+                    ErrorCode::FlowControlError,
+                    "SETTINGS_INITIAL_WINDOW_SIZE overflowed a stream window",
+                ));
+            }
+        }
         Ok(vec![Frame::Settings(SettingsFrame {
             ack: true,
             settings: vec![],
@@ -648,16 +785,45 @@ impl Connection {
         // stream we otherwise reject needs its header block consumed to
         // keep the dynamic table in sync with the peer) before any
         // stream-state bookkeeping.
-        let _fields = self.decoder.decode(header_block_fragment)?;
+        let fields = self.decoder.decode(header_block_fragment)?;
 
         self.reject_if_over_max_concurrent_streams(stream_id)?;
 
+        let trailers = self
+            .streams
+            .get(&stream_id)
+            .is_some_and(|e| e.headers_received);
+        if trailers && !end_stream {
+            return Err(H2Error::Stream(
+                stream_id,
+                ErrorCode::ProtocolError,
+                "trailers must end the stream",
+            ));
+        }
+        validate_fields(&fields, trailers)
+            .map_err(|why| H2Error::Stream(stream_id, ErrorCode::ProtocolError, why))?;
+
         let entry = self.stream_entry(stream_id);
-        entry.stream.apply(Event::RecvHeaders)?;
+        if matches!(
+            entry.stream.state,
+            StreamState::Idle | StreamState::ReservedRemote
+        ) {
+            entry.stream.apply(Event::RecvHeaders)?;
+        }
+        entry.headers_received = true;
         if end_stream {
             entry.stream.apply(Event::RecvEndStream)?;
         }
         self.prune_if_closed(stream_id);
+        self.inbound.push(if trailers {
+            Inbound::Trailers { stream_id, fields }
+        } else {
+            Inbound::Headers {
+                stream_id,
+                fields,
+                end_stream,
+            }
+        });
         Ok(vec![])
     }
 
@@ -682,6 +848,11 @@ impl Connection {
             entry.stream.apply(Event::RecvEndStream)?;
         }
         self.prune_if_closed(data.stream_id);
+        self.inbound.push(Inbound::Data {
+            stream_id,
+            data: data.data,
+            end_stream: data.end_stream,
+        });
         Ok(vec![])
     }
 
@@ -689,11 +860,19 @@ impl Connection {
         let entry = self.stream_entry(rst.stream_id);
         entry.stream.apply(Event::RecvRstStream)?;
         self.prune_if_closed(rst.stream_id);
+        self.inbound.push(Inbound::Reset {
+            stream_id: rst.stream_id,
+            code: rst.error_code,
+        });
         Ok(vec![])
     }
 
     fn handle_goaway(&mut self, goaway: GoAwayFrame) -> Result<Vec<Frame>> {
         self.close_reason = Some(H2Error::Connection(goaway.error_code, "peer sent GOAWAY"));
+        self.inbound.push(Inbound::GoAway {
+            last_stream_id: goaway.last_stream_id,
+            code: goaway.error_code,
+        });
         Ok(vec![])
     }
 
