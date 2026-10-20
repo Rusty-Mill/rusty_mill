@@ -2,10 +2,11 @@
 
 No repository-supplied code is imported. Snapshots are data, never commands.
 """
-import re
+import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -18,6 +19,50 @@ def digest(value: object) -> str:
     """Content identity includes scope, lifecycle and revision, not just prose."""
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                      ensure_ascii=False).encode()).hexdigest()
+
+
+def cargo_metadata_digest(metadata: dict) -> str:
+    """Hash Cargo identity after canonicalizing only schema-defined sets.
+
+    Cargo does not promise an order for these collections, and Windows has
+    emitted consecutive equivalent graphs in different orders. Package and
+    workspace ``metadata`` values are deliberately opaque here: in particular,
+    lists inside application-defined metadata retain their authored order.
+    """
+    normalized = copy.deepcopy(metadata)
+
+    def canonical(value: object) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    def sort_field(value: dict, field: str) -> None:
+        if isinstance(value.get(field), list):
+            value[field].sort(key=canonical)
+
+    sort_field(normalized, 'packages')
+    sort_field(normalized, 'workspace_members')
+    sort_field(normalized, 'workspace_default_members')
+    for package in normalized.get('packages', []):
+        sort_field(package, 'dependencies')
+        sort_field(package, 'targets')
+        for dependency in package.get('dependencies', []):
+            sort_field(dependency, 'features')
+        for target in package.get('targets', []):
+            sort_field(target, 'kind')
+            sort_field(target, 'crate_types')
+            sort_field(target, 'required-features')
+        for enabled_by in package.get('features', {}).values():
+            if isinstance(enabled_by, list):
+                enabled_by.sort(key=canonical)
+    resolve = normalized.get('resolve')
+    if isinstance(resolve, dict):
+        sort_field(resolve, 'nodes')
+        for node in resolve.get('nodes', []):
+            sort_field(node, 'dependencies')
+            sort_field(node, 'deps')
+            sort_field(node, 'features')
+            for dependency in node.get('deps', []):
+                sort_field(dependency, 'dep_kinds')
+    return digest(normalized)
 
 
 def relative_path(value: str) -> str:
@@ -242,7 +287,7 @@ def analyze_impact(metadata: dict, request: dict, projects_data: dict, snapshot:
     return {'schema_version': 1, 'report_kind': 'change-impact', 'source_revision': source_revision,
             'repository': repository, 'changes': changes,
             'input_revisions': {'projects': digest(projects_data), 'requirements': digest(snapshot),
-                                'request': digest(request), 'cargo_metadata': digest(metadata)},
+                                'request': digest(request), 'cargo_metadata': cargo_metadata_digest(metadata)},
             'requirement_revisions': revisions, 'changed_requirements': changed_requirements,
             'source_changed': previous is not None and previous.get('source_revision') != source_revision,
             'projects_changed': previous is not None and previous.get('input_revisions', {}).get('projects') != digest(projects_data),

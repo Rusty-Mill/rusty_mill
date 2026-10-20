@@ -13,6 +13,7 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 - Complete RemindMe inventories preserve inactive contracts; revision comparison detects edits and withdrawals. Millboard ownership supports multiple projects per repository.
 - Unknown consumers broaden validation. Reports bind clean source and input revisions; snapshot freshness requires refreshing exports.
 - Requirement-linked projects contribute all owned Cargo packages to validation without including unrelated projects.
+- Cargo metadata fingerprints normalize Cargo's unordered collections without masking dependency, feature, target, manifest or application-defined metadata changes.
 
 ---
 

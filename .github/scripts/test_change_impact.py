@@ -1,4 +1,5 @@
 """Proposed changes use CI dependency evidence and complete durable inventories."""
+import copy
 from pathlib import Path
 import importlib.util
 import sys
@@ -50,6 +51,64 @@ class ChangeImpactTests(unittest.TestCase):
         self.assertEqual(report['uncertainty'], [])
         self.assertEqual(report['source_revision'], 'head-1')
         self.assertEqual(self.report(), report)
+
+    def test_cargo_metadata_digest_normalizes_schema_defined_sets_only(self):
+        package = self.md['packages'][0]
+        package.update(
+            dependencies=[{'name': 'z', 'features': ['two', 'one'], 'kind': None},
+                          {'name': 'a', 'features': []}],
+            targets=[{'name': 'z', 'kind': ['lib', 'rlib'], 'crate_types': ['rlib', 'lib'],
+                      'required-features': ['two', 'one']},
+                     {'name': 'a', 'kind': ['bin'], 'crate_types': ['bin']}],
+            features={'default': ['z', 'a']},
+            metadata={'application_steps': ['first', 'second']},
+        )
+        node = self.md['resolve']['nodes'][0]
+        node.update(dependencies=['z', 'a'], features=['two', 'one'])
+        node['deps'] = [
+            {'name': 'z', 'pkg': 'z', 'dep_kinds': [
+                {'kind': 'dev', 'target': 'cfg(windows)'}, {'kind': None, 'target': None}]},
+            {'name': 'a', 'pkg': 'a', 'dep_kinds': []},
+        ]
+        equivalent = copy.deepcopy(self.md)
+        equivalent['packages'].reverse()
+        equivalent['workspace_members'].reverse()
+        equivalent['packages'][-1]['dependencies'].reverse()
+        equivalent['packages'][-1]['targets'].reverse()
+        equivalent['packages'][-1]['features']['default'].reverse()
+        for target in equivalent['packages'][-1]['targets']:
+            for field in ('kind', 'crate_types', 'required-features'):
+                if field in target:
+                    target[field].reverse()
+        equivalent['resolve']['nodes'].reverse()
+        equivalent_node = next(n for n in equivalent['resolve']['nodes'] if n['id'] == node['id'])
+        for field in ('dependencies', 'deps', 'features'):
+            equivalent_node[field].reverse()
+        equivalent_node['deps'][-1]['dep_kinds'].reverse()
+        self.assertEqual(MODULE.cargo_metadata_digest(self.md),
+                         MODULE.cargo_metadata_digest(equivalent))
+        equivalent['packages'][-1]['metadata']['application_steps'].reverse()
+        self.assertNotEqual(MODULE.cargo_metadata_digest(self.md),
+                            MODULE.cargo_metadata_digest(equivalent))
+
+    def test_cargo_metadata_digest_keeps_meaningful_identity(self):
+        package = self.md['packages'][0]
+        package.update(dependencies=[{'name': 'dep', 'kind': None, 'features': ['base']}],
+                       targets=[{'name': 'library', 'kind': ['lib'], 'crate_types': ['lib']}],
+                       features={'default': ['base']})
+        baseline = MODULE.cargo_metadata_digest(self.md)
+        cases = [
+            ('dependency kind', package['dependencies'][0], 'kind', 'build'),
+            ('dependency feature', package['dependencies'][0], 'features', ['extra']),
+            ('target identity', package['targets'][0], 'name', 'renamed'),
+            ('manifest identity', package, 'manifest_path', package['manifest_path'] + '.moved'),
+        ]
+        for label, subject, field, changed in cases:
+            with self.subTest(label=label):
+                original = subject[field]
+                subject[field] = changed
+                self.assertNotEqual(MODULE.cargo_metadata_digest(self.md), baseline)
+                subject[field] = original
 
     def test_rank_never_omits_binding_inactive_requirements(self):
         self.projects['repos']['mill']['dormant'] = ['scripts/dormant']
