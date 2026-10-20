@@ -16247,9 +16247,8 @@ dependencies = [
 name = "ts-daemon"
 version = "0.0.1"
 dependencies = [
+ "rusty_log",
  "tokio",
- "tracing",
- "tracing-subscriber",
  "ts-engine",
  "ts-key",
  "ts-localapi",
@@ -16262,9 +16261,9 @@ version = "0.0.1"
 dependencies = [
  "crypto_box",
  "rusty_http",
+ "rusty_log",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
  "ts-key",
  "ts-types",
 ]
@@ -16283,9 +16282,9 @@ dependencies = [
 name = "ts-engine"
 version = "0.0.1"
 dependencies = [
+ "rusty_log",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
  "ts-control",
  "ts-derp",
  "ts-disco",
@@ -16327,11 +16326,11 @@ dependencies = [
  "hyper-util",
  "libc 0.2.189",
  "rusty_http",
+ "rusty_log",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
  "ts-types",
 ]
 
@@ -16342,8 +16341,8 @@ dependencies = [
  "platform",
  "platform-linux",
  "rand_core 0.6.4",
+ "rusty_log",
  "tokio",
- "tracing",
  "ts-derp",
  "ts-disco",
  "ts-key",
@@ -16356,10 +16355,10 @@ name = "ts-net"
 version = "0.0.1"
 dependencies = [
  "parking_lot",
+ "rusty_log",
  "smoltcp",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
  "ts-engine",
  "ts-key",
  "ts-types",
@@ -16420,7 +16419,7 @@ name = "ts-wg"
 version = "0.0.1"
 dependencies = [
  "boringtun",
- "tracing",
+ "rusty_log",
  "ts-key",
  "ts-types",
 ]

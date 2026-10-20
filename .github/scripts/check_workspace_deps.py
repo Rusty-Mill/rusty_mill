@@ -49,13 +49,6 @@ PINNED_EXTERNAL_DEPENDENCIES: dict[str, dict[str, str]] = {
 # Covers workspace members only: Nexus is excluded and frozen, and third-party
 # crates keep their own `tracing` dependency.
 TRACING_BASELINE: dict[str, frozenset[str]] = {
-    "ts-daemon": frozenset({"tracing", "tracing-subscriber"}),
-    "ts-derp": frozenset({"tracing"}),
-    "ts-engine": frozenset({"tracing"}),
-    "ts-localapi": frozenset({"tracing"}),
-    "ts-magicsock": frozenset({"tracing"}),
-    "ts-net": frozenset({"tracing"}),
-    "ts-wg": frozenset({"tracing"}),
 }
 
 

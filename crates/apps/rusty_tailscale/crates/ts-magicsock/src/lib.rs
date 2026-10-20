@@ -154,7 +154,7 @@ impl MagicSock {
             .ok()?
             .ok()?;
         let reflexive = ts_stun::parse_response(&buf[..n], tx).ok()?;
-        tracing::info!(%reflexive, "magicsock: learned reflexive endpoint via STUN");
+        rusty_log::info!(%reflexive, "magicsock: learned reflexive endpoint via STUN");
         Some(reflexive)
     }
 
@@ -222,7 +222,7 @@ impl MagicSock {
         match self.path_for(&node) {
             PathKind::Direct(addr) => {
                 if let Err(e) = self.udp.send_to(&datagram, addr).await {
-                    tracing::debug!(%addr, "magicsock: direct send failed, will fall back: {e}");
+                    rusty_log::debug!(%addr, "magicsock: direct send failed, will fall back: {e}");
                     let _ = self.derp.send(node, datagram).await;
                 }
             }
@@ -235,7 +235,7 @@ impl MagicSock {
     /// Tells `node`, over DERP, our candidate endpoints so it can ping us.
     pub async fn send_call_me_maybe(&mut self, node: NodePublic) {
         if self.local_endpoints.is_empty() {
-            tracing::debug!(peer = %node, "magicsock: no local endpoints, skipping call-me-maybe");
+            rusty_log::debug!(peer = %node, "magicsock: no local endpoints, skipping call-me-maybe");
             return;
         }
         let Some(paths) = self.peers.get_mut(&node) else {
@@ -243,7 +243,7 @@ impl MagicSock {
         };
         paths.last_call_me_maybe = Some(Instant::now());
         let disco_key = paths.disco_key;
-        tracing::debug!(peer = %node, endpoints = ?self.local_endpoints, "magicsock: sending call-me-maybe");
+        rusty_log::debug!(peer = %node, endpoints = ?self.local_endpoints, "magicsock: sending call-me-maybe");
         let msg = Message::CallMeMaybe {
             endpoints: self.local_endpoints.clone(),
         };
@@ -323,7 +323,7 @@ impl MagicSock {
         let (sender_disco, msg) = match ts_disco::open(&self.disco, payload) {
             Ok(v) => v,
             Err(e) => {
-                tracing::debug!(
+                rusty_log::debug!(
                     our_disco = %self.disco.public(),
                     src_disco = ?ts_disco::source_key(payload),
                     "magicsock: disco open failed: {e}"
@@ -332,10 +332,10 @@ impl MagicSock {
             }
         };
         let Some(&node) = self.disco_to_node.get(&sender_disco) else {
-            tracing::debug!("magicsock: disco from unknown disco key, ignoring");
+            rusty_log::debug!("magicsock: disco from unknown disco key, ignoring");
             return; // disco from an unknown peer
         };
-        tracing::debug!(peer = %node, "magicsock: received disco message");
+        rusty_log::debug!(peer = %node, "magicsock: received disco message");
         match msg {
             Message::Ping { tx, .. } => self.on_ping(node, tx, via).await,
             Message::Pong { tx, .. } => self.on_pong(node, tx, via),
@@ -353,7 +353,7 @@ impl MagicSock {
         let disco_key = paths.disco_key;
         match via {
             DiscoVia::Udp(src) => {
-                tracing::debug!(peer = %node, %src, "magicsock: got disco ping over UDP, ponging");
+                rusty_log::debug!(peer = %node, %src, "magicsock: got disco ping over UDP, ponging");
                 let pong = Message::Pong { tx, src };
                 let pkt = ts_disco::seal(&self.disco, &disco_key, &pong);
                 let _ = self.udp.send_to(&pkt, src).await;
@@ -392,7 +392,7 @@ impl MagicSock {
             self.endpoint_to_node.insert(endpoint, node);
             self.endpoint_to_node.insert(src, node);
             if was_relay {
-                tracing::info!(peer = %node, %endpoint, "magicsock: direct path UP (DERP→direct)");
+                rusty_log::info!(peer = %node, %endpoint, "magicsock: direct path UP (DERP→direct)");
             }
         }
     }
@@ -400,7 +400,7 @@ impl MagicSock {
     /// A peer advertised its candidate endpoints; ping each to find a direct
     /// path.
     async fn on_call_me_maybe(&mut self, node: NodePublic, endpoints: Vec<SocketAddr>) {
-        tracing::debug!(peer = %node, ?endpoints, "magicsock: got call-me-maybe, pinging endpoints");
+        rusty_log::debug!(peer = %node, ?endpoints, "magicsock: got call-me-maybe, pinging endpoints");
         for ep in endpoints {
             self.add_candidate(node, ep);
             self.send_ping(node, ep).await;
@@ -429,7 +429,7 @@ impl MagicSock {
         let pkt = ts_disco::seal(&self.disco, &paths.disco_key, &ping);
         self.pending.insert(tx, (node, endpoint, Instant::now()));
         if let Err(e) = self.udp.send_to(&pkt, endpoint).await {
-            tracing::trace!(%endpoint, "magicsock: ping send failed: {e}");
+            rusty_log::trace!(%endpoint, "magicsock: ping send failed: {e}");
         }
     }
 }

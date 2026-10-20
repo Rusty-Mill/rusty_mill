@@ -208,7 +208,7 @@ impl Stack {
             addrs.clear();
             let _ = addrs.push(cidr);
         });
-        tracing::info!(%ip, "ts-net: stack address set");
+        rusty_log::info!(%ip, "ts-net: stack address set");
     }
 
     fn bind(&mut self, port: u16) -> mpsc::Receiver<TcpStream> {
@@ -222,7 +222,7 @@ impl Stack {
             listening,
             accept_tx,
         });
-        tracing::info!(port, "ts-net: listening");
+        rusty_log::info!(port, "ts-net: listening");
         accept_rx
     }
 
@@ -304,7 +304,7 @@ impl Stack {
                 // Deliver the connection; if the backlog is full or the
                 // listener is gone, drop it (the peer will retry / reset).
                 if listener.accept_tx.try_send(stream).is_err() {
-                    tracing::debug!(port, "ts-net: accept backlog full, dropping connection");
+                    rusty_log::debug!(port, "ts-net: accept backlog full, dropping connection");
                     self.reap(id);
                 }
             }

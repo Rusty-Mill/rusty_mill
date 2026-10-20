@@ -16,7 +16,7 @@ tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "macros"
 crypto_box.workspace = true
 rusty_http = { workspace = true, features = ["tokio"] }
 thiserror.workspace = true
-tracing.workspace = true
+rusty_log = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

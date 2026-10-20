@@ -15,7 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "macros"] }
 rusty_http = { workspace = true, features = ["tokio"] }
-tracing.workspace = true
+rusty_log = { workspace = true }
 thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]
