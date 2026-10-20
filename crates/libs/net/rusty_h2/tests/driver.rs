@@ -1233,6 +1233,9 @@ async fn goaway_server() -> (
     .await
     .expect("the server's SETTINGS");
     let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    // Frames are applied in order, so the PING's ACK means the GOAWAY sent
+    // before it has been processed too.
+    barrier(&mut raw).await;
     (raw, respond, knobs, task, acceptor)
 }
 
