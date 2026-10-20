@@ -681,14 +681,14 @@ fn vk_to_keycode(vk: usize) -> KeyCode {
 #[cfg(windows)]
 fn handle_wm_char(pending_surrogate: &mut Option<u16>, unit: u16, events: &mut Vec<Event>) {
     let mut handled = false;
-    if let Some(high) = pending_surrogate.take() {
-        if (0xDC00..=0xDFFF).contains(&unit) {
-            let scalar = 0x10000 + (((high as u32) - 0xD800) << 10) + ((unit as u32) - 0xDC00);
-            if let Some(ch) = char::from_u32(scalar) {
-                events.push(Event::ReceivedCharacter(ch));
-            }
-            handled = true;
+    if let Some(high) = pending_surrogate.take()
+        && (0xDC00..=0xDFFF).contains(&unit)
+    {
+        let scalar = 0x10000 + (((high as u32) - 0xD800) << 10) + ((unit as u32) - 0xDC00);
+        if let Some(ch) = char::from_u32(scalar) {
+            events.push(Event::ReceivedCharacter(ch));
         }
+        handled = true;
     }
     if !handled {
         if (0xD800..=0xDBFF).contains(&unit) {
