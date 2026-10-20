@@ -49,3 +49,8 @@ Python isolation, bundled first-party code, fixed argv, process deadlines and
 output limits from ADR-0014 are retained. Goal execution, BBP hosting, sandboxing,
 approvals and publication behavior are unchanged. No new persistence format or
 migration is introduced in Rusty Multimodal DB.
+
+The bundled program is sent through the existing process seam's stdin to
+`python3 -I - <repo> [request]`. Passing its growing source in `-c` exceeded
+Windows' CreateProcess command-line limit (error 206). Stdin script mode avoids
+that limit while preserving isolated imports and avoiding temporary script files.

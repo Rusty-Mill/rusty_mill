@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Windows inspection launch uses stdin for bundled source, retaining `-I`, deadlines and output bounds instead of exceeding the command-line limit.
 - Stage 1 revision-bound proposed-change impact through `inspect --impact`, joining CI dependency evidence, Millboard ownership and complete RemindMe durable requirements; detects requirement revision changes (ADR-0016).
 - Opt-in `maintain` connects versioned repository findings to one sandboxed BBP task, with deterministic scope, durable recovery, human approvals, reverse-dependency validation and explicit draft PR publication (ADR-0015).
 - Required CI evidence for pause/adoption across Orch processes; real deadline-ending launch-loop recovery coverage.

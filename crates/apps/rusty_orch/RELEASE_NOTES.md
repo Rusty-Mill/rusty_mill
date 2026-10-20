@@ -7,6 +7,8 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 ## Revision-bound change impact
 **2026-10-20**
 
+- Bundled inspection source travels over stdin, avoiding Windows process-launch error 206 while preserving Python isolation and process limits.
+
 - `inspect --impact request.json` reports direct/transitive consumers, logical applications, binding requirements and required validation without execution.
 - Complete RemindMe inventories preserve inactive contracts; revision comparison detects edits and withdrawals. Millboard ownership supports multiple projects per repository.
 - Unknown consumers broaden validation. Reports bind clean source and input revisions; snapshot freshness requires refreshing exports.
