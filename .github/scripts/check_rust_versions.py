@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
 """Fail when a workspace crate declares a `rust-version` below what its dependencies declare.
 
-Read `cargo metadata` JSON (default features, so optional dependencies a plain build
-does not pull are not counted) from argv[1]. For every workspace member that declares
-`rust-version`, take the highest `rust-version` declared by any package in its resolved
-normal and build dependency closure (an edition-2024 package counts as 1.85) and report
-the member if its own declaration is lower. This compares declarations; it does not
-build at the old toolchain.
+Read `cargo metadata` JSON from argv[1]. For every workspace member that declares
+`rust-version`, use `cargo tree -p MEMBER` to obtain that member's independent
+default-feature normal/build closure. Take the highest `rust-version` declared by any
+package in that closure (an edition-2024 package counts as 1.85) and report the member
+if its own declaration is lower. This compares declarations; it does not build at the
+old toolchain.
 """
 import json
+import re
+import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-EDITION_2024_FLOOR = (1, 85)
+EDITION_2024_FLOOR = (1, 85, 0)
 
 
-def _version(text: str | None) -> tuple[int, int]:
-    """Parse `major.minor[.patch]` as (major, minor); no declaration is (0, 0)."""
+def _version(text: str | None) -> tuple[int, int, int]:
+    """Parse and zero-pad `major[.minor[.patch]]`; no declaration is 0.0.0."""
     if not text:
-        return (0, 0)
+        return (0, 0, 0)
     parts = [int(p) for p in text.split(".")]
-    return (parts[0], parts[1] if len(parts) > 1 else 0)
+    return tuple((parts + [0, 0])[:3])
 
 
-def _floor(pkg: dict) -> tuple[int, int]:
+def _floor(pkg: dict) -> tuple[int, int, int]:
     """The toolchain floor a package declares, or implies through its edition."""
-    implied = EDITION_2024_FLOOR if pkg.get("edition") == "2024" else (0, 0)
+    implied = EDITION_2024_FLOOR if pkg.get("edition") == "2024" else (0, 0, 0)
     return max(_version(pkg.get("rust_version")), implied)
 
 
@@ -53,18 +56,82 @@ def rust_version_violations(metadata: dict) -> list[str]:
             continue
         needed, via = max(
             ((_floor(packages[dep]), packages[dep]["name"]) for dep in _closure(member, nodes)),
-            default=((0, 0), ""),
+            default=((0, 0, 0), ""),
         )
         if needed > _version(declared):
             violations.append(
                 f"{packages[member]['name']}: declares rust-version {declared} but "
-                f"`{via}` in its dependencies needs {needed[0]}.{needed[1]}"
+                f"`{via}` in its dependencies needs {'.'.join(map(str, needed))}"
+            )
+    return sorted(violations)
+
+
+def _default_package_keys(member: dict, workspace_root: Path, cargo: str = "cargo") -> set[tuple[str, str]]:
+    """Return (name, version) keys from one member's default normal/build graph."""
+    result = subprocess.run(
+        [
+            cargo,
+            "tree",
+            "--locked",
+            "-p",
+            member["name"],
+            "--edges",
+            "normal,build",
+            "--prefix",
+            "none",
+            "--format",
+            "{p}",
+        ],
+        cwd=workspace_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    keys = set()
+    for line in result.stdout.splitlines():
+        match = re.match(r"^(\S+) v(\S+)", line)
+        if match:
+            keys.add((match.group(1), match.group(2)))
+    return keys
+
+
+def workspace_default_violations(metadata: dict, workspace_root: Path, cargo: str = "cargo") -> list[str]:
+    """Check each member against its separately selected Cargo default-build graph."""
+    packages = {pkg["id"]: pkg for pkg in metadata["packages"]}
+    by_key: dict[tuple[str, str], list[dict]] = {}
+    for package in metadata["packages"]:
+        by_key.setdefault((package["name"], package["version"]), []).append(package)
+
+    members = [
+        packages[member_id]
+        for member_id in metadata["workspace_members"]
+        if packages[member_id].get("rust_version")
+    ]
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        graphs = executor.map(
+            lambda member: _default_package_keys(member, workspace_root, cargo), members
+        )
+
+    violations = []
+    for member, keys in zip(members, graphs, strict=True):
+        declared = member["rust_version"]
+        closure = [pkg for key in keys for pkg in by_key.get(key, [])]
+        needed, via = max(
+            ((_floor(pkg), pkg["name"]) for pkg in closure if pkg["id"] != member["id"]),
+            default=((0, 0, 0), ""),
+        )
+        if needed > _version(declared):
+            violations.append(
+                f"{member['name']}: declares rust-version {declared} but "
+                f"`{via}` in its dependencies needs {'.'.join(map(str, needed))}"
             )
     return sorted(violations)
 
 
 def main() -> None:
-    violations = rust_version_violations(json.loads(Path(sys.argv[1]).read_text()))
+    metadata = json.loads(Path(sys.argv[1]).read_text())
+    workspace_root = Path(metadata["workspace_root"])
+    violations = workspace_default_violations(metadata, workspace_root)
     if violations:
         print(
             "A crate declares a rust-version below what its dependencies declare; "

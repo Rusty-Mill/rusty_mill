@@ -553,9 +553,12 @@ impl Window {
                     }
                     x11::BUTTON_RELEASE => {
                         let button = ev.button.button;
-                        if button != 4 && button != 5 {
-                            if let Some(btn) = x11_button_to_mouse(button) {
-                                events.push(Event::MouseReleased(btn));
+                        match button {
+                            4 | 5 => {}
+                            other => {
+                                if let Some(btn) = x11_button_to_mouse(other) {
+                                    events.push(Event::MouseReleased(btn));
+                                }
                             }
                         }
                     }
