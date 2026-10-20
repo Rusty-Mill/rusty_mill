@@ -17,7 +17,7 @@ use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::error::Error;
 use crate::trust::{
     build_client_config, build_client_config_with_alpn, build_client_config_with_identity,
-    TrustPolicy,
+    build_client_config_with_identity_and_alpn, TrustPolicy,
 };
 
 /// A TLS client connection layered over any `rusty_tokio`
@@ -96,15 +96,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsStream<S> {
         client_key_der: Vec<u8>,
         alpn_protocols: Vec<Vec<u8>>,
     ) -> Result<Self, Error> {
-        let _ = (
-            io,
-            server_name,
-            policy,
-            client_cert_chain_der,
-            client_key_der,
-            alpn_protocols,
-        );
-        todo!()
+        let cert_chain: Vec<CertificateDer<'static>> = client_cert_chain_der
+            .into_iter()
+            .map(CertificateDer::from)
+            .collect();
+        let key = PrivateKeyDer::try_from(client_key_der)
+            .map_err(|reason| Error::InvalidPrivateKey(reason.to_string()))?;
+        let config =
+            build_client_config_with_identity_and_alpn(policy, cert_chain, key, alpn_protocols)?;
+        let name = ServerName::try_from(server_name.to_string())
+            .map_err(|_| Error::InvalidServerName(server_name.to_string()))?;
+        let conn = ClientConnection::new(config, name)?;
+        Ok(Self { conn, io })
     }
 
     /// Like [`AsyncTlsStream::new`], but offers `alpn_protocols` (each

@@ -227,6 +227,20 @@ pub(crate) fn build_client_config_with_identity(
     Ok(Arc::new(config))
 }
 
+/// Both of the above: presents `cert_chain`/`key` as the client certificate
+/// *and* offers `alpn_protocols`, for a server that requires mutual TLS and
+/// negotiates an application protocol.
+pub(crate) fn build_client_config_with_identity_and_alpn(
+    policy: &TrustPolicy,
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    alpn_protocols: Vec<Vec<u8>>,
+) -> Result<Arc<ClientConfig>, Error> {
+    let mut config = client_config_builder(policy)?.with_client_auth_cert(cert_chain, key)?;
+    config.alpn_protocols = alpn_protocols;
+    Ok(Arc::new(config))
+}
+
 /// Like [`build_client_config`], but offers `alpn_protocols` during the
 /// handshake (`rustls::ClientConfig::alpn_protocols` is a plain field set
 /// after building, not part of the typestate builder chain).
