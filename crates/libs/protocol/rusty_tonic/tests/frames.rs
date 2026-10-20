@@ -204,6 +204,49 @@ fn a_split_oversized_prefix_rejects_before_copying_the_body() {
     assert_eq!(d.next_message().unwrap_err(), first);
 }
 
+fn assert_valid_frame_precedes_rejected_prefix(rejected: &[u8], code: Code) {
+    let valid = encode_frame(b"a").unwrap();
+    let mut together = valid.clone();
+    together.extend_from_slice(rejected);
+
+    let mut single_push = FrameDecoder::new(10);
+    single_push.push(&together);
+    assert_eq!(single_push.next_message().unwrap(), Some(b"a".to_vec()));
+    let single_error = single_push.next_message().unwrap_err();
+    assert_eq!(single_error.code(), code);
+    assert_eq!(single_push.next_message().unwrap_err(), single_error);
+
+    let mut split_push = FrameDecoder::new(10);
+    split_push.push(&valid);
+    assert_eq!(split_push.next_message().unwrap(), Some(b"a".to_vec()));
+    split_push.push(rejected);
+    let split_error = split_push.next_message().unwrap_err();
+    assert_eq!(split_error.code(), code);
+    assert_eq!(split_push.next_message().unwrap_err(), split_error);
+}
+
+#[test]
+fn valid_frames_preceding_rejected_prefixes_are_delivered_independent_of_chunking() {
+    assert_valid_frame_precedes_rejected_prefix(&[0, 0, 0, 0, 11], Code::ResourceExhausted);
+    assert_valid_frame_precedes_rejected_prefix(&[2, 0, 0, 0, 0], Code::Internal);
+    assert_valid_frame_precedes_rejected_prefix(&[1, 0, 0, 0, 0], Code::Unimplemented);
+}
+
+#[test]
+fn a_valid_frame_precedes_a_rejected_prefix_split_across_pushes() {
+    let valid = encode_frame(b"a").unwrap();
+    let mut d = FrameDecoder::new(10);
+    let mut first = valid;
+    first.extend_from_slice(&[0, 0, 0]);
+    d.push(&first);
+    d.push(&[0, 11]);
+
+    assert_eq!(d.next_message().unwrap(), Some(b"a".to_vec()));
+    let error = d.next_message().unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(d.next_message().unwrap_err(), error);
+}
+
 #[cfg(target_pointer_width = "32")]
 #[test]
 fn maximum_wire_length_overflow_is_a_terminal_resource_exhausted_error() {

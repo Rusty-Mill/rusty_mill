@@ -72,6 +72,14 @@ impl FrameDecoder {
 
     /// The next whole message, `Ok(None)` if more bytes are needed.
     pub fn next_message(&mut self) -> Result<Option<Vec<u8>>, Status> {
+        // A later prefix can be rejected in the same push that completed earlier frames.
+        // Deliver those already-validated frames before exposing the terminal error.
+        if self.pos < self.buf.len() {
+            return self.take().map_err(|status| {
+                self.fail(status.clone());
+                status
+            });
+        }
         if let Some(status) = &self.failed {
             return Err(status.clone());
         }
@@ -125,9 +133,9 @@ impl FrameDecoder {
 
     fn fail(&mut self, status: Status) {
         self.failed = Some(status);
-        self.buf.clear();
-        self.pos = 0;
-        self.ingest_pos = 0;
+        // `ingest_pos` is the start of the rejected prefix. Everything before it is a
+        // complete, validated frame and must remain observable regardless of chunking.
+        self.buf.truncate(self.ingest_pos);
         self.ingest_frame_end = None;
     }
 
