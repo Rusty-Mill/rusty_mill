@@ -7,7 +7,7 @@ use rusty_h2::client::builder::Builder as ClientBuilder;
 use rusty_h2::driver::{self, Body, ClientHandle, Error, Request, Respond};
 use rusty_h2::error::ErrorCode;
 use rusty_h2::frame::header::{FrameHeader, FRAME_HEADER_LEN};
-use rusty_h2::frame::{DataFrame, Frame, HeadersFrame, SettingsFrame};
+use rusty_h2::frame::{DataFrame, Frame, HeadersFrame, SettingId, SettingsFrame};
 use rusty_h2::hpack::{Encoder, HeaderField};
 use rusty_h2::server::builder::Builder as ServerBuilder;
 use rusty_h2::CONNECTION_PREFACE;
@@ -341,11 +341,21 @@ async fn read_frame<R: AsyncReadExt + Unpin + Send>(r: &mut R) -> Option<Frame> 
 
 /// A raw client that has said hello to a driven server.
 async fn raw_client() -> (TcpStream, driver::Acceptor) {
+    let (raw, acceptor, _driver) = raw_client_with_driver().await;
+    (raw, acceptor)
+}
+
+/// Like [`raw_client`], also returning the server's driver task.
+async fn raw_client_with_driver() -> (
+    TcpStream,
+    driver::Acceptor,
+    rusty_tokio::JoinHandle<Result<(), Error>>,
+) {
     let (raw, b) = pair().await;
     let mut small = ServerBuilder::new();
     small.initial_window_size(10_000);
     let (acceptor, sdrv) = driver::server(b, small);
-    rusty_tokio::spawn(sdrv);
+    let task = rusty_tokio::spawn(sdrv);
     raw.write_all(CONNECTION_PREFACE).await.unwrap();
     raw.write_all(&wire(&Frame::Settings(SettingsFrame {
         ack: false,
@@ -353,7 +363,7 @@ async fn raw_client() -> (TcpStream, driver::Acceptor) {
     })))
     .await
     .unwrap();
-    (raw, acceptor)
+    (raw, acceptor, task)
 }
 
 fn raw_headers(id: u32, end_stream: bool) -> Frame {
@@ -556,4 +566,411 @@ async fn a_server_in_graceful_shutdown_refuses_streams_it_did_not_see_coming() {
         (reset.stream_id, reset.error_code),
         (3, ErrorCode::RefusedStream)
     );
+}
+
+// ---- review round: lifecycle, flushing and wake-ups ---------------------
+
+/// Reads frames off a raw socket until `pick` returns something.
+async fn read_until<T>(raw: &mut TcpStream, mut pick: impl FnMut(Frame) -> Option<T>) -> Option<T> {
+    timeout(Duration::from_secs(5), async {
+        while let Some(f) = read_frame(raw).await {
+            if let Some(t) = pick(f) {
+                return Some(t);
+            }
+        }
+        None
+    })
+    .await
+    .unwrap_or(None)
+}
+
+fn raw_response(id: u32, end_stream: bool) -> Frame {
+    let mut block = Vec::new();
+    Encoder::default().encode(&[hf(":status", "200")], &mut block);
+    Frame::Headers(HeadersFrame {
+        stream_id: id,
+        end_stream,
+        end_headers: true,
+        priority: None,
+        header_block_fragment: block,
+    })
+}
+
+#[rusty_tokio::test]
+async fn a_default_servers_opening_settings_never_enable_push() {
+    let (a, mut raw) = pair().await;
+    let (_acceptor, sdrv) = driver::server(a, ServerBuilder::new());
+    rusty_tokio::spawn(sdrv);
+    raw.write_all(CONNECTION_PREFACE).await.unwrap();
+    raw.write_all(&wire(&Frame::Settings(SettingsFrame {
+        ack: false,
+        settings: vec![],
+    })))
+    .await
+    .unwrap();
+    let settings = read_until(&mut raw, |f| match f {
+        Frame::Settings(s) if !s.ack => Some(s),
+        _ => None,
+    })
+    .await
+    .expect("the server's SETTINGS");
+    // RFC 9113 §6.5.2: a server must not send ENABLE_PUSH = 1.
+    assert!(
+        settings
+            .settings
+            .iter()
+            .all(|x| x.id != SettingId::EnablePush || x.value == 0),
+        "{settings:?}"
+    );
+}
+
+#[rusty_tokio::test]
+async fn an_empty_end_stream_wakes_a_pending_request_body_read() {
+    let (mut raw, mut acceptor) = raw_client().await;
+    raw.write_all(&wire(&raw_headers(1, false))).await.unwrap();
+    let (mut req, _respond) = acceptor.accept().await.unwrap().unwrap();
+    let reader = rusty_tokio::spawn(async move { req.body.next().await.is_none() });
+    rusty_tokio::time::sleep(Duration::from_millis(150)).await; // the read is pending
+    raw.write_all(&wire(&Frame::Data(DataFrame::new(1, Vec::new(), true))))
+        .await
+        .unwrap();
+    assert!(timeout(Duration::from_secs(5), reader)
+        .await
+        .unwrap()
+        .unwrap());
+}
+
+#[rusty_tokio::test]
+async fn an_empty_end_stream_wakes_a_pending_response_body_read() {
+    let (a, raw) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    rusty_tokio::spawn(cdrv);
+    raw.write_all(&wire(&Frame::Settings(SettingsFrame {
+        ack: false,
+        settings: vec![],
+    })))
+    .await
+    .unwrap();
+    let (_s, resp) = h.send_request(request("/svc/Empty"), true).await.unwrap();
+    raw.write_all(&wire(&raw_response(1, false))).await.unwrap();
+    let mut resp = timeout(Duration::from_secs(5), resp)
+        .await
+        .unwrap()
+        .unwrap();
+    let reader = rusty_tokio::spawn(async move { resp.body.next().await.is_none() });
+    rusty_tokio::time::sleep(Duration::from_millis(150)).await;
+    raw.write_all(&wire(&Frame::Data(DataFrame::new(1, Vec::new(), true))))
+        .await
+        .unwrap();
+    assert!(timeout(Duration::from_secs(5), reader)
+        .await
+        .unwrap()
+        .unwrap());
+}
+
+#[rusty_tokio::test]
+async fn a_driver_dropped_before_its_first_poll_closes_the_handles() {
+    let (a, b) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    let (mut acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    drop(cdrv);
+    drop(sdrv);
+    let call = timeout(
+        Duration::from_secs(5),
+        h.send_request(request("/svc/Echo"), true),
+    )
+    .await
+    .expect("a closed connection must not leave the request waiting");
+    assert!(matches!(call, Err(Error::Closed)));
+    let ping = timeout(Duration::from_secs(5), h.ping()).await.unwrap();
+    assert!(matches!(ping, Err(Error::Closed)));
+    let accepted = timeout(Duration::from_secs(5), acceptor.accept())
+        .await
+        .unwrap();
+    assert!(accepted.is_none());
+}
+
+#[rusty_tokio::test]
+async fn an_aborted_driver_fails_every_pending_operation() {
+    let (a, b) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    let (mut acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    let client_task = rusty_tokio::spawn(cdrv);
+    let server_task = rusty_tokio::spawn(sdrv);
+    let (mut send, resp) = h.send_request(request("/svc/Hang"), false).await.unwrap();
+    send.send_data(b"x".to_vec(), false).await.unwrap();
+    let (mut req, _respond) = acceptor.accept().await.unwrap().unwrap();
+    assert!(matches!(req.body.next().await, Some(Ok(Body::Data(_)))));
+
+    let pending_resp = rusty_tokio::spawn(resp);
+    let pending_body = rusty_tokio::spawn(async move { req.body.next().await });
+    let h2 = h.clone();
+    let pending_ping = rusty_tokio::spawn(async move { h2.ping().await });
+    let pending_accept = rusty_tokio::spawn(async move { acceptor.accept().await.is_none() });
+    rusty_tokio::time::sleep(Duration::from_millis(150)).await;
+
+    client_task.abort();
+    server_task.abort();
+    let five = Duration::from_secs(5);
+    assert!(timeout(five, pending_resp).await.unwrap().unwrap().is_err());
+    assert!(matches!(
+        timeout(five, pending_body).await.unwrap().unwrap(),
+        Some(Err(_)) | None
+    ));
+    let ping = timeout(five, pending_ping).await.unwrap().unwrap();
+    assert!(ping.is_err());
+    assert!(timeout(five, pending_accept).await.unwrap().unwrap());
+}
+
+#[rusty_tokio::test]
+async fn a_stream_reset_before_it_is_accepted_is_reclaimed() {
+    let (mut raw, mut acceptor) = raw_client().await;
+    raw.write_all(&wire(&raw_headers(1, false))).await.unwrap();
+    raw.write_all(&wire(&Frame::RstStream(rusty_h2::frame::RstStreamFrame {
+        stream_id: 1,
+        error_code: ErrorCode::Cancel,
+    })))
+    .await
+    .unwrap();
+    raw.write_all(&wire(&raw_headers(3, true))).await.unwrap();
+    let (req, _respond) = timeout(Duration::from_secs(5), acceptor.accept())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        req.headers
+            .iter()
+            .find(|h| h.name == b":path")
+            .map(|h| h.value.clone()),
+        Some(b"/svc/Raw".to_vec())
+    );
+    assert!(
+        timeout(Duration::from_millis(300), acceptor.accept())
+            .await
+            .is_err(),
+        "the reset stream must not be offered later"
+    );
+}
+
+#[rusty_tokio::test]
+async fn unaccepted_requests_are_bounded() {
+    let (mut raw, mut acceptor) = raw_client().await;
+    let mut written = 0u32;
+    for i in 0..600u32 {
+        raw.write_all(&wire(&raw_headers(2 * i + 1, false)))
+            .await
+            .unwrap();
+        written += 1;
+    }
+    assert_eq!(written, 600);
+    let refused = read_until(&mut raw, |f| match f {
+        Frame::RstStream(r) if r.error_code == ErrorCode::RefusedStream => Some(r.stream_id),
+        _ => None,
+    })
+    .await;
+    assert!(
+        refused.is_some(),
+        "requests beyond the pending limit are refused"
+    );
+    let mut accepted = 0;
+    while let Ok(Some(Ok(_))) = timeout(Duration::from_millis(200), acceptor.accept()).await {
+        accepted += 1;
+    }
+    assert!(accepted > 0 && accepted < 600, "accepted {accepted}");
+}
+
+#[rusty_tokio::test]
+async fn dropping_the_acceptor_resets_unaccepted_requests_and_the_driver_finishes() {
+    let (mut raw, acceptor, task) = raw_client_with_driver().await;
+    raw.write_all(&wire(&raw_headers(1, false))).await.unwrap();
+    raw.write_all(&wire(&raw_headers(3, true))).await.unwrap();
+    rusty_tokio::time::sleep(Duration::from_millis(150)).await;
+    drop(acceptor);
+    let mut reset = std::collections::BTreeSet::new();
+    read_until(&mut raw, |f| {
+        if let Frame::RstStream(r) = f {
+            reset.insert(r.stream_id);
+        }
+        (reset.len() == 2).then_some(())
+    })
+    .await
+    .expect("both unaccepted requests are reset");
+    assert!(timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_ok());
+}
+
+#[rusty_tokio::test]
+async fn a_response_that_cannot_be_encoded_resets_the_stream() {
+    let (mut raw, mut acceptor, task) = raw_client_with_driver().await;
+    raw.write_all(&wire(&raw_headers(1, true))).await.unwrap();
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    // Larger than the peer's maximum frame size: there is no CONTINUATION on send.
+    let huge = vec![hf(":status", "200"), hf("x-big", &"v".repeat(40_000))];
+    assert!(respond.send_response(huge, true).await.is_err());
+    let rst = read_until(&mut raw, |f| match f {
+        Frame::RstStream(r) => Some(r),
+        _ => None,
+    })
+    .await
+    .expect("the peer must be told");
+    assert_eq!(
+        (rst.stream_id, rst.error_code),
+        (1, ErrorCode::InternalError)
+    );
+    acceptor.graceful_shutdown();
+    assert!(timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_ok());
+}
+
+/// A transport that buffers writes until flushed and can misbehave on shutdown.
+struct Buffered {
+    inner: TcpStream,
+    buf: Vec<u8>,
+    shutdown_pending_once: bool,
+    shutdown_error: bool,
+    shut_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Buffered {
+    fn new(inner: TcpStream) -> Buffered {
+        Buffered {
+            inner,
+            buf: Vec::new(),
+            shutdown_pending_once: false,
+            shutdown_error: false,
+            shut_down: Default::default(),
+        }
+    }
+
+    fn drain(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        use rusty_tokio::io::AsyncWrite;
+        while !self.buf.is_empty() {
+            match std::pin::Pin::new(&mut self.inner).poll_write(cx, &self.buf) {
+                std::task::Poll::Ready(Ok(n)) => {
+                    self.buf.drain(..n);
+                }
+                other => return other.map(|r| r.map(|_| ())),
+            }
+        }
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+}
+
+impl rusty_tokio::io::AsyncRead for Buffered {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut rusty_tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl rusty_tokio::io::AsyncWrite for Buffered {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.buf.extend_from_slice(data);
+        std::task::Poll::Ready(Ok(data.len()))
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.drain(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use rusty_tokio::io::AsyncWrite;
+        if self.shutdown_pending_once {
+            self.shutdown_pending_once = false;
+            cx.waker().wake_by_ref();
+            return std::task::Poll::Pending;
+        }
+        if self.shutdown_error {
+            return std::task::Poll::Ready(Err(std::io::Error::other("shutdown failed")));
+        }
+        match self.drain(cx) {
+            std::task::Poll::Ready(Ok(())) => {}
+            other => return other,
+        }
+        let done = std::pin::Pin::new(&mut self.inner).poll_shutdown(cx);
+        if done.is_ready() {
+            self.shut_down
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        done
+    }
+}
+
+#[rusty_tokio::test]
+async fn the_driver_flushes_a_buffered_transport() {
+    let (a, mut raw) = pair().await;
+    let (_acceptor, sdrv) = driver::server(Buffered::new(a), ServerBuilder::new());
+    rusty_tokio::spawn(sdrv);
+    raw.write_all(CONNECTION_PREFACE).await.unwrap();
+    raw.write_all(&wire(&Frame::Settings(SettingsFrame {
+        ack: false,
+        settings: vec![],
+    })))
+    .await
+    .unwrap();
+    // Without a flush the server's SETTINGS would sit in the transport's buffer.
+    let got = read_until(&mut raw, |f| {
+        matches!(f, Frame::Settings(s) if !s.ack).then_some(())
+    })
+    .await;
+    assert!(got.is_some(), "the handshake bytes must reach the peer");
+}
+
+#[rusty_tokio::test]
+async fn the_driver_waits_for_shutdown_to_complete() {
+    let (a, b) = pair().await;
+    let mut transport = Buffered::new(a);
+    transport.shutdown_pending_once = true;
+    let shut_down = transport.shut_down.clone();
+    let (h, cdrv) = driver::client(transport, ClientBuilder::new());
+    let (_acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    rusty_tokio::spawn(sdrv);
+    let task = rusty_tokio::spawn(cdrv);
+    drop(h);
+    assert!(timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_ok());
+    assert!(
+        shut_down.load(std::sync::atomic::Ordering::SeqCst),
+        "the driver must not finish before the transport's shutdown completes"
+    );
+}
+
+#[rusty_tokio::test]
+async fn a_failed_shutdown_is_reported() {
+    let (a, b) = pair().await;
+    let mut transport = Buffered::new(a);
+    transport.shutdown_error = true;
+    let (h, cdrv) = driver::client(transport, ClientBuilder::new());
+    let (_acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    rusty_tokio::spawn(sdrv);
+    let task = rusty_tokio::spawn(cdrv);
+    drop(h);
+    let result = timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(Error::Io(_))), "{result:?}");
 }

@@ -494,3 +494,16 @@ fn the_opening_settings_announce_the_local_settings() {
     assert_eq!(get(SettingId::MaxConcurrentStreams), Some(7));
     assert_eq!(get(SettingId::EnablePush), Some(0));
 }
+
+#[test]
+fn a_servers_opening_settings_never_enable_push() {
+    // RFC 9113 §6.5.2: a client must treat ENABLE_PUSH = 1 from a server as
+    // a protocol error, so a default server cannot send it.
+    let Frame::Settings(f) = server().settings_frame() else {
+        panic!("not SETTINGS")
+    };
+    assert!(f
+        .settings
+        .iter()
+        .all(|s| s.id != SettingId::EnablePush || s.value == 0));
+}
