@@ -122,9 +122,12 @@ pub(super) struct Shared {
     pub(super) out: Vec<u8>,
     /// Bytes the driver has taken out of `out` and not yet written.
     pub(super) inflight: usize,
-    /// Every byte ever queued: lets the driver tell whether what it failed
-    /// to deliver was only the closing GOAWAY.
+    /// Every byte ever queued, and the position just after the last frame
+    /// that carries an application's data (HEADERS, DATA, RST_STREAM). Lets
+    /// the driver tell whether what it failed to deliver was only protocol
+    /// housekeeping (SETTINGS, acks, the closing GOAWAY).
     pub(super) queued_total: u64,
+    pub(super) app_end: u64,
     pub(super) driver_waker: Option<Waker>,
     pub(super) streams: HashMap<u32, Stream>,
     /// Streams not yet closed in both directions.
@@ -164,6 +167,7 @@ impl Shared {
             out: Vec::new(),
             inflight: 0,
             queued_total: 0,
+            app_end: 0,
             driver_waker: None,
             streams: HashMap::new(),
             active: 0,
@@ -195,11 +199,14 @@ impl Shared {
     }
 
     pub(super) fn queue(&mut self, frames: impl IntoIterator<Item = Frame>) {
-        let before = self.out.len();
         for f in frames {
+            let before = self.out.len();
             f.encode(&mut self.out);
+            self.queued_total += (self.out.len() - before) as u64;
+            if matches!(f, Frame::Headers(_) | Frame::Data(_) | Frame::RstStream(_)) {
+                self.app_end = self.queued_total;
+            }
         }
-        self.queued_total += (self.out.len() - before) as u64;
         self.wake_driver();
     }
 

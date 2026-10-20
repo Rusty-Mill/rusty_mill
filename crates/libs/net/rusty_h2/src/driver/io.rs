@@ -47,9 +47,6 @@ pub struct ConnectionDriver<T> {
     /// Bytes the transport has accepted, and of those, flushed.
     pub(super) accepted: u64,
     pub(super) flushed: u64,
-    /// Bytes queued before the connection began to close: everything the
-    /// peer needs of this connection lies before it.
-    pub(super) final_mark: Option<u64>,
 }
 
 impl<T> Drop for ConnectionDriver<T> {
@@ -207,7 +204,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
         }
         let mut sh = lock(&self.shared);
         if self.eof {
-            self.final_mark = Some(sh.queued_total);
             let clean = sh.active == 0;
             sh.close_all();
             self.finishing = Some(if clean {
@@ -219,7 +215,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
         }
         let wound_down = sh.closing || sh.conn.goaway_received().is_some();
         if wound_down && sh.active == 0 && sh.accept_queue.is_empty() {
-            self.final_mark = Some(sh.queued_total);
             sh.send_goaway(ErrorCode::NoError);
             sh.close_all();
             self.finishing = Some(Ok(()));
@@ -234,12 +229,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
     }
 
     /// Whether a failed write or flush lost nothing the peer needed: it is the
-    /// peer having hung up first, and everything queued before the closing
-    /// GOAWAY was already flushed. A GOAWAY does not acknowledge delivery
-    /// (RFC 9113 §6.8), so an undelivered response is a failure.
-    fn only_the_closing_goaway_was_lost(&self, e: &Error) -> bool {
+    /// peer having hung up first, and every frame carrying application data
+    /// (headers, body, trailers, resets) was already flushed, so only
+    /// housekeeping like SETTINGS, acks or the closing GOAWAY was lost. A
+    /// GOAWAY does not acknowledge delivery (RFC 9113 §6.8), so an
+    /// undelivered response is a failure.
+    fn only_housekeeping_was_lost(&self, e: &Error) -> bool {
         let Error::Io(io) = e else { return false };
-        self.peer_closed_first(io) && self.final_mark.is_some_and(|mark| self.flushed >= mark)
+        self.peer_closed_first(io) && self.flushed >= lock(&self.shared).app_end
     }
 
     fn fail(&mut self, e: Error) {
@@ -274,7 +271,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Future for ConnectionDr
         if let Poll::Ready(Err(e)) = written {
             // An earlier failure stands; otherwise a failed final write or
             // flush fails the connection, unless the peer had already gone.
-            let benign = this.only_the_closing_goaway_was_lost(&e);
+            let benign = this.only_housekeeping_was_lost(&e);
             let outcome = match this.finishing.take() {
                 Some(Err(first)) => Err(first),
                 Some(Ok(())) if benign => Ok(()),

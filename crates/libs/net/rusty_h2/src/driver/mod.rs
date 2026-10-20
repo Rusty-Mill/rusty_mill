@@ -532,7 +532,6 @@ fn driver<T>(io: T, shared: Handle, server: bool, max_frame: u32) -> ConnectionD
         wpos: 0,
         accepted: 0,
         flushed: 0,
-        final_mark: None,
     }
 }
 

@@ -1319,3 +1319,37 @@ async fn losing_only_the_final_goaway_to_a_peer_that_hung_up_is_not_a_failure() 
         drop(h);
     }
 }
+
+#[rusty_tokio::test]
+async fn losing_only_housekeeping_to_a_peer_that_already_left_is_not_a_failure() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for code in [2u8, 3, 4] {
+        let (raw, b) = pair().await;
+        // The peer says everything it will say and leaves before the server's
+        // driver has even started, so none of the server's SETTINGS, ACK or
+        // GOAWAY can be delivered. None of it is application data.
+        raw.write_all(CONNECTION_PREFACE).await.unwrap();
+        raw.write_all(&wire(&Frame::Settings(SettingsFrame {
+            ack: false,
+            settings: vec![],
+        })))
+        .await
+        .unwrap();
+        raw.write_all(&wire(&Frame::GoAway(rusty_h2::frame::GoAwayFrame {
+            last_stream_id: 0,
+            error_code: ErrorCode::NoError,
+            debug_data: vec![],
+        })))
+        .await
+        .unwrap();
+        drop(raw);
+        let transport = Buffered::new(b);
+        transport.knobs.write_error_kind.store(code, SeqCst);
+        let (_acceptor, sdrv) = driver::server(transport, ServerBuilder::new());
+        let result = timeout(Duration::from_secs(5), rusty_tokio::spawn(sdrv))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_ok(), "write {:?}: {result:?}", kind(code));
+    }
+}
