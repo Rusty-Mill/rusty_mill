@@ -2,11 +2,11 @@
 """Fail when a workspace crate declares a `rust-version` below what its dependencies declare.
 
 Read `cargo metadata` JSON from argv[1]. For every workspace member that declares
-`rust-version`, use `cargo tree -p MEMBER` to obtain that member's independent
-default-feature normal/build closure. Take the highest `rust-version` declared by any
-package in that closure (an edition-2024 package counts as 1.85) and report the member
-if its own declaration is lower. This compares declarations; it does not build at the
-old toolchain.
+`rust-version`, use `cargo tree -p MEMBER --target all` to obtain that member's
+independent default-feature normal/build closure across target-specific dependencies.
+Take the highest `rust-version` declared by any package in that closure (an
+edition-2024 package counts as 1.85) and report the member if its own declaration is
+lower. This compares declarations; it does not build at the old toolchain.
 """
 import json
 import re
@@ -77,6 +77,8 @@ def _default_package_keys(member: dict, workspace_root: Path, cargo: str = "carg
             member["name"],
             "--edges",
             "normal,build",
+            "--target",
+            "all",
             "--prefix",
             "none",
             "--format",
@@ -96,7 +98,7 @@ def _default_package_keys(member: dict, workspace_root: Path, cargo: str = "carg
 
 
 def workspace_default_violations(metadata: dict, workspace_root: Path, cargo: str = "cargo") -> list[str]:
-    """Check each member against its separately selected Cargo default-build graph."""
+    """Check each member's separately selected, all-target default-build graph."""
     packages = {pkg["id"]: pkg for pkg in metadata["packages"]}
     by_key: dict[tuple[str, str], list[dict]] = {}
     for package in metadata["packages"]:

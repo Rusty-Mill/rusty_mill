@@ -4,12 +4,17 @@ Run from the repo root:
     python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 """
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from check_rust_versions import rust_version_violations, workspace_default_violations
+
+
+SCRIPT = Path(__file__).with_name("check_rust_versions.py")
 
 
 def pkg(name: str, rust_version: str | None = None, edition: str = "2021") -> dict:
@@ -120,6 +125,103 @@ class RustVersionViolationsTests(unittest.TestCase):
             )
             md = json.loads(raw.stdout)
             self.assertEqual(workspace_default_violations(md, root, cargo), [])
+
+
+class ProductionPathTests(unittest.TestCase):
+    def _run_fixture(self, manifests: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        """Run the checker entry point against a real temporary Cargo workspace."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        members = ", ".join(f'"{name}"' for name in manifests)
+        (root / "Cargo.toml").write_text(
+            f'[workspace]\nmembers = [{members}]\nresolver = "2"\n'
+        )
+        for name, manifest in manifests.items():
+            (root / name / "src").mkdir(parents=True)
+            (root / name / "src/lib.rs").write_text("")
+            (root / name / "Cargo.toml").write_text(manifest)
+        subprocess.run(["cargo", "generate-lockfile"], cwd=root, check=True, capture_output=True)
+        metadata_path = root / "metadata.json"
+        with metadata_path.open("w") as output:
+            subprocess.run(
+                ["cargo", "metadata", "--format-version=1"],
+                cwd=root,
+                check=True,
+                stdout=output,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        return subprocess.run(
+            [sys.executable, os.fspath(SCRIPT), os.fspath(metadata_path)],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+
+    @staticmethod
+    def _package(name: str, rust_version: str, extra: str = "") -> str:
+        return (
+            f'[package]\nname="{name}"\nversion="0.1.0"\n'
+            f'edition="2021"\nrust-version="{rust_version}"\n{extra}'
+        )
+
+    def test_main_flags_direct_patch_floor(self) -> None:
+        result = self._run_fixture(
+            {
+                "app": self._package(
+                    "app", "1.85", '[dependencies]\ndep={path="../dep"}\n'
+                ),
+                "dep": self._package("dep", "1.85.1"),
+            }
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("app: declares rust-version 1.85", result.stderr)
+        self.assertIn("needs 1.85.1", result.stderr)
+
+    def test_main_flags_transitive_patch_floor(self) -> None:
+        result = self._run_fixture(
+            {
+                "app": self._package(
+                    "app", "1.85", '[dependencies]\nintermediate={path="../intermediate"}\n'
+                ),
+                "intermediate": self._package(
+                    "intermediate", "1.85", '[dependencies]\ndep={path="../dep"}\n'
+                ),
+                "dep": self._package("dep", "1.85.2"),
+            }
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("app: declares rust-version 1.85", result.stderr)
+        self.assertIn("needs 1.85.2", result.stderr)
+
+    def test_main_flags_build_dependency_floor(self) -> None:
+        result = self._run_fixture(
+            {
+                "app": self._package(
+                    "app", "1.85", '[build-dependencies]\nbuild_dep={path="../build_dep"}\n'
+                ),
+                "build_dep": self._package("build_dep", "1.88"),
+            }
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("app: declares rust-version 1.85", result.stderr)
+        self.assertIn("`build_dep`", result.stderr)
+
+    def test_main_flags_windows_only_dependency_on_linux(self) -> None:
+        result = self._run_fixture(
+            {
+                "app": self._package(
+                    "app",
+                    "1.85",
+                    '[target.\'cfg(windows)\'.dependencies]\nwindows_dep={path="../windows_dep"}\n',
+                ),
+                "windows_dep": self._package("windows_dep", "1.88"),
+            }
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("app: declares rust-version 1.85", result.stderr)
+        self.assertIn("`windows_dep`", result.stderr)
 
 
 if __name__ == "__main__":
