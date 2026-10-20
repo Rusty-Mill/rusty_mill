@@ -12,6 +12,8 @@
 
 pub mod client;
 pub mod connect;
+#[cfg(feature = "rusty-tokio")]
+pub mod driver;
 pub mod error;
 pub mod frame;
 pub mod hpack;
