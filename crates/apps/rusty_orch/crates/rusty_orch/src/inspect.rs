@@ -9,7 +9,41 @@ use orch_cli::{excerpt, CommandRunner};
 use crate::args::ArgsError;
 
 /// Inspection always emits a versioned JSON report. It never opens a task.
-pub const USAGE: &str = "usage: rusty_orch inspect [--repo <dir>]\n\nRead-only repository intelligence as JSON. Requires Cargo, Python 3.11+, a current\nCargo.lock and cached dependencies. No agents, builds, tests or changes run.";
+pub const USAGE: &str = "usage: rusty_orch inspect [--repo <dir>] [--impact <request.json>]\n\nRead-only repository intelligence or a revision-bound proposed-change report.\nRequires Cargo, Python 3.11+, a current Cargo.lock and cached dependencies.\nImpact requests use Millboard ownership and complete RemindMe snapshots.\nNo agents, builds, tests or changes run.";
+
+/// Options for the read-only interface; independent of goal execution.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Options {
+    /// Checkout to inspect.
+    pub repo: PathBuf,
+    /// Proposed change and explicit snapshot locations.
+    pub impact: Option<PathBuf>,
+}
+
+/// Parse the extended interface without changing the original repository parser.
+pub fn options(argv: impl IntoIterator<Item = String>, cwd: PathBuf) -> Result<Options, ArgsError> {
+    let mut args = argv.into_iter();
+    let mut remaining = Vec::new();
+    let mut impact = None;
+    while let Some(arg) = args.next() {
+        if arg != "--impact" {
+            remaining.push(arg);
+            continue;
+        }
+        if impact.is_some() {
+            return Err(ArgsError::Usage("duplicate --impact".into()));
+        }
+        impact = Some(PathBuf::from(
+            args.next()
+                .filter(|v| !v.is_empty() && !v.starts_with('-'))
+                .ok_or_else(|| ArgsError::Usage("--impact needs a request file".into()))?,
+        ));
+    }
+    Ok(Options {
+        repo: parse(remaining, cwd)?,
+        impact,
+    })
+}
 
 /// Parse inspection options separately from goal execution and its environment.
 pub fn parse(argv: impl IntoIterator<Item = String>, cwd: PathBuf) -> Result<PathBuf, ArgsError> {
@@ -51,6 +85,7 @@ fn bundled_program() -> Result<String, Box<dyn std::error::Error>> {
             "check_workspace_deps",
             include_str!("../../../../../../.github/scripts/check_workspace_deps.py"),
         ),
+        ("repository_intelligence", include_str!("intelligence.py")),
     ];
     let mut program = String::from("import sys, types\nif sys.version_info < (3, 11): sys.exit(\"repository inspection requires Python 3.11+\")\n");
     for (name, source) in modules {
@@ -59,7 +94,7 @@ fn bundled_program() -> Result<String, Box<dyn std::error::Error>> {
             "m = types.ModuleType('{name}')\nsys.modules['{name}'] = m\nexec({literal}, m.__dict__)\n"
         ));
     }
-    program.push_str(include_str!("intelligence.py"));
+    program.push_str(include_str!("impact.py"));
     Ok(program)
 }
 
@@ -69,8 +104,18 @@ pub fn inspect(
     repo: &std::path::Path,
     runner: &impl CommandRunner,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    inspect_with_impact(repo, None, runner)
+}
+
+/// Like [`inspect`], optionally joining complete, explicitly supplied snapshots.
+/// The same isolated process, output limit and deadline apply to both modes.
+pub fn inspect_with_impact(
+    repo: &std::path::Path,
+    request: Option<&std::path::Path>,
+    runner: &impl CommandRunner,
+) -> Result<String, Box<dyn std::error::Error>> {
     let repo = repo.canonicalize()?;
-    let argv = vec![
+    let mut argv = vec![
         "python3".to_owned(),
         "-I".to_owned(),
         "-c".to_owned(),
@@ -79,6 +124,15 @@ pub fn inspect(
             .ok_or("repository path must be UTF-8")?
             .to_owned(),
     ];
+    if let Some(request) = request {
+        argv.push(
+            request
+                .canonicalize()?
+                .to_str()
+                .ok_or("request path must be UTF-8")?
+                .to_owned(),
+        );
+    }
     let exit = runner.run_in(Some(&repo), &argv, &[], Duration::from_secs(120), &[])?;
     if exit.status != 0 {
         return Err(format!("repository inspection: {}", excerpt(&exit.stderr)).into());
@@ -114,5 +168,27 @@ mod tests {
         let runner = FakeCommand::new(Ok(exit(1, "", "cargo metadata failed")));
         let error = inspect(&std::env::current_dir().expect("cwd"), &runner).expect_err("failure");
         assert!(error.to_string().contains("cargo metadata failed"));
+    }
+
+    #[test]
+    fn impact_options_keep_execution_flags_out_and_reject_missing_or_duplicate_files() {
+        let parsed = options(
+            ["--impact", "request.json", "--repo", "checkout"].map(str::to_owned),
+            PathBuf::from("."),
+        )
+        .expect("options");
+        assert_eq!(parsed.repo, PathBuf::from("checkout"));
+        assert_eq!(parsed.impact, Some(PathBuf::from("request.json")));
+        for args in [
+            vec!["--impact"],
+            vec!["--impact", "--repo"],
+            vec!["--impact", "a", "--impact", "b"],
+            vec!["--impact", "a", "--state", "x"],
+        ] {
+            assert!(matches!(
+                options(args.into_iter().map(str::to_owned), PathBuf::from(".")),
+                Err(ArgsError::Usage(_))
+            ));
+        }
     }
 }
