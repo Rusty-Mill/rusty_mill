@@ -3,6 +3,7 @@
 //! while waiting for anything but the lock.
 
 use std::collections::{HashMap, VecDeque};
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Waker;
 
@@ -24,8 +25,49 @@ pub(super) const MAX_PENDING_ACCEPT: usize = 256;
 
 pub(super) type Handle = Arc<Mutex<Shared>>;
 
-pub(super) fn lock(h: &Handle) -> MutexGuard<'_, Shared> {
-    h.lock().unwrap_or_else(PoisonError::into_inner)
+/// The shared state, locked. Wakers collected while it was held are woken
+/// only after the mutex is released: a wake can drop the last reference to
+/// a task, and that task's destructors (a dropped stream handle, a dropped
+/// driver) lock this mutex.
+pub(super) struct Guard<'a> {
+    /// `None` only inside `drop`.
+    inner: Option<MutexGuard<'a, Shared>>,
+}
+
+pub(super) fn lock(h: &Handle) -> Guard<'_> {
+    Guard {
+        inner: Some(h.lock().unwrap_or_else(PoisonError::into_inner)),
+    }
+}
+
+impl Deref for Guard<'_> {
+    type Target = Shared;
+    fn deref(&self) -> &Shared {
+        self.inner
+            .as_deref()
+            .expect("the guard is live until dropped")
+    }
+}
+
+impl DerefMut for Guard<'_> {
+    fn deref_mut(&mut self) -> &mut Shared {
+        self.inner
+            .as_deref_mut()
+            .expect("the guard is live until dropped")
+    }
+}
+
+impl Drop for Guard<'_> {
+    fn drop(&mut self) {
+        let Some(mut inner) = self.inner.take() else {
+            return;
+        };
+        let wakes = std::mem::take(&mut inner.wakes);
+        drop(inner);
+        for w in wakes {
+            w.wake();
+        }
+    }
 }
 
 /// Why a stream ended without finishing.
@@ -95,6 +137,8 @@ pub(super) struct Shared {
     pub(super) last_peer_stream: u32,
     /// The driver has ended.
     pub(super) closed: bool,
+    /// Wakers to run once the lock is released (see [`Guard`]).
+    pub(super) wakes: Vec<Waker>,
 }
 
 pub(super) fn register(list: &mut Vec<Waker>, w: &Waker) {
@@ -123,6 +167,7 @@ impl Shared {
             goaway_sent: None,
             last_peer_stream: 0,
             closed: false,
+            wakes: Vec::new(),
         };
         if preface {
             s.out.extend_from_slice(crate::CONNECTION_PREFACE);
@@ -145,13 +190,13 @@ impl Shared {
 
     pub(super) fn wake_driver(&mut self) {
         if let Some(w) = self.driver_waker.take() {
-            w.wake();
+            self.wakes.push(w);
         }
     }
 
     pub(super) fn wake_waiters(&mut self) {
         for w in self.waiters.drain(..) {
-            w.wake();
+            self.wakes.push(w);
         }
     }
 
@@ -188,7 +233,7 @@ impl Shared {
             // A reader waiting for more must see the end, whatever the
             // final frame carried (an empty DATA ends a body too).
             if let Some(w) = s.recv_waker.take() {
-                w.wake();
+                self.wakes.push(w);
             }
         }
         self.settle(id);
@@ -252,7 +297,7 @@ impl Shared {
                 .into_iter()
                 .flatten()
             {
-                w.wake();
+                self.wakes.push(w);
             }
         }
         self.settle(id);
@@ -301,11 +346,11 @@ impl Shared {
         }
         for p in self.pings.values_mut() {
             if let Some(w) = p.waker.take() {
-                w.wake();
+                self.wakes.push(w);
             }
         }
         if let Some(w) = self.accept_waker.take() {
-            w.wake();
+            self.wakes.push(w);
         }
         self.wake_waiters();
     }
@@ -321,7 +366,7 @@ impl Shared {
             if let Some(p) = self.pings.get_mut(&id) {
                 p.acked = true;
                 if let Some(w) = p.waker.take() {
-                    w.wake();
+                    self.wakes.push(w);
                 }
             }
             return Ok(());
@@ -366,7 +411,7 @@ impl Shared {
                         Some(s) if !s.recv_dropped && !data.is_empty() => {
                             s.inbox.push_back(Item::Body(Body::Data(data)));
                             if let Some(w) = s.recv_waker.take() {
-                                w.wake();
+                                self.wakes.push(w);
                             }
                         }
                         _ => self.release(stream_id, data.len()),
@@ -379,7 +424,7 @@ impl Shared {
                     if let Some(s) = self.streams.get_mut(&stream_id) {
                         s.inbox.push_back(Item::Body(Body::Trailers(fields)));
                         if let Some(w) = s.recv_waker.take() {
-                            w.wake();
+                            self.wakes.push(w);
                         }
                     }
                     self.close_remote(stream_id);
@@ -404,7 +449,7 @@ impl Shared {
                         }
                     }
                     if let Some(w) = self.accept_waker.take() {
-                        w.wake();
+                        self.wakes.push(w);
                     }
                 }
             }
@@ -424,7 +469,7 @@ impl Shared {
             self.add_stream(id, false);
             self.accept_queue.push_back(id);
             if let Some(w) = self.accept_waker.take() {
-                w.wake();
+                self.wakes.push(w);
             }
         }
         let Some(s) = self.streams.get_mut(&id) else {
@@ -434,10 +479,92 @@ impl Shared {
             s.headers = Some(fields);
         }
         if let Some(w) = s.headers_waker.take() {
-            w.wake();
+            self.wakes.push(w);
         }
         if end_stream {
             self.close_remote(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connect::{PeerType, ServerSettings};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Wake;
+
+    /// A waker that, when woken, notes whether the shared mutex is free. A
+    /// real waker can drop the last reference to a task, whose destructors
+    /// lock this mutex; waking with it held would deadlock.
+    struct ProbeWake {
+        shared: Handle,
+        lock_was_free: AtomicBool,
+        woken: AtomicBool,
+    }
+
+    impl Wake for ProbeWake {
+        fn wake(self: Arc<Self>) {
+            self.woken.store(true, Ordering::SeqCst);
+            let free = self.shared.try_lock().is_ok();
+            self.lock_was_free.store(free, Ordering::SeqCst);
+        }
+    }
+
+    fn probe() -> (Handle, Arc<ProbeWake>) {
+        let conn = Connection::new(ServerSettings::default(), PeerType::Server);
+        let shared: Handle = Arc::new(Mutex::new(Shared::new(conn, true, false)));
+        let waker = Arc::new(ProbeWake {
+            shared: shared.clone(),
+            lock_was_free: AtomicBool::new(false),
+            woken: AtomicBool::new(false),
+        });
+        (shared, waker)
+    }
+
+    #[test]
+    fn wakers_run_after_the_lock_is_released() {
+        let (shared, probe) = probe();
+        {
+            let mut sh = lock(&shared);
+            sh.add_stream(1, false);
+            sh.streams.get_mut(&1).unwrap().recv_waker = Some(Waker::from(probe.clone()));
+            sh.fail_stream(1, Fail::Closed);
+        }
+        assert!(probe.woken.load(Ordering::SeqCst), "the reader is woken");
+        assert!(
+            probe.lock_was_free.load(Ordering::SeqCst),
+            "it must be woken only once the mutex is free"
+        );
+    }
+
+    #[test]
+    fn every_kind_of_wake_waits_for_the_lock_to_be_released() {
+        let (shared, probe) = probe();
+        {
+            let mut sh = lock(&shared);
+            sh.driver_waker = Some(Waker::from(probe.clone()));
+            sh.queue([]);
+        }
+        assert!(probe.woken.load(Ordering::SeqCst));
+        assert!(probe.lock_was_free.load(Ordering::SeqCst), "driver wake");
+
+        let (shared, probe) = self::probe();
+        {
+            let mut sh = lock(&shared);
+            register(&mut sh.waiters, &Waker::from(probe.clone()));
+            sh.wake_waiters();
+        }
+        assert!(probe.woken.load(Ordering::SeqCst));
+        assert!(probe.lock_was_free.load(Ordering::SeqCst), "waiter wake");
+
+        let (shared, probe) = self::probe();
+        {
+            let mut sh = lock(&shared);
+            sh.accept_waker = Some(Waker::from(probe.clone()));
+            sh.close_all();
+        }
+        assert!(probe.woken.load(Ordering::SeqCst));
+        assert!(probe.lock_was_free.load(Ordering::SeqCst), "accept wake");
     }
 }
