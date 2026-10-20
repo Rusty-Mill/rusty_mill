@@ -203,6 +203,37 @@ impl PendingHeaderBlock {
     }
 }
 
+/// What a received frame delivered to the application, in order. Drained
+/// with [`Connection::take_inbound`] after each [`Connection::apply`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Inbound {
+    /// The first header block on a stream (a request, or a response).
+    Headers {
+        stream_id: u32,
+        fields: Vec<HeaderField>,
+        end_stream: bool,
+    },
+    /// Body bytes. The application returns the capacity with
+    /// [`Connection::release_capacity`] once it has consumed them.
+    Data {
+        stream_id: u32,
+        data: Vec<u8>,
+        end_stream: bool,
+    },
+    /// A later header block on a stream; it always ends the stream.
+    Trailers {
+        stream_id: u32,
+        fields: Vec<HeaderField>,
+    },
+    /// The peer reset the stream.
+    Reset { stream_id: u32, code: ErrorCode },
+    /// The peer is closing the connection.
+    GoAway {
+        last_stream_id: u32,
+        code: ErrorCode,
+    },
+}
+
 /// The connection state machine: settings negotiation, flow control, and
 /// frame dispatch, driving the real per-stream state machine
 /// ([`crate::stream::Stream`]) and real HPACK codec
@@ -360,6 +391,54 @@ impl Connection {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Drains what the frames applied so far delivered to the application.
+    pub fn take_inbound(&mut self) -> Vec<Inbound> {
+        todo!()
+    }
+
+    /// Starts a stream: allocates the next stream id (odd for a client) and
+    /// returns its HEADERS frame, encoded with this connection's HPACK
+    /// state. A client opens streams with it; a server uses
+    /// [`Self::send_headers`] on the request's stream.
+    pub fn open_stream(
+        &mut self,
+        fields: &[HeaderField],
+        end_stream: bool,
+    ) -> Result<(u32, Frame)> {
+        let _ = (fields, end_stream);
+        todo!()
+    }
+
+    /// The HEADERS frame for `fields` on an existing stream (a response).
+    pub fn send_headers(
+        &mut self,
+        stream_id: u32,
+        fields: &[HeaderField],
+        end_stream: bool,
+    ) -> Result<Frame> {
+        let _ = (stream_id, fields, end_stream);
+        todo!()
+    }
+
+    /// DATA frames for `data`, split at the peer's maximum frame size, each
+    /// charged to the send windows. Fails, changing nothing, if `data` does
+    /// not fit the windows.
+    pub fn send_data(
+        &mut self,
+        stream_id: u32,
+        data: &[u8],
+        end_stream: bool,
+    ) -> Result<Vec<Frame>> {
+        let _ = (stream_id, data, end_stream);
+        todo!()
+    }
+
+    /// The trailing HEADERS frame (it ends the stream).
+    pub fn send_trailers(&mut self, stream_id: u32, fields: &[HeaderField]) -> Result<Frame> {
+        let _ = (stream_id, fields);
+        todo!()
     }
 
     /// Alias kept for callers written against the earlier stub API.
