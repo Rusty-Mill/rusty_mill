@@ -538,12 +538,16 @@ fn an_h2_reset_reaches_our_server_body_as_cancel() {
     });
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
+    // A request reset before it is accepted is dropped unseen, so the reset
+    // is only sent once our server has accepted the request.
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
     ours.spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         tcp.set_nodelay(true).unwrap();
         let (mut acceptor, drv) = driver::server(tcp, ServerBuilder::new());
         rusty_tokio::spawn(drv);
         if let Some(Ok((mut req, _respond))) = acceptor.accept().await {
+            let _ = accepted_tx.send(());
             while let Some(piece) = req.body.next().await {
                 if let Err(Error::Reset(code)) = piece {
                     let _ = tx.send(code);
@@ -559,6 +563,9 @@ fn an_h2_reset_reaches_our_server_body_as_cancel() {
             .unwrap();
         let (_fut, mut send) = c.send_request(req, false).unwrap();
         h2_send(&mut send, Bytes::from_static(b"part"), false).await;
+        while accepted_rx.try_recv().is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         send.send_reset(Reason::CANCEL);
         tokio::time::sleep(Duration::from_millis(500)).await;
     });

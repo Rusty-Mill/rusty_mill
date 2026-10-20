@@ -626,7 +626,7 @@ async fn a_default_servers_opening_settings_never_enable_push() {
 
 #[rusty_tokio::test]
 async fn an_empty_end_stream_wakes_a_pending_request_body_read() {
-    let (mut raw, mut acceptor) = raw_client().await;
+    let (raw, mut acceptor) = raw_client().await;
     raw.write_all(&wire(&raw_headers(1, false))).await.unwrap();
     let (mut req, _respond) = acceptor.accept().await.unwrap().unwrap();
     let reader = rusty_tokio::spawn(async move { req.body.next().await.is_none() });
@@ -731,15 +731,17 @@ async fn an_aborted_driver_fails_every_pending_operation() {
 
 #[rusty_tokio::test]
 async fn a_stream_reset_before_it_is_accepted_is_reclaimed() {
-    let (mut raw, mut acceptor) = raw_client().await;
-    raw.write_all(&wire(&raw_headers(1, false))).await.unwrap();
-    raw.write_all(&wire(&Frame::RstStream(rusty_h2::frame::RstStreamFrame {
+    let (raw, mut acceptor) = raw_client().await;
+    // One write, so the driver applies all three frames before the
+    // application can look: otherwise the first request may be accepted
+    // before its reset arrives.
+    let mut burst = wire(&raw_headers(1, false));
+    burst.extend(wire(&Frame::RstStream(rusty_h2::frame::RstStreamFrame {
         stream_id: 1,
         error_code: ErrorCode::Cancel,
-    })))
-    .await
-    .unwrap();
-    raw.write_all(&wire(&raw_headers(3, true))).await.unwrap();
+    })));
+    burst.extend(wire(&raw_headers(3, true)));
+    raw.write_all(&burst).await.unwrap();
     let (req, _respond) = timeout(Duration::from_secs(5), acceptor.accept())
         .await
         .unwrap()
@@ -901,7 +903,6 @@ impl rusty_tokio::io::AsyncWrite for Buffered {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        use rusty_tokio::io::AsyncWrite;
         if self.shutdown_pending_once {
             self.shutdown_pending_once = false;
             cx.waker().wake_by_ref();
