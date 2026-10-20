@@ -39,10 +39,13 @@ impl Connection {
         for event in self.inner.take_inbound() {
             match event {
                 connect::Inbound::Headers {
-                    stream_id, fields, ..
+                    stream_id,
+                    fields,
+                    end_stream,
                 } => self.accepted.push_back(IncomingRequest {
                     stream_id,
                     headers: fields,
+                    end_stream,
                 }),
                 other => self.inbound.push(other),
             }
@@ -94,6 +97,7 @@ impl Connection {
 pub struct IncomingRequest {
     stream_id: u32,
     headers: Vec<crate::hpack::HeaderField>,
+    end_stream: bool,
 }
 
 impl IncomingRequest {
@@ -103,6 +107,11 @@ impl IncomingRequest {
 
     pub fn headers(&self) -> &[crate::hpack::HeaderField] {
         &self.headers
+    }
+
+    /// Whether the request HEADERS carried END_STREAM, so no body follows.
+    pub fn end_stream(&self) -> bool {
+        self.end_stream
     }
 
     pub fn method(&self) -> &str {

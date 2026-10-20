@@ -242,6 +242,37 @@ fn every_block_a_connection_sends_shares_one_hpack_state() {
 }
 
 #[test]
+fn rejected_oversized_headers_do_not_change_hpack_state() {
+    let mut c = client();
+    let mut dec = Decoder::new(4096);
+    let oversized = vec![
+        hf(":method", "POST"),
+        hf("a", &"x".repeat(65_536)),
+        hf("x-small", "v"),
+    ];
+    assert!(c.open_stream(&oversized, false).is_err());
+
+    let fields = vec![hf(":method", "POST"), hf("x-small", "v")];
+    let (_, frame) = c.open_stream(&fields, false).unwrap();
+    assert_eq!(decode(&mut dec, &frame), fields);
+}
+
+#[test]
+fn headers_after_local_half_close_are_rejected_without_changing_hpack() {
+    let mut c = client();
+    let mut dec = Decoder::new(4096);
+    let (closed_id, first) = c.open_stream(&request(), true).unwrap();
+    assert_eq!(decode(&mut dec, &first), request());
+
+    assert!(c
+        .send_headers(closed_id, &[hf("x-unsent", "v")], false)
+        .is_err());
+    let fields = vec![hf(":method", "POST"), hf("x-unsent", "v")];
+    let (_, next) = c.open_stream(&fields, false).unwrap();
+    assert_eq!(decode(&mut dec, &next), fields);
+}
+
+#[test]
 fn a_client_opens_odd_streams_in_order() {
     let mut c = client();
     let mut dec = Decoder::new(4096);
@@ -408,5 +439,7 @@ fn poll_accept_yields_each_request_once() {
         (1, "POST", "/svc/Method")
     );
     assert_eq!(b.stream_id(), 3);
+    assert!(!a.end_stream(), "the first request is awaiting a body");
+    assert!(b.end_stream(), "the second request ended with its headers");
     assert!(matches!(s.poll_accept(), Poll::Pending));
 }

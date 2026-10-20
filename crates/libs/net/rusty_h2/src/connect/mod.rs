@@ -473,8 +473,21 @@ impl Connection {
         fields: &[HeaderField],
         end_stream: bool,
     ) -> Result<Frame> {
-        let frame = self.headers_frame(stream_id, fields, end_stream)?;
+        self.validate_sending_headers(stream_id)?;
+
+        // HPACK state is connection-wide. Encode against a snapshot so a
+        // block which is rejected locally is never visible to the encoder
+        // used for later blocks that the peer actually receives.
+        let mut encoder = self.encoder.clone();
+        let frame = Self::headers_frame(
+            &mut encoder,
+            self.remote_settings.max_frame_size,
+            stream_id,
+            fields,
+            end_stream,
+        )?;
         self.send_frame(&frame)?;
+        self.encoder = encoder;
         Ok(frame)
     }
 
@@ -526,20 +539,40 @@ impl Connection {
 
     /// The trailing HEADERS frame (it ends the stream).
     pub fn send_trailers(&mut self, stream_id: u32, fields: &[HeaderField]) -> Result<Frame> {
-        let frame = self.headers_frame(stream_id, fields, true)?;
-        self.send_frame(&frame)?;
-        Ok(frame)
+        self.send_headers(stream_id, fields, true)
     }
 
-    /// Encodes `fields` into one HEADERS frame (not yet recorded as sent).
+    /// Checks whether this endpoint may send HEADERS in the current stream
+    /// state before HPACK state is changed.
+    fn validate_sending_headers(&self, stream_id: u32) -> Result<()> {
+        let state = self
+            .streams
+            .get(&stream_id)
+            .map_or(StreamState::Idle, |entry| entry.stream.state);
+        if matches!(
+            state,
+            StreamState::HalfClosedLocal | StreamState::ReservedRemote | StreamState::Closed
+        ) {
+            return Err(H2Error::Stream(
+                stream_id,
+                ErrorCode::StreamClosed,
+                "HEADERS cannot be sent in the stream's current state",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Encodes `fields` into one HEADERS frame using a tentative encoder.
     fn headers_frame(
-        &mut self,
+        encoder: &mut Encoder,
+        max_frame_size: u32,
         stream_id: u32,
         fields: &[HeaderField],
         end_stream: bool,
     ) -> Result<Frame> {
-        let header_block_fragment = self.encode_headers(fields);
-        if header_block_fragment.len() > self.remote_settings.max_frame_size as usize {
+        let mut header_block_fragment = Vec::new();
+        encoder.encode(fields, &mut header_block_fragment);
+        if header_block_fragment.len() > max_frame_size as usize {
             return Err(H2Error::Stream(
                 stream_id,
                 ErrorCode::InternalError,
@@ -573,6 +606,7 @@ impl Connection {
         }
         match frame {
             Frame::Headers(h) => {
+                self.validate_sending_headers(h.stream_id)?;
                 let entry = self.stream_entry(h.stream_id);
                 if !entry.headers_sent
                     && matches!(
