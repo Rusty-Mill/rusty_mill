@@ -428,7 +428,7 @@ impl AcpClient {
                         // at debug; running out of them is where a request
                         // actually failed after the client tried to save it,
                         // and is the line an operator wants.
-                        tracing::warn!(
+                        rusty_log::warn!(
                             method,
                             status = response.status().as_u16(),
                             attempts = attempt + 1,
@@ -442,7 +442,7 @@ impl AcpClient {
                     // for a minute should not be knocked on in five seconds.
                     match retry_after(response.headers()) {
                         Some(asked) if asked > policy.max_backoff => {
-                            tracing::debug!(
+                            rusty_log::debug!(
                                 method,
                                 ?asked,
                                 max_backoff = ?policy.max_backoff,
@@ -459,7 +459,7 @@ impl AcpClient {
                         return Err(AcpError::Transport(error.to_string()));
                     }
                     if last_attempt {
-                        tracing::warn!(
+                        rusty_log::warn!(
                             method,
                             %error,
                             attempts = attempt + 1,
@@ -472,7 +472,13 @@ impl AcpClient {
                 }
             };
 
-            tracing::debug!(method, attempt = attempt + 1, ?delay, reason, "retrying acp request");
+            rusty_log::debug!(
+                method,
+                attempt = attempt + 1,
+                ?delay,
+                reason,
+                "retrying acp request"
+            );
             telemetry::retried(reason, delay);
             tokio::time::sleep(delay).await;
             attempt += 1;
@@ -657,7 +663,7 @@ impl AcpClient {
                     None
                 }
                 Err(error) if tolerate_blips && error.is_transient() => {
-                    tracing::debug!(%run_id, %error, "transient failure while waiting; polling on");
+                    rusty_log::debug!(%run_id, %error, "transient failure while waiting; polling on");
                     Some(error)
                 }
                 Err(error) => return Err(error),
@@ -1165,7 +1171,7 @@ impl ResumeState {
             return Ok(false);
         };
         if self.attempts >= policy.max_attempts {
-            tracing::warn!(
+            rusty_log::warn!(
                 %run_id,
                 attempts = self.attempts,
                 last_index = ?self.last_index,
@@ -1177,7 +1183,7 @@ impl ResumeState {
 
         let backoff = policy.backoff_for(self.attempts);
         self.attempts += 1;
-        tracing::debug!(
+        rusty_log::debug!(
             %run_id,
             attempt = self.attempts,
             ?backoff,
@@ -1196,7 +1202,7 @@ impl ResumeState {
         let response = match send_checked(&self.client, request).await {
             Ok(response) => response,
             Err(error) if error.is_transient() => {
-                tracing::debug!(
+                rusty_log::debug!(
                     %run_id,
                     %error,
                     attempt = self.attempts,

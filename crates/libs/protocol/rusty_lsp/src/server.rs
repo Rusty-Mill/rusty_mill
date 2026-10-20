@@ -481,13 +481,13 @@ where
         #[cfg(feature = "tracing")]
         match &message {
             Message::Request(req) => {
-                tracing::debug!(method = %req.method, id = %req.id, "<-- request");
+                rusty_log::debug!(method = %req.method, id = %req.id, "<-- request");
             }
             Message::Notification(note) => {
-                tracing::debug!(method = %note.method, "<-- notification");
+                rusty_log::debug!(method = %note.method, "<-- notification");
             }
             Message::Response(response) => {
-                tracing::debug!(id = ?response.id, ok = response.error.is_none(), "<-- response");
+                rusty_log::debug!(id = ?response.id, ok = response.error.is_none(), "<-- response");
             }
         }
 
@@ -814,7 +814,7 @@ fn cancel_request(note: &Notification, in_flight: &InFlight, out_tx: &Outbound) 
     // its own response (it will find its entry already gone).
     if let Some(entry) = lock(in_flight).remove(&id) {
         #[cfg(feature = "tracing")]
-        tracing::debug!(id = %id, "request cancelled by client");
+        rusty_log::debug!(id = %id, "request cancelled by client");
         // Trip the cooperative token first, so work the abort cannot reach
         // (spawn_blocking, helper tasks) observes the cancellation too.
         entry.token.cancel();

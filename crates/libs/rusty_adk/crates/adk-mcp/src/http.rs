@@ -39,7 +39,7 @@ pub fn router(server: Arc<McpServer>, path: &str) -> Router {
         // The description is fixed by this crate; every reply is a 500 if it
         // is somehow invalid, rather than a panic at router construction.
         Err(e) => {
-            tracing::error!(error = %e, "MCP server description is invalid");
+            rusty_log::error!(error = %e, "MCP server description is invalid");
             return Router::new().fallback(|| async {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -72,7 +72,7 @@ pub async fn serve_http(server: Arc<McpServer>, addr: &str, path: &str) -> Resul
         .await
         .map_err(|e| AdkError::Config(format!("cannot bind {addr}: {e}")))?;
 
-    tracing::info!(%addr, %path, "MCP server listening");
+    rusty_log::info!(%addr, %path, "MCP server listening");
 
     axum::serve(listener, router(server, path))
         .await

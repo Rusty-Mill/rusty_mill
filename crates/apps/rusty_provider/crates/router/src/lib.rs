@@ -883,7 +883,7 @@ fn resolve_persistence_target(config: &PersistenceConfig) -> Option<PersistenceT
         PersistenceBackend::Sqlite => match &config.sqlite_path {
             Some(path) => Some(PersistenceTarget::Sqlite(path.into())),
             None => {
-                tracing::warn!(
+                rusty_log::warn!(
                     "persistence backend is \"sqlite\" but sqlite_path is not set; falling back to in-memory usage tracking"
                 );
                 None
@@ -896,12 +896,12 @@ fn resolve_persistence_target(config: &PersistenceConfig) -> Option<PersistenceT
                     tls: config.postgres_tls,
                 }),
                 _ => {
-                    tracing::warn!(env_var = %var, "persistence backend is \"postgres\" but the connection string env var isn't set; falling back to in-memory usage tracking");
+                    rusty_log::warn!(env_var = %var, "persistence backend is \"postgres\" but the connection string env var isn't set; falling back to in-memory usage tracking");
                     None
                 }
             },
             None => {
-                tracing::warn!(
+                rusty_log::warn!(
                     "persistence backend is \"postgres\" but postgres_url_env is not set; falling back to in-memory usage tracking"
                 );
                 None
@@ -991,7 +991,7 @@ impl Router {
             let key = match std::env::var(&cfg.api_key_env) {
                 Ok(k) if !k.is_empty() => k,
                 _ => {
-                    tracing::warn!(provider = %name, env_var = %cfg.api_key_env, "skipping provider: API key env var not set");
+                    rusty_log::warn!(provider = %name, env_var = %cfg.api_key_env, "skipping provider: API key env var not set");
                     metrics.set_provider_configured(name, false);
                     continue;
                 }
@@ -1024,7 +1024,7 @@ impl Router {
         // through degraded fallback behavior. Same "warn, don't fail"
         // pattern as an unresolvable `api_key_env` above.
         for (alias, provider_name, chain_entry) in unresolved_route_providers(config) {
-            tracing::warn!(
+            rusty_log::warn!(
                 alias = %alias,
                 provider = %provider_name,
                 chain_entry = %chain_entry,
@@ -1051,7 +1051,7 @@ impl Router {
                     },
                 )),
                 None => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         alias = %r.alias,
                         "route alias has strategy = \"fusion\" but no judge set; falling back to ordinary sequential-chain dispatch"
                     );
@@ -1100,7 +1100,7 @@ impl Router {
             Some(target) => match Persistence::open(target).await {
                 Ok(p) => Some(Arc::new(p)),
                 Err(e) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         "failed to open persistence database, falling back to in-memory usage tracking: {e}"
                     );
                     None
@@ -1111,7 +1111,7 @@ impl Router {
             Some(p) => match p.load_all().await {
                 Ok(loaded) => loaded,
                 Err(e) => {
-                    tracing::warn!("failed to load persisted usage stats: {e}");
+                    rusty_log::warn!("failed to load persisted usage stats: {e}");
                     HashMap::new()
                 }
             },
@@ -1125,7 +1125,7 @@ impl Router {
                 match std::env::var(var) {
                     Ok(v) if !v.is_empty() => Some(v),
                     _ => {
-                        tracing::warn!(env_var = %var, "webhook auth_header_env is set but not resolvable; sending webhook requests with no Authorization header");
+                        rusty_log::warn!(env_var = %var, "webhook auth_header_env is set but not resolvable; sending webhook requests with no Authorization header");
                         None
                     }
                 }
@@ -1134,7 +1134,7 @@ impl Router {
                 match std::env::var(var) {
                     Ok(v) if !v.is_empty() => Some(v),
                     _ => {
-                        tracing::warn!(env_var = %var, "webhook signing_secret_env is set but not resolvable; sending webhook requests unsigned");
+                        rusty_log::warn!(env_var = %var, "webhook signing_secret_env is set but not resolvable; sending webhook requests unsigned");
                         None
                     }
                 }
@@ -1152,7 +1152,7 @@ impl Router {
             .filter_map(|cfg| match Guardrail::compile(cfg) {
                 Ok(g) => Some(g),
                 Err(e) => {
-                    tracing::warn!(guardrail = %cfg.name, "invalid guardrail pattern, skipping: {e}");
+                    rusty_log::warn!(guardrail = %cfg.name, "invalid guardrail pattern, skipping: {e}");
                     None
                 }
             })
@@ -1175,7 +1175,7 @@ impl Router {
                     Some(Arc::new(ModerationClient::new(cfg, key)))
                 }
                 _ => {
-                    tracing::warn!(env_var = %cfg.api_key_env, "moderation.api_key_env is set but not resolvable; moderation stays disabled");
+                    rusty_log::warn!(env_var = %cfg.api_key_env, "moderation.api_key_env is set but not resolvable; moderation stays disabled");
                     None
                 }
             }
@@ -1186,7 +1186,7 @@ impl Router {
             match std::env::var(&cfg.api_key_env) {
                 Ok(key) if !key.is_empty() => Some(Arc::new(WebSearchClient::new(cfg, key))),
                 _ => {
-                    tracing::warn!(env_var = %cfg.api_key_env, "web_search.api_key_env is set but not resolvable; web search stays disabled");
+                    rusty_log::warn!(env_var = %cfg.api_key_env, "web_search.api_key_env is set but not resolvable; web search stays disabled");
                     None
                 }
             }
@@ -1218,7 +1218,7 @@ impl Router {
                         cfg.embedding_model.clone(),
                     )
                 } else {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         "[cache].mode = \"semantic\" but embedding_model is unset or its \
                          provider isn't configured; falling back to exact-match caching"
                     );
@@ -1355,7 +1355,7 @@ impl Router {
             match persistence.snapshot().await {
                 Ok(snapshot) => return snapshot,
                 Err(e) => {
-                    tracing::warn!("failed to read usage snapshot from persistence, falling back to in-memory view: {e}");
+                    rusty_log::warn!("failed to read usage snapshot from persistence, falling back to in-memory view: {e}");
                 }
             }
         }
@@ -1442,7 +1442,7 @@ impl Router {
                 Ok(Some((period_key, spent_usd))) if period_key == current_key => spent_usd,
                 Ok(_) => 0.0,
                 Err(e) => {
-                    tracing::warn!("failed to read client spend from persistence, treating as unspent for this check: {e}");
+                    rusty_log::warn!("failed to read client spend from persistence, treating as unspent for this check: {e}");
                     0.0
                 }
             }
@@ -1649,7 +1649,7 @@ impl Router {
                 })
                 .collect(),
             Err(e) => {
-                tracing::warn!(client = %client_name, "failed to read client usage history from persistence: {e}");
+                rusty_log::warn!(client = %client_name, "failed to read client usage history from persistence: {e}");
                 Vec::new()
             }
         }
@@ -1948,7 +1948,7 @@ impl Router {
                 Err(RouterError::ModerationFlagged(categories))
             }
             Err(ModerationError::RequestFailed(msg)) => {
-                tracing::warn!("moderation check failed, allowing request through: {msg}");
+                rusty_log::warn!("moderation check failed, allowing request through: {msg}");
                 Ok(())
             }
         }
@@ -1984,7 +1984,7 @@ impl Router {
                 self.metrics.record_web_search("no_results");
             }
             Err(msg) => {
-                tracing::warn!("web search failed, continuing without results: {msg}");
+                rusty_log::warn!("web search failed, continuing without results: {msg}");
                 self.metrics.record_web_search("error");
             }
         }
@@ -2166,7 +2166,7 @@ impl Router {
                             let tps = usage.completion_tokens as f64 / elapsed_secs;
                             ewma_record(&throughput, format!("{provider_name}/{model_name}"), tps);
                             metrics.observe_throughput_tps(&provider_name, &model_name, tps);
-                            tracing::debug!(provider = %provider_name, model = %model_name, tokens_per_sec = tps, "recorded throughput");
+                            rusty_log::debug!(provider = %provider_name, model = %model_name, tokens_per_sec = tps, "recorded throughput");
                         }
                         let cost = record_usage(&usage_map, persistence.as_deref(), &pricing, &provider_name, &model_name, &usage);
                         metrics.record_tokens_and_cost(&provider_name, &model_name, usage.prompt_tokens, usage.completion_tokens, cost);
@@ -2306,7 +2306,7 @@ impl Router {
         match self.embeddings(&req).await {
             Ok(resp) => resp.data.into_iter().next().map(|d| d.embedding),
             Err(e) => {
-                tracing::warn!(
+                rusty_log::warn!(
                     "semantic cache: embedding call failed, skipping cache for this request: {e}"
                 );
                 None
@@ -2500,7 +2500,7 @@ impl Router {
             let provider = match self.get_provider(provider_name) {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!(provider = %provider_name, "skipping candidate: {e}");
+                    rusty_log::warn!(provider = %provider_name, "skipping candidate: {e}");
                     self.metrics
                         .record_attempt(provider_name, model_name, "not_configured");
                     last_err = Some(e);
@@ -2509,7 +2509,7 @@ impl Router {
             };
 
             if let Err(e) = self.check_outbound_rate_limit(provider_name) {
-                tracing::warn!(provider = %provider_name, model = %model_name, "outbound rate limit hit, falling back: {e}");
+                rusty_log::warn!(provider = %provider_name, model = %model_name, "outbound rate limit hit, falling back: {e}");
                 self.metrics
                     .record_attempt(provider_name, model_name, "rate_limited");
                 last_err = Some(RouterError::Provider(e));
@@ -2551,7 +2551,7 @@ impl Router {
                         .observe_latency_seconds(provider_name, model_name, elapsed_secs);
                     self.metrics
                         .record_attempt(provider_name, model_name, "success");
-                    tracing::debug!(provider = %provider_name, model = %model_name, elapsed_ms = elapsed_secs * 1000.0, "recorded latency");
+                    rusty_log::debug!(provider = %provider_name, model = %model_name, elapsed_ms = elapsed_secs * 1000.0, "recorded latency");
 
                     if let Some(usage) = resp.usage.clone() {
                         if usage.completion_tokens > 0 && elapsed_secs > 0.0 {
@@ -2563,7 +2563,7 @@ impl Router {
                             );
                             self.metrics
                                 .observe_throughput_tps(provider_name, model_name, tps);
-                            tracing::debug!(provider = %provider_name, model = %model_name, tokens_per_sec = tps, "recorded throughput");
+                            rusty_log::debug!(provider = %provider_name, model = %model_name, tokens_per_sec = tps, "recorded throughput");
                         }
                         let cost = record_usage(
                             &self.usage,
@@ -2603,7 +2603,7 @@ impl Router {
                     return Ok((resp, attempts));
                 }
                 Err(e) if e.is_retryable() => {
-                    tracing::warn!(provider = %provider_name, model = %model_name, "provider failed, falling back: {e}");
+                    rusty_log::warn!(provider = %provider_name, model = %model_name, "provider failed, falling back: {e}");
                     ewma_record(&self.uptime, format!("{provider_name}/{model_name}"), 0.0);
                     self.metrics
                         .record_attempt(provider_name, model_name, "retryable_error");
@@ -2668,11 +2668,11 @@ impl Router {
                 match result {
                     Ok(Ok(resp)) => Some((provider_name, model_name, resp)),
                     Ok(Err(e)) => {
-                        tracing::warn!(provider = %provider_name, model = %model_name, "fusion panel candidate failed: {e}");
+                        rusty_log::warn!(provider = %provider_name, model = %model_name, "fusion panel candidate failed: {e}");
                         None
                     }
                     Err(_) => {
-                        tracing::warn!(provider = %provider_name, model = %model_name, "fusion panel candidate timed out");
+                        rusty_log::warn!(provider = %provider_name, model = %model_name, "fusion panel candidate timed out");
                         None
                     }
                 }
@@ -2819,7 +2819,7 @@ impl Router {
             let provider = match self.get_provider(provider_name) {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!(provider = %provider_name, "skipping candidate: {e}");
+                    rusty_log::warn!(provider = %provider_name, "skipping candidate: {e}");
                     self.metrics
                         .record_attempt(provider_name, model_name, "not_configured");
                     last_err = Some(e);
@@ -2828,7 +2828,7 @@ impl Router {
             };
 
             if let Err(e) = self.check_outbound_rate_limit(provider_name) {
-                tracing::warn!(provider = %provider_name, model = %model_name, "outbound rate limit hit, falling back: {e}");
+                rusty_log::warn!(provider = %provider_name, model = %model_name, "outbound rate limit hit, falling back: {e}");
                 self.metrics
                     .record_attempt(provider_name, model_name, "rate_limited");
                 last_err = Some(RouterError::Provider(e));
@@ -2875,7 +2875,7 @@ impl Router {
                     );
                     self.metrics
                         .record_attempt(provider_name, model_name, "success");
-                    tracing::debug!(provider = %provider_name, model = %model_name, elapsed_ms, "recorded latency (time to first byte)");
+                    rusty_log::debug!(provider = %provider_name, model = %model_name, elapsed_ms, "recorded latency (time to first byte)");
 
                     let instrumented = self.instrument_stream(
                         provider_name.clone(),
@@ -2891,7 +2891,7 @@ impl Router {
                     ));
                 }
                 Err(e) if e.is_retryable() => {
-                    tracing::warn!(provider = %provider_name, model = %model_name, "provider failed, falling back: {e}");
+                    rusty_log::warn!(provider = %provider_name, model = %model_name, "provider failed, falling back: {e}");
                     ewma_record(&self.uptime, format!("{provider_name}/{model_name}"), 0.0);
                     self.metrics
                         .record_attempt(provider_name, model_name, "retryable_error");
@@ -2965,7 +2965,7 @@ impl Router {
             let provider = match self.get_provider(provider_name) {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!(provider = %provider_name, "skipping candidate: {e}");
+                    rusty_log::warn!(provider = %provider_name, "skipping candidate: {e}");
                     self.metrics
                         .record_attempt(provider_name, model_name, "not_configured");
                     last_err = Some(e);
@@ -2974,7 +2974,7 @@ impl Router {
             };
 
             if let Err(e) = self.check_outbound_rate_limit(provider_name) {
-                tracing::warn!(provider = %provider_name, model = %model_name, "outbound rate limit hit, falling back: {e}");
+                rusty_log::warn!(provider = %provider_name, model = %model_name, "outbound rate limit hit, falling back: {e}");
                 self.metrics
                     .record_attempt(provider_name, model_name, "rate_limited");
                 last_err = Some(RouterError::Provider(e));
@@ -2988,7 +2988,7 @@ impl Router {
                     return Ok(resp);
                 }
                 Err(e) if e.is_retryable() => {
-                    tracing::warn!(provider = %provider_name, model = %model_name, "provider failed, falling back: {e}");
+                    rusty_log::warn!(provider = %provider_name, model = %model_name, "provider failed, falling back: {e}");
                     self.metrics
                         .record_attempt(provider_name, model_name, "retryable_error");
                     last_err = Some(RouterError::Provider(e));

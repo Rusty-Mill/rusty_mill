@@ -163,10 +163,10 @@ dependencies = [
  "futures",
  "rusty_a2a",
  "rusty_base64",
+ "rusty_log",
  "serde_json",
  "tokio",
  "tokio-test",
- "tracing",
 ]
 
 [[package]]
@@ -225,11 +225,11 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures",
+ "rusty_log",
  "serde",
  "serde_json",
  "tokio",
  "tokio-test",
- "tracing",
 ]
 
 [[package]]
@@ -256,11 +256,11 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "rusty-mcp-client",
+ "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -399,6 +399,7 @@ dependencies = [
  "rsa",
  "rusty-mcp",
  "rusty_base64",
+ "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "serde_json",
@@ -408,8 +409,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -421,9 +420,9 @@ dependencies = [
  "regex",
  "reqwest 0.13.4",
  "rusty_a2a",
+ "rusty_log",
  "serde_json",
  "thiserror 2.0.20",
- "tracing",
 ]
 
 [[package]]
@@ -437,10 +436,10 @@ dependencies = [
  "http-body",
  "http-body-util",
  "rusty_agui",
+ "rusty_log",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -456,11 +455,11 @@ dependencies = [
  "rusty-mcp",
  "rusty_base64",
  "rusty_json",
+ "rusty_log",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -502,10 +501,10 @@ dependencies = [
  "hyper",
  "regex",
  "reqwest 0.13.4",
+ "rusty_log",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
  "wiremock",
 ]
 
@@ -524,6 +523,7 @@ dependencies = [
  "regex",
  "rusty-mcp",
  "rusty_json",
+ "rusty_log",
  "rusty_mcp_client_native",
  "rusty_mcp_server",
  "rusty_serve",
@@ -533,7 +533,6 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-prost",
- "tracing",
 ]
 
 [[package]]
@@ -549,10 +548,10 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rusty_log",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -564,11 +563,11 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "rusty_log",
  "rusty_tls",
  "rusty_tokio",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -6320,13 +6319,13 @@ dependencies = [
  "keyring",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
+ "rusty_log",
  "rusty_sqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
- "tracing",
  "walkdir",
 ]
 
@@ -11085,6 +11084,7 @@ dependencies = [
  "rp-core",
  "rp-router",
  "rusty-mcp-client",
+ "rusty_log",
  "rusty_mcp_server",
  "rusty_retry",
  "rusty_serve",
@@ -11092,7 +11092,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -11128,6 +11127,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rusty_ansi",
+ "rusty_log",
  "rusty_retry",
  "rusty_sqlite",
  "serde",
@@ -11137,7 +11137,6 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "toml 0.8.2",
- "tracing",
  "wiremock",
 ]
 
@@ -11155,6 +11154,7 @@ dependencies = [
  "rp-core",
  "rp-mcp",
  "rp-router",
+ "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
@@ -11162,8 +11162,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-http",
- "tracing",
- "tracing-subscriber",
  "wiremock",
 ]
 
@@ -11577,6 +11575,7 @@ dependencies = [
  "redis",
  "reqwest 0.13.4",
  "rusty_base64",
+ "rusty_log",
  "rusty_retry",
  "serde",
  "serde_json",
@@ -11585,8 +11584,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -11806,6 +11803,7 @@ dependencies = [
  "rusty_base64",
  "rusty_http",
  "rusty_json",
+ "rusty_log",
  "rusty_mcp_axum",
  "rusty_mcp_server",
  "rusty_oauth",
@@ -11818,8 +11816,6 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -12181,6 +12177,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rusty_base64",
  "rusty_ip",
+ "rusty_log",
  "rusty_retry",
  "rusty_uuid",
  "serde",
@@ -12194,7 +12191,6 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tonic-types",
- "tracing",
 ]
 
 [[package]]
@@ -12492,6 +12488,7 @@ dependencies = [
  "rusty_crypto_key",
  "rusty_fedora",
  "rusty_http",
+ "rusty_log",
  "rusty_mcp_server",
  "rusty_oauth",
  "rusty_opnsense",
@@ -12503,8 +12500,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml 0.8.2",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -12605,12 +12600,12 @@ version = "0.6.2"
 dependencies = [
  "criterion 0.5.1",
  "rusty_json",
+ "rusty_log",
  "rusty_percent",
  "rusty_tokio",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -12680,6 +12675,7 @@ dependencies = [
  "rusty_atomic_file",
  "rusty_crypto_key",
  "rusty_http",
+ "rusty_log",
  "rusty_mcp_server",
  "rusty_multimodal_db_engine",
  "rusty_oauth",
@@ -12690,8 +12686,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -12700,14 +12694,13 @@ name = "rusty_mill_runner"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "rusty_log",
  "rusty_mcp_server",
  "rusty_mill_board",
  "rusty_sandbox",
  "rusty_serve",
  "serde",
  "serde_json",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -12786,6 +12779,7 @@ dependencies = [
  "orch-dispatch",
  "orch-ollama",
  "orch-store",
+ "rusty_atomic_file",
  "rusty_bbp",
  "rusty_json",
  "rusty_serde",
@@ -12806,6 +12800,19 @@ dependencies = [
  "rusty_rsa",
  "rusty_sha2",
 ]
+
+[[package]]
+name = "rusty_prost"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "rusty_protobuf",
+]
+
+[[package]]
+name = "rusty_protobuf"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_proxmox"
@@ -13074,8 +13081,8 @@ dependencies = [
  "platform-bsd",
  "platform-linux",
  "platform-windows",
+ "rusty_log",
  "rusty_tokio-macros",
- "tracing",
  "windows-sys 0.59.0",
 ]
 
@@ -13984,12 +13991,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rusty_log",
  "serde_json",
  "skillopt-core",
  "skillopt-envs",
  "skillopt-model",
  "tokio",
- "tracing-subscriber",
 ]
 
 [[package]]

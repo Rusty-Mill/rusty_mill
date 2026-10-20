@@ -165,7 +165,7 @@ fn into_response<B: From<String>>(refusal: Refusal) -> Response<B> {
             }
             Err(err) => {
                 // Should be unreachable: `Challenge` strips control characters.
-                tracing::error!(%err, "built an unusable WWW-Authenticate value");
+                rusty_log::error!(%err, "built an unusable WWW-Authenticate value");
             }
         }
     }

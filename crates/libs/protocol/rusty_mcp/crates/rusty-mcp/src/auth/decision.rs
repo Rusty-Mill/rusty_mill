@@ -151,7 +151,7 @@ pub(crate) fn from_validation(
         TokenError::Expired => Rejection::Invalid("the access token has expired".into()),
         TokenError::Unavailable(reason) => {
             // Log the cause; the client is told nothing beyond "try later".
-            tracing::error!(%reason, "token validation failed");
+            rusty_log::error!(%reason, "token validation failed");
             Rejection::Unavailable
         }
     })
@@ -172,7 +172,7 @@ pub(crate) fn check_claims(
             .iter()
             .any(|aud| config.matches_audience(aud))
     {
-        tracing::warn!(
+        rusty_log::warn!(
             audiences = ?verified.audiences,
             resource = config.resource(),
             "rejected a token whose audience does not name this resource"

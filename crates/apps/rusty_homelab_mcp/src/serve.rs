@@ -76,9 +76,9 @@ pub struct McpArgs {
 
 /// Send logs to stderr (stdout carries the protocol on stdio).
 pub fn init_logging(filter: &str) {
-    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    use rusty_log::tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
-    let _ = tracing_subscriber::registry()
+    let _ = rusty_log::tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr).with_ansi(false))
         .with(env_filter)
         .try_init();
@@ -123,7 +123,7 @@ pub fn serve(server: Arc<Server>, args: &McpArgs, token: Option<String>) -> Resu
 
 fn serve_http(server: Arc<Server>, args: &McpArgs, token: Option<String>) -> Result<(), String> {
     let http = bind(server, args, token)?;
-    tracing::info!(bind = %args.bind, path = %args.path, "MCP server listening");
+    rusty_log::info!(bind = %args.bind, path = %args.path, "MCP server listening");
     http.run().map_err(|e| format!("HTTP server failed: {e}"))
 }
 

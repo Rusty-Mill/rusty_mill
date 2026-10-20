@@ -95,11 +95,11 @@ fn run(cli: Cli) -> Result<(), String> {
         runner = runner.with_scope(scope);
     }
     runner.validate()?;
-    tracing::info!(board = %cli.board, "runner started");
+    rusty_log::info!(board = %cli.board, "runner started");
     loop {
         match runner.tick() {
-            Ok(steps) => steps.iter().for_each(|s| tracing::info!(?s, "step")),
-            Err(e) => tracing::warn!(error = %e, "pass failed; will retry"),
+            Ok(steps) => steps.iter().for_each(|s| rusty_log::info!(?s, "step")),
+            Err(e) => rusty_log::warn!(error = %e, "pass failed; will retry"),
         }
         if cli.once {
             return Ok(());
@@ -115,7 +115,7 @@ fn main() -> ExitCode {
         eprintln!("mill-runner __sandbox: {error}");
         return ExitCode::from(rusty_sandbox::SETUP_FAILED);
     }
-    let _ = tracing_subscriber::fmt()
+    let _ = rusty_log::tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .try_init();

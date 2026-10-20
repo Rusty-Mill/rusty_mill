@@ -79,7 +79,7 @@ fn build_replica(store: Arc<dyn Store>, base_url: &str) -> Result<axum::Router, 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_env_filter("info,rusty_acp=debug").init();
+    rusty_log::tracing_subscriber::fmt().with_env_filter("info,rusty_acp=debug").init();
 
     // One store, shared by every replica. Swapping this line is the whole
     // difference between a single host and an HA deployment.
@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "redis-store")]
         Some(url) => {
             let store = rusty_acp::server::store::RedisStore::connect(&url).await?;
-            tracing::info!("using Redis at {url}");
+            rusty_log::info!("using Redis at {url}");
             Arc::new(store)
         }
         #[cfg(not(feature = "redis-store"))]
@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("rebuild with `--features redis-store` to use a Redis URL".into());
         }
         None => {
-            tracing::info!(
+            rusty_log::info!(
                 "using a shared in-process store; pass a Redis URL (with --features \
                  redis-store) for a deployment that survives a restart"
             );
@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for port in [8001u16, 8002] {
         let router = build_replica(Arc::clone(&store), "http://localhost:8001")?;
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-        tracing::info!("replica listening on http://localhost:{port}");
+        rusty_log::info!("replica listening on http://localhost:{port}");
         replicas.push(tokio::spawn(async move { axum::serve(listener, router).await }));
     }
 

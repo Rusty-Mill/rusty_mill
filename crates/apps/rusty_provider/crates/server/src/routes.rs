@@ -1292,7 +1292,7 @@ pub async fn admin_client_usage_history(
 /// changed for it to record.
 fn admin_audit_log(identity: &AdminIdentity, action: &str, target: &str) {
     let (identity_label, organization) = audit_identity_fields(identity);
-    tracing::info!(
+    rusty_log::info!(
         identity = identity_label,
         organization,
         action,
@@ -1302,7 +1302,7 @@ fn admin_audit_log(identity: &AdminIdentity, action: &str, target: &str) {
 }
 
 /// The `(identity, organization)` fields `admin_audit_log` attaches to its
-/// event -- split out from the `tracing::info!` call itself so the
+/// event -- split out from the `rusty_log::info!` call itself so the
 /// per-identity-variant logic is unit-testable without a tracing
 /// subscriber to capture against.
 fn audit_identity_fields(identity: &AdminIdentity) -> (&'static str, &str) {

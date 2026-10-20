@@ -39,10 +39,10 @@ impl Telemetry {
             .unwrap_or_else(|| fallback_filter.to_string());
 
         let Some(tracing_config) = config.config.as_ref().and_then(|c| c.tracing.as_ref()) else {
-            tracing_subscriber::fmt()
+            rusty_log::tracing_subscriber::fmt()
                 .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&filter)),
+                    rusty_log::tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| rusty_log::tracing_subscriber::EnvFilter::new(&filter)),
                 )
                 // stderr, never stdout: a gateway may be launched by something
                 // that reads its stdout, and a log line in a protocol stream

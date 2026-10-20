@@ -223,11 +223,11 @@ impl Federation {
         for dial in dials {
             match dial.await {
                 Ok((name, Ok(target))) => {
-                    tracing::info!(target = %name, "MCP target connected");
+                    rusty_log::info!(target = %name, "MCP target connected");
                     targets.push(target);
                 }
                 Ok((name, Err(err))) => {
-                    tracing::error!(target = %name, %err, "MCP target unavailable");
+                    rusty_log::error!(target = %name, %err, "MCP target unavailable");
                     degraded.push(err.to_string());
                 }
                 Err(err) => {
@@ -235,7 +235,7 @@ impl Federation {
                         name: "?".to_owned(),
                         source: Box::new(err),
                     };
-                    tracing::error!(%err, "MCP target unavailable");
+                    rusty_log::error!(%err, "MCP target unavailable");
                     degraded.push(err.to_string());
                 }
             }
@@ -275,7 +275,7 @@ impl Federation {
             .await
             .unwrap_or_default();
         for warning in warnings {
-            tracing::warn!("{warning}");
+            rusty_log::warn!("{warning}");
         }
 
         Ok(federation)
@@ -655,7 +655,7 @@ impl Federation {
                     // processor that failed, so it takes the same path as one
                     // that could not be reached rather than being ignored.
                     None => {
-                        tracing::warn!("a guardrail rewrote tools/call into something unusable");
+                        rusty_log::warn!("a guardrail rewrote tools/call into something unusable");
                         return Err(error(
                             ErrorCode::INTERNAL_ERROR,
                             "mcpGuardrails returned an unusable request",
@@ -681,7 +681,7 @@ impl Federation {
         let result = match target.call(&params, &upstream_headers) {
             Ok(result) => result,
             Err(ClientError::Timeout) => {
-                tracing::warn!(
+                rusty_log::warn!(
                     target = %target.name,
                     tool = %federated,
                     "tool call exceeded the backend budget"
@@ -703,7 +703,7 @@ impl Federation {
                 });
             }
             Err(err) => {
-                tracing::warn!(target = %target.name, tool = %federated, %err, "tool call failed");
+                rusty_log::warn!(target = %target.name, tool = %federated, %err, "tool call failed");
                 return Err(error(
                     ErrorCode::INTERNAL_ERROR,
                     format!("calling `{federated}` failed: {err}"),
@@ -1128,7 +1128,7 @@ impl Federation {
         match call() {
             Ok(value) => Some(value),
             Err(ClientError::Timeout) => {
-                tracing::warn!(
+                rusty_log::warn!(
                     target = %target.name,
                     what,
                     timeout_ms = self
@@ -1140,7 +1140,7 @@ impl Federation {
                 None
             }
             Err(err) => {
-                tracing::warn!(target = %target.name, what, %err, "an upstream call failed");
+                rusty_log::warn!(target = %target.name, what, %err, "an upstream call failed");
                 None
             }
         }
@@ -1219,7 +1219,7 @@ impl Federation {
                 // that failed, so it takes the same path as one that could not
                 // be reached rather than being ignored.
                 None => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         method,
                         "a guardrail rewrote a request into something unusable"
                     );
@@ -1283,7 +1283,7 @@ impl Federation {
         )) {
             Outcome::Pass => Ok(value.clone()),
             Outcome::Mutated(body) => decode(&body).ok_or_else(|| {
-                tracing::warn!(
+                rusty_log::warn!(
                     method,
                     "a guardrail rewrote a result into something unusable"
                 );

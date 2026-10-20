@@ -49,7 +49,7 @@ pub fn scan_roots(
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!(
+                rusty_log::warn!(
                     "skipping unreadable claude code transcript {}: {e}",
                     path.display()
                 );

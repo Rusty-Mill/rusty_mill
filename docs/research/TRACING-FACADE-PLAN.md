@@ -1,6 +1,6 @@
 # Plan: `tracing` facade (sovereignty list item 12)
 
-Status: **option B approved by the owner (2026-10-19)**. Step 1 (the `rusty_log` crate and the baseline check) is in progress; no crate is migrated yet. Option C is not approved and is not planned.
+Status: **option B approved by the owner (2026-10-19)**. Step 1 (the `rusty_log` crate and the baseline check) is done. Step 2 is in progress: `rusty-mcp`, the eight agent gateway crates the seven protocol, adk and runtime crates, and the eight provider, homelab, board, inventory and skillopt crates are migrated; the other 7 baseline crates (the tailscale family) are not. Option C is not approved and is not planned.
 Context: `RUSTY-MCP-SOVEREIGNTY.md` item 12 and D3; ADR-0002.
 
 ## What was measured (2026-10-18, `cargo metadata --all-features`, main at `25dd9517`)

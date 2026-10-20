@@ -182,7 +182,7 @@ fn stop_on_signal(
                 #[cfg(not(unix))]
                 let _ = tokio::signal::ctrl_c().await;
             });
-            tracing::info!("signal received, shutting down");
+            rusty_log::info!("signal received, shutting down");
             begin_stop(&server, &in_flight);
         })
         .map(drop)
@@ -300,14 +300,14 @@ fn run(cli: Cli) -> Result<(), String> {
         http.shutdown_handle().map_err(|e| e.to_string())?,
         in_flight.clone(),
     )?;
-    tracing::info!(%addr, "Mill Board listening");
+    rusty_log::info!(%addr, "Mill Board listening");
     // The accept loop ends on a signal. Then the requests being answered, the tool calls running
     // and a backup under way get one bounded wait: a commit whose reply is cut off is durable but
     // looks failed to its caller, who may then repeat it.
     match serve_until_drained(http, &in_flight, DRAIN) {
         Ok(true) => Ok(()),
         Ok(false) => {
-            tracing::warn!(
+            rusty_log::warn!(
                 secs = DRAIN.as_secs(),
                 "work still running at the deadline; stopping it"
             );
@@ -318,7 +318,7 @@ fn run(cli: Cli) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    let _ = tracing_subscriber::fmt()
+    let _ = rusty_log::tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .try_init();

@@ -103,14 +103,14 @@ impl A2aGateway {
             match fetch(&client, &url).await {
                 Ok(bytes) => match card::parse(agent, &bytes) {
                     Ok(card) => cards.push((agent.clone(), card)),
-                    Err(rejected) => tracing::warn!(
+                    Err(rejected) => rusty_log::warn!(
                         route = %at,
                         agent = %rejected.source,
                         reason = %rejected.reason,
                         "agent card could not be parsed; excluding it from discovery"
                     ),
                 },
-                Err(err) => tracing::warn!(
+                Err(err) => rusty_log::warn!(
                     route = %at,
                     %agent,
                     %err,
@@ -122,15 +122,15 @@ impl A2aGateway {
         let merged = card::merge(cards, card_policy);
         if let Some(merged) = &merged {
             for collision in &merged.collisions {
-                tracing::warn!(route = %at, "agent card skill collision: {collision}");
+                rusty_log::warn!(route = %at, "agent card skill collision: {collision}");
             }
-            tracing::info!(
+            rusty_log::info!(
                 route = %at,
                 skills = merged.card.skills.len(),
                 "serving a merged agent card"
             );
         } else {
-            tracing::warn!(
+            rusty_log::warn!(
                 route = %at,
                 "no agent card could be assembled; the well-known path will 503"
             );

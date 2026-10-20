@@ -27,5 +27,6 @@ pub mod args;
 pub mod cli;
 pub mod input;
 pub mod inspect;
+pub mod maintenance;
 pub mod report;
 pub mod run;

@@ -154,7 +154,7 @@ impl WebhookNotifier {
         let body = match serde_json::to_vec(&event) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(error = %e, "failed to serialize webhook event; not sending");
+                rusty_log::warn!(error = %e, "failed to serialize webhook event; not sending");
                 return;
             }
         };
@@ -194,12 +194,12 @@ impl WebhookNotifier {
                     Ok(resp) => {
                         let status = resp.status();
                         let will_retry = status.is_server_error() && attempt < policy.max_retries;
-                        tracing::warn!(%url, %status, attempt, will_retry, "webhook delivery failed");
+                        rusty_log::warn!(%url, %status, attempt, will_retry, "webhook delivery failed");
                         status.is_server_error()
                     }
                     Err(e) => {
                         let will_retry = attempt < policy.max_retries;
-                        tracing::warn!(%url, error = %e, attempt, will_retry, "webhook delivery failed");
+                        rusty_log::warn!(%url, error = %e, attempt, will_retry, "webhook delivery failed");
                         true
                     }
                 };

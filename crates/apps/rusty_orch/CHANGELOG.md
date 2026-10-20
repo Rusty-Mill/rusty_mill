@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Opt-in `maintain` connects versioned repository findings to one sandboxed BBP task, with deterministic scope, durable recovery, human approvals, reverse-dependency validation and explicit draft PR publication (ADR-0015).
 - Required CI evidence for pause/adoption across Orch processes; real deadline-ending launch-loop recovery coverage.
 - Durable provider-neutral launcher failure pauses across Orch restarts, explicit owner reset, scoped MCP tool approvals and an LLD profile with bounded linker parallelism.
 - Runnable Codex author/Claude reviewer BBP launchers in the host package, per-turn MCP contracts and an opt-in Linux real-provider smoke. Reviewer built-in tools are removed by fixed launcher arguments.

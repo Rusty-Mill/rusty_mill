@@ -199,7 +199,7 @@ impl ExtAuthz {
         let response = match request.send().await {
             Ok(response) => response,
             Err(err) => {
-                tracing::warn!(
+                rusty_log::warn!(
                     target = %self.target,
                     fail_open = self.fail_open,
                     %err,

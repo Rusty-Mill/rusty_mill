@@ -148,7 +148,7 @@ impl RunHandle {
                         // Records `cancelling` and signals the token; the
                         // executor observes it and writes the terminal state.
                         if let Err(error) = handle.set_cancelling().await {
-                            tracing::warn!(%error, "failed to record cancellation");
+                            rusty_log::warn!(%error, "failed to record cancellation");
                             handle.cancel.cancel();
                         }
                     }
@@ -291,7 +291,7 @@ impl RunHandle {
                         match Self::take_output(&mut state, self.max_output_bytes, pending.clone())
                         {
                             Ok(()) => flushed = Some(pending),
-                            Err(error) => tracing::warn!(
+                            Err(error) => rusty_log::warn!(
                                 %error,
                                 "dropping a trailing message that would exceed the output ceiling"
                             ),

@@ -4,6 +4,18 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Autonomous maintenance execution
+**2026-10-18**
+
+- `maintain` defaults to a read-only plan. Explicit execution opens or recovers
+  one bounded maintenance card using configured BBP providers and independent review.
+- Human gates, Linux confinement, scoped manifest semantics and frozen Cargo
+  validation remain mandatory. An explicit publication flag can open a draft PR
+  for the exact validated tree. Maintenance never merges.
+- Initial repairs cover layer metadata and human-confirmed dependency hoists.
+
+---
+
 ## BBP provider launchers
 **2026-10-17**
 

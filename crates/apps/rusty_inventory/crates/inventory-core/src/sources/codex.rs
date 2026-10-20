@@ -47,7 +47,7 @@ pub fn scan_roots(
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!("skipping unreadable codex rollout {}: {e}", path.display());
+                rusty_log::warn!("skipping unreadable codex rollout {}: {e}", path.display());
             }
         }
     }

@@ -64,7 +64,7 @@ mod worker;
 
 use std::{sync::Arc, time::Duration};
 
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use rusty_log::tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 pub use self::{layer::SpanLayer, span::AttributeValue};
 use crate::otel::{
@@ -89,7 +89,7 @@ const SPAN_BATCH_INTERVAL: Duration = Duration::from_secs(5);
 /// nothing if the span is not recorded: no [`SpanLayer`] is installed, the span
 /// was not sampled, or it has closed. Anything beyond the per-span attribute
 /// limit is dropped.
-pub fn set_attribute(span: &tracing::Span, key: &str, value: impl Into<AttributeValue>) {
+pub fn set_attribute(span: &rusty_log::Span, key: &str, value: impl Into<AttributeValue>) {
     let value = value.into();
     span.with_subscriber(|(id, dispatch)| {
         if let Some(layer) = dispatch.downcast_ref::<SpanLayer>() {
@@ -408,24 +408,24 @@ impl OtelGuard {
         if !self.spans.shutdown(self.timeout) {
             // Worth a loud line: it means telemetry was silently dropped, which
             // otherwise looks like the code was never instrumented.
-            tracing::error!("failed to flush spans before shutdown");
+            rusty_log::error!("failed to flush spans before shutdown");
         }
         if let Some(pusher) = &self.pusher
             && !pusher.shutdown(self.timeout)
         {
-            tracing::error!("failed to flush metrics before shutdown");
+            rusty_log::error!("failed to flush metrics before shutdown");
         }
     }
 
     /// Flush without stopping, for a checkpoint mid-run.
     pub fn flush(&self) {
         if !self.spans.flush(self.timeout) {
-            tracing::warn!("failed to flush spans");
+            rusty_log::warn!("failed to flush spans");
         }
         if let Some(pusher) = &self.pusher
             && !pusher.flush(self.timeout)
         {
-            tracing::warn!("failed to flush metrics");
+            rusty_log::warn!("failed to flush metrics");
         }
     }
 
@@ -490,13 +490,13 @@ impl Drop for OtelGuard {
 /// the second pipeline fed by nothing:
 ///
 /// ```no_run
-/// use tracing_subscriber::prelude::*;
+/// use rusty_log::tracing_subscriber::prelude::*;
 /// # use rusty_mcp::otel::OtelConfig;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let (guard, layer) = rusty_mcp::otel::pipeline(OtelConfig::new("my-server"))?;
 ///
-/// tracing_subscriber::registry()
-///     .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+/// rusty_log::tracing_subscriber::registry()
+///     .with(rusty_log::tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
 ///     .with(layer)
 ///     .init();
 /// # let _ = guard;
@@ -563,7 +563,7 @@ pub fn init(config: OtelConfig, filter: &str) -> Result<OtelGuard, OtelError> {
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
 
-    let installed = tracing_subscriber::registry()
+    let installed = rusty_log::tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr).with_ansi(false))
         .with(layer)
         .with(env_filter)
@@ -573,10 +573,10 @@ pub fn init(config: OtelConfig, filter: &str) -> Result<OtelGuard, OtelError> {
         // A subscriber was already installed, so spans will not reach the layer
         // we just built. Worth saying plainly rather than exporting nothing and
         // leaving the operator to wonder.
-        tracing::warn!("a tracing subscriber was already installed; spans will not be exported");
+        rusty_log::warn!("a tracing subscriber was already installed; spans will not be exported");
     }
 
-    tracing::info!(
+    rusty_log::info!(
         service = %service_name,
         endpoint = %redact::origin(&endpoint),
         sample_ratio,

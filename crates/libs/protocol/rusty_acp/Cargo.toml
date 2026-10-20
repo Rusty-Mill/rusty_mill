@@ -59,7 +59,7 @@ serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
-tracing = { workspace = true }
+rusty_log = { workspace = true }
 rusty_base64 = { workspace = true }
 
 # client
@@ -108,7 +108,7 @@ metrics = { version = "0.24.6", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 eventsource-stream = { workspace = true }
 tokio = { version = "1", features = ["full"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusty_log = { workspace = true, features = ["subscriber"] }
 async-trait = { workspace = true }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }

@@ -243,8 +243,8 @@ impl Backups {
                         return;
                     };
                     match self.run(&board, &settings) {
-                        Ok(done) => tracing::info!(backup = %done.display(), "backup taken"),
-                        Err(why) => tracing::error!(%why, "backup failed"),
+                        Ok(done) => rusty_log::info!(backup = %done.display(), "backup taken"),
+                        Err(why) => rusty_log::error!(%why, "backup failed"),
                     }
                 }
             })

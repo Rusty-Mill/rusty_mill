@@ -106,7 +106,7 @@ impl Shape {
         // one is passed through, so a route can alias `fast` without having to
         // enumerate every model a caller might otherwise ask for.
         let real = real.clone();
-        tracing::debug!(alias = asked, model = %real, "resolved a model alias");
+        rusty_log::debug!(alias = asked, model = %real, "resolved a model alias");
         object.insert("model".into(), Value::String(real));
     }
 

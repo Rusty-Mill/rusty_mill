@@ -96,7 +96,7 @@ impl<H: SharedHandler> SharedHandler for LimitedHandler<H> {
         match self.admission.try_admit() {
             Ok(_permit) => self.inner.handle(request),
             Err(rejection) => {
-                tracing::warn!("shedding a request: the concurrency limit is reached");
+                rusty_log::warn!("shedding a request: the concurrency limit is reached");
                 shed_response(rejection)
             }
         }
@@ -175,7 +175,7 @@ fn refusal_response(refusal: Refusal) -> Response {
         Ok(response) => response,
         Err(err) => {
             // Should be unreachable: `Challenge` strips control characters.
-            tracing::error!(%err, "built an unusable WWW-Authenticate value");
+            rusty_log::error!(%err, "built an unusable WWW-Authenticate value");
             Response::json(
                 StatusCode::from_u16(refusal.status.as_u16()),
                 json!({ "error": "unauthorized" })

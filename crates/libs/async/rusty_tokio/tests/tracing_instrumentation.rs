@@ -1,18 +1,18 @@
 // Everything below runs inside one `#[test]` fn, deliberately -- this
-// installs a `tracing::Subscriber` via `set_global_default`, which (unlike
+// installs a `rusty_log::Subscriber` via `set_global_default`, which (unlike
 // `with_default`) is genuinely process-wide, covering every OS thread
 // including the blocking pool's, but can only be called once per process.
 // A second `#[test]` fn calling it again would panic, so every scenario
 // this file cares about is exercised sequentially against one shared
 // recorder instead.
+use rusty_log::field::{Field, Visit};
+use rusty_log::span::{Attributes, Id, Record};
+use rusty_log::{Event, Metadata, Subscriber};
 use rusty_tokio::task::{self, Builder, LocalSet};
 use rusty_tokio::Runtime;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Id, Record};
-use tracing::{Event, Metadata, Subscriber};
 
 #[derive(Default)]
 struct RecordedSpan {
@@ -119,7 +119,7 @@ impl Subscriber for Recorder {
 #[test]
 fn console_subscriber_shaped_instrumentation() {
     let recorder = Arc::new(Recorder::default());
-    tracing::subscriber::set_global_default(recorder.clone())
+    rusty_log::subscriber::set_global_default(recorder.clone())
         .expect("no other subscriber has been installed in this process yet");
 
     let rt = Runtime::new().unwrap();
