@@ -1805,7 +1805,7 @@ mod tests {
     }
 
     #[test]
-    fn killed_builders_fail_criterion_two_once_more_than_one_pair_in_five_is_lost() {
+    fn with_healthy_controls_criterion_two_allows_one_killed_builder_pair() {
         let lose = |n: usize| {
             let mut p = all([0.5; 5], 1, 1);
             for x in p.iter_mut().filter(|x| x.kind == Kind::Shared).take(n) {
@@ -1818,6 +1818,25 @@ mod tests {
         assert_eq!(lose(1).c2_comparable, Verdict::Holds);
         assert_eq!(lose(2).c2_comparable, Verdict::Fails);
         assert!(lose(2).decision.starts_with("Inconclusive"));
+    }
+
+    #[test]
+    fn overlapping_control_failure_allows_two_killed_builder_pairs() {
+        let mut p = all([0.5; 5], 1, 1);
+        for x in p.iter_mut().filter(|x| x.kind == Kind::Shared).take(2) {
+            x.treatment = killed(run(1, 1), 1.0);
+        }
+        p.iter_mut()
+            .find(|x| x.kind == Kind::Shared)
+            .unwrap()
+            .control
+            .rubric_ok = false;
+
+        let e = evaluate(&p, 500);
+        assert_eq!(e.c2_comparable, Verdict::Holds);
+        assert_eq!(e.c4_contention, Verdict::Holds);
+        assert_eq!(e.c5_loss, Verdict::Holds);
+        assert!(e.decision.starts_with("Build `rusty_crdt`"));
     }
 
     #[test]
