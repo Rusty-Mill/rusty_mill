@@ -84,6 +84,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsStream<S> {
         Ok(Self { conn, io })
     }
 
+    /// Like [`AsyncTlsStream::new_with_client_identity`], and also offers
+    /// `alpn_protocols` (each entry a wire-format protocol ID, e.g.
+    /// `b"h2"`) during the handshake — the async counterpart to
+    /// [`TlsStream::new_with_client_identity_and_alpn`](crate::TlsStream::new_with_client_identity_and_alpn).
+    pub fn new_with_client_identity_and_alpn(
+        io: S,
+        server_name: &str,
+        policy: &TrustPolicy,
+        client_cert_chain_der: Vec<Vec<u8>>,
+        client_key_der: Vec<u8>,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        let _ = (
+            io,
+            server_name,
+            policy,
+            client_cert_chain_der,
+            client_key_der,
+            alpn_protocols,
+        );
+        todo!()
+    }
+
     /// Like [`AsyncTlsStream::new`], but offers `alpn_protocols` (each
     /// entry a wire-format protocol ID, e.g. `b"h2"`) during the handshake
     /// — the async counterpart to
