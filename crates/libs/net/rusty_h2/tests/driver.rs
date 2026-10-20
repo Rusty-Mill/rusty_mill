@@ -462,37 +462,44 @@ async fn a_protocol_violation_sends_goaway_and_ends_the_driver() {
         .is_err());
 }
 
+/// That the driver stops reading while its acks are unwritten is checked
+/// deterministically in `driver::tests` with a transport that takes no
+/// output: how much a real socket buffers (a lot, on Windows loopback) is
+/// not something a test can rely on. Here, over real sockets, the flood is
+/// answered in full once the peer reads the acks.
 #[rusty_tokio::test]
-async fn a_flood_of_pings_stalls_the_peer_instead_of_growing_memory() {
-    let (raw, _acceptor, driver_task) = raw_client_with_driver().await;
+async fn a_flood_of_pings_is_answered_in_full_once_the_acks_are_read() {
+    let (raw, _acceptor) = raw_client().await;
     let ping = wire(&Frame::Ping(rusty_h2::frame::PingFrame {
         ack: false,
         opaque_data: [7; 8],
     }));
-    let flood = ping.repeat(4_000_000); // 68 MB of pings; more acks than any socket buffers hold
+    const PINGS: usize = 400_000;
+    let flood = ping.repeat(PINGS);
     let (mut rd, mut wr) = raw.into_split();
-    let mut writer = rusty_tokio::spawn(async move {
-        let result = wr.write_all(&flood).await;
-        (result, wr)
-    });
-    let early = timeout(Duration::from_secs(2), &mut writer).await;
-    assert!(
-        early.is_err(),
-        "the driver must stop reading while its acks are unread; the writer ended with {:?}, the driver finished: {}",
-        early.map(|r| r.map(|(res, _)| res)),
-        driver_task.is_finished()
-    );
-    // Reading the acks lets the flood through.
-    let drain = rusty_tokio::spawn(async move {
+    let writer = rusty_tokio::spawn(async move { wr.write_all(&flood).await.map(|()| wr) });
+    // Count the acks as they come back (after the server's SETTINGS frames).
+    let reader = rusty_tokio::spawn(async move {
         let mut buf = vec![0u8; 64 * 1024];
-        while rd.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+        let mut bytes = 0usize;
+        while bytes < PINGS * 17 {
+            match rd.read(&mut buf).await {
+                Ok(n) if n > 0 => bytes += n,
+                _ => break,
+            }
+        }
+        bytes
     });
-    let (result, _wr) = timeout(Duration::from_secs(20), writer)
+    let _wr = timeout(Duration::from_secs(30), writer)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let bytes = timeout(Duration::from_secs(30), reader)
         .await
         .unwrap()
         .unwrap();
-    result.unwrap();
-    drain.abort();
+    assert!(bytes >= PINGS * 17, "only {bytes} bytes of acks came back");
 }
 
 #[rusty_tokio::test]

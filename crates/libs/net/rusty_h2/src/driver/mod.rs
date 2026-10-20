@@ -754,6 +754,9 @@ mod tests {
     /// a budget of bytes a write will take.
     #[derive(Default)]
     struct StubState {
+        /// Bytes `poll_read` hands out; once used up it is pending.
+        input: Vec<u8>,
+        read_pos: usize,
         read_waker: Option<Waker>,
         write_waker: Option<Waker>,
         budget: usize,
@@ -767,10 +770,19 @@ mod tests {
         fn poll_read(
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
-            _buf: &mut rusty_tokio::io::ReadBuf<'_>,
+            buf: &mut rusty_tokio::io::ReadBuf<'_>,
         ) -> Poll<std::io::Result<()>> {
+            let mut st = self.0.lock().unwrap();
+            if st.read_pos < st.input.len() {
+                let n = buf.remaining().min(st.input.len() - st.read_pos);
+                let start = st.read_pos;
+                buf.unfilled_mut()[..n].copy_from_slice(&st.input[start..start + n]);
+                buf.advance(n);
+                st.read_pos += n;
+                return Poll::Ready(Ok(()));
+            }
             // Replacing the stored waker destroys the previous one, right here.
-            self.0.lock().unwrap().read_waker = Some(cx.waker().clone());
+            st.read_waker = Some(cx.waker().clone());
             Poll::Pending
         }
     }
@@ -836,5 +848,54 @@ mod tests {
             opaque_data: [1; 8],
         })]);
         assert_eq!(lock(&shared).backlog(), queued - 10 + 17);
+    }
+
+    #[test]
+    fn a_ping_flood_is_not_read_faster_than_its_acks_can_be_written() {
+        use crate::frame::SettingsFrame;
+        const PINGS: usize = 100_000;
+        let mut input = crate::CONNECTION_PREFACE.to_vec();
+        Frame::Settings(SettingsFrame {
+            ack: false,
+            settings: vec![],
+        })
+        .encode(&mut input);
+        for _ in 0..PINGS {
+            Frame::Ping(PingFrame {
+                ack: false,
+                opaque_data: [3; 8],
+            })
+            .encode(&mut input);
+        }
+        let total = input.len();
+        let stub = Stub::default();
+        stub.0.lock().unwrap().input = input;
+        // The transport takes no output at all: its acks pile up.
+        let (_acceptor, mut driver) = server(stub.clone(), crate::server::builder::Builder::new());
+        let shared = driver.shared.clone();
+        for _ in 0..8 {
+            assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+        }
+        let read = stub.0.lock().unwrap().read_pos;
+        assert!(
+            read < total,
+            "the driver must stop reading, not read it all"
+        );
+        let backlog = lock(&shared).backlog();
+        assert!(
+            (shared::OUT_HIGH..shared::OUT_HIGH + 128 * 1024).contains(&backlog),
+            "unwritten output is capped near the limit, not {backlog}"
+        );
+        // Once the transport takes output again, the rest is read and answered.
+        stub.0.lock().unwrap().budget = usize::MAX / 2;
+        for _ in 0..1_000 {
+            let _ = poll_once(&mut driver, Waker::noop());
+            if stub.0.lock().unwrap().read_pos == total {
+                break;
+            }
+        }
+        let st = stub.0.lock().unwrap();
+        assert_eq!(st.read_pos, total);
+        assert!(st.taken >= PINGS * 17, "every ping is acknowledged");
     }
 }
