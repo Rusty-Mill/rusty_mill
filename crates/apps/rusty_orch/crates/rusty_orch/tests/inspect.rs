@@ -44,6 +44,19 @@ fn scan(path: &Path) -> std::process::Output {
 #[test]
 fn cargo_workspace_discovery_reports_all_feature_edges_without_changes() {
     let workspace = Workspace::new();
+    // stdin script mode must retain -I: target-repository modules must never
+    // shadow either the stdlib or the compiled-in first-party helpers.
+    for module in [
+        "json",
+        "affected_crates",
+        "repository_intelligence",
+        "sitecustomize",
+    ] {
+        workspace.write(
+            &format!("{module}.py"),
+            "raise RuntimeError('target code executed')\n",
+        );
+    }
     workspace.write("Cargo.toml", "[workspace]\nmembers = [\"crates/foundation/base\", \"crates/apps/app\"]\nresolver = \"2\"\n");
     workspace.write("crates/foundation/base/Cargo.toml", "[package]\nname = \"base\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[package.metadata.rusty_mill]\nlayer = \"foundation\"\n");
     workspace.write("crates/foundation/base/src/lib.rs", "pub fn base() {}\n");

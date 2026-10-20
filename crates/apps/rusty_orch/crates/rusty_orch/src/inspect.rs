@@ -98,9 +98,6 @@ fn bundled_program() -> Result<String, Box<dyn std::error::Error>> {
     Ok(program)
 }
 
-const STDIN_PROGRAM: &str =
-    "import sys; exec(compile(sys.stdin.buffer.read(), '<rusty_orch>', 'exec'))";
-
 /// Discover and analyze with the existing bounded process seam. Failure returns
 /// no partial report; findings themselves are a successful inspection result.
 pub fn inspect(
@@ -121,8 +118,7 @@ pub fn inspect_with_impact(
     let mut argv = vec![
         "python3".to_owned(),
         "-I".to_owned(),
-        "-c".to_owned(),
-        STDIN_PROGRAM.to_owned(),
+        "-".to_owned(),
         repo.to_str()
             .ok_or("repository path must be UTF-8")?
             .to_owned(),
@@ -136,9 +132,9 @@ pub fn inspect_with_impact(
                 .to_owned(),
         );
     }
-    // Keep the bundled first-party implementation out of argv: Windows has a
-    // much smaller command-line limit than the maximum supported program size.
-    // Isolated mode still prevents imports from the inspected repository.
+    // The compiled-in source exceeds Windows' CreateProcess command-line
+    // limit. Python's stdin script mode keeps argv bounded and, with -I,
+    // still excludes target-repository imports. No script is written to disk.
     let program = bundled_program()?;
     let exit = runner.run_in(
         Some(&repo),
@@ -181,12 +177,37 @@ mod tests {
         let runner = FakeCommand::new(Ok(exit(1, "", "cargo metadata failed")));
         let error = inspect(&std::env::current_dir().expect("cwd"), &runner).expect_err("failure");
         assert!(error.to_string().contains("cargo metadata failed"));
-        let calls = runner.calls.lock().expect("calls");
-        assert_eq!(calls[0].0[1..4], ["-I", "-c", STDIN_PROGRAM]);
-        assert!(calls[0].0.iter().all(|argument| argument.len() < 1_024));
-        assert!(std::str::from_utf8(&calls[0].1)
-            .expect("program")
-            .contains("repository_intelligence"));
+    }
+
+    #[test]
+    fn bundled_source_uses_stdin_with_isolation_and_bounded_launch_arguments() {
+        let repo = std::env::current_dir()
+            .expect("cwd")
+            .canonicalize()
+            .expect("repo");
+        let request = repo
+            .join("Cargo.toml")
+            .canonicalize()
+            .expect("existing file");
+        for impact in [None, Some(request.as_path())] {
+            let runner = FakeCommand::ok("{}");
+            inspect_with_impact(&repo, impact, &runner).expect("report");
+            let calls = runner.calls.lock().expect("calls");
+            let (argv, stdin, timeout) = &calls[0];
+            assert_eq!(&argv[..3], ["python3", "-I", "-"]);
+            assert_eq!(argv.len(), if impact.is_some() { 5 } else { 4 });
+            assert_eq!(argv[3], repo.to_str().expect("UTF8"));
+            if impact.is_some() {
+                assert_eq!(argv[4], request.to_str().expect("UTF8"));
+            }
+            assert_eq!(stdin, bundled_program().expect("source").as_bytes());
+            assert!(argv.iter().map(|s| s.encode_utf16().count()).sum::<usize>() < 1024);
+            assert_eq!(*timeout, Duration::from_secs(120));
+            assert_eq!(
+                runner.cwds.lock().expect("cwds")[0].as_deref(),
+                Some(repo.as_path())
+            );
+        }
     }
 
     #[test]
