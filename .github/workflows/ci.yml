@@ -223,6 +223,10 @@ jobs:
       - run: cargo metadata --format-version=1 --all-features > /tmp/metadata.json
       - run: python3 .github/scripts/check_workspace_deps.py /tmp/metadata.json
       - run: python3 .github/scripts/check_workspace_layers.py /tmp/metadata.json
+      # Default features: an optional dependency a plain build does not pull must not
+      # raise a crate's declared rust-version.
+      - run: cargo metadata --format-version=1 > /tmp/metadata-default.json
+      - run: python3 .github/scripts/check_rust_versions.py /tmp/metadata-default.json
       - run: python3 .github/scripts/generate_workspace_map.py /tmp/metadata.json --verify docs/WORKSPACE-MAP.md
 
   cargo-deny:

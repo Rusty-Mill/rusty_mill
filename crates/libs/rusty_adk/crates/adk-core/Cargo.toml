@@ -2,7 +2,7 @@
 name = "adk-core"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Core ADK 2.0 data model: Content, Event, EventActions, State, Session, InvocationContext"

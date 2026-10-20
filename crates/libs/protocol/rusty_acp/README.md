@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/baileyrd/rusty_acp/actions/workflows/ci.yml/badge.svg)](https://github.com/baileyrd/rusty_acp/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/rustc-1.86%2B-orange.svg)](#install)
+[![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](#install)
 
 A Rust implementation of the [Agent Communication Protocol][acp] (ACP) **v0.2.0** — the open,
 REST-based standard for making AI agents interoperable across frameworks, languages and
@@ -58,9 +58,8 @@ rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["trace"
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["store-testkit"] }
 ```
 
-Minimum supported Rust version is **1.86**, verified in CI on every change. The optional
-`redis-store` and `postgres-store` features require **1.88**, since `redis` and `sqlx` have
-higher floors of their own; an optional dependency does not raise the MSRV for everyone else.
+Minimum supported Rust version is **1.88**, the highest floor the resolved dependencies
+declare (`icu_*`). The CI check `check_rust_versions.py` fails if `rust-version` is lower.
 
 ## Serve an agent
 
