@@ -464,7 +464,7 @@ async fn a_protocol_violation_sends_goaway_and_ends_the_driver() {
 
 #[rusty_tokio::test]
 async fn a_flood_of_pings_stalls_the_peer_instead_of_growing_memory() {
-    let (raw, _acceptor) = raw_client().await;
+    let (raw, _acceptor, driver_task) = raw_client_with_driver().await;
     let ping = wire(&Frame::Ping(rusty_h2::frame::PingFrame {
         ack: false,
         opaque_data: [7; 8],
@@ -472,22 +472,26 @@ async fn a_flood_of_pings_stalls_the_peer_instead_of_growing_memory() {
     let flood = ping.repeat(4_000_000); // 68 MB of pings; more acks than any socket buffers hold
     let (mut rd, mut wr) = raw.into_split();
     let mut writer = rusty_tokio::spawn(async move {
-        wr.write_all(&flood).await.unwrap();
-        wr
+        let result = wr.write_all(&flood).await;
+        (result, wr)
     });
+    let early = timeout(Duration::from_secs(2), &mut writer).await;
     assert!(
-        timeout(Duration::from_secs(2), &mut writer).await.is_err(),
-        "the driver must stop reading while its acks are unread"
+        early.is_err(),
+        "the driver must stop reading while its acks are unread; the writer ended with {:?}, the driver finished: {}",
+        early.map(|r| r.map(|(res, _)| res)),
+        driver_task.is_finished()
     );
     // Reading the acks lets the flood through.
     let drain = rusty_tokio::spawn(async move {
         let mut buf = vec![0u8; 64 * 1024];
         while rd.read(&mut buf).await.is_ok_and(|n| n > 0) {}
     });
-    timeout(Duration::from_secs(20), writer)
+    let (result, _wr) = timeout(Duration::from_secs(20), writer)
         .await
         .unwrap()
         .unwrap();
+    result.unwrap();
     drain.abort();
 }
 
