@@ -191,9 +191,12 @@ Each item is one PR, with its own tests and a change fragment.
     `tracing` and `tracing-subscriber` in the 74 crates that use them. Its own
     plan and owner sign-off before any code; until then `tracing` is a named
     Tier A exception of `rusty-mcp`.
-    **In progress (2026-10-19):** option B of `TRACING-FACADE-PLAN.md` (a `rusty_log`
-    re-export crate, then one migration PR per area). `rusty-mcp`, the agent gateway
-    crates (eight) the protocol, adk and runtime crates (seven) the app crates (eight) and the tailscale family (seven) are migrated; the baseline is empty and the strict rule is the last step.
+    **Done (2026-10-19), as option B of `TRACING-FACADE-PLAN.md`:** a `rusty_log`
+    re-export crate, all 31 workspace crates that used `tracing` or `tracing-subscriber`
+    migrated onto it (one PR per area), and a policy check that only `rusty_log` may
+    depend on `tracing*` directly. The third-party crates in the graph (`axum`, `h2`,
+    `sqlx`, `aws-*`) still depend on `tracing`, so the crate stays in the build graph;
+    an in-house implementation (option C) is not planned.
 
 ## 4. Risks
 
