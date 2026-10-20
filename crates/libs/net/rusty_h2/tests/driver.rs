@@ -944,6 +944,20 @@ struct Knobs {
     fail_flush: std::sync::Arc<std::sync::atomic::AtomicBool>,
     fail_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
     flush_pending_once: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 0 = succeed, otherwise fail with that [`kind`] (see below).
+    write_error_kind: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    flush_error_kind: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+
+/// Error kinds a [`Knobs`] switch can inject.
+fn kind(code: u8) -> std::io::ErrorKind {
+    use std::io::ErrorKind::*;
+    match code {
+        2 => BrokenPipe,
+        3 => ConnectionReset,
+        4 => NotConnected,
+        _ => Other,
+    }
 }
 
 /// A transport that buffers writes until flushed and can misbehave.
@@ -1014,6 +1028,10 @@ impl rusty_tokio::io::AsyncWrite for Buffered {
         use std::sync::atomic::Ordering::SeqCst;
         if self.knobs.fail_flush.load(SeqCst) {
             return std::task::Poll::Ready(Err(std::io::Error::other("flush failed")));
+        }
+        let code = self.knobs.flush_error_kind.load(SeqCst);
+        if code != 0 {
+            return std::task::Poll::Ready(Err(std::io::Error::from(kind(code))));
         }
         if self.knobs.flush_pending_once.swap(false, SeqCst) {
             cx.waker().wake_by_ref();
@@ -1169,4 +1187,111 @@ async fn a_pending_final_flush_is_resumed_and_the_finish_stays_clean() {
         .unwrap()
         .unwrap();
     assert!(result.is_ok(), "{result:?}");
+}
+
+/// A server over a buffered transport, with a raw client that has finished the
+/// handshake, sent one complete request, and announced GOAWAY. Returns the
+/// raw client, the accepted request's responder, and the server's task.
+async fn goaway_server() -> (
+    TcpStream,
+    driver::Respond,
+    Knobs,
+    rusty_tokio::JoinHandle<Result<(), Error>>,
+    driver::Acceptor,
+) {
+    let (mut raw, b) = pair().await;
+    let transport = Buffered::new(b);
+    let knobs = transport.knobs.clone();
+    let (mut acceptor, sdrv) = driver::server(transport, ServerBuilder::new());
+    let task = rusty_tokio::spawn(sdrv);
+    raw.write_all(CONNECTION_PREFACE).await.unwrap();
+    raw.write_all(&wire(&Frame::Settings(SettingsFrame {
+        ack: false,
+        settings: vec![],
+    })))
+    .await
+    .unwrap();
+    raw.write_all(&wire(&raw_headers(1, true))).await.unwrap();
+    raw.write_all(&wire(&Frame::GoAway(rusty_h2::frame::GoAwayFrame {
+        last_stream_id: 1,
+        error_code: ErrorCode::NoError,
+        debug_data: vec![],
+    })))
+    .await
+    .unwrap();
+    // The server's handshake bytes have been flushed to the peer.
+    read_until(&mut raw, |f| {
+        matches!(f, Frame::Settings(s) if !s.ack).then_some(())
+    })
+    .await
+    .expect("the server's SETTINGS");
+    let (_req, respond) = acceptor.accept().await.unwrap().unwrap();
+    (raw, respond, knobs, task, acceptor)
+}
+
+#[rusty_tokio::test]
+async fn a_final_response_that_cannot_be_written_is_a_failure_even_after_goaway() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for code in [2u8, 3, 4] {
+        let (_raw, respond, knobs, task, _acceptor) = goaway_server().await;
+        knobs.write_error_kind.store(code, SeqCst);
+        // The response is required output; GOAWAY does not acknowledge it.
+        respond.send_response(ok_response(), true).await.unwrap();
+        let result = timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, Err(Error::Io(_))),
+            "write {:?}: {result:?}",
+            kind(code)
+        );
+    }
+}
+
+#[rusty_tokio::test]
+async fn a_final_response_that_cannot_be_flushed_is_a_failure_even_after_goaway() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for code in [2u8, 3, 4] {
+        let (_raw, respond, knobs, task, _acceptor) = goaway_server().await;
+        knobs.flush_error_kind.store(code, SeqCst);
+        respond.send_response(ok_response(), true).await.unwrap();
+        let result = timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, Err(Error::Io(_))),
+            "flush {:?}: {result:?}",
+            kind(code)
+        );
+    }
+}
+
+#[rusty_tokio::test]
+async fn losing_only_the_final_goaway_to_a_peer_that_hung_up_is_not_a_failure() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for (code, clean) in [(2u8, true), (3, true), (4, true), (1, false)] {
+        let (a, b) = pair().await;
+        let transport = Buffered::new(a);
+        let knobs = transport.knobs.clone();
+        let (h, cdrv) = driver::client(transport, ClientBuilder::new());
+        let (mut acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+        rusty_tokio::spawn(sdrv);
+        let task = rusty_tokio::spawn(cdrv);
+        timeout(Duration::from_secs(5), h.ping())
+            .await
+            .unwrap()
+            .unwrap();
+        // The server announces GOAWAY; everything the client owed is delivered.
+        acceptor.graceful_shutdown();
+        while h.send_request(request("/svc/Late"), true).await.is_ok() {}
+        knobs.write_error_kind.store(code, SeqCst);
+        drop(h);
+        let result = timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.is_ok(), clean, "write {:?}: {result:?}", kind(code));
+    }
 }

@@ -745,4 +745,92 @@ mod tests {
         }
         assert_dropped_unlocked(&flags, "cancelled ping's waker");
     }
+
+    /// A transport with a stored waker per direction, as real ones have, and
+    /// a budget of bytes a write will take.
+    #[derive(Default)]
+    struct StubState {
+        read_waker: Option<Waker>,
+        write_waker: Option<Waker>,
+        budget: usize,
+        taken: usize,
+    }
+
+    #[derive(Clone, Default)]
+    struct Stub(Arc<Mutex<StubState>>);
+
+    impl rusty_tokio::io::AsyncRead for Stub {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            _buf: &mut rusty_tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            // Replacing the stored waker destroys the previous one, right here.
+            self.0.lock().unwrap().read_waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    impl rusty_tokio::io::AsyncWrite for Stub {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut st = self.0.lock().unwrap();
+            st.write_waker = Some(cx.waker().clone());
+            let n = buf.len().min(st.budget);
+            if n == 0 {
+                return Poll::Pending;
+            }
+            st.budget -= n;
+            st.taken += n;
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn the_transport_is_polled_outside_the_lock() {
+        let stub = Stub::default();
+        let (_client, mut driver) = client(stub, crate::client::builder::Builder::new());
+        let shared = driver.shared.clone();
+        let (waker, flags) = probe(&shared);
+        // The driver is polled by a task whose waker the transport stores.
+        assert!(poll_once(&mut driver, &waker).is_pending());
+        drop(waker);
+        // Polled again by another waker, the transport replaces (and destroys)
+        // the first while the driver is inside its write.
+        assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+        assert_dropped_unlocked(&flags, "the transport's stored waker");
+    }
+
+    #[test]
+    fn output_the_transport_has_not_taken_still_counts_as_backlog() {
+        let stub = Stub::default();
+        let (_client, mut driver) = client(stub.clone(), crate::client::builder::Builder::new());
+        let shared = driver.shared.clone();
+        assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+        let queued = lock(&shared).backlog();
+        assert!(queued > 0, "the preface and SETTINGS are waiting");
+        // The transport takes a little; the rest is still backlog, so a writer
+        // that checks it keeps waiting (backpressure).
+        stub.0.lock().unwrap().budget = 10;
+        assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+        assert_eq!(stub.0.lock().unwrap().taken, 10);
+        assert_eq!(lock(&shared).backlog(), queued - 10);
+        // More output queued meanwhile is counted on top, in order.
+        lock(&shared).queue([Frame::Ping(PingFrame {
+            ack: false,
+            opaque_data: [1; 8],
+        })]);
+        assert_eq!(lock(&shared).backlog(), queued - 10 + 17);
+    }
 }
