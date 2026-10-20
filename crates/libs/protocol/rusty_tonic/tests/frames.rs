@@ -178,6 +178,43 @@ fn a_huge_claimed_length_costs_nothing() {
 }
 
 #[test]
+fn an_oversized_body_in_the_same_push_is_never_buffered() {
+    let mut bytes = vec![0, 0, 0, 0, 11];
+    bytes.extend_from_slice(&[7; 1_000_000]);
+    let mut d = FrameDecoder::new(10);
+    d.push(&bytes);
+    assert_eq!(d.buffered(), 0);
+    assert_eq!(
+        d.next_message().unwrap_err().code(),
+        Code::ResourceExhausted
+    );
+}
+
+#[test]
+fn a_split_oversized_prefix_rejects_before_copying_the_body() {
+    let mut d = FrameDecoder::new(10);
+    d.push(&[0, 0, 0]);
+    assert_eq!(d.buffered(), 3);
+    let mut rest = vec![0, 11];
+    rest.extend_from_slice(&[7; 1_000_000]);
+    d.push(&rest);
+    assert_eq!(d.buffered(), 0);
+    let first = d.next_message().unwrap_err();
+    assert_eq!(first.code(), Code::ResourceExhausted);
+    assert_eq!(d.next_message().unwrap_err(), first);
+}
+
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn maximum_wire_length_overflow_is_a_terminal_resource_exhausted_error() {
+    let mut d = FrameDecoder::new(usize::MAX);
+    d.push(&[0, 0xff, 0xff, 0xff, 0xff]);
+    let first = d.next_message().unwrap_err();
+    assert_eq!(first.code(), Code::ResourceExhausted);
+    assert_eq!(d.next_message().unwrap_err(), first);
+}
+
+#[test]
 fn many_small_messages_in_one_push_are_cheap() {
     let msgs: Vec<Vec<u8>> = (0..100_000u32).map(|i| i.to_be_bytes().to_vec()).collect();
     let mut d = FrameDecoder::default();

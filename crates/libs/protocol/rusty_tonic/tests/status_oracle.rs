@@ -78,7 +78,7 @@ fn tonic_reads_our_trailers() {
         let theirs = tonic::Status::from_header_map(&map(&ours.to_trailers())).unwrap();
         assert_eq!(theirs.code() as i32, ours.code().as_i32(), "{i}: {ours:?}");
         assert_eq!(theirs.message(), ours.message(), "{i}");
-        let want = if ours.details().is_empty() {
+        let want = if ours.code() == Code::Ok || ours.details().is_empty() {
             Vec::new()
         } else {
             rpc_status_bytes(&ours)
@@ -127,7 +127,8 @@ fn we_read_tonics_trailers() {
         let ours = Status::from_headers(borrowed(&pairs(&m))).unwrap();
         assert_eq!(ours.code().as_i32(), code as i32, "{i}");
         assert_eq!(ours.message(), msg, "{i}");
-        assert_eq!(ours.details().len(), usize::from(details.is_some()), "{i}");
-        assert_eq!(ours.error_info().is_some(), details.is_some(), "{i}");
+        let keeps_details = details.is_some() && code != tonic::Code::Ok;
+        assert_eq!(ours.details().len(), usize::from(keeps_details), "{i}");
+        assert_eq!(ours.error_info().is_some(), keeps_details, "{i}");
     }
 }

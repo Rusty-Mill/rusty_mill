@@ -41,6 +41,8 @@ pub fn decode_message<M: Message>(payload: &[u8]) -> Result<M, Status> {
 pub struct FrameDecoder {
     buf: Vec<u8>,
     pos: usize,
+    ingest_pos: usize,
+    ingest_frame_end: Option<usize>,
     max: usize,
     failed: Option<Status>,
 }
@@ -51,6 +53,8 @@ impl FrameDecoder {
         FrameDecoder {
             buf: Vec::new(),
             pos: 0,
+            ingest_pos: 0,
+            ingest_frame_end: None,
             max,
             failed: None,
         }
@@ -58,8 +62,11 @@ impl FrameDecoder {
 
     /// Adds received bytes.
     pub fn push(&mut self, bytes: &[u8]) {
-        if self.failed.is_none() {
-            self.buf.extend_from_slice(bytes);
+        if self.failed.is_some() {
+            return;
+        }
+        if let Err(status) = self.ingest(bytes) {
+            self.fail(status);
         }
     }
 
@@ -69,11 +76,59 @@ impl FrameDecoder {
             return Err(status.clone());
         }
         self.take().map_err(|status| {
-            self.failed = Some(status.clone());
-            self.buf = Vec::new();
-            self.pos = 0;
+            self.fail(status.clone());
             status
         })
+    }
+
+    fn ingest(&mut self, mut bytes: &[u8]) -> Result<(), Status> {
+        while !bytes.is_empty() {
+            if let Some(end) = self.ingest_frame_end {
+                let count = bytes.len().min(end - self.buf.len());
+                self.buf.extend_from_slice(&bytes[..count]);
+                bytes = &bytes[count..];
+                if self.buf.len() < end {
+                    return Ok(());
+                }
+                self.ingest_pos = end;
+                self.ingest_frame_end = None;
+                continue;
+            }
+
+            let prefix_needed = HEADER_LEN - (self.buf.len() - self.ingest_pos);
+            let count = bytes.len().min(prefix_needed);
+            self.buf.extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+            if self.buf.len() - self.ingest_pos < HEADER_LEN {
+                return Ok(());
+            }
+
+            let total = checked_frame_len(
+                self.buf[self.ingest_pos],
+                self.buf[self.ingest_pos + 1..self.ingest_pos + HEADER_LEN]
+                    .try_into()
+                    .expect("four-byte length slice"),
+                self.max,
+            )?;
+            let end = self
+                .ingest_pos
+                .checked_add(total)
+                .ok_or_else(length_overflow)?;
+            self.ingest_frame_end = Some(end);
+            if end == self.buf.len() {
+                self.ingest_pos = end;
+                self.ingest_frame_end = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn fail(&mut self, status: Status) {
+        self.failed = Some(status);
+        self.buf.clear();
+        self.pos = 0;
+        self.ingest_pos = 0;
+        self.ingest_frame_end = None;
     }
 
     /// The next message if its prefix and body are all here. The prefix is checked as soon as
@@ -83,28 +138,7 @@ impl FrameDecoder {
         let [flag, a, b, c, d, ..] = *avail else {
             return Ok(None);
         };
-        match flag {
-            0 => {}
-            1 => {
-                return Err(Status::unimplemented(
-                    "compressed messages are not supported",
-                ))
-            }
-            _ => {
-                return Err(Status::internal(
-                    "invalid compression flag in a message prefix",
-                ))
-            }
-        }
-        let len = usize::try_from(u32::from_be_bytes([a, b, c, d]))
-            .map_err(|_| Status::resource_exhausted("message length does not fit in memory"))?;
-        if len > self.max {
-            return Err(Status::resource_exhausted(format!(
-                "message of {len} bytes exceeds the limit of {} bytes",
-                self.max
-            )));
-        }
-        let total = HEADER_LEN + len;
+        let total = checked_frame_len(flag, [a, b, c, d], self.max)?;
         let Some(body) = avail.get(HEADER_LEN..total) else {
             return Ok(None);
         };
@@ -120,7 +154,11 @@ impl FrameDecoder {
         if self.pos == self.buf.len() {
             self.buf.clear();
             self.pos = 0;
+            self.ingest_pos = 0;
+            self.ingest_frame_end = None;
         } else if self.pos >= 4096 && self.pos * 2 >= self.buf.len() {
+            self.ingest_pos -= self.pos;
+            self.ingest_frame_end = self.ingest_frame_end.map(|end| end - self.pos);
             self.buf.drain(..self.pos);
             self.pos = 0;
         }
@@ -143,6 +181,33 @@ impl FrameDecoder {
     pub fn buffered(&self) -> usize {
         self.buf.len() - self.pos
     }
+}
+
+fn length_overflow() -> Status {
+    Status::resource_exhausted("message length does not fit in memory")
+}
+
+fn checked_frame_len(flag: u8, length: [u8; 4], max: usize) -> Result<usize, Status> {
+    match flag {
+        0 => {}
+        1 => {
+            return Err(Status::unimplemented(
+                "compressed messages are not supported",
+            ))
+        }
+        _ => {
+            return Err(Status::internal(
+                "invalid compression flag in a message prefix",
+            ))
+        }
+    }
+    let len = usize::try_from(u32::from_be_bytes(length)).map_err(|_| length_overflow())?;
+    if len > max {
+        return Err(Status::resource_exhausted(format!(
+            "message of {len} bytes exceeds the limit of {max} bytes"
+        )));
+    }
+    HEADER_LEN.checked_add(len).ok_or_else(length_overflow)
 }
 
 impl Default for FrameDecoder {

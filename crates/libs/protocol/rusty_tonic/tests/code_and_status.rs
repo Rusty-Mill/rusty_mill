@@ -271,12 +271,40 @@ fn malformed_details_are_dropped_and_the_call_keeps_its_code_and_message() {
 }
 
 #[test]
-fn the_header_code_wins_over_the_code_inside_the_details() {
+fn details_with_a_mismatched_code_are_dropped_but_the_outer_status_wins() {
     let mut t = with_info().to_trailers();
     t.iter_mut().find(|(k, _)| k == "grpc-status").unwrap().1 = b"14".to_vec();
     let s = Status::from_headers(borrowed(&t)).unwrap();
     assert_eq!(s.code(), Code::Unavailable);
     assert_eq!(s.message(), "task not found");
+    assert!(s.details().is_empty());
+}
+
+#[test]
+fn details_with_a_matching_code_are_kept() {
+    let s = Status::from_headers(borrowed(&with_info().to_trailers())).unwrap();
+    assert_eq!(s.code(), Code::NotFound);
+    assert_eq!(s.error_info(), Some(info()));
+}
+
+#[test]
+fn ok_statuses_neither_send_nor_accept_details() {
+    let detail = Any::pack(&info()).unwrap();
+    let outgoing = Status::ok().with_details(vec![detail.clone()]);
+    assert!(value(&outgoing.to_trailers(), "grpc-status-details-bin").is_none());
+
+    let rpc = rusty_prost::rpc::Status {
+        code: 0,
+        message: String::new(),
+        details: vec![detail],
+    };
+    let encoded = rusty_base64::encode_standard(&rpc.encode_to_vec().unwrap());
+    let incoming = Status::from_headers([
+        h("grpc-status", "0"),
+        h("grpc-status-details-bin", encoded.trim_end_matches('=')),
+    ])
+    .unwrap();
+    assert!(incoming.details().is_empty());
 }
 
 #[test]

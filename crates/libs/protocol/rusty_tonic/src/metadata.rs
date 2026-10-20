@@ -222,7 +222,9 @@ impl MetadataMap {
 
     /// Reads metadata from received headers. An entry that cannot be metadata (an invalid key
     /// or value, bad base64, a protocol-reserved name) is skipped, and the count is returned
-    /// so the caller can notice. A `-bin` value may carry padding or not.
+    /// so the caller can notice. A `-bin` value may carry padding or not, and a
+    /// comma-joined binary header is split into independently decoded values. Each invalid
+    /// binary member contributes one to the returned count.
     pub fn from_headers<'a>(
         headers: impl IntoIterator<Item = (&'a str, &'a [u8])>,
     ) -> (MetadataMap, usize) {
@@ -239,9 +241,16 @@ impl MetadataMap {
             if is_reserved(name) {
                 continue; // the protocol's, handled by whoever reads the head or trailers
             }
-            let parsed = if is_binary_key(name) {
-                decode_base64(value).map(Value::Binary)
-            } else if valid_ascii(value) {
+            if is_binary_key(name) {
+                for member in value.split(|byte| *byte == b',') {
+                    match decode_base64(member) {
+                        Some(v) => map.entries.push((name.to_string(), Value::Binary(v))),
+                        None => dropped += 1,
+                    }
+                }
+                continue;
+            }
+            let parsed = if valid_ascii(value) {
                 std::str::from_utf8(value)
                     .ok()
                     .map(|s| Value::Ascii(s.to_string()))

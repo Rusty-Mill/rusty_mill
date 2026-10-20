@@ -195,6 +195,23 @@ fn padded_and_unpadded_binary_values_are_both_read() {
 }
 
 #[test]
+fn comma_joined_binary_values_are_split_in_order_and_count_bad_members() {
+    let (m, dropped) =
+        MetadataMap::from_headers([h("trace-bin", "AQ==,Ag,!!!,Aw=="), h("empty-bin", ",")]);
+    let values: Vec<&[u8]> = m
+        .iter()
+        .filter_map(|(key, value)| match (key, value) {
+            ("trace-bin", rusty_tonic::ValueRef::Binary(value)) => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(values, [b"\x01".as_slice(), b"\x02", b"\x03"]);
+    assert_eq!(m.get_bin("empty-bin"), Some(&[][..]));
+    assert_eq!(m.iter().filter(|(key, _)| *key == "empty-bin").count(), 2);
+    assert_eq!(dropped, 1, "each invalid joined member is counted once");
+}
+
+#[test]
 fn received_headers_that_cannot_be_metadata_are_skipped_and_counted() {
     let (m, dropped) = MetadataMap::from_headers([
         h("ok", "v"),
@@ -236,7 +253,17 @@ fn random_headers_never_panic() {
             .map(|_| (names[rng.below(names.len())].to_string(), rng.bytes(20)))
             .collect();
         let (m, dropped) = MetadataMap::from_headers(common::borrowed(&owned));
-        assert!(m.len() + dropped <= owned.len());
+        let members = owned
+            .iter()
+            .map(|(name, value)| {
+                if name.ends_with("-bin") {
+                    value.split(|byte| *byte == b',').count()
+                } else {
+                    1
+                }
+            })
+            .sum::<usize>();
+        assert!(m.len() + dropped <= members);
         let _ = m.to_headers();
     }
 }

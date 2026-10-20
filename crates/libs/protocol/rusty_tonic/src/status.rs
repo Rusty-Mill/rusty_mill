@@ -146,7 +146,7 @@ impl Status {
                 encode_message_text(&self.message),
             ));
         }
-        if !self.details.is_empty() {
+        if self.code != Code::Ok && !self.details.is_empty() {
             let rpc = RpcStatus {
                 code: self.code.as_i32(),
                 message: self.message.clone(),
@@ -186,10 +186,17 @@ impl Status {
                 _ => rest.push((name, value)),
             }
         }
-        let details = details_header.and_then(decode_details).unwrap_or_default();
+        let code = code?;
+        let details = if code == Code::Ok {
+            Vec::new()
+        } else {
+            details_header
+                .and_then(|value| decode_details(value, code))
+                .unwrap_or_default()
+        };
         let (metadata, _skipped) = MetadataMap::from_headers(rest);
         Some(Status {
-            code: code?,
+            code,
             message,
             details,
             metadata,
@@ -209,10 +216,11 @@ fn parse_code(value: &[u8]) -> Code {
 
 /// The details of a `grpc-status-details-bin` value, or `None` if it is not base64 of a
 /// `google.rpc.Status`.
-fn decode_details(value: &[u8]) -> Option<Vec<Any>> {
+fn decode_details(value: &[u8], outer_code: Code) -> Option<Vec<Any>> {
     let (map, _) = MetadataMap::from_headers([("x-details-bin", value)]);
     let raw = map.get_bin("x-details-bin")?;
-    RpcStatus::decode(raw).ok().map(|s| s.details)
+    let status = RpcStatus::decode(raw).ok()?;
+    (status.code == outer_code.as_i32()).then_some(status.details)
 }
 
 /// Percent-encodes everything outside printable ASCII, and `%` itself, as the spec says.
