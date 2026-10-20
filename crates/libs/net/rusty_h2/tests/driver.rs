@@ -1017,6 +1017,13 @@ impl rusty_tokio::io::AsyncWrite for Buffered {
         {
             return std::task::Poll::Ready(Err(std::io::Error::other("write failed")));
         }
+        let code = self
+            .knobs
+            .write_error_kind
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if code != 0 {
+            return std::task::Poll::Ready(Err(std::io::Error::from(kind(code))));
+        }
         self.buf.extend_from_slice(data);
         std::task::Poll::Ready(Ok(data.len()))
     }
@@ -1272,26 +1279,40 @@ async fn a_final_response_that_cannot_be_flushed_is_a_failure_even_after_goaway(
 async fn losing_only_the_final_goaway_to_a_peer_that_hung_up_is_not_a_failure() {
     use std::sync::atomic::Ordering::SeqCst;
     for (code, clean) in [(2u8, true), (3, true), (4, true), (1, false)] {
-        let (a, b) = pair().await;
+        let (a, mut raw) = pair().await;
         let transport = Buffered::new(a);
         let knobs = transport.knobs.clone();
         let (h, cdrv) = driver::client(transport, ClientBuilder::new());
-        let (mut acceptor, sdrv) = driver::server(b, ServerBuilder::new());
-        rusty_tokio::spawn(sdrv);
         let task = rusty_tokio::spawn(cdrv);
-        timeout(Duration::from_secs(5), h.ping())
-            .await
-            .unwrap()
-            .unwrap();
-        // The server announces GOAWAY; everything the client owed is delivered.
-        acceptor.graceful_shutdown();
-        while h.send_request(request("/svc/Late"), true).await.is_ok() {}
+        raw.write_all(&wire(&Frame::Settings(SettingsFrame {
+            ack: false,
+            settings: vec![],
+        })))
+        .await
+        .unwrap();
+        // The client's handshake and its ACK have reached the peer: everything
+        // it owed is delivered. (First its 24-byte preface, which is no frame.)
+        raw.read_exact(&mut [0u8; 24]).await.unwrap();
+        read_until(&mut raw, |f| {
+            matches!(f, Frame::Settings(s) if s.ack).then_some(())
+        })
+        .await
+        .expect("the client's SETTINGS ACK");
+        // Now the peer says GOAWAY, and the client's own closing GOAWAY cannot
+        // be written.
         knobs.write_error_kind.store(code, SeqCst);
-        drop(h);
+        raw.write_all(&wire(&Frame::GoAway(rusty_h2::frame::GoAwayFrame {
+            last_stream_id: 0,
+            error_code: ErrorCode::NoError,
+            debug_data: vec![],
+        })))
+        .await
+        .unwrap();
         let result = timeout(Duration::from_secs(5), task)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(result.is_ok(), clean, "write {:?}: {result:?}", kind(code));
+        drop(h);
     }
 }
