@@ -144,11 +144,33 @@ describe('readImport: generic CSV', () => {
 })
 
 describe('readImport: .ics', () => {
+  const event = (...lines: string[]): string => ['BEGIN:VEVENT', ...lines, 'END:VEVENT'].join('\r\n')
+  const cal = (...events: string[]): string => ['BEGIN:VCALENDAR', ...events, 'END:VCALENDAR'].join('\r\n')
+  // A repeating event with one instance moved: both share the UID.
+  const moved = cal(event('UID:r1', 'SUMMARY:Standup', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=WEEKLY'), event('UID:r1', 'RECURRENCE-ID:20261012T090000Z', 'SUMMARY:Standup', 'DTSTART:20261013T090000Z'))
+
+  it('keeps events that share a UID, each with a distinct key that repeats on re-import', async () => {
+    const keys = readImport(moved, 'cal.ics').tasks.map((t) => t.key)
+    expect(new Set(keys).size).toBe(2)
+    expect(readImport(moved, 'cal.ics').tasks.map((t) => t.key)).toEqual(keys)
+    const api = new MemoryAdapter()
+    expect((await applyImport(api, readImport(moved, 'cal.ics'))).tasks).toBe(2)
+    expect((await applyImport(api, readImport(moved, 'cal.ics'))).existing).toBe(2)
+  })
+
+  it('matches a file imported before by bare UID, and adds only the instance that was dropped then', async () => {
+    const api = new MemoryAdapter()
+    const inbox = (await api.snapshot()).inboxId
+    await api.createTask({ id: derivedId('import|calendar file|r1'), listId: inbox, title: 'Standup' })
+    expect(await applyImport(api, readImport(moved, 'cal.ics'))).toEqual({ tasks: 1, lists: 0, existing: 1, resumed: 0 })
+    expect((await api.snapshot()).tasks).toHaveLength(2)
+  })
+
   it('reads VTODOs through the calendar parser into the Inbox', () => {
     const text = ['BEGIN:VCALENDAR', 'BEGIN:VTODO', 'UID:r1', 'SUMMARY:Renew passport', 'DUE;VALUE=DATE:20261105', 'END:VTODO', 'END:VCALENDAR'].join('\r\n')
     const r = readImport(text, 'Reminders.ics')
     expect(r.tasks).toHaveLength(1)
-    expect(r.tasks[0]).toMatchObject({ key: 'r1', list: '', title: 'Renew passport', isAllDay: true })
+    expect(r.tasks[0]).toMatchObject({ key: '["r1",1]', legacyKey: 'r1', list: '', title: 'Renew passport', isAllDay: true })
   })
 })
 
