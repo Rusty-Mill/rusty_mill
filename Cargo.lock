@@ -13061,7 +13061,7 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty_tls"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "platform",
  "platform-bsd",
