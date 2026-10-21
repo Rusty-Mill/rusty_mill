@@ -1361,3 +1361,136 @@ async fn losing_only_housekeeping_to_a_peer_that_already_left_is_not_a_failure()
         assert!(result.is_ok(), "write {:?}: {result:?}", kind(code));
     }
 }
+
+// ---- readiness: the peer's first SETTINGS ----------------------------------
+
+const BRIEF: Duration = Duration::from_millis(100);
+
+fn empty_settings() -> Vec<u8> {
+    wire(&Frame::Settings(SettingsFrame {
+        ack: false,
+        settings: vec![],
+    }))
+}
+
+/// Starts `ready` on its own task and checks it is still waiting. The task
+/// has registered for a wake-up by then, so what finishes it next must wake it.
+async fn waiting(
+    ready: impl std::future::Future<Output = Result<(), Error>> + Send + 'static,
+) -> rusty_tokio::JoinHandle<Result<(), Error>> {
+    let mut task = rusty_tokio::spawn(ready);
+    assert!(
+        timeout(BRIEF, &mut task).await.is_err(),
+        "nothing has made it ready yet"
+    );
+    task
+}
+
+async fn finished(task: rusty_tokio::JoinHandle<Result<(), Error>>) -> Result<(), Error> {
+    timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the wait ends")
+        .unwrap()
+}
+
+#[rusty_tokio::test]
+async fn a_client_is_ready_once_the_servers_settings_arrive() {
+    let (a, raw) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    rusty_tokio::spawn(cdrv);
+    let ready = waiting(async move { h.ready().await }).await;
+    raw.write_all(&empty_settings()).await.unwrap();
+    finished(ready).await.unwrap();
+}
+
+#[rusty_tokio::test]
+async fn answering_pings_is_not_being_ready() {
+    let (a, mut raw) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    rusty_tokio::spawn(cdrv);
+    let pinging = {
+        let h = h.clone();
+        rusty_tokio::spawn(async move { h.ping().await })
+    };
+    // The peer acknowledges the PING and never sends SETTINGS.
+    let mut preface = [0u8; 24];
+    raw.read_exact(&mut preface).await.unwrap();
+    let data = loop {
+        match read_frame(&mut raw).await.expect("a frame") {
+            Frame::Ping(p) if !p.ack => break p.opaque_data,
+            _ => {}
+        }
+    };
+    raw.write_all(&wire(&Frame::Ping(rusty_h2::frame::PingFrame {
+        ack: true,
+        opaque_data: data,
+    })))
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(5), pinging)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("the PING is acknowledged");
+    let ready = waiting(async move { h.ready().await }).await;
+    raw.write_all(&empty_settings()).await.unwrap();
+    finished(ready).await.unwrap();
+}
+
+#[rusty_tokio::test]
+async fn a_client_whose_connection_closes_first_is_never_ready() {
+    let (a, raw) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    rusty_tokio::spawn(cdrv);
+    let ready = waiting(async move { h.ready().await }).await;
+    drop(raw);
+    let r = finished(ready).await;
+    assert!(r.is_err(), "{r:?}");
+}
+
+#[rusty_tokio::test]
+async fn a_server_is_ready_once_the_clients_preface_and_settings_arrive() {
+    let (raw, b) = pair().await;
+    let (acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    rusty_tokio::spawn(sdrv);
+    let mut ready = waiting(async move { acceptor.ready().await }).await;
+    // One byte of the preface, then the rest of it: not ready without SETTINGS.
+    raw.write_all(&CONNECTION_PREFACE[..1]).await.unwrap();
+    assert!(timeout(BRIEF, &mut ready).await.is_err());
+    raw.write_all(&CONNECTION_PREFACE[1..]).await.unwrap();
+    assert!(
+        timeout(BRIEF, &mut ready).await.is_err(),
+        "the preface alone is not the client's SETTINGS"
+    );
+    raw.write_all(&empty_settings()).await.unwrap();
+    finished(ready).await.unwrap();
+}
+
+#[rusty_tokio::test]
+async fn a_server_whose_connection_closes_first_is_never_ready() {
+    let (raw, b) = pair().await;
+    let (acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    rusty_tokio::spawn(sdrv);
+    let ready = waiting(async move { acceptor.ready().await }).await;
+    raw.write_all(&CONNECTION_PREFACE[..5]).await.unwrap();
+    drop(raw);
+    let r = finished(ready).await;
+    assert!(r.is_err(), "{r:?}");
+}
+
+#[rusty_tokio::test]
+async fn both_sides_are_ready_after_a_handshake() {
+    let (a, b) = pair().await;
+    let (h, cdrv) = driver::client(a, ClientBuilder::new());
+    let (acceptor, sdrv) = driver::server(b, ServerBuilder::new());
+    rusty_tokio::spawn(cdrv);
+    rusty_tokio::spawn(sdrv);
+    timeout(Duration::from_secs(5), h.ready())
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(5), acceptor.ready())
+        .await
+        .unwrap()
+        .unwrap();
+}
