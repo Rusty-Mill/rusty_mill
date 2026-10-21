@@ -30,6 +30,13 @@ def cargo_metadata_digest(metadata: dict) -> str:
     workspace ``metadata`` values are deliberately opaque here: in particular,
     lists inside application-defined metadata retain their authored order.
     """
+    normalized = canonical_cargo_metadata(metadata)
+
+    return digest(normalized)
+
+
+def canonical_cargo_metadata(metadata: dict) -> dict:
+    """Copy metadata and sort only collections Cargo defines as unordered."""
     normalized = copy.deepcopy(metadata)
 
     def canonical(value: object) -> str:
@@ -63,30 +70,71 @@ def cargo_metadata_digest(metadata: dict) -> str:
                 sort_field(dependency, 'dep_kinds')
             sort_field(node, 'deps')
         sort_field(resolve, 'nodes')
-    return digest(normalized)
+    return normalized
 
 
 def cargo_metadata_diagnostics(metadata: dict) -> dict:
-    """Return bounded, content-free fingerprints for instability diagnosis."""
-    result = {}
+    """Return schema-aware, bounded fingerprints without authored content."""
+    max_records, max_depth, max_bytes = 128, 12, 8192
+    records = []
+    omitted = {'records': 0, 'depth': 0, 'bytes': 0}
 
-    def visit(value: object, pointer: str) -> None:
-        if isinstance(value, dict):
-            for key, child in value.items():
+    def kind(value: object) -> str:
+        if value is None:
+            return 'null'
+        if isinstance(value, bool):
+            return 'bool'
+        if isinstance(value, (int, float)):
+            return 'number'
+        if isinstance(value, str):
+            return 'string'
+        if isinstance(value, list):
+            return 'array'
+        return 'object'
+
+    def add(pointer: str, value: object, **extra: str) -> None:
+        if len(records) == max_records:
+            omitted['records'] += 1
+            return
+        records.append({'pointer': pointer or '/', 'type': kind(value),
+                        'fingerprint': digest(value)[:16], **extra})
+
+    path_fields = {'manifest_path', 'workspace_root', 'target_directory', 'build_directory'}
+
+    def visit(value: object, pointer: str, depth: int, field: str = '') -> None:
+        if depth > max_depth:
+            omitted['depth'] += 1
+            return
+        # Cargo declares package/workspace metadata opaque. Fingerprint the
+        # canonical subtree as one unit so authored keys and values never leak.
+        if field == 'metadata':
+            add(pointer, value, opaque='authored-metadata')
+        elif isinstance(value, dict):
+            if not value:
+                add(pointer, value)
+            for key in sorted(value):
                 escaped = key.replace('~', '~0').replace('/', '~1')
-                visit(child, f"{pointer}/{escaped}")
+                visit(value[key], f'{pointer}/{escaped}', depth + 1, key)
         elif isinstance(value, list):
+            if not value:
+                add(pointer, value)
             for index, child in enumerate(value):
-                visit(child, f"{pointer}/{index}")
+                visit(child, f'{pointer}/{index}', depth + 1)
         else:
-            entry = {"type": type(value).__name__, "digest": digest(value)}
-            if isinstance(value, str) and (pointer.endswith('_path') or pointer in (
-                    '/workspace_root', '/target_directory', '/build_directory')):
-                entry["path_spelling"] = (
-                    "extended-unc" if value.startswith('\\\\?\\UNC\\') else
-                    "extended" if value.startswith('\\\\?\\') else "ordinary")
-            result[pointer or '/'] = entry
-    visit(metadata, '')
+            extra = {}
+            dependency_path = field == 'path' and '/dependencies/' in pointer
+            if isinstance(value, str) and (field in path_fields or dependency_path):
+                extra['path_spelling'] = (
+                    'extended-unc' if value.startswith('\\\\?\\UNC\\') else
+                    'extended' if value.startswith('\\\\?\\') else 'ordinary')
+            add(pointer, value, **extra)
+
+    visit(canonical_cargo_metadata(metadata), '', 0)
+    result = {'schema_version': 1, 'records': records, 'truncated': omitted}
+    encoded = lambda: json.dumps(result, sort_keys=True, separators=(',', ':')).encode()
+    while len(encoded()) > max_bytes and records:
+        records.pop()
+        omitted['bytes'] += 1
     return result
 
 

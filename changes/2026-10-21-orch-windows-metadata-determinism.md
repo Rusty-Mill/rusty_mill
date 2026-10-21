@@ -1,7 +1,7 @@
 ---
-category: Fixed
-changelog: Stabilize change-impact Cargo metadata revisions across equivalent Windows path spellings.
+category: Changed
+changelog: Add bounded diagnostics for investigating Windows Cargo metadata instability.
 ---
-## 2026-10-21 - Stable Windows impact revisions
+## 2026-10-21 - Windows impact revision diagnostics
 
-- **Fixed:** Change-impact reports now retain the same Cargo metadata revision for semantically identical Windows workspace metadata while continuing to detect meaningful dependency, feature, target, manifest, and application metadata changes.
+- **Changed:** Opt-in, content-free Cargo metadata fingerprints now help diagnose non-deterministic change-impact reports. This instrumentation does not yet identify or correct the Windows instability.

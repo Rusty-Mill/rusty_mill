@@ -1,5 +1,6 @@
 """Proposed changes use CI dependency evidence and complete durable inventories."""
 import copy
+import json
 from pathlib import Path
 import importlib.util
 import sys
@@ -139,6 +140,49 @@ class ChangeImpactTests(unittest.TestCase):
 
         self.assertEqual(MODULE.cargo_metadata_digest(self.md),
                          MODULE.cargo_metadata_digest(equivalent))
+
+    def test_metadata_diagnostics_are_redacted_bounded_and_canonical(self):
+        self.md['metadata'] = {'DO_NOT_PRINT_SENTINEL': {'private': 'DO_NOT_PRINT_VALUE'}}
+        self.md['packages'][0]['metadata'] = {'ANOTHER_SENTINEL': ['secret']}
+        equivalent = copy.deepcopy(self.md)
+        equivalent['packages'].reverse()
+        diagnostics = MODULE.cargo_metadata_diagnostics(self.md)
+        self.assertEqual(diagnostics, MODULE.cargo_metadata_diagnostics(equivalent))
+        encoded = json.dumps(diagnostics, sort_keys=True, separators=(',', ':'))
+        self.assertLessEqual(len(encoded.encode()), 8192)
+        self.assertNotIn('DO_NOT_PRINT_SENTINEL', encoded)
+        self.assertNotIn('DO_NOT_PRINT_VALUE', encoded)
+        self.assertNotIn('ANOTHER_SENTINEL', encoded)
+
+    def test_metadata_diagnostics_classify_paths_and_empty_containers(self):
+        package = self.md['packages'][0]
+        package['dependencies'] = [{'name': 'local', 'path': r'\\?\C:\checkout\local',
+                                    'features': []}]
+        package['metadata'] = []
+        diagnostics = MODULE.cargo_metadata_diagnostics(self.md)
+        by_pointer = {entry['pointer']: entry for entry in diagnostics['records']}
+        path = next(entry for pointer, entry in by_pointer.items()
+                    if pointer.endswith('/dependencies/0/path'))
+        self.assertEqual(path['path_spelling'], 'extended')
+        self.assertTrue(any(entry['type'] == 'array' and entry.get('opaque') == 'authored-metadata'
+                            for entry in diagnostics['records']))
+        empty_object = MODULE.cargo_metadata_diagnostics({'resolve': {}})['records'][0]
+        empty_array = MODULE.cargo_metadata_diagnostics({'packages': []})['records'][0]
+        self.assertEqual((empty_object['type'], empty_array['type']), ('object', 'array'))
+        self.assertNotEqual(empty_object['fingerprint'], empty_array['fingerprint'])
+
+    def test_metadata_diagnostics_enforce_record_byte_and_depth_limits(self):
+        metadata = {'packages': [{'id': f'package-{index}', 'name': 'x' * 100}
+                                 for index in range(1000)]}
+        diagnostics = MODULE.cargo_metadata_diagnostics(metadata)
+        encoded = json.dumps(diagnostics, sort_keys=True, separators=(',', ':')).encode()
+        self.assertLessEqual(len(encoded), 8192)
+        self.assertTrue(diagnostics['truncated']['records'] or diagnostics['truncated']['bytes'])
+        nested = value = {}
+        for index in range(20):
+            value['child'] = {}
+            value = value['child']
+        self.assertGreater(MODULE.cargo_metadata_diagnostics(nested)['truncated']['depth'], 0)
 
     def test_rank_never_omits_binding_inactive_requirements(self):
         self.projects['repos']['mill']['dormant'] = ['scripts/dormant']

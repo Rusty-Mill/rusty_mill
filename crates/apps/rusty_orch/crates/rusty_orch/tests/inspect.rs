@@ -253,6 +253,21 @@ fn proposed_change_is_revision_bound_and_detects_requirement_edits() {
     );
     let first_json = rusty_json::Value::parse(std::str::from_utf8(&first.stdout).expect("UTF8"))
         .expect("report");
+    let first_diagnostics = rusty_json::Value::parse(
+        std::str::from_utf8(&first.stderr)
+            .expect("diagnostics UTF8")
+            .trim(),
+    )
+    .expect("successful subprocess diagnostics");
+    assert_eq!(first_diagnostics["schema_version"].as_i64(), Some(1));
+    assert!(first_diagnostics["records"]
+        .as_array()
+        .expect("diagnostic records")
+        .iter()
+        .any(|entry| {
+            entry["pointer"].as_str() == Some("/metadata")
+                && entry["opaque"].as_str() == Some("authored-metadata")
+        }));
     assert_eq!(
         first_json["source_revision"]
             .as_str()
