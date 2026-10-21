@@ -298,7 +298,13 @@ mod tests {
         assert!(slots.try_acquire(Class::Agent)?.is_none());
         child.kill().map_err(|e| e.to_string())?;
         child.wait().map_err(|e| e.to_string())?;
-        assert!(slots.try_acquire(Class::Agent)?.is_some());
+        // Another test's fork may hold a copy of the descriptor until it
+        // execs, so the release is awaited, briefly.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while slots.try_acquire(Class::Agent)?.is_none() {
+            assert!(std::time::Instant::now() < deadline, "slot never freed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         Ok(())
     }
 }
