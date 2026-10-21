@@ -15,6 +15,7 @@ use crate::Error;
 type Driver = JoinHandle<Result<(), Error>>;
 
 /// A client certificate and its private key, DER-encoded, leaf first.
+#[derive(Clone)]
 pub struct ClientIdentity {
     /// The certificate chain, leaf first.
     pub cert_chain_der: Vec<Vec<u8>>,
@@ -31,7 +32,8 @@ pub struct Keepalive {
     pub timeout: Duration,
 }
 
-/// How [`connect`] reaches the peer.
+/// How [`connect`] reaches the peer. Cloneable, so a caller can reconnect with the same options.
+#[derive(Clone)]
 pub struct ConnectOptions {
     /// Who to trust for `https` (ignored for `http`). Default: the system store.
     pub trust: TrustPolicy,

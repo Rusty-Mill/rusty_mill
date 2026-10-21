@@ -13124,10 +13124,23 @@ dependencies = [
 name = "rusty_tonic"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
+ "http",
+ "prost",
+ "rcgen",
+ "rustls",
  "rusty_base64",
+ "rusty_h2",
+ "rusty_http",
+ "rusty_hyper",
  "rusty_percent",
  "rusty_prost",
+ "rusty_tls",
+ "rusty_tokio",
+ "tokio",
  "tonic",
+ "tonic-prost",
+ "tower",
 ]
 
 [[package]]
