@@ -6,7 +6,7 @@
  * `completed` is true for `true`, `yes`, `y`, `1`, `x`, `done` or `completed`.
  */
 import { parseCsv } from '@/lib/csv'
-import { blankTask, columns, keepInNotes, parseWhen, readPriority, readRepeat, readTags, uniqueKeys, unreadDates, type ImportResult } from './model'
+import { blankTask, columns, keepInNotes, legacyKeys, parseWhen, readPriority, readRepeat, readTags, uniqueKeys, unreadDates, type ImportResult } from './model'
 
 const TITLE = ['title', 'name', 'task', 'task name', 'subject', 'summary']
 const NOTES = ['notes', 'note', 'description', 'body', 'details']
@@ -24,6 +24,7 @@ export function parseGeneric(text: string): ImportResult {
   if (!isGeneric(rows)) throw new Error(`No title column found; name one of: ${TITLE.join(', ')}`)
   const col = columns(rows[0]!)
   const key = uniqueKeys()
+  const legacyKey = legacyKeys()
   const out: ImportResult = { source: 'CSV', tasks: [], skipped: 0, lossy: 0 }
   for (const row of rows.slice(1)) {
     const title = col(row, ...TITLE)
@@ -40,6 +41,7 @@ export function parseGeneric(text: string): ImportResult {
     if (unread.length > 0 || (rule && !repeatFlag)) out.lossy++
     out.tasks.push({
       ...blankTask(key(list, title, dueText), title),
+      legacyKey: legacyKey(`${list}|${title}|${dueText}`),
       list,
       notes: unread.reduce((notes, [label, text]) => keepInNotes(notes, label, text), col(row, ...NOTES)),
       priority: readPriority(col(row, 'priority')),

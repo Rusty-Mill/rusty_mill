@@ -10,6 +10,11 @@
  * no status. If that second write was lost, the next import finishes it: the
  * task is still at its creation version (`etag` 1), so nobody has edited it,
  * and the write is conditional on that etag. A task edited since is left alone.
+ *
+ * Rows whose key format changed since #821 carry their old `legacyKey`. A row
+ * whose new id is not here but whose legacy id is takes that task over, so
+ * files imported before the change still skip or resume rather than duplicate.
+ * Each existing task is claimed by at most one row per import.
  */
 import type { ApiClient } from '@/api/client'
 import type { NewTask, Task } from '@/api/types'
@@ -70,6 +75,16 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
   const existing = new Map(have.tasks.map((t) => [t.id, t]))
   const byKey = new Map(result.tasks.map((t) => [t.key, t]))
   const idOf = (key: string): string => derivedId(`import|${result.source}|${key}`)
+  const claimed = new Set<string>()
+  /** The id a row writes to: its own, else the one #821 gave it if that task is here and unclaimed. */
+  const resolve = (t: ImportedTask): string => {
+    const own = idOf(t.key)
+    const legacy = t.legacyKey !== null ? idOf(t.legacyKey) : null
+    const id = !existing.has(own) && legacy !== null && existing.has(legacy) && !claimed.has(legacy) ? legacy : own
+    claimed.add(id)
+    return id
+  }
+  const ids = new Map<string, string>() // task key -> resolved id, so subtasks point at their parent's real id
   const out: Applied = { tasks: 0, lists: 0, existing: 0, resumed: 0 }
 
   const listFor = async (name: string): Promise<string> => {
@@ -89,7 +104,8 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
   const placed = new Map<string, string>() // task key -> list id, so subtasks follow their parent
   const roots = result.tasks.map((t) => ({ t, root: rootOf(t, byKey) }))
   for (const { t, root: wanted } of [...roots.filter((r) => !r.root), ...roots.filter((r) => r.root)]) {
-    const id = idOf(t.key)
+    const id = resolve(t)
+    ids.set(t.key, id)
     const root = wanted !== null && placed.has(wanted) ? wanted : null // a parent caught in a cycle was never placed
     const listId = (root !== null && placed.get(root)) || (await listFor(t.list))
     placed.set(t.key, listId)
@@ -103,7 +119,7 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
       out.existing++
       continue
     }
-    const created = await api.createTask(toNewTask(t, id, listId, root ? idOf(root) : null))
+    const created = await api.createTask(toNewTask(t, id, listId, root !== null ? (ids.get(root) ?? null) : null))
     existing.set(id, created)
     if (t.status !== 'open') await api.updateTask(id, { status: t.status }, created.etag)
     out.tasks++

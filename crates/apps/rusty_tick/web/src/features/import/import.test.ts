@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { MemoryAdapter } from '@/api/memory'
 import { applyImport, readImport } from '.'
-import { parseWhen } from './model'
+import { legacyKeys, parseWhen } from './model'
+import { derivedId } from '@/lib/id'
 
 const csv = (...rows: string[][]): string => rows.map((r) => r.map((v) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v)).join(',')).join('\r\n')
 
@@ -232,3 +233,68 @@ describe('applyImport', () => {
     expect(n.tasks).toBe(2)
   })
 })
+
+describe('applyImport: files imported before the key change (#821)', () => {
+  const HEAD = ['TYPE', 'CONTENT', 'DESCRIPTION', 'PRIORITY', 'INDENT', 'AUTHOR', 'RESPONSIBLE', 'DATE', 'DATE_LANG', 'TIMEZONE']
+  const task = (content: string, indent = '1'): string[] => ['task', content, '', '', indent, '', '', '', 'en', '']
+  const todoist = csv(HEAD, task('Task'), task('Task'), task('Task#2'), task('Parent'), task('Child', '2'))
+  /** The id #821 gave a row: `derivedId("import|<source>|<legacy key>")`. */
+  const oldId = (source: string, key: string): string => derivedId(`import|${source}|${key}`)
+
+  /** What #821 left after importing `todoist`: the colliding `Task#2` row was never created. */
+  async function legacyTodoist(api: MemoryAdapter): Promise<string> {
+    const list = await api.createList({ id: derivedId('import|list|p'), name: 'P' })
+    await api.createTask({ id: oldId('Todoist', 'P|Task'), listId: list.id, title: 'Task' })
+    await api.createTask({ id: oldId('Todoist', 'P|Task#2'), listId: list.id, title: 'Task' })
+    await api.createTask({ id: oldId('Todoist', 'P|Parent'), listId: list.id, title: 'Parent' })
+    await api.createTask({ id: oldId('Todoist', 'P|Child'), listId: list.id, title: 'Child', parentId: oldId('Todoist', 'P|Parent') })
+    return list.id
+  }
+
+  it('gives the first row to produce an old key that key, and a later colliding row none', () => {
+    const legacy = legacyKeys()
+    expect(['P|Task', 'P|Task', 'P|Task#2'].map((base) => legacy(base))).toEqual(['P|Task', 'P|Task#2', null])
+  })
+
+  it('matches each old task once, imports the row #821 lost, and keeps edits and parent links', async () => {
+    const api = new MemoryAdapter()
+    await legacyTodoist(api)
+    await api.updateTask(oldId('Todoist', 'P|Task'), { title: 'Task (edited)' })
+
+    expect(await applyImport(api, readImport(todoist, 'P.csv', NOW))).toEqual({ tasks: 1, lists: 0, existing: 4, resumed: 0 })
+    const snap = await api.snapshot()
+    const mine = snap.tasks.filter((t) => t.title !== 'Inbox')
+    expect(mine.map((t) => t.title).sort()).toEqual(['Child', 'Parent', 'Task', 'Task (edited)', 'Task#2'])
+    expect(mine.find((t) => t.title === 'Child')?.parentId).toBe(oldId('Todoist', 'P|Parent'))
+    expect(await applyImport(api, readImport(todoist, 'P.csv', NOW))).toEqual({ tasks: 0, lists: 0, existing: 5, resumed: 0 })
+    expect((await api.snapshot()).tasks).toHaveLength(5)
+  })
+
+  it('finishes a completion #821 lost, and leaves an old task the user edited alone', async () => {
+    const generic = csv(['List', 'Title', 'Completed'], ['', 'Lost close', 'true'], ['', 'Edited', 'true'])
+    const api = new MemoryAdapter()
+    const inbox = (await api.snapshot()).inboxId
+    await api.createTask({ id: oldId('CSV', '|Lost close|'), listId: inbox, title: 'Lost close' }) // its status write failed
+    await api.createTask({ id: oldId('CSV', '|Edited|'), listId: inbox, title: 'Edited' })
+    await api.updateTask(oldId('CSV', '|Edited|'), { notes: 'mine' })
+
+    expect(await applyImport(api, readImport(generic, 'x.csv'))).toEqual({ tasks: 0, lists: 0, existing: 1, resumed: 1 })
+    const snap = await api.snapshot()
+    expect(snap.tasks).toHaveLength(2)
+    expect(snap.tasks.find((t) => t.title === 'Lost close')?.status).toBe('done')
+    expect(snap.tasks.find((t) => t.title === 'Edited')).toMatchObject({ status: 'open', notes: 'mine' })
+    expect(await applyImport(api, readImport(generic, 'x.csv'))).toEqual({ tasks: 0, lists: 0, existing: 2, resumed: 0 })
+  })
+
+  it('creates fresh tasks for rows whose old task the user has since deleted', async () => {
+    const api = new MemoryAdapter()
+    await legacyTodoist(api)
+    await api.purgeTask(oldId('Todoist', 'P|Parent')) // takes Child with it
+    const n = await applyImport(api, readImport(todoist, 'P.csv', NOW))
+    expect(n).toEqual({ tasks: 3, lists: 0, existing: 2, resumed: 0 })
+    const snap = await api.snapshot()
+    const parent = snap.tasks.find((t) => t.title === 'Parent')!
+    expect(snap.tasks.find((t) => t.title === 'Child')?.parentId).toBe(parent.id)
+  })
+})
+

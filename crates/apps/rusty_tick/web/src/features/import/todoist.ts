@@ -10,7 +10,7 @@
 import { parseQuickAdd } from '@/lib/nlp/parse'
 import { parseCsv } from '@/lib/csv'
 import type { Priority } from '@/api/types'
-import { blankTask, columns, keepInNotes, parseWhen, uniqueKeys, type ImportResult, type ImportedTask, type When } from './model'
+import { blankTask, columns, keepInNotes, legacyKeys, parseWhen, uniqueKeys, type ImportResult, type ImportedTask, type When } from './model'
 
 export const isTodoist = (rows: string[][]): boolean => {
   const head = rows[0]?.map((h) => h.trim().toUpperCase()) ?? []
@@ -32,6 +32,7 @@ export function parseTodoist(text: string, fileName: string, now: number): Impor
   if (!isTodoist(rows)) throw new Error('No Todoist header row found')
   const col = columns(rows[0]!)
   const key = uniqueKeys()
+  const legacyKey = legacyKeys()
   const list = listName(fileName)
   const out: ImportResult = { source: 'Todoist', tasks: [], skipped: 0, lossy: 0 }
   let last: ImportedTask | null = null
@@ -57,6 +58,7 @@ export function parseTodoist(text: string, fileName: string, now: number): Impor
     const indent = Number(col(row, 'indent')) || 1
     const task: ImportedTask = {
       ...blankTask(key(list, title), title),
+      legacyKey: legacyKey(`${list}|${title}`),
       list,
       parentKey: indent > 1 && root ? root.key : null,
       notes: dateText && !when ? keepInNotes(notes, 'Todoist date', dateText) : notes,

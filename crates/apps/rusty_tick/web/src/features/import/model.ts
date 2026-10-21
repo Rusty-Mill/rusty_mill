@@ -8,6 +8,8 @@ import { parseRule } from '@/lib/recurrence'
 export interface ImportedTask {
   /** Stable within the source (its own id, or one made from the row): seeds the task id, so importing twice adds nothing. */
   key: string
+  /** The key the first importer (#821) gave this row, when it gave it one of its own; see `legacyKeys`. */
+  legacyKey: string | null
   /** List name as the source calls it; `''` means the Inbox. */
   list: string
   parentKey: string | null
@@ -37,6 +39,7 @@ export interface ImportResult {
 
 export const blankTask = (key: string, title: string): ImportedTask => ({
   key,
+  legacyKey: null,
   list: '',
   parentKey: null,
   title,
@@ -158,5 +161,26 @@ export function uniqueKeys(): (...parts: string[]) => string {
     const n = (seen.get(base) ?? 0) + 1
     seen.set(base, n)
     return JSON.stringify([...parts, n])
+  }
+}
+
+/**
+ * The keys #821's importer gave content-keyed rows: `base`, then `base#2`,
+ * `base#3`, ... for repeats. That scheme let a real title collide with a
+ * repeat (`Task`, `Task`, `Task#2` gave `Task#2` twice), and its importer
+ * created only the first row to produce a key. So the first row to produce a
+ * legacy key owns it, and a later row that produces it again gets `null`: it
+ * was never imported under that key, and must not be matched to another row's task.
+ */
+export function legacyKeys(): (base: string) => string | null {
+  const seen = new Map<string, number>()
+  const claimed = new Set<string>()
+  return (base) => {
+    const n = (seen.get(base) ?? 0) + 1
+    seen.set(base, n)
+    const key = n === 1 ? base : `${base}#${n}`
+    if (claimed.has(key)) return null
+    claimed.add(key)
+    return key
   }
 }
