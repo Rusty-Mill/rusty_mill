@@ -88,9 +88,7 @@ impl Supervisor for StdSupervisor {
             .stdin(Stdio::null())
             .stdout(log)
             .stderr(err);
-        for name in SCRUB {
-            command.env_remove(name);
-        }
+        orch_cli::scrub_env(&mut command, SCRUB);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;

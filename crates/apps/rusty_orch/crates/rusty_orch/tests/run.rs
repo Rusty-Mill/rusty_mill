@@ -436,6 +436,14 @@ fn hosted(
     card: &Card,
     host: &orch_dispatch::fake::FakeHost,
 ) -> Result<Summary, RunError> {
+    hosted_for(store, Some(card), host)
+}
+
+fn hosted_for(
+    store: &mut Store,
+    card: Option<&Card>,
+    host: &orch_dispatch::fake::FakeHost,
+) -> Result<Summary, RunError> {
     execute_hosted(
         spec(5, IMPLEMENT),
         FakeAgent::new([]),
@@ -447,7 +455,7 @@ fn hosted(
         }),
         Some(Hosting {
             host: Box::new(host.clone()),
-            card: Some(CardHosting {
+            card: card.map(|card| CardHosting {
                 card: "card".into(),
                 namespace: "namespace".into(),
                 board: Box::new(card.clone()),
@@ -517,5 +525,30 @@ fn a_card_held_at_a_later_generation_stops_the_run_before_any_host_command() {
     assert!(card.0.borrow().1.is_empty());
     assert_eq!(host.0.borrow().opens, 0);
     assert!(host.0.borrow().fences.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_card_linked_state_resumed_without_its_card_is_refused_before_any_generation() {
+    let dir = scratch("card_omitted");
+    let card = Card::default();
+    let host = orch_dispatch::fake::FakeHost::default();
+    let mut store = Store::open(&dir).expect("open");
+    hosted(&mut store, &card, &host).expect("linked run");
+    drop(store);
+    let fences = host.0.borrow().fences.len();
+    let mut store = Store::open(&dir).expect("reopen");
+    let error = hosted_for(&mut store, None, &host).expect_err("card omitted");
+    assert!(
+        matches!(&error, RunError::Lease(why) if why.contains("linked to card card")),
+        "{error}"
+    );
+    assert_eq!(host.0.borrow().fences.len(), fences, "nothing was hosted");
+    assert_eq!(card.0.borrow().1, ["link 1"]);
+    let factory = store
+        .load_factory(orch_core::GoalId::from_raw(1))
+        .expect("factory");
+    let saved = factory.assignment("goal-orchestrator").expect("assignment");
+    assert_eq!(saved.generation, 1, "no unpublished generation was saved");
     let _ = std::fs::remove_dir_all(&dir);
 }
