@@ -1220,7 +1220,7 @@ jobs:
     # The build output stays under RUNNER_TEMP so it does not bloat the cache.
     name: compile at declared rust-version
     needs: plan
-    if: needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''
+    if: (needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != '') && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
