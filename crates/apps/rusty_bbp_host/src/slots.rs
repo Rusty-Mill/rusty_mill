@@ -114,12 +114,13 @@ impl Slots {
                 .create(true)
                 .truncate(false)
                 .read(true)
-                .append(true)
+                .write(true)
                 .open(&path)
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             match file.try_lock() {
                 Ok(()) => {
-                    // A runner's output from an earlier hold is no one's.
+                    // A runner's output from an earlier hold is no one's. Not
+                    // opened for append: Windows refuses to truncate such a handle.
                     file.set_len(0)
                         .map_err(|e| format!("{}: {e}", path.display()))?;
                     return Ok(Some(Slot { file, class, index }));
@@ -228,7 +229,10 @@ mod tests {
         Ok(())
     }
 
+    // Inheriting a lock with a duplicated descriptor is Unix semantics; the
+    // crash guarantees are proven on Linux.
     #[test]
+    #[cfg(unix)]
     fn a_child_holds_its_slot_until_it_is_reaped() -> Result<(), String> {
         let slots = Slots::open(
             &dir("child"),
