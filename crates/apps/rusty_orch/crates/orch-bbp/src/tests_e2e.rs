@@ -702,7 +702,14 @@ impl Drop for Millboard {
 fn orch_binary_records_each_generation_with_its_millboard_card() {
     let (dir, mut c) = setup();
     c.pool.get_mut("writer").unwrap().program = "/bin/sh".into();
-    c.pool.get_mut("writer").unwrap().args = vec!["-c".into(), "sleep 10".into()];
+    // The writer records whether it can see Orch's board token, then idles.
+    let seen = dir.join("writer-saw-token");
+    let script = format!(
+        "printf %s \"${{{}-unset}}\" > '{}'; sleep 10",
+        orch_cli::BOARD_TOKEN_ENV,
+        seen.display()
+    );
+    c.pool.get_mut("writer").unwrap().args = vec!["-c".into(), script];
     let goal = dir.join("goal.json");
     let cfg = dir.join("bbp.json");
     std::fs::write(&cfg, rusty_serde::json::to_string(&c).unwrap()).unwrap();
@@ -728,7 +735,7 @@ fn orch_binary_records_each_generation_with_its_millboard_card() {
             .arg("--state")
             .arg(dir.join(state))
             .args(["--card", &card, "--board", &board.url, "--json"])
-            .env("RUSTY_ORCH_BOARD_TOKEN", Millboard::TOKEN)
+            .env(orch_cli::BOARD_TOKEN_ENV, Millboard::TOKEN)
             .env("RUSTY_ORCH_BOARD_ACTOR", "rusty_orch")
             .env("RUSTY_ORCH_BOARD_ROLE", "builder")
             .output()
@@ -747,6 +754,18 @@ fn orch_binary_records_each_generation_with_its_millboard_card() {
     };
     let first = report(&run("live"));
     assert_eq!(first["ended"]["kind"].as_str(), Some("waiting"));
+    // The token reached Orch's own Millboard calls, but no hosted child: the
+    // supervisor, moderator and harness all run without it.
+    let started = Instant::now();
+    while !seen.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "writer never ran"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "unset");
     let link = stored();
     assert_eq!(link["generation"].as_u64(), Some(1));
     assert_eq!(link["assignment"].as_str(), Some("goal-orchestrator"));
@@ -774,7 +793,28 @@ fn orch_binary_records_each_generation_with_its_millboard_card() {
     let last = report(&run("live"));
     assert_eq!(last["ended"]["kind"].as_str(), Some("waiting"));
     assert_eq!(stored()["generation"].as_u64(), Some(4));
-    assert_eq!(cancel_hosted(&c, &last), 1);
+    // Resuming the linked state without its card would take a generation
+    // the card never sees, so it is refused before anything is saved.
+    let unlinked = Command::new(&orch)
+        .arg("run")
+        .arg(&goal)
+        .arg("--bbp")
+        .arg(&cfg)
+        .arg("--state")
+        .arg(dir.join("live"))
+        .output()
+        .unwrap();
+    assert!(!unlinked.status.success());
+    let why = String::from_utf8_lossy(&unlinked.stderr);
+    assert!(why.contains("resume it with --card"), "{why}");
+    let resumed = report(&run("live"));
+    assert_eq!(resumed["ended"]["kind"].as_str(), Some("waiting"));
+    assert_eq!(
+        stored()["generation"].as_u64(),
+        Some(5),
+        "no generation was skipped"
+    );
+    assert_eq!(cancel_hosted(&c, &resumed), 1);
     drop(board);
     std::fs::remove_dir_all(dir).unwrap();
     println!("BBP_ACCEPTANCE PASS millboard-link");

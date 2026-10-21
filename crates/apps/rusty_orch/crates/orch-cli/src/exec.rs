@@ -21,6 +21,21 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Credentials the Orch process holds for itself, such as its Millboard
+/// token. No child it launches inherits them, whatever the caller scrubs.
+pub const PARENT_SECRETS: &[&str] = &[BOARD_TOKEN_ENV];
+
+/// Where `rusty_orch run --card` reads its Millboard token.
+pub const BOARD_TOKEN_ENV: &str = "RUSTY_ORCH_BOARD_TOKEN";
+
+/// Remove every [`PARENT_SECRETS`] entry and `extra` from `cmd`'s
+/// environment: the one scrub every child launch goes through.
+pub fn scrub_env(cmd: &mut Command, extra: &[&str]) {
+    for name in PARENT_SECRETS.iter().chain(extra) {
+        cmd.env_remove(name);
+    }
+}
+
 /// Longest slice of model output or stderr an error message carries.
 pub const EXCERPT_CHARS: usize = 200;
 
@@ -138,9 +153,7 @@ impl CommandRunner for StdCommand {
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
-        for name in remove_env {
-            cmd.env_remove(name);
-        }
+        scrub_env(&mut cmd, remove_env);
         own_process_group(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| ExecError::Spawn(e.to_string()))?;
         let pipes = Pipes::take(&mut child, stdin);

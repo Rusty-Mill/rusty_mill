@@ -83,6 +83,9 @@ generation with Millboard before any host command: `card_execution_link` the
 first time or to replay it, and the compare-and-set `card_execution_recover`
 from whatever generation the card carries. A card already past the run's
 generation means a newer process holds the goal, so the run stops untouched.
+A state linked to a card is refused when resumed without `--card`, before any
+generation is taken. The board token stays in the Orch process: every child
+launch scrubs `orch_cli::PARENT_SECRETS`.
 The link's execution and BBP task are the goal's BBP namespace (every BBP task
 id of the goal derives from it), its goal is the goal id, and its attempt is
 `1`, since a run resumes its hosted tasks rather than re-attempting them. Host

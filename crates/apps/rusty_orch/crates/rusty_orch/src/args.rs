@@ -121,7 +121,7 @@ pub fn parse(
             card,
             board: BoardAccess {
                 url,
-                token: env("RUSTY_ORCH_BOARD_TOKEN").map(Token),
+                token: env(orch_cli::BOARD_TOKEN_ENV).map(Token),
                 actor: env("RUSTY_ORCH_BOARD_ACTOR"),
                 role: env("RUSTY_ORCH_BOARD_ROLE"),
             },
