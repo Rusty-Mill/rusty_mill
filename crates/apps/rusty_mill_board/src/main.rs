@@ -41,6 +41,10 @@ const DRAIN: Duration = Duration::from_secs(10);
 /// Mill Board: kanban for humans and agents.
 #[derive(Parser)]
 struct Cli {
+    /// Export validated project ownership and exit before opening stores or services.
+    /// Requires --projects; emits the existing projects file format.
+    #[arg(long, requires = "projects")]
+    export_projects: bool,
     /// Board file (created if absent). Omit for an in-memory board.
     #[arg(long, env = "MILL_BOARD_STORE")]
     store: Option<PathBuf>,
@@ -190,6 +194,14 @@ fn stop_on_signal(
 }
 
 fn run(cli: Cli) -> Result<(), String> {
+    if cli.export_projects {
+        let path = cli
+            .projects
+            .as_deref()
+            .ok_or("--export-projects requires --projects")?;
+        println!("{}", Projects::load(path)?.file_json()?);
+        return Ok(());
+    }
     let store: Box<dyn Store> = match &cli.store {
         Some(path) => Box::new(MmdbStore::open(path).map_err(|e| e.to_string())?),
         None => Box::new(MemStore::default()),

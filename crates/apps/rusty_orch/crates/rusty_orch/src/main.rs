@@ -75,7 +75,7 @@ fn inspect(argv: impl IntoIterator<Item = String>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let repo = match inspect::parse(argv, cwd) {
+    let options = match inspect::options(argv, cwd) {
         Ok(repo) => repo,
         Err(ArgsError::Help) => {
             println!("{}", inspect::USAGE);
@@ -86,7 +86,11 @@ fn inspect(argv: impl IntoIterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match inspect::inspect(&repo, &orch_cli::StdCommand) {
+    match inspect::inspect_with_impact(
+        &options.repo,
+        options.impact.as_deref(),
+        &orch_cli::StdCommand,
+    ) {
         Ok(report) => {
             println!("{report}");
             ExitCode::SUCCESS
