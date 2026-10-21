@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{
-    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, WORK_QUEUES,
-    actionable, entry_column, text_hash,
+    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
+    WORK_QUEUES, actionable, entry_column, text_hash,
 };
 use crate::projects::Projects;
 use crate::store::Store;
@@ -314,6 +314,40 @@ impl<S: Store> Board<S> {
         })
     }
 
+    /// Persist or adopt the one factory execution linked to this card. Builders
+    /// may start work, but cannot replace an existing logical execution.
+    pub fn bind_execution(
+        &self,
+        id: Uuid,
+        link: ExecutionLink,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Build) {
+            return Err(BoardError::Forbidden(Capability::Build));
+        }
+        self.apply(id, by, EventKind::ExecutionLinked, |c, now| {
+            c.bind_execution(link.clone(), now)
+        })
+    }
+
+    /// Move this card's execution to a replacement assignment generation, if
+    /// the stored link still carries `expected_generation` (see
+    /// [`Card::recover_execution`]). Needs Build, like binding.
+    pub fn recover_execution(
+        &self,
+        id: Uuid,
+        expected_generation: u64,
+        link: ExecutionLink,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Build) {
+            return Err(BoardError::Forbidden(Capability::Build));
+        }
+        self.apply(id, by, EventKind::ExecutionRecovered, |c, now| {
+            c.recover_execution(expected_generation, link.clone(), now)
+        })
+    }
+
     /// Pull work: the next card this actor can act on, entered (Ready ->
     /// Building) and claimed. With `id`, that card or an error. Cards nearest
     /// Done come first, then oldest. Cards claimed by someone else are
@@ -431,6 +465,12 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::OutOfScope(current.project));
             }
             let next = op(&current, (self.clock)())?;
+            // Domain operations may deliberately return the unchanged aggregate
+            // for an idempotent replay.  Such a replay is already durable and
+            // must not be sent through the store's rev + 1 CAS.
+            if next == current {
+                return Ok(current);
+            }
             match self.store.replace(&next, Event::of(&next, kind, &by.name)) {
                 Err(BoardError::Conflict) => continue,
                 result => return result.map(|()| next),

@@ -51,3 +51,21 @@ Configuration and executable validation commands live in
 [`orch-bbp`](crates/orch-bbp/README.md). It accepts provider-neutral pools and
 capability rosters, with independent final-review policy; the four-role and
 fixed-vendor assumptions in ADR-0013's original sketch are not requirements.
+
+## Factory execution boundary (Stage 2)
+
+Millboard remains the owner of cards and Orch remains the owner of goals.  The
+bridge persists one `ExecutionLink` with the card: its card, logical execution,
+goal, BBP task, host attempt, assignment id and assignment generation.  On a
+duplicate request or restart it adopts that same logical execution before
+opening a task host; it never creates a second one for a card.
+
+`orch_core::factory` deliberately distinguishes a configured identity from an
+assignment, provider session, model, and process.  Project/task/worker
+assignments receive explicit project, call and delegation grants.  A delegated
+assignment must be narrower than its parent.  Every host command carries the
+assignment generation; replacement and retirement invalidate old generations,
+and retirement also disables descendants.  Host observations reconcile into
+`Running`, `Waiting`, `Completed`, `Failed`, or `Cancelled`; terminal state is
+monotonic.  Transport adapters map these states to existing Millboard columns
+and BBP gates without bypassing Sandbox or BBP approval policy.

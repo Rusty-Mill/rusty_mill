@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Provider-neutral factory assignments and durable card execution links, with
+  aggregate delegation/call budgets and generation-fenced recovery.
 - Windows inspection launch uses stdin for bundled source, retaining `-I`, deadlines and output bounds instead of exceeding the command-line limit.
 - Cargo metadata revision fingerprints are deterministic across unordered Cargo collections while preserving meaningful graph, target, manifest and application-defined metadata changes.
 - Stage 1 revision-bound proposed-change impact through `inspect --impact`, joining CI dependency evidence, Millboard ownership and complete RemindMe durable requirements; detects requirement revision changes and expands requirement-linked projects to their Cargo packages (ADR-0016).
@@ -27,6 +29,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ### Changed
 - `orch-dispatch`: the additive `ClassifiedError` classification lets runners distinguish counted transient failures, counted permanent failures, and unmetered unavailable prerequisites without changing `AgentError(String)`. Missing Codex login now leaves the same card resumable without consuming `max_calls`; true permanent failures still fail it immediately. ADR-0008.
 ### Fixed
+- Execution-link adoption no longer attempts an invalid persistence CAS for an
+  identical replay; assignment replacement, ancestry, and grant validation now
+  fail closed for stale descendants, cycles, duplicate IDs, and escalation.
 - `orch-dispatch`: adapters now declare agent/role capability, so a routed but unsupported role fails its card once before call accounting or backend setup instead of consuming its retry budget (#440). ADR-0007.
 - `orch-ollama` real-binary test asserts a per-run nonce appears in an entry body instead of merely a non-empty reply, matching `orch-codex` (#441).
 - `orch-cli` `render`: explicit entry refs now follow supersession chains and show the newest live entry's id, kind, and body. Aliases of the same live entry are rendered once and are not repeated in card history (#439).
