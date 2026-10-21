@@ -52,7 +52,8 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
     def test_push_pr_and_manual_full_sweep_events_are_declared(self) -> None:
-        self.assertIn("  push:\n    branches: [main]", self.workflow)
+        # No post-merge push run: the merge queue tested the tree that lands.
+        self.assertNotIn("  push:\n    branches: [main]", self.workflow)
         self.assertIn("  pull_request:", self.workflow)
         self.assertIn("  workflow_dispatch:", self.workflow)
         self.assertIn('--event "${{ github.event_name }}"', self.workflow)
@@ -549,7 +550,8 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-latest", job)
         self.assertIn("needs: [plan, fmt]", job)
         self.assertNotIn("continue-on-error", job)
-        self.assertNotIn("if: needs.plan.outputs", job)
+        # Only the platform gate: no scope flag may plan it out.
+        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", job), ["needs.plan.outputs.linux == 'true'"])
         self.assertIn("cargo build --locked -p rusty_orch -p rusty_bbp_host", job)
         self.assertIn("orch_bbp_acceptance.py --output acceptance-results", job)
         self.assertIn('export BBP_TEST_BIN="$PWD/target/debug/bbp"', job)
@@ -824,7 +826,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_rand_platform_commands_and_required_gate_are_preserved(self) -> None:
         job = self.workflow.split("  rusty-rand-platforms:\n", 1)[1].split("\n  # Every other Rust job", 1)[0]
-        self.assertIn("os: [ubuntu-latest, macos-latest]", job)
+        self.assertIn("os: ${{ fromJSON(needs.plan.outputs.rand_os) }}", job)
         self.assertIn("run: cargo test -p rusty_rand", job)
         for target in ("aarch64-unknown-linux-gnu", "riscv64gc-unknown-linux-gnu"):
             self.assertIn(f"run: cargo check -p rusty_rand --target {target} --all-targets", job)
