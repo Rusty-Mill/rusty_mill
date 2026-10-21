@@ -4,6 +4,7 @@ import { useActions, useServices } from '@/app/services'
 import { downloadFile } from '@/features/summary/download'
 import { dayKey } from '@/lib/date'
 import { Confirm } from '@/components/Confirm'
+import { applyImport, readImport } from '@/features/import'
 import { makeBackup, restoreBackup, wipeData } from '../backup'
 import { page, resetDemoData, signOut } from '../session'
 import { APP_NAME, APP_VERSION } from './AboutTab'
@@ -43,6 +44,20 @@ export function AccountTab() {
         void refresh()
       })
       .catch((e: unknown) => notify('error', e instanceof Error ? e.message : 'Could not import that backup'))
+  }
+  const other = useRef<HTMLInputElement>(null)
+  const importOther = (f: File | undefined): void => {
+    if (!f) return
+    void f
+      .text()
+      .then(async (text) => {
+        const read = readImport(text, f.name)
+        const n = await applyImport(api, read)
+        const notes = [n.existing && `${n.existing} already here`, read.skipped && `${read.skipped} rows skipped`, read.lossy && `${read.lossy} with a date or repeat kept in notes or dropped`].filter(Boolean)
+        notify('info', `Imported ${n.tasks} tasks and ${n.lists} lists from ${read.source}${notes.length ? ` (${notes.join('; ')})` : ''}`)
+        void refresh()
+      })
+      .catch((e: unknown) => notify('error', `Could not import ${f.name}: ${e instanceof Error ? e.message : String(e)}`))
   }
   const wipe = (): void => {
     setWiping(false)
@@ -97,6 +112,13 @@ export function AccountTab() {
             </button>
             <input ref={file} type="file" accept="application/json,.json" hidden aria-label="Backup file" onChange={(e) => { importFile(e.target.files?.[0]); e.target.value = '' }} />
           </span>
+        </div>
+        <div className={line}>
+          <span title="TickTick backup, Todoist CSV, any CSV with a Title column (Apple Reminders via tools/export-apple-reminders.js), or .ics">Import from Other Apps</span>
+          <button type="button" onClick={() => other.current?.click()} className="text-primary hover:underline">
+            Import
+          </button>
+          <input ref={other} type="file" accept=".csv,.ics,text/csv,text/calendar" hidden aria-label="File from another app" onChange={(e) => { importOther(e.target.files?.[0]); e.target.value = '' }} />
         </div>
         <div className={line}>
           <span>Manage Account</span>
