@@ -18,7 +18,7 @@
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
-//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--max-usd C --criteria FILE]
+//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--max-usd C --criteria FILE]
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
@@ -171,6 +171,7 @@ fn run() -> Result<String, String> {
                 confinement,
                 poll: std::time::Duration::from_millis(num("poll-ms", 500)?),
                 max_wall: std::time::Duration::from_secs(num("max-wall-secs", u64::MAX / 1000)?),
+                end_grace: std::time::Duration::from_secs(num("end-grace-secs", 60)?),
                 cost_cap: match (a.flags.get("max-usd"), a.flags.get("criteria")) {
                     (Some(usd), Some(file)) => Some(moderator::CostCap {
                         usd: usd

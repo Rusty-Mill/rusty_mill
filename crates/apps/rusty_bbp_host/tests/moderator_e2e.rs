@@ -178,6 +178,7 @@ fn happy_run(tag: &str) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(90),
+        end_grace: Duration::ZERO,
         cost_cap: None,
     };
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
@@ -334,6 +335,7 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(5),
+        end_grace: Duration::ZERO,
         cost_cap: None,
     };
     let first = card(&dir, &task);
@@ -348,6 +350,64 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
     );
     assert_eq!(first.state, State::Planning);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A harness whose turn ended on its own terminal call is not killed at once:
+/// it gets `end_grace` to print its final `result` line, which prices the
+/// turn. Without the grace every ended turn's cost would be unknown.
+#[test]
+fn a_harness_whose_turn_ended_may_finish_within_the_grace() {
+    for (tag, grace, finishes) in [("grace", 10, true), ("nograce", 0, false)] {
+        let dir = tempdir(tag);
+        let (repo, _) = repo(&dir);
+        let task = TaskId("T1".into());
+        open_assigned(&dir, &task, &ProfileSet::shell("test", "true"));
+        let planner = harness(
+            &dir,
+            "planner",
+            &[
+                r##"{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1."}}"##,
+                r#"{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}"#,
+            ],
+        );
+        // What the real harness does after its terminal call: one more model
+        // reply, then the `result` line.
+        let script = PathBuf::from(&planner.program);
+        let body = std::fs::read_to_string(&script).expect("read script");
+        let done = dir.join("planner.done");
+        std::fs::write(
+            &script,
+            format!("{body}sleep 1\ntouch '{}'\n", done.display()),
+        )
+        .expect("write script");
+        let mut cfg = config(
+            &dir,
+            &task,
+            repo,
+            Launchers::default().with("planner", planner),
+            30,
+        );
+        cfg.end_grace = Duration::from_secs(grace);
+        let moderator = std::thread::spawn(move || moderator::run(&cfg));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while card(&dir, &task).state != State::PlanGate {
+            assert!(
+                Instant::now() < deadline,
+                "{tag}: never reached the plan gate"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(done.exists(), finishes, "{tag}");
+        while card(&dir, &task).state != State::Cancelled {
+            assert!(Instant::now() < deadline, "{tag}: cancel never landed");
+            let c = card(&dir, &task);
+            human::perform(&dir, &task, "cancel", &["done"], Some(c.rev)).expect("cancel");
+        }
+        let out = moderator.join().expect("join").expect("moderator");
+        assert_eq!(out.state, State::Cancelled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// An agents file may name only some roles.
@@ -398,6 +458,7 @@ fn config(dir: &Path, task: &TaskId, repo: PathBuf, launchers: Launchers, wall: 
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(wall),
+        end_grace: Duration::ZERO,
         cost_cap: None,
     }
 }
