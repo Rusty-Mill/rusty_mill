@@ -22,6 +22,8 @@ export interface ImportedTask {
   timeZone: string
   reminders: string[]
   repeatFlag: string
+  /** Occurrences left out of the repeat rule (Unix ms on the due timeline). */
+  exDates: number[]
   tags: string[]
   items: { title: string; done: boolean }[]
   status: Status
@@ -51,6 +53,7 @@ export const blankTask = (key: string, title: string): ImportedTask => ({
   timeZone: '',
   reminders: [],
   repeatFlag: '',
+  exDates: [],
   tags: [],
   items: [],
   status: 'open',

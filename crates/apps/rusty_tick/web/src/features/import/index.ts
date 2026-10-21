@@ -18,18 +18,20 @@ export type { ImportResult, ImportedTask } from './model'
 /**
  * Read an `.ics` file into the shared model: the one path for the calendar
  * page's import and this one, so a file imported through both adds its tasks
- * once. A key is the event's UID plus its occurrence, since the moved
- * instances of a repeating event share its UID; `legacyKey` is the bare UID
- * this importer used before, so files it already imported still match.
+ * once. An event's identity is its UID plus its `RECURRENCE-ID` (none for the
+ * master), so a moved instance keeps its task when others are added or the
+ * file is reordered; a repeat of both (a malformed file) gets an occurrence
+ * count. `legacyKey` is the bare UID this importer used before, so files it
+ * already imported still match. Exceptions travel as the master's `exDates`.
  */
 export function readIcs(text: string): ImportResult {
-  const { tasks, skipped, droppedRepeats } = parseIcs(text)
+  const { tasks, skipped, droppedRepeats, droppedExceptions } = parseIcs(text)
   const key = uniqueKeys()
   return {
     source: 'calendar file',
-    tasks: tasks.map(({ uid, ...t }) => ({ ...blankTask(key(uid), t.title), ...t, legacyKey: uid })),
+    tasks: tasks.map(({ uid, recurrenceId, ...t }) => ({ ...blankTask(key(uid, recurrenceId === null ? '' : String(recurrenceId)), t.title), ...t, legacyKey: uid })),
     skipped,
-    lossy: droppedRepeats,
+    lossy: droppedRepeats + droppedExceptions,
   }
 }
 

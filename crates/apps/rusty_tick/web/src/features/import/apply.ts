@@ -6,10 +6,11 @@
  * top-level task. Subtasks nest one level here, so deeper ones hang off their
  * top-level ancestor and live in its list.
  *
- * A task is created open and closed by a second write, since `NewTask` carries
- * no status. If that second write was lost, the next import finishes it: the
- * task is still at its creation version (`etag` 1), so nobody has edited it,
- * and the write is conditional on that etag. A task edited since is left alone.
+ * A task is created open, then closed and given its repeat exceptions by a
+ * second write, since `NewTask` carries neither status nor `exDates`. If that
+ * second write was lost, the next import finishes it: the task is still at its
+ * creation version (`etag` 1), so nobody has edited it, and the write is
+ * conditional on that etag. A task edited since is left alone.
  *
  * Rows whose key format changed since #821 carry their old `legacyKey`. #821
  * wrote rows in the order below (top-level tasks first) and skipped a row whose
@@ -19,7 +20,7 @@
  * so files imported before the change still skip or resume, not duplicate.
  */
 import type { ApiClient } from '@/api/client'
-import type { NewTask, Task } from '@/api/types'
+import type { NewTask, Task, TaskPatch } from '@/api/types'
 import { derivedId } from '@/lib/id'
 import type { ImportResult, ImportedTask } from './model'
 
@@ -28,6 +29,7 @@ const MAX_TITLE = 500
 const MAX_TAGS = 20
 const MAX_TAG_CHARS = 64
 const MAX_ITEMS = 200
+const MAX_EX_DATES = 1000
 /** A task's etag when it has not been written since it was created. */
 const CREATED_ETAG = '1'
 
@@ -36,12 +38,20 @@ export interface Applied {
   lists: number
   /** Already imported (same id), so left alone. */
   existing: number
-  /** Imported before, but its done / won't-do write was lost; finished now. */
+  /** Imported before, but its status / repeat-exception write was lost; finished now. */
   resumed: number
 }
 
-/** True when `found` is this import's own task, untouched since creation, still waiting for its status. */
-const statusPending = (found: Task, t: ImportedTask): boolean => t.status !== 'open' && found.status === 'open' && found.etag === CREATED_ETAG
+/** What `NewTask` cannot carry, written right after the create; `null` when there is nothing to write. */
+function secondWrite(t: ImportedTask): TaskPatch | null {
+  const patch: TaskPatch = {}
+  if (t.status !== 'open') patch.status = t.status
+  if (t.exDates.length > 0) patch.exDates = [...new Set(t.exDates)].sort((a, b) => a - b).slice(0, MAX_EX_DATES)
+  return Object.keys(patch).length > 0 ? patch : null
+}
+
+/** True when `found` is untouched since its creation, so a second write it still lacks can be finished safely. */
+const pending = (found: Task, patch: TaskPatch | null): patch is TaskPatch => patch !== null && found.etag === CREATED_ETAG
 
 /** The top-level ancestor's key, or `null` when `t` is top-level or its parent is not in the file. */
 function rootOf(t: ImportedTask, byKey: ReadonlyMap<string, ImportedTask>): string | null {
@@ -112,8 +122,9 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
     const listId = (root !== null && placed.get(root)) || (await listFor(t.list))
     placed.set(t.key, listId)
     const found = existing.get(id)
-    if (found && statusPending(found, t)) {
-      await api.updateTask(id, { status: t.status }, CREATED_ETAG)
+    const patch = secondWrite(t)
+    if (found && pending(found, patch)) {
+      await api.updateTask(id, patch, CREATED_ETAG)
       out.resumed++
       continue
     }
@@ -123,7 +134,7 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
     }
     const created = await api.createTask(toNewTask(t, id, listId, root !== null ? (ids.get(root) ?? null) : null))
     existing.set(id, created)
-    if (t.status !== 'open') await api.updateTask(id, { status: t.status }, created.etag)
+    if (patch) await api.updateTask(id, patch, created.etag)
     out.tasks++
   }
   return out

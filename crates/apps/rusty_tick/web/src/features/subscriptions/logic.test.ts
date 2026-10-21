@@ -3,7 +3,7 @@ import type { Task } from '@/api/types'
 import type { IcsTask } from '@/lib/ics'
 import { asSubscriptionBody, isStale, MAX_ITEMS, planSync } from './logic'
 
-const ev = (uid: string, o: Partial<IcsTask> = {}): IcsTask => ({ uid, title: uid, notes: '', startMs: null, dueMs: 1000, isAllDay: true, timeZone: '', repeatFlag: '', ...o })
+const ev = (uid: string, o: Partial<IcsTask> = {}): IcsTask => ({ uid, title: uid, notes: '', startMs: null, dueMs: 1000, isAllDay: true, timeZone: '', repeatFlag: '', recurrenceId: null, exDates: [], ...o })
 const task = (id: string, o: Partial<Task> = {}): Task => ({
   id, listId: 'l', parentId: null, title: id, notes: '', kind: 'text', status: 'open', priority: 0, startMs: null, dueMs: 1000, isAllDay: true,
   timeZone: '', reminders: [], repeatFlag: '', exDates: [], items: [], tags: [], sortOrder: 0, createdMs: 0, updatedMs: 0, completedMs: null,
