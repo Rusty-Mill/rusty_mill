@@ -2,7 +2,7 @@
 name = "rusty_voice"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "A sovereign voice-to-text application leveraging rusty_whisper and rusty_audio built exclusively with Rusty Mill libraries"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_voice"
