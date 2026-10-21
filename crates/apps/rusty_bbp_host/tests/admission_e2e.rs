@@ -66,12 +66,19 @@ fn repo(dir: &Path, probe: &Path) -> (PathBuf, String) {
     (repo, base)
 }
 
-/// A harness script that records itself under `probe`, waits for `gate`
-/// (when given) to exist, holds its slot a little, then sends `lines` to the
-/// turn's `bbp mcp`.
-fn harness(bin: &Path, role: &str, probe: &Path, gate: Option<&Path>, lines: &[String]) -> String {
+/// A harness script that runs `prelude`, records itself under `probe`, waits
+/// for `gate` (when given) to exist, holds its slot a little, then sends
+/// `lines` to the turn's `bbp mcp`.
+fn harness(
+    bin: &Path,
+    role: &str,
+    probe: &Path,
+    gate: Option<&Path>,
+    prelude: &str,
+    lines: &[String],
+) -> String {
     let record = format!("{}/agent-$BBP_TASK-$BBP_TURN", probe.display());
-    let mut script = format!("#!/bin/sh\necho start $(date +%s%N) >> {record}\n");
+    let mut script = format!("#!/bin/sh\n{prelude}echo start $(date +%s%N) >> {record}\n");
     if let Some(gate) = gate {
         script.push_str(&format!(
             "while [ ! -e {} ]; do sleep 0.05; done\n",
@@ -103,7 +110,7 @@ struct Task {
     agents: PathBuf,
 }
 
-fn task(root: &Path, name: &str, probe: &Path, gate: Option<&Path>) -> Task {
+fn task(root: &Path, name: &str, probe: &Path, gate: Option<&Path>, prelude: &str) -> Task {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let (repo, base) = repo(&dir, probe);
@@ -152,7 +159,7 @@ fn task(root: &Path, name: &str, probe: &Path, gate: Option<&Path>) -> Task {
     let entries: Vec<String> = scripts
         .iter()
         .map(|(role, lines)| {
-            let program = harness(&bin, role, probe, gate, lines);
+            let program = harness(&bin, role, probe, gate, prelude, lines);
             format!(r#""{role}":{{"program":"{program}","args":[]}}"#)
         })
         .collect();
@@ -295,7 +302,7 @@ fn racing_moderators_never_exceed_two_agents_and_one_validator() {
     let (probe, slots) = (root.join("probe"), root.join("slots"));
     std::fs::create_dir_all(&probe).expect("mkdir");
     let tasks: Vec<Task> = (1..=4)
-        .map(|i| task(&root, &format!("T{i}"), &probe, None))
+        .map(|i| task(&root, &format!("T{i}"), &probe, None, ""))
         .collect();
     let mut mods: Vec<Child> = tasks.iter().map(|t| moderator(t, &slots, 2)).collect();
 
@@ -330,10 +337,23 @@ impl Drop for Release {
 
 #[test]
 fn a_killed_moderator_frees_its_slot_only_when_its_harness_is_gone() {
-    let root = tempdir("crash");
+    crash("crash", "");
+}
+
+#[test]
+fn a_harness_that_drops_its_stdin_still_holds_its_slot_after_a_crash() {
+    // A launcher may replace the harness's stdin; the slot is kept by a
+    // holder process, not by the harness's descriptors.
+    crash("crash_stdin", "exec </dev/null\n");
+}
+
+/// Kill a moderator whose harness, started with `prelude`, holds the only
+/// agent slot; a restarted moderator's next turn waits until it is gone.
+fn crash(tag: &str, prelude: &str) {
+    let root = tempdir(tag);
     let (probe, slots, go) = (root.join("probe"), root.join("slots"), root.join("go"));
     std::fs::create_dir_all(&probe).expect("mkdir");
-    let t = task(&root, "T1", &probe, Some(&go));
+    let t = task(&root, "T1", &probe, Some(&go), prelude);
     // However the test ends, the orphan is let go, so it cannot outlive it.
     let _release = Release(go.clone());
     let started = |turn: u32| probe.join(format!("agent-T1-{turn}")).exists();

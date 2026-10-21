@@ -307,6 +307,18 @@ struct Harness {
     /// harness leaves the list (after it is reaped). The child holds the same
     /// lock through its stdin, so the slot stays taken while it lives.
     _slot: Option<Slot>,
+    /// The `bbp slot-hold` process that keeps the slot while the harness's
+    /// process group has a member, should this moderator die first.
+    hold: Option<Child>,
+}
+
+impl Harness {
+    /// Kill the harness's process group, then its slot holder, and reap both.
+    fn stop(&mut self) -> Result<(), String> {
+        let harness = kill_tree(&mut self.child);
+        let hold = self.hold.as_mut().map_or(Ok(()), kill_tree);
+        harness.and(hold)
+    }
 }
 
 /// Every process the loop started. Dropping it kills the harness and its
@@ -355,8 +367,7 @@ impl Supervision {
     fn kill_harnesses(&mut self) -> Result<(), String> {
         let mut first = Ok(());
         for mut h in self.harnesses.drain(..) {
-            let r = kill_tree(&mut h.child);
-            first = first.and(r);
+            first = first.and(h.stop());
         }
         first
     }
@@ -369,8 +380,13 @@ impl Supervision {
             // Exited harnesses leave the list; on a wait error every one left
             // is still killed before the error is returned.
             let mut failed = None;
-            self.harnesses.retain_mut(|h| match h.child.try_wait() {
-                Ok(Some(_)) => false,
+            self.harnesses.retain_mut(|h| match exited(&mut h.child) {
+                Ok(Some(_)) => {
+                    if let Err(e) = h.stop() {
+                        failed.get_or_insert(e);
+                    }
+                    false
+                }
                 Ok(None) => true,
                 Err(e) => {
                     failed.get_or_insert(format!("harness wait: {e}"));
@@ -391,7 +407,7 @@ impl Supervision {
     /// Kill the harness of `turn`, if one is running.
     fn kill_harness_of(&mut self, turn: TurnId) -> Result<(), String> {
         match self.harnesses.iter().position(|h| h.turn == turn) {
-            Some(i) => kill_tree(&mut self.harnesses.remove(i).child),
+            Some(i) => self.harnesses.remove(i).stop(),
             None => Ok(()),
         }
     }
@@ -406,6 +422,29 @@ impl Drop for Supervision {
             eprintln!("bbp mod: runner not cleaned up: {error}");
         }
     }
+}
+
+/// The child's exit status once it has exited, without reaping it: an
+/// unreaped child keeps its process-group id reserved, so [`kill_tree`] can
+/// still kill what it forked without reaching a group that reused the id.
+#[cfg(target_os = "linux")]
+fn exited(child: &mut Child) -> Result<Option<String>, String> {
+    use rusty_libc::wait::{waitid, CLD_EXITED, P_PID, WEXITED, WNOHANG, WNOWAIT};
+    let pid = i32::try_from(child.id()).map_err(|_| "pid out of range".to_owned())?;
+    let info = waitid(P_PID, pid, WEXITED | WNOHANG | WNOWAIT)
+        .map_err(|e| format!("harness wait: {e:?}"))?;
+    Ok((info.si_pid != 0).then(|| match info.si_code {
+        CLD_EXITED => format!("exit status: {}", info.si_status),
+        _ => format!("signal: {}", info.si_status),
+    }))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exited(child: &mut Child) -> Result<Option<String>, String> {
+    child
+        .try_wait()
+        .map(|status| status.map(|s| s.to_string()))
+        .map_err(|e| format!("harness wait: {e}"))
 }
 
 /// `SIGKILL` the child's process group (the harness and everything it
@@ -592,7 +631,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         let mut forfeited = None;
         for h in &mut sup.harnesses {
             let is_live = live.iter().any(|(id, _)| *id == h.turn);
-            match h.child.try_wait() {
+            match exited(&mut h.child) {
                 Ok(Some(status)) => {
                     eprintln!("bbp mod: harness for turn {} exited: {status}", h.turn.0);
                     forfeited = Some((h.turn, is_live));
@@ -607,7 +646,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                     }
                 }
                 Ok(None) => {}
-                Err(e) => return Err(format!("harness wait: {e}")),
+                Err(e) => return Err(e),
             }
         }
         if let Some((turn, abort)) = forfeited {
@@ -647,12 +686,26 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 .cloned()
                 .ok_or_else(|| format!("{role} has no principal"))?;
             let child = spawn(cfg, l, &role, &principal, turn, stdin)?;
-            sup.harnesses.push(Harness {
+            let mut harness = Harness {
                 turn,
                 child,
                 ended: None,
-                _slot: slot,
-            });
+                _slot: None,
+                hold: None,
+            };
+            if let Some(slot) = slot {
+                match slot.hold_for(&cfg.bbp, harness.child.id()) {
+                    Ok(hold) => harness.hold = Some(hold),
+                    Err(e) => {
+                        if let Err(k) = harness.stop() {
+                            eprintln!("bbp mod: harness for turn {} not stopped: {k}", turn.0);
+                        }
+                        return Err(e);
+                    }
+                }
+                harness._slot = Some(slot);
+            }
+            sup.harnesses.push(harness);
         }
         std::thread::sleep(cfg.poll);
     }

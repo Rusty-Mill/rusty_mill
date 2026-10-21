@@ -10,6 +10,11 @@
 //! reservation table exists, so none can be left behind by a crash, and a
 //! restarted moderator reclaims a slot exactly when its holder is gone.
 //!
+//! A harness is a launcher's program, free to replace its stdin. So the
+//! moderator also hands the lock to a `bbp slot-hold` process of its own
+//! ([`Slot::hold_for`]), which keeps it until the harness's process group
+//! has no member left, whether or not the moderator lives that long.
+//!
 //! The capacity is recorded once, in `<dir>/capacity`, by the first
 //! moderator to open the directory. A moderator configured with a different
 //! capacity is refused, so two configurations can never share one directory
@@ -17,7 +22,8 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 /// What a slot admits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,10 +152,49 @@ impl Slot {
             .map_err(|e| format!("slot: {e}"))
     }
 
+    /// Hold this slot in a `bbp slot-hold` process, in a process group of
+    /// its own, for as long as process group `group` has a member: however
+    /// that group's processes treat their stdio, and whether or not the
+    /// caller outlives them.
+    ///
+    /// # Errors
+    /// When the holder cannot be started.
+    pub fn hold_for(&self, bbp: &Path, group: u32) -> Result<Child, String> {
+        let mut command = Command::new(bbp);
+        command
+            .args(["slot-hold", "--group", &group.to_string()])
+            .stdin(self.stdio()?)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.spawn().map_err(|e| format!("slot holder: {e}"))
+    }
+
     /// `agent-0`, `validator-0`, ...
     pub fn name(&self) -> String {
         format!("{}-{}", self.class.name(), self.index)
     }
+}
+
+/// `bbp slot-hold`: return once process group `group` has no member left.
+/// The slot lock, the caller's stdin, stays open until then.
+pub fn hold_while_alive(group: i32) {
+    while group_alive(group) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A group whose id was freed and reused within one poll keeps the slot
+/// longer than needed: late admission, never oversubscription.
+#[cfg(target_os = "linux")]
+fn group_alive(group: i32) -> bool {
+    group > 0 && rusty_libc::process::killpg(group, 0) != Err(rusty_libc::Errno::ESRCH)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn group_alive(_: i32) -> bool {
+    false
 }
 
 /// Write `bytes` to `path` unless it already exists, without ever exposing a

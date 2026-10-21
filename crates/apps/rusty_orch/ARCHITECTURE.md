@@ -100,8 +100,10 @@ Capacity is admitted where processes start: in the BBP moderator, which every
 hosted task has one of. With `slots` in the BBP configuration, each moderator
 takes an agent slot before launching a harness and a validator slot before
 starting a runner, from a slot directory shared across goals. Slots are kernel
-file locks handed to the child as a stdio descriptor, so a slot is held until
-the child's whole process tree is gone and is never released early by a
+file locks handed to the child as a stdio descriptor, and, for a harness, to
+a `bbp slot-hold` process that watches its process group. So a slot is held
+until the child's whole process tree is gone, whatever the harness does with
+its stdin, and is never released early by a
 moderator crash; no reservation record exists to recover. They are not kept in
 `orch-store`, which one process opens at a time while moderators of many goals
 run at once.
