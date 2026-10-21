@@ -75,6 +75,45 @@ impl TlsAcceptor {
         private_key_der: Vec<u8>,
         client_ca_roots_der: Vec<Vec<u8>>,
     ) -> Result<Self, Error> {
+        Self::client_auth(
+            cert_chain_der,
+            private_key_der,
+            client_ca_roots_der,
+            Vec::new(),
+        )
+    }
+
+    /// Like [`TlsAcceptor::new_with_client_auth`], but also offers
+    /// `alpn_protocols` (each entry a wire-format protocol ID, e.g. `b"h2"`).
+    /// A server that both requires a client certificate and negotiates a
+    /// protocol, such as a gRPC server behind mutual TLS, needs both on one
+    /// connection. A client that offers no protocol still connects (nothing
+    /// is negotiated); one that offers only other protocols is refused. An
+    /// empty `alpn_protocols` offers none, like `new_with_client_auth`. Read
+    /// back what was negotiated with
+    /// [`TlsServerStream::negotiated_alpn_protocol`].
+    pub fn new_with_client_auth_and_alpn(
+        cert_chain_der: Vec<Vec<u8>>,
+        private_key_der: Vec<u8>,
+        client_ca_roots_der: Vec<Vec<u8>>,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        Self::client_auth(
+            cert_chain_der,
+            private_key_der,
+            client_ca_roots_der,
+            alpn_protocols,
+        )
+    }
+
+    /// The shared builder behind the client-certificate constructors; an
+    /// empty `alpn_protocols` offers none.
+    fn client_auth(
+        cert_chain_der: Vec<Vec<u8>>,
+        private_key_der: Vec<u8>,
+        client_ca_roots_der: Vec<Vec<u8>>,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
         let cert_chain: Vec<CertificateDer<'static>> = cert_chain_der
             .into_iter()
             .map(CertificateDer::from)
@@ -91,9 +130,10 @@ impl TlsAcceptor {
                 .build()
                 .map_err(|e| Error::InvalidClientCaRoots(e.to_string()))?;
 
-        let config = server_config_builder()
+        let mut config = server_config_builder()
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(cert_chain, key)?;
+        config.alpn_protocols = alpn_protocols;
         Ok(Self {
             config: finish_config(config)?,
         })
