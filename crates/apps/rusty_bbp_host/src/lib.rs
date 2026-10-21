@@ -34,6 +34,7 @@ pub mod report;
 pub mod run_control;
 pub mod runner;
 pub mod shadow;
+pub mod slots;
 pub mod tokens;
 pub mod why;
 

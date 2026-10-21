@@ -18,6 +18,7 @@
 //! path, the error ones included.
 
 use crate::runner::Confinement;
+use crate::slots::{Class, Slot};
 use crate::{now, open_driver};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
@@ -103,6 +104,10 @@ pub struct Config {
     pub end_grace: Duration,
     /// Stop the run when its harnesses have cost more than this.
     pub cost_cap: Option<CostCap>,
+    /// Machine-wide admission. With slots, a granted turn's harness starts
+    /// only when an agent slot is free, and a selected run's runner only when
+    /// a validator slot is; until then the turn or run waits.
+    pub slots: Option<crate::slots::Slots>,
 }
 
 /// A live dollar cap on one run. Checked each poll from the harness output the
@@ -298,6 +303,10 @@ struct Harness {
     child: Child,
     /// When the moderator first saw this harness's turn no longer live.
     ended: Option<Instant>,
+    /// The moderator's handle on the child's agent slot, dropped when the
+    /// harness leaves the list (after it is reaped). The child holds the same
+    /// lock through its stdin, so the slot stays taken while it lives.
+    _slot: Option<Slot>,
 }
 
 /// Every process the loop started. Dropping it kills the harness and its
@@ -305,6 +314,21 @@ struct Harness {
 struct ActiveRun {
     run: RunId,
     child: Child,
+    _slot: Option<Slot>,
+}
+
+/// A free slot of `class` with the stdio that hands it to the child, or
+/// `None` when admission is configured and every slot is held. Without
+/// admission the child gets a null stdio in its place.
+fn admit(cfg: &Config, class: Class) -> Result<Option<(Option<Slot>, Stdio)>, String> {
+    let Some(slots) = &cfg.slots else {
+        return Ok(Some((None, Stdio::null())));
+    };
+    let Some(slot) = slots.try_acquire(class)? else {
+        return Ok(None);
+    };
+    let stdio = slot.stdio()?;
+    Ok(Some((Some(slot), stdio)))
 }
 
 struct Supervision {
@@ -434,6 +458,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         runner: None,
     };
     let mut launched: HashSet<TurnId> = HashSet::new();
+    let mut waiting: HashSet<TurnId> = HashSet::new();
     let mut ran: HashSet<RunId> = HashSet::new();
 
     // A turn that was live before this loop did anything belongs to an
@@ -544,11 +569,15 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             .filter(|r| r.status.is_none() && !ran.contains(&r.id))
             .map(|r| r.id);
         if let Some(run) = pending {
-            ran.insert(run);
-            sup.runner = Some(ActiveRun {
-                run,
-                child: spawn_runner(cfg)?,
-            });
+            // Without a validator slot the run stays pending for a later poll.
+            if let Some((slot, stdout)) = admit(cfg, Class::Validator)? {
+                ran.insert(run);
+                sup.runner = Some(ActiveRun {
+                    run,
+                    child: spawn_runner(cfg, stdout)?,
+                    _slot: slot,
+                });
+            }
         }
 
         let live: Vec<(TurnId, RoleId)> = d
@@ -595,27 +624,35 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             if launched.contains(&turn) {
                 continue;
             }
-            launched.insert(turn);
-            match cfg.launchers.for_role(&role) {
-                Some(l) => {
-                    let principal = d
-                        .state
-                        .assigned
-                        .get(&role)
-                        .cloned()
-                        .ok_or_else(|| format!("{role} has no principal"))?;
-                    let child = spawn(cfg, l, &role, &principal, turn)?;
-                    sup.harnesses.push(Harness {
-                        turn,
-                        child,
-                        ended: None,
-                    });
-                }
-                None => eprintln!(
+            let Some(l) = cfg.launchers.for_role(&role) else {
+                launched.insert(turn);
+                eprintln!(
                     "bbp mod: no launcher for {role}; turn {} waits for its deadline",
                     turn.0
-                ),
-            }
+                );
+                continue;
+            };
+            // Without an agent slot the turn waits for a later poll, or its deadline.
+            let Some((slot, stdin)) = admit(cfg, Class::Agent)? else {
+                if waiting.insert(turn) {
+                    eprintln!("bbp mod: turn {} waits for an agent slot", turn.0);
+                }
+                continue;
+            };
+            launched.insert(turn);
+            let principal = d
+                .state
+                .assigned
+                .get(&role)
+                .cloned()
+                .ok_or_else(|| format!("{role} has no principal"))?;
+            let child = spawn(cfg, l, &role, &principal, turn, stdin)?;
+            sup.harnesses.push(Harness {
+                turn,
+                child,
+                ended: None,
+                _slot: slot,
+            });
         }
         std::thread::sleep(cfg.poll);
     }
@@ -774,7 +811,9 @@ pub fn require_evidence_marker(
     }
 }
 
-fn spawn_runner(cfg: &Config) -> Result<Child, String> {
+/// `stdout` is the validator slot when admission is configured: the runner
+/// then holds it until it exits.
+fn spawn_runner(cfg: &Config, stdout: Stdio) -> Result<Child, String> {
     let mut command = Proc::new(&cfg.bbp);
     command
         .arg("runner")
@@ -793,7 +832,7 @@ fn spawn_runner(cfg: &Config) -> Result<Child, String> {
         })
         .args(["--supervised", "yes"])
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(Stdio::inherit());
     #[cfg(unix)]
     {
@@ -809,6 +848,7 @@ fn spawn(
     role: &RoleId,
     principal: &PrincipalId,
     turn: TurnId,
+    stdin: Stdio,
 ) -> Result<Child, String> {
     let bbp = &cfg.bbp;
     let mcp = write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, turn)?;
@@ -838,7 +878,7 @@ fn spawn(
         .env("BBP_ROLE", role_name)
         .env("BBP_BIN", bbp)
         .env("BBP_MCP_CONFIG", &mcp)
-        .stdin(Stdio::null());
+        .stdin(stdin);
     // An evidence run pins the cache lifetime for the main agent and for
     // subagents: they default to different lifetimes, and the price file
     // prices cache writes at the 1-hour rate.

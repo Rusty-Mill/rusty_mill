@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- BBP configuration `slots` admits hosted work machine-wide: every moderator sharing the slot directory runs at most the configured agent harnesses and validator runners at once, and a slot is freed only when its process tree is gone.
 - `run --card <id> --board <url>` records each hosted run's assignment generation with its Millboard card before any host command, through `card_execution_link` or the compare-and-set `card_execution_recover`, and stops when the card carries a later generation.
 - Hosted commands carry an assignment fence: each `run` or `maintain` process takes over its assignment at the next generation, persisted first, and the BBP host refuses superseded generations and diverged holders.
 - Provider-neutral factory assignments and durable card execution links, with

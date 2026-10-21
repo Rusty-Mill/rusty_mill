@@ -34,6 +34,8 @@ CASES = (
          "tests_e2e::orch_binary_from_a_stale_state_copy_is_fenced_out_of_the_task"),
     Case("millboard-link", "orch-bbp", ("--lib",),
          "tests_e2e::orch_binary_records_each_generation_with_its_millboard_card"),
+    Case("slot-admission", "orch-bbp", ("--lib",),
+         "tests_e2e::orch_binary_admits_two_goals_through_one_agent_slot"),
     Case("rust-lld", "rusty_bbp_host", ("--test", "rust_lld_profile"),
          "confined_rust_lld_profile_passes_under_one_gib"),
     Case("maintenance", "rusty_orch", ("--lib",),

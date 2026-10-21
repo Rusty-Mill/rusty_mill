@@ -37,6 +37,19 @@ pub struct Config {
     pub assignments: BTreeMap<String, Assignment>,
     pub live_turns: u32,
     pub max_wall_secs: u64,
+    /// Machine-wide admission shared by every moderator naming the same
+    /// directory; without it each moderator launches as its turns allow.
+    #[rusty_serde(default)]
+    pub slots: Option<Slots>,
+}
+/// `bbp mod --slots`: how many harnesses (agents) and runners (validators)
+/// may run at once across every task using `dir`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Slots {
+    #[rusty_serde(with = "path_json")]
+    pub dir: PathBuf,
+    pub agents: u32,
+    pub validators: u32,
 }
 impl Config {
     /// Validate roster and independent-review policy before any host mutation.
@@ -47,6 +60,13 @@ impl Config {
             || self.max_wall_secs == 0
         {
             return Err("live_turns must fit the roster; max_wall_secs must be positive".into());
+        }
+        if self
+            .slots
+            .as_ref()
+            .is_some_and(|s| s.agents == 0 || s.validators == 0)
+        {
+            return Err("slots must admit at least one agent and one validator".into());
         }
         if self.assignments.len() != self.roster.len() {
             return Err("assign every roster role exactly once".into());
@@ -102,12 +122,16 @@ impl Config {
     /// Pin paths before a moderator detaches, so resume never depends on its cwd.
     pub fn absolute(mut self) -> Result<Self, String> {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let slots = self.slots.as_mut().map(|s| &mut s.dir);
         for p in [
             &mut self.dir,
             &mut self.repo,
             &mut self.work,
             &mut self.profiles,
-        ] {
+        ]
+        .into_iter()
+        .chain(slots)
+        {
             if p.is_relative() {
                 *p = cwd.join(&*p);
             }

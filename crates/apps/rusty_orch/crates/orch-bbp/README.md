@@ -27,6 +27,9 @@ The configuration contains:
 - `assignments`: roster role id to `{agent: POOL_MEMBER, builtin_tools: BOOL}`.
 - `live_turns`: positive concurrent turn cap within the roster size.
 - `max_wall_secs`: positive lifetime bound for each moderator invocation.
+- `slots` (optional): `{dir, agents, validators}`, machine-wide admission
+  passed to `bbp mod --slots`. Every moderator naming the same `dir`, across
+  goals, runs at most `agents` harnesses and `validators` runners at once.
 
 See the [two-role configuration](../../docs/examples/bbp.json) and BBP's
 [proving configuration](../../../rusty_bbp_host/docs/proving/agents.json).

@@ -94,6 +94,7 @@ pub(super) fn config(dir: &std::path::Path) -> Config {
         ]),
         live_turns: 1,
         max_wall_secs: 60,
+        slots: None,
     }
 }
 pub(super) fn task() -> (Task, Board) {
@@ -200,6 +201,30 @@ fn pools_are_dynamic_and_rosters_are_capabilities_not_named_roles() {
     c.validate().unwrap();
     c.live_turns = 4;
     assert!(c.validate().is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn slots_are_optional_must_admit_each_class_and_are_pinned_absolute() {
+    let dir = temp();
+    let mut c = config(&dir);
+    let text = rusty_serde::json::to_string(&c).unwrap();
+    let without: Config =
+        rusty_serde::json::from_str(&text.replace(",\"slots\":null", "")).unwrap();
+    assert_eq!(
+        without.slots, None,
+        "a manifest frozen before slots still loads"
+    );
+    c.slots = Some(crate::Slots {
+        dir: "slots".into(),
+        agents: 2,
+        validators: 0,
+    });
+    assert!(c.validate().unwrap_err().contains("slots"));
+    c.slots.as_mut().unwrap().validators = 1;
+    c.validate().unwrap();
+    let pinned = c.absolute().unwrap();
+    assert!(pinned.slots.unwrap().dir.is_absolute());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
