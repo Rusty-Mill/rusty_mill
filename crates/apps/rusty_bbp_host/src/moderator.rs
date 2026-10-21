@@ -342,15 +342,21 @@ impl Supervision {
     fn drain_harnesses(&mut self, grace: Duration) -> Result<(), String> {
         let deadline = Instant::now() + grace;
         loop {
-            let mut running = Vec::new();
-            for mut h in self.harnesses.drain(..) {
-                match h.child.try_wait() {
-                    Ok(Some(_)) => {}
-                    Ok(None) => running.push(h),
-                    Err(e) => return Err(format!("harness wait: {e}")),
+            // Exited harnesses leave the list; on a wait error every one left
+            // is still killed before the error is returned.
+            let mut failed = None;
+            self.harnesses.retain_mut(|h| match h.child.try_wait() {
+                Ok(Some(_)) => false,
+                Ok(None) => true,
+                Err(e) => {
+                    failed.get_or_insert(format!("harness wait: {e}"));
+                    true
                 }
+            });
+            if let Some(e) = failed {
+                self.kill_harnesses()?;
+                return Err(e);
             }
-            self.harnesses = running;
             if self.harnesses.is_empty() || Instant::now() >= deadline {
                 return self.kill_harnesses();
             }
