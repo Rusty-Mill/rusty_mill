@@ -44,8 +44,8 @@ Requires a recent stable Rust (edition 2024).
 # TUI/passthrough mode (default).
 cargo run
 
-# Run the test suite.
-cargo test
+# Run the test suite (the parser/grid tests live in rusty_term_core).
+cargo test -p rusty_term_core -p rusty_term
 ```
 
 `cargo run` spawns your `$SHELL` (Unix) / `%COMSPEC%` (Windows) as a child and

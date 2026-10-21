@@ -174,7 +174,7 @@ Rows 1-6 and 13-17 are core (headless). Rows 7-12 and 18 are front-end.
 
 ## 4. Top 5 recommended changes, in order
 
-Each change comes with the benchmark that proves it. All core changes run `cargo test -p rusty_term` plus the row 14 fidelity diff before merge.
+Each change comes with the benchmark that proves it. All core changes run `cargo test -p rusty_term_core -p rusty_term --all-features` (the core tests live in `rusty_term_core` since the split) plus the row 14 fidelity diff before merge.
 
 1. **Fidelity gate (#14), small first.** Record a corpus (vttest screens, vim, htop, tmux, wide/RTL) as `.vt` files plus expected grids from libghostty-vt. Add `rtbench dump` with attributes and clusters, and diff in CI against stored expectations, not against libghostty at runtime (sovereignty). Proof: 0 cell diffs on the corpus before and after each of the next changes.
 2. **Ring-buffer screen + recycled scrollback rows (#1 + #2).** Introduce a row accessor, swap `cells: Vec<Cell>` for rows addressed through an offset or index map, and reuse the evicted history row. Proof:
