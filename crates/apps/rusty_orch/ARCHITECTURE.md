@@ -112,4 +112,6 @@ A pool member with a `sandbox` runs confined: BBP launches its harness under
 `rusty_sandbox` with a fresh turn workspace and only the declared paths and
 variables, never the BBP directory, so it cannot read the master secret or
 act as the human. Its MCP calls reach the turn's server through a relay over
-named pipes to a broker outside the sandbox.
+named pipes to a broker outside the sandbox. With `checkout`, its workspace is a
+`rusty_worktree` worktree of the repository: tasks share one object store,
+read-only, and each harness writes only its own worktree.
