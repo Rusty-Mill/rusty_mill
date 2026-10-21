@@ -2,7 +2,7 @@
 name = "rusty_serve"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.76"
+rust-version = "1.79"
 license = "MIT"
 repository = "https://github.com/Rusty-Mill/rusty_mill"
 description = "A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server"
