@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/baileyrd/rusty_rdp?label=release)](https://github.com/baileyrd/rusty_rdp/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust: 1.70+](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](#building)
+[![Rust: 1.70+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](#building)
 
 A minimal, **dependency-free** implementation of the Remote Desktop Protocol
 (RDP) wire format in Rust.
@@ -266,7 +266,7 @@ cargo build --features platform   # opt-in platform::net::TcpStream adapter
 cargo build --features serve-example   # opt-in `serve` example (Sandbox confinement)
 ```
 
-The default build has no dependencies and keeps an MSRV of 1.70. The optional
+The default build has no dependencies and keeps an MSRV of 1.75 (`rusty_wire`'s). The optional
 `tls` feature pulls in `rustls` and `rusty_tls` (and their transitive
 crates), which raise the effective MSRV to whatever they require. The
 optional `platform` feature

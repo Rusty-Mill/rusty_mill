@@ -63,7 +63,7 @@ pub type TlsStream = rusty_tls::TlsStream<TcpStream>;
 /// its own platform-specific calls are unsafe, but this crate's `forbid(unsafe_code)`
 /// only has to hold for the code written here, and its public API is safe.
 fn os_random(buf: &mut [u8]) -> io::Result<()> {
-    getrandom::getrandom(buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    getrandom::getrandom(buf).map_err(io::Error::other)
 }
 
 /// Connect to an RDP server over TLS and drive the enhanced-security bring-up.
@@ -350,7 +350,7 @@ pub fn accept_tls(
     let tcp = pre.into_inner();
 
     let conn = ServerConnection::new(tls_config)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("TLS setup failed: {e}")))?;
+        .map_err(|e| io::Error::other(format!("TLS setup failed: {e}")))?;
     let tls = StreamOwned::new(conn, tcp);
 
     let mut transport = RdpTransport::new_enhanced(tls);
@@ -412,7 +412,7 @@ pub fn accept_tls_nla<F: Fn(&str, &str) -> Option<[u8; 16]>>(
     let tcp = pre.into_inner();
 
     let conn = ServerConnection::new(tls_config)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("TLS setup failed: {e}")))?;
+        .map_err(|e| io::Error::other(format!("TLS setup failed: {e}")))?;
     let mut tls = StreamOwned::new(conn, tcp);
 
     while tls.conn.is_handshaking() {
@@ -586,7 +586,7 @@ fn read_ts_request<S: Read>(stream: &mut S) -> io::Result<Vec<u8>> {
 fn server_public_key(tls: &TlsStream) -> io::Result<Vec<u8>> {
     let cert = tls
         .peer_certificate_der()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no server certificate presented"))?;
+        .ok_or_else(|| io::Error::other("no server certificate presented"))?;
     extract_spki(cert)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cannot parse certificate"))
 }

@@ -34,8 +34,8 @@ These override the generic guidance below where they differ. `CLAUDE.md` has the
 - **Comments and docs explain *why*, not what.** Where a choice had a real alternative, say what
   was rejected and what it would have cost.
 
-MSRV is **1.86**. `redis-store` and `postgres-store` need 1.88 because their dependencies do; an
-optional dependency does not raise the floor for everyone else.
+MSRV is **1.88**, the highest floor the resolved dependencies declare; the CI check
+`check_rust_versions.py` fails if `rust-version` is lower.
 
 ## Code style
 - Explicit over implicit; type hints/annotations always.

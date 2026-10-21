@@ -169,10 +169,10 @@ fn measure_one(options: &Options, product: &Product, entry_point: &Path, home: &
         Some(_) => measure::run(product, &binary, home, options.runs, options.settle),
         None => Err(format!("no binary at {}", binary.display())),
     };
-    if options.prebuilt.is_none() {
-        if let Err(error) = std::fs::remove_dir_all(&target_dir) {
-            eprintln!("rusty_baseline: leaving {}: {error}", target_dir.display());
-        }
+    if options.prebuilt.is_none()
+        && let Err(error) = std::fs::remove_dir_all(&target_dir)
+    {
+        eprintln!("rusty_baseline: leaving {}: {error}", target_dir.display());
     }
     Row::Measured {
         bin: product.bin.clone(),

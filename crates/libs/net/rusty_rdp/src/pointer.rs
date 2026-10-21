@@ -112,7 +112,7 @@ impl ColorPointer {
         let h = self.height as usize;
         // Scanlines are padded to a 2-byte boundary.
         let xor_stride = (w * bytes_pp).next_multiple_of_2();
-        let and_stride = w.div_ceil_(16) * 2;
+        let and_stride = w.div_ceil(16) * 2;
         if self.xor_mask.len() < xor_stride * h || self.and_mask.len() < and_stride * h {
             return Err(Error::UnexpectedEof {
                 needed: xor_stride * h + and_stride * h,
@@ -252,16 +252,6 @@ trait NextMultipleOf2 {
 impl NextMultipleOf2 for usize {
     fn next_multiple_of_2(self) -> usize {
         (self + 1) & !1
-    }
-}
-
-/// Local `div_ceil` to keep the crate's MSRV below 1.73.
-trait DivCeil {
-    fn div_ceil_(self, d: usize) -> usize;
-}
-impl DivCeil for usize {
-    fn div_ceil_(self, d: usize) -> usize {
-        (self + d - 1) / d
     }
 }
 
