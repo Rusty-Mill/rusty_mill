@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_msrv_compile import STRIP_CHECK_CFG, check_command, msrv_groups, parse_floor, rustc_for
+from check_msrv_compile import STRIP_LINT_FLAGS, check_command, msrv_groups, parse_floor, rustc_for
 
 
 def metadata(members: dict[str, str | None], outsiders: dict[str, str | None] | None = None) -> dict:
@@ -64,21 +64,17 @@ class CheckCommandTests(unittest.TestCase):
 
 
 class RustcForTests(unittest.TestCase):
-    def test_a_rustc_with_stable_check_cfg_is_used_directly(self) -> None:
+    def test_every_floor_goes_through_an_executable_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(rustc_for((1, 80), "/x/rustc", Path(tmp)), {"RUSTC": "/x/rustc"})
-            self.assertEqual(rustc_for((1, 88), "/x/rustc", Path(tmp)), {"RUSTC": "/x/rustc"})
-
-    def test_an_older_rustc_goes_through_an_executable_wrapper(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            env = rustc_for((1, 75), "/x/rustc", Path(tmp))
-            self.assertEqual(env["RUSTC"], "/x/rustc")
-            wrapper = Path(env["RUSTC_WRAPPER"])
-            self.assertEqual(wrapper.read_text(), STRIP_CHECK_CFG)
-            self.assertTrue(wrapper.stat().st_mode & stat.S_IXUSR)
+            for floor in [(1, 75), (1, 88)]:
+                env = rustc_for(floor, "/x/rustc", Path(tmp))
+                self.assertEqual(env["RUSTC"], "/x/rustc")
+                wrapper = Path(env["RUSTC_WRAPPER"])
+                self.assertEqual(wrapper.read_text(), STRIP_LINT_FLAGS)
+                self.assertTrue(wrapper.stat().st_mode & stat.S_IXUSR)
 
 
-class StripCheckCfgWrapperTests(unittest.TestCase):
+class StripLintFlagsWrapperTests(unittest.TestCase):
     """Run the real wrapper against a fake rustc that prints its arguments, one per line."""
 
     def run_wrapper(self, *args: str) -> list[str]:
@@ -87,7 +83,7 @@ class StripCheckCfgWrapperTests(unittest.TestCase):
             fake.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n')
             fake.chmod(0o755)
             wrapper = Path(tmp, "wrap.sh")
-            wrapper.write_text(STRIP_CHECK_CFG)
+            wrapper.write_text(STRIP_LINT_FLAGS)
             wrapper.chmod(0o755)
             out = subprocess.run([str(wrapper), str(fake), *args], capture_output=True, text=True, check=True, env=os.environ)
         return out.stdout.splitlines()
@@ -103,6 +99,11 @@ class StripCheckCfgWrapperTests(unittest.TestCase):
     def test_arguments_with_spaces_and_a_trailing_check_cfg_survive(self) -> None:
         got = self.run_wrapper("-C", "link-arg=-Wl,--gc sections", "--check-cfg", "cfg(a)")
         self.assertEqual(got, ["-C", "link-arg=-Wl,--gc sections"])
+
+    def test_lint_level_flags_from_a_lints_table_are_dropped(self) -> None:
+        # What cargo passes for pin-project-lite's `[lints.rust]`; rustc before 1.74 rejects `deprecated_safe`.
+        got = self.run_wrapper("--warn=deprecated_safe", "--allow=unknown_lints", "--deny=x", "--forbid=unsafe_code", "--force-warn=y", "--cap-lints", "allow", "-W", "z")
+        self.assertEqual(got, ["--cap-lints", "allow", "-W", "z"])
 
 
 if __name__ == "__main__":

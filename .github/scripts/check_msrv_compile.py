@@ -21,11 +21,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Cargo passes `--check-cfg`, which rustc only accepts without `-Z unstable-options`
-# from 1.80. Below that, a wrapper drops the flag (it only silences lints) before
-# running the real rustc.
-STABLE_CHECK_CFG = (1, 80)
-STRIP_CHECK_CFG = """#!/bin/sh
+# Current cargo passes flags an older rustc rejects, though they only affect lints:
+# `--check-cfg` (accepted without `-Z unstable-options` from 1.80) and each dependency's
+# `[lints]` table as `--warn=NAME` etc. (a lint newer than the rustc is error E0602; a
+# cargo of the floor's vintage would not pass these). A wrapper drops them before
+# running the real rustc. Lints are enforced at the pinned toolchain by the other jobs.
+STRIP_LINT_FLAGS = """#!/bin/sh
 real="$1"; shift
 n=$#; skip=0
 while [ "$n" -gt 0 ]; do
@@ -34,6 +35,7 @@ while [ "$n" -gt 0 ]; do
   case "$a" in
     --check-cfg) skip=1; continue ;;
     --check-cfg=*) continue ;;
+    --warn=*|--allow=*|--deny=*|--forbid=*|--force-warn=*) continue ;;
   esac
   set -- "$@" "$a"
 done
@@ -100,12 +102,10 @@ def check_floor(floor: tuple[int, int], names: list[str], target_base: str) -> b
 
 
 def rustc_for(floor: tuple[int, int], rustc: str, work_dir: Path) -> dict[str, str]:
-    """Environment that makes cargo use `rustc`; below 1.80 it goes through the flag-stripping wrapper."""
-    if floor >= STABLE_CHECK_CFG:
-        return {"RUSTC": rustc}
+    """Environment that makes cargo use `rustc` through the lint-flag-stripping wrapper."""
     work_dir.mkdir(parents=True, exist_ok=True)
     wrapper = work_dir / f"rustc-{floor[0]}.{floor[1]}.sh"
-    wrapper.write_text(STRIP_CHECK_CFG)
+    wrapper.write_text(STRIP_LINT_FLAGS)
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
     # cargo runs `$RUSTC_WRAPPER rustc ...`; the wrapper takes the real path as its first argument.
     return {"RUSTC": rustc, "RUSTC_WRAPPER": str(wrapper.resolve())}
