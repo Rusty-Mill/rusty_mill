@@ -165,9 +165,21 @@ files too), `required-gate` passes, and the result is a merge commit on
 Rollback: turn off "Require merge queue" in the ruleset (queued entries are
 dropped, nothing merges), or set the ruleset to Disabled temporarily.
 
-Known limits, revisit on evidence: the push-to-`main` run after each queue
-merge repeats work the queue already validated (trim only if p90 CI time or
-queue length regresses); batching above 1 only once Windows flakes are gone
+Runner budget (2026-10-21, the trim's trigger was met: one deep-crate bump
+held the shared runner pool for about an hour, and queue entries waited behind
+PR and post-merge runs):
+- No `push` run on `main`. The queue run tested the exact tree that lands; the
+  sweep is daily (was weekly) so `main` still gets a full check and its caches,
+  which PR runs restore, stay fresh.
+- A `pull_request` run is Linux-only. The queue run adds Windows and macOS, so
+  a Windows-only failure now ejects the entry instead of failing the PR; run
+  the workflow manually on the branch first when a change is Windows-sensitive.
+- The queue skips its Linux jobs when a green `pull_request` run of the same PR
+  head recorded the identical tree and first parent (the `tested-tree`
+  artifact; `ci_plan.py linux_already_tested`). With entries queued ahead the
+  tree differs and Linux runs. Any lookup failure runs Linux.
+
+Known limits, revisit on evidence: batching above 1 only once Windows flakes are gone
 and queue wait is the bottleneck; availability depends on the repository being
 public in an organisation (the option must appear in the ruleset).
 
@@ -202,7 +214,7 @@ Verified against `main` at `a402fff`.
 
 1. **Hygiene (all S):** 1, 2, 3, 4, 7 — done together in the PR that
    introduced `required-gate`, `permissions:`, `rust-toolchain.toml`,
-   `CODEOWNERS` and the weekly `schedule:` sweep.
+   `CODEOWNERS` and the `schedule:` sweep (weekly, daily since 2026-10-21).
 2. **Supply chain:** 6 (done: every action SHA-pinned, Dependabot
    `github-actions` group, test enforces it) and 5 (done warn-only: `deny.toml`
    plus a non-blocking `cargo-deny` job). Drop `continue-on-error` once the
