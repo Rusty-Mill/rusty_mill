@@ -552,10 +552,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", job)
         # Only the platform gate: no scope flag may plan it out.
         self.assertEqual(re.findall(r"(?m)^    if: (.+)$", job), ["needs.plan.outputs.linux == 'true'"])
-        self.assertIn("cargo build --locked -p rusty_orch -p rusty_bbp_host", job)
+        self.assertIn("cargo build --locked -p rusty_orch -p rusty_bbp_host -p rusty_mill_board", job)
         self.assertIn("orch_bbp_acceptance.py --output acceptance-results", job)
         self.assertIn('export BBP_TEST_BIN="$PWD/target/debug/bbp"', job)
         self.assertIn('export ORCH_TEST_BIN="$PWD/target/debug/rusty_orch"', job)
+        self.assertIn('export MILLBOARD_TEST_BIN="$PWD/target/debug/rusty_mill_board"', job)
         self.assertEqual(job.count("if: always()"), 2)
         self.assertIn("path: acceptance-results/", job)
         gate = self.workflow.split("  required-gate:\n", 1)[1]

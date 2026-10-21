@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 
+use crate::millboard::{BoardAccess, Token};
+
 /// Printed for `--help` and on a usage error.
 pub const USAGE: &str = "\
 usage: rusty_orch run <goal.json> [options]
@@ -23,6 +25,10 @@ options:
   --state <dir>           save the plan, board, and ledger there and resume
                           from it on the next run      [env RUSTY_ORCH_STATE]
   --bbp <config.json>     enable BBP task hosting (requires --state) [env ORCH_BBP]
+  --card <id>             host the goal for this Millboard card (requires BBP hosting)
+  --board <url>           Millboard's http:// address for --card [env RUSTY_ORCH_BOARD]
+                          credential and identity: env RUSTY_ORCH_BOARD_TOKEN,
+                          RUSTY_ORCH_BOARD_ACTOR, RUSTY_ORCH_BOARD_ROLE
   --json                  print the report as one JSON object
   -h, --help              this text
 
@@ -43,6 +49,15 @@ pub struct Args {
     pub json: bool,
     /// Where to persist and resume from; `None` keeps the run in memory.
     pub state: Option<PathBuf>,
+    /// The Millboard card the hosted goal works for.
+    pub card: Option<CardArgs>,
+}
+
+/// `--card` and how to reach its board.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardArgs {
+    pub card: String,
+    pub board: BoardAccess,
 }
 
 /// The two ways parsing can end without an [`Args`].
@@ -79,6 +94,8 @@ pub fn parse(
     let mut json = false;
     let mut bbp = env("ORCH_BBP").map(PathBuf::from);
     let mut state = env("RUSTY_ORCH_STATE").map(PathBuf::from);
+    let mut card = None;
+    let mut board = env("RUSTY_ORCH_BOARD");
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--ollama-model" => ollama_model = Some(value(&arg, argv.next())?),
@@ -89,13 +106,29 @@ pub fn parse(
             "--json" => json = true,
             "--bbp" => bbp = Some(PathBuf::from(value(&arg, argv.next())?)),
             "--state" => state = Some(PathBuf::from(value(&arg, argv.next())?)),
+            "--card" => card = Some(value(&arg, argv.next())?),
+            "--board" => board = Some(value(&arg, argv.next())?),
             "-h" | "--help" => return Err(ArgsError::Help),
             flag if flag.starts_with('-') => return Err(usage(format!("unknown option {flag:?}"))),
             _ if goal.is_none() => goal = Some(PathBuf::from(arg)),
             _ => return Err(usage(format!("unexpected argument {arg:?}"))),
         }
     }
+    let card = match (card, board) {
+        (None, _) => None,
+        (Some(_), None) => return Err(usage("--card needs --board".to_owned())),
+        (Some(card), Some(url)) => Some(CardArgs {
+            card,
+            board: BoardAccess {
+                url,
+                token: env("RUSTY_ORCH_BOARD_TOKEN").map(Token),
+                actor: env("RUSTY_ORCH_BOARD_ACTOR"),
+                role: env("RUSTY_ORCH_BOARD_ROLE"),
+            },
+        }),
+    };
     Ok(Args {
+        card,
         bbp,
         goal: goal.ok_or_else(|| usage("missing <goal.json>".to_owned()))?,
         ollama_model: ollama_model.unwrap_or_else(|| "llama3.2".to_owned()),
@@ -139,6 +172,38 @@ mod tests {
         assert_eq!(a.claude_model, None);
         assert!(!a.interactive && !a.json);
         assert_eq!(a.state, None);
+        assert_eq!(a.card, None);
+    }
+
+    #[test]
+    fn a_card_needs_a_board_and_takes_its_credential_from_the_environment() {
+        let env = |k: &str| match k {
+            "RUSTY_ORCH_BOARD" => Some("http://env:8787".to_owned()),
+            "RUSTY_ORCH_BOARD_TOKEN" => Some("secret".to_owned()),
+            "RUSTY_ORCH_BOARD_ROLE" => Some("builder".to_owned()),
+            _ => None,
+        };
+        let e = parse(argv("run --card c g.json"), no_env, PathBuf::from("/w"));
+        assert_eq!(e, Err(ArgsError::Usage("--card needs --board".to_owned())));
+        let a = parse(argv("run --card c g.json"), env, PathBuf::from("/w")).expect("ok");
+        let expected = CardArgs {
+            card: "c".into(),
+            board: BoardAccess {
+                url: "http://env:8787".into(),
+                token: Some(Token("secret".into())),
+                actor: None,
+                role: Some("builder".into()),
+            },
+        };
+        assert_eq!(a.card, Some(expected.clone()));
+        let a = parse(
+            argv("run --board http://flag --card c g.json"),
+            env,
+            PathBuf::from("/w"),
+        )
+        .expect("ok");
+        assert_eq!(a.card.map(|c| c.board.url), Some("http://flag".into()));
+        assert!(!format!("{expected:?}").contains("secret"));
     }
 
     #[test]

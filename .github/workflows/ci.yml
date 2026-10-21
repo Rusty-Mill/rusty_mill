@@ -1883,7 +1883,7 @@ jobs:
           shared-key: orch-bbp-acceptance
       - name: Build real host and Orch binaries and acceptance tests
         run: |
-          cargo build --locked -p rusty_orch -p rusty_bbp_host
+          cargo build --locked -p rusty_orch -p rusty_bbp_host -p rusty_mill_board
           cargo test --locked -p orch-bbp --lib --no-run
           cargo test --locked -p rusty_orch --lib --no-run
           cargo test --locked -p rusty_bbp_host --test moderator_e2e --test rust_lld_profile --no-run
@@ -1893,6 +1893,7 @@ jobs:
           set -euo pipefail
           export BBP_TEST_BIN="$PWD/target/debug/bbp"
           export ORCH_TEST_BIN="$PWD/target/debug/rusty_orch"
+          export MILLBOARD_TEST_BIN="$PWD/target/debug/rusty_mill_board"
           python3 .github/scripts/orch_bbp_acceptance.py --output acceptance-results
       - name: Publish each mode's result
         if: always()
