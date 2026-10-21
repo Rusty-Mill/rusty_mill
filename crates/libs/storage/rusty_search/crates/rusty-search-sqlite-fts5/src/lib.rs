@@ -208,8 +208,7 @@ impl SearchBackend for SqliteFts5Backend {
             .map(|f| quote_ident(f))
             .collect::<Vec<_>>()
             .join(", ");
-        let content_placeholders: String = std::iter::repeat("?")
-            .take(handle.field_order.len())
+        let content_placeholders: String = std::iter::repeat_n("?", handle.field_order.len())
             .collect::<Vec<_>>()
             .join(", ");
         let insert_content_sql = format!(
@@ -234,8 +233,7 @@ impl SearchBackend for SqliteFts5Backend {
             .map(|f| quote_ident(f))
             .collect::<Vec<_>>()
             .join(", ");
-        let fts_placeholders: String = std::iter::repeat("?")
-            .take(handle.fts_field_order.len())
+        let fts_placeholders: String = std::iter::repeat_n("?", handle.fts_field_order.len())
             .collect::<Vec<_>>()
             .join(", ");
         let insert_fts_sql = format!(

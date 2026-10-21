@@ -2,7 +2,7 @@
 name = "weather-agent"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 publish = false
 description = "End-to-end rusty-adk example: tools, an LlmAgent, a routing graph, and human-in-the-loop"

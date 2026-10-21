@@ -2,7 +2,7 @@
 name = "rusty_fedora"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "Async client for rusty_fedora_agent's local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write."
 repository = "https://github.com/baileyrd/rusty_fedora"

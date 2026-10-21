@@ -225,7 +225,7 @@ pub fn write_numeric_string(w: &mut Writer, digits: &[u8], min: usize) -> Result
 pub fn read_numeric_string(r: &mut Reader<'_>, min: usize) -> Result<()> {
     let mlength = read_length(r)?;
     let chars = mlength + min;
-    Ok(r.skip((chars + 1) / 2)?)
+    Ok(r.skip(chars.div_ceil(2))?)
 }
 
 #[cfg(test)]

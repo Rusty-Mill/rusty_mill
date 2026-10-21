@@ -2,7 +2,7 @@
 name = "rusty_opnsense"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups."
 repository = "https://github.com/baileyrd/rusty_opnsense"

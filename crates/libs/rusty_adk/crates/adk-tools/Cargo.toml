@@ -2,7 +2,7 @@
 name = "adk-tools"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Tool abstraction for the Rust ADK: Tool trait, FunctionTool, ToolContext, toolsets"
