@@ -232,26 +232,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
         }
     }
 
-    /// Whether `e` from a shutdown is only the peer having hung up first: it
-    /// reached the end of its input or announced GOAWAY, and the error says
-    /// it is gone. Everything had been flushed by then.
-    fn peer_closed_first(&self, e: &std::io::Error) -> bool {
-        peer_gone(e) && (self.eof || lock(&self.shared).conn.goaway_received().is_some())
+    /// Whether everything read has been applied and nothing is half received:
+    /// no frame is cut short, and no header block is waiting for its
+    /// CONTINUATION. (Open calls are counted apart: such a block opens none.)
+    fn input_complete(&self) -> bool {
+        self.rpos == self.rbuf.len() && !lock(&self.shared).conn.header_block_pending()
     }
 
-    /// Whether a failed read is only the peer resetting the connection after
-    /// it said goodbye: it announced GOAWAY, every byte read has been applied
-    /// (no frame is cut short) and no call is still open. Any other error, an
-    /// earlier failure, or a reset without a goodbye still fails the
-    /// connection. Output the peer never got is caught later: the writes fail
-    /// too, and a failed write loses nothing only if every frame carrying
-    /// application data had been flushed (`only_housekeeping_was_lost`).
-    fn reset_after_goodbye(&self, e: &std::io::Error) -> bool {
-        if !peer_gone(e) || self.rpos != self.rbuf.len() {
-            return false;
-        }
-        let sh = lock(&self.shared);
-        sh.conn.goaway_received().is_some() && sh.active == 0
+    /// Whether `e` from a write, flush or shutdown is only the peer having hung
+    /// up first: it reached the end of its input or announced GOAWAY, the error
+    /// says it is gone, and its input was whole. A peer that left in the middle
+    /// of a frame or header block did not say goodbye.
+    fn peer_closed_first(&self, e: &std::io::Error) -> bool {
+        peer_gone(e)
+            && (self.eof || lock(&self.shared).conn.goaway_received().is_some())
+            && self.input_complete()
     }
 
     /// Whether a failed write or flush lost nothing the peer needed: it is the
@@ -263,6 +258,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
     fn only_housekeeping_was_lost(&self, e: &Error) -> bool {
         let Error::Io(io) = e else { return false };
         self.peer_closed_first(io) && self.flushed >= lock(&self.shared).app_end
+    }
+
+    /// Whether a failed read is only the peer resetting the connection after
+    /// it said goodbye, so it can end the input like EOF. The same terminal
+    /// state `decide` needs for a clean end: the peer announced GOAWAY, its
+    /// input was whole, and no call is open; and no application data of ours
+    /// is still undelivered (`flushed >= app_end`), since a generic transport
+    /// does not promise that its writes fail too. Any other error, an earlier
+    /// failure, or a reset without a goodbye still fails the connection.
+    fn reset_after_goodbye(&self, e: &std::io::Error) -> bool {
+        if !peer_gone(e) || !self.input_complete() {
+            return false;
+        }
+        let sh = lock(&self.shared);
+        sh.conn.goaway_received().is_some() && sh.active == 0 && self.flushed >= sh.app_end
     }
 
     fn fail(&mut self, e: Error) {
