@@ -109,8 +109,18 @@ independently abandonable:
 | 3c-i | Ephemeral key exchange, and the TLS `SignatureScheme` namespace — including RSASSA-PSS, which 2b-i refused | **landed** |
 | 3c-ii | The client state machine — flight ordering, HelloRetryRequest, driving it all | **landed** |
 | 4a | The version boundary — alerts, and the RFC 8446 §4.1.3 downgrade sentinel | **landed** |
-| 4b | TLS 1.2 itself — **declined**; `rusty_tls#41` closed not planned, 2026-08-05 | not built |
+| 4b | TLS 1.2 itself — declined 2026-08-05 (`rusty_tls#41`), then approved by the owner 2026-10-08 (decision D1) and built as 4b-i to 4b-vi | **landed** |
 | 5 | Server side — the handshake, and the first thing here that signs | **landed** |
+| 7–14 | BoGo coverage, resumption, client authentication, ALPN, SNI certificate selection, exporters, handshake reporting | **landed** |
+
+**Status note (2026-10-21).** The table above is current; some prose below is
+the record as written at the time and is not. Stage 4b was reopened and built:
+`docs/research/TLS12-DESIGN.md` (repository root) records the decision, stages
+4b-i to 4b-vi and the later stages 7 to 14. So the "Why 4b is declined"
+paragraphs under stage 4 are history, and of stage 5's "does not do" list only
+0-RTT still holds (ADR-0003): client certificates, resumption with tickets,
+TLS 1.2 and HelloRetryRequest generation now exist. None of this touches §3:
+the engine is still never the default.
 
 Stage 2 is split because the original single row was two units of work with
 different risk profiles. Bundling them would have meant landing a validator
