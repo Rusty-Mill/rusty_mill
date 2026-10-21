@@ -293,20 +293,22 @@ fn proposed_change_is_revision_bound_and_detects_requirement_edits() {
         first_json["requirements"][0]["id"].as_str(),
         Some("durable")
     );
-    let second = invoke();
-    assert!(
-        second.status.success(),
-        "repeated impact inspection failed ({}): {}",
-        second.status,
-        String::from_utf8_lossy(&second.stderr)
-    );
-    assert_eq!(
-        first.stdout,
-        second.stdout,
-        "cargo metadata diagnostics\nfirst: {}\nsecond: {}",
-        String::from_utf8_lossy(&first.stderr),
-        String::from_utf8_lossy(&second.stderr)
-    );
+    for attempt in 2..=16 {
+        let repeated = invoke();
+        assert!(
+            repeated.status.success(),
+            "impact inspection {attempt} failed ({}): {}",
+            repeated.status,
+            String::from_utf8_lossy(&repeated.stderr)
+        );
+        assert_eq!(
+            first.stdout,
+            repeated.stdout,
+            "cargo metadata diagnostics at attempt {attempt}\nfirst: {}\nrepeated: {}",
+            String::from_utf8_lossy(&first.stderr),
+            String::from_utf8_lossy(&repeated.stderr)
+        );
+    }
     inputs.write(
         "previous.json",
         std::str::from_utf8(&first.stdout).expect("UTF8"),
