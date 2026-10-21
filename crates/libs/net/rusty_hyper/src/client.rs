@@ -3,11 +3,16 @@
 use std::time::Duration;
 
 use rusty_h2::client::builder::Builder;
-use rusty_h2::driver::ClientHandle;
-use rusty_tls::TrustPolicy;
+use rusty_h2::driver::{self, ClientHandle};
+use rusty_http::Url;
+use rusty_tls::{AsyncTlsStream, TrustPolicy};
+use rusty_tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, TcpStream};
 use rusty_tokio::task::{AbortHandle, JoinHandle};
+use rusty_tokio::time::{sleep, timeout};
 
 use crate::Error;
+
+type Driver = JoinHandle<Result<(), Error>>;
 
 /// A client certificate and its private key, DER-encoded, leaf first.
 pub struct ClientIdentity {
@@ -52,12 +57,20 @@ impl Default for ConnectOptions {
     }
 }
 
-/// Aborts its task when dropped.
-struct AbortOnDrop(AbortHandle);
+/// Aborts its task when dropped, unless disarmed.
+struct AbortOnDrop(Option<AbortHandle>);
+
+impl AbortOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
     }
 }
 
@@ -66,7 +79,7 @@ impl Drop for AbortOnDrop {
 /// connection winds down once every [`ClientHandle`] is dropped too.
 pub struct Connection {
     client: ClientHandle,
-    closed: JoinHandle<Result<(), Error>>,
+    closed: Driver,
     _keepalive: Option<AbortOnDrop>,
 }
 
@@ -78,19 +91,111 @@ impl Connection {
 
     /// Waits for the connection to end and says why: `Ok` for a clean wind-down.
     pub async fn closed(&mut self) -> Result<(), Error> {
-        todo!()
+        finished(&mut self.closed).await
     }
 
     /// Winds the connection down: stops the keepalive, drops this handle and
     /// waits for the calls in flight to finish.
     pub async fn close(self) -> Result<(), Error> {
-        todo!()
+        let Connection {
+            client,
+            mut closed,
+            _keepalive,
+        } = self;
+        drop(_keepalive);
+        drop(client);
+        finished(&mut closed).await
     }
 }
 
+async fn finished(driver: &mut Driver) -> Result<(), Error> {
+    driver.await.unwrap_or(Err(Error::Aborted))
+}
+
 /// Connects to `url` (`http://` is plain h2c with prior knowledge; `https://`
-/// is TLS with ALPN `h2`) and spawns the connection's driver.
+/// is TLS with ALPN `h2`) and spawns the connection's driver. It returns once
+/// a PING has made the round trip, which shows the peer speaks HTTP/2, all
+/// within `connect_timeout`.
 pub async fn connect(url: &str, options: ConnectOptions) -> Result<Connection, Error> {
-    let _ = (url, options);
-    todo!()
+    let url = Url::parse(url).map_err(|e| match e {
+        rusty_http::Error::UnsupportedScheme(s) => Error::UnsupportedScheme(s),
+        _ => Error::InvalidUrl(url.to_string()),
+    })?;
+    let ConnectOptions {
+        trust,
+        identity,
+        connect_timeout,
+        keepalive,
+        h2,
+    } = options;
+    let (client, closed) = timeout(connect_timeout, establish(&url, trust, identity, h2))
+        .await
+        .map_err(|_| Error::Timeout("connect"))??;
+    let guard = keepalive.map(|ka| spawn_keepalive(client.clone(), ka, closed.abort_handle()));
+    Ok(Connection {
+        client,
+        closed,
+        _keepalive: guard,
+    })
+}
+
+/// TCP, then (for `https`) TLS with ALPN `h2`, then the HTTP/2 driver.
+async fn establish(
+    url: &Url,
+    trust: TrustPolicy,
+    identity: Option<ClientIdentity>,
+    h2: Builder,
+) -> Result<(ClientHandle, Driver), Error> {
+    let tcp = TcpStream::connect((url.host.as_str(), url.port)).await?;
+    tcp.set_nodelay(true)?;
+    if url.scheme != "https" {
+        return start(tcp, h2).await;
+    }
+    let alpn = vec![b"h2".to_vec()];
+    let mut tls = match identity {
+        Some(id) => AsyncTlsStream::new_with_client_identity_and_alpn(
+            tcp,
+            &url.host,
+            &trust,
+            id.cert_chain_der,
+            id.key_der,
+            alpn,
+        )?,
+        None => AsyncTlsStream::new_with_alpn(tcp, &url.host, &trust, alpn)?,
+    };
+    // A flush drives the handshake to completion.
+    tls.flush().await?;
+    if tls.negotiated_alpn_protocol() != Some(&b"h2"[..]) {
+        return Err(Error::AlpnNotH2);
+    }
+    start(tls, h2).await
+}
+
+/// Spawns the driver and waits for a PING round trip: only an HTTP/2 peer
+/// answers it.
+async fn start<T>(io: T, h2: Builder) -> Result<(ClientHandle, Driver), Error>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (client, connection) = driver::client(io, h2);
+    let task = rusty_tokio::spawn(async move { connection.await.map_err(Error::from) });
+    // Until the PING is answered the driver dies with this scope.
+    let mut guard = AbortOnDrop(Some(task.abort_handle()));
+    client.ping().await?;
+    guard.disarm();
+    Ok((client, task))
+}
+
+/// Pings every `interval`; a ping unanswered for `timeout` aborts the driver.
+fn spawn_keepalive(client: ClientHandle, ka: Keepalive, driver: AbortHandle) -> AbortOnDrop {
+    let task = rusty_tokio::spawn(async move {
+        loop {
+            sleep(ka.interval).await;
+            match timeout(ka.timeout, client.ping()).await {
+                Ok(Ok(())) => {}
+                _ => return driver.abort(),
+            }
+        }
+    });
+    AbortOnDrop(Some(task.abort_handle()))
 }

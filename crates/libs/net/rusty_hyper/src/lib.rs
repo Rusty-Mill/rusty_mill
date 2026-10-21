@@ -15,11 +15,11 @@ pub use client::{connect, ClientIdentity, ConnectOptions, Connection, Keepalive}
 pub use error::Error;
 pub use server::{serve, ServeOptions, Server};
 
+/// Why an HTTP/2 call or connection failed.
+pub use rusty_h2::driver::Error as H2Error;
 /// The HTTP/2 types a handler or caller works with.
 pub use rusty_h2::driver::{
     Body, ClientHandle, Request, Respond, Response, ResponseFuture, SendStream,
 };
-/// Why an HTTP/2 call or connection failed.
-pub use rusty_h2::driver::Error as H2Error;
 /// A header field, as `rusty_h2` carries it.
 pub use rusty_h2::hpack::HeaderField;

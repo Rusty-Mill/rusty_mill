@@ -1,4 +1,5 @@
 //! Timeouts, keepalive, the connection cap and graceful shutdown.
+#![allow(clippy::unwrap_used)]
 
 mod common;
 
@@ -8,10 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
-use rusty_hyper::{
-    connect, serve, ConnectOptions, Error, Keepalive, Request, Respond, ServeOptions,
-};
-use rusty_tokio::io::{AsyncReadExt, TcpStream};
+use rusty_hyper::{connect, ConnectOptions, Error, Keepalive, Request, Respond, ServeOptions};
+use rusty_tokio::io::TcpStream;
 use rusty_tokio::sync::oneshot;
 use rusty_tokio::time::timeout;
 
@@ -79,7 +78,7 @@ async fn a_peer_that_never_speaks_http2_times_out_connecting() {
 #[rusty_tokio::test]
 async fn a_client_that_never_finishes_the_handshake_is_dropped_by_the_server() {
     let pki = pki();
-    let server = serve(
+    let server = start(
         listener(),
         Some(pki.acceptor(&[b"h2"])),
         ServeOptions {
@@ -89,7 +88,7 @@ async fn a_client_that_never_finishes_the_handshake_is_dropped_by_the_server() {
         echo,
     );
     // Connects and says nothing.
-    let mut idle = TcpStream::connect(server.local_addr()).await.unwrap();
+    let idle = TcpStream::connect(server.local_addr()).await.unwrap();
     let mut buf = [0u8; 16];
     let n = timeout(FIVE, idle.read(&mut buf))
         .await
@@ -102,7 +101,30 @@ async fn a_client_that_never_finishes_the_handshake_is_dropped_by_the_server() {
         ..ConnectOptions::default()
     };
     let conn = connect(&url(&server, "https"), o).await.unwrap();
-    call(conn.client(), "https", &[], b"ok".to_vec()).await.unwrap();
+    call(conn.client(), "https", &[], b"ok".to_vec())
+        .await
+        .unwrap();
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn a_plain_client_that_stays_silent_is_dropped_by_the_server() {
+    let server = start(
+        listener(),
+        None,
+        ServeOptions {
+            handshake_timeout: Duration::from_millis(200),
+            ..ServeOptions::default()
+        },
+        echo,
+    );
+    let idle = TcpStream::connect(server.local_addr()).await.unwrap();
+    let mut buf = [0u8; 16];
+    let n = timeout(FIVE, idle.read(&mut buf))
+        .await
+        .expect("the server must give up on a silent client")
+        .unwrap_or(0);
+    assert_eq!(n, 0, "the server closes the connection");
     server.shutdown().await;
 }
 
@@ -122,12 +144,14 @@ async fn keepalive_closes_a_connection_whose_pings_go_unanswered() {
         .await
         .expect("keepalive must end the connection");
     assert!(ended.is_err());
-    assert!(call(conn.client(), "http", &[], b"x".to_vec()).await.is_err());
+    assert!(call(conn.client(), "http", &[], b"x".to_vec())
+        .await
+        .is_err());
 }
 
 #[rusty_tokio::test]
 async fn keepalive_leaves_a_healthy_connection_alone() {
-    let server = serve(listener(), None, ServeOptions::default(), echo);
+    let server = start(listener(), None, ServeOptions::default(), echo);
     let o = ConnectOptions {
         keepalive: Some(Keepalive {
             interval: Duration::from_millis(30),
@@ -147,7 +171,7 @@ async fn keepalive_leaves_a_healthy_connection_alone() {
 
 #[rusty_tokio::test]
 async fn the_connection_cap_refuses_the_next_and_frees_a_slot_when_one_closes() {
-    let server = serve(
+    let server = start(
         listener(),
         None,
         ServeOptions {
@@ -158,7 +182,9 @@ async fn the_connection_cap_refuses_the_next_and_frees_a_slot_when_one_closes() 
     );
     let u = url(&server, "http");
     let first = connect(&u, ConnectOptions::default()).await.unwrap();
-    call(first.client(), "http", &[], b"1".to_vec()).await.unwrap();
+    call(first.client(), "http", &[], b"1".to_vec())
+        .await
+        .unwrap();
 
     let second = timeout(FIVE, connect(&u, ConnectOptions::default()))
         .await
@@ -176,7 +202,9 @@ async fn the_connection_cap_refuses_the_next_and_frees_a_slot_when_one_closes() 
         rusty_tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let third = third.expect("a slot frees once the first connection is gone");
-    call(third.client(), "http", &[], b"3".to_vec()).await.unwrap();
+    call(third.client(), "http", &[], b"3".to_vec())
+        .await
+        .unwrap();
     server.shutdown().await;
 }
 
@@ -201,15 +229,16 @@ async fn shutdown_lets_a_call_in_flight_finish_and_refuses_new_connections() {
             echo(req, respond).await;
         }
     };
-    let server = serve(listener(), None, ServeOptions::default(), handler);
+    let server = start(listener(), None, ServeOptions::default(), handler);
     let addr = server.local_addr();
     let conn = connect(&format!("http://{addr}"), ConnectOptions::default())
         .await
         .unwrap();
     let h = conn.client().clone();
-    let inflight = rusty_tokio::spawn(async move {
-        call(&h, "http", &[], b"slow".to_vec()).await.unwrap().body
-    });
+    let inflight =
+        rusty_tokio::spawn(
+            async move { call(&h, "http", &[], b"slow".to_vec()).await.unwrap().body },
+        );
     started.await.unwrap();
 
     let mut stopping = rusty_tokio::spawn(server.shutdown());

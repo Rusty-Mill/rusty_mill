@@ -1,6 +1,7 @@
 //! Live interop with the `h2` crate, the independent oracle, over plain
 //! h2c: the oracle as client of our server, and as server of our client.
 //! Our side runs on `rusty_tokio`, the oracle on `tokio`.
+#![allow(clippy::unwrap_used)]
 
 mod common;
 
@@ -10,7 +11,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use common::*;
-use rusty_hyper::{connect, serve, ConnectOptions, ServeOptions};
+use rusty_hyper::{connect, ConnectOptions, ServeOptions};
 
 async fn h2_send(send: &mut h2::SendStream<Bytes>, mut data: Bytes, end: bool) {
     if data.is_empty() {
@@ -87,7 +88,7 @@ fn runtimes() -> (rusty_tokio::Runtime, tokio::runtime::Runtime) {
 #[test]
 fn the_h2_crate_calls_our_server() {
     let (ours, oracle) = runtimes();
-    let server = ours.block_on(async { serve(listener(), None, ServeOptions::default(), echo) });
+    let server = ours.block_on(async { start(listener(), None, ServeOptions::default(), echo) });
     let addr = server.local_addr();
     oracle.block_on(async {
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();

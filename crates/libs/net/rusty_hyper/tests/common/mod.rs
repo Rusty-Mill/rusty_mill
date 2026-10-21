@@ -1,11 +1,12 @@
 //! Shared helpers for the integration tests.
-#![allow(dead_code)]
+#![allow(dead_code, clippy::unwrap_used)]
 
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
 };
 use rusty_hyper::{
-    Body, ClientHandle, ClientIdentity, H2Error, HeaderField, Request, Respond, Server,
+    serve, Body, ClientHandle, ClientIdentity, H2Error, HeaderField, Request, Respond,
+    ServeOptions, Server,
 };
 use rusty_tls::{TlsAcceptor, TrustPolicy};
 use rusty_tokio::io::TcpListener;
@@ -91,6 +92,20 @@ pub async fn echo(mut req: Request, respond: Respond) {
         return;
     }
     let _ = send.send_trailers(vec![hf("grpc-status", "0")]).await;
+}
+
+/// Serves `handler` on a fresh listener.
+pub fn start<F, Fut>(
+    listener: TcpListener,
+    tls: Option<TlsAcceptor>,
+    options: ServeOptions,
+    handler: F,
+) -> Server
+where
+    F: Fn(Request, Respond) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve(listener, tls, options, handler).unwrap()
 }
 
 pub fn url(server: &Server, scheme: &str) -> String {
