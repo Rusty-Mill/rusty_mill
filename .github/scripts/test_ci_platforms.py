@@ -227,5 +227,16 @@ class WorkflowPlatformTests(unittest.TestCase):
                     self.assertNotIn("actions: read", text)
 
 
+    def test_queue_runs_never_save_a_cache_nobody_can_restore(self) -> None:
+        # A merge_group cache is scoped to its temporary queue ref.
+        action = WORKFLOW.parents[1] / "actions" / "setup-build-env" / "action.yml"
+        for path in (WORKFLOW, action):
+            blocks = re.findall(r"uses: Swatinem/rust-cache@\S+.*\n\s+with:\n((?:\s+[a-z-]+: .*\n)+)", path.read_text(encoding="utf-8"))
+            self.assertTrue(blocks, path.name)
+            for block in blocks:
+                with self.subTest(workflow=path.name):
+                    self.assertIn("save-if: ${{ github.event_name != 'merge_group' }}", block)
+
+
 if __name__ == "__main__":
     unittest.main()

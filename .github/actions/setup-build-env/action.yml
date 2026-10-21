@@ -99,6 +99,9 @@ runs:
         & "$dest\bin\protoc.exe" --version
         if ($LASTEXITCODE -ne 0) { throw "protoc did not run" }
 
+    # A merge-queue run's cache is scoped to its temporary queue ref, which no
+    # other run can restore, so saving it only delays the merge.
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
+        save-if: ${{ github.event_name != 'merge_group' }}
         shared-key: ${{ inputs.cache-shared-key }}
