@@ -2,7 +2,7 @@
 name = "rusty_sha1"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.83"
 license = "MIT OR Apache-2.0"
 description = "A zero-dependency SHA-1 (FIPS 180-1) implementation, shared by rusty_git's object hashing and rusty_term's WebSocket handshake"
 
