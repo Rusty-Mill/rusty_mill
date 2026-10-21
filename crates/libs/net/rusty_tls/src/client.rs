@@ -93,6 +93,14 @@ impl<S: Read + Write> TlsStream<S> {
     /// `alpn_protocols` (each entry a wire-format protocol ID, e.g. `b"h2"`)
     /// during the handshake — for a server that both requires a client
     /// certificate and negotiates an application protocol (gRPC over mTLS).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidAlpnProtocols`] if an entry is empty or over 255 bytes,
+    /// or if the offer as framed on the wire (each entry's length plus one
+    /// length byte) exceeds 32,768 bytes. That cap is this library's policy,
+    /// well below the protocol's own limit, to leave room for the rest of the
+    /// ClientHello. An empty `alpn_protocols` offers no ALPN.
     pub fn new_with_client_identity_and_alpn(
         sock: S,
         server_name: &str,
@@ -119,6 +127,14 @@ impl<S: Read + Write> TlsStream<S> {
     /// wire-format protocol ID, e.g. `b"h2"`) during the handshake for
     /// ALPN negotiation. See [`TlsStream::negotiated_alpn_protocol`] to
     /// read back what the server actually picked.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidAlpnProtocols`] if an entry is empty or over 255 bytes,
+    /// or if the offer as framed on the wire (each entry's length plus one
+    /// length byte) exceeds 32,768 bytes. That cap is this library's policy,
+    /// well below the protocol's own limit, to leave room for the rest of the
+    /// ClientHello. An empty `alpn_protocols` offers no ALPN.
     pub fn new_with_alpn(
         sock: S,
         server_name: &str,

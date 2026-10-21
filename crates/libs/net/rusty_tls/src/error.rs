@@ -34,9 +34,10 @@ pub enum Error {
     /// turned into a certificate verifier — most commonly an unparseable
     /// CRL.
     InvalidRevocationConfig(String),
-    /// The ALPN protocol names handed to a client constructor can't be
-    /// encoded: a name is empty or longer than 255 bytes, or the offer as a
-    /// whole is too large for the extension.
+    /// The ALPN protocol names handed to a client constructor were refused: a
+    /// name is empty or longer than 255 bytes, or the offer as framed on the
+    /// wire exceeds this library's cap of 32,768 bytes (a policy limit, below
+    /// the protocol's own, that leaves room for the rest of the ClientHello).
     InvalidAlpnProtocols(String),
 }
 

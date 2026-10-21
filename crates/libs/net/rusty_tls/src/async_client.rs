@@ -88,6 +88,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsStream<S> {
     /// `alpn_protocols` (each entry a wire-format protocol ID, e.g.
     /// `b"h2"`) during the handshake — the async counterpart to
     /// [`TlsStream::new_with_client_identity_and_alpn`](crate::TlsStream::new_with_client_identity_and_alpn).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidAlpnProtocols`] if an entry is empty or over 255 bytes,
+    /// or if the offer as framed on the wire (each entry's length plus one
+    /// length byte) exceeds 32,768 bytes. That cap is this library's policy,
+    /// well below the protocol's own limit, to leave room for the rest of the
+    /// ClientHello. An empty `alpn_protocols` offers no ALPN.
     pub fn new_with_client_identity_and_alpn(
         io: S,
         server_name: &str,
@@ -114,6 +122,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsStream<S> {
     /// entry a wire-format protocol ID, e.g. `b"h2"`) during the handshake
     /// — the async counterpart to
     /// [`TlsStream::new_with_alpn`](crate::TlsStream::new_with_alpn).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidAlpnProtocols`] if an entry is empty or over 255 bytes,
+    /// or if the offer as framed on the wire (each entry's length plus one
+    /// length byte) exceeds 32,768 bytes. That cap is this library's policy,
+    /// well below the protocol's own limit, to leave room for the rest of the
+    /// ClientHello. An empty `alpn_protocols` offers no ALPN.
     pub fn new_with_alpn(
         io: S,
         server_name: &str,

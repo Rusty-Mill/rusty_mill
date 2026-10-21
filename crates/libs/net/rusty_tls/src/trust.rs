@@ -243,7 +243,7 @@ pub(crate) fn validate_alpn(alpn_protocols: &[Vec<u8>]) -> Result<(), Error> {
     }
     if total > MAX_ALPN_LIST_BYTES {
         return Err(Error::InvalidAlpnProtocols(format!(
-            "the offer is {total} bytes; at most {MAX_ALPN_LIST_BYTES}"
+            "the offer is {total} bytes framed; this library accepts at most {MAX_ALPN_LIST_BYTES} (a policy cap, below the protocol limit)"
         )));
     }
     Ok(())
