@@ -1,0 +1,2 @@
+# Raw PTY recordings: byte-exact, CR/LF included. Never normalise.
+*.vt binary

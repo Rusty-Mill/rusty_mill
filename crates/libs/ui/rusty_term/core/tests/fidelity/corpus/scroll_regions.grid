@@ -1,0 +1,26 @@
+size 80x24 cursor 0,23 visible=true alt=false
+|line 01
+|line 02
+|line 03
+|line 04
+|reverse-indexed
+|line 08
+|line 09
+|line 10
+|line 11
+|line 12
+|line 13
+|line 14
+|line 15
+|scrolled A
+|scrolled B
+|line 16
+|line 17
+|line 18
+|line 19
+|inserted-after-IL
+|
+|line 20
+|line 21
+|line 22
+styles:
