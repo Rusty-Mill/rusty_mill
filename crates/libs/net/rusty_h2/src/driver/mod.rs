@@ -335,6 +335,14 @@ impl ClientHandle {
         Ok((send, resp))
     }
 
+    /// Waits until the server's first SETTINGS have arrived, which is what a
+    /// request waits for before it can start. A PING's acknowledgement is not
+    /// that: a peer can answer PINGs and never send SETTINGS. Fails if the
+    /// connection closes first.
+    pub async fn ready(&self) -> Result<(), Error> {
+        ready(&self.shared).await
+    }
+
     /// Sends a PING and waits for its acknowledgement.
     pub async fn ping(&self) -> Result<(), Error> {
         let key = {
@@ -383,6 +391,26 @@ impl ClientHandle {
 }
 
 /// Forgets a ping when its future ends or is dropped.
+/// Waits for the peer's first SETTINGS (on the server, after its preface), or
+/// for the connection to end.
+async fn ready(shared: &Handle) -> Result<(), Error> {
+    poll_fn(|cx| {
+        let mut sh = lock(shared);
+        if sh.closed {
+            return Poll::Ready(Err(Error::Closed));
+        }
+        if sh.settings_received {
+            return Poll::Ready(Ok(()));
+        }
+        if let Some((_, code)) = sh.conn.goaway_received() {
+            return Poll::Ready(Err(Error::GoAway(code)));
+        }
+        register(&mut sh.waiters, cx.waker());
+        Poll::Pending
+    })
+    .await
+}
+
 struct PingGuard {
     shared: Handle,
     key: u64,
@@ -491,6 +519,13 @@ impl Acceptor {
             Poll::Pending
         })
         .await
+    }
+
+    /// Waits until the client's connection preface and first SETTINGS have
+    /// arrived, so a peer that connects and stalls part-way through can be
+    /// told from one that is ready. Fails if the connection closes first.
+    pub async fn ready(&self) -> Result<(), Error> {
+        ready(&self.shared).await
     }
 
     /// Stops accepting: sends GOAWAY, lets in-flight requests finish.
