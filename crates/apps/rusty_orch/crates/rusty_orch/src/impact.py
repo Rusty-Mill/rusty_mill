@@ -42,6 +42,13 @@ def canonical_cargo_metadata(metadata: dict) -> dict:
     def windows_path(value: object) -> object:
         if not isinstance(value, str):
             return value
+        # Win32 normally trims trailing periods and spaces from components,
+        # while an extended-length path addresses those components literally.
+        # Removing the prefix is therefore safe only when every component has
+        # the same meaning under both spellings.
+        components = value.split('\\')
+        if any(component.endswith(('.', ' ')) for component in components if component):
+            return value
         if re.match(r'^\\\\\?\\UNC\\[^\\]+\\[^\\]+(?:\\|$)', value, re.IGNORECASE):
             return '\\\\' + value[8:]
         if re.match(r'^\\\\\?\\[A-Za-z]:\\', value):

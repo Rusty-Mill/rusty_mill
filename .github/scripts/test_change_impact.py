@@ -185,6 +185,32 @@ class ChangeImpactTests(unittest.TestCase):
         package['manifest_path'] = r'\\?\relative\Cargo.toml'
         self.assertNotEqual(MODULE.cargo_metadata_digest(self.md), baseline)
 
+    def test_cargo_metadata_digest_preserves_verbatim_windows_components(self):
+        package = self.md['packages'][0]
+        package['manifest_path'] = r'C:\fixture\crate.\Cargo.toml'
+        package['dependencies'] = [{'name': 'local', 'path': r'C:\fixture\local '}]
+        package['targets'] = [
+            {'name': 'crate', 'src_path': r'\\server\share\crate.\src\lib.rs'}]
+        self.md.update(workspace_root=r'C:\fixture.\workspace',
+                       target_directory=r'C:\target.', build_directory=r'C:\build ')
+
+        cases = [
+            ('workspace root', self.md, 'workspace_root', r'\\?\C:\fixture.\workspace'),
+            ('target directory', self.md, 'target_directory', r'\\?\C:\target.'),
+            ('build directory', self.md, 'build_directory', r'\\?\C:\build '),
+            ('manifest path', package, 'manifest_path', r'\\?\C:\fixture\crate.\Cargo.toml'),
+            ('dependency path', package['dependencies'][0], 'path', r'\\?\C:\fixture\local '),
+            ('target source path', package['targets'][0], 'src_path',
+             r'\\?\UNC\server\share\crate.\src\lib.rs'),
+        ]
+        for label, subject, field, extended in cases:
+            with self.subTest(label=label):
+                ordinary = subject[field]
+                ordinary_digest = MODULE.cargo_metadata_digest(self.md)
+                subject[field] = extended
+                self.assertNotEqual(MODULE.cargo_metadata_digest(self.md), ordinary_digest)
+                subject[field] = ordinary
+
     def test_metadata_diagnostics_are_redacted_bounded_and_canonical(self):
         self.md['metadata'] = {'DO_NOT_PRINT_SENTINEL': {'private': 'DO_NOT_PRINT_VALUE'}}
         self.md['packages'][0]['metadata'] = {'ANOTHER_SENTINEL': ['secret']}
