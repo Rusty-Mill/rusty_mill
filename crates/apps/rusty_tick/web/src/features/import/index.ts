@@ -31,7 +31,7 @@ const ORDINAL_SLACK = 16
  * and moves when instances are added, removed or reordered, so a row offers
  * every position its UID may have had (up to its count here plus
  * `ORDINAL_SLACK`) and the bare UID, and each matches a task whose due date
- * is still this row's, else one edited since that only this row looks like.
+ * is still this row's, else one edited since that only this row fits.
  */
 export function readIcs(text: string): ImportResult {
   const { tasks, skipped, droppedRepeats, droppedExceptions } = parseIcs(text)

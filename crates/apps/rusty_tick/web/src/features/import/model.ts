@@ -33,7 +33,7 @@ export interface ImportedTask {
  * A key an earlier importer gave a row. With `dueMs`, the key alone does not
  * say which row it was (it was given by position), so the task it names is
  * this row's while its due date still matches, or once edited, when no other
- * row looks like it (see `applyImport`).
+ * row fits it (see `applyImport`).
  */
 export interface LegacyKey {
   key: string
