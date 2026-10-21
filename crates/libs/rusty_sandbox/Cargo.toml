@@ -2,6 +2,7 @@
 name = "rusty_sandbox"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Fail-closed sandboxed execution for untrusted processes: a filesystem allowlist (Landlock), socket rules (seccomp), hard rlimits and a process-group job, behind an Executor port with a sans-IO spec"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

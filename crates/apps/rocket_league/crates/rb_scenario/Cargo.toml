@@ -3,6 +3,7 @@ name = "rb_scenario"
 description = "Scenario files for scripted mechanic captures: an initial game state plus a run-length input tape (docs/research/BOT-CAPTURE-PLAN.md). Read by rb-verify and by tools/rb_tape_bot."
 version.workspace = true
 edition.workspace = true
+rust-version = "1.75"
 license.workspace = true
 repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish.workspace = true

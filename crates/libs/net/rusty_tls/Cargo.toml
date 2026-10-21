@@ -2,6 +2,7 @@
 name = "rusty_tls"
 version = "0.12.0"
 edition = "2021"
+rust-version = "1.85"
 description = "A TLS library implementation in Rust"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_tls"

@@ -2,6 +2,7 @@
 name = "rusty_kafka"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_kafka"

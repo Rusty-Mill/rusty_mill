@@ -2,6 +2,7 @@
 name = "rusty_bbp_host"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 description = "Host for the Blackboard Protocol: the per-turn MCP server agents talk to, the human channel CLI, and task administration over a rusty_bbp file store"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"

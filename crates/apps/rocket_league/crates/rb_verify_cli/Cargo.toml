@@ -3,6 +3,7 @@ name = "rb_verify_cli"
 description = "Composition root for the Phase 0 verification pipeline: wires ingestion adapters to the divergence scorer."
 version.workspace = true
 edition.workspace = true
+rust-version = "1.88"
 license.workspace = true
 repository = "https://github.com/Rusty-Mill/rusty_mill"
 publish.workspace = true

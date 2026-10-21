@@ -2,6 +2,7 @@
 name = "rusty_url"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "A from-scratch WHATWG URL Standard implementation, aiming for parity with the `url` crate"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_url"
