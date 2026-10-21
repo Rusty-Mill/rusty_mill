@@ -443,3 +443,67 @@ fn poll_accept_yields_each_request_once() {
     assert!(b.end_stream(), "the second request ended with its headers");
     assert!(matches!(s.poll_accept(), Poll::Pending));
 }
+
+// ---- GOAWAY, capacity and the opening SETTINGS ---------------------------
+
+#[test]
+fn streams_the_peer_accepted_survive_its_goaway_and_new_ones_are_refused() {
+    let mut c = client();
+    let (id, _) = c.open_stream(&request(), false).unwrap();
+    c.apply(Frame::GoAway(GoAwayFrame {
+        last_stream_id: id,
+        error_code: ErrorCode::NoError,
+        debug_data: vec![],
+    }))
+    .unwrap();
+    assert_eq!(c.goaway_received(), Some((id, ErrorCode::NoError)));
+    assert!(
+        c.send_data(id, b"still going", true).is_ok(),
+        "in-flight work continues"
+    );
+    assert!(c.open_stream(&request(), false).is_err(), "no new streams");
+}
+
+#[test]
+fn send_capacity_is_the_smaller_window() {
+    let mut c = client();
+    let (id, _) = c.open_stream(&request(), false).unwrap();
+    assert_eq!(c.send_capacity(id), 65_535);
+    assert_eq!(c.send_capacity(99), 0, "unknown stream");
+    c.apply(settings(SettingId::InitialWindowSize, 100))
+        .unwrap();
+    assert_eq!(c.send_capacity(id), 100);
+    c.send_data(id, &[0; 60], false).unwrap();
+    assert_eq!(c.send_capacity(id), 40);
+}
+
+#[test]
+fn the_opening_settings_announce_the_local_settings() {
+    let s = ServerSettings {
+        initial_window_size: 1_000,
+        max_concurrent_streams: Some(7),
+        enable_push: false,
+        ..ServerSettings::default()
+    };
+    let Frame::Settings(f) = Connection::new(s, PeerType::Client).settings_frame() else {
+        panic!("not SETTINGS")
+    };
+    assert!(!f.ack);
+    let get = |id| f.settings.iter().find(|x| x.id == id).map(|x| x.value);
+    assert_eq!(get(SettingId::InitialWindowSize), Some(1_000));
+    assert_eq!(get(SettingId::MaxConcurrentStreams), Some(7));
+    assert_eq!(get(SettingId::EnablePush), Some(0));
+}
+
+#[test]
+fn a_servers_opening_settings_never_enable_push() {
+    // RFC 9113 §6.5.2: a client must treat ENABLE_PUSH = 1 from a server as
+    // a protocol error, so a default server cannot send it.
+    let Frame::Settings(f) = server().settings_frame() else {
+        panic!("not SETTINGS")
+    };
+    assert!(f
+        .settings
+        .iter()
+        .all(|s| s.id != SettingId::EnablePush || s.value == 0));
+}
