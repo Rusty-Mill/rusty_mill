@@ -256,6 +256,15 @@ describe('readImport: .ics', () => {
     expect((await api.snapshot()).tasks.map((t) => t.id)).toContain(bId)
   })
 
+  it('imports an event with more exceptions than a task can hold, keeping the latest', async () => {
+    const exdates = Array.from({ length: 1500 }, (_, i) => new Date(Date.UTC(2026, 9, 6) + i * 86_400_000).toISOString().replace(/[-:]|\.\d{3}/g, ''))
+    const api = new MemoryAdapter()
+    await applyImport(api, readImport(cal(event('UID:d1', 'SUMMARY:Daily', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=DAILY', `EXDATE:${exdates.join(',')}`)), 'cal.ics'))
+    const task = (await api.snapshot()).tasks.find((t) => t.title === 'Daily')!
+    expect(task.exDates).toHaveLength(1000)
+    expect(task.exDates.at(-1)).toBe(Date.parse('2026-10-06T00:00:00Z') + 1499 * 86_400_000)
+  })
+
   it('does not add exceptions to an earlier-imported master the user has since edited', async () => {
     const api = new MemoryAdapter()
     const inbox = (await api.snapshot()).inboxId

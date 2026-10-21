@@ -23,6 +23,7 @@
 import type { ApiClient } from '@/api/client'
 import type { NewTask, Task, TaskPatch } from '@/api/types'
 import { derivedId } from '@/lib/id'
+import { storedExDates } from '@/lib/ics'
 import type { ImportResult, ImportedTask, LegacyKey } from './model'
 
 /** The server's limits (`service.rs`), so one long field does not fail a whole import. */
@@ -30,7 +31,6 @@ const MAX_TITLE = 500
 const MAX_TAGS = 20
 const MAX_TAG_CHARS = 64
 const MAX_ITEMS = 200
-const MAX_EX_DATES = 1000
 /** A task's etag when it has not been written since it was created. */
 const CREATED_ETAG = '1'
 
@@ -47,7 +47,7 @@ export interface Applied {
 function secondWrite(t: ImportedTask): TaskPatch | null {
   const patch: TaskPatch = {}
   if (t.status !== 'open') patch.status = t.status
-  if (t.exDates.length > 0) patch.exDates = [...new Set(t.exDates)].sort((a, b) => a - b).slice(0, MAX_EX_DATES)
+  if (t.exDates.length > 0) patch.exDates = storedExDates(t.exDates)
   return Object.keys(patch).length > 0 ? patch : null
 }
 
