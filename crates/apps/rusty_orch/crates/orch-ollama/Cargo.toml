@@ -2,7 +2,7 @@
 name = "orch-ollama"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.81"
 description = "Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out."
 license = "MIT"
 

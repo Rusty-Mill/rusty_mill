@@ -570,6 +570,19 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         msrv = self.workflow.split("  multimodal-db-msrv:\n")[1].split("  rusty-config-no-std-check:\n")[0]
         self.assertIn('RUSTUP_TOOLCHAIN: "1.89.0"', msrv)
 
+    def test_msrv_compile_job_builds_at_declared_floors_and_gates(self) -> None:
+        job = self.workflow.split("  msrv-compile:\n")[1].split("  rusty-config-no-std-check:\n")[0]
+        self.assertIn("needs: plan", job)
+        self.assertIn("needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''", job)
+        self.assertIn("check_msrv_compile.py", job)
+        # The pinned toolchain's own versions are covered elsewhere (compared as full versions); builds stay
+        # out of the cached target dir; metadata is locked and Cargo.lock must come out unchanged.
+        self.assertIn('--skip-from "$RUST_TOOLCHAIN"', job)
+        self.assertIn("cargo metadata --locked --format-version=1", job)
+        self.assertIn('test "$(sha256sum Cargo.lock)" = "$lock_before"', job)
+        self.assertIn('--target-base "$RUNNER_TEMP/msrv"', job)
+        self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
+
     def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:
         channel = tomllib.loads((REPO / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
         for path in (WORKFLOW, BASELINE_WORKFLOW, WORKFLOW.with_name("remind-me-release.yml")):
