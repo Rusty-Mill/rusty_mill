@@ -5,9 +5,14 @@
  * is created; `''` and unknown parents fall back sensibly: the Inbox, and a
  * top-level task. Subtasks nest one level here, so deeper ones hang off their
  * top-level ancestor and live in its list.
+ *
+ * A task is created open and closed by a second write, since `NewTask` carries
+ * no status. If that second write was lost, the next import finishes it: the
+ * task is still at its creation version (`etag` 1), so nobody has edited it,
+ * and the write is conditional on that etag. A task edited since is left alone.
  */
 import type { ApiClient } from '@/api/client'
-import type { NewTask } from '@/api/types'
+import type { NewTask, Task } from '@/api/types'
 import { derivedId } from '@/lib/id'
 import type { ImportResult, ImportedTask } from './model'
 
@@ -16,13 +21,20 @@ const MAX_TITLE = 500
 const MAX_TAGS = 20
 const MAX_TAG_CHARS = 64
 const MAX_ITEMS = 200
+/** A task's etag when it has not been written since it was created. */
+const CREATED_ETAG = '1'
 
 export interface Applied {
   tasks: number
   lists: number
   /** Already imported (same id), so left alone. */
   existing: number
+  /** Imported before, but its done / won't-do write was lost; finished now. */
+  resumed: number
 }
+
+/** True when `found` is this import's own task, untouched since creation, still waiting for its status. */
+const statusPending = (found: Task, t: ImportedTask): boolean => t.status !== 'open' && found.status === 'open' && found.etag === CREATED_ETAG
 
 /** The top-level ancestor's key, or `null` when `t` is top-level or its parent is not in the file. */
 function rootOf(t: ImportedTask, byKey: ReadonlyMap<string, ImportedTask>): string | null {
@@ -55,10 +67,10 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
   const have = await api.snapshot()
   const lists = new Map(have.lists.map((l) => [l.name.trim().toLowerCase(), l.id]))
   const listIds = new Set(have.lists.map((l) => l.id))
-  const taskIds = new Set(have.tasks.map((t) => t.id))
+  const existing = new Map(have.tasks.map((t) => [t.id, t]))
   const byKey = new Map(result.tasks.map((t) => [t.key, t]))
   const idOf = (key: string): string => derivedId(`import|${result.source}|${key}`)
-  const out: Applied = { tasks: 0, lists: 0, existing: 0 }
+  const out: Applied = { tasks: 0, lists: 0, existing: 0, resumed: 0 }
 
   const listFor = async (name: string): Promise<string> => {
     const wanted = name.trim()
@@ -81,13 +93,19 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
     const root = wanted !== null && placed.has(wanted) ? wanted : null // a parent caught in a cycle was never placed
     const listId = (root !== null && placed.get(root)) || (await listFor(t.list))
     placed.set(t.key, listId)
-    if (taskIds.has(id)) {
+    const found = existing.get(id)
+    if (found && statusPending(found, t)) {
+      await api.updateTask(id, { status: t.status }, CREATED_ETAG)
+      out.resumed++
+      continue
+    }
+    if (found) {
       out.existing++
       continue
     }
-    await api.createTask(toNewTask(t, id, listId, root ? idOf(root) : null))
-    if (t.status !== 'open') await api.updateTask(id, { status: t.status })
-    taskIds.add(id)
+    const created = await api.createTask(toNewTask(t, id, listId, root ? idOf(root) : null))
+    existing.set(id, created)
+    if (t.status !== 'open') await api.updateTask(id, { status: t.status }, created.etag)
     out.tasks++
   }
   return out

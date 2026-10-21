@@ -10,7 +10,7 @@
 import { parseQuickAdd } from '@/lib/nlp/parse'
 import { parseCsv } from '@/lib/csv'
 import type { Priority } from '@/api/types'
-import { blankTask, columns, parseWhen, uniqueKeys, type ImportResult, type ImportedTask, type When } from './model'
+import { blankTask, columns, keepInNotes, parseWhen, uniqueKeys, type ImportResult, type ImportedTask, type When } from './model'
 
 export const isTodoist = (rows: string[][]): boolean => {
   const head = rows[0]?.map((h) => h.trim().toUpperCase()) ?? []
@@ -20,8 +20,7 @@ export const isTodoist = (rows: string[][]): boolean => {
 const PRIORITY: Record<string, Priority> = { '1': 5, '2': 3, '3': 1 }
 
 function readDate(text: string, now: number): When | null {
-  const iso = parseWhen(text)
-  if (iso) return iso
+  if (/^\d{4}-\d{2}-\d{2}/.test(text.trim())) return parseWhen(text) // invalid ISO stays invalid: quick add would roll it over
   const quick = parseQuickAdd(text, now)
   return quick.dueMs !== null && quick.title === '' ? { ms: quick.dueMs, allDay: quick.isAllDay } : null
 }
@@ -57,10 +56,10 @@ export function parseTodoist(text: string, fileName: string, now: number): Impor
     if (dateText && !when) out.lossy++
     const indent = Number(col(row, 'indent')) || 1
     const task: ImportedTask = {
-      ...blankTask(key(`${list}|${title}`), title),
+      ...blankTask(key(list, title), title),
       list,
       parentKey: indent > 1 && root ? root.key : null,
-      notes: dateText && !when ? [notes, `Todoist date: ${dateText}`].filter(Boolean).join('\n\n') : notes,
+      notes: dateText && !when ? keepInNotes(notes, 'Todoist date', dateText) : notes,
       priority: PRIORITY[col(row, 'priority')] ?? 0,
       dueMs: when?.ms ?? null,
       isAllDay: !!when?.allDay,

@@ -6,7 +6,7 @@
  * `completed` is true for `true`, `yes`, `y`, `1`, `x`, `done` or `completed`.
  */
 import { parseCsv } from '@/lib/csv'
-import { blankTask, columns, parseWhen, readPriority, readRepeat, readTags, uniqueKeys, type ImportResult } from './model'
+import { blankTask, columns, keepInNotes, parseWhen, readPriority, readRepeat, readTags, uniqueKeys, unreadDates, type ImportResult } from './model'
 
 const TITLE = ['title', 'name', 'task', 'task name', 'subject', 'summary']
 const NOTES = ['notes', 'note', 'description', 'body', 'details']
@@ -36,11 +36,12 @@ export function parseGeneric(text: string): ImportResult {
     const due = parseWhen(dueText)
     const start = parseWhen(startText)
     const repeatFlag = readRepeat(rule)
-    if ((dueText && !due) || (startText && !start) || (rule && !repeatFlag)) out.lossy++
+    const unread = unreadDates([['Due', dueText, due], ['Start', startText, start]])
+    if (unread.length > 0 || (rule && !repeatFlag)) out.lossy++
     out.tasks.push({
-      ...blankTask(key(`${list}|${title}|${dueText}`), title),
+      ...blankTask(key(list, title, dueText), title),
       list,
-      notes: col(row, ...NOTES),
+      notes: unread.reduce((notes, [label, text]) => keepInNotes(notes, label, text), col(row, ...NOTES)),
       priority: readPriority(col(row, 'priority')),
       startMs: start && due ? start.ms : null,
       dueMs: (due ?? start)?.ms ?? null,
