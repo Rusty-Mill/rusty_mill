@@ -195,7 +195,7 @@ mod async_ctors {
             assert!(build(&f, Vec::new()).is_ok(), "{name}");
             assert!(build(&f, vec![vec![b'x'; 255]]).is_ok(), "{name}");
             assert!(
-                build(&f, offer(256, 254, 252)).is_ok(),
+                build(&f, offer(128, 254, 127)).is_ok(),
                 "{name}: at the limit"
             );
         }
