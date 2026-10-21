@@ -1,0 +1,13 @@
+{
+  "items": [
+    "[normalize] `.` segments are removed",
+    "[normalize] `..` removes the previous normal segment",
+    "[normalize] in an absolute path `..` at the root is dropped and the leading `/` stays",
+    "[normalize] in a relative path an unmatched `..` is kept, and a later `..` does not remove it",
+    "[normalize] repeated `/` collapse to one",
+    "[normalize] a trailing `/` survives dot-segment removal when the input had one",
+    "[Edge cases] no trailing `/` is added to a result of `/` or `.`",
+    "[Edge cases] an empty result is `/` for absolute input and `.` for relative (the empty string gives `.`)"
+  ],
+  "pass_mark": 6
+}

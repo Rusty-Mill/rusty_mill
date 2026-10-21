@@ -1,0 +1,264 @@
+{
+  "approved": "2026-10-21 by the owner; frozen: a change after the first run voids it",
+  "tasks": {
+    "p01": {
+      "kind": "separable",
+      "title": "slug and truncate_slug",
+      "sections": {
+        "Normalisation": "A",
+        "Truncation": "B"
+      },
+      "concerns": {
+        "A": "Normalisation: what `slug` keeps, lower-cases and replaces.",
+        "B": "Truncation: how `truncate_slug` shortens a slug to `max` bytes."
+      },
+      "rubric_concerns": [
+        "A",
+        "A",
+        "A",
+        "A",
+        "B",
+        "B",
+        "B",
+        "B",
+        "B"
+      ],
+      "shared_items": 0,
+      "items": 9,
+      "null_pair": true
+    },
+    "p02": {
+      "kind": "separable",
+      "title": "parse_duration and format_duration",
+      "sections": {
+        "Parsing": "A",
+        "Formatting": "B"
+      },
+      "concerns": {
+        "A": "Parsing: which strings `parse_duration` accepts and what it returns.",
+        "B": "Formatting: how `format_duration` renders a number of seconds."
+      },
+      "rubric_concerns": [
+        "A",
+        "A",
+        "A",
+        "A",
+        "A",
+        "B",
+        "B",
+        "B"
+      ],
+      "shared_items": 0,
+      "items": 8,
+      "null_pair": true
+    },
+    "p03": {
+      "kind": "separable",
+      "title": "to_roman and from_roman",
+      "sections": {
+        "Encoding": "A",
+        "Decoding": "B"
+      },
+      "concerns": {
+        "A": "Encoding: which numbers `to_roman` accepts and the numeral it writes.",
+        "B": "Decoding: which numerals `from_roman` accepts."
+      },
+      "rubric_concerns": [
+        "A",
+        "A",
+        "A",
+        "A",
+        "B",
+        "B",
+        "B",
+        "B",
+        "B"
+      ],
+      "shared_items": 0,
+      "items": 9,
+      "null_pair": true
+    },
+    "p04": {
+      "kind": "separable",
+      "title": "CSV split_record and join_record",
+      "sections": {
+        "Reading": "A",
+        "Writing": "B"
+      },
+      "concerns": {
+        "A": "Reading: how `split_record` splits one CSV line into fields.",
+        "B": "Writing: how `join_record` writes fields as one CSV line."
+      },
+      "rubric_concerns": [
+        "A",
+        "A",
+        "A",
+        "A",
+        "A",
+        "B",
+        "B",
+        "B",
+        "B"
+      ],
+      "shared_items": 0,
+      "items": 9,
+      "null_pair": false
+    },
+    "p05": {
+      "kind": "separable",
+      "title": "wrap and count_words",
+      "sections": {
+        "Wrapping": "A",
+        "Counting": "B"
+      },
+      "concerns": {
+        "A": "Wrapping: how `wrap` breaks text into lines.",
+        "B": "Counting: what `count_words` counts as a word."
+      },
+      "rubric_concerns": [
+        "A",
+        "A",
+        "A",
+        "A",
+        "A",
+        "B",
+        "B",
+        "B"
+      ],
+      "shared_items": 0,
+      "items": 8,
+      "null_pair": false
+    },
+    "p06": {
+      "kind": "shared",
+      "title": "token bucket rate limiter",
+      "sections": {
+        "State": "AB",
+        "try_take": "AB",
+        "Edge cases": "AB"
+      },
+      "concerns": {
+        "A": "Refill and time: how tokens come back as `now_ms` advances.",
+        "B": "Admission: when a request for `n` tokens is granted and what it costs."
+      },
+      "rubric_concerns": [
+        "AB",
+        "A",
+        "AB",
+        "A",
+        "A",
+        "B",
+        "AB",
+        "B",
+        "AB",
+        "A"
+      ],
+      "shared_items": 4,
+      "items": 10,
+      "null_pair": false
+    },
+    "p07": {
+      "kind": "shared",
+      "title": "LRU cache with expiry",
+      "sections": {
+        "State": "AB",
+        "insert": "AB",
+        "get": "AB",
+        "len": "AB"
+      },
+      "concerns": {
+        "A": "Capacity and recency: what is evicted when the cache is full.",
+        "B": "Expiry: when an entry stops being visible."
+      },
+      "rubric_concerns": [
+        "B",
+        "A",
+        "AB",
+        "AB",
+        "A",
+        "AB",
+        "AB",
+        "B",
+        "A"
+      ],
+      "shared_items": 4,
+      "items": 9,
+      "null_pair": false
+    },
+    "p08": {
+      "kind": "shared",
+      "title": "retry policy with backoff",
+      "sections": {
+        "next_delay": "AB",
+        "Edge cases": "AB"
+      },
+      "concerns": {
+        "A": "Schedule: how long to wait before the next attempt.",
+        "B": "Budget: when to stop retrying."
+      },
+      "rubric_concerns": [
+        "A",
+        "A",
+        "AB",
+        "B",
+        "AB",
+        "B",
+        "AB",
+        "AB"
+      ],
+      "shared_items": 4,
+      "items": 8,
+      "null_pair": false
+    },
+    "p09": {
+      "kind": "shared",
+      "title": "money formatting",
+      "sections": {
+        "format_amount": "AB",
+        "Edge cases": "AB"
+      },
+      "concerns": {
+        "A": "Rounding: how thousandths become cents.",
+        "B": "Layout: sign, thousands separators and decimals."
+      },
+      "rubric_concerns": [
+        "A",
+        "A",
+        "AB",
+        "B",
+        "AB",
+        "B",
+        "AB",
+        "B"
+      ],
+      "shared_items": 3,
+      "items": 8,
+      "null_pair": false
+    },
+    "p10": {
+      "kind": "shared",
+      "title": "path normalisation",
+      "sections": {
+        "normalize": "AB",
+        "Edge cases": "AB"
+      },
+      "concerns": {
+        "A": "Dot segments: what `.` and `..` do.",
+        "B": "Separators: repeated, leading and trailing `/`."
+      },
+      "rubric_concerns": [
+        "A",
+        "A",
+        "AB",
+        "AB",
+        "B",
+        "AB",
+        "AB",
+        "AB"
+      ],
+      "shared_items": 5,
+      "items": 8,
+      "null_pair": false
+    }
+  }
+}

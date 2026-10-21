@@ -1,0 +1,15 @@
+{
+  "items": [
+    "[State] the state holds tokens and the time of the last refill, with a sub-token remainder (fixed point or equivalent)",
+    "[State] a new bucket starts full",
+    "[try_take] refill happens first, from elapsed time, before the admission decision",
+    "[try_take] refill is integer arithmetic and keeps the fractional remainder between calls",
+    "[try_take] refill is capped at `capacity`",
+    "[try_take] all or nothing: a refused request consumes no tokens",
+    "[Edge cases] `n == 0` is granted without changing state, even with a backwards clock",
+    "[Edge cases] `n > capacity` is always refused",
+    "[Edge cases] a backwards `now_ms` refills nothing and does not move the refill time back or underflow",
+    "[Edge cases] long idle periods do not overflow the refill arithmetic"
+  ],
+  "pass_mark": 8
+}
