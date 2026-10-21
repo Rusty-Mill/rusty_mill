@@ -15,6 +15,9 @@ import { isTodoist, parseTodoist } from './todoist'
 export { applyImport, type Applied } from './apply'
 export type { ImportResult, ImportedTask } from './model'
 
+/** How many more instances than the file now holds a UID may have had when #829 imported it. */
+const ORDINAL_SLACK = 16
+
 /**
  * Read an `.ics` file into the shared model: the one path for the calendar
  * page's import and this one, so a file imported through both adds its tasks
@@ -30,9 +33,6 @@ export type { ImportResult, ImportedTask } from './model'
  * `ORDINAL_SLACK`) and the bare UID, and each matches only a task whose due
  * date is still this row's.
  */
-/** How many more instances than the file now holds a UID may have had when #829 imported it. */
-const ORDINAL_SLACK = 16
-
 export function readIcs(text: string): ImportResult {
   const { tasks, skipped, droppedRepeats, droppedExceptions } = parseIcs(text)
   const key = uniqueKeys()
