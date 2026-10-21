@@ -18,11 +18,53 @@ layer = "libs"
 rusty_prost = { workspace = true }
 rusty_base64 = { workspace = true }
 rusty_percent = { workspace = true }
+# The client (module `client`) is behind `rusty-tokio`, the arrangement `rusty_h2`, `rusty_tls`
+# and `rusty_hyper` use, so a default build pulls in nothing and stays sans-IO.
+rusty_hyper = { path = "../../net/rusty_hyper", optional = true, features = ["rusty-tokio"] }
+# The HTTP/2 error codes the client maps to gRPC statuses.
+rusty_h2 = { path = "../../net/rusty_h2", optional = true }
+rusty_http = { workspace = true, optional = true }
+rusty_tokio = { workspace = true, optional = true }
+
+[features]
+rusty-tokio = ["dep:rusty_hyper", "dep:rusty_h2", "dep:rusty_http", "dep:rusty_tokio"]
+
+[[test]]
+name = "client_calls"
+required-features = ["rusty-tokio"]
+
+[[test]]
+name = "client_lifecycle"
+required-features = ["rusty-tokio"]
+
+[[test]]
+name = "client_tls"
+required-features = ["rusty-tokio"]
+
+[[test]]
+name = "client_tonic"
+required-features = ["rusty-tokio"]
 
 [dev-dependencies]
 # Independent oracle only (never shipped): our status trailers are read by tonic and tonic's by
-# us. The library builds on rust-version 1.75; the tests need tonic's floor.
+# us, and (client tests) a real tonic server is called by our client. The library builds on
+# rust-version 1.75; the tests need tonic's floor.
 tonic = { workspace = true }
+# The oracle server's message type and codec, and its runtime (never shipped).
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+http = { workspace = true }
+tower = { workspace = true }
+futures-util = { workspace = true }
+# Throwaway certificates for the TLS tests; `CertificateDer` names the pinned anchors.
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+# Names `TcpListener` and `spawn` in the tests (already a dependency under the feature).
+rusty_tokio = { workspace = true }
+rusty_hyper = { path = "../../net/rusty_hyper", features = ["rusty-tokio"] }
+rusty_h2 = { path = "../../net/rusty_h2", features = ["rusty-tokio"] }
+rusty_tls = { workspace = true, features = ["rusty-tokio"] }
 
 [lints.rust]
 unsafe_code = "forbid"
