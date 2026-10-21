@@ -52,6 +52,7 @@ pub(super) fn config(dir: &std::path::Path) -> Config {
                     vendor: "ollama".into(),
                     program: "ollama".into(),
                     args: vec!["{task}".into()],
+                    sandbox: None,
                 },
             ),
             (
@@ -60,6 +61,7 @@ pub(super) fn config(dir: &std::path::Path) -> Config {
                     vendor: "future-provider".into(),
                     program: "future-cli".into(),
                     args: vec!["{mcp_config}".into()],
+                    sandbox: None,
                 },
             ),
         ]),

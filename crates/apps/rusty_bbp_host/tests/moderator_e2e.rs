@@ -99,6 +99,7 @@ fn harness(dir: &Path, name: &str, lines: &[&str]) -> Launcher {
         program: path.to_string_lossy().into_owned(),
         args: vec!["{role}".into(), "{turn}".into()],
         builtin_tools: false,
+        sandbox: None,
     }
 }
 
@@ -642,6 +643,7 @@ fn the_harness_process_tree_dies_with_the_moderator() {
                 "{dir}/heartbeat".into(),
             ],
             builtin_tools: false,
+            sandbox: None,
         },
     );
     let out = moderator::run(&config(&dir, &task, repo, launchers, 2));
@@ -728,6 +730,7 @@ fn launchers_are_keyed_by_any_role_id() {
             program: "true".into(),
             args: vec![],
             builtin_tools: true,
+            sandbox: None,
         },
     );
     assert!(l
@@ -802,6 +805,7 @@ fn script(dir: &Path, name: &str, body: &str) -> Launcher {
         .map(String::from)
         .into(),
         builtin_tools: false,
+        sandbox: None,
     }
 }
 
@@ -2268,6 +2272,7 @@ fn no_progress_deadlines_pause_live_harnesses_and_survive_restart() {
             r#"echo $$ > "$BBP_DIR/live-$BBP_TURN.pid"; exec sleep 30"#.into(),
         ],
         builtin_tools: false,
+        sandbox: None,
     };
     let mut cfg = config(
         &dir,

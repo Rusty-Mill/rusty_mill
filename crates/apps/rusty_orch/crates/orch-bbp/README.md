@@ -19,7 +19,9 @@ The configuration contains:
   explicit workload environment and resource limits. For Cargo, include the
   toolchain and cached dependencies required by the offline sandbox. No
   environment or credentials are automatically copied into the workload.
-- `pool`: any number of named agents, each with `vendor`, `program`, `args`.
+- `pool`: any number of named agents, each with `vendor`, `program`, `args`,
+  and optionally `sandbox: {read, write, env}`, which runs that member's
+  harness confined away from the BBP directory (see BBP's "Confined harnesses").
   Launchers must speak BBP MCP. BBP expands `{bbp}`, `{dir}`, `{task}`, `{role}`,
   `{principal}`, `{turn}` and `{mcp_config}`; Orch does not render agent prompts.
   Codex, Claude, Ollama and future providers use the same configuration surface.

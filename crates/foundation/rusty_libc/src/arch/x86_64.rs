@@ -83,6 +83,7 @@ pub mod nr {
     pub const EXIT_GROUP: usize = 231;
     pub const OPENAT: usize = 257;
     pub const MKDIRAT: usize = 258;
+    pub const MKNODAT: usize = 259;
     pub const UNLINKAT: usize = 263;
     pub const SYMLINKAT: usize = 266;
     pub const LINKAT: usize = 265;

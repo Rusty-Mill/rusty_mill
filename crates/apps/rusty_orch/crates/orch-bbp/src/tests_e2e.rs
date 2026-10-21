@@ -732,6 +732,93 @@ echo end $(date +%s%N) >> {record}
     println!("BBP_ACCEPTANCE PASS slot-admission");
 }
 
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; enforced Linux sandbox"]
+fn orch_binary_confines_a_sandboxed_pool_member_away_from_the_bbp_directory() {
+    let (dir, mut c) = setup();
+    // The writer lives outside the BBP directory, which is all it may read
+    // besides the system and `bbp`; it probes the directory, then plans.
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("plan.sh");
+    std::fs::write(&script, r##"d="$1"
+if cat "$d/master" >/dev/null 2>&1; then echo "master: read"; else echo "master: denied"; fi
+if "$BBP_BIN" card --dir "$d" --task "$BBP_TASK" >/dev/null 2>&1; then echo "log: read"; else echo "log: denied"; fi
+"$BBP_BIN" mcp <<'RPC'
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"script","version":"0"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1."}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}}
+RPC
+"##).unwrap();
+    let writer = c.pool.get_mut("writer").unwrap();
+    writer.program = "/bin/sh".into();
+    writer.args = vec![script.to_string_lossy().into(), "{dir}".into()];
+    writer.sandbox = Some(Sandbox {
+        read: vec![bin.to_string_lossy().into()],
+        ..Sandbox::default()
+    });
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&c).unwrap()).unwrap();
+    let goal = dir.join("goal.json");
+    std::fs::write(&goal, r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#).unwrap();
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    let out = Command::new(&orch)
+        .arg("run")
+        .arg(&goal)
+        .arg("--bbp")
+        .arg(&cfg)
+        .arg("--state")
+        .arg(dir.join("orch-state"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: rusty_serde::json::Value =
+        rusty_serde::json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let entry = report["entries"]
+        .as_seq()
+        .unwrap()
+        .iter()
+        .find(|e| e["body"].as_str() == Some("hosted task"))
+        .unwrap();
+    let pointer = entry["refs"].as_seq().unwrap()[0]
+        .as_str()
+        .unwrap()
+        .strip_prefix("url:bbp:")
+        .unwrap();
+    let h: Handle = rusty_serde::json::from_str(pointer).unwrap();
+    let log = h
+        .dir
+        .join("agents")
+        .join(rusty_bbp::Sha256::of(h.task.as_bytes()).hex())
+        .join("turn-1.log");
+    // The writer reaches the gate through its relay.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &events(&h));
+        if view.card.state == rusty_bbp::State::PlanGate {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no plan gate; writer said:\n{}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let said = std::fs::read_to_string(&log).unwrap();
+    println!("{said}");
+    assert!(said.contains("master: denied"), "{said}");
+    assert!(said.contains("log: denied"), "{said}");
+    assert_eq!(cancel_hosted(&c, &report), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS harness-confined");
+}
+
 /// A real in-memory Millboard on a loopback port with a shared token and the
 /// default roles, stopped on drop.
 struct Millboard {

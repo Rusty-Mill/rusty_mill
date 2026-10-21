@@ -6,7 +6,7 @@
 )]
 mod config;
 mod supervisor;
-pub use config::{Agent, Assignment, Config, Slots};
+pub use config::{Agent, Assignment, Config, Sandbox, Slots};
 pub use supervisor::{StdSupervisor, Supervised, Supervisor};
 
 use orch_cli::{CommandRunner, ExecError, StdCommand};
@@ -109,6 +109,7 @@ struct Launcher {
     program: String,
     args: Vec<String>,
     builtin_tools: bool,
+    sandbox: Option<Sandbox>,
 }
 
 /// A provider-neutral adapter over finite CLI commands and a detached supervisor.
@@ -320,6 +321,7 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
                     program: agent.program.clone(),
                     args: agent.args.clone(),
                     builtin_tools: assignment.builtin_tools,
+                    sandbox: agent.sandbox.clone(),
                 },
             );
         }
