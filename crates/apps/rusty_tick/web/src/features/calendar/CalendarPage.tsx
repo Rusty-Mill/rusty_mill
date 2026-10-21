@@ -19,7 +19,7 @@ import { useSubscriptions } from '../subscriptions/store'
 import { syncSubscription } from '../subscriptions/sync'
 import { SubscriptionsDialog } from '../subscriptions/SubscriptionsDialog'
 import { Toolbar } from './Toolbar'
-import { parseIcs } from '@/lib/ics'
+import { applyImport, readIcs } from '@/features/import'
 
 /** A calendar file can hold years of events; each import is capped so it cannot flood the queue. */
 const IMPORT_LIMIT = 500
@@ -45,7 +45,6 @@ export function CalendarPage() {
   const now = useNow()
   const tasks = useData((s) => s.tasks)
   const lists = useData((s) => s.lists)
-  const inboxId = useData((s) => s.inboxId)
   const [anchor, setAnchor] = useState(() => Date.now())
   const [showDone, setShowDone] = useState(false)
   const [pop, setPop] = useState<Pop | null>(null)
@@ -94,11 +93,11 @@ export function CalendarPage() {
     e.target.value = '' // so choosing the same file again fires again
     if (!file) return
     try {
-      const { tasks: found, skipped, droppedRepeats } = parseIcs(await readText(file))
-      const batch = found.slice(0, IMPORT_LIMIT)
-      for (const t of batch) await actions.createTask({ listId: inboxId, ...t })
-      const notes = [skipped && `${skipped} skipped (cancelled, completed or undated)`, droppedRepeats && `${droppedRepeats} repeating events imported once`, found.length > batch.length && `only the first ${IMPORT_LIMIT} imported`]
-      actions.notify('info', `Imported ${batch.length} from ${file.name} into Inbox${notes.some(Boolean) ? ` (${notes.filter(Boolean).join('; ')})` : ''}`)
+      const read = readIcs(await readText(file))
+      const n = await applyImport(api, { ...read, tasks: read.tasks.slice(0, IMPORT_LIMIT) })
+      await actions.refresh()
+      const notes = [n.existing && `${n.existing} already here`, read.skipped && `${read.skipped} skipped (cancelled, completed or undated)`, read.lossy && `${read.lossy} repeating events imported once`, read.tasks.length > IMPORT_LIMIT && `only the first ${IMPORT_LIMIT} imported`]
+      actions.notify('info', `Imported ${n.tasks} from ${file.name} into Inbox${notes.some(Boolean) ? ` (${notes.filter(Boolean).join('; ')})` : ''}`)
     } catch (err) {
       actions.notify('error', `Could not import ${file.name}: ${err instanceof Error ? err.message : String(err)}`)
     }

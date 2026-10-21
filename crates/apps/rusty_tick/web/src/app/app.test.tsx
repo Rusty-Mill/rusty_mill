@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { INBOX_ID } from '@/api/memory'
+import { applyImport, readImport } from '@/features/import'
 import { addDays, atTime, startOfDay } from '@/lib/date'
 import { renderApp } from '@/test/renderApp'
 
@@ -743,6 +744,19 @@ describe("won't do, countdowns and calendar import", () => {
     expect(await screen.findByText(/Imported 1 from cal\.ics into Inbox/)).toBeInTheDocument()
     const tasks = (await api.snapshot()).tasks
     expect(tasks.map((t) => [t.title, t.listId, t.isAllDay])).toContainEqual(['Dentist', INBOX_ID, true])
+  })
+
+  it('adds an .ics file once, however often and through whichever import it comes', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/c/all/calendar/m')
+    const ics = ['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:d1', 'SUMMARY:Dentist', 'DTSTART;VALUE=DATE:20261010', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n')
+    const upload = async (): Promise<void> => user.upload(await screen.findByLabelText('Import calendar file'), new File([ics], 'cal.ics', { type: 'text/calendar' }))
+    await upload()
+    expect(await screen.findByText(/Imported 1 from cal\.ics into Inbox/)).toBeInTheDocument()
+    await upload()
+    expect(await screen.findByText(/Imported 0 from cal\.ics into Inbox \(1 already here\)/)).toBeInTheDocument()
+    expect((await applyImport(api, readImport(ics, 'cal.ics'))).existing).toBe(1) // Settings → Import from Other Apps
+    expect((await api.snapshot()).tasks.filter((t) => t.title === 'Dentist')).toHaveLength(1)
   })
   it('assigns a task to someone, shows them on the row, and filters by assignee', async () => {
     const user = userEvent.setup()
