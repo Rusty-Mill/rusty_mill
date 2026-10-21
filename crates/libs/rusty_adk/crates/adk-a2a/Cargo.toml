@@ -2,7 +2,7 @@
 name = "adk-a2a"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Serve a Rust ADK agent over the Agent2Agent (A2A) protocol"

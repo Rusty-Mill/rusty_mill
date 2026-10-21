@@ -55,12 +55,10 @@ exported from the crate root.
 - **`PUSH_PROMISE` delivery**: the promised stream is reserved via the
   real state machine, but this driver never assembles/delivers the
   pushed response itself.
-- **Mid-connection `SETTINGS_INITIAL_WINDOW_SIZE` changes** (RFC 9113
-  §6.9.2) don't retroactively resize already-open streams' windows; only
-  streams opened after the change pick up the new value.
-- **`server::Connection::poll_accept`** always returns `Poll::Pending` —
-  turning an inbound HEADERS frame into a queued `IncomingRequest` isn't
-  implemented.
+- **`server::Connection::poll_accept`** and the received-event queue exist
+  now; `server::SendResponse::send_response` still encodes with a fresh
+  HPACK encoder per response (desyncs the peer on the second one) — use
+  `connect::Connection::send_headers`.
 - **No async I/O driver** — callers own reading frames off, and writing
   the frames this crate builds to, the wire themselves.
 

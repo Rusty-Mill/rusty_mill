@@ -98,9 +98,8 @@ The crate is not on crates.io and is not going there. Depend on it from git. Don
 release workflow, a `documentation = "https://docs.rs/..."` link, or a version-based
 install snippet.
 
-MSRV is **1.86**. The optional `redis-store` and `postgres-store` features need 1.88, since
-the `redis` and `sqlx` crates have higher floors — an optional dependency does not raise the
-MSRV for everyone else, so `rust-version` stays at 1.86.
+MSRV is **1.88**: the workspace's resolved dependencies (`icu_*`) declare 1.88, and the CI check
+`check_rust_versions.py` fails if `rust-version` is lower than what the dependencies declare.
 
 ## Two checks that will fail if you are careless
 

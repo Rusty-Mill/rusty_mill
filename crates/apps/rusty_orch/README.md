@@ -50,3 +50,7 @@ Internal — not for external distribution.
 cards on the existing BBP host. Its roster and provider pool are explicit and
 frozen per task. Research and design retain their current adapters. See
 [configuration, recovery and validation](crates/orch-bbp/README.md).
+
+Proposed-change impact: `rusty_orch inspect --repo <checkout> --impact <request.json>`
+joins Cargo consumers to Millboard ownership and complete RemindMe requirements.
+See [Stage 1 usage and snapshot contract](docs/change-impact.md).

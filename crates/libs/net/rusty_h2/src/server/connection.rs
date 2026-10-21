@@ -4,6 +4,7 @@ use crate::connect;
 use crate::error::ErrorCode;
 use crate::frame;
 
+use std::collections::VecDeque;
 use std::task::Poll;
 
 use super::builder::Builder;
@@ -14,6 +15,10 @@ use super::send_response::SendResponse;
 pub struct Connection {
     /// Connection state.
     inner: connect::Connection,
+    /// Requests whose HEADERS have arrived and not yet been accepted.
+    accepted: VecDeque<IncomingRequest>,
+    /// Everything else the peer sent (body, trailers, resets), in order.
+    inbound: Vec<connect::Inbound>,
 }
 
 impl Connection {
@@ -21,20 +26,52 @@ impl Connection {
     pub fn new(builder: Builder) -> Self {
         let settings = builder.to_settings();
         let inner = connect::Connection::new(settings, connect::PeerType::Server);
-        Connection { inner }
+        Connection {
+            inner,
+            accepted: VecDeque::new(),
+            inbound: Vec::new(),
+        }
     }
 
     /// Apply a received frame to the connection state machine.
     pub fn apply(&mut self, frame: frame::Frame) -> crate::error::Result<Vec<frame::Frame>> {
-        self.inner.apply(frame)
+        let result = self.inner.apply(frame);
+        for event in self.inner.take_inbound() {
+            match event {
+                connect::Inbound::Headers {
+                    stream_id,
+                    fields,
+                    end_stream,
+                } => self.accepted.push_back(IncomingRequest {
+                    stream_id,
+                    headers: fields,
+                    end_stream,
+                }),
+                other => self.inbound.push(other),
+            }
+        }
+        result
     }
 
-    /// Accept a new inbound request.
-    ///
-    /// Always pending: turning a HEADERS frame observed by [`Self::apply`]
-    /// into a queued [`IncomingRequest`] isn't implemented yet.
+    /// Drains the body bytes, trailers and resets received since the last
+    /// call. A request's own HEADERS come from [`Self::poll_accept`].
+    pub fn take_inbound(&mut self) -> Vec<connect::Inbound> {
+        std::mem::take(&mut self.inbound)
+    }
+
+    /// The connection state machine, for sending headers, data and trailers
+    /// and returning flow-control capacity.
+    pub fn state_mut(&mut self) -> &mut connect::Connection {
+        &mut self.inner
+    }
+
+    /// Accept the next request whose HEADERS [`Self::apply`] has seen;
+    /// pending when there is none.
     pub fn poll_accept(&mut self) -> Poll<Option<IncomingRequest>> {
-        Poll::Pending
+        match self.accepted.pop_front() {
+            Some(request) => Poll::Ready(Some(request)),
+            None => Poll::Pending,
+        }
     }
 
     /// Send a GOAWAY frame with the provided error code.
@@ -60,6 +97,7 @@ impl Connection {
 pub struct IncomingRequest {
     stream_id: u32,
     headers: Vec<crate::hpack::HeaderField>,
+    end_stream: bool,
 }
 
 impl IncomingRequest {
@@ -69,6 +107,11 @@ impl IncomingRequest {
 
     pub fn headers(&self) -> &[crate::hpack::HeaderField] {
         &self.headers
+    }
+
+    /// Whether the request HEADERS carried END_STREAM, so no body follows.
+    pub fn end_stream(&self) -> bool {
+        self.end_stream
     }
 
     pub fn method(&self) -> &str {

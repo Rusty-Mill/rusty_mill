@@ -80,3 +80,8 @@ Layout: `domain` (pure) / `store` + `mmdb` (port and adapters) / `board` (servic
 Optional runner: [`runner/`](runner/README.md) (`mill-runner`) works cards through stages by running
 a sandboxed command per column; the board does not depend on it. A BBP conductor is designed but
 paused (ADR-0001).
+
+Export validated project ownership without opening a store or services:
+`rusty_mill_board --projects projects.json --export-projects`. The JSON uses the
+existing projects file format and can feed
+[Orch change-impact reports](../rusty_orch/docs/change-impact.md).
