@@ -1,0 +1,11 @@
+---
+category: Fixed
+changelog: "`rusty_h2`: a peer that resets the connection (Windows `ConnectionAborted`/`ConnectionReset`) after sending GOAWAY, with nothing left open, is a clean wind-down on the read path as well as the write path, instead of an I/O error."
+---
+## 2026-10-21 - rusty_h2: a reset after the peer's goodbye is a clean wind-down
+
+- **Found by:** `rusty_h2::driver::dropping_every_client_handle_closes_the_connection_cleanly` failing on `windows-latest` (3 of 3 tries) with `Io(ConnectionAborted)`, on #822 (run 39575394412). It passed in #810 and on other runs, so it is timing-dependent: the client winds down and closes its socket with the server's SETTINGS unread, and Windows reports that to the server as a reset or an abort.
+- **Cause:** the driver treated only `BrokenPipe`, `ConnectionReset` and `NotConnected` as "the peer is gone". Windows also says `ConnectionAborted`. And a fatal read error was always a failure, even when the GOAWAY it followed had already been applied.
+- **Fixed:** `ConnectionAborted` is "the peer is gone" (so a final write or shutdown that fails with it after the peer's GOAWAY or end of input is benign, as `ConnectionReset` already was). A failed read is treated as the end of the input only when the peer is gone, it had announced GOAWAY, every byte read has been applied (no frame cut short) and no call is open. Everything else still fails the connection: a reset without a goodbye, a reset in the middle of a frame, a call still open (accepted or not), an unrelated error. Application output the peer never received stays a failure through the write path (`only_housekeeping_was_lost`).
+- **Tests (written first):** 9 deterministic unit tests over the in-crate `Stub` transport, which now can inject read and write errors; no sockets, sleeps or OS dependence. Written first, 3 of them failed (the write path and the read path); the other 6 guard the failures that must stay failures. The existing housekeeping test in `tests/driver.rs` now also covers `ConnectionAborted`. Mutation-checked: dropping `ConnectionAborted`, the goodbye, the cut-frame check or the open-call check, or recovering every error, each fails a test.
+- **Not observed:** whether the Windows failure was on the read or the write; both are handled. The CI log gives only the final error.

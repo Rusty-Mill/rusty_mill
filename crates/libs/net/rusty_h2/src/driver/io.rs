@@ -16,10 +16,15 @@ use crate::CONNECTION_PREFACE;
 
 const READ_CHUNK: usize = 64 * 1024;
 
-/// Errors a shutdown reports when the peer closed first.
+/// Errors a transport reports when the peer is gone: it closed, or reset the
+/// connection. Windows says `ConnectionAborted` where Unix says
+/// `ConnectionReset` or `BrokenPipe`.
 fn peer_gone(e: &std::io::Error) -> bool {
-    use std::io::ErrorKind::{BrokenPipe, ConnectionReset, NotConnected};
-    matches!(e.kind(), NotConnected | BrokenPipe | ConnectionReset)
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected};
+    matches!(
+        e.kind(),
+        NotConnected | BrokenPipe | ConnectionReset | ConnectionAborted
+    )
 }
 
 /// The connection's task: spawn it, or await it to run the connection to
@@ -145,6 +150,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
             let mut buf = ReadBuf::new(&mut chunk);
             match Pin::new(&mut self.io).poll_read(cx, &mut buf) {
                 Poll::Pending => return Ok(()),
+                Poll::Ready(Err(e)) if self.reset_after_goodbye(&e) => {
+                    // As if the input had ended: everything it carried has
+                    // been applied.
+                    self.eof = true;
+                    return Ok(());
+                }
                 Poll::Ready(Err(e)) => return Err(Error::Io(e)),
                 Poll::Ready(Ok(())) if buf.filled().is_empty() => {
                     self.eof = true;
@@ -226,6 +237,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
     /// it is gone. Everything had been flushed by then.
     fn peer_closed_first(&self, e: &std::io::Error) -> bool {
         peer_gone(e) && (self.eof || lock(&self.shared).conn.goaway_received().is_some())
+    }
+
+    /// Whether a failed read is only the peer resetting the connection after
+    /// it said goodbye: it announced GOAWAY, every byte read has been applied
+    /// (no frame is cut short) and no call is still open. Any other error, an
+    /// earlier failure, or a reset without a goodbye still fails the
+    /// connection. Output the peer never got is caught later: the writes fail
+    /// too, and a failed write loses nothing only if every frame carrying
+    /// application data had been flushed (`only_housekeeping_was_lost`).
+    fn reset_after_goodbye(&self, e: &std::io::Error) -> bool {
+        if !peer_gone(e) || self.rpos != self.rbuf.len() {
+            return false;
+        }
+        let sh = lock(&self.shared);
+        sh.conn.goaway_received().is_some() && sh.active == 0
     }
 
     /// Whether a failed write or flush lost nothing the peer needed: it is the

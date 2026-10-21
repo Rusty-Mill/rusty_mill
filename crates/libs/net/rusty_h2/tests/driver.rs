@@ -964,6 +964,7 @@ fn kind(code: u8) -> std::io::ErrorKind {
         2 => BrokenPipe,
         3 => ConnectionReset,
         4 => NotConnected,
+        5 => ConnectionAborted,
         _ => Other,
     }
 }
@@ -1331,7 +1332,7 @@ async fn losing_only_the_final_goaway_to_a_peer_that_hung_up_is_not_a_failure() 
 #[rusty_tokio::test]
 async fn losing_only_housekeeping_to_a_peer_that_already_left_is_not_a_failure() {
     use std::sync::atomic::Ordering::SeqCst;
-    for code in [2u8, 3, 4] {
+    for code in [2u8, 3, 4, 5] {
         let (raw, b) = pair().await;
         // The peer says everything it will say and leaves before the server's
         // driver has even started, so none of the server's SETTINGS, ACK or
