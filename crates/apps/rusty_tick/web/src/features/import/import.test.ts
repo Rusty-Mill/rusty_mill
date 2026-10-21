@@ -211,6 +211,51 @@ describe('readImport: .ics', () => {
     expect(await shownDays(api)).not.toContain(day('2026-10-12T09:00Z'))
   })
 
+  /** What #829 left: each row of `rows` (in file order) as `[uid, n]`, with its own due date and no exceptions. */
+  async function written829(api: MemoryAdapter, rows: { uid: string; title: string; dueMs: number; repeat?: boolean }[]): Promise<string[]> {
+    const inbox = (await api.snapshot()).inboxId
+    const seen = new Map<string, number>()
+    const ids: string[] = []
+    for (const r of rows) {
+      const n = (seen.get(r.uid) ?? 0) + 1
+      seen.set(r.uid, n)
+      const id = derivedId(`import|calendar file|${JSON.stringify([r.uid, n])}`)
+      await api.createTask({ id, listId: inbox, title: r.title, dueMs: r.dueMs, repeatFlag: r.repeat ? 'RRULE:FREQ=WEEKLY' : '' })
+      ids.push(id)
+    }
+    return ids
+  }
+  const m829 = { uid: 'r1', title: 'Standup', dueMs: Date.UTC(2026, 9, 5, 9), repeat: true }
+  const a829 = { uid: 'r1', title: 'Standup', dueMs: Date.UTC(2026, 9, 13, 9) }
+
+  it('matches tasks #829 imported, adds the master its exceptions, and adds nothing else', async () => {
+    const api = new MemoryAdapter()
+    await written829(api, [m829, a829])
+    expect(await applyImport(api, readImport(cal(master, movedA), 'cal.ics'))).toEqual({ tasks: 0, lists: 0, existing: 1, resumed: 1 })
+    expect((await api.snapshot()).tasks).toHaveLength(2)
+    expect(await shownDays(api)).toEqual([day('2026-10-05T09:00Z'), day('2026-10-13T09:00Z'), day('2026-10-19T09:00Z'), day('2026-10-26T09:00Z')].sort())
+  })
+
+  it('matches tasks #829 imported by due date when the file is reordered and grows, keeping edits', async () => {
+    const api = new MemoryAdapter()
+    const [, aId] = await written829(api, [m829, a829])
+    await api.updateTask(aId!, { notes: 'mine' })
+    const n = await applyImport(api, readImport(cal(movedB, movedA, master), 'cal.ics'))
+    expect(n).toEqual({ tasks: 1, lists: 0, existing: 1, resumed: 1 })
+    const tasks = (await api.snapshot()).tasks
+    expect(tasks).toHaveLength(3)
+    expect(tasks.find((t) => t.id === aId)).toMatchObject({ dueMs: Date.UTC(2026, 9, 13, 9), notes: 'mine' })
+  })
+
+  it('matches a task #829 imported after an instance before it was removed from the file', async () => {
+    const api = new MemoryAdapter()
+    const b829 = { uid: 'r1', title: 'Standup', dueMs: Date.UTC(2026, 9, 20, 9) }
+    const [, , bId] = await written829(api, [m829, a829, b829])
+    const n = await applyImport(api, readImport(cal(master, movedB), 'cal.ics'))
+    expect(n.tasks).toBe(0)
+    expect((await api.snapshot()).tasks.map((t) => t.id)).toContain(bId)
+  })
+
   it('does not add exceptions to an earlier-imported master the user has since edited', async () => {
     const api = new MemoryAdapter()
     const inbox = (await api.snapshot()).inboxId
@@ -225,7 +270,9 @@ describe('readImport: .ics', () => {
     const text = ['BEGIN:VCALENDAR', 'BEGIN:VTODO', 'UID:r1', 'SUMMARY:Renew passport', 'DUE;VALUE=DATE:20261105', 'END:VTODO', 'END:VCALENDAR'].join('\r\n')
     const r = readImport(text, 'Reminders.ics')
     expect(r.tasks).toHaveLength(1)
-    expect(r.tasks[0]).toMatchObject({ key: '["r1","",1]', legacyKey: 'r1', list: '', title: 'Renew passport', isAllDay: true })
+    expect(r.tasks[0]).toMatchObject({ key: '["r1","",1]', list: '', title: 'Renew passport', isAllDay: true })
+    const due = new Date(2026, 10, 5).getTime()
+    expect(r.tasks[0]!.legacy).toEqual(expect.arrayContaining([{ key: '["r1",1]', dueMs: due }, { key: '["r1",2]', dueMs: due }, { key: 'r1', dueMs: due }]))
   })
 })
 

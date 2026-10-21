@@ -12,17 +12,18 @@
  * creation version (`etag` 1), so nobody has edited it, and the write is
  * conditional on that etag. A task edited since is left alone.
  *
- * Rows whose key format changed since #821 carry their old `legacyKey`. #821
- * wrote rows in the order below (top-level tasks first) and skipped a row whose
- * key was already taken, so the first row in that order to produce a legacy
- * key owns the task #821 made for it; a later row with the same legacy key was
- * never written. A row whose new id is not here takes over the task it owns,
- * so files imported before the change still skip or resume, not duplicate.
+ * Rows whose key format changed carry their earlier keys (`legacy`). An
+ * earlier importer wrote rows in the order below (top-level tasks first) and
+ * skipped a row whose key was already taken, so the first row in that order
+ * that may claim a legacy key owns the task it names: any row, or with a
+ * `dueMs`, only one whose due date the task still has. A row whose own id is
+ * not here takes over the task it owns, so files imported before still skip
+ * or resume rather than duplicate.
  */
 import type { ApiClient } from '@/api/client'
 import type { NewTask, Task, TaskPatch } from '@/api/types'
 import { derivedId } from '@/lib/id'
-import type { ImportResult, ImportedTask } from './model'
+import type { ImportResult, ImportedTask, LegacyKey } from './model'
 
 /** The server's limits (`service.rs`), so one long field does not fail a whole import. */
 const MAX_TITLE = 500
@@ -86,16 +87,25 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
   const listIds = new Set(have.lists.map((l) => l.id))
   const existing = new Map(have.tasks.map((t) => [t.id, t]))
   const byKey = new Map(result.tasks.map((t) => [t.key, t]))
-  const idOf = (key: string): string => derivedId(`import|${result.source}|${key}`)
+  const memo = new Map<string, string>()
+  const idOf = (key: string): string => {
+    const known = memo.get(key)
+    if (known !== undefined) return known
+    const id = derivedId(`import|${result.source}|${key}`)
+    memo.set(key, id)
+    return id
+  }
   const roots = result.tasks.map((t) => ({ t, root: rootOf(t, byKey) }))
   const order = [...roots.filter((r) => !r.root), ...roots.filter((r) => r.root)] // #821's write order too
-  const owner = new Map<string, string>() // legacy id -> key of the row #821 wrote it for
-  for (const { t } of order) if (t.legacyKey !== null && !owner.has(idOf(t.legacyKey))) owner.set(idOf(t.legacyKey), t.key)
-  /** The id a row writes to: its own, else the task #821 made for it, if that is here. */
+  const mayClaim = (c: LegacyKey): boolean => c.dueMs === undefined || existing.get(idOf(c.key))?.dueMs === c.dueMs
+  const owner = new Map<string, string>() // legacy id -> key of the row that owns the task it names
+  for (const { t } of order) for (const c of t.legacy) if (mayClaim(c) && !owner.has(idOf(c.key))) owner.set(idOf(c.key), t.key)
+  /** The id a row writes to: its own, else the earlier task it owns, if that is here. */
   const resolve = (t: ImportedTask): string => {
     const own = idOf(t.key)
-    const legacy = t.legacyKey !== null ? idOf(t.legacyKey) : null
-    return !existing.has(own) && legacy !== null && owner.get(legacy) === t.key && existing.has(legacy) ? legacy : own
+    if (existing.has(own)) return own
+    const legacy = t.legacy.map((c) => idOf(c.key)).find((id) => owner.get(id) === t.key && existing.has(id))
+    return legacy ?? own
   }
   const ids = new Map<string, string>() // task key -> resolved id, so subtasks point at their parent's real id
   const out: Applied = { tasks: 0, lists: 0, existing: 0, resumed: 0 }

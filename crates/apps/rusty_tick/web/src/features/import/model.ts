@@ -8,8 +8,8 @@ import { parseRule } from '@/lib/recurrence'
 export interface ImportedTask {
   /** Stable within the source (its own id, or one made from the row): seeds the task id, so importing twice adds nothing. */
   key: string
-  /** The key the first importer (#821) gave this row, for sources whose keys changed since; see `legacyKeys`. */
-  legacyKey: string | null
+  /** Keys earlier importers gave this row, newest first, for sources whose keys changed since; see `LegacyKey`. */
+  legacy: LegacyKey[]
   /** List name as the source calls it; `''` means the Inbox. */
   list: string
   parentKey: string | null
@@ -29,6 +29,16 @@ export interface ImportedTask {
   status: Status
 }
 
+/**
+ * A key an earlier importer gave a row. With `dueMs`, the key alone does not
+ * say which row it was (it was given by position), so the task it names is
+ * this row's only while its due date still matches.
+ */
+export interface LegacyKey {
+  key: string
+  dueMs?: number | null
+}
+
 export interface ImportResult {
   /** Human name of the source, for messages: `TickTick`, `Todoist`, ... */
   source: string
@@ -41,7 +51,7 @@ export interface ImportResult {
 
 export const blankTask = (key: string, title: string): ImportedTask => ({
   key,
-  legacyKey: null,
+  legacy: [],
   list: '',
   parentKey: null,
   title,
