@@ -85,7 +85,10 @@ fn actual_cli_adopts_after_every_lost_open_reply_and_freezes_the_pool() {
             FakeSupervisor::default(),
         )
         .unwrap();
-        assert!(host.open(&task, &board).is_err(), "lost reply {at}");
+        assert!(
+            host.open(&task, &board, &fence()).is_err(),
+            "lost reply {at}"
+        );
         drop(host);
         let mut changed = c.clone();
         changed.pool.get_mut("writer").unwrap().vendor = "codex".into();
@@ -97,8 +100,8 @@ fn actual_cli_adopts_after_every_lost_open_reply_and_freezes_the_pool() {
             FakeSupervisor::default(),
         )
         .unwrap();
-        let handle = host.open(&task, &board).unwrap();
-        assert_eq!(host.open(&task, &board).unwrap(), handle);
+        let handle = host.open(&task, &board, &fence()).unwrap();
+        assert_eq!(host.open(&task, &board, &fence()).unwrap(), handle);
         let h = host.handle(&handle).unwrap();
         let log = events(&h);
         assert_eq!(
@@ -193,7 +196,7 @@ fn wait_gate<S: Supervisor>(
 ) -> GateContext {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let progress = host.poll(handle).unwrap();
+        let progress = host.poll(handle, &fence()).unwrap();
         if let Progress::Gate(g) = &progress {
             assert!(
                 g.prompt.as_str().contains(expected),
@@ -229,7 +232,7 @@ fn answer<S: Supervisor>(
         .unwrap();
     let question = board.get(id).unwrap().clone();
     assert_eq!(
-        host.relay(handle, &question, &txt(body)).unwrap(),
+        host.relay(handle, &question, &txt(body), &fence()).unwrap(),
         Relayed::Applied
     );
     question
@@ -284,7 +287,7 @@ fn scripted_task_restarts_moderator_then_records_receipt_and_closes() {
         supervisor.clone(),
     )
     .unwrap();
-    let handle = host.open(&task, &board).unwrap();
+    let handle = host.open(&task, &board, &fence()).unwrap();
     let h = host.handle(&handle).unwrap();
     let gate = wait_gate(&mut host, &handle, "approve-plan");
     // Simulate a killed moderator at a durable human gate, then rebuild the adapter.
@@ -301,11 +304,11 @@ fn scripted_task_restarts_moderator_then_records_receipt_and_closes() {
         supervisor.clone(),
     )
     .unwrap();
-    assert_eq!(host.open(&task, &board).unwrap(), handle);
+    assert_eq!(host.open(&task, &board, &fence()).unwrap(), handle);
     let question = answer(&mut host, &handle, &mut board, gate, "approve-plan art:2");
     // Lost checkpoint after BBP accepted: replay must not create a second approval.
     assert_eq!(
-        host.relay(&handle, &question, &txt("approve-plan art:2"))
+        host.relay(&handle, &question, &txt("approve-plan art:2"), &fence())
             .unwrap(),
         Relayed::Applied
     );
@@ -328,7 +331,9 @@ fn scripted_task_restarts_moderator_then_records_receipt_and_closes() {
         gate,
         "receipt art:4 external-merge-sha",
     );
-    assert!(matches!(host.poll(&handle).unwrap(),Progress::Closed{outputs} if outputs.len()==2));
+    assert!(
+        matches!(host.poll(&handle, &fence()).unwrap(),Progress::Closed{outputs} if outputs.len()==2)
+    );
     let log = events(&h);
     let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &log);
     assert_eq!(
@@ -377,10 +382,10 @@ RPC
     c.pool.get_mut("writer").unwrap().program = "/bin/sh".into();
     c.pool.get_mut("writer").unwrap().args = vec![script.to_string_lossy().into()];
     let mut host = BbpHost::new(c.clone(), "supervisor".into(), "context".into()).unwrap();
-    let handle = host.open(&task, &board).unwrap();
+    let handle = host.open(&task, &board, &fence()).unwrap();
     let h = host.handle(&handle).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !matches!(host.poll(&handle).unwrap(), Progress::Gate(_)) {
+    while !matches!(host.poll(&handle, &fence()).unwrap(), Progress::Gate(_)) {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -403,7 +408,10 @@ RPC
         .unwrap()
         .success());
     std::thread::sleep(Duration::from_millis(50));
-    assert!(matches!(host.poll(&handle).unwrap(), Progress::Gate(_)));
+    assert!(matches!(
+        host.poll(&handle, &fence()).unwrap(),
+        Progress::Gate(_)
+    ));
     let second = std::fs::read_to_string(pid_path).unwrap();
     assert_ne!(first, second);
     // Cancel through the real human channel; the detached moderator exits itself.
@@ -434,7 +442,7 @@ RPC
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(matches!(
-        host.poll(&handle).unwrap(),
+        host.poll(&handle, &fence()).unwrap(),
         Progress::Cancelled { .. }
     ));
     std::fs::remove_dir_all(dir).unwrap();
@@ -529,6 +537,104 @@ fn orch_binary_reopens_its_durable_goal_without_opening_or_charging_twice() {
 }
 
 #[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN"]
+fn orch_binary_from_a_stale_state_copy_is_fenced_out_of_the_task() {
+    let (dir, mut c) = setup();
+    c.pool.get_mut("writer").unwrap().program = "/bin/sh".into();
+    c.pool.get_mut("writer").unwrap().args = vec!["-c".into(), "sleep 10".into()];
+    let goal = dir.join("goal.json");
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&c).unwrap()).unwrap();
+    std::fs::write(&goal, r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#).unwrap();
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    let run = |state: &str| {
+        let out = Command::new(&orch)
+            .arg("run")
+            .arg(&goal)
+            .arg("--bbp")
+            .arg(&cfg)
+            .arg("--state")
+            .arg(dir.join(state))
+            .arg("--json")
+            .output()
+            .unwrap();
+        let report = rusty_serde::json::from_str::<rusty_serde::json::Value>(
+            &String::from_utf8(out.stdout).unwrap(),
+        )
+        .unwrap();
+        (out.status.success(), report)
+    };
+    let (ok, first) = run("live");
+    assert!(ok, "{first:?}");
+    // A copy of the state as it stood after the first holder, e.g. a restored backup.
+    let copied = Command::new("cp")
+        .arg("-R")
+        .arg(dir.join("live"))
+        .arg(dir.join("copy"))
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    let (ok, second) = run("live");
+    assert!(ok, "{second:?}");
+    // The copy reaches the same generation from its own record, so only the
+    // holder distinguishes it. It must not drive the task.
+    let (ok, stale) = run("copy");
+    assert!(!ok);
+    assert_eq!(stale["ended"]["kind"].as_str(), Some("failed"));
+    assert!(
+        stale["ended"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("held by another process"),
+        "{stale:?}"
+    );
+    assert_eq!(stale["calls"].as_u64(), Some(1));
+    assert_eq!(stale["tasks"][0]["status"].as_str(), Some("running"));
+    // The live state takes over again past the generation the refused copy
+    // recorded, and keeps the one task.
+    let (ok, third) = run("live");
+    assert!(ok, "{third:?}");
+    assert_eq!(third["ended"]["kind"].as_str(), Some("waiting"));
+    let entry = third["entries"]
+        .as_seq()
+        .unwrap()
+        .iter()
+        .find(|e| e["body"].as_str() == Some("hosted task"))
+        .unwrap();
+    let pointer = entry["refs"].as_seq().unwrap()[0]
+        .as_str()
+        .unwrap()
+        .strip_prefix("url:bbp:")
+        .unwrap();
+    let h: Handle = rusty_serde::json::from_str(pointer).unwrap();
+    let log = events(&h);
+    assert_eq!(
+        log.iter()
+            .filter(|e| matches!(e, Event::TaskOpened { .. }))
+            .count(),
+        1
+    );
+    let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &log);
+    let cancel = Command::new(&c.binary)
+        .args(["human", "--dir"])
+        .arg(&h.dir)
+        .args([
+            "--task",
+            &h.task,
+            "--rev",
+            &view.card.rev.0.to_string(),
+            "cancel",
+            "test cleanup",
+        ])
+        .output()
+        .unwrap();
+    assert!(cancel.status.success());
+    std::thread::sleep(Duration::from_millis(600));
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS stale-holder");
+}
+
+#[test]
 #[ignore = "requires BBP_TEST_BIN; full dispatcher correction path"]
 fn dispatcher_allows_invalid_subject_and_missing_receipt_to_be_corrected() {
     use orch_core::goal::{Goal, GoalDraft, StopRule};
@@ -571,7 +677,7 @@ fn dispatcher_allows_invalid_subject_and_missing_receipt_to_be_corrected() {
         supervisor.clone(),
     )
     .unwrap();
-    let mut dispatcher = Dispatcher::new(route, FakeAgent::new([])).with_host(host);
+    let mut dispatcher = Dispatcher::new(route, FakeAgent::new([])).with_host(host, fence());
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut invalid_plan = false;
     let mut invalid_receipt = false;
@@ -655,8 +761,8 @@ fn concurrent_tasks_keep_run_one_checkouts_isolated_during_adoption() {
     };
     let mut a = make("a", sa.clone());
     let mut b = make("b", sb.clone());
-    let ha = a.open(&task, &board).unwrap();
-    let hb = b.open(&task, &board).unwrap();
+    let ha = a.open(&task, &board, &fence()).unwrap();
+    let hb = b.open(&task, &board, &fence()).unwrap();
     let da = a.handle(&ha).unwrap();
     let db = b.handle(&hb).unwrap();
     let wa = supervisor::task_work(&c, &da.task).join("run-1");
@@ -671,15 +777,15 @@ fn concurrent_tasks_keep_run_one_checkouts_isolated_during_adoption() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !wa.join("running.pid").exists() || !wb.join("running.pid").exists() {
         assert!(Instant::now() < deadline, "both workloads did not overlap");
-        a.poll(&ha).unwrap();
-        b.poll(&hb).unwrap();
+        a.poll(&ha, &fence()).unwrap();
+        b.poll(&hb, &fence()).unwrap();
         std::thread::sleep(Duration::from_millis(10));
     }
     std::fs::write(wa.join("sentinel"), "a").unwrap();
     std::fs::write(wb.join("sentinel"), "b").unwrap();
     drop(a);
     let mut a = make("a", sa.clone());
-    assert_eq!(a.open(&task, &board).unwrap(), ha);
+    assert_eq!(a.open(&task, &board, &fence()).unwrap(), ha);
     assert_eq!(std::fs::read_to_string(wa.join("sentinel")).unwrap(), "a");
     assert_eq!(std::fs::read_to_string(wb.join("sentinel")).unwrap(), "b");
     let ga = wait_gate(&mut a, &ha, "approve-merge");
@@ -690,8 +796,14 @@ fn concurrent_tasks_keep_run_one_checkouts_isolated_during_adoption() {
     let gb = wait_gate(&mut b, &hb, "receipt");
     answer(&mut a, &ha, &mut ba, ga, "receipt art:4 a");
     answer(&mut b, &hb, &mut bb, gb, "receipt art:4 b");
-    assert!(matches!(a.poll(&ha).unwrap(), Progress::Closed { .. }));
-    assert!(matches!(b.poll(&hb).unwrap(), Progress::Closed { .. }));
+    assert!(matches!(
+        a.poll(&ha, &fence()).unwrap(),
+        Progress::Closed { .. }
+    ));
+    assert!(matches!(
+        b.poll(&hb, &fence()).unwrap(),
+        Progress::Closed { .. }
+    ));
     drop(a);
     drop(b);
     drop(sa);
@@ -732,7 +844,7 @@ RPC
         supervisor.clone(),
     )
     .unwrap();
-    let handle = host.open(&task, &board).unwrap();
+    let handle = host.open(&task, &board, &fence()).unwrap();
     let h = host.handle(&handle).unwrap();
     let gate = wait_gate(&mut host, &handle, "approve-plan");
     answer(&mut host, &handle, &mut board, gate, "approve-plan art:2");
@@ -772,7 +884,7 @@ RPC
         .is_empty()
     {
         assert!(Instant::now() < deadline);
-        host.poll(&handle).unwrap();
+        host.poll(&handle, &fence()).unwrap();
         std::thread::sleep(Duration::from_millis(20));
     }
     let gate = wait_gate(&mut host, &handle, "resume STATE");
@@ -788,7 +900,7 @@ RPC
     let gate = wait_gate(&mut host, &handle, "receipt");
     answer(&mut host, &handle, &mut board, gate, "receipt art:4 merged");
     assert!(matches!(
-        host.poll(&handle).unwrap(),
+        host.poll(&handle, &fence()).unwrap(),
         Progress::Closed { .. }
     ));
     drop(host);

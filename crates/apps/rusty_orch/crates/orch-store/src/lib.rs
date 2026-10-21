@@ -19,12 +19,14 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+mod assignments;
 mod record;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use orch_core::board::Board;
+use orch_core::factory::Factory;
 use orch_core::task::Plan;
 use orch_core::GoalId;
 use orch_dispatch::Ledger;
@@ -34,11 +36,13 @@ use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::generic::query::GetById;
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
+use assignments::AssignmentRecord;
 use record::{ById, GoalRecord, Revision};
 
 /// The store's files inside its directory.
 const LOCK_FILE: &str = "lock";
 const GOALS_FILE: &str = "goals.mmap";
+const ASSIGNMENTS_FILE: &str = "assignments.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -114,9 +118,11 @@ pub fn fingerprint(goal_json: &str) -> u64 {
     hash.finish()
 }
 
-/// One data directory, locked for this process, holding goal snapshots.
+/// One data directory, locked for this process, holding goal snapshots and
+/// each goal's assignment record.
 pub struct Store {
     goals: GenericMmapStore<GoalRecord, ById, Revision>,
+    assignments: GenericMmapStore<AssignmentRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -137,7 +143,17 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
-        Ok(Self { goals, _lock: lock })
+        let path = dir.join(ASSIGNMENTS_FILE);
+        let assignments = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
+        Ok(Self {
+            goals,
+            assignments,
+            _lock: lock,
+        })
     }
 
     /// The saved state of `goal`, or `None` when nothing was saved for it.
@@ -189,6 +205,45 @@ impl Store {
                 .map_err(|e| StoreError::Engine(engine_error(e)))
         } else {
             self.goals
+                .replace(record)
+                .map_err(|e| StoreError::Engine(engine_error(e)))
+        }
+    }
+}
+
+impl Store {
+    /// The assignment record of `goal`, or an empty factory when none was
+    /// saved.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record does not rebuild through
+    /// [`Factory::restore`].
+    pub fn load_factory(&self, goal: GoalId) -> Result<Factory, StoreError> {
+        self.assignments
+            .get(record::key(goal))
+            .map_or_else(|| Ok(Factory::default()), AssignmentRecord::into_factory)
+    }
+
+    /// Save `factory` as the assignment record of `goal`. A successful return
+    /// means it is durable, so a generation taken over in it may be used.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_factory(&mut self, goal: GoalId, factory: &Factory) -> Result<(), StoreError> {
+        let revision = self
+            .assignments
+            .get(record::key(goal))
+            .map_or(0, |r| r.revision as u64)
+            + 1;
+        let record = AssignmentRecord::from_factory(goal, factory, revision);
+        if revision == 1 {
+            self.assignments
+                .insert(record)
+                .map_err(|e| StoreError::Engine(engine_error(e)))
+        } else {
+            self.assignments
                 .replace(record)
                 .map_err(|e| StoreError::Engine(engine_error(e)))
         }

@@ -10,11 +10,12 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use orch_core::board::{Author, Board, EntryKind, NewEntry};
+use orch_core::factory::{Factory, FactoryError, Grant, Identity};
 use orch_core::goal::Goal;
 use orch_core::task::Plan;
 use orch_core::{EntryId, GoalId, TaskId, Text};
 use orch_dispatch::{
-    AgentRunner, DispatchError, Dispatcher, Ledger, Outcome, Routing, RoutingError,
+    AgentRunner, DispatchError, Dispatcher, Fence, Ledger, Outcome, Routing, RoutingError, TaskHost,
 };
 use orch_store::{GoalState, Store, StoreError};
 
@@ -81,6 +82,9 @@ pub enum RunError {
     Store(StoreError),
     /// The store holds state for a different goal file.
     GoalChanged,
+    /// The goal's orchestrator assignment could not be taken over, so no
+    /// hosted command may run.
+    Lease(String),
 }
 
 impl fmt::Display for RunError {
@@ -94,6 +98,7 @@ impl fmt::Display for RunError {
                 "the goal file differs from the one the saved state was built from; \
                  use a fresh --state directory",
             ),
+            Self::Lease(why) => write!(f, "cannot hold the goal's hosted tasks: {why}"),
         }
     }
 }
@@ -160,14 +165,70 @@ pub fn execute_resumable<R: AgentRunner>(
     execute_hosted(spec, runner, console, now, resume, None)
 }
 
-/// Resumable execution with an optional long-lived task host.
+/// The one orchestrator assignment a goal's state holds. Each process that
+/// hosts the goal takes it over at the next generation.
+pub const GOAL_ORCHESTRATOR: &str = "goal-orchestrator";
+
+/// A token unique to this process, distinguishing it from any other holder
+/// that reaches the same generation from a diverged copy of the state.
+///
+/// # Errors
+///
+/// When the platform's random source fails.
+pub fn holder() -> Result<Text, String> {
+    let bytes = rusty_rand::bytes(16).map_err(|e| format!("random holder: {e}"))?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Text::new(&hex).ok_or_else(|| "empty holder".to_owned())
+}
+
+/// Take over the goal's orchestrator assignment at its next generation and
+/// make that durable before any hosted command can use it, so every earlier
+/// process holding the goal is fenced out by the host.
+fn take_over(
+    resume: &mut Option<Resume<'_>>,
+    goal: &Goal,
+    goal_id: GoalId,
+) -> Result<Fence, RunError> {
+    let mut factory = match resume {
+        Some(r) => r.store.load_factory(goal_id)?,
+        None => Factory::default(),
+    };
+    let lease = |e: FactoryError| RunError::Lease(format!("{e:?}"));
+    let generation = factory
+        .take_over(
+            GOAL_ORCHESTRATOR,
+            Identity {
+                id: "rusty_orch".into(),
+                target: "rusty_orch run".into(),
+            },
+            Grant {
+                projects: Vec::new(),
+                delegation_budget: 0,
+                call_budget: goal.budget().max_calls().get(),
+            },
+        )
+        .map_err(lease)?;
+    if let Some(r) = resume {
+        r.store.save_factory(goal_id, &factory)?;
+    }
+    Ok(Fence {
+        assignment: Text::new(GOAL_ORCHESTRATOR)
+            .ok_or_else(|| RunError::Lease("blank assignment".into()))?,
+        generation,
+        holder: holder().map_err(RunError::Lease)?,
+    })
+}
+
+/// Resumable execution with an optional long-lived task host. With a host,
+/// this process first takes over the goal's orchestrator assignment and
+/// issues every hosted command under that generation.
 pub fn execute_hosted<R: AgentRunner>(
     spec: Spec,
     runner: R,
     console: &mut dyn Console,
     now: impl Fn() -> Instant,
     mut resume: Option<Resume<'_>>,
-    host: Option<Box<dyn orch_dispatch::TaskHost>>,
+    host: Option<Box<dyn TaskHost>>,
 ) -> Result<Summary, RunError> {
     let goal_id = GoalId::from_raw(1);
     let saved = match &resume {
@@ -183,8 +244,12 @@ pub fn execute_hosted<R: AgentRunner>(
         ),
     };
     let routing = Routing::try_from(spec.routing).map_err(RunError::Routing)?;
-    let mut dispatcher = Dispatcher::new(routing, runner).with_boxed_host(host);
     let goal = spec.goal;
+    let host = match host {
+        Some(host) => Some((host, take_over(&mut resume, &goal, goal_id)?)),
+        None => None,
+    };
+    let mut dispatcher = Dispatcher::new(routing, runner).with_boxed_host(host);
     let budget = goal.budget().wall_clock();
     let started = now();
 

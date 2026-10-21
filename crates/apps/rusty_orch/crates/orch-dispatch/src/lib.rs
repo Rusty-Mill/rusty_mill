@@ -28,4 +28,4 @@ pub use dispatch::{Ceiling, DispatchError, Dispatcher, Outcome};
 pub use ledger::Ledger;
 pub use routing::{Routing, RoutingConfig, RoutingError};
 
-pub use host::{hosted_handle, GateContext, HostHandle, Progress, Relayed, TaskHost};
+pub use host::{hosted_handle, Fence, GateContext, HostHandle, Progress, Relayed, TaskHost};

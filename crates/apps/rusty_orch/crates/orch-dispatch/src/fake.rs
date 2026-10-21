@@ -75,14 +75,36 @@ pub struct HostScript {
     pub answers: Vec<(orch_core::board::Entry, orch_core::Text)>,
     pub progress: std::collections::VecDeque<Result<crate::Progress, crate::ClassifiedError>>,
     pub relays: std::collections::VecDeque<Result<crate::Relayed, crate::ClassifiedError>>,
+    /// The fence of every command, in order.
+    pub fences: Vec<crate::Fence>,
+}
+impl HostScript {
+    /// Record `fence`, refusing it like a real host when a later generation,
+    /// or another holder of the same one, has already been admitted.
+    fn admit(&mut self, fence: &crate::Fence) -> Result<(), crate::ClassifiedError> {
+        let superseded = self.fences.iter().any(|seen| {
+            seen.generation > fence.generation
+                || (seen.generation == fence.generation && seen.holder != fence.holder)
+        });
+        if superseded {
+            return Err(crate::ClassifiedError::Unavailable(crate::AgentError(
+                "fake host: superseded fence".into(),
+            )));
+        }
+        self.fences.push(fence.clone());
+        Ok(())
+    }
 }
 impl crate::TaskHost for FakeHost {
     fn open(
         &mut self,
         _task: &orch_core::task::Task,
         _board: &orch_core::board::Board,
+        fence: &crate::Fence,
     ) -> Result<crate::HostHandle, crate::ClassifiedError> {
-        self.0.borrow_mut().opens += 1;
+        let mut state = self.0.borrow_mut();
+        state.admit(fence)?;
+        state.opens += 1;
         Ok(crate::HostHandle(
             orch_core::Text::new("fake:durable-task").ok_or_else(|| {
                 crate::ClassifiedError::Permanent(crate::AgentError(
@@ -94,8 +116,10 @@ impl crate::TaskHost for FakeHost {
     fn poll(
         &mut self,
         _handle: &crate::HostHandle,
+        fence: &crate::Fence,
     ) -> Result<crate::Progress, crate::ClassifiedError> {
         let mut state = self.0.borrow_mut();
+        state.admit(fence)?;
         state.polls += 1;
         state
             .progress
@@ -107,8 +131,10 @@ impl crate::TaskHost for FakeHost {
         _handle: &crate::HostHandle,
         gate: &orch_core::board::Entry,
         answer: &orch_core::Text,
+        fence: &crate::Fence,
     ) -> Result<crate::Relayed, crate::ClassifiedError> {
         let mut state = self.0.borrow_mut();
+        state.admit(fence)?;
         state.answers.push((gate.clone(), answer.clone()));
         state
             .relays
