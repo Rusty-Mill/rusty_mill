@@ -215,6 +215,40 @@ pub(crate) fn build_client_config(policy: &TrustPolicy) -> Result<Arc<ClientConf
     Ok(Arc::new(config))
 }
 
+/// The most ALPN protocol-name bytes a client will offer (each name counts
+/// its length plus one). rustls encodes all of a ClientHello's extensions
+/// behind a 16-bit length and panics in debug builds when that overflows, so
+/// the offer is capped well under 65,535 to leave room for the others.
+const MAX_ALPN_LIST_BYTES: usize = 32 * 1024;
+
+/// Checks an ALPN offer before it reaches rustls. An empty overall offer is
+/// fine (no ALPN); an empty name trips a rustls debug assertion, a name over
+/// 255 bytes has its length truncated to one byte on the wire, and an
+/// oversized offer overflows the extension block.
+pub(crate) fn validate_alpn(alpn_protocols: &[Vec<u8>]) -> Result<(), Error> {
+    let mut total = 0usize;
+    for (i, name) in alpn_protocols.iter().enumerate() {
+        if name.is_empty() {
+            return Err(Error::InvalidAlpnProtocols(format!(
+                "protocol {i} is empty"
+            )));
+        }
+        if name.len() > 255 {
+            return Err(Error::InvalidAlpnProtocols(format!(
+                "protocol {i} is {} bytes; a name is at most 255",
+                name.len()
+            )));
+        }
+        total += name.len() + 1;
+    }
+    if total > MAX_ALPN_LIST_BYTES {
+        return Err(Error::InvalidAlpnProtocols(format!(
+            "the offer is {total} bytes framed; this library accepts at most {MAX_ALPN_LIST_BYTES} (a policy cap, below the protocol limit)"
+        )));
+    }
+    Ok(())
+}
+
 /// Like [`build_client_config`], but presents `cert_chain`/`key` to the
 /// server as a client certificate (mTLS) — for a server that requests and
 /// verifies one, rather than the plain `with_no_client_auth()` path.
@@ -227,6 +261,21 @@ pub(crate) fn build_client_config_with_identity(
     Ok(Arc::new(config))
 }
 
+/// Both of the above: presents `cert_chain`/`key` as the client certificate
+/// *and* offers `alpn_protocols`, for a server that requires mutual TLS and
+/// negotiates an application protocol.
+pub(crate) fn build_client_config_with_identity_and_alpn(
+    policy: &TrustPolicy,
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    alpn_protocols: Vec<Vec<u8>>,
+) -> Result<Arc<ClientConfig>, Error> {
+    validate_alpn(&alpn_protocols)?;
+    let mut config = client_config_builder(policy)?.with_client_auth_cert(cert_chain, key)?;
+    config.alpn_protocols = alpn_protocols;
+    Ok(Arc::new(config))
+}
+
 /// Like [`build_client_config`], but offers `alpn_protocols` during the
 /// handshake (`rustls::ClientConfig::alpn_protocols` is a plain field set
 /// after building, not part of the typestate builder chain).
@@ -234,6 +283,7 @@ pub(crate) fn build_client_config_with_alpn(
     policy: &TrustPolicy,
     alpn_protocols: Vec<Vec<u8>>,
 ) -> Result<Arc<ClientConfig>, Error> {
+    validate_alpn(&alpn_protocols)?;
     let mut config = client_config_builder(policy)?.with_no_client_auth();
     config.alpn_protocols = alpn_protocols;
     Ok(Arc::new(config))
