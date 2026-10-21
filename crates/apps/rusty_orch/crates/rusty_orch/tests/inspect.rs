@@ -241,6 +241,7 @@ fn proposed_change_is_revision_bound_and_detects_requirement_edits() {
             .arg(inputs.0.join("request.json"))
             .env("ORCH_BBP", "missing-config.json")
             .env("RUSTY_ORCH_STATE", workspace.0.join("must-not-exist"))
+            .env("RUSTY_ORCH_METADATA_DIAGNOSTICS", "1")
             .output()
             .expect("impact process")
     };
@@ -252,6 +253,29 @@ fn proposed_change_is_revision_bound_and_detects_requirement_edits() {
     );
     let first_json = rusty_json::Value::parse(std::str::from_utf8(&first.stdout).expect("UTF8"))
         .expect("report");
+    let first_diagnostics = rusty_json::Value::parse(
+        std::str::from_utf8(&first.stderr)
+            .expect("diagnostics UTF8")
+            .trim(),
+    )
+    .expect("successful subprocess diagnostics");
+    assert_eq!(first_diagnostics["schema_version"].as_i64(), Some(2));
+    assert!(first_diagnostics["top_level_fingerprints"]["packages"]
+        .as_str()
+        .is_some());
+    assert!(
+        first_diagnostics["path_fields"]["targets.src_path"]["fingerprint"]
+            .as_str()
+            .is_some()
+    );
+    assert!(first_diagnostics["records"]
+        .as_array()
+        .expect("diagnostic records")
+        .iter()
+        .any(|entry| {
+            entry["pointer"].as_str() == Some("/metadata")
+                && entry["opaque"].as_str() == Some("authored-metadata")
+        }));
     assert_eq!(
         first_json["source_revision"]
             .as_str()
@@ -277,7 +301,22 @@ fn proposed_change_is_revision_bound_and_detects_requirement_edits() {
         first_json["requirements"][0]["id"].as_str(),
         Some("durable")
     );
-    assert_eq!(first.stdout, invoke().stdout);
+    for attempt in 2..=16 {
+        let repeated = invoke();
+        assert!(
+            repeated.status.success(),
+            "impact inspection {attempt} failed ({}): {}",
+            repeated.status,
+            String::from_utf8_lossy(&repeated.stderr)
+        );
+        assert_eq!(
+            first.stdout,
+            repeated.stdout,
+            "cargo metadata diagnostics at attempt {attempt}\nfirst: {}\nrepeated: {}",
+            String::from_utf8_lossy(&first.stderr),
+            String::from_utf8_lossy(&repeated.stderr)
+        );
+    }
     inputs.write(
         "previous.json",
         std::str::from_utf8(&first.stdout).expect("UTF8"),
