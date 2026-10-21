@@ -10,7 +10,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use orch_core::board::{Author, Board, EntryKind, NewEntry};
-use orch_core::factory::{Factory, FactoryError, Grant, Identity};
+use orch_core::factory::{ExecutionLink, ExecutionState, Factory, FactoryError, Grant, Identity};
 use orch_core::goal::Goal;
 use orch_core::task::Plan;
 use orch_core::{EntryId, GoalId, TaskId, Text};
@@ -20,6 +20,7 @@ use orch_dispatch::{
 use orch_store::{GoalState, Store, StoreError};
 
 use crate::input::{build_plan, InputError, Spec};
+use crate::millboard::{self, CardLinks};
 
 /// Where answers come from and where progress goes. The binary wires stdin
 /// and stderr; tests script it.
@@ -181,13 +182,36 @@ pub fn holder() -> Result<Text, String> {
     Text::new(&hex).ok_or_else(|| "empty holder".to_owned())
 }
 
+/// The attempt a card's execution link names. A run resumes the goal's
+/// hosted tasks rather than re-attempting them, so there is one.
+pub const ATTEMPT: &str = "1";
+
+/// A long-lived task host, and the Millboard card the goal is hosted for.
+pub struct Hosting {
+    pub host: Box<dyn TaskHost>,
+    pub card: Option<CardHosting>,
+}
+
+/// The Millboard card a hosted goal works for.
+pub struct CardHosting {
+    /// Millboard's card id.
+    pub card: String,
+    /// The goal's BBP namespace: its logical execution, and the prefix every
+    /// one of its BBP task ids derives from.
+    pub namespace: String,
+    pub board: Box<dyn CardLinks>,
+}
+
 /// Take over the goal's orchestrator assignment at its next generation and
 /// make that durable before any hosted command can use it, so every earlier
-/// process holding the goal is fenced out by the host.
+/// process holding the goal is fenced out by the host. With a card, the
+/// generation is then recorded with the card, so the card always names the
+/// generation that may act for it.
 fn take_over(
     resume: &mut Option<Resume<'_>>,
     goal: &Goal,
     goal_id: GoalId,
+    card: Option<&mut CardHosting>,
 ) -> Result<Fence, RunError> {
     let mut factory = match resume {
         Some(r) => r.store.load_factory(goal_id)?,
@@ -208,8 +232,15 @@ fn take_over(
             },
         )
         .map_err(lease)?;
+    let link = card
+        .as_ref()
+        .map(|c| link_card(&mut factory, c, goal_id, generation))
+        .transpose()?;
     if let Some(r) = resume {
         r.store.save_factory(goal_id, &factory)?;
+    }
+    if let (Some(card), Some(link)) = (card, link) {
+        millboard::publish(card.board.as_mut(), &link).map_err(RunError::Lease)?;
     }
     Ok(Fence {
         assignment: Text::new(GOAL_ORCHESTRATOR)
@@ -219,16 +250,45 @@ fn take_over(
     })
 }
 
+/// Bind `card` to the goal's execution at `generation` in the factory. One
+/// state directory hosts one goal, so it serves one card.
+fn link_card(
+    factory: &mut Factory,
+    card: &CardHosting,
+    goal_id: GoalId,
+    generation: u64,
+) -> Result<ExecutionLink, RunError> {
+    if let Some(other) = factory.links().find(|l| l.card != card.card) {
+        return Err(RunError::Lease(format!(
+            "this state is linked to card {}",
+            other.card
+        )));
+    }
+    factory
+        .initiate_or_adopt(ExecutionLink {
+            card: card.card.clone(),
+            execution: card.namespace.clone(),
+            goal: goal_id.get().to_string(),
+            bbp_task: card.namespace.clone(),
+            attempt: ATTEMPT.into(),
+            assignment: GOAL_ORCHESTRATOR.into(),
+            generation,
+            state: ExecutionState::Running,
+        })
+        .map_err(|e| RunError::Lease(format!("{e:?}")))
+}
+
 /// Resumable execution with an optional long-lived task host. With a host,
-/// this process first takes over the goal's orchestrator assignment and
-/// issues every hosted command under that generation.
+/// this process first takes over the goal's orchestrator assignment, records
+/// it with the hosting card if there is one, and issues every hosted command
+/// under that generation.
 pub fn execute_hosted<R: AgentRunner>(
     spec: Spec,
     runner: R,
     console: &mut dyn Console,
     now: impl Fn() -> Instant,
     mut resume: Option<Resume<'_>>,
-    host: Option<Box<dyn TaskHost>>,
+    hosting: Option<Hosting>,
 ) -> Result<Summary, RunError> {
     let goal_id = GoalId::from_raw(1);
     let saved = match &resume {
@@ -245,8 +305,11 @@ pub fn execute_hosted<R: AgentRunner>(
     };
     let routing = Routing::try_from(spec.routing).map_err(RunError::Routing)?;
     let goal = spec.goal;
-    let host = match host {
-        Some(host) => Some((host, take_over(&mut resume, &goal, goal_id)?)),
+    let host = match hosting {
+        Some(mut h) => {
+            let fence = take_over(&mut resume, &goal, goal_id, h.card.as_mut())?;
+            Some((h.host, fence))
+        }
         None => None,
     };
     let mut dispatcher = Dispatcher::new(routing, runner).with_boxed_host(host);

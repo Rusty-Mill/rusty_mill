@@ -536,6 +536,45 @@ fn orch_binary_reopens_its_durable_goal_without_opening_or_charging_twice() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Cancel the one task a report's hosted entry points at, so its harness
+/// stops before the test directory goes; returns how often it was opened.
+fn cancel_hosted(c: &Config, report: &rusty_serde::json::Value) -> usize {
+    let entry = report["entries"]
+        .as_seq()
+        .unwrap()
+        .iter()
+        .find(|e| e["body"].as_str() == Some("hosted task"))
+        .unwrap();
+    let pointer = entry["refs"].as_seq().unwrap()[0]
+        .as_str()
+        .unwrap()
+        .strip_prefix("url:bbp:")
+        .unwrap();
+    let h: Handle = rusty_serde::json::from_str(pointer).unwrap();
+    let log = events(&h);
+    let opened = log
+        .iter()
+        .filter(|e| matches!(e, Event::TaskOpened { .. }))
+        .count();
+    let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &log);
+    let cancel = Command::new(&c.binary)
+        .args(["human", "--dir"])
+        .arg(&h.dir)
+        .args([
+            "--task",
+            &h.task,
+            "--rev",
+            &view.card.rev.0.to_string(),
+            "cancel",
+            "test cleanup",
+        ])
+        .output()
+        .unwrap();
+    assert!(cancel.status.success());
+    std::thread::sleep(Duration::from_millis(600));
+    opened
+}
+
 #[test]
 #[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN"]
 fn orch_binary_from_a_stale_state_copy_is_fenced_out_of_the_task() {
@@ -595,43 +634,150 @@ fn orch_binary_from_a_stale_state_copy_is_fenced_out_of_the_task() {
     let (ok, third) = run("live");
     assert!(ok, "{third:?}");
     assert_eq!(third["ended"]["kind"].as_str(), Some("waiting"));
-    let entry = third["entries"]
-        .as_seq()
-        .unwrap()
-        .iter()
-        .find(|e| e["body"].as_str() == Some("hosted task"))
-        .unwrap();
-    let pointer = entry["refs"].as_seq().unwrap()[0]
-        .as_str()
-        .unwrap()
-        .strip_prefix("url:bbp:")
-        .unwrap();
-    let h: Handle = rusty_serde::json::from_str(pointer).unwrap();
-    let log = events(&h);
-    assert_eq!(
-        log.iter()
-            .filter(|e| matches!(e, Event::TaskOpened { .. }))
-            .count(),
-        1
-    );
-    let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &log);
-    let cancel = Command::new(&c.binary)
-        .args(["human", "--dir"])
-        .arg(&h.dir)
-        .args([
-            "--task",
-            &h.task,
-            "--rev",
-            &view.card.rev.0.to_string(),
-            "cancel",
-            "test cleanup",
-        ])
-        .output()
-        .unwrap();
-    assert!(cancel.status.success());
-    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(cancel_hosted(&c, &third), 1);
     std::fs::remove_dir_all(dir).unwrap();
     println!("BBP_ACCEPTANCE PASS stale-holder");
+}
+
+/// A real in-memory Millboard on a loopback port with a shared token and the
+/// default roles, stopped on drop.
+struct Millboard {
+    child: Child,
+    url: String,
+}
+impl Millboard {
+    const TOKEN: &'static str = "acceptance-token";
+    fn start() -> Self {
+        let bin = std::env::var_os("MILLBOARD_TEST_BIN").expect("set MILLBOARD_TEST_BIN");
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let child = Command::new(bin)
+            .args(["--http", &format!("127.0.0.1:{port}")])
+            .args(["--auth-token", Self::TOKEN])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let board = Self {
+            child,
+            url: format!("http://127.0.0.1:{port}"),
+        };
+        let started = Instant::now();
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "millboard did not start"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        board
+    }
+    fn call(&self, op: &str, args: &str) -> rusty_serde::json::Value {
+        let out = Command::new("curl")
+            .args(["-sS", "-X", "POST", "-H", "Content-Type: application/json"])
+            .args(["-H", &format!("Authorization: Bearer {}", Self::TOKEN)])
+            .args(["--data", args, &format!("{}/api/{op}", self.url)])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        rusty_serde::json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap()
+    }
+}
+impl Drop for Millboard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+#[ignore = "requires built bbp, rusty_orch and rusty_mill_board at BBP_TEST_BIN, ORCH_TEST_BIN and MILLBOARD_TEST_BIN"]
+fn orch_binary_records_each_generation_with_its_millboard_card() {
+    let (dir, mut c) = setup();
+    c.pool.get_mut("writer").unwrap().program = "/bin/sh".into();
+    c.pool.get_mut("writer").unwrap().args = vec!["-c".into(), "sleep 10".into()];
+    let goal = dir.join("goal.json");
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&c).unwrap()).unwrap();
+    let goal_json = r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#;
+    std::fs::write(&goal, goal_json).unwrap();
+    let board = Millboard::start();
+    let added = board.call(
+        "card_add",
+        r#"{"actor":"nano","role":"human","title":"Implement flag"}"#,
+    );
+    let card = added["card"]["id"].as_str().unwrap().to_owned();
+    let stored = || {
+        let got = board.call("card_get", &format!(r#"{{"id":"{card}"}}"#));
+        got["card"]["execution"].clone()
+    };
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    let run = |state: &str| {
+        Command::new(&orch)
+            .arg("run")
+            .arg(&goal)
+            .arg("--bbp")
+            .arg(&cfg)
+            .arg("--state")
+            .arg(dir.join(state))
+            .args(["--card", &card, "--board", &board.url, "--json"])
+            .env("RUSTY_ORCH_BOARD_TOKEN", Millboard::TOKEN)
+            .env("RUSTY_ORCH_BOARD_ACTOR", "rusty_orch")
+            .env("RUSTY_ORCH_BOARD_ROLE", "builder")
+            .output()
+            .unwrap()
+    };
+    let report = |out: &std::process::Output| {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        rusty_serde::json::from_str::<rusty_serde::json::Value>(
+            &String::from_utf8(out.stdout.clone()).unwrap(),
+        )
+        .unwrap()
+    };
+    let first = report(&run("live"));
+    assert_eq!(first["ended"]["kind"].as_str(), Some("waiting"));
+    let link = stored();
+    assert_eq!(link["generation"].as_u64(), Some(1));
+    assert_eq!(link["assignment"].as_str(), Some("goal-orchestrator"));
+    let namespace = rusty_bbp::Sha256::of(goal_json.as_bytes()).hex();
+    assert_eq!(link["execution"].as_str(), Some(namespace.as_str()));
+    // A copy of the state as it stood at generation 1, e.g. a restored backup.
+    let copied = Command::new("cp")
+        .arg("-R")
+        .arg(dir.join("live"))
+        .arg(dir.join("copy"))
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    report(&run("live"));
+    report(&run("live"));
+    assert_eq!(stored()["generation"].as_u64(), Some(3));
+    // The copy takes over at generation 2, which the card has moved past: it
+    // stops before any host command, and the card is unchanged.
+    let stale = run("copy");
+    assert!(!stale.status.success());
+    let why = String::from_utf8_lossy(&stale.stderr);
+    assert!(why.contains("superseded"), "{why}");
+    assert!(stale.stdout.is_empty());
+    assert_eq!(stored()["generation"].as_u64(), Some(3));
+    let last = report(&run("live"));
+    assert_eq!(last["ended"]["kind"].as_str(), Some("waiting"));
+    assert_eq!(stored()["generation"].as_u64(), Some(4));
+    assert_eq!(cancel_hosted(&c, &last), 1);
+    drop(board);
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS millboard-link");
 }
 
 #[test]

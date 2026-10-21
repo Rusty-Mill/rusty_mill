@@ -51,6 +51,12 @@ cards on the existing BBP host. Its roster and provider pool are explicit and
 frozen per task. Research and design retain their current adapters. See
 [configuration, recovery and validation](crates/orch-bbp/README.md).
 
+Add `--card <id> --board http://127.0.0.1:8787` to host the goal for a Millboard
+card. Each run records its assignment generation with the card before any host
+command, and stops if the card already carries a later one. The credential and
+identity come from `RUSTY_ORCH_BOARD_TOKEN`, `RUSTY_ORCH_BOARD_ACTOR` and
+`RUSTY_ORCH_BOARD_ROLE` (a role with Build); plain `http://` only.
+
 Proposed-change impact: `rusty_orch inspect --repo <checkout> --impact <request.json>`
 joins Cargo consumers to Millboard ownership and complete RemindMe requirements.
 See [Stage 1 usage and snapshot contract](docs/change-impact.md).
