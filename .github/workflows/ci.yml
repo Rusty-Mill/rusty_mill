@@ -1207,6 +1207,45 @@ jobs:
       - name: cargo check on the declared rust-version
         run: cargo check -p rusty_multimodal_db --all-features --all-targets
 
+  msrv-compile:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-msrv-compile
+      queue: max
+      cancel-in-progress: false
+    # `check_rust_versions.py` (dependency policy) compares declared
+    # rust-versions; this builds. Each workspace crate that declares one is
+    # `cargo check`ed with a rustc of exactly that version (default features),
+    # grouped by floor. Only the affected crates on a PR; every crate on a full
+    # sweep. Floors at the pinned toolchain are covered by the ordinary jobs.
+    # The build output stays under RUNNER_TEMP so it does not bloat the cache.
+    name: compile at declared rust-version
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-build-env
+        with:
+          cache-shared-key: msrv-compile
+      - name: cargo check each crate at its declared rust-version
+        env:
+          PLAN_FULL: ${{ needs.plan.outputs.full }}
+          PLAN_PACKAGES: ${{ needs.plan.outputs.packages }}
+        run: |
+          set -euo pipefail
+          # Locked: a metadata call that rewrote Cargo.lock would validate a lock nobody committed.
+          lock_before="$(sha256sum Cargo.lock)"
+          cargo metadata --locked --format-version=1 > "$RUNNER_TEMP/metadata-default.json"
+          scope=()
+          if [ "$PLAN_FULL" != "true" ]; then scope=(--packages "$PLAN_PACKAGES"); fi
+          # rusty_multimodal_db has its own msrv job; the remind_me crates have their own jobs.
+          python3 .github/scripts/check_msrv_compile.py "$RUNNER_TEMP/metadata-default.json" \
+            "${scope[@]}" \
+            --skip-from "$RUST_TOOLCHAIN" \
+            --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db" \
+            --target-base "$RUNNER_TEMP/msrv"
+          test "$(sha256sum Cargo.lock)" = "$lock_before"
+
   rusty-config-no-std-check:
     concurrency:
       group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-config-no-std-check
@@ -1883,6 +1922,7 @@ jobs:
       - win32-cross-compile-check
       - multimodal-db-feature-sets
       - multimodal-db-msrv
+      - msrv-compile
       - rusty-config-no-std-check
       - rusty-tls-engine
       - rusty-tls-fuzz

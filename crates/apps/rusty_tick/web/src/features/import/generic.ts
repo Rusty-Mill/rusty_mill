@@ -41,7 +41,7 @@ export function parseGeneric(text: string): ImportResult {
     if (unread.length > 0 || (rule && !repeatFlag)) out.lossy++
     out.tasks.push({
       ...blankTask(key(list, title, dueText), title),
-      legacyKey: legacyKey(`${list}|${title}|${dueText}`),
+      legacy: [{ key: legacyKey(`${list}|${title}|${dueText}`) }],
       list,
       notes: unread.reduce((notes, [label, text]) => keepInNotes(notes, label, text), col(row, ...NOTES)),
       priority: readPriority(col(row, 'priority')),

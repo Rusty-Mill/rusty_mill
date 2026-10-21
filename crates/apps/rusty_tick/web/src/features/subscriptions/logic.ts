@@ -1,7 +1,7 @@
 /**
  * Calendar subscriptions: a feed URL, the list its events live in, and which
- * task came from which event (`items`, by the feed's UID), so a refresh
- * updates tasks in place instead of duplicating them. Pure.
+ * task came from which event (`items`, by `itemKey`), so a refresh updates
+ * tasks in place instead of duplicating them. Pure.
  */
 import type { Task, TaskPatch } from '@/api/types'
 import type { IcsTask } from '@/lib/ics'
@@ -10,7 +10,7 @@ export interface SubscriptionBody {
   name: string
   url: string
   listId: string
-  /** Feed UID to task id. */
+  /** `itemKey` of a feed event to its task id. */
   items: Record<string, string>
   /** When the last successful sync finished; 0 before the first. */
   syncedMs: number
@@ -30,7 +30,14 @@ export function asSubscriptionBody(body: unknown): SubscriptionBody | null {
   return { name: o.name, url: o.url, listId: o.listId, items, syncedMs: typeof o.syncedMs === 'number' ? o.syncedMs : 0 }
 }
 
-/** The task fields a feed owns; a sync overwrites these and nothing else. */
+/**
+ * The key a feed event's task is stored under: its UID, plus its
+ * `RECURRENCE-ID` for a moved instance, so the instances of a repeating event
+ * each keep a task. A master or one-off keeps the bare UID, as stored before.
+ */
+export const itemKey = (e: IcsTask): string => (e.recurrenceId === null ? e.uid : JSON.stringify([e.uid, e.recurrenceId]))
+
+/** The task fields a new event's task is created with. */
 export const sourceFields = (t: IcsTask): Pick<Task, 'title' | 'notes' | 'startMs' | 'dueMs' | 'isAllDay' | 'timeZone' | 'repeatFlag'> => ({
   title: t.title,
   notes: t.notes,
@@ -40,6 +47,18 @@ export const sourceFields = (t: IcsTask): Pick<Task, 'title' | 'notes' | 'startM
   timeZone: t.timeZone,
   repeatFlag: t.repeatFlag,
 })
+
+/**
+ * The task fields a feed owns; a sync overwrites these and nothing else. With
+ * the repeat rule it owns the rule's exceptions, so an occurrence the feed
+ * moved or cancelled is not shown beside its replacement.
+ */
+const feedFields = (t: IcsTask): Pick<Task, 'title' | 'notes' | 'startMs' | 'dueMs' | 'isAllDay' | 'timeZone' | 'repeatFlag' | 'exDates'> => ({
+  ...sourceFields(t),
+  exDates: [...new Set(t.exDates)].sort((a, b) => a - b),
+})
+
+const same = (a: unknown, b: unknown): boolean => (Array.isArray(a) && Array.isArray(b) ? a.length === b.length && a.every((x, i) => x === b[i]) : a === b)
 
 export interface SyncPlan {
   create: IcsTask[]
@@ -51,33 +70,35 @@ export interface SyncPlan {
 }
 
 /**
- * What to do so the tasks match `feed`:
- * - a new UID creates a task;
- * - a known UID updates the fields the feed owns, if any changed (a task the
+ * What to do so the tasks match `feed`, event by `itemKey`:
+ * - a new event creates a task (its exceptions, which a create cannot carry,
+ *   are written right after; see `syncSubscription`);
+ * - a known event updates the fields the feed owns, if any changed (a task the
  *   user deleted stays deleted: it is not brought back);
- * - a UID gone from the feed trashes its task.
+ * - an event gone from the feed trashes its task.
  */
 export function planSync(feed: readonly IcsTask[], items: Record<string, string>, tasks: Record<string, Task>): SyncPlan {
   const plan: SyncPlan = { create: [], update: [], trash: [], items: {} }
   const seen = new Set<string>()
   for (const event of feed.slice(0, MAX_ITEMS)) {
-    if (seen.has(event.uid)) continue
-    seen.add(event.uid)
-    const taskId = items[event.uid]
+    const key = itemKey(event)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const taskId = items[key]
     if (taskId === undefined) {
       plan.create.push(event)
       continue
     }
-    plan.items[event.uid] = taskId
+    plan.items[key] = taskId
     const task = tasks[taskId]
     if (!task || task.deletedMs !== null) continue
-    const want = sourceFields(event)
+    const want = feedFields(event)
     const patch: Record<string, unknown> = {}
-    for (const key of Object.keys(want) as (keyof typeof want)[]) if (task[key] !== want[key]) patch[key] = want[key]
+    for (const field of Object.keys(want) as (keyof typeof want)[]) if (!same(task[field], want[field])) patch[field] = want[field]
     if (Object.keys(patch).length > 0) plan.update.push({ taskId, patch: patch as TaskPatch })
   }
-  for (const [uid, taskId] of Object.entries(items)) {
-    if (seen.has(uid)) continue
+  for (const [key, taskId] of Object.entries(items)) {
+    if (seen.has(key)) continue
     const task = tasks[taskId]
     if (task && task.deletedMs === null) plan.trash.push(taskId)
   }

@@ -2,7 +2,7 @@
 name = "orch-cli"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.81"
 description = "Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering."
 license = "MIT"
 

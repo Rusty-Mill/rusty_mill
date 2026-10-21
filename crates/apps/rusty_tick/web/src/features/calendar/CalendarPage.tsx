@@ -96,7 +96,7 @@ export function CalendarPage() {
       const read = readIcs(await readText(file))
       const n = await applyImport(api, { ...read, tasks: read.tasks.slice(0, IMPORT_LIMIT) })
       await actions.refresh()
-      const notes = [n.existing && `${n.existing} already here`, read.skipped && `${read.skipped} skipped (cancelled, completed or undated)`, read.lossy && `${read.lossy} repeating events imported once`, read.tasks.length > IMPORT_LIMIT && `only the first ${IMPORT_LIMIT} imported`]
+      const notes = [n.existing && `${n.existing} already here`, read.skipped && `${read.skipped} skipped (cancelled, completed or undated)`, read.lossy && `${read.lossy} repeat rules or exceptions not understood`, read.tasks.length > IMPORT_LIMIT && `only the first ${IMPORT_LIMIT} imported`]
       actions.notify('info', `Imported ${n.tasks} from ${file.name} into Inbox${notes.some(Boolean) ? ` (${notes.filter(Boolean).join('; ')})` : ''}`)
     } catch (err) {
       actions.notify('error', `Could not import ${file.name}: ${err instanceof Error ? err.message : String(err)}`)

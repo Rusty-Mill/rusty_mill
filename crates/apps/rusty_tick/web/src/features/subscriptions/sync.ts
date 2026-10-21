@@ -4,7 +4,7 @@ import type { Task } from '@/api/types'
 import type { DataActions } from '@/store/data'
 import type { DocItem } from '@/lib/docStore'
 import { parseIcs } from '@/lib/ics'
-import { planSync, sourceFields, type SubscriptionBody } from './logic'
+import { itemKey, planSync, sourceFields, type SubscriptionBody } from './logic'
 import { useSubscriptions } from './store'
 
 type Deps = { api: Pick<ApiClient, 'fetchIcs'>; actions: Pick<DataActions, 'createTask' | 'updateTask' | 'trashTask'>; tasks: Record<string, Task> }
@@ -20,7 +20,11 @@ export async function syncSubscription(sub: DocItem<SubscriptionBody>, { api, ac
   const feed = parseIcs(await api.fetchIcs(sub.url)).tasks
   const plan = planSync(feed, sub.items, tasks)
   const items = { ...plan.items }
-  for (const event of plan.create) items[event.uid] = (await actions.createTask({ listId: sub.listId, ...sourceFields(event) })).id
+  for (const event of plan.create) {
+    const { id } = await actions.createTask({ listId: sub.listId, ...sourceFields(event) })
+    items[itemKey(event)] = id
+    if (event.exDates.length > 0) await actions.updateTask(id, { exDates: [...new Set(event.exDates)].sort((a, b) => a - b) }) // a create cannot carry them
+  }
   for (const { taskId, patch } of plan.update) await actions.updateTask(taskId, patch)
   for (const taskId of plan.trash) await actions.trashTask(taskId)
   const { id: _id, ...body } = sub
