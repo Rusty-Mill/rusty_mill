@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Task } from '@/api/types'
 import type { IcsTask } from '@/lib/ics'
-import { asSubscriptionBody, isStale, MAX_ITEMS, planSync } from './logic'
+import { asSubscriptionBody, isStale, itemKey, MAX_ITEMS, planSync } from './logic'
 
 const ev = (uid: string, o: Partial<IcsTask> = {}): IcsTask => ({ uid, title: uid, notes: '', startMs: null, dueMs: 1000, isAllDay: true, timeZone: '', repeatFlag: '', recurrenceId: null, exDates: [], ...o })
 const task = (id: string, o: Partial<Task> = {}): Task => ({
@@ -42,6 +42,34 @@ describe('planSync', () => {
     expect(planSync([ev('a'), ev('a', { title: 'again' })], {}, {}).create).toHaveLength(1)
     const many = Array.from({ length: MAX_ITEMS + 5 }, (_, i) => ev(`e${i}`))
     expect(planSync(many, {}, {}).create).toHaveLength(MAX_ITEMS)
+  })
+})
+
+describe('planSync: repeating events', () => {
+  const master = ev('r', { repeatFlag: 'RRULE:FREQ=WEEKLY', exDates: [12] })
+  const moved = ev('r', { title: 'moved', recurrenceId: 11, dueMs: 13 })
+
+  it('gives a moved instance its own task, whatever its place in the feed', () => {
+    for (const feed of [[master, moved], [moved, master]]) {
+      expect(planSync(feed, {}, {}).create.map(itemKey).sort()).toEqual(['["r",11]', 'r'])
+    }
+  })
+
+  it('still finds a master stored under its bare UID, and adds only the moved instance', () => {
+    const plan = planSync([master, moved], { r: 't1' }, { t1: task('t1', { title: 'r', repeatFlag: 'RRULE:FREQ=WEEKLY' }) })
+    expect(plan.create.map(itemKey)).toEqual(['["r",11]'])
+    expect(plan.update).toEqual([{ taskId: 't1', patch: { exDates: [12] } }]) // the feed's exceptions reach the master
+  })
+
+  it('patches exceptions only when they changed', () => {
+    const tasks = { t1: task('t1', { title: 'r', repeatFlag: 'RRULE:FREQ=WEEKLY', exDates: [12] }) }
+    expect(planSync([master], { r: 't1' }, tasks).update).toEqual([])
+    expect(planSync([ev('r', { repeatFlag: 'RRULE:FREQ=WEEKLY', exDates: [19, 12] })], { r: 't1' }, tasks).update).toEqual([{ taskId: 't1', patch: { exDates: [12, 19] } }])
+  })
+
+  it('trashes a moved instance the feed no longer has', () => {
+    const plan = planSync([master], { r: 't1', '["r",11]': 't2' }, { t1: task('t1', { title: 'r', repeatFlag: 'RRULE:FREQ=WEEKLY', exDates: [12] }), t2: task('t2') })
+    expect(plan.trash).toEqual(['t2'])
   })
 })
 
