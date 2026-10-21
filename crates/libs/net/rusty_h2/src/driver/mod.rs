@@ -887,6 +887,7 @@ mod tests {
             "unwritten output is capped near the limit, not {backlog}"
         );
         // Once the transport takes output again, the rest is read and answered.
+        // (Polled in a loop with a no-op waker: wake-ups are not exercised here.)
         stub.0.lock().unwrap().budget = usize::MAX / 2;
         for _ in 0..1_000 {
             let _ = poll_once(&mut driver, Waker::noop());
@@ -896,6 +897,6 @@ mod tests {
         }
         let st = stub.0.lock().unwrap();
         assert_eq!(st.read_pos, total);
-        assert!(st.taken >= PINGS * 17, "every ping is acknowledged");
+        assert!(st.taken >= PINGS * 17, "bytes for every ping were written");
     }
 }
