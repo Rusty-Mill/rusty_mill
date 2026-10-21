@@ -5,6 +5,7 @@ No repository-supplied code is imported. Snapshots are data, never commands.
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -29,8 +30,43 @@ def cargo_metadata_digest(metadata: dict) -> str:
     workspace ``metadata`` values are deliberately opaque here: in particular,
     lists inside application-defined metadata retain their authored order.
     """
+    normalized = canonical_cargo_metadata(metadata)
+
+    return digest(normalized)
+
+
+def canonical_cargo_metadata(metadata: dict) -> dict:
+    """Copy metadata and sort only collections Cargo defines as unordered."""
     normalized = copy.deepcopy(metadata)
 
+    def windows_path(value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        # Win32 normally trims trailing periods and spaces from components,
+        # while an extended-length path addresses those components literally.
+        # Removing the prefix is therefore safe only when every component has
+        # the same meaning under both spellings.
+        components = value.split('\\')
+        if any(component.endswith(('.', ' ')) for component in components if component):
+            return value
+        if re.match(r'^\\\\\?\\UNC\\[^\\]+\\[^\\]+(?:\\|$)', value, re.IGNORECASE):
+            return '\\\\' + value[8:]
+        if re.match(r'^\\\\\?\\[A-Za-z]:\\', value):
+            return value[4:]
+        return value
+
+    def path_field(value: dict, field: str) -> None:
+        if field in value:
+            value[field] = windows_path(value[field])
+
+    for field in ('workspace_root', 'target_directory', 'build_directory'):
+        path_field(normalized, field)
+    for package in normalized.get('packages', []):
+        path_field(package, 'manifest_path')
+        for dependency in package.get('dependencies', []):
+            path_field(dependency, 'path')
+        for target in package.get('targets', []):
+            path_field(target, 'src_path')
     def canonical(value: object) -> str:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -62,7 +98,118 @@ def cargo_metadata_digest(metadata: dict) -> str:
                 sort_field(dependency, 'dep_kinds')
             sort_field(node, 'deps')
         sort_field(resolve, 'nodes')
-    return digest(normalized)
+    return normalized
+
+
+def cargo_metadata_diagnostics(metadata: dict) -> dict:
+    """Return schema-aware, bounded fingerprints without authored content."""
+    max_records, max_depth, max_bytes = 128, 12, 8192
+    normalized = canonical_cargo_metadata(metadata)
+    records = []
+    omitted = {'records': 0, 'depth': 0, 'bytes': 0}
+
+    def kind(value: object) -> str:
+        if value is None:
+            return 'null'
+        if isinstance(value, bool):
+            return 'bool'
+        if isinstance(value, (int, float)):
+            return 'number'
+        if isinstance(value, str):
+            return 'string'
+        if isinstance(value, list):
+            return 'array'
+        return 'object'
+
+    def add(pointer: str, value: object, **extra: str) -> None:
+        if len(records) == max_records:
+            omitted['records'] += 1
+            return
+        records.append({'pointer': pointer or '/', 'type': kind(value),
+                        'fingerprint': digest(value)[:16], **extra})
+
+    path_fields = {'manifest_path', 'src_path', 'workspace_root', 'target_directory',
+                   'build_directory'}
+
+    def visit(value: object, pointer: str, depth: int, field: str = '') -> None:
+        if depth > max_depth:
+            omitted['depth'] += 1
+            return
+        # Cargo declares package/workspace metadata opaque. Fingerprint the
+        # canonical subtree as one unit so authored keys and values never leak.
+        if field == 'metadata':
+            add(pointer, value, opaque='authored-metadata')
+        elif isinstance(value, dict):
+            if not value:
+                add(pointer, value)
+            for key in sorted(value):
+                escaped = key.replace('~', '~0').replace('/', '~1')
+                visit(value[key], f'{pointer}/{escaped}', depth + 1, key)
+        elif isinstance(value, list):
+            if not value:
+                add(pointer, value)
+            for index, child in enumerate(value):
+                visit(child, f'{pointer}/{index}', depth + 1)
+        else:
+            extra = {}
+            dependency_path = field == 'path' and '/dependencies/' in pointer
+            if isinstance(value, str) and (field in path_fields or dependency_path):
+                extra['path_spelling'] = (
+                    'extended-unc' if value.startswith('\\\\?\\UNC\\') else
+                    'extended' if value.startswith('\\\\?\\') else 'ordinary')
+            add(pointer, value, **extra)
+
+    candidate_paths = {
+        'workspace_root': [normalized.get('workspace_root')],
+        'target_directory': [normalized.get('target_directory')],
+        'build_directory': [normalized.get('build_directory')],
+        'manifest_path': [package.get('manifest_path')
+                          for package in normalized.get('packages', [])],
+        'dependency.path': [dependency.get('path')
+                            for package in normalized.get('packages', [])
+                            for dependency in package.get('dependencies', [])],
+        'targets.src_path': [target.get('src_path')
+                             for package in normalized.get('packages', [])
+                             for target in package.get('targets', [])],
+    }
+
+    def path_summary(values: list) -> dict:
+        values = [value for value in values if isinstance(value, str)]
+        spellings = {'extended': 0, 'extended-unc': 0, 'ordinary': 0}
+        for value in values:
+            spelling = ('extended-unc' if value.startswith('\\\\?\\UNC\\') else
+                        'extended' if value.startswith('\\\\?\\') else 'ordinary')
+            spellings[spelling] += 1
+        return {'count': len(values), 'fingerprint': digest(values)[:16],
+                'spellings': spellings}
+
+    known_top_level = ('packages', 'workspace_members', 'workspace_default_members',
+                       'resolve', 'target_directory', 'build_directory',
+                       'workspace_root', 'version', 'metadata')
+    top_level = {field: digest(normalized[field])[:16]
+                 for field in known_top_level if field in normalized}
+    packages = normalized.get('packages', [])
+    package_limit = 32
+    package_fingerprints = [digest(package)[:16] for package in packages[:package_limit]]
+    package_remainder = (digest(packages[package_limit:])[:16]
+                         if len(packages) > package_limit else None)
+    visit(normalized, '', 0)
+    result = {
+        'schema_version': 2,
+        'top_level_fingerprints': top_level,
+        'package_fingerprints': package_fingerprints,
+        'package_remainder': {'count': max(0, len(packages) - package_limit),
+                              'fingerprint': package_remainder},
+        'path_fields': {field: path_summary(values)
+                        for field, values in candidate_paths.items()},
+        'records': records,
+        'truncated': omitted,
+    }
+    encoded = lambda: json.dumps(result, sort_keys=True, separators=(',', ':')).encode()
+    while len(encoded()) > max_bytes and records:
+        records.pop()
+        omitted['bytes'] += 1
+    return result
 
 
 def relative_path(value: str) -> str:
@@ -349,7 +496,11 @@ def impact_main() -> None:
     if result.returncode:
         raise ValueError('cargo metadata failed (requires current lockfile and cached dependencies): '
                          + result.stderr.decode(errors='replace')[:1000])
-    report = analyze_impact(json.loads(result.stdout), request, projects, snapshot, revision, previous)
+    metadata = json.loads(result.stdout)
+    if os.environ.get('RUSTY_ORCH_METADATA_DIAGNOSTICS') == '1':
+        print(json.dumps(cargo_metadata_diagnostics(metadata), sort_keys=True,
+                         separators=(',', ':')), file=sys.stderr)
+    report = analyze_impact(metadata, request, projects, snapshot, revision, previous)
     if revision != git_revision(repo) or any(path.read_bytes() != data for path, data in inputs.items()):
         raise ValueError('source or snapshot changed during impact analysis; retry')
     print(json.dumps(report, sort_keys=True, indent=2))

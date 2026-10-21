@@ -1,5 +1,6 @@
 """Proposed changes use CI dependency evidence and complete durable inventories."""
 import copy
+import json
 from pathlib import Path
 import importlib.util
 import sys
@@ -139,6 +140,130 @@ class ChangeImpactTests(unittest.TestCase):
 
         self.assertEqual(MODULE.cargo_metadata_digest(self.md),
                          MODULE.cargo_metadata_digest(equivalent))
+
+    def test_cargo_metadata_digest_normalizes_captured_windows_path_spellings(self):
+        package = self.md['packages'][0]
+        package['manifest_path'] = r'C:\fixture\crate\Cargo.toml'
+        package['dependencies'] = [{'name': 'local', 'path': r'C:\fixture\local'}]
+        package['targets'] = [{'name': 'crate', 'src_path': r'C:\fixture\crate\src\lib.rs'}]
+        self.md.update(workspace_root=r'C:\fixture', target_directory=r'C:\fixture\target',
+                       build_directory=r'C:\fixture\target')
+        equivalent = copy.deepcopy(self.md)
+        extended = lambda value: '\\\\?\\' + value
+        equivalent.update(workspace_root=extended(self.md['workspace_root']),
+                          target_directory=extended(self.md['target_directory']),
+                          build_directory=extended(self.md['build_directory']))
+        equivalent_package = equivalent['packages'][0]
+        equivalent_package['manifest_path'] = extended(package['manifest_path'])
+        equivalent_package['dependencies'][0]['path'] = extended(
+            package['dependencies'][0]['path'])
+        equivalent_package['targets'][0]['src_path'] = extended(
+            package['targets'][0]['src_path'])
+        self.assertEqual(MODULE.cargo_metadata_digest(self.md),
+                         MODULE.cargo_metadata_digest(equivalent))
+        equivalent_package['manifest_path'] += '.moved'
+        self.assertNotEqual(MODULE.cargo_metadata_digest(self.md),
+                            MODULE.cargo_metadata_digest(equivalent))
+
+    def test_cargo_metadata_digest_preserves_opaque_ids_and_non_windows_paths(self):
+        package = self.md['packages'][0]
+        baseline = MODULE.cargo_metadata_digest(self.md)
+        cases = [
+            ('git source id', package, 'id',
+             'git+file:///%3F/repo#crate@0.1.0', 'git+file:///repo#crate@0.1.0'),
+            ('non-Windows path source id', package, 'id',
+             'path+file:///%3F/repo#crate@0.1.0', 'path+file:///repo#crate@0.1.0'),
+            ('POSIX manifest path', package, 'manifest_path',
+             '/tmp/file:///%3F/crate/Cargo.toml', '/tmp/file:///crate/Cargo.toml'),
+        ]
+        for label, subject, field, first, second in cases:
+            with self.subTest(label=label):
+                subject[field] = first
+                first_digest = MODULE.cargo_metadata_digest(self.md)
+                subject[field] = second
+                self.assertNotEqual(MODULE.cargo_metadata_digest(self.md), first_digest)
+        package['manifest_path'] = r'\\?\relative\Cargo.toml'
+        self.assertNotEqual(MODULE.cargo_metadata_digest(self.md), baseline)
+
+    def test_cargo_metadata_digest_preserves_verbatim_windows_components(self):
+        package = self.md['packages'][0]
+        package['manifest_path'] = r'C:\fixture\crate.\Cargo.toml'
+        package['dependencies'] = [{'name': 'local', 'path': r'C:\fixture\local '}]
+        package['targets'] = [
+            {'name': 'crate', 'src_path': r'\\server\share\crate.\src\lib.rs'}]
+        self.md.update(workspace_root=r'C:\fixture.\workspace',
+                       target_directory=r'C:\target.', build_directory=r'C:\build ')
+
+        cases = [
+            ('workspace root', self.md, 'workspace_root', r'\\?\C:\fixture.\workspace'),
+            ('target directory', self.md, 'target_directory', r'\\?\C:\target.'),
+            ('build directory', self.md, 'build_directory', r'\\?\C:\build '),
+            ('manifest path', package, 'manifest_path', r'\\?\C:\fixture\crate.\Cargo.toml'),
+            ('dependency path', package['dependencies'][0], 'path', r'\\?\C:\fixture\local '),
+            ('target source path', package['targets'][0], 'src_path',
+             r'\\?\UNC\server\share\crate.\src\lib.rs'),
+        ]
+        for label, subject, field, extended in cases:
+            with self.subTest(label=label):
+                ordinary = subject[field]
+                ordinary_digest = MODULE.cargo_metadata_digest(self.md)
+                subject[field] = extended
+                self.assertNotEqual(MODULE.cargo_metadata_digest(self.md), ordinary_digest)
+                subject[field] = ordinary
+
+    def test_metadata_diagnostics_are_redacted_bounded_and_canonical(self):
+        self.md['metadata'] = {'DO_NOT_PRINT_SENTINEL': {'private': 'DO_NOT_PRINT_VALUE'}}
+        self.md['packages'][0]['metadata'] = {'ANOTHER_SENTINEL': ['secret']}
+        equivalent = copy.deepcopy(self.md)
+        equivalent['packages'].reverse()
+        diagnostics = MODULE.cargo_metadata_diagnostics(self.md)
+        self.assertEqual(diagnostics, MODULE.cargo_metadata_diagnostics(equivalent))
+        encoded = json.dumps(diagnostics, sort_keys=True, separators=(',', ':'))
+        self.assertLessEqual(len(encoded.encode()), 8192)
+        self.assertNotIn('DO_NOT_PRINT_SENTINEL', encoded)
+        self.assertNotIn('DO_NOT_PRINT_VALUE', encoded)
+        self.assertNotIn('ANOTHER_SENTINEL', encoded)
+
+    def test_metadata_diagnostics_classify_paths_and_empty_containers(self):
+        package = self.md['packages'][0]
+        package['dependencies'] = [{'name': 'local', 'path': r'\\?\C:\checkout\local',
+                                    'features': []}]
+        package['metadata'] = []
+        diagnostics = MODULE.cargo_metadata_diagnostics(self.md)
+        by_pointer = {entry['pointer']: entry for entry in diagnostics['records']}
+        path = next(entry for pointer, entry in by_pointer.items()
+                    if pointer.endswith('/dependencies/0/path'))
+        self.assertEqual(path['path_spelling'], 'ordinary')
+        self.assertEqual(diagnostics['schema_version'], 2)
+        self.assertEqual(diagnostics['path_fields']['dependency.path']['spellings']['ordinary'], 1)
+        self.assertTrue(any(entry['type'] == 'array' and entry.get('opaque') == 'authored-metadata'
+                            for entry in diagnostics['records']))
+        empty_object = MODULE.cargo_metadata_diagnostics({'resolve': {}})['records'][0]
+        empty_array = MODULE.cargo_metadata_diagnostics({'packages': []})['records'][0]
+        self.assertEqual((empty_object['type'], empty_array['type']), ('object', 'array'))
+        self.assertNotEqual(empty_object['fingerprint'], empty_array['fingerprint'])
+
+    def test_metadata_diagnostics_enforce_record_byte_and_depth_limits(self):
+        metadata = {'packages': [{'id': f'package-{index}', 'name': 'x' * 100}
+                                 for index in range(1000)]}
+        diagnostics = MODULE.cargo_metadata_diagnostics(metadata)
+        encoded = json.dumps(diagnostics, sort_keys=True, separators=(',', ':')).encode()
+        self.assertLessEqual(len(encoded), 8192)
+        self.assertTrue(diagnostics['truncated']['records'] or diagnostics['truncated']['bytes'])
+        nested = value = {}
+        for index in range(20):
+            value['child'] = {}
+            value = value['child']
+        self.assertGreater(MODULE.cargo_metadata_diagnostics(nested)['truncated']['depth'], 0)
+
+    def test_metadata_diagnostics_summarize_changes_beyond_detail_limit(self):
+        metadata = {'packages': [{'id': f'package-{index}', 'name': 'x' * 100}
+                                 for index in range(100)]}
+        before = MODULE.cargo_metadata_diagnostics(metadata)
+        metadata['packages'][-1]['name'] = 'changed beyond detail prefix'
+        after = MODULE.cargo_metadata_diagnostics(metadata)
+        self.assertNotEqual(before['top_level_fingerprints'], after['top_level_fingerprints'])
+        self.assertNotEqual(before['package_remainder'], after['package_remainder'])
 
     def test_rank_never_omits_binding_inactive_requirements(self):
         self.projects['repos']['mill']['dormant'] = ['scripts/dormant']

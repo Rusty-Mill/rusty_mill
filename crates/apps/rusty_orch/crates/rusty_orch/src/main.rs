@@ -86,13 +86,18 @@ fn inspect(argv: impl IntoIterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match inspect::inspect_with_impact(
+    let diagnostics = std::env::var_os("RUSTY_ORCH_METADATA_DIAGNOSTICS").as_deref()
+        == Some(std::ffi::OsStr::new("1"));
+    match inspect::inspect_with_impact_diagnostics(
         &options.repo,
         options.impact.as_deref(),
         &orch_cli::StdCommand,
     ) {
-        Ok(report) => {
-            println!("{report}");
+        Ok(output) => {
+            println!("{}", output.report);
+            if diagnostics && !output.diagnostics.is_empty() {
+                eprint!("{}", output.diagnostics);
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {

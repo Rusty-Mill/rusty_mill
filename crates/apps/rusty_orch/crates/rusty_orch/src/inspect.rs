@@ -114,6 +114,23 @@ pub fn inspect_with_impact(
     request: Option<&std::path::Path>,
     runner: &impl CommandRunner,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(inspect_with_impact_diagnostics(repo, request, runner)?.report)
+}
+
+/// Successful inspection output with explicitly retained helper diagnostics.
+pub struct InspectionOutput {
+    /// Stable JSON report written to stdout by the normal interface.
+    pub report: String,
+    /// Opt-in diagnostics emitted by the helper on a successful invocation.
+    pub diagnostics: String,
+}
+
+/// Run inspection while explicitly retaining stderr from a successful helper.
+pub fn inspect_with_impact_diagnostics(
+    repo: &std::path::Path,
+    request: Option<&std::path::Path>,
+    runner: &impl CommandRunner,
+) -> Result<InspectionOutput, Box<dyn std::error::Error>> {
     let repo = repo.canonicalize()?;
     let mut argv = vec![
         "python3".to_owned(),
@@ -147,7 +164,10 @@ pub fn inspect_with_impact(
         return Err(format!("repository inspection: {}", excerpt(&exit.stderr)).into());
     }
     let report: rusty_json::Value = rusty_json::Value::parse(std::str::from_utf8(&exit.stdout)?)?;
-    Ok(report.to_json_string_pretty())
+    Ok(InspectionOutput {
+        report: report.to_json_string_pretty(),
+        diagnostics: String::from_utf8_lossy(&exit.stderr).into_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -177,6 +197,25 @@ mod tests {
         let runner = FakeCommand::new(Ok(exit(1, "", "cargo metadata failed")));
         let error = inspect(&std::env::current_dir().expect("cwd"), &runner).expect_err("failure");
         assert!(error.to_string().contains("cargo metadata failed"));
+    }
+
+    #[test]
+    fn successful_subprocess_diagnostics_require_explicit_opt_in() {
+        let repo = std::env::current_dir().expect("cwd");
+        let runner = FakeCommand::new(Ok(exit(0, "{}", "diagnostic")));
+        assert_eq!(inspect(&repo, &runner).expect("report"), "{}");
+        let output = inspect_with_impact_diagnostics(&repo, None, &runner).expect("output");
+        assert_eq!(output.report, "{}");
+        assert_eq!(output.diagnostics, "diagnostic");
+    }
+
+    #[test]
+    fn report_only_inspection_accepts_non_utf8_success_stderr() {
+        let repo = std::env::current_dir().expect("cwd");
+        let mut success = exit(0, "{}", "");
+        success.stderr = vec![0xff];
+        let runner = FakeCommand::new(Ok(success));
+        assert_eq!(inspect(&repo, &runner).expect("report"), "{}");
     }
 
     #[test]
