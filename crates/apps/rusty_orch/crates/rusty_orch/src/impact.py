@@ -42,13 +42,11 @@ def canonical_cargo_metadata(metadata: dict) -> dict:
     def windows_path(value: object) -> object:
         if not isinstance(value, str):
             return value
-        if value.startswith('\\\\?\\UNC\\'):
+        if re.match(r'^\\\\\?\\UNC\\[^\\]+\\[^\\]+(?:\\|$)', value, re.IGNORECASE):
             return '\\\\' + value[8:]
-        if value.startswith('\\\\?\\'):
+        if re.match(r'^\\\\\?\\[A-Za-z]:\\', value):
             return value[4:]
-        # Cargo package IDs embed local paths as file URLs. A verbatim drive
-        # path is serialized with the same question-mark segment.
-        return value.replace('file:///?/', 'file:///').replace('file:///%3F/', 'file:///')
+        return value
 
     def path_field(value: dict, field: str) -> None:
         if field in value:
@@ -56,26 +54,12 @@ def canonical_cargo_metadata(metadata: dict) -> dict:
 
     for field in ('workspace_root', 'target_directory', 'build_directory'):
         path_field(normalized, field)
-    for field in ('workspace_members', 'workspace_default_members'):
-        if isinstance(normalized.get(field), list):
-            normalized[field] = [windows_path(item) for item in normalized[field]]
     for package in normalized.get('packages', []):
-        for field in ('id', 'manifest_path'):
-            path_field(package, field)
+        path_field(package, 'manifest_path')
         for dependency in package.get('dependencies', []):
             path_field(dependency, 'path')
         for target in package.get('targets', []):
             path_field(target, 'src_path')
-    resolve = normalized.get('resolve')
-    if isinstance(resolve, dict):
-        path_field(resolve, 'root')
-        for node in resolve.get('nodes', []):
-            path_field(node, 'id')
-            if isinstance(node.get('dependencies'), list):
-                node['dependencies'] = [windows_path(item) for item in node['dependencies']]
-            for dependency in node.get('deps', []):
-                path_field(dependency, 'pkg')
-
     def canonical(value: object) -> str:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -113,6 +97,7 @@ def canonical_cargo_metadata(metadata: dict) -> dict:
 def cargo_metadata_diagnostics(metadata: dict) -> dict:
     """Return schema-aware, bounded fingerprints without authored content."""
     max_records, max_depth, max_bytes = 128, 12, 8192
+    normalized = canonical_cargo_metadata(metadata)
     records = []
     omitted = {'records': 0, 'depth': 0, 'bytes': 0}
 
@@ -167,8 +152,52 @@ def cargo_metadata_diagnostics(metadata: dict) -> dict:
                     'extended' if value.startswith('\\\\?\\') else 'ordinary')
             add(pointer, value, **extra)
 
-    visit(canonical_cargo_metadata(metadata), '', 0)
-    result = {'schema_version': 1, 'records': records, 'truncated': omitted}
+    candidate_paths = {
+        'workspace_root': [normalized.get('workspace_root')],
+        'target_directory': [normalized.get('target_directory')],
+        'build_directory': [normalized.get('build_directory')],
+        'manifest_path': [package.get('manifest_path')
+                          for package in normalized.get('packages', [])],
+        'dependency.path': [dependency.get('path')
+                            for package in normalized.get('packages', [])
+                            for dependency in package.get('dependencies', [])],
+        'targets.src_path': [target.get('src_path')
+                             for package in normalized.get('packages', [])
+                             for target in package.get('targets', [])],
+    }
+
+    def path_summary(values: list) -> dict:
+        values = [value for value in values if isinstance(value, str)]
+        spellings = {'extended': 0, 'extended-unc': 0, 'ordinary': 0}
+        for value in values:
+            spelling = ('extended-unc' if value.startswith('\\\\?\\UNC\\') else
+                        'extended' if value.startswith('\\\\?\\') else 'ordinary')
+            spellings[spelling] += 1
+        return {'count': len(values), 'fingerprint': digest(values)[:16],
+                'spellings': spellings}
+
+    known_top_level = ('packages', 'workspace_members', 'workspace_default_members',
+                       'resolve', 'target_directory', 'build_directory',
+                       'workspace_root', 'version', 'metadata')
+    top_level = {field: digest(normalized[field])[:16]
+                 for field in known_top_level if field in normalized}
+    packages = normalized.get('packages', [])
+    package_limit = 32
+    package_fingerprints = [digest(package)[:16] for package in packages[:package_limit]]
+    package_remainder = (digest(packages[package_limit:])[:16]
+                         if len(packages) > package_limit else None)
+    visit(normalized, '', 0)
+    result = {
+        'schema_version': 2,
+        'top_level_fingerprints': top_level,
+        'package_fingerprints': package_fingerprints,
+        'package_remainder': {'count': max(0, len(packages) - package_limit),
+                              'fingerprint': package_remainder},
+        'path_fields': {field: path_summary(values)
+                        for field, values in candidate_paths.items()},
+        'records': records,
+        'truncated': omitted,
+    }
     encoded = lambda: json.dumps(result, sort_keys=True, separators=(',', ':')).encode()
     while len(encoded()) > max_bytes and records:
         records.pop()

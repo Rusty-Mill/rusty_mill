@@ -143,42 +143,47 @@ class ChangeImpactTests(unittest.TestCase):
 
     def test_cargo_metadata_digest_normalizes_captured_windows_path_spellings(self):
         package = self.md['packages'][0]
-        package['id'] = 'path+file:///C:/fixture/crate#crate@0.1.0'
         package['manifest_path'] = r'C:\fixture\crate\Cargo.toml'
         package['dependencies'] = [{'name': 'local', 'path': r'C:\fixture\local'}]
         package['targets'] = [{'name': 'crate', 'src_path': r'C:\fixture\crate\src\lib.rs'}]
         self.md.update(workspace_root=r'C:\fixture', target_directory=r'C:\fixture\target',
                        build_directory=r'C:\fixture\target')
-        self.md['workspace_members'] = [package['id']]
-        node = self.md['resolve']['nodes'][0]
-        node.update(id=package['id'], dependencies=[package['id']],
-                    deps=[{'name': 'crate', 'pkg': package['id'], 'dep_kinds': []}])
-        self.md['resolve']['root'] = package['id']
-
         equivalent = copy.deepcopy(self.md)
         extended = lambda value: '\\\\?\\' + value
         equivalent.update(workspace_root=extended(self.md['workspace_root']),
                           target_directory=extended(self.md['target_directory']),
                           build_directory=extended(self.md['build_directory']))
-        extended_id = package['id'].replace('file:///', 'file:///?/')
-        equivalent['workspace_members'] = [extended_id]
         equivalent_package = equivalent['packages'][0]
-        equivalent_package.update(id=extended_id,
-                                  manifest_path=extended(package['manifest_path']))
+        equivalent_package['manifest_path'] = extended(package['manifest_path'])
         equivalent_package['dependencies'][0]['path'] = extended(
             package['dependencies'][0]['path'])
         equivalent_package['targets'][0]['src_path'] = extended(
             package['targets'][0]['src_path'])
-        equivalent_node = equivalent['resolve']['nodes'][0]
-        equivalent_node.update(id=extended_id, dependencies=[extended_id])
-        equivalent_node['deps'][0]['pkg'] = extended_id
-        equivalent['resolve']['root'] = extended_id
-
         self.assertEqual(MODULE.cargo_metadata_digest(self.md),
                          MODULE.cargo_metadata_digest(equivalent))
         equivalent_package['manifest_path'] += '.moved'
         self.assertNotEqual(MODULE.cargo_metadata_digest(self.md),
                             MODULE.cargo_metadata_digest(equivalent))
+
+    def test_cargo_metadata_digest_preserves_opaque_ids_and_non_windows_paths(self):
+        package = self.md['packages'][0]
+        baseline = MODULE.cargo_metadata_digest(self.md)
+        cases = [
+            ('git source id', package, 'id',
+             'git+file:///%3F/repo#crate@0.1.0', 'git+file:///repo#crate@0.1.0'),
+            ('non-Windows path source id', package, 'id',
+             'path+file:///%3F/repo#crate@0.1.0', 'path+file:///repo#crate@0.1.0'),
+            ('POSIX manifest path', package, 'manifest_path',
+             '/tmp/file:///%3F/crate/Cargo.toml', '/tmp/file:///crate/Cargo.toml'),
+        ]
+        for label, subject, field, first, second in cases:
+            with self.subTest(label=label):
+                subject[field] = first
+                first_digest = MODULE.cargo_metadata_digest(self.md)
+                subject[field] = second
+                self.assertNotEqual(MODULE.cargo_metadata_digest(self.md), first_digest)
+        package['manifest_path'] = r'\\?\relative\Cargo.toml'
+        self.assertNotEqual(MODULE.cargo_metadata_digest(self.md), baseline)
 
     def test_metadata_diagnostics_are_redacted_bounded_and_canonical(self):
         self.md['metadata'] = {'DO_NOT_PRINT_SENTINEL': {'private': 'DO_NOT_PRINT_VALUE'}}
@@ -203,6 +208,8 @@ class ChangeImpactTests(unittest.TestCase):
         path = next(entry for pointer, entry in by_pointer.items()
                     if pointer.endswith('/dependencies/0/path'))
         self.assertEqual(path['path_spelling'], 'ordinary')
+        self.assertEqual(diagnostics['schema_version'], 2)
+        self.assertEqual(diagnostics['path_fields']['dependency.path']['spellings']['ordinary'], 1)
         self.assertTrue(any(entry['type'] == 'array' and entry.get('opaque') == 'authored-metadata'
                             for entry in diagnostics['records']))
         empty_object = MODULE.cargo_metadata_diagnostics({'resolve': {}})['records'][0]
@@ -222,6 +229,15 @@ class ChangeImpactTests(unittest.TestCase):
             value['child'] = {}
             value = value['child']
         self.assertGreater(MODULE.cargo_metadata_diagnostics(nested)['truncated']['depth'], 0)
+
+    def test_metadata_diagnostics_summarize_changes_beyond_detail_limit(self):
+        metadata = {'packages': [{'id': f'package-{index}', 'name': 'x' * 100}
+                                 for index in range(100)]}
+        before = MODULE.cargo_metadata_diagnostics(metadata)
+        metadata['packages'][-1]['name'] = 'changed beyond detail prefix'
+        after = MODULE.cargo_metadata_diagnostics(metadata)
+        self.assertNotEqual(before['top_level_fingerprints'], after['top_level_fingerprints'])
+        self.assertNotEqual(before['package_remainder'], after['package_remainder'])
 
     def test_rank_never_omits_binding_inactive_requirements(self):
         self.projects['repos']['mill']['dormant'] = ['scripts/dormant']

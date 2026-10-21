@@ -259,7 +259,15 @@ fn proposed_change_is_revision_bound_and_detects_requirement_edits() {
             .trim(),
     )
     .expect("successful subprocess diagnostics");
-    assert_eq!(first_diagnostics["schema_version"].as_i64(), Some(1));
+    assert_eq!(first_diagnostics["schema_version"].as_i64(), Some(2));
+    assert!(first_diagnostics["top_level_fingerprints"]["packages"]
+        .as_str()
+        .is_some());
+    assert!(
+        first_diagnostics["path_fields"]["targets.src_path"]["fingerprint"]
+            .as_str()
+            .is_some()
+    );
     assert!(first_diagnostics["records"]
         .as_array()
         .expect("diagnostic records")
