@@ -796,6 +796,17 @@ mod tests {
         write_waker: Option<Waker>,
         budget: usize,
         taken: usize,
+        /// Once `input` is used up, reads fail with this instead of waiting.
+        read_error: Option<std::io::ErrorKind>,
+        /// Writes fail with this instead of using the budget.
+        write_error: Option<std::io::ErrorKind>,
+        /// Flushes fail with this.
+        flush_error: Option<std::io::ErrorKind>,
+        /// Shutdown fails with this.
+        shutdown_error: Option<std::io::ErrorKind>,
+        /// Writes are accepted but a flush stays pending while this is set:
+        /// output the transport holds without having delivered it.
+        hold_flush: bool,
     }
 
     #[derive(Clone, Default)]
@@ -816,6 +827,9 @@ mod tests {
                 st.read_pos += n;
                 return Poll::Ready(Ok(()));
             }
+            if let Some(kind) = st.read_error {
+                return Poll::Ready(Err(kind.into()));
+            }
             // Replacing the stored waker destroys the previous one, right here.
             st.read_waker = Some(cx.waker().clone());
             Poll::Pending
@@ -829,6 +843,9 @@ mod tests {
             buf: &[u8],
         ) -> Poll<std::io::Result<usize>> {
             let mut st = self.0.lock().unwrap();
+            if let Some(kind) = st.write_error {
+                return Poll::Ready(Err(kind.into()));
+            }
             st.write_waker = Some(cx.waker().clone());
             let n = buf.len().min(st.budget);
             if n == 0 {
@@ -840,11 +857,21 @@ mod tests {
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            let st = self.0.lock().unwrap();
+            if let Some(kind) = st.flush_error {
+                return Poll::Ready(Err(kind.into()));
+            }
+            if st.hold_flush {
+                return Poll::Pending;
+            }
             Poll::Ready(Ok(()))
         }
 
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
+            match self.0.lock().unwrap().shutdown_error {
+                Some(kind) => Poll::Ready(Err(kind.into())),
+                None => Poll::Ready(Ok(())),
+            }
         }
     }
 
@@ -933,5 +960,431 @@ mod tests {
         let st = stub.0.lock().unwrap();
         assert_eq!(st.read_pos, total);
         assert!(st.taken >= PINGS * 17, "bytes for every ping were written");
+    }
+
+    // ---- a peer that resets the connection after saying goodbye -----------
+    //
+    // Windows reports a peer that closed with unread data as a reset
+    // (`ConnectionReset`) or an abort (`ConnectionAborted`), on the read or on
+    // the write that follows. Both are a clean wind-down only when the peer had
+    // said GOAWAY and nothing it needed was left undelivered; everything else
+    // is still a failure. These tests drive the driver by hand over `Stub`, so
+    // they are deterministic and the same on every OS.
+
+    use std::io::ErrorKind;
+
+    /// The errors a transport gives for a peer that is gone.
+    const PEER_GONE: [ErrorKind; 4] = [
+        ErrorKind::BrokenPipe,
+        ErrorKind::ConnectionReset,
+        ErrorKind::NotConnected,
+        ErrorKind::ConnectionAborted,
+    ];
+
+    fn goaway() -> Frame {
+        Frame::GoAway(crate::frame::GoAwayFrame {
+            last_stream_id: 0,
+            error_code: ErrorCode::NoError,
+            debug_data: vec![],
+        })
+    }
+
+    fn request_headers(id: u32, end_stream: bool) -> Frame {
+        let mut block = Vec::new();
+        crate::hpack::Encoder::default().encode(
+            &[
+                HeaderField::new(":method", "POST"),
+                HeaderField::new(":scheme", "http"),
+                HeaderField::new(":path", "/x"),
+                HeaderField::new(":authority", "localhost"),
+            ],
+            &mut block,
+        );
+        Frame::Headers(crate::frame::HeadersFrame {
+            stream_id: id,
+            end_stream,
+            end_headers: true,
+            priority: None,
+            header_block_fragment: block,
+        })
+    }
+
+    /// A client's opening bytes (preface and empty SETTINGS) then `frames`.
+    fn peer_input(frames: &[Frame]) -> Vec<u8> {
+        let mut input = crate::CONNECTION_PREFACE.to_vec();
+        Frame::Settings(crate::frame::SettingsFrame {
+            ack: false,
+            settings: vec![],
+        })
+        .encode(&mut input);
+        for f in frames {
+            f.encode(&mut input);
+        }
+        input
+    }
+
+    /// A server driver over a [`Stub`] that has `input` to read, and writes
+    /// without limit.
+    fn stub_server(input: Vec<u8>) -> (Stub, Acceptor, ConnectionDriver<Stub>) {
+        let stub = Stub::default();
+        {
+            let mut st = stub.0.lock().unwrap();
+            st.input = input;
+            st.budget = usize::MAX / 2;
+        }
+        let (acceptor, driver) = server(stub.clone(), crate::server::builder::Builder::new());
+        (stub, acceptor, driver)
+    }
+
+    /// Polls `driver` until it ends; a driver that is still waiting after a
+    /// few polls is stuck.
+    fn finish<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+        driver: &mut ConnectionDriver<T>,
+    ) -> Result<(), Error> {
+        for _ in 0..8 {
+            if let Poll::Ready(r) = poll_once(driver, Waker::noop()) {
+                return r;
+            }
+        }
+        panic!("the driver did not finish");
+    }
+
+    /// The transport operations a peer that has gone can fail.
+    #[derive(Clone, Copy, Debug)]
+    enum Op {
+        Write,
+        Flush,
+        Shutdown,
+    }
+
+    const OPS: [Op; 3] = [Op::Write, Op::Flush, Op::Shutdown];
+
+    fn fail(stub: &Stub, op: Op, kind: ErrorKind) {
+        let mut st = stub.0.lock().unwrap();
+        match op {
+            Op::Write => st.write_error = Some(kind),
+            Op::Flush => st.flush_error = Some(kind),
+            Op::Shutdown => st.shutdown_error = Some(kind),
+        }
+    }
+
+    #[test]
+    fn a_write_flush_or_shutdown_a_departed_peer_refuses_after_its_goodbye_is_not_a_failure() {
+        for op in OPS {
+            for kind in PEER_GONE {
+                let (stub, _acceptor, mut driver) = stub_server(peer_input(&[goaway()]));
+                fail(&stub, op, kind);
+                let r = finish(&mut driver);
+                assert!(r.is_ok(), "{op:?} {kind:?}: {r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failure_to_write_flush_or_shut_down_without_any_goodbye_is_still_a_failure() {
+        // This side winds down on its own (every handle dropped); the peer has
+        // said nothing and the input has not ended, so nothing says it left.
+        for op in OPS {
+            for kind in PEER_GONE {
+                let stub = Stub::default();
+                stub.0.lock().unwrap().budget = usize::MAX / 2;
+                let (handle, mut driver) =
+                    client(stub.clone(), crate::client::builder::Builder::new());
+                drop(handle);
+                fail(&stub, op, kind);
+                let r = finish(&mut driver);
+                assert!(
+                    matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                    "{op:?} {kind:?}: {r:?}"
+                );
+            }
+        }
+    }
+
+    /// Input that is not whole, after a goodbye: a frame cut short, or a
+    /// header block still waiting for its CONTINUATION.
+    fn incomplete_inputs() -> Vec<(&'static str, Vec<u8>)> {
+        let mut cut = peer_input(&[goaway()]);
+        cut.extend_from_slice(&[0, 0, 4]); // the start of a frame header
+        let mut unfinished = peer_input(&[goaway()]);
+        let Frame::Headers(mut headers) = request_headers(1, false) else {
+            unreachable!()
+        };
+        headers.end_headers = false;
+        Frame::Headers(headers).encode(&mut unfinished);
+        vec![
+            ("a frame cut short", cut),
+            ("an unfinished header block", unfinished),
+        ]
+    }
+
+    #[test]
+    fn incomplete_input_after_a_goodbye_is_not_clean_on_the_write_flush_and_shutdown_paths() {
+        // The read stays pending (the peer has not reset), the driver has
+        // wound down on the GOAWAY, and then the final operation fails.
+        for (what, input) in incomplete_inputs() {
+            for op in OPS {
+                for kind in PEER_GONE {
+                    let (stub, _acceptor, mut driver) = stub_server(input.clone());
+                    fail(&stub, op, kind);
+                    let r = finish(&mut driver);
+                    assert!(
+                        matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                        "{what}, {op:?} {kind:?}: {r:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_reset_read_with_incomplete_input_is_a_failure_even_after_a_goodbye() {
+        for (what, input) in incomplete_inputs() {
+            for kind in PEER_GONE {
+                let (stub, _acceptor, mut driver) = stub_server(input.clone());
+                stub.0.lock().unwrap().read_error = Some(kind);
+                let r = finish(&mut driver);
+                assert!(
+                    matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                    "{what}, {kind:?}: {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reset_read_after_the_peers_goodbye_is_a_clean_wind_down() {
+        for kind in PEER_GONE {
+            let (stub, _acceptor, mut driver) = stub_server(peer_input(&[goaway()]));
+            stub.0.lock().unwrap().read_error = Some(kind);
+            let r = finish(&mut driver);
+            assert!(r.is_ok(), "read {kind:?}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn a_reset_read_without_a_goodbye_is_a_failure() {
+        for kind in PEER_GONE {
+            let (stub, _acceptor, mut driver) = stub_server(peer_input(&[]));
+            stub.0.lock().unwrap().read_error = Some(kind);
+            let r = finish(&mut driver);
+            assert!(
+                matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                "{kind:?}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrelated_read_error_after_a_goodbye_is_a_failure() {
+        for kind in [
+            ErrorKind::TimedOut,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+        ] {
+            let (stub, _acceptor, mut driver) = stub_server(peer_input(&[goaway()]));
+            stub.0.lock().unwrap().read_error = Some(kind);
+            let r = finish(&mut driver);
+            assert!(
+                matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                "{kind:?}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reset_read_in_the_middle_of_a_frame_is_a_failure_even_after_a_goodbye() {
+        for kind in PEER_GONE {
+            let mut input = peer_input(&[goaway()]);
+            input.extend_from_slice(&[0, 0, 4]); // the start of a frame header
+            let (stub, _acceptor, mut driver) = stub_server(input);
+            stub.0.lock().unwrap().read_error = Some(kind);
+            let r = finish(&mut driver);
+            assert!(
+                matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                "{kind:?}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reset_read_with_a_request_unaccepted_is_a_failure_even_after_a_goodbye() {
+        for kind in PEER_GONE {
+            let (stub, _acceptor, mut driver) =
+                stub_server(peer_input(&[request_headers(1, false), goaway()]));
+            stub.0.lock().unwrap().read_error = Some(kind);
+            let r = finish(&mut driver);
+            assert!(
+                matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                "{kind:?}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reset_read_with_an_accepted_call_unanswered_is_a_failure_even_after_a_goodbye() {
+        for kind in PEER_GONE {
+            let (stub, mut acceptor, mut driver) =
+                stub_server(peer_input(&[request_headers(1, false), goaway()]));
+            assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+            let mut accept = Box::pin(acceptor.accept());
+            let Poll::Ready(Some(Ok(_call))) = poll_once(&mut accept, Waker::noop()) else {
+                panic!("the request is accepted");
+            };
+            // The call is held open, unanswered, while the peer resets.
+            {
+                let mut st = stub.0.lock().unwrap();
+                st.read_error = Some(kind);
+                st.write_error = Some(kind);
+            }
+            let r = finish(&mut driver);
+            assert!(
+                matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                "{kind:?}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_write_or_flush_that_fails_with_a_response_undelivered_is_a_failure_even_after_a_goodbye() {
+        // The driver has wound down on the peer's GOAWAY, but the response it
+        // owes is still in its own buffer or the transport's. Losing that is
+        // not losing housekeeping.
+        for op in [Op::Write, Op::Flush] {
+            for kind in PEER_GONE {
+                let (stub, mut acceptor, mut driver) =
+                    stub_server(peer_input(&[request_headers(1, true), goaway()]));
+                stub.0.lock().unwrap().hold_flush = true;
+                assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+                let mut accept = Box::pin(acceptor.accept());
+                let Poll::Ready(Some(Ok((_request, respond)))) =
+                    poll_once(&mut accept, Waker::noop())
+                else {
+                    panic!("the request is accepted");
+                };
+                let mut reply =
+                    Box::pin(respond.send_response(vec![HeaderField::new(":status", "200")], true));
+                assert!(matches!(
+                    poll_once(&mut reply, Waker::noop()),
+                    Poll::Ready(Ok(_))
+                ));
+                match op {
+                    // The transport takes the response, holds it, then fails.
+                    Op::Flush => {
+                        assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+                        let mut st = stub.0.lock().unwrap();
+                        st.hold_flush = false;
+                        st.flush_error = Some(kind);
+                    }
+                    // The transport refuses the response outright.
+                    _ => fail(&stub, Op::Write, kind),
+                }
+                let r = finish(&mut driver);
+                assert!(
+                    matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                    "{op:?} {kind:?}: {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reset_read_with_a_response_accepted_but_not_flushed_is_a_failure_even_after_a_goodbye() {
+        // Only the read fails. Writes are accepted, so nothing here says they
+        // will fail; but the response is held by the transport, not delivered.
+        for kind in PEER_GONE {
+            let (stub, mut acceptor, mut driver) =
+                stub_server(peer_input(&[request_headers(1, true), goaway()]));
+            stub.0.lock().unwrap().hold_flush = true;
+            assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+            let mut accept = Box::pin(acceptor.accept());
+            let Poll::Ready(Some(Ok((_request, respond)))) = poll_once(&mut accept, Waker::noop())
+            else {
+                panic!("the request is accepted");
+            };
+            let mut reply =
+                Box::pin(respond.send_response(vec![HeaderField::new(":status", "200")], true));
+            assert!(matches!(
+                poll_once(&mut reply, Waker::noop()),
+                Poll::Ready(Ok(_))
+            ));
+            // The read fails in the very poll that finds the response queued,
+            // before any of it is flushed (a poll that found nothing to read
+            // would let the driver wind down cleanly on the GOAWAY first).
+            stub.0.lock().unwrap().read_error = Some(kind);
+            assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+            // The transport has the response and holds it. Once it lets go,
+            // the connection ends with the read error, not as a clean wind-down.
+            stub.0.lock().unwrap().hold_flush = false;
+            let r = finish(&mut driver);
+            assert!(
+                matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                "{kind:?}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reset_read_with_a_response_unsent_and_writes_failing_too_is_a_failure_even_after_a_goodbye(
+    ) {
+        for kind in PEER_GONE {
+            let (stub, mut acceptor, mut driver) =
+                stub_server(peer_input(&[request_headers(1, true), goaway()]));
+            // Nothing can be written yet.
+            stub.0.lock().unwrap().budget = 0;
+            assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+            let mut accept = Box::pin(acceptor.accept());
+            let Poll::Ready(Some(Ok((_request, respond)))) = poll_once(&mut accept, Waker::noop())
+            else {
+                panic!("the request is accepted");
+            };
+            let mut reply =
+                Box::pin(respond.send_response(vec![HeaderField::new(":status", "200")], true));
+            assert!(matches!(
+                poll_once(&mut reply, Waker::noop()),
+                Poll::Ready(Ok(_))
+            ));
+            // The response is queued, undelivered; then the peer resets, which
+            // fails the writes as well as the reads.
+            {
+                let mut st = stub.0.lock().unwrap();
+                st.read_error = Some(kind);
+                st.write_error = Some(kind);
+            }
+            let r = finish(&mut driver);
+            assert!(
+                matches!(r, Err(Error::Io(ref e)) if e.kind() == kind),
+                "{kind:?}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reset_read_after_a_delivered_response_and_a_goodbye_is_clean() {
+        for kind in PEER_GONE {
+            let (stub, mut acceptor, mut driver) =
+                stub_server(peer_input(&[request_headers(1, true)]));
+            assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+            let mut accept = Box::pin(acceptor.accept());
+            let Poll::Ready(Some(Ok((_request, respond)))) = poll_once(&mut accept, Waker::noop())
+            else {
+                panic!("the request is accepted");
+            };
+            let mut reply =
+                Box::pin(respond.send_response(vec![HeaderField::new(":status", "200")], true));
+            assert!(matches!(
+                poll_once(&mut reply, Waker::noop()),
+                Poll::Ready(Ok(_))
+            ));
+            // The response goes out; then the peer says goodbye and resets.
+            assert!(poll_once(&mut driver, Waker::noop()).is_pending());
+            {
+                let mut st = stub.0.lock().unwrap();
+                goaway().encode(&mut st.input);
+                st.read_error = Some(kind);
+            }
+            let r = finish(&mut driver);
+            assert!(r.is_ok(), "{kind:?}: {r:?}");
+        }
     }
 }
