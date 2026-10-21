@@ -34,6 +34,10 @@ pub enum Error {
     /// turned into a certificate verifier — most commonly an unparseable
     /// CRL.
     InvalidRevocationConfig(String),
+    /// The ALPN protocol names handed to a client constructor can't be
+    /// encoded: a name is empty or longer than 255 bytes, or the offer as a
+    /// whole is too large for the extension.
+    InvalidAlpnProtocols(String),
 }
 
 impl fmt::Display for Error {
@@ -52,6 +56,9 @@ impl fmt::Display for Error {
             Error::InvalidRevocationConfig(reason) => {
                 write!(f, "invalid revocation config: {reason}")
             }
+            Error::InvalidAlpnProtocols(reason) => {
+                write!(f, "invalid ALPN protocols: {reason}")
+            }
         }
     }
 }
@@ -65,7 +72,8 @@ impl std::error::Error for Error {
             | Error::NoTrustAnchors
             | Error::InvalidPrivateKey(_)
             | Error::InvalidClientCaRoots(_)
-            | Error::InvalidRevocationConfig(_) => None,
+            | Error::InvalidRevocationConfig(_)
+            | Error::InvalidAlpnProtocols(_) => None,
         }
     }
 }
