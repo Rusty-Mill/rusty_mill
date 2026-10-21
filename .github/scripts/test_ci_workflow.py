@@ -575,8 +575,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("needs: plan", job)
         self.assertIn("needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''", job)
         self.assertIn("check_msrv_compile.py", job)
-        # The pinned toolchain's own floors are covered elsewhere; builds stay out of the cached target dir.
-        self.assertIn('--skip-from "${RUST_TOOLCHAIN%.*}"', job)
+        # The pinned toolchain's own versions are covered elsewhere (compared as full versions); builds stay
+        # out of the cached target dir; metadata is locked and Cargo.lock must come out unchanged.
+        self.assertIn('--skip-from "$RUST_TOOLCHAIN"', job)
+        self.assertIn("cargo metadata --locked --format-version=1", job)
+        self.assertIn('test "$(sha256sum Cargo.lock)" = "$lock_before"', job)
         self.assertIn('--target-base "$RUNNER_TEMP/msrv"', job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
 

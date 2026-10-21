@@ -1197,15 +1197,18 @@ jobs:
           PLAN_PACKAGES: ${{ needs.plan.outputs.packages }}
         run: |
           set -euo pipefail
-          cargo metadata --format-version=1 > "$RUNNER_TEMP/metadata-default.json"
+          # Locked: a metadata call that rewrote Cargo.lock would validate a lock nobody committed.
+          lock_before="$(sha256sum Cargo.lock)"
+          cargo metadata --locked --format-version=1 > "$RUNNER_TEMP/metadata-default.json"
           scope=()
           if [ "$PLAN_FULL" != "true" ]; then scope=(--packages "$PLAN_PACKAGES"); fi
           # rusty_multimodal_db has its own msrv job; the remind_me crates have their own jobs.
           python3 .github/scripts/check_msrv_compile.py "$RUNNER_TEMP/metadata-default.json" \
             "${scope[@]}" \
-            --skip-from "${RUST_TOOLCHAIN%.*}" \
+            --skip-from "$RUST_TOOLCHAIN" \
             --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db" \
             --target-base "$RUNNER_TEMP/msrv"
+          test "$(sha256sum Cargo.lock)" = "$lock_before"
 
   rusty-config-no-std-check:
     concurrency:

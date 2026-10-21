@@ -2,9 +2,9 @@
 name = "rusty_log"
 version = "0.1.0"
 edition = "2021"
-# Compiled with a 1.74 rustc: `pin-project-lite` (through `tracing`) does not build on 1.73. The
-# `msrv-compile` CI job keeps this honest. `tracing` 0.1 and `tracing-subscriber` 0.3 declare 1.65.
-rust-version = "1.74"
+# Builds on 1.71 (default and all features) with the `msrv-compile` CI job's method. Below that, cargo refuses it:
+# `unicode-ident` (through `tracing-attributes`) declares 1.71. `tracing` 0.1 itself declares 1.65.
+rust-version = "1.71"
 description = "The workspace's single door to `tracing`: re-exports the logging and span API, and (feature `subscriber`) the subscriber kit, so that one crate owns the third-party dependency."
 license = "MIT OR Apache-2.0"
 publish = false
