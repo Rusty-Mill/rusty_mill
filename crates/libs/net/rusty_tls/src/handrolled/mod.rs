@@ -90,8 +90,8 @@
 //!   the certificate's private key and needs rotating; the module says why and
 //!   [`ticket::TicketKeys`] is the shape that makes rotating possible.
 //!
-//! TLS 1.2 (4b) is being built in stages; `docs/research/TLS12-DESIGN.md` has
-//! the plan. Its record layer and key derivation exist so far.
+//! TLS 1.2 (4b) was built in stages 4b-i to 4b-vi;
+//! `docs/research/TLS12-DESIGN.md` records them.
 //!
 //! # What is deliberately *not* here
 //!

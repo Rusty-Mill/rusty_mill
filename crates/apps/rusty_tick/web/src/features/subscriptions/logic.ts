@@ -4,7 +4,7 @@
  * tasks in place instead of duplicating them. Pure.
  */
 import type { Task, TaskPatch } from '@/api/types'
-import type { IcsTask } from '@/lib/ics'
+import { storedExDates, type IcsTask } from '@/lib/ics'
 
 export interface SubscriptionBody {
   name: string
@@ -55,7 +55,7 @@ export const sourceFields = (t: IcsTask): Pick<Task, 'title' | 'notes' | 'startM
  */
 const feedFields = (t: IcsTask): Pick<Task, 'title' | 'notes' | 'startMs' | 'dueMs' | 'isAllDay' | 'timeZone' | 'repeatFlag' | 'exDates'> => ({
   ...sourceFields(t),
-  exDates: [...new Set(t.exDates)].sort((a, b) => a - b),
+  exDates: storedExDates(t.exDates),
 })
 
 const same = (a: unknown, b: unknown): boolean => (Array.isArray(a) && Array.isArray(b) ? a.length === b.length && a.every((x, i) => x === b[i]) : a === b)

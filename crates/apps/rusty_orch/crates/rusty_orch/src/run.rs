@@ -218,6 +218,12 @@ fn take_over(
         None => Factory::default(),
     };
     let lease = |e: FactoryError| RunError::Lease(format!("{e:?}"));
+    if let (None, Some(linked)) = (&card, factory.links().next()) {
+        return Err(RunError::Lease(format!(
+            "this state is linked to card {}; resume it with --card and --board",
+            linked.card
+        )));
+    }
     let generation = factory
         .take_over(
             GOAL_ORCHESTRATOR,

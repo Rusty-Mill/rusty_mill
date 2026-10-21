@@ -263,7 +263,7 @@ export class MemoryAdapter implements ApiClient {
     if (patch.timeZone !== undefined) task.timeZone = patch.timeZone
     if (patch.reminders !== undefined) task.reminders = patch.reminders
     if (patch.repeatFlag !== undefined) task.repeatFlag = patch.repeatFlag
-    if (patch.exDates !== undefined) task.exDates = patch.exDates
+    if (patch.exDates !== undefined) task.exDates = cleanExDates(patch.exDates)
     if (patch.items !== undefined) task.items = cleanItems(patch.items)
     if (patch.tags !== undefined) task.tags = this.cleanTags(patch.tags)
     if (patch.sortOrder !== undefined) task.sortOrder = patch.sortOrder
@@ -488,6 +488,11 @@ function cleanTitle(title: string): string {
 function cleanNotes(notes: string): string {
   if ([...notes].length > 100_000) fail('notes are longer than 100000 characters')
   return notes
+}
+
+function cleanExDates(exDates: number[]): number[] {
+  if (exDates.length > 1000) fail('more than 1000 exDates')
+  return exDates
 }
 
 function cleanColor(color: string | null): string | null {

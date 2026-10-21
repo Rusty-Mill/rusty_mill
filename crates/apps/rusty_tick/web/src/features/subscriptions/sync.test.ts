@@ -13,8 +13,11 @@ const movedA = event('UID:r1', 'RECURRENCE-ID:20261012T090000Z', 'SUMMARY:Standu
 const movedB = event('UID:r1', 'RECURRENCE-ID:20261019T090000Z', 'SUMMARY:Standup', 'DTSTART:20261020T090000Z')
 const day = (iso: string): string => dayKey(startOfDay(Date.parse(iso)))
 
-/** A feed served from `text`, synced into a MemoryAdapter through actions that write to it. */
+let feeds = 0
+
+/** A feed served from `text`, synced into a MemoryAdapter through actions that write to it. Each has its own URL, since the subscription store is shared. */
 async function harness() {
+  const url = `https://x/f${++feeds}.ics`
   const api = new MemoryAdapter()
   const list = await api.createList({ name: 'Feed' })
   let text = ''
@@ -27,10 +30,10 @@ async function harness() {
   const store = useSubscriptions.getState()
   const sync = async (feed: string): Promise<void> => {
     text = feed
-    const sub = useSubscriptions.getState().items.find((s) => s.url === 'https://x/f.ics')!
+    const sub = useSubscriptions.getState().items.find((s) => s.url === url)!
     await syncSubscription(sub, { api: { fetchIcs: async () => text }, actions, tasks: await tasks() })
   }
-  store.add({ name: 'Feed', url: 'https://x/f.ics', listId: list.id, items: {}, syncedMs: 0 })
+  store.add({ name: 'Feed', url, listId: list.id, items: {}, syncedMs: 0 })
   /** The local days the calendar draws Standup on, through October. */
   const shown = async (): Promise<string[]> =>
     buildEvents(Object.values(await tasks()).filter((t) => t.deletedMs === null), false, new Date(2026, 10, 1).getTime())
@@ -49,5 +52,17 @@ describe('syncSubscription: repeating events', () => {
     await h.sync(cal(master, movedB))
     expect(await h.shown()).toEqual([day('2026-10-05T09:00Z'), day('2026-10-12T09:00Z'), day('2026-10-20T09:00Z'), day('2026-10-26T09:00Z')].sort())
     expect((await h.api.snapshot()).tasks.filter((t) => t.deletedMs === null)).toHaveLength(2)
+  })
+
+  it('syncs a feed whose event has more exceptions than a task can hold, keeping the latest', async () => {
+    const h = await harness()
+    const exdates = Array.from({ length: 1500 }, (_, i) => new Date(Date.UTC(2026, 9, 6) + i * 86_400_000).toISOString().replace(/[-:]|\.\d{3}/g, ''))
+    const daily = event('UID:d1', 'SUMMARY:Daily', 'DTSTART:20261005T090000Z', 'RRULE:FREQ=DAILY', `EXDATE:${exdates.join(',')}`)
+    await h.sync(cal(daily))
+    const task = (await h.api.snapshot()).tasks.find((t) => t.title === 'Daily')!
+    expect(task.exDates).toHaveLength(1000)
+    expect(task.exDates.at(-1)).toBe(Date.parse('2026-10-06T00:00:00Z') + 1499 * 86_400_000)
+    await h.sync(cal(daily)) // a refresh patches nothing and does not fail
+    expect((await h.api.snapshot()).tasks.find((t) => t.title === 'Daily')!.exDates).toEqual(task.exDates)
   })
 })

@@ -11,6 +11,17 @@
 import { addDays, startOfDay } from './date'
 import { parseRule } from './recurrence'
 
+/** The most `exDates` the server keeps on a task (`MAX_EX_DATES` in `service.rs`); a longer list is refused. */
+export const MAX_EX_DATES = 1000
+
+/**
+ * Exceptions as a task stores them: unique, ascending, and at most
+ * `MAX_EX_DATES`, so a write is never refused. Past the cap the latest are
+ * kept: a long-running series' recent and future exceptions are the ones the
+ * calendar shows.
+ */
+export const storedExDates = (exDates: readonly number[]): number[] => [...new Set(exDates)].sort((a, b) => a - b).slice(-MAX_EX_DATES)
+
 export interface IcsTask {
   /** The feed's `UID`, or one made from the title and dates when it has none: stable across fetches. */
   uid: string

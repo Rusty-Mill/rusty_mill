@@ -1,8 +1,10 @@
 # TLS 1.2 for the native engine: scope and stages
 
-Date: 2026-10-08. Status: in progress. Owner approved implementing TLS 1.2 (decision D1 in
-`TLS-ENGINE-ASSESSMENT.md`). Stages 4b-i (record layer), 4b-ii (key derivation) and 4b-iii (client handshake) are built; the server, version negotiation and hardening are not. Supersedes ADR-0002 stage 4b
-("declined") once the first stage lands and the crate ADR is amended (decision D3, still open).
+Date: 2026-10-08. Status (updated 2026-10-21): built. Owner approved implementing TLS 1.2 (decision D1 in
+`TLS-ENGINE-ASSESSMENT.md`). Stages 4b-i to 4b-vi (record layer, key derivation, client, server, version
+negotiation, hardening) and the later stages 7 to 14 are done; what is left is under "Next action". ADR-0002's
+stage table records 4b as landed (2026-10-21). Superseding ADR-0002 itself (decision D3) is still open, and the
+engine is still never the default.
 
 ## Principle
 

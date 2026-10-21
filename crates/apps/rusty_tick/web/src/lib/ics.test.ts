@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseIcs } from './ics'
+import { MAX_EX_DATES, parseIcs, storedExDates } from './ics'
 
 const wrap = (...items: string[]): string => ['BEGIN:VCALENDAR', 'VERSION:2.0', ...items, 'END:VCALENDAR'].join('\r\n')
 const event = (...lines: string[]): string => ['BEGIN:VEVENT', ...lines, 'END:VEVENT'].join('\r\n')
@@ -64,5 +64,20 @@ describe('parseIcs', () => {
     expect(droppedExceptions).toBe(0)
     expect(tasks[0]).toMatchObject({ recurrenceId: null, exDates: [Date.UTC(2026, 9, 19, 10), Date.UTC(2026, 9, 12, 10)] })
     expect(tasks[1]).toMatchObject({ recurrenceId: Date.UTC(2026, 9, 12, 9), exDates: [] })
+  })
+})
+
+describe('storedExDates', () => {
+  it('dedupes and sorts', () => {
+    expect(storedExDates([30, 10, 20, 10])).toEqual([10, 20, 30])
+    expect(storedExDates([])).toEqual([])
+  })
+
+  it('keeps the latest MAX_EX_DATES past the cap', () => {
+    const many = Array.from({ length: MAX_EX_DATES + 500 }, (_, i) => MAX_EX_DATES + 500 - i) // descending, 1..1500
+    const kept = storedExDates(many)
+    expect(kept).toHaveLength(MAX_EX_DATES)
+    expect(kept[0]).toBe(501)
+    expect(kept.at(-1)).toBe(MAX_EX_DATES + 500)
   })
 })

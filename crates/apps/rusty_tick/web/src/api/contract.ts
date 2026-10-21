@@ -99,6 +99,14 @@ export function runApiContract(label: string, make: () => Promise<ApiClient>): v
       expect(patched.exDates).toEqual([5])
     })
 
+    it('keeps up to 1000 exDates and refuses more', async () => {
+      const { api, list } = await setup()
+      const t = await api.createTask({ listId: list.id, title: 't', repeatFlag: 'RRULE:FREQ=DAILY' })
+      const many = Array.from({ length: 1001 }, (_, i) => i)
+      expect((await api.updateTask(t.id, { exDates: many.slice(0, 1000) })).exDates).toHaveLength(1000)
+      await expect(api.updateTask(t.id, { exDates: many })).rejects.toBeInstanceOf(InvalidError)
+    })
+
     it('stamps completion and clears it on reopen', async () => {
       const { api, list } = await setup()
       const t = await api.createTask({ listId: list.id, title: 't' })
