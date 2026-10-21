@@ -3,7 +3,7 @@ import type { ApiClient } from '@/api/client'
 import type { Task } from '@/api/types'
 import type { DataActions } from '@/store/data'
 import type { DocItem } from '@/lib/docStore'
-import { parseIcs } from '@/lib/ics'
+import { parseIcs, storedExDates } from '@/lib/ics'
 import { itemKey, planSync, sourceFields, type SubscriptionBody } from './logic'
 import { useSubscriptions } from './store'
 
@@ -23,7 +23,7 @@ export async function syncSubscription(sub: DocItem<SubscriptionBody>, { api, ac
   for (const event of plan.create) {
     const { id } = await actions.createTask({ listId: sub.listId, ...sourceFields(event) })
     items[itemKey(event)] = id
-    if (event.exDates.length > 0) await actions.updateTask(id, { exDates: [...new Set(event.exDates)].sort((a, b) => a - b) }) // a create cannot carry them
+    if (event.exDates.length > 0) await actions.updateTask(id, { exDates: storedExDates(event.exDates) }) // a create cannot carry them
   }
   for (const { taskId, patch } of plan.update) await actions.updateTask(taskId, patch)
   for (const taskId of plan.trash) await actions.trashTask(taskId)
