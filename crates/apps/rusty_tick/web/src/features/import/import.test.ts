@@ -251,9 +251,28 @@ describe('applyImport: files imported before the key change (#821)', () => {
     return list.id
   }
 
-  it('gives the first row to produce an old key that key, and a later colliding row none', () => {
+  it('replays the old keys in file order, collisions included', () => {
     const legacy = legacyKeys()
-    expect(['P|Task', 'P|Task', 'P|Task#2'].map((base) => legacy(base))).toEqual(['P|Task', 'P|Task#2', null])
+    expect(['P|Task', 'P|Task', 'P|Task#2'].map((base) => legacy(base))).toEqual(['P|Task', 'P|Task#2', 'P|Task#2'])
+  })
+
+  it('gives a colliding old key to the row #821 wrote first (top-level before subtasks), not the first in the file', async () => {
+    // #821 wrote Parent and the top-level Task#2 (key P|Task#2), then the first Task child (P|Task);
+    // the second Task child (also P|Task#2) collided and was never written.
+    const file = csv(HEAD, task('Parent'), task('Task', '2'), task('Task', '2'), task('Task#2'))
+    const api = new MemoryAdapter()
+    const list = await api.createList({ id: derivedId('import|list|p'), name: 'P' })
+    await api.createTask({ id: oldId('Todoist', 'P|Parent'), listId: list.id, title: 'Parent' })
+    await api.createTask({ id: oldId('Todoist', 'P|Task#2'), listId: list.id, title: 'Task#2' })
+    await api.createTask({ id: oldId('Todoist', 'P|Task'), listId: list.id, title: 'Task', parentId: oldId('Todoist', 'P|Parent') })
+    await api.updateTask(oldId('Todoist', 'P|Task#2'), { notes: 'mine' })
+
+    expect(await applyImport(api, readImport(file, 'P.csv', NOW))).toEqual({ tasks: 1, lists: 0, existing: 3, resumed: 0 })
+    const tasks = (await api.snapshot()).tasks
+    expect(tasks).toHaveLength(4)
+    expect(tasks.filter((t) => t.title === 'Task#2')).toEqual([expect.objectContaining({ id: oldId('Todoist', 'P|Task#2'), parentId: null, notes: 'mine' })])
+    expect(tasks.filter((t) => t.title === 'Task').map((t) => t.parentId)).toEqual([oldId('Todoist', 'P|Parent'), oldId('Todoist', 'P|Parent')])
+    expect(await applyImport(api, readImport(file, 'P.csv', NOW))).toEqual({ tasks: 0, lists: 0, existing: 4, resumed: 0 })
   })
 
   it('matches each old task once, imports the row #821 lost, and keeps edits and parent links', async () => {

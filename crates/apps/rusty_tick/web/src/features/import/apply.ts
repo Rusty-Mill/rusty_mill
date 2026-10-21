@@ -11,10 +11,12 @@
  * task is still at its creation version (`etag` 1), so nobody has edited it,
  * and the write is conditional on that etag. A task edited since is left alone.
  *
- * Rows whose key format changed since #821 carry their old `legacyKey`. A row
- * whose new id is not here but whose legacy id is takes that task over, so
- * files imported before the change still skip or resume rather than duplicate.
- * Each existing task is claimed by at most one row per import.
+ * Rows whose key format changed since #821 carry their old `legacyKey`. #821
+ * wrote rows in the order below (top-level tasks first) and skipped a row whose
+ * key was already taken, so the first row in that order to produce a legacy
+ * key owns the task #821 made for it; a later row with the same legacy key was
+ * never written. A row whose new id is not here takes over the task it owns,
+ * so files imported before the change still skip or resume, not duplicate.
  */
 import type { ApiClient } from '@/api/client'
 import type { NewTask, Task } from '@/api/types'
@@ -75,14 +77,15 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
   const existing = new Map(have.tasks.map((t) => [t.id, t]))
   const byKey = new Map(result.tasks.map((t) => [t.key, t]))
   const idOf = (key: string): string => derivedId(`import|${result.source}|${key}`)
-  const claimed = new Set<string>()
-  /** The id a row writes to: its own, else the one #821 gave it if that task is here and unclaimed. */
+  const roots = result.tasks.map((t) => ({ t, root: rootOf(t, byKey) }))
+  const order = [...roots.filter((r) => !r.root), ...roots.filter((r) => r.root)] // #821's write order too
+  const owner = new Map<string, string>() // legacy id -> key of the row #821 wrote it for
+  for (const { t } of order) if (t.legacyKey !== null && !owner.has(idOf(t.legacyKey))) owner.set(idOf(t.legacyKey), t.key)
+  /** The id a row writes to: its own, else the task #821 made for it, if that is here. */
   const resolve = (t: ImportedTask): string => {
     const own = idOf(t.key)
     const legacy = t.legacyKey !== null ? idOf(t.legacyKey) : null
-    const id = !existing.has(own) && legacy !== null && existing.has(legacy) && !claimed.has(legacy) ? legacy : own
-    claimed.add(id)
-    return id
+    return !existing.has(own) && legacy !== null && owner.get(legacy) === t.key && existing.has(legacy) ? legacy : own
   }
   const ids = new Map<string, string>() // task key -> resolved id, so subtasks point at their parent's real id
   const out: Applied = { tasks: 0, lists: 0, existing: 0, resumed: 0 }
@@ -102,8 +105,7 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
   }
 
   const placed = new Map<string, string>() // task key -> list id, so subtasks follow their parent
-  const roots = result.tasks.map((t) => ({ t, root: rootOf(t, byKey) }))
-  for (const { t, root: wanted } of [...roots.filter((r) => !r.root), ...roots.filter((r) => r.root)]) {
+  for (const { t, root: wanted } of order) {
     const id = resolve(t)
     ids.set(t.key, id)
     const root = wanted !== null && placed.has(wanted) ? wanted : null // a parent caught in a cycle was never placed
