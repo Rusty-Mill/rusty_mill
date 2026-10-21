@@ -422,3 +422,27 @@ async fn the_server_keeps_serving_after_misbehaving_clients() {
     assert_eq!(reply.message.n, 4);
     server.shutdown().await;
 }
+
+#[rusty_tokio::test]
+async fn a_request_stream_cut_short_fails_the_handlers_read() {
+    let router = Router::new().client_streaming(PATH, |r: Request<Incoming<Blob>>| async move {
+        let mut incoming = r.message;
+        while incoming.message().await?.is_some() {}
+        Ok(Response::new(blob(0, 0)))
+    });
+    let server = serve(router);
+    let one = frame(&blob(1, 1).encode_to_vec().unwrap());
+    // A whole message, then a prefix promising 10 bytes and 3 of them, then the end.
+    let r = raw(
+        server.local_addr(),
+        grpc_headers(PATH),
+        &[one, vec![0, 0, 0, 0, 10, 1, 2, 3]],
+        true,
+    )
+    .await
+    .unwrap();
+    let status = r.status();
+    assert_eq!(status.code(), Code::Internal);
+    assert!(status.message().contains("middle of a message"), "{status}");
+    server.shutdown().await;
+}
