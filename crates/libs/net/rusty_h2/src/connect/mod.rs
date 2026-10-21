@@ -441,6 +441,14 @@ impl Connection {
         }
     }
 
+    /// Whether a header block has begun (HEADERS or PUSH_PROMISE without
+    /// END_HEADERS) and is still waiting for its CONTINUATION frames. No stream
+    /// is opened until it completes, so a count of open streams does not show it.
+    #[cfg(feature = "rusty-tokio")]
+    pub(crate) fn header_block_pending(&self) -> bool {
+        self.pending_header_block.is_some()
+    }
+
     /// The peer's GOAWAY (last processed stream id, error code), if it sent one.
     pub fn goaway_received(&self) -> Option<(u32, ErrorCode)> {
         self.goaway
