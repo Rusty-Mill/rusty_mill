@@ -22,11 +22,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # `build.rs` compiles spec/a2a.proto with tonic-prost-build when the
-      # `grpc` feature is on, and that needs a protoc binary.
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - name: Build
         run: cargo build --features full --all-targets
 
@@ -49,9 +44,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -73,9 +65,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       # Each optional feature gates real code, so a build with the others off
       # is the only thing that catches a missing `#[cfg]` or a dependency

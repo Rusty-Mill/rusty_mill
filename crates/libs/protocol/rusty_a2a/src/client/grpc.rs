@@ -24,7 +24,6 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Request, Status};
-use tonic_types::StatusExt;
 
 use crate::error::A2aError;
 
@@ -62,8 +61,8 @@ use super::{A2aClient, ClientError, Result};
 /// [`ClientError::Grpc`] instead of guessing either way.
 fn status_to_client_error(status: Status) -> ClientError {
     let message = status.message().to_string();
-    if let Some(reason) = status.get_error_details().error_info().map(|i| i.reason.as_str()) {
-        let err = match reason {
+    if let Some(info) = crate::grpc_convert::error_info(&status) {
+        let err = match info.reason.as_str() {
             "TASK_NOT_FOUND" => Some(A2aError::TaskNotFound(message.clone())),
             "TASK_NOT_CANCELABLE" => Some(A2aError::TaskNotCancelable(message.clone())),
             "PUSH_NOTIFICATION_NOT_SUPPORTED" => Some(A2aError::PushNotificationNotSupported),
