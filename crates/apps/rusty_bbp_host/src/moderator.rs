@@ -95,6 +95,12 @@ pub struct Config {
     pub poll: Duration,
     /// Give up after this long; the task is left where it stands.
     pub max_wall: Duration,
+    /// How long a harness whose turn ended (its own terminal call, or a
+    /// revocation) may keep running before it is killed, so it can print its
+    /// final `result` line. A harness killed before that line leaves its
+    /// turn's cost unknown, which fails an evidence run. Cap and wall stops
+    /// kill at once.
+    pub end_grace: Duration,
     /// Stop the run when its harnesses have cost more than this.
     pub cost_cap: Option<CostCap>,
 }
@@ -290,6 +296,8 @@ pub fn write_mcp_config(
 struct Harness {
     turn: TurnId,
     child: Child,
+    /// When the moderator first saw this harness's turn no longer live.
+    ended: Option<Instant>,
 }
 
 /// Every process the loop started. Dropping it kills the harness and its
@@ -327,6 +335,27 @@ impl Supervision {
             first = first.and(r);
         }
         first
+    }
+
+    /// Let harnesses whose turns have ended exit on their own, for at most
+    /// `grace`, then kill the rest.
+    fn drain_harnesses(&mut self, grace: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + grace;
+        loop {
+            let mut running = Vec::new();
+            for mut h in self.harnesses.drain(..) {
+                match h.child.try_wait() {
+                    Ok(Some(_)) => {}
+                    Ok(None) => running.push(h),
+                    Err(e) => return Err(format!("harness wait: {e}")),
+                }
+            }
+            self.harnesses = running;
+            if self.harnesses.is_empty() || Instant::now() >= deadline {
+                return self.kill_harnesses();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Kill the harness of `turn`, if one is running.
@@ -455,7 +484,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             started,
         };
         if matches!(state, State::Closed | State::Cancelled) {
-            sup.kill_harnesses()?;
+            sup.drain_harnesses(cfg.end_grace)?;
             sup.stop_runner()?;
             d.sync().map_err(|e| format!("{e:?}"))?;
             let stop = check_terminal(cfg, &d).err().map(|reason| Stop {
@@ -535,9 +564,12 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                     break;
                 }
                 Ok(None) if !is_live => {
-                    eprintln!("bbp mod: turn {} ended; stopping its harness", h.turn.0);
-                    forfeited = Some((h.turn, false));
-                    break;
+                    let ended = *h.ended.get_or_insert_with(Instant::now);
+                    if ended.elapsed() >= cfg.end_grace {
+                        eprintln!("bbp mod: turn {} ended; stopping its harness", h.turn.0);
+                        forfeited = Some((h.turn, false));
+                        break;
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => return Err(format!("harness wait: {e}")),
@@ -567,7 +599,11 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                         .cloned()
                         .ok_or_else(|| format!("{role} has no principal"))?;
                     let child = spawn(cfg, l, &role, &principal, turn)?;
-                    sup.harnesses.push(Harness { turn, child });
+                    sup.harnesses.push(Harness {
+                        turn,
+                        child,
+                        ended: None,
+                    });
                 }
                 None => eprintln!(
                     "bbp mod: no launcher for {role}; turn {} waits for its deadline",

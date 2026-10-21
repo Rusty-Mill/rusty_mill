@@ -1,0 +1,14 @@
+{
+  "items": [
+    "[Reading] fields are separated by commas",
+    "[Reading] quoted fields: commas inside are literal and `\"\"` is one quote",
+    "[Reading] the empty line is one empty field; a trailing comma adds an empty field",
+    "[Reading] unterminated quote returns `None`",
+    "[Reading] a quote inside an unquoted field, or text after a closing quote, returns `None`",
+    "[Writing] fields are joined with commas",
+    "[Writing] a field is quoted if and only if it has a comma, a quote, or a leading or trailing space",
+    "[Writing] quotes inside a quoted field are doubled",
+    "[Writing] writing then reading returns the original fields"
+  ],
+  "pass_mark": 7
+}

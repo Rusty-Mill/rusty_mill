@@ -1,0 +1,13 @@
+{
+  "items": [
+    "[next_delay] delay is `base_ms * factor^(failures-1)`",
+    "[next_delay] delay is capped at `max_delay_ms`",
+    "[next_delay] arithmetic saturates: neither the delay nor `elapsed + delay` can overflow or panic",
+    "[next_delay] `None` once `failures >= max_attempts`",
+    "[next_delay] `None` when `elapsed_ms + delay` would pass `deadline_ms`, using the capped delay",
+    "[Edge cases] `deadline_ms == 0` means no deadline",
+    "[Edge cases] `failures == 0` returns `None`",
+    "[Edge cases] exactly reaching the deadline is allowed (`elapsed + delay == deadline`)"
+  ],
+  "pass_mark": 6
+}

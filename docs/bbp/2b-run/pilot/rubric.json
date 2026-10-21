@@ -1,0 +1,9 @@
+{
+  "items": [
+    "[Title case] first letter of each word upper-cased, the rest lower-cased",
+    "[Title case] words split on any whitespace and joined with one space",
+    "[Initials] first character of each word, upper-cased, no separators",
+    "[Initials] no words gives the empty string"
+  ],
+  "pass_mark": 3
+}

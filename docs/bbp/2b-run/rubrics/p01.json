@@ -1,0 +1,14 @@
+{
+  "items": [
+    "[Normalisation] ASCII letters are lower-cased and kept",
+    "[Normalisation] ASCII digits are kept unchanged",
+    "[Normalisation] every maximal run of other characters (including non-ASCII) becomes exactly one `-`",
+    "[Normalisation] no leading or trailing `-`; input with no ASCII alphanumerics gives the empty string",
+    "[Truncation] a slug of at most `max` bytes is returned unchanged",
+    "[Truncation] a longer slug is cut to the longest prefix of whole words of length at most `max`",
+    "[Truncation] the truncated result never ends with `-`",
+    "[Truncation] a first word longer than `max` is hard-cut to `max` bytes",
+    "[Truncation] `max == 0` gives the empty string"
+  ],
+  "pass_mark": 7
+}

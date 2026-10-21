@@ -1,0 +1,14 @@
+{
+  "items": [
+    "[Encoding] accepted range is 1 to 3999; 0 and above 3999 return `None`",
+    "[Encoding] output is upper case",
+    "[Encoding] subtractive forms IV, IX, XL, XC, CD, CM are used (canonical form)",
+    "[Encoding] at most three repeats of I, X, C, M",
+    "[Decoding] accepts exactly the canonical numerals and returns their value",
+    "[Decoding] empty input is refused",
+    "[Decoding] lower case is refused",
+    "[Decoding] non-canonical forms (`IIII`, `VX`, `IC`, `IIV`) are refused",
+    "[Decoding] values above 3999 (`MMMM`) are refused"
+  ],
+  "pass_mark": 7
+}

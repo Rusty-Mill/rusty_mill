@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::board::Board;
-use crate::domain::{Actor, BoardError, Card, Column, DEFAULT_PROJECT};
+use crate::domain::{Actor, BoardError, Card, Column, DEFAULT_PROJECT, ExecutionLink};
 use crate::store::Store;
 
 /// The board every surface shares.
@@ -246,6 +246,48 @@ struct CommentArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct BindExecutionArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Card id.
+    id: String,
+    /// Stable logical execution id; repeat it to adopt after a restart.
+    execution: String,
+    /// Orch goal id.
+    goal: String,
+    /// BBP task id.
+    bbp_task: String,
+    /// Task-host attempt id.
+    attempt: String,
+    /// Configured provider-neutral orchestrator assignment.
+    assignment: String,
+    /// Assignment generation used to fence stale host commands.
+    generation: u64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RecoverExecutionArgs {
+    #[serde(flatten)]
+    link: BindExecutionArgs,
+    /// The generation the stored link must still carry (compare-and-set).
+    expected_generation: u64,
+}
+
+impl BindExecutionArgs {
+    fn link(self) -> (Who, String, ExecutionLink) {
+        let link = ExecutionLink {
+            execution: self.execution,
+            goal: self.goal,
+            bbp_task: self.bbp_task,
+            attempt: self.attempt,
+            assignment: self.assignment,
+            generation: self.generation,
+        };
+        (self.who, self.id, link)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct EventsArgs {
     /// Return events after this event id (omit for the beginning).
     after: Option<String>,
@@ -409,6 +451,25 @@ pub fn ops() -> Vec<Op> {
                     a.body.as_deref().unwrap_or(""),
                     a.tags.unwrap_or_default(),
                 )?)
+            },
+        ),
+        op(
+            "card_execution_link",
+            "Initiate or adopt this card's one recoverable Orch execution. A different logical execution is refused; this persists the Orch goal, BBP task, host attempt, assignment and generation with the card.",
+            |b, i, a: BindExecutionArgs| {
+                let (who, card_id, link) = a.link();
+                let who = acting(b, i, &who)?;
+                card(b.bind_execution(id(&card_id)?, link, &who)?)
+            },
+        ),
+        op(
+            "card_execution_recover",
+            "Hand this card's execution to a replacement assignment generation. Compare-and-set: refused unless the stored link still carries expected_generation and names the same execution, goal, BBP task, attempt and assignment; the new generation must be higher.",
+            |b, i, a: RecoverExecutionArgs| {
+                let expected = a.expected_generation;
+                let (who, card_id, link) = a.link.link();
+                let who = acting(b, i, &who)?;
+                card(b.recover_execution(id(&card_id)?, expected, link, &who)?)
             },
         ),
         op(

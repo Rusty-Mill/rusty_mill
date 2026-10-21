@@ -1,0 +1,14 @@
+{
+  "items": [
+    "[State] each entry records its expiry time (insert time + ttl)",
+    "[State] recency order is tracked per key",
+    "[insert] inserting an existing key replaces the value, restarts its life and makes it most recent",
+    "[insert] when full, expired entries are dropped before any live entry",
+    "[insert] only if none expired, the least recently used live entry is evicted",
+    "[get] an expired entry returns `None` and is removed",
+    "[get] a live hit makes the key most recent but does not extend its life",
+    "[len] `len` counts only live entries at `now_ms`",
+    "[State] `capacity == 0` stores nothing"
+  ],
+  "pass_mark": 7
+}

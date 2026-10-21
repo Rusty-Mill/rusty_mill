@@ -55,6 +55,7 @@ fn config(dir: &Path, task: &TaskId, cost_cap: Option<CostCap>) -> Config {
         confinement: Confinement::Unconfined,
         poll: Duration::from_millis(50),
         max_wall: Duration::from_secs(1),
+        end_grace: Duration::ZERO,
         cost_cap,
     }
 }
