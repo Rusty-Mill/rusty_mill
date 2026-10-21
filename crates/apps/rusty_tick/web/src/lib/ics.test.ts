@@ -8,7 +8,7 @@ describe('parseIcs', () => {
   it('reads a UTC event as a start and a due time', () => {
     const { tasks } = parseIcs(wrap(event('SUMMARY:Standup', 'DTSTART:20261005T090000Z', 'DTEND:20261005T093000Z')))
     expect(tasks).toEqual([
-      { uid: `Standup|${Date.UTC(2026, 9, 5, 9)}|${Date.UTC(2026, 9, 5, 9, 30)}`, title: 'Standup', notes: '', startMs: Date.UTC(2026, 9, 5, 9), dueMs: Date.UTC(2026, 9, 5, 9, 30), isAllDay: false, timeZone: '', repeatFlag: '' },
+      { uid: `Standup|${Date.UTC(2026, 9, 5, 9)}|${Date.UTC(2026, 9, 5, 9, 30)}`, title: 'Standup', notes: '', startMs: Date.UTC(2026, 9, 5, 9), dueMs: Date.UTC(2026, 9, 5, 9, 30), isAllDay: false, timeZone: '', repeatFlag: '', recurrenceId: null, exDates: [] },
     ])
   })
 
@@ -51,6 +51,18 @@ describe('parseIcs', () => {
   })
 
   it('returns nothing for text that is not a calendar', () => {
-    expect(parseIcs('hello')).toEqual({ tasks: [], skipped: 0, droppedRepeats: 0 })
+    expect(parseIcs('hello')).toEqual({ tasks: [], skipped: 0, droppedRepeats: 0, droppedExceptions: 0 })
+  })
+
+  it('puts exceptions of an event with an end on its due timeline: EXDATE and moved instances alike', () => {
+    const { tasks, droppedExceptions } = parseIcs(
+      wrap(
+        event('UID:w', 'SUMMARY:Sync', 'DTSTART:20261005T090000Z', 'DTEND:20261005T100000Z', 'RRULE:FREQ=WEEKLY', 'EXDATE:20261019T090000Z'),
+        event('UID:w', 'RECURRENCE-ID:20261012T090000Z', 'SUMMARY:Sync', 'DTSTART:20261013T090000Z', 'DTEND:20261013T100000Z'),
+      ),
+    )
+    expect(droppedExceptions).toBe(0)
+    expect(tasks[0]).toMatchObject({ recurrenceId: null, exDates: [Date.UTC(2026, 9, 19, 10), Date.UTC(2026, 9, 12, 10)] })
+    expect(tasks[1]).toMatchObject({ recurrenceId: Date.UTC(2026, 9, 12, 9), exDates: [] })
   })
 })

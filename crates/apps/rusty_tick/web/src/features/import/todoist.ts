@@ -58,7 +58,7 @@ export function parseTodoist(text: string, fileName: string, now: number): Impor
     const indent = Number(col(row, 'indent')) || 1
     const task: ImportedTask = {
       ...blankTask(key(list, title), title),
-      legacyKey: legacyKey(`${list}|${title}`),
+      legacy: [{ key: legacyKey(`${list}|${title}`) }],
       list,
       parentKey: indent > 1 && root ? root.key : null,
       notes: dateText && !when ? keepInNotes(notes, 'Todoist date', dateText) : notes,
