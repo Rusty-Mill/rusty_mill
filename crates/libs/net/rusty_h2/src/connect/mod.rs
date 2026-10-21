@@ -289,6 +289,7 @@ pub struct Connection {
     seen_preface: bool,
     pending_header_block: Option<PendingHeaderBlock>,
     inbound: Vec<Inbound>,
+    goaway: Option<(u32, ErrorCode)>,
 }
 
 // `Encoder`/`Decoder` don't implement `Debug` (their internal HPACK
@@ -330,6 +331,7 @@ impl Connection {
             seen_preface: false,
             pending_header_block: None,
             inbound: Vec::new(),
+            goaway: None,
         }
     }
 
@@ -439,6 +441,64 @@ impl Connection {
         }
     }
 
+    /// The peer's GOAWAY (last processed stream id, error code), if it sent one.
+    pub fn goaway_received(&self) -> Option<(u32, ErrorCode)> {
+        self.goaway
+    }
+
+    /// How many bytes of DATA `stream_id` may send right now: the smaller of
+    /// its window and the connection's, or zero.
+    pub fn send_capacity(&self, stream_id: u32) -> usize {
+        let stream = self
+            .streams
+            .get(&stream_id)
+            .map_or(0, |e| e.flow.send_window);
+        usize::try_from(stream.min(self.conn_flow.send_window).max(0)).unwrap_or(0)
+    }
+
+    /// The SETTINGS frame announcing this endpoint's own settings.
+    pub fn settings_frame(&self) -> Frame {
+        let s = &self.local_settings;
+        let mut settings = vec![
+            Setting {
+                id: SettingId::HeaderTableSize,
+                value: s.header_table_size,
+            },
+            Setting {
+                id: SettingId::InitialWindowSize,
+                value: s.initial_window_size,
+            },
+            Setting {
+                id: SettingId::MaxFrameSize,
+                value: s.max_frame_size,
+            },
+        ];
+        // RFC 9113 §6.5.2: only a client announces ENABLE_PUSH; a client must
+        // treat a server's ENABLE_PUSH = 1 as a protocol error.
+        if self.peer_type == PeerType::Client {
+            settings.push(Setting {
+                id: SettingId::EnablePush,
+                value: u32::from(s.enable_push),
+            });
+        }
+        if let Some(v) = s.max_concurrent_streams {
+            settings.push(Setting {
+                id: SettingId::MaxConcurrentStreams,
+                value: v,
+            });
+        }
+        if let Some(v) = s.max_header_list_size {
+            settings.push(Setting {
+                id: SettingId::MaxHeaderListSize,
+                value: v,
+            });
+        }
+        Frame::Settings(SettingsFrame {
+            ack: false,
+            settings,
+        })
+    }
+
     /// Drains what the frames applied so far delivered to the application.
     pub fn take_inbound(&mut self) -> Vec<Inbound> {
         std::mem::take(&mut self.inbound)
@@ -453,6 +513,12 @@ impl Connection {
         fields: &[HeaderField],
         end_stream: bool,
     ) -> Result<(u32, Frame)> {
+        if self.goaway.is_some() {
+            return Err(H2Error::Connection(
+                ErrorCode::RefusedStream,
+                "the peer sent GOAWAY; no new streams",
+            ));
+        }
         let stream_id = self.next_stream_id;
         let next = stream_id
             .checked_add(2)
@@ -902,7 +968,9 @@ impl Connection {
     }
 
     fn handle_goaway(&mut self, goaway: GoAwayFrame) -> Result<Vec<Frame>> {
-        self.close_reason = Some(H2Error::Connection(goaway.error_code, "peer sent GOAWAY"));
+        // Streams the peer already accepted run to completion (RFC 9113
+        // §6.8), so this is not a close; it only stops new streams.
+        self.goaway = Some((goaway.last_stream_id, goaway.error_code));
         self.inbound.push(Inbound::GoAway {
             last_stream_id: goaway.last_stream_id,
             code: goaway.error_code,
@@ -1245,7 +1313,7 @@ mod tests {
     }
 
     #[test]
-    fn goaway_sets_a_close_reason_and_rejects_further_frames() {
+    fn goaway_is_recorded_and_later_frames_are_still_accepted() {
         let mut conn = Connection::new(ServerSettings::default(), PeerType::Client);
         conn.apply_frame(Frame::GoAway(GoAwayFrame {
             last_stream_id: 0,
@@ -1253,8 +1321,9 @@ mod tests {
             debug_data: vec![],
         }))
         .unwrap();
-        let err = conn.apply_frame(settings_frame(true, vec![])).unwrap_err();
-        assert!(matches!(err, H2Error::Connection(ErrorCode::NoError, _)));
+        // Streams the peer already accepted run to completion (RFC 9113 §6.8).
+        assert_eq!(conn.goaway_received(), Some((0, ErrorCode::NoError)));
+        conn.apply_frame(settings_frame(true, vec![])).unwrap();
     }
 
     #[test]

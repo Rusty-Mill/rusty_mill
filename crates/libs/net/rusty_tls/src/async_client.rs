@@ -17,7 +17,7 @@ use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::error::Error;
 use crate::trust::{
     build_client_config, build_client_config_with_alpn, build_client_config_with_identity,
-    TrustPolicy,
+    build_client_config_with_identity_and_alpn, TrustPolicy,
 };
 
 /// A TLS client connection layered over any `rusty_tokio`
@@ -84,10 +84,52 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsStream<S> {
         Ok(Self { conn, io })
     }
 
+    /// Like [`AsyncTlsStream::new_with_client_identity`], and also offers
+    /// `alpn_protocols` (each entry a wire-format protocol ID, e.g.
+    /// `b"h2"`) during the handshake — the async counterpart to
+    /// [`TlsStream::new_with_client_identity_and_alpn`](crate::TlsStream::new_with_client_identity_and_alpn).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidAlpnProtocols`] if an entry is empty or over 255 bytes,
+    /// or if the offer as framed on the wire (each entry's length plus one
+    /// length byte) exceeds 32,768 bytes. That cap is this library's policy,
+    /// well below the protocol's own limit, to leave room for the rest of the
+    /// ClientHello. An empty `alpn_protocols` offers no ALPN.
+    pub fn new_with_client_identity_and_alpn(
+        io: S,
+        server_name: &str,
+        policy: &TrustPolicy,
+        client_cert_chain_der: Vec<Vec<u8>>,
+        client_key_der: Vec<u8>,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        let cert_chain: Vec<CertificateDer<'static>> = client_cert_chain_der
+            .into_iter()
+            .map(CertificateDer::from)
+            .collect();
+        let key = PrivateKeyDer::try_from(client_key_der)
+            .map_err(|reason| Error::InvalidPrivateKey(reason.to_string()))?;
+        let config =
+            build_client_config_with_identity_and_alpn(policy, cert_chain, key, alpn_protocols)?;
+        let name = ServerName::try_from(server_name.to_string())
+            .map_err(|_| Error::InvalidServerName(server_name.to_string()))?;
+        let conn = ClientConnection::new(config, name)?;
+        Ok(Self { conn, io })
+    }
+
     /// Like [`AsyncTlsStream::new`], but offers `alpn_protocols` (each
     /// entry a wire-format protocol ID, e.g. `b"h2"`) during the handshake
     /// — the async counterpart to
     /// [`TlsStream::new_with_alpn`](crate::TlsStream::new_with_alpn).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidAlpnProtocols`] if an entry is empty or over 255 bytes,
+    /// or if the offer as framed on the wire (each entry's length plus one
+    /// length byte) exceeds 32,768 bytes. That cap is this library's policy,
+    /// well below the protocol's own limit, to leave room for the rest of the
+    /// ClientHello. An empty `alpn_protocols` offers no ALPN.
     pub fn new_with_alpn(
         io: S,
         server_name: &str,

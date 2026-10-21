@@ -9,5 +9,24 @@ license = "MIT"
 layer = "libs"
 
 [dependencies]
+rusty_tokio = { workspace = true, version = "0.2.0", optional = true }
+
+[features]
+# The async connection driver (`driver`). Off by default so the sans-IO core
+# stays dependency-free; the same arrangement as `rusty_tls`.
+rusty-tokio = ["dep:rusty_tokio"]
+
+[[test]]
+name = "driver"
+required-features = ["rusty-tokio"]
+
+[[test]]
+name = "interop"
+required-features = ["rusty-tokio"]
 
 [dev-dependencies]
+# Independent oracles only (never shipped): live interop in both directions.
+h2 = { workspace = true }
+http = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
