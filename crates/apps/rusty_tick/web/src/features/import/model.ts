@@ -8,6 +8,8 @@ import { parseRule } from '@/lib/recurrence'
 export interface ImportedTask {
   /** Stable within the source (its own id, or one made from the row): seeds the task id, so importing twice adds nothing. */
   key: string
+  /** The key the first importer (#821) gave this row, for sources whose keys changed since; see `legacyKeys`. */
+  legacyKey: string | null
   /** List name as the source calls it; `''` means the Inbox. */
   list: string
   parentKey: string | null
@@ -37,6 +39,7 @@ export interface ImportResult {
 
 export const blankTask = (key: string, title: string): ImportedTask => ({
   key,
+  legacyKey: null,
   list: '',
   parentKey: null,
   title,
@@ -84,26 +87,44 @@ function localDay(ms: number, zone: string): number {
   return new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime()
 }
 
+const daysIn = (y: number, mo: number): number => new Date(Date.UTC(y, mo, 0)).getUTCDate()
+
+/** Offset minutes east of UTC for `Z`, `±hh`mm or `±hh:mm`; `null` past ±14:00 or 59 minutes. */
+function readOffset(text: string): number | null {
+  if (text === 'Z') return 0
+  const [h, mi] = [Number(text.slice(1, 3)), Number(text.slice(-2))]
+  if (h > 14 || mi > 59 || (h === 14 && mi > 0)) return null
+  return (text[0] === '-' ? -1 : 1) * (h * 60 + mi)
+}
+
 /**
  * An ISO-like date: `2026-10-05` (all day), or a date and time with `T` or a
  * space, an optional `Z` or `±hhmm`/`±hh:mm` offset (none means local time).
- * `allDay` forces a dated time onto its calendar day in `zone`. `null` when unreadable.
+ * `allDay` forces a dated time onto its calendar day in `zone`. `null` when
+ * unreadable or out of range (`2026-02-30`, `25:00`): a deadline is never invented.
  */
 export function parseWhen(text: string, allDay = false, zone = ''): When | null {
-  const t = text.trim()
-  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/.exec(t)
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/.exec(text.trim())
   if (!m) return null
   const [y, mo, d, h, mi, s] = [m[1], m[2], m[3], m[4] ?? '0', m[5] ?? '0', m[6] ?? '0'].map(Number) as [number, number, number, number, number, number]
+  if (mo < 1 || mo > 12 || d < 1 || d > daysIn(y, mo) || h > 23 || mi > 59 || s > 59) return null
   if (m[4] === undefined) return { ms: new Date(y, mo - 1, d).getTime(), allDay: true }
   let ms: number
   if (m[7] === undefined) ms = new Date(y, mo - 1, d, h, mi, s).getTime()
   else {
-    const off = m[7] === 'Z' ? 0 : (m[7][0] === '-' ? -1 : 1) * (Number(m[7].slice(1, 3)) * 60 + Number(m[7].slice(-2)))
+    const off = readOffset(m[7])
+    if (off === null) return null
     ms = Date.UTC(y, mo - 1, d, h, mi, s) - off * 60_000
   }
-  if (Number.isNaN(ms)) return null
   return allDay ? { ms: localDay(ms, zone), allDay: true } : { ms, allDay: false }
 }
+
+/** Append `label: text` to `notes`, so a value the app could not read is kept, not lost. */
+export const keepInNotes = (notes: string, label: string, text: string): string => [notes, `${label}: ${text}`].filter(Boolean).join('\n\n')
+
+/** The `[label, text]` of each date that was given but could not be read. */
+export const unreadDates = (dates: [label: string, text: string, when: When | null][]): [string, string][] =>
+  dates.filter(([, text, when]) => text !== '' && when === null).map(([label, text]) => [label, text])
 
 /** An `RRULE` the app understands, as `RRULE:...`; `''` for none or one it does not. */
 export function readRepeat(rule: string): string {
@@ -128,10 +149,28 @@ export const readTags = (text: string): string[] =>
     .filter(Boolean)
 
 /**
- * Keys made from content collide when a file holds the same row twice; the
- * second copy gets `#2`, and so on, so both are imported and re-imports still match.
+ * Keys made from content collide when a file holds the same row twice. Each
+ * key encodes its parts and the occurrence count as JSON, so no title (not
+ * even one ending in `#2` or holding `|`) can collide with another row, and a
+ * re-import of the same file yields the same keys.
  */
-export function uniqueKeys(): (base: string) => string {
+export function uniqueKeys(): (...parts: string[]) => string {
+  const seen = new Map<string, number>()
+  return (...parts) => {
+    const base = JSON.stringify(parts)
+    const n = (seen.get(base) ?? 0) + 1
+    seen.set(base, n)
+    return JSON.stringify([...parts, n])
+  }
+}
+
+/**
+ * The keys #821's importer gave content-keyed rows, in file order: `base`,
+ * then `base#2`, `base#3`, ... for repeats. That scheme can give two rows the
+ * same key (`Task`, `Task`, `Task#2` give `Task#2` twice); which of them owns
+ * the task #821 created is decided by `applyImport`, in #821's write order.
+ */
+export function legacyKeys(): (base: string) => string {
   const seen = new Map<string, number>()
   return (base) => {
     const n = (seen.get(base) ?? 0) + 1

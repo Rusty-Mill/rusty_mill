@@ -53,7 +53,7 @@ export function AccountTab() {
       .then(async (text) => {
         const read = readImport(text, f.name)
         const n = await applyImport(api, read)
-        const notes = [n.existing && `${n.existing} already here`, read.skipped && `${read.skipped} rows skipped`, read.lossy && `${read.lossy} with a date or repeat kept in notes or dropped`].filter(Boolean)
+        const notes = [n.existing && `${n.existing} already here`, n.resumed && `${n.resumed} finished from an earlier import`, read.skipped && `${read.skipped} rows skipped`, read.lossy && `${read.lossy} with a date or repeat kept in notes or dropped`].filter(Boolean)
         notify('info', `Imported ${n.tasks} tasks and ${n.lists} lists from ${read.source}${notes.length ? ` (${notes.join('; ')})` : ''}`)
         void refresh()
       })

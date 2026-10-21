@@ -7,7 +7,7 @@
  */
 import type { Status } from '@/api/types'
 import { parseCsv } from '@/lib/csv'
-import { blankTask, columns, parseWhen, readPriority, readRepeat, readTags, type ImportResult, type ImportedTask } from './model'
+import { blankTask, columns, keepInNotes, parseWhen, readPriority, readRepeat, readTags, unreadDates, type ImportResult, type ImportedTask } from './model'
 
 export const isTickTick = (rows: string[][]): boolean => headerIndex(rows) >= 0
 
@@ -48,19 +48,22 @@ export function parseTickTick(text: string): ImportResult {
     }
     const zone = col(row, 'timezone')
     const allDay = col(row, 'is all day').toLowerCase() === 'true'
-    const start = parseWhen(col(row, 'start date'), allDay, zone)
-    const due = parseWhen(col(row, 'due date'), allDay, zone)
+    const [startText, dueText] = [col(row, 'start date'), col(row, 'due date')]
+    const start = parseWhen(startText, allDay, zone)
+    const due = parseWhen(dueText, allDay, zone)
     const rule = col(row, 'repeat')
     const repeatFlag = readRepeat(rule)
-    if (rule && !repeatFlag) out.lossy++
-    const content = col(row, 'content')
     const checklist = col(row, 'kind').toUpperCase() === 'CHECKLIST' || col(row, 'is check list').toUpperCase() === 'Y'
+    const body = checklist ? splitChecklist(col(row, 'content')) : { notes: col(row, 'content'), items: [] }
+    const unread = unreadDates([['TickTick start date', startText, start], ['TickTick due date', dueText, due]])
+    if (unread.length > 0 || (rule && !repeatFlag)) out.lossy++
     const parent = col(row, 'parentid')
     const task: ImportedTask = {
       ...blankTask(col(row, 'taskid') || `row-${i}`, title),
       list: col(row, 'list name'),
       parentKey: parent && parent !== '0' ? parent : null,
-      ...(checklist ? splitChecklist(content) : { notes: content }),
+      items: body.items,
+      notes: unread.reduce((notes, [label, text]) => keepInNotes(notes, label, text), body.notes),
       priority: readPriority(col(row, 'priority')),
       startMs: start && due && start.ms !== due.ms ? start.ms : null,
       dueMs: (due ?? start)?.ms ?? null,
