@@ -12520,6 +12520,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_hyper"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "h2",
+ "http",
+ "rcgen",
+ "rustls",
+ "rusty_h2",
+ "rusty_http",
+ "rusty_tls",
+ "rusty_tokio",
+ "tokio",
+]
+
+[[package]]
 name = "rusty_ip"
 version = "0.1.0"
 
