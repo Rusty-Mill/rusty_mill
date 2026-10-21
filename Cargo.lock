@@ -13015,23 +13015,31 @@ dependencies = [
  "pollster 0.3.0",
  "rusty-ttf-parser",
  "rusty_atomic_file",
- "rusty_base64",
  "rusty_dirs",
  "rusty_font",
  "rusty_gpu",
  "rusty_gui",
- "rusty_hex",
  "rusty_regx",
  "rusty_sha1",
- "rusty_term_l13",
+ "rusty_term_core",
  "rusty_win32",
  "softbuffer",
  "tokio",
- "unicode-segmentation",
- "unicode-width 0.2.2",
  "wgpu 22.1.0",
  "windows-sys 0.59.0",
  "winit",
+]
+
+[[package]]
+name = "rusty_term_core"
+version = "0.1.1"
+dependencies = [
+ "rusty_base64",
+ "rusty_hex",
+ "rusty_regx",
+ "rusty_term_l13",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

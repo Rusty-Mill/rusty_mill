@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/core/arabic_tables.rs from released UCD files.
+"""Generate core/src/arabic_tables.rs from released UCD files.
 
 Usage: gen_arabic_tables.py <ucd_dir> with ArabicShaping.txt and
 UnicodeData.txt from one released UCD version. Output is frozen and checked
@@ -87,7 +87,7 @@ def main(ucd):
             "pub(super) const FORMS: &[(u32, u8, u32)] = &["]
     out += [f"    (0x{b:04X}, {f}, 0x{p:04X})," for (b, f), p in entries]
     out += ["];"]
-    open("src/core/arabic_tables.rs", "w").write("\n".join(out) + "\n")
+    open("core/src/arabic_tables.rs", "w").write("\n".join(out) + "\n")
     print(f"wrote {len(ranges)} join ranges, {len(entries)} presentation forms")
 
 if __name__ == "__main__":

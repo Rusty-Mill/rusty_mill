@@ -327,7 +327,7 @@ pub(crate) fn contrast_ratio(a: u32, b: u32) -> f32 {
 /// disables. If even the pole itself can't reach the ratio (it can't, above
 /// ~21), the pole is returned.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
-pub(crate) fn ensure_contrast(fg: u32, bg: u32, min_ratio: f32) -> u32 {
+pub fn ensure_contrast(fg: u32, bg: u32, min_ratio: f32) -> u32 {
     if min_ratio <= 1.0 || contrast_ratio(fg, bg) >= min_ratio {
         return fg;
     }

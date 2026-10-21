@@ -35,6 +35,7 @@ members = [
     "crates/apps/rusty_meshed/crates/rusty-meshed-trace",
     "crates/libs/ui/rusty_term",
     "crates/libs/ui/rusty_term/l13",
+    "crates/libs/ui/rusty_term/core",
     "crates/libs/ui/rusty_gpu",
     "crates/libs/ui/rusty_gui",
     "crates/libs/ui/rusty_font",

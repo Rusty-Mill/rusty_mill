@@ -1,0 +1,10 @@
+[package]
+name = "rtbench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+rusty_term = { path = "../../../../crates/libs/ui/rusty_term" }
+[profile.release]
+debug = 1

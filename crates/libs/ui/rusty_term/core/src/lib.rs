@@ -44,7 +44,7 @@ mod sixel;
 mod webp;
 
 #[cfg(feature = "gui")]
-pub(crate) use bidi::mirrored as bidi_mirrored;
+pub use bidi::mirrored as bidi_mirrored;
 pub use cell::{
     ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_REVERSE,
     ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, UnderlineStyle, WIDE_TRAILER,
@@ -53,7 +53,7 @@ pub use cell::{
 pub use cell::{Cell, char_width};
 pub use color::Theme;
 #[cfg(feature = "gui")]
-pub(crate) use color::ensure_contrast;
+pub use color::ensure_contrast;
 #[cfg(any(test, feature = "gui"))]
 pub use grid::BidiRow;
 #[cfg(any(test, feature = "gui"))]
@@ -63,9 +63,9 @@ pub use grid::{CursorShape, DirtyFrame, Grid, LineAttr, SCROLLBACK_MAX};
 pub use grid::{MouseModes, Selection};
 pub use parser::AnsiParser;
 #[cfg(feature = "gui")]
-pub(crate) use png::decode as png_decode;
+pub use png::decode as png_decode;
 #[cfg(any(feature = "gui", feature = "web-bridge"))]
-pub(crate) use rusty_base64::encode_standard as base64_encode;
+pub use rusty_base64::encode_standard as base64_encode;
 
 #[cfg(test)]
 mod tests;

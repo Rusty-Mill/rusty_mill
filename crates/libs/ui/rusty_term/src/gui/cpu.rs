@@ -1453,7 +1453,7 @@ mod tests {
             b"\x1b[48;2;0;0;255m \r\n\x1b[48;2;0;128;0m \r\n\x1b[48;2;255;0;0m ",
         );
         g.cursor_visible = false;
-        assert_eq!(g.scrollback.len(), 1, "blue line scrolled into history");
+        assert_eq!(g.scrollback_len(), 1, "blue line scrolled into history");
         // Cell is 4x8 (MockFont); two rows -> a 4x16 buffer. buf[0] is the top row.
         let mut buf = vec![0u32; 4 * 16];
         render(&g, &[], &mut MockFont, &mut buf, 4, 16, true);

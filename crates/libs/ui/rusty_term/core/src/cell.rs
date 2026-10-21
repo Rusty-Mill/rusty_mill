@@ -179,7 +179,7 @@ pub struct Cell {
 
 impl Cell {
     /// Construct a blank cell (space glyph, default colors).
-    pub(crate) fn blank() -> Self {
+    pub fn blank() -> Self {
         Cell {
             ch: ' ',
             cluster: 0,
