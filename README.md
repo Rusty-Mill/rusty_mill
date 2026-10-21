@@ -83,6 +83,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | Crate | Path | Purpose |
 |---|---|---|
 | [`rusty_term`](crates/libs/ui/rusty_term) | `crates/libs/ui/rusty_term` | Terminal emulator (VT/ANSI parser, optional native GUI/GPU backends) |
+| [`rusty_term_core`](crates/libs/ui/rusty_term/core) | `crates/libs/ui/rusty_term/core` | `rusty_term`'s headless VT engine (parser, grid, scrollback, OSC); no tokio, PTY or renderer |
 | [`rusty_term_l13`](crates/libs/ui/rusty_term/l13) | `crates/libs/ui/rusty_term/l13` | `rusty_term`'s L13 structured side-channel (MCP + LSP/ACP over private OSC) |
 | [`rusty_gpu`](crates/libs/ui/rusty_gpu) | `crates/libs/ui/rusty_gpu` | `no_std` software framebuffer presenter and SIMD rasterizer |
 | [`rusty_gui`](crates/libs/ui/rusty_gui) | `crates/libs/ui/rusty_gui` | `no_std` windowing, event loop, and clipboard manager |

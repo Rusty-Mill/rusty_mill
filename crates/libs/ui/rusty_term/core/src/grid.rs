@@ -51,16 +51,16 @@ const FOLD_BLOCKS_MAX: usize = 1024;
 /// consumes this, not modeled here. See [`FOLD_BLOCKS_MAX`] for why this type
 /// itself isn't feature-gated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CommandBlock {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) folded: bool,
+pub struct CommandBlock {
+    pub start: usize,
+    pub end: usize,
+    pub folded: bool,
     /// Exit code its OSC 133;D reported (`None` when the shell omitted one).
     /// Colors the windowed front-end's command gutter marks.
-    pub(crate) exit: Option<i32>,
+    pub exit: Option<i32>,
     /// How long the command ran (C to D), when the timer saw its C. Shown by
     /// the windowed front-end's command dock.
-    pub(crate) runtime: Option<std::time::Duration>,
+    pub runtime: Option<std::time::Duration>,
 }
 
 /// What a command gutter mark says about the viewport row it sits beside:
@@ -339,7 +339,7 @@ fn find_matches_rx(
 }
 
 /// One stored Kitty image: its root pixels plus any animation frames.
-pub(crate) struct KittyImage {
+pub struct KittyImage {
     pub id: u32,
     pub w: usize,
     pub h: usize,
@@ -359,7 +359,7 @@ impl KittyImage {
     }
 }
 
-pub(crate) struct KittyFrame {
+pub struct KittyFrame {
     pub pixels: Vec<Option<u32>>,
     /// Display time in milliseconds (floored to 40 — the protocol allows 0,
     /// but a zero-gap loop would spin the repaint timer).
@@ -449,7 +449,7 @@ pub struct Grid {
     /// Interned grapheme-continuation strings; a [`Cell::cluster`] of `n` refers
     /// to `clusters[n - 1]` (`0` means a lone `ch`). Append-only and bounded by
     /// [`CLUSTER_MAX`], so ids stay stable for cells held in scrollback.
-    pub(crate) clusters: Vec<String>,
+    pub clusters: Vec<String>,
     /// `Arc` snapshot of `clusters`, mirroring `links_arc`.
     pub(crate) clusters_arc: Arc<[String]>,
     /// The hyperlink id stamped onto cells written while an OSC 8 link is open
@@ -495,7 +495,7 @@ pub struct Grid {
     pub bell: bool,
     /// Stored Kitty images (`a=t`/`a=T` with an id), bounded; each carries
     /// its animation frames and playback state.
-    pub(crate) kitty_images: Vec<KittyImage>,
+    pub kitty_images: Vec<KittyImage>,
     /// Counter behind the synthesized `0xFFFF_xxxx` ids that inline animated
     /// GIFs store their frames under (see `render_animated_image`).
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
@@ -852,19 +852,19 @@ fn is_padding(c: &Cell) -> bool {
 /// footprint reserved for it, anchored by `serial` (its top cell row's stable
 /// scroll position) so it tracks scrollback. Used by the CPU renderer only.
 #[cfg(any(test, feature = "gui"))]
-pub(crate) struct GridImage {
-    pub(crate) serial: usize,
-    pub(crate) col: usize,
-    pub(crate) cols: usize,
-    pub(crate) rows: usize,
-    pub(crate) pw: usize,
-    pub(crate) ph: usize,
+pub struct GridImage {
+    pub serial: usize,
+    pub col: usize,
+    pub cols: usize,
+    pub rows: usize,
+    pub pw: usize,
+    pub ph: usize,
     /// Source pixels, row-major `pw × ph`; `None` = transparent (skipped).
-    pub(crate) pixels: Vec<Option<u32>>,
+    pub pixels: Vec<Option<u32>>,
     /// For animated images (inline GIF): the backing [`KittyImage`] id whose
     /// *current frame* renderers draw instead of `pixels` (same `pw × ph`).
     /// `pixels` stays as the first frame, the fallback if the store evicts it.
-    pub(crate) anim: Option<u32>,
+    pub anim: Option<u32>,
 }
 
 /// One viewport row's bidi view (see [`Grid::bidi_row`]): the visual→logical
@@ -1465,7 +1465,7 @@ impl Grid {
     /// the top of [`Self::kitty_flags_stack`], or `0` (legacy encoding) when
     /// nothing has pushed an entry. Consulted by the windowed front-end's own
     /// key encoder.
-    pub(crate) fn kitty_keyboard_flags(&self) -> u8 {
+    pub fn kitty_keyboard_flags(&self) -> u8 {
         self.kitty_flags_stack.last().copied().unwrap_or(0)
     }
 
@@ -1519,7 +1519,7 @@ impl Grid {
     /// synchronized-output window is open. Auto-expires after
     /// [`SYNC_OUTPUT_TIMEOUT`] so a misbehaving or crashed client that opens a
     /// window and never closes it can't freeze the display indefinitely.
-    pub(crate) fn sync_output_active(&mut self) -> bool {
+    pub fn sync_output_active(&mut self) -> bool {
         if !self.sync_output {
             return false;
         }
@@ -1627,7 +1627,7 @@ impl Grid {
     /// lines if it runs past the bottom; the cursor ends at column 0 of the row
     /// below it (xterm "sixel scrolling"). Shared by the Sixel and Kitty paths,
     /// which have no explicit-size concept of their own.
-    pub(crate) fn render_image(&mut self, width: usize, height: usize, pixels: &[Option<u32>]) {
+    pub fn render_image(&mut self, width: usize, height: usize, pixels: &[Option<u32>]) {
         self.render_image_sized(width, height, pixels, None, None, true);
     }
 
@@ -1880,14 +1880,14 @@ impl Grid {
 
     /// Placed pixel images for the CPU renderer to composite over the cells.
     #[cfg(any(test, feature = "gui"))]
-    pub(crate) fn images(&self) -> &[GridImage] {
+    pub fn images(&self) -> &[GridImage] {
         &self.images
     }
 
     /// The viewport row of image `im`'s top cell (negative when scrolled partly
     /// above the view).
     #[cfg(any(test, feature = "gui"))]
-    pub(crate) fn image_top_row(&self, im: &GridImage) -> isize {
+    pub fn image_top_row(&self, im: &GridImage) -> isize {
         let off = self.view_offset.min(self.scrollback.len());
         im.serial as isize - self.total_scrolled as isize + off as isize
     }
@@ -2309,7 +2309,7 @@ impl Grid {
             cluster: 0,
             fg: self.default_fg,
             bg: self.default_bg,
-            flags: crate::core::cell::ATTR_DIM | crate::core::cell::ATTR_ITALIC,
+            flags: crate::cell::ATTR_DIM | crate::cell::ATTR_ITALIC,
             link: 0,
             underline_color: self.default_fg,
         }
@@ -2865,6 +2865,11 @@ impl Grid {
     }
 
     /// Override the scrollback line cap (the `scrollback` config key). `0`
+    /// Number of lines currently held in scrollback (folds not applied).
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
     /// disables history. An already-overfull buffer is trimmed immediately.
     pub fn set_scrollback_max(&mut self, max: usize) {
         self.scrollback_max = max;
@@ -3109,7 +3114,7 @@ impl Grid {
     }
 
     /// Whether the alternate screen buffer (`?47`/`?1047`/`?1049`) is active.
-    pub(crate) fn in_alt_screen(&self) -> bool {
+    pub fn in_alt_screen(&self) -> bool {
         self.primary.is_some()
     }
 
@@ -3575,7 +3580,7 @@ impl Grid {
     /// laid out at the current width; `fg`/`bg` default to the grid's defaults.
     /// Marks the bottom row dirty so the next frame composites it.
     #[cfg(feature = "l13")]
-    pub(crate) fn set_status_line(&mut self, text: String, fg: Option<u32>, bg: Option<u32>) {
+    pub fn set_status_line(&mut self, text: String, fg: Option<u32>, bg: Option<u32>) {
         let fg = fg.unwrap_or(self.default_fg);
         let bg = bg.unwrap_or(self.default_bg);
         self.status_line = Some(StatusLine::new(text, fg, bg, self.cols));
@@ -3598,7 +3603,7 @@ impl Grid {
     /// The status-line overlay cells (length `cols`) to composite over the bottom
     /// row, or `None` when no overlay is set or the alternate screen is active
     /// (its full-screen app owns the whole grid).
-    pub(crate) fn status_row(&self) -> Option<&[Cell]> {
+    pub fn status_row(&self) -> Option<&[Cell]> {
         if self.primary.is_some() {
             return None;
         }
@@ -4046,7 +4051,7 @@ impl Grid {
     /// Absolute logical line where the currently-running command's output
     /// began (OSC 133;C seen, no D yet), or `None` outside a command.
     #[cfg(any(test, feature = "gui"))]
-    pub(crate) fn running_command(&self) -> Option<usize> {
+    pub fn running_command(&self) -> Option<usize> {
         self.fold_pending_start
     }
 
@@ -4118,7 +4123,7 @@ impl Grid {
     /// already tested and correct across scroll/resize/RIS.
     #[cfg(any(test, feature = "gui"))]
     #[allow(dead_code)] // exercised by tests; the viewport-rendering consumer is future work
-    pub(crate) fn fold_blocks(&self) -> &[CommandBlock] {
+    pub fn fold_blocks(&self) -> &[CommandBlock] {
         &self.fold_blocks
     }
 
@@ -4126,7 +4131,7 @@ impl Grid {
     /// live screen; empty when out of range. The command dock uses the line
     /// just above a block's output start (the prompt line) as its label.
     #[cfg(any(test, feature = "gui"))]
-    pub(crate) fn abs_line_text(&self, abs: usize) -> String {
+    pub fn abs_line_text(&self, abs: usize) -> String {
         let history = self.scrollback.len();
         let cells = if abs < history {
             &self.scrollback[abs].cells[..]
@@ -4169,7 +4174,7 @@ impl Grid {
     /// status ribbon shows it as a success/error pill; L13 reads it for the
     /// structured side-channel.
     #[cfg(any(feature = "l13", feature = "gui"))]
-    pub(crate) fn last_command_exit(&self) -> Option<i32> {
+    pub fn last_command_exit(&self) -> Option<i32> {
         self.last_exit
     }
 
@@ -4184,7 +4189,7 @@ impl Grid {
     /// (which happens outside the parser's `advance`, so it has no `responses` in
     /// hand). Returns `None` when nobody is subscribed — no wasted frame.
     #[cfg(feature = "l13")]
-    pub(crate) fn resize_notification(&self) -> Option<Vec<u8>> {
+    pub fn resize_notification(&self) -> Option<Vec<u8>> {
         let mut buf = Vec::new();
         rusty_term_l13::notify_resource_changed(self, rusty_term_l13::RES_DIMENSIONS, &mut buf);
         (!buf.is_empty()).then_some(buf)
@@ -4258,7 +4263,7 @@ impl Grid {
     /// down. A target hidden inside a folded command block unfolds it first
     /// (a search hit must be visible, not buried behind a summary line).
     #[cfg(any(test, feature = "gui"))]
-    pub(crate) fn scroll_to_abs(&mut self, abs: usize) {
+    pub fn scroll_to_abs(&mut self, abs: usize) {
         let hit = self
             .visible_folds()
             .find(|(_, b)| abs > b.start && abs < b.end)

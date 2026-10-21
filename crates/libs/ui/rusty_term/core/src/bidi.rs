@@ -77,7 +77,7 @@ pub(crate) fn class(ch: char) -> Class {
 /// The mirrored form of `ch` (rule L4): what to *draw* when `ch` sits in an
 /// RTL (odd-level) run. `None` when the char has no mirror.
 #[cfg_attr(not(any(test, feature = "gui")), allow(dead_code))]
-pub(crate) fn mirrored(ch: char) -> Option<char> {
+pub fn mirrored(ch: char) -> Option<char> {
     let cp = ch as u32;
     MIRRORED
         .binary_search_by_key(&cp, |&(a, _)| a)
@@ -775,7 +775,7 @@ pub(crate) fn reorder(text: &[char], para: u8) -> (Vec<u8>, Vec<u16>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::base64;
+    use crate::base64;
 
     /// Adversarial isolate/embedding control-character sequences — the kind
     /// a crafted file or hostile process output could feed the terminal —
@@ -1110,7 +1110,7 @@ YjSjaPVLc8pKnem9z0WKOAlgX59NyTOhOR31eKrXyGs1lPXZZCn2V+KpsRSeUcvV537qy8eHFbrQ5+t4
 UYbROzZu0ayJCwExmgqyTkSJ7KjR0BBVPWwR5WxSQzQa1N5ONkv3AbmijBRR6lUmuPKRTSZmV5WXnSTFexR1fjOnu0rPvptYBzf+fJykthQPkZwSEDnpaomp\
 ogTOpUbh3Ler7+qnw/mp3PlpS1ml93Wfuj0Zu9aWnnGQRnt/JPJTVJMhlYnqGQU+X/qp9ICape9KB1/9+t5X5ZN2BQ3qXomFSrPf/n9yAMTc";
         let comp = base64::decode(FIXTURE_ZB64.as_bytes()).expect("fixture base64");
-        let raw = crate::core::inflate::zlib_decompress(&comp, 1 << 20).expect("fixture zlib");
+        let raw = crate::inflate::zlib_decompress(&comp, 1 << 20).expect("fixture zlib");
         let data = String::from_utf8(raw).expect("fixture utf8");
         let mut cases = 0usize;
         for line in data.lines() {

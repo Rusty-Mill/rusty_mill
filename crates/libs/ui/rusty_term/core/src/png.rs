@@ -9,7 +9,7 @@
 use super::inflate;
 
 /// A decoded image as tightly-packed RGBA8 (`rgba.len() == width * height * 4`).
-pub(crate) struct Image {
+pub struct Image {
     pub width: usize,
     pub height: usize,
     pub rgba: Vec<u8>,
@@ -21,7 +21,7 @@ const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 const MAX_PIXELS: usize = 4 * 1024 * 1024;
 
 /// Decode a PNG into RGBA8, or `None` if malformed or an unsupported variant.
-pub(crate) fn decode(data: &[u8]) -> Option<Image> {
+pub fn decode(data: &[u8]) -> Option<Image> {
     if data.len() < 8 || data[..8] != SIGNATURE {
         return None;
     }

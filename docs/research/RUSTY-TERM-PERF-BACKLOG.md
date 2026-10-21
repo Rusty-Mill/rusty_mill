@@ -1,6 +1,8 @@
 # rusty_term performance backlog from prior art
 
-Date: 2026-10-21 · Status: **evaluation only, awaiting owner sign-off before any engine change** · Base: `main` @ `434ed13b`
+Date: 2026-10-21 · Status: **accepted by the owner 2026-10-21** (backlog order and headless split) · Base: `main` @ `434ed13b`
+
+Paths below are as of that base. The headless split has since moved `src/core/` to the `rusty_term_core` crate at `crates/libs/ui/rusty_term/core/src/`; file names and line numbers are unchanged apart from `mod.rs`, which became `lib.rs`.
 
 This answers the brief "rusty_term performance backlog from prior art" (owner upload, not in the repo). It follows `MUX-ADOPT-DECISIONS.md`, which picked `rusty_term` as the single `term` engine for the mux and named its speed and fidelity against libghostty as the main open risk.
 

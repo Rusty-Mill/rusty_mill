@@ -62,6 +62,14 @@ relays it through the parser into the host terminal. Before spawning, it sets
 | `l13`          |         | L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP plus LSP/ACP negotiation. Lives in its own crate (`l13/`, see below). |
 | `web-bridge`   |         | `rusty_term_web_bridge`: a hand-rolled WebSocket PTY bridge (RFC 6455 handshake + framing, zero new dependencies) for the [web frontend prototype](web/README.md). Binds `127.0.0.1` only. |
 
+The VT engine (parser, grid, scrollback, OSC, image decoders) is its own crate,
+`rusty_term_core` (`core/`), with no async runtime, PTY or renderer. Its
+dependencies are `rusty_base64`, `rusty_hex`, `unicode-width` and
+`unicode-segmentation`. A headless consumer such as a mux server depends on it
+directly; this crate re-exports it as `rusty_term::core`. The `gui`, `l13` and
+`web-bridge` features above forward to the core features of the same names. Only
+`l13` brings tokio into the core's tree, through `rusty_lsp`.
+
 The runtime is always **tokio** — a single async reactor. On Unix it registers
 the PTY master + `/dev/tty` with the reactor (`AsyncFd` → mio → epoll) and takes
 `SIGWINCH` from a signal stream; on Windows, where ConPTY's pipes aren't
@@ -345,7 +353,7 @@ It lives in its own workspace crate, `l13/` (package `rusty_term_l13`), addresse
 against a narrow `TerminalState` trait rather than this repo's `Grid` type
 directly — independently buildable and unit-tested with no dependency on
 `rusty_term` itself (`cargo test -p rusty_term_l13`); `Grid` implements the
-trait as a thin delegation layer (`src/core/grid.rs`). It reuses the JSON-RPC
+trait as a thin delegation layer (`core/src/grid.rs`). It reuses the JSON-RPC
 model and LSP types from `rusty_lsp`, pinned as a `git` dependency (tag
 `v0.1.0`) rather than a local path, so building `--features l13` needs
 network access but no sibling checkout.
@@ -363,17 +371,6 @@ src/
     windows.rs         ConPTY (windows-sys)
   runtime/           the tokio I/O loop
     tokio_rt.rs        async reactor: Unix AsyncFd / Windows ConPTY bridge
-  core/              parser + grid + protocol surface
-    parser.rs          VT/ANSI state machine
-    grid.rs            cells, scrollback, reflow, image + ligature plumbing
-    charset.rs         G0–G3 + DEC line-drawing
-    color.rs           palette + truecolor
-    osc.rs             OSC dispatch (title, palette, hyperlinks, clipboard, …)
-    sixel.rs           Sixel decoder
-    kitty.rs           Kitty graphics (APC) protocol
-    iterm.rs           iTerm2 inline images (OSC 1337)
-    base64/inflate/png/jpeg.rs   from-scratch image-decode stack (no crates)
-    tests.rs           the core test suite
   render.rs          TUI-mode ANSI re-emission
   input.rs           TUI-mode input handling + scrollback keys
   term.rs            TERM probe-and-fallback selection
@@ -389,6 +386,19 @@ src/
     window.rs          winit event loop
   bin/bench_metrics.rs   grid-handoff microbenchmark
   bin/bench_vt_throughput.rs  parser+grid throughput bench (see bench/)
+core/                the `rusty_term_core` crate: the headless VT engine, no
+                     tokio/PTY/renderer; re-exported as `rusty_term::core`
+  src/
+    parser.rs          VT/ANSI state machine
+    grid.rs            cells, scrollback, reflow, image + ligature plumbing
+    charset.rs         G0–G3 + DEC line-drawing
+    color.rs           palette + truecolor
+    osc.rs             OSC dispatch (title, palette, hyperlinks, clipboard, …)
+    sixel.rs           Sixel decoder
+    kitty.rs           Kitty graphics (APC) protocol
+    iterm.rs           iTerm2 inline images (OSC 1337)
+    base64/inflate/png/jpeg.rs   from-scratch image-decode stack (no crates)
+    tests.rs           the core test suite
 l13/                 the `rusty_term_l13` workspace crate (feature `l13`)
   src/lib.rs           L13 structured side-channel, against a TerminalState trait
 extra/

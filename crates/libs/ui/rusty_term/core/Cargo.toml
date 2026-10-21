@@ -1,0 +1,35 @@
+[package]
+name = "rusty_term_core"
+# Kept in lockstep with rusty_term: the parser answers XTVERSION with
+# `rusty_term(<CARGO_PKG_VERSION>)`, which now reads this crate's version.
+version = "0.1.1"
+edition = "2024"
+license = "MIT"
+description = "rusty_term's headless VT engine: parser, grid, scrollback and OSC handling, with no async runtime, PTY or renderer."
+repository = "https://github.com/baileyrd/rusty_term"
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[features]
+default = []
+# Front-end view state the windowed renderer needs: bidi/Arabic shaping
+# tables, scrollback search (regex via rusty_regx), inline images, command
+# folds. A headless consumer (mux server, TUI) leaves it off.
+gui = ["dep:rusty_regx"]
+# L13 structured side-channel state on the Grid (see rusty_term's `l13`).
+l13 = ["dep:rusty_term_l13"]
+# Base64 encoding for the web bridge's clipboard relay.
+web-bridge = []
+
+[dependencies]
+rusty_base64 = { workspace = true }
+rusty_hex = { workspace = true }
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+rusty_regx = { workspace = true, optional = true }
+rusty_term_l13 = { path = "../l13", optional = true }
+
+[dev-dependencies]
+# The test suite exercises the search's regex mode without the `gui` feature.
+rusty_regx = { workspace = true }

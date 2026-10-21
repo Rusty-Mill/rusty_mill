@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/core/bidi_tables.rs from released UCD files.
+"""Generate core/src/bidi_tables.rs from released UCD files.
 
 Usage: gen_bidi_tables.py <ucd_dir>  where <ucd_dir> holds
 DerivedBidiClass.txt (the extracted/ variant), BidiBrackets.txt, and
@@ -88,7 +88,7 @@ def main(ucd):
             "pub(super) const MIRRORED: &[(u32, u32)] = &["]
     out += [f"    (0x{a:04X}, 0x{b:04X})," for a, b in mir]
     out += ["];"]
-    open("src/core/bidi_tables.rs", "w").write("\n".join(out) + "\n")
+    open("core/src/bidi_tables.rs", "w").write("\n".join(out) + "\n")
     print(f"wrote {len(non_l)} class ranges, {len(brk)} brackets, {len(mir)} mirrors")
 
 if __name__ == "__main__":

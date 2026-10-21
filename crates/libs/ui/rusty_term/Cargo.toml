@@ -19,11 +19,11 @@ default = []
 # (`l13/`) addressed against a narrow `TerminalState` trait, not `Grid`
 # directly — independently buildable/testable, not welded to this binary.
 # Opt-in so the default terminal stays lean.
-l13 = ["dep:rusty_term_l13"]
+l13 = ["rusty_term_core/l13"]
 # Native window backend (the tcore-font/tcore-app fork): a standalone window
 # instead of rendering into a host terminal. winit for windowing/input,
 # softbuffer for CPU presentation, rusty_font for glyph rasterization.
-gui = ["dep:rusty_font", "dep:rusty-ttf-parser", "dep:winit", "dep:softbuffer", "dep:arboard", "dep:rusty_regx", "dep:accesskit", "dep:accesskit_winit"]
+gui = ["rusty_term_core/gui", "dep:rusty_font", "dep:rusty-ttf-parser", "dep:winit", "dep:softbuffer", "dep:arboard", "dep:rusty_regx", "dep:accesskit", "dep:accesskit_winit"]
 # Adds the wgpu GPU renderer alongside the CPU (softbuffer) one.
 gui-gpu = ["gui", "dep:wgpu", "dep:bytemuck", "dep:pollster"]
 # WebSocket PTY bridge for the Nebula web frontend (`web/`): the
@@ -31,7 +31,7 @@ gui-gpu = ["gui", "dep:wgpu", "dep:bytemuck", "dep:pollster"]
 # (src/web_bridge), the runtime is the tokio the terminal already links.
 # SHA-1 comes from the sibling rusty_sha1 crate, shared with rusty_git's
 # object hashing — see rusty_git/src/sha1.rs's doc comment.
-web-bridge = ["tokio/io-util", "dep:rusty_sha1"]
+web-bridge = ["rusty_term_core/web-bridge", "tokio/io-util", "dep:rusty_sha1"]
 
 [[bin]]
 name = "rusty_term_web_bridge"
@@ -39,14 +39,13 @@ path = "src/bin/web_bridge.rs"
 required-features = ["web-bridge"]
 
 [dependencies]
+# The headless VT engine (parser, grid, scrollback): no tokio, PTY or
+# renderer. Re-exported as `rusty_term::core` so existing paths still work.
+rusty_term_core = { path = "core", version = "0.1.1" }
 rusty_dirs = { workspace = true }
-rusty_hex = { workspace = true }
-rusty_base64 = { workspace = true }
 rusty_atomic_file = { workspace = true }
 libc = { workspace = true }
 parking_lot = "0.12"
-unicode-width = { workspace = true }
-unicode-segmentation = { workspace = true }
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "net",
@@ -55,7 +54,6 @@ tokio = { version = "1", default-features = false, features = [
     "sync",
     "macros",
 ] }
-rusty_term_l13 = { path = "l13", optional = true }
 # Sibling no_std ecosystem crates. Pinned via git+rev, not path: a path dep
 # on a sibling checkout only resolves on the original author's machine, and
 # Cargo resolves every dependency's manifest regardless of feature
