@@ -240,6 +240,76 @@ fn failed_initial_insert_can_recover_with_a_synthesized_first_revision() {
 }
 
 #[test]
+fn assignments_generations_and_links_survive_a_reopen() {
+    use orch_core::factory::{
+        Assignment, ExecutionLink, ExecutionState, Factory, FactoryError, Grant, Identity,
+    };
+    let dir = dir("assignments");
+    let goal = GoalId::from_raw(1);
+    let identity = || Identity {
+        id: "orch".into(),
+        target: "rusty_orch run".into(),
+    };
+    let grant = |projects: &[&str], delegation_budget, call_budget| Grant {
+        projects: projects.iter().map(|p| (*p).into()).collect(),
+        delegation_budget,
+        call_budget,
+    };
+    let mut factory = Factory::default();
+    {
+        let mut store = Store::open(&dir).expect("open");
+        assert_eq!(store.load_factory(goal).expect("load"), Factory::default());
+        factory
+            .take_over("root", identity(), grant(&["orch"], 1, 4))
+            .expect("first holder");
+        factory
+            .delegate(
+                "root",
+                1,
+                Assignment {
+                    id: "worker".into(),
+                    generation: 1,
+                    identity: identity(),
+                    parent: Some("root".into()),
+                    grant: grant(&["orch"], 0, 2),
+                    active: true,
+                },
+            )
+            .expect("delegate");
+        factory
+            .initiate_or_adopt(ExecutionLink {
+                card: "card".into(),
+                execution: "execution".into(),
+                goal: "goal".into(),
+                bbp_task: "bbp".into(),
+                attempt: "attempt".into(),
+                assignment: "root".into(),
+                generation: 1,
+                state: ExecutionState::Running,
+            })
+            .expect("link");
+        store.save_factory(goal, &factory).expect("save");
+        factory
+            .take_over("root", identity(), grant(&["orch"], 1, 4))
+            .expect("second holder");
+        store.save_factory(goal, &factory).expect("save again");
+    }
+    let store = Store::open(&dir).expect("reopen");
+    let loaded = store.load_factory(goal).expect("load");
+    assert_eq!(loaded, factory);
+    assert_eq!(loaded.authorize("root", 2), Ok(()));
+    assert_eq!(
+        loaded.authorize("worker", 1),
+        Err(FactoryError::StaleGeneration)
+    );
+    assert_eq!(
+        store.load_factory(GoalId::from_raw(2)).expect("other goal"),
+        Factory::default()
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn the_directory_is_held_by_one_process_at_a_time() {
     let dir = dir("lock");
     let first = Store::open(&dir).expect("open");
@@ -338,7 +408,16 @@ fn hosted_handle_gate_fence_and_charge_survive_a_store_reopen() {
         reviewers: vec![Agent::Local, Agent::Codex],
     })
     .unwrap();
-    let make = || Dispatcher::new(route.clone(), FakeAgent::new([])).with_host(host.clone());
+    let make = || {
+        Dispatcher::new(route.clone(), FakeAgent::new([])).with_host(
+            host.clone(),
+            orch_dispatch::Fence {
+                assignment: text("goal-orchestrator"),
+                generation: 1,
+                holder: text("test"),
+            },
+        )
+    };
     let mut dispatcher = make();
     assert_eq!(
         dispatcher.run(&goal, &mut plan, &mut board, &mut ledger),

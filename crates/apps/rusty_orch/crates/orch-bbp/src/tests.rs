@@ -23,6 +23,17 @@ pub(super) fn temp() -> PathBuf {
 pub(super) fn txt(s: &str) -> Text {
     Text::new(s).unwrap()
 }
+/// The fence of a test holder at `generation`.
+pub(super) fn fence_at(generation: u64, holder: &str) -> Fence {
+    Fence {
+        assignment: txt("goal-orchestrator"),
+        generation,
+        holder: txt(holder),
+    }
+}
+pub(super) fn fence() -> Fence {
+    fence_at(1, "test")
+}
 pub(super) fn config(dir: &std::path::Path) -> Config {
     use ArtifactKind::*;
     use MessageKind::*;
@@ -217,7 +228,7 @@ fn open_decodes_exit_zero_already_open_and_resumes_partial_assignment() {
         sup.clone(),
     )
     .unwrap();
-    let handle = host.open(&task, &board).unwrap();
+    let handle = host.open(&task, &board, &fence()).unwrap();
     let calls = command.calls.borrow();
     assert_eq!(
         calls.iter().map(|a| a[1].as_str()).collect::<Vec<_>>(),
@@ -251,7 +262,7 @@ fn open_decodes_exit_zero_already_open_and_resumes_partial_assignment() {
         .extend([json(&Some(adopted_view.clone())), json(&Some(adopted_view))]);
     let mut resumed =
         BbpHost::with_seams(next, "goal".into(), "changed".into(), command.clone(), sup).unwrap();
-    assert_eq!(resumed.open(&task, &board).unwrap(), handle);
+    assert_eq!(resumed.open(&task, &board, &fence()).unwrap(), handle);
     let h = resumed.handle(&handle).unwrap();
     assert_eq!(
         BbpHost::<Contract, FakeSupervisor>::load(&h)
@@ -313,14 +324,14 @@ fn relay_uses_saved_fence_and_stable_op_and_rejects_subject_or_flag_injection() 
         json(&Some(view(&c, State::PlanGate))),
     ]);
     assert!(matches!(
-        host.relay(&handle, &gate, &txt("approve-plan art:2")),
+        host.relay(&handle, &gate, &txt("approve-plan art:2"), &fence()),
         Ok(Relayed::Stale(Progress::Gate(_)))
     ));
     let call = cmd.calls.borrow()[0].clone();
     assert!(call.windows(2).any(|a| a == ["--fence", "12"]));
     cmd.replies.borrow_mut().push_back(json(&Response::Ok));
     assert_eq!(
-        host.relay(&handle, &gate, &txt("approve-plan art:2")),
+        host.relay(&handle, &gate, &txt("approve-plan art:2"), &fence()),
         Ok(Relayed::Applied)
     );
     assert_eq!(
@@ -334,7 +345,7 @@ fn relay_uses_saved_fence_and_stable_op_and_rejects_subject_or_flag_injection() 
             .borrow_mut()
             .push_back(json(&Some(view(&c, State::PlanGate))));
         assert!(
-            matches!(host.relay(&handle, &gate, &txt(invalid)), Ok(Relayed::Rejected(Progress::Gate(g))) if g.prompt.as_str().contains("Answer rejected"))
+            matches!(host.relay(&handle, &gate, &txt(invalid), &fence()), Ok(Relayed::Rejected(Progress::Gate(g))) if g.prompt.as_str().contains("Answer rejected"))
         );
     }
     assert!(
@@ -409,4 +420,30 @@ fn hosted_brief_reuses_the_existing_renderer_to_resolve_board_context() {
     assert!(frozen.brief.contains("required research context"));
     assert!(frozen.brief.contains("Goal context"));
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_fence_admits_later_generations_and_refuses_superseded_holders() {
+    let dir = temp();
+    let h = Handle {
+        dir: dir.clone(),
+        task: "orch-fenced".into(),
+    };
+    let admit = |fence: Fence| <BbpHost>::admit(&h, &fence);
+    let unavailable =
+        |r: Result<(), ClassifiedError>| matches!(r, Err(ClassifiedError::Unavailable(_)));
+    admit(fence_at(1, "first")).unwrap();
+    admit(fence_at(1, "first")).unwrap();
+    assert!(unavailable(admit(fence_at(1, "diverged"))));
+    admit(fence_at(3, "second")).unwrap();
+    assert!(unavailable(admit(fence_at(1, "first"))));
+    assert!(unavailable(admit(fence_at(2, "late"))));
+    let mut foreign = fence_at(4, "other");
+    foreign.assignment = txt("maintenance");
+    assert!(matches!(admit(foreign), Err(ClassifiedError::Permanent(_))));
+    admit(fence_at(3, "second")).unwrap();
+    // A later generation of the owner still takes over.
+    admit(fence_at(4, "third")).unwrap();
+    assert!(unavailable(admit(fence_at(3, "second"))));
+    let _ = std::fs::remove_dir_all(dir);
 }

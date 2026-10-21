@@ -12,7 +12,7 @@ use orch_cli::{CommandRunner, StdCommand};
 use orch_core::board::Board;
 use orch_core::task::{Plan, Role, Task, TaskSpec};
 use orch_core::{GoalId, Ref, Text};
-use orch_dispatch::{HostHandle, Progress, TaskHost};
+use orch_dispatch::{Fence, HostHandle, Progress, TaskHost};
 use rusty_bbp::{ArtifactPayload, FsStore, Sha256, State, Store, TaskState};
 use rusty_serde::json::{self, Value};
 use rusty_serde::{Deserialize, Serialize};
@@ -285,6 +285,10 @@ struct Attempt {
     detail: String,
     pr_url: Option<String>,
     last_card: Option<Value>,
+    /// The generation of the maintenance assignment that last drove this
+    /// attempt; journals written before generations read as zero.
+    #[rusty_serde(default)]
+    generation: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Journal {
@@ -656,6 +660,7 @@ pub fn execute(options: &Options, runner: &impl CommandRunner) -> Result<String>
         detail: "write-ahead intent; uncertain opens are adopted".into(),
         pr_url: None,
         last_card: None,
+        generation: 0,
     });
     save(&journal_path, &journal)?;
     let index = journal.attempts.len() - 1;
@@ -672,12 +677,28 @@ pub fn execute(options: &Options, runner: &impl CommandRunner) -> Result<String>
     Ok(json::to_string(&public_state(&journal)?)?)
 }
 
+/// The assignment every maintenance cycle holds its hosted task under.
+const MAINTENANCE: &str = "maintenance";
+
 fn advance(journal: &mut Journal, index: usize, path: &Path, state_dir: &Path) -> Result<()> {
     let attempt = &mut journal.attempts[index];
     // Restored from the journal, not the mutable config/profile files supplied
     // by this invocation. Intent is already durable before any external call.
     rusty_atomic_file::write_private(&attempt.config.profiles, attempt.profiles.as_bytes())?;
-    let result = advance_host(attempt, state_dir);
+    // Each cycle drives the task under a new generation, durable before the
+    // host sees it, so a cycle running from a stale journal copy is refused.
+    attempt.generation = attempt
+        .generation
+        .checked_add(1)
+        .ok_or("maintenance generation exhausted")?;
+    let fence = Fence {
+        assignment: Text::new(MAINTENANCE).ok_or("blank assignment")?,
+        generation: attempt.generation,
+        holder: crate::run::holder()?,
+    };
+    save(path, journal)?;
+    let attempt = &mut journal.attempts[index];
+    let result = advance_host(attempt, state_dir, &fence);
     if let Err(error) = &result {
         attempt.status = "interrupted".into();
         attempt.detail = error.to_string();
@@ -685,7 +706,7 @@ fn advance(journal: &mut Journal, index: usize, path: &Path, state_dir: &Path) -
     save(path, journal)?;
     result
 }
-fn advance_host(attempt: &mut Attempt, state_dir: &Path) -> Result<()> {
+fn advance_host(attempt: &mut Attempt, state_dir: &Path, fence: &Fence) -> Result<()> {
     if attempt.handle.is_none()
         && git(&StdCommand, &attempt.config.repo, &["rev-parse", "HEAD"])? != attempt.base
     {
@@ -699,7 +720,7 @@ fn advance_host(attempt: &mut Attempt, state_dir: &Path) -> Result<()> {
         attempt.namespace.clone(),
         attempt.selection.instruction.clone(),
     )?;
-    drive(attempt, &mut host)?;
+    drive(attempt, &mut host, fence)?;
     observe(attempt)?;
     if attempt.status == "validated" {
         prepare(attempt, state_dir)?;
@@ -707,19 +728,22 @@ fn advance_host(attempt: &mut Attempt, state_dir: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn drive(attempt: &mut Attempt, host: &mut impl TaskHost) -> Result<()> {
+fn drive(attempt: &mut Attempt, host: &mut impl TaskHost, fence: &Fence) -> Result<()> {
     let handle = match &attempt.handle {
         Some(h) => HostHandle(Text::new(h).ok_or("empty hosted handle")?),
         None => {
             let (task, board) = task(&attempt.selection)?;
             let handle = host
-                .open(&task, &board)
+                .open(&task, &board, fence)
                 .map_err(|e| format!("BBP open: {e:?}"))?;
             attempt.handle = Some(handle.0.as_str().into());
             handle
         }
     };
-    match host.poll(&handle).map_err(|e| format!("BBP poll: {e:?}"))? {
+    match host
+        .poll(&handle, fence)
+        .map_err(|e| format!("BBP poll: {e:?}"))?
+    {
         Progress::Working => {
             attempt.status = "working".into();
             attempt.detail = "BBP owns execution; repeat maintain --execute to poll".into();

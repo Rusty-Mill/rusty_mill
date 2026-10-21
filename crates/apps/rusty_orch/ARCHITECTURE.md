@@ -63,9 +63,20 @@ opening a task host; it never creates a second one for a card.
 `orch_core::factory` deliberately distinguishes a configured identity from an
 assignment, provider session, model, and process.  Project/task/worker
 assignments receive explicit project, call and delegation grants.  A delegated
-assignment must be narrower than its parent.  Every host command carries the
-assignment generation; replacement and retirement invalidate old generations,
-and retirement also disables descendants.  Host observations reconcile into
+assignment must be narrower than its parent.  Replacement and retirement
+invalidate old generations, and retirement also disables descendants.
+
+On the hosted path, every `rusty_orch run` process takes over the goal's
+`goal-orchestrator` assignment at its next generation and saves the factory in
+`orch-store`'s assignment record before any host command. `maintain` does the
+same with a `maintenance` generation in its journal. Every `TaskHost` command
+carries a `Fence`: assignment, generation, and a random holder token for the
+process. The BBP host admits a higher generation for a task by publishing it
+once under the task's manifest, and refuses lower generations and other
+holders of the admitted one as unavailable, so a process running from a stale
+copy of the state cannot keep driving the task. The latest process to start
+wins; it fences out the earlier one rather than waiting for it. The Millboard
+side of the link (`card_execution_link`) has no Orch caller yet.  Host observations reconcile into
 `Running`, `Waiting`, `Completed`, `Failed`, or `Cancelled`; terminal state is
 monotonic.  Transport adapters map these states to existing Millboard columns
 and BBP gates without bypassing Sandbox or BBP approval policy.

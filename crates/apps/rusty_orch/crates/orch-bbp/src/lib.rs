@@ -14,7 +14,8 @@ use orch_core::board::{Board, Entry, EntryKind};
 use orch_core::task::Task;
 use orch_core::{Ref, Text};
 use orch_dispatch::{
-    AgentError, ClassifiedError, GateContext, HostHandle, Output, Progress, Relayed, TaskHost,
+    AgentError, ClassifiedError, Fence, GateContext, HostHandle, Output, Progress, Relayed,
+    TaskHost,
 };
 use rusty_bbp::{Code, PrincipalKind, Response, Sha256, State, TaskView};
 use rusty_serde::{Deserialize, Serialize};
@@ -56,6 +57,35 @@ fn request_display(message: &rusty_bbp::Message) -> Result<String, ClassifiedErr
     ))
 }
 
+/// Publish `bytes` as `dir/name` unless it already exists, never replacing
+/// it: written whole to a private temporary, then hard-linked into place.
+fn publish_once(dir: &std::path::Path, name: &str, bytes: &[u8]) -> Result<(), ClassifiedError> {
+    let tmp = dir.join(format!(
+        "{name}-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(transient)?
+            .as_nanos()
+    ));
+    rusty_atomic_file::write_private(&tmp, bytes).map_err(transient)?;
+    let published = std::fs::hard_link(&tmp, dir.join(name));
+    let _ = std::fs::remove_file(tmp);
+    match published {
+        Ok(()) => {
+            // Match rusty_atomic_file's platform contract: directory
+            // fsync is supported on Unix, not std File::open on Windows.
+            #[cfg(unix)]
+            std::fs::File::open(dir)
+                .and_then(|d| d.sync_all())
+                .map_err(transient)?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(transient(e)),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Handle {
     #[rusty_serde(with = "config::path_json")]
@@ -67,6 +97,12 @@ struct Frozen {
     config: Config,
     brief: String,
     profiles: String,
+}
+/// Who holds one admitted generation of a hosted task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Holder {
+    assignment: String,
+    holder: String,
 }
 #[derive(Debug, Clone, Serialize)]
 struct Launcher {
@@ -198,30 +234,72 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             profiles,
         };
         let bytes = rusty_serde::json::to_string(&frozen).map_err(permanent)?;
-        let tmp = dir.join(format!(
-            "manifest-{}-{}.tmp",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(transient)?
-                .as_nanos()
-        ));
-        rusty_atomic_file::write_private(&tmp, bytes.as_bytes()).map_err(transient)?;
-        let published = std::fs::hard_link(&tmp, &path);
-        let _ = std::fs::remove_file(tmp);
-        match published {
-            Ok(()) => {
-                // Match rusty_atomic_file's platform contract: directory
-                // fsync is supported on Unix, not std File::open on Windows.
-                #[cfg(unix)]
-                std::fs::File::open(&dir)
-                    .and_then(|d| d.sync_all())
-                    .map_err(transient)?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(transient(e)),
-        }
+        publish_once(&dir, "manifest.json", bytes.as_bytes())?;
         Self::load(h)
+    }
+    /// Admit `fence` for this task, or refuse it. Each admitted generation
+    /// is a file published once and never rewritten, so the highest
+    /// generation only grows whatever the interleaving of processes, and two
+    /// holders racing for one generation find the same winner.
+    fn admit(h: &Handle, fence: &Fence) -> Result<(), ClassifiedError> {
+        let dir = Self::manifest(h).join("fence");
+        std::fs::create_dir_all(&dir).map_err(transient)?;
+        let mine = Holder {
+            assignment: fence.assignment.as_str().into(),
+            holder: fence.holder.as_str().into(),
+        };
+        let foreign = |owner: &Holder| {
+            permanent(format!(
+                "hosted task belongs to assignment {}",
+                owner.assignment
+            ))
+        };
+        let (highest, owner) = match Self::highest(&dir)? {
+            Some((_, owner)) if owner.assignment != mine.assignment => return Err(foreign(&owner)),
+            Some((generation, owner)) if generation >= fence.generation => (generation, owner),
+            _ => {
+                let name = format!("{:020}", fence.generation);
+                let bytes = rusty_serde::json::to_string(&mine).map_err(permanent)?;
+                publish_once(&dir, &name, bytes.as_bytes())?;
+                (fence.generation, Self::holder(&dir.join(&name))?)
+            }
+        };
+        if owner.assignment != mine.assignment {
+            return Err(foreign(&owner));
+        }
+        if highest > fence.generation {
+            return Err(ClassifiedError::Unavailable(AgentError(format!(
+                "superseded: generation {highest} now holds this task"
+            ))));
+        }
+        if owner != mine {
+            return Err(ClassifiedError::Unavailable(AgentError(format!(
+                "generation {highest} is held by another process"
+            ))));
+        }
+        Ok(())
+    }
+    fn highest(dir: &std::path::Path) -> Result<Option<(u64, Holder)>, ClassifiedError> {
+        let mut highest: Option<u64> = None;
+        for entry in std::fs::read_dir(dir).map_err(transient)? {
+            let name = entry.map_err(transient)?.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // Publication temporaries are not generations.
+            if name.ends_with(".tmp") {
+                continue;
+            }
+            let generation: u64 = name
+                .parse()
+                .map_err(|_| permanent(format!("unexpected fence file {name}")))?;
+            highest = highest.max(Some(generation));
+        }
+        highest
+            .map(|g| Ok((g, Self::holder(&dir.join(format!("{g:020}")))?)))
+            .transpose()
+    }
+    fn holder(path: &std::path::Path) -> Result<Holder, ClassifiedError> {
+        let bytes = std::fs::read_to_string(path).map_err(transient)?;
+        rusty_serde::json::from_str(&bytes).map_err(permanent)
     }
     fn materialize(h: &Handle, frozen: &Frozen) -> Result<PathBuf, ClassifiedError> {
         let dir = Self::manifest(h);
@@ -381,7 +459,12 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
     }
 }
 impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, S> {
-    fn open(&mut self, task: &Task, board: &Board) -> Result<HostHandle, ClassifiedError> {
+    fn open(
+        &mut self,
+        task: &Task,
+        board: &Board,
+        fence: &Fence,
+    ) -> Result<HostHandle, ClassifiedError> {
         let id =
             Sha256::of(format!("{}:{}:{}", self.namespace, board.goal(), task.id()).as_bytes())
                 .hex();
@@ -389,6 +472,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
             dir: self.config.dir.clone(),
             task: format!("orch-{id}"),
         };
+        Self::admit(&h, fence)?;
         let frozen = self.freeze(&h, task, board)?;
         let config = &frozen.config;
         let agents = Self::materialize(&h, &frozen)?;
@@ -466,8 +550,9 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
             rusty_serde::json::to_string(&h).map_err(permanent)?
         ))?))
     }
-    fn poll(&mut self, handle: &HostHandle) -> Result<Progress, ClassifiedError> {
+    fn poll(&mut self, handle: &HostHandle, fence: &Fence) -> Result<Progress, ClassifiedError> {
         let h = self.handle(handle)?;
+        Self::admit(&h, fence)?;
         let frozen = Self::load(&h)?;
         let view = self
             .show(&frozen.config, &h)?
@@ -482,8 +567,10 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
         handle: &HostHandle,
         gate: &Entry,
         answer: &Text,
+        fence: &Fence,
     ) -> Result<Relayed, ClassifiedError> {
         let h = self.handle(handle)?;
+        Self::admit(&h, fence)?;
         let frozen = Self::load(&h)?;
         let refs: Vec<_> = gate
             .content()
@@ -549,7 +636,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
                         | Code::Terminal
                 ) =>
             {
-                Ok(Relayed::Stale(self.poll(handle)?))
+                Ok(Relayed::Stale(self.poll(handle, fence)?))
             }
             Response::Rejected(r)
                 if !matches!(r.code, Code::Forbidden | Code::OpConflict | Code::NotOpen) =>

@@ -68,6 +68,14 @@ fn attempt() -> Attempt {
         detail: "".into(),
         pr_url: None,
         last_card: None,
+        generation: 0,
+    }
+}
+fn fence() -> Fence {
+    Fence {
+        assignment: Text::new(MAINTENANCE).unwrap(),
+        generation: 1,
+        holder: Text::new("test").unwrap(),
     }
 }
 #[test]
@@ -189,12 +197,21 @@ struct Host {
     gate: bool,
 }
 impl TaskHost for Host {
-    fn open(&mut self, task: &Task, _: &Board) -> std::result::Result<HostHandle, ClassifiedError> {
+    fn open(
+        &mut self,
+        task: &Task,
+        _: &Board,
+        _: &Fence,
+    ) -> std::result::Result<HostHandle, ClassifiedError> {
         assert_eq!(task.spec().role, Role::Implement);
         self.opens += 1;
         Ok(HostHandle(Text::new("bbp:durable").unwrap()))
     }
-    fn poll(&mut self, _: &HostHandle) -> std::result::Result<Progress, ClassifiedError> {
+    fn poll(
+        &mut self,
+        _: &HostHandle,
+        _: &Fence,
+    ) -> std::result::Result<Progress, ClassifiedError> {
         if self.fail_poll {
             return Err(ClassifiedError::Transient(orch_dispatch::AgentError(
                 "lost reply".into(),
@@ -214,6 +231,7 @@ impl TaskHost for Host {
         _: &HostHandle,
         _: &Entry,
         _: &Text,
+        _: &Fence,
     ) -> std::result::Result<Relayed, ClassifiedError> {
         panic!("maintenance must never relay approval")
     }
@@ -226,16 +244,16 @@ fn crash_recovery_keeps_identity_and_does_not_reopen_known_handle() {
         fail_poll: true,
         gate: false,
     };
-    assert!(drive(&mut a, &mut host).is_err());
+    assert!(drive(&mut a, &mut host, &fence()).is_err());
     let bytes = json::to_string(&a).unwrap();
     let mut recovered: Attempt = json::from_str(&bytes).unwrap();
     host.fail_poll = false;
     host.gate = true;
-    drive(&mut recovered, &mut host).unwrap();
+    drive(&mut recovered, &mut host, &fence()).unwrap();
     assert_eq!(host.opens, 1);
     assert_eq!(recovered.namespace, a.namespace);
     assert_eq!(recovered.status, "waiting-human");
-    drive(&mut recovered, &mut host).unwrap();
+    drive(&mut recovered, &mut host, &fence()).unwrap();
     assert_eq!(host.opens, 1);
 }
 #[test]
@@ -738,4 +756,14 @@ fn deleted_terminal_checkout_does_not_block_an_unrelated_repository() {
     persist_task(&config.dir, "old", &dir.join("already-deleted"), true);
     assert!(active_bbp_task(&config).unwrap().is_none());
     fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn journals_from_before_generations_load_at_generation_zero() {
+    let mut value: Value = json::from_str(&json::to_string(&attempt()).unwrap()).unwrap();
+    let Value::Map(fields) = &mut value else {
+        panic!("attempt is an object")
+    };
+    fields.retain(|(k, _)| k != "generation");
+    let old: Attempt = json::from_str(&json::to_string(&value).unwrap()).unwrap();
+    assert_eq!(old.generation, 0);
 }

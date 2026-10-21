@@ -30,15 +30,40 @@ pub enum Relayed {
     /// Invalid human input: replace the answered question so the human can correct it.
     Rejected(Progress),
 }
+/// The authority a host command is issued under: one generation of an
+/// orchestrator assignment, held by one process.
+///
+/// A host admits the first command of a higher generation for a task and
+/// from then on refuses lower generations, and other holders of the same
+/// generation, as [`ClassifiedError::Unavailable`]: a superseded
+/// orchestrator stops driving the task without failing it. A different
+/// assignment for the same task is refused as permanent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fence {
+    /// The assignment that owns the hosted task.
+    pub assignment: Text,
+    /// The assignment generation, persisted before any command uses it.
+    pub generation: u64,
+    /// Unique per holding process, so two holders that reached the same
+    /// generation from diverged records cannot both act.
+    pub holder: Text,
+}
 /// Idempotent, crash-recoverable task boundary. Poll and relay are unmetered.
+/// Every command carries the caller's [`Fence`].
 pub trait TaskHost: std::fmt::Debug {
-    fn open(&mut self, task: &Task, board: &Board) -> Result<HostHandle, ClassifiedError>;
-    fn poll(&mut self, handle: &HostHandle) -> Result<Progress, ClassifiedError>;
+    fn open(
+        &mut self,
+        task: &Task,
+        board: &Board,
+        fence: &Fence,
+    ) -> Result<HostHandle, ClassifiedError>;
+    fn poll(&mut self, handle: &HostHandle, fence: &Fence) -> Result<Progress, ClassifiedError>;
     fn relay(
         &mut self,
         handle: &HostHandle,
         gate: &Entry,
         answer: &Text,
+        fence: &Fence,
     ) -> Result<Relayed, ClassifiedError>;
 }
 /// Find the host pointer saved by the dispatcher, without adapter memory.
