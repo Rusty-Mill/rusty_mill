@@ -74,14 +74,14 @@ pub async fn serve<B: LocalBackend>(
     let path = socket_path.as_ref();
     let listener = bind(path)?;
     let backend = Arc::new(backend);
-    tracing::info!(socket = %path.display(), "localapi: serving");
+    rusty_log::info!(socket = %path.display(), "localapi: serving");
 
     loop {
         let (stream, _addr) = listener.accept().await.map_err(ServeError::Accept)?;
         let backend = backend.clone();
         tokio::spawn(async move {
             if let Err(e) = serve_connection(stream, &*backend).await {
-                tracing::debug!("localapi: connection error: {e}");
+                rusty_log::debug!("localapi: connection error: {e}");
             }
         });
     }

@@ -23,7 +23,9 @@ one copy.
   is testable without a socket, and it runs under one lock, so it may
   hold `&mut` state.
 - `Server::bind(addr, handler)`, `.with_web_dir(dir)`, `.run()`,
-  `.shutdown_handle()`. `/api/...` and `/health` go to the handler;
+  `.shutdown_handle()`. After `run()` returns (the accept loop has stopped),
+  `ShutdownHandle::wait_idle(within)` waits for the requests still being answered, until their last byte is
+  written; connections idle between requests are not waited for. `/api/...` and `/health` go to the handler;
   anything else serves the web directory through `static_files::load`
   (path-safe: no `..`, no symlink escape, unknown paths fall back to
   `index.html` so client-side routes survive a reload) with a strict

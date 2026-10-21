@@ -15,9 +15,9 @@ package resolved from a git source whose name collides with a workspace
 member's name.
 
 It also pins the direct external dependencies of the crates in
-`PINNED_EXTERNAL_DEPENDENCIES` (ADR-0002, sovereignty list item 10), and keeps
-a shrinking baseline of the workspace crates that still depend on `tracing`
-directly instead of through `rusty_log` (`docs/research/TRACING-FACADE-PLAN.md`).
+`PINNED_EXTERNAL_DEPENDENCIES` (ADR-0002, sovereignty list item 10), and allows
+`tracing` and `tracing-*` as direct dependencies of one workspace crate only,
+`rusty_log` (`docs/research/TRACING-FACADE-PLAN.md`).
 """
 import json
 import sys
@@ -40,48 +40,6 @@ PINNED_EXTERNAL_DEPENDENCIES: dict[str, dict[str, str]] = {
     },
 }
 
-# Workspace crates that depend on `tracing` or a `tracing-*` crate directly, in
-# any dependency kind, by dependency name. New code uses `rusty_log` instead
-# (`docs/research/TRACING-FACADE-PLAN.md`). The baseline only shrinks: a crate
-# not on it that adds such a dependency is a violation, and so is an entry the
-# crate no longer has, so migrating a crate means deleting its line here. When
-# it is empty, the last migration PR replaces this with a strict rule.
-# Covers workspace members only: Nexus is excluded and frozen, and third-party
-# crates keep their own `tracing` dependency.
-TRACING_BASELINE: dict[str, frozenset[str]] = {
-    "adk-a2a": frozenset({"tracing"}),
-    "adk-graph": frozenset({"tracing"}),
-    "adk-mcp": frozenset({"tracing"}),
-    "agentgateway": frozenset({"tracing", "tracing-subscriber"}),
-    "agentgateway-a2a": frozenset({"tracing"}),
-    "agentgateway-agui": frozenset({"tracing"}),
-    "agentgateway-auth": frozenset({"tracing"}),
-    "agentgateway-llm": frozenset({"tracing"}),
-    "agentgateway-mcp": frozenset({"tracing"}),
-    "agentgateway-proxy": frozenset({"tracing"}),
-    "agentgateway-tls": frozenset({"tracing"}),
-    "inventory-core": frozenset({"tracing"}),
-    "rp-mcp": frozenset({"tracing"}),
-    "rp-router": frozenset({"tracing"}),
-    "rp-server": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty-acp": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty_a2a": frozenset({"tracing"}),
-    "rusty_homelab_mcp": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty_lsp": frozenset({"tracing"}),
-    "rusty_mill_board": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty_mill_runner": frozenset({"tracing", "tracing-subscriber"}),
-    "rusty_tokio": frozenset({"tracing"}),
-    "skillopt-cli": frozenset({"tracing-subscriber"}),
-    "ts-daemon": frozenset({"tracing", "tracing-subscriber"}),
-    "ts-derp": frozenset({"tracing"}),
-    "ts-engine": frozenset({"tracing"}),
-    "ts-localapi": frozenset({"tracing"}),
-    "ts-magicsock": frozenset({"tracing"}),
-    "ts-net": frozenset({"tracing"}),
-    "ts-wg": frozenset({"tracing"}),
-}
-
-
 # The facade itself is the one crate allowed to depend on `tracing` for good.
 TRACING_FACADE = "rusty_log"
 
@@ -90,31 +48,25 @@ def _is_tracing(name: str) -> bool:
     return name == "tracing" or name.startswith("tracing-")
 
 
-def tracing_baseline_violations(
+def tracing_facade_violations(
     metadata: dict,
-    baseline: dict[str, frozenset[str]] = TRACING_BASELINE,
     facade: str = TRACING_FACADE,
 ) -> list[str]:
-    """Return sorted descriptions of workspace crates whose direct `tracing*`
-    dependencies differ from the baseline. Any dependency kind counts, and
-    path or registry source does not matter; the facade crate is exempt.
+    """Return sorted descriptions of workspace crates, other than the facade,
+    that depend directly on `tracing` or a `tracing-*` crate. Any dependency
+    kind counts, and path or registry source does not matter. Only workspace
+    members are checked: Nexus is excluded and frozen, and third-party crates
+    keep their own `tracing` dependency.
     """
     workspace_ids = set(metadata["workspace_members"])
     violations = []
     for pkg in metadata["packages"]:
         if pkg["id"] not in workspace_ids or pkg["name"] == facade:
             continue
-        actual = {dep["name"] for dep in pkg.get("dependencies", []) if _is_tracing(dep["name"])}
-        allowed = baseline.get(pkg["name"], frozenset())
-        for name in sorted(actual - allowed):
+        for name in sorted({d["name"] for d in pkg.get("dependencies", []) if _is_tracing(d["name"])}):
             violations.append(
                 f"{pkg['name']}: depends on `{name}` directly; use `{facade}` instead "
                 "(docs/research/TRACING-FACADE-PLAN.md)"
-            )
-        for name in sorted(allowed - actual):
-            violations.append(
-                f"{pkg['name']}: `{name}` is on TRACING_BASELINE but is no longer a "
-                "dependency; delete it from the baseline"
             )
     return sorted(violations)
 
@@ -206,15 +158,15 @@ def main() -> None:
         for violation in pinned:
             print(f"  - {violation}", file=sys.stderr)
 
-    baseline = tracing_baseline_violations(metadata)
-    if baseline:
+    facade = tracing_facade_violations(metadata)
+    if facade:
         failed = True
         print(
-            "Direct `tracing` dependencies differ from the baseline "
+            "Only `rusty_log` may depend on `tracing` directly "
             "(docs/research/TRACING-FACADE-PLAN.md):",
             file=sys.stderr,
         )
-        for violation in baseline:
+        for violation in facade:
             print(f"  - {violation}", file=sys.stderr)
 
     if failed:

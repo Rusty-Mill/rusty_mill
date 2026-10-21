@@ -324,7 +324,7 @@ impl Store for RedisStore {
             dropped += 1;
         }
         if dropped > 0 {
-            tracing::warn!(
+            rusty_log::warn!(
                 %run_id,
                 dropped,
                 limit,
@@ -408,7 +408,7 @@ impl Store for RedisStore {
             match decode::<Notification>(&raw) {
                 Ok(notification) => Some(notification),
                 Err(error) => {
-                    tracing::warn!(%error, "dropping undecodable notification");
+                    rusty_log::warn!(%error, "dropping undecodable notification");
                     None
                 }
             }

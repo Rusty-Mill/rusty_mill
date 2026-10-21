@@ -44,6 +44,10 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   actor and role) and register `/mcp` in each model's own client; a model then pulls work with `card_take`,
   comments, and moves it on, using its own subscription session. See
   [`docs/connecting-models.md`](docs/connecting-models.md) for setup and the paste-in working loop.
+- **As a service:** `GET /health` (200, or 503 when the store must be reopened), SIGTERM stops accepting, waits for running requests and a backup, then exits, a second
+  process on the same `--store` is refused (`<store>.lock`), and `--backup-dir DIR` keeps pruned, consistent backups
+  of the store and settings (`--backup-secs`, `--backup-keep`; none while the store needs a restart), compacting the store after each. A systemd unit, an
+  env example and the install, restore and rollback steps are in [`deploy/`](deploy/README.md). ADR-0005.
 - **Storage:** `rusty_multimodal_db_engine` (one durable record per commit holds the event and the card after it,
   so a commit is atomic; state is rebuilt from those records at open), or in memory when `--store` is omitted.
   Event ids are UUIDv7 assigned inside the commit, so id order is commit order and doubles as the polling
@@ -76,3 +80,8 @@ Layout: `domain` (pure) / `store` + `mmdb` (port and adapters) / `board` (servic
 Optional runner: [`runner/`](runner/README.md) (`mill-runner`) works cards through stages by running
 a sandboxed command per column; the board does not depend on it. A BBP conductor is designed but
 paused (ADR-0001).
+
+Export validated project ownership without opening a store or services:
+`rusty_mill_board --projects projects.json --export-projects`. The JSON uses the
+existing projects file format and can feed
+[Orch change-impact reports](../rusty_orch/docs/change-impact.md).

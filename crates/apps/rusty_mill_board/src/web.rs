@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use crate::api::{CallError, Identity, Op, Shared};
 use crate::domain::BoardError;
+use crate::drain::InFlight;
 use crate::identities::Credentials;
 use crate::settings::Settings;
 
@@ -66,6 +67,7 @@ pub struct Web {
     hosts: Vec<String>,
     auth: Auth,
     settings: Arc<Settings>,
+    in_flight: Arc<InFlight>,
 }
 
 impl Web {
@@ -86,7 +88,21 @@ impl Web {
             mcp_path,
             hosts,
             auth,
+            in_flight: Arc::default(),
         }
+    }
+
+    /// Count requests in `flight`, the counter the MCP tools and the backups share, so one stop
+    /// waits for all of them and, once it has closed, every request is answered 503 unrun.
+    #[must_use]
+    pub fn with_in_flight(mut self, flight: Arc<InFlight>) -> Self {
+        self.in_flight = flight;
+        self
+    }
+
+    /// The counter requests are counted in.
+    pub fn in_flight(&self) -> Arc<InFlight> {
+        Arc::clone(&self.in_flight)
     }
 
     /// Serve `/api/settings_*` from `settings` (read-only settings by default).
@@ -186,6 +202,12 @@ fn reply(status: StatusCode, body: Value) -> Response {
 
 impl SharedHandler for Web {
     fn handle(&self, request: &Request<'_>) -> Response {
+        let Some(_running) = self.in_flight.enter() else {
+            return reply(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "shutting down"}),
+            );
+        };
         let path = request.target.split('?').next().unwrap_or("");
         if path == self.mcp_path {
             return match self.identify(request) {
@@ -193,6 +215,16 @@ impl SharedHandler for Web {
                     .mcp
                     .handle_with(request, identity.and_then(|i| principal(&i))),
                 Err(()) => reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"})),
+            };
+        }
+        if path == "/health" && request.method == &Method::Get {
+            // Open to probes on any Host: it says only whether the store can still commit.
+            return match self.board.health() {
+                Ok(()) => reply(StatusCode::OK, json!({"ok": true})),
+                Err(e) => reply(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"ok": false, "error": e.to_string()}),
+                ),
             };
         }
         if !self.host_ok(request) {

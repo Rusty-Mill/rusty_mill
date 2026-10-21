@@ -140,7 +140,7 @@ impl Webhook {
                 // A header whose expression produced nothing is left off
                 // rather than sent empty: an empty `x-tenant` is a claim that
                 // there is no tenant, which is not what happened.
-                tracing::debug!(header = %name, "a webhook header expression produced no value");
+                rusty_log::debug!(header = %name, "a webhook header expression produced no value");
                 continue;
             };
             // Pseudo-headers are instructions about the request rather than
@@ -148,7 +148,7 @@ impl Webhook {
             match name.as_str() {
                 ":path" => path = value,
                 other if other.starts_with(':') => {
-                    tracing::debug!(header = other, "ignoring an unsupported pseudo-header");
+                    rusty_log::debug!(header = other, "ignoring an unsupported pseudo-header");
                 }
                 _ => headers.push((name.clone(), value)),
             }
@@ -168,7 +168,7 @@ impl Webhook {
         match self.send(request, key).await {
             Ok(verdict) => verdict,
             Err(reason) => {
-                tracing::warn!(
+                rusty_log::warn!(
                     %reason,
                     fail_open = self.fail_open,
                     "the guard webhook could not be consulted"
@@ -212,7 +212,7 @@ fn read_action(answered: &Value, key: &str) -> Verdict {
     let Some(action) = answered.get("action") else {
         // Upstream's schema requires it. A body without one has not answered
         // the question, so it is not a pass.
-        tracing::warn!("a guard webhook answered without an `action`");
+        rusty_log::warn!("a guard webhook answered without an `action`");
         return Verdict::Reject(Rejection {
             status: 503,
             headers: None,
@@ -235,7 +235,7 @@ fn read_action(answered: &Value, key: &str) -> Verdict {
             // A mask that carried nothing readable is not a pass: it asked for
             // a rewrite and did not say to what.
             None => {
-                tracing::warn!("a guard webhook masked with a body this build cannot read");
+                rusty_log::warn!("a guard webhook masked with a body this build cannot read");
                 Verdict::Reject(Rejection {
                     status: 503,
                     headers: None,

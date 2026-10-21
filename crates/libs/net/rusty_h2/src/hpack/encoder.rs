@@ -4,6 +4,7 @@ use crate::hpack::{static_table, HeaderField, DEFAULT_HEADER_TABLE_SIZE};
 
 /// An HPACK encoder. Holds the dynamic table state mirroring what the
 /// remote peer's decoder will build up as it processes our header blocks.
+#[derive(Clone)]
 pub struct Encoder {
     dynamic_table: DynamicTable,
     pending_size_update: Option<usize>,

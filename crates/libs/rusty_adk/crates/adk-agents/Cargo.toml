@@ -2,7 +2,7 @@
 name = "adk-agents"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Agents for the Rust ADK: LlmAgent, workflow agents, callbacks, and graph integration"

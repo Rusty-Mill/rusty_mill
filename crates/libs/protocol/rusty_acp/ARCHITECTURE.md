@@ -91,9 +91,8 @@ and what it would have cost.
 - **Choosing an observability backend.** `metrics` is a facade and `trace` emits identifiers;
   neither picks an exporter, because taking `tracing-opentelemetry` would pick the ecosystem for
   every dependent.
-- **Raising the MSRV for optional dependencies.** `rust-version` is 1.86. `redis-store` and
-  `postgres-store` need 1.88 because their dependencies do; an optional dependency does not
-  raise the floor for everyone else.
+- **Keeping the MSRV below the dependencies' floor.** `rust-version` is 1.88, the highest floor
+  the resolved dependencies declare (`icu_*`); `check_rust_versions.py` enforces that it is not lower.
 - **Extending the wire format.** Where this crate serves more than ACP defines — `/ready`, the
   resumable SSE stream, `Acp-Events-From` — it is an extension a client can ignore, and
   `tests/spec_coverage.rs` fails if one is added without being declared as such.

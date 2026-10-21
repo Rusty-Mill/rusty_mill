@@ -339,7 +339,7 @@ impl SqliteBackend {
                 let conn = match init_connection(&writer_path) {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::error!(
+                        rusty_log::error!(
                             "persistence writer thread failed to open {}: {e}",
                             writer_path.display()
                         );
@@ -402,7 +402,7 @@ impl SqliteBackend {
                         }
                     };
                     if let Err(e) = result {
-                        tracing::warn!("failed to persist event to sqlite: {e}");
+                        rusty_log::warn!("failed to persist event to sqlite: {e}");
                     }
                 }
             })
@@ -436,7 +436,7 @@ impl SqliteBackend {
             cost_usd,
         });
         if self.tx.send(event).is_err() {
-            tracing::warn!("persistence writer thread is gone; dropping usage event");
+            rusty_log::warn!("persistence writer thread is gone; dropping usage event");
         }
     }
 
@@ -462,7 +462,7 @@ impl SqliteBackend {
             cost_usd,
         };
         if self.tx.send(event).is_err() {
-            tracing::warn!("persistence writer thread is gone; dropping client spend event");
+            rusty_log::warn!("persistence writer thread is gone; dropping client spend event");
         }
     }
 
@@ -472,7 +472,7 @@ impl SqliteBackend {
             period_key,
         };
         if self.tx.send(event).is_err() {
-            tracing::warn!("persistence writer thread is gone; dropping client spend reset");
+            rusty_log::warn!("persistence writer thread is gone; dropping client spend reset");
         }
     }
 
@@ -522,7 +522,9 @@ impl SqliteBackend {
             cost_usd,
         };
         if self.tx.send(event).is_err() {
-            tracing::warn!("persistence writer thread is gone; dropping daily client usage event");
+            rusty_log::warn!(
+                "persistence writer thread is gone; dropping daily client usage event"
+            );
         }
     }
 
@@ -580,11 +582,11 @@ fn build_rustls_client_config() -> Result<rustls::ClientConfig, String> {
     let mut roots = rustls::RootCertStore::empty();
     let loaded = rustls_native_certs::load_native_certs();
     for err in &loaded.errors {
-        tracing::warn!("error loading a native root certificate: {err}");
+        rusty_log::warn!("error loading a native root certificate: {err}");
     }
     for cert in loaded.certs {
         if let Err(e) = roots.add(cert) {
-            tracing::warn!("failed to add a native root certificate: {e}");
+            rusty_log::warn!("failed to add a native root certificate: {e}");
         }
     }
     if roots.is_empty() {
@@ -630,7 +632,7 @@ impl PostgresBackend {
         let (client, connection) = config.connect(tls).await?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                tracing::error!("postgres persistence connection closed with an error: {e}");
+                rusty_log::error!("postgres persistence connection closed with an error: {e}");
             }
         });
         // `CREATE TABLE IF NOT EXISTS` isn't safe against concurrent first
@@ -675,7 +677,7 @@ impl PostgresBackend {
                 )
                 .await;
             if let Err(e) = result {
-                tracing::warn!("failed to persist usage event to postgres: {e}");
+                rusty_log::warn!("failed to persist usage event to postgres: {e}");
             }
         });
     }
@@ -718,7 +720,7 @@ impl PostgresBackend {
                 )
                 .await;
             if let Err(e) = result {
-                tracing::warn!("failed to persist client spend event to postgres: {e}");
+                rusty_log::warn!("failed to persist client spend event to postgres: {e}");
             }
         });
     }
@@ -738,7 +740,7 @@ impl PostgresBackend {
                 )
                 .await;
             if let Err(e) = result {
-                tracing::warn!("failed to persist client spend reset to postgres: {e}");
+                rusty_log::warn!("failed to persist client spend reset to postgres: {e}");
             }
         });
     }
@@ -790,7 +792,7 @@ impl PostgresBackend {
                 )
                 .await;
             if let Err(e) = result {
-                tracing::warn!("failed to persist daily client usage event to postgres: {e}");
+                rusty_log::warn!("failed to persist daily client usage event to postgres: {e}");
             }
         });
     }

@@ -30,7 +30,7 @@ pub async fn run(
     let shutdown = CancellationToken::new();
     let serving = run_with_shutdown_and_limits(gateway, addrs, shutdown.clone(), limits).await?;
     signal().await;
-    tracing::info!("shutting down");
+    rusty_log::info!("shutting down");
     shutdown.cancel();
     serving.await;
     Ok(())
@@ -68,7 +68,7 @@ pub async fn run_with_shutdown_and_limits(
         // Bind every port before serving any, so a port already in use is a
         // startup failure rather than a gateway that half works.
         let listener = TcpListener::bind(addr).await?;
-        tracing::info!(%addr, "listening");
+        rusty_log::info!(%addr, "listening");
         listeners.push((addr.port(), listener));
     }
 
@@ -108,7 +108,7 @@ async fn accept_loop(
                     // A failed accept is usually per-connection (fd limits,
                     // a client that vanished); tearing down the listener
                     // would turn a transient problem into an outage.
-                    tracing::warn!(%port, %err, "accept failed");
+                    rusty_log::warn!(%port, %err, "accept failed");
                     continue;
                 }
             },
@@ -141,7 +141,7 @@ async fn accept_loop(
                     let tls = match terminator.accept(stream).await {
                         Ok(tls) => tls,
                         Err(err) => {
-                            tracing::debug!(%port, %err, "TLS handshake failed");
+                            rusty_log::debug!(%port, %err, "TLS handshake failed");
                             return;
                         }
                     };
@@ -188,7 +188,7 @@ async fn serve_connection<S>(
     tokio::select! {
         result = connection.as_mut() => {
             if let Err(err) = result {
-                tracing::debug!(%port, %err, "connection closed with error");
+                rusty_log::debug!(%port, %err, "connection closed with error");
             }
         }
         _ = shutdown.cancelled() => {
@@ -207,7 +207,7 @@ async fn signal() {
         let mut term = match signal(SignalKind::terminate()) {
             Ok(term) => term,
             Err(err) => {
-                tracing::warn!(%err, "cannot listen for SIGTERM; only SIGINT will stop the gateway");
+                rusty_log::warn!(%err, "cannot listen for SIGTERM; only SIGINT will stop the gateway");
                 let _ = tokio::signal::ctrl_c().await;
                 return;
             }

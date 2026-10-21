@@ -3,7 +3,7 @@ name = "inventory-core"
 description = "Local-first index over the conversation history AI coding tools write to disk"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.87"
 license = "MIT"
 repository = "https://github.com/baileyrd/rusty_inventrory"
 
@@ -14,7 +14,7 @@ layer = "apps"
 thiserror = "2"
 serde.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
+rusty_log = { workspace = true }
 rusty_sqlite.workspace = true
 aes-gcm = "0.10"
 directories = "5"

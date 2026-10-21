@@ -269,14 +269,14 @@ async fn reader_loop<R: AsyncRead + Unpin + Send + 'static>(
         let (t, payload) = match frame::read_frame(&mut read_half, MAX_FRAME_SIZE).await {
             Ok(f) => f,
             Err(e) => {
-                tracing::debug!("DERP read loop ended: {e}");
+                rusty_log::debug!("DERP read loop ended: {e}");
                 return;
             }
         };
         match t {
             FrameType::RecvPacket => {
                 if payload.len() < KEY_LEN {
-                    tracing::debug!("short RecvPacket frame");
+                    rusty_log::debug!("short RecvPacket frame");
                     continue;
                 }
                 let mut src = [0u8; KEY_LEN];
@@ -297,15 +297,15 @@ async fn reader_loop<R: AsyncRead + Unpin + Send + 'static>(
                 }
             }
             FrameType::KeepAlive | FrameType::Pong => {}
-            FrameType::PeerGone => tracing::debug!("DERP peer gone"),
-            FrameType::PeerPresent => tracing::debug!("DERP peer present"),
+            FrameType::PeerGone => rusty_log::debug!("DERP peer gone"),
+            FrameType::PeerPresent => rusty_log::debug!("DERP peer present"),
             FrameType::Health => {
                 if !payload.is_empty() {
-                    tracing::warn!("DERP health: {}", String::from_utf8_lossy(&payload));
+                    rusty_log::warn!("DERP health: {}", String::from_utf8_lossy(&payload));
                 }
             }
-            FrameType::Restarting => tracing::info!("DERP server restarting"),
-            other => tracing::trace!("ignoring DERP frame {other:?}"),
+            FrameType::Restarting => rusty_log::info!("DERP server restarting"),
+            other => rusty_log::trace!("ignoring DERP frame {other:?}"),
         }
     }
 }
@@ -325,7 +325,7 @@ async fn writer_loop(mut write_half: OwnedWriteHalf, mut rx: mpsc::Receiver<Outb
             }
         };
         if let Err(e) = result {
-            tracing::debug!("DERP write loop ended: {e}");
+            rusty_log::debug!("DERP write loop ended: {e}");
             return;
         }
     }

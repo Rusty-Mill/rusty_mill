@@ -1,0 +1,32 @@
+[package]
+name = "rusty_tonic"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Dependency-free gRPC protocol core: status codes and error details, validated metadata, message framing with a receive limit, grpc-timeout, and request/response header lists. Sans-IO; no async, no HTTP/2, no code generation."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["grpc", "protobuf", "protocol"]
+categories = ["network-programming", "encoding"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+rusty_prost = { workspace = true }
+rusty_base64 = { workspace = true }
+rusty_percent = { workspace = true }
+
+[dev-dependencies]
+# Independent oracle only (never shipped): our status trailers are read by tonic and tonic's by
+# us. The library builds on rust-version 1.75; the tests need tonic's floor.
+tonic = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"

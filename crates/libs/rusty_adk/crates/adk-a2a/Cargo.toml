@@ -2,7 +2,7 @@
 name = "adk-a2a"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Serve a Rust ADK agent over the Agent2Agent (A2A) protocol"
@@ -23,7 +23,7 @@ rusty_base64.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros"] }
-tracing.workspace = true
+rusty_log = { workspace = true }
 # A merged sibling in this workspace (was a git dependency on
 # baileyrd/rusty_a2a before the monorepo merge). `server` is the only
 # feature the bridge needs: it implements A2A's `AgentExecutor` trait and

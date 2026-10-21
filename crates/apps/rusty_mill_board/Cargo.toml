@@ -37,9 +37,8 @@ rusty_rand = { workspace = true }
 rusty_atomic_file = { workspace = true }
 clap = { workspace = true }
 rusty_request = { workspace = true, features = ["tokio"] }
-tokio = { workspace = true, features = ["rt"] }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "signal"] }
+rusty_log = { workspace = true, features = ["subscriber"] }
 
 [dev-dependencies]
 rusty_multimodal_db_engine = { workspace = true, features = ["test-support"] }

@@ -190,7 +190,7 @@ impl Moderation {
     /// refuse the route's whole traffic.
     pub async fn check(&self, inputs: Vec<String>) -> Decision {
         if inputs.is_empty() {
-            tracing::debug!("a moderation rule found no text in the prompt to classify");
+            rusty_log::debug!("a moderation rule found no text in the prompt to classify");
             return Decision::Allowed;
         }
 
@@ -200,7 +200,7 @@ impl Moderation {
                 false => Decision::Allowed,
             },
             Err(reason) => {
-                tracing::warn!(%reason, "the moderation endpoint could not be consulted");
+                rusty_log::warn!(%reason, "the moderation endpoint could not be consulted");
                 Decision::Rejected(unreachable())
             }
         }

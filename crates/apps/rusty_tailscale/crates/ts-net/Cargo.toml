@@ -20,7 +20,7 @@ smoltcp = { version = "0.13", default-features = false, features = [
     "proto-ipv4",
     "socket-tcp",
 ] }
-tracing.workspace = true
+rusty_log = { workspace = true }
 thiserror.workspace = true
 # The `write_waker` backpressure lock in `stack.rs` is always immediately
 # unwrapped; parking_lot avoids the poisoning-error boilerplate for that.

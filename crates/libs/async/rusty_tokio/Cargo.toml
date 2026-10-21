@@ -58,9 +58,7 @@ futures-io = { version = "0.3", optional = true }
 # specifically -- works against this runtime with zero changes on its
 # end. See `task::trace`'s own docs for exactly which parts of tokio's
 # full console support this covers.
-tracing = { version = "0.1", optional = true, default-features = false, features = [
-    "std",
-] }
+rusty_log = { workspace = true, optional = true }
 
 [features]
 # `Buf`/`BufMut` integration: `AsyncReadExt::read_buf`,
@@ -100,7 +98,7 @@ io-uring-reactor = ["dep:io-uring"]
 # (task registration, name, spawn location, poll count, busy/idle time)
 # and what's deliberately not (waker clone/drop/self-wake stats,
 # resource/async-op instrumentation for `sync` primitives).
-tracing = ["dep:tracing"]
+tracing = ["dep:rusty_log"]
 # N OS threads, each pinned to its own CPU core (Linux; a harmless
 # no-op pin elsewhere), each running its own independent scheduler
 # queue, reactor, timer driver, and blocking pool -- no shared
@@ -211,7 +209,7 @@ futures-io = "0.3"
 # inspect emitted spans directly, so it needs the crate unconditionally
 # even though `required-features` below skips the test target unless
 # the `tracing` feature is enabled.
-tracing = { version = "0.1", default-features = false, features = ["std"] }
+rusty_log = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 # `tests/signal_windows.rs` calls `GenerateConsoleCtrlEvent` directly to

@@ -283,7 +283,7 @@ impl Gateway {
                 continue;
             }
             let forwarder = Passthrough::new(&routes, &registry, &format!("binds[{b}]"))?;
-            tracing::info!(port = bind.port, "passthrough listener ready");
+            rusty_log::info!(port = bind.port, "passthrough listener ready");
             passthrough.insert(bind.port, Arc::new(forwarder));
         }
         let default_timeout = config
@@ -361,9 +361,9 @@ impl Gateway {
                     .await?;
 
                     for reason in federation.degraded() {
-                        tracing::warn!(route = %at, "serving degraded: {reason}");
+                        rusty_log::warn!(route = %at, "serving degraded: {reason}");
                     }
-                    tracing::info!(
+                    rusty_log::info!(
                         route = %at,
                         targets = ?federation.target_names().collect::<Vec<_>>(),
                         "MCP backend ready"
@@ -424,7 +424,7 @@ impl Gateway {
                         None => {
                             let resolved = resolve_backends(&route.backends, &registry, &at)?;
                             let proxy = HostProxy::new(&resolved, &route.policies, &at)?;
-                            tracing::info!(
+                            rusty_log::info!(
                                 route = %at,
                                 endpoints = proxy.endpoint_count(),
                                 "forwarding backend ready"
@@ -490,7 +490,7 @@ impl Gateway {
                         sole_path_prefix(&route.matches),
                         &at,
                     )?;
-                    tracing::info!(
+                    rusty_log::info!(
                         route = %at,
                         provider = backend.provider().name(),
                         endpoint = backend.endpoint(),
@@ -506,7 +506,7 @@ impl Gateway {
                     match route.backends.len() {
                         1 => {
                             let proxy = HostProxy::dynamic(backend, &route.policies, &at)?;
-                            tracing::warn!(
+                            rusty_log::warn!(
                                 route = %at,
                                 computed = proxy.is_dynamic(),
                                 "a `dynamic` backend makes this route a forward proxy: the \
@@ -652,7 +652,7 @@ impl Gateway {
                     // Claims that cannot reach the rules must not be dropped:
                     // a rule on `jwt.*` would then judge a token it never saw.
                     Err(err) => {
-                        tracing::error!(%err, "verified token claims are not valid JSON");
+                        rusty_log::error!(%err, "verified token claims are not valid JSON");
                         let failed = status(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "the token claims could not be read",
@@ -683,7 +683,7 @@ impl Gateway {
                         Some(bytes)
                     }
                     Err(()) => {
-                        tracing::info!(
+                        rusty_log::info!(
                             route = ?selection.route.name,
                             limit,
                             "refusing a request whose body exceeds `extAuthz.includeBody`"
@@ -722,7 +722,7 @@ impl Gateway {
                     headers,
                     body,
                 } => {
-                    tracing::info!(route = ?selection.route.name, %status, "external authorization denied");
+                    rusty_log::info!(route = ?selection.route.name, %status, "external authorization denied");
                     let mut response = status_bytes(status, Bytes::from(body));
                     response.headers_mut().extend(headers);
                     return Ok(with_cors(response, cors_headers));
@@ -737,7 +737,7 @@ impl Gateway {
             Some(budget) => match tokio::time::timeout(budget, call).await {
                 Ok(response) => response,
                 Err(_) => {
-                    tracing::warn!(
+                    rusty_log::warn!(
                         route = ?selection.route.name,
                         timeout_ms = budget.as_millis() as u64,
                         "request exceeded its budget"
@@ -832,7 +832,7 @@ impl Gateway {
                 {
                     Ok(bytes) => bytes,
                     Err(()) => {
-                        tracing::info!(
+                        rusty_log::info!(
                             route = ?selection.route.name,
                             limit = agentgateway_llm::MAX_REQUEST_BYTES,
                             "refusing an A2A request body that is too large"
@@ -846,7 +846,7 @@ impl Gateway {
 
                 match a2a.check(&bytes) {
                     Decision::Refused { method, body } => {
-                        tracing::info!(method = %method, "refusing an A2A method");
+                        rusty_log::info!(method = %method, "refusing an A2A method");
                         // 200 with a JSON-RPC error object, not an HTTP error:
                         // that is where a JSON-RPC client looks, and an A2A
                         // client parsing the envelope would otherwise see a
@@ -854,7 +854,7 @@ impl Gateway {
                         return json(StatusCode::OK, Bytes::from(body));
                     }
                     Decision::Permitted { method } => {
-                        tracing::debug!(
+                        rusty_log::debug!(
                             method = %method,
                             task = ?agentgateway_a2a::task_id(&bytes),
                             "forwarding an A2A call"

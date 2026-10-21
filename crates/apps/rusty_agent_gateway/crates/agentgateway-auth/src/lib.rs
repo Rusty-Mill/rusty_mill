@@ -168,7 +168,7 @@ impl JwtAuthenticator {
                 // this gateway did not anticipate is not one to wave through, and
                 // the log line is how we find out the mapping needs updating.
                 other => {
-                    tracing::warn!(error = %other, "unrecognized token rejection; denying");
+                    rusty_log::warn!(error = %other, "unrecognized token rejection; denying");
                     AuthRejection::unauthorized("invalid_token", other.to_string())
                 }
             })?;
@@ -198,7 +198,7 @@ impl JwtAuthenticator {
 
         // The reason is deliberately not echoed back: telling a caller which
         // audiences we accept helps them go and find a token that carries one.
-        tracing::debug!(
+        rusty_log::debug!(
             presented = ?token.audiences,
             accepted = ?self.audiences,
             "rejecting a token minted for another audience"

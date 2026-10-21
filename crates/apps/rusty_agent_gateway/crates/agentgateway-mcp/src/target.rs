@@ -400,7 +400,7 @@ impl Target {
             return headers.to_native();
         }
         if !headers.is_empty() {
-            tracing::debug!(
+            rusty_log::debug!(
                 target = %self.name,
                 "a guardrail asked to change headers on a stdio target; there are none"
             );

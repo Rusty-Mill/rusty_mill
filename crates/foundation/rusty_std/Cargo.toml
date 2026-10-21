@@ -2,7 +2,7 @@
 name = "rusty_std"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_std"

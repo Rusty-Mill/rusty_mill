@@ -142,7 +142,7 @@ impl Passthrough {
     pub async fn forward(self: Arc<Self>, client: TcpStream) {
         let name = crate::peek_server_name(&client).await;
         let Some(destination) = self.destination(name.as_deref()) else {
-            tracing::debug!(
+            rusty_log::debug!(
                 server_name = name.as_deref().unwrap_or("<none>"),
                 "closing a passthrough connection no route claims"
             );
@@ -152,7 +152,7 @@ impl Passthrough {
         let mut upstream = match TcpStream::connect(&destination).await {
             Ok(upstream) => upstream,
             Err(err) => {
-                tracing::warn!(%destination, %err, "could not reach a passthrough upstream");
+                rusty_log::warn!(%destination, %err, "could not reach a passthrough upstream");
                 return;
             }
         };
@@ -162,14 +162,14 @@ impl Passthrough {
         // finishes: a TLS session ends when one peer closes, and holding the
         // other open would leak a connection per handshake.
         match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
-            Ok((from_client, from_upstream)) => tracing::debug!(
+            Ok((from_client, from_upstream)) => rusty_log::debug!(
                 %destination,
                 from_client,
                 from_upstream,
                 "a passthrough connection closed"
             ),
             Err(err) => {
-                tracing::debug!(%destination, %err, "a passthrough connection failed")
+                rusty_log::debug!(%destination, %err, "a passthrough connection failed")
             }
         }
     }

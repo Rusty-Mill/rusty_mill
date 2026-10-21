@@ -2,7 +2,7 @@
 name = "rusty_baseline"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Per-product baseline: binary size, dependency closure, clean and incremental build, startup, idle and peak RSS"
 license = "MIT OR Apache-2.0"
 publish = false

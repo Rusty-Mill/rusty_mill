@@ -363,7 +363,7 @@ impl PostgresStore {
         .await
         .map_err(|err| pg_error("account for trimmed events", err))?;
 
-        tracing::warn!(
+        rusty_log::warn!(
             %run_id,
             dropped = deleted.len(),
             limit = self.config.max_run_event_bytes,
@@ -486,7 +486,7 @@ impl PostgresStore {
             // conversation without any error to notice — the same silent
             // restart the in-memory store's eviction has, and worth the same
             // line in the log.
-            tracing::warn!(
+            rusty_log::warn!(
                 sessions = swept.sessions,
                 ?retention,
                 "swept sessions past retention; their history and state are gone"
@@ -737,7 +737,7 @@ impl Store for PostgresStore {
                 let pointer: Pointer = match serde_json::from_str(message.payload()) {
                     Ok(pointer) => pointer,
                     Err(error) => {
-                        tracing::warn!(%error, "dropping undecodable notification pointer");
+                        rusty_log::warn!(%error, "dropping undecodable notification pointer");
                         return None;
                     }
                 };
@@ -1105,7 +1105,7 @@ impl PostgresStore {
             // Trimmed, or not appended yet. Both are a dropped notification.
             Ok(None) => None,
             Err(error) => {
-                tracing::warn!(%error, %run_id, index, "failed to read a notified event");
+                rusty_log::warn!(%error, %run_id, index, "failed to read a notified event");
                 None
             }
         }
@@ -1132,7 +1132,7 @@ impl PostgresStore {
                     }
                     Ok(None) => None,
                     Err(error) => {
-                        tracing::warn!(%error, id, "failed to read a parked notification");
+                        rusty_log::warn!(%error, id, "failed to read a parked notification");
                         None
                     }
                 }

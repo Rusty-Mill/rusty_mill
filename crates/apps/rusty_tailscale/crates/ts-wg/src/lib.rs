@@ -104,7 +104,7 @@ impl WgPeer for BoringWgPeer {
                 out.push(WgAction::ToPeer(pkt.to_vec()));
             }
             TunnResult::Done => {}
-            TunnResult::Err(e) => tracing::debug!("wg encapsulate error: {e:?}"),
+            TunnResult::Err(e) => rusty_log::debug!("wg encapsulate error: {e:?}"),
             // encapsulate never yields tunnel packets.
             _ => {}
         }
@@ -126,7 +126,7 @@ impl WgPeer for BoringWgPeer {
                 out.push(WgAction::ToLocal(pkt.to_vec()));
             }
             TunnResult::Done => {}
-            TunnResult::Err(e) => tracing::debug!("wg decapsulate error: {e:?}"),
+            TunnResult::Err(e) => rusty_log::debug!("wg decapsulate error: {e:?}"),
         }
         out
     }
@@ -136,7 +136,7 @@ impl WgPeer for BoringWgPeer {
         match self.tunn.update_timers(self.buf.as_mut_slice()) {
             TunnResult::WriteToNetwork(pkt) => out.push(WgAction::ToPeer(pkt.to_vec())),
             TunnResult::Done => {}
-            TunnResult::Err(e) => tracing::debug!("wg timer error: {e:?}"),
+            TunnResult::Err(e) => rusty_log::debug!("wg timer error: {e:?}"),
             _ => {}
         }
         out

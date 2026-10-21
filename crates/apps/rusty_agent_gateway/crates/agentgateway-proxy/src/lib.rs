@@ -110,7 +110,7 @@ impl HostProxy {
         if let Some(rewrite) = proxy.rewrite.as_ref()
             && rewrite.authority().is_some()
         {
-            tracing::warn!(
+            rusty_log::warn!(
                 route = %at,
                 "ignoring `urlRewrite.authority` on a `dynamic` route: the request chooses the \
                  upstream, and a fixed authority would mean it never does"
@@ -224,7 +224,7 @@ impl HostProxy {
             Some(_) if retry::is_replayable(&body) => match body.collect().await {
                 Ok(collected) => RequestBody::Buffered(collected.to_bytes()),
                 Err(err) => {
-                    tracing::warn!(%err, "reading the request body failed");
+                    rusty_log::warn!(%err, "reading the request body failed");
                     return error(StatusCode::BAD_REQUEST, "could not read the request body");
                 }
             },
@@ -277,7 +277,7 @@ impl HostProxy {
             {
                 Ok(uri) => uri,
                 Err(err) => {
-                    tracing::warn!(%err, "could not build the upstream URI");
+                    rusty_log::warn!(%err, "could not build the upstream URI");
                     return error(StatusCode::INTERNAL_SERVER_ERROR, "invalid upstream URI");
                 }
             };
@@ -306,7 +306,7 @@ impl HostProxy {
                 Some(budget) => match tokio::time::timeout(budget, call).await {
                     Ok(result) => result,
                     Err(_) => {
-                        tracing::warn!(
+                        rusty_log::warn!(
                             upstream = %authority,
                             timeout_ms = budget.as_millis() as u64,
                             "upstream exceeded its budget"
@@ -336,7 +336,7 @@ impl HostProxy {
                     if !retry_this {
                         return finish(response);
                     }
-                    tracing::debug!(
+                    rusty_log::debug!(
                         upstream = %authority,
                         status,
                         attempt = attempt + 1,
@@ -348,7 +348,7 @@ impl HostProxy {
                     // 502, not 500: the gateway is fine, the upstream is not,
                     // and conflating the two sends people debugging the wrong
                     // process.
-                    tracing::warn!(upstream = %authority, %err, "upstream request failed");
+                    rusty_log::warn!(upstream = %authority, %err, "upstream request failed");
 
                     // Only a connect failure is known never to have reached the
                     // upstream. Any other transport error may have been received

@@ -100,28 +100,41 @@ async fn pool_respects_a_higher_max_connections_before_blocking() -> rusty_db::R
 
 #[tokio::test]
 async fn acquire_timeout_errors_instead_of_hanging_forever() -> rusty_db::Result<()> {
-    let config = PoolConfig::new(1).with_acquire_timeout(Duration::from_millis(200));
-    let engine = file_engine_with("acquire_timeout", config).await?;
+    // The acquire timeout also bounds opening the pool's first connection, so it is not set so low
+    // that a loaded runner's file, WAL and schema setup can use it up before the test starts (that
+    // failed at ~0.2 s on Windows CI as "pool timed out" before the assertion was reached). This test
+    // needs no file and no table: one in-memory connection, held, is enough to exhaust the pool.
+    const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(1);
+    let config = PoolConfig::new(1).with_acquire_timeout(ACQUIRE_TIMEOUT);
+    let engine = SqliteDriver::engine_with("sqlite::memory:", config)
+        .await
+        .unwrap_or_else(|e| panic!("stage 1, creating the pool: {e}"));
 
-    let held = engine.connect().await?;
+    let held = engine.connect().await.unwrap_or_else(|e| {
+        panic!("stage 2, the first checkout (the pool's only connection): {e}")
+    });
 
-    // No external timeout wrapper on the call under test — this relies
-    // entirely on the pool's own configured acquire_timeout to give up.
-    // It's wrapped in a generous outer timeout purely as a test safety net,
-    // so a broken acquire_timeout fails this test instead of hanging the
-    // whole suite.
+    // No external timeout wrapper on the call under test: this relies entirely on the pool's own
+    // configured acquire_timeout to give up. The outer timeout is only a safety net, so a broken
+    // acquire_timeout fails this test instead of hanging the whole suite.
     let start = std::time::Instant::now();
-    let outcome = timeout(Duration::from_secs(5), engine.connect()).await;
+    let outcome = timeout(Duration::from_secs(10), engine.connect()).await;
     let elapsed = start.elapsed();
 
     let result = outcome.expect("engine.connect() hung well past its configured acquire_timeout");
+    let error = match result {
+        Ok(_) => panic!(
+            "stage 3, the exhausted acquire: expected the pool's own timeout, got a connection"
+        ),
+        Err(error) => error.to_string(),
+    };
     assert!(
-        result.is_err(),
-        "expected the pool's own acquire_timeout to produce an error"
+        error.contains("timed out"),
+        "stage 3, the exhausted acquire: expected the pool's timeout error, got: {error}"
     );
     assert!(
-        elapsed < Duration::from_secs(2),
-        "acquire_timeout should have fired quickly, took {elapsed:?}"
+        elapsed >= ACQUIRE_TIMEOUT / 2 && elapsed < ACQUIRE_TIMEOUT * 5,
+        "acquire_timeout should fire after about {ACQUIRE_TIMEOUT:?}, took {elapsed:?}"
     );
 
     drop(held);

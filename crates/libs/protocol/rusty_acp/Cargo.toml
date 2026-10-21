@@ -2,7 +2,7 @@
 name = "rusty-acp"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.88"
 description = "Agent Communication Protocol (ACP) v0.2.0 for Rust: protocol types, an HTTP client, and a server framework for hosting agents."
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_acp"
@@ -59,7 +59,7 @@ serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
-tracing = { workspace = true }
+rusty_log = { workspace = true }
 rusty_base64 = { workspace = true }
 
 # client
@@ -108,7 +108,7 @@ metrics = { version = "0.24.6", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 eventsource-stream = { workspace = true }
 tokio = { version = "1", features = ["full"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusty_log = { workspace = true, features = ["subscriber"] }
 async-trait = { workspace = true }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }

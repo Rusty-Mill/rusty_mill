@@ -1,0 +1,148 @@
+//! Counting the work in flight, so a stop can wait for it and then refuse new work.
+
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct State {
+    running: usize,
+    closed: bool,
+}
+
+/// The requests and background jobs running now. `enter` while open; once a stop has
+/// [`InFlight::close_and_wait`]ed, `enter` refuses, so nothing starts that the stop cannot wait for.
+#[derive(Default)]
+pub struct InFlight {
+    state: Mutex<State>,
+    idle: Condvar,
+}
+
+/// One unit of work in flight; it leaves when dropped.
+pub struct Running<'a>(&'a InFlight);
+
+impl InFlight {
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Start a unit of work, or `None` once the stop has begun.
+    pub fn enter(&self) -> Option<Running<'_>> {
+        let mut state = self.state();
+        if state.closed {
+            return None;
+        }
+        state.running += 1;
+        Some(Running(self))
+    }
+
+    /// Refuse new work from now on, without waiting. Work already running is unaffected.
+    pub fn close(&self) {
+        self.state().closed = true;
+    }
+
+    /// Refuse new work, then wait up to `within` for the work running to finish. `true` if it all did.
+    pub fn close_and_wait(&self, within: Duration) -> bool {
+        self.close();
+        self.wait(within)
+    }
+
+    /// Wait up to `within` for the work running to finish. `true` if none is left.
+    pub fn wait(&self, within: Duration) -> bool {
+        let end = Instant::now() + within;
+        let mut state = self.state();
+        while state.running > 0 {
+            let Some(left) = end.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            state = self
+                .idle
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state();
+        state.running -= 1;
+        if state.running == 0 {
+            self.0.idle.notify_all();
+        }
+    }
+}
+
+/// Serve until a stop begins ([`begin_stop`]), then spend at most `within` letting the work
+/// finish: first the requests being answered (until their last byte is written), then whatever
+/// `flight` still counts (MCP calls running on detached workers, a backup). `Ok(true)` if all of it
+/// finished; `Ok(false)` if the deadline ended it. One deadline for both, so a stop is bounded.
+///
+/// # Errors
+/// If the listener fails, after the work has been given its time.
+pub fn serve_until_drained(
+    server: rusty_serve::Server,
+    flight: &InFlight,
+    within: Duration,
+) -> std::io::Result<bool> {
+    let handle = server.shutdown_handle()?;
+    let served = server.run();
+    // Admission first, and without waiting: from here nothing new starts, so neither wait below
+    // can be outrun by a request or a tool call that begins after it has seen the count at zero.
+    flight.close();
+    let end = Instant::now() + within;
+    let answered = handle.wait_idle(within);
+    let finished = flight.wait(end.saturating_duration_since(Instant::now()));
+    served.map(|()| answered && finished)
+}
+
+/// Begin a stop: close admission, then stop accepting. In that order and from one place (the signal
+/// handler and the tests both call it), so no request or tool call is admitted after the listener
+/// has been told to stop.
+pub fn begin_stop(stop: &rusty_serve::ShutdownHandle, flight: &InFlight) {
+    flight.close();
+    stop.shutdown();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn a_stop_waits_for_work_held_across_it_then_refuses_new_work() {
+        let flight = Arc::new(InFlight::default());
+        let (held, release) = std::sync::mpsc::channel::<()>();
+        let worker = {
+            let flight = Arc::clone(&flight);
+            std::thread::spawn(move || {
+                let _running = flight.enter().expect("open");
+                held.send(()).expect("signal");
+                std::thread::sleep(Duration::from_millis(150));
+            })
+        };
+        release.recv().expect("worker holds a request");
+        let started = Instant::now();
+        assert!(flight.close_and_wait(Duration::from_secs(5)));
+        assert!(started.elapsed() >= Duration::from_millis(100), "it waited");
+        assert!(flight.enter().is_none(), "closed for new work");
+        worker.join().expect("worker");
+    }
+
+    #[test]
+    fn a_stop_gives_up_at_its_deadline_on_work_that_never_ends() {
+        let flight = InFlight::default();
+        let _stuck = flight.enter().expect("open");
+        let started = Instant::now();
+        assert!(!flight.close_and_wait(Duration::from_millis(100)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(flight.enter().is_none());
+    }
+
+    #[test]
+    fn an_idle_stop_returns_at_once() {
+        assert!(InFlight::default().close_and_wait(Duration::from_secs(5)));
+    }
+}

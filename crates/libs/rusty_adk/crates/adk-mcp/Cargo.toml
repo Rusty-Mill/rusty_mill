@@ -2,7 +2,7 @@
 name = "adk-mcp"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Model Context Protocol transports for the Rust ADK: serve ADK tools, or consume an MCP server's"
@@ -24,7 +24,7 @@ adk-core.workspace = true
 adk-tools.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
+rusty_log = { workspace = true }
 # The workspace's first-party MCP stack: the wire protocol, handshake and
 # transports. This crate keeps only the ADK mapping.
 rusty_mcp_server = { workspace = true }

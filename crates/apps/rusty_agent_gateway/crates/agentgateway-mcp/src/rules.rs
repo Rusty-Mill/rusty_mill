@@ -76,7 +76,7 @@ impl Rule {
         match self.program.execute(context) {
             Ok(cel::Value::Bool(value)) => value,
             Ok(other) => {
-                tracing::debug!(
+                rusty_log::debug!(
                     expression = %self.expression,
                     result = ?other,
                     "a rule produced a non-boolean; treating it as false"
@@ -87,7 +87,7 @@ impl Rule {
                 // Routine, not exceptional: `jwt.sub == ...` on a route with no
                 // token cannot evaluate, and the right answer there is "this
                 // rule does not match", not a 500.
-                tracing::debug!(
+                rusty_log::debug!(
                     expression = %self.expression,
                     %err,
                     "a rule could not be evaluated; treating it as false"
