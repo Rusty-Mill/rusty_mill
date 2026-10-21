@@ -331,9 +331,12 @@ fn echo_router() -> Router {
     })
 }
 
-fn with(headers: Vec<(String, Vec<u8>)>, name: &str, value: &str) -> Vec<(String, Vec<u8>)> {
-    let mut headers: Vec<_> = headers.into_iter().filter(|(n, _)| n != name).collect();
-    headers.push((name.to_string(), value.as_bytes().to_vec()));
+/// `headers` with `name` set to `value` in place (pseudo-headers must stay first).
+fn with(mut headers: Vec<(String, Vec<u8>)>, name: &str, value: &str) -> Vec<(String, Vec<u8>)> {
+    match headers.iter_mut().find(|(n, _)| n == name) {
+        Some(h) => h.1 = value.as_bytes().to_vec(),
+        None => headers.push((name.to_string(), value.as_bytes().to_vec())),
+    }
     headers
 }
 

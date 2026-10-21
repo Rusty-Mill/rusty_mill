@@ -6,6 +6,7 @@ mod client_common;
 mod server_common;
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -43,6 +44,7 @@ fn router() -> Router {
             Ok(reply)
         })
         .unary("/pkg.Svc/Slow", |r: Request<Blob>| async move {
+            let _dropped = Dropped;
             rusty_tokio::time::sleep(Duration::from_secs(10)).await;
             Ok(Response::new(r.message))
         })
@@ -160,6 +162,7 @@ fn an_error_with_metadata_and_an_unimplemented_method() {
         assert_eq!(e.message(), "gone");
         assert_eq!(e.metadata().get("x-why").unwrap(), "missing");
 
+        g.ready().await.unwrap();
         let e = g
             .unary(
                 tonic::Request::new(pblob(1, 0)),
@@ -224,16 +227,28 @@ fn a_bidirectional_stream() {
     });
 }
 
+/// Set when the slow handler's future is dropped.
+static SLOW_DROPPED: AtomicBool = AtomicBool::new(false);
+
+struct Dropped;
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        SLOW_DROPPED.store(true, Ordering::SeqCst);
+    }
+}
+
 #[test]
-fn the_clients_deadline_ends_a_slow_call() {
+fn the_clients_deadline_stops_a_slow_handler() {
     with_client(|mut g| async move {
         let mut req = tonic::Request::new(pblob(1, 1));
         req.set_timeout(Duration::from_millis(300));
-        let e = g
-            .unary(req, path("/pkg.Svc/Slow"), codec())
-            .await
-            .unwrap_err();
-        assert_eq!(e.code(), tonic::Code::DeadlineExceeded);
+        // `tonic` also times the call out itself; what matters is that our server dropped the
+        // handler, which a cancel alone would not (a sleeping handler is only dropped by its
+        // deadline).
+        assert!(g.unary(req, path("/pkg.Svc/Slow"), codec()).await.is_err());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(SLOW_DROPPED.load(Ordering::SeqCst));
     });
 }
 

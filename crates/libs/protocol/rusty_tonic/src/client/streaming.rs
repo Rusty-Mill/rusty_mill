@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Runs `f` until `deadline`; `None` if the deadline came first.
-pub(super) async fn until<F: Future>(deadline: Option<Instant>, f: F) -> Option<F::Output> {
+pub(crate) async fn until<F: Future>(deadline: Option<Instant>, f: F) -> Option<F::Output> {
     match deadline {
         None => Some(f.await),
         Some(at) => timeout_at(at, f).await.ok(),
@@ -40,7 +40,7 @@ fn pairs(headers: &[HeaderField]) -> Vec<(&str, &[u8])> {
 }
 
 /// The longest message a call may send, checked against the message about to be framed.
-pub(super) fn frame<T: Message>(message: &T, max: Option<usize>) -> Result<Vec<u8>, Status> {
+pub(crate) fn frame<T: Message>(message: &T, max: Option<usize>) -> Result<Vec<u8>, Status> {
     let frame = encode_message(message)?;
     match max {
         Some(max) if frame.len() - HEADER_LEN > max => Err(Status::resource_exhausted(format!(

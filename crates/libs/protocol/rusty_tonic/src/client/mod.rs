@@ -14,3 +14,7 @@ mod streaming;
 pub use call::{Request, Response};
 pub use channel::{Channel, ChannelOptions, Interceptor};
 pub use streaming::{Reply, Sender, Streaming};
+
+// What the server shares with the client: deadlines, send-limit framing and error mapping.
+pub(crate) use error::status_from_h2;
+pub(crate) use streaming::{frame, until};
