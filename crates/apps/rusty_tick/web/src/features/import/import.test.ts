@@ -256,6 +256,47 @@ describe('readImport: .ics', () => {
     expect((await api.snapshot()).tasks.map((t) => t.id)).toContain(bId)
   })
 
+  it('matches tasks #829 imported whose due dates were edited since, by title and repeat, keeping edits', async () => {
+    const api = new MemoryAdapter()
+    const [mId, aId] = await written829(api, [m829, a829])
+    await api.updateTask(mId!, { dueMs: Date.UTC(2026, 9, 6, 9) })
+    await api.updateTask(aId!, { dueMs: Date.UTC(2026, 9, 14, 9), notes: 'mine' })
+    expect(await applyImport(api, readImport(cal(movedA, master), 'cal.ics'))).toEqual({ tasks: 0, lists: 0, existing: 2, resumed: 0 })
+    const tasks = (await api.snapshot()).tasks
+    expect(tasks).toHaveLength(2)
+    expect(tasks.find((t) => t.id === aId)).toMatchObject({ dueMs: Date.UTC(2026, 9, 14, 9), notes: 'mine' })
+  })
+
+  it('matches a task imported by bare UID whose due date was edited since', async () => {
+    const api = new MemoryAdapter()
+    const inbox = (await api.snapshot()).inboxId
+    const id = derivedId('import|calendar file|r1')
+    await api.createTask({ id, listId: inbox, title: 'Standup', dueMs: Date.UTC(2026, 9, 5, 9), repeatFlag: 'RRULE:FREQ=WEEKLY' })
+    await api.updateTask(id, { dueMs: Date.UTC(2026, 9, 7, 9) })
+    expect(await applyImport(api, readImport(moved, 'cal.ics'))).toEqual({ tasks: 1, lists: 0, existing: 1, resumed: 0 }) // the instance dropped then
+    expect((await api.snapshot()).tasks).toHaveLength(2)
+  })
+
+  it('matches the one edited task left when the others still have their due dates', async () => {
+    const api = new MemoryAdapter()
+    const b829 = { uid: 'r1', title: 'Standup', dueMs: Date.UTC(2026, 9, 20, 9) }
+    const [, , bId] = await written829(api, [m829, a829, b829])
+    await api.updateTask(bId!, { dueMs: Date.UTC(2026, 9, 21, 9) })
+    expect((await applyImport(api, readImport(cal(master, movedA, movedB), 'cal.ics'))).tasks).toBe(0)
+  })
+
+  it('does not guess between look-alike tasks whose due dates were both edited', async () => {
+    const api = new MemoryAdapter()
+    const b829 = { uid: 'r1', title: 'Standup', dueMs: Date.UTC(2026, 9, 20, 9) }
+    const [, aId, bId] = await written829(api, [m829, a829, b829])
+    await api.updateTask(aId!, { dueMs: Date.UTC(2026, 9, 14, 9) })
+    await api.updateTask(bId!, { dueMs: Date.UTC(2026, 9, 21, 9) })
+    expect(await applyImport(api, readImport(cal(master, movedA, movedB), 'cal.ics'))).toEqual({ tasks: 2, lists: 0, existing: 0, resumed: 1 })
+    const tasks = (await api.snapshot()).tasks
+    expect(tasks.find((t) => t.id === aId)!.dueMs).toBe(Date.UTC(2026, 9, 14, 9))
+    expect(tasks.find((t) => t.id === bId)!.dueMs).toBe(Date.UTC(2026, 9, 21, 9))
+  })
+
   it('imports an event with more exceptions than a task can hold, keeping the latest', async () => {
     const exdates = Array.from({ length: 1500 }, (_, i) => new Date(Date.UTC(2026, 9, 6) + i * 86_400_000).toISOString().replace(/[-:]|\.\d{3}/g, ''))
     const api = new MemoryAdapter()
