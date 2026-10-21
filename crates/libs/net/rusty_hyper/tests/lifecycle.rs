@@ -20,6 +20,11 @@ const FIVE: Duration = Duration::from_secs(5);
 /// acknowledges the client's, answers the first `answer_pings` PINGs and
 /// ignores the rest.
 fn raw_peer(answer_pings: usize) -> std::net::SocketAddr {
+    raw_peer_with(answer_pings, true)
+}
+
+/// Like [`raw_peer`], optionally never sending its own SETTINGS.
+fn raw_peer_with(answer_pings: usize, send_settings: bool) -> std::net::SocketAddr {
     let l = StdListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -27,7 +32,9 @@ fn raw_peer(answer_pings: usize) -> std::net::SocketAddr {
         let mut preface = [0u8; 24];
         s.read_exact(&mut preface).unwrap();
         // An empty SETTINGS frame: length 0, type 4, flags 0, stream 0.
-        s.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).unwrap();
+        if send_settings {
+            s.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).unwrap();
+        }
         let mut answered = 0;
         loop {
             let mut head = [0u8; 9];
@@ -119,12 +126,7 @@ async fn a_plain_client_that_stays_silent_is_dropped_by_the_server() {
         echo,
     );
     let idle = TcpStream::connect(server.local_addr()).await.unwrap();
-    let mut buf = [0u8; 16];
-    let n = timeout(FIVE, idle.read(&mut buf))
-        .await
-        .expect("the server must give up on a silent client")
-        .unwrap_or(0);
-    assert_eq!(n, 0, "the server closes the connection");
+    closed_by_the_server(&idle).await;
     server.shutdown().await;
 }
 
@@ -266,4 +268,176 @@ async fn shutdown_lets_a_call_in_flight_finish_and_refuses_new_connections() {
     let body = timeout(FIVE, inflight).await.unwrap().unwrap();
     assert_eq!(body, b"slow", "the call in flight finishes");
     timeout(FIVE, stopping).await.unwrap().unwrap();
+}
+
+#[rusty_tokio::test]
+async fn a_peer_that_answers_pings_but_sends_no_settings_times_out_connecting() {
+    // It acknowledges the PING and never sends SETTINGS: not an HTTP/2 server
+    // a request could ever start on.
+    let addr = raw_peer_with(usize::MAX, false);
+    let o = ConnectOptions {
+        connect_timeout: Duration::from_millis(300),
+        ..ConnectOptions::default()
+    };
+    let r = timeout(FIVE, connect(&format!("http://{addr}"), o))
+        .await
+        .expect("connect honours its own deadline");
+    assert!(matches!(r, Err(Error::Timeout(_))), "{:?}", r.err());
+}
+
+/// Reads until the server closes the connection. An HTTP/2 server speaks
+/// first (its SETTINGS), so some bytes may arrive before the end.
+async fn closed_by_the_server(s: &TcpStream) {
+    let mut buf = [0u8; 256];
+    loop {
+        match timeout(FIVE, s.read(&mut buf))
+            .await
+            .expect("the server must give up on a stalled client")
+        {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Connects clients that stall, then checks the one slot comes back.
+async fn assert_stalled_clients_free_the_slot(
+    server: &rusty_hyper::Server,
+    scheme: &str,
+    options: impl Fn() -> ConnectOptions,
+    stalled: TcpStream,
+) {
+    // The stalled client holds the only slot, so a real one is turned away
+    // until the server gives up on it.
+    let u = url(server, scheme);
+    let mut conn = None;
+    for _ in 0..200 {
+        if let Ok(c) = connect(&u, options()).await {
+            conn = Some(c);
+            break;
+        }
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let conn = conn.expect("the stalled client's slot is freed by the handshake deadline");
+    call(conn.client(), scheme, &[], b"ok".to_vec())
+        .await
+        .unwrap();
+    closed_by_the_server(&stalled).await;
+}
+
+#[rusty_tokio::test]
+async fn a_client_stuck_part_way_through_the_preface_does_not_hold_a_slot() {
+    let server = start(
+        listener(),
+        None,
+        ServeOptions {
+            handshake_timeout: Duration::from_millis(300),
+            max_connections: 1,
+            ..ServeOptions::default()
+        },
+        echo,
+    );
+    let stalled = TcpStream::connect(server.local_addr()).await.unwrap();
+    stalled.write_all(b"P").await.unwrap();
+    assert_stalled_clients_free_the_slot(&server, "http", ConnectOptions::default, stalled).await;
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn a_client_that_finishes_tls_but_never_sends_http2_does_not_hold_a_slot() {
+    use rusty_tls::AsyncTlsStream;
+    use rusty_tokio::io::AsyncWriteExt;
+
+    let pki = pki();
+    let server = start(
+        listener(),
+        Some(pki.acceptor(&[b"h2"])),
+        ServeOptions {
+            handshake_timeout: Duration::from_millis(500),
+            max_connections: 1,
+            ..ServeOptions::default()
+        },
+        echo,
+    );
+    // TLS completes with ALPN h2; then the client sends one byte of the preface.
+    let tcp = TcpStream::connect(server.local_addr()).await.unwrap();
+    let mut tls =
+        AsyncTlsStream::new_with_alpn(tcp, "127.0.0.1", &pki.trust(), vec![b"h2".to_vec()])
+            .unwrap();
+    tls.flush().await.unwrap();
+    tls.write_all(b"P").await.unwrap();
+    tls.flush().await.unwrap();
+    let u = url(&server, "https");
+    let mut conn = None;
+    for _ in 0..200 {
+        let o = ConnectOptions {
+            trust: pki.trust(),
+            ..ConnectOptions::default()
+        };
+        if let Ok(c) = connect(&u, o).await {
+            conn = Some(c);
+            break;
+        }
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let conn = conn.expect("the stalled TLS client's slot is freed by the handshake deadline");
+    call(conn.client(), "https", &[], b"ok".to_vec())
+        .await
+        .unwrap();
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn closed_can_be_awaited_again_and_then_closed() {
+    // Ended by the server going away: a clean end, every time it is asked.
+    let server = start(listener(), None, ServeOptions::default(), echo);
+    let mut conn = connect(&url(&server, "http"), ConnectOptions::default())
+        .await
+        .unwrap();
+    call(conn.client(), "http", &[], b"x".to_vec())
+        .await
+        .unwrap();
+    server.shutdown().await;
+    assert!(timeout(FIVE, conn.closed()).await.unwrap().is_ok());
+    assert!(timeout(FIVE, conn.closed()).await.unwrap().is_ok());
+    assert!(timeout(FIVE, conn.close()).await.unwrap().is_ok());
+
+    // Ended by the keepalive: the same failure is reported every time.
+    let addr = raw_peer(1);
+    let o = ConnectOptions {
+        keepalive: Some(Keepalive {
+            interval: Duration::from_millis(50),
+            timeout: Duration::from_millis(150),
+        }),
+        ..ConnectOptions::default()
+    };
+    let mut conn = connect(&format!("http://{addr}"), o).await.unwrap();
+    assert!(timeout(FIVE, conn.closed()).await.unwrap().is_err());
+    assert!(timeout(FIVE, conn.closed()).await.unwrap().is_err());
+    assert!(timeout(FIVE, conn.close()).await.unwrap().is_err());
+}
+
+#[rusty_tokio::test]
+async fn dropping_the_server_stops_it_gracefully() {
+    let server = start(listener(), None, ServeOptions::default(), echo);
+    let addr = server.local_addr();
+    let conn = connect(&format!("http://{addr}"), ConnectOptions::default())
+        .await
+        .unwrap();
+    call(conn.client(), "http", &[], b"before".to_vec())
+        .await
+        .unwrap();
+    drop(server);
+    let mut refused = false;
+    for _ in 0..100 {
+        if connect(&format!("http://{addr}"), ConnectOptions::default())
+            .await
+            .is_err()
+        {
+            refused = true;
+            break;
+        }
+        rusty_tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(refused, "a dropped server takes no new connections");
 }

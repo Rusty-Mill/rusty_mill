@@ -80,6 +80,8 @@ impl Drop for AbortOnDrop {
 pub struct Connection {
     client: ClientHandle,
     closed: Driver,
+    /// How the connection ended, once it has been awaited.
+    outcome: Option<Result<(), Error>>,
     _keepalive: Option<AbortOnDrop>,
 }
 
@@ -89,22 +91,34 @@ impl Connection {
         &self.client
     }
 
-    /// Waits for the connection to end and says why: `Ok` for a clean wind-down.
-    pub async fn closed(&mut self) -> Result<(), Error> {
-        finished(&mut self.closed).await
+    /// Waits for the connection to end and says why: `Ok` for a clean
+    /// wind-down. Asking again returns the same answer.
+    pub async fn closed(&mut self) -> Result<(), &Error> {
+        if self.outcome.is_none() {
+            self.outcome = Some(finished(&mut self.closed).await);
+        }
+        match &self.outcome {
+            Some(Err(e)) => Err(e),
+            _ => Ok(()),
+        }
     }
 
     /// Winds the connection down: stops the keepalive, drops this handle and
-    /// waits for the calls in flight to finish.
+    /// waits for the calls in flight to finish. After [`Connection::closed`]
+    /// it returns that answer.
     pub async fn close(self) -> Result<(), Error> {
         let Connection {
             client,
             mut closed,
+            outcome,
             _keepalive,
         } = self;
         drop(_keepalive);
         drop(client);
-        finished(&mut closed).await
+        match outcome {
+            Some(done) => done,
+            None => finished(&mut closed).await,
+        }
     }
 }
 
@@ -114,8 +128,8 @@ async fn finished(driver: &mut Driver) -> Result<(), Error> {
 
 /// Connects to `url` (`http://` is plain h2c with prior knowledge; `https://`
 /// is TLS with ALPN `h2`) and spawns the connection's driver. It returns once
-/// a PING has made the round trip, which shows the peer speaks HTTP/2, all
-/// within `connect_timeout`.
+/// the server's first SETTINGS have arrived, which shows the peer speaks
+/// HTTP/2, all within `connect_timeout`.
 pub async fn connect(url: &str, options: ConnectOptions) -> Result<Connection, Error> {
     let url = Url::parse(url).map_err(|e| match e {
         rusty_http::Error::UnsupportedScheme(s) => Error::UnsupportedScheme(s),
@@ -135,6 +149,7 @@ pub async fn connect(url: &str, options: ConnectOptions) -> Result<Connection, E
     Ok(Connection {
         client,
         closed,
+        outcome: None,
         _keepalive: guard,
     })
 }
@@ -171,17 +186,19 @@ async fn establish(
     start(tls, h2).await
 }
 
-/// Spawns the driver and waits for a PING round trip: only an HTTP/2 peer
-/// answers it.
+/// Spawns the driver and waits for the server's first SETTINGS, which only an
+/// HTTP/2 server sends and which a request needs before it can start. (An
+/// acknowledged PING is not enough: a peer can answer PINGs and never send
+/// SETTINGS.)
 async fn start<T>(io: T, h2: Builder) -> Result<(ClientHandle, Driver), Error>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (client, connection) = driver::client(io, h2);
     let task = rusty_tokio::spawn(async move { connection.await.map_err(Error::from) });
-    // Until the PING is answered the driver dies with this scope.
+    // Until the peer is ready the driver dies with this scope.
     let mut guard = AbortOnDrop(Some(task.abort_handle()));
-    client.ping().await?;
+    client.ready().await?;
     guard.disarm();
     Ok((client, task))
 }
