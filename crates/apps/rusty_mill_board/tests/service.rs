@@ -109,6 +109,73 @@ fn identical_execution_binding_is_concurrent_and_restart_idempotent() {
 }
 
 #[test]
+fn execution_recovery_survives_reopen_and_fences_stale_actors() {
+    let dir = dir("execution_recover");
+    let path = dir.join("board.mmap");
+    let board = board_at(&path);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "recover once", "", vec![]).expect("add");
+    let link = |generation| ExecutionLink {
+        execution: "execution-1".into(),
+        goal: "goal-1".into(),
+        bbp_task: "task-1".into(),
+        attempt: "attempt-1".into(),
+        assignment: "project-orch".into(),
+        generation,
+    };
+    board
+        .bind_execution(card.id, link(1), &human)
+        .expect("bind");
+    drop(board);
+
+    // Two replacements race from the same expected generation: one wins.
+    let reopened = board_at(&path);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let racers: Vec<_> = [2_u64, 3]
+        .into_iter()
+        .map(|generation| {
+            let (board, barrier) = (Arc::clone(&reopened), Arc::clone(&barrier));
+            std::thread::spawn(move || {
+                let builder = board.roles().actor("nano", "human").expect("role");
+                barrier.wait();
+                board.recover_execution(card.id, 1, link(generation), &builder)
+            })
+        })
+        .collect();
+    let won: Vec<_> = racers
+        .into_iter()
+        .filter_map(|racer| racer.join().expect("thread").ok())
+        .collect();
+    assert_eq!(won.len(), 1, "exactly one recovery wins the CAS");
+    let winner = won[0].execution.clone().expect("link");
+    drop(reopened);
+
+    let reopened = board_at(&path);
+    let builder = reopened.roles().actor("nano", "human").expect("role");
+    let stored = reopened.get(card.id).expect("card");
+    assert_eq!(stored.execution.as_ref(), Some(&winner));
+    // Replaying the winning recovery is a no-op, with no new event.
+    let events = reopened.events(None, 100).expect("events").len();
+    assert_eq!(
+        reopened
+            .recover_execution(card.id, 1, winner.clone(), &builder)
+            .expect("replay"),
+        stored
+    );
+    assert_eq!(reopened.events(None, 100).expect("events").len(), events);
+    // The stale generation can neither recover again nor rebind.
+    assert!(
+        reopened
+            .recover_execution(card.id, 1, link(9), &builder)
+            .is_err()
+    );
+    assert!(reopened.bind_execution(card.id, link(1), &builder).is_err());
+    assert_eq!(reopened.get(card.id).expect("card").execution, Some(winner));
+    drop(reopened);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn a_store_has_one_owner_until_it_is_dropped() {
     let dir = dir("owner");
     let path = dir.join("board.mmap");

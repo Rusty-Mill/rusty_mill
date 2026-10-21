@@ -166,8 +166,42 @@ impl Factory {
         if assignment.generation != generation {
             return Err(FactoryError::StaleGeneration);
         }
-        assignment.generation += 1;
+        assignment.generation = generation
+            .checked_add(1)
+            .ok_or(FactoryError::Invalid("assignment generation exhausted"))?;
         assignment.active = false;
+        Ok(())
+    }
+
+    /// Re-grant a delegated child under its parent's current generation.
+    ///
+    /// Replacing a parent leaves every child delegated by the old generation
+    /// stale; this is the one way back. The parent must be active at
+    /// `parent_generation`, the child's generation must advance, and the new
+    /// grant must fit the parent's. Children of the child stay bound to the
+    /// child's former generation and need their own re-grant.
+    pub fn regrant(
+        &mut self,
+        parent: &str,
+        parent_generation: u64,
+        child: Assignment,
+    ) -> Result<(), FactoryError> {
+        self.authorize(parent, parent_generation)?;
+        let previous = self
+            .assignments
+            .get(&child.id)
+            .ok_or(FactoryError::UnknownAssignment)?;
+        if previous.parent.as_deref() != Some(parent) {
+            return Err(FactoryError::Invalid("re-grant changes parent"));
+        }
+        if child.generation <= previous.generation {
+            return Err(FactoryError::StaleGeneration);
+        }
+        self.validate_child_grant(parent, &child, Some(&child.id))?;
+        self.validate_reserved_capacity(&child)?;
+        let child_id = child.id.clone();
+        self.assignments.insert(child_id.clone(), child);
+        self.parent_generations.insert(child_id, parent_generation);
         Ok(())
     }
 
@@ -196,6 +230,11 @@ impl Factory {
     }
 
     /// Initiate a card exactly once or adopt its previous durable execution after restart.
+    ///
+    /// A link with a higher, currently authorized generation moves a
+    /// non-terminal execution to that generation in memory; the adapter
+    /// persists it with Millboard's `card_execution_recover`, a
+    /// compare-and-set on the previous generation.
     pub fn initiate_or_adopt(
         &mut self,
         link: ExecutionLink,
@@ -294,6 +333,24 @@ impl Factory {
         }
     }
 
+    /// Add one assignment's reservation (itself plus its descendants, and its
+    /// calls) to running totals. Every step is checked: a budget at `u32::MAX`
+    /// is refused, never wrapped.
+    fn reserve(
+        (descendants, calls): (u32, u32),
+        grant: &Grant,
+    ) -> Result<(u32, u32), FactoryError> {
+        let descendants = grant
+            .delegation_budget
+            .checked_add(1)
+            .and_then(|own| descendants.checked_add(own))
+            .ok_or(FactoryError::DelegationOutsideGrant)?;
+        let calls = calls
+            .checked_add(grant.call_budget)
+            .ok_or(FactoryError::DelegationOutsideGrant)?;
+        Ok((descendants, calls))
+    }
+
     fn validate_child_grant(
         &self,
         parent: &str,
@@ -307,24 +364,14 @@ impl Factory {
             .assignments
             .get(parent)
             .ok_or(FactoryError::UnknownAssignment)?;
-        let (mut descendants, mut calls) = (0_u32, 0_u32);
+        let mut totals = (0_u32, 0_u32);
         for existing in self.assignments.values().filter(|assignment| {
             assignment.parent.as_deref() == Some(parent)
                 && replacing != Some(assignment.id.as_str())
         }) {
-            descendants = descendants
-                .checked_add(1 + existing.grant.delegation_budget)
-                .ok_or(FactoryError::DelegationOutsideGrant)?;
-            calls = calls
-                .checked_add(existing.grant.call_budget)
-                .ok_or(FactoryError::DelegationOutsideGrant)?;
+            totals = Self::reserve(totals, &existing.grant)?;
         }
-        descendants = descendants
-            .checked_add(1 + child.grant.delegation_budget)
-            .ok_or(FactoryError::DelegationOutsideGrant)?;
-        calls = calls
-            .checked_add(child.grant.call_budget)
-            .ok_or(FactoryError::DelegationOutsideGrant)?;
+        let (descendants, calls) = Self::reserve(totals, &child.grant)?;
         if descendants > parent_assignment.grant.delegation_budget
             || calls > parent_assignment.grant.call_budget
             || child
@@ -339,19 +386,15 @@ impl Factory {
     }
 
     fn validate_reserved_capacity(&self, assignment: &Assignment) -> Result<(), FactoryError> {
-        let (mut descendants, mut calls) = (0_u32, 0_u32);
+        let mut totals = (0_u32, 0_u32);
         for child in self
             .assignments
             .values()
             .filter(|child| child.parent.as_deref() == Some(assignment.id.as_str()))
         {
-            descendants = descendants
-                .checked_add(1 + child.grant.delegation_budget)
-                .ok_or(FactoryError::DelegationOutsideGrant)?;
-            calls = calls
-                .checked_add(child.grant.call_budget)
-                .ok_or(FactoryError::DelegationOutsideGrant)?;
+            totals = Self::reserve(totals, &child.grant)?;
         }
+        let (descendants, calls) = totals;
         if descendants > assignment.grant.delegation_budget || calls > assignment.grant.call_budget
         {
             return Err(FactoryError::DelegationOutsideGrant);
@@ -557,5 +600,134 @@ mod tests {
             f.reconcile("card-1", "project", 1, ExecutionState::Cancelled),
             Err(FactoryError::Terminal)
         );
+    }
+    #[test]
+    fn budgets_at_the_integer_limit_are_refused_not_wrapped() {
+        let mut f = Factory::default();
+        f.assign(assignment(
+            "project",
+            None,
+            1,
+            &["orch"],
+            u32::MAX,
+            u32::MAX,
+        ))
+        .unwrap();
+        // 1 + u32::MAX descendants cannot be represented: refused, no panic.
+        assert_eq!(
+            f.delegate(
+                "project",
+                1,
+                assignment("greedy", Some("project"), 1, &["orch"], u32::MAX, 1)
+            ),
+            Err(FactoryError::DelegationOutsideGrant)
+        );
+        f.delegate(
+            "project",
+            1,
+            assignment("max", Some("project"), 1, &["orch"], u32::MAX - 1, 1),
+        )
+        .unwrap();
+        // The sibling total would pass u32::MAX.
+        assert_eq!(
+            f.delegate(
+                "project",
+                1,
+                assignment("one-more", Some("project"), 1, &["orch"], 0, 1)
+            ),
+            Err(FactoryError::DelegationOutsideGrant)
+        );
+        // Calls overflow on their own as well.
+        let mut g = Factory::default();
+        g.assign(assignment("project", None, 1, &["orch"], 4, u32::MAX))
+            .unwrap();
+        g.delegate(
+            "project",
+            1,
+            assignment("a", Some("project"), 1, &["orch"], 0, u32::MAX),
+        )
+        .unwrap();
+        assert_eq!(
+            g.delegate(
+                "project",
+                1,
+                assignment("b", Some("project"), 1, &["orch"], 0, 1)
+            ),
+            Err(FactoryError::DelegationOutsideGrant)
+        );
+    }
+    #[test]
+    fn retiring_the_last_generation_is_refused_without_mutating() {
+        let mut f = Factory::default();
+        f.assign(assignment("project", None, u64::MAX, &["orch"], 1, 1))
+            .unwrap();
+        assert_eq!(
+            f.retire("project", u64::MAX),
+            Err(FactoryError::Invalid("assignment generation exhausted"))
+        );
+        assert_eq!(f.authorize("project", u64::MAX), Ok(()));
+    }
+    #[test]
+    fn a_child_recovers_only_through_a_regrant_by_the_current_parent() {
+        let mut f = Factory::default();
+        f.assign(assignment("root", None, 1, &["orch"], 3, 10))
+            .unwrap();
+        f.delegate(
+            "root",
+            1,
+            assignment("worker", Some("root"), 1, &["orch"], 0, 4),
+        )
+        .unwrap();
+        f.replace(assignment("root", None, 2, &["orch"], 3, 10))
+            .unwrap();
+        // A plain replacement of the child keeps its old parent binding: stale.
+        f.replace(assignment("worker", Some("root"), 2, &["orch"], 0, 4))
+            .unwrap();
+        assert_eq!(f.authorize("worker", 2), Err(FactoryError::StaleGeneration));
+        // The old parent generation cannot re-grant.
+        assert_eq!(
+            f.regrant(
+                "root",
+                1,
+                assignment("worker", Some("root"), 3, &["orch"], 0, 4)
+            ),
+            Err(FactoryError::StaleGeneration)
+        );
+        // Nor can a re-grant reuse the child's generation or broaden its grant.
+        assert_eq!(
+            f.regrant(
+                "root",
+                2,
+                assignment("worker", Some("root"), 2, &["orch"], 0, 4)
+            ),
+            Err(FactoryError::StaleGeneration)
+        );
+        assert_eq!(
+            f.regrant(
+                "root",
+                2,
+                assignment("worker", Some("root"), 3, &["other"], 0, 4)
+            ),
+            Err(FactoryError::DelegationOutsideGrant)
+        );
+        f.regrant(
+            "root",
+            2,
+            assignment("worker", Some("root"), 3, &["orch"], 0, 4),
+        )
+        .unwrap();
+        assert_eq!(f.authorize("worker", 3), Ok(()));
+        assert_eq!(f.authorize("worker", 2), Err(FactoryError::StaleGeneration));
+        // A retired parent re-grants nothing.
+        f.retire("root", 2).unwrap();
+        assert_eq!(
+            f.regrant(
+                "root",
+                3,
+                assignment("worker", Some("root"), 4, &["orch"], 0, 4)
+            ),
+            Err(FactoryError::Retired)
+        );
+        assert_eq!(f.authorize("worker", 3), Err(FactoryError::StaleGeneration));
     }
 }

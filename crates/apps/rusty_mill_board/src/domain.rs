@@ -223,6 +223,32 @@ pub struct ExecutionLink {
     pub generation: u64,
 }
 
+impl ExecutionLink {
+    /// Every id is required and generations start at 1.
+    fn validate(&self) -> Result<(), BoardError> {
+        let ids = [
+            &self.execution,
+            &self.goal,
+            &self.bbp_task,
+            &self.attempt,
+            &self.assignment,
+        ];
+        if ids.iter().any(|value| value.is_empty()) || self.generation == 0 {
+            return Err(BoardError::Invalid("execution link is incomplete"));
+        }
+        Ok(())
+    }
+
+    /// Whether `other` names the same logical execution, whatever its generation.
+    fn same_execution(&self, other: &Self) -> bool {
+        self.execution == other.execution
+            && self.goal == other.goal
+            && self.bbp_task == other.bbp_task
+            && self.attempt == other.attempt
+            && self.assignment == other.assignment
+    }
+}
+
 /// Why an operation was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardError {
@@ -298,6 +324,8 @@ pub enum EventKind {
     Synced,
     /// A factory execution was initiated or adopted.
     ExecutionLinked,
+    /// A factory execution moved to a replacement assignment generation.
+    ExecutionRecovered,
     /// Moved to another project.
     Assigned,
 }
@@ -512,19 +540,7 @@ impl Card {
     /// Bind the card to one logical execution. Replaying the same durable link
     /// adopts it; a different link is refused so duplicate submitters cannot fork work.
     pub fn bind_execution(&self, link: ExecutionLink, now_ms: i64) -> Result<Self, BoardError> {
-        if [
-            &link.execution,
-            &link.goal,
-            &link.bbp_task,
-            &link.attempt,
-            &link.assignment,
-        ]
-        .iter()
-        .any(|value| value.is_empty())
-            || link.generation == 0
-        {
-            return Err(BoardError::Invalid("execution link is incomplete"));
-        }
+        link.validate()?;
         match &self.execution {
             Some(existing) if existing == &link => Ok(self.clone()),
             Some(_) => Err(BoardError::Refused(
@@ -535,6 +551,51 @@ impl Card {
                 ..self.next(now_ms)
             }),
         }
+    }
+
+    /// Hand the card's execution to a replacement assignment generation.
+    ///
+    /// A compare-and-set on the generation: the stored link must still carry
+    /// `expected_generation`, `link` must name the same logical execution
+    /// (execution, goal, BBP task, attempt, assignment), and its generation
+    /// must advance. Replaying a recovery that already landed returns the card
+    /// unchanged; a stale actor presenting an older generation is refused and
+    /// can never overwrite the newer link.
+    pub fn recover_execution(
+        &self,
+        expected_generation: u64,
+        link: ExecutionLink,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        link.validate()?;
+        let Some(existing) = &self.execution else {
+            return Err(BoardError::Refused(
+                "card has no execution to recover".into(),
+            ));
+        };
+        if existing == &link {
+            return Ok(self.clone());
+        }
+        if !existing.same_execution(&link) {
+            return Err(BoardError::Refused(
+                "card already has a logical execution".into(),
+            ));
+        }
+        if existing.generation != expected_generation {
+            return Err(BoardError::Refused(format!(
+                "execution generation is {}, not {expected_generation}",
+                existing.generation
+            )));
+        }
+        if link.generation <= expected_generation {
+            return Err(BoardError::Invalid(
+                "recovery must advance the execution generation",
+            ));
+        }
+        Ok(Self {
+            execution: Some(link),
+            ..self.next(now_ms)
+        })
     }
 
     /// Append a comment.
@@ -751,6 +812,55 @@ mod tests {
         replacement.attempt = "another".into();
         assert!(matches!(
             c.bind_execution(replacement, 2),
+            Err(BoardError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn execution_recovery_is_a_generation_compare_and_set() {
+        let link = ExecutionLink {
+            execution: "execution".into(),
+            goal: "goal".into(),
+            bbp_task: "bbp".into(),
+            attempt: "attempt".into(),
+            assignment: "project-orch".into(),
+            generation: 1,
+        };
+        let at = |generation| ExecutionLink {
+            generation,
+            ..link.clone()
+        };
+        assert!(matches!(
+            card().recover_execution(1, at(2), 1),
+            Err(BoardError::Refused(_))
+        ));
+        let c = card().bind_execution(link.clone(), 1).expect("bind");
+        let mut other = at(2);
+        other.attempt = "another".into();
+        assert!(matches!(
+            c.recover_execution(1, other, 2),
+            Err(BoardError::Refused(_))
+        ));
+        let recovered = c.recover_execution(1, at(2), 2).expect("recover");
+        assert_eq!(recovered.execution, Some(at(2)));
+        assert_eq!(recovered.rev, c.rev + 1);
+        assert_eq!(
+            recovered.recover_execution(2, at(1), 3),
+            Err(BoardError::Invalid(
+                "recovery must advance the execution generation"
+            ))
+        );
+        // Replay is a no-op; the stale generation can neither recover nor bind.
+        assert_eq!(
+            recovered.recover_execution(1, at(2), 3),
+            Ok(recovered.clone())
+        );
+        assert!(matches!(
+            recovered.recover_execution(1, at(3), 3),
+            Err(BoardError::Refused(_))
+        ));
+        assert!(matches!(
+            recovered.bind_execution(link, 3),
             Err(BoardError::Refused(_))
         ));
     }

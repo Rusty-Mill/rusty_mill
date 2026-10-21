@@ -12,8 +12,12 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 - Assignment delegation now reserves aggregate descendant and call budgets,
   rejects identity reuse and cycles, validates replacement grants, and fences
   descendants to the generation of the ancestor that delegated them.
-- An authorized replacement generation can recover a non-terminal execution;
-  stale generations remain unable to reconcile it.
+- An authorized replacement generation can recover a non-terminal execution
+  and persist it through Millboard's generation compare-and-set
+  (`card_execution_recover`); stale generations can neither reconcile nor
+  overwrite it.
+- A parent's current generation re-grants a child stranded by the parent's
+  replacement (`Factory::regrant`). Budget arithmetic is fully checked.
 
 ---
 

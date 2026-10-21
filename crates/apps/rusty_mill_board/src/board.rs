@@ -330,6 +330,24 @@ impl<S: Store> Board<S> {
         })
     }
 
+    /// Move this card's execution to a replacement assignment generation, if
+    /// the stored link still carries `expected_generation` (see
+    /// [`Card::recover_execution`]). Needs Build, like binding.
+    pub fn recover_execution(
+        &self,
+        id: Uuid,
+        expected_generation: u64,
+        link: ExecutionLink,
+        by: &Actor,
+    ) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Build) {
+            return Err(BoardError::Forbidden(Capability::Build));
+        }
+        self.apply(id, by, EventKind::ExecutionRecovered, |c, now| {
+            c.recover_execution(expected_generation, link.clone(), now)
+        })
+    }
+
     /// Pull work: the next card this actor can act on, entered (Ready ->
     /// Building) and claimed. With `id`, that card or an error. Cards nearest
     /// Done come first, then oldest. Cards claimed by someone else are

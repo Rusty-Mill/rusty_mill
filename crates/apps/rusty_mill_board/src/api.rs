@@ -266,6 +266,28 @@ struct BindExecutionArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct RecoverExecutionArgs {
+    #[serde(flatten)]
+    link: BindExecutionArgs,
+    /// The generation the stored link must still carry (compare-and-set).
+    expected_generation: u64,
+}
+
+impl BindExecutionArgs {
+    fn link(self) -> (Who, String, ExecutionLink) {
+        let link = ExecutionLink {
+            execution: self.execution,
+            goal: self.goal,
+            bbp_task: self.bbp_task,
+            attempt: self.attempt,
+            assignment: self.assignment,
+            generation: self.generation,
+        };
+        (self.who, self.id, link)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct EventsArgs {
     /// Return events after this event id (omit for the beginning).
     after: Option<String>,
@@ -435,19 +457,19 @@ pub fn ops() -> Vec<Op> {
             "card_execution_link",
             "Initiate or adopt this card's one recoverable Orch execution. A different logical execution is refused; this persists the Orch goal, BBP task, host attempt, assignment and generation with the card.",
             |b, i, a: BindExecutionArgs| {
-                let who = acting(b, i, &a.who)?;
-                card(b.bind_execution(
-                    id(&a.id)?,
-                    ExecutionLink {
-                        execution: a.execution,
-                        goal: a.goal,
-                        bbp_task: a.bbp_task,
-                        attempt: a.attempt,
-                        assignment: a.assignment,
-                        generation: a.generation,
-                    },
-                    &who,
-                )?)
+                let (who, card_id, link) = a.link();
+                let who = acting(b, i, &who)?;
+                card(b.bind_execution(id(&card_id)?, link, &who)?)
+            },
+        ),
+        op(
+            "card_execution_recover",
+            "Hand this card's execution to a replacement assignment generation. Compare-and-set: refused unless the stored link still carries expected_generation and names the same execution, goal, BBP task, attempt and assignment; the new generation must be higher.",
+            |b, i, a: RecoverExecutionArgs| {
+                let expected = a.expected_generation;
+                let (who, card_id, link) = a.link.link();
+                let who = acting(b, i, &who)?;
+                card(b.recover_execution(id(&card_id)?, expected, link, &who)?)
             },
         ),
         op(
