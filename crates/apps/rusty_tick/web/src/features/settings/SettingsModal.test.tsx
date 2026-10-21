@@ -215,6 +215,14 @@ describe('SettingsModal', () => {
       await waitFor(() => expect(services.store.getState().toasts.map((t) => t.message)).toContain('That file is not a Tick Local backup'))
     })
 
+    it('Import from Other Apps reads a CSV into lists and tasks', async () => {
+      const user = setup()
+      const text = 'List,Title,Due\nErrands,Buy stamps,2026-10-05\n'
+      Object.defineProperty(File.prototype, 'text', { configurable: true, value: () => Promise.resolve(text) }) // jsdom's File has no text()
+      await user.upload(screen.getByLabelText('File from another app'), new File([text], 'reminders.csv', { type: 'text/csv' }))
+      await waitFor(() => expect(services.store.getState().toasts.map((t) => t.message)).toContain('Imported 1 tasks and 1 lists from CSV'))
+    })
+
     it('server mode: shows the masked token and signs out', async () => {
       setToken('secret-token-abcd1234', false)
       const reload = vi.spyOn(page, 'reload').mockImplementation(() => undefined)

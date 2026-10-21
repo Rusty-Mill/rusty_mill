@@ -16,10 +16,15 @@ use crate::CONNECTION_PREFACE;
 
 const READ_CHUNK: usize = 64 * 1024;
 
-/// Errors a shutdown reports when the peer closed first.
+/// Errors a transport reports when the peer is gone: it closed, or reset the
+/// connection. Windows says `ConnectionAborted` where Unix says
+/// `ConnectionReset` or `BrokenPipe`.
 fn peer_gone(e: &std::io::Error) -> bool {
-    use std::io::ErrorKind::{BrokenPipe, ConnectionReset, NotConnected};
-    matches!(e.kind(), NotConnected | BrokenPipe | ConnectionReset)
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected};
+    matches!(
+        e.kind(),
+        NotConnected | BrokenPipe | ConnectionReset | ConnectionAborted
+    )
 }
 
 /// The connection's task: spawn it, or await it to run the connection to
@@ -145,6 +150,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
             let mut buf = ReadBuf::new(&mut chunk);
             match Pin::new(&mut self.io).poll_read(cx, &mut buf) {
                 Poll::Pending => return Ok(()),
+                Poll::Ready(Err(e)) if self.reset_after_goodbye(&e) => {
+                    // As if the input had ended: everything it carried has
+                    // been applied.
+                    self.eof = true;
+                    return Ok(());
+                }
                 Poll::Ready(Err(e)) => return Err(Error::Io(e)),
                 Poll::Ready(Ok(())) if buf.filled().is_empty() => {
                     self.eof = true;
@@ -221,11 +232,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
         }
     }
 
-    /// Whether `e` from a shutdown is only the peer having hung up first: it
-    /// reached the end of its input or announced GOAWAY, and the error says
-    /// it is gone. Everything had been flushed by then.
+    /// Whether everything read has been applied and nothing is half received:
+    /// no frame is cut short, and no header block is waiting for its
+    /// CONTINUATION. (Open calls are counted apart: such a block opens none.)
+    fn input_complete(&self) -> bool {
+        self.rpos == self.rbuf.len() && !lock(&self.shared).conn.header_block_pending()
+    }
+
+    /// Whether `e` from a write, flush or shutdown is only the peer having hung
+    /// up first: it reached the end of its input or announced GOAWAY, the error
+    /// says it is gone, and its input was whole. A peer that left in the middle
+    /// of a frame or header block did not say goodbye.
     fn peer_closed_first(&self, e: &std::io::Error) -> bool {
-        peer_gone(e) && (self.eof || lock(&self.shared).conn.goaway_received().is_some())
+        peer_gone(e)
+            && (self.eof || lock(&self.shared).conn.goaway_received().is_some())
+            && self.input_complete()
     }
 
     /// Whether a failed write or flush lost nothing the peer needed: it is the
@@ -237,6 +258,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionDriver<T> {
     fn only_housekeeping_was_lost(&self, e: &Error) -> bool {
         let Error::Io(io) = e else { return false };
         self.peer_closed_first(io) && self.flushed >= lock(&self.shared).app_end
+    }
+
+    /// Whether a failed read is only the peer resetting the connection after
+    /// it said goodbye, so it can end the input like EOF. The same terminal
+    /// state `decide` needs for a clean end: the peer announced GOAWAY, its
+    /// input was whole, and no call is open; and no application data of ours
+    /// is still undelivered (`flushed >= app_end`), since a generic transport
+    /// does not promise that its writes fail too. Any other error, an earlier
+    /// failure, or a reset without a goodbye still fails the connection.
+    fn reset_after_goodbye(&self, e: &std::io::Error) -> bool {
+        if !peer_gone(e) || !self.input_complete() {
+            return false;
+        }
+        let sh = lock(&self.shared);
+        sh.conn.goaway_received().is_some() && sh.active == 0 && self.flushed >= sh.app_end
     }
 
     fn fail(&mut self, e: Error) {
