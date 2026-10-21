@@ -1,0 +1,13 @@
+{
+  "items": [
+    "[Parsing] accepted grammar: one or more `<digits><unit>` parts, units `h` `m` `s`",
+    "[Parsing] units must appear in the order h, m, s and at most once each",
+    "[Parsing] empty input and a number without a unit are refused",
+    "[Parsing] spaces and any other character are refused",
+    "[Parsing] overflow (in a part or in the total) returns `None`, never panics or wraps",
+    "[Formatting] parts are written largest first: hours, minutes, seconds",
+    "[Formatting] zero parts are omitted",
+    "[Formatting] 0 seconds renders as `0s`"
+  ],
+  "pass_mark": 6
+}

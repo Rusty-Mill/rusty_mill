@@ -1,0 +1,13 @@
+{
+  "items": [
+    "[format_amount] input is thousandths; output has exactly two decimals",
+    "[format_amount] rounding is half away from zero, for negatives too",
+    "[format_amount] rounding happens before grouping, so a carry can add a group (`999.995` to `1,000.00`)",
+    "[format_amount] thousands groups are separated by `,`",
+    "[format_amount] the sign is decided after rounding: a result of zero has no `-`",
+    "[format_amount] negative results have a leading `-` before the digits",
+    "[Edge cases] `i64::MIN` and `i64::MAX` format without panic (wider arithmetic or equivalent)",
+    "[Edge cases] amounts under one unit have a leading `0` (`0.01`)"
+  ],
+  "pass_mark": 6
+}

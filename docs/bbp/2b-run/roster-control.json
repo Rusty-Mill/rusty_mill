@@ -1,0 +1,109 @@
+[
+  {
+    "id": "planner",
+    "turn_order": 0,
+    "post": [
+      "Ask",
+      "Answer",
+      "Propose",
+      "Finding",
+      "RequestDecision",
+      "Pass"
+    ],
+    "write": [
+      "Spec"
+    ],
+    "read_artifacts": [
+      "Brief",
+      "Spec",
+      "Diff",
+      "Candidate",
+      "TestReport",
+      "Log"
+    ],
+    "read_messages": "All",
+    "verdict_at": [],
+    "final_decision": false,
+    "consultable": true
+  },
+  {
+    "id": "coder",
+    "turn_order": 1,
+    "post": [
+      "Ask",
+      "Answer",
+      "Propose",
+      "Finding",
+      "RequestDecision",
+      "Pass"
+    ],
+    "write": [
+      "Diff",
+      "Candidate"
+    ],
+    "read_artifacts": [
+      "Brief",
+      "Spec",
+      "Diff",
+      "Candidate",
+      "TestReport",
+      "Log"
+    ],
+    "read_messages": "All",
+    "verdict_at": [],
+    "final_decision": false,
+    "consultable": true
+  },
+  {
+    "id": "tester",
+    "turn_order": 2,
+    "post": [
+      "Ask",
+      "Answer",
+      "Finding",
+      "Verdict",
+      "RequestDecision",
+      "Pass"
+    ],
+    "write": [],
+    "read_artifacts": [
+      "Brief",
+      "Spec",
+      "Diff",
+      "Candidate",
+      "TestReport",
+      "Log"
+    ],
+    "read_messages": "All",
+    "verdict_at": [
+      "Test"
+    ],
+    "final_decision": false,
+    "consultable": true
+  },
+  {
+    "id": "reviewer",
+    "turn_order": 3,
+    "post": [
+      "Answer",
+      "Finding",
+      "Verdict",
+      "RequestDecision",
+      "Pass"
+    ],
+    "write": [],
+    "read_artifacts": [
+      "Brief",
+      "Spec",
+      "Diff",
+      "Candidate",
+      "TestReport"
+    ],
+    "read_messages": "Scoped",
+    "verdict_at": [
+      "Review"
+    ],
+    "final_decision": true,
+    "consultable": false
+  }
+]

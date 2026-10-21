@@ -1,0 +1,13 @@
+{
+  "items": [
+    "[Wrapping] words are split on any whitespace; runs collapse",
+    "[Wrapping] greedy fill: a word joins the line if line + space + word fits `width`",
+    "[Wrapping] a word longer than `width` is alone on its line, unbroken",
+    "[Wrapping] lines have no leading or trailing spaces",
+    "[Wrapping] text with no words gives an empty vector",
+    "[Counting] a word is a maximal run of non-whitespace characters",
+    "[Counting] tabs and newlines separate words (Unicode whitespace)",
+    "[Counting] punctuation inside a run does not split it"
+  ],
+  "pass_mark": 6
+}
