@@ -241,6 +241,7 @@ fn proposed_change_is_revision_bound_and_detects_requirement_edits() {
             .arg(inputs.0.join("request.json"))
             .env("ORCH_BBP", "missing-config.json")
             .env("RUSTY_ORCH_STATE", workspace.0.join("must-not-exist"))
+            .env("RUSTY_ORCH_METADATA_DIAGNOSTICS", "1")
             .output()
             .expect("impact process")
     };
@@ -277,7 +278,20 @@ fn proposed_change_is_revision_bound_and_detects_requirement_edits() {
         first_json["requirements"][0]["id"].as_str(),
         Some("durable")
     );
-    assert_eq!(first.stdout, invoke().stdout);
+    let second = invoke();
+    assert!(
+        second.status.success(),
+        "repeated impact inspection failed ({}): {}",
+        second.status,
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout,
+        second.stdout,
+        "cargo metadata diagnostics\nfirst: {}\nsecond: {}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&second.stderr)
+    );
     inputs.write(
         "previous.json",
         std::str::from_utf8(&first.stdout).expect("UTF8"),

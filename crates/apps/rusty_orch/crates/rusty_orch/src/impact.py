@@ -5,6 +5,7 @@ No repository-supplied code is imported. Snapshots are data, never commands.
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -63,6 +64,30 @@ def cargo_metadata_digest(metadata: dict) -> str:
             sort_field(node, 'deps')
         sort_field(resolve, 'nodes')
     return digest(normalized)
+
+
+def cargo_metadata_diagnostics(metadata: dict) -> dict:
+    """Return bounded, content-free fingerprints for instability diagnosis."""
+    result = {}
+
+    def visit(value: object, pointer: str) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                escaped = key.replace('~', '~0').replace('/', '~1')
+                visit(child, f"{pointer}/{escaped}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{pointer}/{index}")
+        else:
+            entry = {"type": type(value).__name__, "digest": digest(value)}
+            if isinstance(value, str) and (pointer.endswith('_path') or pointer in (
+                    '/workspace_root', '/target_directory', '/build_directory')):
+                entry["path_spelling"] = (
+                    "extended-unc" if value.startswith('\\\\?\\UNC\\') else
+                    "extended" if value.startswith('\\\\?\\') else "ordinary")
+            result[pointer or '/'] = entry
+    visit(metadata, '')
+    return result
 
 
 def relative_path(value: str) -> str:
@@ -349,7 +374,11 @@ def impact_main() -> None:
     if result.returncode:
         raise ValueError('cargo metadata failed (requires current lockfile and cached dependencies): '
                          + result.stderr.decode(errors='replace')[:1000])
-    report = analyze_impact(json.loads(result.stdout), request, projects, snapshot, revision, previous)
+    metadata = json.loads(result.stdout)
+    if os.environ.get('RUSTY_ORCH_METADATA_DIAGNOSTICS') == '1':
+        print(json.dumps(cargo_metadata_diagnostics(metadata), sort_keys=True,
+                         separators=(',', ':')), file=sys.stderr)
+    report = analyze_impact(metadata, request, projects, snapshot, revision, previous)
     if revision != git_revision(repo) or any(path.read_bytes() != data for path, data in inputs.items()):
         raise ValueError('source or snapshot changed during impact analysis; retry')
     print(json.dumps(report, sort_keys=True, indent=2))
