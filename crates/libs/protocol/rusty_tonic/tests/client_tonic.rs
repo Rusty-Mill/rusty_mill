@@ -14,7 +14,10 @@ use futures_util::StreamExt;
 use rusty_tonic::client::{Channel, ChannelOptions, Request};
 use rusty_tonic::Code;
 use tonic::body::Body;
-use tonic::server::{Grpc, NamedService};
+use tonic::server::{
+    ClientStreamingService, Grpc, NamedService, ServerStreamingService, StreamingService,
+    UnaryService,
+};
 use tonic_prost::ProstCodec;
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -32,6 +35,87 @@ impl NamedService for Svc {
     const NAME: &'static str = "pkg.Svc";
 }
 
+type Reply<T> = Pin<Box<dyn Future<Output = Result<tonic::Response<T>, tonic::Status>> + Send>>;
+type Out = Pin<Box<dyn futures_util::Stream<Item = Result<PBlob, tonic::Status>> + Send>>;
+
+struct UnaryM;
+impl UnaryService<PBlob> for UnaryM {
+    type Response = PBlob;
+    type Future = Reply<PBlob>;
+    fn call(&mut self, r: tonic::Request<PBlob>) -> Self::Future {
+        Box::pin(async move {
+            let mut b = r.into_inner();
+            if b.n == 99 {
+                let mut s = tonic::Status::not_found("gone");
+                s.metadata_mut().insert("x-why", "missing".parse().unwrap());
+                return Err(s);
+            }
+            b.n += 1;
+            let mut resp = tonic::Response::new(b);
+            resp.metadata_mut()
+                .insert("x-reply", "yes".parse().unwrap());
+            Ok(resp)
+        })
+    }
+}
+
+struct ServerStreamM;
+impl ServerStreamingService<PBlob> for ServerStreamM {
+    type Response = PBlob;
+    type ResponseStream = Out;
+    type Future = Reply<Out>;
+    fn call(&mut self, r: tonic::Request<PBlob>) -> Self::Future {
+        Box::pin(async move {
+            let n = r.into_inner().n;
+            let items = (0..n).map(|i| {
+                Ok(PBlob {
+                    data: vec![i as u8; 3],
+                    n: i,
+                })
+            });
+            let out: Out = Box::pin(futures_util::stream::iter(items));
+            Ok(tonic::Response::new(out))
+        })
+    }
+}
+
+struct ClientStreamM;
+impl ClientStreamingService<PBlob> for ClientStreamM {
+    type Response = PBlob;
+    type Future = Reply<PBlob>;
+    fn call(&mut self, r: tonic::Request<tonic::Streaming<PBlob>>) -> Self::Future {
+        Box::pin(async move {
+            let mut stream = r.into_inner();
+            let mut sum = 0;
+            while let Some(b) = stream.message().await? {
+                sum += b.n;
+            }
+            Ok(tonic::Response::new(PBlob {
+                data: Vec::new(),
+                n: sum,
+            }))
+        })
+    }
+}
+
+struct BidiM;
+impl StreamingService<PBlob> for BidiM {
+    type Response = PBlob;
+    type ResponseStream = Out;
+    type Future = Reply<Out>;
+    fn call(&mut self, r: tonic::Request<tonic::Streaming<PBlob>>) -> Self::Future {
+        Box::pin(async move {
+            let out: Out = Box::pin(r.into_inner().map(|b| {
+                b.map(|mut b| {
+                    b.n += 100;
+                    b
+                })
+            }));
+            Ok(tonic::Response::new(out))
+        })
+    }
+}
+
 type Fut = Pin<Box<dyn Future<Output = Result<http::Response<Body>, Infallible>> + Send>>;
 
 impl tower::Service<http::Request<Body>> for Svc {
@@ -44,80 +128,16 @@ impl tower::Service<http::Request<Body>> for Svc {
     }
 
     fn call(&mut self, req: http::Request<Body>) -> Fut {
-        let codec = ProstCodec::<PBlob, PBlob>::default();
-        let mut grpc = Grpc::new(codec);
-        match req.uri().path().to_string().as_str() {
-            "/pkg.Svc/Unary" => Box::pin(async move {
-                Ok(grpc
-                    .unary(
-                        |r: tonic::Request<PBlob>| async move {
-                            let mut b = r.into_inner();
-                            if b.n == 99 {
-                                let mut s = tonic::Status::not_found("gone");
-                                s.metadata_mut().insert("x-why", "missing".parse().unwrap());
-                                return Err(s);
-                            }
-                            b.n += 1;
-                            let mut resp = tonic::Response::new(b);
-                            resp.metadata_mut()
-                                .insert("x-reply", "yes".parse().unwrap());
-                            Ok(resp)
-                        },
-                        req,
-                    )
-                    .await)
-            }),
-            "/pkg.Svc/ServerStream" => Box::pin(async move {
-                Ok(grpc
-                    .server_streaming(
-                        |r: tonic::Request<PBlob>| async move {
-                            let n = r.into_inner().n;
-                            let items = (0..n).map(|i| {
-                                Ok(PBlob {
-                                    data: vec![i as u8; 3],
-                                    n: i,
-                                })
-                            });
-                            Ok(tonic::Response::new(futures_util::stream::iter(items)))
-                        },
-                        req,
-                    )
-                    .await)
-            }),
-            "/pkg.Svc/ClientStream" => Box::pin(async move {
-                Ok(grpc
-                    .client_streaming(
-                        |r: tonic::Request<tonic::Streaming<PBlob>>| async move {
-                            let mut stream = r.into_inner();
-                            let mut sum = 0;
-                            while let Some(b) = stream.message().await? {
-                                sum += b.n;
-                            }
-                            Ok(tonic::Response::new(PBlob {
-                                data: Vec::new(),
-                                n: sum,
-                            }))
-                        },
-                        req,
-                    )
-                    .await)
-            }),
-            "/pkg.Svc/Bidi" => Box::pin(async move {
-                Ok(grpc
-                    .streaming(
-                        |r: tonic::Request<tonic::Streaming<PBlob>>| async move {
-                            let out = r.into_inner().map(|b| {
-                                b.map(|mut b| {
-                                    b.n += 100;
-                                    b
-                                })
-                            });
-                            Ok(tonic::Response::new(out))
-                        },
-                        req,
-                    )
-                    .await)
-            }),
+        let mut grpc = Grpc::new(ProstCodec::<PBlob, PBlob>::default());
+        match req.uri().path() {
+            "/pkg.Svc/Unary" => Box::pin(async move { Ok(grpc.unary(UnaryM, req).await) }),
+            "/pkg.Svc/ServerStream" => {
+                Box::pin(async move { Ok(grpc.server_streaming(ServerStreamM, req).await) })
+            }
+            "/pkg.Svc/ClientStream" => {
+                Box::pin(async move { Ok(grpc.client_streaming(ClientStreamM, req).await) })
+            }
+            "/pkg.Svc/Bidi" => Box::pin(async move { Ok(grpc.streaming(BidiM, req).await) }),
             _ => Box::pin(async { Ok(tonic::Status::unimplemented("no such method").into_http()) }),
         }
     }
@@ -156,7 +176,7 @@ where
     let (ours, oracle) = runtimes();
     let addr = tonic_server(&oracle);
     let channel = Channel::new(&format!("http://{addr}"), ChannelOptions::default()).unwrap();
-    ours.block_on(rusty_tokio::time::timeout(FIVE * 4, f(channel)))
+    ours.block_on(async move { rusty_tokio::time::timeout(FIVE * 4, f(channel)).await })
         .unwrap();
 }
 

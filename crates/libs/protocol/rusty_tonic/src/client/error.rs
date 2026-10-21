@@ -1,19 +1,33 @@
 //! Transport errors as gRPC statuses.
 
+use rusty_h2::error::ErrorCode;
 use rusty_hyper::H2Error;
 
-use crate::Status;
+use crate::{Code, Status};
 
 /// The status for an HTTP/2 error on a call.
 pub(crate) fn status_from_h2(e: &H2Error) -> Status {
-    let _ = e;
-    todo!()
+    let code = match e {
+        H2Error::Reset(ErrorCode::RefusedStream)
+        | H2Error::GoAway(_)
+        | H2Error::Io(_)
+        | H2Error::Closed => Code::Unavailable,
+        H2Error::Reset(ErrorCode::Cancel) => Code::Cancelled,
+        H2Error::Reset(ErrorCode::EnhanceYourCalm) => Code::ResourceExhausted,
+        H2Error::Reset(ErrorCode::InadequateSecurity) => Code::PermissionDenied,
+        H2Error::Reset(_) | H2Error::Protocol(_) => Code::Internal,
+    };
+    Status::new(code, e.to_string())
 }
 
 /// The status for a failure to connect.
 pub(crate) fn status_from_connect(e: &rusty_hyper::Error) -> Status {
-    let _ = e;
-    todo!()
+    use rusty_hyper::Error;
+    let code = match e {
+        Error::InvalidUrl(_) | Error::UnsupportedScheme(_) => Code::InvalidArgument,
+        _ => Code::Unavailable,
+    };
+    Status::new(code, e.to_string())
 }
 
 #[cfg(test)]

@@ -175,6 +175,19 @@ async fn replies_a_server_should_not_send_become_statuses() {
     server.shutdown().await;
 }
 
+#[rusty_tokio::test]
+async fn a_message_cut_short_fails_the_call_even_when_the_server_says_ok() {
+    let server = start(misbehave);
+    let mut stream = channel(&server)
+        .server_streaming::<Blob, Blob>("/bad/cut", request(blob(1, 1)))
+        .await
+        .unwrap();
+    let err = stream.message().await.unwrap_err();
+    assert_eq!(err.code(), Code::Internal);
+    assert!(err.message().contains("middle of a message"), "{err}");
+    server.shutdown().await;
+}
+
 // ---- streaming ------------------------------------------------------------------------------
 
 #[rusty_tokio::test]

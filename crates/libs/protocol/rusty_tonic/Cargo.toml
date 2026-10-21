@@ -49,7 +49,7 @@ required-features = ["rusty-tokio"]
 # Independent oracle only (never shipped): our status trailers are read by tonic and tonic's by
 # us, and (client tests) a real tonic server is called by our client. The library builds on
 # rust-version 1.75; the tests need tonic's floor.
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["router"] }
 # The oracle server's message type and codec, and its runtime (never shipped).
 tonic-prost = { workspace = true }
 prost = { workspace = true }

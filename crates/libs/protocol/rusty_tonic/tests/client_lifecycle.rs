@@ -6,7 +6,6 @@ mod client_common;
 use std::time::Duration;
 
 use client_common::*;
-use rusty_h2::driver::Body;
 use rusty_h2::server::builder::Builder;
 use rusty_hyper::{serve, Request, Respond, ServeOptions};
 use rusty_tokio::sync::{mpsc, oneshot};
@@ -85,7 +84,13 @@ fn channel_without_timeout(server: &rusty_hyper::Server) -> Channel {
     channel(server)
 }
 
-/// A server that reads the request and then waits, reporting how the stream ended.
+/// The next report from the server, which fails the test rather than hanging it.
+async fn next(rx: &mut mpsc::Receiver<String>) -> String {
+    timeout(FIVE, rx.recv()).await.unwrap().unwrap()
+}
+
+/// A server that reads the request and then waits, reporting how the call ended: the stream
+/// being reset, noticed either on the request body or by failing to write.
 fn stalling_server() -> (rusty_hyper::Server, mpsc::Receiver<String>) {
     let (tx, rx) = mpsc::channel(8);
     let server = start(move |mut req: Request, respond: Respond| {
@@ -94,16 +99,23 @@ fn stalling_server() -> (rusty_hyper::Server, mpsc::Receiver<String>) {
             let mut send = start_response(respond, &MetadataMap::new()).await;
             let mut decoder = FrameDecoder::new(usize::MAX);
             let _ = next_message(&mut req.body, &mut decoder).await;
-            // The client is done with the call when it resets the stream.
+            tx.send("started".to_string()).await.unwrap();
+            let mut body_open = true;
             let ended = loop {
-                match req.body.next().await {
-                    Some(Ok(Body::Data(_))) | Some(Ok(Body::Trailers(_))) => {}
-                    Some(Err(e)) => break format!("{e}"),
-                    None => break "ended".to_string(),
+                if body_open {
+                    match timeout(Duration::from_millis(20), req.body.next()).await {
+                        Ok(Some(Err(e))) => break format!("{e}"),
+                        Ok(None) => body_open = false,
+                        Ok(Some(Ok(_))) | Err(_) => {}
+                    }
+                } else {
+                    sleep(Duration::from_millis(20)).await;
+                }
+                if let Err(e) = send.send_data(Vec::new(), false).await {
+                    break format!("{e}");
                 }
             };
             tx.send(ended).await.unwrap();
-            let _ = send.send_data(Vec::new(), true).await;
         }
     });
     (server, rx)
@@ -113,15 +125,20 @@ fn stalling_server() -> (rusty_hyper::Server, mpsc::Receiver<String>) {
 async fn a_unary_call_past_its_deadline_is_deadline_exceeded_and_cancels_the_stream() {
     let (server, mut ended) = stalling_server();
     let channel = channel(&server);
+    // Long enough for the server to have started the call, even on a loaded machine.
+    let limit = Duration::from_millis(600);
     let started = std::time::Instant::now();
     let err = channel
-        .unary::<Blob, Blob>(PATH, request(blob(1, 1)).with_timeout(SHORT))
+        .unary::<Blob, Blob>(PATH, request(blob(1, 1)).with_timeout(limit))
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::DeadlineExceeded);
-    assert!(started.elapsed() >= SHORT && started.elapsed() < FIVE);
-    let how = timeout(FIVE, ended.recv()).await.unwrap().unwrap();
-    assert!(how.contains("reset"), "the server saw {how}");
+    assert!(started.elapsed() >= limit && started.elapsed() < FIVE * 2);
+    assert_eq!(next(&mut ended).await, "started");
+    // The request was whole when the stream was reset, so the server learns of it by failing
+    // to write, as a closed stream.
+    let how = next(&mut ended).await;
+    assert!(how.contains("reset") || how.contains("closed"), "{how}");
 }
 
 #[rusty_tokio::test]
@@ -165,9 +182,10 @@ async fn a_stream_that_stalls_past_the_deadline_fails_after_what_arrived() {
 
 #[rusty_tokio::test]
 async fn a_call_that_never_gets_its_response_headers_honours_the_deadline_too() {
-    let server = start(|mut req: Request, _respond: Respond| async move {
+    let server = start(|mut req: Request, respond: Respond| async move {
         let _ = read_call(&mut req).await;
         sleep(FIVE).await;
+        drop(respond);
     });
     let channel = channel(&server);
     let err = channel
@@ -175,7 +193,7 @@ async fn a_call_that_never_gets_its_response_headers_honours_the_deadline_too() 
         .await
         .err()
         .unwrap();
-    assert_eq!(err.code(), Code::DeadlineExceeded);
+    assert_eq!(err.code(), Code::DeadlineExceeded, "{err:?}");
 }
 
 #[rusty_tokio::test]
@@ -187,10 +205,26 @@ async fn dropping_a_stream_cancels_the_call() {
         .await
         .unwrap();
     sender.send(&blob(1, 1)).await.unwrap();
+    assert_eq!(next(&mut ended).await, "started");
     drop(stream);
     drop(sender);
-    let how = timeout(FIVE, ended.recv()).await.unwrap().unwrap();
+    let how = next(&mut ended).await;
     assert!(how.contains("reset"), "the server saw {how}");
+}
+
+#[rusty_tokio::test]
+async fn dropping_a_server_stream_cancels_the_call() {
+    let (server, mut ended) = stalling_server();
+    let mut stream = channel(&server)
+        .server_streaming::<Blob, Blob>(PATH, request(blob(1, 1)))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut ended).await, "started");
+    // Nothing has arrived but the headers; dropping the stream ends the call.
+    let _ = &mut stream;
+    drop(stream);
+    let how = next(&mut ended).await;
+    assert!(how.contains("reset") || how.contains("closed"), "{how}");
 }
 
 #[rusty_tokio::test]
@@ -202,10 +236,11 @@ async fn a_sender_dropped_without_finishing_cancels_the_call() {
         .await
         .unwrap();
     sender.send(&blob(1, 1)).await.unwrap();
+    assert_eq!(next(&mut ended).await, "started");
     drop(sender);
     let err = reply.response().await.unwrap_err();
     assert_eq!(err.code(), Code::Cancelled);
-    let how = timeout(FIVE, ended.recv()).await.unwrap().unwrap();
+    let how = next(&mut ended).await;
     assert!(how.contains("reset"), "the server saw {how}");
 }
 
@@ -308,23 +343,16 @@ async fn a_call_made_after_the_server_said_goodbye_is_retried_on_a_new_connectio
         .unary::<Blob, Blob>(PATH, request(blob(1, 1)))
         .await
         .unwrap();
-    let shutting = rusty_tokio::spawn(server.shutdown());
-    shutting.await.unwrap();
+    server.shutdown().await;
     let l = rusty_tokio::io::TcpListener::bind(addr).unwrap();
     let again = serve(l, None, ServeOptions::default(), echo).unwrap();
-    // The old connection is gone or going; the call must still succeed, once.
-    let mut ok = false;
-    for _ in 0..2 {
-        if channel
-            .unary::<Blob, Blob>(PATH, request(blob(2, 1)))
-            .await
-            .is_ok()
-        {
-            ok = true;
-            break;
-        }
-    }
-    assert!(ok);
+    // Let the client take in the goodbye: its connection is closed, and nothing is sent on it.
+    sleep(SHORT).await;
+    let reply = channel
+        .unary::<Blob, Blob>(PATH, request(blob(2, 1)))
+        .await
+        .unwrap();
+    assert_eq!(reply.message.n, 2);
     again.shutdown().await;
 }
 
@@ -338,8 +366,9 @@ async fn a_call_in_flight_when_the_connection_dies_is_unavailable() {
         let (mut acceptor, driver) = rusty_h2::driver::server(tcp, Builder::new());
         let driver = rusty_tokio::spawn(driver);
         let accepted = acceptor.accept().await.unwrap().unwrap();
-        // Drop the connection under the call.
+        // Drop the connection under the call; once the driver is gone nothing more is written.
         driver.abort();
+        let _ = driver.await;
         let _ = opened_tx.send(());
         drop(accepted);
         drop(acceptor);
@@ -349,7 +378,7 @@ async fn a_call_in_flight_when_the_connection_dies_is_unavailable() {
         .unary::<Blob, Blob>(PATH, request(blob(1, 1)))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), Code::Unavailable);
+    assert_eq!(err.code(), Code::Unavailable, "{err:?}");
     opened_rx.await.unwrap();
 }
 
@@ -364,11 +393,11 @@ async fn a_call_is_never_sent_twice() {
         let (tcp, _) = l.accept().await.unwrap();
         let (mut acceptor, driver) = rusty_h2::driver::server(tcp, Builder::new());
         let driver = rusty_tokio::spawn(driver);
-        while let Some(Ok((mut req, _respond))) = acceptor.accept().await {
+        if let Some(Ok((mut req, _respond))) = acceptor.accept().await {
             let _ = read_call(&mut req).await;
             tx.send(()).await.unwrap();
             driver.abort();
-            break;
+            let _ = driver.await;
         }
     });
     let channel = Channel::new(&url(addr), ChannelOptions::default()).unwrap();
@@ -376,8 +405,9 @@ async fn a_call_is_never_sent_twice() {
         .unary::<Blob, Blob>(PATH, request(blob(1, 1)))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), Code::Unavailable);
+    assert_eq!(err.code(), Code::Unavailable, "{err:?}");
+    assert!(rx.recv().await.is_some(), "the server saw the call once");
+    // The server task ends after the one call; a second would have been queued before that.
     sleep(SHORT).await;
-    assert!(rx.try_recv().is_ok(), "the server saw the call once");
-    assert!(rx.try_recv().is_err(), "and not a second time");
+    assert!(rx.recv().await.is_none(), "and not a second time");
 }
