@@ -8,6 +8,7 @@
 //! - [`board`]: the append-only blackboard agents read and write.
 
 pub mod board;
+pub mod factory;
 pub mod goal;
 mod ids;
 mod reference;

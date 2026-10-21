@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::board::Board;
-use crate::domain::{Actor, BoardError, Card, Column, DEFAULT_PROJECT};
+use crate::domain::{Actor, BoardError, Card, Column, DEFAULT_PROJECT, ExecutionLink};
 use crate::store::Store;
 
 /// The board every surface shares.
@@ -246,6 +246,26 @@ struct CommentArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct BindExecutionArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Card id.
+    id: String,
+    /// Stable logical execution id; repeat it to adopt after a restart.
+    execution: String,
+    /// Orch goal id.
+    goal: String,
+    /// BBP task id.
+    bbp_task: String,
+    /// Task-host attempt id.
+    attempt: String,
+    /// Configured provider-neutral orchestrator assignment.
+    assignment: String,
+    /// Assignment generation used to fence stale host commands.
+    generation: u64,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct EventsArgs {
     /// Return events after this event id (omit for the beginning).
     after: Option<String>,
@@ -409,6 +429,17 @@ pub fn ops() -> Vec<Op> {
                     a.body.as_deref().unwrap_or(""),
                     a.tags.unwrap_or_default(),
                 )?)
+            },
+        ),
+        op(
+            "card_execution_link",
+            "Initiate or adopt this card's one recoverable Orch execution. A different logical execution is refused; this persists the Orch goal, BBP task, host attempt, assignment and generation with the card.",
+            |b, i, a: BindExecutionArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.bind_execution(id(&a.id)?, ExecutionLink {
+                    execution: a.execution, goal: a.goal, bbp_task: a.bbp_task,
+                    attempt: a.attempt, assignment: a.assignment, generation: a.generation,
+                }, &who)?)
             },
         ),
         op(

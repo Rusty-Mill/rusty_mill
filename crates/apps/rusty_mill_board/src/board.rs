@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{
-    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, WORK_QUEUES,
+    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink, WORK_QUEUES,
     actionable, entry_column, text_hash,
 };
 use crate::projects::Projects;
@@ -312,6 +312,15 @@ impl<S: Store> Board<S> {
         self.apply(id, by, EventKind::Synced, |c, now| {
             Ok(c.mark_synced(synced_text, now))
         })
+    }
+
+    /// Persist or adopt the one factory execution linked to this card. Builders
+    /// may start work, but cannot replace an existing logical execution.
+    pub fn bind_execution(&self, id: Uuid, link: ExecutionLink, by: &Actor) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Build) {
+            return Err(BoardError::Forbidden(Capability::Build));
+        }
+        self.apply(id, by, EventKind::ExecutionLinked, |c, now| c.bind_execution(link.clone(), now))
     }
 
     /// Pull work: the next card this actor can act on, entered (Ready ->

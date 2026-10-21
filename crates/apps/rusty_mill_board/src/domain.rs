@@ -196,10 +196,31 @@ pub struct Card {
     /// issue: the common ancestor that says which side changed the text since.
     #[serde(default)]
     pub synced_text: Option<u64>,
+    /// The single recoverable Orch execution this card owns, when factory hosting is enabled.
+    /// It is data rather than a provider handle: providers, sessions and processes can change.
+    #[serde(default)]
+    pub execution: Option<ExecutionLink>,
     /// Creation time, Unix ms.
     pub created_ms: i64,
     /// Last change, Unix ms.
     pub updated_ms: i64,
+}
+
+/// Stable cross-component ids for the one logical execution a card may own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionLink {
+    /// Logical execution id, stable through task-host recovery.
+    pub execution: String,
+    /// Orch goal id.
+    pub goal: String,
+    /// BBP task id.
+    pub bbp_task: String,
+    /// Task-host attempt id.
+    pub attempt: String,
+    /// Provider-neutral configured assignment id.
+    pub assignment: String,
+    /// Assignment generation that must accompany host commands.
+    pub generation: u64,
 }
 
 /// Why an operation was refused.
@@ -275,6 +296,8 @@ pub enum EventKind {
     Linked,
     /// Title/body brought in line with the linked issue.
     Synced,
+    /// A factory execution was initiated or adopted.
+    ExecutionLinked,
     /// Moved to another project.
     Assigned,
 }
@@ -353,6 +376,7 @@ impl Card {
             comments: Vec::new(),
             issue: None,
             synced_text: None,
+            execution: None,
             created_ms: now_ms,
             updated_ms: now_ms,
         })
@@ -482,6 +506,29 @@ impl Card {
         Self {
             synced_text: Some(synced_text),
             ..self.next(now_ms)
+        }
+    }
+
+    /// Bind the card to one logical execution. Replaying the same durable link
+    /// adopts it; a different link is refused so duplicate submitters cannot fork work.
+    pub fn bind_execution(&self, link: ExecutionLink, now_ms: i64) -> Result<Self, BoardError> {
+        if [
+            &link.execution,
+            &link.goal,
+            &link.bbp_task,
+            &link.attempt,
+            &link.assignment,
+        ]
+        .iter()
+        .any(|value| value.is_empty())
+            || link.generation == 0
+        {
+            return Err(BoardError::Invalid("execution link is incomplete"));
+        }
+        match &self.execution {
+            Some(existing) if existing == &link => Ok(self.clone()),
+            Some(_) => Err(BoardError::Refused("card already has a logical execution".into())),
+            None => Ok(Self { execution: Some(link), ..self.next(now_ms) }),
         }
     }
 
@@ -681,6 +728,19 @@ mod tests {
             (Some(7), Some(99), 1, 3)
         );
         assert_eq!(c.mark_synced(5, 4).synced_text, Some(5));
+    }
+
+    #[test]
+    fn execution_link_is_idempotent_but_never_replaced() {
+        let link = ExecutionLink {
+            execution: "execution".into(), goal: "goal".into(), bbp_task: "bbp".into(),
+            attempt: "attempt".into(), assignment: "project-orch".into(), generation: 1,
+        };
+        let c = card().bind_execution(link.clone(), 1).expect("bind");
+        assert_eq!(c.bind_execution(link.clone(), 2).expect("adopt"), c);
+        let mut replacement = link;
+        replacement.attempt = "another".into();
+        assert!(matches!(c.bind_execution(replacement, 2), Err(BoardError::Refused(_))));
     }
 
     #[test]
