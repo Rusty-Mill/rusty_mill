@@ -3,7 +3,7 @@ name = "inventory-core"
 description = "Local-first index over the conversation history AI coding tools write to disk"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.87"
 license = "MIT"
 repository = "https://github.com/baileyrd/rusty_inventrory"
 

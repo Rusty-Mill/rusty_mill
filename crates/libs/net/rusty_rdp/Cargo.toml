@@ -2,7 +2,7 @@
 name = "rusty_rdp"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.75"
 description = "A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format in Rust."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_rdp"

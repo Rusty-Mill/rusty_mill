@@ -3,7 +3,7 @@ name = "inventory-tauri"
 description = "Menu bar app: one keystroke to every AI conversation on your machine"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/baileyrd/rusty_inventrory"
 

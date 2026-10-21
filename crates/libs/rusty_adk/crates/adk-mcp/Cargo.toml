@@ -2,7 +2,7 @@
 name = "adk-mcp"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Model Context Protocol transports for the Rust ADK: serve ADK tools, or consume an MCP server's"
