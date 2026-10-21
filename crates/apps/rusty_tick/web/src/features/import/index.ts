@@ -15,21 +15,40 @@ import { isTodoist, parseTodoist } from './todoist'
 export { applyImport, type Applied } from './apply'
 export type { ImportResult, ImportedTask } from './model'
 
+/** How many more instances than the file now holds a UID may have had when #829 imported it. */
+const ORDINAL_SLACK = 16
+
 /**
  * Read an `.ics` file into the shared model: the one path for the calendar
  * page's import and this one, so a file imported through both adds its tasks
- * once. A key is the event's UID plus its occurrence, since the moved
- * instances of a repeating event share its UID; `legacyKey` is the bare UID
- * this importer used before, so files it already imported still match.
+ * once. An event's identity is its UID plus its `RECURRENCE-ID` (none for the
+ * master), so a moved instance keeps its task when others are added or the
+ * file is reordered; a repeat of both (a malformed file) gets an occurrence
+ * count. Exceptions travel as the master's `exDates`.
+ *
+ * Earlier importers keyed a row by its UID and position: #829 by `[uid, n]`,
+ * before it by the bare UID. A position does not say which instance it was,
+ * and moves when instances are added, removed or reordered, so a row offers
+ * every position its UID may have had (up to its count here plus
+ * `ORDINAL_SLACK`) and the bare UID, and each matches only a task whose due
+ * date is still this row's.
  */
 export function readIcs(text: string): ImportResult {
-  const { tasks, skipped, droppedRepeats } = parseIcs(text)
+  const { tasks, skipped, droppedRepeats, droppedExceptions } = parseIcs(text)
   const key = uniqueKeys()
+  const count = new Map<string, number>()
+  for (const t of tasks) count.set(t.uid, (count.get(t.uid) ?? 0) + 1)
+  /** #829's keys a row with this UID may have had: `[uid, n]` for each position. */
+  const ordinals = (uid: string): string[] => Array.from({ length: count.get(uid)! + ORDINAL_SLACK }, (_, i) => JSON.stringify([uid, i + 1]))
   return {
     source: 'calendar file',
-    tasks: tasks.map(({ uid, ...t }) => ({ ...blankTask(key(uid), t.title), ...t, legacyKey: uid })),
+    tasks: tasks.map(({ uid, recurrenceId, ...t }) => ({
+      ...blankTask(key(uid, recurrenceId === null ? '' : String(recurrenceId)), t.title),
+      ...t,
+      legacy: [...ordinals(uid), uid].map((k) => ({ key: k, dueMs: t.dueMs })),
+    })),
     skipped,
-    lossy: droppedRepeats,
+    lossy: droppedRepeats + droppedExceptions,
   }
 }
 

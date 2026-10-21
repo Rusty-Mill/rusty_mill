@@ -11,6 +11,8 @@
 //! - [`input`]: the goal file, parsed with `rusty_json` into `orch-core`
 //!   drafts and specs.
 //! - [`agents`]: the composite runner over the two real adapters.
+//! - [`millboard`]: the hosting card's execution link, over Millboard's
+//!   HTTP API.
 //! - [`run`]: the loop around the dispatcher: wall clock, blocked questions,
 //!   interactive answers.
 //! - [`report`]: text and JSON views of the result.
@@ -28,5 +30,6 @@ pub mod cli;
 pub mod input;
 pub mod inspect;
 pub mod maintenance;
+pub mod millboard;
 pub mod report;
 pub mod run;

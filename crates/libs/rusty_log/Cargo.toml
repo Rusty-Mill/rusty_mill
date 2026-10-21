@@ -2,8 +2,8 @@
 name = "rusty_log"
 version = "0.1.0"
 edition = "2021"
-# The floor of the locked dependency graph (`syn`, `log`, `lock_api`: 1.71; `tracing` 0.1 and
-# `tracing-subscriber` 0.3 themselves: 1.65). A facade must not raise its consumers' floor above that.
+# Builds on 1.71 (default and all features) with the `msrv-compile` CI job's method. Below that, cargo refuses it:
+# `unicode-ident` (through `tracing-attributes`) declares 1.71. `tracing` 0.1 itself declares 1.65.
 rust-version = "1.71"
 description = "The workspace's single door to `tracing`: re-exports the logging and span API, and (feature `subscriber`) the subscriber kit, so that one crate owns the third-party dependency."
 license = "MIT OR Apache-2.0"

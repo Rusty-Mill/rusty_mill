@@ -12,6 +12,7 @@ store.save(&GoalState { fingerprint, plan, board, ledger })?; // durable on retu
 - **Rebuilt, not trusted.** `load` replays the snapshot through `Plan::add` and the lifecycle transitions, `Board::append`, and `Ledger::from_counts`, so every `orch-core` invariant is checked again. A snapshot that fails is `StoreError::Corrupt`.
 - **Fingerprint.** `fingerprint(goal_json)` is stored with the snapshot; the caller refuses to resume when the goal file no longer matches.
 - **One process per directory** (`StoreError::Locked`).
+- **Assignment record.** `save_factory`/`load_factory` keep each goal's orchestrator assignments, their authorizing parent generations and execution links in a second file, `assignments.mmap` (`rusty_orch::AssignmentRecord::v1`), rebuilt through `Factory::restore`. It is separate so the goal snapshot's v1 layout is unchanged and a generation can be made durable before any host command uses it.
 
 The engine's record bound needs `serde` derives on the snapshot rows, which makes this the one crate in the family with registry dependencies, and its `rust-version` is the engine's 1.89. The initial format is tagged `rusty_orch::GoalRecord::v1`. Positional bincode makes the complete row layout the format; adding fields is not compatible. A future incompatible layout must either have an explicit supported reader that migrates v1 or use a new tag and reject v1 before decoding.
 

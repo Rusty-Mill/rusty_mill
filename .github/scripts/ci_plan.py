@@ -8,9 +8,12 @@ making the selection contract unit-testable.
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import subprocess
 import sys
-from collections.abc import Iterable
+import zipfile
+from collections.abc import Callable, Iterable, Iterator
 
 
 PATH_JOB_PREFIXES = {
@@ -97,6 +100,93 @@ def event_plan(
             return "full", ""
         return "scoped", push_before
     return "full", ""
+
+
+# The artifact a pull-request run leaves behind so the merge queue can tell
+# whether that run already tested the exact commit the queue would merge.
+TESTED_RECORD_ARTIFACT = "tested-tree"
+TESTED_RECORD_FILE = "tested-tree.txt"
+
+
+def platform_outputs(event: str, linux_tested: bool = False) -> dict[str, str]:
+    """Return the runner platforms this event's run covers.
+
+    A pull request runs on Linux only. The merge queue runs Windows and macOS,
+    and Linux too unless ``linux_tested``: a green pull-request run already
+    tested the queue entry's exact tree on the same first parent. Every other
+    event (manual, scheduled) runs all three. Each tree is therefore tested once
+    per platform before it merges.
+    """
+    linux = event != "merge_group" or not linux_tested
+    others = event != "pull_request"
+    rust_os = [os for os, on in (("ubuntu-latest", linux), ("windows-latest", others)) if on]
+    rand_os = [os for os, on in (("ubuntu-latest", linux), ("macos-latest", others)) if on]
+    return {
+        "linux": str(linux).lower(),
+        "windows": str(others).lower(),
+        "macos": str(others).lower(),
+        "rust_os": json.dumps(rust_os, separators=(",", ":")),
+        "rand_os": json.dumps(rand_os, separators=(",", ":")),
+    }
+
+
+def tested_record(head: str = "HEAD", cwd: str | None = None) -> str:
+    """Identify what a run tests: the commit's tree and its first parent."""
+    result = subprocess.run(
+        ["git", "rev-parse", f"{head}^{{tree}}", f"{head}^1"],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+    )
+    return " ".join(result.stdout.split())
+
+
+def queued_pr_head(cwd: str | None = None) -> str:
+    """Return the PR head a merge-queue commit merges (its second parent)."""
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD^2"], check=True, capture_output=True, text=True, cwd=cwd
+    )
+    return result.stdout.strip()
+
+
+def _gh(args: list[str]) -> bytes:
+    return subprocess.run(["gh", *args], check=True, capture_output=True).stdout
+
+
+def _uploaded_records(repo: str, run_id: int, gh: Callable[[list[str]], bytes]) -> Iterator[str]:
+    """Yield the tested-tree records a pull-request run uploaded."""
+    listing = gh(["api", f"repos/{repo}/actions/runs/{run_id}/artifacts?name={TESTED_RECORD_ARTIFACT}"])
+    for artifact in json.loads(listing)["artifacts"]:
+        if artifact.get("expired"):
+            continue
+        blob = gh(["api", f"repos/{repo}/actions/artifacts/{artifact['id']}/zip"])
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            yield archive.read(TESTED_RECORD_FILE).decode().strip()
+
+
+def linux_already_tested(
+    repo: str, gh: Callable[[list[str]], bytes] = _gh, cwd: str | None = None
+) -> bool:
+    """Whether a green pull-request run already tested this queue entry on Linux.
+
+    A queue entry's commit merges the PR head (second parent) onto its first
+    parent. A pull-request run of that head whose recorded tree and first
+    parent are identical tested the same commit content, and the workflow is
+    part of that tree, so repeating its Linux jobs adds nothing. Any lookup
+    failure means "not tested".
+    """
+    try:
+        record = tested_record(cwd=cwd)
+        query = f"event=pull_request&status=success&head_sha={queued_pr_head(cwd=cwd)}"
+        runs = json.loads(gh(["api", f"repos/{repo}/actions/workflows/ci.yml/runs?{query}"]))["workflow_runs"]
+        for run in runs:
+            if record in _uploaded_records(repo, run["id"], gh):
+                print(f"Linux already tested by pull-request run {run['id']}", file=sys.stderr)
+                return True
+    except (subprocess.CalledProcessError, KeyError, ValueError, zipfile.BadZipFile) as error:
+        print(f"Linux not reused: {error}", file=sys.stderr)
+    return False
 
 
 def changed_paths_from_git(base: str, head: str = "HEAD", cwd: str | None = None) -> list[str]:
@@ -250,7 +340,18 @@ def main() -> None:
         help="Exit successfully only if stdin contains a workspace-wide path.",
     )
     parser.add_argument("--is-ci-only", action="store_true")
+    parser.add_argument("--tested-record", action="store_true")
+    parser.add_argument("--emit-platforms", metavar="EVENT")
+    parser.add_argument("--repo", default="", help="owner/name, for the merge queue's reuse lookup.")
     args = parser.parse_args()
+    if args.tested_record:
+        print(tested_record())
+        return
+    if args.emit_platforms:
+        tested = args.emit_platforms == "merge_group" and bool(args.repo) and linux_already_tested(args.repo)
+        for key, value in platform_outputs(args.emit_platforms, tested).items():
+            print(f"{key}={value}")
+        return
     if args.emit_full:
         for key, value in full_plan_outputs().items():
             print(f"{key}={value}")

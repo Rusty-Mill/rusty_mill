@@ -10,8 +10,9 @@ use orch_core::board::{Confidence, EntryKind};
 use orch_dispatch::fake::{FakeAgent, Reply};
 use orch_ollama::OllamaAgent;
 use rusty_json::Value;
-use rusty_orch::args::Args;
+use rusty_orch::args::{Args, CardArgs};
 use rusty_orch::cli::{self, Streams, EXIT_BLOCKED, EXIT_FAILED, EXIT_FINISHED};
+use rusty_orch::millboard::BoardAccess;
 
 const GOAL: &str = r#"{"goal":"g","done_when":["d"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":5,"stop":"checkpoint",
   "tasks":[{"role":"research","instruction":"i","acceptance":["a"],"max_calls":2}]}"#;
@@ -27,6 +28,7 @@ fn args(interactive: bool, json: bool) -> Args {
         interactive,
         json,
         state: None,
+        card: None,
     }
 }
 
@@ -386,4 +388,25 @@ fn inline_bbp_configuration_requires_durable_state_before_any_invocation() {
     let result = run_goal(&args(false, true), &goal, FakeAgent::new([]), "");
     let error = result.unwrap_err().to_string();
     assert!(error.contains("requires --state"), "{error}");
+}
+
+#[test]
+fn a_card_without_bbp_hosting_is_refused_before_any_invocation() {
+    let mut args = args(false, true);
+    args.card = Some(CardArgs {
+        card: "card".into(),
+        board: BoardAccess {
+            url: "http://127.0.0.1:1".into(),
+            token: None,
+            actor: None,
+            role: None,
+        },
+    });
+    let error = run_goal(&args, GOAL, FakeAgent::new([]), "")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("--card requires BBP task hosting"),
+        "{error}"
+    );
 }

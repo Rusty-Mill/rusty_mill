@@ -106,8 +106,19 @@ pub enum FactoryError {
     Terminal,
 }
 
+/// One stored assignment and the parent generation that authorized it: the
+/// unit a storage adapter saves and hands back to [`Factory::restore`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delegation {
+    /// The assignment as last changed.
+    pub assignment: Assignment,
+    /// Generation of the parent that delegated or last re-granted it;
+    /// `None` exactly when the assignment has no parent.
+    pub parent_generation: Option<u64>,
+}
+
 /// In-memory aggregate rebuilt from the durable card/execution records by a storage adapter.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Factory {
     assignments: BTreeMap<String, Assignment>,
     /// Generation of the parent which authorized each child. Kept out of the
@@ -303,7 +314,183 @@ impl Factory {
         self.links.get(card)
     }
 
-    fn authorize(&self, id: &str, generation: u64) -> Result<(), FactoryError> {
+    /// Every execution link, in card order.
+    pub fn links(&self) -> impl Iterator<Item = &ExecutionLink> {
+        self.links.values()
+    }
+
+    /// The current record of an assignment.
+    pub fn assignment(&self, id: &str) -> Option<&Assignment> {
+        self.assignments.get(id)
+    }
+
+    /// Every assignment with its authorizing parent generation, in id order.
+    pub fn delegations(&self) -> Vec<Delegation> {
+        self.assignments
+            .values()
+            .map(|assignment| Delegation {
+                assignment: assignment.clone(),
+                parent_generation: self.parent_generations.get(&assignment.id).copied(),
+            })
+            .collect()
+    }
+
+    /// Take over a top-level assignment: install it at generation 1, or
+    /// advance it to the next generation so that every earlier holder is
+    /// stale. The caller persists the result before issuing any command
+    /// under the returned generation.
+    pub fn take_over(
+        &mut self,
+        id: &str,
+        identity: Identity,
+        grant: Grant,
+    ) -> Result<u64, FactoryError> {
+        let next = |generation: u64| Assignment {
+            id: id.to_owned(),
+            generation,
+            identity: identity.clone(),
+            parent: None,
+            grant: grant.clone(),
+            active: true,
+        };
+        let Some(previous) = self.assignments.get(id) else {
+            self.assign(next(1))?;
+            return Ok(1);
+        };
+        if previous.parent.is_some() {
+            return Err(FactoryError::Invalid(
+                "a delegated assignment is re-granted by its parent",
+            ));
+        }
+        if !previous.active {
+            return Err(FactoryError::Retired);
+        }
+        let generation = previous
+            .generation
+            .checked_add(1)
+            .ok_or(FactoryError::Invalid("assignment generation exhausted"))?;
+        self.replace(next(generation))?;
+        Ok(generation)
+    }
+
+    /// Rebuild a factory from stored delegations and links, re-checking the
+    /// invariants the mutating operations maintain instead of trusting them:
+    /// unique ids, known acyclic parents, parent generations no later than
+    /// the parent's own, delegation and call budgets that cover every child,
+    /// project scopes of currently bound children inside their parent's, and
+    /// links naming a known assignment at a generation it has reached.
+    pub fn restore(
+        delegations: Vec<Delegation>,
+        links: Vec<ExecutionLink>,
+    ) -> Result<Self, FactoryError> {
+        let mut factory = Self::default();
+        for Delegation {
+            assignment,
+            parent_generation,
+        } in delegations
+        {
+            if assignment.id.is_empty()
+                || assignment.identity.id.is_empty()
+                || assignment.generation == 0
+            {
+                return Err(FactoryError::Invalid(
+                    "assignment id, identity id, and generation are required",
+                ));
+            }
+            if assignment.parent.is_some() != parent_generation.is_some() {
+                return Err(FactoryError::Invalid(
+                    "a parent generation must accompany exactly the delegated assignments",
+                ));
+            }
+            if let Some(generation) = parent_generation {
+                factory
+                    .parent_generations
+                    .insert(assignment.id.clone(), generation);
+            }
+            if factory
+                .assignments
+                .insert(assignment.id.clone(), assignment)
+                .is_some()
+            {
+                return Err(FactoryError::Invalid("assignment id already exists"));
+            }
+        }
+        for assignment in factory.assignments.values() {
+            factory.restored_ancestry(assignment)?;
+            factory.validate_reserved_capacity(assignment)?;
+        }
+        for link in links {
+            factory.restored_link(&link)?;
+            if factory.links.insert(link.card.clone(), link).is_some() {
+                return Err(FactoryError::CardAlreadyLinked);
+            }
+        }
+        Ok(factory)
+    }
+
+    fn restored_ancestry(&self, assignment: &Assignment) -> Result<(), FactoryError> {
+        let mut current = assignment;
+        let mut seen = BTreeSet::new();
+        while let Some(parent) = current.parent.as_deref() {
+            if !seen.insert(current.id.as_str()) {
+                return Err(FactoryError::Invalid(
+                    "assignment ancestry contains a cycle",
+                ));
+            }
+            let parent_assignment = self
+                .assignments
+                .get(parent)
+                .ok_or(FactoryError::Invalid("assignment names an unknown parent"))?;
+            let bound = self.parent_generations.get(&current.id).copied();
+            if bound > Some(parent_assignment.generation) {
+                return Err(FactoryError::Invalid(
+                    "assignment is bound to a parent generation not yet reached",
+                ));
+            }
+            if bound == Some(parent_assignment.generation)
+                && current
+                    .grant
+                    .projects
+                    .iter()
+                    .any(|project| !parent_assignment.grant.projects.contains(project))
+            {
+                return Err(FactoryError::DelegationOutsideGrant);
+            }
+            current = parent_assignment;
+        }
+        Ok(())
+    }
+
+    fn restored_link(&self, link: &ExecutionLink) -> Result<(), FactoryError> {
+        if [
+            &link.card,
+            &link.execution,
+            &link.goal,
+            &link.bbp_task,
+            &link.attempt,
+        ]
+        .iter()
+        .any(|id| id.is_empty())
+        {
+            return Err(FactoryError::Invalid("execution identifiers are required"));
+        }
+        let owner = self
+            .assignments
+            .get(&link.assignment)
+            .ok_or(FactoryError::UnknownAssignment)?;
+        if link.generation == 0 || link.generation > owner.generation {
+            return Err(FactoryError::Invalid(
+                "link generation is outside its assignment's history",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether a command under `generation` of assignment `id` is current:
+    /// the generation is the assignment's own, it and every ancestor are
+    /// active, and each link of the ancestry is bound to its parent's
+    /// current generation.
+    pub fn authorize(&self, id: &str, generation: u64) -> Result<(), FactoryError> {
         let assignment = self
             .assignments
             .get(id)
@@ -729,5 +916,142 @@ mod tests {
             Err(FactoryError::Retired)
         );
         assert_eq!(f.authorize("worker", 3), Err(FactoryError::StaleGeneration));
+    }
+    fn restored(f: &Factory) -> Result<Factory, FactoryError> {
+        Factory::restore(f.delegations(), f.links().cloned().collect())
+    }
+    #[test]
+    fn a_restored_factory_keeps_every_fence_and_link() {
+        let mut f = Factory::default();
+        f.assign(assignment("root", None, 1, &["orch"], 3, 10))
+            .unwrap();
+        f.delegate(
+            "root",
+            1,
+            assignment("stale", Some("root"), 1, &["orch"], 0, 2),
+        )
+        .unwrap();
+        f.delegate(
+            "root",
+            1,
+            assignment("current", Some("root"), 1, &["orch"], 0, 2),
+        )
+        .unwrap();
+        f.replace(assignment("root", None, 2, &["orch"], 3, 10))
+            .unwrap();
+        f.regrant(
+            "root",
+            2,
+            assignment("current", Some("root"), 2, &["orch"], 0, 2),
+        )
+        .unwrap();
+        let mut owned = link(2);
+        owned.assignment = "root".into();
+        f.initiate_or_adopt(owned).unwrap();
+        f.reconcile("card-1", "root", 2, ExecutionState::Completed)
+            .unwrap();
+        let g = restored(&f).unwrap();
+        assert_eq!(g, f);
+        assert_eq!(g.authorize("current", 2), Ok(()));
+        assert_eq!(g.authorize("stale", 1), Err(FactoryError::StaleGeneration));
+        assert_eq!(
+            g.link("card-1").map(|l| l.state),
+            Some(ExecutionState::Completed)
+        );
+    }
+    #[test]
+    fn restore_refuses_records_the_operations_could_not_have_produced() {
+        let root = || Delegation {
+            assignment: assignment("root", None, 2, &["orch"], 1, 4),
+            parent_generation: None,
+        };
+        let child = |generation, projects: &[&str], calls| Delegation {
+            assignment: assignment("child", Some("root"), 1, projects, 0, calls),
+            parent_generation: generation,
+        };
+        let refused = |delegations: Vec<Delegation>, links: Vec<ExecutionLink>| {
+            Factory::restore(delegations, links).unwrap_err()
+        };
+        assert_eq!(
+            refused(vec![root(), child(None, &["orch"], 1)], vec![]),
+            FactoryError::Invalid(
+                "a parent generation must accompany exactly the delegated assignments"
+            )
+        );
+        assert_eq!(
+            refused(vec![root(), child(Some(3), &["orch"], 1)], vec![]),
+            FactoryError::Invalid("assignment is bound to a parent generation not yet reached")
+        );
+        assert_eq!(
+            refused(vec![root(), child(Some(2), &["other"], 1)], vec![]),
+            FactoryError::DelegationOutsideGrant
+        );
+        // A stale child keeps the scope it was granted; only budgets bind it.
+        assert!(Factory::restore(vec![root(), child(Some(1), &["other"], 1)], vec![]).is_ok());
+        assert_eq!(
+            refused(vec![root(), child(Some(1), &["orch"], 5)], vec![]),
+            FactoryError::DelegationOutsideGrant
+        );
+        assert_eq!(
+            refused(vec![child(Some(1), &["orch"], 1)], vec![]),
+            FactoryError::Invalid("assignment names an unknown parent")
+        );
+        assert_eq!(
+            refused(vec![root(), root()], vec![]),
+            FactoryError::Invalid("assignment id already exists")
+        );
+        let mut cyclic = root();
+        cyclic.assignment.parent = Some("child".into());
+        cyclic.parent_generation = Some(1);
+        assert_eq!(
+            refused(vec![cyclic, child(Some(1), &["orch"], 1)], vec![]),
+            FactoryError::Invalid("assignment ancestry contains a cycle")
+        );
+        let mut ahead = link(3);
+        ahead.assignment = "root".into();
+        assert_eq!(
+            refused(vec![root()], vec![ahead]),
+            FactoryError::Invalid("link generation is outside its assignment's history")
+        );
+        assert_eq!(
+            refused(vec![root()], vec![link(1)]),
+            FactoryError::UnknownAssignment
+        );
+    }
+    #[test]
+    fn taking_over_fences_every_earlier_holder() {
+        let mut f = Factory::default();
+        let identity = || Identity {
+            id: "orch".into(),
+            target: "rusty_orch run".into(),
+        };
+        let grant = || Grant {
+            projects: vec![],
+            delegation_budget: 0,
+            call_budget: 3,
+        };
+        assert_eq!(f.take_over("goal", identity(), grant()), Ok(1));
+        assert_eq!(f.take_over("goal", identity(), grant()), Ok(2));
+        assert_eq!(f.authorize("goal", 1), Err(FactoryError::StaleGeneration));
+        assert_eq!(f.authorize("goal", 2), Ok(()));
+        f.retire("goal", 2).unwrap();
+        assert_eq!(
+            f.take_over("goal", identity(), grant()),
+            Err(FactoryError::Retired)
+        );
+        f.assign(assignment("root", None, 1, &["orch"], 1, 1))
+            .unwrap();
+        f.delegate(
+            "root",
+            1,
+            assignment("child", Some("root"), 1, &["orch"], 0, 1),
+        )
+        .unwrap();
+        assert_eq!(
+            f.take_over("child", identity(), grant()),
+            Err(FactoryError::Invalid(
+                "a delegated assignment is re-granted by its parent"
+            ))
+        );
     }
 }

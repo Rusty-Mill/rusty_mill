@@ -9,8 +9,12 @@ use orch_dispatch::fake::{FakeAgent, Reply};
 use orch_dispatch::{Ceiling, DispatchError};
 use orch_store::{fingerprint, Store};
 use rusty_orch::input::parse;
+use rusty_orch::millboard::CardLinks;
 use rusty_orch::report;
-use rusty_orch::run::{execute, execute_resumable, Console, Ended, Resume, RunError};
+use rusty_orch::run::{
+    execute, execute_hosted, execute_resumable, CardHosting, Console, Ended, Hosting, Resume,
+    RunError, Summary,
+};
 
 /// A console that hands out scripted answers and records what it saw.
 #[derive(Default)]
@@ -392,4 +396,159 @@ fn the_assumptions_block_is_absent_when_none_were_made() {
     let mut console = Scripted::default();
     let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
     assert!(!report::text(&s).contains("assumptions ("));
+}
+
+/// A card on a board with Millboard's compare-and-set, shared across runs.
+#[derive(Clone, Default)]
+struct Card(std::rc::Rc<std::cell::RefCell<(Option<u64>, Vec<String>)>>);
+
+impl CardLinks for Card {
+    fn stored(&mut self, _: &str) -> Result<Option<u64>, String> {
+        Ok(self.0.borrow().0)
+    }
+    fn link(&mut self, link: &orch_core::factory::ExecutionLink) -> Result<(), String> {
+        let mut card = self.0.borrow_mut();
+        card.1.push(format!("link {}", link.generation));
+        card.0 = Some(link.generation);
+        Ok(())
+    }
+    fn recover(
+        &mut self,
+        expected: u64,
+        link: &orch_core::factory::ExecutionLink,
+    ) -> Result<(), String> {
+        let mut card = self.0.borrow_mut();
+        card.1
+            .push(format!("recover {expected}->{}", link.generation));
+        if card.0 != Some(expected) {
+            return Err("execution generation changed".into());
+        }
+        card.0 = Some(link.generation);
+        Ok(())
+    }
+}
+
+const IMPLEMENT: &str =
+    r#"[{"role":"implement","instruction":"i","acceptance":["a"],"max_calls":2}]"#;
+
+fn hosted(
+    store: &mut Store,
+    card: &Card,
+    host: &orch_dispatch::fake::FakeHost,
+) -> Result<Summary, RunError> {
+    hosted_for(store, Some(card), host)
+}
+
+fn hosted_for(
+    store: &mut Store,
+    card: Option<&Card>,
+    host: &orch_dispatch::fake::FakeHost,
+) -> Result<Summary, RunError> {
+    execute_hosted(
+        spec(5, IMPLEMENT),
+        FakeAgent::new([]),
+        &mut Scripted::default(),
+        frozen(),
+        Some(Resume {
+            store,
+            fingerprint: fingerprint("hosted-goal"),
+        }),
+        Some(Hosting {
+            host: Box::new(host.clone()),
+            card: card.map(|card| CardHosting {
+                card: "card".into(),
+                namespace: "namespace".into(),
+                board: Box::new(card.clone()),
+            }),
+        }),
+    )
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("rusty_orch_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+#[test]
+fn each_hosted_run_records_its_generation_with_the_card_before_hosting() {
+    let dir = scratch("card_generations");
+    let card = Card::default();
+    let host = orch_dispatch::fake::FakeHost::default();
+    for _ in 0..2 {
+        let mut store = Store::open(&dir).expect("open");
+        let s = hosted(&mut store, &card, &host).expect("run");
+        assert!(matches!(s.ended, Ended::Waiting(_)), "{}", s.ended);
+    }
+    assert_eq!(card.0.borrow().1, ["link 1", "recover 1->2"]);
+    let mut generations: Vec<u64> = host
+        .0
+        .borrow()
+        .fences
+        .iter()
+        .map(|f| f.generation)
+        .collect();
+    generations.dedup();
+    assert_eq!(
+        generations,
+        [1, 2],
+        "each run hosts under the generation it linked"
+    );
+    let factory = Store::open(&dir)
+        .expect("reopen")
+        .load_factory(orch_core::GoalId::from_raw(1))
+        .expect("factory");
+    let link = factory.link("card").expect("linked");
+    assert_eq!(
+        (
+            link.execution.as_str(),
+            link.bbp_task.as_str(),
+            link.generation
+        ),
+        ("namespace", "namespace", 2)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_card_held_at_a_later_generation_stops_the_run_before_any_host_command() {
+    let dir = scratch("card_superseded");
+    let card = Card::default();
+    card.0.borrow_mut().0 = Some(7);
+    let host = orch_dispatch::fake::FakeHost::default();
+    let mut store = Store::open(&dir).expect("open");
+    let error = hosted(&mut store, &card, &host).expect_err("superseded");
+    assert!(
+        matches!(&error, RunError::Lease(why) if why.starts_with("superseded")),
+        "{error}"
+    );
+    assert!(card.0.borrow().1.is_empty());
+    assert_eq!(host.0.borrow().opens, 0);
+    assert!(host.0.borrow().fences.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_card_linked_state_resumed_without_its_card_is_refused_before_any_generation() {
+    let dir = scratch("card_omitted");
+    let card = Card::default();
+    let host = orch_dispatch::fake::FakeHost::default();
+    let mut store = Store::open(&dir).expect("open");
+    hosted(&mut store, &card, &host).expect("linked run");
+    drop(store);
+    let fences = host.0.borrow().fences.len();
+    let mut store = Store::open(&dir).expect("reopen");
+    let error = hosted_for(&mut store, None, &host).expect_err("card omitted");
+    assert!(
+        matches!(&error, RunError::Lease(why) if why.contains("linked to card card")),
+        "{error}"
+    );
+    assert_eq!(host.0.borrow().fences.len(), fences, "nothing was hosted");
+    assert_eq!(card.0.borrow().1, ["link 1"]);
+    let factory = store
+        .load_factory(orch_core::GoalId::from_raw(1))
+        .expect("factory");
+    let saved = factory.assignment("goal-orchestrator").expect("assignment");
+    assert_eq!(saved.generation, 1, "no unpublished generation was saved");
+    let _ = std::fs::remove_dir_all(&dir);
 }

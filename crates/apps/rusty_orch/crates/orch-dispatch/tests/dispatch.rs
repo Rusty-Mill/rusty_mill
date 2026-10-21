@@ -830,6 +830,14 @@ fn repeated_agent_failure_exhausts_retries_and_strands_dependents() {
     );
 }
 
+fn fence(generation: u64, holder: &str) -> orch_dispatch::Fence {
+    orch_dispatch::Fence {
+        assignment: text("goal-orchestrator"),
+        generation,
+        holder: text(holder),
+    }
+}
+
 fn gate(rev: u64) -> orch_dispatch::Progress {
     orch_dispatch::Progress::Gate(orch_dispatch::GateContext {
         prompt: text("approve-plan art:2"),
@@ -855,7 +863,7 @@ fn hosted_cards_resume_gates_and_complete_once_without_runner_calls() {
             routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
             FakeAgent::new([]),
         )
-        .with_host(host.clone())
+        .with_host(host.clone(), fence(1, "first"))
     };
     let mut dispatcher = make_dispatcher();
     assert_eq!(
@@ -943,7 +951,7 @@ fn hosted_failure_or_empty_completion_does_not_finish_a_card() {
             routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
             FakeAgent::new([]),
         )
-        .with_host(host);
+        .with_host(host, fence(1, "first"));
         assert!(d.run(&goal(1), &mut plan, &mut board, &mut ledger).is_err());
         assert_ne!(plan.get(id).unwrap().state().status(), Status::Done);
         assert_eq!(ledger.calls(), 1);
@@ -963,7 +971,7 @@ fn hosting_does_not_reroute_research_or_design() {
         routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
         FakeAgent::new([Reply::Write(vec![finding()]), Reply::Write(vec![finding()])]),
     )
-    .with_host(host.clone());
+    .with_host(host.clone(), fence(1, "first"));
     assert_eq!(
         d.run(&goal(2), &mut plan, &mut board, &mut ledger),
         Ok(Outcome::Finished)
@@ -985,7 +993,7 @@ fn an_agent_answer_cannot_approve_a_hosted_task() {
         routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
         FakeAgent::new([]),
     )
-    .with_host(host.clone());
+    .with_host(host.clone(), fence(1, "first"));
     assert_eq!(
         dispatcher.run(&goal(1), &mut plan, &mut board, &mut ledger),
         Ok(Outcome::Blocked(vec![id]))
@@ -1022,7 +1030,7 @@ fn a_saved_host_handle_cannot_fall_back_to_a_one_call_runner() {
         .push_back(Ok(Progress::Working));
     let route = routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]);
     Dispatcher::new(route.clone(), FakeAgent::new([]))
-        .with_host(host)
+        .with_host(host, fence(1, "first"))
         .run(&goal(1), &mut plan, &mut board, &mut ledger)
         .unwrap();
     let result = Dispatcher::new(route, FakeAgent::new([])).run(
@@ -1036,4 +1044,51 @@ fn a_saved_host_handle_cannot_fall_back_to_a_one_call_runner() {
     );
     assert_eq!(ledger.calls(), 1);
     assert_eq!(plan.get(id).unwrap().state().status(), Status::Running);
+}
+
+#[test]
+fn a_superseded_holder_stops_without_changing_the_card_or_its_charge() {
+    use orch_dispatch::{fake::FakeHost, Progress};
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let id = plan.add(spec(Role::Implement, vec![], 1)).unwrap();
+    let mut board = Board::new(plan.goal());
+    let mut ledger = Ledger::new();
+    let host = FakeHost::default();
+    let dispatcher = |fence| {
+        Dispatcher::new(
+            routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
+            FakeAgent::new([]),
+        )
+        .with_host(host.clone(), fence)
+    };
+    assert_eq!(
+        dispatcher(fence(1, "first")).run(&goal(1), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Waiting(vec![id]))
+    );
+    // A later holder polls once; the earlier one is now refused.
+    assert_eq!(
+        dispatcher(fence(2, "second")).run(&goal(1), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Waiting(vec![id]))
+    );
+    let before = (plan.clone(), board.clone(), ledger.calls());
+    for stale in [fence(1, "first"), fence(2, "diverged")] {
+        assert!(matches!(
+            dispatcher(stale).run(&goal(1), &mut plan, &mut board, &mut ledger),
+            Err(DispatchError::Agent { task, .. }) if task == id
+        ));
+        assert_eq!((plan.clone(), board.clone(), ledger.calls()), before);
+    }
+    host.0.borrow_mut().progress.push_back(Ok(Progress::Closed {
+        outputs: vec![orch_dispatch::Output {
+            kind: EntryKind::Artifact,
+            body: text("merged"),
+            refs: vec![orch_core::Ref::Commit(text("abc123"))],
+            supersedes: None,
+        }],
+    }));
+    assert_eq!(
+        dispatcher(fence(2, "second")).run(&goal(1), &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Finished)
+    );
+    assert_eq!(host.0.borrow().opens, 1);
 }

@@ -123,7 +123,7 @@ pub enum Outcome {
 pub struct Dispatcher<R> {
     routing: Routing,
     runner: R,
-    host: Option<Box<dyn crate::TaskHost>>,
+    host: Option<(Box<dyn crate::TaskHost>, crate::Fence)>,
 }
 
 impl<R: AgentRunner> Dispatcher<R> {
@@ -136,14 +136,18 @@ impl<R: AgentRunner> Dispatcher<R> {
         }
     }
 
-    /// Enable long-lived hosting for Implement cards. Other roles keep their runner.
-    pub fn with_host(mut self, host: impl crate::TaskHost + 'static) -> Self {
-        self.host = Some(Box::new(host));
+    /// Enable long-lived hosting for Implement cards, every command issued
+    /// under `fence`. Other roles keep their runner.
+    pub fn with_host(mut self, host: impl crate::TaskHost + 'static, fence: crate::Fence) -> Self {
+        self.host = Some((Box::new(host), fence));
         self
     }
 
-    /// Supply an optional host at a composition root.
-    pub fn with_boxed_host(mut self, host: Option<Box<dyn crate::TaskHost>>) -> Self {
+    /// Supply an optional host and its fence at a composition root.
+    pub fn with_boxed_host(
+        mut self,
+        host: Option<(Box<dyn crate::TaskHost>, crate::Fence)>,
+    ) -> Self {
         self.host = host;
         self
     }
@@ -298,11 +302,11 @@ impl<R: AgentRunner> Dispatcher<R> {
             plan.start(id, agent)?;
         }
         let task = plan.get(id).ok_or(PlanError::UnknownTask(id))?;
-        let Some(host) = self.host.as_mut() else {
+        let Some((host, fence)) = self.host.as_mut() else {
             return Err(DispatchError::Stuck);
         };
         let handle = host
-            .open(task, board)
+            .open(task, board, fence)
             .map_err(|e| host_error(plan, id, agent, e))?;
         append_atomically(
             board,
@@ -326,7 +330,7 @@ impl<R: AgentRunner> Dispatcher<R> {
         board: &mut Board,
         polled: &mut HashSet<TaskId>,
     ) -> Result<(), DispatchError> {
-        let Some(host) = self.host.as_mut() else {
+        let Some((host, fence)) = self.host.as_mut() else {
             return Ok(());
         };
         let tasks: Vec<_> = plan
@@ -359,7 +363,7 @@ impl<R: AgentRunner> Dispatcher<R> {
                 let Some(answer) = answer else {
                     // Supervise without replacing the persisted question's fence.
                     let progress = host
-                        .poll(&handle)
+                        .poll(&handle, fence)
                         .map_err(|e| host_error(plan, id, agent, e))?;
                     if matches!(
                         progress,
@@ -380,16 +384,16 @@ impl<R: AgentRunner> Dispatcher<R> {
                     continue;
                 };
                 let relayed = host
-                    .relay(&handle, gate, &answer.content().body)
+                    .relay(&handle, gate, &answer.content().body, fence)
                     .map_err(|e| host_error(plan, id, agent, e))?;
                 supersedes = Some(question);
                 plan.resume(id)?;
                 match relayed {
-                    crate::Relayed::Applied => host.poll(&handle),
+                    crate::Relayed::Applied => host.poll(&handle, fence),
                     crate::Relayed::Stale(p) | crate::Relayed::Rejected(p) => Ok(p),
                 }
             } else {
-                host.poll(&handle)
+                host.poll(&handle, fence)
             }
             .map_err(|e| host_error(plan, id, agent, e))?;
             apply_progress(plan, board, id, agent, &handle, progress, supersedes)?;

@@ -20,7 +20,8 @@ use orch_core::goal::StopRule;
 use orch_dispatch::AgentRunner;
 
 use crate::args::Args;
-use crate::run::{self, Console, Ended, Resume};
+use crate::millboard::HttpMillboard;
+use crate::run::{self, CardHosting, Console, Ended, Hosting, Resume};
 use crate::{input, report};
 
 /// Exit status for a finished run.
@@ -116,10 +117,7 @@ impl Console for Stdio<'_> {
 }
 
 /// Configuration stays at the I/O composition root; orch-core remains pure.
-fn task_host(
-    args: &Args,
-    goal_json: &str,
-) -> Result<Option<Box<dyn orch_dispatch::TaskHost>>, Box<dyn std::error::Error>> {
+fn task_host(args: &Args, goal_json: &str) -> Result<Option<Hosting>, Box<dyn std::error::Error>> {
     let root: rusty_serde::json::Value = rusty_serde::json::from_str(goal_json)?;
     let config: Option<orch_bbp::Config> = match &args.bbp {
         Some(file) => Some(rusty_serde::json::from_str(&std::fs::read_to_string(
@@ -134,6 +132,9 @@ fn task_host(
             .transpose()?,
     };
     let Some(config) = config else {
+        if args.card.is_some() {
+            return Err("--card requires BBP task hosting (--bbp or the goal's bbp)".into());
+        }
         return Ok(None);
     };
     if args.state.is_none() {
@@ -152,10 +153,18 @@ fn task_host(
         spec.goal.outcome(), lines(spec.goal.done_when()), lines(spec.goal.constraints()),
         lines(spec.goal.in_scope()), lines(spec.goal.out_of_scope()), lines(spec.goal.refs())
     );
-    let host = orch_bbp::BbpHost::new(
-        config,
-        rusty_bbp::Sha256::of(goal_json.as_bytes()).hex(),
-        context,
-    )?;
-    Ok(Some(Box::new(host)))
+    let namespace = rusty_bbp::Sha256::of(goal_json.as_bytes()).hex();
+    let card = match &args.card {
+        Some(card) => Some(CardHosting {
+            card: card.card.clone(),
+            namespace: namespace.clone(),
+            board: Box::new(HttpMillboard::new(card.board.clone())?),
+        }),
+        None => None,
+    };
+    let host = orch_bbp::BbpHost::new(config, namespace, context)?;
+    Ok(Some(Hosting {
+        host: Box::new(host),
+        card,
+    }))
 }

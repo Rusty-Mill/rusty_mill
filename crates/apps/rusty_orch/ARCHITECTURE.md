@@ -63,9 +63,33 @@ opening a task host; it never creates a second one for a card.
 `orch_core::factory` deliberately distinguishes a configured identity from an
 assignment, provider session, model, and process.  Project/task/worker
 assignments receive explicit project, call and delegation grants.  A delegated
-assignment must be narrower than its parent.  Every host command carries the
-assignment generation; replacement and retirement invalidate old generations,
-and retirement also disables descendants.  Host observations reconcile into
+assignment must be narrower than its parent.  Replacement and retirement
+invalidate old generations, and retirement also disables descendants.
+
+On the hosted path, every `rusty_orch run` process takes over the goal's
+`goal-orchestrator` assignment at its next generation and saves the factory in
+`orch-store`'s assignment record before any host command. `maintain` does the
+same with a `maintenance` generation in its journal. Every `TaskHost` command
+carries a `Fence`: assignment, generation, and a random holder token for the
+process. The BBP host admits a higher generation for a task by publishing it
+once under the task's manifest, and refuses lower generations and other
+holders of the admitted one as unavailable, so a process running from a stale
+copy of the state cannot keep driving the task. The latest process to start
+wins; it fences out the earlier one rather than waiting for it.
+
+With `--card`, Orch is the only writer of the card's generation. After saving
+the take-over, the run binds the card in the factory and records the same
+generation with Millboard before any host command: `card_execution_link` the
+first time or to replay it, and the compare-and-set `card_execution_recover`
+from whatever generation the card carries. A card already past the run's
+generation means a newer process holds the goal, so the run stops untouched.
+A state linked to a card is refused when resumed without `--card`, before any
+generation is taken. The board token stays in the Orch process: every child
+launch scrubs `orch_cli::PARENT_SECRETS`.
+The link's execution and BBP task are the goal's BBP namespace (every BBP task
+id of the goal derives from it), its goal is the goal id, and its attempt is
+`1`, since a run resumes its hosted tasks rather than re-attempting them. Host
+observations reconcile into
 `Running`, `Waiting`, `Completed`, `Failed`, or `Cancelled`; terminal state is
 monotonic.  Transport adapters map these states to existing Millboard columns
 and BBP gates without bypassing Sandbox or BBP approval policy.

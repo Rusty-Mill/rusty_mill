@@ -10,9 +10,9 @@ name: CI
 # touches (plus everything that transitively depends on them) and every
 # other job scopes its cargo invocation to just that set via `-p`, instead
 # of always running `--workspace` across ~70 largely-unrelated crates.
-# PRs and main pushes use their event's base-to-head range. CI-only changes
-# run planner tests, workflow lint, and representative Linux/Windows smoke
-# tests; missing history, manual dispatches, and build-global changes still
+# PRs and merge-queue entries use their event's base-to-head range. CI-only changes
+# run planner tests, workflow lint, and representative smoke tests on the
+# run's platforms; missing history, manual dispatches, and build-global changes still
 # get the full sweep. A root Cargo.toml edit
 # used to force the same full sweep unconditionally, but the single most
 # common edit to that file is adding a handful of brand-new, independent
@@ -26,8 +26,14 @@ name: CI
 # full Cargo resolve graph below, with a conservative full fallback whenever
 # the old/new lockfile impact cannot be established reliably.
 on:
-  push:
-    branches: [main]
+  # No `push` trigger: every change reaches `main` through the merge queue,
+  # whose `merge_group` run already tested the exact tree that lands, so a
+  # post-merge run would repeat it (ADR-0009). The daily sweep below replaces
+  # it as the full check of `main` and the writer of `main`'s caches.
+  #
+  # Platforms (ci_plan.py `platform_outputs`): a PR runs Linux only; the queue
+  # runs Windows and macOS, and Linux too unless a green PR run already tested
+  # the identical tree on the same parent. Each tree is tested once per OS.
   pull_request:
   # The merge queue (ADR-0009) validates each queued entry on a temporary
   # branch; `required-gate` must run here or the queue waits forever for a
@@ -38,10 +44,11 @@ on:
   # It is useful for re-running the whole workspace after runner or cache
   # incidents without creating a no-op commit.
   workflow_dispatch:
-  # Weekly full-workspace sweep: catches drift that scoped PR runs cannot see
-  # (ADR-0009). `ci_plan.py` treats any event other than push, PR and merge_group as full.
+  # Daily full-workspace sweep: catches drift that scoped runs cannot see
+  # (ADR-0009) and refreshes the `main` caches that PR runs restore.
+  # `ci_plan.py` treats any event other than push, PR and merge_group as full.
   schedule:
-    - cron: "17 3 * * 1"
+    - cron: "17 3 * * *"
 
 # Least privilege (ADR-0009): no job here writes to the repository.
 permissions:
@@ -106,6 +113,8 @@ jobs:
       queue: max
       cancel-in-progress: false
     name: RL live tooling mocked safety tests
+    needs: plan
+    if: needs.plan.outputs.windows == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -119,6 +128,8 @@ jobs:
       queue: max
       cancel-in-progress: false
     name: Tape verifier discovery and Windows ScoreOnly
+    needs: plan
+    if: needs.plan.outputs.windows == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -218,6 +229,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: dependency-policy
           cache-targets: false
       - run: cargo metadata --format-version=1 --all-features > /tmp/metadata.json
@@ -289,6 +301,15 @@ jobs:
       rand_platforms: ${{ steps.plan.outputs.rand_platforms }}
       shards: ${{ steps.plan.outputs.shards }}
       components: ${{ steps.plan.outputs.components }}
+      linux: ${{ steps.platforms.outputs.linux }}
+      windows: ${{ steps.platforms.outputs.windows }}
+      macos: ${{ steps.platforms.outputs.macos }}
+      rust_os: ${{ steps.platforms.outputs.rust_os }}
+      rand_os: ${{ steps.platforms.outputs.rand_os }}
+    # `actions: read` lets a merge-queue run find the PR run's tested-tree record.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -301,6 +322,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: plan
           cache-targets: false
 
@@ -411,6 +433,22 @@ jobs:
             echo "components=$components"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Record the tested tree
+        if: github.event_name == 'pull_request'
+        run: python3 .github/scripts/ci_plan.py --tested-record > tested-tree.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'pull_request'
+        with:
+          name: tested-tree
+          path: tested-tree.txt
+          retention-days: 14
+
+      - name: Choose platforms
+        id: platforms
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci_plan.py --emit-platforms "${{ github.event_name }}" --repo "${{ github.repository }}" >> "$GITHUB_OUTPUT"
+
       - name: Summary
         shell: bash
         run: |
@@ -419,7 +457,7 @@ jobs:
               echo "### CI scope: full workspace sweep"
             elif [ "${{ steps.plan.outputs.ci_only }}" = "true" ]; then
               echo "### CI scope: CI-only smoke validation"
-              echo "Planner tests, workflow lint, and representative Linux/Windows smoke tests ran; this is not full workspace coverage."
+              echo "Planner tests, workflow lint, and representative smoke tests ran on this run's platforms; this is not full workspace coverage."
             elif [ -z "${{ steps.plan.outputs.packages }}" ]; then
               echo "### CI scope: no workspace crate affected -- build/test/clippy skipped"
             else
@@ -441,7 +479,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(needs.plan.outputs.rust_os) }}
         scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -493,7 +531,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(needs.plan.outputs.rust_os) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -513,7 +551,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(needs.plan.outputs.rust_os) }}
         shard: ${{ fromJson(needs.plan.outputs.shards) }}
         scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
@@ -704,7 +742,7 @@ jobs:
       cancel-in-progress: false
     name: data-mesh-monitor (npm build + trace parity)
     needs: plan
-    if: needs.plan.outputs.dashboard == 'true'
+    if: needs.plan.outputs.dashboard == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -732,7 +770,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_term web (npm build)
     needs: plan
-    if: needs.plan.outputs.term_web == 'true'
+    if: needs.plan.outputs.term_web == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -757,7 +795,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_tick web (typecheck, test, build)
     needs: plan
-    if: needs.plan.outputs.tick == 'true'
+    if: needs.plan.outputs.tick == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -788,7 +826,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_tick e2e (Playwright)
     needs: plan
-    if: needs.plan.outputs.tick == 'true'
+    if: needs.plan.outputs.tick == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -800,6 +838,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rusty-tick-e2e
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -837,7 +876,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_agui conformance (@ag-ui/client)
     needs: plan
-    if: needs.plan.outputs.agui == 'true'
+    if: needs.plan.outputs.agui == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -849,6 +888,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rusty-agui-conformance
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -915,7 +955,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_fair_play web (typecheck, test, build)
     needs: plan
-    if: needs.plan.outputs.fair_play == 'true'
+    if: needs.plan.outputs.fair_play == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -941,7 +981,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_fair_play e2e (Playwright)
     needs: plan
-    if: needs.plan.outputs.fair_play == 'true'
+    if: needs.plan.outputs.fair_play == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -953,6 +993,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rusty-fair-play-e2e
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -984,7 +1025,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_key desktop (npm build)
     needs: plan
-    if: needs.plan.outputs.key_desktop == 'true'
+    if: needs.plan.outputs.key_desktop == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -1010,7 +1051,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_win32 cross-compile check (mingw, Linux)
     needs: plan
-    if: needs.plan.outputs.win32 == 'true'
+    if: needs.plan.outputs.win32 == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1021,6 +1062,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: win32-cross
       - name: Install mingw-w64
         run: sudo apt-get update && sudo apt-get install -y mingw-w64
@@ -1047,7 +1089,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(needs.plan.outputs.rand_os) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1057,6 +1099,7 @@ jobs:
           targets: ${{ matrix.os == 'ubuntu-latest' && 'aarch64-unknown-linux-gnu,riscv64gc-unknown-linux-gnu' || '' }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rand-platforms-${{ matrix.os }}
       - name: cargo test -p rusty_rand (macOS)
         if: matrix.os == 'macos-latest'
@@ -1101,7 +1144,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_multimodal_db feature sets (default, client, server, research)
     needs: plan
-    if: needs.plan.outputs.multimodal_db == 'true'
+    if: needs.plan.outputs.multimodal_db == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1111,6 +1154,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: multimodal-db-feature-sets
       - name: cargo clippy -p rusty_multimodal_db (default features)
         run: cargo clippy -p rusty_multimodal_db --all-targets -- -D warnings
@@ -1155,7 +1199,7 @@ jobs:
     # bump does not rename a check a branch protection might require.
     name: rusty_multimodal_db msrv (rust-version)
     needs: plan
-    if: needs.plan.outputs.multimodal_db == 'true'
+    if: needs.plan.outputs.multimodal_db == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     env:
       # rust-toolchain.toml would otherwise win over the action's default.
@@ -1167,9 +1211,49 @@ jobs:
           toolchain: "1.89.0"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: multimodal-db-msrv
       - name: cargo check on the declared rust-version
         run: cargo check -p rusty_multimodal_db --all-features --all-targets
+
+  msrv-compile:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-msrv-compile
+      queue: max
+      cancel-in-progress: false
+    # `check_rust_versions.py` (dependency policy) compares declared
+    # rust-versions; this builds. Each workspace crate that declares one is
+    # `cargo check`ed with a rustc of exactly that version (default features),
+    # grouped by floor. Only the affected crates on a PR; every crate on a full
+    # sweep. Floors at the pinned toolchain are covered by the ordinary jobs.
+    # The build output stays under RUNNER_TEMP so it does not bloat the cache.
+    name: compile at declared rust-version
+    needs: plan
+    if: (needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != '') && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-build-env
+        with:
+          cache-shared-key: msrv-compile
+      - name: cargo check each crate at its declared rust-version
+        env:
+          PLAN_FULL: ${{ needs.plan.outputs.full }}
+          PLAN_PACKAGES: ${{ needs.plan.outputs.packages }}
+        run: |
+          set -euo pipefail
+          # Locked: a metadata call that rewrote Cargo.lock would validate a lock nobody committed.
+          lock_before="$(sha256sum Cargo.lock)"
+          cargo metadata --locked --format-version=1 > "$RUNNER_TEMP/metadata-default.json"
+          scope=()
+          if [ "$PLAN_FULL" != "true" ]; then scope=(--packages "$PLAN_PACKAGES"); fi
+          # rusty_multimodal_db has its own msrv job; the remind_me crates have their own jobs.
+          python3 .github/scripts/check_msrv_compile.py "$RUNNER_TEMP/metadata-default.json" \
+            "${scope[@]}" \
+            --skip-from "$RUST_TOOLCHAIN" \
+            --exclude "$REMIND_ME_PACKAGES rusty_multimodal_db" \
+            --target-base "$RUNNER_TEMP/msrv"
+          test "$(sha256sum Cargo.lock)" = "$lock_before"
 
   rusty-config-no-std-check:
     concurrency:
@@ -1178,7 +1262,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_config no_std (--no-default-features)
     needs: plan
-    if: needs.plan.outputs.rusty_config_no_std == 'true'
+    if: needs.plan.outputs.rusty_config_no_std == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1187,6 +1271,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rusty-config-no-std
       - name: cargo check -p rusty_config --no-default-features
         run: cargo check -p rusty_config --no-default-features --all-targets
@@ -1206,7 +1291,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_tls native engine (handrolled cfg)
     needs: plan
-    if: needs.plan.outputs.tls_engine == 'true'
+    if: needs.plan.outputs.tls_engine == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: --cfg rusty_tls_handrolled
@@ -1221,6 +1306,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rusty-tls-engine
       - name: cargo clippy -p rusty_tls --features handrolled-engine
         run: cargo clippy -p rusty_tls --all-targets --features handrolled-engine -- -D warnings
@@ -1368,7 +1454,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_tls native engine fuzz smoke
     needs: plan
-    if: needs.plan.outputs.tls_engine == 'true'
+    if: needs.plan.outputs.tls_engine == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: --cfg rusty_tls_handrolled
@@ -1384,6 +1470,7 @@ jobs:
           tool: cargo-fuzz@0.13.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rusty-tls-fuzz
           workspaces: crates/libs/net/rusty_tls/fuzz
       - name: fuzz smoke (30 s per target)
@@ -1413,7 +1500,7 @@ jobs:
       cancel-in-progress: false
     name: replay-viewer headless-GL smoke
     needs: plan
-    if: needs.plan.outputs.rleval_viewer == 'true'
+    if: needs.plan.outputs.rleval_viewer == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1422,6 +1509,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rleval-viewer-gl-smoke
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -1447,7 +1535,7 @@ jobs:
       cancel-in-progress: false
     name: rleval-app feature sets (default, mmdb, oidc)
     needs: plan
-    if: needs.plan.outputs.rleval_app == 'true'
+    if: needs.plan.outputs.rleval_app == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1457,6 +1545,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rleval-app-feature-sets
       - name: cargo clippy -p rleval-app (default features)
         run: cargo clippy -p rleval-app --all-targets -- -D warnings
@@ -1483,7 +1572,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_remind_me build / test / clippy (default features)
     needs: plan
-    if: needs.plan.outputs.remind_me == 'true'
+    if: needs.plan.outputs.remind_me == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
@@ -1495,6 +1584,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: remind-me
       - name: cargo build
         run: cargo build --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
@@ -1513,7 +1603,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_remind_me feature ${{ matrix.feature }}
     needs: plan
-    if: needs.plan.outputs.remind_me == 'true'
+    if: needs.plan.outputs.remind_me == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
@@ -1545,6 +1635,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: remind-me-feature-${{ matrix.feature }}
       - name: Install system packages this feature needs
         if: matrix.apt
@@ -1565,7 +1656,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_remind_me build / test / clippy (combined features)
     needs: plan
-    if: needs.plan.outputs.remind_me == 'true'
+    if: needs.plan.outputs.remind_me == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
@@ -1577,6 +1668,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: remind-me-combined
       - name: cargo build --features ann,ocr,rerank,local-embed,pdf
         run: cargo build --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf
@@ -1597,7 +1689,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_remind_me plugin.json version vs. crate versions
     needs: plan
-    if: needs.plan.outputs.remind_me == 'true'
+    if: needs.plan.outputs.remind_me == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1611,7 +1703,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_remind_me hub (engine + SQLite copy)
     needs: plan
-    if: needs.plan.outputs.remind_me == 'true'
+    if: needs.plan.outputs.remind_me == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
@@ -1623,6 +1715,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: remind-me-hub
       - name: cargo clippy -p remind_me_hub --no-default-features
         run: cargo clippy --locked -p remind_me_hub --no-default-features --all-targets -- -D warnings
@@ -1637,7 +1730,7 @@ jobs:
     # Postgres is only a legacy recovery source, never a runtime backend.
     name: rusty_remind_me legacy Postgres import
     needs: plan
-    if: needs.plan.outputs.remind_me_legacy_import == 'true'
+    if: needs.plan.outputs.remind_me_legacy_import == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
@@ -1662,6 +1755,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: remind-me-legacy-import
       - name: Lint the recovery feature and binaries
         run: cargo clippy --locked -p remind_me_hub --no-default-features --features postgres-import --all-targets -- -D warnings
@@ -1681,7 +1775,7 @@ jobs:
       cancel-in-progress: false
     name: rusty_remind_me build / test / clippy (windows)
     needs: plan
-    if: needs.plan.outputs.remind_me == 'true'
+    if: needs.plan.outputs.remind_me == 'true' && needs.plan.outputs.windows == 'true'
     runs-on: windows-latest
     env:
       RUSTFLAGS: -D warnings
@@ -1693,6 +1787,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: remind-me-windows
       - name: cargo build
         run: cargo build --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
@@ -1722,7 +1817,7 @@ jobs:
       cancel-in-progress: false
     name: crypto constant-time checks (valgrind taint, disassembly budget)
     needs: plan
-    if: needs.plan.outputs.crypto_ct == 'true'
+    if: needs.plan.outputs.crypto_ct == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1731,6 +1826,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: crypto-constant-time
       - name: Install valgrind
         run: |
@@ -1770,6 +1866,7 @@ jobs:
       cancel-in-progress: false
     name: Orch BBP confined acceptance (Linux)
     needs: [plan, fmt]
+    if: needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -1782,10 +1879,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: orch-bbp-acceptance
       - name: Build real host and Orch binaries and acceptance tests
         run: |
-          cargo build --locked -p rusty_orch -p rusty_bbp_host
+          cargo build --locked -p rusty_orch -p rusty_bbp_host -p rusty_mill_board
           cargo test --locked -p orch-bbp --lib --no-run
           cargo test --locked -p rusty_orch --lib --no-run
           cargo test --locked -p rusty_bbp_host --test moderator_e2e --test rust_lld_profile --no-run
@@ -1795,6 +1893,7 @@ jobs:
           set -euo pipefail
           export BBP_TEST_BIN="$PWD/target/debug/bbp"
           export ORCH_TEST_BIN="$PWD/target/debug/rusty_orch"
+          export MILLBOARD_TEST_BIN="$PWD/target/debug/rusty_mill_board"
           python3 .github/scripts/orch_bbp_acceptance.py --output acceptance-results
       - name: Publish each mode's result
         if: always()
@@ -1846,6 +1945,7 @@ jobs:
       - win32-cross-compile-check
       - multimodal-db-feature-sets
       - multimodal-db-msrv
+      - msrv-compile
       - rusty-config-no-std-check
       - rusty-tls-engine
       - rusty-tls-fuzz

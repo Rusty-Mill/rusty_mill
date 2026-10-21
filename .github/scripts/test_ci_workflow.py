@@ -52,7 +52,8 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
     def test_push_pr_and_manual_full_sweep_events_are_declared(self) -> None:
-        self.assertIn("  push:\n    branches: [main]", self.workflow)
+        # No post-merge push run: the merge queue tested the tree that lands.
+        self.assertNotIn("  push:\n    branches: [main]", self.workflow)
         self.assertIn("  pull_request:", self.workflow)
         self.assertIn("  workflow_dispatch:", self.workflow)
         self.assertIn('--event "${{ github.event_name }}"', self.workflow)
@@ -549,11 +550,13 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-latest", job)
         self.assertIn("needs: [plan, fmt]", job)
         self.assertNotIn("continue-on-error", job)
-        self.assertNotIn("if: needs.plan.outputs", job)
-        self.assertIn("cargo build --locked -p rusty_orch -p rusty_bbp_host", job)
+        # Only the platform gate: no scope flag may plan it out.
+        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", job), ["needs.plan.outputs.linux == 'true'"])
+        self.assertIn("cargo build --locked -p rusty_orch -p rusty_bbp_host -p rusty_mill_board", job)
         self.assertIn("orch_bbp_acceptance.py --output acceptance-results", job)
         self.assertIn('export BBP_TEST_BIN="$PWD/target/debug/bbp"', job)
         self.assertIn('export ORCH_TEST_BIN="$PWD/target/debug/rusty_orch"', job)
+        self.assertIn('export MILLBOARD_TEST_BIN="$PWD/target/debug/rusty_mill_board"', job)
         self.assertEqual(job.count("if: always()"), 2)
         self.assertIn("path: acceptance-results/", job)
         gate = self.workflow.split("  required-gate:\n", 1)[1]
@@ -569,6 +572,19 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertEqual(self._planner_map("--event", "schedule")["mode"], "full")
         msrv = self.workflow.split("  multimodal-db-msrv:\n")[1].split("  rusty-config-no-std-check:\n")[0]
         self.assertIn('RUSTUP_TOOLCHAIN: "1.89.0"', msrv)
+
+    def test_msrv_compile_job_builds_at_declared_floors_and_gates(self) -> None:
+        job = self.workflow.split("  msrv-compile:\n")[1].split("  rusty-config-no-std-check:\n")[0]
+        self.assertIn("needs: plan", job)
+        self.assertIn("needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''", job)
+        self.assertIn("check_msrv_compile.py", job)
+        # The pinned toolchain's own versions are covered elsewhere (compared as full versions); builds stay
+        # out of the cached target dir; metadata is locked and Cargo.lock must come out unchanged.
+        self.assertIn('--skip-from "$RUST_TOOLCHAIN"', job)
+        self.assertIn("cargo metadata --locked --format-version=1", job)
+        self.assertIn('test "$(sha256sum Cargo.lock)" = "$lock_before"', job)
+        self.assertIn('--target-base "$RUNNER_TEMP/msrv"', job)
+        self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
 
     def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:
         channel = tomllib.loads((REPO / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
@@ -824,7 +840,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_rand_platform_commands_and_required_gate_are_preserved(self) -> None:
         job = self.workflow.split("  rusty-rand-platforms:\n", 1)[1].split("\n  # Every other Rust job", 1)[0]
-        self.assertIn("os: [ubuntu-latest, macos-latest]", job)
+        self.assertIn("os: ${{ fromJSON(needs.plan.outputs.rand_os) }}", job)
         self.assertIn("run: cargo test -p rusty_rand", job)
         for target in ("aarch64-unknown-linux-gnu", "riscv64gc-unknown-linux-gnu"):
             self.assertIn(f"run: cargo check -p rusty_rand --target {target} --all-targets", job)
