@@ -166,7 +166,7 @@ pub fn inspect_with_impact_diagnostics(
     let report: rusty_json::Value = rusty_json::Value::parse(std::str::from_utf8(&exit.stdout)?)?;
     Ok(InspectionOutput {
         report: report.to_json_string_pretty(),
-        diagnostics: String::from_utf8(exit.stderr)?,
+        diagnostics: String::from_utf8_lossy(&exit.stderr).into_owned(),
     })
 }
 
@@ -207,6 +207,15 @@ mod tests {
         let output = inspect_with_impact_diagnostics(&repo, None, &runner).expect("output");
         assert_eq!(output.report, "{}");
         assert_eq!(output.diagnostics, "diagnostic");
+    }
+
+    #[test]
+    fn report_only_inspection_accepts_non_utf8_success_stderr() {
+        let repo = std::env::current_dir().expect("cwd");
+        let mut success = exit(0, "{}", "");
+        success.stderr = vec![0xff];
+        let runner = FakeCommand::new(Ok(success));
+        assert_eq!(inspect(&repo, &runner).expect("report"), "{}");
     }
 
     #[test]

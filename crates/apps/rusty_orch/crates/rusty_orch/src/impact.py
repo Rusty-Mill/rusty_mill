@@ -39,6 +39,43 @@ def canonical_cargo_metadata(metadata: dict) -> dict:
     """Copy metadata and sort only collections Cargo defines as unordered."""
     normalized = copy.deepcopy(metadata)
 
+    def windows_path(value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        if value.startswith('\\\\?\\UNC\\'):
+            return '\\\\' + value[8:]
+        if value.startswith('\\\\?\\'):
+            return value[4:]
+        # Cargo package IDs embed local paths as file URLs. A verbatim drive
+        # path is serialized with the same question-mark segment.
+        return value.replace('file:///?/', 'file:///').replace('file:///%3F/', 'file:///')
+
+    def path_field(value: dict, field: str) -> None:
+        if field in value:
+            value[field] = windows_path(value[field])
+
+    for field in ('workspace_root', 'target_directory', 'build_directory'):
+        path_field(normalized, field)
+    for field in ('workspace_members', 'workspace_default_members'):
+        if isinstance(normalized.get(field), list):
+            normalized[field] = [windows_path(item) for item in normalized[field]]
+    for package in normalized.get('packages', []):
+        for field in ('id', 'manifest_path'):
+            path_field(package, field)
+        for dependency in package.get('dependencies', []):
+            path_field(dependency, 'path')
+        for target in package.get('targets', []):
+            path_field(target, 'src_path')
+    resolve = normalized.get('resolve')
+    if isinstance(resolve, dict):
+        path_field(resolve, 'root')
+        for node in resolve.get('nodes', []):
+            path_field(node, 'id')
+            if isinstance(node.get('dependencies'), list):
+                node['dependencies'] = [windows_path(item) for item in node['dependencies']]
+            for dependency in node.get('deps', []):
+                path_field(dependency, 'pkg')
+
     def canonical(value: object) -> str:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -99,7 +136,8 @@ def cargo_metadata_diagnostics(metadata: dict) -> dict:
         records.append({'pointer': pointer or '/', 'type': kind(value),
                         'fingerprint': digest(value)[:16], **extra})
 
-    path_fields = {'manifest_path', 'workspace_root', 'target_directory', 'build_directory'}
+    path_fields = {'manifest_path', 'src_path', 'workspace_root', 'target_directory',
+                   'build_directory'}
 
     def visit(value: object, pointer: str, depth: int, field: str = '') -> None:
         if depth > max_depth:

@@ -141,6 +141,45 @@ class ChangeImpactTests(unittest.TestCase):
         self.assertEqual(MODULE.cargo_metadata_digest(self.md),
                          MODULE.cargo_metadata_digest(equivalent))
 
+    def test_cargo_metadata_digest_normalizes_captured_windows_path_spellings(self):
+        package = self.md['packages'][0]
+        package['id'] = 'path+file:///C:/fixture/crate#crate@0.1.0'
+        package['manifest_path'] = r'C:\fixture\crate\Cargo.toml'
+        package['dependencies'] = [{'name': 'local', 'path': r'C:\fixture\local'}]
+        package['targets'] = [{'name': 'crate', 'src_path': r'C:\fixture\crate\src\lib.rs'}]
+        self.md.update(workspace_root=r'C:\fixture', target_directory=r'C:\fixture\target',
+                       build_directory=r'C:\fixture\target')
+        self.md['workspace_members'] = [package['id']]
+        node = self.md['resolve']['nodes'][0]
+        node.update(id=package['id'], dependencies=[package['id']],
+                    deps=[{'name': 'crate', 'pkg': package['id'], 'dep_kinds': []}])
+        self.md['resolve']['root'] = package['id']
+
+        equivalent = copy.deepcopy(self.md)
+        extended = lambda value: '\\\\?\\' + value
+        equivalent.update(workspace_root=extended(self.md['workspace_root']),
+                          target_directory=extended(self.md['target_directory']),
+                          build_directory=extended(self.md['build_directory']))
+        extended_id = package['id'].replace('file:///', 'file:///?/')
+        equivalent['workspace_members'] = [extended_id]
+        equivalent_package = equivalent['packages'][0]
+        equivalent_package.update(id=extended_id,
+                                  manifest_path=extended(package['manifest_path']))
+        equivalent_package['dependencies'][0]['path'] = extended(
+            package['dependencies'][0]['path'])
+        equivalent_package['targets'][0]['src_path'] = extended(
+            package['targets'][0]['src_path'])
+        equivalent_node = equivalent['resolve']['nodes'][0]
+        equivalent_node.update(id=extended_id, dependencies=[extended_id])
+        equivalent_node['deps'][0]['pkg'] = extended_id
+        equivalent['resolve']['root'] = extended_id
+
+        self.assertEqual(MODULE.cargo_metadata_digest(self.md),
+                         MODULE.cargo_metadata_digest(equivalent))
+        equivalent_package['manifest_path'] += '.moved'
+        self.assertNotEqual(MODULE.cargo_metadata_digest(self.md),
+                            MODULE.cargo_metadata_digest(equivalent))
+
     def test_metadata_diagnostics_are_redacted_bounded_and_canonical(self):
         self.md['metadata'] = {'DO_NOT_PRINT_SENTINEL': {'private': 'DO_NOT_PRINT_VALUE'}}
         self.md['packages'][0]['metadata'] = {'ANOTHER_SENTINEL': ['secret']}
@@ -163,7 +202,7 @@ class ChangeImpactTests(unittest.TestCase):
         by_pointer = {entry['pointer']: entry for entry in diagnostics['records']}
         path = next(entry for pointer, entry in by_pointer.items()
                     if pointer.endswith('/dependencies/0/path'))
-        self.assertEqual(path['path_spelling'], 'extended')
+        self.assertEqual(path['path_spelling'], 'ordinary')
         self.assertTrue(any(entry['type'] == 'array' and entry.get('opaque') == 'authored-metadata'
                             for entry in diagnostics['records']))
         empty_object = MODULE.cargo_metadata_diagnostics({'resolve': {}})['records'][0]
