@@ -4,6 +4,19 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Factory execution-link hardening
+**2026-10-21**
+
+- Card execution-link adoption is persistence-idempotent, including concurrent
+  submission and reopening the durable board store.
+- Assignment delegation now reserves aggregate descendant and call budgets,
+  rejects identity reuse and cycles, validates replacement grants, and fences
+  descendants to the generation of the ancestor that delegated them.
+- An authorized replacement generation can recover a non-terminal execution;
+  stale generations remain unable to reconcile it.
+
+---
+
 ## Revision-bound change impact
 **2026-10-20**
 

@@ -8,7 +8,7 @@ use rusty_mill_board::api::Identity;
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::backup::Backups;
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::Column;
+use rusty_mill_board::domain::{Column, ExecutionLink};
 use rusty_mill_board::mmdb::MmdbStore;
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{Files, Settings, open_credentials};
@@ -62,6 +62,50 @@ fn wait_for_waiter(settings: &Settings) {
 
 fn no_settings(board: &Arc<Shared>) -> Settings {
     Settings::read_only(Arc::clone(board))
+}
+
+#[test]
+fn identical_execution_binding_is_concurrent_and_restart_idempotent() {
+    let dir = dir("execution_adopt");
+    let path = dir.join("board.mmap");
+    let board = board_at(&path);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "execute once", "", vec![]).expect("add");
+    let link = ExecutionLink {
+        execution: "execution-1".into(),
+        goal: "goal-1".into(),
+        bbp_task: "task-1".into(),
+        attempt: "attempt-1".into(),
+        assignment: "project-orch".into(),
+        generation: 1,
+    };
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let mut threads = Vec::new();
+    for _ in 0..8 {
+        let (board, barrier, link) = (Arc::clone(&board), Arc::clone(&barrier), link.clone());
+        threads.push(std::thread::spawn(move || {
+            let builder = board.roles().actor("nano", "human").expect("role");
+            barrier.wait();
+            board.bind_execution(card.id, link, &builder).expect("bind")
+        }));
+    }
+    for thread in threads {
+        let adopted = thread.join().expect("thread");
+        assert_eq!(adopted.execution.as_ref(), Some(&link));
+        assert_eq!(adopted.rev, 1);
+    }
+    assert_eq!(board.events(None, 100).expect("events").len(), 2);
+    drop(board);
+
+    let reopened = board_at(&path);
+    let builder = reopened.roles().actor("nano", "human").expect("role");
+    let adopted = reopened
+        .bind_execution(card.id, link, &builder)
+        .expect("adopt");
+    assert_eq!(adopted.rev, 1);
+    assert_eq!(reopened.events(None, 100).expect("events").len(), 2);
+    drop(reopened);
+    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]

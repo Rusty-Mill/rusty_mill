@@ -436,10 +436,18 @@ pub fn ops() -> Vec<Op> {
             "Initiate or adopt this card's one recoverable Orch execution. A different logical execution is refused; this persists the Orch goal, BBP task, host attempt, assignment and generation with the card.",
             |b, i, a: BindExecutionArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.bind_execution(id(&a.id)?, ExecutionLink {
-                    execution: a.execution, goal: a.goal, bbp_task: a.bbp_task,
-                    attempt: a.attempt, assignment: a.assignment, generation: a.generation,
-                }, &who)?)
+                card(b.bind_execution(
+                    id(&a.id)?,
+                    ExecutionLink {
+                        execution: a.execution,
+                        goal: a.goal,
+                        bbp_task: a.bbp_task,
+                        attempt: a.attempt,
+                        assignment: a.assignment,
+                        generation: a.generation,
+                    },
+                    &who,
+                )?)
             },
         ),
         op(

@@ -527,8 +527,13 @@ impl Card {
         }
         match &self.execution {
             Some(existing) if existing == &link => Ok(self.clone()),
-            Some(_) => Err(BoardError::Refused("card already has a logical execution".into())),
-            None => Ok(Self { execution: Some(link), ..self.next(now_ms) }),
+            Some(_) => Err(BoardError::Refused(
+                "card already has a logical execution".into(),
+            )),
+            None => Ok(Self {
+                execution: Some(link),
+                ..self.next(now_ms)
+            }),
         }
     }
 
@@ -733,14 +738,21 @@ mod tests {
     #[test]
     fn execution_link_is_idempotent_but_never_replaced() {
         let link = ExecutionLink {
-            execution: "execution".into(), goal: "goal".into(), bbp_task: "bbp".into(),
-            attempt: "attempt".into(), assignment: "project-orch".into(), generation: 1,
+            execution: "execution".into(),
+            goal: "goal".into(),
+            bbp_task: "bbp".into(),
+            attempt: "attempt".into(),
+            assignment: "project-orch".into(),
+            generation: 1,
         };
         let c = card().bind_execution(link.clone(), 1).expect("bind");
         assert_eq!(c.bind_execution(link.clone(), 2).expect("adopt"), c);
         let mut replacement = link;
         replacement.attempt = "another".into();
-        assert!(matches!(c.bind_execution(replacement, 2), Err(BoardError::Refused(_))));
+        assert!(matches!(
+            c.bind_execution(replacement, 2),
+            Err(BoardError::Refused(_))
+        ));
     }
 
     #[test]
