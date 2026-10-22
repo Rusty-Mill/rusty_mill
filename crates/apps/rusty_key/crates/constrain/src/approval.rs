@@ -261,6 +261,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn adapter_dropped_after_enqueue_fails_closed() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let (tx, rx) = approval_channel(8);
+        let gate = ApprovalGate::new(vec![ApprovalTrigger::BashFirstUse], tx);
+        let args = json!({"command": "ls"});
+        let mut check = std::pin::pin!(gate.before_tool("bash", &args));
+        let mut cx = Context::from_waker(Waker::noop());
+
+        // First poll queues the request and parks on its one-shot.
+        assert!(check.as_mut().poll(&mut cx).is_pending());
+        // The adapter goes away without reading it: the queued responder must
+        // be dropped with the channel, so the gate denies instead of hanging.
+        drop(rx);
+        assert!(matches!(
+            check.as_mut().poll(&mut cx),
+            Poll::Ready(Err(PolicyError::ApprovalDenied))
+        ));
+    }
+
     #[rusty_tokio::test]
     async fn mcp_first_use_is_scoped_per_server() {
         // Two separately configured McpToolFirstUse triggers, one per server.

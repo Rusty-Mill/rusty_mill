@@ -1877,3 +1877,25 @@ fn channel_endpoints_implement_debug() {
     let (tx, rx) = rusty_tokio::sync::watch::channel(0);
     assert_eq!(format!("{tx:?} {rx:?}"), "Sender { .. } Receiver { .. }");
 }
+
+#[test]
+fn dropping_a_receiver_drops_undelivered_values() {
+    let value = Arc::new(());
+    let (tx, rx) = rusty_tokio::sync::mpsc::channel::<Arc<()>>(4);
+    tx.try_send(Arc::clone(&value)).unwrap();
+    drop(rx);
+    assert_eq!(
+        Arc::strong_count(&value),
+        1,
+        "bounded: value outlived its receiver"
+    );
+
+    let (tx, rx) = rusty_tokio::sync::mpsc::unbounded_channel::<Arc<()>>();
+    tx.send(Arc::clone(&value)).unwrap();
+    drop(rx);
+    assert_eq!(
+        Arc::strong_count(&value),
+        1,
+        "unbounded: value outlived its receiver"
+    );
+}
