@@ -224,3 +224,19 @@ impact. Worth its own issue.
    tests keep axum as a dev-dependency.
 3. For `agentgateway`: drop axum only (small), and treat hyper / tower as a
    separate later track (6.3.2)?
+
+**Answered by the owner, 2026-10-22 (in the project thread for #879):**
+
+1. **`rusty_tokio` only.** `rusty_axum` gets no `tokio` dependency and no
+   `tokio` driver. A consumer still on `tokio` libraries wraps its handler
+   futures in a small adapter of its own that enters a
+   `tokio::runtime::Handle` on every poll, and drops the adapter when it
+   leaves `tokio`. A throwaway check passed 200 of 200 `rusty_tokio`
+   tasks that each used tokio sockets, timers, `spawn` and a oneshot
+   channel this way. The cost is two runtimes in one process while a
+   consumer is mid-migration. This replaces the recommendation in 6.3.1.
+2. **Yes, dev-dependencies count**, and `rmcp`, the wire-format oracle,
+   is to be replaced too, so the suggestion in question 2 is withdrawn.
+   ADR-0002 Amendment 1 records the change.
+3. **`agentgateway` drops axum only for now.** Hyper is tracked in #885
+   and tower in #886.
