@@ -46,8 +46,10 @@ at `6ba272c8`):
    arrays the native crates use.
 2. **Selection uses the ADR-0002 section 1 construction, a second time:** a cargo feature
    `native-crypto` that adds the native crates instead of `ring`, and a cfg
-   `--cfg rusty_tls_native_crypto` that a dependency cannot set. It only has effect inside the existing
-   `handrolled-engine` and `rusty_tls_handrolled` gates. Without it the engine uses `ring`, as today.
+   `--cfg rusty_tls_native_crypto` that a dependency cannot set, together with the existing
+   `--cfg rusty_tls_handrolled`. `native-crypto` does not require `handrolled-engine`, so a
+   native build has no direct `ring` dependency (the narrow ADR-0002 §1 exception in ADR-0005,
+   owner decision 2026-10-22). Without the native cfg the engine uses `ring`, as today.
    `rustls`'s own `ring` is untouched.
 3. **Under the native cfg, signing is compiled out:** `sign.rs`, `server.rs`, `server12.rs`, `ticket.rs`
    and `ClientIdentity`. Keeping them would keep `ring` in the graph (decision D3). A client asked for a
@@ -62,7 +64,7 @@ at `6ba272c8`):
 | Check | How |
 | --- | --- |
 | The client-side engine suite under the native backend | A second variant of the `rusty-tls-engine` CI job (`.github/workflows/ci.yml`) with the native cfg. Its client tests against a real `rustls` server then double as interop with a `ring`-backed peer. Server and mTLS suites cannot run there, because section 3 compiles them out, so the variant needs its own list of the tests it supports and its own zero-tests guard. It is **not** equivalent coverage: the existing `ring`-backend job stays unchanged and keeps running everything. |
-| OpenSSL interop and BoGo | OpenSSL interop in the client direction (`handrolled_client12_socket_interop`) runs in the variant. **BoGo does not yet:** its shim drives the engine's server and does not build on the native backend, so a client-only shim is follow-up work; until then BoGo covers the `ring` backend only, at its existing floor (830). This is a deferral of what ADR-0005 decision 4 asks for, and it needs the owner's agreement; it is not equivalent coverage. |
+| OpenSSL interop and BoGo | OpenSSL interop in the client direction (`handrolled_client12_socket_interop`) runs in the variant. **BoGo does not yet:** its shim drives the engine's server and does not build on the native backend, so a client-only shim is follow-up work; until then BoGo covers the `ring` backend only, at its existing floor (830). The owner agreed to this deferral on 2026-10-22 (ADR-0005 decision 4). It is a deferral, not equivalent coverage. |
 | Seam differential | Same keys and inputs through both backends: byte-identical records, secrets and Finished values. RFC 8448 known answers under both. |
 | Constant time | The existing `crypto-constant-time` job covers the primitives; the seam adds no secret-dependent branch or index, checked in review. |
 | Plan section 11 table | Re-checked at the integration commit. |

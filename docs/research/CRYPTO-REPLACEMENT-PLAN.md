@@ -80,6 +80,12 @@ backend, signing, the servers, tickets and client certificates are compiled out,
 is offered first. D5 (AES-GCM's review status) is still open and must be settled before the native
 backend merges.
 
+**Owner decisions (2026-10-22, later): ADR-0002 §1 exception; BoGo deferral.** Asked whether the native
+path should keep requiring `handrolled-engine` (which puts `ring` back as a direct dependency) or take a
+narrow exception to ADR-0002 §1, the owner chose the exception ("(a)"). The owner also agreed to defer BoGo
+on the native backend until a client-only shim exists. Both are recorded in ADR-0005 and are the
+implementer's transcription, not yet restated from the owner's GitHub account.
+
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
 new crates rather than extending `rusty_rsa`; one additive function,

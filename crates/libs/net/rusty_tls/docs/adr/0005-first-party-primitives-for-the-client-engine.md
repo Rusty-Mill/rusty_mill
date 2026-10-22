@@ -1,14 +1,17 @@
 # ADR-0005: First-party cryptographic primitives behind the hand-rolled client engine
 
 Status: **Accepted** — 2026-10-22, client role only. Supersedes ADR-0002 §6 for the
-primitives the hand-rolled engine's client path uses, and for nothing else.
+primitives the hand-rolled engine's client path uses, and makes one narrow exception to
+ADR-0002 §1 for that path's cargo feature (decision 1). Nothing else in ADR-0002 changes.
 Date: 2026-10-08 (drafted as `docs/research/CRYPTO-REPLACEMENT-PLAN.md` §10)
 Accepted: 2026-10-22
 
 *Provenance.* The owner approved this in the working session on 2026-10-22, answering the
 recommendations for decisions D2, D3 and D4 in `docs/research/TLS-NATIVE-CRYPTO-SEAM.md`
-with "Approved". This is the implementer's transcription of that answer, not a statement
-from the owner's GitHub account.
+with "Approved". Later the same day the owner chose the §1 exception in decision 1 ("(a)")
+over keeping `handrolled-engine` as a requirement, and agreed to defer BoGo on the native
+backend (decision 4). Each of these is the implementer's transcription of the owner's
+answer, not a statement from the owner's GitHub account.
 
 ## Context
 
@@ -44,10 +47,17 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
    The backend is chosen by the ADR-0002 §1 construction a second time: a cargo feature
    `native-crypto`, which adds the first-party crates, and the build flag
    `--cfg rusty_tls_native_crypto`, which no dependency can set. They take effect only
-   together with the existing `--cfg rusty_tls_handrolled`. `native-crypto` deliberately does
-   **not** require `handrolled-engine`, so a native build has no direct `ring` dependency
-   and the compiler checks that the engine makes no `ring` call. Without the native cfg the
-   engine uses `ring`, as today.
+   together with the existing `--cfg rusty_tls_handrolled`.
+
+   **This is a narrow exception to ADR-0002 §1** (owner decision, 2026-10-22). §1 requires
+   the `handrolled-engine` feature as well as the cfg. The native path requires
+   `native-crypto` instead and deliberately does not require `handrolled-engine`, so a
+   native build has no direct `ring` dependency and the compiler checks that the engine
+   makes no `ring` call. What §1 relies on is unchanged: a cfg that only the person running
+   the build can set, so feature unification cannot select the engine or its backend. The
+   feature still keeps the first-party crates out of the graph for anyone who does not
+   enable it. The exception covers only this path, and without the native cfg the engine
+   uses `ring` under §1 as written.
 2. **Under the native backend, signing is compiled out (D3).** `sign.rs`, the TLS 1.3 and
    1.2 servers, session tickets and `ClientIdentity` do not exist in that build, so the
    engine makes no `ring` call at all. `ring` stays in the build regardless, because
@@ -64,8 +74,8 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
    engine job runs the client-side suites under the native backend, with its own list of
    supported tests and zero-tests guard. A native BoGo floor needs a client-only BoGo shim,
    because the current shim drives the engine's server. Until one exists, BoGo covers the
-   `ring` backend only. That is a deferral the owner must agree to, not equivalent
-   coverage. A seam differential runs the same keys and inputs through both backends. The `crypto-constant-time` job and the plan's §11
+   `ring` backend only. The owner agreed to this deferral on 2026-10-22. It is a deferral,
+   not equivalent coverage, and a client-only shim is the follow-up. A seam differential runs the same keys and inputs through both backends. The `crypto-constant-time` job and the plan's §11
    table apply. The `ring` job keeps full coverage. The secret-handling primitives listed
    under Context (HMAC/HKDF, the AEADs, X25519, ECDH) each keep their crate's constant-time
    evidence and review requirement. Constant-time claims stay "no leak found by these

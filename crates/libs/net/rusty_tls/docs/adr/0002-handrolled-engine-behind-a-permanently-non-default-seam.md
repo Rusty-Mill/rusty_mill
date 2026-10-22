@@ -66,6 +66,12 @@ This is the same construction `tokio` uses for `tokio_unstable` and
 for "must not be reachable by feature unification," which is why it is the one
 chosen here.
 
+**One exception (2026-10-22, ADR-0005).** The engine's native-crypto client path is gated by
+`native-crypto` and `--cfg rusty_tls_native_crypto` together with `--cfg rusty_tls_handrolled`,
+and does not require `handrolled-engine`. That build then has no direct `ring` dependency. The
+cfg half of this section, which carries the guarantee, applies unchanged. Everywhere else, the
+two gates above stand as written.
+
 ### 2. Enabling the feature without the cfg is a documented no-op, not a silent one
 
 `feature = "handrolled-engine"` without `--cfg rusty_tls_handrolled` compiles a
@@ -584,7 +590,8 @@ Revisiting that is its own issue, with its own ADR, and nothing here should be
 read as a step toward it.
 
 **Superseded for the client path (2026-10-22).** ADR-0005 lets the engine's client path
-use first-party primitives behind its own feature and cfg, with signing compiled out. This
+use first-party primitives behind its own feature and cfg, with signing compiled out (and
+makes the narrow §1 exception noted there). This
 section still governs everything else, and `ring` is still the engine's default backend.
 
 ## Alternatives considered
