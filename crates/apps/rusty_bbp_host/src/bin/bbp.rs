@@ -20,7 +20,7 @@
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N]
-//! bbp slot-hold --group G                 holds the slot lock on stdin until process group G is empty; started by bbp mod
+//! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
@@ -46,11 +46,7 @@ fn run() -> Result<String, String> {
     }
     let a = Args::parse(argv.into_iter().skip(1));
     if sub == "slot-hold" {
-        let group = a
-            .flag("group")?
-            .parse()
-            .map_err(|_| "--group must be a number")?;
-        slots::hold_while_alive(group);
+        slots::hold_while_alive();
         return Ok(String::new());
     }
     if sub == "profiles" {

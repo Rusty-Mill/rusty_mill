@@ -315,8 +315,9 @@ struct Harness {
     /// harness leaves the list (after it is reaped). The child holds the same
     /// lock through its stdin, so the slot stays taken while it lives.
     _slot: Option<Slot>,
-    /// The `bbp slot-hold` process that keeps the slot while the harness's
-    /// process group has a member, should this moderator die first.
+    /// The `bbp slot-hold` process that leads the harness's process group
+    /// and keeps the slot while the group has another member, should this
+    /// moderator die first.
     hold: Option<Child>,
 }
 
@@ -343,12 +344,18 @@ fn admit(cfg: &Config, class: Class) -> Result<Option<(Option<Slot>, Stdio)>, St
 }
 
 impl Harness {
-    /// Kill the harness's process group (its broker included), then its
-    /// slot holder, and reap them all.
+    /// The harness's process group: its slot holder's, or its own.
+    fn group(&self) -> u32 {
+        self.hold.as_ref().map_or(self.child.id(), Child::id)
+    }
+
+    /// Kill the harness's process group (its broker and slot holder
+    /// included) and reap them all, the group's leader last.
     fn stop(&mut self) -> Result<(), String> {
-        let harness = kill_tree(&mut self.child);
-        let broker = self.broker.as_mut().map_or(Ok(()), kill_tree);
-        let hold = self.hold.as_mut().map_or(Ok(()), kill_tree);
+        let group = self.group();
+        let harness = kill_tree(&mut self.child, group);
+        let broker = self.broker.as_mut().map_or(Ok(()), |b| kill_tree(b, group));
+        let hold = self.hold.as_mut().map_or(Ok(()), |h| kill_tree(h, group));
         // Nothing runs in the worktree any more; a leftover is replaced by
         // the next turn of the same number, so failing to remove it is not fatal.
         if let Some(Err(e)) = self.confined.as_ref().map(Turn::finish) {
@@ -442,6 +449,7 @@ impl Drop for Supervision {
 /// The child's exit status once it has exited, without reaping it: an
 /// unreaped child keeps its process-group id reserved, so [`kill_tree`] can
 /// still kill what it forked without reaching a group that reused the id.
+/// (A slot holder, the group's leader, is reaped after the harness.)
 #[cfg(target_os = "linux")]
 fn exited(child: &mut Child) -> Result<Option<String>, String> {
     use rusty_libc::wait::{waitid, CLD_EXITED, P_PID, WEXITED, WNOHANG, WNOWAIT};
@@ -462,12 +470,12 @@ fn exited(child: &mut Child) -> Result<Option<String>, String> {
         .map_err(|e| format!("harness wait: {e}"))
 }
 
-/// `SIGKILL` the child's process group (the harness and everything it
-/// forked), then reap the child. A group that is already gone is fine.
-fn kill_tree(child: &mut Child) -> Result<(), String> {
+/// `SIGKILL` process group `group` (the harness and everything it forked),
+/// then the child, and reap the child. A group that is already gone is fine.
+fn kill_tree(child: &mut Child, group: u32) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let group = i32::try_from(child.id()).map_err(|_| "pid out of range".to_owned())?;
+        let group = i32::try_from(group).map_err(|_| "pid out of range".to_owned())?;
         match rusty_libc::process::killpg(group, rusty_libc::signal::SIGKILL) {
             Ok(()) | Err(rusty_libc::Errno::ESRCH) => {}
             Err(e) => return Err(format!("killpg({group}): {e:?}")),
@@ -706,29 +714,32 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 .get(&role)
                 .cloned()
                 .ok_or_else(|| format!("{role} has no principal"))?;
-            let launched = spawn(cfg, l, &role, &principal, turn, stdin)?;
-            let mut harness = Harness {
+            // The holder is up before the harness, so the slot never rests on
+            // this moderator alone.
+            let mut hold = slot.as_ref().map(|s| s.holder(&cfg.bbp)).transpose()?;
+            let group = hold.as_ref().map(Child::id);
+            let launched = match spawn(cfg, l, &role, &principal, turn, stdin, group) {
+                Ok(launched) => launched,
+                Err(e) => {
+                    if let Some(Err(k)) = hold.as_mut().map(|h| kill_tree(h, h.id())) {
+                        eprintln!("bbp mod: slot holder for turn {} not stopped: {k}", turn.0);
+                    }
+                    return Err(e);
+                }
+            };
+            // The group has its member: the holder may start watching it.
+            if let Some(h) = hold.as_mut() {
+                drop(h.stdin.take());
+            }
+            sup.harnesses.push(Harness {
                 turn,
                 child: launched.child,
                 broker: launched.broker,
                 confined: launched.confined,
                 ended: None,
-                _slot: None,
-                hold: None,
-            };
-            if let Some(slot) = slot {
-                match slot.hold_for(&cfg.bbp, harness.child.id()) {
-                    Ok(hold) => harness.hold = Some(hold),
-                    Err(e) => {
-                        if let Err(k) = harness.stop() {
-                            eprintln!("bbp mod: harness for turn {} not stopped: {k}", turn.0);
-                        }
-                        return Err(e);
-                    }
-                }
-                harness._slot = Some(slot);
-            }
-            sup.harnesses.push(harness);
+                _slot: slot,
+                hold,
+            });
         }
         std::thread::sleep(cfg.poll);
     }
@@ -933,6 +944,7 @@ fn spawn(
     principal: &PrincipalId,
     turn: TurnId,
     stdin: Stdio,
+    group: Option<u32>,
 ) -> Result<Launched, String> {
     let bbp = &cfg.bbp;
     let confined = l
@@ -1003,18 +1015,30 @@ fn spawn(
     cmd.stdin(stdin)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err));
-    // Its own process group, so everything the harness forks dies with it.
+    // Its slot holder's process group, or its own, so everything the
+    // harness forks dies with it.
     #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    std::os::unix::process::CommandExt::process_group(
+        &mut cmd,
+        i32::try_from(group.unwrap_or(0)).map_err(|_| "pid out of range".to_owned())?,
+    );
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", l.program))?;
+    let group = group.unwrap_or(child.id());
     let broker = match &confined {
         None => None,
-        Some(t) => match t.broker(cfg, principal, turn, child.id(), Stdio::from(broker_log)) {
+        Some(t) => match t.broker(
+            cfg,
+            principal,
+            turn,
+            child.id(),
+            group,
+            Stdio::from(broker_log),
+        ) {
             Ok(broker) => Some(broker),
             Err(e) => {
-                kill_tree(&mut child)?;
+                kill_tree(&mut child, group)?;
                 return Err(e);
             }
         },
