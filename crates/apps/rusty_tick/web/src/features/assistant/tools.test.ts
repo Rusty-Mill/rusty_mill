@@ -177,4 +177,11 @@ describe('update_task', () => {
     expect(await run(c, 'update_task', { query: 'Add to list groceries', due: 'friday' })).toEqual({ title: 'Add to list groceries', due: expect.any(String) })
     expect(done).toEqual([`update g ${JSON.stringify({ dueMs: new Date(2026, 9, 23).getTime(), isAllDay: true })}`])
   })
+
+  it('moves the task named to the list named whole, even with "to list" in it', async () => {
+    const { c, done } = context([task('m', 'Buy milk'), task('q', 'Buy milk to list "Things')])
+    c.entities.lists.push(list('t', 'Things to list Work'))
+    expect(await run(c, 'update_task', { query: 'Buy milk', list: 'Things to list Work' })).toEqual({ title: 'Buy milk', list: 'Things to list Work' })
+    expect(done).toEqual(['move m t'])
+  })
 })

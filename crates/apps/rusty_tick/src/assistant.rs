@@ -216,9 +216,9 @@ enum Cut<'a> {
 }
 
 /// Cut `rest` ("X to Y") without guessing. A quoted name ends at its closing
-/// quote, " to " inside it included; a quoted new value starts at the " to "
-/// just before it. Otherwise a rename needs exactly one " to ", while a move or
-/// a priority cuts at the last one: a day or a priority never holds " to ".
+/// quote; otherwise only a " to " outside quotes can be the cut (`separators`),
+/// a rename needs exactly one, and a move or a priority takes the last: a day
+/// or a priority never holds " to ".
 fn cut<'a>(rest: &'a str, field: &str) -> Cut<'a> {
     let rest = rest.trim();
     if let Some((open, close)) = [('“', '”'), ('"', '"')]
@@ -237,17 +237,11 @@ fn cut<'a>(rest: &'a str, field: &str) -> Cut<'a> {
             _ => Cut::Missing,
         };
     }
-    let lower = rest.to_ascii_lowercase();
-    let cuts: Vec<usize> = lower.match_indices(" to ").map(|(at, _)| at).collect();
-    let quoted_value = cuts
-        .iter()
-        .rev()
-        .find(|&&at| rest[at + 4..].trim_start().starts_with(['“', '"']));
-    let at = match (quoted_value, cuts.as_slice()) {
-        (Some(&at), _) | (None, &[at]) => at,
-        (None, &[.., last]) if field != "title" => last,
-        (None, &[]) => return Cut::Missing,
-        (None, _) => return Cut::Ambiguous,
+    let at = match *separators(rest).as_slice() {
+        [at] => at,
+        [.., last] if field != "title" => last,
+        [] => return Cut::Missing,
+        _ => return Cut::Ambiguous,
     };
     Cut::At(unquote(&rest[..at]), unquote(&rest[at + 4..]))
 }
@@ -327,9 +321,10 @@ fn list_name(clause: &str) -> Option<&str> {
 
 /// "move X to list Y", "move X to the Y list" or "move X to (the) inbox": a move
 /// between lists. Only the destination clause can name the list: a quoted task
-/// name ends at its closing quote, and an unquoted one at the last " to " whose
-/// rest is a whole list name, so "to list" inside a title is never taken for
-/// it. Anything else is not a list move, and stays a move to a day.
+/// name ends at its closing quote, and an unquoted one at the last " to "
+/// outside quotes whose rest is a whole list name, so "to list" inside a title
+/// or a quoted list name is never taken for the cut. Anything else is not a
+/// list move, and stays a move to a day.
 fn list_move(text: &str, prefix: &str) -> Option<Reply> {
     let rest = text[prefix.len()..].trim();
     if let Some((open, close)) = [('“', '”'), ('"', '"')]
@@ -350,11 +345,34 @@ fn list_move(text: &str, prefix: &str) -> Option<Reply> {
     {
         return Some(list_call("", name));
     }
-    let lower = rest.to_ascii_lowercase();
-    lower.rmatch_indices(" to ").find_map(|(at, _)| {
+    separators(rest).into_iter().rev().find_map(|at| {
         let name = list_name(rest[at + " to ".len()..].trim())?;
         Some(list_call(unquote(&rest[..at]), name))
     })
+}
+
+/// Byte offsets of each " to " in `text` outside quotes ("…" or “…”): the only
+/// places a command may be cut, so no quoted name is ever split. An unclosed
+/// quote runs to the end, so it offers no cut and the person is asked.
+fn separators(text: &str) -> Vec<usize> {
+    let mut quote: Option<char> = None;
+    let mut out = Vec::new();
+    for (at, ch) in text.char_indices() {
+        match (quote, ch) {
+            (None, '"') => quote = Some('"'),
+            (None, '“') => quote = Some('”'),
+            (Some(close), c) if c == close => quote = None,
+            (None, ' ')
+                if text
+                    .get(at..at + 4)
+                    .is_some_and(|w| w.eq_ignore_ascii_case(" to ")) =>
+            {
+                out.push(at)
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn list_call(query: &str, list: &str) -> Reply {
@@ -711,6 +729,21 @@ mod tests {
             call(
                 UPDATE_TASK,
                 json!({"query": "add to list groceries", "list": "Shopping"})
+            )
+        );
+        // A " to " inside a quoted list name is never the cut.
+        assert_eq!(
+            decide(&input("move Buy milk to list \"Things to list Work\"")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "Buy milk", "list": "Things to list Work"})
+            )
+        );
+        assert_eq!(
+            decide(&input("move Buy milk to the “Things to do” list")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "Buy milk", "list": "Things to do"})
             )
         );
         // Still a day: it does not end in a list.
