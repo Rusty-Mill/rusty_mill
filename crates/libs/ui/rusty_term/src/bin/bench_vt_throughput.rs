@@ -19,12 +19,12 @@
 //!   cargo run --release --bin bench_vt_throughput               # all workloads, 20 iterations each
 //!   cargo run --release --bin bench_vt_throughput -- 100         # 100 iterations each
 //!   cargo run --release --bin bench_vt_throughput -- 50 bench/workloads/sgr_churn.vt
-//!   cargo run --release --bin bench_vt_throughput -- 20 --floors bench/floors.txt
+//!   cargo run --release --bin bench_vt_throughput -- --once bench/workloads/scroll_heavy.vt
 //!
-//! `--floors FILE` turns the run into a regression gate (the CI bench job):
-//! each line of FILE is `<workload> <minimum MB/s>`; the run prints a markdown
-//! table of measured vs. floor and exits 1 if any workload falls below its
-//! floor or a floored workload is missing.
+//! `--once` feeds each file through the parser exactly once, with no warmup,
+//! timing or latency pass, and prints nothing. It exists to be run under an
+//! instruction counter (`bench/ir_gate.py` runs it under cachegrind), where
+//! the deterministic count, not wall-clock time, is the CI regression gate.
 
 use std::env;
 use std::fs;
@@ -80,18 +80,17 @@ fn percentile_ns(sorted_ns: &[u64], p: f64) -> u64 {
     sorted_ns[idx.min(sorted_ns.len() - 1)]
 }
 
-/// Run one workload; returns its name and MB/s, or `None` if it was skipped.
-fn bench_one(path: &str, iterations: u32) -> Option<(String, f64)> {
+fn bench_one(path: &str, iterations: u32) {
     let data = match fs::read(path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("skip {path}: {e}");
-            return None;
+            return;
         }
     };
     if data.is_empty() {
         eprintln!("skip {path}: empty file");
-        return None;
+        return;
     }
 
     feed(&data, 1); // warmup
@@ -132,53 +131,6 @@ fn bench_one(path: &str, iterations: u32) -> Option<(String, f64)> {
         percentile_ns(&latencies_ns, 99.0),
         percentile_ns(&latencies_ns, 99.9),
     );
-    Some((name.to_owned(), mb_per_s))
-}
-
-/// Parse a floors file: `<workload> <min MB/s>` per line; blank lines and
-/// `#` comments are ignored.
-fn parse_floors(text: &str) -> Result<Vec<(String, f64)>, String> {
-    let mut floors = Vec::new();
-    for (n, line) in text.lines().enumerate() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let (Some(name), Some(min), None) = (parts.next(), parts.next(), parts.next()) else {
-            return Err(format!("line {}: expected `<workload> <min MB/s>`", n + 1));
-        };
-        let min: f64 = min
-            .parse()
-            .map_err(|_| format!("line {}: `{min}` is not a number", n + 1))?;
-        floors.push((name.to_owned(), min));
-    }
-    Ok(floors)
-}
-
-/// Compare results with floors: a markdown table, and the failures (a
-/// workload below its floor, or a floored workload that did not run).
-fn check_floors(results: &[(String, f64)], floors: &[(String, f64)]) -> (String, Vec<String>) {
-    let mut table = String::from("| workload | MB/s | floor | |\n|---|---:|---:|---|\n");
-    let mut failures = Vec::new();
-    for (name, min) in floors {
-        match results.iter().find(|(r, _)| r == name) {
-            Some((_, mbps)) => {
-                let ok = *mbps >= *min;
-                table.push_str(&format!(
-                    "| {name} | {mbps:.1} | {min:.1} | {} |\n",
-                    if ok { "ok" } else { "**below floor**" }
-                ));
-                if !ok {
-                    failures.push(format!(
-                        "{name}: {mbps:.1} MB/s is below the {min:.1} MB/s floor"
-                    ));
-                }
-            }
-            None => failures.push(format!("{name}: has a floor but did not run")),
-        }
-    }
-    (table, failures)
 }
 
 fn discover_workloads(dir: &str) -> Vec<String> {
@@ -197,24 +149,19 @@ fn discover_workloads(dir: &str) -> Vec<String> {
 
 fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
-    let floors = match args.iter().position(|a| a == "--floors") {
-        Some(i) => {
-            let Some(path) = args.get(i + 1).cloned() else {
-                eprintln!("--floors needs a file argument");
-                std::process::exit(2);
-            };
-            args.drain(i..=i + 1);
-            let text = fs::read_to_string(&path).unwrap_or_else(|e| {
-                eprintln!("cannot read floors file {path}: {e}");
-                std::process::exit(2);
-            });
-            Some(parse_floors(&text).unwrap_or_else(|e| {
-                eprintln!("{path}: {e}");
-                std::process::exit(2);
-            }))
+    if let Some(i) = args.iter().position(|a| a == "--once") {
+        args.remove(i);
+        for path in &args {
+            match fs::read(path) {
+                Ok(data) => feed(&data, 1),
+                Err(e) => {
+                    eprintln!("{path}: {e}");
+                    std::process::exit(2);
+                }
+            }
         }
-        None => None,
-    };
+        return;
+    }
 
     let (iterations, rest): (u32, &[String]) =
         match args.first().and_then(|s| s.parse::<u32>().ok()) {
@@ -239,63 +186,7 @@ fn main() {
     println!(
         "--- rusty_term parser+grid throughput ({COLS}x{ROWS} grid, {CHUNK}B chunks, x{iterations} each) ---"
     );
-    let results: Vec<(String, f64)> = paths
-        .iter()
-        .filter_map(|path| bench_one(path, iterations))
-        .collect();
-
-    let Some(floors) = floors else { return };
-    let (table, failures) = check_floors(&results, &floors);
-    println!("\n{table}");
-    if !failures.is_empty() {
-        for f in &failures {
-            eprintln!("FLOOR: {f}");
-        }
-        std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn floors_parse_with_comments_and_blanks() {
-        let f = parse_floors("# header\n\nascii_throughput 6.5  # note\nscroll_heavy 2\n").unwrap();
-        assert_eq!(
-            f,
-            vec![
-                ("ascii_throughput".into(), 6.5),
-                ("scroll_heavy".into(), 2.0)
-            ]
-        );
-    }
-
-    #[test]
-    fn floors_reject_malformed_lines() {
-        assert!(
-            parse_floors("ascii_throughput")
-                .unwrap_err()
-                .contains("line 1")
-        );
-        assert!(parse_floors("a 1 2").is_err());
-        assert!(parse_floors("a fast").unwrap_err().contains("not a number"));
-    }
-
-    #[test]
-    fn check_flags_slow_and_missing_workloads() {
-        let floors = vec![("a".into(), 10.0), ("b".into(), 5.0), ("c".into(), 1.0)];
-        let results = vec![("a".into(), 12.0), ("b".into(), 4.0)];
-        let (table, failures) = check_floors(&results, &floors);
-        assert_eq!(failures.len(), 2);
-        assert!(failures[0].starts_with("b:"));
-        assert!(failures[1].contains("did not run"));
-        assert!(table.contains("| a | 12.0 | 10.0 | ok |"));
-    }
-
-    #[test]
-    fn check_passes_at_or_above_floor() {
-        let floors = vec![("a".into(), 10.0)];
-        assert!(check_floors(&[("a".into(), 10.0)], &floors).1.is_empty());
+    for path in &paths {
+        bench_one(path, iterations);
     }
 }

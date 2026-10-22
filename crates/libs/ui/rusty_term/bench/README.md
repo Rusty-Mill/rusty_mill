@@ -50,7 +50,8 @@ Feeds each `bench/workloads/*.vt` file through `AnsiParser::advance` +
 untimed warmup pass per file. No process spawn, no PTY, no display — just
 the parser and grid doing their job. It has no external dependencies and
 nothing to skip, so it is the piece CI runs: the `rusty-term-bench` job (see
-below) gates every PR that affects `rusty_term_core` or `rusty_term`.
+below) gates every PR that affects `rusty_term_core` or `rusty_term` on its
+instruction count.
 
 ```sh
 cargo run --release --bin bench_vt_throughput                 # all workloads, 20 iterations each
@@ -67,25 +68,30 @@ so a large throughput run doesn't also blow up the latency pass — so
 keystroke-to-pixel input latency; there's no render in this binary to
 measure that against.
 
-### Throughput floors (CI)
+### Instruction-count gate (CI)
 
-`--floors FILE` turns a run into a regression gate. Each line of
-[`floors.txt`](floors.txt) is `<workload> <minimum MB/s>`. The run prints a
-markdown table of measured vs. floor and exits 1 if a workload is below its
-floor or did not run. CI runs exactly this:
+The CI `rusty-term-bench` job fails on instructions, not on time. It prints
+`bench_vt_throughput 20` MB/s to the job summary for information only, then
+runs [`ir_gate.py`](ir_gate.py), which counts the instructions of one
+`bench_vt_throughput --once <workload>` pass under valgrind's cachegrind,
+divides by the workload's size, and fails if any workload exceeds its ceiling
+in [`ir_ceilings.txt`](ir_ceilings.txt):
 
 ```sh
 python3 bench/gen_workloads.py --size quick
 cargo build --release -p rusty_term --bin bench_vt_throughput
-../../../../target/release/bench_vt_throughput 20 --floors bench/floors.txt
+python3 bench/ir_gate.py --bin ../../../../target/release/bench_vt_throughput
 ```
 
-The floors sit at about half the slowest measured run, because runner noise
-is around ±20%, so only a real regression fails. The table lands in the job
-summary, so each run records its numbers. **Ratchet:** a PR that speeds a
-workload up raises that workload's floor to about half the new number in the
-same PR. The baseline and the libghostty-vt reference numbers are in
-`docs/research/RUSTY-TERM-PERF-BACKLOG.md` §2.1.
+Instruction counts are deterministic for a given binary and input, so the
+gate cannot flake on a slow or busy runner. The one host dependency, glibc
+choosing a `rep movsb` memmove on CPUs with ERMS/FSRM (about 8x more counted
+instructions on scroll-heavy input), is pinned off with `GLIBC_TUNABLES`.
+
+Ceilings are the measured count plus 10% for toolchain codegen drift.
+**Ratchet:** a PR that lowers a workload's count lowers its ceiling to about
++10% of the new value in the same PR. The baseline and the libghostty-vt
+reference throughput are in `docs/research/RUSTY-TERM-PERF-BACKLOG.md` §2.1.
 
 ## `run_bench.py` (cross-terminal)
 

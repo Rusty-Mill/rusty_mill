@@ -794,21 +794,26 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run build
 
-  # rusty_term parser+grid throughput floor. The engine rewrites in
+  # rusty_term parser+grid throughput gate. The engine rewrites in
   # docs/research/RUSTY-TERM-PERF-BACKLOG.md are performance work; without
   # this job a regression would only show when someone re-ran the bench by
-  # hand. Floors in bench/floors.txt sit at about half the measured MB/s, so
-  # runner noise passes and a real slowdown fails; a PR that speeds a
-  # workload up raises its floor (ratchet). The table goes to the job summary.
+  # hand. The failing check is deterministic: instructions per input byte
+  # under cachegrind (bench/ir_gate.py), against bench/ir_ceilings.txt, with
+  # glibc's memmove variant pinned so the count does not depend on the
+  # runner's CPU. Wall-clock MB/s is printed to the job summary for
+  # information only and never fails the build.
   rusty-term-bench:
     concurrency:
       group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-term-bench
       queue: max
       cancel-in-progress: false
-    name: rusty_term throughput floor (bench_vt_throughput)
+    name: rusty_term instruction-count gate (bench_vt_throughput)
     needs: plan
     if: needs.plan.outputs.term_bench == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/libs/ui/rusty_term
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -818,16 +823,32 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
           shared-key: rusty-term-bench
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version
+      - name: Gate script unit tests
+        run: python3 -m unittest discover -s bench -p 'test_*.py' -v
       - name: Build bench_vt_throughput (release)
         run: cargo build --release --locked -p rusty_term --bin bench_vt_throughput
       - name: Generate quick workloads
-        working-directory: crates/libs/ui/rusty_term
         run: python3 bench/gen_workloads.py --size quick
-      - name: Throughput vs floors
-        working-directory: crates/libs/ui/rusty_term
+      - name: Throughput (informational, never fails)
+        run: |
+          {
+            echo "### rusty_term throughput (MB/s, informational)"
+            echo '```'
+            ../../../../target/release/bench_vt_throughput 20 || echo "bench run failed (informational)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Instructions per byte vs ceilings (the gate)
         run: |
           set -o pipefail
-          ../../../../target/release/bench_vt_throughput 20 --floors bench/floors.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### rusty_term instructions per byte (cachegrind)"
+            python3 bench/ir_gate.py --bin ../../../../target/release/bench_vt_throughput
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # rusty_tick's web UI (Vite/React). Typecheck, unit tests (jsdom over the
   # in-memory adapter) and the production build; the Playwright run against
