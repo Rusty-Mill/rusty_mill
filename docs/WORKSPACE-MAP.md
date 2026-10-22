@@ -39,7 +39,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_percent | rusty_percent | Hand-rolled, dependency-free percent-encoding for URL components and query strings: RFC 3986 unreserved encode, lenient decode, form decode ('+' is a space). | 11 |
 | foundation | rusty_pk | rusty_pk | Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, X25519, ECDH on P-256 and P-384. Portable, no unsafe. Stages 2 and 4 and gap 2 of the native ring replacement plan. | 0 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 11 |
-| foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 5 |
+| foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 6 |
 | foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. | 8 |
 | foundation | rusty_rsa | rusty_rsa | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256 -- the primitives rusty_oauth and rusty_rdp each independently reimplemented for their own RSA public-key verification/encryption. Named for the primary use case; BigUint is general-purpose (rusty_oauth's own ECC/ES256 code also builds on it) and SHA-256 is a general hash, not RSA-specific -- see lib.rs. | 6 |
 | foundation | rusty_serde | rusty_serde | A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format. | 14 |
@@ -110,9 +110,9 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_git | rusty_git | Pure Rust implementation of Git object model, index, refs, and CLI binary | 1 |
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
-| libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 1 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 28 |
-| libs | rusty_hyper | rusty_hyper | HTTP/2-only client and server packaging over rusty_h2: connect(url) for plain h2c or TLS with ALPN h2, serve(listener, tls, handler), timeouts, keepalive and graceful shutdown. No HTTP/1.1. | 0 |
+| libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 2 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 29 |
+| libs | rusty_hyper | rusty_hyper | HTTP/2-only client and server packaging over rusty_h2: connect(url) for plain h2c or TLS with ALPN h2, serve(listener, tls, handler), timeouts, keepalive and graceful shutdown. No HTTP/1.1. | 1 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
@@ -128,7 +128,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 9 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 13 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
-| libs | rusty_prost | rusty_prost | Dependency-free Protobuf message layer on rusty_protobuf: a Message trait for hand-written schemas, and the well-known types (Timestamp, Any, Struct, Value, ...) plus google.rpc Status and ErrorInfo. No derive, no code generation. | 1 |
+| libs | rusty_prost | rusty_prost | Dependency-free Protobuf message layer on rusty_protobuf: a Message trait for hand-written schemas, and the well-known types (Timestamp, Any, Struct, Value, ...) plus google.rpc Status and ErrorInfo. No derive, no code generation. | 2 |
 | libs | rusty_protobuf | rusty_protobuf | Dependency-free Protobuf wire-format runtime: a zero-copy reader that returns errors instead of panicking on hostile input, and a length-fixing writer. No code generation; schemas are hand-written on top. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
 | libs | rusty_rag | rusty_rag | Sovereign AI Retrieval-Augmented Generation (RAG) &amp; Question Answering Engine for Rusty Mill | 0 |
@@ -152,15 +152,17 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_sqlite | rusty_sqlite | A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management. | 10 |
 | libs | rusty_stream | rusty_stream | Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio. | 0 |
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
+| libs | rusty_term | rusty_term_core | rusty_term's headless VT engine: parser, grid, scrollback and OSC handling, with no async runtime, PTY or renderer. | 1 |
 | libs | rusty_term | rusty_term_l13 | rusty_term's L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP + LSP/ACP negotiation, addressed against a narrow TerminalState trait rather than rusty_term's own Grid type. | 1 |
-| libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 8 |
-| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 21 |
+| libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 9 |
+| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 22 |
 | libs | rusty_tokio | rusty_tokio-macros | Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports. | 1 |
 | libs | rusty_tonic | rusty_tonic | Dependency-free gRPC protocol core: status codes and error details, validated metadata, message framing with a receive limit, grpc-timeout, and request/response header lists. Sans-IO; no async, no HTTP/2, no code generation. | 0 |
 | libs | rusty_ttf_parser | rusty-ttf-parser | A #![no_std], allocation-free, zero-dependency TrueType/OpenType reader: cmap, GSUB lookups and PNG colour bitmaps | 1 |
 | libs | rusty_vulkan | rusty_vulkan | A #![no_std] + alloc sovereign raw Vulkan / Metal hardware command buffer and GPU surface layer | 1 |
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) | 1 |
 | libs | rusty_wiremock | rusty_wiremock | A blocking std::net HTTP mock server that answers canned responses, for Rusty Mill test suites | 4 |
+| libs | rusty_worktree | rusty_worktree | Git worktrees that share one repository's object store, driven through the git CLI with hooks off and the git directory always named explicitly | 2 |
 | apps | coreutils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities | 0 |
 | apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. | 0 |
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) | 0 |

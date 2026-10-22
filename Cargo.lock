@@ -7551,12 +7551,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "multimap"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
-
-[[package]]
 name = "murmur3"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9698,27 +9692,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prost-build"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
-dependencies = [
- "heck 0.5.0",
- "itertools 0.14.0",
- "log",
- "multimap",
- "petgraph",
- "prettyplease 0.2.37",
- "prost",
- "prost-types",
- "pulldown-cmark",
- "pulldown-cmark-to-cmark",
- "regex",
- "syn 2.0.119",
- "tempfile",
-]
-
-[[package]]
 name = "prost-derive"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9748,26 +9721,6 @@ dependencies = [
  "compat",
  "contract",
  "crossterm 0.29.0",
-]
-
-[[package]]
-name = "pulldown-cmark"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
-dependencies = [
- "bitflags 2.13.1",
- "memchr",
- "unicase",
-]
-
-[[package]]
-name = "pulldown-cmark-to-cmark"
-version = "22.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab1ad36992cead65f02aa399a373a42730922f1525d988172634fdefdecb8a60"
-dependencies = [
- "pulldown-cmark",
 ]
 
 [[package]]
@@ -12165,6 +12118,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.9",
+ "bytes",
  "chrono",
  "ed25519-dalek 3.0.0",
  "eventsource-stream",
@@ -12172,12 +12126,11 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "p256 0.14.0",
- "prost",
- "prost-types",
  "reqwest 0.13.4",
  "rusty_base64",
  "rusty_ip",
  "rusty_log",
+ "rusty_prost",
  "rusty_retry",
  "rusty_uuid",
  "serde",
@@ -12188,9 +12141,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tonic-types",
 ]
 
 [[package]]
@@ -12269,6 +12219,7 @@ dependencies = [
  "rusty_rand",
  "rusty_sandbox",
  "rusty_serde",
+ "rusty_worktree",
 ]
 
 [[package]]
@@ -12722,6 +12673,7 @@ dependencies = [
  "rusty_mill_board",
  "rusty_sandbox",
  "rusty_serve",
+ "rusty_worktree",
  "serde",
  "serde_json",
  "uuid",
@@ -13015,23 +12967,31 @@ dependencies = [
  "pollster 0.3.0",
  "rusty-ttf-parser",
  "rusty_atomic_file",
- "rusty_base64",
  "rusty_dirs",
  "rusty_font",
  "rusty_gpu",
  "rusty_gui",
- "rusty_hex",
  "rusty_regx",
  "rusty_sha1",
- "rusty_term_l13",
+ "rusty_term_core",
  "rusty_win32",
  "softbuffer",
  "tokio",
- "unicode-segmentation",
- "unicode-width 0.2.2",
  "wgpu 22.1.0",
  "windows-sys 0.59.0",
  "winit",
+]
+
+[[package]]
+name = "rusty_term_core"
+version = "0.1.1"
+dependencies = [
+ "rusty_base64",
+ "rusty_hex",
+ "rusty_regx",
+ "rusty_term_l13",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -13079,7 +13039,7 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty_tls"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "platform",
  "platform-bsd",
@@ -13124,10 +13084,23 @@ dependencies = [
 name = "rusty_tonic"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
+ "http",
+ "prost",
+ "rcgen",
+ "rustls",
  "rusty_base64",
+ "rusty_h2",
+ "rusty_http",
+ "rusty_hyper",
  "rusty_percent",
  "rusty_prost",
+ "rusty_tls",
+ "rusty_tokio",
+ "tokio",
  "tonic",
+ "tonic-prost",
+ "tower",
 ]
 
 [[package]]
@@ -13174,6 +13147,10 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty_wiremock"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_worktree"
 version = "0.1.0"
 
 [[package]]
@@ -16047,18 +16024,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tonic-build"
-version = "0.14.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c68f61875ac5293cf72e6c8cf0158086428c82c37229e98c840878f1706b0322"
-dependencies = [
- "prettyplease 0.2.37",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "tonic-prost"
 version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16066,33 +16031,6 @@ checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
  "bytes",
  "prost",
- "tonic",
-]
-
-[[package]]
-name = "tonic-prost-build"
-version = "0.14.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "654e5643eff75d7f8c99197ce1440ed19a3474eada74c12bbac488b2cafdae27"
-dependencies = [
- "prettyplease 0.2.37",
- "proc-macro2",
- "prost-build",
- "prost-types",
- "quote",
- "syn 2.0.119",
- "tempfile",
- "tonic-build",
-]
-
-[[package]]
-name = "tonic-types"
-version = "0.14.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73ab1b02061f83d519bba3caa167f88f261ef05720ab8ebc954ade70de3348e8"
-dependencies = [
- "prost",
- "prost-types",
  "tonic",
 ]
 
@@ -16596,12 +16534,6 @@ checksum = "96bd2f2237fe450fcd0a1d2f5f4e91711124f7857ba2e964247776ebeeb7b0c4"
 dependencies = [
  "unic-common",
 ]
-
-[[package]]
-name = "unicase"
-version = "2.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-bidi"

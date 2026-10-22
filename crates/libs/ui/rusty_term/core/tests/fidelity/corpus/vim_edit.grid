@@ -1,0 +1,56 @@
+size 80x24 cursor 4,8 visible=true alt=true
+|  1 001 plain ascii line with some words to wrap and scroll
+|  2 002 plain ascii line with some words to wrap and scroll
+|  3 003 plain ascii line with some words to wrap and scroll
+|  4 004 plain ascii line with some words to wrap and scroll
+|  5 005 plain ascii line with some words to wrap and scroll
+|  6 006 plain ascii line with some words to wrap and scroll
+|  7 007 plain ascii line with some words to wrap and scroll
+|  8 008 plain ascii line with some words to wrap and scroll
+|  9 wide: 日本語テキスト 漢字 한국어
+| 10 emoji: 😀 👍🏽ci 🇯l🇵n
+| 11 inserted 日本 line
+|sample.txt [+]
+|  7 007 plain ascii line with some words to wrap and scroll
+|  8 008 plain ascii line with some words to wrap and scroll
+|  9 wide: 日本語テキスト 漢字 한국어
+| 10 emoji: 😀 👍🏽.. 🇯.🇵.
+| 11 inserted 日本 line
+| 12 combining: é ü ñ
+| 13 rtl: שלום עולם
+| 14 tabs:   a       b       c
+| 15 014 filler ..............
+| 16 015 filler ...............
+|sample.txt [+]
+|/wide
+styles:
+0:0-3 fg=#af5f00 bg=-
+1:0-3 fg=#af5f00 bg=-
+2:0-3 fg=#af5f00 bg=-
+3:0-3 fg=#af5f00 bg=-
+4:0-3 fg=#af5f00 bg=-
+5:0-3 fg=#af5f00 bg=-
+6:0-3 fg=#af5f00 bg=-
+7:0-3 fg=#af5f00 bg=-
+8:0-3 fg=#af5f00 bg=-
+9:0-3 fg=#af5f00 bg=-
+10:0-3 fg=#af5f00 bg=-
+11:0-79 fg=- bg=- bold,reverse
+12:0-3 fg=#af5f00 bg=-
+13:0-3 fg=#af5f00 bg=-
+14:0-3 fg=#af5f00 bg=-
+15:0-3 fg=#af5f00 bg=-
+16:0-3 fg=#af5f00 bg=-
+17:0-3 fg=#af5f00 bg=-
+18:0-3 fg=#af5f00 bg=-
+19:0-3 fg=#af5f00 bg=-
+20:0-3 fg=#af5f00 bg=-
+21:0-3 fg=#af5f00 bg=-
+22:0-79 fg=- bg=- reverse
+trailers:
+8:11,13,15,17,19,21,23,26,28,31,33,35
+9:12,15
+10:14,16
+14:11,13,15,17,19,21,23,26,28,31,33,35
+15:12,15
+16:14,16

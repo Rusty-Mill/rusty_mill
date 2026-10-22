@@ -57,6 +57,7 @@ fn config(dir: &Path, task: &TaskId, cost_cap: Option<CostCap>) -> Config {
         max_wall: Duration::from_secs(1),
         end_grace: Duration::ZERO,
         cost_cap,
+        slots: None,
     }
 }
 

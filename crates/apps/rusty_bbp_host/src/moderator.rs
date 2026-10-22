@@ -17,7 +17,9 @@
 //! is in its own process group and is killed, group and all, on every exit
 //! path, the error ones included.
 
+use crate::confine::{HarnessSandbox, Turn};
 use crate::runner::Confinement;
+use crate::slots::{Class, Slot};
 use crate::{now, open_driver};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
@@ -40,6 +42,10 @@ pub struct Launcher {
     /// launch configuration; the protocol has no opinion.
     #[rusty_serde(default)]
     pub builtin_tools: bool,
+    /// Run this role's harness confined, reaching only what this declares
+    /// (Linux). See [`crate::confine`].
+    #[rusty_serde(default)]
+    pub sandbox: Option<HarnessSandbox>,
 }
 
 /// One launcher per role id, keyed by the ids of the task's roster. A role
@@ -103,6 +109,10 @@ pub struct Config {
     pub end_grace: Duration,
     /// Stop the run when its harnesses have cost more than this.
     pub cost_cap: Option<CostCap>,
+    /// Machine-wide admission. With slots, a granted turn's harness starts
+    /// only when an agent slot is free, and a selected run's runner only when
+    /// a validator slot is; until then the turn or run waits.
+    pub slots: Option<crate::slots::Slots>,
 }
 
 /// A live dollar cap on one run. Checked each poll from the harness output the
@@ -296,8 +306,18 @@ pub fn write_mcp_config(
 struct Harness {
     turn: TurnId,
     child: Child,
+    /// A confined harness's MCP broker, in the harness's process group.
+    broker: Option<Child>,
+    confined: Option<Turn>,
     /// When the moderator first saw this harness's turn no longer live.
     ended: Option<Instant>,
+    /// The moderator's handle on the child's agent slot, dropped when the
+    /// harness leaves the list (after it is reaped). The child holds the same
+    /// lock through its stdin, so the slot stays taken while it lives.
+    _slot: Option<Slot>,
+    /// The `bbp slot-hold` process that keeps the slot while the harness's
+    /// process group has a member, should this moderator die first.
+    hold: Option<Child>,
 }
 
 /// Every process the loop started. Dropping it kills the harness and its
@@ -305,6 +325,37 @@ struct Harness {
 struct ActiveRun {
     run: RunId,
     child: Child,
+    _slot: Option<Slot>,
+}
+
+/// A free slot of `class` with the stdio that hands it to the child, or
+/// `None` when admission is configured and every slot is held. Without
+/// admission the child gets a null stdio in its place.
+fn admit(cfg: &Config, class: Class) -> Result<Option<(Option<Slot>, Stdio)>, String> {
+    let Some(slots) = &cfg.slots else {
+        return Ok(Some((None, Stdio::null())));
+    };
+    let Some(slot) = slots.try_acquire(class)? else {
+        return Ok(None);
+    };
+    let stdio = slot.stdio()?;
+    Ok(Some((Some(slot), stdio)))
+}
+
+impl Harness {
+    /// Kill the harness's process group (its broker included), then its
+    /// slot holder, and reap them all.
+    fn stop(&mut self) -> Result<(), String> {
+        let harness = kill_tree(&mut self.child);
+        let broker = self.broker.as_mut().map_or(Ok(()), kill_tree);
+        let hold = self.hold.as_mut().map_or(Ok(()), kill_tree);
+        // Nothing runs in the worktree any more; a leftover is replaced by
+        // the next turn of the same number, so failing to remove it is not fatal.
+        if let Some(Err(e)) = self.confined.as_ref().map(Turn::finish) {
+            eprintln!("bbp mod: turn {} worktree not removed: {e}", self.turn.0);
+        }
+        harness.and(broker).and(hold)
+    }
 }
 
 struct Supervision {
@@ -331,8 +382,7 @@ impl Supervision {
     fn kill_harnesses(&mut self) -> Result<(), String> {
         let mut first = Ok(());
         for mut h in self.harnesses.drain(..) {
-            let r = kill_tree(&mut h.child);
-            first = first.and(r);
+            first = first.and(h.stop());
         }
         first
     }
@@ -345,8 +395,13 @@ impl Supervision {
             // Exited harnesses leave the list; on a wait error every one left
             // is still killed before the error is returned.
             let mut failed = None;
-            self.harnesses.retain_mut(|h| match h.child.try_wait() {
-                Ok(Some(_)) => false,
+            self.harnesses.retain_mut(|h| match exited(&mut h.child) {
+                Ok(Some(_)) => {
+                    if let Err(e) = h.stop() {
+                        failed.get_or_insert(e);
+                    }
+                    false
+                }
                 Ok(None) => true,
                 Err(e) => {
                     failed.get_or_insert(format!("harness wait: {e}"));
@@ -367,7 +422,7 @@ impl Supervision {
     /// Kill the harness of `turn`, if one is running.
     fn kill_harness_of(&mut self, turn: TurnId) -> Result<(), String> {
         match self.harnesses.iter().position(|h| h.turn == turn) {
-            Some(i) => kill_tree(&mut self.harnesses.remove(i).child),
+            Some(i) => self.harnesses.remove(i).stop(),
             None => Ok(()),
         }
     }
@@ -382,6 +437,29 @@ impl Drop for Supervision {
             eprintln!("bbp mod: runner not cleaned up: {error}");
         }
     }
+}
+
+/// The child's exit status once it has exited, without reaping it: an
+/// unreaped child keeps its process-group id reserved, so [`kill_tree`] can
+/// still kill what it forked without reaching a group that reused the id.
+#[cfg(target_os = "linux")]
+fn exited(child: &mut Child) -> Result<Option<String>, String> {
+    use rusty_libc::wait::{waitid, CLD_EXITED, P_PID, WEXITED, WNOHANG, WNOWAIT};
+    let pid = i32::try_from(child.id()).map_err(|_| "pid out of range".to_owned())?;
+    let info = waitid(P_PID, pid, WEXITED | WNOHANG | WNOWAIT)
+        .map_err(|e| format!("harness wait: {e:?}"))?;
+    Ok((info.si_pid != 0).then(|| match info.si_code {
+        CLD_EXITED => format!("exit status: {}", info.si_status),
+        _ => format!("signal: {}", info.si_status),
+    }))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exited(child: &mut Child) -> Result<Option<String>, String> {
+    child
+        .try_wait()
+        .map(|status| status.map(|s| s.to_string()))
+        .map_err(|e| format!("harness wait: {e}"))
 }
 
 /// `SIGKILL` the child's process group (the harness and everything it
@@ -434,6 +512,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         runner: None,
     };
     let mut launched: HashSet<TurnId> = HashSet::new();
+    let mut waiting: HashSet<TurnId> = HashSet::new();
     let mut ran: HashSet<RunId> = HashSet::new();
 
     // A turn that was live before this loop did anything belongs to an
@@ -544,11 +623,15 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             .filter(|r| r.status.is_none() && !ran.contains(&r.id))
             .map(|r| r.id);
         if let Some(run) = pending {
-            ran.insert(run);
-            sup.runner = Some(ActiveRun {
-                run,
-                child: spawn_runner(cfg)?,
-            });
+            // Without a validator slot the run stays pending for a later poll.
+            if let Some((slot, stdout)) = admit(cfg, Class::Validator)? {
+                ran.insert(run);
+                sup.runner = Some(ActiveRun {
+                    run,
+                    child: spawn_runner(cfg, stdout)?,
+                    _slot: slot,
+                });
+            }
         }
 
         let live: Vec<(TurnId, RoleId)> = d
@@ -563,9 +646,15 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
         let mut forfeited = None;
         for h in &mut sup.harnesses {
             let is_live = live.iter().any(|(id, _)| *id == h.turn);
-            match h.child.try_wait() {
+            match exited(&mut h.child) {
                 Ok(Some(status)) => {
                     eprintln!("bbp mod: harness for turn {} exited: {status}", h.turn.0);
+                    if let Some(why) = h.confined.as_ref().and_then(Turn::setup_error) {
+                        eprintln!(
+                            "bbp mod: turn {} was not confined, so nothing ran: {why}",
+                            h.turn.0
+                        );
+                    }
                     forfeited = Some((h.turn, is_live));
                     break;
                 }
@@ -578,7 +667,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                     }
                 }
                 Ok(None) => {}
-                Err(e) => return Err(format!("harness wait: {e}")),
+                Err(e) => return Err(e),
             }
         }
         if let Some((turn, abort)) = forfeited {
@@ -595,27 +684,51 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             if launched.contains(&turn) {
                 continue;
             }
-            launched.insert(turn);
-            match cfg.launchers.for_role(&role) {
-                Some(l) => {
-                    let principal = d
-                        .state
-                        .assigned
-                        .get(&role)
-                        .cloned()
-                        .ok_or_else(|| format!("{role} has no principal"))?;
-                    let child = spawn(cfg, l, &role, &principal, turn)?;
-                    sup.harnesses.push(Harness {
-                        turn,
-                        child,
-                        ended: None,
-                    });
-                }
-                None => eprintln!(
+            let Some(l) = cfg.launchers.for_role(&role) else {
+                launched.insert(turn);
+                eprintln!(
                     "bbp mod: no launcher for {role}; turn {} waits for its deadline",
                     turn.0
-                ),
+                );
+                continue;
+            };
+            // Without an agent slot the turn waits for a later poll, or its deadline.
+            let Some((slot, stdin)) = admit(cfg, Class::Agent)? else {
+                if waiting.insert(turn) {
+                    eprintln!("bbp mod: turn {} waits for an agent slot", turn.0);
+                }
+                continue;
+            };
+            launched.insert(turn);
+            let principal = d
+                .state
+                .assigned
+                .get(&role)
+                .cloned()
+                .ok_or_else(|| format!("{role} has no principal"))?;
+            let launched = spawn(cfg, l, &role, &principal, turn, stdin)?;
+            let mut harness = Harness {
+                turn,
+                child: launched.child,
+                broker: launched.broker,
+                confined: launched.confined,
+                ended: None,
+                _slot: None,
+                hold: None,
+            };
+            if let Some(slot) = slot {
+                match slot.hold_for(&cfg.bbp, harness.child.id()) {
+                    Ok(hold) => harness.hold = Some(hold),
+                    Err(e) => {
+                        if let Err(k) = harness.stop() {
+                            eprintln!("bbp mod: harness for turn {} not stopped: {k}", turn.0);
+                        }
+                        return Err(e);
+                    }
+                }
+                harness._slot = Some(slot);
             }
+            sup.harnesses.push(harness);
         }
         std::thread::sleep(cfg.poll);
     }
@@ -774,7 +887,9 @@ pub fn require_evidence_marker(
     }
 }
 
-fn spawn_runner(cfg: &Config) -> Result<Child, String> {
+/// `stdout` is the validator slot when admission is configured: the runner
+/// then holds it until it exits.
+fn spawn_runner(cfg: &Config, stdout: Stdio) -> Result<Child, String> {
     let mut command = Proc::new(&cfg.bbp);
     command
         .arg("runner")
@@ -793,7 +908,7 @@ fn spawn_runner(cfg: &Config) -> Result<Child, String> {
         })
         .args(["--supervised", "yes"])
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(Stdio::inherit());
     #[cfg(unix)]
     {
@@ -803,15 +918,32 @@ fn spawn_runner(cfg: &Config) -> Result<Child, String> {
     command.spawn().map_err(|e| format!("starting runner: {e}"))
 }
 
+/// A started harness: its process, and for a confined one the broker that
+/// serves its MCP relay and the places of its turn.
+struct Launched {
+    child: Child,
+    broker: Option<Child>,
+    confined: Option<Turn>,
+}
+
 fn spawn(
     cfg: &Config,
     l: &Launcher,
     role: &RoleId,
     principal: &PrincipalId,
     turn: TurnId,
-) -> Result<Child, String> {
+    stdin: Stdio,
+) -> Result<Launched, String> {
     let bbp = &cfg.bbp;
-    let mcp = write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, turn)?;
+    let confined = l
+        .sandbox
+        .as_ref()
+        .map(|sandbox| Turn::prepare(cfg, sandbox, turn))
+        .transpose()?;
+    let mcp = match &confined {
+        Some(t) => t.mcp_config.clone(),
+        None => write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, turn)?,
+    };
     let role_name = role.0.as_str();
     let fill = |a: &str| {
         a.replace("{dir}", &cfg.dir.to_string_lossy())
@@ -828,35 +960,70 @@ fn spawn(
     }
     let log = File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
     let err = log.try_clone().map_err(|e| e.to_string())?;
+    let broker_log = log.try_clone().map_err(|e| e.to_string())?;
     eprintln!("bbp mod: launching {role_name} for turn {}", turn.0);
-    let mut cmd = Proc::new(fill(&l.program));
-    cmd.args(l.args.iter().map(|a| fill(a)))
-        .env("BBP_DIR", &cfg.dir)
-        .env("BBP_TASK", &cfg.task.0)
-        .env("BBP_PRINCIPAL", &principal.0)
-        .env("BBP_TURN", turn.0.to_string())
-        .env("BBP_ROLE", role_name)
-        .env("BBP_BIN", bbp)
-        .env("BBP_MCP_CONFIG", &mcp)
-        .stdin(Stdio::null());
+    let mut env: Vec<(String, String)> = vec![
+        ("BBP_TASK".into(), cfg.task.0.clone()),
+        ("BBP_PRINCIPAL".into(), principal.0.clone()),
+        ("BBP_TURN".into(), turn.0.to_string()),
+        ("BBP_ROLE".into(), role_name.into()),
+        ("BBP_BIN".into(), bbp.to_string_lossy().into_owned()),
+        ("BBP_MCP_CONFIG".into(), mcp.to_string_lossy().into_owned()),
+    ];
     // An evidence run pins the cache lifetime for the main agent and for
     // subagents: they default to different lifetimes, and the price file
     // prices cache writes at the 1-hour rate.
     if cfg.cost_cap.is_some() {
         for var in crate::tokens::CACHE_TTL_ENV {
-            cmd.env(var, crate::tokens::PINNED_CACHE_TTL);
+            env.push((var.into(), crate::tokens::PINNED_CACHE_TTL.into()));
         }
         // A subagent, if one starts despite the launcher's restrictions, runs
         // on the role's own model, which is priced.
         if let Ok(Some(model)) = crate::pins::pinned_model(l) {
-            cmd.env("CLAUDE_CODE_SUBAGENT_MODEL", model);
+            env.push(("CLAUDE_CODE_SUBAGENT_MODEL".into(), model));
         }
     }
-    cmd.stdout(Stdio::from(log)).stderr(Stdio::from(err));
+    let program = fill(&l.program);
+    let args: Vec<String> = l.args.iter().map(|a| fill(a)).collect();
+    let mut cmd = match (&l.sandbox, &confined) {
+        (Some(sandbox), Some(t)) => {
+            // Its own MCP channel is the relay; the task directory is out of reach.
+            env.push((
+                crate::broker::RELAY_ENV.into(),
+                t.pipes.to_string_lossy().into_owned(),
+            ));
+            t.command(cfg, sandbox, program, args, env)?
+        }
+        _ => {
+            let mut cmd = Proc::new(program);
+            cmd.args(args).env("BBP_DIR", &cfg.dir).envs(env);
+            cmd
+        }
+    };
+    cmd.stdin(stdin)
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err));
     // Its own process group, so everything the harness forks dies with it.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    cmd.spawn().map_err(|e| format!("spawn {}: {e}", l.program))
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn {}: {e}", l.program))?;
+    let broker = match &confined {
+        None => None,
+        Some(t) => match t.broker(cfg, principal, turn, child.id(), Stdio::from(broker_log)) {
+            Ok(broker) => Some(broker),
+            Err(e) => {
+                kill_tree(&mut child)?;
+                return Err(e);
+            }
+        },
+    };
+    Ok(Launched {
+        child,
+        broker,
+        confined,
+    })
 }
 
 #[cfg(test)]

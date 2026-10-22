@@ -16,9 +16,10 @@
  * earlier importer wrote rows in the order below (top-level tasks first) and
  * skipped a row whose key was already taken, so the first row in that order
  * that may claim a legacy key owns the task it names: any row, or with a
- * `dueMs`, only one whose due date the task still has. A row whose own id is
- * not here takes over the task it owns, so files imported before still skip
- * or resume rather than duplicate.
+ * `dueMs`, only one whose due date the task still has. A task edited since
+ * (its due date, title or repeat) goes to the one row left that it fits (`edited`).
+ * A row whose own id is not here takes over the task it owns, so files
+ * imported before still skip or resume rather than duplicate.
  */
 import type { ApiClient } from '@/api/client'
 import type { NewTask, Task, TaskPatch } from '@/api/types'
@@ -59,6 +60,58 @@ function rootOf(t: ImportedTask, byKey: ReadonlyMap<string, ImportedTask>): stri
   let parent = t.parentKey !== null ? byKey.get(t.parentKey) : undefined
   for (let hops = 0; parent?.parentKey && byKey.has(parent.parentKey) && hops < byKey.size; hops++) parent = byKey.get(parent.parentKey)
   return parent && parent.key !== t.key ? parent.key : null
+}
+
+/**
+ * How sure a pairing of an edited task and a row is, surest first: the same
+ * title (as written) and both repeating or neither; then the repeat alone;
+ * then only the UID, which every candidate shares with its row already.
+ */
+const sameRepeat = (found: Task, t: ImportedTask): boolean => (found.repeatFlag !== '') === (t.repeatFlag !== '')
+const sameTitle = (found: Task, t: ImportedTask): boolean => sameRepeat(found, t) && found.title === t.title.slice(0, MAX_TITLE)
+const sameUid = (): boolean => true
+
+/**
+ * Earlier tasks named by a due-dated legacy key that nobody claimed by due
+ * date, paired with rows still without a task that they `fit`. Only a task
+ * edited since its import qualifies: one still at its creation version has its
+ * imported due date, so its row is gone from the file, not edited.
+ *
+ * Rows are paired a group at a time: the rows whose candidates are the same
+ * tasks, when there are as many tasks as rows and no other row wants them. One
+ * row and one task is a sure pair. Several are look-alikes, and which takes
+ * which does not matter: each is edited, so none is written, and every row is
+ * accounted for. When the counts differ, which row is new is a guess, so the
+ * group is imported anew instead.
+ */
+function edited(
+  rows: readonly ImportedTask[],
+  existing: ReadonlyMap<string, Task>,
+  owner: ReadonlyMap<string, string>,
+  idOf: (key: string) => string,
+  resolve: (t: ImportedTask) => string,
+  fits: (found: Task, t: ImportedTask) => boolean,
+): [id: string, key: string][] {
+  const candidates = rows
+    .filter((t) => !existing.has(resolve(t)))
+    .map((t) => {
+      const ids = t.legacy.filter((c) => c.dueMs !== undefined).map((c) => idOf(c.key))
+      const found = ids.filter((id) => {
+        const task = existing.get(id)
+        return task !== undefined && task.etag !== CREATED_ETAG && !owner.has(id) && fits(task, t)
+      })
+      return { key: t.key, ids: [...new Set(found)] }
+    })
+  const wanted = new Map<string, number>()
+  for (const c of candidates) for (const id of c.ids) wanted.set(id, (wanted.get(id) ?? 0) + 1)
+  const groups = new Map<string, { ids: string[]; keys: string[] }>() // same candidates (in legacy-key order) -> their rows
+  for (const c of candidates.filter((c) => c.ids.length > 0)) {
+    const group = groups.get(c.ids.join('\n')) ?? { ids: c.ids, keys: [] }
+    group.keys.push(c.key)
+    groups.set(c.ids.join('\n'), group)
+  }
+  const whole = (g: { ids: string[]; keys: string[] }): boolean => g.ids.length === g.keys.length && g.ids.every((id) => wanted.get(id) === g.keys.length)
+  return [...groups.values()].filter(whole).flatMap((g) => g.ids.map((id, i): [string, string] => [id, g.keys[i]!]))
 }
 
 function toNewTask(t: ImportedTask, id: string, listId: string, parentId: string | null): NewTask {
@@ -106,6 +159,9 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
     if (existing.has(own)) return own
     const legacy = t.legacy.map((c) => idOf(c.key)).find((id) => owner.get(id) === t.key && existing.has(id))
     return legacy ?? own
+  }
+  for (const fits of [sameTitle, sameRepeat, sameUid]) {
+    for (const [id, key] of edited(order.map((r) => r.t), existing, owner, idOf, resolve, fits)) owner.set(id, key)
   }
   const ids = new Map<string, string>() // task key -> resolved id, so subtasks point at their parent's real id
   const out: Applied = { tasks: 0, lists: 0, existing: 0, resumed: 0 }

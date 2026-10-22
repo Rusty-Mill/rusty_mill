@@ -44,12 +44,10 @@ ed25519-dalek = { version = "3", optional = true }
 getrandom = { version = "0.4", optional = true }
 signature = { version = "3", optional = true }
 
-# grpc feature
+# grpc feature: the messages are `rusty_prost` (see `src/pb`); `tonic` is only the transport.
 tonic = { version = "0.14", optional = true }
-prost = { workspace = true, optional = true }
-prost-types = { workspace = true, optional = true }
-tonic-prost = { workspace = true, optional = true }
-tonic-types = { version = "0.14.6", optional = true }
+rusty_prost = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -77,11 +75,8 @@ server = [
 signing = ["dep:p256", "dep:ed25519-dalek", "dep:getrandom", "dep:signature"]
 grpc = [
   "dep:tonic",
-  "dep:prost",
-  "dep:prost-types",
-  "dep:tonic-prost",
-  "dep:tonic-prost-build",
-  "dep:tonic-types",
+  "dep:rusty_prost",
+  "dep:bytes",
   "dep:tokio",
   "dep:futures-core",
   "dep:futures-util",
@@ -117,8 +112,14 @@ path = "tests/wire_format.rs"
 name = "integration"
 path = "tests/integration.rs"
 # JSON-RPC and REST only — deliberately not `full`. Gating this on `grpc`
-# would make the suite silently skip anywhere `protoc` is missing.
+# would make the suite silently skip wherever the `grpc` feature is off.
 required-features = ["client", "server"]
+
+[[test]]
+name = "pb_wire"
+path = "tests/pb_wire.rs"
+# The hand-written `pb` messages; they exist with `grpc`.
+required-features = ["grpc"]
 
 [[test]]
 name = "grpc_integration"
@@ -260,6 +261,3 @@ required-features = ["client", "server"]
 name = "task_authorization_scoping"
 path = "tests/task_authorization_scoping.rs"
 required-features = ["client", "server"]
-
-[build-dependencies]
-tonic-prost-build = { version = "0.14", optional = true }

@@ -22,9 +22,11 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, TimeZone, Utc};
+use rusty_prost::rpc;
+use rusty_prost::wkt::Any;
+use rusty_prost::Message;
 use serde_json::{Map, Value};
 use tonic::{Code, Status};
-use tonic_types::{ErrorDetails, StatusExt};
 
 use crate::error::A2aError;
 use crate::pb;
@@ -56,13 +58,42 @@ pub fn a2a_error_to_status(err: A2aError) -> Status {
     };
     let message = err.standard_message();
     match err.reason() {
-        Some(reason) => {
-            let details =
-                ErrorDetails::with_error_info(reason, ERROR_DOMAIN, std::collections::HashMap::new());
-            Status::with_error_details(code, message, details)
-        }
+        Some(reason) => with_error_info(code, message, reason),
         None => Status::new(code, message),
     }
+}
+
+/// `code` and `message` with a `google.rpc.ErrorInfo` for `reason` in the status details (the
+/// `google.rpc.Status` that `grpc-status-details-bin` carries). If the details cannot be
+/// encoded the status goes without them: the code and message are still right.
+fn with_error_info(code: Code, message: String, reason: &str) -> Status {
+    let info = rpc::ErrorInfo {
+        reason: reason.to_string(),
+        domain: ERROR_DOMAIN.to_string(),
+        metadata: Default::default(),
+    };
+    let details = Any::pack(&info).ok().and_then(|any| {
+        rpc::Status {
+            code: code as i32,
+            message: message.clone(),
+            details: vec![any],
+        }
+        .encode_to_vec()
+        .ok()
+    });
+    match details {
+        Some(bytes) => Status::with_details(code, message, bytes.into()),
+        None => Status::new(code, message),
+    }
+}
+
+/// The `google.rpc.ErrorInfo` in `status`'s details, if it carries one.
+pub(crate) fn error_info(status: &Status) -> Option<rpc::ErrorInfo> {
+    let details = rpc::Status::decode(status.details()).ok()?;
+    details
+        .details
+        .iter()
+        .find_map(|any| any.unpack::<rpc::ErrorInfo>().ok().flatten())
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -75,56 +106,51 @@ fn non_empty(s: String) -> Option<String> {
 
 // --- google.protobuf.Struct/Value <-> serde_json ---
 
-fn struct_to_json(s: prost_types::Struct) -> Map<String, Value> {
+fn struct_to_json(s: pb::Struct) -> Map<String, Value> {
     s.fields
         .into_iter()
         .map(|(k, v)| (k, prost_value_to_json(v)))
         .collect()
 }
 
-fn json_to_struct(m: Map<String, Value>) -> prost_types::Struct {
-    prost_types::Struct {
+fn json_to_struct(m: Map<String, Value>) -> pb::Struct {
+    pb::Struct {
         fields: m.into_iter().map(|(k, v)| (k, json_to_prost_value(v))).collect(),
     }
 }
 
-fn prost_value_to_json(v: prost_types::Value) -> Value {
-    use prost_types::value::Kind;
-    match v.kind {
-        None | Some(Kind::NullValue(_)) => Value::Null,
-        Some(Kind::NumberValue(n)) => serde_json::Number::from_f64(n)
+fn prost_value_to_json(v: pb::Value) -> Value {
+    match v {
+        pb::Value::Null => Value::Null,
+        pb::Value::Number(n) => serde_json::Number::from_f64(n)
             .map(Value::Number)
             .unwrap_or(Value::Null),
-        Some(Kind::StringValue(s)) => Value::String(s),
-        Some(Kind::BoolValue(b)) => Value::Bool(b),
-        Some(Kind::StructValue(s)) => Value::Object(struct_to_json(s)),
-        Some(Kind::ListValue(l)) => Value::Array(l.values.into_iter().map(prost_value_to_json).collect()),
+        pb::Value::String(s) => Value::String(s),
+        pb::Value::Bool(b) => Value::Bool(b),
+        pb::Value::Struct(s) => Value::Object(struct_to_json(s)),
+        pb::Value::List(l) => Value::Array(l.into_iter().map(prost_value_to_json).collect()),
     }
 }
 
-fn json_to_prost_value(v: Value) -> prost_types::Value {
-    use prost_types::value::Kind;
-    let kind = match v {
-        Value::Null => Kind::NullValue(0),
-        Value::Bool(b) => Kind::BoolValue(b),
-        Value::Number(n) => Kind::NumberValue(n.as_f64().unwrap_or(0.0)),
-        Value::String(s) => Kind::StringValue(s),
-        Value::Array(a) => Kind::ListValue(prost_types::ListValue {
-            values: a.into_iter().map(json_to_prost_value).collect(),
-        }),
-        Value::Object(o) => Kind::StructValue(json_to_struct(o)),
-    };
-    prost_types::Value { kind: Some(kind) }
+fn json_to_prost_value(v: Value) -> pb::Value {
+    match v {
+        Value::Null => pb::Value::Null,
+        Value::Bool(b) => pb::Value::Bool(b),
+        Value::Number(n) => pb::Value::Number(n.as_f64().unwrap_or(0.0)),
+        Value::String(s) => pb::Value::String(s),
+        Value::Array(a) => pb::Value::List(a.into_iter().map(json_to_prost_value).collect()),
+        Value::Object(o) => pb::Value::Struct(json_to_struct(o)),
+    }
 }
 
 // --- google.protobuf.Timestamp <-> chrono ---
 
-fn timestamp_to_chrono(ts: prost_types::Timestamp) -> Option<DateTime<Utc>> {
+fn timestamp_to_chrono(ts: pb::Timestamp) -> Option<DateTime<Utc>> {
     Utc.timestamp_opt(ts.seconds, ts.nanos.max(0) as u32).single()
 }
 
-fn chrono_to_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
-    prost_types::Timestamp {
+fn chrono_to_timestamp(dt: DateTime<Utc>) -> pb::Timestamp {
+    pb::Timestamp {
         seconds: dt.timestamp(),
         nanos: dt.timestamp_subsec_nanos() as i32,
     }
@@ -579,7 +605,7 @@ fn our_auth_code_flow_to_pb(f: ours::AuthorizationCodeOAuthFlow) -> pb::Authoriz
         authorization_url: f.authorization_url,
         token_url: f.token_url,
         refresh_url: f.refresh_url.unwrap_or_default(),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
         pkce_required: f.pkce_required,
     }
 }
@@ -588,7 +614,7 @@ fn our_client_creds_flow_to_pb(f: ours::ClientCredentialsOAuthFlow) -> pb::Clien
     pb::ClientCredentialsOAuthFlow {
         token_url: f.token_url,
         refresh_url: f.refresh_url.unwrap_or_default(),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
     }
 }
 
@@ -596,7 +622,7 @@ fn our_implicit_flow_to_pb(f: ours::ImplicitOAuthFlow) -> pb::ImplicitOAuthFlow 
     pb::ImplicitOAuthFlow {
         authorization_url: f.authorization_url,
         refresh_url: f.refresh_url.unwrap_or_default(),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
     }
 }
 
@@ -604,7 +630,7 @@ fn our_password_flow_to_pb(f: ours::PasswordOAuthFlow) -> pb::PasswordOAuthFlow 
     pb::PasswordOAuthFlow {
         token_url: f.token_url,
         refresh_url: f.refresh_url.unwrap_or_default(),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
     }
 }
 
@@ -613,7 +639,7 @@ fn our_device_code_flow_to_pb(f: ours::DeviceCodeOAuthFlow) -> pb::DeviceCodeOAu
         device_authorization_url: f.device_authorization_url,
         token_url: f.token_url,
         refresh_url: f.refresh_url.unwrap_or_default(),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
     }
 }
 
@@ -955,7 +981,7 @@ fn pb_auth_code_flow_to_ours(f: pb::AuthorizationCodeOAuthFlow) -> ours::Authori
         authorization_url: f.authorization_url,
         token_url: f.token_url,
         refresh_url: non_empty(f.refresh_url),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
         pkce_required: f.pkce_required,
     }
 }
@@ -964,7 +990,7 @@ fn pb_client_creds_flow_to_ours(f: pb::ClientCredentialsOAuthFlow) -> ours::Clie
     ours::ClientCredentialsOAuthFlow {
         token_url: f.token_url,
         refresh_url: non_empty(f.refresh_url),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
     }
 }
 
@@ -972,7 +998,7 @@ fn pb_implicit_flow_to_ours(f: pb::ImplicitOAuthFlow) -> ours::ImplicitOAuthFlow
     ours::ImplicitOAuthFlow {
         authorization_url: f.authorization_url,
         refresh_url: non_empty(f.refresh_url),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
     }
 }
 
@@ -980,7 +1006,7 @@ fn pb_password_flow_to_ours(f: pb::PasswordOAuthFlow) -> ours::PasswordOAuthFlow
     ours::PasswordOAuthFlow {
         token_url: f.token_url,
         refresh_url: non_empty(f.refresh_url),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
     }
 }
 
@@ -989,7 +1015,7 @@ fn pb_device_code_flow_to_ours(f: pb::DeviceCodeOAuthFlow) -> ours::DeviceCodeOA
         device_authorization_url: f.device_authorization_url,
         token_url: f.token_url,
         refresh_url: non_empty(f.refresh_url),
-        scopes: f.scopes,
+        scopes: f.scopes.into_iter().collect(),
     }
 }
 
@@ -1183,5 +1209,28 @@ pub fn our_get_extended_agent_card_request_to_pb(
 ) -> pb::GetExtendedAgentCardRequest {
     pb::GetExtendedAgentCardRequest {
         tenant: r.tenant.unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_error_with_a_reason_carries_it_and_the_domain_in_the_status_details() {
+        let status = a2a_error_to_status(A2aError::TaskNotFound("no such task".into()));
+        assert_eq!(status.code(), Code::NotFound);
+        assert_eq!(status.message(), "no such task");
+        let info = error_info(&status).expect("an ErrorInfo detail");
+        assert_eq!(info.reason, "TASK_NOT_FOUND");
+        assert_eq!(info.domain, ERROR_DOMAIN);
+    }
+
+    #[test]
+    fn an_error_without_a_reason_has_no_details() {
+        let status = a2a_error_to_status(A2aError::Internal("boom".into()));
+        assert_eq!(status.code(), Code::Internal);
+        assert!(error_info(&status).is_none());
+        assert!(error_info(&Status::new(Code::Unknown, "plain")).is_none());
     }
 }

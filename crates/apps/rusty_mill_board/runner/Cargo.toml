@@ -25,6 +25,7 @@ unwrap_used = "warn"
 [dependencies]
 rusty_mill_board = { path = ".." }
 rusty_sandbox = { workspace = true }
+rusty_worktree = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

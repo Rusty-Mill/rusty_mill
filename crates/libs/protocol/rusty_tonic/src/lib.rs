@@ -8,6 +8,8 @@
 //! Compression is not supported: a compressed message is `UNIMPLEMENTED`, and `identity` is
 //! the only encoding.
 
+#[cfg(feature = "rusty-tokio")]
+pub mod client;
 mod code;
 mod frame;
 mod head;

@@ -5,7 +5,8 @@
 
 pub mod backend;
 pub mod config;
-pub mod core;
+/// The headless VT engine, re-exported from the `rusty_term_core` crate.
+pub use rusty_term_core as core;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod input;

@@ -28,8 +28,8 @@
 //! crate's server implements all three - JSON-RPC and HTTP+JSON/REST from
 //! the same `axum` router/port (`server::AgentServer::into_router`), and
 //! gRPC via `server::AgentServices::grpc_service`/`serve_grpc` (feature
-//! `grpc`, compiled from the vendored `spec/a2a.proto` by `build.rs`;
-//! requires a `protoc` binary on `PATH`). All bindings share one task
+//! `grpc`, with the messages of the vendored `spec/a2a.proto` written out in [`pb`] on
+//! `rusty_prost`; no `protoc` needed). All bindings share one task
 //! store and executor. The client implements all three too, as three
 //! separate types (see [`client`] above) rather than one that speaks
 //! whichever binding a server happens to prefer. Per spec Section 5.1, an

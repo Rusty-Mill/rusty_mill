@@ -131,7 +131,9 @@ $names = Get-ChildItem $out -Filter "*_run1.jsonl" | ForEach-Object { $_.Name -r
 $rows = @()
 foreach ($name in $names) {
     $runs = @()
-    foreach ($capture in (Get-ChildItem $out -Filter "${name}_run*.jsonl" | Sort-Object Name)) {
+    # Exactly `<name>_run<k>.jsonl`: rb_run_tapes also writes `<name>_run<k>.pads.jsonl` beside each
+    # capture (ADR-0071), which a bare `_run*.jsonl` wildcard would hand to rb-verify as a capture.
+    foreach ($capture in (Get-ChildItem $out -Filter "${name}_run*.jsonl" | Where-Object { $_.Name -match "^$([regex]::Escape($name))_run\d+\.jsonl$" } | Sort-Object Name)) {
         $runs += Get-RunScore $(if (Test-Path (Join-Path $scenarioDir "$name.json")) { Join-Path $scenarioDir "$name.json" } else { Join-Path $experimentDir "$name.json" }) $capture.FullName
     }
     $good = @($runs | Where-Object { $_.Ok })

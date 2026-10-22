@@ -99,6 +99,7 @@ fn harness(dir: &Path, name: &str, lines: &[&str]) -> Launcher {
         program: path.to_string_lossy().into_owned(),
         args: vec!["{role}".into(), "{turn}".into()],
         builtin_tools: false,
+        sandbox: None,
     }
 }
 
@@ -180,6 +181,7 @@ fn happy_run(tag: &str) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
         max_wall: Duration::from_secs(90),
         end_grace: Duration::ZERO,
         cost_cap: None,
+        slots: None,
     };
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
 
@@ -337,6 +339,7 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
         max_wall: Duration::from_secs(5),
         end_grace: Duration::ZERO,
         cost_cap: None,
+        slots: None,
     };
     let first = card(&dir, &task);
     let out = moderator::run(&cfg);
@@ -460,6 +463,7 @@ fn config(dir: &Path, task: &TaskId, repo: PathBuf, launchers: Launchers, wall: 
         max_wall: Duration::from_secs(wall),
         end_grace: Duration::ZERO,
         cost_cap: None,
+        slots: None,
     }
 }
 
@@ -639,6 +643,7 @@ fn the_harness_process_tree_dies_with_the_moderator() {
                 "{dir}/heartbeat".into(),
             ],
             builtin_tools: false,
+            sandbox: None,
         },
     );
     let out = moderator::run(&config(&dir, &task, repo, launchers, 2));
@@ -725,6 +730,7 @@ fn launchers_are_keyed_by_any_role_id() {
             program: "true".into(),
             args: vec![],
             builtin_tools: true,
+            sandbox: None,
         },
     );
     assert!(l
@@ -799,6 +805,7 @@ fn script(dir: &Path, name: &str, body: &str) -> Launcher {
         .map(String::from)
         .into(),
         builtin_tools: false,
+        sandbox: None,
     }
 }
 
@@ -2265,6 +2272,7 @@ fn no_progress_deadlines_pause_live_harnesses_and_survive_restart() {
             r#"echo $$ > "$BBP_DIR/live-$BBP_TURN.pid"; exec sleep 30"#.into(),
         ],
         builtin_tools: false,
+        sandbox: None,
     };
     let mut cfg = config(
         &dir,

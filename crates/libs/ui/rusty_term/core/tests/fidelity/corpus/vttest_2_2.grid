@@ -1,0 +1,27 @@
+size 80x24 cursor 35,4 visible=true alt=false
+|      *     *     *     *     *     *     *     *     *     *     *     *     *
+|      *     *     *     *     *     *     *     *     *     *     *     *     *
+|
+|Test of TAB setting/resetting. These two lines
+|should look the same. Push <RETURN>
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+styles:
+trailers:

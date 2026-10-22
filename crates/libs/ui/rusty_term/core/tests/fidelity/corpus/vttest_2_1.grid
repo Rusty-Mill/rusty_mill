@@ -1,0 +1,27 @@
+size 80x24 cursor 13,7 visible=true alt=false
+|********************************************************************************
+|********************************************************************************
+|********************************************************************************
+|
+|This should be three identical lines of *'s completely filling
+|the top of the screen without any empty lines between.
+|(Test of WRAP AROUND mode setting.)
+|Push <RETURN>
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+styles:
+trailers:

@@ -1,0 +1,8 @@
+[package]
+name = "ghbench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+libghostty-vt = { git = "https://github.com/phall1/libghostty-rs", rev = "fd9d9001" }

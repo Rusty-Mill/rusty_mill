@@ -639,6 +639,188 @@ fn orch_binary_from_a_stale_state_copy_is_fenced_out_of_the_task() {
     println!("BBP_ACCEPTANCE PASS stale-holder");
 }
 
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; Linux moderator"]
+fn orch_binary_admits_two_goals_through_one_agent_slot() {
+    let (dir, mut c) = setup();
+    let (probe, slots) = (dir.join("probe"), dir.join("slots"));
+    std::fs::create_dir_all(&probe).unwrap();
+    c.slots = Some(Slots {
+        dir: slots.clone(),
+        agents: 1,
+        validators: 1,
+    });
+    // The writer records its lifetime, holds its slot a while, then plans to
+    // the gate. Its record lies inside the slot hold.
+    let script = dir.join("plan.sh");
+    let record = format!("{}/$BBP_TASK", probe.display());
+    std::fs::write(&script, format!(r##"echo start $(date +%s%N) >> {record}
+sleep 1
+"$BBP_BIN" mcp >/dev/null <<'RPC'
+{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"protocolVersion":"2025-06-18","capabilities":{{}},"clientInfo":{{"name":"script","version":"0"}}}}}}
+{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"put_artifact","arguments":{{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1."}}}}}}
+{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"post","arguments":{{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}}}}}
+RPC
+echo end $(date +%s%N) >> {record}
+"##)).unwrap();
+    c.pool.get_mut("writer").unwrap().program = "/bin/sh".into();
+    c.pool.get_mut("writer").unwrap().args = vec![script.to_string_lossy().into()];
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&c).unwrap()).unwrap();
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    // Two goals, so two tasks and two detached moderators, started together.
+    let runs: Vec<Child> = ["one", "two"]
+        .iter()
+        .map(|name| {
+            let goal = dir.join(format!("{name}.json"));
+            std::fs::write(&goal, format!(r#"{{"goal":"Implement flag {name}","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}}]}}"#)).unwrap();
+            Command::new(&orch)
+                .arg("run")
+                .arg(&goal)
+                .arg("--bbp")
+                .arg(&cfg)
+                .arg("--state")
+                .arg(dir.join(format!("state-{name}")))
+                .arg("--json")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let reports: Vec<rusty_serde::json::Value> = runs
+        .into_iter()
+        .map(|run| {
+            let out = run.wait_with_output().unwrap();
+            assert!(out.status.success());
+            rusty_serde::json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap()
+        })
+        .collect();
+    // Both writers finish, one after the other.
+    let ended = || -> Vec<(u128, u128)> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&probe).unwrap() {
+            let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            let at: Vec<u128> = text
+                .lines()
+                .map(|l| l.split_once(' ').unwrap().1.parse().unwrap())
+                .collect();
+            if let [start, end] = at[..] {
+                out.push((start, end));
+            }
+        }
+        out
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while ended().len() < 2 {
+        assert!(Instant::now() < deadline, "both writers did not run");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut spans = ended();
+    spans.sort();
+    assert!(
+        spans[0].1 <= spans[1].0,
+        "the second writer started before the first ended: {spans:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(slots.join("capacity")).unwrap(),
+        "agents=1 validators=1\n"
+    );
+    for report in &reports {
+        assert_eq!(cancel_hosted(&c, report), 1);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS slot-admission");
+}
+
+#[test]
+#[ignore = "requires built bbp and rusty_orch at BBP_TEST_BIN and ORCH_TEST_BIN; enforced Linux sandbox"]
+fn orch_binary_confines_a_sandboxed_pool_member_away_from_the_bbp_directory() {
+    let (dir, mut c) = setup();
+    // The writer lives outside the BBP directory, which is all it may read
+    // besides the system and `bbp`; it probes the directory, then plans.
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("plan.sh");
+    std::fs::write(&script, r##"d="$1"
+if cat "$d/master" >/dev/null 2>&1; then echo "master: read"; else echo "master: denied"; fi
+if "$BBP_BIN" card --dir "$d" --task "$BBP_TASK" >/dev/null 2>&1; then echo "log: read"; else echo "log: denied"; fi
+"$BBP_BIN" mcp <<'RPC'
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"script","version":"0"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1."}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve?","gate":true}}}
+RPC
+"##).unwrap();
+    let writer = c.pool.get_mut("writer").unwrap();
+    writer.program = "/bin/sh".into();
+    writer.args = vec![script.to_string_lossy().into(), "{dir}".into()];
+    writer.sandbox = Some(Sandbox {
+        read: vec![bin.to_string_lossy().into()],
+        ..Sandbox::default()
+    });
+    let cfg = dir.join("bbp.json");
+    std::fs::write(&cfg, rusty_serde::json::to_string(&c).unwrap()).unwrap();
+    let goal = dir.join("goal.json");
+    std::fs::write(&goal, r#"{"goal":"Implement flag","done_when":["tested"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":1,"stop":"checkpoint","tasks":[{"role":"implement","instruction":"Implement flag","acceptance":["tested"],"max_calls":1}]}"#).unwrap();
+    let orch = std::env::var_os("ORCH_TEST_BIN").expect("set ORCH_TEST_BIN");
+    let out = Command::new(&orch)
+        .arg("run")
+        .arg(&goal)
+        .arg("--bbp")
+        .arg(&cfg)
+        .arg("--state")
+        .arg(dir.join("orch-state"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    // A fast writer can reach the plan gate before `run` returns, which then
+    // reports the task blocked on that question (exit 3) instead of running.
+    assert!(
+        matches!(out.status.code(), Some(0 | 3)),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: rusty_serde::json::Value =
+        rusty_serde::json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let entry = report["entries"]
+        .as_seq()
+        .unwrap()
+        .iter()
+        .find(|e| e["body"].as_str() == Some("hosted task"))
+        .unwrap();
+    let pointer = entry["refs"].as_seq().unwrap()[0]
+        .as_str()
+        .unwrap()
+        .strip_prefix("url:bbp:")
+        .unwrap();
+    let h: Handle = rusty_serde::json::from_str(pointer).unwrap();
+    let log = h
+        .dir
+        .join("agents")
+        .join(rusty_bbp::Sha256::of(h.task.as_bytes()).hex())
+        .join("turn-1.log");
+    // The writer reaches the gate through its relay.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let view = TaskView::from_events(rusty_bbp::TaskId(h.task.clone()), &events(&h));
+        if view.card.state == rusty_bbp::State::PlanGate {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no plan gate; writer said:\n{}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let said = std::fs::read_to_string(&log).unwrap();
+    println!("{said}");
+    assert!(said.contains("master: denied"), "{said}");
+    assert!(said.contains("log: denied"), "{said}");
+    assert_eq!(cancel_hosted(&c, &report), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("BBP_ACCEPTANCE PASS harness-confined");
+}
+
 /// A real in-memory Millboard on a loopback port with a shared token and the
 /// default roles, stopped on drop.
 struct Millboard {

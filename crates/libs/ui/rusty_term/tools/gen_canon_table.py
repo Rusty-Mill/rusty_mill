@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/core/canon_tables.rs from UnicodeData.txt: each char with a
+"""Generate core/src/canon_tables.rs from UnicodeData.txt: each char with a
 canonical decomposition maps to its recursively-resolved base (first) char,
 giving the search pipeline accent-insensitive canonical folding. Hangul
 syllables (algorithmic decompositions) are excluded — folding them to their
@@ -39,7 +39,7 @@ def main(ucd):
            "pub(super) const CANON_BASE: &[(u32, u32)] = &["]
     out += [f"    (0x{a:04X}, 0x{b:04X})," for a, b in pairs]
     out += ["];"]
-    open("src/core/canon_tables.rs", "w").write("\n".join(out) + "\n")
+    open("core/src/canon_tables.rs", "w").write("\n".join(out) + "\n")
     print(f"wrote {len(pairs)} canonical-base pairs")
 
 if __name__ == "__main__":
