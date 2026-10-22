@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
 const {resolve,supportedPR,sameTarget,safePath,parsePatch,validatePatch,publish} = require('./codex_publication.cjs');
-const workflow=fs.readFileSync(path.join(__dirname,'../workflows/codex.yml'),'utf8');
+const workflow=fs.readFileSync(path.join(__dirname,'../automation-templates/codex.yml.disabled'),'utf8');
 function fixture({sha='head',pr=true,fork=false}={}) {
   const context={repo:{owner:'o',repo:'r'},eventName:'issue_comment',payload:{action:'created',issue:{number:12},comment:{body:'@codex fix',user:{type:'User',login:'human'},author_association:'OWNER'}}};
   const env={WORKER_LOGIN:'verified-fixture-worker'};
@@ -117,4 +117,11 @@ test('Git validates patch without running candidate code and exports exact index
     // Test-only directory, bounded under the OS temp directory.
     assert.ok(path.resolve(temp).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(temp,{recursive:true,force:true});
   }
+});
+
+test('live workflow is an inert hold with no blocked action or credential references', () => {
+  const active = fs.readFileSync(path.join(__dirname, '../workflows/codex.yml'), 'utf8');
+  assert.match(active, /if: \$\{\{ false &&/);
+  assert.doesNotMatch(active, /uses:|secrets\.|workflow_dispatch:|pull_request_target:/);
+  assert.match(active, /timeout-minutes: 1/);
 });
