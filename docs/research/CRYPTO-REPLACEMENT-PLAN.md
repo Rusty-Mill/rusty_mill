@@ -11,7 +11,9 @@ signature verification, X25519 and ChaCha20-Poly1305, and does not cover AES-GCM
 key exchange, signing, or randomness (section 0, "Scope limits"). **Consumer status:** no
 consumer, `rusty_tls` file, gate or default was changed; nothing here is used by anything.
 Work was frozen at stage 4 by owner decision; the freeze has since been reopened for gaps 1 and 2 (done) and,
-on 2026-10-10, for AES-GCM (gap 3) only, the `rusty_tls` seam and signing staying closed (section 0). Everything marked "decision" is the owner's. Section 10 is a
+on 2026-10-10, for AES-GCM (gap 3); on 2026-10-22 the `rusty_tls` seam (gap 4) was reopened for the client role only, by
+the implementer's transcription of the owner's instruction, not yet restated from the owner's GitHub account; signing
+(gap 5) stays closed (section 0). Everything marked "decision" is the owner's. Section 10 is a
 draft ADR and is **not accepted**. Vocabulary used below: "implemented" means code and tests
 exist; it never means reviewed or approved for TLS use.
 
