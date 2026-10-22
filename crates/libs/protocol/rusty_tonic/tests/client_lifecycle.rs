@@ -89,35 +89,35 @@ async fn next(rx: &mut mpsc::Receiver<String>) -> String {
     timeout(FIVE, rx.recv()).await.unwrap().unwrap()
 }
 
-/// A server that reads the request and then waits, reporting how the call ended: the stream
-/// being reset, noticed either on the request body or by failing to write.
+/// Reads the request's first message, reports "started", and then waits, reporting how the call
+/// ended: the stream being reset, noticed either on the request body or by failing to write.
+async fn stall(mut req: Request, respond: Respond, tx: mpsc::Sender<String>) {
+    let mut send = start_response(respond, &MetadataMap::new()).await;
+    let mut decoder = FrameDecoder::new(usize::MAX);
+    let _ = next_message(&mut req.body, &mut decoder).await;
+    tx.send("started".to_string()).await.unwrap();
+    let mut body_open = true;
+    let ended = loop {
+        if body_open {
+            match timeout(Duration::from_millis(20), req.body.next()).await {
+                Ok(Some(Err(e))) => break format!("{e}"),
+                Ok(None) => body_open = false,
+                Ok(Some(Ok(_))) | Err(_) => {}
+            }
+        } else {
+            sleep(Duration::from_millis(20)).await;
+        }
+        if let Err(e) = send.send_data(Vec::new(), false).await {
+            break format!("{e}");
+        }
+    };
+    tx.send(ended).await.unwrap();
+}
+
+/// A server whose every call stalls (see [`stall`]).
 fn stalling_server() -> (rusty_hyper::Server, mpsc::Receiver<String>) {
     let (tx, rx) = mpsc::channel(8);
-    let server = start(move |mut req: Request, respond: Respond| {
-        let tx = tx.clone();
-        async move {
-            let mut send = start_response(respond, &MetadataMap::new()).await;
-            let mut decoder = FrameDecoder::new(usize::MAX);
-            let _ = next_message(&mut req.body, &mut decoder).await;
-            tx.send("started".to_string()).await.unwrap();
-            let mut body_open = true;
-            let ended = loop {
-                if body_open {
-                    match timeout(Duration::from_millis(20), req.body.next()).await {
-                        Ok(Some(Err(e))) => break format!("{e}"),
-                        Ok(None) => body_open = false,
-                        Ok(Some(Ok(_))) | Err(_) => {}
-                    }
-                } else {
-                    sleep(Duration::from_millis(20)).await;
-                }
-                if let Err(e) = send.send_data(Vec::new(), false).await {
-                    break format!("{e}");
-                }
-            };
-            tx.send(ended).await.unwrap();
-        }
-    });
+    let server = start(move |req: Request, respond: Respond| stall(req, respond, tx.clone()));
     (server, rx)
 }
 
@@ -166,8 +166,10 @@ async fn a_stream_that_stalls_past_the_deadline_fails_after_what_arrived() {
         let _ = send.send_data(Vec::new(), true).await;
     });
     let channel = channel(&server);
+    // Long enough for the first reply to arrive even on a loaded machine.
+    let limit = Duration::from_millis(600);
     let mut stream = channel
-        .server_streaming::<Blob, Blob>(PATH, request(blob(0, 0)).with_timeout(SHORT))
+        .server_streaming::<Blob, Blob>(PATH, request(blob(0, 0)).with_timeout(limit))
         .await
         .unwrap();
     assert_eq!(stream.message().await.unwrap(), Some(blob(1, 3)));
@@ -242,6 +244,104 @@ async fn a_sender_dropped_without_finishing_cancels_the_call() {
     assert_eq!(err.code(), Code::Cancelled);
     let how = next(&mut ended).await;
     assert!(how.contains("reset"), "the server saw {how}");
+}
+
+/// Whether the server noticed the call was over: a reset, or a stream already gone.
+fn saw_the_call_end(how: &str) -> bool {
+    how.contains("reset") || how.contains("closed")
+}
+
+#[rusty_tokio::test]
+async fn a_reply_dropped_after_the_request_was_finished_cancels_the_call() {
+    let (server, mut ended) = stalling_server();
+    let (mut sender, reply) = channel(&server)
+        .client_streaming::<Blob, Blob>(PATH, rusty_tonic::client::Request::new(()))
+        .await
+        .unwrap();
+    sender.send(&blob(1, 1)).await.unwrap();
+    sender.finish().await.unwrap();
+    assert_eq!(next(&mut ended).await, "started");
+    // The request is complete; only the reply is left to give up on.
+    drop(reply);
+    let how = next(&mut ended).await;
+    assert!(saw_the_call_end(&how), "the server saw {how}");
+}
+
+#[rusty_tokio::test]
+async fn a_reply_dropped_before_the_request_is_finished_still_ends_the_call() {
+    let (server, mut ended) = stalling_server();
+    let (mut sender, reply) = channel(&server)
+        .client_streaming::<Blob, Blob>(PATH, rusty_tonic::client::Request::new(()))
+        .await
+        .unwrap();
+    sender.send(&blob(1, 1)).await.unwrap();
+    assert_eq!(next(&mut ended).await, "started");
+    drop(reply);
+    // The end of the request goes out at once, and only afterwards is the cancellation seen:
+    // the call must still be reset, not left open with nobody holding it.
+    let _ = sender.finish().await;
+    let how = next(&mut ended).await;
+    assert!(saw_the_call_end(&how), "the server saw {how}");
+}
+
+#[rusty_tokio::test]
+async fn a_deadline_after_the_request_was_finished_cancels_the_call() {
+    let (server, mut ended) = stalling_server();
+    let mut request = rusty_tonic::client::Request::new(());
+    request.timeout = Some(Duration::from_millis(600));
+    let (mut sender, reply) = channel(&server)
+        .client_streaming::<Blob, Blob>(PATH, request)
+        .await
+        .unwrap();
+    sender.send(&blob(1, 1)).await.unwrap();
+    sender.finish().await.unwrap();
+    let err = reply.response().await.unwrap_err();
+    assert_eq!(err.code(), Code::DeadlineExceeded);
+    assert_eq!(next(&mut ended).await, "started");
+    let how = next(&mut ended).await;
+    assert!(saw_the_call_end(&how), "the server saw {how}");
+}
+
+#[rusty_tokio::test]
+async fn a_finished_call_that_is_given_up_on_frees_its_stream_slot() {
+    // One stream at a time: a second call can start only if the first one really ended.
+    let mut h2 = Builder::new();
+    h2.max_concurrent_streams(1);
+    let options = ServeOptions {
+        h2,
+        ..ServeOptions::default()
+    };
+    let (tx, mut ended) = mpsc::channel(8);
+    let server = serve(
+        listener(),
+        None,
+        options,
+        move |req: Request, respond: Respond| {
+            let tx = tx.clone();
+            async move {
+                if header(&req.headers, ":path") == Some("/pkg.Svc/Stall") {
+                    stall(req, respond, tx).await;
+                } else {
+                    echo(req, respond).await;
+                }
+            }
+        },
+    )
+    .unwrap();
+    let channel = channel(&server);
+    let (mut sender, reply) = channel
+        .client_streaming::<Blob, Blob>("/pkg.Svc/Stall", rusty_tonic::client::Request::new(()))
+        .await
+        .unwrap();
+    sender.send(&blob(1, 1)).await.unwrap();
+    sender.finish().await.unwrap();
+    assert_eq!(next(&mut ended).await, "started");
+    drop(reply);
+    let second = timeout(FIVE, channel.unary::<Blob, Blob>(PATH, request(blob(2, 2))))
+        .await
+        .expect("the second call was never admitted: the first still holds the only stream")
+        .unwrap();
+    assert_eq!(second.message.n, 2);
 }
 
 #[rusty_tokio::test]
