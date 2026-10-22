@@ -2,8 +2,13 @@
 
 The complete proposed configuration is an **inert template** at
 `.github/automation-templates/review-router.yml.disabled`; its job gates also remain
-literal `false`. The live `.github/workflows/review-router.yml` contains only a disabled
-hold job with no action or secret references. Current repository policy does not
+literal `false`. The live `.github/workflows/review-router.yml` is manual-only
+(`workflow_dispatch`) and contains only a disabled hold job with no action or
+secret references. The existing CI policy requires every PR-triggered check to
+run through `ci.yml` and `required-gate`; the hold therefore has no PR event
+triggers. Proposed automatic PR triggers remain only in the inert template, and
+future activation must resolve how they participate in that CI policy without
+bypassing or weakening it. Current repository policy does not
 allow either `openai/codex-action` or `anthropics/claude-code-action`, and GitHub
 validates that policy even for skipped jobs. The initial disabled review-router
 run failed at startup for precisely that reason; no generation job started.

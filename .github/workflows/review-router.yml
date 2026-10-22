@@ -1,6 +1,6 @@
 name: Review router (activation held)
 on:
-  pull_request: {types: [opened, synchronize, ready_for_review]}
+  workflow_dispatch:
 permissions: {contents: read}
 jobs:
   activation-hold:

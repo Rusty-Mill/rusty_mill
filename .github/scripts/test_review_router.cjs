@@ -50,6 +50,8 @@ test('a raced head never reaches the publication API; successful review is COMME
 test('live workflow is an inert hold with no blocked action or credential references', () => {
   const active = fs.readFileSync(path.join(__dirname, '../workflows/review-router.yml'), 'utf8');
   assert.match(active, /if: \$\{\{ false &&/);
-  assert.doesNotMatch(active, /uses:|secrets\.|workflow_dispatch:|pull_request_target:/);
+  assert.doesNotMatch(active, /uses:|secrets\.|pull_request(?:_target)?:/);
+  assert.match(active, /^on:\n  workflow_dispatch:\npermissions:/m);
+  assert.match(workflow, /^on:\n  pull_request: \{types: \[opened, synchronize, ready_for_review\]\}/m);
   assert.match(active, /timeout-minutes: 1/);
 });
