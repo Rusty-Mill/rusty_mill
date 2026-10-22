@@ -49,7 +49,7 @@
 
 use core::fmt;
 
-use ring::hmac;
+use super::crypto::{HashAlgorithm, HmacKey};
 
 use super::record::Aead;
 use super::record12::fixed_iv_len;
@@ -97,13 +97,6 @@ impl fmt::Display for ScheduleError {
 
 impl std::error::Error for ScheduleError {}
 
-fn hmac_algorithm(hash: Hash) -> hmac::Algorithm {
-    match hash {
-        Hash::Sha256 => hmac::HMAC_SHA256,
-        Hash::Sha384 => hmac::HMAC_SHA384,
-    }
-}
-
 /// `PRF(secret, label, seed)`, RFC 5246 §5, writing `out.len()` octets.
 ///
 /// ```text
@@ -117,21 +110,21 @@ fn hmac_algorithm(hash: Hash) -> hmac::Algorithm {
 /// order down at the call site). It is exposed so the tests can hold it to
 /// OpenSSL's and rustls' implementations directly.
 pub fn prf(hash: Hash, secret: &[u8], label: &[u8], seed: &[&[u8]], out: &mut [u8]) {
-    let key = hmac::Key::new(hmac_algorithm(hash), secret);
+    let key = HmacKey::new(hash.algorithm(), secret);
 
-    let mut a_ctx = hmac::Context::with_key(&key);
+    let mut a_ctx = key.context();
     a_ctx.update(label);
     seed.iter().for_each(|piece| a_ctx.update(piece));
     let mut a = a_ctx.sign(); // A(1)
 
     for chunk in out.chunks_mut(hash.len()) {
-        let mut block = hmac::Context::with_key(&key);
-        block.update(a.as_ref());
+        let mut block = key.context();
+        block.update(&a);
         block.update(label);
         seed.iter().for_each(|piece| block.update(piece));
         let block = block.sign();
-        chunk.copy_from_slice(&block.as_ref()[..chunk.len()]);
-        a = hmac::sign(&key, a.as_ref()); // A(i+1)
+        chunk.copy_from_slice(&block[..chunk.len()]);
+        a = key.sign(&a); // A(i+1)
     }
 }
 
@@ -308,13 +301,13 @@ pub fn verify_finished(
     let Ok(expected) = finished_verify_data(hash, master_secret, side, handshake_hash) else {
         return false;
     };
-    // `hmac::verify` compares in constant time but wants a full-length tag, and
-    // `verify_data` is truncated; `ring`'s own comparison helper is deprecated.
-    // So compare MACs of the two values under a key only the verifier knows (the
-    // expected value). They are equal exactly when the values are, and the final
-    // comparison is ring's constant-time one. Only the length of `received`,
-    // which is public, affects the time taken.
-    let key = hmac::Key::new(hmac::HMAC_SHA256, &expected);
-    let expected_tag = hmac::sign(&key, &expected);
-    hmac::verify(&key, received, expected_tag.as_ref()).is_ok()
+    // `HmacKey::verify` compares in constant time but wants a full-length tag,
+    // and `verify_data` is truncated. So compare MACs of the two values under a
+    // key only the verifier knows (the expected value). They are equal exactly
+    // when the values are, and the final comparison is the backend's
+    // constant-time one. Only the length of `received`, which is public,
+    // affects the time taken.
+    let key = HmacKey::new(HashAlgorithm::Sha256, &expected);
+    let expected_tag = key.sign(&expected);
+    key.verify(received, &expected_tag)
 }

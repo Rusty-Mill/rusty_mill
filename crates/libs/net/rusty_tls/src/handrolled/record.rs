@@ -52,7 +52,7 @@
 
 use core::fmt;
 
-use ring::aead;
+use super::crypto::{AeadAlgorithm, AeadKey};
 
 /// Length of the record header: type (1) + legacy version (2) + length (2).
 pub const HEADER_LEN: usize = 5;
@@ -114,11 +114,11 @@ impl Aead {
         TAG_LEN
     }
 
-    fn ring_algorithm(self) -> &'static aead::Algorithm {
+    pub(crate) const fn algorithm(self) -> AeadAlgorithm {
         match self {
-            Self::Aes128Gcm => &aead::AES_128_GCM,
-            Self::Aes256Gcm => &aead::AES_256_GCM,
-            Self::ChaCha20Poly1305 => &aead::CHACHA20_POLY1305,
+            Self::Aes128Gcm => AeadAlgorithm::Aes128Gcm,
+            Self::Aes256Gcm => AeadAlgorithm::Aes256Gcm,
+            Self::ChaCha20Poly1305 => AeadAlgorithm::ChaCha20Poly1305,
         }
     }
 }
@@ -310,7 +310,7 @@ impl std::error::Error for RecordError {}
 /// traffic secrets. A key update produces a new one, with its own sequence
 /// number starting again at zero.
 struct DirectionKey {
-    key: aead::LessSafeKey,
+    key: AeadKey,
     iv: [u8; NONCE_LEN],
 }
 
@@ -327,25 +327,20 @@ impl DirectionKey {
         }
 
         // Both lengths are checked immediately above, which is the only way
-        // `UnboundKey::new` can fail.
-        let unbound = aead::UnboundKey::new(alg.ring_algorithm(), key).map_err(|_| {
-            RecordError::KeyLength {
-                expected: alg.key_len(),
-                actual: key.len(),
-            }
+        // `AeadKey::new` can fail.
+        let key = AeadKey::new(alg.algorithm(), key).map_err(|_| RecordError::KeyLength {
+            expected: alg.key_len(),
+            actual: key.len(),
         })?;
 
         let mut fixed_iv = [0u8; NONCE_LEN];
         fixed_iv.copy_from_slice(iv);
 
-        Ok(Self {
-            key: aead::LessSafeKey::new(unbound),
-            iv: fixed_iv,
-        })
+        Ok(Self { key, iv: fixed_iv })
     }
 
     /// RFC 8446 §5.3: left-pad the sequence number to the IV length, then XOR.
-    fn nonce(&self, seq: u64) -> aead::Nonce {
+    fn nonce(&self, seq: u64) -> [u8; NONCE_LEN] {
         let mut nonce = self.iv;
         for (out, byte) in nonce[NONCE_LEN - 8..].iter_mut().zip(seq.to_be_bytes()) {
             *out ^= byte;
@@ -353,7 +348,7 @@ impl DirectionKey {
         // Unique by construction: `seq` never repeats for a given key (the
         // sequence counter is monotonic and refuses to wrap), and the IV is
         // fixed for the key's lifetime.
-        aead::Nonce::assume_unique_for_key(nonce)
+        nonce
     }
 }
 
@@ -480,7 +475,7 @@ impl Sealer {
             .key
             .seal_in_place_append_tag(
                 self.key.nonce(seq),
-                aead::Aad::from(additional_data(encrypted_len)),
+                &additional_data(encrypted_len),
                 &mut inner,
             )
             .map_err(|_| RecordError::Encrypt)?;
@@ -594,11 +589,7 @@ impl Opener {
         let plain_len = self
             .key
             .key
-            .open_in_place(
-                self.key.nonce(seq),
-                aead::Aad::from(additional_data(declared)),
-                &mut buf,
-            )
+            .open_in_place(self.key.nonce(seq), &additional_data(declared), &mut buf)
             .map_err(|_| RecordError::Decrypt)?
             .len();
         buf.truncate(plain_len);

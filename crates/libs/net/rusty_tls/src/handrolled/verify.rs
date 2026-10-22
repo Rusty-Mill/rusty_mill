@@ -121,7 +121,7 @@
 //! off the signature algorithm rejects real certificates, which is the safe
 //! direction to be wrong in but wrong nonetheless.
 
-use ring::signature;
+use super::crypto::Verifier;
 
 use super::der::{ObjectIdentifier, Reader};
 use super::x509::{AlgorithmIdentifier, Certificate, SubjectPublicKeyInfo};
@@ -332,26 +332,26 @@ impl SignatureAlgorithm {
         Ok(algorithm)
     }
 
-    /// The `ring` verifier for this algorithm, given the key's curve.
+    /// The verifier for this algorithm, given the key's curve.
     ///
     /// `curve` is `Some` exactly for ECDSA, because that is the only case
     /// where the verifier depends on something the signature algorithm does
     /// not state.
-    fn ring_algorithm(self, curve: Option<Curve>) -> &'static dyn signature::VerificationAlgorithm {
+    const fn verifier(self, curve: Option<Curve>) -> Verifier {
         match (self, curve) {
-            // The 2048–8192 bound is `ring`'s, and is why undersized RSA
+            // The 2048–8192 bound is the verifier's, and is why undersized RSA
             // moduli need no check of their own here.
-            (Self::RsaPkcs1Sha256, _) => &signature::RSA_PKCS1_2048_8192_SHA256,
-            (Self::RsaPkcs1Sha384, _) => &signature::RSA_PKCS1_2048_8192_SHA384,
-            (Self::RsaPkcs1Sha512, _) => &signature::RSA_PKCS1_2048_8192_SHA512,
-            (Self::EcdsaSha256, Some(Curve::P256)) => &signature::ECDSA_P256_SHA256_ASN1,
-            (Self::EcdsaSha256, Some(Curve::P384)) => &signature::ECDSA_P384_SHA256_ASN1,
-            (Self::EcdsaSha384, Some(Curve::P256)) => &signature::ECDSA_P256_SHA384_ASN1,
-            (Self::EcdsaSha384, Some(Curve::P384)) => &signature::ECDSA_P384_SHA384_ASN1,
-            (Self::Ed25519, _) => &signature::ED25519,
+            (Self::RsaPkcs1Sha256, _) => Verifier::RsaPkcs1Sha256,
+            (Self::RsaPkcs1Sha384, _) => Verifier::RsaPkcs1Sha384,
+            (Self::RsaPkcs1Sha512, _) => Verifier::RsaPkcs1Sha512,
+            (Self::EcdsaSha256, Some(Curve::P256)) => Verifier::EcdsaP256Sha256,
+            (Self::EcdsaSha256, Some(Curve::P384)) => Verifier::EcdsaP384Sha256,
+            (Self::EcdsaSha384, Some(Curve::P256)) => Verifier::EcdsaP256Sha384,
+            (Self::EcdsaSha384, Some(Curve::P384)) => Verifier::EcdsaP384Sha384,
+            (Self::Ed25519, _) => Verifier::Ed25519,
             // Unreachable: `check_key_compatibility` returns `Some` for every
             // ECDSA algorithm before this is called, and errors otherwise.
-            (Self::EcdsaSha256 | Self::EcdsaSha384, None) => &signature::ED25519,
+            (Self::EcdsaSha256 | Self::EcdsaSha384, None) => Verifier::Ed25519,
         }
     }
 
@@ -491,8 +491,9 @@ pub fn verify_signed_data(
     let algorithm = SignatureAlgorithm::from_identifier(algorithm)?;
     let curve = check_key_compatibility(algorithm, key)?;
 
-    signature::UnparsedPublicKey::new(algorithm.ring_algorithm(curve), key.key)
-        .verify(message, signature)
+    algorithm
+        .verifier(curve)
+        .verify(key.key, message, signature)
         .map_err(|_| VerifyError::BadSignature)
 }
 
@@ -607,10 +608,7 @@ impl SignatureScheme {
     ///
     /// So the curve is read from the key (as the X.509 side does) and combined
     /// with the hash the scheme names. Ed25519 and RSA-PSS are unchanged.
-    fn tls12_algorithm(
-        self,
-        key: &SubjectPublicKeyInfo<'_>,
-    ) -> Result<&'static dyn signature::VerificationAlgorithm, VerifyError> {
+    fn tls12_algorithm(self, key: &SubjectPublicKeyInfo<'_>) -> Result<Verifier, VerifyError> {
         let key_mismatch = |key: &SubjectPublicKeyInfo<'_>| match key.algorithm.oid {
             oid::RSA_ENCRYPTION | oid::EC_PUBLIC_KEY | oid::ED25519 => {
                 VerifyError::KeyAlgorithmMismatch
@@ -625,9 +623,9 @@ impl SignatureScheme {
                 }
                 require_null_or_absent_parameters(&key.algorithm)?;
                 Ok(match self {
-                    Self::RSA_PKCS1_SHA384 => &signature::RSA_PKCS1_2048_8192_SHA384,
-                    Self::RSA_PKCS1_SHA512 => &signature::RSA_PKCS1_2048_8192_SHA512,
-                    _ => &signature::RSA_PKCS1_2048_8192_SHA256,
+                    Self::RSA_PKCS1_SHA384 => Verifier::RsaPkcs1Sha384,
+                    Self::RSA_PKCS1_SHA512 => Verifier::RsaPkcs1Sha512,
+                    _ => Verifier::RsaPkcs1Sha256,
                 })
             }
             Self::ECDSA_SECP256R1_SHA256 | Self::ECDSA_SECP384R1_SHA384 => {
@@ -636,10 +634,10 @@ impl SignatureScheme {
                 }
                 let sha384 = self == Self::ECDSA_SECP384R1_SHA384;
                 Ok(match (named_curve(key)?, sha384) {
-                    (Curve::P256, false) => &signature::ECDSA_P256_SHA256_ASN1,
-                    (Curve::P256, true) => &signature::ECDSA_P256_SHA384_ASN1,
-                    (Curve::P384, false) => &signature::ECDSA_P384_SHA256_ASN1,
-                    (Curve::P384, true) => &signature::ECDSA_P384_SHA384_ASN1,
+                    (Curve::P256, false) => Verifier::EcdsaP256Sha256,
+                    (Curve::P256, true) => Verifier::EcdsaP256Sha384,
+                    (Curve::P384, false) => Verifier::EcdsaP384Sha256,
+                    (Curve::P384, true) => Verifier::EcdsaP384Sha384,
                 })
             }
             other => other.tls13_algorithm(key),
@@ -655,10 +653,7 @@ impl SignatureScheme {
     /// is [`VerifyError::CertificateOnlyScheme`] rather than "unsupported",
     /// because it is implemented and being turned away on the RFC's
     /// instruction.
-    fn tls13_algorithm(
-        self,
-        key: &SubjectPublicKeyInfo<'_>,
-    ) -> Result<&'static dyn signature::VerificationAlgorithm, VerifyError> {
+    fn tls13_algorithm(self, key: &SubjectPublicKeyInfo<'_>) -> Result<Verifier, VerifyError> {
         // Weak first, so a SHA-1 scheme is never reported as merely
         // unsupported — it is refused on strength, and that distinction is
         // the same one certificates make.
@@ -715,28 +710,28 @@ impl SignatureScheme {
         }
 
         match self {
-            // `ring`'s PSS verifiers fix MGF1 with the same hash and a salt
+            // The PSS verifiers fix MGF1 with the same hash and a salt
             // length equal to the digest length, which is what RFC 8446
             // §4.2.3 requires of these schemes. They also enforce a 2048–8192
             // bit modulus, so an undersized RSA key is refused without a
             // check here — including RFC 8448's own 1024-bit example key.
-            Self::RSA_PSS_RSAE_SHA256 => Ok(&signature::RSA_PSS_2048_8192_SHA256),
-            Self::RSA_PSS_RSAE_SHA384 => Ok(&signature::RSA_PSS_2048_8192_SHA384),
-            Self::RSA_PSS_RSAE_SHA512 => Ok(&signature::RSA_PSS_2048_8192_SHA512),
+            Self::RSA_PSS_RSAE_SHA256 => Ok(Verifier::RsaPssSha256),
+            Self::RSA_PSS_RSAE_SHA384 => Ok(Verifier::RsaPssSha384),
+            Self::RSA_PSS_RSAE_SHA512 => Ok(Verifier::RsaPssSha512),
 
             // The scheme names the curve, so the key has to be on it. This is
             // the inverse of the X.509 rule and the reason these are two
             // types — see the module docs.
             Self::ECDSA_SECP256R1_SHA256 => match named_curve(key)? {
-                Curve::P256 => Ok(&signature::ECDSA_P256_SHA256_ASN1),
+                Curve::P256 => Ok(Verifier::EcdsaP256Sha256),
                 Curve::P384 => Err(VerifyError::CurveMismatch),
             },
             Self::ECDSA_SECP384R1_SHA384 => match named_curve(key)? {
-                Curve::P384 => Ok(&signature::ECDSA_P384_SHA384_ASN1),
+                Curve::P384 => Ok(Verifier::EcdsaP384Sha384),
                 Curve::P256 => Err(VerifyError::CurveMismatch),
             },
 
-            Self::ED25519 => Ok(&signature::ED25519),
+            Self::ED25519 => Ok(Verifier::Ed25519),
 
             // Unreachable: `required_key` above returns for everything else.
             _ => Err(VerifyError::UnsupportedSignatureAlgorithm),
@@ -768,9 +763,9 @@ pub fn verify_tls13_signature(
     message: &[u8],
     signature: &[u8],
 ) -> Result<(), VerifyError> {
-    let algorithm = scheme.tls13_algorithm(key)?;
-    signature::UnparsedPublicKey::new(algorithm, key.key)
-        .verify(message, signature)
+    scheme
+        .tls13_algorithm(key)?
+        .verify(key.key, message, signature)
         .map_err(|_| VerifyError::BadSignature)
 }
 
@@ -793,9 +788,9 @@ pub fn verify_tls12_signature(
     message: &[u8],
     signature: &[u8],
 ) -> Result<(), VerifyError> {
-    let algorithm = scheme.tls12_algorithm(key)?;
-    signature::UnparsedPublicKey::new(algorithm, key.key)
-        .verify(message, signature)
+    scheme
+        .tls12_algorithm(key)?
+        .verify(key.key, message, signature)
         .map_err(|_| VerifyError::BadSignature)
 }
 

@@ -68,7 +68,7 @@
 //! label construction is the part TLS defines and the part worth
 //! hand-rolling. The underlying HMAC is not.
 
-use ring::hmac;
+use super::crypto::{self, HashAlgorithm, HmacKey};
 
 /// The hash a cipher suite's key schedule runs on.
 ///
@@ -100,35 +100,24 @@ impl Hash {
         false
     }
 
-    fn digest_algorithm(self) -> &'static ring::digest::Algorithm {
+    pub(crate) const fn algorithm(self) -> HashAlgorithm {
         match self {
-            Self::Sha256 => &ring::digest::SHA256,
-            Self::Sha384 => &ring::digest::SHA384,
-        }
-    }
-
-    fn hmac_algorithm(self) -> hmac::Algorithm {
-        match self {
-            Self::Sha256 => hmac::HMAC_SHA256,
-            Self::Sha384 => hmac::HMAC_SHA384,
+            Self::Sha256 => HashAlgorithm::Sha256,
+            Self::Sha384 => HashAlgorithm::Sha384,
         }
     }
 
     /// The hash of the empty string, which `Derive-Secret` uses whenever its
     /// `Messages` argument is `""`.
     pub fn empty_hash(self) -> Vec<u8> {
-        ring::digest::digest(self.digest_algorithm(), b"")
-            .as_ref()
-            .to_vec()
+        crypto::digest(self.algorithm(), b"")
     }
 
     /// Hash a message. Provided so a caller can build transcript hashes
     /// without reaching for a second digest implementation and risking a
     /// mismatch with the one the schedule uses.
     pub fn hash(self, message: &[u8]) -> Vec<u8> {
-        ring::digest::digest(self.digest_algorithm(), message)
-            .as_ref()
-            .to_vec()
+        crypto::digest(self.algorithm(), message)
     }
 }
 
@@ -138,23 +127,22 @@ impl Hash {
 /// message, which reads backwards until you remember that extract's job is to
 /// concentrate entropy from the IKM rather than to authenticate it.
 fn hkdf_extract(hash: Hash, salt: &[u8], ikm: &[u8]) -> Vec<u8> {
-    let key = hmac::Key::new(hash.hmac_algorithm(), salt);
-    hmac::sign(&key, ikm).as_ref().to_vec()
+    HmacKey::new(hash.algorithm(), salt).sign(ikm)
 }
 
 /// `HKDF-Expand(prk, info, length)`, RFC 5869 §2.3.
 fn hkdf_expand(hash: Hash, prk: &[u8], info: &[u8], length: usize) -> Vec<u8> {
-    let key = hmac::Key::new(hash.hmac_algorithm(), prk);
+    let key = HmacKey::new(hash.algorithm(), prk);
     let mut output = Vec::with_capacity(length);
     let mut previous: Vec<u8> = Vec::new();
     let mut counter: u8 = 1;
 
     while output.len() < length {
-        let mut context = hmac::Context::with_key(&key);
+        let mut context = key.context();
         context.update(&previous);
         context.update(info);
         context.update(&[counter]);
-        previous = context.sign().as_ref().to_vec();
+        previous = context.sign();
         output.extend_from_slice(&previous);
         // RFC 5869 caps expansion at 255 blocks. Nothing TLS 1.3 derives
         // comes close, so this is a bound rather than a case to handle.
@@ -407,8 +395,7 @@ pub fn finished_key(hash: Hash, traffic_secret: &[u8]) -> Vec<u8> {
 /// handshake traffic secret *and* saw the same transcript, which is what makes
 /// a modified ClientHello detectable rather than merely unlikely to work.
 pub fn finished_verify_data(hash: Hash, traffic_secret: &[u8], transcript_hash: &[u8]) -> Vec<u8> {
-    let key = hmac::Key::new(hash.hmac_algorithm(), &finished_key(hash, traffic_secret));
-    hmac::sign(&key, transcript_hash).as_ref().to_vec()
+    HmacKey::new(hash.algorithm(), &finished_key(hash, traffic_secret)).sign(transcript_hash)
 }
 
 /// Check a received Finished message's `verify_data`.
@@ -423,8 +410,8 @@ pub fn verify_finished(
     transcript_hash: &[u8],
     verify_data: &[u8],
 ) -> bool {
-    let key = hmac::Key::new(hash.hmac_algorithm(), &finished_key(hash, traffic_secret));
-    hmac::verify(&key, transcript_hash, verify_data).is_ok()
+    HmacKey::new(hash.algorithm(), &finished_key(hash, traffic_secret))
+        .verify(transcript_hash, verify_data)
 }
 
 /// The next application traffic secret after a KeyUpdate, RFC 8446 §7.2.
