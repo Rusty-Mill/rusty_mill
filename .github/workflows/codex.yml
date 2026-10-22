@@ -1,0 +1,65 @@
+name: codex
+on:
+  issue_comment: {types: [created]}
+permissions: {contents: read}
+
+jobs:
+  work:
+    if: >
+      contains(github.event.comment.body, '@codex') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+      github.event.comment.user.login != 'yourname-codex'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.CODEX_BOT_PAT }}
+      N: ${{ github.event.issue.number }}
+      IS_PR: ${{ github.event.issue.pull_request != null }}
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {token: "${{ secrets.CODEX_BOT_PAT }}", fetch-depth: 0}
+
+      - name: Resolve branch and context
+        id: ctx
+        run: |
+          git config user.name  "yourname-codex"
+          git config user.email "yourname-codex@users.noreply.github.com"
+          echo ".agent-context.md" >> .git/info/exclude
+          if [ "$IS_PR" = true ]; then
+            ref=$(gh pr view "$N" --json headRefName -q .headRefName)
+            case "$ref" in
+              codex/*) ;;
+              *) gh pr comment "$N" --body "Codex only updates codex/* PRs."
+                 echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0;;
+            esac
+            git checkout "$ref"
+            { gh pr view "$N" --comments; gh pr diff "$N"; } > .agent-context.md
+          else
+            ref="codex/issue-$N"
+            git checkout -b "$ref"
+            gh issue view "$N" --comments > .agent-context.md
+          fi
+          echo "ok=true"   >> "$GITHUB_OUTPUT"
+          echo "ref=$ref"  >> "$GITHUB_OUTPUT"
+
+      - if: steps.ctx.outputs.ok == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: workspace-write
+          prompt: |
+            Context (issue or PR, comments, diff) is in .agent-context.md.
+            Latest request: ${{ github.event.comment.body }}
+            Make minimal, focused changes with tests. Do not commit or push.
+
+      - name: Commit and push
+        if: steps.ctx.outputs.ok == 'true'
+        env: {REF: "${{ steps.ctx.outputs.ref }}"}
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            gh issue comment "$N" --body "Codex made no changes."; exit 0
+          fi
+          git add -A
+          git commit -m "codex: ${TITLE} (#$N)"
+          git push origin "HEAD:$REF"
+          [ "$IS_PR" = true ] || gh pr create --title "codex: $TITLE" --body "Closes #$N" --head "$REF"
