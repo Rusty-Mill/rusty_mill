@@ -1,6 +1,8 @@
 //! Scratch oracle baseline: same workloads and fill as rtbench, run through
 //! libghostty-vt (phall1 fork, prebuilt). Not committed; comparison only.
 use libghostty_vt::Terminal;
+
+mod oracle;
 use std::time::Instant;
 
 fn rss_kb(field: &str) -> u64 {
@@ -45,6 +47,10 @@ fn throughput(dir: &str, iters: u32) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() > 2 && args[1] == "grid" {
+        print!("{}", oracle::dump(&args[2]));
+        return;
+    }
     if args.len() > 2 && args[1] == "dump" {
         let data = std::fs::read(&args[2]).expect("read");
         let mut t = Terminal::new(120, 40).expect("term");
