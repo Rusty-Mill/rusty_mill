@@ -224,6 +224,21 @@ mod tests {
         dir
     }
 
+    /// The next free slot of `class`, awaited briefly: another test's fork
+    /// may hold a copy of a just-released lock until it execs.
+    fn reacquire(slots: &Slots, class: Class) -> Result<Slot, String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(slot) = slots.try_acquire(class)? {
+                return Ok(slot);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("slot never freed".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     const TWO_AND_ONE: Capacity = Capacity {
         agents: 2,
         validators: 1,
@@ -239,12 +254,9 @@ mod tests {
         let v = slots.try_acquire(Class::Validator)?.ok_or("validator")?;
         assert!(slots.try_acquire(Class::Validator)?.is_none());
         drop(a);
-        assert_eq!(
-            slots.try_acquire(Class::Agent)?.map(|s| s.name()),
-            Some("agent-0".into())
-        );
+        assert_eq!(reacquire(&slots, Class::Agent)?.name(), "agent-0");
         drop(v);
-        assert!(slots.try_acquire(Class::Validator)?.is_some());
+        reacquire(&slots, Class::Validator)?;
         Ok(())
     }
 
@@ -298,13 +310,7 @@ mod tests {
         assert!(slots.try_acquire(Class::Agent)?.is_none());
         child.kill().map_err(|e| e.to_string())?;
         child.wait().map_err(|e| e.to_string())?;
-        // Another test's fork may hold a copy of the descriptor until it
-        // execs, so the release is awaited, briefly.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while slots.try_acquire(Class::Agent)?.is_none() {
-            assert!(std::time::Instant::now() < deadline, "slot never freed");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        reacquire(&slots, Class::Agent)?;
         Ok(())
     }
 }
