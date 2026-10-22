@@ -366,15 +366,18 @@ pub struct KittyFrame {
     pub gap_ms: u32,
 }
 
-/// The authoritative screen buffer: a row-major grid of [`Cell`]s plus a
-/// per-row damage (`dirty`) tracker and a cursor position.
+/// The authoritative screen buffer: a grid of [`Cell`]s held as one [`Line`]
+/// per row, plus a per-row damage (`dirty`) tracker and a cursor position.
 pub struct Grid {
     /// Number of columns.
     pub cols: usize,
     /// Number of rows.
     pub rows: usize,
-    /// Row-major cell storage; `len() == cols * rows`.
-    pub cells: Vec<Cell>,
+    /// The live screen, top row first; `len() == rows`, and every line holds
+    /// exactly `cols` cells. A scroll rotates rows instead of moving cells, and
+    /// a line leaving the top moves whole into [`Grid::scrollback`]. Read it
+    /// through [`Grid::row`].
+    screen: Vec<Line>,
     /// Per-row damage flags; `len() == rows`.
     pub dirty: Vec<bool>,
     /// Cursor position as `(col, row)`, both zero-based.
@@ -389,6 +392,10 @@ pub struct Grid {
     /// When `Some`, the alternate screen is active and this holds the primary
     /// screen to restore on exit. Kept the same dimensions as the live buffer.
     primary: Option<SavedScreen>,
+    /// The alternate screen's rows, kept after leaving it and blanked for
+    /// reuse on the next entry, so an app that toggles the alternate screen
+    /// does not allocate a row per switch. Empty until first use.
+    spare_screen: Vec<Line>,
     /// Monotonic counter bumped on every parsed batch; lets the renderer
     /// reason about frame freshness.
     pub epoch: u64,
@@ -715,17 +722,6 @@ pub struct Grid {
     /// surfaced as the `terminal://command` resource.
     #[cfg(feature = "l13")]
     last_command_output: Option<String>,
-    /// Per-row line size attributes (DECDWL/DECDHL); `len() == rows`. The
-    /// renderer relays each to the host so double-width/height lines display
-    /// correctly, and they shift with the rows they label as the screen scrolls.
-    line_attrs: Vec<LineAttr>,
-    /// Per-row soft-wrap flags; `len() == rows`. `wrapped[y]` is set when DECAWM
-    /// autowrap overflowed row `y` into row `y + 1`, marking the two as one
-    /// logical line. Travels with the row through scrolls (alongside
-    /// [`Grid::line_attrs`]) and into [`Grid::scrollback`], and is the signal the
-    /// reflow uses to rejoin wrapped runs on resize. A *hard* line break (LF,
-    /// NEL, IND) leaves it clear.
-    wrapped: Vec<bool>,
 }
 
 /// Build the default tab-stop table for a `cols`-wide grid: a stop at every
@@ -810,46 +806,66 @@ pub(crate) fn alt_mode(param: usize) -> Option<AltMode> {
 /// A stashed screen buffer plus its cursor, used to swap the primary screen out
 /// while the alternate screen is active.
 struct SavedScreen {
-    cells: Vec<Cell>,
+    screen: Vec<Line>,
     cursor: (usize, usize),
     /// The DECSC/`CSI s` register at the time of the switch, kept separate from
     /// the alternate screen's so the two buffers don't share one save slot.
     saved_cursor: (usize, usize),
     /// The mode that activated the alternate screen, governing exit behaviour.
     mode: AltMode,
-    /// Line size attributes of the stashed screen, swapped back on exit.
-    line_attrs: Vec<LineAttr>,
-    /// Soft-wrap flags of the stashed screen, swapped back on exit. Parallel to
-    /// [`SavedScreen::line_attrs`].
-    wrapped: Vec<bool>,
 }
 
-/// One stored line of scrollback history: the cells as they left the screen plus
-/// the soft-wrap bit that says whether the next stored line is a continuation of
-/// the same logical line (set by DECAWM autowrap, clear on a hard line break).
+/// One row of cells, on the live screen or in scrollback. The same value moves
+/// from the screen into history when it scrolls off the top, and an evicted
+/// history line is recycled as the new bottom row, so a scroll moves no cells.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Line {
+    /// The row's cells: exactly `cols` on the live screen; a history line keeps
+    /// the width it had when it left the screen until the next reflow.
     pub cells: Vec<Cell>,
+    /// Soft wrap: set when DECAWM autowrap overflowed this row into the next,
+    /// marking the two as one logical line. A *hard* line break (LF, NEL, IND)
+    /// leaves it clear. The reflow uses it to rejoin wrapped runs on resize.
     pub wrapped: bool,
+    /// Line size (DECDWL/DECDHL). The renderer relays it to the host. Always
+    /// [`LineAttr::Single`] in scrollback: a double-width line is meaningless
+    /// once scrolled off.
+    pub attr: LineAttr,
 }
 
-/// Clip/extend `old` (sized `old_cols`×`old_rows`) into a fresh `cols`×`rows`
-/// buffer, preserving the top-left overlap and blank-filling any new area. Used
-/// for the *alternate* screen, whose full-screen apps repaint on resize — there
-/// is no logical-line history there to rejoin, so a plain clip is correct.
-fn reflow_clip(
-    old: &[Cell],
-    old_cols: usize,
-    old_rows: usize,
-    cols: usize,
-    rows: usize,
-) -> Vec<Cell> {
-    let mut new = vec![Cell::blank(); cols * rows];
-    let copy_rows = rows.min(old_rows);
-    let copy_cols = cols.min(old_cols);
-    for y in 0..copy_rows {
-        let src = y * old_cols;
-        let dst = y * cols;
-        new[dst..dst + copy_cols].copy_from_slice(&old[src..src + copy_cols]);
+impl Line {
+    /// A row of `cols` copies of `fill`, unwrapped and single-width.
+    fn blank(cols: usize, fill: Cell) -> Self {
+        Line {
+            cells: vec![fill; cols],
+            wrapped: false,
+            attr: LineAttr::Single,
+        }
+    }
+
+    /// Reset to [`Line::blank`] in place, reusing the cell allocation.
+    fn clear(&mut self, cols: usize, fill: Cell) {
+        self.cells.clear();
+        self.cells.resize(cols, fill);
+        self.wrapped = false;
+        self.attr = LineAttr::Single;
+    }
+}
+
+/// A `rows`-high screen of [`Line::blank`] rows.
+fn blank_screen(cols: usize, rows: usize, fill: Cell) -> Vec<Line> {
+    (0..rows).map(|_| Line::blank(cols, fill)).collect()
+}
+
+/// Clip/extend the screen `old` into a fresh `cols`×`rows` screen, preserving
+/// the top-left overlap and blank-filling any new area. Used for the
+/// *alternate* screen, whose full-screen apps repaint on resize — there is no
+/// logical-line history there to rejoin, so a plain clip is correct.
+fn reflow_clip(old: &[Line], cols: usize, rows: usize) -> Vec<Line> {
+    let mut new = blank_screen(cols, rows, Cell::blank());
+    for (dst, src) in new.iter_mut().zip(old) {
+        let n = cols.min(src.cells.len());
+        dst.cells[..n].copy_from_slice(&src.cells[..n]);
     }
     new
 }
@@ -896,14 +912,11 @@ pub struct BidiRow {
     pub shaped: Option<Vec<Option<char>>>,
 }
 
-/// The product of a wrap-aware reflow: the rebuilt history, the new on-screen
-/// buffer with its per-row metadata, the relocated cursor, and the remapped
-/// prompt marks.
+/// The product of a wrap-aware reflow: the rebuilt history, the new screen,
+/// the relocated cursor, and the remapped prompt marks.
 struct Reflowed {
     scrollback: VecDeque<Line>,
-    cells: Vec<Cell>,
-    wrapped: Vec<bool>,
-    line_attrs: Vec<LineAttr>,
+    screen: Vec<Line>,
     cursor: (usize, usize),
     prompt_marks: Vec<usize>,
     /// Remapped command-capture anchor; only consumed under the `l13` feature.
@@ -930,11 +943,8 @@ struct Reflowed {
 #[allow(clippy::too_many_arguments)]
 fn reflow_history(
     scrollback: &VecDeque<Line>,
-    screen: &[Cell],
-    screen_wrapped: &[bool],
-    screen_attrs: &[LineAttr],
+    screen: &[Line],
     old_cols: usize,
-    old_rows: usize,
     cursor: (usize, usize),
     prompt_marks: &[usize],
     command_start: Option<usize>,
@@ -946,8 +956,8 @@ fn reflow_history(
     scrollback_max: usize,
 ) -> Reflowed {
     let hist = scrollback.len();
-    let old_total = hist + old_rows;
-    let cursor_phys = hist + cursor.1.min(old_rows.saturating_sub(1));
+    let old_total = hist + screen.len();
+    let cursor_phys = hist + cursor.1.min(screen.len().saturating_sub(1));
     // Borrow physical row `i` as (cells, wrapped, line attr). Scrollback lines
     // have no size attribute (a double-width line is meaningless once scrolled
     // off) and may be narrower than `old_cols`; both are handled by the joiner.
@@ -959,12 +969,8 @@ fn reflow_history(
                 LineAttr::Single,
             )
         } else {
-            let y = i - hist;
-            (
-                &screen[y * old_cols..y * old_cols + old_cols],
-                screen_wrapped[y],
-                screen_attrs[y],
-            )
+            let line = &screen[i - hist];
+            (&line.cells, line.wrapped, line.attr)
         }
     };
 
@@ -1109,9 +1115,7 @@ fn reflow_history(
     }
     let dropped = screen_top.saturating_sub(scrollback_max);
     let mut new_scrollback: VecDeque<Line> = VecDeque::new();
-    let mut cells = vec![blank; new_cols * new_rows];
-    let mut wrapped = vec![false; new_rows];
-    let mut line_attrs = vec![LineAttr::Single; new_rows];
+    let mut new_screen: Vec<Line> = Vec::with_capacity(new_rows);
     for (r, row) in out_cells.into_iter().enumerate() {
         if r < dropped {
             continue; // oldest history beyond the scrollback cap
@@ -1120,15 +1124,18 @@ fn reflow_history(
             new_scrollback.push_back(Line {
                 cells: row,
                 wrapped: out_wrapped[r],
+                attr: LineAttr::Single,
             });
         } else if r < screen_top + new_rows {
-            let y = r - screen_top;
-            cells[y * new_cols..(y + 1) * new_cols].copy_from_slice(&row);
-            wrapped[y] = out_wrapped[r];
-            line_attrs[y] = out_attr[r];
+            new_screen.push(Line {
+                cells: row,
+                wrapped: out_wrapped[r],
+                attr: out_attr[r],
+            });
         }
         // r >= screen_top + new_rows: below the cursor's window, dropped.
     }
+    new_screen.resize_with(new_rows, || Line::blank(new_cols, blank));
     let cy = ncur.0.saturating_sub(screen_top).min(new_rows - 1);
     let cx = ncur.1.min(new_cols - 1);
 
@@ -1176,9 +1183,7 @@ fn reflow_history(
 
     Reflowed {
         scrollback: new_scrollback,
-        cells,
-        wrapped,
-        line_attrs,
+        screen: new_screen,
         cursor: (cx, cy),
         prompt_marks: new_marks,
         command_start: new_command_start,
@@ -1271,13 +1276,14 @@ impl Grid {
         Self {
             cols,
             rows,
-            cells: vec![Cell::blank(); cols * rows],
+            screen: blank_screen(cols, rows, Cell::blank()),
             dirty: vec![false; rows],
             cursor: (0, 0),
             saved_cursor: (0, 0),
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             primary: None,
+            spare_screen: Vec::new(),
             epoch: 0,
             title: String::new(),
             title_stack: Vec::new(),
@@ -1353,8 +1359,6 @@ impl Grid {
             cursor_blink: false,
             default_cursor_shape: CursorShape::default(),
             default_cursor_blink: false,
-            line_attrs: vec![LineAttr::Single; rows],
-            wrapped: vec![false; rows],
             prompt_marks: Vec::new(),
             #[cfg(any(test, feature = "gui"))]
             fold_pending_start: None,
@@ -1380,18 +1384,34 @@ impl Grid {
         if x >= self.cols || y >= self.rows {
             return;
         }
-        let idx = y * self.cols + x;
-        if self.cells[idx].flags & WIDE_TRAILER != 0 {
+        let row = &mut self.screen[y].cells;
+        if row[x].flags & WIDE_TRAILER != 0 {
             // Overwriting the trailing half: blank the head to its left.
             if x >= 1 {
-                self.cells[idx - 1] = Cell::blank();
+                row[x - 1] = Cell::blank();
             }
-        } else if x + 1 < self.cols && self.cells[idx + 1].flags & WIDE_TRAILER != 0 {
+        } else if x + 1 < row.len() && row[x + 1].flags & WIDE_TRAILER != 0 {
             // Overwriting the leading half: blank the orphaned trailer to its right.
-            self.cells[idx + 1] = Cell::blank();
+            row[x + 1] = Cell::blank();
         }
-        self.cells[idx] = cell;
+        row[x] = cell;
         self.dirty[y] = true;
+    }
+
+    /// The cells of live screen row `y` (`cols` of them); empty past the
+    /// last row.
+    pub fn row(&self, y: usize) -> &[Cell] {
+        self.screen.get(y).map_or(&[], |line| &line.cells)
+    }
+
+    /// Mutable access to the cells of live screen row `y`; empty past the
+    /// last row. Writes bypass [`Grid::set_cell`]'s wide-glyph repair and do
+    /// not mark the row dirty.
+    pub fn row_mut(&mut self, y: usize) -> &mut [Cell] {
+        match self.screen.get_mut(y) {
+            Some(line) => &mut line.cells,
+            None => &mut [],
+        }
     }
 
     /// Move the cursor to `(x, y)`, clamping into the grid so a malformed or
@@ -1582,16 +1602,26 @@ impl Grid {
         let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
         let blank = self.erase_cell();
         for y in top..bottom {
-            for x in l..=r {
-                self.cells[y * self.cols + x] = self.cells[(y + 1) * self.cols + x];
-            }
+            self.copy_band(y + 1, y, l, r);
         }
-        for x in l..=r {
-            self.cells[bottom * self.cols + x] = blank;
-        }
+        self.screen[bottom].cells[l..=r].fill(blank);
         for d in &mut self.dirty[top..=bottom] {
             *d = true;
         }
+    }
+
+    /// Copy columns `l..=r` of row `src` over the same columns of row `dst`.
+    fn copy_band(&mut self, src: usize, dst: usize, l: usize, r: usize) {
+        if src == dst {
+            return;
+        }
+        let (lo, hi) = self.screen.split_at_mut(src.max(dst));
+        let (from, to) = if src < dst {
+            (&lo[src], &mut hi[0])
+        } else {
+            (&hi[0], &mut lo[dst])
+        };
+        to.cells[l..=r].copy_from_slice(&from.cells[l..=r]);
     }
 
     /// Scroll the margin band down one row (the [`Grid::scroll_band_up`]
@@ -1601,13 +1631,9 @@ impl Grid {
         let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
         let blank = self.erase_cell();
         for y in (top..bottom).rev() {
-            for x in l..=r {
-                self.cells[(y + 1) * self.cols + x] = self.cells[y * self.cols + x];
-            }
+            self.copy_band(y, y + 1, l, r);
         }
-        for x in l..=r {
-            self.cells[top * self.cols + x] = blank;
-        }
+        self.screen[top].cells[l..=r].fill(blank);
         for d in &mut self.dirty[top..=bottom] {
             *d = true;
         }
@@ -1913,21 +1939,30 @@ impl Grid {
 
     /// Scroll the current scrolling region up by one row, blanking the freed
     /// bottom row of the region. Only the region's rows are marked dirty.
+    ///
+    /// Rows rotate; no cells move. On a full-screen scroll of the primary
+    /// buffer the line leaving the top moves into scrollback, and the line
+    /// that eviction drops from the front of a full scrollback is recycled as
+    /// the new bottom row.
     pub fn scroll_up(&mut self) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         if bottom <= top || bottom >= self.rows {
             return;
         }
-        // Capture the line leaving the top into scrollback, but only for a
-        // full-screen scroll on the primary buffer: partial-region scrolls
-        // (TUI apps using DECSTBM) and the alternate screen don't form history.
+        let blank = self.erase_cell();
+        self.screen[top..=bottom].rotate_left(1);
+        // The line that left the top now sits at `bottom`.
+        // Capture it into scrollback, but only for a full-screen scroll on the
+        // primary buffer: partial-region scrolls (TUI apps using DECSTBM) and
+        // the alternate screen don't form history.
         if top == 0 && bottom == self.rows - 1 && self.primary.is_none() {
-            self.scrollback.push_back(Line {
-                cells: self.cells[0..self.cols].to_vec(),
-                wrapped: self.wrapped[top],
-            });
+            let mut line = std::mem::take(&mut self.screen[bottom]);
+            line.attr = LineAttr::Single;
+            self.scrollback.push_back(line);
             if self.scrollback.len() > self.scrollback_max {
-                self.scrollback.pop_front();
+                if let Some(evicted) = self.scrollback.pop_front() {
+                    self.screen[bottom] = evicted;
+                }
                 self.evict_prompt_mark();
                 #[cfg(feature = "l13")]
                 if let Some(s) = &mut self.command_start {
@@ -1953,16 +1988,7 @@ impl Grid {
                 self.dirty.iter_mut().for_each(|d| *d = true);
             }
         }
-        let src = (top + 1) * self.cols;
-        let dst = top * self.cols;
-        let count = (bottom - top) * self.cols;
-        self.cells.copy_within(src..src + count, dst);
-        let last = bottom * self.cols;
-        let blank = self.erase_cell();
-        for c in &mut self.cells[last..last + self.cols] {
-            *c = blank;
-        }
-        self.shift_line_meta(top + 1, top, bottom - top, bottom..bottom + 1);
+        self.screen[bottom].clear(self.cols, blank);
         for d in &mut self.dirty[top..=bottom] {
             *d = true;
         }
@@ -2030,8 +2056,8 @@ impl Grid {
             if self.autowrap {
                 // Mark this row as soft-wrapped before leaving it, so the reflow
                 // and scrollback know it and its successor are one logical line.
-                if self.cursor.1 < self.wrapped.len() {
-                    self.wrapped[self.cursor.1] = true;
+                if let Some(line) = self.screen.get_mut(self.cursor.1) {
+                    line.wrapped = true;
                 }
                 self.carriage_return();
                 self.newline();
@@ -2091,7 +2117,7 @@ impl Grid {
             return None;
         }
         let left = cx - 1;
-        if self.cells[cy * self.cols + left].flags & WIDE_TRAILER != 0 && left >= 1 {
+        if self.screen[cy].cells[left].flags & WIDE_TRAILER != 0 && left >= 1 {
             Some((left - 1, cy)) // land on the wide glyph's head, not its trailer
         } else {
             Some((left, cy))
@@ -2110,7 +2136,7 @@ impl Grid {
     /// The full glyph text at `(x, y)` of the live grid: the base scalar plus
     /// any interned grapheme continuation.
     fn glyph_text(&self, x: usize, y: usize) -> String {
-        self.cell_text(self.cells[y * self.cols + x])
+        self.cell_text(self.screen[y].cells[x])
     }
 
     /// The full glyph text of `cell` (live or scrollback — the cluster table is
@@ -2633,8 +2659,7 @@ impl Grid {
     /// Append `ch` to the grapheme continuation of the cell at `(x, y)`,
     /// re-interning the grown suffix and marking the row dirty.
     fn append_to_glyph(&mut self, x: usize, y: usize, ch: char) {
-        let idx = y * self.cols + x;
-        let mut suffix = match self.cells[idx].cluster {
+        let mut suffix = match self.screen[y].cells[x].cluster {
             0 => String::new(),
             id => self
                 .clusters
@@ -2644,7 +2669,7 @@ impl Grid {
         };
         suffix.push(ch);
         let id = self.intern_cluster(suffix);
-        self.cells[idx].cluster = id;
+        self.screen[y].cells[x].cluster = id;
         self.dirty[y] = true;
     }
 
@@ -2707,7 +2732,7 @@ impl Grid {
         let (c0, c1) = cols.unwrap_or((0, self.cols.saturating_sub(1)));
         for y in y0..=y1.min(self.rows.saturating_sub(1)) {
             for x in c0..=c1.min(self.cols.saturating_sub(1)) {
-                let cell = &mut self.cells[y * self.cols + x];
+                let cell = &mut self.screen[y].cells[x];
                 if cell.flags & super::cell::ATTR_PROTECTED == 0 {
                     *cell = erase;
                 }
@@ -2724,15 +2749,13 @@ impl Grid {
         if from >= to {
             return;
         }
-        let base = y * self.cols;
         let blank = self.erase_cell();
-        for c in &mut self.cells[base + from..base + to] {
-            *c = blank;
-        }
+        let line = &mut self.screen[y];
+        line.cells[from..to].fill(blank);
         // Erasing through the right margin ends the line here: it no longer
         // wraps into the row below (EL, the tail of ED, ECH at the margin).
         if to >= self.cols {
-            self.wrapped[y] = false;
+            line.wrapped = false;
         }
         self.dirty[y] = true;
     }
@@ -2750,8 +2773,7 @@ impl Grid {
         }
         let blank = self.erase_cell();
         for y in top..=bottom {
-            let base = y * self.cols;
-            self.cells[base + left..=base + right].fill(blank);
+            self.screen[y].cells[left..=right].fill(blank);
             self.dirty[y] = true;
         }
     }
@@ -2783,8 +2805,7 @@ impl Grid {
             underline_color: pen.underline_color,
         };
         for y in top..=bottom {
-            let base = y * self.cols;
-            self.cells[base + left..=base + right].fill(cell);
+            self.screen[y].cells[left..=right].fill(cell);
             self.dirty[y] = true;
         }
     }
@@ -2817,13 +2838,10 @@ impl Grid {
         let w = (right - left + 1).min(self.cols - dst_left);
         let mut buf = Vec::with_capacity(h * w);
         for y in 0..h {
-            let base = (top + y) * self.cols;
-            buf.extend_from_slice(&self.cells[base + left..base + left + w]);
+            buf.extend_from_slice(&self.screen[top + y].cells[left..left + w]);
         }
-        for y in 0..h {
-            let src = y * w;
-            let base = (dst_top + y) * self.cols;
-            self.cells[base + dst_left..base + dst_left + w].copy_from_slice(&buf[src..src + w]);
+        for (y, src) in buf.chunks(w).enumerate() {
+            self.screen[dst_top + y].cells[dst_left..dst_left + w].copy_from_slice(src);
             self.dirty[dst_top + y] = true;
         }
     }
@@ -2844,10 +2862,12 @@ impl Grid {
     /// Blank every cell and home the cursor (used by `CSI 2 J`).
     pub(crate) fn clear_all(&mut self) {
         let blank = self.erase_cell();
-        self.cells.fill(blank);
+        for line in &mut self.screen {
+            line.cells.fill(blank);
+            line.wrapped = false;
+        }
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
-        self.wrapped.iter_mut().for_each(|w| *w = false);
         self.dirty.iter_mut().for_each(|d| *d = true);
         self.cursor = (0, 0);
     }
@@ -2955,7 +2975,7 @@ impl Grid {
     /// refilling is exact, not lossy.
     pub fn apply_theme(&mut self, theme: &super::Theme) {
         self.set_default_colors(theme.fg, theme.bg, theme.cursor);
-        self.cells = vec![self.default_cell(); self.cols * self.rows];
+        self.screen = blank_screen(self.cols, self.rows, self.default_cell());
         self.dirty = vec![true; self.rows];
     }
 
@@ -2966,18 +2986,14 @@ impl Grid {
     /// can't know they meant "the theme's red"). Full repaint requested.
     pub fn retheme(&mut self, old: &super::Theme, new: &super::Theme) {
         let map = |c: &mut u32| *c = super::color::remap(*c, old, new);
-        for cell in &mut self.cells {
-            map(&mut cell.fg);
-            map(&mut cell.bg);
-        }
-        for line in &mut self.scrollback {
+        let stashed = self.primary.iter_mut().flat_map(|p| p.screen.iter_mut());
+        for line in self
+            .screen
+            .iter_mut()
+            .chain(&mut self.scrollback)
+            .chain(stashed)
+        {
             for cell in &mut line.cells {
-                map(&mut cell.fg);
-                map(&mut cell.bg);
-            }
-        }
-        if let Some(primary) = &mut self.primary {
-            for cell in &mut primary.cells {
                 map(&mut cell.fg);
                 map(&mut cell.bg);
             }
@@ -3015,7 +3031,7 @@ impl Grid {
         self.right_margin = cols.saturating_sub(1);
         #[cfg(any(test, feature = "gui"))]
         self.images.clear(); // serials/reflow change; drop placed images
-        let (old_cols, old_rows) = (self.cols, self.rows);
+        let old_cols = self.cols;
         let clamp = |(x, y): (usize, usize)| (x.min(cols - 1), y.min(rows - 1));
         let blank = self.default_cell(); // a resize is not an erase: no BCE
         // Preserve tab stops within the surviving width; default the new columns.
@@ -3034,49 +3050,11 @@ impl Grid {
         let (fold_start, fold_blocks) = (self.fold_pending_start, self.fold_blocks.clone());
         #[cfg(not(any(test, feature = "gui")))]
         let (fold_start, fold_blocks): (Option<usize>, Vec<CommandBlock>) = (None, Vec::new());
-        if self.primary.is_none() {
+        if let Some(primary) = self.primary.take() {
             let r = reflow_history(
                 &self.scrollback,
-                &self.cells,
-                &self.wrapped,
-                &self.line_attrs,
+                &primary.screen,
                 old_cols,
-                old_rows,
-                self.cursor,
-                &self.prompt_marks,
-                cmd_start,
-                fold_start,
-                &fold_blocks,
-                cols,
-                rows,
-                blank,
-                self.scrollback_max,
-            );
-            self.scrollback = r.scrollback;
-            self.cells = r.cells;
-            self.wrapped = r.wrapped;
-            self.line_attrs = r.line_attrs;
-            self.cursor = r.cursor;
-            self.prompt_marks = r.prompt_marks;
-            #[cfg(feature = "l13")]
-            {
-                self.command_start = r.command_start;
-            }
-            #[cfg(any(test, feature = "gui"))]
-            {
-                self.fold_pending_start = r.fold_pending_start;
-                self.fold_blocks = r.fold_blocks;
-            }
-            self.saved_cursor = clamp(self.saved_cursor);
-        } else {
-            let primary = self.primary.take().expect("primary present");
-            let r = reflow_history(
-                &self.scrollback,
-                &primary.cells,
-                &primary.wrapped,
-                &primary.line_attrs,
-                old_cols,
-                old_rows,
                 primary.cursor,
                 &self.prompt_marks,
                 cmd_start,
@@ -3099,17 +3077,42 @@ impl Grid {
                 self.fold_blocks = r.fold_blocks;
             }
             self.primary = Some(SavedScreen {
-                cells: r.cells,
+                screen: r.screen,
                 cursor: r.cursor,
                 saved_cursor: clamp(primary.saved_cursor),
                 mode: primary.mode,
-                line_attrs: r.line_attrs,
-                wrapped: r.wrapped,
             });
-            self.cells = reflow_clip(&self.cells, old_cols, old_rows, cols, rows);
-            self.line_attrs = vec![LineAttr::Single; rows];
-            self.wrapped = vec![false; rows];
+            self.screen = reflow_clip(&self.screen, cols, rows);
             self.cursor = clamp(self.cursor);
+            self.saved_cursor = clamp(self.saved_cursor);
+        } else {
+            let r = reflow_history(
+                &self.scrollback,
+                &self.screen,
+                old_cols,
+                self.cursor,
+                &self.prompt_marks,
+                cmd_start,
+                fold_start,
+                &fold_blocks,
+                cols,
+                rows,
+                blank,
+                self.scrollback_max,
+            );
+            self.scrollback = r.scrollback;
+            self.screen = r.screen;
+            self.cursor = r.cursor;
+            self.prompt_marks = r.prompt_marks;
+            #[cfg(feature = "l13")]
+            {
+                self.command_start = r.command_start;
+            }
+            #[cfg(any(test, feature = "gui"))]
+            {
+                self.fold_pending_start = r.fold_pending_start;
+                self.fold_blocks = r.fold_blocks;
+            }
             self.saved_cursor = clamp(self.saved_cursor);
         }
 
@@ -3132,14 +3135,12 @@ impl Grid {
         }
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
-        let blank = self.erase_cell();
+        let alt = self.take_spare_screen(self.erase_cell());
         self.primary = Some(SavedScreen {
-            cells: std::mem::replace(&mut self.cells, vec![blank; self.cols * self.rows]),
+            screen: std::mem::replace(&mut self.screen, alt),
             cursor: self.cursor,
             saved_cursor: self.saved_cursor,
             mode,
-            line_attrs: std::mem::replace(&mut self.line_attrs, vec![LineAttr::Single; self.rows]),
-            wrapped: std::mem::replace(&mut self.wrapped, vec![false; self.rows]),
         });
         if mode == AltMode::Dec1049 {
             self.cursor = (0, 0);
@@ -3150,15 +3151,24 @@ impl Grid {
         self.dirty.iter_mut().for_each(|d| *d = true);
     }
 
+    /// The spare rows (see [`Grid::spare_screen`]) sized to the grid and filled
+    /// with `fill`.
+    fn take_spare_screen(&mut self, fill: Cell) -> Vec<Line> {
+        let mut screen = std::mem::take(&mut self.spare_screen);
+        screen.resize_with(self.rows, Line::default);
+        for line in &mut screen {
+            line.clear(self.cols, fill);
+        }
+        screen
+    }
+
     /// Switch back to the primary screen, restoring its buffer. For `?1049` the
     /// cursor (and DECSC register) saved on entry are restored; `?47`/`?1047`
     /// leave the cursor as the alternate session left it. No-op if not on the
     /// alternate screen.
     pub(crate) fn leave_alt_screen(&mut self) {
         if let Some(saved) = self.primary.take() {
-            self.cells = saved.cells;
-            self.line_attrs = saved.line_attrs;
-            self.wrapped = saved.wrapped;
+            self.spare_screen = std::mem::replace(&mut self.screen, saved.screen);
             if saved.mode == AltMode::Dec1049 {
                 self.cursor = (
                     saved.cursor.0.min(self.cols.saturating_sub(1)),
@@ -3197,15 +3207,12 @@ impl Grid {
         if y >= self.rows || x >= self.cols || n == 0 {
             return;
         }
-        let base = y * self.cols;
-        let row_end = base + self.cols;
-        let from = base + x;
         let n = n.min(self.cols - x);
-        self.cells.copy_within(from + n..row_end, from);
         let blank = self.erase_cell();
-        for c in &mut self.cells[row_end - n..row_end] {
-            *c = blank;
-        }
+        let row = &mut self.screen[y].cells;
+        row[x..].rotate_left(n);
+        let end = row.len();
+        row[end - n..].fill(blank);
         self.dirty[y] = true;
     }
 
@@ -3216,15 +3223,11 @@ impl Grid {
         if y >= self.rows || x >= self.cols || n == 0 {
             return;
         }
-        let base = y * self.cols;
-        let row_end = base + self.cols;
-        let from = base + x;
         let n = n.min(self.cols - x);
-        self.cells.copy_within(from..row_end - n, from + n);
         let blank = self.erase_cell();
-        for c in &mut self.cells[from..from + n] {
-            *c = blank;
-        }
+        let row = &mut self.screen[y].cells;
+        row[x..].rotate_right(n);
+        row[x..x + n].fill(blank);
         self.dirty[y] = true;
     }
 
@@ -3253,14 +3256,10 @@ impl Grid {
             let (l, r) = (self.left_margin, self.right_margin.min(self.cols - 1));
             let blank = self.erase_cell();
             for y in ((cy + n)..=self.scroll_bottom).rev() {
-                for x in l..=r {
-                    self.cells[y * self.cols + x] = self.cells[(y - n) * self.cols + x];
-                }
+                self.copy_band(y - n, y, l, r);
             }
-            for y in cy..(cy + n).min(self.scroll_bottom + 1) {
-                for x in l..=r {
-                    self.cells[y * self.cols + x] = blank;
-                }
+            for line in &mut self.screen[cy..(cy + n).min(self.scroll_bottom + 1)] {
+                line.cells[l..=r].fill(blank);
             }
             for d in &mut self.dirty[cy..=self.scroll_bottom] {
                 *d = true;
@@ -3268,22 +3267,13 @@ impl Grid {
             return;
         }
         let n = n.min(self.scroll_bottom + 1 - cy);
-        let cols = self.cols;
-        // Shift rows [cy, scroll_bottom - n] down by n. copy_within is a memmove,
-        // so the forward (overlapping) copy is well-defined.
-        let count = (self.scroll_bottom + 1 - cy - n) * cols;
-        if count > 0 {
-            let src = cy * cols;
-            let dst = (cy + n) * cols;
-            self.cells.copy_within(src..src + count, dst);
-        }
-        // Blank the n freed rows at the cursor.
-        let blank_end = (cy + n) * cols;
+        // Rotate rows [cy, scroll_bottom] down by n; the n rows that fall off
+        // the region bottom come round to the cursor row and are blanked.
         let blank = self.erase_cell();
-        for c in &mut self.cells[cy * cols..blank_end] {
-            *c = blank;
+        self.screen[cy..=self.scroll_bottom].rotate_right(n);
+        for line in &mut self.screen[cy..cy + n] {
+            line.clear(self.cols, blank);
         }
-        self.shift_line_meta(cy, cy + n, count / cols, cy..cy + n);
         for d in &mut self.dirty[cy..=self.scroll_bottom] {
             *d = true;
         }
@@ -3311,15 +3301,11 @@ impl Grid {
             // instead of panicking; there's nothing to shift up in that case.
             if let Some(copy_end) = self.scroll_bottom.checked_sub(n) {
                 for y in cy..=copy_end {
-                    for x in l..=r {
-                        self.cells[y * self.cols + x] = self.cells[(y + n) * self.cols + x];
-                    }
+                    self.copy_band(y + n, y, l, r);
                 }
             }
-            for y in (self.scroll_bottom + 1 - n)..=self.scroll_bottom {
-                for x in l..=r {
-                    self.cells[y * self.cols + x] = blank;
-                }
+            for line in &mut self.screen[(self.scroll_bottom + 1 - n)..=self.scroll_bottom] {
+                line.cells[l..=r].fill(blank);
             }
             for d in &mut self.dirty[cy..=self.scroll_bottom] {
                 *d = true;
@@ -3327,27 +3313,13 @@ impl Grid {
             return;
         }
         let n = n.min(self.scroll_bottom + 1 - cy);
-        let cols = self.cols;
-        // Shift rows [cy + n, scroll_bottom] up by n.
-        let count = (self.scroll_bottom + 1 - cy - n) * cols;
-        if count > 0 {
-            let src = (cy + n) * cols;
-            let dst = cy * cols;
-            self.cells.copy_within(src..src + count, dst);
-        }
-        // Blank the n rows freed at the region bottom.
-        let first_blank = (self.scroll_bottom + 1 - n) * cols;
-        let region_end = (self.scroll_bottom + 1) * cols;
+        // Rotate rows [cy, scroll_bottom] up by n; the n deleted rows come
+        // round to the region bottom and are blanked.
         let blank = self.erase_cell();
-        for c in &mut self.cells[first_blank..region_end] {
-            *c = blank;
+        self.screen[cy..=self.scroll_bottom].rotate_left(n);
+        for line in &mut self.screen[self.scroll_bottom + 1 - n..=self.scroll_bottom] {
+            line.clear(self.cols, blank);
         }
-        self.shift_line_meta(
-            cy + n,
-            cy,
-            count / cols,
-            (self.scroll_bottom + 1 - n)..(self.scroll_bottom + 1),
-        );
         for d in &mut self.dirty[cy..=self.scroll_bottom] {
             *d = true;
         }
@@ -3389,21 +3361,12 @@ impl Grid {
             return;
         }
         let n = n.min(bottom + 1 - top);
-        let cols = self.cols;
-        // Shift rows [top, bottom - n] down by n.
-        let count = (bottom + 1 - top - n) * cols;
-        if count > 0 {
-            let src = top * cols;
-            let dst = (top + n) * cols;
-            self.cells.copy_within(src..src + count, dst);
-        }
-        // Blank the n freed rows at the region top.
-        let blank_end = (top + n) * cols;
+        // Rotate the region down by n and blank the n rows freed at its top.
         let blank = self.erase_cell();
-        for c in &mut self.cells[top * cols..blank_end] {
-            *c = blank;
+        self.screen[top..=bottom].rotate_right(n);
+        for line in &mut self.screen[top..top + n] {
+            line.clear(self.cols, blank);
         }
-        self.shift_line_meta(top, top + n, count / cols, top..top + n);
         for d in &mut self.dirty[top..=bottom] {
             *d = true;
         }
@@ -3426,33 +3389,9 @@ impl Grid {
     /// Set the current cursor row's line size attribute (`ESC # 3/4/5/6`).
     pub(crate) fn set_line_attr(&mut self, attr: LineAttr) {
         let y = self.cursor.1;
-        if y < self.line_attrs.len() {
-            self.line_attrs[y] = attr;
+        if let Some(line) = self.screen.get_mut(y) {
+            line.attr = attr;
             self.dirty[y] = true;
-        }
-    }
-
-    /// Mirror a region scroll on the per-row metadata tables (line size + soft
-    /// wrap): move `count` rows from `src_row` to begin at `dst_row`, then reset
-    /// the rows in `blank` to single-width / unwrapped. Keeps both glued to the
-    /// content rows they label as the screen scrolls.
-    fn shift_line_meta(
-        &mut self,
-        src_row: usize,
-        dst_row: usize,
-        count: usize,
-        blank: std::ops::Range<usize>,
-    ) {
-        if count > 0 {
-            self.line_attrs
-                .copy_within(src_row..src_row + count, dst_row);
-            self.wrapped.copy_within(src_row..src_row + count, dst_row);
-        }
-        for a in &mut self.line_attrs[blank.clone()] {
-            *a = LineAttr::Single;
-        }
-        for w in &mut self.wrapped[blank] {
-            *w = false;
         }
     }
 
@@ -3532,12 +3471,10 @@ impl Grid {
         self.grapheme_clustering = false; // and every mode (DECSTR keeps 2027)
         self.allow_deccolm = false;
         self.column_mode_132 = false;
-        self.cells = vec![self.default_cell(); self.cols * self.rows];
+        self.screen = blank_screen(self.cols, self.rows, self.default_cell());
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
         self.dirty = vec![true; self.rows];
-        self.line_attrs = vec![LineAttr::Single; self.rows];
-        self.wrapped = vec![false; self.rows];
         self.cursor = (0, 0);
         self.saved_cursor = (0, 0);
         self.scroll_top = 0;
@@ -3611,7 +3548,9 @@ impl Grid {
         // default_fg/bg are intentionally untouched: the parser re-syncs them
         // from its (theme-seeded) palette right after — see DECSTR handling.
         self.current_link = 0;
-        self.line_attrs.fill(LineAttr::Single);
+        for line in &mut self.screen {
+            line.attr = LineAttr::Single;
+        }
     }
 
     /// Screen-alignment test (`DECALN`, `ESC # 8`): fill every cell with `E` and
@@ -3619,9 +3558,9 @@ impl Grid {
     pub(crate) fn fill_alignment(&mut self) {
         let mut e = Cell::blank();
         e.ch = 'E';
-        self.cells.fill(e);
-        self.line_attrs.fill(LineAttr::Single);
-        self.wrapped.iter_mut().for_each(|w| *w = false);
+        for line in &mut self.screen {
+            line.clear(self.cols, e);
+        }
         self.dirty.iter_mut().for_each(|d| *d = true);
         self.cursor = (0, 0);
     }
@@ -4202,12 +4141,10 @@ impl Grid {
         let cells = if abs < history {
             &self.scrollback[abs].cells[..]
         } else {
-            let r = abs - history;
-            if r >= self.rows {
-                return String::new();
+            match self.screen.get(abs - history) {
+                Some(line) => &line.cells[..],
+                None => return String::new(),
             }
-            let s = r * self.cols;
-            &self.cells[s..s + self.cols]
         };
         row_text(cells, &self.clusters).trim().to_string()
     }
@@ -4227,8 +4164,7 @@ impl Grid {
             let cells = if i < history {
                 &self.scrollback[i].cells[..]
             } else {
-                let s = (i - history) * self.cols;
-                &self.cells[s..s + self.cols]
+                &self.screen[i - history].cells[..]
             };
             out.push_str(&row_text(cells, &self.clusters));
         }
@@ -4270,10 +4206,9 @@ impl Grid {
             .enumerate()
             .filter(|&(_, d)| *d)
             .map(|(y, _)| {
-                let start = y * self.cols;
                 let cells = match (y + 1 == self.rows).then(|| self.status_row()).flatten() {
                     Some(s) => s.to_vec(),
-                    None => self.cells[start..start + self.cols].to_vec(),
+                    None => self.screen[y].cells.clone(),
                 };
                 (y, cells)
             })
@@ -4283,7 +4218,7 @@ impl Grid {
             rows,
             links: self.links_arc.clone(),
             clusters: self.clusters_arc.clone(),
-            line_attrs: self.line_attrs.clone(),
+            line_attrs: self.screen.iter().map(|l| l.attr).collect(),
         }
     }
 
@@ -4314,15 +4249,12 @@ impl Grid {
     #[cfg(any(test, feature = "gui"))]
     fn phys_row(&self, abs: usize) -> (&[Cell], bool) {
         let h = self.scrollback.len();
-        if abs < h {
-            (&self.scrollback[abs].cells, self.scrollback[abs].wrapped)
+        let line = if abs < h {
+            &self.scrollback[abs]
         } else {
-            let y = abs - h;
-            (
-                &self.cells[y * self.cols..(y + 1) * self.cols],
-                self.wrapped[y],
-            )
-        }
+            &self.screen[abs - h]
+        };
+        (&line.cells, line.wrapped)
     }
 
     /// Scroll the viewport so absolute row `abs` is visible, about a third
@@ -4595,7 +4527,7 @@ impl Grid {
                 HistLine::Summary(i) => self.summary_cell(i, col),
             }
         } else {
-            self.cells[(row - off) * self.cols + col]
+            self.screen[row - off].cells[col]
         }
     }
 
@@ -4862,15 +4794,13 @@ impl Grid {
                 row
             } else {
                 // The rest shows the live grid, shifted down by `off`.
-                let gy = y - off;
-                let start = gy * self.cols;
-                self.cells[start..start + self.cols].to_vec()
+                self.screen[y - off].cells.clone()
             };
             rows.push((y, cells));
             attrs.push(if status.is_some() || y < off {
                 LineAttr::Single // history + status-overlay rows are single width
             } else {
-                self.line_attrs[y - off]
+                self.screen[y - off].attr
             });
         }
         DirtyFrame {
@@ -4932,9 +4862,9 @@ impl Grid {
 impl rusty_term_l13::TerminalState for Grid {
     fn screen_text(&self) -> String {
         let mut lines: Vec<String> = self
-            .cells
-            .chunks(self.cols)
-            .map(|row| row_text(row, &self.clusters))
+            .screen
+            .iter()
+            .map(|line| row_text(&line.cells, &self.clusters))
             .collect();
         while lines.last().is_some_and(String::is_empty) {
             lines.pop();

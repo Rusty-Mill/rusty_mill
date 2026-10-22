@@ -32,7 +32,7 @@ fn main() {
         let mut p = AnsiParser::new();
         for c in data.chunks(4096) { p.advance(&mut g, c); }
         for r in 0..40 {
-            let row: String = g.cells[r * 120..(r + 1) * 120].iter().filter(|c| c.flags & rusty_term::core::WIDE_TRAILER == 0).map(|c| c.ch).collect();
+            let row: String = g.row(r).iter().filter(|c| c.flags & rusty_term::core::WIDE_TRAILER == 0).map(|c| c.ch).collect();
             println!("{}", row.trim_end());
         }
         return;
