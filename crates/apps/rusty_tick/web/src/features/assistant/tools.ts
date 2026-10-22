@@ -93,13 +93,16 @@ const weekday = (word: string): number => WEEKDAYS.findIndex((w) => [w, `${w}s`,
  * How often `text` says a task repeats, as the `RRULE` the app stores: daily,
  * weekly, monthly, yearly (annually), every N days/weeks/months/years, on
  * weekdays, or every monday[, wednesday and friday]. `''` for never;
- * `undefined` when unreadable, so nothing is guessed.
+ * `undefined` when unreadable, so nothing is guessed. A monthly rule keeps the
+ * day of month of `due`, as the date picker's does, so the 31st stays the 31st
+ * after a shorter month.
  */
-export function readRepeat(text: string): string | undefined {
+export function readRepeat(text: string, due: number | null = null): string | undefined {
   const t = norm(text)
   if (NEVER.includes(t)) return ''
   const rule = (freq: Freq, interval = 1, byDay: number[] = []): string | undefined => {
-    const r: Rule = { freq, interval, byDay, byMonthDay: null, until: null }
+    const byMonthDay = freq === 'MONTHLY' && due !== null ? new Date(due).getDate() : null
+    const r: Rule = { freq, interval, byDay, byMonthDay, until: null }
     return interval >= 1 && interval <= 99 && parseRule(formatRule(r)) ? formatRule(r) : undefined
   }
   if (FREQ[t]) return rule(FREQ[t]!)
@@ -293,11 +296,13 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
     await c.update(task.id, made.patch)
     return { title: task.title, remind: made.said }
   }
-  if (rule !== undefined) {
+  if (repeat !== undefined && rule !== undefined) {
     // A repeat needs a date to count from: an undated task starts today, as in the date picker.
-    const patch: TaskPatch = rule !== '' && task.dueMs === null ? { repeatFlag: rule, dueMs: startOfDay(c.now), isAllDay: true } : { repeatFlag: rule }
+    const due = task.dueMs ?? startOfDay(c.now)
+    const anchored = readRepeat(repeat, due) ?? rule // the same words, now anchored on the due day
+    const patch: TaskPatch = anchored !== '' && task.dueMs === null ? { repeatFlag: anchored, dueMs: due, isAllDay: true } : { repeatFlag: anchored }
     await c.update(task.id, patch)
-    const said = rule === '' ? 'never' : describeRule(rule).replace(/^Every/, 'every')
+    const said = anchored === '' ? 'never' : describeRule(anchored).replace(/^Every/, 'every')
     return patch.dueMs === undefined ? { title: task.title, repeat: said } : { title: task.title, repeat: said, due: whenLabel(patch) }
   }
   if (target !== undefined) {

@@ -1,0 +1,40 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { useState } from 'react';
+import { useActions, useData } from '@/app/services';
+import { Popover } from '@/components/Popover';
+import { formatTime } from '@/lib/date';
+import { usePrefs } from '../settings/prefs';
+import { buildQuickAdd } from '../tasks/quickAddParse';
+import { shortDate } from './layout';
+/** A one-line add box for a day or slot. Natural language works: a date in the text overrides the slot. */
+export function AddPopover({ anchor, target, onClose }) {
+    const actions = useActions();
+    const inboxId = useData((s) => s.inboxId);
+    const lists = useData((s) => s.lists);
+    const tasks = useData((s) => s.tasks);
+    const { hour12, defaultReminder } = usePrefs((s) => s.prefs);
+    const [text, setText] = useState('');
+    const submit = (e) => {
+        e.preventDefault();
+        const built = buildQuickAdd(text, {
+            now: Date.now(),
+            lists: Object.values(lists),
+            inboxId,
+            view: { kind: 'inbox' },
+            siblings: (listId) => Object.values(tasks).filter((t) => t.listId === listId && t.deletedMs === null),
+            defaultReminder,
+        });
+        if (!built.ok)
+            return;
+        const input = built.input;
+        if (input.dueMs === undefined) {
+            input.dueMs = target.ms;
+            input.isAllDay = target.allDay;
+            if (!target.allDay && defaultReminder)
+                input.reminders = [defaultReminder];
+        }
+        void actions.createTask(input);
+        onClose();
+    };
+    return (_jsx(Popover, { anchor: anchor, open: true, onClose: onClose, role: "dialog", ariaLabel: "Add task", placement: "bottom-start", className: "w-[300px] p-3", children: _jsxs("form", { onSubmit: submit, children: [_jsx("div", { className: "mb-2 text-s text-grey", children: target.allDay ? shortDate(target.ms) : `${shortDate(target.ms)}, ${formatTime(target.ms, hour12)}` }), _jsxs("div", { className: "flex gap-2", children: [_jsx("input", { autoFocus: true, value: text, onChange: (e) => setText(e.target.value), "aria-label": "Task title", placeholder: "Add task", className: "h-8 min-w-0 flex-1 rounded-row border border-line bg-surface px-2.5 outline-hidden focus:border-primary" }), _jsx("button", { type: "submit", className: "h-8 rounded-row bg-primary px-3 text-white outline-hidden focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:opacity-50", disabled: !text.trim(), children: "Add" })] })] }) }));
+}

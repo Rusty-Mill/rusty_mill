@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { List, Task } from '@/api/types'
 import { addDays, startOfDay } from '@/lib/date'
+import { nextOccurrence } from '@/lib/recurrence'
 import { moveTo, overdue, pickTask, readDay, readRemind, readRepeat, readWhen, remindTrigger, taskTools, type ToolContext } from './tools'
 
 const NOW = new Date(2026, 9, 22, 12).getTime()
@@ -265,6 +266,24 @@ describe('update_task with a repeat', () => {
       `update u ${JSON.stringify({ repeatFlag: 'RRULE:FREQ=WEEKLY;INTERVAL=2', dueMs: new Date(2026, 9, 22).getTime(), isAllDay: true })}`,
       'update d {"repeatFlag":""}',
     ])
+  })
+
+  it('keeps a monthly task on its day of month across February', async () => {
+    const jan31 = new Date(2027, 0, 31, 9).getTime()
+    const { c, done } = context([task('m', 'Rent', { dueMs: jan31, isAllDay: false, repeatFlag: '' }), task('u', 'Review', { repeatFlag: '' })])
+    expect(await run(c, 'update_task', { query: 'rent', repeat: 'monthly' })).toEqual({ title: 'Rent', repeat: 'every month on the 31st' })
+    expect(await run(c, 'update_task', { query: 'rent', repeat: 'every 2 months' })).toEqual({ title: 'Rent', repeat: expect.stringContaining('31st') })
+    await run(c, 'update_task', { query: 'review', repeat: 'monthly' })
+    const rules = done.map((d) => JSON.parse(d.slice(d.indexOf('{'))).repeatFlag as string)
+    expect(rules).toEqual(['RRULE:FREQ=MONTHLY;BYMONTHDAY=31', 'RRULE:FREQ=MONTHLY;INTERVAL=2;BYMONTHDAY=31', 'RRULE:FREQ=MONTHLY;BYMONTHDAY=22'])
+    const feb = nextOccurrence(rules[0]!, jan31)!
+    expect(new Date(feb)).toEqual(new Date(2027, 1, 28, 9))
+    expect(new Date(nextOccurrence(rules[0]!, feb)!)).toEqual(new Date(2027, 2, 31, 9))
+    const dec31 = new Date(2026, 11, 31, 9).getTime()
+    const two = nextOccurrence(rules[1]!, dec31)!
+    expect(new Date(two)).toEqual(new Date(2027, 1, 28, 9))
+    expect(new Date(nextOccurrence(rules[1]!, two)!)).toEqual(new Date(2027, 3, 30, 9))
+    expect(new Date(nextOccurrence(rules[1]!, nextOccurrence(rules[1]!, two)!)!)).toEqual(new Date(2027, 5, 30, 9))
   })
 
   it('changes nothing for a repeat it cannot read', async () => {

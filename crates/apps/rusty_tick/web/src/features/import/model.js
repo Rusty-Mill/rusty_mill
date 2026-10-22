@@ -1,0 +1,133 @@
+import { parseRule } from '@/lib/recurrence';
+export const blankTask = (key, title) => ({
+    key,
+    legacy: [],
+    list: '',
+    parentKey: null,
+    title,
+    notes: '',
+    priority: 0,
+    startMs: null,
+    dueMs: null,
+    isAllDay: false,
+    timeZone: '',
+    reminders: [],
+    repeatFlag: '',
+    exDates: [],
+    tags: [],
+    items: [],
+    status: 'open',
+});
+/** Column lookup by header name, case- and space-insensitive, trying each alias in turn. */
+export function columns(header) {
+    const index = new Map(header.map((h, i) => [h.trim().toLowerCase(), i]));
+    return (row, ...names) => {
+        for (const n of names) {
+            const i = index.get(n);
+            if (i !== undefined)
+                return (row[i] ?? '').trim();
+        }
+        return '';
+    };
+}
+/** The calendar day `ms` falls on in `zone` (or locally), as local midnight: the app's all-day convention. */
+function localDay(ms, zone) {
+    if (zone) {
+        try {
+            const [y, m, d] = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(ms).split('-').map(Number);
+            return new Date(y, m - 1, d).getTime();
+        }
+        catch {
+            /* unknown zone: use the local day */
+        }
+    }
+    const at = new Date(ms);
+    return new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime();
+}
+const daysIn = (y, mo) => new Date(Date.UTC(y, mo, 0)).getUTCDate();
+/** Offset minutes east of UTC for `Z`, `±hh`mm or `±hh:mm`; `null` past ±14:00 or 59 minutes. */
+function readOffset(text) {
+    if (text === 'Z')
+        return 0;
+    const [h, mi] = [Number(text.slice(1, 3)), Number(text.slice(-2))];
+    if (h > 14 || mi > 59 || (h === 14 && mi > 0))
+        return null;
+    return (text[0] === '-' ? -1 : 1) * (h * 60 + mi);
+}
+/**
+ * An ISO-like date: `2026-10-05` (all day), or a date and time with `T` or a
+ * space, an optional `Z` or `±hhmm`/`±hh:mm` offset (none means local time).
+ * `allDay` forces a dated time onto its calendar day in `zone`. `null` when
+ * unreadable or out of range (`2026-02-30`, `25:00`): a deadline is never invented.
+ */
+export function parseWhen(text, allDay = false, zone = '') {
+    const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/.exec(text.trim());
+    if (!m)
+        return null;
+    const [y, mo, d, h, mi, s] = [m[1], m[2], m[3], m[4] ?? '0', m[5] ?? '0', m[6] ?? '0'].map(Number);
+    if (mo < 1 || mo > 12 || d < 1 || d > daysIn(y, mo) || h > 23 || mi > 59 || s > 59)
+        return null;
+    if (m[4] === undefined)
+        return { ms: new Date(y, mo - 1, d).getTime(), allDay: true };
+    let ms;
+    if (m[7] === undefined)
+        ms = new Date(y, mo - 1, d, h, mi, s).getTime();
+    else {
+        const off = readOffset(m[7]);
+        if (off === null)
+            return null;
+        ms = Date.UTC(y, mo - 1, d, h, mi, s) - off * 60_000;
+    }
+    return allDay ? { ms: localDay(ms, zone), allDay: true } : { ms, allDay: false };
+}
+/** Append `label: text` to `notes`, so a value the app could not read is kept, not lost. */
+export const keepInNotes = (notes, label, text) => [notes, `${label}: ${text}`].filter(Boolean).join('\n\n');
+/** The `[label, text]` of each date that was given but could not be read. */
+export const unreadDates = (dates) => dates.filter(([, text, when]) => text !== '' && when === null).map(([label, text]) => [label, text]);
+/** An `RRULE` the app understands, as `RRULE:...`; `''` for none or one it does not. */
+export function readRepeat(rule) {
+    const body = rule.trim().replace(/^RRULE:/i, '');
+    return body && parseRule(body) ? `RRULE:${body}` : '';
+}
+const PRIORITY_WORDS = { high: 5, medium: 3, med: 3, low: 1, none: 0 };
+/** `0|1|3|5` or `high|medium|low|none`; anything else is no priority. */
+export function readPriority(text) {
+    const t = text.trim().toLowerCase();
+    if (t in PRIORITY_WORDS)
+        return PRIORITY_WORDS[t];
+    return [0, 1, 3, 5].find((p) => String(p) === t) ?? 0;
+}
+/** Split a tag cell on commas (and spaces after a `#`), dropping blanks and `#`. */
+export const readTags = (text) => text
+    .split(/,|\s+(?=#)/)
+    .map((t) => t.trim().replace(/^#/, ''))
+    .filter(Boolean);
+/**
+ * Keys made from content collide when a file holds the same row twice. Each
+ * key encodes its parts and the occurrence count as JSON, so no title (not
+ * even one ending in `#2` or holding `|`) can collide with another row, and a
+ * re-import of the same file yields the same keys.
+ */
+export function uniqueKeys() {
+    const seen = new Map();
+    return (...parts) => {
+        const base = JSON.stringify(parts);
+        const n = (seen.get(base) ?? 0) + 1;
+        seen.set(base, n);
+        return JSON.stringify([...parts, n]);
+    };
+}
+/**
+ * The keys #821's importer gave content-keyed rows, in file order: `base`,
+ * then `base#2`, `base#3`, ... for repeats. That scheme can give two rows the
+ * same key (`Task`, `Task`, `Task#2` give `Task#2` twice); which of them owns
+ * the task #821 created is decided by `applyImport`, in #821's write order.
+ */
+export function legacyKeys() {
+    const seen = new Map();
+    return (base) => {
+        const n = (seen.get(base) ?? 0) + 1;
+        seen.set(base, n);
+        return n === 1 ? base : `${base}#${n}`;
+    };
+}
