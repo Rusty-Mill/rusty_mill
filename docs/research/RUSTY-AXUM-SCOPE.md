@@ -66,7 +66,7 @@ its own reasons; if one is, build B first and move the smallest consumer
 
 ## 5. Questions for the owner
 
-**Decided 2026-10-22 (owner):** roll our own `rusty_axum`, so question 1 is answered: dropping `axum` repo-wide is a goal. Questions 2 to 4 (blocking or async, `rusty_tokio`, first consumer) are still open.
+**Decided 2026-10-22 (owner):** roll our own `rusty_axum`, so question 1 is answered: dropping `axum` repo-wide is a goal. Question 2 is answered too: the target is option C, a full async framework. Questions 3 and 4 (whether `rusty_tokio` can host the server loop, which consumer goes first) are open; the staged plan is the `rusty_axum` issue.
 
 1. Is dropping `axum` repo-wide a goal, or only from the MCP crates?
 2. If repo-wide, is B (blocking) acceptable for any crate, or must it be async?
