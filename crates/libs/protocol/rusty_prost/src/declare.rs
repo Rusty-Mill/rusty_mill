@@ -376,7 +376,7 @@ macro_rules! open_enum {
         impl TryFrom<i32> for $name {
             type Error = $crate::UnknownEnumValue;
 
-            fn try_from(value: i32) -> Result<Self, $crate::UnknownEnumValue> {
+            fn try_from(value: i32) -> ::core::result::Result<Self, $crate::UnknownEnumValue> {
                 match value {
                     $( $num => Ok(Self::$var), )*
                     other => Err($crate::UnknownEnumValue(other)),
