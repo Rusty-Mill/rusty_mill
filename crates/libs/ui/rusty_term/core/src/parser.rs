@@ -689,6 +689,8 @@ impl AnsiParser {
             &mut self.responses,
             &mut self.pen,
         );
+        // OSC 4/10/11/104 can move the pen's background or the default.
+        self.sync_erase_bg(g);
     }
 
     /// The pen cells are actually written with: the SGR pen plus the
@@ -1149,6 +1151,7 @@ impl AnsiParser {
             b'm' => {
                 let sgr = self.parse_sgr_params();
                 self.apply_sgr(&sgr);
+                self.sync_erase_bg(g);
             }
             b'H' | b'f' => {
                 // CSI row ; col H — both 1-based; default to 1. Origin-aware.
@@ -1418,6 +1421,12 @@ impl AnsiParser {
             },
             _ => {}
         }
+    }
+
+    /// Tell the grid which background erases fill with (BCE): the pen's,
+    /// or `None` while it is the palette default so OSC 11 still applies.
+    fn sync_erase_bg(&self, g: &mut Grid) {
+        g.set_erase_bg((self.pen.bg != self.palette.bg).then_some(self.pen.bg));
     }
 
     /// Reset SGR state to the default pen (default colors, no attributes).
