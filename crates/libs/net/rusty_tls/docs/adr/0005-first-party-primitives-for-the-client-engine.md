@@ -43,9 +43,11 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
 1. **The hand-rolled engine's client path may use the first-party crates instead of `ring`.**
    The backend is chosen by the ADR-0002 §1 construction a second time: a cargo feature
    `native-crypto`, which adds the first-party crates, and the build flag
-   `--cfg rusty_tls_native_crypto`, which no dependency can set. Both only take effect
-   inside the existing `handrolled-engine` feature and `rusty_tls_handrolled` flag. Without
-   them the engine uses `ring`, as today.
+   `--cfg rusty_tls_native_crypto`, which no dependency can set. They take effect only
+   together with the existing `--cfg rusty_tls_handrolled`. `native-crypto` deliberately does
+   **not** require `handrolled-engine`, so a native build has no direct `ring` dependency
+   and the compiler checks that the engine makes no `ring` call. Without the native cfg the
+   engine uses `ring`, as today.
 2. **Under the native backend, signing is compiled out (D3).** `sign.rs`, the TLS 1.3 and
    1.2 servers, session tickets and `ClientIdentity` do not exist in that build, so the
    engine makes no `ring` call at all. `ring` stays in the build regardless, because
@@ -60,8 +62,10 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
    build's order does not change.
 4. **The evidence bar is the one in `TLS-NATIVE-CRYPTO-SEAM.md` §4.** A CI variant of the
    engine job runs the client-side suites under the native backend, with its own list of
-   supported tests, zero-tests guard and BoGo floor. A seam differential runs the same keys
-   and inputs through both backends. The `crypto-constant-time` job and the plan's §11
+   supported tests and zero-tests guard. A native BoGo floor needs a client-only BoGo shim,
+   because the current shim drives the engine's server. Until one exists, BoGo covers the
+   `ring` backend only. That is a deferral the owner must agree to, not equivalent
+   coverage. A seam differential runs the same keys and inputs through both backends. The `crypto-constant-time` job and the plan's §11
    table apply. The `ring` job keeps full coverage. The secret-handling primitives listed
    under Context (HMAC/HKDF, the AEADs, X25519, ECDH) each keep their crate's constant-time
    evidence and review requirement. Constant-time claims stay "no leak found by these
