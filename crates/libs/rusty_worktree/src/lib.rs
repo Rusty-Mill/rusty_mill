@@ -8,6 +8,11 @@
 //! repository is. A sandboxed process can therefore be given write access to
 //! one worktree and read access to [`Repo::git_dir`], with staging and
 //! commits left to the caller outside the sandbox.
+//!
+//! On Windows, `canonicalize` gives verbatim paths (`\\?\C:\…`,
+//! `\\?\UNC\server\share\…`), which git does not accept as a `--git-dir`.
+//! Every path handed to git is first spelled in the plain form when that
+//! form names the same file, and the path is refused otherwise.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -68,15 +73,16 @@ impl Repo {
                 os("--quiet"),
                 os(&reference),
             ];
+            let target = git_path(dir)?;
             let tail: Vec<&OsStr> = if self.git(&verify).is_ok() {
-                vec![os("worktree"), os("add"), dir.as_os_str(), os(branch)]
+                vec![os("worktree"), os("add"), target.as_os_str(), os(branch)]
             } else {
                 vec![
                     os("worktree"),
                     os("add"),
                     os("-b"),
                     os(branch),
-                    dir.as_os_str(),
+                    target.as_os_str(),
                     os(base),
                 ]
             };
@@ -95,11 +101,12 @@ impl Repo {
             std::fs::remove_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         self.git(&[os("worktree"), os("prune")])?;
+        let target = git_path(dir)?;
         self.git(&[
             os("worktree"),
             os("add"),
             os("--detach"),
-            dir.as_os_str(),
+            target.as_os_str(),
             os(rev),
         ])?;
         dir.canonicalize().map_err(|e| e.to_string())
@@ -111,8 +118,14 @@ impl Repo {
     /// # Errors
     /// When git refuses.
     pub fn remove(&self, dir: &Path) -> Result<(), String> {
-        self.git(&[os("worktree"), os("remove"), os("--force"), dir.as_os_str()])
-            .map(drop)
+        let target = git_path(dir)?;
+        self.git(&[
+            os("worktree"),
+            os("remove"),
+            os("--force"),
+            target.as_os_str(),
+        ])
+        .map(drop)
     }
 
     /// The admin directory git keeps for the worktree at `dir`.
@@ -192,17 +205,19 @@ impl Repo {
 
     /// git in the main repository.
     fn git(&self, tail: &[&OsStr]) -> Result<String, String> {
-        run(&[&[os("-C"), self.root.as_os_str()], tail].concat())
+        let root = git_path(&self.root)?;
+        run(&[&[os("-C"), root.as_os_str()], tail].concat())
     }
 
     /// git on the worktree at `dir`, through its admin directory.
     fn in_worktree(&self, dir: &Path, tail: &[&OsStr]) -> Result<String, String> {
-        let admin = self.admin_dir(dir)?;
+        let admin = git_path(&self.admin_dir(dir)?)?;
+        let work = git_path(dir)?;
         let base = [
             os("--git-dir"),
             admin.as_os_str(),
             os("--work-tree"),
-            dir.as_os_str(),
+            work.as_os_str(),
         ];
         run(&[&base[..], tail].concat())
     }
@@ -210,6 +225,90 @@ impl Repo {
 
 fn os(s: &str) -> &OsStr {
     OsStr::new(s)
+}
+
+/// `path` spelled the way git accepts it. Anything but a Windows verbatim
+/// path is returned as it is. A verbatim disk or UNC path becomes its plain
+/// form (`C:\…`, `\\server\share\…`) when every component means the same
+/// there; any other verbatim path is refused rather than altered.
+///
+/// # Errors
+/// When `path` is verbatim and has no plain form naming the same file.
+fn git_path(path: &Path) -> Result<PathBuf, String> {
+    plain_form(path).ok_or_else(|| {
+        format!(
+            "{}: git cannot take this path, and no plain form names the same file",
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(windows))]
+fn plain_form(path: &Path) -> Option<PathBuf> {
+    Some(path.to_path_buf())
+}
+
+#[cfg(windows)]
+fn plain_form(path: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+    let mut parts = path.components();
+    let Some(Component::Prefix(prefix)) = parts.next() else {
+        return Some(path.to_path_buf());
+    };
+    let mut plain = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut unc = std::ffi::OsString::from(r"\\");
+            unc.push(server);
+            unc.push(r"\");
+            unc.push(share);
+            unc.push(r"\");
+            PathBuf::from(unc)
+        }
+        Prefix::Verbatim(_) | Prefix::DeviceNS(_) => return None,
+        Prefix::Disk(_) | Prefix::UNC(..) => return Some(path.to_path_buf()),
+    };
+    for part in parts {
+        match part {
+            Component::RootDir => {}
+            Component::Normal(name) if name.to_str().is_some_and(plain_name) => plain.push(name),
+            _ => return None,
+        }
+    }
+    Some(plain)
+}
+
+/// Whether a verbatim path component means the same in a plain Windows
+/// path: no character the plain form treats specially, no trailing dot or
+/// space (stripped there), and not a DOS device name (which the plain form
+/// opens instead of the file).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn plain_name(name: &str) -> bool {
+    const DEVICES: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
+    if matches!(name, "" | "." | "..") || name.ends_with(['.', ' ']) {
+        return false;
+    }
+    if name
+        .chars()
+        .any(|c| c < ' ' || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+    {
+        return false;
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end()
+        .to_ascii_uppercase();
+    let numbered = ["COM", "LPT"].iter().any(|port| {
+        stem.strip_prefix(port).is_some_and(|n| {
+            matches!(
+                n,
+                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    });
+    !numbered && !DEVICES.contains(&stem.as_str())
 }
 
 /// Run git; stdout on success, stderr on failure. No inherited `GIT_*`
@@ -257,6 +356,7 @@ pub fn parse_status(out: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -270,5 +370,59 @@ mod tests {
         assert!(parse_status("").is_empty());
         // A truncated entry is skipped rather than invented.
         assert_eq!(parse_status("x\0 M ok.rs\0"), ["ok.rs"]);
+    }
+
+    #[test]
+    fn plain_names_exclude_what_a_plain_windows_path_rewrites() {
+        for ok in [
+            "repo", ".git", "a b", "con-fig", "COM10", "nul_", "x.y.z", "é",
+        ] {
+            assert!(plain_name(ok), "{ok}");
+        }
+        for bad in [
+            "", ".", "..", "dot.", "space ", "a:b", "a/b", "a*", "tab\t", "CON", "nul.txt",
+            "Aux .rs", "com1", "LPT9.log", "COM¹", "CONOUT$",
+        ] {
+            assert!(!plain_name(bad), "{bad}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn paths_pass_through_off_windows() {
+        let path = Path::new("/tmp/a b/.git/worktrees/x");
+        assert_eq!(git_path(path).unwrap(), path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_paths_take_their_plain_form_or_are_refused() {
+        let cases = [
+            (r"\\?\C:\Users\a\repo\.git", Some(r"C:\Users\a\repo\.git")),
+            (r"\\?\UNC\srv\share\r\.git", Some(r"\\srv\share\r\.git")),
+            (r"C:\plain\path", Some(r"C:\plain\path")),
+            (r"\\srv\share\plain", Some(r"\\srv\share\plain")),
+            (r"relative\dir", Some(r"relative\dir")),
+            (r"\\?\C:\a\trailing.", None),
+            (r"\\?\C:\a\nul\b", None),
+            (r"\\?\Volume{0}\x", None),
+            (r"\\.\COM1", None),
+        ];
+        for (input, want) in cases {
+            let got = git_path(Path::new(input)).ok();
+            assert_eq!(got.as_deref(), want.map(Path::new), "{input}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_canonical_path_reaches_git_in_a_form_it_reads() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let plain = git_path(&dir).unwrap();
+        assert!(
+            !plain.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+            "{plain:?}"
+        );
+        assert_eq!(plain.canonicalize().unwrap(), dir);
     }
 }
