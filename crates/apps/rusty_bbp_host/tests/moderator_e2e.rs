@@ -109,6 +109,14 @@ fn card(dir: &Path, task: &TaskId) -> Card {
 
 /// Drive one task from open to closed; the run directory is left for the caller.
 fn happy_run(tag: &str) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
+    happy_run_polling(tag, Duration::from_millis(50))
+}
+
+/// [`happy_run`] with the moderator's longest wait between passes set to `poll`.
+fn happy_run_polling(
+    tag: &str,
+    poll: Duration,
+) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
     let dir = tempdir(tag);
     let (repo, base) = repo(&dir);
     let task = TaskId("T1".into());
@@ -177,7 +185,7 @@ fn happy_run(tag: &str) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
         work: dir.join("work"),
         launchers,
         confinement: Confinement::Unconfined,
-        poll: Duration::from_millis(50),
+        poll,
         max_wall: Duration::from_secs(90),
         end_grace: Duration::ZERO,
         cost_cap: None,
@@ -291,6 +299,22 @@ fn moderator_drives_a_task_from_open_to_closed_with_scripted_agents() {
         count(moderator::mcp_config_path(&dir, &task, TurnId(1))),
         4,
         "one MCP config per launched turn"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The poll is only the longest wait: log appends (agents' calls, the human's
+/// gate commands) and harness and runner exits wake the moderator. With a
+/// one-minute poll the whole task, eight states, still closes in seconds.
+#[test]
+fn events_drive_the_moderator_and_the_poll_is_only_a_fallback() {
+    let started = Instant::now();
+    let (dir, _, out, _) = happy_run_polling("events", Duration::from_secs(60));
+    assert_eq!(out.state, State::Closed);
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "took {:?}: the loop waited on its poll instead of events",
+        started.elapsed()
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

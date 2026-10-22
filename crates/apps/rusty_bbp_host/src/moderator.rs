@@ -1,9 +1,11 @@
 //! The moderator loop: `bbp mod`. The core decides who holds the turn; this
-//! loop makes it happen. Each iteration it re-reads the store, fires
-//! deadlines, starts the runner for a pending selected run, launches one
-//! agent harness for a newly granted turn with a `bbp mcp` binding in its
-//! environment, and reaps a harness whose turn has ended. Human gates are
-//! states with no turn, so the loop simply waits through them.
+//! loop makes it happen. A pass runs when the task's log changes or a child it
+//! started exits, and at least every `poll` (see [`crate::waker`]). Each pass
+//! re-reads the store, fires deadlines, starts the runner for a pending
+//! selected run, launches one agent harness for a newly granted turn with a
+//! `bbp mcp` binding in its environment, and reaps a harness whose turn has
+//! ended. Human gates are states with no turn, so the loop simply waits
+//! through them.
 //!
 //! The harness never sees a token: it gets `BBP_DIR`, `BBP_TASK`,
 //! `BBP_PRINCIPAL` and `BBP_TURN`, and talks to the per-turn `bbp mcp`
@@ -97,7 +99,9 @@ pub struct Config {
     pub work: PathBuf,
     pub launchers: Launchers,
     pub confinement: Confinement,
-    /// How long to sleep when nothing is ready.
+    /// The longest wait between passes. A pass runs sooner when the task's
+    /// log changes or a harness or the runner exits; with no event, deadlines,
+    /// the wall limit, the end grace and the cost cap are checked this often.
     pub poll: Duration,
     /// Give up after this long; the task is left where it stands.
     pub max_wall: Duration,
@@ -514,6 +518,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
     let mut launched: HashSet<TurnId> = HashSet::new();
     let mut waiting: HashSet<TurnId> = HashSet::new();
     let mut ran: HashSet<RunId> = HashSet::new();
+    let mut waker = crate::waker::Waker::new(&log_path_for(&cfg.dir, &cfg.task));
 
     // A turn that was live before this loop did anything belongs to an
     // invocation it cannot see or stop. Abort it so its token dies and the
@@ -730,7 +735,13 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             }
             sup.harnesses.push(harness);
         }
-        std::thread::sleep(cfg.poll);
+        let children: Vec<u32> = sup
+            .harnesses
+            .iter()
+            .map(|h| h.child.id())
+            .chain(sup.runner.as_ref().map(|r| r.child.id()))
+            .collect();
+        waker.wait(&children, cfg.poll)?;
     }
 }
 
