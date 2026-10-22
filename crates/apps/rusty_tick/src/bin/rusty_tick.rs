@@ -23,7 +23,7 @@
 use rusty_tick::admin;
 use rusty_tick::backend::Backend;
 use rusty_tick::pool::DEFAULT_MAX_OPEN_USERS;
-use rusty_tick::server::Server;
+use rusty_tick::server;
 use rusty_tick::service::system_clock;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -110,7 +110,7 @@ fn run() -> Result<(), String> {
         ));
     }
     let backend = open_backend(&options.data_dir)?;
-    let mut server = Server::bind(options.addr, backend)
+    let mut server = server::bind(options.addr, backend)
         .map_err(|e| format!("binding {}: {e}", options.addr))?;
     if let Some(dir) = options.web_dir {
         if !dir.join("index.html").is_file() {

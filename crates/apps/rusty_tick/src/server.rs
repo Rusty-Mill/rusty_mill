@@ -10,6 +10,15 @@ pub use rusty_serve::{Handler, ShutdownHandle, DEFAULT_MAX_CONNECTIONS, MAX_BODY
 
 pub type Server = rusty_serve::Server<Backend>;
 
+/// Bind the whole surface to `addr`: the API and web UI under the backend's
+/// lock, and MCP at [`crate::mcp::MCP_PATH`] beside them.
+///
+/// # Errors
+/// The bind error, if the address is taken or not allowed.
+pub fn bind(addr: std::net::SocketAddr, backend: Backend) -> std::io::Result<rusty_serve::Server> {
+    rusty_serve::Server::bind_shared(addr, crate::mcp::Routes::new(backend)?)
+}
+
 /// The assistant's route: a streamed AG-UI run, so it bypasses the
 /// buffered [`api::Response`] path.
 const AGENT_PATH: &str = "/api/agent";

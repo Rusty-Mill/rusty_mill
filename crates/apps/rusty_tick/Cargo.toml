@@ -23,6 +23,8 @@ rusty_tls = { workspace = true }
 # The assistant behind `POST /api/agent` (ADR-0007 follow-ons step 3).
 rusty_agui = { workspace = true, features = ["serve"] }
 rusty_json = { workspace = true }
+# `/mcp`: the task API as MCP tools, over Streamable HTTP on `rusty_serve`.
+rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty_url = { workspace = true }
 # Per-user tokens (ADR-0002): random secrets, their encoding, and a digest of
 # each so only digests are stored. SHA-256 is `rusty_rsa`'s, the monorepo's

@@ -1,7 +1,7 @@
 //! End to end over a real socket: framing, keep-alive, limits, shutdown.
 
 use rusty_tick::backend::Backend;
-use rusty_tick::server::{Server, ShutdownHandle, MAX_BODY_BYTES};
+use rusty_tick::server::{bind, ShutdownHandle, MAX_BODY_BYTES};
 use rusty_tick::service::system_clock;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -25,7 +25,7 @@ impl Running {
     fn start_with(web_dir: Option<std::path::PathBuf>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let backend = Backend::single(dir.path(), TOKEN.into(), system_clock()).unwrap();
-        let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), backend).unwrap();
+        let mut server = bind("127.0.0.1:0".parse().unwrap(), backend).unwrap();
         if let Some(web) = web_dir {
             server = server.with_web_dir(web);
         }
@@ -303,5 +303,108 @@ fn without_a_web_dir_only_the_api_answers() {
         status(&root),
         401,
         "no UI is served, and the API needs a token"
+    );
+}
+
+/// One JSON-RPC `message` to `/mcp`, as a Streamable HTTP client sends it; the whole response.
+fn mcp(server: &Running, token: Option<&str>, session: Option<&str>, message: &str) -> String {
+    let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    let sid = session.map_or(String::new(), |s| format!("Mcp-Session-Id: {s}\r\n"));
+    exchange(
+        server,
+        &format!(
+            "POST /mcp HTTP/1.1\r\nHost: t\r\n{auth}{sid}Accept: application/json, text/event-stream\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{message}",
+            message.len()
+        ),
+    )
+}
+
+fn header<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+    let head = response.split_once("\r\n\r\n").map_or(response, |(h, _)| h);
+    head.lines().find_map(|l| {
+        let (n, v) = l.split_once(':')?;
+        n.eq_ignore_ascii_case(name).then_some(v.trim())
+    })
+}
+
+fn call(server: &Running, session: &str, id: u32, tool: &str, args: &str) -> String {
+    let message = format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{args}}}}}"#
+    );
+    let response = mcp(server, Some(TOKEN), Some(session), &message);
+    assert_eq!(status(&response), 200, "{response}");
+    body(&response).to_string()
+}
+
+#[test]
+fn mcp_needs_a_token_and_runs_tools_against_the_callers_tasks() {
+    let server = Running::start();
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    assert_eq!(status(&mcp(&server, None, None, init)), 401);
+    assert_eq!(
+        status(&mcp(&server, Some("wrong-token-wrong-token"), None, init)),
+        401
+    );
+
+    let opened = mcp(&server, Some(TOKEN), None, init);
+    assert_eq!(status(&opened), 200, "{opened}");
+    let session = header(&opened, "mcp-session-id")
+        .expect("a session id")
+        .to_string();
+    let ready = mcp(
+        &server,
+        Some(TOKEN),
+        Some(&session),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    );
+    assert_eq!(status(&ready), 202, "{ready}");
+
+    let tools = mcp(
+        &server,
+        Some(TOKEN),
+        Some(&session),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    );
+    for name in [
+        "list_lists",
+        "add_task",
+        "search_tasks",
+        "complete_task",
+        "delete_task",
+    ] {
+        assert!(
+            body(&tools).contains(&format!(r#""name":"{name}""#)),
+            "{name}: {tools}"
+        );
+    }
+
+    let added = call(&server, &session, 3, "add_task", r#"{"title":"Buy milk"}"#);
+    assert!(
+        added.contains("Buy milk") && !added.contains(r#""isError":true"#),
+        "{added}"
+    );
+    let found = call(&server, &session, 4, "search_tasks", r#"{"query":"milk"}"#);
+    assert!(found.contains("Buy milk"), "{found}");
+    let api = exchange(
+        &server,
+        &request("GET", "/api/v1/search?q=milk", "", "Connection: close\r\n"),
+    );
+    assert!(body(&api).contains("Buy milk"), "{api}");
+
+    let unknown = call(
+        &server,
+        &session,
+        5,
+        "add_task",
+        r#"{"title":"x","colour":"red"}"#,
+    );
+    assert!(
+        unknown.contains(r#""isError":true"#),
+        "the API refuses an unknown field: {unknown}"
+    );
+    let reshaped = call(&server, &session, 6, "get_task", r#"{"id":"../trash"}"#);
+    assert!(
+        reshaped.contains(r#""isError":true"#) && reshaped.contains("not a task or list id"),
+        "{reshaped}"
     );
 }

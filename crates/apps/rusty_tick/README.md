@@ -81,11 +81,26 @@ and stay in their parent's list (moving a parent moves them). `repeatFlag` is an
 `RRULE` and `reminders` are `TRIGGER:` strings; the server stores both, and the web UI expands
 recurrence and raises reminders as browser notifications.
 
+## MCP
+
+The server also speaks MCP (Streamable HTTP) at `/mcp`, under the same bearer
+tokens as the API, so an agent can read and change your tasks. Tools:
+`list_lists`, `list_tasks`, `due_tasks`, `search_tasks`, `get_task`,
+`add_task` (to the Inbox unless `listId` is given), `update_task`,
+`complete_task`, `reopen_task` and `delete_task` (to the Trash). Each runs
+the matching API route in-process, with its validation and errors. Browsers
+are refused (no `Origin` is accepted). For Claude Code:
+
+```
+claude mcp add --transport http tick http://127.0.0.1:8787/mcp --header "Authorization: Bearer $RUSTY_TICK_TOKEN"
+```
+
 ## Layout
 
 `api` (pure router) and `dto` (wire shapes) sit over `service` (rules), which
 sits over `store`/`lists` (the engine). `server` binds `Backend` to
-`rusty_serve`, the shared blocking HTTP server that also serves `web/dist`.
+`rusty_serve`, the shared blocking HTTP server that also serves `web/dist`;
+`mcp` routes `/mcp` beside it and turns tool calls into API requests.
 
 ```
 cargo test -p rusty_tick
