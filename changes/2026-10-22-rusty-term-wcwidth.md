@@ -10,5 +10,5 @@ changelog: rusty_term lays out text per code point by default (as vim and other 
   - regional indicators are 2 columns, as in vim and Ghostty. glibc's `wcwidth` says 1.
   Closes Rusty-Mill/rusty_mill#855.
 - **Added:** DEC private mode 2027 (`CSI ? 2027 h/l`, reported by DECRQM) switches on the previous one-cell-per-grapheme behaviour, as in Ghostty, WezTerm, foot and contour. RIS resets it; DECSTR keeps it, as Ghostty does. Under the mode, a flag is one 2-column glyph.
-- **Changed:** `unicode_heavy` throughput roughly doubled (about 13 to 24 MB/s locally), because the default path no longer runs UAX #29 segmentation per character. The `vim_edit` and `wide_combining` fidelity goldens changed in their emoji rows and now match libghostty-vt (15 of 18 cases).
+- **Changed:** `unicode_heavy` throughput roughly doubled (about 13 to 24 MB/s locally; 528 to 256 instructions per byte, and its ceiling in `bench/ir_ceilings.txt` drops from 580 to 282), because the default path no longer runs UAX #29 segmentation per character. The `vim_edit` and `wide_combining` fidelity goldens changed in their emoji rows and now match libghostty-vt (15 of 18 cases).
 - **Known limitations:** ZWJ sequences such as `👨‍💻` render as their parts by default, as in xterm. Apps that want joined emoji enable mode 2027. There is no config key to make clustering the default yet.
