@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rusty_h2::driver::{Body, RecvStream, ResponseFuture, SendStream};
@@ -20,7 +21,7 @@ use crate::{
 };
 
 /// Runs `f` until `deadline`; `None` if the deadline came first.
-pub(super) async fn until<F: Future>(deadline: Option<Instant>, f: F) -> Option<F::Output> {
+pub(crate) async fn until<F: Future>(deadline: Option<Instant>, f: F) -> Option<F::Output> {
     match deadline {
         None => Some(f.await),
         Some(at) => timeout_at(at, f).await.ok(),
@@ -40,7 +41,7 @@ fn pairs(headers: &[HeaderField]) -> Vec<(&str, &[u8])> {
 }
 
 /// The longest message a call may send, checked against the message about to be framed.
-pub(super) fn frame<T: Message>(message: &T, max: Option<usize>) -> Result<Vec<u8>, Status> {
+pub(crate) fn frame<T: Message>(message: &T, max: Option<usize>) -> Result<Vec<u8>, Status> {
     let frame = encode_message(message)?;
     match max {
         Some(max) if frame.len() - HEADER_LEN > max => Err(Status::resource_exhausted(format!(
@@ -51,20 +52,43 @@ pub(super) fn frame<T: Message>(message: &T, max: Option<usize>) -> Result<Vec<u
     }
 }
 
-/// How a call is cancelled: a stream whose requests are already sent is reset directly; one
-/// still sending leaves that to its [`Sender`], which is told through a signal.
+/// Where a finished [`Sender`] leaves its stream so the call can still be cancelled: the
+/// stream once the requests are all sent, and whether the call was cancelled before that.
+#[derive(Default)]
+pub(super) struct Handoff {
+    cancelled: bool,
+    send: Option<SendStream>,
+}
+
+pub(super) type Slot = Arc<Mutex<Handoff>>;
+
+/// Locks the slot. Nothing under the lock can panic, so a poisoned lock still holds a valid
+/// value and is used as it is.
+fn lock(slot: &Slot) -> std::sync::MutexGuard<'_, Handoff> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// How a call is cancelled: a stream whose requests are already sent is reset directly. One
+/// still sending is told through a signal, so its [`Sender`] resets it; a [`Sender`] that has
+/// finished has left its stream in the slot, and that is reset from here.
 pub(super) enum Cancel {
     Reset(SendStream),
-    Signal(watch::Sender<bool>),
+    Signal(watch::Sender<bool>, Slot),
 }
 
 impl Cancel {
     fn cancel(&mut self) {
         match self {
             Cancel::Reset(send) => send.reset(ErrorCode::Cancel),
-            // A send fails only when the sender is already gone, which is the aim.
-            Cancel::Signal(signal) => {
+            Cancel::Signal(signal, slot) => {
+                // A send fails only when the sender is already gone, which is the aim.
                 let _ = signal.send(true);
+                let mut handoff = lock(slot);
+                handoff.cancelled = true;
+                if let Some(send) = handoff.send.as_mut() {
+                    send.reset(ErrorCode::Cancel);
+                }
             }
         }
     }
@@ -119,10 +143,14 @@ impl<T> Streaming<T> {
 
     /// Waits for the response's headers. After it, [`Streaming::metadata`] is the server's.
     pub(super) async fn open(&mut self) -> Result<(), Status> {
-        let Some(head) = self.head.take() else {
+        let Some(pending) = self.head.as_mut() else {
             return Ok(());
         };
-        let response = match until(self.deadline, head).await {
+        // Awaited in place, not taken out: if this future is dropped mid-wait, `Drop` still
+        // finds the call open and cancels it.
+        let waited = until(self.deadline, pending).await;
+        self.head = None;
+        let response = match waited {
             None => return Err(self.fail(deadline_exceeded())),
             Some(Err(e)) => return Err(self.fail(status_from_h2(&e))),
             Some(Ok(response)) => response,
@@ -259,6 +287,7 @@ impl<T> Drop for Streaming<T> {
 pub struct Sender<T> {
     send: SendStream,
     cancelled: watch::Receiver<bool>,
+    slot: Slot,
     max_send: Option<usize>,
     deadline: Option<Instant>,
     _t: PhantomData<fn(T)>,
@@ -273,12 +302,14 @@ impl<T: Message> Sender<T> {
     pub(super) fn new(
         send: SendStream,
         cancelled: watch::Receiver<bool>,
+        slot: Slot,
         max_send: Option<usize>,
         deadline: Option<Instant>,
     ) -> Sender<T> {
         Sender {
             send,
             cancelled,
+            slot,
             max_send,
             deadline,
             _t: PhantomData,
@@ -314,9 +345,19 @@ impl<T: Message> Sender<T> {
         self.write(frame, false).await
     }
 
-    /// Ends the requests. Without it (the sender dropped) the call is cancelled.
+    /// Ends the requests. Without it (the sender dropped) the call is cancelled. After it, the
+    /// call can still be cancelled from the reply: dropping it, or its deadline, resets the stream.
     pub async fn finish(mut self) -> Result<(), Status> {
-        self.write(Vec::new(), true).await
+        self.write(Vec::new(), true).await?;
+        let Sender { mut send, slot, .. } = self;
+        let mut handoff = lock(&slot);
+        if handoff.cancelled {
+            // Cancelled while the last bytes were going out.
+            send.reset(ErrorCode::Cancel);
+        } else {
+            handoff.send = Some(send);
+        }
+        Ok(())
     }
 }
 

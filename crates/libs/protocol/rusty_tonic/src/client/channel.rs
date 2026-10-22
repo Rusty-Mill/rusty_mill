@@ -11,7 +11,7 @@ use rusty_prost::Message;
 use rusty_tokio::sync::{watch, Mutex};
 
 use super::error::{status_from_connect, status_from_h2};
-use super::streaming::{frame, until, Cancel};
+use super::streaming::{frame, until, Cancel, Slot};
 use super::{Reply, Request, Response, Sender, Streaming};
 use crate::{MetadataMap, RequestHead, Scheme, Status, DEFAULT_MAX_RECV_MESSAGE_SIZE};
 
@@ -174,13 +174,20 @@ impl Channel {
             deadline,
         } = self.start(path, request.metadata, request.timeout).await?;
         let (signal, cancelled) = watch::channel(false);
+        let slot = Slot::default();
         let streaming = Streaming::new(
             response,
             options.max_recv_message_size,
             deadline,
-            Cancel::Signal(signal),
+            Cancel::Signal(signal, slot.clone()),
         );
-        let sender = Sender::new(send, cancelled, options.max_send_message_size, deadline);
+        let sender = Sender::new(
+            send,
+            cancelled,
+            slot,
+            options.max_send_message_size,
+            deadline,
+        );
         Ok((sender, streaming))
     }
 
