@@ -130,7 +130,11 @@ function Close-GameIfRunning([bool]$allowClose, [int]$timeoutSec) {
 }
 
 function Install-Plugin([string]$srcDir, [string]$pluginsDir, $current, $stamp, [bool]$closeGame, [int]$closeTimeoutSec) {
-    Close-GameIfRunning $closeGame $closeTimeoutSec
+    # Refuse before building when the game cannot be closed, but only stop it once the build has
+    # succeeded: the build does not need the game closed, so a failed build must not end a session.
+    if (-not $closeGame -and (Get-Process -Name "RocketLeague" -ErrorAction SilentlyContinue)) {
+        throw "Rocket League is running and holds the plugin DLL; close it and rerun (or pass -CloseGame)"
+    }
     $build = Join-Path $srcDir "build"
     if (Test-Path -LiteralPath $build) { Remove-Item -LiteralPath $build -Recurse -Force }
     Push-Location $srcDir
@@ -145,6 +149,7 @@ function Install-Plugin([string]$srcDir, [string]$pluginsDir, $current, $stamp, 
     $built = Join-Path $build "Release\$PluginName.dll"
     if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { throw "build succeeded but '$built' is missing" }
 
+    Close-GameIfRunning $closeGame $closeTimeoutSec
     $installed = Join-Path $pluginsDir "$PluginName.dll"
     if (Test-Path -LiteralPath $installed -PathType Leaf) {
         $tag = if ($null -ne $stamp) { "bm$($stamp.bakkesmod_version)" } else { "unstamped" }

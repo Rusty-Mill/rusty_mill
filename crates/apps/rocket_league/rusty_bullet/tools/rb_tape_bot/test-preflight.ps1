@@ -142,10 +142,16 @@ try {
     Assert ($null -ne $r.Failure -and $r.Failure -match 'stale' -and $r.Stops -eq 0 -and $r.Calls -eq '') "closegame with -Check: $($r.Failure) / stops $($r.Stops)"
     Write-Host 'PASS closegame-ignored-by-check'
 
-    # game that will not exit: fail before building, install untouched
+    # a failed build must not end the session: the game is only stopped once there is a DLL to install
     $dllBefore = Get-Content $dll -Raw
+    $r = Invoke-Preflight $l -GameRunning -CloseGame -CmakeExit 7
+    Assert ($null -ne $r.Failure -and $r.Failure -match 'cmake configure failed.*7' -and $r.Stops -eq 0) "failed build with -CloseGame: $($r.Failure) / stops $($r.Stops)"
+    Assert ((Get-Content $dll -Raw) -eq $dllBefore) 'failed build with -CloseGame changed the install'
+    Write-Host 'PASS closegame-build-failed-keeps-game'
+
+    # game that will not exit: built, then fail without touching the install
     $r = Invoke-Preflight $l -GameRunning -CloseGame -GameStaysUp
-    Assert ($null -ne $r.Failure -and $r.Failure -match 'did not exit' -and $r.Calls -eq '' -and $r.Stops -eq 1) "game stays up: $($r.Failure) / $($r.Calls)"
+    Assert ($null -ne $r.Failure -and $r.Failure -match 'did not exit' -and $r.Calls -eq 'configure,build' -and $r.Stops -eq 1) "game stays up: $($r.Failure) / $($r.Calls)"
     Assert ((Get-Content $dll -Raw) -eq $dllBefore) 'game that would not exit still changed the install'
     Write-Host 'PASS closegame-game-wont-exit'
 
