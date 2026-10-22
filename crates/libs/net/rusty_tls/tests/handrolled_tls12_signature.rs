@@ -13,7 +13,13 @@
 //!   because a live OpenSSL server produced exactly that signature and a first
 //!   version of this verifier, which copied TLS 1.3's rule, refused it.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rusty_tls::handrolled::verify::{
     verify_tls12_signature, verify_tls13_signature, SignatureScheme, VerifyError,

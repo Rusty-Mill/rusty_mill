@@ -22,7 +22,13 @@
 //! messages, and `the_server_finished_verify_data_now_checks_out` computes
 //! it — closing a gap 3a documented rather than hid.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rusty_tls::handrolled::handshake::{
     certificate_verify_content, extension, find, messages, parse_encrypted_extensions,

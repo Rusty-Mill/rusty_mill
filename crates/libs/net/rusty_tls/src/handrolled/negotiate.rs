@@ -55,22 +55,30 @@
 //! Resumption works only in 1.3: a 1.3 hello carries the `pre_shared_key`, and
 //! a 1.2 reply ignores it (the binder is computed over the combined hello).
 
-use super::client::{plaintext_record, ClientConfig, ClientError, ClientHandshake, Connection};
+#[cfg(not(rusty_tls_native_crypto))]
+use super::client::plaintext_record;
+use super::client::{ClientConfig, ClientError, ClientHandshake, Connection};
 use super::client12::{
     CipherSuite12, ClientConfig12, ClientHandshake12, Connection12, MAX_HANDSHAKE_BUFFER,
 };
 use super::handshake::{complete_prefix, extension, find, messages, HandshakeType};
-use super::handshake12::{ClientHello12, ServerHello12};
+#[cfg(not(rusty_tls_native_crypto))]
+use super::handshake12::ClientHello12;
+use super::handshake12::ServerHello12;
 use super::kx::NamedGroup;
 use super::limits::Noise;
 use super::record::ContentType;
 use super::record12::split;
+#[cfg(not(rusty_tls_native_crypto))]
 use super::server::{ServerConfig, ServerError, ServerHandshake};
+#[cfg(not(rusty_tls_native_crypto))]
 use super::server12::{ServerConfig12, ServerHandshake12};
 use super::verify::SignatureScheme;
 
-/// `TLS_FALLBACK_SCSV`, RFC 7507 §3.
+/// `TLS_FALLBACK_SCSV`, RFC 7507 §3. Read only by the server side.
+#[cfg(not(rusty_tls_native_crypto))]
 const FALLBACK_SCSV: u16 = 0x5600;
+#[cfg(not(rusty_tls_native_crypto))]
 const TLS13: u16 = 0x0304;
 
 /// The version a connection was established in.
@@ -401,9 +409,10 @@ fn server_hello_version(buffer: &[u8]) -> Version {
 }
 
 // ---------------------------------------------------------------------------
-// Server
+// Server (absent on the native backend, which has no server role: ADR-0005)
 // ---------------------------------------------------------------------------
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// A server that speaks TLS 1.3 and TLS 1.2.
 pub struct ServerConfigBoth<'a> {
     /// The TLS 1.3 half.
@@ -412,6 +421,7 @@ pub struct ServerConfigBoth<'a> {
     pub tls12: &'a ServerConfig12<'a>,
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 enum ServerState<'a> {
     Pending {
         buffer: Vec<u8>,
@@ -423,12 +433,14 @@ enum ServerState<'a> {
     Failed,
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// A server handshake that has not yet read a ClientHello.
 pub struct ServerHandshakeBoth<'a> {
     config: &'a ServerConfigBoth<'a>,
     state: ServerState<'a>,
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 impl<'a> ServerHandshakeBoth<'a> {
     /// A server waiting for a ClientHello.
     pub fn new(config: &'a ServerConfigBoth<'a>) -> Self {
@@ -559,6 +571,7 @@ impl<'a> ServerHandshakeBoth<'a> {
     }
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// Which machine should read the ClientHello that is complete in `buffer`.
 ///
 /// Errors only for what the choice itself must refuse: a hello that cannot be

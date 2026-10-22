@@ -31,7 +31,13 @@
 //! `handrolled_record12_kat.rs` covers it with vectors from an unrelated
 //! implementation.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use rustls::crypto::cipher::{AeadKey, InboundOpaqueMessage, OutboundChunks, OutboundPlainMessage};
 use rustls::crypto::ring::cipher_suite::{

@@ -31,8 +31,18 @@
 //!   string included. A function here that took a transcript hash and added
 //!   the framing itself would be one refactor away from signing a bare hash,
 //!   which is exactly the cross-protocol reuse the framing exists to prevent.
+//!
+//! # On the native backend
+//!
+//! With `--cfg rusty_tls_native_crypto` (ADR-0005) there is no signing at
+//! all: [`SigningKey`] is an enum with no variants, so no key, and therefore
+//! no client certificate, can exist in that build. Its methods keep their
+//! signatures so the client compiles unchanged, and none can be reached.
+//! [`SignError`] stays, because the client's error type names it.
 
+#[cfg(not(rusty_tls_native_crypto))]
 use ring::rand::SystemRandom;
+#[cfg(not(rusty_tls_native_crypto))]
 use ring::signature::{self, KeyPair};
 
 use super::verify::SignatureScheme;
@@ -69,6 +79,7 @@ impl core::fmt::Display for SignError {
 
 impl std::error::Error for SignError {}
 
+#[cfg(not(rusty_tls_native_crypto))]
 enum Inner {
     Ecdsa {
         pair: signature::EcdsaKeyPair,
@@ -84,10 +95,47 @@ enum Inner {
 /// there is no constructor that sniffs the document and decides for you. A
 /// server that guessed wrong about its own key would find out at handshake
 /// time, on a connection it could not complete.
+#[cfg(not(rusty_tls_native_crypto))]
 pub struct SigningKey {
     inner: Inner,
 }
 
+/// A private key that can sign a TLS handshake — of which, on the native
+/// backend, there are none. See the module docs.
+#[cfg(rusty_tls_native_crypto)]
+pub enum SigningKey {}
+
+#[cfg(rusty_tls_native_crypto)]
+impl SigningKey {
+    /// Unreachable: there is no `SigningKey` on the native backend.
+    pub fn schemes(&self) -> &'static [SignatureScheme] {
+        match *self {}
+    }
+
+    /// Unreachable: there is no `SigningKey` on the native backend.
+    pub fn certificate_type(&self) -> u8 {
+        match *self {}
+    }
+
+    /// Unreachable: there is no `SigningKey` on the native backend.
+    pub fn public_key(&self) -> Vec<u8> {
+        match *self {}
+    }
+
+    /// Unreachable: there is no `SigningKey` on the native backend.
+    pub fn sign(&self, _scheme: SignatureScheme, _message: &[u8]) -> Result<Vec<u8>, SignError> {
+        match *self {}
+    }
+}
+
+#[cfg(rusty_tls_native_crypto)]
+impl core::fmt::Debug for SigningKey {
+    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {}
+    }
+}
+
+#[cfg(not(rusty_tls_native_crypto))]
 impl SigningKey {
     /// An ECDSA P-256 key, which signs `ecdsa_secp256r1_sha256`.
     pub fn ecdsa_p256(pkcs8: &[u8]) -> Result<Self, SignError> {
@@ -224,6 +272,7 @@ impl SigningKey {
 }
 
 /// Says what kind of key it is and nothing else.
+#[cfg(not(rusty_tls_native_crypto))]
 impl core::fmt::Debug for SigningKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let kind = match &self.inner {

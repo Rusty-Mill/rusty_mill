@@ -29,7 +29,13 @@
 //!     -- --ignored --nocapture
 //! ```
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -88,8 +94,10 @@ struct Pki {
     leaf_pem: String,
     key_pem: String,
     /// The leaf then the root, DER, and the leaf's key as PKCS#8: what a client
-    /// presenting this certificate needs.
+    /// presenting this certificate needs (never, on the native backend).
+    #[cfg_attr(rusty_tls_native_crypto, allow(dead_code))]
     chain: Vec<Vec<u8>>,
+    #[cfg_attr(rusty_tls_native_crypto, allow(dead_code))]
     pkcs8: Vec<u8>,
 }
 
@@ -619,6 +627,7 @@ fn a_certificate_request_is_answered_with_none() {
     );
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// A required client certificate is satisfied: OpenSSL, run with `-Verify 1`
 /// against the client's own CA, completes the handshake only if it received a
 /// chain that verifies and a `CertificateVerify` that proves the key.

@@ -1,6 +1,6 @@
 [package]
 name = "rusty_tls"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 description = "A TLS library implementation in Rust"
 license = "MIT OR Apache-2.0"
@@ -55,6 +55,19 @@ rusty_tokio = { workspace = true, version = "0.2.0", optional = true }
 # already present transitively as rustls' own crypto provider, so enabling
 # this adds no new code to a build, only a direct edge.
 ring = { version = "0.17", optional = true }
+# The first-party primitives behind the engine's client path, instead of
+# `ring` (ADR-0005; `docs/research/TLS-NATIVE-CRYPTO-SEAM.md`). SHA-2, HMAC
+# and HKDF; signature verification, X25519 and ECDH; ChaCha20-Poly1305 and
+# AES-GCM; and OS randomness. All first-party, so they add no external code
+# to the graph. Optional, behind `native-crypto`, and only used when
+# `--cfg rusty_tls_native_crypto` is also set.
+rusty_sha2 = { workspace = true, optional = true }
+rusty_pk = { workspace = true, optional = true }
+rusty_aead = { workspace = true, optional = true }
+rusty_rand = { workspace = true, optional = true }
+# Constant-time comparison and wiping for the native backend's HMAC tags and
+# ephemeral X25519 scalar; the same helpers the first-party crates use.
+rusty_crypto_key = { workspace = true, optional = true }
 
 # Exactly one `platform` backend per target — the same shape rustils'
 # own `coreutils` uses. `TrustPolicy::System` is the only caller; every
@@ -101,6 +114,15 @@ rusty-tokio = ["dep:rusty_tokio"]
 # Never a default feature, permanently. That is a binding decision recorded in
 # the ADR, not an intention.
 handrolled-engine = ["dep:ring"]
+# The engine's client path on first-party primitives instead of `ring`
+# (ADR-0005). Like `handrolled-engine`, this is half of a two-part gate: the
+# backend switches only when `--cfg rusty_tls_native_crypto` is also set, so a
+# dependency enabling this feature changes nothing. With the cfg, the engine's
+# signing, servers, session tickets and client certificates are compiled out.
+# It deliberately does not imply `handrolled-engine`: built without it, the
+# crate has no direct `ring` dependency, so the compiler itself checks that the
+# engine makes no `ring` call. `ring` stays in the graph through `rustls`.
+native-crypto = ["dep:rusty_sha2", "dep:rusty_pk", "dep:rusty_aead", "dep:rusty_rand", "dep:rusty_crypto_key"]
 
 [dev-dependencies]
 # Generates throwaway certificates (wrong hostname, expired, untrusted
@@ -139,4 +161,4 @@ unsafe_code = "forbid"
 missing_docs = "warn"
 # `rusty_tls_handrolled` is set via RUSTFLAGS, not by cargo, so it has to be
 # declared here or every build warns about it as an unexpected cfg.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rusty_tls_handrolled)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rusty_tls_handrolled)', 'cfg(rusty_tls_native_crypto)'] }

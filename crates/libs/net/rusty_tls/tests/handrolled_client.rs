@@ -31,7 +31,13 @@
 //! tolerated its absence would authenticate an attacker who copied a
 //! certificate off the wire.
 
-#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+#![cfg(all(
+    rusty_tls_handrolled,
+    any(
+        all(feature = "handrolled-engine", not(rusty_tls_native_crypto)),
+        all(feature = "native-crypto", rusty_tls_native_crypto)
+    )
+))]
 
 use std::sync::Arc;
 
@@ -49,6 +55,7 @@ use rusty_tls::handrolled::handshake::{
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
+#[cfg(not(rusty_tls_native_crypto))]
 use rusty_tls::handrolled::sign::SigningKey;
 use rusty_tls::handrolled::x509::Certificate;
 
@@ -2560,6 +2567,7 @@ fn against_client_auth(
     Err(ClientError::Failed)
 }
 
+#[cfg(not(rusty_tls_native_crypto))]
 /// The headline: this client authenticates itself to a `rustls` server.
 ///
 /// `rustls` checks the chain against a root it was given, and checks the
