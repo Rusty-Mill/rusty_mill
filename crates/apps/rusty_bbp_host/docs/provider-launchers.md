@@ -49,6 +49,31 @@ and push-token variables and inherited BBP bindings are removed from provider
 environments; the MCP config explicitly supplies only its four public binding
 variables. Provider auth stays in the CLI's normal login store.
 
+## Confined
+
+Either launcher may be given a `sandbox` in the agents file. The moderator then
+runs the launcher, and through it the provider, inside the harness sandbox. The
+launcher cannot read the task directory there. Instead, it reads the facts the
+moderator wrote for the turn to a file the sandbox can read but not write (named by
+`BBP_LAUNCH_FACTS`), and refuses on the same grounds as when it runs unconfined. The
+MCP configuration it gives the provider names only the relay (`BBP_MCP_RELAY`),
+and its private files live in the sandbox's `TMPDIR`.
+
+- **Author:** the Codex author clones the task repository with `--shared`, so
+  its clone reads the repository's object store and writes its own objects. Grant
+  `read` on the repository's `.git` and nothing writable there. The clone stays
+  private and fully usable (`git add -N`, `git diff`), and the store cannot be
+  altered from inside the sandbox.
+- **Provider access:** grant `read` on each provider's installation and login
+  store, and `write` on whatever state the provider keeps there. Keep `HOME` in
+  `env` if the CLI finds its login through it.
+- **Workspace:** leave `checkout` off, since the launcher makes its own
+  working directory.
+
+`tests/confined_harness.rs` runs the Codex launcher this way with a provider stub
+(acceptance mode `launcher-confined`). The stub cannot read `master` or write the
+object store, and it plans through the relay.
+
 ## Compatibility and tests
 
 The fixed arguments were checked against installed Codex CLI 0.155.1 and Claude

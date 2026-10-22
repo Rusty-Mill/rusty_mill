@@ -12,6 +12,7 @@
 //! helper exits before the program runs: confinement fails closed.
 
 use crate::broker;
+use crate::launchers::Facts;
 use crate::moderator::{task_dir, Config};
 use rusty_bbp::{PrincipalId, Sha256, TurnId};
 use rusty_sandbox::{HelperRequest, Limits, SandboxSpec, Sockets};
@@ -26,7 +27,17 @@ const FILE_BYTES: u64 = 1 << 30;
 const OPEN_FILES: u64 = 4_096;
 /// Per user on Linux, so a brake rather than a quota.
 const PROCESSES: u64 = 4_096;
-const SYSTEM_ROOTS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
+/// The system's programs and libraries, and its entropy source, which git
+/// and TLS clients read when `getrandom` is not what they were built with.
+const SYSTEM_ROOTS: [&str; 7] = [
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/etc",
+    "/dev/urandom",
+];
 
 /// What a launcher's harness may reach beyond its turn workspace.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,13 +73,20 @@ pub(crate) struct Turn {
     repo: Option<Repo>,
     pub pipes: PathBuf,
     pub mcp_config: PathBuf,
+    /// The turn's launch [`Facts`], readable but not writable by the harness.
+    pub facts: PathBuf,
     status: PathBuf,
 }
 
 impl Turn {
     /// Make the workspace and the pipes afresh and write the turn's MCP
-    /// configuration into the workspace.
-    pub fn prepare(cfg: &Config, sandbox: &HarnessSandbox, turn: TurnId) -> Result<Turn, String> {
+    /// configuration and launch `facts` beside the workspace.
+    pub fn prepare(
+        cfg: &Config,
+        sandbox: &HarnessSandbox,
+        turn: TurnId,
+        facts: &Facts,
+    ) -> Result<Turn, String> {
         // The sandbox takes absolute roots only; a relative `--work` is
         // resolved against the moderator's working directory.
         let work = std::path::absolute(&cfg.work)
@@ -79,6 +97,7 @@ impl Turn {
         let workspace = base.join(format!("turn-{}", turn.0));
         let pipes = base.join(format!("turn-{}.mcp", turn.0));
         let scratch = base.join(format!("turn-{}.home", turn.0));
+        let facts_path = base.join(format!("turn-{}.facts.json", turn.0));
         let status =
             task_dir(&cfg.dir, "agents", &cfg.task).join(format!("turn-{}.sandbox", turn.0));
         for dir in [&base, &scratch] {
@@ -103,6 +122,8 @@ impl Turn {
         );
         rusty_atomic_file::write(&mcp_config, text.as_bytes())
             .map_err(|e| format!("{}: {e}", mcp_config.display()))?;
+        rusty_atomic_file::write(&facts_path, facts.to_json()?.as_bytes())
+            .map_err(|e| format!("{}: {e}", facts_path.display()))?;
         if let Some(parent) = status.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -113,6 +134,7 @@ impl Turn {
             repo,
             pipes,
             mcp_config,
+            facts: facts_path,
             status,
         })
     }
@@ -152,6 +174,7 @@ impl Turn {
             .collect();
         read.push(bbp.parent().ok_or("bbp binary has no directory")?.into());
         read.push(replies);
+        read.push(self.facts.clone());
         read.extend(self.repo.as_ref().map(Repo::git_dir));
         read.extend(sandbox.read.iter().map(PathBuf::from));
         let mut write = vec![
