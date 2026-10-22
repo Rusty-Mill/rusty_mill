@@ -8,3 +8,4 @@
 | 2026-10-21 | DECCOLM never resizes; honor mode ?40, default off. Verify against Ghostty first | Matches Alacritty and kitty; resizing is xterm opt-in (#856) | Owner |
 | 2026-10-21 | #850 (tokio-free `l13`) is low priority | The mux does not need `l13` in Phase 1 | Owner |
 | 2026-10-22 | Project and crate prefix: `rusty_mux` | Owner confirmed in the project thread | Owner |
+| 2026-10-22 | Crate names `rusty_mux_*` (core, proto, server, tui, ctl, mcp, transport, auth, status, script) as listed in CAPABILITIES | Owner confirmed in the project chat; each crate is still created only when its phase starts | Owner |

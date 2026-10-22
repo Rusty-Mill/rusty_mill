@@ -2,7 +2,7 @@
 
 The 28 Rex capabilities from the design brief §3, re-baselined against **our** work, not phux's scorecard. Status: `not-started` / `in-progress` / `done` / `blocked`. Phases are from [ROADMAP.md](ROADMAP.md).
 
-Crate names below are **proposed** (`rusty_mux_*` after the brief §8 components). Creating each crate needs owner approval.
+Crate names below follow the brief §8 components with the `rusty_mux_*` prefix, confirmed by the owner 2026-10-22 ([DECISIONS.md](DECISIONS.md)).
 
 ## Engine prerequisites (credited)
 
