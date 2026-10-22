@@ -262,7 +262,7 @@ fn edit(text: &str, lower: &str) -> Option<Reply> {
             .map(|p| (*p, *field))
     })?;
     if field == "due" {
-        if let Some(reply) = list_move(text, lower, prefix) {
+        if let Some(reply) = list_move(text, prefix) {
             return Some(reply);
         }
     }
@@ -297,43 +297,64 @@ fn edit(text: &str, lower: &str) -> Option<Reply> {
 const LIST_HELP: &str =
     "Move which task to which list? Try “move buy milk to list Work” or “move buy milk to the Work list”.";
 
-/// "move X to list Y", "move X to the Y list" or "move X to (the) inbox": a move
-/// between lists, told from a move to a day by its list words (a day never ends
-/// in "list"). With both list forms present, the last one is the cut, so a
-/// title may hold "to list" too.
-fn list_move(text: &str, lower: &str, prefix: &str) -> Option<Reply> {
-    let named = lower
-        .rfind(" to list ")
-        .map(|at| (at, at + " to list ".len(), text.len()));
-    let the_list = lower
-        .ends_with(" list")
-        .then(|| lower.rfind(" to the "))
-        .flatten()
-        .map(|at| (at, at + " to the ".len(), text.len() - " list".len()));
-    let (at, start, end) = match (named, the_list) {
-        (Some(a), Some(b)) => {
-            if a.0 > b.0 {
-                a
-            } else {
-                b
-            }
-        }
-        (Some(cut), None) | (None, Some(cut)) => cut,
-        (None, None) if lower.ends_with(" to list") => return Some(Reply::Text(LIST_HELP.into())),
-        (None, None) => {
-            let inbox = [" to inbox", " to the inbox"]
-                .iter()
-                .find(|w| lower.ends_with(*w))?;
-            let at = lower.len() - inbox.len();
-            return Some(list_call(
-                text.get(prefix.len()..at).map_or("", unquote),
-                "Inbox",
-            ));
-        }
+/// The list a move's destination clause names (after its " to "): "list Y",
+/// "the Y list", or "(the) inbox". `Some("")` for a bare "list", so the person
+/// is asked; `None` when the clause is not a list (a day, say). An unquoted
+/// name holding " to " is not taken: that " to " may be the real cut.
+fn list_name(clause: &str) -> Option<&str> {
+    let lower = clause.to_ascii_lowercase();
+    match lower.as_str() {
+        "inbox" | "the inbox" => return Some("Inbox"),
+        "list" | "the list" => return Some(""),
+        _ => {}
+    }
+    let name = if lower.starts_with("list ") {
+        &clause["list ".len()..]
+    } else if lower.starts_with("the ") && lower.ends_with(" list") {
+        clause.get("the ".len()..clause.len() - " list".len())?
+    } else {
+        return None;
     };
-    let query = text.get(prefix.len()..at).map_or("", unquote);
-    let list = text.get(start..end).map_or("", unquote);
-    Some(list_call(query, list))
+    let name = name.trim();
+    let quoted = [('“', '”'), ('"', '"')]
+        .iter()
+        .any(|(open, close)| name.len() > 1 && name.starts_with(*open) && name.ends_with(*close));
+    if !quoted && name.to_ascii_lowercase().contains(" to ") {
+        return None;
+    }
+    Some(unquote(name))
+}
+
+/// "move X to list Y", "move X to the Y list" or "move X to (the) inbox": a move
+/// between lists. Only the destination clause can name the list: a quoted task
+/// name ends at its closing quote, and an unquoted one at the last " to " whose
+/// rest is a whole list name, so "to list" inside a title is never taken for
+/// it. Anything else is not a list move, and stays a move to a day.
+fn list_move(text: &str, prefix: &str) -> Option<Reply> {
+    let rest = text[prefix.len()..].trim();
+    if let Some((open, close)) = [('“', '”'), ('"', '"')]
+        .into_iter()
+        .find(|(o, _)| rest.starts_with(*o))
+    {
+        let inner = &rest[open.len_utf8()..];
+        let end = inner.find(close)?;
+        let after = inner[end + close.len_utf8()..].trim_start();
+        let clause = after.get(..3).filter(|w| w.eq_ignore_ascii_case("to "))?;
+        let name = list_name(after[clause.len()..].trim())?;
+        return Some(list_call(inner[..end].trim(), name));
+    }
+    if let Some(name) = rest
+        .get(..3)
+        .filter(|w| w.eq_ignore_ascii_case("to "))
+        .and_then(|_| list_name(rest[3..].trim()))
+    {
+        return Some(list_call("", name));
+    }
+    let lower = rest.to_ascii_lowercase();
+    lower.rmatch_indices(" to ").find_map(|(at, _)| {
+        let name = list_name(rest[at + " to ".len()..].trim())?;
+        Some(list_call(unquote(&rest[..at]), name))
+    })
 }
 
 fn list_call(query: &str, list: &str) -> Reply {
@@ -662,6 +683,35 @@ mod tests {
         assert_eq!(
             decide(&input("move buy milk to the inbox")),
             call(UPDATE_TASK, json!({"query": "buy milk", "list": "Inbox"}))
+        );
+        // "to list" inside the task's own title is not a destination.
+        assert_eq!(
+            decide(&input("move \"Add to list groceries\" to friday")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "Add to list groceries", "due": "friday"})
+            )
+        );
+        assert_eq!(
+            decide(&input("move add to list groceries to friday")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "add to list groceries", "due": "friday"})
+            )
+        );
+        assert_eq!(
+            decide(&input("move “Add to list groceries” to list Shopping")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "Add to list groceries", "list": "Shopping"})
+            )
+        );
+        assert_eq!(
+            decide(&input("move add to list groceries to list Shopping")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "add to list groceries", "list": "Shopping"})
+            )
         );
         // Still a day: it does not end in a list.
         assert_eq!(

@@ -171,4 +171,10 @@ describe('update_task', () => {
     expect(await run(c, 'update_task', { query: 'buy', list: 'Work' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
     expect(done).toEqual(['move m w', 'move o inbox'])
   })
+
+  it('reschedules the task whose title holds "to list", and moves nothing between lists', async () => {
+    const { c, done } = context([task('a', 'Add', { startMs: null }), task('g', 'Add to list groceries', { startMs: null })])
+    expect(await run(c, 'update_task', { query: 'Add to list groceries', due: 'friday' })).toEqual({ title: 'Add to list groceries', due: expect.any(String) })
+    expect(done).toEqual([`update g ${JSON.stringify({ dueMs: new Date(2026, 9, 23).getTime(), isAllDay: true })}`])
+  })
 })
