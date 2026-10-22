@@ -124,7 +124,11 @@ fn command(text: &str, lower: &str) -> Option<Reply> {
         let Some(prefix) = verb.prefixes.iter().find(|p| lower.starts_with(*p)) else {
             continue;
         };
-        let rest = text[prefix.len()..].trim().trim_matches(['“', '”', '"']);
+        // Quotes off before the last trim, so `delete " "` asks rather than sends a blank name.
+        let rest = text[prefix.len()..]
+            .trim()
+            .trim_matches(['“', '”', '"'])
+            .trim();
         if rest.is_empty() {
             return Some(Reply::Text(verb.ask.into()));
         }
@@ -421,6 +425,14 @@ mod tests {
         );
         assert_eq!(
             decide(&input("complete ")),
+            Reply::Text("Which task should I complete?".into())
+        );
+        assert_eq!(
+            decide(&input("delete \" \"")),
+            Reply::Text("Which task should I delete?".into())
+        );
+        assert_eq!(
+            decide(&input("complete “  ”")),
             Reply::Text("Which task should I complete?".into())
         );
         assert!(matches!(decide(&input("help")), Reply::Text(t) if t == HELP));

@@ -34,6 +34,10 @@ describe('pickTask', () => {
     expect(pickTask(tasks, 'cow', 'task')).toEqual({ task: tasks[1] })
   })
 
+  it('names no task for an empty or blank query', () => {
+    for (const q of ['', '   ']) expect(pickTask(tasks, q, 'task')).toEqual({ error: 'Say which task.' })
+  })
+
   it('names the candidates rather than guess, and says when nothing matches', () => {
     expect(pickTask(tasks.slice(0, 2), 'milk', 'task')).toEqual({ matches: ['Buy milk', 'Milk the cow'] })
     expect(pickTask(tasks, 'bread', 'open task')).toEqual({ error: 'No open task matches “bread”.' })
@@ -72,5 +76,12 @@ describe('taskTools', () => {
     expect(await run(c, 'delete_task', { query: 'old idea' })).toEqual({ error: 'No task matches “old idea”.' })
     expect(await run(c, 'delete_task', { query: 'call mum' })).toEqual({ title: 'Call mum' })
     expect(done).toEqual(['toggle late', 'reopen closed', 'trash today'])
+  })
+  it('changes nothing for an empty, blank or missing query, even with one task to pick', async () => {
+    const { c, done } = context([task('only', 'Only task'), task('shut', 'Shut task', { status: 'done' })])
+    for (const name of ['complete_task', 'reopen_task', 'delete_task']) {
+      for (const args of [{ query: '' }, { query: '  ' }, {}] as Record<string, string>[]) expect(await run(c, name, args)).toEqual({ error: 'Say which task.' })
+    }
+    expect(done).toEqual([])
   })
 })

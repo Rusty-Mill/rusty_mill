@@ -34,9 +34,13 @@ export const line = (t: Task): string => (t.dueMs === null ? t.title : `${t.titl
 
 export type Pick = { task: Task } | { matches: string[] } | { error: string }
 
-/** The one task among `tasks` that `query` names: its exact title, else the only title containing it. */
+/**
+ * The one task among `tasks` that `query` names: its exact title, else the
+ * only title containing it. A blank query names none (every title contains it).
+ */
 export function pickTask(tasks: readonly Task[], query: string, what: string): Pick {
   const q = norm(query)
+  if (q === '') return { error: 'Say which task.' }
   const exact = tasks.filter((t) => norm(t.title) === q)
   const found = exact.length > 0 ? exact : tasks.filter((t) => norm(t.title).includes(q))
   if (found.length === 1) return { task: found[0]! }
