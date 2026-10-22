@@ -1,0 +1,43 @@
+name: review-router
+on:
+  pull_request: {types: [opened, synchronize, ready_for_review]}
+permissions: {contents: read, pull-requests: write}
+
+jobs:
+  who:
+    runs-on: ubuntu-latest
+    outputs: {author: "${{ steps.a.outputs.author }}"}
+    steps:
+      - id: a
+        env: {REF: "${{ github.head_ref }}"}
+        run: |
+          case "$REF" in claude/*) a=claude;; codex/*) a=codex;; *) a=human;; esac
+          echo "author=$a" >> "$GITHUB_OUTPUT"
+
+  claude-review:
+    needs: who
+    if: needs.who.outputs.author != 'claude'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: "Review this PR: correctness, tests, style. Comment findings only."
+
+  codex-review:
+    needs: who
+    if: needs.who.outputs.author != 'codex'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: openai/codex-action@v1
+        id: codex
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: "Review the diff against origin/${{ github.base_ref }}. Findings only."
+      - env:
+          GH_TOKEN: ${{ secrets.CODEX_BOT_PAT }}
+          OUT: ${{ steps.codex.outputs.final-message }}
+        run: gh pr review ${{ github.event.pull_request.number }} --comment --body "$OUT"
