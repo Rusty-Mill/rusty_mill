@@ -11,3 +11,4 @@
 | R7 | libghostty fork / Zig build | Only matters if a second engine is ever wanted | Not in the runtime path (DECISIONS) | accepted |
 | R8 | Rex memory claims (≈400 KB vs ≈5 MB) unverified | Wrong scale targets | Spike 5 with our own numbers | open |
 | R9 | `rusty_term` performance: 1.6x to 4.5x slower than libghostty-vt at 10k lines (`RUSTY-TERM-PERF-BACKLOG.md` §2.1) | Server CPU under floods | Phase 0 ring buffer with numeric floors | open |
+| R10 | No Windows peer identity. `rusty_tokio`'s `peer_cred` is gated to Linux and macOS, and its docs state no verified Windows mechanism exists (`crates/libs/async/rusty_tokio/src/io/unix.rs:815-819`) | A Windows server cannot tell which local user connected | Gate: no authenticated Windows use until a verified peer-identity mechanism exists (feasibility spike before Phase 3/4) | open |
