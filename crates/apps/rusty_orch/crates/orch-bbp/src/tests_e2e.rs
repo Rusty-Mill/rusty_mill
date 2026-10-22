@@ -772,8 +772,10 @@ RPC
         .arg("--json")
         .output()
         .unwrap();
+    // A fast writer can reach the plan gate before `run` returns, which then
+    // reports the task blocked on that question (exit 3) instead of running.
     assert!(
-        out.status.success(),
+        matches!(out.status.code(), Some(0 | 3)),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
