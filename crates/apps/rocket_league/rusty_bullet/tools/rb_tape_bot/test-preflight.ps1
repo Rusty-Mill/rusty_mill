@@ -22,6 +22,7 @@ function New-Layout([string]$name) {
 function Invoke-Preflight($l, [switch]$Check, [int]$CmakeExit = 0, [switch]$GameRunning, [switch]$CloseGame, [switch]$GameStaysUp) {
     $global:cmakeCalls = [Collections.Generic.List[string]]::new()
     $global:cmakeExit = $CmakeExit
+    $global:configureArgs = @()
     $global:gameRunning = [bool]$GameRunning
     $global:gameStaysUp = [bool]$GameStaysUp
     $global:stopCalls = 0
@@ -30,11 +31,12 @@ function Invoke-Preflight($l, [switch]$Check, [int]$CmakeExit = 0, [switch]$Game
     if ($Check) { $args2.Check = $true }
     if ($CloseGame) { $args2.CloseGame = $true; $args2.CloseTimeoutSec = 1 }
     try { & $preflight @args2 6>$null } catch { $failure = $_ }
-    [pscustomobject]@{ Failure = $failure; Calls = ($global:cmakeCalls -join ','); Stops = $global:stopCalls }
+    [pscustomobject]@{ Failure = $failure; Calls = ($global:cmakeCalls -join ','); Stops = $global:stopCalls; Configure = $global:configureArgs }
 }
 
 function cmake {
     $global:cmakeCalls.Add($(if ($args -contains '--build') { 'build' } else { 'configure' }))
+    if ($args -notcontains '--build') { $global:configureArgs = @($args) }
     $global:LASTEXITCODE = $global:cmakeExit
     if ($global:cmakeExit -eq 0 -and $args -contains '--build') {
         $out = Join-Path (Get-Location) 'build\Release'
@@ -60,6 +62,14 @@ try {
     $stamp = Get-Content (Join-Path $l.Plugins 'rusty_bullet_capture.stamp.json') -Raw | ConvertFrom-Json
     Assert ($stamp.bakkesmod_version -eq '229') 'stamp lost the BakkesMod version'
     Write-Host 'PASS fresh'
+
+    # The SDK that is fingerprinted is the SDK CMake links: the selected -BakkesModDir, not the
+    # %APPDATA% default in CMakeLists.txt. This layout is off the default and its path has spaces.
+    $expectedSdk = (Join-Path $l.Bm 'bakkesmodsdk') -replace '\\', '/'
+    Assert ($expectedSdk -match ' ') 'test layout should have spaces in the SDK path'
+    Assert ($expectedSdk -ne ((Join-Path $env:APPDATA 'bakkesmod\bakkesmod\bakkesmodsdk') -replace '\\', '/')) 'test layout should not be the APPDATA default'
+    Assert (@($r.Configure) -ccontains "-DBAKKESMOD_SDK_PATH=$expectedSdk") "configure did not pass the selected SDK: $($r.Configure -join ' | ')"
+    Write-Host 'PASS sdk-path-passed'
 
     # same inputs again -> nothing to do
     $r = Invoke-Preflight $l

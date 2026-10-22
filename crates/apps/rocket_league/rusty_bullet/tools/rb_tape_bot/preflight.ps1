@@ -129,7 +129,7 @@ function Close-GameIfRunning([bool]$allowClose, [int]$timeoutSec) {
     }
 }
 
-function Install-Plugin([string]$srcDir, [string]$pluginsDir, $current, $stamp, [bool]$closeGame, [int]$closeTimeoutSec) {
+function Install-Plugin([string]$srcDir, [string]$sdkDir, [string]$pluginsDir, $current, $stamp, [bool]$closeGame, [int]$closeTimeoutSec) {
     # Refuse before building when the game cannot be closed, but only stop it once the build has
     # succeeded: the build does not need the game closed, so a failed build must not end a session.
     if (-not $closeGame -and (Get-Process -Name "RocketLeague" -ErrorAction SilentlyContinue)) {
@@ -139,7 +139,9 @@ function Install-Plugin([string]$srcDir, [string]$pluginsDir, $current, $stamp, 
     if (Test-Path -LiteralPath $build) { Remove-Item -LiteralPath $build -Recurse -Force }
     Push-Location $srcDir
     try {
-        cmake -B build
+        # The SDK that was fingerprinted must be the SDK that is linked: CMakeLists.txt otherwise
+        # falls back to %APPDATA%, which differs from -BakkesModDir on a non-default install.
+        cmake -B build "-DBAKKESMOD_SDK_PATH=$sdkDir"
         if ($LASTEXITCODE -ne 0) { throw "cmake configure failed (exit $LASTEXITCODE)" }
         cmake --build build --config Release
         if ($LASTEXITCODE -ne 0) { throw "cmake build failed (exit $LASTEXITCODE)" }
@@ -186,5 +188,7 @@ if ($reasons.Count -eq 0) {
 foreach ($r in $reasons) { Write-Host "preflight: $r" }
 if ($Check) { throw "preflight: $PluginName is stale ($($reasons -join '; ')); run preflight.ps1 without -Check to rebuild" }
 
-Install-Plugin $PluginSource $pluginsDir $current $stamp ([bool]$CloseGame) $CloseTimeoutSec
+# Absolute, with forward slashes: CMakeLists.txt appends "/include" and "/lib/pluginsdk.lib" to it.
+$sdkDir = (Resolve-Path -LiteralPath (Join-Path $BakkesModDir "bakkesmodsdk")).Path -replace "\\", "/"
+Install-Plugin $PluginSource $sdkDir $pluginsDir $current $stamp ([bool]$CloseGame) $CloseTimeoutSec
 Write-Host "preflight: rebuilt and installed $PluginName for BakkesMod $($current.bakkesmod_version)"
