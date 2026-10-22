@@ -28,6 +28,8 @@ fn repo(tag: &str) -> (PathBuf, Repo) {
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.name", "t"]);
     git(&repo, &["config", "user.email", "t@example.invalid"]);
+    // Checkouts write what was committed, whatever the platform's default.
+    git(&repo, &["config", "core.autocrlf", "false"]);
     std::fs::write(repo.join("flag.txt"), "no\n").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-qm", "base"]);
