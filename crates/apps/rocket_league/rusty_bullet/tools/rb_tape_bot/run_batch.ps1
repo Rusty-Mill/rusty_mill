@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Run from the repository root:
-      powershell -File tools\rb_tape_bot\run_batch.ps1 [-Repeat 2] [-Scenarios a,b]
+      pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1 [-Repeat 2] [-Scenarios a,b]
   Needs BakkesMod with the capture plugin (1.4+) set to load at game start;
   BakkesMod.exe is started if it is not already running (-BakkesMod gives its
   path, -NoBakkesMod skips that). Writes replays\batch_<timestamp>\ with the
@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-# `powershell -File ... -Scenarios a,b` delivers "a,b" as one string.
+# `pwsh -File ... -Scenarios a,b` delivers "a,b" as one string.
 $Scenarios = @($Scenarios | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $bot = Join-Path $root "tools\rb_tape_bot"

@@ -196,7 +196,7 @@ gives the game's rule: a press at most 6 ticks after the first is ignored
 ## Session 2, stage 2 (2026-10-06): unattended batch of all eleven scenarios
 
 One command from the repository root, nobody touching the machine:
-`powershell -File tools\rb_tape_bot\run_batch.ps1` (ADR-0064). Plugin 1.4
+`pwsh -NoProfile -File tools\rb_tape_bot\run_batch.ps1` (ADR-0064). Plugin 1.4
 (job-file trigger) installed with the 1.3 DLL kept as `.1.3.dll.bak`, and
 `plugin load rusty_bullet_capture` added to BakkesMod's `plugins.cfg`
 (backup `plugins.cfg.bak`). Final batch `replays/batch_20261006-195814/`
