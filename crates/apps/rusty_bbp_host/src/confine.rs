@@ -215,6 +215,9 @@ impl Turn {
             .stderr(log);
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, group as i32);
+        // Without process groups the moderator stops the broker by its handle.
+        #[cfg(not(unix))]
+        let _ = group;
         command
             .spawn()
             .map_err(|e| format!("starting the MCP broker: {e}"))

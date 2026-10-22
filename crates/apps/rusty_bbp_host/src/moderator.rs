@@ -481,6 +481,9 @@ fn kill_tree(child: &mut Child, group: u32) -> Result<(), String> {
             Err(e) => return Err(format!("killpg({group}): {e:?}")),
         }
     }
+    // Elsewhere only the child itself is killed.
+    #[cfg(not(target_os = "linux"))]
+    let _ = group;
     match child.kill() {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
