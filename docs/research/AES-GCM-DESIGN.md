@@ -87,7 +87,7 @@ separate, separately approved module.
 
 No step touches `rusty_tls`. Throughput below `ring` by 60 to 150x means the engine should order ChaCha20-Poly1305
 before AES-GCM when only the portable path exists. That is a `rusty_tls` policy and a ClientHello fingerprint
-change, so it is for the seam work (gap 4, closed) and is flagged here only so it is not forgotten.
+change, so it is for the seam work (gap 4, reopened for the client role 2026-10-22; decision D4 in `TLS-NATIVE-CRYPTO-SEAM.md`) and is flagged here only so it is not forgotten.
 
 ## 6. Open questions for the owner
 

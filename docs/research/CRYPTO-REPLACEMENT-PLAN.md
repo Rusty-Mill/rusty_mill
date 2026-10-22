@@ -11,7 +11,9 @@ signature verification, X25519 and ChaCha20-Poly1305, and does not cover AES-GCM
 key exchange, signing, or randomness (section 0, "Scope limits"). **Consumer status:** no
 consumer, `rusty_tls` file, gate or default was changed; nothing here is used by anything.
 Work was frozen at stage 4 by owner decision; the freeze has since been reopened for gaps 1 and 2 (done) and,
-on 2026-10-10, for AES-GCM (gap 3) only, the `rusty_tls` seam and signing staying closed (section 0). Everything marked "decision" is the owner's. Section 10 is a
+on 2026-10-10, for AES-GCM (gap 3); on 2026-10-22 the `rusty_tls` seam (gap 4) was reopened for the client role only, by
+the implementer's transcription of the owner's instruction, not yet restated from the owner's GitHub account; signing
+(gap 5) stays closed (section 0). Everything marked "decision" is the owner's. Section 10 is a
 draft ADR and is **not accepted**. Vocabulary used below: "implemented" means code and tests
 exist; it never means reviewed or approved for TLS use.
 
@@ -60,6 +62,14 @@ next steps; the implementer's transcription, **not yet restated from the owner's
   intrinsics until the owner confirms D1.
 - **"Keep ct64"** (the AES-GCM bitsliced layout, `AES-GCM-DESIGN.md` section 8). `ct64` only; the 64-block layout is
   removed. This chose the layout; it did not answer whether about 65 to 80 MB/s bulk is worth finishing, so that stays open.
+
+**Owner decision (2026-10-22): gap 4 reopened, client role only.** Given directly in the implementing session, in answer
+to `TLS-NATIVE-CRYPTO-SEAM.md` decision D1: "reopen gap 4, client role only". This is the implementer's transcription, not yet
+restated from the owner's GitHub account. It reopens the `rusty_tls` backend seam (section 13.1, gap 4) for the **client
+role** as scoped in `TLS-NATIVE-CRYPTO-SEAM.md`. It does **not** reopen signing (gap 5), the server role or client
+certificates, and it changes no default: the engine keeps `ring` unless the new cfg is set. Still open, and each the
+owner's: the ADR that ADR-0002 section 6 requires before the engine's primitives change (seam note D2, the section 10
+draft); signing under the native cfg (D3); the suite order with portable AES (D4); and AES-GCM's review status (D5).
 
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
@@ -743,7 +753,7 @@ Context: stages 0 to 4 are implemented. The owner has verified an independent re
 cover the #540 stage rows, so those keep their "review pending" labels (section 0, "Review status, reconciled", and
 section 11). The stage-4 freeze (section 0) covers *implementation*. It was reopened for gaps 1 and 2 only, on the
 owner's instruction, which the owner confirmed directly (section 0); on 2026-10-10 it was reopened for gap 3
-(AES-GCM) as well (section 0, "Owner decisions (2026-10-10)"); gaps 4 and 5 stay closed until the owner reopens them. Gaps are those in section 2.3. The goal of this plan is a **client-role native
+(AES-GCM) as well (section 0, "Owner decisions (2026-10-10)"); gap 4 was reopened for the client role on 2026-10-22 (section 0); gap 5 stays closed until the owner reopens it. Gaps are those in section 2.3. The goal of this plan is a **client-role native
 engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate decision.
 
 ### 13.1 Gaps, in the order I would close them
@@ -753,7 +763,7 @@ engine off `ring`** (section 7.2: stages 1 to 5 plus 6a); signing is a separate 
 | 1 | **Randomness** | Smallest; every key generation (X25519, ECDHE, nonces, ticket keys) needs it, so it blocks the rest. | Evaluate `rusty_rand` first (section 3): `getrandom(2)` instead of `/dev/urandom` (blocks until the pool is initialised), no global `Mutex<File>`, fork/short-read behaviour, Windows `BCryptGenRandom`. Prefer fixing `rusty_rand` over a new crate. OS entropy only, no home-made DRBG. | Short-read, failure-path and fork tests; the failure must propagate, never return zeros. Not provable by tests: entropy quality (OS's job). | 2 to 4 |
 | 2 | **ECDH P-256 / P-384** (stage 6a) | RFC 8446 requires secp256r1 key exchange; the Montgomery core is reusable. | Secret scalar multiplication with complete formulas, constant-time table selection, on-curve and infinity checks, uncompressed SEC1 points. Today's scalar multiplication in `rusty_pk` is `_vartime` and **must not be reused for secrets**. | Wycheproof ECDH (invalid-curve and twist cases), differential vs `ring`, methods 1 to 4 of section 4.4 clean (valgrind taint, exact disassembly counts, timing with A/A baseline, planted-leak control), review. | 8 to 10 |
 | 3 | **AES-128/256-GCM** (stage 5) | Hardest and slowest; RFC 8446 mandates AES-128-GCM and the engine prefers AES-256-GCM, so most real handshakes need it. Also the ticket cipher. | Decision needed first (13.2 D1): portable fixsliced AES plus table-free GHASH, or AES-NI/PCLMUL in one reviewed `unsafe` module behind a runtime feature check. | Wycheproof GCM + CAVP + differential; no table lookup indexed by a secret (the disassembly script cannot show this; choose a check, e.g. valgrind taint plus review); methods 1 to 4; review. Portable throughput is 60 to 150x below `ring`; measure before wiring. | 8 to 12 (+5 to 8 with intrinsics) |
-| 4 | **`rusty_tls` backend seam** | Only after 1 to 3 exist; the TLS-engine session owns `rusty_tls`. | Same signatures as the `ring` call sites (section 2.3), selected by an extra cfg beside `rusty_tls_handrolled`; adapters for `Nonce`/`Aad`/`LessSafeKey`/`hmac::Context`; default stays `ring`. Scoped in `TLS-NATIVE-CRYPTO-SEAM.md` (2026-10-21; still closed). | Differential at the seam (same handshakes, both backends), interop with `ring`-backed peers, the whole section 11 table re-checked at the integration commit. | 5 to 8 |
+| 4 | **`rusty_tls` backend seam** | Only after 1 to 3 exist; the TLS-engine session owns `rusty_tls`. | Same signatures as the `ring` call sites (section 2.3), selected by an extra cfg beside `rusty_tls_handrolled`; adapters for `Nonce`/`Aad`/`LessSafeKey`/`hmac::Context`; default stays `ring`. Scoped in `TLS-NATIVE-CRYPTO-SEAM.md`; **reopened 2026-10-22, client role only** (section 0). | Differential at the seam (same handshakes, both backends), interop with `ring`-backed peers, the whole section 11 table re-checked at the integration commit. | 5 to 8 |
 | 5 | **Signing** (stage 6b) | Only if a server role or client certificates must go native. | ECDSA P-256/P-384 (RFC 6979 or hedged nonce), Ed25519 sign, PKCS#8 parse. RSA-PSS signing (stage 7) stays "recommend not doing". | Wycheproof, differential both directions, nonce-bias test, methods 1 to 4, review. | 6 to 8 |
 
 Sum for the client role (1 to 4): about 23 to 34 days plus intrinsics if chosen, before
@@ -769,7 +779,7 @@ re-derived.
   *Open (2026-10-10):* not reconfirmed; AES-GCM starts portable-only and uses no intrinsics until the owner confirms.
   Options, order of work, evidence bar and the open questions are in `AES-GCM-DESIGN.md` (draft, no code).
 - **D2 Reopen the freeze** for gaps 1 to 3 (and which of 4 and 5). *Decided:* gaps 1 and 2 (2026-10-09) and gap 3,
-  AES-GCM (2026-10-10, "Unfreeze"); gaps 4 and 5 stay closed.
+  AES-GCM (2026-10-10, "Unfreeze"); gap 4, client role only (2026-10-22); gap 5 stays closed.
 - **D3 Client-only or also server role** (gap 5).
 - **D4 Review process per stage:** this plan assumes each of gaps 2, 3 and 5 gets the same
   evidence package and an independent review before it is wired; the previous review was by
