@@ -94,7 +94,7 @@ mod tests {
             .header("Authorization", &format!("Bearer {token}"));
         let mut input = RunAgentInput::new("t", "r", vec![Message::user("u", "add Buy milk")]);
         input.tools.push(Tool {
-            name: crate::assistant::CREATE_TASK.into(),
+            name: crate::assistant::ADD_TASK.into(),
             description: "Add a task".into(),
             parameters: json!({"type": "object"}),
         });
@@ -106,7 +106,7 @@ mod tests {
             .collect();
         assert!(events.iter().any(|k| matches!(
             k,
-            EventKind::ToolCallStart { tool_call_name, .. } if tool_call_name == "create_task"
+            EventKind::ToolCallStart { tool_call_name, .. } if tool_call_name == "add_task"
         )));
         assert!(matches!(events.last(), Some(EventKind::RunFinished { .. })));
         stop.shutdown();

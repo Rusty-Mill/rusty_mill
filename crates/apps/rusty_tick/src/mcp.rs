@@ -6,9 +6,13 @@
 //! Each tool is a call to an existing route, made in-process through
 //! [`Backend::handle`] with the caller's own `Authorization` header. The
 //! routes' validation, per-user stores and error bodies are reused as they
-//! are; a tool only names the route and passes its arguments through.
+//! are; a tool only names the route and passes its arguments through. Tool
+//! names are shared with the web assistant's tools (`crate::assistant`).
 
 use crate::api;
+use crate::assistant::{
+    ADD_TASK, COMPLETE_TASK, DELETE_TASK, DUE_TASKS, LIST_LISTS, REOPEN_TASK, SEARCH_TASKS,
+};
 use crate::backend::Backend;
 use crate::lists::INBOX_ID;
 use rusty_http::Method;
@@ -205,7 +209,7 @@ fn specs() -> Vec<Spec> {
     update_fields.insert("id", json!({"type": "string", "description": "Task id"}));
     vec![
         Spec {
-            name: "list_lists",
+            name: LIST_LISTS,
             description: "All lists, with their ids.",
             schema: json!({"type": "object"}),
             route: |_| Ok((Method::Get, "/api/v1/lists".into(), None)),
@@ -230,7 +234,7 @@ fn specs() -> Vec<Spec> {
             },
         },
         Spec {
-            name: "due_tasks",
+            name: DUE_TASKS,
             description: "Open tasks due today, in the next 7 days, or overdue.",
             schema: json!({"type": "object", "properties": {
                 "view": {"type": "string", "enum": ["today", "next7", "overdue"]},
@@ -252,7 +256,7 @@ fn specs() -> Vec<Spec> {
             },
         },
         Spec {
-            name: "search_tasks",
+            name: SEARCH_TASKS,
             description: "Tasks whose title or notes contain a word starting with the query.",
             schema: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
             route: |args| {
@@ -267,7 +271,7 @@ fn specs() -> Vec<Spec> {
             route: |args| on_task(args, Method::Get, ""),
         },
         Spec {
-            name: "add_task",
+            name: ADD_TASK,
             description: "Add a task.",
             schema: json!({"type": "object", "properties": task_fields, "required": ["title"]}),
             route: |args| {
@@ -291,19 +295,19 @@ fn specs() -> Vec<Spec> {
             },
         },
         Spec {
-            name: "complete_task",
+            name: COMPLETE_TASK,
             description: "Mark a task done (a repeating one moves to its next date).",
             schema: by_id.clone(),
             route: |args| on_task(args, Method::Post, "/complete"),
         },
         Spec {
-            name: "reopen_task",
+            name: REOPEN_TASK,
             description: "Mark a done task open again.",
             schema: by_id.clone(),
             route: |args| on_task(args, Method::Post, "/reopen"),
         },
         Spec {
-            name: "delete_task",
+            name: DELETE_TASK,
             description: "Move a task to the Trash (it can be restored in the app).",
             schema: by_id,
             route: |args| on_task(args, Method::Delete, ""),
