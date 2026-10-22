@@ -64,7 +64,9 @@ Recommendation: stay on A until a crate other than MCP is being de-axumed for
 its own reasons; if one is, build B first and move the smallest consumer
 (`rk-app`) to see what is missing, before committing to C.
 
-## 5. Questions for the owner (not decided here)
+## 5. Questions for the owner
+
+**Decided 2026-10-22 (owner):** roll our own `rusty_axum`, so question 1 is answered: dropping `axum` repo-wide is a goal. Questions 2 to 4 (blocking or async, `rusty_tokio`, first consumer) are still open.
 
 1. Is dropping `axum` repo-wide a goal, or only from the MCP crates?
 2. If repo-wide, is B (blocking) acceptable for any crate, or must it be async?

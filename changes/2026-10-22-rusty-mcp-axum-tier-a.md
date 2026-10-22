@@ -1,8 +1,8 @@
 ---
 category: Changed
-changelog: "ADR-0002 now records `rusty_mcp_axum` as an adapter that stays (Tier A) until the repo-wide axum decision, instead of a crate on its way out."
+changelog: "ADR-0002 now records the decision to build `rusty_axum` and classifies `rusty_mcp_axum` as a transitional crate to delete once its consumers move onto it."
 ---
-## 2026-10-22 - `rusty_mcp_axum` is Tier A until axum is decided (issue #875)
+## 2026-10-22 - `rusty_axum` decided; `rusty_mcp_axum` is Tier T (issue #875)
 
-- **Changed:** ADR-0002 Amendment 1 gains a status line classifying `rusty_mcp_axum` as Tier A. Retiring it needs `rp-server`, `remind_me_remote`, `adk-mcp` and `agentgateway` off axum, and `rusty_serve` has no router, nesting or middleware to move them onto. No in-house replacement exists; options B and C in `RUSTY-AXUM-SCOPE.md` stay undecided.
+- **Changed:** ADR-0002 Amendment 1 gains a status line: the workspace builds its own `rusty_axum`, and `rusty_mcp_axum` is Tier T (owner, seam, milestone stated) until `rp-server`, `remind_me_remote`, `adk-mcp` and `agentgateway` move onto it. `RUSTY-AXUM-SCOPE.md` records that question 1 is answered; blocking versus async is still open.
 - **No code change.**
