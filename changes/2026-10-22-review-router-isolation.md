@@ -1,0 +1,9 @@
+---
+category: Security
+changelog: Hold review-router activation and isolate read-only generation from exact-head review publication.
+---
+## 2026-10-22 - Isolate review generation and publication
+
+- **Fixed:** reject fork/draft PRs; use explicit read-only Claude GitHub authentication and constrained review tools; run Codex with read-only permissions and dropped privileges.
+- **Security:** publish bounded untrusted text from a fresh runner using an ephemeral narrow token and exact PR/base head checks; disable every job with a literal gate and pin actions.
+- **Known limitations:** provider, identity-routing, runtime-version and spending decisions remain deferred; no provider runtime was invoked.
