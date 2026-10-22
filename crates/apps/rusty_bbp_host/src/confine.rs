@@ -69,8 +69,11 @@ impl Turn {
     /// Make the workspace and the pipes afresh and write the turn's MCP
     /// configuration into the workspace.
     pub fn prepare(cfg: &Config, sandbox: &HarnessSandbox, turn: TurnId) -> Result<Turn, String> {
-        let base = cfg
-            .work
+        // The sandbox takes absolute roots only; a relative `--work` is
+        // resolved against the moderator's working directory.
+        let work = std::path::absolute(&cfg.work)
+            .map_err(|e| format!("work {}: {e}", cfg.work.display()))?;
+        let base = work
             .join("turns")
             .join(Sha256::of(cfg.task.0.as_bytes()).hex());
         let workspace = base.join(format!("turn-{}", turn.0));
