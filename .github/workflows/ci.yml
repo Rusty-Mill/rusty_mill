@@ -285,6 +285,7 @@ jobs:
       ci_only: ${{ steps.plan.outputs.ci_only }}
       dashboard: ${{ steps.plan.outputs.dashboard }}
       term_web: ${{ steps.plan.outputs.term_web }}
+      term_bench: ${{ steps.plan.outputs.term_bench }}
       key_desktop: ${{ steps.plan.outputs.key_desktop }}
       tick: ${{ steps.plan.outputs.tick }}
       fair_play: ${{ steps.plan.outputs.fair_play }}
@@ -784,6 +785,41 @@ jobs:
           cache-dependency-path: crates/libs/ui/rusty_term/web/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm run build
+
+  # rusty_term parser+grid throughput floor. The engine rewrites in
+  # docs/research/RUSTY-TERM-PERF-BACKLOG.md are performance work; without
+  # this job a regression would only show when someone re-ran the bench by
+  # hand. Floors in bench/floors.txt sit at about half the measured MB/s, so
+  # runner noise passes and a real slowdown fails; a PR that speeds a
+  # workload up raises its floor (ratchet). The table goes to the job summary.
+  rusty-term-bench:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-term-bench
+      queue: max
+      cancel-in-progress: false
+    name: rusty_term throughput floor (bench_vt_throughput)
+    needs: plan
+    if: needs.plan.outputs.term_bench == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+          shared-key: rusty-term-bench
+      - name: Build bench_vt_throughput (release)
+        run: cargo build --release --locked -p rusty_term --bin bench_vt_throughput
+      - name: Generate quick workloads
+        working-directory: crates/libs/ui/rusty_term
+        run: python3 bench/gen_workloads.py --size quick
+      - name: Throughput vs floors
+        working-directory: crates/libs/ui/rusty_term
+        run: |
+          set -o pipefail
+          ../../../../target/release/bench_vt_throughput 20 --floors bench/floors.txt | tee -a "$GITHUB_STEP_SUMMARY"
 
   # rusty_tick's web UI (Vite/React). Typecheck, unit tests (jsdom over the
   # in-memory adapter) and the production build; the Playwright run against
@@ -1936,6 +1972,7 @@ jobs:
       - test
       - data-mesh-monitor
       - rusty-term-web
+      - rusty-term-bench
       - rusty-tick-web
       - rusty-tick-e2e
       - rusty-agui-conformance

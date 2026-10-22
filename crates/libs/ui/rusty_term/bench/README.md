@@ -48,9 +48,9 @@ use real disk.
 Feeds each `bench/workloads/*.vt` file through `AnsiParser::advance` +
 `Grid` directly, in 4 KB chunks (a realistic PTY `read()` size), with one
 untimed warmup pass per file. No process spawn, no PTY, no display — just
-the parser and grid doing their job. This is the piece that's actually safe
-to run in CI as a regression smoke test (see the `bench-smoke` CI job),
-since it has no external dependencies and nothing to skip.
+the parser and grid doing their job. It has no external dependencies and
+nothing to skip, so it is the piece CI runs: the `rusty-term-bench` job (see
+below) gates every PR that affects `rusty_term_core` or `rusty_term`.
 
 ```sh
 cargo run --release --bin bench_vt_throughput                 # all workloads, 20 iterations each
@@ -66,6 +66,26 @@ so a large throughput run doesn't also blow up the latency pass — so
 "how long one PTY-read-sized chunk takes to parse", not end-to-end
 keystroke-to-pixel input latency; there's no render in this binary to
 measure that against.
+
+### Throughput floors (CI)
+
+`--floors FILE` turns a run into a regression gate. Each line of
+[`floors.txt`](floors.txt) is `<workload> <minimum MB/s>`. The run prints a
+markdown table of measured vs. floor and exits 1 if a workload is below its
+floor or did not run. CI runs exactly this:
+
+```sh
+python3 bench/gen_workloads.py --size quick
+cargo build --release -p rusty_term --bin bench_vt_throughput
+../../../../target/release/bench_vt_throughput 20 --floors bench/floors.txt
+```
+
+The floors sit at about half the slowest measured run, because runner noise
+is around ±20%, so only a real regression fails. The table lands in the job
+summary, so each run records its numbers. **Ratchet:** a PR that speeds a
+workload up raises that workload's floor to about half the new number in the
+same PR. The baseline and the libghostty-vt reference numbers are in
+`docs/research/RUSTY-TERM-PERF-BACKLOG.md` §2.1.
 
 ## `run_bench.py` (cross-terminal)
 

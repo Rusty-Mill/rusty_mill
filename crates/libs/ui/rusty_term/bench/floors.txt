@@ -1,0 +1,18 @@
+# Minimum parser+grid throughput (MB/s) per workload, enforced in CI by the
+# rusty-term-bench job: `bench_vt_throughput 20 --floors bench/floors.txt`
+# on `gen_workloads.py --size quick`.
+#
+# Floors sit at about half the slowest measured run, so runner noise (±20%
+# observed) never trips them and only a real regression does. Ratchet: a PR
+# that speeds a workload up raises its floor to about half the new number.
+#
+# Baseline 2026-10-22, before the ring-buffer scroll work: local 4 vCPU Xeon
+# 2.1 GHz, quick workloads x20, slowest of 3 runs. libghostty-vt reference
+# (default-size workloads, 10k lines kept): see
+# docs/research/RUSTY-TERM-PERF-BACKLOG.md §2.1.
+alt_screen_flicker  3.5
+ascii_throughput    6.0
+cursor_thrash      55.0
+scroll_heavy        1.9
+sgr_churn           5.5
+unicode_heavy       7.0
