@@ -13,6 +13,8 @@ Engine tuning stops here. Backlog #3 (GUI frame path) and #4 (printable fast pat
 
 ## Phase 1: vertical slice (Linux; Windows once spike 1 answers)
 
+Runtime: `rusty_tokio` (DECISIONS), extended where needed; no tokio in any mux binary.
+
 Scope: `core` (< 3k LOC, zero I/O, IDs via `rusty_uuid`), `proto` (`rusty_wire` + LEB128 varint; u32 BE length + u8 type + tagged fields; skip unknown ids; feature bits; < 4k LOC), `server` (PTYs via `platform::pty`, one `rusty_term_core` per PTY, snapshot then ready then raw byte tee, single-writer input, per-client viewport), and a throwaway TUI client over a Unix socket. No auth, TLS, roaming, parking, MCP or scripting.
 
 Exit criteria:
