@@ -64,7 +64,7 @@ describe('the assistant panel', () => {
     // The first run offered the tools, named as the MCP server's; the second carried the tool's answer.
     expect(agent.inputs).toHaveLength(2)
     expect(agent.inputs[0]?.tools?.map((t) => t.name).sort()).toEqual(
-      ['add_task', 'complete_task', 'delete_task', 'due_tasks', 'list_lists', 'reopen_task', 'search_tasks'],
+      ['add_task', 'complete_task', 'delete_task', 'due_tasks', 'list_lists', 'reopen_task', 'search_tasks', 'update_task'],
     )
     expect(agent.inputs[1]?.messages?.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'c1' })
     expect(JSON.parse(String(agent.inputs[1]?.messages?.at(-1)?.content))).toMatchObject({ title: 'Buy milk' })

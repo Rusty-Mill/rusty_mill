@@ -26,6 +26,9 @@ pub const REOPEN_TASK: &str = "reopen_task";
 pub const DELETE_TASK: &str = "delete_task";
 /// The lists, by name: `{}`.
 pub const LIST_LISTS: &str = "list_lists";
+/// The one task a title names, renamed (`{query, title}`) or given a new due
+/// day (`{query, due}`: the day as said, read by the browser in its own zone).
+pub const UPDATE_TASK: &str = "update_task";
 
 /// What the assistant decided to do with a run.
 #[derive(Debug, PartialEq)]
@@ -41,7 +44,8 @@ pub enum Reply {
 }
 
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
-“due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk” or “lists”.";
+“due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
+“rename buy milk to buy oat milk”, “move buy milk to friday” or “lists”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -85,6 +89,12 @@ const VERBS: [Verb; 5] = [
     },
 ];
 
+/// Commands that change one task: their words and the field the part after " to " sets.
+const EDITS: [(&[&str], &str); 2] = [
+    (&["rename "], "title"),
+    (&["move ", "reschedule ", "postpone "], "due"),
+];
+
 const LISTS: [&str; 5] = [
     "lists",
     "my lists",
@@ -104,7 +114,8 @@ pub fn decide(input: &RunAgentInput) -> Reply {
         return Reply::Text(report(called(input, tool_call_id), &content.text()));
     }
     let text = last_user_text(input).trim().to_string();
-    let lower = text.to_lowercase();
+    // ASCII only, so a byte offset in `lower` is one in `text` (the words matched are ASCII).
+    let lower = text.to_ascii_lowercase();
     if text.is_empty() || lower == "help" || lower.contains("what can you do") {
         return Reply::Text(HELP.into());
     }
@@ -120,15 +131,14 @@ pub fn decide(input: &RunAgentInput) -> Reply {
 
 /// The command `text` (lower-cased as `lower`) asks for, if any.
 fn command(text: &str, lower: &str) -> Option<Reply> {
+    if let Some(reply) = edit(text, lower) {
+        return Some(reply);
+    }
     for verb in &VERBS {
         let Some(prefix) = verb.prefixes.iter().find(|p| lower.starts_with(*p)) else {
             continue;
         };
-        // Quotes off before the last trim, so `delete " "` asks rather than sends a blank name.
-        let rest = text[prefix.len()..]
-            .trim()
-            .trim_matches(['“', '”', '"'])
-            .trim();
+        let rest = unquote(&text[prefix.len()..]);
         if rest.is_empty() {
             return Some(Reply::Text(verb.ask.into()));
         }
@@ -166,6 +176,40 @@ fn command(text: &str, lower: &str) -> Option<Reply> {
         tool: DUE_TASKS,
         args: json!({ "view": view }),
         say: "Checking…".into(),
+    })
+}
+
+/// `text` without its surrounding space and quotes. Quotes come off before the
+/// last trim, so `delete " "` asks rather than sends a blank name.
+fn unquote(text: &str) -> &str {
+    text.trim().trim_matches(['“', '”', '"']).trim()
+}
+
+/// "rename X to Y" or "move X to WHEN": an `update_task` call, or what to ask
+/// when a part is missing. The split is at the last " to ", so a title may hold one.
+fn edit(text: &str, lower: &str) -> Option<Reply> {
+    let (prefix, field) = EDITS.iter().find_map(|(prefixes, field)| {
+        prefixes
+            .iter()
+            .find(|p| lower.starts_with(*p))
+            .map(|p| (*p, *field))
+    })?;
+    let parts = lower[prefix.len()..].rfind(" to ").map(|at| {
+        let at = prefix.len() + at;
+        (unquote(&text[prefix.len()..at]), unquote(&text[at + 4..]))
+    });
+    let Some((query, value)) = parts.filter(|(q, v)| !q.is_empty() && !v.is_empty()) else {
+        return Some(Reply::Text(match field {
+            "title" => "Rename which task to what? Try “rename buy milk to buy oat milk”.".into(),
+            _ => "Move which task to when? Try “move buy milk to friday”.".into(),
+        }));
+    };
+    let mut args = json!({ "query": query });
+    args.insert(field, value);
+    Some(Reply::Call {
+        tool: UPDATE_TASK,
+        args,
+        say: format!("Looking up “{query}”…"),
     })
 }
 
@@ -209,6 +253,10 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
         COMPLETE_TASK => format!("Completed “{title}”."),
         REOPEN_TASK => format!("Reopened “{title}”."),
         DELETE_TASK => format!("Moved “{title}” to the Trash."),
+        UPDATE_TASK => match parsed.get("due").and_then(Value::as_str) {
+            Some(due) => format!("Moved “{title}” to {due}."),
+            None => format!("Renamed it “{title}”."),
+        },
         LIST_LISTS => bullets(
             "Your lists:",
             "You have no lists.",
@@ -305,8 +353,9 @@ mod tests {
     use super::*;
     use rusty_agui::{Content, Tool, ToolCall};
 
-    const ALL: [&str; 7] = [
+    const ALL: [&str; 8] = [
         ADD_TASK,
+        UPDATE_TASK,
         SEARCH_TASKS,
         DUE_TASKS,
         COMPLETE_TASK,
@@ -339,7 +388,9 @@ mod tests {
             .get("title")
             .or_else(|| args.get("query"))
             .and_then(Value::as_str);
+        let query = args.get("query").and_then(Value::as_str);
         Some(match (tool, rest) {
+            (UPDATE_TASK, _) => format!("Looking up “{}”…", query?),
             (ADD_TASK, Some(r)) => format!("Adding “{r}”…"),
             (SEARCH_TASKS, Some(r)) => format!("Looking for “{r}”…"),
             (LIST_LISTS, _) => "Reading your lists…".into(),
@@ -374,6 +425,48 @@ mod tests {
             error: None,
         });
         decide(&thread)
+    }
+
+    #[test]
+    fn turns_rename_and_move_into_update_task() {
+        assert_eq!(
+            decide(&input("rename buy milk to Buy oat milk")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "buy milk", "title": "Buy oat milk"})
+            )
+        );
+        assert_eq!(
+            decide(&input("Move “talk to mum” to Friday")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "talk to mum", "due": "Friday"})
+            )
+        );
+        assert_eq!(
+            decide(&input("reschedule pay rent to in 3 days")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "pay rent", "due": "in 3 days"})
+            )
+        );
+        for missing in ["rename buy milk", "rename  to x", "rename x to \" \""] {
+            assert!(
+                matches!(decide(&input(missing)), Reply::Text(t) if t.starts_with("Rename which task")),
+                "{missing}"
+            );
+        }
+        assert!(
+            matches!(decide(&input("move buy milk")), Reply::Text(t) if t.starts_with("Move which task"))
+        );
+        // A character whose lower case is longer must not shift where the name is cut.
+        assert_eq!(
+            decide(&input("rename \u{212A}ettle to Kettle")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "\u{212A}ettle", "title": "Kettle"})
+            )
+        );
     }
 
     #[test]
@@ -453,6 +546,17 @@ mod tests {
         assert_eq!(
             answered("complete milk", r#"{"title":"Buy milk"}"#),
             Reply::Text("Completed “Buy milk”.".into())
+        );
+        assert_eq!(
+            answered("rename milk to Oat milk", r#"{"title":"Oat milk"}"#),
+            Reply::Text("Renamed it “Oat milk”.".into())
+        );
+        assert_eq!(
+            answered(
+                "move milk to friday",
+                r#"{"title":"Buy milk","due":"Fri, 23 Oct"}"#
+            ),
+            Reply::Text("Moved “Buy milk” to Fri, 23 Oct.".into())
         );
         assert_eq!(
             answered("delete milk", r#"{"title":"Buy milk"}"#),

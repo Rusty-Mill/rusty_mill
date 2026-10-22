@@ -12,6 +12,7 @@
 use crate::api;
 use crate::assistant::{
     ADD_TASK, COMPLETE_TASK, DELETE_TASK, DUE_TASKS, LIST_LISTS, REOPEN_TASK, SEARCH_TASKS,
+    UPDATE_TASK,
 };
 use crate::backend::Backend;
 use crate::lists::INBOX_ID;
@@ -283,7 +284,7 @@ fn specs() -> Vec<Spec> {
             },
         },
         Spec {
-            name: "update_task",
+            name: UPDATE_TASK,
             description: "Change a task's fields; those left out are kept.",
             schema: json!({"type": "object", "properties": update_fields, "required": ["id"]}),
             route: |args| {

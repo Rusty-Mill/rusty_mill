@@ -95,11 +95,13 @@ are refused (no `Origin` is accepted). For Claude Code:
 claude mcp add --transport http tick http://127.0.0.1:8787/mcp --header "Authorization: Bearer $RUSTY_TICK_TOKEN"
 ```
 
-The web UI's assistant (`/api/agent`) offers the same tools except
-`update_task`, by the same names, run in the browser. It is rule-based, not a
-model: “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”,
-“due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”,
-“lists”. A task is named by its title; when several match, it asks which.
+The web UI's assistant (`/api/agent`) offers the same tools, by the same
+names, run in the browser. It is rule-based, not a model: “add buy milk”,
+“find milk”, “what's due today?”, “what's overdue?”, “due this week”,
+“complete buy milk”, “reopen buy milk”, “delete buy milk”, “rename buy milk to
+buy oat milk”, “move buy milk to friday” (also tomorrow, in 3 days, next week,
+2026-11-05, none) and “lists”. A task is named by its title; when several
+match, it asks which. An unreadable day changes nothing.
 
 ## Layout
 

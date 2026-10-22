@@ -5,10 +5,10 @@
  * agent turns into a reply; a task named ambiguously is not guessed at.
  */
 import type { ActionDefinition } from '@rusty-mill/agui-core'
-import type { NewTask, Task } from '@/api/types'
+import type { NewTask, Task, TaskPatch } from '@/api/types'
 import { searchTasks } from '@/features/search/search'
 import { tasksForView, type Entities } from '@/features/tasks/organize'
-import { startOfDay } from '@/lib/date'
+import { addDays, startOfDay } from '@/lib/date'
 
 /** Most tasks one answer lists. */
 export const MAX_SHOWN = 20
@@ -25,6 +25,7 @@ export interface ToolContext {
   toggleDone(id: string): Promise<void>
   reopen(id: string): Promise<void>
   trash(id: string): Promise<void>
+  update(id: string, patch: TaskPatch): Promise<void>
 }
 
 const norm = (text: string): string => text.trim().toLowerCase()
@@ -51,6 +52,72 @@ export function pickTask(tasks: readonly Task[], query: string, what: string): P
 /** Open tasks due before today. */
 export const overdue = (tasks: readonly Task[], now: number): Task[] =>
   tasks.filter((t) => t.deletedMs === null && t.status === 'open' && t.dueMs !== null && t.dueMs < startOfDay(now))
+
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+const NO_DATE = ['none', 'no date', 'no due date', 'someday']
+
+/**
+ * The day `text` names, as local midnight: today, tomorrow, next week, in N
+ * days, a weekday (its next one, a week on if it is today), or YYYY-MM-DD.
+ * `null` for no date; `undefined` when unreadable, so nothing is guessed.
+ */
+export function readDay(text: string, now: number): number | null | undefined {
+  const t = norm(text).replace(/^(on|by|the) /, '')
+  const today = startOfDay(now)
+  if (NO_DATE.includes(t)) return null
+  if (t === 'today') return today
+  if (t === 'tomorrow') return addDays(today, 1)
+  if (t === 'next week') return addDays(today, 7)
+  const inDays = /^in (\d{1,3}) days?$/.exec(t)
+  if (inDays) return addDays(today, Number(inDays[1]))
+  const weekday = WEEKDAYS.findIndex((w) => t === w || t === w.slice(0, 3) || t === `next ${w}`)
+  if (weekday >= 0) return addDays(today, (weekday - new Date(today).getDay() + 7) % 7 || 7)
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t)
+  if (!iso) return undefined
+  const [y, m, d] = [Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])]
+  const day = new Date(y, m, d)
+  return day.getFullYear() === y && day.getMonth() === m && day.getDate() === d ? day.getTime() : undefined
+}
+
+/**
+ * The patch that moves `t` to `day` (local midnight), or clears its dates for
+ * `null`. A timed task keeps its time of day; an undated one becomes all-day;
+ * a start that would fall after the new due date is dropped.
+ */
+export function moveTo(t: Task, day: number | null): TaskPatch {
+  if (day === null) return { dueMs: null, startMs: null }
+  const at = new Date(day)
+  if (t.dueMs !== null && !t.isAllDay) {
+    const old = new Date(t.dueMs)
+    at.setHours(old.getHours(), old.getMinutes(), 0, 0)
+  }
+  const dueMs = at.getTime()
+  const patch: TaskPatch = { dueMs, isAllDay: t.dueMs === null || t.isAllDay }
+  if (t.startMs !== null && t.startMs > dueMs) patch.startMs = null
+  return patch
+}
+
+const dayLabel = (ms: number): string => new Date(ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+
+/** Rename the task `query` names, or move it to the day `due` names; validated before anything changes. */
+async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: string]: string }): Promise<Answer> {
+  const { query = '', title, due } = args
+  if (title === undefined && due === undefined) return { error: 'Say what to change: a new title or a day.' }
+  if (title !== undefined && title.trim() === '') return { error: 'Say the new title.' }
+  const day = due === undefined ? undefined : readDay(due, c.now)
+  if (due !== undefined && day === undefined) {
+    return { error: `I can't read “${due.trim()}” as a day; try today, tomorrow, friday, in 3 days, next week, 2026-11-05 or none.` }
+  }
+  const pick = pickTask(tasks, query, 'task')
+  if (!('task' in pick)) return pick
+  if (title !== undefined) {
+    await c.update(pick.task.id, { title: title.trim() })
+    return { title: title.trim() }
+  }
+  const patch = moveTo(pick.task, day ?? null)
+  await c.update(pick.task.id, patch)
+  return { title: pick.task.title, due: patch.dueMs == null ? 'no date' : dayLabel(patch.dueMs) }
+}
 
 const titled = { type: 'object', properties: { query: { type: 'string', description: 'The task’s title, or enough of it' } }, required: ['query'] }
 
@@ -102,6 +169,16 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
       description: 'Open again the one done task this names.',
       parameters: titled,
       handler: ({ query }) => onOne(live.filter((t) => t.status !== 'open'), query ?? '', 'done task', (t) => c.reopen(t.id)),
+    },
+    {
+      name: 'update_task',
+      description: 'Rename the one task this names, or move it to another day (today, tomorrow, friday, in 3 days, next week, 2026-11-05, or none).',
+      parameters: {
+        type: 'object',
+        properties: { query: titled.properties.query, title: { type: 'string', description: 'The new title' }, due: { type: 'string', description: 'The new day, as said' } },
+        required: ['query'],
+      },
+      handler: (args) => updateOne(c, live, args),
     },
     {
       name: 'delete_task',

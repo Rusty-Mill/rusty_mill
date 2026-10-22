@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { List, Task } from '@/api/types'
 import { addDays, startOfDay } from '@/lib/date'
-import { overdue, pickTask, taskTools, type ToolContext } from './tools'
+import { moveTo, overdue, pickTask, readDay, taskTools, type ToolContext } from './tools'
 
 const NOW = new Date(2026, 9, 22, 12).getTime()
 const task = (id: string, title: string, over: Partial<Task> = {}): Task =>
@@ -19,6 +19,7 @@ function context(tasks: Task[]): { c: ToolContext; done: string[] } {
     toggleDone: async (id) => void done.push(`toggle ${id}`),
     reopen: async (id) => void done.push(`reopen ${id}`),
     trash: async (id) => void done.push(`trash ${id}`),
+    update: async (id, patch) => void done.push(`update ${id} ${JSON.stringify(patch)}`),
   }
   return { c, done }
 }
@@ -82,6 +83,65 @@ describe('taskTools', () => {
     for (const name of ['complete_task', 'reopen_task', 'delete_task']) {
       for (const args of [{ query: '' }, { query: '  ' }, {}] as Record<string, string>[]) expect(await run(c, name, args)).toEqual({ error: 'Say which task.' })
     }
+    expect(done).toEqual([])
+  })})
+
+describe('readDay', () => {
+  const day = (y: number, m: number, d: number): number => new Date(y, m - 1, d).getTime()
+
+  it('reads the days people say, relative to now (a Thursday)', () => {
+    expect(readDay('today', NOW)).toBe(day(2026, 10, 22))
+    expect(readDay('Tomorrow', NOW)).toBe(day(2026, 10, 23))
+    expect(readDay('friday', NOW)).toBe(day(2026, 10, 23))
+    expect(readDay('on Mon', NOW)).toBe(day(2026, 10, 26))
+    expect(readDay('thursday', NOW)).toBe(day(2026, 10, 29)) // today’s weekday means next week’s
+    expect(readDay('in 3 days', NOW)).toBe(day(2026, 10, 25))
+    expect(readDay('next week', NOW)).toBe(day(2026, 10, 29))
+    expect(readDay('2026-11-05', NOW)).toBe(day(2026, 11, 5))
+    expect(readDay('no date', NOW)).toBeNull()
+  })
+
+  it('reads nothing it is not sure of', () => {
+    for (const text of ['soonish', '2026-02-30', '5/11', 'in many days', '']) expect(readDay(text, NOW)).toBeUndefined()
+  })
+})
+
+describe('moveTo', () => {
+  const friday = new Date(2026, 9, 23).getTime()
+
+  it("keeps a timed task's time of day, and makes an undated one all-day", () => {
+    const timed = task('t', 'Call', { dueMs: new Date(2026, 9, 20, 9, 30).getTime(), isAllDay: false, startMs: null })
+    expect(moveTo(timed, friday)).toEqual({ dueMs: new Date(2026, 9, 23, 9, 30).getTime(), isAllDay: false })
+    expect(moveTo(task('u', 'Idea', { startMs: null }), friday)).toEqual({ dueMs: friday, isAllDay: true })
+  })
+
+  it('drops a start that would follow the new due date, and clears both for no date', () => {
+    const ranged = task('r', 'Trip', { startMs: new Date(2026, 9, 25).getTime(), dueMs: new Date(2026, 9, 27).getTime(), isAllDay: true })
+    expect(moveTo(ranged, friday)).toEqual({ dueMs: friday, isAllDay: true, startMs: null })
+    expect(moveTo(ranged, null)).toEqual({ dueMs: null, startMs: null })
+  })
+})
+
+describe('update_task', () => {
+  const tasks = [task('m', 'Buy milk', { startMs: null }), task('o', 'Buy oats', { startMs: null })]
+
+  it('renames or moves the one task named', async () => {
+    const { c, done } = context(tasks)
+    expect(await run(c, 'update_task', { query: 'milk', title: ' Buy oat milk ' })).toEqual({ title: 'Buy oat milk' })
+    expect(await run(c, 'update_task', { query: 'oats', due: 'friday' })).toEqual({ title: 'Buy oats', due: expect.any(String) })
+    expect(done).toEqual([
+      'update m {"title":"Buy oat milk"}',
+      `update o ${JSON.stringify({ dueMs: new Date(2026, 9, 23).getTime(), isAllDay: true })}`,
+    ])
+  })
+
+  it('changes nothing for an unreadable day, a blank or missing change, or an unclear task', async () => {
+    const { c, done } = context(tasks)
+    expect(await run(c, 'update_task', { query: 'milk', due: 'soonish' })).toEqual({ error: expect.stringContaining("can't read “soonish”") })
+    expect(await run(c, 'update_task', { query: 'milk', title: '  ' })).toEqual({ error: 'Say the new title.' })
+    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title or a day.' })
+    expect(await run(c, 'update_task', { query: 'buy', due: 'today' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
+    expect(await run(c, 'update_task', { query: ' ', due: 'today' })).toEqual({ error: 'Say which task.' })
     expect(done).toEqual([])
   })
 })

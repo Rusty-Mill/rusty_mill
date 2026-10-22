@@ -110,7 +110,7 @@ function useTaskTools(): void {
   const filters = useFilters((s) => s.items)
   const assigneeItems = useAssignees((s) => s.items)
   const actions = useActions()
-  const [add, search, due, complete, reopen, remove, listLists] = taskTools({
+  const [add, search, due, complete, reopen, update, remove, listLists] = taskTools({
     entities: { tasks: Object.values(tasks), lists: Object.values(lists), tags: Object.values(tags), inboxId, filters, assignees: assigneeMap(assigneeItems) },
     listId: spec?.kind === 'list' ? spec.id : inboxId,
     now: Date.now(),
@@ -118,12 +118,14 @@ function useTaskTools(): void {
     toggleDone: actions.toggleDone,
     reopen: (id) => actions.updateTask(id, { status: 'open' }),
     trash: actions.trashTask,
+    update: actions.updateTask,
   })
   useAction(add!)
   useAction(search!)
   useAction(due!)
   useAction(complete!)
   useAction(reopen!)
+  useAction(update!)
   useAction(remove!)
   useAction(listLists!)
 }
