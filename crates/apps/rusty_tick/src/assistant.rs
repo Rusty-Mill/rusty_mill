@@ -45,7 +45,8 @@ pub enum Reply {
 
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
-“rename buy milk to buy oat milk”, “move buy milk to friday” or “lists”.";
+“rename buy milk to buy oat milk”, “move buy milk to friday”, “make buy milk high priority” \
+or “lists”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -90,10 +91,31 @@ const VERBS: [Verb; 5] = [
 ];
 
 /// Commands that change one task: their words and the field the part after " to " sets.
-const EDITS: [(&[&str], &str); 2] = [
+const EDITS: [(&[&str], &str); 3] = [
     (&["rename "], "title"),
     (&["move ", "reschedule ", "postpone "], "due"),
+    (&["set priority of ", "priority of "], "priority"),
 ];
+
+/// Priority words as people say them, and the one each stands for.
+const PRIORITIES: [(&str, &str); 6] = [
+    ("high", "high"),
+    ("medium", "medium"),
+    ("med", "medium"),
+    ("low", "low"),
+    ("none", "none"),
+    ("no", "none"),
+];
+
+/// The priority `word` names (a trailing " priority" allowed), if it is one.
+fn priority(word: &str) -> Option<&'static str> {
+    let word = word.to_ascii_lowercase();
+    let word = word.strip_suffix(" priority").unwrap_or(&word).trim();
+    PRIORITIES
+        .iter()
+        .find(|(said, _)| *said == word)
+        .map(|(_, means)| *means)
+}
 
 const LISTS: [&str; 5] = [
     "lists",
@@ -131,7 +153,7 @@ pub fn decide(input: &RunAgentInput) -> Reply {
 
 /// The command `text` (lower-cased as `lower`) asks for, if any.
 fn command(text: &str, lower: &str) -> Option<Reply> {
-    if let Some(reply) = edit(text, lower) {
+    if let Some(reply) = edit(text, lower).or_else(|| priority_phrase(text, lower)) {
         return Some(reply);
     }
     for verb in &VERBS {
@@ -195,8 +217,8 @@ enum Cut<'a> {
 
 /// Cut `rest` ("X to Y") without guessing. A quoted name ends at its closing
 /// quote, " to " inside it included; a quoted new value starts at the " to "
-/// just before it. Otherwise a rename needs exactly one " to ", while a move
-/// cuts at the last one: a day never holds " to ", so the rest is the name.
+/// just before it. Otherwise a rename needs exactly one " to ", while a move or
+/// a priority cuts at the last one: a day or a priority never holds " to ".
 fn cut<'a>(rest: &'a str, field: &str) -> Cut<'a> {
     let rest = rest.trim();
     if let Some((open, close)) = [('“', '”'), ('"', '"')]
@@ -223,7 +245,7 @@ fn cut<'a>(rest: &'a str, field: &str) -> Cut<'a> {
         .find(|&&at| rest[at + 4..].trim_start().starts_with(['“', '"']));
     let at = match (quoted_value, cuts.as_slice()) {
         (Some(&at), _) | (None, &[at]) => at,
-        (None, &[.., last]) if field == "due" => last,
+        (None, &[.., last]) if field != "title" => last,
         (None, &[]) => return Cut::Missing,
         (None, _) => return Cut::Ambiguous,
     };
@@ -253,17 +275,47 @@ fn edit(text: &str, lower: &str) -> Option<Reply> {
                 "title" => {
                     "Rename which task to what? Try “rename buy milk to buy oat milk”.".into()
                 }
+                "priority" => PRIORITY_HELP.into(),
                 _ => "Move which task to when? Try “move buy milk to friday”.".into(),
             }))
         }
     };
+    if field == "priority" {
+        return Some(match priority(value) {
+            Some(means) => update_call(query, field, means),
+            None => Reply::Text("Priority is high, medium, low or none.".into()),
+        });
+    }
+    Some(update_call(query, field, value))
+}
+
+const PRIORITY_HELP: &str = "Which task, and what priority? Try “make buy milk high priority”.";
+
+/// "make|mark|set X <word> priority": the fixed ending says where the name stops.
+fn priority_phrase(text: &str, lower: &str) -> Option<Reply> {
+    let prefix = ["make ", "mark ", "set "]
+        .into_iter()
+        .find(|p| lower.starts_with(p))?;
+    let (word, means) = PRIORITIES
+        .iter()
+        .find(|(said, _)| lower.ends_with(&format!(" {said} priority")))?;
+    let end = text.len() - (word.len() + " priority".len() + 1);
+    let query = text.get(prefix.len()..end).map_or("", unquote);
+    if query.is_empty() {
+        return Some(Reply::Text(PRIORITY_HELP.into()));
+    }
+    Some(update_call(query, "priority", means))
+}
+
+/// An `update_task` call setting `field` of the task `query` names.
+fn update_call(query: &str, field: &str, value: &str) -> Reply {
     let mut args = json!({ "query": query });
     args.insert(field, value);
-    Some(Reply::Call {
+    Reply::Call {
         tool: UPDATE_TASK,
         args,
         say: format!("Looking up “{query}”…"),
-    })
+    }
 }
 
 /// The call the tool message `tool_call_id` answers.
@@ -306,9 +358,14 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
         COMPLETE_TASK => format!("Completed “{title}”."),
         REOPEN_TASK => format!("Reopened “{title}”."),
         DELETE_TASK => format!("Moved “{title}” to the Trash."),
-        UPDATE_TASK => match parsed.get("due").and_then(Value::as_str) {
-            Some(due) => format!("Moved “{title}” to {due}."),
-            None => format!("Renamed it “{title}”."),
+        UPDATE_TASK => match (
+            parsed.get("due").and_then(Value::as_str),
+            parsed.get("priority").and_then(Value::as_str),
+        ) {
+            (Some(due), _) => format!("Moved “{title}” to {due}."),
+            (_, Some("none")) => format!("Cleared the priority of “{title}”."),
+            (_, Some(level)) => format!("Gave “{title}” {level} priority."),
+            _ => format!("Renamed it “{title}”."),
         },
         LIST_LISTS => bullets(
             "Your lists:",
@@ -523,6 +580,60 @@ mod tests {
                 "{unclosed}"
             );
         }
+    }
+
+    #[test]
+    fn turns_priority_phrases_into_update_task() {
+        assert_eq!(
+            decide(&input("make buy milk high priority")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "buy milk", "priority": "high"})
+            )
+        );
+        assert_eq!(
+            decide(&input("Mark “talk to mum” low priority")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "talk to mum", "priority": "low"})
+            )
+        );
+        assert_eq!(
+            decide(&input("set pay rent no priority")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "pay rent", "priority": "none"})
+            )
+        );
+        assert_eq!(
+            decide(&input("set priority of talk to mum to Medium")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "talk to mum", "priority": "medium"})
+            )
+        );
+        assert!(matches!(
+            decide(&input("set priority of buy milk to urgent")),
+            Reply::Text(t) if t.starts_with("Priority is")
+        ));
+        assert!(matches!(
+            decide(&input("make high priority")),
+            Reply::Text(t) if t.starts_with("Which task")
+        ));
+        assert_eq!(
+            answered(
+                "make milk high priority",
+                r#"{"title":"Buy milk","priority":"high"}"#
+            ),
+            Reply::Text("Gave “Buy milk” high priority.".into())
+        );
+        assert_eq!(
+            answered(
+                "make milk no priority",
+                r#"{"title":"Buy milk","priority":"none"}"#
+            ),
+            Reply::Text("Cleared the priority of “Buy milk”.".into())
+        );
     }
 
     #[test]

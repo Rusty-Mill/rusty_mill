@@ -139,7 +139,7 @@ describe('update_task', () => {
     const { c, done } = context(tasks)
     expect(await run(c, 'update_task', { query: 'milk', due: 'soonish' })).toEqual({ error: expect.stringContaining("can't read “soonish”") })
     expect(await run(c, 'update_task', { query: 'milk', title: '  ' })).toEqual({ error: 'Say the new title.' })
-    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title or a day.' })
+    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day or a priority.' })
     expect(await run(c, 'update_task', { query: 'buy', due: 'today' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
     expect(await run(c, 'update_task', { query: ' ', due: 'today' })).toEqual({ error: 'Say which task.' })
     expect(done).toEqual([])
@@ -149,5 +149,14 @@ describe('update_task', () => {
     const { c, done } = context([task('m', 'Buy milk'), task('t', 'Buy milk to Talk')])
     expect(await run(c, 'update_task', { query: 'Buy milk', title: 'Talk to mum' })).toEqual({ title: 'Talk to mum' })
     expect(done).toEqual(['update m {"title":"Talk to mum"}'])
+  })
+
+  it('sets the priority of the one task named, and changes nothing for an unknown one', async () => {
+    const { c, done } = context(tasks)
+    expect(await run(c, 'update_task', { query: 'milk', priority: 'high' })).toEqual({ title: 'Buy milk', priority: 'high' })
+    expect(await run(c, 'update_task', { query: 'oats', priority: 'none' })).toEqual({ title: 'Buy oats', priority: 'none' })
+    expect(await run(c, 'update_task', { query: 'milk', priority: 'urgent' })).toEqual({ error: 'Priority is high, medium, low or none.' })
+    expect(await run(c, 'update_task', { query: 'buy', priority: 'low' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
+    expect(done).toEqual(['update m {"priority":5}', 'update o {"priority":0}'])
   })
 })

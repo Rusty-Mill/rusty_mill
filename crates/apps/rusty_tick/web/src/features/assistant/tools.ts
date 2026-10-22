@@ -5,7 +5,7 @@
  * agent turns into a reply; a task named ambiguously is not guessed at.
  */
 import type { ActionDefinition } from '@rusty-mill/agui-core'
-import type { NewTask, Task, TaskPatch } from '@/api/types'
+import type { NewTask, Priority, Task, TaskPatch } from '@/api/types'
 import { searchTasks } from '@/features/search/search'
 import { tasksForView, type Entities } from '@/features/tasks/organize'
 import { addDays, startOfDay } from '@/lib/date'
@@ -99,24 +99,39 @@ export function moveTo(t: Task, day: number | null): TaskPatch {
 
 const dayLabel = (ms: number): string => new Date(ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
 
-/** Rename the task `query` names, or move it to the day `due` names; validated before anything changes. */
+/** Priority words, as the agent sends them, and the priority each sets. */
+const PRIORITY: Record<string, Priority> = { high: 5, medium: 3, med: 3, low: 1, none: 0, no: 0 }
+const PRIORITY_NAME: Record<Priority, string> = { 5: 'high', 3: 'medium', 1: 'low', 0: 'none' }
+
+/**
+ * Rename the task `query` names, move it to the day `due` names, or set its
+ * `priority`; every argument is checked before the task is picked, so a bad
+ * one changes nothing.
+ */
 async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: string]: string }): Promise<Answer> {
-  const { query = '', title, due } = args
-  if (title === undefined && due === undefined) return { error: 'Say what to change: a new title or a day.' }
+  const { query = '', title, due, priority } = args
+  if (title === undefined && due === undefined && priority === undefined) return { error: 'Say what to change: a new title, a day or a priority.' }
   if (title !== undefined && title.trim() === '') return { error: 'Say the new title.' }
   const day = due === undefined ? undefined : readDay(due, c.now)
   if (due !== undefined && day === undefined) {
     return { error: `I can't read “${due.trim()}” as a day; try today, tomorrow, friday, in 3 days, next week, 2026-11-05 or none.` }
   }
+  const level = priority === undefined ? undefined : PRIORITY[norm(priority)]
+  if (priority !== undefined && level === undefined) return { error: 'Priority is high, medium, low or none.' }
   const pick = pickTask(tasks, query, 'task')
   if (!('task' in pick)) return pick
+  const { task } = pick
   if (title !== undefined) {
-    await c.update(pick.task.id, { title: title.trim() })
+    await c.update(task.id, { title: title.trim() })
     return { title: title.trim() }
   }
-  const patch = moveTo(pick.task, day ?? null)
-  await c.update(pick.task.id, patch)
-  return { title: pick.task.title, due: patch.dueMs == null ? 'no date' : dayLabel(patch.dueMs) }
+  if (level !== undefined) {
+    await c.update(task.id, { priority: level })
+    return { title: task.title, priority: PRIORITY_NAME[level] }
+  }
+  const patch = moveTo(task, day ?? null)
+  await c.update(task.id, patch)
+  return { title: task.title, due: patch.dueMs == null ? 'no date' : dayLabel(patch.dueMs) }
 }
 
 const titled = { type: 'object', properties: { query: { type: 'string', description: 'The task’s title, or enough of it' } }, required: ['query'] }
@@ -172,10 +187,15 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
     },
     {
       name: 'update_task',
-      description: 'Rename the one task this names, or move it to another day (today, tomorrow, friday, in 3 days, next week, 2026-11-05, or none).',
+      description: 'Rename the one task this names, move it to another day (today, tomorrow, friday, in 3 days, next week, 2026-11-05, or none), or set its priority.',
       parameters: {
         type: 'object',
-        properties: { query: titled.properties.query, title: { type: 'string', description: 'The new title' }, due: { type: 'string', description: 'The new day, as said' } },
+        properties: {
+          query: titled.properties.query,
+          title: { type: 'string', description: 'The new title' },
+          due: { type: 'string', description: 'The new day, as said' },
+          priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
+        },
         required: ['query'],
       },
       handler: (args) => updateOne(c, live, args),
