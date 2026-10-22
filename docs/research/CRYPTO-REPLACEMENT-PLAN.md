@@ -71,6 +71,14 @@ certificates, and it changes no default: the engine keeps `ring` unless the new 
 owner's: the ADR that ADR-0002 section 6 requires before the engine's primitives change (seam note D2, the section 10
 draft); signing under the native cfg (D3); the suite order with portable AES (D4); and AES-GCM's review status (D5).
 
+**Owner decisions (2026-10-22): ADR-0005 accepted; signing compiled out; ChaCha20 first.** Given directly
+in the implementing session as "Approved", in answer to the recommendations for D2, D3 and D4 in
+`TLS-NATIVE-CRYPTO-SEAM.md`. This is the implementer's transcription, not yet restated from the owner's
+GitHub account. Section 10's draft is accepted as ADR-0005 for the client role only. Under the native
+backend, signing, the servers, tickets and client certificates are compiled out, and ChaCha20-Poly1305
+is offered first. D5 (AES-GCM's review status) is still open and must be settled before the native
+backend merges.
+
 **Provisional implementer choices, not owner decisions.** Section 9 items 3 to 5 were never
 answered. To keep moving I picked defaults; each is open for the owner to reverse:
 new crates rather than extending `rusty_rsa`; one additive function,
@@ -608,7 +616,12 @@ and currently running on provisional implementer defaults: items 1 (partly overt
 6. Stop point. My suggestion: stages 0 to 4 as a firm plan, 5 to 6a if intrinsics are approved,
    6b if a server role needs it, 7 never.
 
-## 10. Draft ADR text (NOT ACCEPTED)
+## 10. Draft ADR text (accepted 2026-10-22 as ADR-0005, client role only)
+
+**Accepted** as `crates/libs/net/rusty_tls/docs/adr/0005-first-party-primitives-for-the-client-engine.md`,
+scoped to the hand-rolled engine's client path; that file is authoritative. The draft below
+is kept as written.
+
 
 > **ADR-0005 (draft): First-party cryptographic primitives behind the native TLS engine**
 > Status: **Proposed. Not accepted.** Would supersede section 6 of ADR-0002 only for the

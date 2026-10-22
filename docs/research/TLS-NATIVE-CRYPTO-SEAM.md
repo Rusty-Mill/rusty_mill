@@ -1,8 +1,8 @@
 # Native engine off `ring`: scope for gap 4 (the `rusty_tls` backend seam)
 
-Date: 2026-10-21. Status: **scope, no code. Gap 4 reopened by the owner on 2026-10-22, client role only** (D1;
-`CRYPTO-REPLACEMENT-PLAN.md` section 0). D2 to D5 are still open. Nothing here changes a gate, a default, a
-dependency or a consumer. Every decision in section 6 is the owner's.
+Date: 2026-10-21. Status: **scope, no code beyond step 1 (#865). Gap 4 reopened for the client role (D1) and D2 to D4
+decided on 2026-10-22: ADR-0005 accepted, signing compiled out, ChaCha20-Poly1305 first.** D5 is still
+open. Every decision in section 6 is the owner's.
 
 Context: `CRYPTO-REPLACEMENT-PLAN.md` section 13.1, gap 4 ("same signatures as the `ring` call sites,
 selected by an extra cfg beside `rusty_tls_handrolled`; default stays `ring`"). This note turns that row
@@ -15,9 +15,8 @@ into a concrete design, an evidence plan and the decisions that block it.
   certificate**, which is where the plan recommends stopping (plan section 1).
 - The work is one internal module plus mechanical call-site changes: about **6 to 9 days** (the plan's 5
   to 8, plus about 1 for compiling signing out and the CI variant).
-- It is blocked by decisions, not code. Gap 4 is reopened (D1, 2026-10-22); still open are an ADR for
-  ADR-0002 section 6, what happens to signing, the cipher-suite order with portable AES, and AES-GCM's
-  review status (section 6).
+- It was blocked by decisions, not code. D1 to D4 were decided on 2026-10-22 (ADR-0005); AES-GCM's
+  review status (D5) is still open and must be settled before the native backend merges (section 6).
 - This removes `ring` from the *engine*. rustls, the default engine, keeps it, and so do `boringtun`,
   `quinn`, `jsonwebtoken` and the other lockfile users (plan decision D5).
 
@@ -79,9 +78,9 @@ signing out under the cfg (about 1), the CI variant and seam differential (about
 | # | Decision | Options | Recommendation |
 | --- | --- | --- | --- |
 | D1 | Reopen gap 4 | Reopen for the client role, or keep it closed | **Decided 2026-10-22: reopened, client role only** |
-| D2 | ADR | ADR-0002 section 6 requires its own ADR to revisit `ring`. Accept the plan's section 10 draft (ADR-0005), scoped to the client role, or amend ADR-0002 section 6 | Accept ADR-0005, client role only |
-| D3 | Signing under the native cfg | Compile out the server and client certificates (ring-free), or keep `ring` for signing only (native primitives, not ring-free) | Compile out |
-| D4 | Cipher-suite order with portable AES (60 to 150 times slower than `ring`) | Put ChaCha20-Poly1305 first under the native cfg (a ClientHello fingerprint change), or confirm the AES intrinsics approval (plan D1, never reconfirmed) | ChaCha20-Poly1305 first |
+| D2 | ADR | ADR-0002 section 6 requires its own ADR to revisit `ring`. Accept the plan's section 10 draft (ADR-0005), scoped to the client role, or amend ADR-0002 section 6 | **Decided 2026-10-22: ADR-0005 accepted, client role only** |
+| D3 | Signing under the native cfg | Compile out the server and client certificates (ring-free), or keep `ring` for signing only (native primitives, not ring-free) | **Decided 2026-10-22: compile out** |
+| D4 | Cipher-suite order with portable AES (60 to 150 times slower than `ring`) | Put ChaCha20-Poly1305 first under the native cfg (a ClientHello fingerprint change), or confirm the AES intrinsics approval (plan D1, never reconfirmed) | **Decided 2026-10-22: ChaCha20-Poly1305 first** |
 | D5 | AES-GCM review | Whether the 2026-10-13 review of #651 is gap 3's review; and whether `rusty_aead`'s AES types stay exported unconditionally (`AES-GCM-DESIGN.md` section 10) | Owner's call |
 
 ## 7. Not in scope

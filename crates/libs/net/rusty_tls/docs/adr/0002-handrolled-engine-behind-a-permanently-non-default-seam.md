@@ -583,6 +583,10 @@ The protocol layers get hand-rolled; the primitives underneath stay `ring`.
 Revisiting that is its own issue, with its own ADR, and nothing here should be
 read as a step toward it.
 
+**Superseded for the client path (2026-10-22).** ADR-0005 lets the engine's client path
+use first-party primitives behind its own feature and cfg, with signing compiled out. This
+section still governs everything else, and `ring` is still the engine's default backend.
+
 ## Alternatives considered
 
 - **Keep `rustls` permanently, build nothing.** Status quo, and still the right
