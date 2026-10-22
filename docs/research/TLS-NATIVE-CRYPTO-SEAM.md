@@ -11,7 +11,7 @@ into a concrete design, an evidence plan and the decisions that block it.
 ## 1. Answer first
 
 - Every primitive the hand-rolled engine takes from `ring` has a first-party replacement **except
-  signing** (gap 5, closed). So a truly ring-free engine is the **client role with no client
+  signing** (gap 5, closed). So an engine that calls no `ring` is the **client role with no client
   certificate**, which is where the plan recommends stopping (plan section 1).
 - The work is one internal module plus mechanical call-site changes: about **6 to 9 days** (the plan's 5
   to 8, plus about 1 for compiling signing out and the CI variant).

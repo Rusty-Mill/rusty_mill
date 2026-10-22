@@ -39,8 +39,10 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
    inside the existing `handrolled-engine` feature and `rusty_tls_handrolled` flag. Without
    them the engine uses `ring`, as today.
 2. **Under the native backend, signing is compiled out (D3).** `sign.rs`, the TLS 1.3 and
-   1.2 servers, session tickets and `ClientIdentity` do not exist in that build, so `ring`
-   is not in its dependency graph. The native engine is a client that presents no
+   1.2 servers, session tickets and `ClientIdentity` do not exist in that build, so the
+   engine makes no `ring` call at all. `ring` stays in the build regardless, because
+   `rustls`, the crate's default engine, depends on it (plan D5): the goal is an engine that
+   does not need `ring`, not a lockfile without it. The native engine is a client that presents no
    certificate. A server asking for one gets an empty Certificate, as a client with no
    identity configured does today.
 3. **Under the native backend, ChaCha20-Poly1305 is offered first (D4).** Portable AES-GCM
@@ -65,10 +67,10 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
   default build. It was rejected as the only option because the first-party crates exist,
   and the client path needs none of the dangerous stages.
 - **Replace only the public-data primitives (hashes, HMAC, verification) and keep `ring`
-  for the rest.** That is the plan's recommended floor. It would not take `ring` out of the
-  engine's graph, which is the point of gap 4.
+  for the rest.** That is the plan's recommended floor. The engine would still call `ring`,
+  and ending that is the point of gap 4.
 - **Keep `ring` only for signing** (D3's other option). The primitives would be native but
-  the build would not be ring-free. It was rejected because the client role needs no
+  the engine would still call `ring`. It was rejected because the client role needs no
   signing.
 - **Keep AES-GCM first with portable AES** (D4's other option), or use AES-NI intrinsics.
   The intrinsics approval from 2026-10-08 was never reconfirmed (plan D1). Putting a slow
@@ -76,7 +78,7 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
 
 ## Consequences
 
-- **Accepted:** auditability and a ring-free client engine, at the cost of:
+- **Accepted:** auditability and a client engine that calls no `ring`, at the cost of:
   - slower portable AES-GCM;
   - a maintenance burden;
   - weaker evidence than `ring` for secret-handling code;
