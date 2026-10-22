@@ -143,10 +143,14 @@ impl<T> Streaming<T> {
 
     /// Waits for the response's headers. After it, [`Streaming::metadata`] is the server's.
     pub(super) async fn open(&mut self) -> Result<(), Status> {
-        let Some(head) = self.head.take() else {
+        let Some(pending) = self.head.as_mut() else {
             return Ok(());
         };
-        let response = match until(self.deadline, head).await {
+        // Awaited in place, not taken out: if this future is dropped mid-wait, `Drop` still
+        // finds the call open and cancels it.
+        let waited = until(self.deadline, pending).await;
+        self.head = None;
+        let response = match waited {
             None => return Err(self.fail(deadline_exceeded())),
             Some(Err(e)) => return Err(self.fail(status_from_h2(&e))),
             Some(Ok(response)) => response,

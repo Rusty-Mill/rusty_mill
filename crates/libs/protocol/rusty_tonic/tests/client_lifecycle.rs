@@ -284,6 +284,97 @@ async fn a_reply_dropped_before_the_request_is_finished_still_ends_the_call() {
     assert!(saw_the_call_end(&how), "the server saw {how}");
 }
 
+/// A server with room for one stream at a time. A call to `/pkg.Svc/Silent` is read whole and
+/// then left unanswered; 300 ms on it tries to answer, which fails if the client has given up
+/// (the stream was reset), and that is reported. Any other call is echoed.
+fn one_stream_server() -> (rusty_hyper::Server, mpsc::Receiver<String>) {
+    let mut h2 = Builder::new();
+    h2.max_concurrent_streams(1);
+    let options = ServeOptions {
+        h2,
+        ..ServeOptions::default()
+    };
+    let (tx, rx) = mpsc::channel(8);
+    let server = serve(
+        listener(),
+        None,
+        options,
+        move |mut req: Request, respond: Respond| {
+            let tx = tx.clone();
+            async move {
+                if header(&req.headers, ":path") != Some("/pkg.Svc/Silent") {
+                    return echo(req, respond).await;
+                }
+                let _ = read_call(&mut req).await;
+                tx.send("started".to_string()).await.unwrap();
+                sleep(Duration::from_millis(300)).await;
+                let answered = respond
+                    .send_response(fields(&[(":status".into(), b"200".to_vec())]), true)
+                    .await;
+                tx.send(
+                    if answered.is_ok() {
+                        "answered"
+                    } else {
+                        "reset"
+                    }
+                    .to_string(),
+                )
+                .await
+                .unwrap();
+            }
+        },
+    )
+    .unwrap();
+    (server, rx)
+}
+
+#[rusty_tokio::test]
+async fn a_response_wait_given_up_on_from_outside_after_the_request_was_finished_cancels_the_call()
+{
+    let (server, mut ended) = one_stream_server();
+    let channel = channel(&server);
+    let (mut sender, reply) = channel
+        .client_streaming::<Blob, Blob>("/pkg.Svc/Silent", rusty_tonic::client::Request::new(()))
+        .await
+        .unwrap();
+    sender.send(&blob(1, 1)).await.unwrap();
+    sender.finish().await.unwrap();
+    assert_eq!(next(&mut ended).await, "started");
+    // The caller gives up while the server has sent no headers: no deadline of ours is involved.
+    assert!(timeout(Duration::from_millis(100), reply.response())
+        .await
+        .is_err());
+    let second = timeout(FIVE, channel.unary::<Blob, Blob>(PATH, request(blob(2, 2))))
+        .await
+        .expect("the stream slot was never freed")
+        .unwrap();
+    assert_eq!(second.message.n, 2);
+    assert_eq!(
+        next(&mut ended).await,
+        "reset",
+        "the server found the call reset"
+    );
+}
+
+#[rusty_tokio::test]
+async fn a_unary_call_given_up_on_from_outside_while_waiting_for_headers_cancels_the_call() {
+    let (server, mut ended) = one_stream_server();
+    let channel = channel(&server);
+    let call = channel.unary::<Blob, Blob>("/pkg.Svc/Silent", request(blob(1, 1)));
+    assert!(timeout(Duration::from_millis(100), call).await.is_err());
+    assert_eq!(next(&mut ended).await, "started");
+    let second = timeout(FIVE, channel.unary::<Blob, Blob>(PATH, request(blob(2, 2))))
+        .await
+        .expect("the stream slot was never freed")
+        .unwrap();
+    assert_eq!(second.message.n, 2);
+    assert_eq!(
+        next(&mut ended).await,
+        "reset",
+        "the server found the call reset"
+    );
+}
+
 #[rusty_tokio::test]
 async fn a_deadline_after_the_request_was_finished_cancels_the_call() {
     let (server, mut ended) = stalling_server();
