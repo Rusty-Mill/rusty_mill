@@ -144,4 +144,10 @@ describe('update_task', () => {
     expect(await run(c, 'update_task', { query: ' ', due: 'today' })).toEqual({ error: 'Say which task.' })
     expect(done).toEqual([])
   })
+
+  it('renames the task named exactly, leaving one whose title merely contains it', async () => {
+    const { c, done } = context([task('m', 'Buy milk'), task('t', 'Buy milk to Talk')])
+    expect(await run(c, 'update_task', { query: 'Buy milk', title: 'Talk to mum' })).toEqual({ title: 'Talk to mum' })
+    expect(done).toEqual(['update m {"title":"Talk to mum"}'])
+  })
 })

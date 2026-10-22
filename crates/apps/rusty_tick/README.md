@@ -101,7 +101,8 @@ names, run in the browser. It is rule-based, not a model: “add buy milk”,
 “complete buy milk”, “reopen buy milk”, “delete buy milk”, “rename buy milk to
 buy oat milk”, “move buy milk to friday” (also tomorrow, in 3 days, next week,
 2026-11-05, none) and “lists”. A task is named by its title; when several
-match, it asks which. An unreadable day changes nothing.
+match, it asks which. Quote a name that contains “to” (“rename "a to b" to c”). An
+unreadable day changes nothing.
 
 ## Layout
 

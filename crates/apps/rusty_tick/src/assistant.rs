@@ -185,8 +185,53 @@ fn unquote(text: &str) -> &str {
     text.trim().trim_matches(['“', '”', '"']).trim()
 }
 
+/// Where an edit's task name ends and its new value begins.
+enum Cut<'a> {
+    At(&'a str, &'a str),
+    Missing,
+    /// More than one " to " could be the cut.
+    Ambiguous,
+}
+
+/// Cut `rest` ("X to Y") without guessing. A quoted name ends at its closing
+/// quote, " to " inside it included; a quoted new value starts at the " to "
+/// just before it. Otherwise a rename needs exactly one " to ", while a move
+/// cuts at the last one: a day never holds " to ", so the rest is the name.
+fn cut<'a>(rest: &'a str, field: &str) -> Cut<'a> {
+    let rest = rest.trim();
+    if let Some((open, close)) = [('“', '”'), ('"', '"')]
+        .into_iter()
+        .find(|(o, _)| rest.starts_with(*o))
+    {
+        let inner = &rest[open.len_utf8()..];
+        let Some(end) = inner.find(close) else {
+            return Cut::Missing;
+        };
+        let after = inner[end + close.len_utf8()..].trim_start();
+        return match after.get(..3) {
+            Some(word) if word.eq_ignore_ascii_case("to ") => {
+                Cut::At(inner[..end].trim(), unquote(&after[3..]))
+            }
+            _ => Cut::Missing,
+        };
+    }
+    let lower = rest.to_ascii_lowercase();
+    let cuts: Vec<usize> = lower.match_indices(" to ").map(|(at, _)| at).collect();
+    let quoted_value = cuts
+        .iter()
+        .rev()
+        .find(|&&at| rest[at + 4..].trim_start().starts_with(['“', '"']));
+    let at = match (quoted_value, cuts.as_slice()) {
+        (Some(&at), _) | (None, &[at]) => at,
+        (None, &[.., last]) if field == "due" => last,
+        (None, &[]) => return Cut::Missing,
+        (None, _) => return Cut::Ambiguous,
+    };
+    Cut::At(unquote(&rest[..at]), unquote(&rest[at + 4..]))
+}
+
 /// "rename X to Y" or "move X to WHEN": an `update_task` call, or what to ask
-/// when a part is missing. The split is at the last " to ", so a title may hold one.
+/// when a part is missing or the cut between them is unclear (see `cut`).
 fn edit(text: &str, lower: &str) -> Option<Reply> {
     let (prefix, field) = EDITS.iter().find_map(|(prefixes, field)| {
         prefixes
@@ -194,15 +239,23 @@ fn edit(text: &str, lower: &str) -> Option<Reply> {
             .find(|p| lower.starts_with(*p))
             .map(|p| (*p, *field))
     })?;
-    let parts = lower[prefix.len()..].rfind(" to ").map(|at| {
-        let at = prefix.len() + at;
-        (unquote(&text[prefix.len()..at]), unquote(&text[at + 4..]))
-    });
-    let Some((query, value)) = parts.filter(|(q, v)| !q.is_empty() && !v.is_empty()) else {
-        return Some(Reply::Text(match field {
-            "title" => "Rename which task to what? Try “rename buy milk to buy oat milk”.".into(),
-            _ => "Move which task to when? Try “move buy milk to friday”.".into(),
-        }));
+    let (query, value) = match cut(&text[prefix.len()..], field) {
+        Cut::At(query, value) if !query.is_empty() && !value.is_empty() => (query, value),
+        Cut::Ambiguous => {
+            return Some(Reply::Text(
+                "That has more than one “to”, so I can't tell where the name ends. \
+                 Put the names in quotes, like “rename \"buy milk\" to \"talk to mum\"”."
+                    .into(),
+            ))
+        }
+        _ => {
+            return Some(Reply::Text(match field {
+                "title" => {
+                    "Rename which task to what? Try “rename buy milk to buy oat milk”.".into()
+                }
+                _ => "Move which task to when? Try “move buy milk to friday”.".into(),
+            }))
+        }
     };
     let mut args = json!({ "query": query });
     args.insert(field, value);
@@ -425,6 +478,51 @@ mod tests {
             error: None,
         });
         decide(&thread)
+    }
+
+    #[test]
+    fn splits_a_rename_only_where_it_is_sure() {
+        // Two " to ", unquoted: either could be the cut, so it asks.
+        assert!(matches!(
+            decide(&input("rename Buy milk to Talk to mum")),
+            Reply::Text(t) if t.contains("quotes")
+        ));
+        // Quotes mark where each name ends, " to " inside them included.
+        assert_eq!(
+            decide(&input("rename \"Buy milk\" to \"Talk to mum\"")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "Buy milk", "title": "Talk to mum"})
+            )
+        );
+        assert_eq!(
+            decide(&input("rename “talk to mum” to call mum")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "talk to mum", "title": "call mum"})
+            )
+        );
+        assert_eq!(
+            decide(&input("rename Buy milk to “Talk to mum”")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "Buy milk", "title": "Talk to mum"})
+            )
+        );
+        // A day never holds " to ", so a move still cuts at the last one.
+        assert_eq!(
+            decide(&input("move talk to mum to friday")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "talk to mum", "due": "friday"})
+            )
+        );
+        for unclosed in ["rename “buy milk to oats", "rename \"buy\" milk to oats"] {
+            assert!(
+                matches!(decide(&input(unclosed)), Reply::Text(t) if t.starts_with("Rename which task")),
+                "{unclosed}"
+            );
+        }
     }
 
     #[test]
