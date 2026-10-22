@@ -1,4 +1,4 @@
-//! `rusty_stream` — single-node durable log for RustyMill.
+//! `rusty_journal` — single-node durable log for RustyMill.
 //!
 //! Phase 1 scope: append-only segment log + in-memory offset index
 //! (`segment`), rolled and retained by size/time (`retention`), on

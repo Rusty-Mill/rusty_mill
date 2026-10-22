@@ -271,5 +271,5 @@ name = "uring_fs_sim_driver"
 required-features = ["io-uring-fs"]
 
 [[test]]
-name = "rusty_stream_segment_log_recovery"
+name = "rusty_journal_segment_log_recovery"
 required-features = ["io-uring-fs"]

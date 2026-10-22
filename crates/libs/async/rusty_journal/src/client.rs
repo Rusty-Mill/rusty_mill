@@ -1,4 +1,4 @@
-//! A Rust client for `rusty_stream`'s wire protocol (`docs/phase1-scope.md`
+//! A Rust client for `rusty_journal`'s wire protocol (`docs/phase1-scope.md`
 //! §2's "Client SDK — Rust first") — the last piece of Phase 1's scope
 //! list, completing the loop [`crate::protocol`] encodes and
 //! [`crate::server`] serves: connect once, then call [`Client::produce`],
@@ -76,7 +76,7 @@ impl From<ProtocolError> for ClientError {
     }
 }
 
-/// A connection to a `rusty_stream` server, speaking [`crate::protocol`]
+/// A connection to a `rusty_journal` server, speaking [`crate::protocol`]
 /// over one [`rusty_tokio::io::TcpStream`].
 pub struct Client {
     stream: TcpStream,

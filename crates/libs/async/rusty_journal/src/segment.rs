@@ -105,7 +105,7 @@ impl Segment {
             if n == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "not a rusty_stream segment file (bad magic or truncated header)",
+                    "not a rusty_journal segment file (bad magic or truncated header)",
                 ));
             }
             header_buf[header_have..header_have + n].copy_from_slice(&chunk[..n]);
@@ -114,7 +114,7 @@ impl Segment {
         if &header_buf[0..4] != MAGIC {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "not a rusty_stream segment file (bad magic or truncated header)",
+                "not a rusty_journal segment file (bad magic or truncated header)",
             ));
         }
         let epoch = Epoch(u64::from_le_bytes(header_buf[4..12].try_into().unwrap()));

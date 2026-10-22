@@ -119,7 +119,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`rusty_a2a`](crates/libs/protocol/rusty_a2a) | `crates/libs/protocol/rusty_a2a` | Reusable implementation of the Agent2Agent (A2A) protocol: JSON-RPC/REST/gRPC transports, client and server |
 | [`rusty-mcp`](crates/libs/protocol/rusty_mcp/crates/rusty-mcp) | `crates/libs/protocol/rusty_mcp/crates/rusty-mcp` | Reusable scaffold for building Model Context Protocol servers, built on `rmcp` |
 | [`rusty-mcp-demo`](crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo) | `crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo` | Example MCP server built on the `rusty-mcp` scaffold |
-| [`rusty_stream`](crates/libs/async/rusty_stream) | `crates/libs/async/rusty_stream` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
+| [`rusty_journal`](crates/libs/async/rusty_journal) | `crates/libs/async/rusty_journal` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
 | [`rusty_url`](crates/foundation/rusty_url) | `crates/foundation/rusty_url` | From-scratch WHATWG URL Standard implementation, aiming for parity with the `url` crate |
 | [`rusty_http`](crates/libs/net/rusty_http) | `crates/libs/net/rusty_http` | Sans-IO HTTP/1.1 message layer and `Url` type, with optional sync/`rusty_tokio`/real-tokio async adapters |
 | [`rusty_serve`](crates/libs/net/rusty_serve) | `crates/libs/net/rusty_serve` | Small blocking HTTP/1.1 server on `rusty_http` for a JSON API plus a built web UI (sans-IO `Handler` or lock-free `SharedHandler`, buffered JSON or chunked streaming bodies, per-response headers, configurable `Limits`, path-safe static files); used by `rusty_tick`, `rusty_fair_play`, `rusty_agui` and `rusty_channel` |

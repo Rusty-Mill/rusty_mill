@@ -498,7 +498,7 @@ jobs:
           components: clippy
           cache-shared-key: clippy-${{ matrix.scope.component }}-${{ matrix.os }}
 
-      # rusty_stream is built on io_uring, a Linux-only kernel interface --
+      # rusty_journal is built on io_uring, a Linux-only kernel interface --
       # excluded on windows-latest rather than making its internals
       # cfg-gated portable shims like rusty_win32 does the other way.
       # rusty_fedora_agent gets the same treatment: it shells out to
@@ -520,7 +520,7 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ matrix.scope.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
+          windows-exclude: rusty_journal rusty_fedora_agent rusty_multimodal_db
           exclude: ${{ env.REMIND_ME_PACKAGES }}
 
       - name: Clippy
@@ -575,7 +575,7 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ matrix.scope.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
+          windows-exclude: rusty_journal rusty_fedora_agent rusty_multimodal_db
           exclude: ${{ env.REMIND_ME_PACKAGES }}
 
       # mill-term's own tests locate sibling binaries (rush/rgit/rsed/rawk)
@@ -708,7 +708,7 @@ jobs:
       # from the plan job's raw list: only the former has the per-OS
       # exclusions applied. Re-deriving the scope here from
       # `needs.plan.outputs.packages` (or a bare `--doc --workspace`) is
-      # exactly how rusty_stream -- Linux-only, and correctly excluded on
+      # exactly how rusty_journal -- Linux-only, and correctly excluded on
       # windows-latest by every other step in this job -- was still getting
       # compiled by this one step and failing the whole job on Windows.
       # Runs once per OS, not once per shard -- doctests are cheap and

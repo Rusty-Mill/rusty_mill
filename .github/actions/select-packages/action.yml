@@ -6,7 +6,7 @@ description: >
   re-filter the selection (e.g. doctests, which must drop bin-only crates)
   starts from the same excluded set instead of the plan job's raw output --
   the raw output still names Windows-excluded crates, and re-deriving from
-  it silently re-admits them (that is exactly how `rusty_stream` kept being
+  it silently re-admits them (that is exactly how `rusty_journal` kept being
   compiled on windows-latest by `cargo test --doc` while build/nextest
   correctly skipped it).
 inputs:

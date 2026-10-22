@@ -1,4 +1,4 @@
-//! Standalone `rusty_stream` server binary — wires a real, production
+//! Standalone `rusty_journal` server binary — wires a real, production
 //! `Log`/`ConsumerOffsets` (backed by `rusty_tokio`'s real io_uring
 //! driver via `uring_global_driver`, not `SimDriver`) to `server::serve`
 //! over a real TCP listener, with Ctrl-C triggering graceful shutdown.
@@ -26,10 +26,10 @@ use std::sync::Arc;
 use rusty_tokio::io::{uring_global_driver, TcpListener};
 use rusty_tokio::sync::{watch, Mutex};
 
-use rusty_stream::clock::SystemClock;
-use rusty_stream::consumer::ConsumerOffsets;
-use rusty_stream::retention::{Log, RetentionPolicy};
-use rusty_stream::server::{self, AppState};
+use rusty_journal::clock::SystemClock;
+use rusty_journal::consumer::ConsumerOffsets;
+use rusty_journal::retention::{Log, RetentionPolicy};
+use rusty_journal::server::{self, AppState};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7420";
 const DEFAULT_DATA_DIR: &str = "./data";
@@ -57,14 +57,14 @@ async fn main() -> std::io::Result<()> {
     let log = match Log::open(driver.clone(), clock.clone(), &log_dir, default_policy()).await {
         Ok(log) => {
             println!(
-                "rusty_stream: recovered existing log at {}",
+                "rusty_journal: recovered existing log at {}",
                 log_dir.display()
             );
             log
         }
         Err(_) => {
             println!(
-                "rusty_stream: starting a fresh log at {}",
+                "rusty_journal: starting a fresh log at {}",
                 log_dir.display()
             );
             Log::create(driver.clone(), clock, &log_dir, default_policy()).await?
@@ -74,14 +74,14 @@ async fn main() -> std::io::Result<()> {
     let consumer_offsets = match ConsumerOffsets::open_on(driver.clone(), &offsets_path).await {
         Ok(offsets) => {
             println!(
-                "rusty_stream: recovered existing consumer offsets at {}",
+                "rusty_journal: recovered existing consumer offsets at {}",
                 offsets_path.display()
             );
             offsets
         }
         Err(_) => {
             println!(
-                "rusty_stream: starting fresh consumer offsets at {}",
+                "rusty_journal: starting fresh consumer offsets at {}",
                 offsets_path.display()
             );
             ConsumerOffsets::create_on(driver, &offsets_path).await?
@@ -94,13 +94,13 @@ async fn main() -> std::io::Result<()> {
     };
 
     let listener = TcpListener::bind_addrs(addr.as_str()).await?;
-    println!("rusty_stream: listening on {addr}");
+    println!("rusty_journal: listening on {addr}");
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let serve_handle = rusty_tokio::spawn(server::serve(listener, state, shutdown_rx));
 
     rusty_tokio::signal::ctrl_c().await?;
-    println!("rusty_stream: Ctrl-C received, shutting down gracefully");
+    println!("rusty_journal: Ctrl-C received, shutting down gracefully");
     // No receivers left to observe this is only possible if `serve` has
     // already returned on its own (e.g. a listener error) -- nothing to
     // signal in that case, so a failed send here is fine to ignore.

@@ -288,7 +288,7 @@ fn read_varint(reader: &mut Reader) -> Result<i32, CodecError> {
 // ---------------------------------------------------------------------
 // CRC-32C (Castagnoli) -- what the record batch `crc` field uses,
 // distinct from the standard CRC-32/ISO-HDLC (zlib/gzip) polynomial.
-// Table-based, same shape as `rusty_stream::record`'s CRC-32
+// Table-based, same shape as `rusty_journal::record`'s CRC-32
 // implementation, just the Castagnoli reflected polynomial instead.
 // ---------------------------------------------------------------------
 
