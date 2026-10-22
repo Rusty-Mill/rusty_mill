@@ -17,7 +17,7 @@
  * skipped a row whose key was already taken, so the first row in that order
  * that may claim a legacy key owns the task it names: any row, or with a
  * `dueMs`, only one whose due date the task still has. A task edited since
- * (its due date, title too) goes to the one row left that it fits (`edited`).
+ * (its due date, title or repeat) goes to the one row left that it fits (`edited`).
  * A row whose own id is not here takes over the task it owns, so files
  * imported before still skip or resume rather than duplicate.
  */
@@ -62,9 +62,14 @@ function rootOf(t: ImportedTask, byKey: ReadonlyMap<string, ImportedTask>): stri
   return parent && parent.key !== t.key ? parent.key : null
 }
 
-/** How sure a pairing of an edited task and a row is: both repeating or neither, and, first, the same title (as written). */
+/**
+ * How sure a pairing of an edited task and a row is, surest first: the same
+ * title (as written) and both repeating or neither; then the repeat alone;
+ * then only the UID, which every candidate shares with its row already.
+ */
 const sameRepeat = (found: Task, t: ImportedTask): boolean => (found.repeatFlag !== '') === (t.repeatFlag !== '')
 const sameTitle = (found: Task, t: ImportedTask): boolean => sameRepeat(found, t) && found.title === t.title.slice(0, MAX_TITLE)
+const sameUid = (): boolean => true
 
 /**
  * Earlier tasks named by a due-dated legacy key that nobody claimed by due
@@ -143,7 +148,7 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
     const legacy = t.legacy.map((c) => idOf(c.key)).find((id) => owner.get(id) === t.key && existing.has(id))
     return legacy ?? own
   }
-  for (const fits of [sameTitle, sameRepeat]) {
+  for (const fits of [sameTitle, sameRepeat, sameUid]) {
     for (const [id, key] of edited(order.map((r) => r.t), existing, owner, idOf, resolve, fits)) owner.set(id, key)
   }
   const ids = new Map<string, string>() // task key -> resolved id, so subtasks point at their parent's real id
