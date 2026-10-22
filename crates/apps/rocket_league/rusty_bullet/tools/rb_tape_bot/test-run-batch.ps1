@@ -63,9 +63,43 @@ try {
         }
         Write-Host "PASS $case"
     }
+
+    # Only <name>_run<k>.jsonl are captures: rb_run_tapes also writes <name>_run<k>.pads.jsonl beside each one
+    # (ADR-0071), and the scorer must not hand it to rb-verify. The report is identical either way under pwsh,
+    # so this counts what rb-verify is asked to score, with a compiled stand-in that logs its --against argument.
+    $layout = Join-Path $temp 'sidecar'
+    $bot = Join-Path $layout 'tools/rb_tape_bot'
+    $batch = Join-Path $layout 'capture batch'
+    $binary = Join-Path $layout 'target/release/rb-verify.exe'
+    $log = Join-Path $layout 'verify-calls.log'
+    $null = New-Item -ItemType Directory -Force $bot, $batch, (Split-Path $binary)
+    Copy-Item (Join-Path $PSScriptRoot 'run_batch.ps1') $bot
+    foreach ($name in 'scn_run1.jsonl', 'scn_run2.jsonl', 'scn_run1.pads.jsonl', 'scn_run2.pads.jsonl') {
+        Set-Content (Join-Path $batch $name) ''
+    }
+    $stub = Join-Path $layout 'rb_verify_stub.rs'
+    Set-Content $stub @'
+use std::io::Write;
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let log = std::env::var("RB_STUB_LOG").expect("RB_STUB_LOG");
+    let against = args.iter().position(|a| a == "--against").and_then(|i| args.get(i + 1)).expect("--against");
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log).expect("open log");
+    writeln!(f, "{against}").expect("write log");
+}
+'@
+    rustc --edition 2021 -o $binary $stub
+    Assert ($LASTEXITCODE -eq 0) 'could not compile the rb-verify stand-in'
+    $env:RB_STUB_LOG = $log
+    $env:CARGO_TARGET_DIR = $null
+    & (Join-Path $bot 'run_batch.ps1') -ScoreOnly $batch
+    $scored = @(Get-Content $log | ForEach-Object { Split-Path $_ -Leaf } | Sort-Object)
+    Assert (($scored -join ',') -eq 'scn_run1.jsonl,scn_run2.jsonl') "scorer asked rb-verify to score: $($scored -join ', ')"
+    Write-Host 'PASS sidecar'
 } finally {
     $env:CARGO_TARGET_DIR = $oldTarget
     $env:RB_VERIFY = $oldVerify
+    $env:RB_STUB_LOG = $null
     Remove-Item Function:cargo -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $temp -Recurse -Force
 }
