@@ -1,4 +1,4 @@
-import { CalendarClock, ChevronRight, Copy, Flag, FolderInput, GripVertical, ListChecks, MoreHorizontal, Trash2 } from 'lucide-react'
+import { CalendarClock, ChevronRight, Copy, Flag, FolderInput, GitMerge, GripVertical, ListChecks, MoreHorizontal, Trash2 } from 'lucide-react'
 import { memo, useRef, useState } from 'react'
 import type { List, Priority, Tag, Task } from '@/api/types'
 import { Menu, type MenuEntry } from '@/components/Menu'
@@ -14,6 +14,8 @@ export interface RowActions {
   setPriority: (id: string, p: Priority) => void
   moveTo: (id: string, listId: string) => void
   duplicate: (t: Task) => void
+  /** Merge `t`, a duplicate, into a task the user picks. */
+  merge: (t: Task) => void
   remove: (id: string) => void
 }
 
@@ -66,6 +68,7 @@ export const TaskRow = memo(function TaskRow({ task, selected, now, hour12, show
       icon: <FolderInput size={16} />,
       submenu: lists.filter((l) => !l.archived).map((l) => ({ id: l.id, label: l.name, checked: l.id === task.listId, onSelect: () => actions.moveTo(task.id, l.id) })),
     },
+    { id: 'merge', label: 'Merge into…', icon: <GitMerge size={16} />, onSelect: () => actions.merge(task) },
     'separator',
     { id: 'delete', label: 'Delete', icon: <Trash2 size={16} />, danger: true, onSelect: () => actions.remove(task.id) },
   ]
