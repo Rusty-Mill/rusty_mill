@@ -4,7 +4,8 @@ import type { Task } from '@/api/types'
 const norm = (text: string): string => text.trim().toLowerCase()
 
 /**
- * Tasks `duplicate` may be merged into: live tasks other than itself. With no
+ * Tasks `duplicate` may be merged into: live tasks other than itself and its
+ * subtasks (trashing it trashes them, so one kept would go too). With no
  * `query`, those with its title (the likely duplicates); else those whose
  * title contains `query`, its title first. At most `limit`.
  */
@@ -13,7 +14,7 @@ export function mergeTargets(tasks: readonly Task[], duplicate: Task, query: str
   const q = norm(query)
   const matches = (t: Task): boolean => (q === '' ? norm(t.title) === title : norm(t.title).includes(q))
   return tasks
-    .filter((t) => t.id !== duplicate.id && t.deletedMs === null && matches(t))
+    .filter((t) => t.id !== duplicate.id && t.parentId !== duplicate.id && t.deletedMs === null && matches(t))
     .sort((a, b) => Number(norm(b.title) === title) - Number(norm(a.title) === title))
     .slice(0, limit)
 }

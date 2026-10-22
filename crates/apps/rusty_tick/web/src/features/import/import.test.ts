@@ -343,6 +343,18 @@ describe('readImport: .ics', () => {
     expect((await api.snapshot()).tasks.find((t) => t.dueMs === Date.UTC(2026, 9, 20, 9))).toBeDefined()
   })
 
+  it('leaves an untouched task a duplicate was merged into as it is: no status or exceptions from the file', async () => {
+    const api = new MemoryAdapter()
+    const inbox = (await api.snapshot()).inboxId
+    const keep = await api.createTask({ listId: inbox, title: 'Standup' }) // the user's own, still at etag 1
+    await applyImport(api, readImport(cal(master, movedA), 'cal.ics'))
+    const duplicate = (await api.snapshot()).tasks.find((t) => t.repeatFlag !== '')!
+    await recordMerge(api, duplicate.id, keep.id)
+    await api.purgeTask(duplicate.id)
+    expect((await applyImport(api, readImport(cal(master, movedA), 'cal.ics'))).resumed).toBe(0)
+    expect((await api.snapshot()).tasks.find((t) => t.id === keep.id)).toMatchObject({ etag: '1', exDates: [] })
+  })
+
   it('imports an event with more exceptions than a task can hold, keeping the latest', async () => {
     const exdates = Array.from({ length: 1500 }, (_, i) => new Date(Date.UTC(2026, 9, 6) + i * 86_400_000).toISOString().replace(/[-:]|\.\d{3}/g, ''))
     const api = new MemoryAdapter()

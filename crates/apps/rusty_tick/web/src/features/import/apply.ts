@@ -20,7 +20,8 @@
  * (its due date, title or repeat) goes to the one row left that it fits (`edited`).
  * A row whose own id is not here takes over the task it owns, so files
  * imported before still skip or resume rather than duplicate. A task the user
- * merged into another (see `aliases.ts`) resolves to the one kept.
+ * merged into another (see `aliases.ts`) resolves to the one kept, which is
+ * never written: at etag 1 it is the user's untouched task, not a lost write.
  */
 import type { ApiClient } from '@/api/client'
 import type { NewTask, Task, TaskPatch } from '@/api/types'
@@ -195,7 +196,8 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
     placed.set(t.key, listId)
     const found = existing.get(id)
     const patch = secondWrite(t)
-    if (found && pending(found, patch)) {
+    const merged = id !== idOf(t.key) && aliases.get(idOf(t.key)) === id // the user's kept task: never written
+    if (found && !merged && pending(found, patch)) {
       await api.updateTask(id, patch, CREATED_ETAG)
       out.resumed++
       continue
