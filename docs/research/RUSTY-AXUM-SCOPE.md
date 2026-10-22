@@ -227,14 +227,16 @@ impact. Worth its own issue.
 
 **Answered by the owner, 2026-10-22 (in the project thread for #879):**
 
-1. **`rusty_tokio` only.** `rusty_axum` gets no `tokio` dependency and no
-   `tokio` driver. A consumer still on `tokio` libraries wraps its handler
-   futures in a small adapter of its own that enters a
-   `tokio::runtime::Handle` on every poll, and drops the adapter when it
-   leaves `tokio`. A throwaway check passed 200 of 200 `rusty_tokio`
-   tasks that each used tokio sockets, timers, `spawn` and a oneshot
-   channel this way. The cost is two runtimes in one process while a
-   consumer is mid-migration. This replaces the recommendation in 6.3.1.
+1. **`rusty_tokio`.** The owner asked for `rusty_tokio` rather than a
+   `tokio` driver, so `rusty_axum` gets no `tokio` dependency. *Proposed,
+   not yet decided:* how a consumer still on `tokio` libraries bridges.
+   The proposal is a small adapter in the consumer that enters a
+   `tokio::runtime::Handle` on every poll of its handler futures, dropped
+   when the consumer leaves `tokio`. A throwaway check (exploratory, not
+   production evidence) passed 200 of 200 `rusty_tokio` tasks that each
+   used tokio sockets, timers, `spawn` and a oneshot channel this way.
+   The cost is two runtimes in one process while a consumer is
+   mid-migration. This replaces the recommendation in 6.3.1.
 2. **Yes, dev-dependencies count**, and `rmcp`, the wire-format oracle,
    is to be replaced too, so the suggestion in question 2 is withdrawn.
    ADR-0002 Amendment 1 records the change.
