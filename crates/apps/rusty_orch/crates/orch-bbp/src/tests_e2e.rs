@@ -1281,7 +1281,10 @@ RPC
 fn no_progress_pause_survives_orch_processes_without_duplicate_task_or_charge() {
     let (dir, mut c) = setup();
     c.pool.get_mut("writer").unwrap().program = "/bin/sh".into();
-    c.pool.get_mut("writer").unwrap().args = vec!["-c".into(), "exit 0".into()];
+    // Idle a moment before quitting: an event-driven moderator reaps an
+    // instant exit at once, and three of them would pause the task before
+    // this first `orch run` reaches its checkpoint.
+    c.pool.get_mut("writer").unwrap().args = vec!["-c".into(), "sleep 1; exit 0".into()];
     std::fs::write(
         dir.join("bbp.json"),
         rusty_serde::json::to_string(&c).unwrap(),
@@ -1322,7 +1325,7 @@ fn no_progress_pause_survives_orch_processes_without_duplicate_task_or_charge() 
         .strip_prefix("url:bbp:")
         .unwrap();
     let h: Handle = rusty_serde::json::from_str(pointer).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let health = Command::new(&c.binary)
             .args(["mod-health", "--dir"])
@@ -1403,7 +1406,7 @@ fn no_progress_pause_survives_orch_processes_without_duplicate_task_or_charge() 
     );
     let key = Sha256::of(h.task.as_bytes()).hex();
     // Let its bounded moderator pause before removing its private fixture.
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + Duration::from_secs(15);
     loop {
         let lock = std::fs::OpenOptions::new()
             .write(true)
