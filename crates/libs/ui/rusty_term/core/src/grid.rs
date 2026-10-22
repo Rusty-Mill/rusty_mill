@@ -15,6 +15,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::sixel::SixelImage;
 
+mod snapshot;
+pub use snapshot::SnapshotError;
+
 /// Default maximum number of lines retained in the scrollback history. Older
 /// lines are dropped as new ones arrive. Overridable per-grid via
 /// [`Grid::set_scrollback_max`] (the `scrollback` config key).
@@ -818,7 +821,7 @@ struct SavedScreen {
 /// One row of cells, on the live screen or in scrollback. The same value moves
 /// from the screen into history when it scrolls off the top, and an evicted
 /// history line is recycled as the new bottom row, so a scroll moves no cells.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Line {
     /// The row's cells: exactly `cols` on the live screen; a history line keeps
     /// the width it had when it left the screen until the next reflow.
