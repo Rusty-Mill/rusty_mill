@@ -34,6 +34,9 @@ PACKAGE_JOB_PREFIXES = {
 
 PACKAGE_JOB_NAMES = {
     "term_web": frozenset({"rusty_term"}),
+    # The throughput floor (bench_vt_throughput) guards the engine in
+    # rusty_term_core and the binary that drives it in rusty_term.
+    "term_bench": frozenset({"rusty_term_core", "rusty_term"}),
     "tick": frozenset({"rusty_tick"}),
     "fair_play": frozenset({"rusty_fair_play"}),
     "agui": frozenset({"rusty_agui"}),

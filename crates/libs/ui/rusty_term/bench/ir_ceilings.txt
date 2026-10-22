@@ -1,0 +1,19 @@
+# Maximum instructions per input byte for one `bench_vt_throughput --once`
+# pass, counted by cachegrind. Enforced in CI by the rusty-term-bench job:
+# `python3 bench/ir_gate.py --bin <release binary>` on
+# `gen_workloads.py --size quick`. MB/s in the same job is informational only.
+#
+# Counts are deterministic for a given binary and input (glibc's memmove
+# variant is pinned, see ir_gate.py), so each ceiling is the measured value
+# plus 10% headroom for toolchain codegen drift. Ratchet: a PR that lowers a
+# workload's count lowers its ceiling to about +10% of the new value.
+#
+# Baseline 2026-10-22, rustc 1.98.1, before the ring-buffer scroll work.
+# Measured: alt 837.0, ascii 375.8, cursor 124.8, scroll 1000.6, sgr 429.1,
+# unicode 528.0.
+alt_screen_flicker   920
+ascii_throughput     415
+cursor_thrash        137
+scroll_heavy        1100
+sgr_churn            472
+unicode_heavy        580
