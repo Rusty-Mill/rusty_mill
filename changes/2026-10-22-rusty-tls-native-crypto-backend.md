@@ -4,7 +4,7 @@ changelog: "`rusty_tls`: the `native-crypto` feature: with `--cfg rusty_tls_nati
 ---
 ## 2026-10-22 - rusty_tls: the hand-rolled engine on first-party primitives (gap 4, step 2)
 
-- **Added:** a native backend for `handrolled::crypto` (`crypto/native.rs`), beside the `ring` one (`crypto/ring.rs`), covering the same items: digests, HMAC, the three AEADs, X25519/P-256/P-384, the 11 signature verifiers and the random fill. It is selected by the new `native-crypto` feature together with `--cfg rusty_tls_native_crypto`, the ADR-0002 §1 two-part gate. A cfg without the feature is a compile error that names the feature. `native-crypto` does not imply `handrolled-engine`, so that build has no direct `ring` dependency and the compiler checks that the engine makes no `ring` call. `ring` stays in the build through `rustls`.
+- **Added:** a native backend for `handrolled::crypto` (`crypto/native.rs`), beside the `ring` one (`crypto/ring.rs`), covering the same items: digests, HMAC, the three AEADs, X25519/P-256/P-384, the 11 signature verifiers and the random fill. It is selected by the new `native-crypto` feature together with `--cfg rusty_tls_native_crypto`, the ADR-0002 §1 two-part gate. A cfg without the feature is a compile error that names the feature. `native-crypto` does not imply `handrolled-engine` (the narrow ADR-0002 §1 exception in ADR-0005, owner decision 2026-10-22), so that build has no direct `ring` dependency and the compiler checks that the engine makes no `ring` call. `ring` stays in the build through `rustls`.
 - **Changed (native backend only):**
   - `sign.rs`'s `SigningKey` is an enum with no variants, so no key or client certificate can exist.
   - `server`, `server12`, `ticket` and the server half of `negotiate` are compiled out.
@@ -22,7 +22,7 @@ changelog: "`rusty_tls`: the `native-crypto` feature: with `--cfg rusty_tls_nati
   - runs a zero-tests guard that requires every non-ring-only suite to run and every ring-only suite to run nothing;
   - runs the x509-limbo differential.
 - **Known limitations:**
-  - BoGo does not run on the native backend yet, because its shim needs the server role. ADR-0005 asks for a native BoGo floor; this is a deferral that needs the owner's agreement, not equivalent coverage.
+  - BoGo does not run on the native backend yet, because its shim needs the server role. ADR-0005 asks for a native BoGo floor; the owner agreed on 2026-10-22 to defer it until a client-only shim exists. It is a deferral, not equivalent coverage.
   - The native build cannot present a client certificate or act as a server.
   - AES-GCM is portable and slow.
   - D5 (AES-GCM's review status) must be settled before this merges (ADR-0005).
