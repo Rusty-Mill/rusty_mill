@@ -128,7 +128,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 9 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 13 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
-| libs | rusty_prost | rusty_prost | Dependency-free Protobuf message layer on rusty_protobuf: a Message trait for hand-written schemas, and the well-known types (Timestamp, Any, Struct, Value, ...) plus google.rpc Status and ErrorInfo. No derive, no code generation. | 2 |
+| libs | rusty_prost | rusty_prost | Dependency-free Protobuf message layer on rusty_protobuf: a Message trait for hand-written schemas, and the well-known types (Timestamp, Any, Struct, Value, ...) plus google.rpc Status and ErrorInfo. No derive, no code generation. | 4 |
 | libs | rusty_protobuf | rusty_protobuf | Dependency-free Protobuf wire-format runtime: a zero-copy reader that returns errors instead of panicking on hostile input, and a length-fixing writer. No code generation; schemas are hand-written on top. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
 | libs | rusty_rag | rusty_rag | Sovereign AI Retrieval-Augmented Generation (RAG) &amp; Question Answering Engine for Rusty Mill | 0 |
@@ -157,7 +157,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 9 |
 | libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 22 |
 | libs | rusty_tokio | rusty_tokio-macros | Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports. | 1 |
-| libs | rusty_tonic | rusty_tonic | Dependency-free gRPC protocol core: status codes and error details, validated metadata, message framing with a receive limit, grpc-timeout, and request/response header lists. Sans-IO; no async, no HTTP/2, no code generation. | 0 |
+| libs | rusty_tonic | rusty_tonic | Dependency-free gRPC protocol core: status codes and error details, validated metadata, message framing with a receive limit, grpc-timeout, and request/response header lists. Sans-IO; no async, no HTTP/2, no code generation. | 2 |
 | libs | rusty_ttf_parser | rusty-ttf-parser | A #![no_std], allocation-free, zero-dependency TrueType/OpenType reader: cmap, GSUB lookups and PNG colour bitmaps | 1 |
 | libs | rusty_vulkan | rusty_vulkan | A #![no_std] + alloc sovereign raw Vulkan / Metal hardware command buffer and GPU surface layer | 1 |
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) | 1 |
