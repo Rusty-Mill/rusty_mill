@@ -142,6 +142,7 @@ jobs:
           python -I -m unittest discover -s crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot -p 'test_verify_path.py' -v
           if ($LASTEXITCODE -ne 0) { throw "Python verifier regressions failed" }
           ./crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot/test-run-batch.ps1
+          ./crates/apps/rocket_league/rusty_bullet/tools/rb_tape_bot/test-preflight.ps1
       - name: Real monorepo ScoreOnly with matching recorded fixture (no game)
         shell: pwsh
         env:

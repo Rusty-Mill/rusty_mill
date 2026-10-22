@@ -109,6 +109,16 @@ frames, largest gap, start-frame error, repeatable). Captures are
 `<scenario>_run<k>.jsonl` next to it; core's log is `core.log` there if the
 runner had to start core. About five minutes for all eleven twice.
 
+Before the game launches, `preflight.ps1` checks that the installed capture
+plugin was built for the installed BakkesMod (version, `pluginsdk.lib` hash and
+plugin source hash, stamped beside the DLL) and rebuilds and reinstalls it when
+not, keeping the old DLL as `.bm<version>.dll.bak`. `-NoPreflight` skips it;
+`preflight.ps1 -Check` reports without changing anything. A running game holds the
+DLL, so a hand run refuses until you close it or pass `-CloseGame`; `run_batch.ps1`
+passes it, since core relaunches the game anyway. It also warns when
+Rocket League was updated after RLBot core or BakkesMod. BakkesMod's own update
+prompt still needs a click; accept it and rerun.
+
 What `rb_run_tapes` does for each scenario: starts `RLBotServer.exe` if core
 is not listening; if the capture plugin's heartbeat is missing, starts a
 warm-up freeplay match so core launches Rocket League (Epic) and the plugin
