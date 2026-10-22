@@ -101,8 +101,6 @@
 //! perfectly until it meets a server that asks for a different group, and then
 //! fails with a decrypt error that looks like anything but a transcript bug.
 
-use ring::rand::{SecureRandom, SystemRandom};
-
 use super::client12::{CipherSuite12, MAX_HANDSHAKE_BUFFER};
 use super::handshake::{
     certificate_verify_content, complete_prefix, encode_alpn_offer, extension, find, messages,
@@ -1339,9 +1337,7 @@ impl<'a> ClientHandshake<'a> {
 
 pub(super) fn random_bytes(len: usize) -> Result<Vec<u8>> {
     let mut out = vec![0u8; len];
-    SystemRandom::new()
-        .fill(&mut out)
-        .map_err(|_| ClientError::Random)?;
+    super::crypto::fill_random(&mut out).map_err(|_| ClientError::Random)?;
     Ok(out)
 }
 

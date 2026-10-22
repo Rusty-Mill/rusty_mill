@@ -42,8 +42,7 @@
 
 use core::fmt;
 
-use ring::agreement;
-use ring::rand::SystemRandom;
+use super::crypto::{EphemeralKey, KxAlgorithm};
 
 /// Why a key exchange did not produce a secret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,11 +111,11 @@ impl NamedGroup {
         }
     }
 
-    fn ring_algorithm(self) -> &'static agreement::Algorithm {
+    const fn algorithm(self) -> KxAlgorithm {
         match self {
-            Self::SecP256R1 => &agreement::ECDH_P256,
-            Self::SecP384R1 => &agreement::ECDH_P384,
-            Self::X25519 => &agreement::X25519,
+            Self::SecP256R1 => KxAlgorithm::P256,
+            Self::SecP384R1 => KxAlgorithm::P384,
+            Self::X25519 => KxAlgorithm::X25519,
         }
     }
 }
@@ -128,21 +127,15 @@ impl NamedGroup {
 /// on why one use is a type-level property here rather than a convention.
 pub struct KeyExchange {
     group: NamedGroup,
-    private: agreement::EphemeralPrivateKey,
+    private: EphemeralKey,
     public: Vec<u8>,
 }
 
 impl KeyExchange {
     /// Generate a fresh ephemeral key for `group`.
     pub fn generate(group: NamedGroup) -> Result<Self, KxError> {
-        let rng = SystemRandom::new();
-        let private = agreement::EphemeralPrivateKey::generate(group.ring_algorithm(), &rng)
-            .map_err(|_| KxError::Generation)?;
-        let public = private
-            .compute_public_key()
-            .map_err(|_| KxError::Generation)?
-            .as_ref()
-            .to_vec();
+        let private = EphemeralKey::generate(group.algorithm()).map_err(|_| KxError::Generation)?;
+        let public = private.public_key().map_err(|_| KxError::Generation)?;
 
         Ok(Self {
             group,
@@ -186,8 +179,9 @@ impl KeyExchange {
         peer_public_key: &[u8],
         f: impl FnOnce(&[u8]) -> T,
     ) -> Result<T, KxError> {
-        let peer = agreement::UnparsedPublicKey::new(self.group.ring_algorithm(), peer_public_key);
-        agreement::agree_ephemeral(self.private, &peer, f).map_err(|_| KxError::BadPeerKey)
+        self.private
+            .agree(peer_public_key, f)
+            .map_err(|_| KxError::BadPeerKey)
     }
 }
 

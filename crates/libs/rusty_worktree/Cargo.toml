@@ -1,0 +1,23 @@
+[package]
+name = "rusty_worktree"
+version = "0.1.0"
+edition = "2021"
+description = "Git worktrees that share one repository's object store, driven through the git CLI with hooks off and the git directory always named explicitly"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+# None: std and the git CLI.
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

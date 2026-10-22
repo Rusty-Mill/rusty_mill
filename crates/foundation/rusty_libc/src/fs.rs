@@ -341,6 +341,31 @@ pub fn mkdir(path: &CStr, mode: u32) -> Result<(), Errno> {
     mkdirat(AT_FDCWD, path, mode)
 }
 
+/// Create the named pipe `path` relative to `dirfd` with permission bits
+/// `mode` (masked by the process umask). Fails with `EEXIST` if `path`
+/// exists, so a caller never adopts a file someone else planted.
+pub fn mkfifoat(dirfd: i32, path: &CStr, mode: u32) -> Result<(), Errno> {
+    // SAFETY: `path` is a valid C string the kernel only reads; a FIFO takes
+    // no device number.
+    let ret = unsafe {
+        syscall4(
+            nr::MKNODAT,
+            dirfd as usize,
+            path.as_ptr() as usize,
+            (u32::from(S_IFIFO) | (mode & 0o7777)) as usize,
+            0,
+        )
+    };
+    from_ret(ret).map(|_| ())
+}
+
+/// Create the named pipe `path` (relative to the cwd). Shorthand for
+/// [`mkfifoat`].
+#[inline]
+pub fn mkfifo(path: &CStr, mode: u32) -> Result<(), Errno> {
+    mkfifoat(AT_FDCWD, path, mode)
+}
+
 /// [`renameat2`] flag: fail with `EEXIST` if `new` already exists.
 pub const RENAME_NOREPLACE: u32 = 1;
 /// [`renameat2`] flag: atomically exchange `old` and `new` (both must exist).
@@ -708,6 +733,17 @@ mod tests {
             std::process::id()
         );
         std::ffi::CString::new(p).unwrap()
+    }
+
+    #[test]
+    fn mkfifo_makes_a_named_pipe_and_refuses_an_existing_path() {
+        let path = temp_path("fifo");
+        let _ = unlink(&path);
+        mkfifo(&path, 0o600).expect("mkfifo");
+        let st = lstat(&path).expect("lstat");
+        assert_eq!(st.stx_mode & S_IFMT, S_IFIFO);
+        assert_eq!(mkfifo(&path, 0o600), Err(Errno::EEXIST));
+        unlink(&path).expect("unlink");
     }
 
     #[test]

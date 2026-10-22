@@ -49,7 +49,7 @@
 
 use core::fmt;
 
-use ring::aead;
+use super::crypto::AeadKey;
 
 use super::record::{
     Aead, ContentType, Opened, RecordError, Sequence, HEADER_LEN, MAX_FRAGMENT_LEN, TAG_LEN,
@@ -93,18 +93,10 @@ pub const fn overhead(alg: Aead) -> usize {
     }
 }
 
-const fn ring_algorithm(alg: Aead) -> &'static aead::Algorithm {
-    match alg {
-        Aead::Aes128Gcm => &aead::AES_128_GCM,
-        Aead::Aes256Gcm => &aead::AES_256_GCM,
-        Aead::ChaCha20Poly1305 => &aead::CHACHA20_POLY1305,
-    }
-}
-
 /// The key and fixed nonce material for one direction of one connection.
 struct DirectionKey {
     alg: Aead,
-    key: aead::LessSafeKey,
+    key: AeadKey,
     /// Salt (first four bytes) for AES-GCM, the full IV for ChaCha20-Poly1305.
     fixed: [u8; CHACHA_IV_LEN],
 }
@@ -125,27 +117,21 @@ impl DirectionKey {
         }
 
         // The key length is checked above, which is the only way
-        // `UnboundKey::new` can fail.
-        let unbound = aead::UnboundKey::new(ring_algorithm(alg), key).map_err(|_| {
-            RecordError::KeyLength {
-                expected: alg.key_len(),
-                actual: key.len(),
-            }
+        // `AeadKey::new` can fail.
+        let key = AeadKey::new(alg.algorithm(), key).map_err(|_| RecordError::KeyLength {
+            expected: alg.key_len(),
+            actual: key.len(),
         })?;
 
         let mut fixed = [0u8; CHACHA_IV_LEN];
         fixed[..fixed_iv.len()].copy_from_slice(fixed_iv);
 
-        Ok(Self {
-            alg,
-            key: aead::LessSafeKey::new(unbound),
-            fixed,
-        })
+        Ok(Self { alg, key, fixed })
     }
 
     /// The nonce for sealing record number `seq`, and the explicit part to put
     /// on the wire (empty for ChaCha20-Poly1305).
-    fn seal_nonce(&self, seq: u64) -> (aead::Nonce, Vec<u8>) {
+    fn seal_nonce(&self, seq: u64) -> ([u8; CHACHA_IV_LEN], Vec<u8>) {
         match self.alg {
             Aead::Aes128Gcm | Aead::Aes256Gcm => {
                 let explicit = seq.to_be_bytes();
@@ -156,23 +142,23 @@ impl DirectionKey {
     }
 
     /// `salt ‖ explicit`, RFC 5288 §3.
-    fn gcm_nonce(&self, explicit: &[u8]) -> aead::Nonce {
+    fn gcm_nonce(&self, explicit: &[u8]) -> [u8; CHACHA_IV_LEN] {
         let mut nonce = [0u8; CHACHA_IV_LEN];
         nonce[..GCM_SALT_LEN].copy_from_slice(&self.fixed[..GCM_SALT_LEN]);
         nonce[GCM_SALT_LEN..].copy_from_slice(explicit);
         // Unique per key when sealing because `explicit` is the sequence
         // number, which never repeats. When opening it is the peer's value and
         // uniqueness is the peer's obligation; opening does not depend on it.
-        aead::Nonce::assume_unique_for_key(nonce)
+        nonce
     }
 
     /// `iv ⊕ (0⁴ ‖ seq)`, RFC 7905 §2.
-    fn chacha_nonce(&self, seq: u64) -> aead::Nonce {
+    fn chacha_nonce(&self, seq: u64) -> [u8; CHACHA_IV_LEN] {
         let mut nonce = self.fixed;
         for (out, byte) in nonce[CHACHA_IV_LEN - 8..].iter_mut().zip(seq.to_be_bytes()) {
             *out ^= byte;
         }
-        aead::Nonce::assume_unique_for_key(nonce)
+        nonce
     }
 }
 
@@ -289,7 +275,7 @@ impl Sealer {
         let mut body = fragment.to_vec();
         self.key
             .key
-            .seal_in_place_append_tag(nonce, aead::Aad::from(aad), &mut body)
+            .seal_in_place_append_tag(nonce, &aad, &mut body)
             .map_err(|_| RecordError::Encrypt)?;
 
         let wire_len = explicit.len() + body.len();
@@ -410,7 +396,7 @@ impl Opener {
         let opened_len = self
             .key
             .key
-            .open_in_place(nonce, aead::Aad::from(aad), &mut buf)
+            .open_in_place(nonce, &aad, &mut buf)
             .map_err(|_| RecordError::Decrypt)?
             .len();
         buf.truncate(opened_len);

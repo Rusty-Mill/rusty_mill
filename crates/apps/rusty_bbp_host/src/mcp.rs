@@ -541,9 +541,12 @@ impl Server {
 
     /// Serve stdin to stdout until EOF.
     pub fn serve(&mut self) -> io::Result<()> {
-        let stdin = io::stdin();
-        let mut stdout = io::stdout().lock();
-        for line in stdin.lock().lines() {
+        self.serve_on(io::stdin().lock(), io::stdout().lock())
+    }
+
+    /// Serve newline-delimited requests from `input` to `output` until EOF.
+    pub fn serve_on(&mut self, input: impl BufRead, mut stdout: impl Write) -> io::Result<()> {
+        for line in input.lines() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
