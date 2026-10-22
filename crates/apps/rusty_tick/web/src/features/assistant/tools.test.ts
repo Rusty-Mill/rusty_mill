@@ -20,6 +20,7 @@ function context(tasks: Task[]): { c: ToolContext; done: string[] } {
     reopen: async (id) => void done.push(`reopen ${id}`),
     trash: async (id) => void done.push(`trash ${id}`),
     update: async (id, patch) => void done.push(`update ${id} ${JSON.stringify(patch)}`),
+    move: async (id, listId) => void done.push(`move ${id} ${listId}`),
   }
   return { c, done }
 }
@@ -139,7 +140,7 @@ describe('update_task', () => {
     const { c, done } = context(tasks)
     expect(await run(c, 'update_task', { query: 'milk', due: 'soonish' })).toEqual({ error: expect.stringContaining("can't read “soonish”") })
     expect(await run(c, 'update_task', { query: 'milk', title: '  ' })).toEqual({ error: 'Say the new title.' })
-    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day or a priority.' })
+    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority or a list.' })
     expect(await run(c, 'update_task', { query: 'buy', due: 'today' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
     expect(await run(c, 'update_task', { query: ' ', due: 'today' })).toEqual({ error: 'Say which task.' })
     expect(done).toEqual([])
@@ -158,5 +159,16 @@ describe('update_task', () => {
     expect(await run(c, 'update_task', { query: 'milk', priority: 'urgent' })).toEqual({ error: 'Priority is high, medium, low or none.' })
     expect(await run(c, 'update_task', { query: 'buy', priority: 'low' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
     expect(done).toEqual(['update m {"priority":5}', 'update o {"priority":0}'])
+  })
+
+  it('moves the one task named to the one list named, and changes nothing otherwise', async () => {
+    const { c, done } = context(tasks)
+    expect(await run(c, 'update_task', { query: 'milk', list: 'work' })).toEqual({ title: 'Buy milk', list: 'Work' })
+    expect(await run(c, 'update_task', { query: 'oats', list: 'inbox' })).toEqual({ title: 'Buy oats', list: 'Inbox' })
+    expect(await run(c, 'update_task', { query: 'milk', list: 'Old' })).toEqual({ error: 'No list matches “Old”.' }) // archived
+    expect(await run(c, 'update_task', { query: 'milk', list: 'o' })).toEqual({ error: expect.stringMatching(/^Several lists match “o”: Inbox, Work/) })
+    expect(await run(c, 'update_task', { query: 'milk', list: ' ' })).toEqual({ error: 'Say which list.' })
+    expect(await run(c, 'update_task', { query: 'buy', list: 'Work' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
+    expect(done).toEqual(['move m w', 'move o inbox'])
   })
 })

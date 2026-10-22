@@ -119,6 +119,7 @@ function useTaskTools(): void {
     reopen: (id) => actions.updateTask(id, { status: 'open' }),
     trash: actions.trashTask,
     update: actions.updateTask,
+    move: actions.moveTask,
   })
   useAction(add!)
   useAction(search!)

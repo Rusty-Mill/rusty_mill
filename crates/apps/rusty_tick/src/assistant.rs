@@ -45,8 +45,8 @@ pub enum Reply {
 
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
-“rename buy milk to buy oat milk”, “move buy milk to friday”, “make buy milk high priority” \
-or “lists”.";
+“rename buy milk to buy oat milk”, “move buy milk to friday”, “make buy milk high priority”, \
+“move buy milk to list Work” or “lists”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -261,6 +261,11 @@ fn edit(text: &str, lower: &str) -> Option<Reply> {
             .find(|p| lower.starts_with(*p))
             .map(|p| (*p, *field))
     })?;
+    if field == "due" {
+        if let Some(reply) = list_move(text, lower, prefix) {
+            return Some(reply);
+        }
+    }
     let (query, value) = match cut(&text[prefix.len()..], field) {
         Cut::At(query, value) if !query.is_empty() && !value.is_empty() => (query, value),
         Cut::Ambiguous => {
@@ -287,6 +292,55 @@ fn edit(text: &str, lower: &str) -> Option<Reply> {
         });
     }
     Some(update_call(query, field, value))
+}
+
+const LIST_HELP: &str =
+    "Move which task to which list? Try “move buy milk to list Work” or “move buy milk to the Work list”.";
+
+/// "move X to list Y", "move X to the Y list" or "move X to (the) inbox": a move
+/// between lists, told from a move to a day by its list words (a day never ends
+/// in "list"). With both list forms present, the last one is the cut, so a
+/// title may hold "to list" too.
+fn list_move(text: &str, lower: &str, prefix: &str) -> Option<Reply> {
+    let named = lower
+        .rfind(" to list ")
+        .map(|at| (at, at + " to list ".len(), text.len()));
+    let the_list = lower
+        .ends_with(" list")
+        .then(|| lower.rfind(" to the "))
+        .flatten()
+        .map(|at| (at, at + " to the ".len(), text.len() - " list".len()));
+    let (at, start, end) = match (named, the_list) {
+        (Some(a), Some(b)) => {
+            if a.0 > b.0 {
+                a
+            } else {
+                b
+            }
+        }
+        (Some(cut), None) | (None, Some(cut)) => cut,
+        (None, None) if lower.ends_with(" to list") => return Some(Reply::Text(LIST_HELP.into())),
+        (None, None) => {
+            let inbox = [" to inbox", " to the inbox"]
+                .iter()
+                .find(|w| lower.ends_with(*w))?;
+            let at = lower.len() - inbox.len();
+            return Some(list_call(
+                text.get(prefix.len()..at).map_or("", unquote),
+                "Inbox",
+            ));
+        }
+    };
+    let query = text.get(prefix.len()..at).map_or("", unquote);
+    let list = text.get(start..end).map_or("", unquote);
+    Some(list_call(query, list))
+}
+
+fn list_call(query: &str, list: &str) -> Reply {
+    if query.is_empty() || list.is_empty() {
+        return Reply::Text(LIST_HELP.into());
+    }
+    update_call(query, "list", list)
 }
 
 const PRIORITY_HELP: &str = "Which task, and what priority? Try “make buy milk high priority”.";
@@ -359,10 +413,13 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
         REOPEN_TASK => format!("Reopened “{title}”."),
         DELETE_TASK => format!("Moved “{title}” to the Trash."),
         UPDATE_TASK => match (
-            parsed.get("due").and_then(Value::as_str),
+            parsed
+                .get("due")
+                .or_else(|| parsed.get("list"))
+                .and_then(Value::as_str),
             parsed.get("priority").and_then(Value::as_str),
         ) {
-            (Some(due), _) => format!("Moved “{title}” to {due}."),
+            (Some(to), _) => format!("Moved “{title}” to {to}."),
             (_, Some("none")) => format!("Cleared the priority of “{title}”."),
             (_, Some(level)) => format!("Gave “{title}” {level} priority."),
             _ => format!("Renamed it “{title}”."),
@@ -580,6 +637,54 @@ mod tests {
                 "{unclosed}"
             );
         }
+    }
+
+    #[test]
+    fn turns_list_moves_into_update_task() {
+        assert_eq!(
+            decide(&input("move buy milk to list Work")),
+            call(UPDATE_TASK, json!({"query": "buy milk", "list": "Work"}))
+        );
+        assert_eq!(
+            decide(&input("Move add to list groceries to the Shopping list")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "add to list groceries", "list": "Shopping"})
+            )
+        );
+        assert_eq!(
+            decide(&input("move talk to mum to list “Things to do”")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "talk to mum", "list": "Things to do"})
+            )
+        );
+        assert_eq!(
+            decide(&input("move buy milk to the inbox")),
+            call(UPDATE_TASK, json!({"query": "buy milk", "list": "Inbox"}))
+        );
+        // Still a day: it does not end in a list.
+        assert_eq!(
+            decide(&input("move buy milk to friday")),
+            call(UPDATE_TASK, json!({"query": "buy milk", "due": "friday"}))
+        );
+        for missing in [
+            "move to list Work",
+            "move buy milk to list ",
+            "move buy milk to the list",
+        ] {
+            assert!(
+                matches!(decide(&input(missing)), Reply::Text(t) if t.starts_with("Move which task to which list")),
+                "{missing}"
+            );
+        }
+        assert_eq!(
+            answered(
+                "move milk to list Work",
+                r#"{"title":"Buy milk","list":"Work"}"#
+            ),
+            Reply::Text("Moved “Buy milk” to Work.".into())
+        );
     }
 
     #[test]

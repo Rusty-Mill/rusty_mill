@@ -5,7 +5,7 @@
  * agent turns into a reply; a task named ambiguously is not guessed at.
  */
 import type { ActionDefinition } from '@rusty-mill/agui-core'
-import type { NewTask, Priority, Task, TaskPatch } from '@/api/types'
+import type { List, NewTask, Priority, Task, TaskPatch } from '@/api/types'
 import { searchTasks } from '@/features/search/search'
 import { tasksForView, type Entities } from '@/features/tasks/organize'
 import { addDays, startOfDay } from '@/lib/date'
@@ -26,6 +26,8 @@ export interface ToolContext {
   reopen(id: string): Promise<void>
   trash(id: string): Promise<void>
   update(id: string, patch: TaskPatch): Promise<void>
+  /** Move a task (and its subtasks) to another list. */
+  move(id: string, listId: string): Promise<void>
 }
 
 const norm = (text: string): string => text.trim().toLowerCase()
@@ -99,18 +101,30 @@ export function moveTo(t: Task, day: number | null): TaskPatch {
 
 const dayLabel = (ms: number): string => new Date(ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
 
+/** The one live list `name` names: its exact name, else the only one containing it. */
+export function pickList(lists: readonly List[], name: string): { list: List } | { error: string } {
+  const q = norm(name)
+  if (q === '') return { error: 'Say which list.' }
+  const live = lists.filter((l) => !l.archived)
+  const exact = live.filter((l) => norm(l.name) === q)
+  const found = exact.length > 0 ? exact : live.filter((l) => norm(l.name).includes(q))
+  if (found.length === 1) return { list: found[0]! }
+  if (found.length === 0) return { error: `No list matches “${name.trim()}”.` }
+  return { error: `Several lists match “${name.trim()}”: ${found.slice(0, 5).map((l) => l.name).join(', ')}. Say a little more of the one you mean.` }
+}
+
 /** Priority words, as the agent sends them, and the priority each sets. */
 const PRIORITY: Record<string, Priority> = { high: 5, medium: 3, med: 3, low: 1, none: 0, no: 0 }
 const PRIORITY_NAME: Record<Priority, string> = { 5: 'high', 3: 'medium', 1: 'low', 0: 'none' }
 
 /**
- * Rename the task `query` names, move it to the day `due` names, or set its
- * `priority`; every argument is checked before the task is picked, so a bad
- * one changes nothing.
+ * Rename the task `query` names, move it to the day `due` names or the
+ * `list` named, or set its `priority`; every argument is checked before the
+ * task is picked, so a bad one changes nothing.
  */
 async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: string]: string }): Promise<Answer> {
-  const { query = '', title, due, priority } = args
-  if (title === undefined && due === undefined && priority === undefined) return { error: 'Say what to change: a new title, a day or a priority.' }
+  const { query = '', title, due, priority, list } = args
+  if ([title, due, priority, list].every((v) => v === undefined)) return { error: 'Say what to change: a new title, a day, a priority or a list.' }
   if (title !== undefined && title.trim() === '') return { error: 'Say the new title.' }
   const day = due === undefined ? undefined : readDay(due, c.now)
   if (due !== undefined && day === undefined) {
@@ -118,12 +132,18 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   }
   const level = priority === undefined ? undefined : PRIORITY[norm(priority)]
   if (priority !== undefined && level === undefined) return { error: 'Priority is high, medium, low or none.' }
+  const target = list === undefined ? undefined : pickList(c.entities.lists, list)
+  if (target !== undefined && 'error' in target) return target
   const pick = pickTask(tasks, query, 'task')
   if (!('task' in pick)) return pick
   const { task } = pick
   if (title !== undefined) {
     await c.update(task.id, { title: title.trim() })
     return { title: title.trim() }
+  }
+  if (target !== undefined) {
+    await c.move(task.id, target.list.id)
+    return { title: task.title, list: target.list.name }
   }
   if (level !== undefined) {
     await c.update(task.id, { priority: level })
@@ -187,7 +207,7 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
     },
     {
       name: 'update_task',
-      description: 'Rename the one task this names, move it to another day (today, tomorrow, friday, in 3 days, next week, 2026-11-05, or none), or set its priority.',
+      description: 'Rename the one task this names, move it to another day (today, tomorrow, friday, in 3 days, next week, 2026-11-05, or none), set its priority, or move it to another list.',
       parameters: {
         type: 'object',
         properties: {
@@ -195,6 +215,7 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
           title: { type: 'string', description: 'The new title' },
           due: { type: 'string', description: 'The new day, as said' },
           priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
+          list: { type: 'string', description: 'The list to move it to, by name' },
         },
         required: ['query'],
       },
