@@ -1329,6 +1329,12 @@ jobs:
           fi
       - name: cargo clippy -p rusty_tls --features native-crypto
         run: cargo clippy -p rusty_tls --all-targets --features native-crypto -- -D warnings
+      # With the native cfg the server modules do not exist, so a doc link to
+      # one breaks only here; the job above cannot see it.
+      - name: cargo doc -p rusty_tls --all-features (native cfg)
+        env:
+          RUSTDOCFLAGS: --cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto -D warnings
+        run: cargo doc -p rusty_tls --all-features --no-deps
       # Includes the seam differential (`handrolled::crypto::native::tests`):
       # the same inputs through both backends, byte-identical outputs.
       - name: cargo test -p rusty_tls --features native-crypto

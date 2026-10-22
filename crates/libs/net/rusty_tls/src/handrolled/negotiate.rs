@@ -2,7 +2,7 @@
 //! 4b-v.
 //!
 //! The two versions have separate state machines ([`super::client`],
-//! [`super::client12`], [`super::server`], [`super::server12`]) because they
+//! [`super::client12`], `super::server`, `super::server12`) because they
 //! share almost nothing past the record header. This module is the seam between
 //! them, and it is small on purpose: it chooses, and then it steps aside.
 //!
@@ -32,7 +32,7 @@
 //!
 //! - **A server that speaks both** and answers a client in 1.2 writes
 //!   `DOWNGRD\x01` in the last eight octets of `ServerHello.random`
-//!   ([`ServerHandshake12`]'s `downgraded` constructor, used here and nowhere
+//!   (`ServerHandshake12`'s `downgraded` constructor, used here and nowhere
 //!   else).
 //! - **A client that offered both** and is answered in 1.2 refuses a
 //!   `ServerHello` that carries it ([`ClientError::DowngradeDetected`]). The

@@ -216,16 +216,30 @@ impl EphemeralKey {
         match &self {
             Self::X25519(scalar) => {
                 let peer: &[u8; x25519::KEY_LEN] = peer.try_into().map_err(|_| CryptoError)?;
-                let mut shared = x25519::agree(scalar, peer).map_err(|_| CryptoError)?;
-                let result = f(&shared);
-                wipe(&mut shared);
-                Ok(result)
+                let shared = X25519Secret(x25519::agree(scalar, peer).map_err(|_| CryptoError)?);
+                Ok(f(&shared.0))
             }
             Self::Nist(private) => {
                 let shared = private.agree(peer).map_err(|_| CryptoError)?;
                 Ok(f(shared.as_bytes()))
             }
         }
+    }
+}
+
+/// A raw X25519 shared secret, wiped on drop.
+///
+/// A guard rather than a `wipe` after the call, because `f` is the caller's
+/// closure and may unwind: an explicit wipe after it would then be skipped,
+/// leaving the secret on the stack. The NIST path gets the same guarantee
+/// from `rusty_pk`'s `SharedSecret`.
+struct X25519Secret([u8; x25519::KEY_LEN]);
+
+impl Drop for X25519Secret {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+        #[cfg(test)]
+        tests::count_x25519_wipe();
     }
 }
 
@@ -571,6 +585,37 @@ mod tests {
                 assert!(ring::verify(verifier, &key, m, s).is_err(), "{verifier:?}");
             }
         }
+    }
+
+    std::thread_local! {
+        static X25519_WIPES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
+
+    pub(super) fn count_x25519_wipe() {
+        X25519_WIPES.with(|n| n.set(n.get() + 1));
+    }
+
+    /// The shared secret is wiped when the caller's closure returns, and also
+    /// when it panics, which an explicit wipe after the call would skip.
+    #[test]
+    fn the_x25519_secret_is_wiped_even_if_the_caller_panics() {
+        let peer = ring::EphemeralKey::generate(KxAlgorithm::X25519)
+            .unwrap()
+            .public_key()
+            .unwrap();
+        let wipes = || X25519_WIPES.with(core::cell::Cell::get);
+
+        let before = wipes();
+        let key = EphemeralKey::generate(KxAlgorithm::X25519).unwrap();
+        key.agree(&peer, |_| ()).unwrap();
+        assert_eq!(wipes(), before + 1, "wiped after a normal return");
+
+        let key = EphemeralKey::generate(KxAlgorithm::X25519).unwrap();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            key.agree(&peer, |_| panic!("the caller's closure panics"))
+        }));
+        assert!(unwound.is_err(), "the panic propagated");
+        assert_eq!(wipes(), before + 2, "wiped while unwinding");
     }
 
     #[test]

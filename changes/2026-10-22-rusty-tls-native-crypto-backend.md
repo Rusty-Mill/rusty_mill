@@ -12,17 +12,17 @@ changelog: "`rusty_tls`: the `native-crypto` feature: with `--cfg rusty_tls_nati
 
   The `ring` build is unchanged.
 - **Tests:**
-  - **Seam differential:** 9 tests in `crypto::native::tests` put the same inputs through both backends. Digests, HMACs, AEAD output and key-exchange secrets must be byte-identical, and both backends must refuse the same bad inputs (tampered ciphertext, tag, AAD and nonce; short buffers; wrong key lengths; off-curve, truncated and low-order peer keys; bad signatures).
+  - **Seam differential:** 10 tests in `crypto::native::tests` put the same inputs through both backends. Digests, HMACs, AEAD output and key-exchange secrets must be byte-identical, and both backends must refuse the same bad inputs (tampered ciphertext, tag, AAD and nonce; short buffers; wrong key lengths; off-curve, truncated and low-order peer keys; bad signatures). The tenth checks that the X25519 shared secret is wiped even when the caller's closure panics, through a wipe-on-drop guard; it fails against an explicit wipe after the call.
   - **Whole engine suite on the native backend,** before the server role was compiled out: 61 binaries, 722 passed, 0 failed, 35 ignored, identical to `ring`.
   - **After compiling the server role out:** 11 server or signing suites are marked `// ring-only suite (ADR-0005)`. Client-certificate tests inside the client suites are gated individually. The TLS 1.2 scripted hostile server signs with a test-only `ring` signer on the native backend, so its refusal tests still run there.
 - **CI:** a new `rusty-tls-engine-native` job in `required-gate`. It:
   - asserts there is no direct `ring` dependency;
-  - runs clippy and the tests;
+  - runs clippy, rustdoc with `-D warnings` and the tests;
   - runs OpenSSL interop in the client direction;
   - runs a zero-tests guard that requires every non-ring-only suite to run and every ring-only suite to run nothing;
   - runs the x509-limbo differential.
 - **Known limitations:**
-  - BoGo does not run on the native backend yet, because its shim needs the server role.
+  - BoGo does not run on the native backend yet, because its shim needs the server role. ADR-0005 asks for a native BoGo floor; this is a deferral that needs the owner's agreement, not equivalent coverage.
   - The native build cannot present a client certificate or act as a server.
   - AES-GCM is portable and slow.
   - D5 (AES-GCM's review status) must be settled before this merges (ADR-0005).
