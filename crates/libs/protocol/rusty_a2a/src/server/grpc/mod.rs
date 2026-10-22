@@ -1,8 +1,6 @@
 //! Exposes an `Engine` over gRPC (spec Section
-//! 10), implementing the `A2AService` service generated from the vendored
-//! `spec/a2a.proto` by `build.rs` (via `tonic-prost-build`; requires a
-//! `protoc` binary on `PATH` to build this crate with the `grpc` feature
-//! at all).
+//! 10), implementing the `A2AService` trait of [`crate::pb`] (hand-written from the vendored
+//! `spec/a2a.proto`; building this crate with the `grpc` feature needs no `protoc`).
 //!
 //! Runs as its own [`tonic`] server rather than being merged into the
 //! `axum::Router` the other bindings share - see
@@ -255,13 +253,13 @@ impl A2aService for GrpcService {
     async fn delete_task_push_notification_config(
         &self,
         request: Request<pb::DeleteTaskPushNotificationConfigRequest>,
-    ) -> Result<Response<()>, Status> {
+    ) -> Result<Response<pb::Empty>, Status> {
         let auth = self.authenticate(&request).await?;
         let req = pb_delete_push_notification_config_request_to_ours(request.into_inner());
         self.engine
             .delete_push_notification_config(req, auth.as_ref())
             .await
             .map_err(a2a_error_to_status)?;
-        Ok(Response::new(()))
+        Ok(Response::new(pb::Empty))
     }
 }
