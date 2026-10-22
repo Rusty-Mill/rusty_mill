@@ -285,16 +285,27 @@ describe('readImport: .ics', () => {
     expect((await applyImport(api, readImport(cal(master, movedA, movedB), 'cal.ics'))).tasks).toBe(0)
   })
 
-  it('does not guess between look-alike tasks whose due dates were both edited', async () => {
+  it('matches look-alike tasks whose due dates were all edited, one task each, keeping edits', async () => {
     const api = new MemoryAdapter()
     const b829 = { uid: 'r1', title: 'Standup', dueMs: Date.UTC(2026, 9, 20, 9) }
     const [, aId, bId] = await written829(api, [m829, a829, b829])
     await api.updateTask(aId!, { dueMs: Date.UTC(2026, 9, 14, 9) })
     await api.updateTask(bId!, { dueMs: Date.UTC(2026, 9, 21, 9) })
-    expect(await applyImport(api, readImport(cal(master, movedA, movedB), 'cal.ics'))).toEqual({ tasks: 2, lists: 0, existing: 0, resumed: 1 })
+    expect(await applyImport(api, readImport(cal(master, movedA, movedB), 'cal.ics'))).toEqual({ tasks: 0, lists: 0, existing: 2, resumed: 1 })
     const tasks = (await api.snapshot()).tasks
+    expect(tasks).toHaveLength(3)
     expect(tasks.find((t) => t.id === aId)!.dueMs).toBe(Date.UTC(2026, 9, 14, 9))
     expect(tasks.find((t) => t.id === bId)!.dueMs).toBe(Date.UTC(2026, 9, 21, 9))
+  })
+
+  it('does not guess which look-alike instance is new when there are more of them than edited tasks', async () => {
+    const api = new MemoryAdapter()
+    const b829 = { uid: 'r1', title: 'Standup', dueMs: Date.UTC(2026, 9, 20, 9) }
+    const [, aId, bId] = await written829(api, [m829, a829, b829])
+    await api.updateTask(aId!, { dueMs: Date.UTC(2026, 9, 14, 9) })
+    await api.updateTask(bId!, { dueMs: Date.UTC(2026, 9, 21, 9) })
+    const movedC = event('UID:r1', 'RECURRENCE-ID:20261026T090000Z', 'SUMMARY:Standup', 'DTSTART:20261027T090000Z')
+    expect(await applyImport(api, readImport(cal(master, movedA, movedB, movedC), 'cal.ics'))).toEqual({ tasks: 3, lists: 0, existing: 0, resumed: 1 })
   })
 
   it('matches tasks #829 imported whose titles and due dates were both edited since', async () => {
@@ -304,6 +315,14 @@ describe('readImport: .ics', () => {
     await api.updateTask(aId!, { title: 'Standup (moved)', dueMs: Date.UTC(2026, 9, 14, 9) })
     expect(await applyImport(api, readImport(cal(movedA, master), 'cal.ics'))).toEqual({ tasks: 0, lists: 0, existing: 2, resumed: 0 })
     expect((await api.snapshot()).tasks.map((t) => t.title).sort()).toEqual(['Standup (moved)', 'Team standup'])
+  })
+
+  it('matches a task #829 imported whose repeat, title and due date were all edited since', async () => {
+    const api = new MemoryAdapter()
+    const [mId] = await written829(api, [m829, a829])
+    await api.updateTask(mId!, { title: 'One-off sync', repeatFlag: '', dueMs: Date.UTC(2026, 9, 6, 9) })
+    expect(await applyImport(api, readImport(cal(master, movedA), 'cal.ics'))).toEqual({ tasks: 0, lists: 0, existing: 2, resumed: 0 })
+    expect((await api.snapshot()).tasks.find((t) => t.id === mId)).toMatchObject({ title: 'One-off sync', repeatFlag: '' })
   })
 
   it('does not take an untouched task for a new instance when the one it was is gone from the file', async () => {
