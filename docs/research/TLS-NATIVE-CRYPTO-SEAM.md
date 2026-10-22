@@ -61,8 +61,8 @@ at `6ba272c8`):
 
 | Check | How |
 | --- | --- |
-| Whole engine suite under both backends | A second variant of the `rusty-tls-engine` CI job (`.github/workflows/ci.yml`) with the native cfg. Its existing tests against a real `rustls` peer then double as interop with a `ring`-backed peer. |
-| OpenSSL interop and BoGo | Same job variant; the BoGo floor (830) applies unchanged. |
+| The client-side engine suite under the native backend | A second variant of the `rusty-tls-engine` CI job (`.github/workflows/ci.yml`) with the native cfg. Its client tests against a real `rustls` server then double as interop with a `ring`-backed peer. Server and mTLS suites cannot run there, because section 3 compiles them out, so the variant needs its own list of the tests it supports and its own zero-tests guard. It is **not** equivalent coverage: the existing `ring`-backend job stays unchanged and keeps running everything. |
+| OpenSSL interop and BoGo | Same job variant, client direction only. BoGo's server cases do not apply, so the variant needs its own floor, set from its first run with every newly disabled case given a reason; the existing floor (830) stays on the `ring` job. |
 | Seam differential | Same keys and inputs through both backends: byte-identical records, secrets and Finished values. RFC 8448 known answers under both. |
 | Constant time | The existing `crypto-constant-time` job covers the primitives; the seam adds no secret-dependent branch or index, checked in review. |
 | Plan section 11 table | Re-checked at the integration commit. |
