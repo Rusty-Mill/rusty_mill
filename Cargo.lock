@@ -12948,6 +12948,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_stream"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "rusty_stream-macros",
+ "rusty_tokio",
+]
+
+[[package]]
+name = "rusty_stream-macros"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_sync"
 version = "0.1.0"
 dependencies = [

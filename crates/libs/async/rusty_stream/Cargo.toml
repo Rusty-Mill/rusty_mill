@@ -1,0 +1,26 @@
+[package]
+name = "rusty_stream"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "The workspace's async Stream trait, its combinators and the stream!/try_stream! macros -- the in-house replacement for futures, futures-util, futures-core and async-stream."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+rusty_stream-macros = { path = "rusty_stream-macros", version = "0.1.0" }
+# Optional (see the `futures-core` feature below): the trait that axum SSE,
+# reqwest's `bytes_stream` and tonic speak. Interop only, the same posture
+# `rusty_tokio` takes with `futures-io`: a default build carries no
+# third-party dependency.
+futures-core = { workspace = true, optional = true }
+
+[features]
+# `Compat<S>`: adapts this crate's `Stream` to `futures_core::Stream` and back.
+futures-core = ["dep:futures-core"]
+
+[dev-dependencies]
+rusty_tokio = { workspace = true }
