@@ -1860,3 +1860,20 @@ fn set_once_wait_wakes_every_concurrent_waiter() {
         }
     });
 }
+
+#[test]
+fn channel_endpoints_implement_debug() {
+    let (tx, rx) = rusty_tokio::sync::mpsc::channel::<i32>(1);
+    assert_eq!(format!("{tx:?} {rx:?}"), "Sender { .. } Receiver { .. }");
+    let (tx, rx) = rusty_tokio::sync::mpsc::unbounded_channel::<i32>();
+    assert_eq!(
+        format!("{tx:?} {rx:?}"),
+        "UnboundedSender { .. } UnboundedReceiver { .. }"
+    );
+    let (tx, rx) = rusty_tokio::sync::oneshot::channel::<i32>();
+    assert_eq!(format!("{tx:?} {rx:?}"), "Sender { .. } Receiver { .. }");
+    let (tx, rx) = rusty_tokio::sync::broadcast::channel::<i32>(1);
+    assert_eq!(format!("{tx:?} {rx:?}"), "Sender { .. } Receiver { .. }");
+    let (tx, rx) = rusty_tokio::sync::watch::channel(0);
+    assert_eq!(format!("{tx:?} {rx:?}"), "Sender { .. } Receiver { .. }");
+}

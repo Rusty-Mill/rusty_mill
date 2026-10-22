@@ -21,6 +21,7 @@
 //! would then wait for a second, distinct change instead of noticing
 //! the one it just missed -- a real lost wakeup, not a hypothetical one.
 
+use std::fmt;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::task::{Poll, Waker};
@@ -128,6 +129,18 @@ impl<T> Drop for Sender<T> {
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
     seen_version: u64,
+}
+
+impl<T> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Receiver").finish_non_exhaustive()
+    }
 }
 
 impl<T> Receiver<T> {

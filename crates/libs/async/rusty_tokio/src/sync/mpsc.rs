@@ -93,6 +93,18 @@ pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
 }
 
+impl<T> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Receiver").finish_non_exhaustive()
+    }
+}
+
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "mpsc channel capacity must be positive");
     let shared = Arc::new(Shared {
@@ -625,6 +637,18 @@ pub struct UnboundedSender<T> {
 
 pub struct UnboundedReceiver<T> {
     shared: Arc<UnboundedShared<T>>,
+}
+
+impl<T> fmt::Debug for UnboundedSender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnboundedSender").finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Debug for UnboundedReceiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnboundedReceiver").finish_non_exhaustive()
+    }
 }
 
 pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {

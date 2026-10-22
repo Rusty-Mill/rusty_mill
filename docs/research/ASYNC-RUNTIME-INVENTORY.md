@@ -83,6 +83,7 @@ come from the Gaps column of section 4.
 | G9 | Third-party dependencies that need a tokio runtime: `reqwest` 10, `axum` 9, `aisdk` 4, `sqlx` 4, `hyper` 3, `tower`/`tower-http`/`hyper-util`/`tonic` 2 each, `tokio-postgres`, `h2`, `redis`, `aws-sdk-s3`, `meilisearch-sdk` | `Cargo.lock`, direct normal dependencies only | 27 | no: these crates keep `tokio` until the framework is replaced (#687), following the precedent of D4 in `RUSTY-MCP-SOVEREIGNTY.md`. Two of them are softer, see below |
 | G10 | `tokio_test::block_on` appears only in doctests (7 `rusty_adk` crates) | `adk-*/src/lib.rs` doc comments | 7 | yes: `rusty_tokio::Runtime::new()?.block_on` |
 | G11 | Public API exposes `tokio` or `futures` types, so dependents migrate together: `rusty_lsp`, `rusty_request`, `rusty-db-core`, `rusty_term`, `rusty_homelab_mcp`, `rk-app` | single-line `pub` signatures | 6 | no gap: ordering only, see section 3. `rusty_http`, `rusty_request`, `rusty_tls` and `rusty_h2` already ship a `rusty-tokio` feature beside `tokio` |
+| G13 | Channel endpoints (`mpsc`, `oneshot`, `broadcast`, `watch` senders and receivers) lacked `Debug`, which tokio implements; a struct deriving `Debug` over one failed to build. Found by the pilot | `rk-constrain` `ApprovalRequest` | 1 | yes: closed in the pilot PR |
 | G12 | Method-level surface (builder methods, `*Ext` methods, `select!` arm bodies) is not probed | method | — | checked crate by crate by compiling; the pilot is the first check |
 
 The two softer G9 cases are `sha256`, which reaches tokio only through its
@@ -94,11 +95,15 @@ the two `remind_me` crates to tier B.
 
 ## 3. Order
 
-1. **Pilot `rk-constrain`** (tier A, #686 deliverable 3). It has no
-   workspace async dependencies and no G1 paths. It uses `spawn`,
-   `sync::mpsc`, `sync::oneshot`, `JoinHandle` and 8 `#[tokio::test]`, so it
-   exercises the scheduler, the channels and the test macro, which most of
-   tier A needs.
+1. **Pilot `rk-constrain`** (tier A, #686 deliverable 3; done). It has no
+   workspace async dependencies and no G1 paths, and its `spawn`,
+   `sync::mpsc`, `sync::oneshot`, `JoinHandle` and 21 tests exercise the
+   scheduler, the channels and the test macro. Its public API exposed tokio
+   channel types to `rk-agui`, `rk-app` and the desktop shell. It now exports
+   `approval_channel()` and the `ApprovalTx`/`ApprovalRx`/`ApprovalResponder`
+   aliases, so callers never name a runtime crate. `rusty_tokio`'s channels
+   need no `rusty_tokio` runtime, and those dependents still drain them from
+   tokio. The pilot surfaced G13.
 2. Gap tickets, independent of each other and of the pilot: #897 (G1, first:
    39 crates need it, and it turns the rest of tier A into a crate rename),
    #898 (G2, G3), #899 (G4, G5), #900 (G6), #901 (G8). #895 renames the log

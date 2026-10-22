@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use rusty_tokio::sync::{mpsc, oneshot};
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
 
 use crate::{Policy, PolicyError};
 
@@ -38,7 +38,7 @@ pub struct ApprovalRequest {
     /// Why approval was requested.
     pub trigger: ApprovalTrigger,
     /// The adapter answers on this one-shot channel.
-    pub respond: oneshot::Sender<ApprovalResponse>,
+    pub respond: ApprovalResponder,
 }
 
 /// The human's (or remote ACL's) decision.
@@ -52,19 +52,32 @@ pub enum ApprovalResponse {
     Block,
 }
 
+/// The gate's end of the approval channel.
+pub type ApprovalTx = mpsc::Sender<ApprovalRequest>;
+/// The adapter's end of the approval channel.
+pub type ApprovalRx = mpsc::Receiver<ApprovalRequest>;
+/// Answers one [`ApprovalRequest`].
+pub type ApprovalResponder = oneshot::Sender<ApprovalResponse>;
+
+/// An approval channel holding up to `capacity` pending requests. The channel
+/// is runtime-agnostic, so adapters on any executor can drain it.
+pub fn approval_channel(capacity: usize) -> (ApprovalTx, ApprovalRx) {
+    mpsc::channel(capacity)
+}
+
 /// Gates triggering tool calls behind a human response over a channel.
 pub struct ApprovalGate {
     triggers: Vec<ApprovalTrigger>,
-    tx: mpsc::Sender<ApprovalRequest>,
+    tx: ApprovalTx,
     auto_approve: Mutex<HashSet<String>>,
     fired: Mutex<HashSet<String>>,
 }
 
 impl ApprovalGate {
     /// Build a gate with `triggers`, sending requests on `tx`. The adapter end
-    /// (the matching [`mpsc::Receiver`]) renders prompts and answers each
+    /// (the matching [`ApprovalRx`]) renders prompts and answers each
     /// request's one-shot.
-    pub fn new(triggers: Vec<ApprovalTrigger>, tx: mpsc::Sender<ApprovalRequest>) -> Self {
+    pub fn new(triggers: Vec<ApprovalTrigger>, tx: ApprovalTx) -> Self {
         Self {
             triggers,
             tx,
@@ -165,10 +178,10 @@ mod tests {
 
     /// Spawn a scripted adapter that answers each request with `responses` in order.
     fn responder(
-        mut rx: mpsc::Receiver<ApprovalRequest>,
+        mut rx: ApprovalRx,
         responses: Vec<ApprovalResponse>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
+    ) -> rusty_tokio::JoinHandle<()> {
+        rusty_tokio::spawn(async move {
             let mut it = responses.into_iter();
             while let Some(req) = rx.recv().await {
                 let r = it.next().unwrap_or(ApprovalResponse::Block);
@@ -177,9 +190,9 @@ mod tests {
         })
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn allow_block_and_allow_always_round_trip() {
-        let (tx, rx) = mpsc::channel(8);
+        let (tx, rx) = approval_channel(8);
         let _adapter = responder(
             rx,
             vec![
@@ -217,9 +230,9 @@ mod tests {
             .is_ok());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn bash_first_use_fires_only_once() {
-        let (tx, rx) = mpsc::channel(8);
+        let (tx, rx) = approval_channel(8);
         // Only one response is scripted; a second prompt would deadlock the
         // adapter (it returns Block on exhaustion), so the test proves the gate
         // consults the adapter exactly once.
@@ -237,9 +250,9 @@ mod tests {
             .is_ok());
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn no_adapter_fails_closed() {
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = approval_channel(1);
         drop(rx);
         let gate = ApprovalGate::new(vec![ApprovalTrigger::BashFirstUse], tx);
         assert!(matches!(
@@ -248,7 +261,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn mcp_first_use_is_scoped_per_server() {
         // Two separately configured McpToolFirstUse triggers, one per server.
         // Only ONE response is scripted (for the first server). If the gate
@@ -259,7 +272,7 @@ mod tests {
         // trigger has not fired yet, so it must consult the adapter again;
         // since responses are exhausted, the scripted adapter answers
         // `Block`, and the call must be denied.
-        let (tx, rx) = mpsc::channel(8);
+        let (tx, rx) = approval_channel(8);
         let _adapter = responder(rx, vec![ApprovalResponse::Allow]);
         let gate = ApprovalGate::new(
             vec![
