@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {validTarget,reviewText,publish} = require('./review_publication.cjs');
-const workflow = fs.readFileSync(path.join(__dirname, '../workflows/review-router.yml'), 'utf8');
+const workflow = fs.readFileSync(path.join(__dirname, '../automation-templates/review-router.yml.disabled'), 'utf8');
 const expected = {number:12,head:{sha:'head',repo:{full_name:'o/r'}},base:{sha:'base',repo:{full_name:'o/r'}}};
 const pr = {...expected,state:'open',draft:false};
 test('all jobs fail closed, forks rejected, generation has no write credentials', () => {
@@ -45,4 +45,11 @@ test('a raced head never reaches the publication API; successful review is COMME
   await publish(args);
   assert.equal(posts[0].commit_id,'head');
   assert.equal(posts[0].event,'COMMENT');
+});
+
+test('live workflow is an inert hold with no blocked action or credential references', () => {
+  const active = fs.readFileSync(path.join(__dirname, '../workflows/review-router.yml'), 'utf8');
+  assert.match(active, /if: \$\{\{ false &&/);
+  assert.doesNotMatch(active, /uses:|secrets\.|workflow_dispatch:|pull_request_target:/);
+  assert.match(active, /timeout-minutes: 1/);
 });

@@ -1,5 +1,20 @@
 # Review router: disabled
 
+The complete proposed configuration is an **inert template** at
+`.github/automation-templates/review-router.yml.disabled`; its job gates also remain
+literal `false`. The live `.github/workflows/review-router.yml` contains only a disabled
+hold job with no action or secret references. Current repository policy does not
+allow either `openai/codex-action` or `anthropics/claude-code-action`, and GitHub
+validates that policy even for skipped jobs. The initial disabled review-router
+run failed at startup for precisely that reason; no generation job started.
+
+Activation therefore also needs a **separate explicit decision on the action
+allowlist**, followed by a reviewed code change installing the template in the
+live workflow path and reviewing/removing its literal holds. No repository rule
+was changed here. Do not copy the template into a live workflow or allowlist a
+provider as a routine correction. The design below describes the inert template,
+not an active service. Existing secrets, variables and auto-merge cannot install it.
+
 Every job has a literal `false` activation gate. Pushes, merges, existing secrets
 and repository variables cannot enable it. A separate explicit activation decision
 and reviewed code change must approve provider costs/limits, subscription terms,
