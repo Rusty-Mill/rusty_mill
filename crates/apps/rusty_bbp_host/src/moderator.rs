@@ -17,6 +17,7 @@
 //! is in its own process group and is killed, group and all, on every exit
 //! path, the error ones included.
 
+use crate::confine::{HarnessSandbox, Turn};
 use crate::runner::Confinement;
 use crate::slots::{Class, Slot};
 use crate::{now, open_driver};
@@ -41,6 +42,10 @@ pub struct Launcher {
     /// launch configuration; the protocol has no opinion.
     #[rusty_serde(default)]
     pub builtin_tools: bool,
+    /// Run this role's harness confined, reaching only what this declares
+    /// (Linux). See [`crate::confine`].
+    #[rusty_serde(default)]
+    pub sandbox: Option<HarnessSandbox>,
 }
 
 /// One launcher per role id, keyed by the ids of the task's roster. A role
@@ -301,6 +306,9 @@ pub fn write_mcp_config(
 struct Harness {
     turn: TurnId,
     child: Child,
+    /// A confined harness's MCP broker, in the harness's process group.
+    broker: Option<Child>,
+    confined: Option<Turn>,
     /// When the moderator first saw this harness's turn no longer live.
     ended: Option<Instant>,
     /// The moderator's handle on the child's agent slot, dropped when the
@@ -310,15 +318,6 @@ struct Harness {
     /// The `bbp slot-hold` process that keeps the slot while the harness's
     /// process group has a member, should this moderator die first.
     hold: Option<Child>,
-}
-
-impl Harness {
-    /// Kill the harness's process group, then its slot holder, and reap both.
-    fn stop(&mut self) -> Result<(), String> {
-        let harness = kill_tree(&mut self.child);
-        let hold = self.hold.as_mut().map_or(Ok(()), kill_tree);
-        harness.and(hold)
-    }
 }
 
 /// Every process the loop started. Dropping it kills the harness and its
@@ -341,6 +340,17 @@ fn admit(cfg: &Config, class: Class) -> Result<Option<(Option<Slot>, Stdio)>, St
     };
     let stdio = slot.stdio()?;
     Ok(Some((Some(slot), stdio)))
+}
+
+impl Harness {
+    /// Kill the harness's process group (its broker included), then its
+    /// slot holder, and reap them all.
+    fn stop(&mut self) -> Result<(), String> {
+        let harness = kill_tree(&mut self.child);
+        let broker = self.broker.as_mut().map_or(Ok(()), kill_tree);
+        let hold = self.hold.as_mut().map_or(Ok(()), kill_tree);
+        harness.and(broker).and(hold)
+    }
 }
 
 struct Supervision {
@@ -634,6 +644,12 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
             match exited(&mut h.child) {
                 Ok(Some(status)) => {
                     eprintln!("bbp mod: harness for turn {} exited: {status}", h.turn.0);
+                    if let Some(why) = h.confined.as_ref().and_then(Turn::setup_error) {
+                        eprintln!(
+                            "bbp mod: turn {} was not confined, so nothing ran: {why}",
+                            h.turn.0
+                        );
+                    }
                     forfeited = Some((h.turn, is_live));
                     break;
                 }
@@ -685,10 +701,12 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 .get(&role)
                 .cloned()
                 .ok_or_else(|| format!("{role} has no principal"))?;
-            let child = spawn(cfg, l, &role, &principal, turn, stdin)?;
+            let launched = spawn(cfg, l, &role, &principal, turn, stdin)?;
             let mut harness = Harness {
                 turn,
-                child,
+                child: launched.child,
+                broker: launched.broker,
+                confined: launched.confined,
                 ended: None,
                 _slot: None,
                 hold: None,
@@ -895,6 +913,14 @@ fn spawn_runner(cfg: &Config, stdout: Stdio) -> Result<Child, String> {
     command.spawn().map_err(|e| format!("starting runner: {e}"))
 }
 
+/// A started harness: its process, and for a confined one the broker that
+/// serves its MCP relay and the places of its turn.
+struct Launched {
+    child: Child,
+    broker: Option<Child>,
+    confined: Option<Turn>,
+}
+
 fn spawn(
     cfg: &Config,
     l: &Launcher,
@@ -902,9 +928,17 @@ fn spawn(
     principal: &PrincipalId,
     turn: TurnId,
     stdin: Stdio,
-) -> Result<Child, String> {
+) -> Result<Launched, String> {
     let bbp = &cfg.bbp;
-    let mcp = write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, turn)?;
+    let confined = l
+        .sandbox
+        .as_ref()
+        .map(|_| Turn::prepare(cfg, turn))
+        .transpose()?;
+    let mcp = match &confined {
+        Some(t) => t.mcp_config.clone(),
+        None => write_mcp_config(&cfg.dir, &cfg.task, bbp, principal, turn)?,
+    };
     let role_name = role.0.as_str();
     let fill = |a: &str| {
         a.replace("{dir}", &cfg.dir.to_string_lossy())
@@ -921,35 +955,70 @@ fn spawn(
     }
     let log = File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
     let err = log.try_clone().map_err(|e| e.to_string())?;
+    let broker_log = log.try_clone().map_err(|e| e.to_string())?;
     eprintln!("bbp mod: launching {role_name} for turn {}", turn.0);
-    let mut cmd = Proc::new(fill(&l.program));
-    cmd.args(l.args.iter().map(|a| fill(a)))
-        .env("BBP_DIR", &cfg.dir)
-        .env("BBP_TASK", &cfg.task.0)
-        .env("BBP_PRINCIPAL", &principal.0)
-        .env("BBP_TURN", turn.0.to_string())
-        .env("BBP_ROLE", role_name)
-        .env("BBP_BIN", bbp)
-        .env("BBP_MCP_CONFIG", &mcp)
-        .stdin(stdin);
+    let mut env: Vec<(String, String)> = vec![
+        ("BBP_TASK".into(), cfg.task.0.clone()),
+        ("BBP_PRINCIPAL".into(), principal.0.clone()),
+        ("BBP_TURN".into(), turn.0.to_string()),
+        ("BBP_ROLE".into(), role_name.into()),
+        ("BBP_BIN".into(), bbp.to_string_lossy().into_owned()),
+        ("BBP_MCP_CONFIG".into(), mcp.to_string_lossy().into_owned()),
+    ];
     // An evidence run pins the cache lifetime for the main agent and for
     // subagents: they default to different lifetimes, and the price file
     // prices cache writes at the 1-hour rate.
     if cfg.cost_cap.is_some() {
         for var in crate::tokens::CACHE_TTL_ENV {
-            cmd.env(var, crate::tokens::PINNED_CACHE_TTL);
+            env.push((var.into(), crate::tokens::PINNED_CACHE_TTL.into()));
         }
         // A subagent, if one starts despite the launcher's restrictions, runs
         // on the role's own model, which is priced.
         if let Ok(Some(model)) = crate::pins::pinned_model(l) {
-            cmd.env("CLAUDE_CODE_SUBAGENT_MODEL", model);
+            env.push(("CLAUDE_CODE_SUBAGENT_MODEL".into(), model));
         }
     }
-    cmd.stdout(Stdio::from(log)).stderr(Stdio::from(err));
+    let program = fill(&l.program);
+    let args: Vec<String> = l.args.iter().map(|a| fill(a)).collect();
+    let mut cmd = match (&l.sandbox, &confined) {
+        (Some(sandbox), Some(t)) => {
+            // Its own MCP channel is the relay; the task directory is out of reach.
+            env.push((
+                crate::broker::RELAY_ENV.into(),
+                t.pipes.to_string_lossy().into_owned(),
+            ));
+            t.command(cfg, sandbox, program, args, env)?
+        }
+        _ => {
+            let mut cmd = Proc::new(program);
+            cmd.args(args).env("BBP_DIR", &cfg.dir).envs(env);
+            cmd
+        }
+    };
+    cmd.stdin(stdin)
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err));
     // Its own process group, so everything the harness forks dies with it.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    cmd.spawn().map_err(|e| format!("spawn {}: {e}", l.program))
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn {}: {e}", l.program))?;
+    let broker = match &confined {
+        None => None,
+        Some(t) => match t.broker(cfg, principal, turn, child.id(), Stdio::from(broker_log)) {
+            Ok(broker) => Some(broker),
+            Err(e) => {
+                kill_tree(&mut child)?;
+                return Err(e);
+            }
+        },
+    };
+    Ok(Launched {
+        child,
+        broker,
+        confined,
+    })
 }
 
 #[cfg(test)]

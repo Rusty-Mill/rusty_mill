@@ -34,6 +34,7 @@ pub mod nr {
     pub const CLOSE: usize = 57;
     pub const PIPE2: usize = 59;
     pub const MKDIRAT: usize = 34;
+    pub const MKNODAT: usize = 33;
     pub const UNLINKAT: usize = 35;
     pub const SYMLINKAT: usize = 36;
     pub const LINKAT: usize = 37;

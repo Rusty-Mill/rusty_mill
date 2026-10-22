@@ -83,7 +83,22 @@ Every harness runs in its own process group and is killed, group and all, when i
 
 `--slots DIR --agent-slots N --validator-slots M` caps how many harnesses (agents) and runners (validators) run at once across every moderator, of any task, that names `DIR`. A slot is an exclusive kernel lock on `DIR/<class>-<n>.lock`; the moderator takes a free one before it launches a harness or a runner, and a granted turn or selected run with no free slot waits for a later poll (or its deadline). The locked file becomes the harness's stdin or the runner's stdout, so the lock lives in an open file description the whole process tree shares. A launcher may replace a harness's stdin, so the moderator also passes the lock to a `bbp slot-hold --group G` process in its own process group, which keeps it until the harness's process group has no member left. The slot is released only when the moderator has reaped its child, or, if the moderator dies first, when the child and everything it started are gone. Nothing is recorded that a crash could leave behind, and a restarted moderator gets the slot back exactly when its holder has exited. The first moderator records the capacity in `DIR/capacity`; one configured differently is refused. Like the runner, these guarantees are Unix-shaped and proven on Linux; on Windows the slots lock and count, but a crash is not claimed to keep them. `tests/admission_e2e.rs` races four moderators through two agent slots and one validator slot, and kills a moderator while its harness holds the only slot, once with a harness that keeps its stdin and once with one that replaces it.
 
-The harness is trusted with the directory. It runs as the moderator's user, so a harness with shell or file tools can read `<dir>/master` or call `bbp human`; `bbp mcp` is the fence for the model's tool calls, not for the harness process. Run a harness you do not trust under its own sandbox or user, with the task directory unreadable to it except through the MCP server.
+An unconfined harness is trusted with the directory. It runs as the moderator's user, so a harness with shell or file tools can read `<dir>/master` or call `bbp human`; `bbp mcp` is the fence for the model's tool calls, not for the harness process.
+
+### Confined harnesses
+
+A launcher with a `sandbox` object runs its harness under `rusty_sandbox` (Linux), through this binary's `__sandbox` helper:
+
+```json
+{"coder": {"program": "/opt/agent/bin/agent", "args": ["--mcp-config", "{mcp_config}"],
+           "sandbox": {"read": ["/opt/agent", "/home/me/.agent"], "write": [], "env": ["AGENT_API_KEY"]}}}
+```
+
+Landlock limits it to the system directories (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`), the directory of the `bbp` binary, the declared `read` and `write` paths, and a fresh turn workspace at `<work>/turns/<sha256(task)>/turn-N`, which is its working directory, `HOME` and `TMPDIR`. Seccomp allows internet sockets only, so it reaches its model but no Unix or abstract socket. Its environment is exactly the binding (`BBP_TASK`, `BBP_PRINCIPAL`, `BBP_TURN`, `BBP_ROLE`, `BBP_BIN`, `BBP_MCP_CONFIG`), `PATH` (default `/usr/bin:/bin`), and the variables named in `env`; `BBP_DIR` is not among them. A sandbox from which the task directory, or anything in it, could be reached is refused before launch, and a sandbox the kernel cannot enforce means the helper exits before the program runs, its reason in `<dir>/agents/<sha256(task)>/turn-N.sandbox`.
+
+The harness therefore cannot read `master` or the log, or run `bbp human`. Its MCP server still works: inside the sandbox `bbp mcp` (the `{mcp_config}` points at it, with `BBP_MCP_RELAY` set) is a relay that copies its stdio over two named pipes to `bbp mcp-broker`, which the moderator starts outside the sandbox with the turn's binding, in the harness's process group, and kills with it. The harness is granted the two pipes, not the directory that holds them, so it can neither replace them nor reach the broker another way. `tests/confined_harness.rs` probes all of this; the unconfined control reads `master`.
+
+The opinionated provider launchers (`codex-bbp-harness`, `claude-bbp-harness`) still validate their binding by reading the task directory, so they run unconfined for now.
 
 `--roster FILE` (on `bbp open`) is a JSON array of roles: id, `turn_order` and the capability fields of the spec's Role table. The roles are the orchestrator's to define; the host passes them on and the core validates and records them. `docs/proving/roster.json` is the four-role example of spec Appendix C.1. An invalid roster is refused with `BadRoster` and no task exists; a roster cannot change afterwards.
 

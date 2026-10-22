@@ -107,3 +107,9 @@ its stdin, and is never released early by a
 moderator crash; no reservation record exists to recover. They are not kept in
 `orch-store`, which one process opens at a time while moderators of many goals
 run at once.
+
+A pool member with a `sandbox` runs confined: BBP launches its harness under
+`rusty_sandbox` with a fresh turn workspace and only the declared paths and
+variables, never the BBP directory, so it cannot read the master secret or
+act as the human. Its MCP calls reach the turn's server through a relay over
+named pipes to a broker outside the sandbox.

@@ -1,7 +1,8 @@
 //! `bbp`: host commands for the Blackboard Protocol.
 //!
 //! ```text
-//! bbp mcp                                   per-turn MCP server; env BBP_DIR, BBP_TASK, BBP_PRINCIPAL, BBP_TURN
+//! bbp mcp                                   per-turn MCP server; env BBP_DIR, BBP_TASK, BBP_PRINCIPAL, BBP_TURN (with BBP_MCP_RELAY: relay to the broker)
+//! bbp mcp-broker --pipes DIR --harness PID  serves a confined harness's relay; env as bbp mcp
 //! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
@@ -25,8 +26,8 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, args::Args, grade, human, mcp, moderator, pairs, pins, profiles, report, response_json,
-    runner, shadow, slots, tokens, why,
+    admin, args::Args, broker, grade, human, mcp, moderator, pairs, pins, profiles, report,
+    response_json, runner, shadow, slots, tokens, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -98,11 +99,23 @@ fn run() -> Result<String, String> {
         return pairs::json(&PathBuf::from(a.flag("manifest")?));
     }
     if sub == "mcp" {
+        // Inside a harness sandbox: relay to the broker instead of serving.
+        if let Some(pipes) = std::env::var_os(broker::RELAY_ENV) {
+            return broker::relay(&PathBuf::from(pipes)).map(|()| String::new());
+        }
         let binding = mcp::Binding::from_env()?;
         return mcp::Server::new(binding)?
             .serve()
             .map(|_| String::new())
             .map_err(|e| e.to_string());
+    }
+    if sub == "mcp-broker" {
+        let harness = a
+            .flag("harness")?
+            .parse()
+            .map_err(|_| "--harness must be a pid")?;
+        let pipes = PathBuf::from(a.flag("pipes")?);
+        return broker::broker(&pipes, mcp::Binding::from_env()?, harness).map(|()| String::new());
     }
     let dir = PathBuf::from(a.flag_or_env("dir", "BBP_DIR")?);
     // `bbp why TASK` names the task positionally too.

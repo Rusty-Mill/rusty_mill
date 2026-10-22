@@ -10,6 +10,22 @@ pub struct Agent {
     pub vendor: String,
     pub program: String,
     pub args: Vec<String>,
+    /// Run this member's harness confined (`bbp` launcher `sandbox`): it then
+    /// reaches only these paths and variables, never the BBP directory.
+    #[rusty_serde(default)]
+    pub sandbox: Option<Sandbox>,
+}
+/// What a confined harness may reach beyond its own turn workspace: absolute
+/// paths to read, absolute paths to write, and the names of the variables it
+/// keeps. Passed to BBP unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sandbox {
+    #[rusty_serde(default)]
+    pub read: Vec<String>,
+    #[rusty_serde(default)]
+    pub write: Vec<String>,
+    #[rusty_serde(default)]
+    pub env: Vec<String>,
 }
 /// Explicit policy for one roster role. No role or provider is synthesized.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
