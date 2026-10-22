@@ -54,3 +54,4 @@ styles:
 4:0-8 fg=#ff8000 bg=-
 4:9-12 fg=#ff8000 bg=#004080
 4:14-20 fg=- bg=- underline:straight ul=#800000
+trailers:
