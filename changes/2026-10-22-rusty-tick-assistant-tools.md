@@ -1,6 +1,6 @@
 ---
 category: Added
-changelog: rusty_tick's web assistant can find tasks, list what's due or overdue, complete, reopen, rename, reschedule, reprioritize, move between lists, set or stop repeats on, and delete tasks, and list your lists, using the MCP server's tool names.
+changelog: rusty_tick's web assistant can find tasks, list what's due or overdue, complete, reopen, rename, reschedule, reprioritize, move between lists, set or stop repeats and reminders on, and delete tasks, and list your lists, using the MCP server's tool names.
 ---
 ## 2026-10-22 - rusty_tick: the MCP tools in the web assistant
 
@@ -21,3 +21,4 @@ changelog: rusty_tick's web assistant can find tasks, list what's due or overdue
 - **Added:** a move to a list is told from a move to a day by its destination clause alone, since a day never ends in “list”. A quoted task name ends at its closing quote. An unquoted name ends at the last “ to ” outside quotes whose rest is a whole list name (a list name containing “to” must be quoted). A command is only ever cut at a “ to ” outside quotes, so “to list” inside a title or a quoted list name is never taken for the destination: `move "Add to list groceries" to friday` still reschedules that task. The browser names the list as it names a task: an exact name first, else the only live list containing the words. An unknown, archived, blank or ambiguous list changes nothing.
 - **Fixed:** the command words are matched case-insensitively in ASCII only, so a character whose lower case is longer (such as the Kelvin sign) can't shift where a name is cut.
 - **Notes:** the assistant is still rule-based, not a model.
+- **Added:** reminders: “remind me about … 1 hour before / a day before / at the time / on the day” and “stop reminding me about …”. The when is a fixed ending or the last two words before “before”, so the name is never cut inside. The browser writes the same trigger the date picker does (from the due time, or 09:00 for an all-day task) and keeps one reminder, as the picker does. An unreadable when, an undated task, or minutes or hours on an all-day task changes nothing. “remind me to …” still adds a task.

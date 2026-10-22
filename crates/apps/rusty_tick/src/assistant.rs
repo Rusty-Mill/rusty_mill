@@ -46,7 +46,7 @@ pub enum Reply {
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
 “rename buy milk to buy oat milk”, “move buy milk to friday at 3pm”, “make buy milk high priority”, \
-“move buy milk to list Work”, “repeat water plants every week” or “lists”.";
+“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before” or “lists”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -156,6 +156,7 @@ fn command(text: &str, lower: &str) -> Option<Reply> {
     if let Some(reply) = edit(text, lower)
         .or_else(|| priority_phrase(text, lower))
         .or_else(|| repeat_phrase(text, lower))
+        .or_else(|| remind_phrase(text, lower))
     {
         return Some(reply);
     }
@@ -391,6 +392,54 @@ fn list_call(query: &str, list: &str) -> Reply {
     update_call(query, "list", list)
 }
 
+const REMIND_HELP: &str =
+    "Remind you about which task, and when? Try “remind me about dentist 1 hour before” \
+or “stop reminding me about dentist”.";
+const STOP_REMINDING: [&str; 3] = [
+    "stop reminding me about ",
+    "don't remind me about ",
+    "don’t remind me about ",
+];
+/// When-phrases with no count that end a reminder request.
+const REMIND_AT: [&str; 4] = [" at the time", " at time", " on time", " on the day"];
+
+/// "remind me about X <when>" and "stop reminding me about X": an `update_task`
+/// call with the when as said (the browser reads it against the task's due
+/// date), or `none`. The when is a fixed ending ("at the time", "on the day")
+/// or "<count> <unit> before", whose count and unit are the last two words, so
+/// the name before them is never cut inside. ("remind me to …" still adds a task.)
+fn remind_phrase(text: &str, lower: &str) -> Option<Reply> {
+    if let Some(stop) = STOP_REMINDING.iter().find(|s| lower.starts_with(*s)) {
+        return Some(remind_call(unquote(&text[stop.len()..]), "none"));
+    }
+    if lower == "remind me about" || STOP_REMINDING.iter().any(|s| lower == s.trim_end()) {
+        return Some(Reply::Text(REMIND_HELP.into()));
+    }
+    let rest = text
+        .get("remind me about ".len()..)
+        .filter(|_| lower.starts_with("remind me about "))?
+        .trim();
+    let lower = rest.to_ascii_lowercase();
+    let at = match REMIND_AT.iter().find(|e| lower.ends_with(*e)) {
+        Some(ending) => Some(rest.len() - ending.len()),
+        None => lower
+            .strip_suffix(" before")
+            .and_then(|body| body.rmatch_indices(' ').nth(1))
+            .map(|(at, _)| at),
+    };
+    Some(match at {
+        Some(at) => remind_call(unquote(&rest[..at]), rest[at..].trim()),
+        None => Reply::Text(REMIND_HELP.into()),
+    })
+}
+
+fn remind_call(query: &str, when: &str) -> Reply {
+    if query.is_empty() || when.is_empty() {
+        return Reply::Text(REMIND_HELP.into());
+    }
+    update_call(query, "remind", when)
+}
+
 const REPEAT_HELP: &str =
     "Repeat which task, and how often? Try “repeat water plants every week” or “stop repeating standup”.";
 const STOP_REPEATING: [&str; 4] = [
@@ -533,6 +582,13 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
         COMPLETE_TASK => format!("Completed “{title}”."),
         REOPEN_TASK => format!("Reopened “{title}”."),
         DELETE_TASK => format!("Moved “{title}” to the Trash."),
+        UPDATE_TASK if parsed.get("remind").is_some() => {
+            match parsed.get("remind").and_then(Value::as_str) {
+                Some("none") => format!("No more reminders for “{title}”."),
+                Some(when) => format!("I'll remind you about “{title}” {when}."),
+                None => "Done.".into(),
+            }
+        }
         UPDATE_TASK if parsed.get("repeat").is_some() => {
             match (
                 parsed.get("repeat").and_then(Value::as_str),
@@ -872,6 +928,65 @@ mod tests {
                 r#"{"title":"Buy milk","list":"Work"}"#
             ),
             Reply::Text("Moved “Buy milk” to Work.".into())
+        );
+    }
+
+    #[test]
+    fn turns_reminder_phrases_into_update_task() {
+        let remind = |q: &str, r: &str| call(UPDATE_TASK, json!({"query": q, "remind": r}));
+        assert_eq!(
+            decide(&input("remind me about dentist 1 hour before")),
+            remind("dentist", "1 hour before")
+        );
+        assert_eq!(
+            decide(&input("Remind me about pay rent 2 days before")),
+            remind("pay rent", "2 days before")
+        );
+        assert_eq!(
+            decide(&input("remind me about “call in 5 days” a day before")),
+            remind("call in 5 days", "a day before")
+        );
+        assert_eq!(
+            decide(&input("remind me about standup at the time")),
+            remind("standup", "at the time")
+        );
+        assert_eq!(
+            decide(&input("remind me about bins on the day")),
+            remind("bins", "on the day")
+        );
+        assert_eq!(
+            decide(&input("stop reminding me about standup")),
+            remind("standup", "none")
+        );
+        // "remind me to …" still adds a task.
+        assert_eq!(
+            decide(&input("remind me to call mum")),
+            call(ADD_TASK, json!({"title": "call mum"}))
+        );
+        for missing in [
+            "remind me about dentist",
+            "remind me about 1 hour before",
+            "remind me about",
+            "stop reminding me about",
+        ] {
+            assert!(
+                matches!(decide(&input(missing)), Reply::Text(t) if t.starts_with("Remind you about which task")),
+                "{missing}"
+            );
+        }
+        assert_eq!(
+            answered(
+                "remind me about dentist 1 hour before",
+                r#"{"title":"Dentist","remind":"1 hour before"}"#
+            ),
+            Reply::Text("I'll remind you about “Dentist” 1 hour before.".into())
+        );
+        assert_eq!(
+            answered(
+                "stop reminding me about dentist",
+                r#"{"title":"Dentist","remind":"none"}"#
+            ),
+            Reply::Text("No more reminders for “Dentist”.".into())
         );
     }
 

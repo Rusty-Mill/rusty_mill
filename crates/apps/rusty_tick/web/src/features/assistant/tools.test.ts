@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { List, Task } from '@/api/types'
 import { addDays, startOfDay } from '@/lib/date'
-import { moveTo, overdue, pickTask, readDay, readRepeat, readWhen, taskTools, type ToolContext } from './tools'
+import { moveTo, overdue, pickTask, readDay, readRemind, readRepeat, readWhen, remindTrigger, taskTools, type ToolContext } from './tools'
 
 const NOW = new Date(2026, 9, 22, 12).getTime()
 const task = (id: string, title: string, over: Partial<Task> = {}): Task =>
@@ -140,7 +140,7 @@ describe('update_task', () => {
     const { c, done } = context(tasks)
     expect(await run(c, 'update_task', { query: 'milk', due: 'soonish' })).toEqual({ error: expect.stringContaining("can't read “soonish”") })
     expect(await run(c, 'update_task', { query: 'milk', title: '  ' })).toEqual({ error: 'Say the new title.' })
-    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority, a list or a repeat.' })
+    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority, a list, a repeat or a reminder.' })
     expect(await run(c, 'update_task', { query: 'buy', due: 'today' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
     expect(await run(c, 'update_task', { query: ' ', due: 'today' })).toEqual({ error: 'Say which task.' })
     expect(done).toEqual([])
@@ -270,6 +270,60 @@ describe('update_task with a repeat', () => {
   it('changes nothing for a repeat it cannot read', async () => {
     const { c, done } = context([task('d', 'Gym')])
     expect(await run(c, 'update_task', { query: 'gym', repeat: 'every blue moon' })).toEqual({ error: expect.stringContaining("can't read") })
+    expect(done).toEqual([])
+  })
+})
+
+describe('readRemind', () => {
+  it('reads when people say to be reminded', () => {
+    expect(readRemind('1 hour before')).toEqual({ n: 1, unit: 'hour' })
+    expect(readRemind('A day before')).toEqual({ n: 1, unit: 'day' })
+    expect(readRemind('30 mins before')).toEqual({ n: 30, unit: 'minute' })
+    expect(readRemind('2 days before')).toEqual({ n: 2, unit: 'day' })
+    expect(readRemind('at the time')).toEqual({ n: 0, unit: 'day' })
+    expect(readRemind('on the day')).toEqual({ n: 0, unit: 'day' })
+    expect(readRemind('none')).toBe('none')
+  })
+
+  it('reads nothing it is not sure of', () => {
+    for (const text of ['soon', '1 week before', '100 hours before', '31 days before', '1 hour after', 'an hour', '']) expect(readRemind(text), text).toBeUndefined()
+  })
+
+  it('writes the triggers the date picker writes', () => {
+    expect(remindTrigger({ n: 0, unit: 'day' }, false)).toBe('TRIGGER:PT0S')
+    expect(remindTrigger({ n: 5, unit: 'minute' }, false)).toBe('TRIGGER:-PT5M')
+    expect(remindTrigger({ n: 1, unit: 'hour' }, false)).toBe('TRIGGER:-PT1H')
+    expect(remindTrigger({ n: 1, unit: 'day' }, false)).toBe('TRIGGER:-P1D')
+    expect(remindTrigger({ n: 0, unit: 'day' }, true)).toBe('TRIGGER:PT9H')
+    expect(remindTrigger({ n: 1, unit: 'day' }, true)).toBe('TRIGGER:-PT15H')
+    expect(remindTrigger({ n: 2, unit: 'day' }, true)).toBe('TRIGGER:-PT39H')
+    expect(remindTrigger({ n: 1, unit: 'hour' }, true)).toBeUndefined()
+  })
+})
+
+describe('update_task with a reminder', () => {
+  const timed = task('t', 'Dentist', { dueMs: new Date(2026, 9, 23, 15).getTime(), isAllDay: false, reminders: ['TRIGGER:-PT5M'] })
+  const allDay = task('a', 'Bins', { dueMs: new Date(2026, 9, 23).getTime(), isAllDay: true, reminders: [] })
+
+  it('sets one reminder from the due time, or 09:00 for an all-day task, and clears it for none', async () => {
+    const { c, done } = context([timed, allDay])
+    expect(await run(c, 'update_task', { query: 'dentist', remind: '1 hour before' })).toEqual({ title: 'Dentist', remind: '1 hour before' })
+    expect(await run(c, 'update_task', { query: 'bins', remind: 'a day before' })).toEqual({ title: 'Bins', remind: '1 day before, at 09:00' })
+    expect(await run(c, 'update_task', { query: 'bins', remind: 'on the day' })).toEqual({ title: 'Bins', remind: 'on the day, at 09:00' })
+    expect(await run(c, 'update_task', { query: 'dentist', remind: 'none' })).toEqual({ title: 'Dentist', remind: 'none' })
+    expect(done).toEqual([
+      'update t {"reminders":["TRIGGER:-PT1H"]}',
+      'update a {"reminders":["TRIGGER:-PT15H"]}',
+      'update a {"reminders":["TRIGGER:PT9H"]}',
+      'update t {"reminders":[]}',
+    ])
+  })
+
+  it('changes nothing for a reminder it cannot read or set', async () => {
+    const { c, done } = context([timed, allDay, task('u', 'Someday', { reminders: [] })])
+    expect(await run(c, 'update_task', { query: 'dentist', remind: 'whenever' })).toEqual({ error: expect.stringContaining("can't read") })
+    expect(await run(c, 'update_task', { query: 'bins', remind: '1 hour before' })).toEqual({ error: expect.stringContaining('all day') })
+    expect(await run(c, 'update_task', { query: 'someday', remind: '1 hour before' })).toEqual({ error: expect.stringContaining('no date') })
     expect(done).toEqual([])
   })
 })

@@ -197,18 +197,70 @@ export function pickList(lists: readonly List[], name: string): { list: List } |
   return { error: `Several lists match “${name.trim()}”: ${found.slice(0, 5).map((l) => l.name).join(', ')}. Say a little more of the one you mean.` }
 }
 
+/** A reminder as said: `n` units before the due time (0: at it), or none. */
+export type Remind = 'none' | { n: number; unit: 'minute' | 'hour' | 'day' }
+const REMIND_UNIT: Record<string, { unit: 'minute' | 'hour' | 'day'; max: number }> = {
+  minute: { unit: 'minute', max: 1440 },
+  min: { unit: 'minute', max: 1440 },
+  hour: { unit: 'hour', max: 72 },
+  hr: { unit: 'hour', max: 72 },
+  day: { unit: 'day', max: 30 },
+}
+const REMIND_AT = ['at the time', 'at time', 'on time', 'on the day']
+
+/** When `text` says to remind: "1 hour before", "a day before", "at the time", or none. */
+export function readRemind(text: string): Remind | undefined {
+  const t = norm(text)
+  if (NEVER.includes(t) || t === 'off') return 'none'
+  if (REMIND_AT.includes(t)) return { n: 0, unit: 'day' }
+  const m = /^(\d{1,4}|a|an|one) (minute|min|hour|hr|day)s? before$/.exec(t)
+  const unit = m ? REMIND_UNIT[m[2]!] : undefined
+  if (!m || !unit) return undefined
+  const n = /^\d/.test(m[1]!) ? Number(m[1]) : 1
+  return n <= unit.max ? { n, unit: unit.unit } : undefined
+}
+
+/**
+ * The `TRIGGER:` the app stores for `r` on a task, as the date picker writes
+ * them: from the due time, or from 09:00 on the day for an all-day task, which
+ * has no time to count minutes or hours from (`undefined`).
+ */
+export function remindTrigger(r: { n: number; unit: 'minute' | 'hour' | 'day' }, allDay: boolean): string | undefined {
+  if (allDay) {
+    if (r.n === 0) return 'TRIGGER:PT9H'
+    return r.unit === 'day' ? `TRIGGER:-PT${24 * r.n - 9}H` : undefined
+  }
+  if (r.n === 0) return 'TRIGGER:PT0S'
+  return { minute: `TRIGGER:-PT${r.n}M`, hour: `TRIGGER:-PT${r.n}H`, day: `TRIGGER:-P${r.n}D` }[r.unit]
+}
+
+const remindLabel = (r: { n: number; unit: string }, allDay: boolean): string => {
+  const when = r.n === 0 ? (allDay ? 'on the day' : 'at the time') : `${r.n} ${r.unit}${r.n === 1 ? '' : 's'} before`
+  return allDay ? `${when}, at 09:00` : when
+}
+
+/** Remind about `task` as `r` says: the patch, or why it cannot be. */
+function remindPatch(task: Task, r: Remind): { patch: TaskPatch; said: string } | { error: string } {
+  if (r === 'none') return { patch: { reminders: [] }, said: 'none' }
+  if (task.dueMs === null) return { error: `“${task.title}” has no date to remind you from; give it one first, as in “move ${task.title} to friday at 3pm”.` }
+  const trigger = remindTrigger(r, task.isAllDay)
+  if (trigger === undefined) return { error: `“${task.title}” is all day, so it can only remind you on the day or days before (at 09:00); give it a time to remind you minutes or hours before.` }
+  // One reminder, as the date picker keeps: it shows and edits only the first.
+  return { patch: { reminders: [trigger] }, said: remindLabel(r, task.isAllDay) }
+}
+
 /** Priority words, as the agent sends them, and the priority each sets. */
 const PRIORITY: Record<string, Priority> = { high: 5, medium: 3, med: 3, low: 1, none: 0, no: 0 }
 const PRIORITY_NAME: Record<Priority, string> = { 5: 'high', 3: 'medium', 1: 'low', 0: 'none' }
 
 /**
  * Rename the task `query` names, move it to the day `due` names or the
- * `list` named, or set its `priority` or `repeat`; every argument is checked
+ * `list` named, or set its `priority`, `repeat` or `remind`; every argument is checked
  * before the task is picked, so a bad one changes nothing.
  */
 async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: string]: string }): Promise<Answer> {
-  const { query = '', title, due, priority, list, repeat } = args
-  if ([title, due, priority, list, repeat].every((v) => v === undefined)) return { error: 'Say what to change: a new title, a day, a priority, a list or a repeat.' }
+  const { query = '', title, due, priority, list, repeat, remind } = args
+  if ([title, due, priority, list, repeat, remind].every((v) => v === undefined)) return { error: 'Say what to change: a new title, a day, a priority, a list, a repeat or a reminder.' }
   if (title !== undefined && title.trim() === '') return { error: 'Say the new title.' }
   const when = due === undefined ? undefined : readWhen(due, c.now)
   if (due !== undefined && when === undefined) {
@@ -222,6 +274,10 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   if (repeat !== undefined && rule === undefined) {
     return { error: `I can't read “${repeat.trim()}” as a repeat; try daily, weekly, every 2 weeks, on weekdays, every monday and friday, monthly or never.` }
   }
+  const reminder = remind === undefined ? undefined : readRemind(remind)
+  if (remind !== undefined && reminder === undefined) {
+    return { error: `I can't read “${remind.trim()}” as a reminder; try at the time, 5 minutes before, 1 hour before, a day before or none.` }
+  }
   const target = list === undefined ? undefined : pickList(c.entities.lists, list)
   if (target !== undefined && 'error' in target) return target
   const pick = pickTask(tasks, query, 'task')
@@ -230,6 +286,12 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   if (title !== undefined) {
     await c.update(task.id, { title: title.trim() })
     return { title: title.trim() }
+  }
+  if (reminder !== undefined) {
+    const made = remindPatch(task, reminder)
+    if ('error' in made) return made
+    await c.update(task.id, made.patch)
+    return { title: task.title, remind: made.said }
   }
   if (rule !== undefined) {
     // A repeat needs a date to count from: an undated task starts today, as in the date picker.
@@ -306,7 +368,7 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
     },
     {
       name: 'update_task',
-      description: 'Rename the one task this names, move it to another day or time (today, tomorrow, friday at 3pm, in 3 days, 2026-11-05 9:30, 3pm, all day, or none), set its priority, or move it to another list.',
+      description: 'Rename the one task this names, move it to another day or time (today, tomorrow, friday at 3pm, in 3 days, 2026-11-05 9:30, 3pm, all day, or none), set its priority, repeat or reminder, or move it to another list.',
       parameters: {
         type: 'object',
         properties: {
@@ -316,6 +378,7 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
           priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
           list: { type: 'string', description: 'The list to move it to, by name' },
           repeat: { type: 'string', description: 'How often it repeats, as said (daily, every 2 weeks, on weekdays, never)' },
+          remind: { type: 'string', description: 'When to remind, as said (at the time, 1 hour before, a day before, none)' },
         },
         required: ['query'],
       },
