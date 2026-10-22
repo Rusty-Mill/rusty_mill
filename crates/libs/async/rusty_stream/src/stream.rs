@@ -165,26 +165,34 @@ impl<S: Stream + Unpin> Stream for SelectAll<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let this = self.get_mut();
-        let mut tried = 0;
-        while tried < this.streams.len() {
-            let i = (this.start + tried) % this.streams.len();
+        let len = this.streams.len();
+        // Visit each stream once, in rotated order, against a fixed index
+        // space: ended streams are removed only after the loop, so a removal
+        // cannot shift an unvisited stream out of this poll.
+        let mut ended = Vec::new();
+        let mut found = None;
+        for k in 0..len {
+            let i = (this.start + k) % len;
             match Pin::new(&mut this.streams[i]).poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     this.start = i + 1;
-                    return Poll::Ready(Some(item));
+                    found = Some(item);
+                    break;
                 }
-                // An ended stream leaves the set; the stream that slides into
-                // index `i` has not been tried yet, so `tried` stays put.
-                Poll::Ready(None) => {
-                    this.streams.swap_remove(i);
-                }
-                Poll::Pending => tried += 1,
+                Poll::Ready(None) => ended.push(i),
+                Poll::Pending => {}
             }
         }
-        if this.streams.is_empty() {
-            Poll::Ready(None)
-        } else {
-            Poll::Pending
+        // Highest index first, so each `swap_remove` moves in a stream that
+        // is staying.
+        ended.sort_unstable_by(|a, b| b.cmp(a));
+        for i in ended {
+            this.streams.swap_remove(i);
+        }
+        match found {
+            Some(item) => Poll::Ready(Some(item)),
+            None if this.streams.is_empty() => Poll::Ready(None),
+            None => Poll::Pending,
         }
     }
 }

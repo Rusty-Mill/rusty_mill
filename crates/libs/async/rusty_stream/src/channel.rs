@@ -79,12 +79,16 @@ pub mod mpsc {
         /// Queue `value` for the receiver, or hand it back if the receiver
         /// has been dropped.
         pub fn unbounded_send(&self, value: T) -> Result<(), SendError<T>> {
-            let mut inner = lock(&self.shared);
-            if !inner.receiver_alive {
-                return Err(SendError(value));
-            }
-            inner.queue.push_back(value);
-            if let Some(waker) = inner.receiver_waker.take() {
+            let waker = {
+                let mut inner = lock(&self.shared);
+                if !inner.receiver_alive {
+                    return Err(SendError(value));
+                }
+                inner.queue.push_back(value);
+                inner.receiver_waker.take()
+            };
+            // Woken after unlocking: a waker may poll the receiver inline.
+            if let Some(waker) = waker {
                 waker.wake();
             }
             Ok(())
@@ -107,12 +111,17 @@ pub mod mpsc {
 
     impl<T> Drop for UnboundedSender<T> {
         fn drop(&mut self) {
-            let mut inner = lock(&self.shared);
-            inner.senders -= 1;
-            if inner.senders == 0 {
-                if let Some(waker) = inner.receiver_waker.take() {
-                    waker.wake();
+            let waker = {
+                let mut inner = lock(&self.shared);
+                inner.senders -= 1;
+                if inner.senders == 0 {
+                    inner.receiver_waker.take()
+                } else {
+                    None
                 }
+            };
+            if let Some(waker) = waker {
+                waker.wake();
             }
         }
     }
@@ -146,9 +155,14 @@ pub mod mpsc {
 
     impl<T> Drop for UnboundedReceiver<T> {
         fn drop(&mut self) {
-            let mut inner = lock(&self.shared);
-            inner.receiver_alive = false;
-            inner.queue.clear();
+            let undelivered = {
+                let mut inner = lock(&self.shared);
+                inner.receiver_alive = false;
+                std::mem::take(&mut inner.queue)
+            };
+            // Dropped after unlocking: a queued value may own a sender to
+            // this channel, whose own drop locks it.
+            drop(undelivered);
         }
     }
 

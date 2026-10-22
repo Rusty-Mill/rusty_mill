@@ -234,3 +234,74 @@ async fn nested_stream_macro_owns_its_yields() {
     let items: Vec<i32> = outer.collect().await;
     assert_eq!(items, vec![3]);
 }
+
+/// One poll with a waker that does nothing (`Waker::noop` needs Rust 1.85;
+/// this crate declares 1.75).
+fn poll_once<S: Stream + Unpin>(s: &mut S) -> std::task::Poll<Option<S::Item>> {
+    struct Noop;
+    impl std::task::Wake for Noop {
+        fn wake(self: Arc<Self>) {}
+    }
+    let waker = std::task::Waker::from(Arc::new(Noop));
+    let mut cx = std::task::Context::from_waker(&waker);
+    std::pin::Pin::new(s).poll_next(&mut cx)
+}
+
+#[test]
+fn select_all_does_not_skip_a_ready_stream_after_a_removal() {
+    let pending: BoxStream<'static, i32> = once(std::future::pending::<i32>()).boxed();
+    let mut merged = select_all(vec![
+        pending,
+        iter(vec![10]).boxed(),
+        iter(vec![20, 30]).boxed(),
+    ]);
+    assert_eq!(poll_once(&mut merged), std::task::Poll::Ready(Some(10)));
+    assert_eq!(poll_once(&mut merged), std::task::Poll::Ready(Some(20)));
+    // The exhausted stream is removed mid-poll; the ready 30 must not be skipped.
+    assert_eq!(poll_once(&mut merged), std::task::Poll::Ready(Some(30)));
+    assert_eq!(poll_once(&mut merged), std::task::Poll::Pending);
+}
+
+#[test]
+fn dropping_the_receiver_with_a_queued_sender_does_not_deadlock() {
+    struct Msg(#[allow(dead_code)] mpsc::UnboundedSender<Msg>);
+    let (tx, rx) = mpsc::unbounded::<Msg>();
+    tx.unbounded_send(Msg(tx.clone())).unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // The queued Msg owns a sender to this channel; dropping it must not
+        // re-lock a mutex the receiver's drop still holds.
+        drop(rx);
+        done_tx.send(()).unwrap();
+    });
+    if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+        // The stuck thread holds the channel lock; dropping `tx` would block
+        // here too, so leak it and fail instead of hanging the test run.
+        std::mem::forget(tx);
+        panic!("receiver drop deadlocked");
+    }
+    drop(tx);
+}
+
+#[rusty_tokio::test]
+async fn try_stream_leaves_returns_in_typed_closures_and_nested_fns() {
+    let s: BoxStream<'static, Result<i32, ()>> = Box::pin(try_stream! {
+        let typed = |n: i32| -> () {
+            if n > 0 {
+                return;
+            }
+            assert!(n <= 0);
+        };
+        fn nested(n: i32) {
+            if n > 0 {
+                return;
+            }
+            assert!(n <= 0);
+        }
+        typed(1);
+        nested(1);
+        yield 7;
+    });
+    let items: Vec<Result<i32, ()>> = s.collect().await;
+    assert_eq!(items, vec![Ok(7)]);
+}

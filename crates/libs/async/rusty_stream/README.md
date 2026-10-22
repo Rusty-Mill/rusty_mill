@@ -27,8 +27,8 @@ it runs on any executor.
   so a stream that is always ready cannot starve the others.
 - **`stream!` / `try_stream!` rewrite tokens, without `syn`.** Inside
   `try_stream!`, `?` yields the error as the last item and ends the stream,
-  and a bare `return;` ends the stream early. A bare `return;` inside a nested
-  `fn` item is not supported. Yields inside a nested macro call belong to
+  and a bare `return;` ends the stream early (one inside a closure, an `async`
+  block or a nested `fn` belongs to that inner function). Yields inside a nested macro call belong to
   that macro.
 
 ## Interop

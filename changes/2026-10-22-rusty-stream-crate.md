@@ -17,9 +17,8 @@ changelog: New `rusty_stream`: an in-house `Stream` trait, combinators, `stream!
   - Adapters require `Unpin` streams and box the futures they hold, instead of pin projection.
   - The macros rewrite tokens with no `syn`. A `Yielder` passes each yielded value through a shared slot, with no thread-locals.
   - The `futures-core` feature adds `Compat<S>`, which converts in both directions for crates that speak `futures_core::Stream` (axum, reqwest, tonic).
-- **Verified:** 17 integration tests cover every adapter, the channel (including a send after the receiver drops), both macros (`?`, a bare `return;`, closures and nested macros inside the body) and the compat round trip. Also clippy `-D warnings` and fmt on both crates. `cargo tree` shows that the default build pulls nothing outside the workspace.
+- **Verified:** 20 integration tests cover every adapter, the channel (including a send after the receiver drops), both macros (`?`, a bare `return;`, closures with and without return types, nested `fn` items and nested macros inside the body), a `select_all` removal that must not skip a ready stream, a receiver drop with a queued value that owns a sender (no deadlock) and the compat round trip. Also clippy `-D warnings` and fmt on both crates. `cargo tree` shows that the default build pulls nothing outside the workspace.
 - **Known limitations:**
   - Adapters need `Unpin` streams (use `.boxed()` or `Box::pin`).
   - `select_all` merges round-robin, not in `FuturesUnordered` order.
-  - A bare `return;` inside a nested `fn` item in a `try_stream!` body is not supported.
   - No workspace crate uses it yet; the family migrations (#908, #909, #910, #911) adopt it.

@@ -7,8 +7,8 @@
 //!
 //! `try_stream!`'s body returns `Result<(), E>`, so `?` works as written: an
 //! error is yielded as the stream's last item. A bare `return;` is rewritten
-//! to `return Ok(())`, except inside closure and `async` block bodies.
-//! A bare `return;` inside a nested `fn` item is not supported.
+//! to `return Ok(())`, except inside the bodies of closures, `async` blocks
+//! and nested `fn` items, where it belongs to that inner function.
 
 use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
 
@@ -88,7 +88,7 @@ fn rewrite(input: TokenStream, yielder: &Ident, is_try: bool, fix_return: bool) 
                 i += 1;
             }
             TokenTree::Group(g) => {
-                let nested_fn = fix_return && opens_closure_or_async(&out);
+                let nested_fn = fix_return && opens_fn_body(&out);
                 let inner = rewrite(g.stream(), yielder, is_try, fix_return && !nested_fn);
                 let mut group = Group::new(g.delimiter(), inner);
                 group.set_span(g.span());
@@ -128,11 +128,39 @@ fn follows_bang(emitted: &[TokenTree]) -> bool {
     matches!(emitted.last(), Some(TokenTree::Punct(p)) if p.as_char() == '!')
 }
 
-/// Whether the tokens just emitted end a closure head (`|..|`) or `async`/`move`.
-fn opens_closure_or_async(emitted: &[TokenTree]) -> bool {
+/// Whether a block about to be emitted is its own function body, where a bare
+/// `return` belongs to that function: it follows a closure head (`|..|`),
+/// `async`/`move`, or, since the last statement boundary, a `fn` item or a
+/// `->` return type (`|x| -> T { .. }`, `fn f() -> T { .. }`).
+fn opens_fn_body(emitted: &[TokenTree]) -> bool {
     match emitted.last() {
-        Some(TokenTree::Punct(p)) => p.as_char() == '|',
-        Some(TokenTree::Ident(id)) => matches!(id.to_string().as_str(), "async" | "move"),
+        Some(TokenTree::Punct(p)) if p.as_char() == '|' => return true,
+        Some(TokenTree::Ident(id)) if matches!(id.to_string().as_str(), "async" | "move") => {
+            return true
+        }
+        _ => {}
+    }
+    let head: Vec<&TokenTree> = emitted
+        .iter()
+        .rev()
+        .take_while(|t| !is_statement_boundary(t))
+        .collect();
+    let has_fn = head
+        .iter()
+        .any(|t| matches!(t, TokenTree::Ident(id) if id.to_string() == "fn"));
+    // `head` is reversed, so an arrow reads `>` then `-`.
+    let has_arrow = head.windows(2).any(|pair| {
+        matches!((pair[0], pair[1]), (TokenTree::Punct(gt), TokenTree::Punct(minus))
+            if gt.as_char() == '>' && minus.as_char() == '-' && minus.spacing() == Spacing::Joint)
+    });
+    has_fn || has_arrow
+}
+
+/// A `;` or a `{ .. }` block ends the previous statement.
+fn is_statement_boundary(token: &TokenTree) -> bool {
+    match token {
+        TokenTree::Punct(p) => p.as_char() == ';',
+        TokenTree::Group(g) => g.delimiter() == Delimiter::Brace,
         _ => false,
     }
 }
