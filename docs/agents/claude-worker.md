@@ -1,5 +1,20 @@
 # Claude interactive worker: disabled
 
+The complete proposed configuration is an **inert template** at
+`.github/automation-templates/claude.yml.disabled`; its job gates also remain
+literal `false`. The live `.github/workflows/claude.yml` contains only a disabled
+hold job with no action or secret references. Current repository policy does not
+allow either `openai/codex-action` or `anthropics/claude-code-action`, and GitHub
+validates that policy even for skipped jobs. The initial disabled review-router
+run failed at startup for precisely that reason; no generation job started.
+
+Activation therefore also needs a **separate explicit decision on the action
+allowlist**, followed by a reviewed code change installing the template in the
+live workflow path and reviewing/removing its literal holds. No repository rule
+was changed here. Do not copy the template into a live workflow or allowlist a
+provider as a routine correction. The design below describes the inert template,
+not an active service. Existing secrets, variables and auto-merge cannot install it.
+
 This workflow is a human-mentioned **code-writing** worker, not automatic review.
 It handles newly created `@claude` issue comments and PR review comments from
 human owners, members or collaborators. Bots are rejected; there is no placeholder

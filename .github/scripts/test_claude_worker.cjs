@@ -2,7 +2,7 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const text = fs.readFileSync(path.join(__dirname, '../workflows/claude.yml'), 'utf8');
+const text = fs.readFileSync(path.join(__dirname, '../automation-templates/claude.yml.disabled'), 'utf8');
 test('worker is disabled, human mention gated, bounded and subscription-authenticated', () => {
   assert.match(text, /if: \$\{\{ false &&/);
   assert.match(text, /comment\.user\.type == 'User'/);
@@ -24,4 +24,11 @@ test('current PR identity and checkout use API-resolved exact head, never a pref
     await fn({rest:{pulls:{get:async()=>({data:{state,head:{repo:{full_name:repo},ref,sha:'exact'}}})}}}, {repo:{owner:'Rusty-Mill',repo:'rusty_mill'},payload:{issue:{number:1,pull_request:{}}}}, {notice:()=>{},setOutput:(k,v)=>outputs[k]=v});
     assert.equal(outputs.sha, accepted ? 'exact' : undefined);
   }
+});
+
+test('live workflow is an inert hold with no blocked action or credential references', () => {
+  const active = fs.readFileSync(path.join(__dirname, '../workflows/claude.yml'), 'utf8');
+  assert.match(active, /if: \$\{\{ false &&/);
+  assert.doesNotMatch(active, /uses:|secrets\.|workflow_dispatch:|pull_request_target:/);
+  assert.match(active, /timeout-minutes: 1/);
 });
