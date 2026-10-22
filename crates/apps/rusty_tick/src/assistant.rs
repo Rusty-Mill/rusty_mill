@@ -45,7 +45,7 @@ pub enum Reply {
 
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
-“rename buy milk to buy oat milk”, “move buy milk to friday”, “make buy milk high priority”, \
+“rename buy milk to buy oat milk”, “move buy milk to friday at 3pm”, “make buy milk high priority”, \
 “move buy milk to list Work” or “lists”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
@@ -745,6 +745,18 @@ mod tests {
                 UPDATE_TASK,
                 json!({"query": "Buy milk", "list": "Things to do"})
             )
+        );
+        // A day and time, or a time alone, is still a move in time: the browser reads it.
+        assert_eq!(
+            decide(&input("move pay rent to friday at 3pm")),
+            call(
+                UPDATE_TASK,
+                json!({"query": "pay rent", "due": "friday at 3pm"})
+            )
+        );
+        assert_eq!(
+            decide(&input("move talk to mum to 9:30")),
+            call(UPDATE_TASK, json!({"query": "talk to mum", "due": "9:30"}))
         );
         // Still a day: it does not end in a list.
         assert_eq!(

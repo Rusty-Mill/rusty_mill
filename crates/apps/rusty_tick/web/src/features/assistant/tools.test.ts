@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { List, Task } from '@/api/types'
 import { addDays, startOfDay } from '@/lib/date'
-import { moveTo, overdue, pickTask, readDay, taskTools, type ToolContext } from './tools'
+import { moveTo, overdue, pickTask, readDay, readWhen, taskTools, type ToolContext } from './tools'
 
 const NOW = new Date(2026, 9, 22, 12).getTime()
 const task = (id: string, title: string, over: Partial<Task> = {}): Task =>
@@ -183,5 +183,52 @@ describe('update_task', () => {
     c.entities.lists.push(list('t', 'Things to list Work'))
     expect(await run(c, 'update_task', { query: 'Buy milk', list: 'Things to list Work' })).toEqual({ title: 'Buy milk', list: 'Things to list Work' })
     expect(done).toEqual(['move m t'])
+  })
+})
+
+describe('readWhen', () => {
+  const day = (d: number): number => new Date(2026, 9, d).getTime()
+
+  it('reads a day, a time of day, or both', () => {
+    expect(readWhen('friday', NOW)).toEqual({ day: day(23) })
+    expect(readWhen('Friday at 3pm', NOW)).toEqual({ day: day(23), time: { h: 15, m: 0 } })
+    expect(readWhen('tomorrow 9:30', NOW)).toEqual({ day: day(23), time: { h: 9, m: 30 } })
+    expect(readWhen('2026-11-05 15:00', NOW)).toEqual({ day: new Date(2026, 10, 5).getTime(), time: { h: 15, m: 0 } })
+    expect(readWhen('3:30 pm', NOW)).toEqual({ time: { h: 15, m: 30 } })
+    expect(readWhen('at 9', NOW)).toEqual({ time: { h: 9, m: 0 } })
+    expect(readWhen('12am', NOW)).toEqual({ time: { h: 0, m: 0 } })
+    expect(readWhen('noon', NOW)).toEqual({ time: { h: 12, m: 0 } })
+    expect(readWhen('friday all day', NOW)).toEqual({ day: day(23), time: 'all-day' })
+    expect(readWhen('all day', NOW)).toEqual({ time: 'all-day' })
+    expect(readWhen('none', NOW)).toBeNull()
+  })
+
+  it('reads nothing it is not sure of', () => {
+    for (const text of ['3', 'friday 3', '25:00', '13pm', '9:75', 'at 24', 'soonish at 3pm', 'friday at']) expect(readWhen(text, NOW), text).toBeUndefined()
+  })
+})
+
+describe('update_task with a time', () => {
+  const timed = task('t', 'Call mum', { dueMs: new Date(2026, 9, 20, 9, 30).getTime(), isAllDay: false, startMs: null })
+  const undated = task('u', 'Buy milk', { startMs: null })
+
+  it('sets the day and time, keeps the day for a time alone, and drops the time for all day', async () => {
+    const { c, done } = context([timed, undated])
+    await run(c, 'update_task', { query: 'buy milk', due: 'friday at 3pm' })
+    await run(c, 'update_task', { query: 'call mum', due: '4:15pm' })
+    await run(c, 'update_task', { query: 'buy milk', due: 'at 9' })
+    await run(c, 'update_task', { query: 'call mum', due: 'all day' })
+    expect(done).toEqual([
+      `update u ${JSON.stringify({ dueMs: new Date(2026, 9, 23, 15).getTime(), isAllDay: false })}`,
+      `update t ${JSON.stringify({ dueMs: new Date(2026, 9, 20, 16, 15).getTime(), isAllDay: false })}`,
+      `update u ${JSON.stringify({ dueMs: new Date(2026, 9, 22, 9).getTime(), isAllDay: false })}`,
+      `update t ${JSON.stringify({ dueMs: new Date(2026, 9, 20).getTime(), isAllDay: true })}`,
+    ])
+  })
+
+  it('changes nothing for a time it cannot read', async () => {
+    const { c, done } = context([timed])
+    expect(await run(c, 'update_task', { query: 'call mum', due: 'friday at 13pm' })).toEqual({ error: expect.stringContaining("can't read") })
+    expect(done).toEqual([])
   })
 })

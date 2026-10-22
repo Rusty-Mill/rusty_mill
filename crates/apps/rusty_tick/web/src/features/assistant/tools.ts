@@ -81,25 +81,78 @@ export function readDay(text: string, now: number): number | null | undefined {
   return day.getFullYear() === y && day.getMonth() === m && day.getDate() === d ? day.getTime() : undefined
 }
 
+/** A time of day, or none (`all-day`). */
+export type Clock = { h: number; m: number } | 'all-day'
+
+/** What a "move … to …" names: a day, a time of day, or both; a missing part is kept. */
+export interface When {
+  day?: number
+  time?: Clock
+}
+
+const CLOCK = String.raw`\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?|noon|midnight|all day`
+
 /**
- * The patch that moves `t` to `day` (local midnight), or clears its dates for
- * `null`. A timed task keeps its time of day; an undated one becomes all-day;
- * a start that would fall after the new due date is dropped.
+ * `text` as a time of day: 3pm, 3:30 pm, 15:30, noon, midnight, all day. A
+ * bare hour ("9") counts only after "at" (`bare`), so "friday 3" is not taken
+ * for 3 o'clock; an hour or minute out of range is not read at all.
  */
-export function moveTo(t: Task, day: number | null): TaskPatch {
+function readClock(text: string, bare: boolean): Clock | undefined {
+  const t = norm(text)
+  if (t === 'all day') return 'all-day'
+  if (t === 'noon') return { h: 12, m: 0 }
+  if (t === 'midnight') return { h: 0, m: 0 }
+  const parts = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/.exec(t)
+  if (!parts || (!bare && parts[2] === undefined && parts[3] === undefined)) return undefined
+  const [hour, minute, half] = [Number(parts[1]), Number(parts[2] ?? 0), parts[3]]
+  if (minute > 59) return undefined
+  if (half === undefined) return hour <= 23 ? { h: hour, m: minute } : undefined
+  if (hour < 1 || hour > 12) return undefined
+  return { h: (hour % 12) + (half === 'pm' ? 12 : 0), m: minute }
+}
+
+/**
+ * The day and time `text` names, as `readDay` reads days, optionally followed
+ * by a time ("friday at 3pm", "tomorrow 9:30", "2026-11-05 15:00"), or a time
+ * alone ("3pm", "at 9", "all day"). `null` for no date; `undefined` when any
+ * part is unreadable, so nothing is guessed.
+ */
+export function readWhen(text: string, now: number): When | null | undefined {
+  const t = norm(text)
+  const day = readDay(t, now)
+  if (day !== undefined) return day === null ? null : { day }
+  const atTime = /^(.*\S)\s+at\s+(.+)$/.exec(t) ?? /^()at\s+(.+)$/.exec(t)
+  const split = atTime ?? new RegExp(`^(.*\\S)\\s+(${CLOCK})$`).exec(t) ?? new RegExp(`^()(${CLOCK})$`).exec(t)
+  if (!split) return undefined
+  const time = readClock(split[2]!, atTime !== null)
+  if (time === undefined) return undefined
+  if (split[1] === '') return { time }
+  const on = readDay(split[1]!, now)
+  return on === undefined || on === null ? undefined : { day: on, time }
+}
+
+/**
+ * The patch that moves `t` to `day` (local midnight), at `time` if given, or
+ * clears its dates for `null`. Without a time, a timed task keeps its time of
+ * day and an undated one becomes all-day; a start that would fall after the
+ * new due date is dropped.
+ */
+export function moveTo(t: Task, day: number | null, time?: Clock): TaskPatch {
   if (day === null) return { dueMs: null, startMs: null }
   const at = new Date(day)
-  if (t.dueMs !== null && !t.isAllDay) {
-    const old = new Date(t.dueMs)
-    at.setHours(old.getHours(), old.getMinutes(), 0, 0)
-  }
+  const keep = time === undefined && t.dueMs !== null && !t.isAllDay ? new Date(t.dueMs) : null
+  if (time !== undefined && time !== 'all-day') at.setHours(time.h, time.m, 0, 0)
+  if (keep) at.setHours(keep.getHours(), keep.getMinutes(), 0, 0)
   const dueMs = at.getTime()
-  const patch: TaskPatch = { dueMs, isAllDay: t.dueMs === null || t.isAllDay }
+  const isAllDay = time === undefined ? keep === null : time === 'all-day'
+  const patch: TaskPatch = { dueMs, isAllDay }
   if (t.startMs !== null && t.startMs > dueMs) patch.startMs = null
   return patch
 }
 
 const dayLabel = (ms: number): string => new Date(ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+const whenLabel = (patch: TaskPatch): string =>
+  patch.dueMs == null ? 'no date' : patch.isAllDay ? dayLabel(patch.dueMs) : `${dayLabel(patch.dueMs)} at ${new Date(patch.dueMs).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`
 
 /** The one live list `name` names: its exact name, else the only one containing it. */
 export function pickList(lists: readonly List[], name: string): { list: List } | { error: string } {
@@ -126,9 +179,11 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   const { query = '', title, due, priority, list } = args
   if ([title, due, priority, list].every((v) => v === undefined)) return { error: 'Say what to change: a new title, a day, a priority or a list.' }
   if (title !== undefined && title.trim() === '') return { error: 'Say the new title.' }
-  const day = due === undefined ? undefined : readDay(due, c.now)
-  if (due !== undefined && day === undefined) {
-    return { error: `I can't read “${due.trim()}” as a day; try today, tomorrow, friday, in 3 days, next week, 2026-11-05 or none.` }
+  const when = due === undefined ? undefined : readWhen(due, c.now)
+  if (due !== undefined && when === undefined) {
+    return {
+      error: `I can't read “${due.trim()}” as a day or time; try today, tomorrow, friday, in 3 days, next week, 2026-11-05, 3pm, friday at 9:30, all day or none.`,
+    }
   }
   const level = priority === undefined ? undefined : PRIORITY[norm(priority)]
   if (priority !== undefined && level === undefined) return { error: 'Priority is high, medium, low or none.' }
@@ -149,9 +204,11 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
     await c.update(task.id, { priority: level })
     return { title: task.title, priority: PRIORITY_NAME[level] }
   }
-  const patch = moveTo(task, day ?? null)
+  if (when === undefined) return { error: 'Say what to change: a new title, a day, a priority or a list.' }
+  // A time alone keeps the task's day (today for an undated task).
+  const patch = when === null ? moveTo(task, null) : moveTo(task, when.day ?? startOfDay(task.dueMs ?? c.now), when.time)
   await c.update(task.id, patch)
-  return { title: task.title, due: patch.dueMs == null ? 'no date' : dayLabel(patch.dueMs) }
+  return { title: task.title, due: whenLabel(patch) }
 }
 
 const titled = { type: 'object', properties: { query: { type: 'string', description: 'The task’s title, or enough of it' } }, required: ['query'] }
@@ -207,13 +264,13 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
     },
     {
       name: 'update_task',
-      description: 'Rename the one task this names, move it to another day (today, tomorrow, friday, in 3 days, next week, 2026-11-05, or none), set its priority, or move it to another list.',
+      description: 'Rename the one task this names, move it to another day or time (today, tomorrow, friday at 3pm, in 3 days, 2026-11-05 9:30, 3pm, all day, or none), set its priority, or move it to another list.',
       parameters: {
         type: 'object',
         properties: {
           query: titled.properties.query,
           title: { type: 'string', description: 'The new title' },
-          due: { type: 'string', description: 'The new day, as said' },
+          due: { type: 'string', description: 'The new day and/or time, as said' },
           priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
           list: { type: 'string', description: 'The list to move it to, by name' },
         },
