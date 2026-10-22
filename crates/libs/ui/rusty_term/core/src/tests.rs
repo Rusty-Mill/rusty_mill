@@ -6492,3 +6492,65 @@ fn decrqm_reports_modes_3_and_40() {
     p.advance(&mut g, b"\x1bc\x1b[?40$p\x1b[?3$p");
     assert_eq!(p.take_responses(), b"\x1b[?40;2$y\x1b[?3;2$y");
 }
+
+#[test]
+fn printable_ascii_len_matches_a_byte_scan() {
+    // Every byte value at every position of a 19-byte buffer (two words plus
+    // a tail), surrounded by printable bytes.
+    for bad in 0..=255u8 {
+        for pos in 0..19 {
+            let mut buf = [b'a'; 19];
+            buf[pos] = bad;
+            let want = buf
+                .iter()
+                .take_while(|b| (0x20..=0x7e).contains(*b))
+                .count();
+            assert_eq!(printable_ascii_len(&buf), want, "byte {bad:#04x} at {pos}");
+        }
+    }
+    assert_eq!(printable_ascii_len(b""), 0);
+    assert_eq!(printable_ascii_len(b" ~"), 2);
+}
+
+/// Text and flags of every cell, wrap bit of every scrollback line, cursor
+/// and scrollback length.
+type GridState = (Vec<(char, u16)>, Vec<bool>, (usize, usize), usize);
+
+/// The [`GridState`] of `g`, for comparing two grids.
+fn grid_state(g: &Grid) -> GridState {
+    let cells = cells(g).iter().map(|c| (c.ch, c.flags)).collect();
+    let wraps = g.scrollback.iter().map(|l| l.wrapped).collect();
+    (cells, wraps, g.cursor, g.scrollback.len())
+}
+
+#[test]
+fn ascii_fast_path_matches_put_char_one_byte_at_a_time() {
+    // Each setup leaves wide glyphs on screen (so runs start and end on their
+    // halves) under one mode the fast path must defer to put_char for.
+    let setups: [&str; 5] = [
+        "",
+        "\x1b[?7l",           // DECAWM off
+        "\x1b[4h",            // insert mode
+        "\x1b[?69h\x1b[3;7s", // DECSLRM margins, columns 3..=7
+        "\x1b[2;3r",          // scroll region
+    ];
+    let run = b"0123456789abcdefghij";
+    for setup in setups {
+        for x in 1..=9 {
+            for len in 1..=run.len() {
+                let prefix = format!("世界世界世\r\n日本日本日{setup}\x1b[2;{x}H");
+                let mut fast = parse(prefix.as_bytes(), 9, 3);
+                let mut slow = parse(prefix.as_bytes(), 9, 3);
+                AnsiParser::new().advance(&mut fast, &run[..len]);
+                for &b in &run[..len] {
+                    slow.put_char(char::from(b), Pen::default());
+                }
+                assert_eq!(
+                    grid_state(&fast),
+                    grid_state(&slow),
+                    "setup {setup:?}, column {x}, {len} bytes"
+                );
+            }
+        }
+    }
+}
