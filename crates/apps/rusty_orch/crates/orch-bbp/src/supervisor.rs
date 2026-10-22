@@ -84,10 +84,15 @@ impl Supervisor for StdSupervisor {
                 "sandbox",
                 "--max-wall-secs",
                 &config.max_wall_secs.to_string(),
-            ])
-            .stdin(Stdio::null())
-            .stdout(log)
-            .stderr(err);
+            ]);
+        if let Some(slots) = &config.slots {
+            command
+                .arg("--slots")
+                .arg(&slots.dir)
+                .args(["--agent-slots", &slots.agents.to_string()])
+                .args(["--validator-slots", &slots.validators.to_string()]);
+        }
+        command.stdin(Stdio::null()).stdout(log).stderr(err);
         orch_cli::scrub_env(&mut command, SCRUB);
         #[cfg(unix)]
         {

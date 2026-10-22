@@ -6,7 +6,7 @@
 )]
 mod config;
 mod supervisor;
-pub use config::{Agent, Assignment, Config};
+pub use config::{Agent, Assignment, Config, Slots};
 pub use supervisor::{StdSupervisor, Supervised, Supervisor};
 
 use orch_cli::{CommandRunner, ExecError, StdCommand};

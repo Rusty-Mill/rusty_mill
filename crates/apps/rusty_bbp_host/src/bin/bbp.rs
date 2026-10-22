@@ -18,14 +18,15 @@
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
-//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--max-usd C --criteria FILE]
+//! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N]
+//! bbp slot-hold --group G                 holds the slot lock on stdin until process group G is empty; started by bbp mod
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
     admin, args::Args, grade, human, mcp, moderator, pairs, pins, profiles, report, response_json,
-    runner, shadow, tokens, why,
+    runner, shadow, slots, tokens, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -43,6 +44,14 @@ fn run() -> Result<String, String> {
         std::process::exit(i32::from(rusty_sandbox::SETUP_FAILED));
     }
     let a = Args::parse(argv.into_iter().skip(1));
+    if sub == "slot-hold" {
+        let group = a
+            .flag("group")?
+            .parse()
+            .map_err(|_| "--group must be a number")?;
+        slots::hold_while_alive(group);
+        return Ok(String::new());
+    }
     if sub == "profiles" {
         if a.pos(0)? != "rust-lld" {
             return Err("usage: bbp profiles rust-lld --sysroot PATH".into());
@@ -184,6 +193,21 @@ fn run() -> Result<String, String> {
                     }),
                     (None, None) => None,
                     _ => return Err("--max-usd and --criteria go together".into()),
+                },
+                slots: match a.flags.get("slots") {
+                    None => None,
+                    Some(dir) => {
+                        let count = |k: &str| -> Result<u32, String> {
+                            a.flag(k)?
+                                .parse()
+                                .map_err(|_| format!("--{k} must be a number"))
+                        };
+                        let capacity = slots::Capacity {
+                            agents: count("agent-slots")?,
+                            validators: count("validator-slots")?,
+                        };
+                        Some(slots::Slots::open(&PathBuf::from(dir), capacity)?)
+                    }
                 },
             };
             let out = moderator::run_to_stop(&cfg)?;

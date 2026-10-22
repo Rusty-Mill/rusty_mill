@@ -180,6 +180,7 @@ fn happy_run(tag: &str) -> (PathBuf, TaskId, moderator::Outcome, Vec<State>) {
         max_wall: Duration::from_secs(90),
         end_grace: Duration::ZERO,
         cost_cap: None,
+        slots: None,
     };
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
 
@@ -337,6 +338,7 @@ fn a_harness_that_exits_early_forfeits_its_turn() {
         max_wall: Duration::from_secs(5),
         end_grace: Duration::ZERO,
         cost_cap: None,
+        slots: None,
     };
     let first = card(&dir, &task);
     let out = moderator::run(&cfg);
@@ -460,6 +462,7 @@ fn config(dir: &Path, task: &TaskId, repo: PathBuf, launchers: Launchers, wall: 
         max_wall: Duration::from_secs(wall),
         end_grace: Duration::ZERO,
         cost_cap: None,
+        slots: None,
     }
 }
 
