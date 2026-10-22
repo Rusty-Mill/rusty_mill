@@ -5,12 +5,16 @@
 //! longest wait, so deadlines, the wall limit, the end grace and the cost cap
 //! are still checked at least that often when nothing happens.
 //!
-//! Linux watches the log with inotify and the children with pidfds. Elsewhere,
-//! or if the watch cannot be set up, the waker sleeps for the whole timeout,
-//! which is the loop's previous behavior.
+//! Linux watches the log with inotify and the children with pidfds. Where
+//! pidfds are unavailable or denied, children are checked every
+//! [`CHILD_POLL`] instead. Elsewhere, or if the log watch cannot be set up, the
+//! waker sleeps for the whole timeout, which is the loop's previous behavior.
 
 use std::path::Path;
 use std::time::Duration;
+
+/// How often children are checked when they cannot be watched with pidfds.
+pub const CHILD_POLL: Duration = Duration::from_millis(100);
 
 /// Why [`Waker::wait`] returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +29,9 @@ pub enum Wake {
 pub struct Waker {
     #[cfg(target_os = "linux")]
     inotify: Option<linux::Inotify>,
+    /// Cleared on the first pidfd the kernel refuses as unsupported or denied.
+    #[cfg(target_os = "linux")]
+    pidfds: bool,
 }
 
 impl Waker {
@@ -41,7 +48,10 @@ impl Waker {
                     )
                 })
                 .ok();
-            Waker { inotify }
+            Waker {
+                inotify,
+                pidfds: true,
+            }
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -55,7 +65,8 @@ impl Waker {
     pub fn wait(&mut self, pids: &[u32], timeout: Duration) -> Result<Wake, String> {
         #[cfg(target_os = "linux")]
         if let Some(inotify) = &self.inotify {
-            return linux::wait(inotify, pids, timeout);
+            let open = |pid| rusty_libc::process::pidfd_open(pid, 0);
+            return linux::wait(inotify, &mut self.pidfds, pids, timeout, open);
         }
         let _ = pids;
         std::thread::sleep(timeout);
@@ -65,12 +76,11 @@ impl Waker {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::Wake;
+    use super::{Wake, CHILD_POLL};
     use rusty_libc::fd::{close, poll, read, PollFd, POLLIN};
     use rusty_libc::inotify::{
         inotify_add_watch, inotify_init1, IN_CLOEXEC, IN_MODIFY, IN_NONBLOCK,
     };
-    use rusty_libc::process::pidfd_open;
     use rusty_libc::Errno;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -125,18 +135,52 @@ mod linux {
         }
     }
 
-    pub fn wait(inotify: &Inotify, pids: &[u32], timeout: Duration) -> Result<Wake, String> {
-        // The children are unreaped, so their pids cannot be reused under us.
-        let mut pidfds = Pidfds(Vec::with_capacity(pids.len()));
+    /// Open a pidfd for each child. `false` in the second place means some
+    /// child could not be watched (pidfds unsupported or denied, now or on an
+    /// earlier wait), so the caller must bound its wait by [`CHILD_POLL`].
+    fn open_pidfds(
+        enabled: &mut bool,
+        pids: &[u32],
+        open: impl Fn(i32) -> Result<i32, Errno>,
+    ) -> Result<(Pidfds, bool), String> {
+        let mut fds = Pidfds(Vec::with_capacity(pids.len()));
+        if !*enabled {
+            return Ok((fds, pids.is_empty()));
+        }
         for &pid in pids {
             let pid = i32::try_from(pid).map_err(|_| "pid out of range".to_owned())?;
-            match pidfd_open(pid, 0) {
-                Ok(fd) => pidfds.0.push(fd),
+            match open(pid) {
+                Ok(fd) => fds.0.push(fd),
                 // Already reaped: nothing to wait for.
                 Err(Errno::ESRCH) => {}
+                // An old kernel or a sandbox: check the children on a timer.
+                Err(e @ (Errno::ENOSYS | Errno::EPERM | Errno::EACCES)) => {
+                    eprintln!(
+                        "bbp mod: cannot watch children (pidfd_open: {e:?}); checking every {CHILD_POLL:?}"
+                    );
+                    *enabled = false;
+                    return Ok((Pidfds(Vec::new()), false));
+                }
                 Err(e) => return Err(format!("pidfd_open({pid}): {e:?}")),
             }
         }
+        Ok((fds, true))
+    }
+
+    pub fn wait(
+        inotify: &Inotify,
+        pidfds_enabled: &mut bool,
+        pids: &[u32],
+        timeout: Duration,
+        open: impl Fn(i32) -> Result<i32, Errno>,
+    ) -> Result<Wake, String> {
+        // The children are unreaped, so their pids cannot be reused under us.
+        let (pidfds, all_watched) = open_pidfds(pidfds_enabled, pids, open)?;
+        let timeout = if all_watched {
+            timeout
+        } else {
+            timeout.min(CHILD_POLL)
+        };
         let mut fds: Vec<PollFd> = std::iter::once(inotify.0)
             .chain(pidfds.0.iter().copied())
             .map(|fd| PollFd {
@@ -145,7 +189,8 @@ mod linux {
                 revents: 0,
             })
             .collect();
-        let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        // Rounded up, so a wait for a deadline does not end just short of it.
+        let ms = i32::try_from(timeout.as_micros().div_ceil(1_000)).unwrap_or(i32::MAX);
         let ready = match poll(&mut fds, ms) {
             Ok(n) => n,
             // A signal cut the wait short: let the loop run a pass.
@@ -231,13 +276,86 @@ mod tests {
         child.wait().expect("reap");
     }
 
+    /// Waits on a live child with pidfds refused as `err` by the kernel.
+    fn wait_refused(name: &str, err: rusty_libc::Errno) -> (Result<Wake, String>, bool, usize) {
+        let (path, _file) = log_file(name);
+        let inotify = linux::Inotify::watch(&path).expect("watch");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn");
+        let calls = std::cell::Cell::new(0);
+        let open = |_| {
+            calls.set(calls.get() + 1);
+            Err(err)
+        };
+        let mut enabled = true;
+        let started = Instant::now();
+        let woke = linux::wait(
+            &inotify,
+            &mut enabled,
+            &[child.id()],
+            Duration::from_secs(10),
+            open,
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        if woke.is_ok() {
+            // A later wait does not ask the kernel again.
+            let again = linux::wait(
+                &inotify,
+                &mut enabled,
+                &[child.id()],
+                Duration::from_secs(10),
+                open,
+            );
+            assert_eq!(again, Ok(Wake::Timeout));
+        }
+        child.kill().expect("kill");
+        child.wait().expect("reap");
+        (woke, enabled, calls.get())
+    }
+
+    #[test]
+    fn unavailable_pidfds_fall_back_to_checking_children_on_a_timer() {
+        for err in [
+            rusty_libc::Errno::ENOSYS,
+            rusty_libc::Errno::EPERM,
+            rusty_libc::Errno::EACCES,
+        ] {
+            let (woke, enabled, calls) = wait_refused("nopidfd", err);
+            assert_eq!(woke, Ok(Wake::Timeout), "{err:?}");
+            assert!(!enabled, "{err:?}");
+            assert_eq!(calls, 1, "{err:?}");
+        }
+    }
+
+    #[test]
+    fn other_pidfd_errors_are_not_swallowed() {
+        let (woke, enabled, _) = wait_refused("pidfd-emfile", rusty_libc::Errno::EMFILE);
+        assert!(woke.expect_err("an error").contains("pidfd_open"));
+        assert!(enabled);
+    }
+}
+
+/// The fallback every platform has: no watch, sleep out the timeout.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod fallback_tests {
+    use super::*;
+
     #[test]
     fn a_missing_log_falls_back_to_sleeping() {
         let path = std::env::temp_dir()
             .join("bbp-waker-missing")
             .join("none.log");
         let mut waker = Waker::new(&path);
+        let started = std::time::Instant::now();
         let woke = waker.wait(&[], Duration::from_millis(50)).expect("wait");
         assert_eq!(woke, Wake::Timeout);
+        assert!(started.elapsed() >= Duration::from_millis(50));
     }
 }

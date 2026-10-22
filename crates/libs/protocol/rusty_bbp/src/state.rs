@@ -442,6 +442,25 @@ impl TaskState {
         self.turns.first()
     }
 
+    /// The pending request's deadline, when passing it would escalate (A4).
+    pub fn request_deadline(&self) -> Option<Time> {
+        if self.state.terminal() || self.state == State::Escalated {
+            return None;
+        }
+        self.pending_request.as_ref().and_then(|p| p.deadline)
+    }
+
+    /// The next time a `Tick` would change anything: the earliest live turn
+    /// deadline or escalating request deadline. A driver that waits for events
+    /// must wake by then.
+    pub fn next_deadline(&self) -> Option<Time> {
+        self.turns
+            .iter()
+            .map(|t| t.deadline)
+            .chain(self.request_deadline())
+            .min()
+    }
+
     /// Slice not yet spent by live turns: what a new grant may not take.
     pub fn reserved(&self) -> Slice {
         self.turns
