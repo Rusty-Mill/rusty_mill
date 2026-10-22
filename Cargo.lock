@@ -518,21 +518,20 @@ dependencies = [
  "cel",
  "http",
  "http-body-util",
- "prost",
- "prost-types",
  "regex",
  "rusty-mcp",
  "rusty_json",
  "rusty_log",
  "rusty_mcp_client_native",
  "rusty_mcp_server",
+ "rusty_prost",
  "rusty_serve",
+ "rusty_tonic",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tonic",
- "tonic-prost",
 ]
 
 [[package]]
@@ -12118,7 +12117,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.9",
- "bytes",
  "chrono",
  "ed25519-dalek 3.0.0",
  "eventsource-stream",
@@ -12132,6 +12130,7 @@ dependencies = [
  "rusty_log",
  "rusty_prost",
  "rusty_retry",
+ "rusty_tonic",
  "rusty_uuid",
  "serde",
  "serde_json",
@@ -13084,8 +13083,10 @@ dependencies = [
 name = "rusty_tonic"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "http",
+ "http-body-util",
  "prost",
  "rcgen",
  "rustls",

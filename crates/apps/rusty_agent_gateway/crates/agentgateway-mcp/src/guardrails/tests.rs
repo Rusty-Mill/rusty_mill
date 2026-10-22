@@ -42,7 +42,7 @@ struct Seen {
     bodies: Vec<Option<Vec<u8>>>,
     backends: Vec<Vec<String>>,
     headers: Vec<Vec<(String, String)>>,
-    metadata: Vec<Option<prost_types::Struct>>,
+    metadata: Vec<Option<rusty_prost::wkt::Struct>>,
     calls: usize,
 }
 
@@ -142,12 +142,10 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                             _ => request_result::Result::Pass(Pass {}),
                         }),
                         metadata: match &script {
-                            Script::Annotate(value) => {
-                                match wire::to_proto_value(value.clone()).kind {
-                                    Some(prost_types::value::Kind::StructValue(s)) => Some(s),
-                                    _ => None,
-                                }
-                            }
+                            Script::Annotate(value) => match wire::to_proto_value(value.clone()) {
+                                Value::Struct(s) => Some(s),
+                                _ => None,
+                            },
                             _ => None,
                         },
                         header_mutation: match &script {
@@ -165,6 +163,7 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                         },
                     }
                     .encode_to_vec()
+                    .expect("should encode")
                 } else {
                     McpResponseResult {
                         result: Some(match &script {
@@ -182,6 +181,7 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                         }),
                     }
                     .encode_to_vec()
+                    .expect("should encode")
                 };
 
                 let mut framed = Vec::with_capacity(payload.len() + 5);
@@ -248,7 +248,8 @@ fn chain(processors: Vec<Processor>) -> Guardrails {
         .expect("should compile")
 }
 
-use prost::Message as _;
+use rusty_prost::Message as _;
+use rusty_prost::wkt::Value;
 
 #[tokio::test]
 async fn a_passing_processor_leaves_the_call_alone() {
@@ -682,8 +683,8 @@ async fn metadata_expressions_reach_the_processor() {
         .expect("metadata should be sent")
         .fields
         .clone();
-    let text = |key: &str| match fields.get(key).and_then(|v| v.kind.clone()) {
-        Some(prost_types::value::Kind::StringValue(s)) => s,
+    let text = |key: &str| match fields.get(key).cloned() {
+        Some(Value::String(s)) => s,
         other => panic!("{key} should be a string, got {other:?}"),
     };
     assert_eq!(text("tenant"), "acme");
@@ -939,8 +940,8 @@ async fn header_changes_from_several_processors_accumulate() {
 
 /// The string value of a metadata key the processor was sent, if any.
 fn metadata_text(seen: &Seen, key: &str) -> Option<String> {
-    match seen.metadata[0].as_ref()?.fields.get(key)?.kind.clone()? {
-        prost_types::value::Kind::StringValue(s) => Some(s),
+    match seen.metadata[0].as_ref()?.fields.get(key)?.clone() {
+        Value::String(s) => Some(s),
         other => panic!("{key} should be a string, got {other:?}"),
     }
 }
@@ -1116,8 +1117,7 @@ async fn the_response_phase_gets_the_subject_too() {
 /// One processor's metadata bag, folded into a running set.
 fn annotations(value: serde_json::Value) -> Annotations {
     let mut annotations = Annotations::default();
-    let Some(prost_types::value::Kind::StructValue(structure)) = wire::to_proto_value(value).kind
-    else {
+    let Value::Struct(structure) = wire::to_proto_value(value) else {
         panic!("a metadata bag must be an object");
     };
     annotations.merge(structure);
@@ -1178,8 +1178,7 @@ fn a_later_processor_wins_a_key_collision() {
     // A chain reads as a pipeline: the last thing to say something about a
     // call is the most informed.
     let mut annotations = annotations(serde_json::json!({"verdict": "unknown"}));
-    let Some(prost_types::value::Kind::StructValue(second)) =
-        wire::to_proto_value(serde_json::json!({"verdict": "clean"})).kind
+    let Value::Struct(second) = wire::to_proto_value(serde_json::json!({"verdict": "clean"}))
     else {
         unreachable!()
     };
