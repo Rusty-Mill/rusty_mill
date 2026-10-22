@@ -1,7 +1,8 @@
 //! The A2A gRPC binding's messages (spec Section 10), written out from the vendored
-//! `spec/a2a.proto` on [`rusty_prost`]: one table entry per proto field, in `macros`. There is
-//! no code generator and no `protoc`; `tests/pb_wire.rs` holds the reference implementation's
-//! bytes for every message and checks these against them.
+//! `spec/a2a.proto` on [`rusty_prost`]: one table entry per proto field, declared with its
+//! `message!`, `oneof!` and `open_enum!`. There is no code generator and no `protoc`;
+//! `tests/pb_wire.rs` holds the reference implementation's bytes for every message and checks
+//! these against them.
 //!
 //! The shapes follow what `prost` generated, so `grpc_convert` reads the same: a message
 //! field is `Option<M>`, an enum field is its `i32` (a value the schema does not know is kept,
@@ -9,70 +10,14 @@
 //! (`part::Content`), `optional` scalars are `Option`s, and a map is a `BTreeMap` (sorted, so
 //! encoding is deterministic). Unknown fields are dropped on decode.
 
-#[macro_use]
-mod macros;
 mod service;
 
 use std::collections::BTreeMap;
 
 pub use rusty_prost::wkt::{Empty, Struct, Timestamp, Value};
+pub use rusty_prost::UnknownEnumValue;
+use rusty_prost::{message, oneof, open_enum};
 pub use service::{a2a_service_client, a2a_service_server};
-
-/// A value the schema has no enum member for (see the enums' `TryFrom<i32>`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnknownEnumValue(pub i32);
-
-impl std::fmt::Display for UnknownEnumValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unknown enumeration value {}", self.0)
-    }
-}
-
-impl std::error::Error for UnknownEnumValue {}
-
-/// A proto enum. Fields hold the `i32`, so a member added by a newer peer survives; `try_from`
-/// is how the known ones are told apart.
-macro_rules! open_enum {
-    ($(#[$meta:meta])* $name:ident { $($var:ident = $num:literal : $str:literal),* $(,)? }) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-        #[repr(i32)]
-        pub enum $name {
-            $(
-                #[allow(missing_docs)]
-                $var = $num,
-            )*
-        }
-
-        impl $name {
-            /// The name in the `.proto` (`TASK_STATE_WORKING`).
-            pub fn as_str_name(&self) -> &'static str {
-                match self {
-                    $( Self::$var => $str, )*
-                }
-            }
-
-            /// The member named `name` in the `.proto`.
-            pub fn from_str_name(name: &str) -> Option<Self> {
-                match name {
-                    $( $str => Some(Self::$var), )*
-                    _ => None,
-                }
-            }
-        }
-
-        impl TryFrom<i32> for $name {
-            type Error = UnknownEnumValue;
-
-            fn try_from(value: i32) -> Result<Self, UnknownEnumValue> {
-                match value {
-                    $( $num => Ok(Self::$var), )*
-                    other => Err(UnknownEnumValue(other)),
-                }
-            }
-        }
-    };
-}
 
 open_enum! {
     /// The lifecycle state of a [`Task`].

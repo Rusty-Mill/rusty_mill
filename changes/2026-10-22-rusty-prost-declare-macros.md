@@ -1,0 +1,15 @@
+---
+category: Added
+changelog: "`rusty_prost`: `message!`, `oneof!` and `open_enum!` declare a proto schema as a table (one line per field) instead of a hand-written `encode` and `merge_field`; `rusty_a2a`'s `pb` moves onto them with its wire vectors unchanged."
+---
+## 2026-10-22 - rusty_prost: declare a schema as a table
+
+- **Why:** `rusty_a2a`'s `pb` (#858) wrote its 44 messages with a private macro pair; the agent gateway's `ext_mcp` messages are the second real consumer, so the macros move to `rusty_prost`, where both can use them. Approved in the phase 5 design check for `agentgateway-mcp` (decision 2); this is the separate first PR it asked for.
+- **Added (`rusty_prost`):**
+  - `message!` writes the struct (`Debug`, `Default`, `Clone`, `PartialEq`) and its `Message` impl from `NUMBER name: Type = kind` lines, with an optional `oneof name: Type;`. Kinds: `string`, `bytes`, `bool`, `int32`, `enumv`, `opt_string`, `opt_bytes`, `opt_int32`, `opt_bool`, `msg`, `rep_string`, `rep_msg`, `map_str`, `map_msg` (the table is in the `declare` module docs).
+  - `oneof!` declares the members of a `oneof` as an enum with the new `Oneof` trait (the last member wins; a message member that repeats merges into the previous one).
+  - `open_enum!` declares a proto enum with `as_str_name`, `from_str_name` and `TryFrom<i32>`, with `UnknownEnumValue` as its error. Fields hold the `i32`, so a value a newer peer adds survives.
+- **Changed (`rusty_a2a`):** `src/pb/macros.rs` and the local `open_enum!` are gone; `pb` uses the `rusty_prost` macros, and `pb::UnknownEnumValue` is a re-export. The 286 reference vectors and the rest of the suite pass unchanged, which is the proof the move changes no bytes.
+- **Tests (written first; they did not compile before the macros existed):** `rusty_prost/tests/declare.rs` (12) declares a message with every kind and checks it against a `prost`-derived mirror on 3,000 random values: the same bytes, each side reads the other's, then the merge rules (a scalar repeated, a oneof's last member, a repeated message member and map key, an entry with no key or value, unknown fields), the oneof trait, and the enum. The module doctest pins the byte layout of an optional field. 15 mutations of the macros (each kind written at its default, the map key and value, oneof merging, repeated order, optional zero and negative, the unknown-enum check, an unrelated field clobbering a oneof, the error text): one survivor got a test (an unknown field must leave a set oneof alone), one is equivalent by construction.
+- **Finding:** `prost` leaves a map entry's key or value out when it is the default; the reference implementation (and these macros) always write both. Both read either form, so the byte comparison with `prost` uses non-default entries and a separate test pins the difference.
+- **Known limitations:** keys are `String` only (`map_str`, `map_msg`), a oneof's members are `string`, `bytes` or `msg`, and there are no numeric repeated fields: the kinds are those the two consumers need, and a new one is a new arm.
