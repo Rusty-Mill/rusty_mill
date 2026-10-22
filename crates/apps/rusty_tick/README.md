@@ -108,7 +108,8 @@ friday; “make … repeat …”; “stop repeating …”), “remind me about
 before” (or 5 minutes, a day before, at the time, on the day; “stop reminding me about
 …”; an all-day task is reminded at 09:00), “snooze dentist for 2 hours” (or 30 minutes,
 a day, 1 week, “until friday at 9”: minutes and hours count from now, days from the due
-day) and “lists”. A task is named by its title; when several
+day), “lists”, and for habits “habits”, “check in meditate”, “undo check in meditate”
+and “add habit meditate” (habits live in the browser, so these have no MCP tool). A task is named by its title; when several
 match, it asks which. Quote a name that contains “to” (“rename "a to b" to c”). An
 unreadable day changes nothing.
 

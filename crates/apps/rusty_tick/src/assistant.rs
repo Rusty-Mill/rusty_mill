@@ -29,6 +29,14 @@ pub const LIST_LISTS: &str = "list_lists";
 /// The one task a title names, renamed (`{query, title}`) or given a new due
 /// day (`{query, due}`: the day as said, read by the browser in its own zone).
 pub const UPDATE_TASK: &str = "update_task";
+/// Habits are client documents with no API route, so these three run only in
+/// the browser and have no MCP twin.
+/// Today's habits and their progress: `{}`.
+pub const LIST_HABITS: &str = "list_habits";
+/// One more check-in today for the habit a name names, or none (`undo`): `{query, undo?}`.
+pub const CHECK_IN_HABIT: &str = "check_in_habit";
+/// A new daily habit: `{name}`.
+pub const ADD_HABIT: &str = "add_habit";
 
 /// What the assistant decided to do with a run.
 #[derive(Debug, PartialEq)]
@@ -46,7 +54,7 @@ pub enum Reply {
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
 “rename buy milk to buy oat milk”, “move buy milk to friday at 3pm”, “make buy milk high priority”, \
-“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours” or “lists”.";
+“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours”, “lists”, “habits”, “check in meditate” or “add habit meditate”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -158,6 +166,7 @@ fn command(text: &str, lower: &str) -> Option<Reply> {
         .or_else(|| repeat_phrase(text, lower))
         .or_else(|| remind_phrase(text, lower))
         .or_else(|| snooze_phrase(text, lower))
+        .or_else(|| habit_phrase(text, lower))
     {
         return Some(reply);
     }
@@ -441,6 +450,80 @@ fn remind_call(query: &str, when: &str) -> Reply {
     update_call(query, "remind", when)
 }
 
+const HABIT_LISTS: [&str; 6] = [
+    "habits",
+    "my habits",
+    "habits today",
+    "show habits",
+    "show my habits",
+    "list habits",
+];
+/// Habit commands that name a habit: their words, the tool, its arguments, and what to ask.
+const HABIT_VERBS: [(&[&str], &str, &str, &str); 3] = [
+    (
+        &[
+            "undo check in for ",
+            "undo check-in for ",
+            "undo check in ",
+            "undo check-in ",
+        ],
+        CHECK_IN_HABIT,
+        "undo",
+        "Undo which habit's check-in? Try “undo check in meditate”.",
+    ),
+    (
+        &["check in for ", "check in to ", "check in "],
+        CHECK_IN_HABIT,
+        "",
+        "Check in which habit? Try “check in meditate”.",
+    ),
+    (
+        &["add habit ", "new habit "],
+        ADD_HABIT,
+        "",
+        "What habit should I add? Try “add habit meditate”.",
+    ),
+];
+
+/// "habits", "check in X", "undo check in X" and "add habit X". Checked before
+/// the task verbs, so "add habit …" never adds a task.
+fn habit_phrase(text: &str, lower: &str) -> Option<Reply> {
+    if HABIT_LISTS.contains(&lower.trim_end_matches(['?', '.', '!'])) {
+        return Some(Reply::Call {
+            tool: LIST_HABITS,
+            args: json!({}),
+            say: "Reading your habits…".into(),
+        });
+    }
+    let bare = HABIT_VERBS
+        .iter()
+        .find(|(prefixes, ..)| prefixes.iter().any(|p| lower == p.trim_end()));
+    if let Some((.., ask)) = bare {
+        return Some(Reply::Text((*ask).into()));
+    }
+    let (prefix, tool, flag, ask) =
+        HABIT_VERBS.iter().find_map(|(prefixes, tool, flag, ask)| {
+            let prefix = prefixes.iter().find(|p| lower.starts_with(*p))?;
+            Some((prefix, *tool, *flag, *ask))
+        })?;
+    let rest = unquote(&text[prefix.len()..]);
+    if rest.is_empty() {
+        return Some(Reply::Text(ask.into()));
+    }
+    let (args, say) = match (tool, flag) {
+        (ADD_HABIT, _) => (
+            json!({ "name": rest }),
+            format!("Adding the habit “{rest}”…"),
+        ),
+        (_, "undo") => (
+            json!({ "query": rest, "undo": "true" }),
+            format!("Looking up “{rest}”…"),
+        ),
+        _ => (json!({ "query": rest }), format!("Looking up “{rest}”…")),
+    };
+    Some(Reply::Call { tool, args, say })
+}
+
 const SNOOZE_HELP: &str = "Snooze which task, and for how long? Try “snooze dentist for 2 hours” \
 or “snooze bins until friday”.";
 const SNOOZE_UNITS: [&str; 10] = [
@@ -618,7 +701,12 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
     }
     if let Some(matches) = strings(&parsed, "matches") {
         return format!(
-            "Several tasks match “{}”: {}. Say a little more of the one you mean.",
+            "Several {} match “{}”: {}. Say a little more of the one you mean.",
+            if name.contains("habit") {
+                "habits"
+            } else {
+                "tasks"
+            },
             arg("query"),
             matches.join(", ")
         );
@@ -626,6 +714,23 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
     let title = parsed.get("title").and_then(Value::as_str).unwrap_or("it");
     match name {
         ADD_TASK => format!("Added “{title}”."),
+        ADD_HABIT => format!("Added the daily habit “{title}”."),
+        CHECK_IN_HABIT => {
+            let progress = parsed.get("progress").and_then(Value::as_str).unwrap_or("");
+            match (
+                parsed.get("undone").is_some(),
+                parsed.get("already").is_some(),
+            ) {
+                (true, _) => format!("Cleared today's check-ins for “{title}”."),
+                (_, true) => format!("“{title}” is already done today ({progress})."),
+                _ => format!("Checked in “{title}”: {progress} today."),
+            }
+        }
+        LIST_HABITS => bullets(
+            "Today's habits:",
+            "No habits are due today.",
+            strings(&parsed, "habits"),
+        ),
         COMPLETE_TASK => format!("Completed “{title}”."),
         REOPEN_TASK => format!("Reopened “{title}”."),
         DELETE_TASK => format!("Moved “{title}” to the Trash."),
@@ -761,7 +866,10 @@ mod tests {
     use super::*;
     use rusty_agui::{Content, Tool, ToolCall};
 
-    const ALL: [&str; 8] = [
+    const ALL: [&str; 11] = [
+        LIST_HABITS,
+        CHECK_IN_HABIT,
+        ADD_HABIT,
         ADD_TASK,
         UPDATE_TASK,
         SEARCH_TASKS,
@@ -802,6 +910,11 @@ mod tests {
             (ADD_TASK, Some(r)) => format!("Adding “{r}”…"),
             (SEARCH_TASKS, Some(r)) => format!("Looking for “{r}”…"),
             (LIST_LISTS, _) => "Reading your lists…".into(),
+            (LIST_HABITS, _) => "Reading your habits…".into(),
+            (ADD_HABIT, _) => format!(
+                "Adding the habit “{}”…",
+                args.get("name").and_then(Value::as_str)?
+            ),
             (DUE_TASKS, _) => "Checking…".into(),
             (_, Some(r)) => format!("Looking up “{r}”…"),
             _ => return None,
@@ -981,6 +1094,83 @@ mod tests {
                 r#"{"title":"Buy milk","list":"Work"}"#
             ),
             Reply::Text("Moved “Buy milk” to Work.".into())
+        );
+    }
+
+    #[test]
+    fn turns_habit_phrases_into_habit_tools() {
+        assert_eq!(decide(&input("habits")), call(LIST_HABITS, json!({})));
+        assert_eq!(
+            decide(&input("Show my habits?")),
+            call(LIST_HABITS, json!({}))
+        );
+        assert_eq!(
+            decide(&input("check in meditate")),
+            call(CHECK_IN_HABIT, json!({"query": "meditate"}))
+        );
+        assert_eq!(
+            decide(&input("Check in to “read 20 pages”")),
+            call(CHECK_IN_HABIT, json!({"query": "read 20 pages"}))
+        );
+        assert_eq!(
+            decide(&input("undo check-in for meditate")),
+            call(CHECK_IN_HABIT, json!({"query": "meditate", "undo": "true"}))
+        );
+        assert_eq!(
+            decide(&input("add habit drink water")),
+            call(ADD_HABIT, json!({"name": "drink water"}))
+        );
+        assert_eq!(
+            decide(&input("add drink water")),
+            call(ADD_TASK, json!({"title": "drink water"}))
+        );
+        assert_eq!(
+            decide(&input("check off milk")),
+            call(COMPLETE_TASK, json!({"query": "milk"}))
+        );
+        for (missing, ask) in [
+            ("check in", "Check in which"),
+            ("check in “ ”", "Check in which"),
+            ("undo check in", "Undo which"),
+            ("add habit", "What habit"),
+        ] {
+            assert!(
+                matches!(decide(&input(missing)), Reply::Text(t) if t.starts_with(ask)),
+                "{missing}"
+            );
+        }
+        assert_eq!(
+            answered(
+                "check in meditate",
+                r#"{"title":"Meditate","progress":"1/1"}"#
+            ),
+            Reply::Text("Checked in “Meditate”: 1/1 today.".into())
+        );
+        assert_eq!(
+            answered(
+                "check in meditate",
+                r#"{"title":"Meditate","progress":"1/1","already":"yes"}"#
+            ),
+            Reply::Text("“Meditate” is already done today (1/1).".into())
+        );
+        assert_eq!(
+            answered(
+                "undo check in meditate",
+                r#"{"title":"Meditate","undone":"yes"}"#
+            ),
+            Reply::Text("Cleared today's check-ins for “Meditate”.".into())
+        );
+        assert_eq!(
+            answered("check in read", r#"{"matches":["Read","Read news"]}"#),
+            Reply::Text("Several habits match “read”: Read, Read news. Say a little more of the one you mean.".into())
+        );
+        assert_eq!(
+            answered("habits", r#"{"habits":["Meditate (0/1)","Water (3/8)"]}"#),
+            Reply::Text("Today's habits:\n- Meditate (0/1)\n- Water (3/8)".into())
+        );
+        assert_eq!(
+            answered("add habit meditate", r#"{"title":"Meditate"}"#),
+            Reply::Text("Added the daily habit “Meditate”.".into())
         );
     }
 
