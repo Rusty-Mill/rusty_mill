@@ -20,6 +20,10 @@
 //!
 //! # What is here
 //!
+//! - `crypto` (private) — the one place the client path calls its
+//!   cryptographic backend: hashes, HMAC, AEAD, key exchange, signature
+//!   checks and randomness. The backend is `ring`; signing and the server's
+//!   ticket cipher call `ring` directly.
 //! - [`record`] — the TLS 1.3 record layer (stage 1): AEAD protection and
 //!   framing for an already-established connection.
 //! - [`record12`] — the TLS 1.2 record layer (stage 4b-i): the same AEADs as
@@ -102,6 +106,7 @@
 
 pub mod client;
 pub mod client12;
+mod crypto;
 pub mod der;
 pub mod export;
 pub mod handshake;
