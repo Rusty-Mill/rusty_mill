@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { MemoryAdapter } from '@/api/memory'
+import { recordMerge } from './aliases'
 import { applyImport, readImport } from '.'
 import { legacyKeys, parseWhen } from './model'
 import { buildEvents } from '@/features/calendar/layout'
@@ -330,6 +331,16 @@ describe('readImport: .ics', () => {
     const [, aId] = await written829(api, [m829, a829])
     expect(await applyImport(api, readImport(cal(master, movedB), 'cal.ics'))).toEqual({ tasks: 1, lists: 0, existing: 0, resumed: 1 })
     expect((await api.snapshot()).tasks.find((t) => t.id === aId)!.dueMs).toBe(a829.dueMs)
+  })
+
+  it('writes a row merged into an earlier task to that task, and gives that task to no other row', async () => {
+    const api = new MemoryAdapter()
+    const [, aId] = await written829(api, [m829, a829])
+    await api.updateTask(aId!, { dueMs: Date.UTC(2026, 9, 14, 9) })
+    const movedAId = derivedId(`import|calendar file|${JSON.stringify(['r1', String(Date.UTC(2026, 9, 12, 9)), 1])}`)
+    await recordMerge(api, movedAId, aId!) // its duplicate was merged into the #829 task, then purged
+    expect(await applyImport(api, readImport(cal(master, movedA, movedB), 'cal.ics'))).toEqual({ tasks: 1, lists: 0, existing: 1, resumed: 1 })
+    expect((await api.snapshot()).tasks.find((t) => t.dueMs === Date.UTC(2026, 9, 20, 9))).toBeDefined()
   })
 
   it('imports an event with more exceptions than a task can hold, keeping the latest', async () => {
