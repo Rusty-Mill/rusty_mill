@@ -31,7 +31,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C07 | Agent / MCP integration | 2 | `rusty_mux_mcp` on `rusty_mcp_server` | not-started | |
 | C08 | Command palette + directory browse | 4 | `rusty_mux` clients | not-started | |
 | C09 | Self-hosted, no account, no telemetry | 1 | all | not-started | |
-| C10 | Native scrollback and selection | 1 | `rusty_term_core`, TUI client | in-progress | engine rows above |
+| C10 | Native scrollback and selection | 1 | `rusty_term_core`, `rusty_mux_tui` | in-progress | engine rows above |
 | C11 | Session model (session/window/block/client) | 1 | `rusty_mux_core` | not-started | |
 | C12 | Tabs and splits, client-native | 4 | `rusty_mux` clients | not-started | |
 | C13 | Mosh-like feel (roaming, predictive echo) | 3 | `rusty_mux_transport` | not-started | spike 4 |
