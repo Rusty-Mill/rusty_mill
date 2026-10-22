@@ -1,6 +1,6 @@
 size 80x24 cursor 13,21 visible=true alt=false
-|********************************************************************************
-|*++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*
+|Test of autowrap, mixing control and print characters.
+|The left/right margins should have letters in order:
 |M                                                                              m
 |N
 |n
@@ -20,8 +20,8 @@ size 80x24 cursor 13,21 visible=true alt=false
 |Z
 |z
 |
-|Push <RETURN>                                                                  *
-|++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ *
-|********************************************************************************
+|Push <RETURN>
+|
+|
 styles:
 trailers:

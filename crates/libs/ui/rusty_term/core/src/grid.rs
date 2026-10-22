@@ -628,6 +628,13 @@ pub struct Grid {
     /// follow wcwidth one code point at a time, as the programs laying out the
     /// screen assume. When on, a whole UAX #29 grapheme shares one cell.
     pub(crate) grapheme_clustering: bool,
+    /// DEC private mode 40: allow DECCOLM (80/132 column switching). Off by
+    /// default; while off, DECCOLM is ignored.
+    pub(crate) allow_deccolm: bool,
+    /// DEC private mode 3 (DECCOLM), as last set while mode 40 allowed it.
+    /// Reported by DECRQM only: the grid is never resized for it (see
+    /// [`Grid::deccolm`]).
+    pub(crate) column_mode_132: bool,
     /// Whether origin mode (DECOM `?6`, default off) is enabled. When on,
     /// absolute cursor positioning (`CUP`/`HVP`/`VPA`) is relative to the scroll
     /// region top and the cursor is confined to the region.
@@ -1331,6 +1338,8 @@ impl Grid {
             cursor_icon: None,
             autowrap: true,
             grapheme_clustering: false,
+            allow_deccolm: false,
+            column_mode_132: false,
             origin_mode: false,
             lr_margin_mode: false,
             left_margin: 0,
@@ -2819,6 +2828,19 @@ impl Grid {
         }
     }
 
+    /// DECCOLM (`CSI ? 3 h/l`) while mode 40 allows it: the side effects
+    /// only. The screen is cleared, every margin reset and the cursor homed,
+    /// but the grid keeps its size. In a mux the server owns the PTY size and
+    /// each client its own viewport, so a program must not force 80 or 132
+    /// columns (Ghostty resizes the grid here; this deliberately does not).
+    pub(crate) fn deccolm(&mut self, wide: bool) {
+        self.column_mode_132 = wide;
+        self.reset_scroll_region();
+        self.left_margin = 0;
+        self.right_margin = self.cols.saturating_sub(1);
+        self.clear_all(); // also homes the cursor
+    }
+
     /// Blank every cell and home the cursor (used by `CSI 2 J`).
     pub(crate) fn clear_all(&mut self) {
         let blank = self.erase_cell();
@@ -3508,6 +3530,8 @@ impl Grid {
         self.primary = None; // leave the alternate screen if active
         self.erase_bg = None; // RIS resets the SGR pen too
         self.grapheme_clustering = false; // and every mode (DECSTR keeps 2027)
+        self.allow_deccolm = false;
+        self.column_mode_132 = false;
         self.cells = vec![self.default_cell(); self.cols * self.rows];
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();

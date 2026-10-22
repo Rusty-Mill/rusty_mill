@@ -6261,3 +6261,73 @@ fn regional_indicators_are_two_columns_wide() {
     }
     assert_eq!(char_width('\u{1f1e5}'), 1, "just below the block");
 }
+
+// ---- DECCOLM (CSI ? 3 h/l) gated by mode 40, #856 ----
+//
+// Owner decision: never resize. A mux server owns the PTY size and each
+// client its own viewport, so a program must not force 132 columns. With
+// mode 40 (allow 80/132 switching, default off) set, DECCOLM runs its side
+// effects only: clear the screen, reset all margins, home the cursor. With
+// mode 40 reset it is ignored. (Ghostty also resizes the grid; we don't.)
+
+fn deccolm_setup() -> Vec<u8> {
+    // Text on every row, top/bottom margins 2-4, left/right margins 3-8,
+    // cursor parked mid-screen.
+    b"line0\r\nline1\r\nline2\r\nline3\r\nline4\x1b[2;4r\x1b[?69h\x1b[3;8s\x1b[4;5H".to_vec()
+}
+
+#[test]
+fn deccolm_is_ignored_without_mode_40() {
+    for seq in [&b"\x1b[?3h"[..], b"\x1b[?3l"] {
+        let mut input = deccolm_setup();
+        input.extend_from_slice(seq);
+        let g = parse(&input, 10, 5);
+        assert_eq!(
+            row_text(&g, 0).trim_end(),
+            "line0",
+            "{seq:?} must not clear"
+        );
+        assert_eq!((g.scroll_top, g.scroll_bottom), (1, 3), "margins kept");
+        assert_eq!(g.cols, 10);
+    }
+}
+
+#[test]
+fn deccolm_with_mode_40_clears_resets_margins_and_homes_without_resizing() {
+    for seq in [&b"\x1b[?40h\x1b[?3h"[..], b"\x1b[?40h\x1b[?3l"] {
+        let mut input = deccolm_setup();
+        input.extend_from_slice(seq);
+        let g = parse(&input, 10, 5);
+        for y in 0..5 {
+            assert_eq!(row_text(&g, y).trim_end(), "", "{seq:?} row {y} cleared");
+        }
+        assert_eq!(
+            (g.scroll_top, g.scroll_bottom),
+            (0, 4),
+            "top/bottom margins reset"
+        );
+        assert_eq!(
+            (g.left_margin, g.right_margin),
+            (0, 9),
+            "left/right margins reset"
+        );
+        assert_eq!(g.cursor, (0, 0), "cursor homed");
+        assert_eq!((g.cols, g.rows), (10, 5), "size unchanged");
+    }
+}
+
+#[test]
+fn decrqm_reports_modes_3_and_40() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[?40$p\x1b[?3$p");
+    assert_eq!(p.take_responses(), b"\x1b[?40;2$y\x1b[?3;2$y");
+    // Without mode 40 a DECCOLM set is ignored, so mode 3 stays reset.
+    p.advance(&mut g, b"\x1b[?3h\x1b[?3$p");
+    assert_eq!(p.take_responses(), b"\x1b[?3;2$y");
+    p.advance(&mut g, b"\x1b[?40h\x1b[?3h\x1b[?40$p\x1b[?3$p");
+    assert_eq!(p.take_responses(), b"\x1b[?40;1$y\x1b[?3;1$y");
+    // RIS resets both.
+    p.advance(&mut g, b"\x1bc\x1b[?40$p\x1b[?3$p");
+    assert_eq!(p.take_responses(), b"\x1b[?40;2$y\x1b[?3;2$y");
+}
