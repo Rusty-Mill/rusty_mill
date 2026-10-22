@@ -189,14 +189,15 @@ impl Turn {
         Ok(command)
     }
 
-    /// Start the broker for this turn, in `harness`'s process group so that
-    /// killing the harness's group kills it too.
+    /// Start the broker for this turn, watching process `harness`, in the
+    /// harness's process group `group` so that killing the group kills it too.
     pub fn broker(
         &self,
         cfg: &Config,
         principal: &PrincipalId,
         turn: TurnId,
         harness: u32,
+        group: u32,
         log: Stdio,
     ) -> Result<std::process::Child, String> {
         let mut command = Command::new(&cfg.bbp);
@@ -213,7 +214,10 @@ impl Turn {
             .stdout(Stdio::null())
             .stderr(log);
         #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, harness as i32);
+        std::os::unix::process::CommandExt::process_group(&mut command, group as i32);
+        // Without process groups the moderator stops the broker by its handle.
+        #[cfg(not(unix))]
+        let _ = group;
         command
             .spawn()
             .map_err(|e| format!("starting the MCP broker: {e}"))
