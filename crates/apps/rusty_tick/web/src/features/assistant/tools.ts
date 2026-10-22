@@ -452,19 +452,25 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
       },
     },
     {
-      name: 'priority_tasks',
-      description: 'Open tasks of one priority: all of them, or those due today (overdue included), in the next 7 days, or overdue.',
+      name: 'filter_tasks',
+      description: 'Open tasks of a priority and/or with a tag: all of them, or those due today (overdue included), in the next 7 days, or overdue.',
       parameters: {
         type: 'object',
-        properties: { priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] }, view: { type: 'string', enum: ['all', 'today', 'next7', 'overdue'] } },
-        required: ['priority'],
+        properties: {
+          priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
+          tag: { type: 'string', description: 'A tag’s name, with or without #' },
+          view: { type: 'string', enum: ['all', 'today', 'next7', 'overdue'] },
+        },
       },
-      handler: ({ priority, view = 'all' }) => {
-        const level = PRIORITY[norm(priority ?? '')]
-        if (level === undefined) return { error: 'Priority is high, medium, low or none.' }
+      handler: ({ priority, tag, view = 'all' }) => {
+        const level = priority === undefined ? undefined : PRIORITY[norm(priority)]
+        if (priority !== undefined && level === undefined) return { error: 'Priority is high, medium, low or none.' }
+        const name = tag === undefined ? undefined : norm(tag).replace(/^#/, '')
+        if (name !== undefined && !c.entities.tags.some((t) => t.name === name)) return { error: `You have no tag #${name}.` }
+        if (level === undefined && name === undefined) return { error: 'Say a priority or a tag to filter by.' }
         const tasks =
           view === 'overdue' ? overdue(live, c.now) : tasksForView({ kind: view === 'next7' ? 'week' : view === 'today' ? 'today' : 'all' }, c.entities, c.now)
-        return lines(tasks.filter((t) => t.priority === level))
+        return lines(tasks.filter((t) => (level === undefined || t.priority === level) && (name === undefined || t.tags.includes(name))))
       },
     },
     {

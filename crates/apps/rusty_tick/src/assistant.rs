@@ -29,9 +29,10 @@ pub const LIST_LISTS: &str = "list_lists";
 /// The one task a title names, renamed (`{query, title}`) or given a new due
 /// day (`{query, due}`: the day as said, read by the browser in its own zone).
 pub const UPDATE_TASK: &str = "update_task";
-/// Open tasks of one priority, in a view: `{priority, view}` (`all`, `today`,
-/// `next7` or `overdue`). Browser-only: an MCP agent filters `list_tasks` itself.
-pub const PRIORITY_TASKS: &str = "priority_tasks";
+/// Open tasks of a priority and/or with a tag, in a view: `{priority?, tag?,
+/// view}` (`all`, `today`, `next7` or `overdue`). Browser-only: an MCP agent
+/// filters `list_tasks` itself.
+pub const FILTER_TASKS: &str = "filter_tasks";
 /// Habits are client documents with no API route, so these three run only in
 /// the browser and have no MCP twin.
 /// Today's habits and their progress: `{}`.
@@ -57,7 +58,7 @@ pub enum Reply {
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
 “rename buy milk to buy oat milk”, “move buy milk to friday at 3pm”, “make buy milk high priority”, \
-“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours”, “tag dentist with health”, “what's high priority today?”, “lists”, “habits”, “check in meditate” or “add habit meditate”.";
+“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours”, “tag dentist with health”, “what's high priority today?”, “tasks tagged work”, “lists”, “habits”, “check in meditate” or “add habit meditate”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -171,7 +172,7 @@ fn command(text: &str, lower: &str) -> Option<Reply> {
         .or_else(|| snooze_phrase(text, lower))
         .or_else(|| habit_phrase(text, lower))
         .or_else(|| tag_phrase(text, lower))
-        .or_else(|| priority_filter(lower))
+        .or_else(|| filter_question(lower))
     {
         return Some(reply);
     }
@@ -470,25 +471,40 @@ const FILTER_VIEWS: [(&str, &str); 6] = [
     ("today", "today"),
 ];
 
-/// "high priority", "what's high priority today?", "overdue low priority
-/// tasks": a `priority_tasks` call. Every other word must be filler or a view
-/// word, so "add buy milk high priority" is never read as a question.
-fn priority_filter(lower: &str) -> Option<Reply> {
+/// "high priority", "what's tagged work today?", "#errands", "overdue high
+/// priority tasks tagged work": a `filter_tasks` call. Every other word must be
+/// filler or one view's words, so "add buy milk high priority" is never read as
+/// a question. A tag is "tagged X", "tag X" or "#X"; quote one with spaces.
+fn filter_question(lower: &str) -> Option<Reply> {
     let cleaned = lower
         .replace(['?', '.', '!', ','], " ")
         .replace("-priority", " priority");
-    let words: Vec<&str> = cleaned.split_whitespace().collect();
-    let at = words
-        .windows(2)
-        .position(|w| w[1] == "priority" && priority(w[0]).is_some())?;
-    let level = priority(words[at])?;
-    let rest = words
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != at && *i != at + 1)
-        .map(|(_, w)| *w);
-    let mut view = "all";
-    for word in rest {
+    let words = tokens(&cleaned);
+    let (mut level, mut tag, mut view) = (None, None, "all");
+    let mut i = 0;
+    while let Some(&word) = words.get(i) {
+        let next = words.get(i + 1).copied();
+        i += 1;
+        if next == Some("priority") && level.is_none() {
+            if let Some(named) = priority(word) {
+                level = Some(named);
+                i += 1;
+                continue;
+            }
+        }
+        let named_tag = match word {
+            "tagged" | "tag" => {
+                i += 1;
+                Some(next?.trim_start_matches('#'))
+            }
+            _ => word.strip_prefix('#'),
+        };
+        if let Some(named) = named_tag {
+            if named.is_empty() || tag.replace(named).is_some() {
+                return None;
+            }
+            continue;
+        }
         match FILTER_VIEWS.iter().find(|(said, _)| *said == word) {
             Some((_, named)) if view == "all" || view == *named => view = named,
             Some(_) => return None,
@@ -496,31 +512,69 @@ fn priority_filter(lower: &str) -> Option<Reply> {
             None => return None,
         }
     }
+    if level.is_none() && tag.is_none() {
+        return None;
+    }
+    let mut args = Value::object();
+    if let Some(level) = level {
+        args.insert("priority", level);
+    }
+    if let Some(tag) = tag {
+        args.insert("tag", tag);
+    }
+    args.insert("view", view);
     Some(Reply::Call {
-        tool: PRIORITY_TASKS,
-        args: json!({ "priority": level, "view": view }),
+        tool: FILTER_TASKS,
+        args,
         say: "Checking…".into(),
     })
 }
 
-/// The heading and the nothing-found line for a priority filter's answer.
-fn priority_heading(level: &str, view: &str) -> (String, String) {
+/// `text`'s words, a quoted run ("…" or “…”) being one word without its quotes.
+fn tokens(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text.trim_start();
+    while let Some(first) = rest.chars().next() {
+        let close = match first {
+            '"' => Some('"'),
+            '“' => Some('”'),
+            _ => None,
+        };
+        let (word, after) = match close {
+            Some(close) => {
+                let body = &rest[first.len_utf8()..];
+                body.find(close).map_or((body, ""), |end| {
+                    (&body[..end], &body[end + close.len_utf8()..])
+                })
+            }
+            None => rest.split_at(rest.find(char::is_whitespace).unwrap_or(rest.len())),
+        };
+        out.push(word);
+        rest = after.trim_start();
+    }
+    out
+}
+
+/// The heading and the nothing-found line for a filter's answer.
+fn filter_heading(level: Option<&str>, tag: Option<&str>, view: &str) -> (String, String) {
     let which = match level {
-        "none" => "tasks with no priority".to_string(),
-        level => format!("{level}-priority tasks"),
+        None => "tasks".to_string(),
+        Some("none") => "tasks with no priority".to_string(),
+        Some(level) => format!("{level}-priority tasks"),
     };
+    let tagged = tag.map_or(String::new(), |t| format!(" tagged #{t}"));
     let (before, after) = match view {
         "today" => ("", " due today"),
         "next7" => ("", " due in the next 7 days"),
         "overdue" => ("overdue ", ""),
         _ => ("open ", ""),
     };
-    let heading = format!("{before}{which}{after}:");
+    let heading = format!("{before}{which}{tagged}{after}:");
     let mut first = heading.chars();
     let heading = first
         .next()
         .map_or(String::new(), |c| c.to_uppercase().chain(first).collect());
-    (heading, format!("No {before}{which}{after}."))
+    (heading, format!("No {before}{which}{tagged}{after}."))
 }
 
 const TAG_HELP: &str = "Tag which task, and with what? Try “tag dentist with health” \
@@ -859,8 +913,11 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
                 _ => format!("Checked in “{title}”: {progress} today."),
             }
         }
-        PRIORITY_TASKS => {
-            let (heading, none) = priority_heading(&arg("priority"), &arg("view"));
+        FILTER_TASKS => {
+            let (level, tag) = (arg("priority"), arg("tag"));
+            let some = |v: &str| Some(v.to_string()).filter(|v| !v.is_empty());
+            let (heading, none) =
+                filter_heading(some(&level).as_deref(), some(&tag).as_deref(), &arg("view"));
             bullets(&heading, &none, strings(&parsed, "tasks"))
         }
         LIST_HABITS => bullets(
@@ -1012,7 +1069,7 @@ mod tests {
     use rusty_agui::{Content, Tool, ToolCall};
 
     const ALL: [&str; 12] = [
-        PRIORITY_TASKS,
+        FILTER_TASKS,
         LIST_HABITS,
         CHECK_IN_HABIT,
         ADD_HABIT,
@@ -1061,7 +1118,7 @@ mod tests {
                 "Adding the habit “{}”…",
                 args.get("name").and_then(Value::as_str)?
             ),
-            (DUE_TASKS | PRIORITY_TASKS, _) => "Checking…".into(),
+            (DUE_TASKS | FILTER_TASKS, _) => "Checking…".into(),
             (_, Some(r)) => format!("Looking up “{r}”…"),
             _ => return None,
         })
@@ -1244,8 +1301,64 @@ mod tests {
     }
 
     #[test]
-    fn turns_priority_questions_into_priority_tasks() {
-        let filter = |p: &str, v: &str| call(PRIORITY_TASKS, json!({"priority": p, "view": v}));
+    fn turns_tag_questions_into_filter_tasks() {
+        let tagged = |t: &str, v: &str| call(FILTER_TASKS, json!({"tag": t, "view": v}));
+        assert_eq!(decide(&input("tasks tagged work")), tagged("work", "all"));
+        assert_eq!(decide(&input("#errands")), tagged("errands", "all"));
+        assert_eq!(
+            decide(&input("What's tagged #work today?")),
+            tagged("work", "today")
+        );
+        assert_eq!(
+            decide(&input("overdue tasks with tag “deep work”")),
+            tagged("deep work", "overdue")
+        );
+        assert_eq!(
+            decide(&input("high priority tasks tagged work due this week")),
+            call(
+                FILTER_TASKS,
+                json!({"priority": "high", "tag": "work", "view": "next7"})
+            )
+        );
+        assert_eq!(
+            decide(&input("tag milk with work")),
+            call(UPDATE_TASK, json!({"query": "milk", "tag": "work"}))
+        );
+        assert_eq!(
+            decide(&input("find #work")),
+            call(SEARCH_TASKS, json!({"query": "#work"}))
+        );
+        for not_ours in [
+            "tagged",
+            "#",
+            "#work #home",
+            "tagged work and home",
+            "add #work report",
+        ] {
+            assert!(
+                !matches!(
+                    decide(&input(not_ours)),
+                    Reply::Call {
+                        tool: FILTER_TASKS,
+                        ..
+                    }
+                ),
+                "{not_ours}"
+            );
+        }
+        assert_eq!(
+            answered("tasks tagged work", r#"{"tasks":["Report"]}"#),
+            Reply::Text("Open tasks tagged #work:\n- Report".into())
+        );
+        assert_eq!(
+            answered("high priority tagged work today", r#"{"tasks":[]}"#),
+            Reply::Text("No high-priority tasks tagged #work due today.".into())
+        );
+    }
+
+    #[test]
+    fn turns_priority_questions_into_filter_tasks() {
+        let filter = |p: &str, v: &str| call(FILTER_TASKS, json!({"priority": p, "view": v}));
         assert_eq!(decide(&input("high priority")), filter("high", "all"));
         assert_eq!(
             decide(&input("What's high priority today?")),
@@ -1284,7 +1397,7 @@ mod tests {
                 !matches!(
                     decide(&input(not_ours)),
                     Reply::Call {
-                        tool: PRIORITY_TASKS,
+                        tool: FILTER_TASKS,
                         ..
                     }
                 ),

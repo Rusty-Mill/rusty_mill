@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { List, Task } from '@/api/types'
+import type { List, Tag, Task } from '@/api/types'
 import { addDays, startOfDay } from '@/lib/date'
 import { nextOccurrence } from '@/lib/recurrence'
 import { moveTo, overdue, pickTask, readDay, readRemind, readRepeat, readSnooze, readTags, readWhen, remindTrigger, snoozeTo, taskTools, type ToolContext } from './tools'
@@ -408,26 +408,39 @@ describe('tags', () => {
   })
 })
 
-describe('priority_tasks', () => {
+describe('filter_tasks', () => {
   const day = (d: number): number => new Date(2026, 9, d, 9).getTime()
   const tasks = [
-    task('a', 'Pay rent', { priority: 5, dueMs: day(22) }),
-    task('b', 'Call bank', { priority: 5, dueMs: day(20) }),
+    task('a', 'Pay rent', { priority: 5, dueMs: day(22), tags: ['home'] }),
+    task('b', 'Call bank', { priority: 5, dueMs: day(20), tags: ['work'] }),
     task('c', 'Plan trip', { priority: 5, dueMs: day(26) }),
-    task('d', 'Someday', { priority: 5 }),
-    task('e', 'Read', { priority: 0, dueMs: day(22) }),
-    task('f', 'Done high', { priority: 5, status: 'done' }),
-    task('g', 'Trashed high', { priority: 5, deletedMs: 1 }),
+    task('d', 'Someday', { priority: 5, tags: ['deep work'] }),
+    task('e', 'Read', { priority: 0, dueMs: day(22), tags: ['work'] }),
+    task('f', 'Done high', { priority: 5, status: 'done', tags: ['work'] }),
+    task('g', 'Trashed high', { priority: 5, deletedMs: 1, tags: ['work'] }),
   ]
+  const known = ['home', 'work', 'deep work', 'unused'].map((name) => ({ name }) as Tag)
 
-  it('lists the open tasks of one priority in each view', async () => {
+  it('lists the open tasks of a priority and/or a tag in each view', async () => {
     const { c } = context(tasks)
-    const titles = async (args: Record<string, string>) => ((await run(c, 'priority_tasks', args)) as { tasks: string[] }).tasks.map((l) => l.split(' (')[0])
+    c.entities.tags = known
+    const titles = async (args: Record<string, string>) => ((await run(c, 'filter_tasks', args)) as { tasks: string[] }).tasks.map((l) => l.split(' (')[0])
     expect(await titles({ priority: 'high' })).toEqual(['Pay rent', 'Call bank', 'Plan trip', 'Someday'])
     expect(await titles({ priority: 'high', view: 'today' })).toEqual(['Pay rent', 'Call bank'])
     expect(await titles({ priority: 'high', view: 'next7' })).toEqual(['Pay rent', 'Plan trip'])
     expect(await titles({ priority: 'high', view: 'overdue' })).toEqual(['Call bank'])
     expect(await titles({ priority: 'none', view: 'today' })).toEqual(['Read'])
-    expect(await run(c, 'priority_tasks', { priority: 'urgent' })).toEqual({ error: 'Priority is high, medium, low or none.' })
+    expect(await titles({ tag: '#Work' })).toEqual(['Call bank', 'Read'])
+    expect(await titles({ tag: 'deep work' })).toEqual(['Someday'])
+    expect(await titles({ tag: 'work', priority: 'high', view: 'today' })).toEqual(['Call bank'])
+    expect(await titles({ tag: 'unused' })).toEqual([])
+  })
+
+  it('names what it cannot filter by', async () => {
+    const { c } = context(tasks)
+    c.entities.tags = known
+    expect(await run(c, 'filter_tasks', { priority: 'urgent' })).toEqual({ error: 'Priority is high, medium, low or none.' })
+    expect(await run(c, 'filter_tasks', { tag: 'gym' })).toEqual({ error: 'You have no tag #gym.' })
+    expect(await run(c, 'filter_tasks', { view: 'today' })).toEqual({ error: 'Say a priority or a tag to filter by.' })
   })
 })
