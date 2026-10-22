@@ -1,7 +1,7 @@
 import { Menu as MenuIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import type { ViewMode } from '@/api/types'
+import type { Task, ViewMode } from '@/api/types'
 import { taskPath } from '@/app/paths'
 import { useActions, useData } from '@/app/services'
 import { NoTasksArt } from '@/components/Illustrations'
@@ -14,6 +14,7 @@ import { KanbanBoard } from './KanbanBoard'
 import { MatrixBoard } from './MatrixBoard'
 import { TimelineView } from './TimelineView'
 import { QuickAdd } from './QuickAdd'
+import { MergeDialog } from './MergeDialog'
 import { TaskRow, type RowActions } from './TaskRow'
 import { reorderItems, viewKey, type ViewSpec } from './organize'
 import { buildRows, windowRows, ROW_HEIGHT, HEADER_HEIGHT, VIRTUALIZE_ABOVE, type Row } from './rows'
@@ -61,6 +62,7 @@ export function ListColumn({ spec, selectedId }: Props) {
   const tagsByName = useMemo(() => Object.fromEntries(tags.map((t) => [t.name, t])), [tags])
   const rows = useMemo(() => buildRows(groups, collapsedGroups, key), [groups, collapsedGroups, key])
 
+  const [merging, setMerging] = useState<Task | null>(null)
   const rowActions: RowActions = useMemo(
     () => ({
       open: (id) => navigate(taskPath(spec, id)),
@@ -68,6 +70,7 @@ export function ListColumn({ spec, selectedId }: Props) {
       setPriority: taskActions.setPriority,
       moveTo: taskActions.moveTo,
       duplicate: (t) => void taskActions.duplicate(t),
+      merge: setMerging,
       remove: taskActions.remove,
     }),
     [navigate, spec, taskActions],
@@ -144,6 +147,7 @@ export function ListColumn({ spec, selectedId }: Props) {
           selectedId={selectedId}
         />
       )}
+      <MergeDialog task={merging} onClose={() => setMerging(null)} />
     </section>
   )
 }

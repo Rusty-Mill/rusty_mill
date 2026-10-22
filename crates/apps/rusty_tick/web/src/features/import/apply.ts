@@ -19,12 +19,15 @@
  * `dueMs`, only one whose due date the task still has. A task edited since
  * (its due date, title or repeat) goes to the one row left that it fits (`edited`).
  * A row whose own id is not here takes over the task it owns, so files
- * imported before still skip or resume rather than duplicate.
+ * imported before still skip or resume rather than duplicate. A task the user
+ * merged into another (see `aliases.ts`) resolves to the one kept, which is
+ * never written: at etag 1 it is the user's untouched task, not a lost write.
  */
 import type { ApiClient } from '@/api/client'
 import type { NewTask, Task, TaskPatch } from '@/api/types'
 import { derivedId } from '@/lib/id'
 import { storedExDates } from '@/lib/ics'
+import { readAliases } from './aliases'
 import type { ImportResult, ImportedTask, LegacyKey } from './model'
 
 /** The server's limits (`service.rs`), so one long field does not fail a whole import. */
@@ -92,13 +95,14 @@ function edited(
   resolve: (t: ImportedTask) => string,
   fits: (found: Task, t: ImportedTask) => boolean,
 ): [id: string, key: string][] {
+  const taken = new Set(rows.map(resolve).filter((id) => existing.has(id))) // already some row's task
   const candidates = rows
     .filter((t) => !existing.has(resolve(t)))
     .map((t) => {
       const ids = t.legacy.filter((c) => c.dueMs !== undefined).map((c) => idOf(c.key))
       const found = ids.filter((id) => {
         const task = existing.get(id)
-        return task !== undefined && task.etag !== CREATED_ETAG && !owner.has(id) && fits(task, t)
+        return task !== undefined && task.etag !== CREATED_ETAG && !owner.has(id) && !taken.has(id) && fits(task, t)
       })
       return { key: t.key, ids: [...new Set(found)] }
     })
@@ -153,10 +157,13 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
   const mayClaim = (c: LegacyKey): boolean => c.dueMs === undefined || existing.get(idOf(c.key))?.dueMs === c.dueMs
   const owner = new Map<string, string>() // legacy id -> key of the row that owns the task it names
   for (const { t } of order) for (const c of t.legacy) if (mayClaim(c) && !owner.has(idOf(c.key))) owner.set(idOf(c.key), t.key)
-  /** The id a row writes to: its own, else the earlier task it owns, if that is here. */
+  const aliases = await readAliases(api)
+  /** The id a row writes to: its own (or the task it was merged into), else the earlier task it owns, if that is here. */
   const resolve = (t: ImportedTask): string => {
     const own = idOf(t.key)
     if (existing.has(own)) return own
+    const merged = aliases.get(own)
+    if (merged !== undefined && existing.has(merged)) return merged
     const legacy = t.legacy.map((c) => idOf(c.key)).find((id) => owner.get(id) === t.key && existing.has(id))
     return legacy ?? own
   }
@@ -189,7 +196,8 @@ export async function applyImport(api: ApiClient, result: ImportResult): Promise
     placed.set(t.key, listId)
     const found = existing.get(id)
     const patch = secondWrite(t)
-    if (found && pending(found, patch)) {
+    const merged = id !== idOf(t.key) && aliases.get(idOf(t.key)) === id // the user's kept task: never written
+    if (found && !merged && pending(found, patch)) {
       await api.updateTask(id, patch, CREATED_ETAG)
       out.resumed++
       continue

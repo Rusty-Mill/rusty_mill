@@ -829,3 +829,26 @@ describe("won't do, countdowns and calendar import", () => {
     expect(labels.slice(0, 6)).toEqual(['Month', 'Week', 'Day', '3 Days', '10 Days', 'Agenda'])
   })
 })
+
+describe('merge duplicates', () => {
+  it('merges an imported duplicate into the task kept, and a later import does not bring it back', async () => {
+    const user = userEvent.setup()
+    const file = ['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:m1', 'SUMMARY:Standup', 'DTSTART:20261105T090000Z', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n')
+    let keepId = ''
+    const { api } = await renderApp('/p/inbox/tasks', async (a) => {
+      keepId = (await a.createTask({ listId: INBOX_ID, title: 'Standup', notes: 'mine' })).id
+      await applyImport(a, readImport(file, 'cal.ics'))
+    })
+    const duplicate = (await api.snapshot()).tasks.find((t) => t.id !== keepId)!
+    const row = within(document.querySelector(`[data-task-id="${duplicate.id}"]`) as HTMLElement)
+    await user.click(row.getByRole('button', { name: 'Options for Standup' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Merge into…' }))
+    const dialog = within(screen.getByRole('dialog', { name: 'Merge into…' }))
+    await user.click(within(dialog.getByRole('list', { name: 'Tasks to keep' })).getByRole('button', { name: /Standup/ }))
+    await waitFor(async () => expect((await api.snapshot()).tasks.find((t) => t.id === duplicate.id)?.deletedMs).not.toBeNull())
+
+    await api.purgeTask(duplicate.id)
+    expect(await applyImport(api, readImport(file, 'cal.ics'))).toMatchObject({ tasks: 0, existing: 1 })
+    expect((await api.snapshot()).tasks.map((t) => t.id)).toEqual([keepId])
+  })
+})

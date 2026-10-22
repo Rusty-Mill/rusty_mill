@@ -25,12 +25,14 @@ rusty_hyper = { path = "../../net/rusty_hyper", optional = true, features = ["ru
 rusty_h2 = { path = "../../net/rusty_h2", optional = true }
 rusty_http = { workspace = true, optional = true }
 rusty_tokio = { workspace = true, optional = true }
+# The server (module `server`) takes an optional `TlsAcceptor`.
+rusty_tls = { workspace = true, optional = true, features = ["rusty-tokio"] }
 # The `tonic-codec` feature: a codec for `rusty_prost` messages on tonic's transport.
 tonic = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 
 [features]
-rusty-tokio = ["dep:rusty_hyper", "dep:rusty_h2", "dep:rusty_http", "dep:rusty_tokio"]
+rusty-tokio = ["dep:rusty_hyper", "dep:rusty_h2", "dep:rusty_http", "dep:rusty_tokio", "dep:rusty_tls"]
 tonic-codec = ["dep:tonic", "dep:bytes"]
 
 [[test]]
@@ -51,6 +53,18 @@ required-features = ["rusty-tokio"]
 
 [[test]]
 name = "client_tonic"
+required-features = ["rusty-tokio"]
+
+[[test]]
+name = "server_calls"
+required-features = ["rusty-tokio"]
+
+[[test]]
+name = "server_lifecycle"
+required-features = ["rusty-tokio"]
+
+[[test]]
+name = "server_tonic"
 required-features = ["rusty-tokio"]
 
 [dev-dependencies]

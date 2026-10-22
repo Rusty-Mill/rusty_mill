@@ -5,6 +5,10 @@ bridge that lets `rp-server` and `adk-mcp` keep axum while the MCP crates stop
 depending on it) raised the question "can we make our own axum?". Answer:
 yes, but it is a new framework, not an MCP step, and nothing forces it yet.
 
+**Superseded in part (2026-10-22):** the owner decided to build `rusty_axum`
+as the full async framework (option C) and to drop `axum` repo-wide; see §5.
+The recommendation in §4 is kept as history.
+
 ## 1. Who uses axum today
 
 Crates with `axum` in their manifest (13, counted by manifest, not by
@@ -60,11 +64,20 @@ was read for what it truly depends on (extractor kinds, WebSocket, multipart,
   crates then migrates by hand. Only worth it if "no third-party web stack"
   is a goal in itself.
 
-Recommendation: stay on A until a crate other than MCP is being de-axumed for
-its own reasons; if one is, build B first and move the smallest consumer
+Recommendation (2026-10-09, superseded by the 2026-10-22 decision in §5):
+stay on A until a crate other than MCP is being de-axumed for its own reasons; if one is, build B first and move the smallest consumer
 (`rk-app`) to see what is missing, before committing to C.
 
-## 5. Questions for the owner (not decided here)
+## 5. Questions for the owner
+
+**Decided 2026-10-22 (owner):** roll our own `rusty_axum`. Question 1: dropping
+`axum` repo-wide is a goal. Question 2: the target is option C, a full async
+framework, not B. Question 3: the intended base is `rusty_tokio` and
+`rusty_tls`, but whether `rusty_tokio` can drive a server accept loop for
+many connections is unverified; stage 1 of #879 answers it, and a "no" stops
+the plan. Question 4 stays open: `rk-app` is the planned pilot, confirmed only
+by the stage 1 consumer inventory. `rusty_mcp_axum` stays (Tier T, ADR-0002
+Amendment 1) until its consumers have moved, `agentgateway` last.
 
 1. Is dropping `axum` repo-wide a goal, or only from the MCP crates?
 2. If repo-wide, is B (blocking) acceptable for any crate, or must it be async?

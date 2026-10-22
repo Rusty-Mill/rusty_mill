@@ -44,3 +44,14 @@ pub struct Response<T> {
     /// The trailing metadata.
     pub trailers: MetadataMap,
 }
+
+impl<T> Response<T> {
+    /// A reply carrying `message`, with no metadata (what a server handler usually returns).
+    pub fn new(message: T) -> Response<T> {
+        Response {
+            message,
+            metadata: MetadataMap::new(),
+            trailers: MetadataMap::new(),
+        }
+    }
+}

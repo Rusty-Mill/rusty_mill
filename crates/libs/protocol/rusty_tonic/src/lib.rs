@@ -14,6 +14,8 @@ mod code;
 mod frame;
 mod head;
 mod metadata;
+#[cfg(feature = "rusty-tokio")]
+pub mod server;
 mod status;
 mod timeout;
 #[cfg(feature = "tonic-codec")]
