@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { List, Task } from '@/api/types'
 import { addDays, startOfDay } from '@/lib/date'
 import { nextOccurrence } from '@/lib/recurrence'
-import { moveTo, overdue, pickTask, readDay, readRemind, readRepeat, readWhen, remindTrigger, taskTools, type ToolContext } from './tools'
+import { moveTo, overdue, pickTask, readDay, readRemind, readRepeat, readSnooze, readWhen, remindTrigger, snoozeTo, taskTools, type ToolContext } from './tools'
 
 const NOW = new Date(2026, 9, 22, 12).getTime()
 const task = (id: string, title: string, over: Partial<Task> = {}): Task =>
@@ -141,7 +141,7 @@ describe('update_task', () => {
     const { c, done } = context(tasks)
     expect(await run(c, 'update_task', { query: 'milk', due: 'soonish' })).toEqual({ error: expect.stringContaining("can't read “soonish”") })
     expect(await run(c, 'update_task', { query: 'milk', title: '  ' })).toEqual({ error: 'Say the new title.' })
-    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority, a list, a repeat or a reminder.' })
+    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority, a list, a repeat, a reminder or a snooze.' })
     expect(await run(c, 'update_task', { query: 'buy', due: 'today' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
     expect(await run(c, 'update_task', { query: ' ', due: 'today' })).toEqual({ error: 'Say which task.' })
     expect(done).toEqual([])
@@ -344,5 +344,38 @@ describe('update_task with a reminder', () => {
     expect(await run(c, 'update_task', { query: 'bins', remind: '1 hour before' })).toEqual({ error: expect.stringContaining('all day') })
     expect(await run(c, 'update_task', { query: 'someday', remind: '1 hour before' })).toEqual({ error: expect.stringContaining('no date') })
     expect(done).toEqual([])
+  })
+})
+
+describe('snooze', () => {
+  const at = (d: number, h = 0, m = 0): number => new Date(2026, 9, d, h, m).getTime()
+  const timed = task('t', 'Dentist', { dueMs: at(22, 15), isAllDay: false, startMs: null })
+  const allDay = task('a', 'Bins', { dueMs: at(25), isAllDay: true, startMs: null })
+  const overdue = task('o', 'Taxes', { dueMs: at(19, 9), isAllDay: false, startMs: null })
+
+  it('reads how long people say to snooze', () => {
+    expect(readSnooze('2 hours', NOW)).toEqual({ minutes: 120 })
+    expect(readSnooze('for 30 mins', NOW)).toEqual({ minutes: 30 })
+    expect(readSnooze('A day', NOW)).toEqual({ days: 1 })
+    expect(readSnooze('2 weeks', NOW)).toEqual({ days: 14 })
+    expect(readSnooze('until friday at 9', NOW)).toEqual({ until: { day: at(23), time: { h: 9, m: 0 } } })
+    for (const text of ['ages', '0 hours', '73 hours', '53 weeks', '2 months', 'until whenever', 'until none', '']) expect(readSnooze(text, NOW), text).toBeUndefined()
+  })
+
+  it('counts minutes and hours from now, and days from the due day or today', () => {
+    expect(snoozeTo(timed, { minutes: 90 }, NOW + 20_000)).toEqual({ dueMs: at(22, 13, 31), isAllDay: false })
+    expect(snoozeTo(timed, { days: 1 }, NOW)).toEqual({ dueMs: at(23, 15), isAllDay: false })
+    expect(snoozeTo(allDay, { days: 2 }, NOW)).toEqual({ dueMs: at(27), isAllDay: true })
+    expect(snoozeTo(overdue, { days: 1 }, NOW)).toEqual({ dueMs: at(23, 9), isAllDay: false })
+    expect(snoozeTo(task('u', 'Someday', { startMs: null }), { days: 7 }, NOW)).toEqual({ dueMs: at(29), isAllDay: true })
+    expect(snoozeTo(allDay, { until: { day: at(30) } }, NOW)).toEqual({ dueMs: at(30), isAllDay: true })
+  })
+
+  it('snoozes the one task named, and changes nothing for a snooze it cannot read', async () => {
+    const { c, done } = context([timed, allDay])
+    expect(await run(c, 'update_task', { query: 'dentist', snooze: '2 hours' })).toEqual({ title: 'Dentist', snooze: expect.any(String) })
+    expect(done).toEqual([`update t ${JSON.stringify({ dueMs: at(22, 14), isAllDay: false })}`])
+    expect(await run(c, 'update_task', { query: 'bins', snooze: 'a fortnight' })).toEqual({ error: expect.stringContaining("can't read") })
+    expect(done).toHaveLength(1)
   })
 })

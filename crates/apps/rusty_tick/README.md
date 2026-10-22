@@ -106,7 +106,9 @@ milk to list Work” (or “to the Work list”, “to inbox”), “repeat wate
 every 2 weeks” (or daily, weekly, monthly, yearly, on weekdays, every monday and
 friday; “make … repeat …”; “stop repeating …”), “remind me about dentist 1 hour
 before” (or 5 minutes, a day before, at the time, on the day; “stop reminding me about
-…”; an all-day task is reminded at 09:00) and “lists”. A task is named by its title; when several
+…”; an all-day task is reminded at 09:00), “snooze dentist for 2 hours” (or 30 minutes,
+a day, 1 week, “until friday at 9”: minutes and hours count from now, days from the due
+day) and “lists”. A task is named by its title; when several
 match, it asks which. Quote a name that contains “to” (“rename "a to b" to c”). An
 unreadable day changes nothing.
 

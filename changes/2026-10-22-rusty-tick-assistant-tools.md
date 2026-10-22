@@ -1,6 +1,6 @@
 ---
 category: Added
-changelog: rusty_tick's web assistant can find tasks, list what's due or overdue, complete, reopen, rename, reschedule, reprioritize, move between lists, set or stop repeats and reminders on, and delete tasks, and list your lists, using the MCP server's tool names.
+changelog: rusty_tick's web assistant can find tasks, list what's due or overdue, complete, reopen, rename, reschedule, reprioritize, move between lists, set or stop repeats and reminders on, snooze, and delete tasks, and list your lists, using the MCP server's tool names.
 ---
 ## 2026-10-22 - rusty_tick: the MCP tools in the web assistant
 
@@ -22,3 +22,4 @@ changelog: rusty_tick's web assistant can find tasks, list what's due or overdue
 - **Fixed:** the command words are matched case-insensitively in ASCII only, so a character whose lower case is longer (such as the Kelvin sign) can't shift where a name is cut.
 - **Notes:** the assistant is still rule-based, not a model.
 - **Added:** reminders: “remind me about … 1 hour before / a day before / at the time / on the day” and “stop reminding me about …”. The when is a fixed ending or the last two words before “before”, so the name is never cut inside. The browser writes the same trigger the date picker does (from the due time, or 09:00 for an all-day task) and keeps one reminder, as the picker does. An unreadable when, an undated task, or minutes or hours on an all-day task changes nothing. “remind me to …” still adds a task.
+- **Added:** snooze: “snooze … for 30 minutes / 2 hours / a day / 1 week” and “snooze … until friday at 9”. Minutes and hours count from now (to the minute); days and weeks from the due day, or today for an overdue or undated task, keeping the time; “until” moves the task as “move … to …” does. Reminders count from the due time, so they move with it. An unreadable snooze changes nothing.

@@ -46,7 +46,7 @@ pub enum Reply {
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
 “rename buy milk to buy oat milk”, “move buy milk to friday at 3pm”, “make buy milk high priority”, \
-“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before” or “lists”.";
+“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours” or “lists”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -157,6 +157,7 @@ fn command(text: &str, lower: &str) -> Option<Reply> {
         .or_else(|| priority_phrase(text, lower))
         .or_else(|| repeat_phrase(text, lower))
         .or_else(|| remind_phrase(text, lower))
+        .or_else(|| snooze_phrase(text, lower))
     {
         return Some(reply);
     }
@@ -440,6 +441,52 @@ fn remind_call(query: &str, when: &str) -> Reply {
     update_call(query, "remind", when)
 }
 
+const SNOOZE_HELP: &str = "Snooze which task, and for how long? Try “snooze dentist for 2 hours” \
+or “snooze bins until friday”.";
+const SNOOZE_UNITS: [&str; 10] = [
+    "minute", "minutes", "min", "mins", "hour", "hours", "day", "days", "week", "weeks",
+];
+
+/// "snooze X for <count> <unit>" or "snooze X until <when>": an `update_task`
+/// call with the snooze as said, which the browser reads against now and the
+/// task's due date. The count and unit are the last two words, and "until"
+/// the last one outside quotes, so the name is never cut inside.
+fn snooze_phrase(text: &str, lower: &str) -> Option<Reply> {
+    if lower == "snooze" {
+        return Some(Reply::Text(SNOOZE_HELP.into()));
+    }
+    let rest = text
+        .get("snooze ".len()..)
+        .filter(|_| lower.starts_with("snooze "))?
+        .trim();
+    if let Some(&at) = outside_quotes(rest, " until ").last() {
+        return Some(snooze_call(unquote(&rest[..at]), rest[at..].trim()));
+    }
+    let duration = rest.rsplit_once(' ').and_then(|(head, unit)| {
+        let (name, _count) = head.trim_end().rsplit_once(' ')?;
+        SNOOZE_UNITS
+            .contains(&unit.to_ascii_lowercase().as_str())
+            .then_some(name)
+    });
+    let Some(name) = duration else {
+        return Some(Reply::Text(SNOOZE_HELP.into()));
+    };
+    let snooze = rest[name.len()..].trim();
+    let name = match name.len().checked_sub(" for".len()) {
+        Some(at) if name[at..].eq_ignore_ascii_case(" for") => &name[..at],
+        _ if name.eq_ignore_ascii_case("for") => "",
+        _ => name,
+    };
+    Some(snooze_call(unquote(name), snooze))
+}
+
+fn snooze_call(query: &str, snooze: &str) -> Reply {
+    if query.is_empty() || snooze.is_empty() {
+        return Reply::Text(SNOOZE_HELP.into());
+    }
+    update_call(query, "snooze", snooze)
+}
+
 const REPEAT_HELP: &str =
     "Repeat which task, and how often? Try “repeat water plants every week” or “stop repeating standup”.";
 const STOP_REPEATING: [&str; 4] = [
@@ -586,6 +633,12 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
             match parsed.get("remind").and_then(Value::as_str) {
                 Some("none") => format!("No more reminders for “{title}”."),
                 Some(when) => format!("I'll remind you about “{title}” {when}."),
+                None => "Done.".into(),
+            }
+        }
+        UPDATE_TASK if parsed.get("snooze").is_some() => {
+            match parsed.get("snooze").and_then(Value::as_str) {
+                Some(until) => format!("Snoozed “{title}” until {until}."),
                 None => "Done.".into(),
             }
         }
@@ -928,6 +981,55 @@ mod tests {
                 r#"{"title":"Buy milk","list":"Work"}"#
             ),
             Reply::Text("Moved “Buy milk” to Work.".into())
+        );
+    }
+
+    #[test]
+    fn turns_snooze_phrases_into_update_task() {
+        let snooze = |q: &str, d: &str| call(UPDATE_TASK, json!({"query": q, "snooze": d}));
+        assert_eq!(
+            decide(&input("snooze dentist for 2 hours")),
+            snooze("dentist", "2 hours")
+        );
+        assert_eq!(
+            decide(&input("Snooze pay rent FOR a day")),
+            snooze("pay rent", "a day")
+        );
+        assert_eq!(
+            decide(&input("snooze bins 30 minutes")),
+            snooze("bins", "30 minutes")
+        );
+        assert_eq!(
+            decide(&input("snooze “wait for 2 days” for 1 week")),
+            snooze("wait for 2 days", "1 week")
+        );
+        assert_eq!(
+            decide(&input("snooze bins until friday at 9")),
+            snooze("bins", "until friday at 9")
+        );
+        assert_eq!(
+            decide(&input("snooze “until done” until tomorrow")),
+            snooze("until done", "until tomorrow")
+        );
+        for missing in [
+            "snooze",
+            "snooze dentist",
+            "snooze for 2 hours",
+            "snooze dentist for ages",
+            "snooze until friday",
+            "snooze dentist until",
+        ] {
+            assert!(
+                matches!(decide(&input(missing)), Reply::Text(t) if t.starts_with("Snooze which task")),
+                "{missing}"
+            );
+        }
+        assert_eq!(
+            answered(
+                "snooze dentist for 2 hours",
+                r#"{"title":"Dentist","snooze":"Thu 22 Oct 21:30"}"#
+            ),
+            Reply::Text("Snoozed “Dentist” until Thu 22 Oct 21:30.".into())
         );
     }
 

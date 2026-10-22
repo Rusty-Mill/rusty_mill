@@ -8,7 +8,7 @@ import type { ActionDefinition } from '@rusty-mill/agui-core'
 import type { List, NewTask, Priority, Task, TaskPatch } from '@/api/types'
 import { searchTasks } from '@/features/search/search'
 import { tasksForView, type Entities } from '@/features/tasks/organize'
-import { addDays, startOfDay } from '@/lib/date'
+import { addDays, MINUTE, startOfDay } from '@/lib/date'
 import { describeRule, formatRule, parseRule, type Freq, type Rule } from '@/lib/recurrence'
 
 /** Most tasks one answer lists. */
@@ -184,6 +184,45 @@ export function moveTo(t: Task, day: number | null, time?: Clock): TaskPatch {
   return patch
 }
 
+/** A snooze as said: for a span of minutes or days, or until a day and/or time. */
+export type Snooze = { minutes: number } | { days: number } | { until: When }
+/** Each unit as minutes or days, and the most of it a snooze takes. */
+const SNOOZE_UNIT: Record<string, { per: 'minutes' | 'days'; size: number; max: number }> = {
+  minute: { per: 'minutes', size: 1, max: 1440 },
+  min: { per: 'minutes', size: 1, max: 1440 },
+  hour: { per: 'minutes', size: 60, max: 72 },
+  day: { per: 'days', size: 1, max: 365 },
+  week: { per: 'days', size: 7, max: 52 },
+}
+
+/** How long `text` says to snooze: "2 hours", "a day", "1 week", or "until friday at 9". */
+export function readSnooze(text: string, now: number): Snooze | undefined {
+  const t = norm(text)
+  const until = /^until (.+)$/.exec(t)
+  if (until) {
+    const when = readWhen(until[1]!, now)
+    return when ? { until: when } : undefined
+  }
+  const m = /^(?:for )?(\d{1,4}|a|an|one) (minute|min|hour|day|week)s?$/.exec(t)
+  const unit = m ? SNOOZE_UNIT[m[2]!] : undefined
+  if (!m || !unit) return undefined
+  const n = /^\d/.test(m[1]!) ? Number(m[1]) : 1
+  if (n < 1 || n > unit.max) return undefined
+  return unit.per === 'minutes' ? { minutes: n * unit.size } : { days: n * unit.size }
+}
+
+/**
+ * Where snoozing `t` moves it. Minutes and hours count from now, to the
+ * minute; days and weeks from its due day (today if it is overdue or undated),
+ * keeping its time; "until" moves it as "move … to …" does.
+ */
+export function snoozeTo(t: Task, snooze: Snooze, now: number): TaskPatch {
+  if ('until' in snooze) return moveTo(t, snooze.until.day ?? startOfDay(t.dueMs ?? now), snooze.until.time)
+  if ('days' in snooze) return moveTo(t, addDays(Math.max(startOfDay(t.dueMs ?? now), startOfDay(now)), snooze.days))
+  const at = new Date(Math.ceil((now + snooze.minutes * MINUTE) / MINUTE) * MINUTE)
+  return moveTo(t, startOfDay(at.getTime()), { h: at.getHours(), m: at.getMinutes() })
+}
+
 const dayLabel = (ms: number): string => new Date(ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
 const whenLabel = (patch: TaskPatch): string =>
   patch.dueMs == null ? 'no date' : patch.isAllDay ? dayLabel(patch.dueMs) : `${dayLabel(patch.dueMs)} at ${new Date(patch.dueMs).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`
@@ -258,12 +297,14 @@ const PRIORITY_NAME: Record<Priority, string> = { 5: 'high', 3: 'medium', 1: 'lo
 
 /**
  * Rename the task `query` names, move it to the day `due` names or the
- * `list` named, or set its `priority`, `repeat` or `remind`; every argument is checked
+ * `list` named, `snooze` it, or set its `priority`, `repeat` or `remind`; every argument is checked
  * before the task is picked, so a bad one changes nothing.
  */
 async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: string]: string }): Promise<Answer> {
-  const { query = '', title, due, priority, list, repeat, remind } = args
-  if ([title, due, priority, list, repeat, remind].every((v) => v === undefined)) return { error: 'Say what to change: a new title, a day, a priority, a list, a repeat or a reminder.' }
+  const { query = '', title, due, priority, list, repeat, remind, snooze } = args
+  if ([title, due, priority, list, repeat, remind, snooze].every((v) => v === undefined)) {
+    return { error: 'Say what to change: a new title, a day, a priority, a list, a repeat, a reminder or a snooze.' }
+  }
   if (title !== undefined && title.trim() === '') return { error: 'Say the new title.' }
   const when = due === undefined ? undefined : readWhen(due, c.now)
   if (due !== undefined && when === undefined) {
@@ -281,6 +322,10 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   if (remind !== undefined && reminder === undefined) {
     return { error: `I can't read “${remind.trim()}” as a reminder; try at the time, 5 minutes before, 1 hour before, a day before or none.` }
   }
+  const span = snooze === undefined ? undefined : readSnooze(snooze, c.now)
+  if (snooze !== undefined && span === undefined) {
+    return { error: `I can't read “${snooze.trim()}” as a snooze; try 30 minutes, 2 hours, a day, 1 week or until friday at 9.` }
+  }
   const target = list === undefined ? undefined : pickList(c.entities.lists, list)
   if (target !== undefined && 'error' in target) return target
   const pick = pickTask(tasks, query, 'task')
@@ -289,6 +334,11 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   if (title !== undefined) {
     await c.update(task.id, { title: title.trim() })
     return { title: title.trim() }
+  }
+  if (span !== undefined) {
+    const patch = snoozeTo(task, span, c.now)
+    await c.update(task.id, patch)
+    return { title: task.title, snooze: whenLabel(patch) }
   }
   if (reminder !== undefined) {
     const made = remindPatch(task, reminder)
@@ -373,7 +423,7 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
     },
     {
       name: 'update_task',
-      description: 'Rename the one task this names, move it to another day or time (today, tomorrow, friday at 3pm, in 3 days, 2026-11-05 9:30, 3pm, all day, or none), set its priority, repeat or reminder, or move it to another list.',
+      description: 'Rename the one task this names, move it to another day or time (today, tomorrow, friday at 3pm, in 3 days, 2026-11-05 9:30, 3pm, all day, or none), set its priority, repeat or reminder, snooze it, or move it to another list.',
       parameters: {
         type: 'object',
         properties: {
@@ -384,6 +434,7 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
           list: { type: 'string', description: 'The list to move it to, by name' },
           repeat: { type: 'string', description: 'How often it repeats, as said (daily, every 2 weeks, on weekdays, never)' },
           remind: { type: 'string', description: 'When to remind, as said (at the time, 1 hour before, a day before, none)' },
+          snooze: { type: 'string', description: 'How long to snooze it, as said (30 minutes, 2 hours, a day, 1 week, until friday at 9)' },
         },
         required: ['query'],
       },
