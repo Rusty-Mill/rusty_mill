@@ -90,8 +90,10 @@ The two softer G9 cases are `sha256`, which reaches tokio only through its
 async helper (`remind_me_core`, `remind_me_remote`), and `winit`/
 `accesskit_winit`, which reach it through the platform accessibility bus
 (`rusty_term`). Tokio runs inside those crates and no tokio type crosses into
-workspace code. Replacing `sha256` with the in-house hash (#688) would move
-the two `remind_me` crates to tier B.
+workspace code. Replacing `sha256` with the in-house hash (#688) removes one
+edge but does not by itself move either `remind_me` crate out of tier C:
+`remind_me_remote` still depends on axum, and `remind_me_core` on the AWS SDK
+(optional `cloud-backup`, `rt-tokio`).
 
 ## 3. Order
 
