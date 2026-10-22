@@ -22,10 +22,18 @@ X25519, ECDH on P-256 and P-384), `rusty_aead` (ChaCha20-Poly1305, AES-GCM) and 
 client role on 2026-10-22. Its first step (#865) put every client-path primitive behind one
 internal module, `handrolled::crypto`, still backed by `ring`.
 
-The primitives differ in what can be verified. Hashes, HMAC, HKDF and signature
-verification handle only public data, so vectors, differential tests and fuzzing are the
-right evidence. Everything that handles a secret key can leak through timing or cache
-effects that none of those techniques can observe.
+The primitives differ in what can be verified. Hashing public data (the handshake
+transcript) and signature verification handle only public data, so vectors, differential
+tests and fuzzing are the right evidence. Everything else on the client path handles a
+secret:
+- **HMAC and HKDF:** the key schedule keys them with salts, PRKs and traffic secrets, and
+  derives further secrets from them (`schedule.rs`, `schedule12.rs`).
+- **The AEADs:** they hold the traffic keys.
+- **X25519 and ECDH:** they hold the ephemeral private key.
+
+Code that handles a secret can leak it through timing or cache effects that none of those
+techniques can observe. The plan's §11 already classifies these primitives that way, and the
+§10 draft's wording, which put HMAC and HKDF among the public-data primitives, was wrong.
 
 `ring` is also used by `rustls` and by `boringtun`, `quinn`, `jsonwebtoken` and others in the
 lockfile. Replacing it under the hand-rolled engine does not remove it from the build.
@@ -54,8 +62,10 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
    engine job runs the client-side suites under the native backend, with its own list of
    supported tests, zero-tests guard and BoGo floor. A seam differential runs the same keys
    and inputs through both backends. The `crypto-constant-time` job and the plan's §11
-   table apply. The `ring` job keeps full coverage. Constant-time claims stay "no leak found
-   by these methods on this toolchain", never proof.
+   table apply. The `ring` job keeps full coverage. The secret-handling primitives listed
+   under Context (HMAC/HKDF, the AEADs, X25519, ECDH) each keep their crate's constant-time
+   evidence and review requirement. Constant-time claims stay "no leak found by these
+   methods on this toolchain", never proof.
 5. **Unchanged:** RSA signing is not built (plan stage 7). `ring` stays a dev-dependency
    oracle for the first-party crates. Nothing here becomes a default, and no consumer is
    wired. ADR-0002 §3 (never the default) and Amendment 1 (`rleval-app` stays on `ring`
@@ -65,9 +75,11 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
 
 - **Keep `ring` for everything.** This was the status quo and ADR-0002 §6. It is still the
   default build. It was rejected as the only option because the first-party crates exist,
-  and the client path needs none of the dangerous stages.
-- **Replace only the public-data primitives (hashes, HMAC, verification) and keep `ring`
-  for the rest.** That is the plan's recommended floor. The engine would still call `ring`,
+  and the client path needs no signing. It does still need secret-handling primitives
+  (HMAC/HKDF, the AEADs, X25519, ECDH), and the evidence and review rules below apply to
+  them.
+- **Replace only the public-data primitives (hashing of public data, signature
+  verification) and keep `ring` for the rest.** That is the plan's recommended floor. The engine would still call `ring`,
   and ending that is the point of gap 4.
 - **Keep `ring` only for signing** (D3's other option). The primitives would be native but
   the engine would still call `ring`. It was rejected because the client role needs no
@@ -89,7 +101,8 @@ lockfile. Replacing it under the hand-rolled engine does not remove it from the 
   (`TLS-NATIVE-CRYPTO-SEAM.md` D5, open). The plan's standing rule is that each
   secret-handling stage is reviewed before it is wired, and the owner reviews alone (plan
   D4, 2026-10-10).
-- **Created:** the native backend in `handrolled::crypto`, the `native-crypto` feature and
-  cfg, the client-only CI variant, and the seam differential.
+- **Required by this decision, not built when it was accepted:** the native backend in
+  `handrolled::crypto`, the `native-crypto` feature and cfg, the client-only CI variant, and
+  the seam differential.
 - **Foreclosed:** using this ADR to justify native signing, a native server role, or any
   default change. Each of those needs its own decision.

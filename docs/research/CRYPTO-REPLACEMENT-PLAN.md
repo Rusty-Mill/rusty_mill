@@ -13,8 +13,9 @@ consumer, `rusty_tls` file, gate or default was changed; nothing here is used by
 Work was frozen at stage 4 by owner decision; the freeze has since been reopened for gaps 1 and 2 (done) and,
 on 2026-10-10, for AES-GCM (gap 3); on 2026-10-22 the `rusty_tls` seam (gap 4) was reopened for the client role only, by
 the implementer's transcription of the owner's instruction, not yet restated from the owner's GitHub account; signing
-(gap 5) stays closed (section 0). Everything marked "decision" is the owner's. Section 10 is a
-draft ADR and is **not accepted**. Vocabulary used below: "implemented" means code and tests
+(gap 5) stays closed (section 0). Everything marked "decision" is the owner's. Section 10's draft
+was accepted on 2026-10-22 as ADR-0005, for the client role only (section 0; the implementer's
+transcription, pending the owner's restatement on GitHub). Vocabulary used below: "implemented" means code and tests
 exist; it never means reviewed or approved for TLS use.
 
 ## 0. Progress and owner decisions (updated as stages land)
@@ -620,7 +621,9 @@ and currently running on provisional implementer defaults: items 1 (partly overt
 
 **Accepted** as `crates/libs/net/rusty_tls/docs/adr/0005-first-party-primitives-for-the-client-engine.md`,
 scoped to the hand-rolled engine's client path; that file is authoritative. The draft below
-is kept as written.
+is kept as written, with one known error: its Context counts HMAC and HKDF among the
+public-data primitives. They are keyed with secrets (section 11 says so), and ADR-0005
+corrects this.
 
 
 > **ADR-0005 (draft): First-party cryptographic primitives behind the native TLS engine**
@@ -793,7 +796,9 @@ re-derived.
   Options, order of work, evidence bar and the open questions are in `AES-GCM-DESIGN.md` (draft, no code).
 - **D2 Reopen the freeze** for gaps 1 to 3 (and which of 4 and 5). *Decided:* gaps 1 and 2 (2026-10-09) and gap 3,
   AES-GCM (2026-10-10, "Unfreeze"); gap 4, client role only (2026-10-22); gap 5 stays closed.
-- **D3 Client-only or also server role** (gap 5).
+- **D3 Client-only or also server role** (gap 5). *Decided 2026-10-22:* client role only. Under
+  the native backend, signing, the servers and client certificates are compiled out (ADR-0005;
+  the implementer's transcription, pending the owner's restatement on GitHub).
 - **D4 Review process per stage:** this plan assumes each of gaps 2, 3 and 5 gets the same
   evidence package and an independent review before it is wired; the previous review was by
   the owner alone. A second reviewer for the AES and ECDH secret-handling code is cheap
