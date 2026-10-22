@@ -6,7 +6,10 @@ Builds on `docs/bbp-event-driven-design.md` (accepted Phase 1) and `docs/bbp-con
 
 ## Why this note exists
 
-The 2b evidence run (2026-10-22, records in the project files `bbp-2b-run/`) tested the loop:
+This account of the 2b evidence run (2026-10-22) is an **external report, not verifiable from this
+repository**: its records (run logs, `bbp pairs` output, blind scores) are in the owner's project files
+(`bbp-2b-run/`), not committed here. It grants no permission to run providers or spend; every phase keeps
+its own owner approval. As reported, the run tested the loop:
 `TurnBased` policy, a 500 ms moderator poll, a one-shot `claude -p` process per turn, and whole-spec
 `put_artifact` snapshots. Its two planners each wrote a spec from scratch at the same time, so nothing was
 ever co-edited, and its c4/c5 results say nothing about a CRDT. It also showed that a 500 ms poll is too
@@ -30,8 +33,11 @@ coarse to time an 11 s spec (c3 was unmeasurable). Both point at the same fix: s
   `MemStore`, and the poll kept as a timeout fallback, not as the clock).
 - Harness exits and runner reports already arrive as process events; the moderator waits on those too
   instead of checking them each poll.
-- Effect: decisions happen within milliseconds of the event that caused them. Timing measured by the
-  moderator stops carrying poll error, which is what made c3 unmeasurable.
+- Expected effect: decisions follow the event that caused them, and moderator timing stops carrying poll
+  error, which is what made c3 unmeasurable. The latency is to be measured in the implementation, not
+  assumed from push delivery.
+- Turn deadlines, `--max-wall-secs` and the cost cap are checked today on each poll. With pushes they must
+  still fire when nothing happens: the moderator's wait has a timeout set by the nearest deadline.
 - Tests: the existing moderator end-to-end tests with the poll set very long must still pass (proves the
   poll is no longer the clock); a test that an append wakes a waiting moderator.
 
@@ -62,11 +68,16 @@ CRDT makes data converge but cannot make order-dependent rules hold (b1 stands).
 
 **Design so a CRDT can slot in, without betting on it now:**
 
-- Make artifact edits **ops appended to the task log** (insert/delete against a stated base, plus the
-  author's turn), not whole-snapshot replacements. The artifact's text is a fold over its ops, like the
-  card. Today's behavior is one fold (last write wins per section, with the base check refusing a stale
-  edit); an RGA fold from `rusty_crdt` is a second fold over the same ops. Switching is a fold change, not
-  a log or protocol change, and old logs replay under either.
+- Today an artifact is a snapshot: each `ArtifactStored` event holds a whole version, and a spec is immutable
+  per version (`docs/bbp-concurrency-design.md`). There is no edit op, no section-level last-write-wins and
+  no stale-base refusal; all three below are **proposed**, not existing behavior.
+- Proposed: artifact edits become **ops appended to the task log** (insert/delete against a stated base
+  version, plus the author's turn), and the artifact's text is a fold over its ops, like the card. The
+  baseline fold would be last write wins per section, with a base check that refuses a stale edit.
+- An RGA fold from `rusty_crdt` would be a second fold over those ops, but only if the op format carries
+  what RGA needs: stable element identities and their parents, not just positions relative to a base.
+  Base-relative edits alone do not give that. Whether one op format serves both folds, and whether old
+  snapshot logs replay under the new schema, are **to be validated** in step 4's design, not assumed here.
 - A stale-base refusal is the measurable event: each one is a merge a CRDT would have done automatically.
 
 **Measure at realistic agent counts, not with two agents.** Contention grows with the number of concurrent
