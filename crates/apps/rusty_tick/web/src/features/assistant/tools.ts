@@ -5,7 +5,7 @@
  * agent turns into a reply; a task named ambiguously is not guessed at.
  */
 import type { ActionDefinition } from '@rusty-mill/agui-core'
-import type { List, NewTask, Priority, Task, TaskPatch } from '@/api/types'
+import type { List, NewTask, Priority, Status, Task, TaskPatch } from '@/api/types'
 import { searchTasks } from '@/features/search/search'
 import { tasksForView, type Entities } from '@/features/tasks/organize'
 import { addDays, MINUTE, startOfDay } from '@/lib/date'
@@ -324,6 +324,8 @@ function tagPatch(t: Task, said: string[], remove: boolean, known: readonly { na
   return { patch: { tags: [...t.tags, ...added] }, changed: names }
 }
 
+const STATUSES: readonly Status[] = ['open', 'done', 'wontdo']
+
 /** Priority words, as the agent sends them, and the priority each sets. */
 const PRIORITY: Record<string, Priority> = { high: 5, medium: 3, med: 3, low: 1, none: 0, no: 0 }
 const PRIORITY_NAME: Record<Priority, string> = { 5: 'high', 3: 'medium', 1: 'low', 0: 'none' }
@@ -453,17 +455,20 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
     },
     {
       name: 'filter_tasks',
-      description: 'Open tasks of a priority, with a tag and/or in a list: all of them, or those due today (overdue included), in the next 7 days, or overdue.',
+      description:
+        'Tasks of a status (open unless named), priority, tag and/or list: all of them, or those due today (overdue included), in the next 7 days, or overdue.',
       parameters: {
         type: 'object',
         properties: {
+          status: { type: 'string', enum: ['open', 'done', 'wontdo'] },
           priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
           tag: { type: 'string', description: 'A tag’s name, with or without #' },
           list: { type: 'string', description: 'A list’s name, or enough of it' },
           view: { type: 'string', enum: ['all', 'today', 'next7', 'overdue'] },
         },
       },
-      handler: ({ priority, tag, list, view = 'all' }) => {
+      handler: ({ status, priority, tag, list, view = 'all' }) => {
+        if (status !== undefined && !STATUSES.includes(status as Status)) return { error: 'Status is open, done or wontdo.' }
         const level = priority === undefined ? undefined : PRIORITY[norm(priority)]
         if (priority !== undefined && level === undefined) return { error: 'Priority is high, medium, low or none.' }
         const name = tag === undefined ? undefined : norm(tag).replace(/^#/, '')
@@ -471,11 +476,14 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
         const target = list === undefined ? undefined : pickList(c.entities.lists, list)
         if (target !== undefined && 'error' in target) return target
         const listId = target?.list.id
-        if (level === undefined && name === undefined && listId === undefined) return { error: 'Say a priority, a tag or a list to filter by.' }
-        const tasks =
-          view === 'overdue' ? overdue(live, c.now) : tasksForView({ kind: view === 'next7' ? 'week' : view === 'today' ? 'today' : 'all' }, c.entities, c.now)
+        if ([status, level, name, listId].every((v) => v === undefined)) return { error: 'Say a status, a priority, a tag or a list to filter by.' }
+        // Views go by due date whatever the status; done tasks are included, then kept by status.
+        const kind = view === 'next7' ? 'week' : view === 'today' ? 'today' : 'all'
+        const viewed = tasksForView({ kind }, c.entities, c.now, true)
+        const tasks = view === 'overdue' ? viewed.filter((t) => t.dueMs !== null && t.dueMs < startOfDay(c.now)) : viewed
+        const wanted = status ?? 'open'
         const found = lines(
-          tasks.filter((t) => (level === undefined || t.priority === level) && (name === undefined || t.tags.includes(name)) && (listId === undefined || t.listId === listId)),
+          tasks.filter((t) => t.status === wanted && (level === undefined || t.priority === level) && (name === undefined || t.tags.includes(name)) && (listId === undefined || t.listId === listId)),
         )
         return target === undefined ? found : { ...found, list: target.list.name }
       },

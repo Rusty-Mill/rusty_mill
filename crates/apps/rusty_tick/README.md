@@ -110,7 +110,8 @@ before” (or 5 minutes, a day before, at the time, on the day; “stop remindin
 a day, 1 week, “until friday at 9”: minutes and hours count from now, days from the due
 day), “tag dentist with health” (several: “#work, home and errands”; “remove tag health from
 dentist”), “what's high priority today?” (or this week, overdue, or any time; low, medium,
-no priority), “tasks tagged work” (or “#work”), “what's in Work?” (combined: “high priority tagged work in Home”),
+no priority), “tasks tagged work” (or “#work”), “what's in Work?”, “done tasks” (or completed, won't do, open; combined: “done high priority
+tasks tagged work in Home”),
 “lists”, and for habits “habits”, “check in meditate”, “undo check in meditate”
 and “add habit meditate” (habits live in the browser, so these have no MCP tool). A task is named by its title; when several
 match, it asks which. Quote a name that contains “to” (“rename "a to b" to c”). An

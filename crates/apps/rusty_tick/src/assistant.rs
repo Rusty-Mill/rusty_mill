@@ -29,9 +29,9 @@ pub const LIST_LISTS: &str = "list_lists";
 /// The one task a title names, renamed (`{query, title}`) or given a new due
 /// day (`{query, due}`: the day as said, read by the browser in its own zone).
 pub const UPDATE_TASK: &str = "update_task";
-/// Open tasks of a priority, with a tag and/or in a list, in a view:
-/// `{priority?, tag?, list?, view}` (`all`, `today`, `next7` or `overdue`).
-/// Browser-only: an MCP agent filters `list_tasks` itself.
+/// Tasks of a status (open unless named), priority, tag and/or list, in a view
+/// by due date: `{status?, priority?, tag?, list?, view}` (`all`, `today`,
+/// `next7` or `overdue`). Browser-only: an MCP agent filters `list_tasks` itself.
 pub const FILTER_TASKS: &str = "filter_tasks";
 /// Habits are client documents with no API route, so these three run only in
 /// the browser and have no MCP twin.
@@ -58,7 +58,7 @@ pub enum Reply {
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
 “rename buy milk to buy oat milk”, “move buy milk to friday at 3pm”, “make buy milk high priority”, \
-“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours”, “tag dentist with health”, “what's high priority today?”, “tasks tagged work”, “what's in Work today?”, “lists”, “habits”, “check in meditate” or “add habit meditate”.";
+“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours”, “tag dentist with health”, “what's high priority today?”, “tasks tagged work”, “what's in Work today?”, “done tasks in Work”, “lists”, “habits”, “check in meditate” or “add habit meditate”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -457,10 +457,22 @@ fn remind_call(query: &str, when: &str) -> Reply {
 }
 
 /// Words a priority question may hold besides the priority and the view.
-const FILTER_FILLER: [&str; 23] = [
+const FILTER_FILLER: [&str; 22] = [
     "what's", "what’s", "whats", "what", "is", "are", "show", "me", "my", "list", "all", "the",
-    "tasks", "task", "which", "open", "due", "with", "items", "anything", "any", "for", "in",
+    "tasks", "task", "which", "due", "with", "items", "anything", "any", "for", "in",
 ];
+/// Status words, and the status each names ("won't do" is read as two words).
+const FILTER_STATUSES: [(&str, &str); 7] = [
+    ("open", "open"),
+    ("done", "done"),
+    ("completed", "done"),
+    ("finished", "done"),
+    ("closed", "done"),
+    ("wontdo", "wontdo"),
+    ("won't-do", "wontdo"),
+];
+const WONT: [&str; 3] = ["won't", "won’t", "wont"];
+
 /// View words, and the view each names.
 const FILTER_VIEWS: [(&str, &str); 6] = [
     ("overdue", "overdue"),
@@ -472,7 +484,8 @@ const FILTER_VIEWS: [(&str, &str); 6] = [
 ];
 
 /// "high priority", "what's tagged work today?", "#errands", "what's in Work?",
-/// "overdue high priority tasks tagged work in Home": a `filter_tasks` call.
+/// "done tasks in Work", "overdue high priority tasks tagged work in Home": a
+/// `filter_tasks` call.
 /// Every other word must be filler or one view's words, so "add buy milk high
 /// priority" is never read as a question. A tag is "tagged X", "tag X" or "#X";
 /// a list is "in X", "in list X" or "in the X list"; quote either with spaces.
@@ -482,6 +495,7 @@ fn filter_question(lower: &str) -> Option<Reply> {
         .replace("-priority", " priority");
     let words = tokens(&cleaned);
     let (mut level, mut tag, mut list, mut view) = (None, None, None, "all");
+    let mut status = None;
     let mut i = 0;
     while let Some(&word) = words.get(i) {
         let next = words.get(i + 1).copied();
@@ -492,6 +506,22 @@ fn filter_question(lower: &str) -> Option<Reply> {
                 i += 1;
                 continue;
             }
+        }
+        let named_status = match word {
+            w if WONT.contains(&w) && next == Some("do") => {
+                i += 1;
+                Some("wontdo")
+            }
+            w => FILTER_STATUSES
+                .iter()
+                .find(|(said, _)| *said == w)
+                .map(|(_, s)| *s),
+        };
+        if let Some(named) = named_status {
+            if status.replace(named).is_some_and(|was| was != named) {
+                return None;
+            }
+            continue;
         }
         if word == "in" {
             if let Some((name, after)) = list_after_in(&words, i) {
@@ -522,10 +552,13 @@ fn filter_question(lower: &str) -> Option<Reply> {
             None => return None,
         }
     }
-    if level.is_none() && tag.is_none() && list.is_none() {
+    if status.is_none() && level.is_none() && tag.is_none() && list.is_none() {
         return None;
     }
     let mut args = Value::object();
+    if let Some(status) = status {
+        args.insert("status", status);
+    }
     if let Some(level) = level {
         args.insert("priority", level);
     }
@@ -587,6 +620,7 @@ fn tokens(text: &str) -> Vec<&str> {
 
 /// The heading and the nothing-found line for a filter's answer.
 fn filter_heading(
+    status: Option<&str>,
     level: Option<&str>,
     tag: Option<&str>,
     list: Option<&str>,
@@ -599,12 +633,20 @@ fn filter_heading(
     };
     let tagged = tag.map_or(String::new(), |t| format!(" tagged #{t}"))
         + &list.map_or(String::new(), |l| format!(" in {l}"));
-    let (before, after) = match view {
+    let (overdue, after) = match view {
         "today" => ("", " due today"),
         "next7" => ("", " due in the next 7 days"),
         "overdue" => ("overdue ", ""),
-        _ => ("open ", ""),
+        _ => ("", ""),
     };
+    // "Open" is said only where nothing else narrows the list ("Open tasks tagged #work").
+    let state = match (status, view) {
+        (Some("done"), _) => "done ",
+        (Some("wontdo"), _) => "won't-do ",
+        (_, "all") => "open ",
+        _ => "",
+    };
+    let before = format!("{overdue}{state}");
     let heading = format!("{before}{which}{tagged}{after}:");
     let mut first = heading.chars();
     let heading = first
@@ -950,7 +992,7 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
             }
         }
         FILTER_TASKS => {
-            let (level, tag) = (arg("priority"), arg("tag"));
+            let (status, level, tag) = (arg("status"), arg("priority"), arg("tag"));
             // The browser answers with the list's own name, as the person named it.
             let list = parsed
                 .get("list")
@@ -958,6 +1000,7 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
                 .map_or_else(|| arg("list"), str::to_string);
             let some = |v: &str| Some(v.to_string()).filter(|v| !v.is_empty());
             let (heading, none) = filter_heading(
+                some(&status).as_deref(),
                 some(&level).as_deref(),
                 some(&tag).as_deref(),
                 some(&list).as_deref(),
@@ -1342,6 +1385,60 @@ mod tests {
                 r#"{"title":"Buy milk","list":"Work"}"#
             ),
             Reply::Text("Moved “Buy milk” to Work.".into())
+        );
+    }
+
+    #[test]
+    fn turns_status_questions_into_filter_tasks() {
+        let by = |st: &str, v: &str| call(FILTER_TASKS, json!({"status": st, "view": v}));
+        assert_eq!(decide(&input("done tasks")), by("done", "all"));
+        assert_eq!(
+            decide(&input("show me completed tasks due this week")),
+            by("done", "next7")
+        );
+        assert_eq!(decide(&input("won't do tasks")), by("wontdo", "all"));
+        assert_eq!(decide(&input("open tasks due today")), by("open", "today"));
+        assert_eq!(
+            decide(&input("finished high priority tasks in work")),
+            call(
+                FILTER_TASKS,
+                json!({"status": "done", "priority": "high", "list": "work", "view": "all"})
+            )
+        );
+        assert_eq!(
+            decide(&input("done milk")),
+            call(COMPLETE_TASK, json!({"query": "milk"}))
+        );
+        assert_eq!(
+            decide(&input("complete tasks")),
+            call(COMPLETE_TASK, json!({"query": "tasks"}))
+        );
+        for not_ours in ["done open tasks", "won't", "what won't do tasks are there"] {
+            assert!(
+                !matches!(
+                    decide(&input(not_ours)),
+                    Reply::Call {
+                        tool: FILTER_TASKS,
+                        ..
+                    }
+                ),
+                "{not_ours}"
+            );
+        }
+        assert_eq!(
+            answered(
+                "done tasks in work",
+                r#"{"tasks":["Report"],"list":"Work"}"#
+            ),
+            Reply::Text("Done tasks in Work:\n- Report".into())
+        );
+        assert_eq!(
+            answered("overdue won't do tasks", r#"{"tasks":[]}"#),
+            Reply::Text("No overdue won't-do tasks.".into())
+        );
+        assert_eq!(
+            answered("open tasks tagged work", r#"{"tasks":["Report"]}"#),
+            Reply::Text("Open tasks tagged #work:\n- Report".into())
         );
     }
 

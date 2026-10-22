@@ -436,6 +436,21 @@ describe('filter_tasks', () => {
     expect(await titles({ tag: 'unused' })).toEqual([])
   })
 
+  it('filters by status, with views by due date and the Trash left out', async () => {
+    const extra = [
+      task('h', 'Old done', { priority: 5, status: 'done', dueMs: day(19), tags: ['work'] }),
+      task('i', 'Skipped', { status: 'wontdo', dueMs: day(23) }),
+    ]
+    const { c } = context([...tasks, ...extra])
+    c.entities.tags = known
+    const titles = async (args: Record<string, string>) => ((await run(c, 'filter_tasks', args)) as { tasks: string[] }).tasks.map((l) => l.split(' (')[0])
+    expect(await titles({ status: 'done' })).toEqual(['Done high', 'Old done'])
+    expect(await titles({ status: 'done', view: 'overdue' })).toEqual(['Old done'])
+    expect(await titles({ status: 'done', tag: 'work', priority: 'high' })).toEqual(['Done high', 'Old done'])
+    expect(await titles({ status: 'wontdo', view: 'next7' })).toEqual(['Skipped'])
+    expect(await titles({ status: 'open', view: 'overdue' })).toEqual(['Call bank'])
+  })
+
   it('filters by list, answering with the list’s own name', async () => {
     const { c } = context([...tasks, task('w', 'Report', { priority: 5, dueMs: day(22), listId: 'w' }), task('x', 'Draft', { listId: 'w' })])
     c.entities.tags = known
@@ -449,7 +464,8 @@ describe('filter_tasks', () => {
     c.entities.tags = known
     expect(await run(c, 'filter_tasks', { priority: 'urgent' })).toEqual({ error: 'Priority is high, medium, low or none.' })
     expect(await run(c, 'filter_tasks', { tag: 'gym' })).toEqual({ error: 'You have no tag #gym.' })
-    expect(await run(c, 'filter_tasks', { view: 'today' })).toEqual({ error: 'Say a priority, a tag or a list to filter by.' })
+    expect(await run(c, 'filter_tasks', { view: 'today' })).toEqual({ error: 'Say a status, a priority, a tag or a list to filter by.' })
+    expect(await run(c, 'filter_tasks', { status: 'stuck' })).toEqual({ error: 'Status is open, done or wontdo.' })
     expect(await run(c, 'filter_tasks', { list: 'old' })).toEqual({ error: 'No list matches “old”.' })
   })
 })
