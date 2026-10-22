@@ -1,9 +1,12 @@
 //! The moderator loop: `bbp mod`. The core decides who holds the turn; this
-//! loop makes it happen. Each iteration it re-reads the store, fires
-//! deadlines, starts the runner for a pending selected run, launches one
-//! agent harness for a newly granted turn with a `bbp mcp` binding in its
-//! environment, and reaps a harness whose turn has ended. Human gates are
-//! states with no turn, so the loop simply waits through them.
+//! loop makes it happen. A pass runs when the task's log changes, a child it
+//! started exits or a deadline, the wall limit or an end grace comes due, and
+//! at least every `poll` (see [`crate::waker`] and `next_wait`). Each pass
+//! re-reads the store, fires deadlines, starts the runner for a pending
+//! selected run, launches one agent harness for a newly granted turn with a
+//! `bbp mcp` binding in its environment, and reaps a harness whose turn has
+//! ended. Human gates are states with no turn, so the loop simply waits
+//! through them.
 //!
 //! The harness never sees a token: it gets `BBP_DIR`, `BBP_TASK`,
 //! `BBP_PRINCIPAL` and `BBP_TURN`, and talks to the per-turn `bbp mcp`
@@ -97,7 +100,10 @@ pub struct Config {
     pub work: PathBuf,
     pub launchers: Launchers,
     pub confinement: Confinement,
-    /// How long to sleep when nothing is ready.
+    /// The longest wait between passes. A pass runs sooner when the task's
+    /// log changes, a harness or the runner exits, or a turn or request
+    /// deadline, the wall limit or an end grace comes due; with no event the
+    /// cost cap and slot admission are checked this often.
     pub poll: Duration,
     /// Give up after this long; the task is left where it stands.
     pub max_wall: Duration,
@@ -525,6 +531,7 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
     let mut launched: HashSet<TurnId> = HashSet::new();
     let mut waiting: HashSet<TurnId> = HashSet::new();
     let mut ran: HashSet<RunId> = HashSet::new();
+    let mut waker = crate::waker::Waker::new(&log_path_for(&cfg.dir, &cfg.task));
 
     // A turn that was live before this loop did anything belongs to an
     // invocation it cannot see or stop. Abort it so its token dies and the
@@ -744,8 +751,40 @@ pub fn run_to_stop(cfg: &Config) -> Result<Outcome, String> {
                 hold,
             });
         }
-        std::thread::sleep(cfg.poll);
+        let children: Vec<u32> = sup
+            .harnesses
+            .iter()
+            .map(|h| h.child.id())
+            .chain(sup.runner.as_ref().map(|r| r.child.id()))
+            .collect();
+        let graces = sup
+            .harnesses
+            .iter()
+            .filter_map(|h| h.ended)
+            .map(|ended| cfg.end_grace.saturating_sub(ended.elapsed()));
+        let wall = cfg.max_wall.saturating_sub(started.elapsed());
+        let timeout = next_wait(cfg.poll, now(), d.state.next_deadline(), wall, graces);
+        waker.wait(&children, timeout)?;
     }
+}
+
+/// How long a pass may wait for an event: until the nearest turn or request
+/// deadline, the wall limit or the end of a grace comes due, and never longer
+/// than `poll`. A quiet harness produces no event, so these must wake the loop
+/// themselves. The wall check is strict (`>`), hence the extra millisecond.
+fn next_wait(
+    poll: Duration,
+    now: Time,
+    deadline: Option<Time>,
+    wall_left: Duration,
+    graces: impl IntoIterator<Item = Duration>,
+) -> Duration {
+    let until_deadline = deadline.map(|d| Duration::from_millis(d.0.saturating_sub(now.0)));
+    let past_wall = wall_left + Duration::from_millis(1);
+    graces
+        .into_iter()
+        .chain(until_deadline)
+        .fold(poll.min(past_wall), Duration::min)
 }
 
 /// Explicit owner acknowledgement after repairing a no-progress launcher.
@@ -1056,6 +1095,36 @@ fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wait_ends_at_whatever_comes_due_first() {
+        let ms = Duration::from_millis;
+        let poll = ms(60_000);
+        let now = Time(10_000);
+        let wall = ms(120_000);
+        let none: [Duration; 0] = [];
+        // Nothing due: the poll.
+        assert_eq!(next_wait(poll, now, None, wall, none), poll);
+        // A turn deadline 1 s away.
+        assert_eq!(
+            next_wait(poll, now, Some(Time(11_000)), wall, none),
+            ms(1_000)
+        );
+        // A deadline already passed: no wait, the next tick fires it.
+        assert_eq!(next_wait(poll, now, Some(Time(9_000)), wall, none), ms(0));
+        // The wall limit, one millisecond past it since its check is strict.
+        assert_eq!(next_wait(poll, now, None, ms(2_000), none), ms(2_001));
+        // The shortest remaining grace.
+        assert_eq!(
+            next_wait(poll, now, None, wall, [ms(700), ms(300)]),
+            ms(300)
+        );
+        // A short poll still bounds everything.
+        assert_eq!(
+            next_wait(ms(50), now, Some(Time(11_000)), wall, [ms(700)]),
+            ms(50)
+        );
+    }
 
     #[test]
     fn visits_close_on_change_and_keep_order_and_repeats() {
