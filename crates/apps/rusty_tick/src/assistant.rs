@@ -29,6 +29,9 @@ pub const LIST_LISTS: &str = "list_lists";
 /// The one task a title names, renamed (`{query, title}`) or given a new due
 /// day (`{query, due}`: the day as said, read by the browser in its own zone).
 pub const UPDATE_TASK: &str = "update_task";
+/// Open tasks of one priority, in a view: `{priority, view}` (`all`, `today`,
+/// `next7` or `overdue`). Browser-only: an MCP agent filters `list_tasks` itself.
+pub const PRIORITY_TASKS: &str = "priority_tasks";
 /// Habits are client documents with no API route, so these three run only in
 /// the browser and have no MCP twin.
 /// Today's habits and their progress: `{}`.
@@ -54,7 +57,7 @@ pub enum Reply {
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
 “rename buy milk to buy oat milk”, “move buy milk to friday at 3pm”, “make buy milk high priority”, \
-“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours”, “tag dentist with health”, “lists”, “habits”, “check in meditate” or “add habit meditate”.";
+“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours”, “tag dentist with health”, “what's high priority today?”, “lists”, “habits”, “check in meditate” or “add habit meditate”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -168,6 +171,7 @@ fn command(text: &str, lower: &str) -> Option<Reply> {
         .or_else(|| snooze_phrase(text, lower))
         .or_else(|| habit_phrase(text, lower))
         .or_else(|| tag_phrase(text, lower))
+        .or_else(|| priority_filter(lower))
     {
         return Some(reply);
     }
@@ -449,6 +453,74 @@ fn remind_call(query: &str, when: &str) -> Reply {
         return Reply::Text(REMIND_HELP.into());
     }
     update_call(query, "remind", when)
+}
+
+/// Words a priority question may hold besides the priority and the view.
+const FILTER_FILLER: [&str; 23] = [
+    "what's", "what’s", "whats", "what", "is", "are", "show", "me", "my", "list", "all", "the",
+    "tasks", "task", "which", "open", "due", "with", "items", "anything", "any", "for", "in",
+];
+/// View words, and the view each names.
+const FILTER_VIEWS: [(&str, &str); 6] = [
+    ("overdue", "overdue"),
+    ("week", "next7"),
+    ("this", "next7"),
+    ("next", "next7"),
+    ("7", "next7"),
+    ("today", "today"),
+];
+
+/// "high priority", "what's high priority today?", "overdue low priority
+/// tasks": a `priority_tasks` call. Every other word must be filler or a view
+/// word, so "add buy milk high priority" is never read as a question.
+fn priority_filter(lower: &str) -> Option<Reply> {
+    let cleaned = lower
+        .replace(['?', '.', '!', ','], " ")
+        .replace("-priority", " priority");
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    let at = words
+        .windows(2)
+        .position(|w| w[1] == "priority" && priority(w[0]).is_some())?;
+    let level = priority(words[at])?;
+    let rest = words
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != at && *i != at + 1)
+        .map(|(_, w)| *w);
+    let mut view = "all";
+    for word in rest {
+        match FILTER_VIEWS.iter().find(|(said, _)| *said == word) {
+            Some((_, named)) if view == "all" || view == *named => view = named,
+            Some(_) => return None,
+            None if FILTER_FILLER.contains(&word) || word == "days" => {}
+            None => return None,
+        }
+    }
+    Some(Reply::Call {
+        tool: PRIORITY_TASKS,
+        args: json!({ "priority": level, "view": view }),
+        say: "Checking…".into(),
+    })
+}
+
+/// The heading and the nothing-found line for a priority filter's answer.
+fn priority_heading(level: &str, view: &str) -> (String, String) {
+    let which = match level {
+        "none" => "tasks with no priority".to_string(),
+        level => format!("{level}-priority tasks"),
+    };
+    let (before, after) = match view {
+        "today" => ("", " due today"),
+        "next7" => ("", " due in the next 7 days"),
+        "overdue" => ("overdue ", ""),
+        _ => ("open ", ""),
+    };
+    let heading = format!("{before}{which}{after}:");
+    let mut first = heading.chars();
+    let heading = first
+        .next()
+        .map_or(String::new(), |c| c.to_uppercase().chain(first).collect());
+    (heading, format!("No {before}{which}{after}."))
 }
 
 const TAG_HELP: &str = "Tag which task, and with what? Try “tag dentist with health” \
@@ -787,6 +859,10 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
                 _ => format!("Checked in “{title}”: {progress} today."),
             }
         }
+        PRIORITY_TASKS => {
+            let (heading, none) = priority_heading(&arg("priority"), &arg("view"));
+            bullets(&heading, &none, strings(&parsed, "tasks"))
+        }
         LIST_HABITS => bullets(
             "Today's habits:",
             "No habits are due today.",
@@ -935,7 +1011,8 @@ mod tests {
     use super::*;
     use rusty_agui::{Content, Tool, ToolCall};
 
-    const ALL: [&str; 11] = [
+    const ALL: [&str; 12] = [
+        PRIORITY_TASKS,
         LIST_HABITS,
         CHECK_IN_HABIT,
         ADD_HABIT,
@@ -984,7 +1061,7 @@ mod tests {
                 "Adding the habit “{}”…",
                 args.get("name").and_then(Value::as_str)?
             ),
-            (DUE_TASKS, _) => "Checking…".into(),
+            (DUE_TASKS | PRIORITY_TASKS, _) => "Checking…".into(),
             (_, Some(r)) => format!("Looking up “{r}”…"),
             _ => return None,
         })
@@ -1163,6 +1240,71 @@ mod tests {
                 r#"{"title":"Buy milk","list":"Work"}"#
             ),
             Reply::Text("Moved “Buy milk” to Work.".into())
+        );
+    }
+
+    #[test]
+    fn turns_priority_questions_into_priority_tasks() {
+        let filter = |p: &str, v: &str| call(PRIORITY_TASKS, json!({"priority": p, "view": v}));
+        assert_eq!(decide(&input("high priority")), filter("high", "all"));
+        assert_eq!(
+            decide(&input("What's high priority today?")),
+            filter("high", "today")
+        );
+        assert_eq!(
+            decide(&input("show me my high-priority tasks")),
+            filter("high", "all")
+        );
+        assert_eq!(
+            decide(&input("overdue low priority tasks")),
+            filter("low", "overdue")
+        );
+        assert_eq!(
+            decide(&input("med priority due this week")),
+            filter("medium", "next7")
+        );
+        assert_eq!(
+            decide(&input("no priority tasks due in the next 7 days")),
+            filter("none", "next7")
+        );
+        assert_eq!(
+            decide(&input("make milk high priority")),
+            call(UPDATE_TASK, json!({"query": "milk", "priority": "high"}))
+        );
+        assert_eq!(
+            decide(&input("add buy milk high priority")),
+            call(ADD_TASK, json!({"title": "buy milk high priority"}))
+        );
+        assert_eq!(
+            decide(&input("what's due today?")),
+            call(DUE_TASKS, json!({"view": "today"}))
+        );
+        for not_ours in ["high priority overdue today", "priority", "top priority"] {
+            assert!(
+                !matches!(
+                    decide(&input(not_ours)),
+                    Reply::Call {
+                        tool: PRIORITY_TASKS,
+                        ..
+                    }
+                ),
+                "{not_ours}"
+            );
+        }
+        assert_eq!(
+            answered(
+                "high priority today",
+                r#"{"tasks":["Pay rent","Call bank"]}"#
+            ),
+            Reply::Text("High-priority tasks due today:\n- Pay rent\n- Call bank".into())
+        );
+        assert_eq!(
+            answered("overdue low priority", r#"{"tasks":[]}"#),
+            Reply::Text("No overdue low-priority tasks.".into())
+        );
+        assert_eq!(
+            answered("no priority tasks", r#"{"tasks":["Read"]}"#),
+            Reply::Text("Open tasks with no priority:\n- Read".into())
         );
     }
 

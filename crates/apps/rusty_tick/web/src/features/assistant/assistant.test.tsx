@@ -72,6 +72,7 @@ describe('the assistant panel', () => {
       'due_tasks',
       'list_habits',
       'list_lists',
+      'priority_tasks',
       'reopen_task',
       'search_tasks',
       'update_task',

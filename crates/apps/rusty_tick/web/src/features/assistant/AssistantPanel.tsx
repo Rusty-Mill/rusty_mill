@@ -113,7 +113,7 @@ function useTaskTools(): void {
   const filters = useFilters((s) => s.items)
   const assigneeItems = useAssignees((s) => s.items)
   const actions = useActions()
-  const [add, search, due, complete, reopen, update, remove, listLists] = taskTools({
+  const [add, search, due, byPriority, complete, reopen, update, remove, listLists] = taskTools({
     entities: { tasks: Object.values(tasks), lists: Object.values(lists), tags: Object.values(tags), inboxId, filters, assignees: assigneeMap(assigneeItems) },
     listId: spec?.kind === 'list' ? spec.id : inboxId,
     now: Date.now(),
@@ -127,6 +127,7 @@ function useTaskTools(): void {
   useAction(add!)
   useAction(search!)
   useAction(due!)
+  useAction(byPriority!)
   useAction(complete!)
   useAction(reopen!)
   useAction(update!)

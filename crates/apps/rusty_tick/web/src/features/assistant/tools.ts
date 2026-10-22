@@ -452,6 +452,22 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
       },
     },
     {
+      name: 'priority_tasks',
+      description: 'Open tasks of one priority: all of them, or those due today (overdue included), in the next 7 days, or overdue.',
+      parameters: {
+        type: 'object',
+        properties: { priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] }, view: { type: 'string', enum: ['all', 'today', 'next7', 'overdue'] } },
+        required: ['priority'],
+      },
+      handler: ({ priority, view = 'all' }) => {
+        const level = PRIORITY[norm(priority ?? '')]
+        if (level === undefined) return { error: 'Priority is high, medium, low or none.' }
+        const tasks =
+          view === 'overdue' ? overdue(live, c.now) : tasksForView({ kind: view === 'next7' ? 'week' : view === 'today' ? 'today' : 'all' }, c.entities, c.now)
+        return lines(tasks.filter((t) => t.priority === level))
+      },
+    },
+    {
       name: 'complete_task',
       description: 'Complete the one open task this names.',
       parameters: titled,

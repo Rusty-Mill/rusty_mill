@@ -407,3 +407,27 @@ describe('tags', () => {
     expect(done).toEqual([])
   })
 })
+
+describe('priority_tasks', () => {
+  const day = (d: number): number => new Date(2026, 9, d, 9).getTime()
+  const tasks = [
+    task('a', 'Pay rent', { priority: 5, dueMs: day(22) }),
+    task('b', 'Call bank', { priority: 5, dueMs: day(20) }),
+    task('c', 'Plan trip', { priority: 5, dueMs: day(26) }),
+    task('d', 'Someday', { priority: 5 }),
+    task('e', 'Read', { priority: 0, dueMs: day(22) }),
+    task('f', 'Done high', { priority: 5, status: 'done' }),
+    task('g', 'Trashed high', { priority: 5, deletedMs: 1 }),
+  ]
+
+  it('lists the open tasks of one priority in each view', async () => {
+    const { c } = context(tasks)
+    const titles = async (args: Record<string, string>) => ((await run(c, 'priority_tasks', args)) as { tasks: string[] }).tasks.map((l) => l.split(' (')[0])
+    expect(await titles({ priority: 'high' })).toEqual(['Pay rent', 'Call bank', 'Plan trip', 'Someday'])
+    expect(await titles({ priority: 'high', view: 'today' })).toEqual(['Pay rent', 'Call bank'])
+    expect(await titles({ priority: 'high', view: 'next7' })).toEqual(['Pay rent', 'Plan trip'])
+    expect(await titles({ priority: 'high', view: 'overdue' })).toEqual(['Call bank'])
+    expect(await titles({ priority: 'none', view: 'today' })).toEqual(['Read'])
+    expect(await run(c, 'priority_tasks', { priority: 'urgent' })).toEqual({ error: 'Priority is high, medium, low or none.' })
+  })
+})
