@@ -1,7 +1,18 @@
 //! Opinionated provider launchers over the existing per-turn BBP MCP server.
 //! Generic moderator launchers remain available for other providers/policies.
-use crate::{mcp::Binding, moderator, open_driver};
-use rusty_bbp::{ArtifactKind, PrincipalKind, ReadScope, Role, Sha256, State};
+//!
+//! Unconfined, a launcher reads its turn's [`Facts`] from the task directory
+//! and gives the provider a `bbp mcp` bound to it. Confined (the moderator
+//! set [`crate::broker::RELAY_ENV`]), the task directory is out of reach: the
+//! moderator writes the facts to a file the harness may read but not write
+//! ([`FACTS_ENV`]), and the provider's `bbp mcp` is the relay. The checks and
+//! the provider's restrictions are the same either way.
+use crate::{broker, mcp::Binding, moderator, open_driver};
+use rusty_bbp::{
+    ArtifactKind, PrincipalId, PrincipalKind, ReadScope, Role, Sha256, State, TaskId, TaskState,
+    TurnId,
+};
+use rusty_serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -56,20 +67,191 @@ fn json(value: &impl rusty_serde::Serialize) -> Result<String, String> {
     rusty_serde::json::to_string(value).map_err(|e| e.to_string())
 }
 
-fn binding_env(b: &Binding) -> BTreeMap<&'static str, String> {
-    BTreeMap::from([
-        ("BBP_DIR", b.dir.to_string_lossy().into_owned()),
-        ("BBP_TASK", b.task.0.clone()),
-        ("BBP_PRINCIPAL", b.principal.0.clone()),
-        ("BBP_TURN", b.turn.0.to_string()),
-    ])
+/// Names the moderator-written facts file of a confined launch.
+pub const FACTS_ENV: &str = "BBP_LAUNCH_FACTS";
+
+/// What a launcher checks before it starts its provider, taken from the
+/// task's state for one principal's turn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Facts {
+    /// The task's repository path.
+    pub repo: String,
+    /// Whether the task is in review.
+    pub review: bool,
+    /// Whether the turn is a live turn of the principal's role.
+    pub live: bool,
+    /// The principal's role, when it is an assigned agent.
+    pub role: Option<Capabilities>,
+    /// The principal's agent vendor.
+    pub vendor: Option<String>,
+    /// The vendor of every agent whose role writes candidates.
+    pub candidate_vendors: Vec<String>,
 }
 
-fn mcp_json(b: &Binding, bbp: &Path) -> Result<String, String> {
+/// The capabilities of a role that the launch policies depend on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capabilities {
+    pub final_decision: bool,
+    pub writes_candidate: bool,
+    pub writes_nothing: bool,
+    pub scoped_messages: bool,
+    pub reads_logs: bool,
+}
+
+impl Capabilities {
+    fn of(role: &Role) -> Capabilities {
+        Capabilities {
+            final_decision: role.final_decision,
+            writes_candidate: role.write.contains(&ArtifactKind::Candidate),
+            writes_nothing: role.write.is_empty(),
+            scoped_messages: role.read_messages == ReadScope::Scoped,
+            reads_logs: role.read_artifacts.contains(&ArtifactKind::Log),
+        }
+    }
+}
+
+impl Facts {
+    /// The facts of `principal`'s turn `turn` in `state`.
+    pub fn of(state: &TaskState, principal: &PrincipalId, turn: TurnId) -> Facts {
+        let role_id = state.role_of(principal);
+        let vendor = |kind: &PrincipalKind| match kind {
+            PrincipalKind::Agent { vendor, .. } => Some(vendor.clone()),
+            _ => None,
+        };
+        Facts {
+            repo: state.repo.clone(),
+            review: state.state == State::Review,
+            live: role_id
+                .as_ref()
+                .is_some_and(|r| state.turns.iter().any(|t| t.id == turn && &t.role == r)),
+            role: role_id
+                .as_ref()
+                .and_then(|r| state.roster.get(r))
+                .map(Capabilities::of),
+            vendor: state
+                .principals
+                .get(principal)
+                .and_then(|p| vendor(&p.kind)),
+            candidate_vendors: state
+                .principals
+                .values()
+                .filter_map(|p| match &p.kind {
+                    PrincipalKind::Agent { role, vendor }
+                        if state
+                            .roster
+                            .get(role)
+                            .is_some_and(|r| r.write.contains(&ArtifactKind::Candidate)) =>
+                    {
+                        Some(vendor.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// The facts file of a confined launch.
+    fn read(path: &Path) -> Result<Facts, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// The text of the facts file.
+    pub fn to_json(&self) -> Result<String, String> {
+        json(self)
+    }
+}
+
+/// Refuse a launch whose turn, role or vendor does not fit `provider`.
+fn check(provider: Provider, facts: &Facts) -> Result<(), String> {
+    let role = facts
+        .role
+        .as_ref()
+        .ok_or("principal is not an assigned agent")?;
+    if !facts.live {
+        return Err("binding is not the current live turn".into());
+    }
+    validate_role(provider, role)?;
+    if facts.vendor.as_deref() != Some(provider.name()) {
+        return Err("principal vendor differs from launcher".into());
+    }
+    if provider == Provider::Claude {
+        if !facts.review {
+            return Err("reviewer requires a Review turn".into());
+        }
+        if facts.candidate_vendors.iter().any(|v| v == "claude") {
+            return Err("reviewer vendor also authors candidates".into());
+        }
+    }
+    Ok(())
+}
+
+/// How the provider's `bbp mcp` reaches its turn.
+#[derive(Clone, Debug)]
+enum Channel {
+    /// Through the task directory, as the binding.
+    Direct(Binding),
+    /// Confined: through the moderator's relay pipes in `pipes`.
+    Relay {
+        task: TaskId,
+        turn: TurnId,
+        pipes: PathBuf,
+    },
+}
+
+impl Channel {
+    /// The moderator's per-turn environment: relayed when it names pipes.
+    fn from_env() -> Result<Channel, String> {
+        let Some(pipes) = std::env::var_os(broker::RELAY_ENV).map(PathBuf::from) else {
+            return Binding::from_env().map(Channel::Direct);
+        };
+        let var = |k: &str| std::env::var(k).map_err(|_| format!("missing ${k}"));
+        Ok(Channel::Relay {
+            task: TaskId(var("BBP_TASK")?),
+            turn: TurnId(
+                var("BBP_TURN")?
+                    .parse()
+                    .map_err(|_| "BBP_TURN must be a number".to_owned())?,
+            ),
+            pipes,
+        })
+    }
+
+    fn task(&self) -> &TaskId {
+        match self {
+            Self::Direct(b) => &b.task,
+            Self::Relay { task, .. } => task,
+        }
+    }
+
+    fn turn(&self) -> TurnId {
+        match self {
+            Self::Direct(b) => b.turn,
+            Self::Relay { turn, .. } => *turn,
+        }
+    }
+
+    /// The environment of the provider's `bbp mcp`.
+    fn env(&self) -> BTreeMap<&'static str, String> {
+        match self {
+            Self::Direct(b) => BTreeMap::from([
+                ("BBP_DIR", b.dir.to_string_lossy().into_owned()),
+                ("BBP_TASK", b.task.0.clone()),
+                ("BBP_PRINCIPAL", b.principal.0.clone()),
+                ("BBP_TURN", b.turn.0.to_string()),
+            ]),
+            Self::Relay { pipes, .. } => {
+                BTreeMap::from([(broker::RELAY_ENV, pipes.to_string_lossy().into_owned())])
+            }
+        }
+    }
+}
+
+fn mcp_json(channel: &Channel, bbp: &Path) -> Result<String, String> {
     Ok(format!(
         "{{\"mcpServers\":{{\"bbp\":{{\"command\":{},\"args\":[\"mcp\"],\"env\":{}}}}}}}",
         json(&bbp.to_string_lossy())?,
-        json(&binding_env(b))?
+        json(&channel.env())?
     ))
 }
 
@@ -88,32 +270,33 @@ struct McpServer {
     env: BTreeMap<String, String>,
 }
 
-fn validate_config(path: &Path, b: &Binding, bbp: &Path) -> Result<(), String> {
-    let expected_path = moderator::mcp_config_path(&b.dir, &b.task, b.turn);
-    if path.canonicalize().map_err(|e| e.to_string())?
-        != expected_path.canonicalize().map_err(|e| e.to_string())?
-    {
-        return Err("MCP configuration belongs to another task/turn".into());
+fn validate_config(path: &Path, channel: &Channel, bbp: &Path) -> Result<(), String> {
+    // A relayed configuration is the moderator's, beside the workspace; only
+    // its content can be checked.
+    if let Channel::Direct(b) = channel {
+        let expected_path = moderator::mcp_config_path(&b.dir, &b.task, b.turn);
+        if path.canonicalize().map_err(|e| e.to_string())?
+            != expected_path.canonicalize().map_err(|e| e.to_string())?
+        {
+            return Err("MCP configuration belongs to another task/turn".into());
+        }
     }
     let actual: McpConfig =
         rusty_serde::json::from_str(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     let expected: McpConfig =
-        rusty_serde::json::from_str(&mcp_json(b, bbp)?).map_err(|e| e.to_string())?;
+        rusty_serde::json::from_str(&mcp_json(channel, bbp)?).map_err(|e| e.to_string())?;
     if actual != expected {
         return Err("MCP configuration does not match the current binding".into());
     }
     Ok(())
 }
 
-fn validate_role(provider: Provider, role: &Role) -> Result<(), String> {
+fn validate_role(provider: Provider, role: &Capabilities) -> Result<(), String> {
     let valid = match provider {
-        Provider::Codex => !role.final_decision && role.write.contains(&ArtifactKind::Candidate),
+        Provider::Codex => !role.final_decision && role.writes_candidate,
         Provider::Claude => {
-            role.final_decision
-                && role.read_messages == ReadScope::Scoped
-                && role.write.is_empty()
-                && !role.read_artifacts.contains(&ArtifactKind::Log)
+            role.final_decision && role.scoped_messages && role.writes_nothing && !role.reads_logs
         }
     };
     if !valid {
@@ -141,7 +324,16 @@ fn git(args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn prepare_cwd(root: &Path, repo: &str, provider: Provider) -> Result<PathBuf, String> {
+/// The provider's working directory in `root`: empty for the reviewer, a
+/// private clone of `repo` for the author. A confined author's clone shares
+/// the repository's object store, which its sandbox lets it read but not
+/// write; an unconfined one copies it.
+fn prepare_cwd(
+    root: &Path,
+    repo: &str,
+    provider: Provider,
+    confined: bool,
+) -> Result<PathBuf, String> {
     let cwd = root.join("workspace");
     if provider == Provider::Claude {
         std::fs::create_dir(&cwd).map_err(|e| e.to_string())?;
@@ -151,10 +343,15 @@ fn prepare_cwd(root: &Path, repo: &str, provider: Provider) -> Result<PathBuf, S
         return Err("author requires a local absolute repository path".into());
     }
     let target = cwd.to_str().ok_or("non-UTF8 author checkout")?;
+    let objects = if confined {
+        "--shared"
+    } else {
+        "--no-hardlinks"
+    };
     git(&[
         "clone",
         "--quiet",
-        "--no-hardlinks",
+        objects,
         "--no-checkout",
         "--",
         repo,
@@ -173,7 +370,7 @@ const REVIEW_TOOLS: &str =
 
 fn arguments(
     provider: Provider,
-    b: &Binding,
+    channel: &Channel,
     bbp: &Path,
     config: &Path,
     cwd: &Path,
@@ -181,9 +378,9 @@ fn arguments(
 ) -> Result<Vec<String>, String> {
     let prompt = format!(
         "BBP task {}, turn {}. Prefix every operation id with t{}-.\n{}",
-        b.task.0,
-        b.turn.0,
-        b.turn.0,
+        channel.task().0,
+        channel.turn().0,
+        channel.turn().0,
         if provider == Provider::Codex {
             AUTHOR
         } else {
@@ -234,7 +431,8 @@ fn arguments(
         .to_vec(),
     };
     if provider == Provider::Codex {
-        let env = binding_env(b)
+        let env = channel
+            .env()
             .iter()
             .map(|(k, v)| Ok(format!("{}={}", json(k)?, json(v)?)))
             .collect::<Result<Vec<_>, String>>()?
@@ -271,12 +469,7 @@ pub fn run(provider: Provider) -> Result<(), String> {
         return Err("BBP provider launchers require Linux".into());
     }
     let options = Options::parse(std::env::args().skip(1))?;
-    let binding = Binding::from_env()?;
-    // Keep the moderator's spelling in MCP env (including symlink aliases),
-    // while validate_config compares file identity through canonical paths.
-    if !binding.dir.is_absolute() {
-        return Err("BBP_DIR must be absolute".into());
-    }
+    let channel = Channel::from_env()?;
     let bbp = PathBuf::from(std::env::var_os("BBP_BIN").ok_or("missing BBP_BIN")?);
     if !bbp.is_absolute() {
         return Err("BBP_BIN must be absolute".into());
@@ -285,54 +478,34 @@ pub fn run(provider: Provider) -> Result<(), String> {
         .mcp
         .or_else(|| std::env::var_os("BBP_MCP_CONFIG").map(PathBuf::from))
         .ok_or("missing per-turn MCP configuration")?;
-    validate_config(&mcp, &binding, &bbp)?;
-    let driver = open_driver(&binding.dir, &binding.task)?;
-    let role_id = driver
-        .state
-        .role_of(&binding.principal)
-        .ok_or("principal is not an assigned agent")?;
-    if !driver
-        .state
-        .turns
-        .iter()
-        .any(|t| t.id == binding.turn && t.role == role_id)
-    {
-        return Err("binding is not the current live turn".into());
+    // Keep the moderator's spelling in MCP env (including symlink aliases),
+    // while validate_config compares file identity through canonical paths.
+    if matches!(&channel, Channel::Direct(b) if !b.dir.is_absolute()) {
+        return Err("BBP_DIR must be absolute".into());
     }
-    let role = driver.state.roster.get(&role_id).ok_or("missing role")?;
-    validate_role(provider, role)?;
-    let assigned = driver
-        .state
-        .principals
-        .get(&binding.principal)
-        .ok_or("missing principal")?;
-    if !matches!(&assigned.kind, PrincipalKind::Agent { vendor, .. } if vendor == provider.name()) {
-        return Err("principal vendor differs from launcher".into());
-    }
-    if provider == Provider::Claude {
-        if driver.state.state != State::Review {
-            return Err("reviewer requires a Review turn".into());
+    validate_config(&mcp, &channel, &bbp)?;
+    let (facts, parent) = match &channel {
+        Channel::Direct(binding) => {
+            let driver = open_driver(&binding.dir, &binding.task)?;
+            let facts = Facts::of(&driver.state, &binding.principal, binding.turn);
+            let parent = binding
+                .dir
+                .join("harness")
+                .join(Sha256::of(binding.task.0.as_bytes()).hex());
+            (facts, parent)
         }
-        for principal in driver.state.principals.values() {
-            if let PrincipalKind::Agent { role, vendor } = &principal.kind {
-                if vendor == "claude"
-                    && driver
-                        .state
-                        .roster
-                        .get(role)
-                        .is_some_and(|r| r.write.contains(&ArtifactKind::Candidate))
-                {
-                    return Err("reviewer vendor also authors candidates".into());
-                }
-            }
+        Channel::Relay { .. } => {
+            let path = std::env::var_os(FACTS_ENV).ok_or(format!("missing ${FACTS_ENV}"))?;
+            // The sandbox's own scratch directory, private to this harness.
+            (
+                Facts::read(Path::new(&path))?,
+                std::env::temp_dir().join("bbp-launch"),
+            )
         }
-    }
-    let parent = binding
-        .dir
-        .join("harness")
-        .join(Sha256::of(binding.task.0.as_bytes()).hex());
+    };
+    check(provider, &facts)?;
     std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
-    let root = parent.join(format!("turn-{}", binding.turn.0));
+    let root = parent.join(format!("turn-{}", channel.turn().0));
     std::fs::create_dir(&root)
         .map_err(|e| format!("turn workspace already exists or cannot be created: {e}"))?;
     #[cfg(unix)]
@@ -341,15 +514,16 @@ pub fn run(provider: Provider) -> Result<(), String> {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
     }
-    let cwd = prepare_cwd(&root, &driver.state.repo, provider)?;
+    let confined = matches!(channel, Channel::Relay { .. });
+    let cwd = prepare_cwd(&root, &facts.repo, provider, confined)?;
     let config = root.join("mcp.json");
-    rusty_atomic_file::write_private(&config, mcp_json(&binding, &bbp)?.as_bytes())
+    rusty_atomic_file::write_private(&config, mcp_json(&channel, &bbp)?.as_bytes())
         .map_err(|e| e.to_string())?;
     let mut command = Command::new(options.binary.unwrap_or_else(|| provider.name().into()));
     command
         .args(arguments(
             provider,
-            &binding,
+            &channel,
             &bbp,
             &config,
             &cwd,

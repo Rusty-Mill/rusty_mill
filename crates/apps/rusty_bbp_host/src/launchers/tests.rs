@@ -3,6 +3,10 @@ use super::*;
 use rusty_bbp::{PrincipalId, Stage, TaskId, TurnId};
 use rusty_serde::json::Value;
 
+fn direct() -> Channel {
+    Channel::Direct(binding())
+}
+
 fn binding() -> Binding {
     Binding {
         dir: "/tmp/store with spaces".into(),
@@ -16,7 +20,7 @@ fn binding() -> Binding {
 fn reviewer_has_no_builtin_tools_or_extra_mcp_sources() {
     let args = arguments(
         Provider::Claude,
-        &binding(),
+        &direct(),
         Path::new("/bin/bbp"),
         Path::new("/turn/mcp.json"),
         Path::new("/empty"),
@@ -58,7 +62,7 @@ fn reviewer_has_no_builtin_tools_or_extra_mcp_sources() {
 fn author_pins_one_required_mcp_server_and_uses_ephemeral_sandbox() {
     let args = arguments(
         Provider::Codex,
-        &binding(),
+        &direct(),
         Path::new("/bin/bbp"),
         Path::new("/turn/mcp.json"),
         Path::new("/private/checkout"),
@@ -119,7 +123,7 @@ fn reviewer_capabilities_are_checked_instead_of_role_names() {
         .scoped()
         .verdict_at(&[Stage::Review])
         .final_decision();
-    assert!(validate_role(Provider::Claude, &reviewer).is_ok());
+    assert!(validate_role(Provider::Claude, &Capabilities::of(&reviewer)).is_ok());
     for role in [
         Role {
             read_messages: ReadScope::All,
@@ -134,12 +138,12 @@ fn reviewer_capabilities_are_checked_instead_of_role_names() {
             ..reviewer.clone()
         },
     ] {
-        assert!(validate_role(Provider::Claude, &role).is_err());
+        assert!(validate_role(Provider::Claude, &Capabilities::of(&role)).is_err());
     }
-    assert!(validate_role(Provider::Codex, &reviewer).is_err());
+    assert!(validate_role(Provider::Codex, &Capabilities::of(&reviewer)).is_err());
     assert!(validate_role(
         Provider::Codex,
-        &Role::new("maker", 0).write(&[ArtifactKind::Candidate])
+        &Capabilities::of(&Role::new("maker", 0).write(&[ArtifactKind::Candidate]))
     )
     .is_ok());
 }
@@ -147,8 +151,7 @@ fn reviewer_capabilities_are_checked_instead_of_role_names() {
 #[test]
 fn mcp_json_carries_exact_binding_and_no_other_servers() {
     let value: Value =
-        rusty_serde::json::from_str(&mcp_json(&binding(), Path::new("/bbp path")).unwrap())
-            .unwrap();
+        rusty_serde::json::from_str(&mcp_json(&direct(), Path::new("/bbp path")).unwrap()).unwrap();
     let server = value.get("mcpServers").unwrap().get("bbp").unwrap();
     assert_eq!(
         server
@@ -174,7 +177,7 @@ fn mcp_json_carries_exact_binding_and_no_other_servers() {
 
 #[test]
 fn config_decoding_is_order_independent_but_rejects_extra_server_fields() {
-    let text = mcp_json(&binding(), Path::new("/bbp")).unwrap();
+    let text = mcp_json(&direct(), Path::new("/bbp")).unwrap();
     let expected: McpConfig = rusty_serde::json::from_str(&text).unwrap();
     let reordered = text.replace(
         "\"command\":\"/bbp\",\"args\":[\"mcp\"]",
@@ -195,7 +198,7 @@ fn config_decoding_is_order_independent_but_rejects_extra_server_fields() {
 fn author_preapproves_only_named_bbp_agent_tools_and_scrubs_git_context() {
     let args = arguments(
         Provider::Codex,
-        &binding(),
+        &direct(),
         Path::new("/bbp"),
         Path::new("/mcp"),
         Path::new("/clone"),
@@ -214,4 +217,111 @@ fn author_preapproves_only_named_bbp_agent_tools_and_scrubs_git_context() {
     assert!(args
         .iter()
         .any(|a| a.contains("GIT_CONFIG_GLOBAL=\"/dev/null\"")));
+}
+
+fn facts(provider: Provider) -> Facts {
+    let role = match provider {
+        Provider::Codex => Role::new("maker", 0).write(&[ArtifactKind::Candidate]),
+        Provider::Claude => Role::new("auditor", 1)
+            .scoped()
+            .verdict_at(&[Stage::Review])
+            .final_decision(),
+    };
+    Facts {
+        repo: "/repo".into(),
+        review: provider == Provider::Claude,
+        live: true,
+        role: Some(Capabilities::of(&role)),
+        vendor: Some(provider.name().into()),
+        candidate_vendors: vec!["codex".into()],
+    }
+}
+
+#[test]
+fn the_same_checks_refuse_a_launch_whatever_its_facts_came_from() {
+    for provider in [Provider::Codex, Provider::Claude] {
+        assert_eq!(check(provider, &facts(provider)), Ok(()));
+        for (broken, error) in [
+            (
+                Facts {
+                    role: None,
+                    ..facts(provider)
+                },
+                "not an assigned agent",
+            ),
+            (
+                Facts {
+                    live: false,
+                    ..facts(provider)
+                },
+                "live turn",
+            ),
+            (
+                Facts {
+                    vendor: Some("other".into()),
+                    ..facts(provider)
+                },
+                "vendor differs",
+            ),
+        ] {
+            assert!(
+                check(provider, &broken).unwrap_err().contains(error),
+                "{error}"
+            );
+        }
+    }
+    assert!(check(Provider::Codex, &facts(Provider::Claude)).is_err());
+    let planning = Facts {
+        review: false,
+        ..facts(Provider::Claude)
+    };
+    assert!(check(Provider::Claude, &planning)
+        .unwrap_err()
+        .contains("Review turn"));
+    let same = Facts {
+        candidate_vendors: vec!["claude".into()],
+        ..facts(Provider::Claude)
+    };
+    assert!(check(Provider::Claude, &same)
+        .unwrap_err()
+        .contains("also authors"));
+}
+
+#[test]
+fn facts_survive_their_file() {
+    let f = facts(Provider::Claude);
+    let back: Facts = rusty_serde::json::from_str(&f.to_json().unwrap()).unwrap();
+    assert_eq!(back, f);
+}
+
+#[test]
+fn a_relayed_provider_gets_only_the_relay_and_keeps_its_restrictions() {
+    let relay = Channel::Relay {
+        task: TaskId("t".into()),
+        turn: TurnId(7),
+        pipes: "/work/turn-7.mcp".into(),
+    };
+    let config: McpConfig =
+        rusty_serde::json::from_str(&mcp_json(&relay, Path::new("/bbp")).unwrap()).unwrap();
+    assert_eq!(
+        config.servers["bbp"].env,
+        BTreeMap::from([("BBP_MCP_RELAY".to_owned(), "/work/turn-7.mcp".to_owned())])
+    );
+    let args = arguments(
+        Provider::Codex,
+        &relay,
+        Path::new("/bbp"),
+        Path::new("/mcp"),
+        Path::new("/clone"),
+        None,
+    )
+    .unwrap();
+    let config = args.iter().find(|a| a.starts_with("mcp_servers=")).unwrap();
+    assert!(
+        config.contains("\"BBP_MCP_RELAY\"=\"/work/turn-7.mcp\"") && !config.contains("BBP_DIR")
+    );
+    assert!(args
+        .windows(2)
+        .any(|w| w == ["--sandbox", "workspace-write"]));
+    assert!(args.last().unwrap().contains("t7-"));
 }

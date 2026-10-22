@@ -269,3 +269,123 @@ fn two_confined_tasks_share_one_object_store_but_not_their_worktrees() {
     let _ = std::fs::remove_dir_all(&root);
     println!("BBP_ACCEPTANCE PASS shared-worktrees");
 }
+
+/// A Codex provider stand-in: reports what it can reach from the author's
+/// clone, then plans over the `bbp mcp` relay its launcher configured.
+const AUTHOR: &str = r##"#!/bin/sh
+cfg=$(for a in "$@"; do case "$a" in mcp_servers=*) printf '%s' "$a";; esac; done)
+relay=$(printf '%s' "$cfg" | sed -n 's/.*"BBP_MCP_RELAY"="\([^"]*\)".*/\1/p')
+bbp=$(printf '%s' "$cfg" | sed -n 's/^mcp_servers={bbp={command="\([^"]*\)".*/\1/p')
+if cat "$TASK_DIR/master" >/dev/null 2>&1; then echo "master: read"; else echo "master: denied"; fi
+echo "flag: $(cat flag.txt)"
+if git add -N . && git diff --quiet; then echo "clone: usable"; else echo "clone: broken"; fi
+if echo x > "$REPO/.git/objects/forged" 2>/dev/null; then echo "objects: wrote"; else echo "objects: denied"; fi
+echo "alternates: $(cat "$(git rev-parse --git-dir)/objects/info/alternates")"
+if env | grep -q '^BBP_'; then echo "env: bbp"; else echo "env: clean"; fi
+BBP_MCP_RELAY="$relay" "$bbp" mcp >/dev/null <<'RPC'
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"t1-p1","kind":"spec","brief":1,"body":"# Spec\nAC1 flag says ok."}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"post","arguments":{"op":"t1-p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve the plan?","gate":true}}}
+RPC
+"##;
+
+#[test]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
+    let root = root("launcher").canonicalize().expect("canonical");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("flag.txt"), "no\n").expect("write");
+    git(&repo, &["add", "."]);
+    let who = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+    git(&repo, &[&who[..], &["commit", "-qm", "base"]].concat());
+    let (dir, task) = (root.join("T1"), TaskId("T1".into()));
+    let example: rusty_serde::json::Value =
+        rusty_serde::json::from_str(include_str!("../../rusty_orch/docs/examples/bbp.json"))
+            .expect("example");
+    let roster: Vec<Role> = rusty_serde::json::from_str(
+        &rusty_serde::json::to_string(&example["roster"]).expect("roster"),
+    )
+    .expect("roster");
+    admin::open_task(
+        &dir,
+        &task,
+        &repo.to_string_lossy(),
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &ProfileSet::shell("test", "true"),
+        roster,
+    )
+    .expect("open");
+    for (role, vendor) in [("maker", "codex"), ("auditor", "claude")] {
+        admin::assign(
+            &dir,
+            &task,
+            &RoleId(role.into()),
+            &PrincipalId(role.into()),
+            vendor,
+        )
+        .expect("assign");
+    }
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).expect("mkdir");
+    let stub = bin.join("codex.sh");
+    let script = AUTHOR.replacen(
+        "#!/bin/sh\n",
+        &format!(
+            "#!/bin/sh\nTASK_DIR='{}'\nREPO='{}'\n",
+            dir.display(),
+            repo.display()
+        ),
+        1,
+    );
+    std::fs::write(&stub, script).expect("write");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let launcher = Launcher {
+        program: env!("CARGO_BIN_EXE_codex-bbp-harness").into(),
+        args: vec![
+            "--provider-bin".into(),
+            stub.to_string_lossy().into_owned(),
+            "--mcp-config".into(),
+            "{mcp_config}".into(),
+        ],
+        builtin_tools: true,
+        sandbox: Some(HarnessSandbox {
+            read: vec![
+                bin.to_string_lossy().into_owned(),
+                repo.join(".git").to_string_lossy().into_owned(),
+            ],
+            ..HarnessSandbox::default()
+        }),
+    };
+    let cfg = Config {
+        dir,
+        task,
+        bbp: PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
+        repo: repo.clone(),
+        work: root.join("work"),
+        launchers: Launchers::default().with("maker", launcher),
+        confinement: Confinement::Unconfined,
+        poll: Duration::from_millis(50),
+        max_wall: Duration::from_secs(60),
+        end_grace: Duration::from_secs(5),
+        cost_cap: None,
+        slots: None,
+    };
+    let said = plan(cfg);
+    println!("{said}");
+    for line in [
+        "master: denied".to_owned(),
+        "flag: no".into(),
+        "clone: usable".into(),
+        "objects: denied".into(),
+        format!("alternates: {}", repo.join(".git/objects").display()),
+        "env: clean".into(),
+    ] {
+        assert!(said.contains(&line), "{line}:\n{said}");
+    }
+    assert!(!repo.join(".git/objects/forged").exists());
+    let _ = std::fs::remove_dir_all(&root);
+    println!("BBP_ACCEPTANCE PASS launcher-confined");
+}

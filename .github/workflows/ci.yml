@@ -293,6 +293,7 @@ jobs:
       ci_only: ${{ steps.plan.outputs.ci_only }}
       dashboard: ${{ steps.plan.outputs.dashboard }}
       term_web: ${{ steps.plan.outputs.term_web }}
+      term_bench: ${{ steps.plan.outputs.term_bench }}
       key_desktop: ${{ steps.plan.outputs.key_desktop }}
       tick: ${{ steps.plan.outputs.tick }}
       fair_play: ${{ steps.plan.outputs.fair_play }}
@@ -493,6 +494,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           components: clippy
           cache-shared-key: clippy-${{ matrix.scope.component }}-${{ matrix.os }}
@@ -544,6 +546,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           cache-shared-key: ci-smoke-${{ matrix.os }}
       - run: cargo test --locked -p rusty_baseline
@@ -566,6 +569,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           cache-shared-key: test-${{ matrix.scope.component }}-${{ matrix.os }}
 
@@ -792,6 +796,62 @@ jobs:
           cache-dependency-path: crates/libs/ui/rusty_term/web/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm run build
+
+  # rusty_term parser+grid throughput gate. The engine rewrites in
+  # docs/research/RUSTY-TERM-PERF-BACKLOG.md are performance work; without
+  # this job a regression would only show when someone re-ran the bench by
+  # hand. The failing check is deterministic: instructions per input byte
+  # under cachegrind (bench/ir_gate.py), against bench/ir_ceilings.txt, with
+  # glibc's memmove variant pinned so the count does not depend on the
+  # runner's CPU. Wall-clock MB/s is printed to the job summary for
+  # information only and never fails the build.
+  rusty-term-bench:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-term-bench
+      queue: max
+      cancel-in-progress: false
+    name: rusty_term instruction-count gate (bench_vt_throughput)
+    needs: plan
+    if: needs.plan.outputs.term_bench == 'true' && needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/libs/ui/rusty_term
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'merge_group' }}
+          shared-key: rusty-term-bench
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version
+      - name: Gate script unit tests
+        run: python3 -m unittest discover -s bench -p 'test_*.py' -v
+      - name: Build bench_vt_throughput (release)
+        run: cargo build --release --locked -p rusty_term --bin bench_vt_throughput
+      - name: Generate quick workloads
+        run: python3 bench/gen_workloads.py --size quick
+      - name: Throughput (informational, never fails)
+        run: |
+          {
+            echo "### rusty_term throughput (MB/s, informational)"
+            echo '```'
+            ../../../../target/release/bench_vt_throughput 20 || echo "bench run failed (informational)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Instructions per byte vs ceilings (the gate)
+        run: |
+          set -o pipefail
+          {
+            echo "### rusty_term instructions per byte (cachegrind)"
+            python3 bench/ir_gate.py --bin ../../../../target/release/bench_vt_throughput
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # rusty_tick's web UI (Vite/React). Typecheck, unit tests (jsdom over the
   # in-memory adapter) and the production build; the Playwright run against
@@ -1242,6 +1302,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
+        timeout-minutes: 15
         with:
           cache-shared-key: msrv-compile
       - name: cargo check each crate at its declared rust-version
@@ -1944,6 +2005,7 @@ jobs:
       - test
       - data-mesh-monitor
       - rusty-term-web
+      - rusty-term-bench
       - rusty-tick-web
       - rusty-tick-e2e
       - rusty-agui-conformance
