@@ -436,11 +436,20 @@ describe('filter_tasks', () => {
     expect(await titles({ tag: 'unused' })).toEqual([])
   })
 
+  it('filters by list, answering with the list’s own name', async () => {
+    const { c } = context([...tasks, task('w', 'Report', { priority: 5, dueMs: day(22), listId: 'w' }), task('x', 'Draft', { listId: 'w' })])
+    c.entities.tags = known
+    expect(await run(c, 'filter_tasks', { list: 'work' })).toEqual({ tasks: [expect.stringMatching(/^Report/), 'Draft'], list: 'Work' })
+    expect(await run(c, 'filter_tasks', { list: 'WORK', priority: 'high', view: 'today' })).toEqual({ tasks: [expect.stringMatching(/^Report/)], list: 'Work' })
+    expect(await run(c, 'filter_tasks', { list: 'inbox', tag: 'work' })).toEqual({ tasks: [expect.stringMatching(/^Call bank/), expect.stringMatching(/^Read/)], list: 'Inbox' })
+  })
+
   it('names what it cannot filter by', async () => {
     const { c } = context(tasks)
     c.entities.tags = known
     expect(await run(c, 'filter_tasks', { priority: 'urgent' })).toEqual({ error: 'Priority is high, medium, low or none.' })
     expect(await run(c, 'filter_tasks', { tag: 'gym' })).toEqual({ error: 'You have no tag #gym.' })
-    expect(await run(c, 'filter_tasks', { view: 'today' })).toEqual({ error: 'Say a priority or a tag to filter by.' })
+    expect(await run(c, 'filter_tasks', { view: 'today' })).toEqual({ error: 'Say a priority, a tag or a list to filter by.' })
+    expect(await run(c, 'filter_tasks', { list: 'old' })).toEqual({ error: 'No list matches “old”.' })
   })
 })

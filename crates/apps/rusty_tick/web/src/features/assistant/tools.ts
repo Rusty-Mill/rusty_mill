@@ -453,24 +453,31 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
     },
     {
       name: 'filter_tasks',
-      description: 'Open tasks of a priority and/or with a tag: all of them, or those due today (overdue included), in the next 7 days, or overdue.',
+      description: 'Open tasks of a priority, with a tag and/or in a list: all of them, or those due today (overdue included), in the next 7 days, or overdue.',
       parameters: {
         type: 'object',
         properties: {
           priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
           tag: { type: 'string', description: 'A tag’s name, with or without #' },
+          list: { type: 'string', description: 'A list’s name, or enough of it' },
           view: { type: 'string', enum: ['all', 'today', 'next7', 'overdue'] },
         },
       },
-      handler: ({ priority, tag, view = 'all' }) => {
+      handler: ({ priority, tag, list, view = 'all' }) => {
         const level = priority === undefined ? undefined : PRIORITY[norm(priority)]
         if (priority !== undefined && level === undefined) return { error: 'Priority is high, medium, low or none.' }
         const name = tag === undefined ? undefined : norm(tag).replace(/^#/, '')
         if (name !== undefined && !c.entities.tags.some((t) => t.name === name)) return { error: `You have no tag #${name}.` }
-        if (level === undefined && name === undefined) return { error: 'Say a priority or a tag to filter by.' }
+        const target = list === undefined ? undefined : pickList(c.entities.lists, list)
+        if (target !== undefined && 'error' in target) return target
+        const listId = target?.list.id
+        if (level === undefined && name === undefined && listId === undefined) return { error: 'Say a priority, a tag or a list to filter by.' }
         const tasks =
           view === 'overdue' ? overdue(live, c.now) : tasksForView({ kind: view === 'next7' ? 'week' : view === 'today' ? 'today' : 'all' }, c.entities, c.now)
-        return lines(tasks.filter((t) => (level === undefined || t.priority === level) && (name === undefined || t.tags.includes(name))))
+        const found = lines(
+          tasks.filter((t) => (level === undefined || t.priority === level) && (name === undefined || t.tags.includes(name)) && (listId === undefined || t.listId === listId)),
+        )
+        return target === undefined ? found : { ...found, list: target.list.name }
       },
     },
     {
