@@ -11,17 +11,30 @@ resolve graph includes edges that only exist behind an optional feature --
 CI itself always builds with --all-features, so the affected-crate set
 has to match that graph, not the default-features one.
 
-Printing nothing means no workspace crate was touched.
+Printing nothing means no workspace crate needs Cargo validation.
+Only the audited prose-only TLS ADR Markdown paths are excluded from seeds.
 
 The graph logic lives in `affected_packages` so `test_affected_crates.py`
 can exercise it against synthetic metadata without spawning cargo.
 """
 import json
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable, Optional
 
 CrateDirs = list[tuple[Path, str]]
+
+
+def is_prose_only_tls_adr(file_path: str) -> bool:
+    """Match only audited TLS ADR Markdown, not other docs or build inputs."""
+    # These decision records are linked in comments, never included/read by
+    # Rust code, tests or build scripts. Keep this exception narrow: Markdown
+    # elsewhere may be compiled with include_str! or consumed as test data.
+    path = PurePosixPath(file_path)
+    return (
+        path.parent == PurePosixPath("crates/libs/net/rusty_tls/docs/adr")
+        and path.suffix == ".md"
+    )
 
 
 def owning_crate(file_path: str, crate_dirs: CrateDirs, root_dir: Path) -> Optional[str]:
@@ -83,7 +96,10 @@ def affected_packages(metadata: dict, changed_files: Iterable[str]) -> list[str]
 
     changed_ids = {
         owner
-        for owner in (owning_crate(f, crate_dirs, root_dir) for f in changed_files)
+        for owner in (
+            owning_crate(f, crate_dirs, root_dir)
+            for f in changed_files if not is_prose_only_tls_adr(f)
+        )
         if owner is not None
     }
     if not changed_ids:

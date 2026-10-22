@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 from affected_crates import affected_packages
+from ci_components import component_scopes
+from ci_plan import is_ci_only_change, is_workspace_wide_change, specialized_job_flags
 
 ROOT = "/repo"
 
@@ -62,6 +64,76 @@ class OwningCrateTests(unittest.TestCase):
     def test_manifest_itself_counts_as_inside_the_crate(self) -> None:
         md = metadata({"a": ("crates/a", [])})
         self.assertEqual(affected_packages(md, ["crates/a/Cargo.toml"]), ["a"])
+
+
+class TlsAdrImpactTests(unittest.TestCase):
+    # Exact changed paths from PR #868, including its newly added ADR.
+    PR_868_PATHS = [
+        "changes/2026-10-22-rusty-tls-adr-0005-accepted.md",
+        "crates/libs/net/rusty_tls/docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md",
+        "crates/libs/net/rusty_tls/docs/adr/0005-first-party-primitives-for-the-client-engine.md",
+        "docs/research/CRYPTO-REPLACEMENT-PLAN.md",
+        "docs/research/TLS-NATIVE-CRYPTO-SEAM.md",
+    ]
+
+    def setUp(self) -> None:
+        self.metadata = metadata({
+            "rusty_tls": ("crates/libs/net/rusty_tls", []),
+            "rusty_request": ("crates/libs/net/rusty_request", ["rusty_tls"]),
+            "rusty_tick": ("crates/apps/rusty_tick", ["rusty_request"]),
+            "unrelated": ("crates/libs/other", []),
+        })
+        self.tls_dependents = ["rusty_request", "rusty_tick", "rusty_tls"]
+
+    def test_pr_868_prose_does_not_seed_cargo_impact(self) -> None:
+        for paths in ([path] for path in self.PR_868_PATHS):
+            with self.subTest(paths=paths):
+                self.assertEqual(affected_packages(self.metadata, paths), [])
+        self.assertEqual(affected_packages(self.metadata, iter(self.PR_868_PATHS)), [])
+
+    def test_pr_868_plans_no_cargo_lanes_or_specialized_jobs(self) -> None:
+        packages = affected_packages(self.metadata, self.PR_868_PATHS)
+        self.assertEqual(component_scopes(self.metadata, packages), [])
+        self.assertFalse(any(specialized_job_flags(self.PR_868_PATHS, packages).values()))
+        self.assertFalse(is_workspace_wide_change(self.PR_868_PATHS))
+        self.assertFalse(is_ci_only_change(self.PR_868_PATHS))
+
+    def test_mixed_tls_source_manifest_and_fixture_changes_keep_dependents(self) -> None:
+        for path in (
+            "src/lib.rs", "Cargo.toml", "tests/data/rsa2048_pkcs8.hex",
+            "tests/data/fixture.md",
+        ):
+            with self.subTest(path=path):
+                paths = [*self.PR_868_PATHS, f"crates/libs/net/rusty_tls/{path}"]
+                packages = affected_packages(self.metadata, paths)
+                self.assertEqual(packages, self.tls_dependents)
+                self.assertTrue(specialized_job_flags(paths, packages)["tls_engine"])
+                self.assertEqual(
+                    sorted(" ".join(scope["packages"] for scope in component_scopes(self.metadata, packages)).split()),
+                    self.tls_dependents,
+                )
+
+    def test_only_direct_markdown_in_the_audited_directory_is_excluded(self) -> None:
+        for path in (
+            "README.md", "docs/README.md", "docs/adr-other/decision.md",
+            "docs/adr.md", "docs/adr/nested/decision.md", "docs/adr/fixture.json",
+            "docs/adr/example.rs", "docs/adr/../fixture.md",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    affected_packages(self.metadata, [f"crates/libs/net/rusty_tls/{path}"]),
+                    self.tls_dependents,
+                )
+        self.assertEqual(
+            affected_packages(self.metadata, ["crates/libs/other/docs/adr/decision.md"]),
+            ["unrelated"],
+        )
+
+    def test_mixed_unrelated_code_is_not_dropped_with_the_adrs(self) -> None:
+        self.assertEqual(
+            affected_packages(self.metadata, [*self.PR_868_PATHS, "crates/libs/other/src/lib.rs"]),
+            ["unrelated"],
+        )
 
 
 class ReverseDependencyTests(unittest.TestCase):
