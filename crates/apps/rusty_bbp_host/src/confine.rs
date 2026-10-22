@@ -16,6 +16,7 @@ use crate::moderator::{task_dir, Config};
 use rusty_bbp::{PrincipalId, Sha256, TurnId};
 use rusty_sandbox::{HelperRequest, Limits, SandboxSpec, Sockets};
 use rusty_serde::{Deserialize, Serialize};
+use rusty_worktree::Repo;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -38,15 +39,27 @@ pub struct HarnessSandbox {
     #[rusty_serde(default)]
     pub write: Vec<String>,
     /// Names of the moderator's environment variables it keeps. `PATH`
-    /// defaults to `/usr/bin:/bin`, and `HOME` and `TMPDIR` to the workspace.
+    /// defaults to `/usr/bin:/bin`, and `HOME` and `TMPDIR` to a scratch
+    /// directory beside the workspace.
     #[rusty_serde(default)]
     pub env: Vec<String>,
+    /// Make the workspace a git worktree of `--repo-path`, detached at its
+    /// `HEAD`. Worktrees of every turn and task share the repository's
+    /// object store, which the harness may read but not write; each harness
+    /// may write only its own worktree.
+    #[rusty_serde(default)]
+    pub checkout: bool,
 }
 
 /// One confined turn's places: the workspace it may write, the pipes of its
 /// MCP relay, and the helper's setup-status file, which it cannot reach.
 pub(crate) struct Turn {
     pub workspace: PathBuf,
+    /// `HOME` and `TMPDIR`, kept out of the workspace so a checkout's diff
+    /// shows only the harness's edits.
+    scratch: PathBuf,
+    /// The repository the workspace is a worktree of, with `checkout`.
+    repo: Option<Repo>,
     pub pipes: PathBuf,
     pub mcp_config: PathBuf,
     status: PathBuf,
@@ -55,20 +68,33 @@ pub(crate) struct Turn {
 impl Turn {
     /// Make the workspace and the pipes afresh and write the turn's MCP
     /// configuration into the workspace.
-    pub fn prepare(cfg: &Config, turn: TurnId) -> Result<Turn, String> {
-        let base = cfg
-            .work
+    pub fn prepare(cfg: &Config, sandbox: &HarnessSandbox, turn: TurnId) -> Result<Turn, String> {
+        // The sandbox takes absolute roots only; a relative `--work` is
+        // resolved against the moderator's working directory.
+        let work = std::path::absolute(&cfg.work)
+            .map_err(|e| format!("work {}: {e}", cfg.work.display()))?;
+        let base = work
             .join("turns")
             .join(Sha256::of(cfg.task.0.as_bytes()).hex());
         let workspace = base.join(format!("turn-{}", turn.0));
         let pipes = base.join(format!("turn-{}.mcp", turn.0));
+        let scratch = base.join(format!("turn-{}.home", turn.0));
         let status =
             task_dir(&cfg.dir, "agents", &cfg.task).join(format!("turn-{}.sandbox", turn.0));
-        for dir in [&base, &workspace] {
+        for dir in [&base, &scratch] {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
+        let repo = if sandbox.checkout {
+            let repo = Repo::open(&cfg.repo)?;
+            repo.add_detached(&workspace, "HEAD")?;
+            Some(repo)
+        } else {
+            std::fs::create_dir_all(&workspace)
+                .map_err(|e| format!("{}: {e}", workspace.display()))?;
+            None
+        };
         broker::make_pipes(&pipes)?;
-        let mcp_config = workspace.join("mcp.json");
+        let mcp_config = scratch.join("mcp.json");
         let text = format!(
             "{{\"mcpServers\":{{\"bbp\":{{\"command\":{},\"args\":[\"mcp\"],\"env\":{{{}:{}}}}}}}}}\n",
             json(&cfg.bbp.to_string_lossy())?,
@@ -83,6 +109,8 @@ impl Turn {
         std::fs::write(&status, b"").map_err(|e| format!("{}: {e}", status.display()))?;
         Ok(Turn {
             workspace,
+            scratch,
+            repo,
             pipes,
             mcp_config,
             status,
@@ -105,11 +133,11 @@ impl Turn {
                 env.push((name.clone(), value));
             }
         }
-        let workspace = self.workspace.to_string_lossy().into_owned();
+        let scratch = self.scratch.to_string_lossy().into_owned();
         for (name, default) in [
             ("PATH", "/usr/bin:/bin"),
-            ("HOME", workspace.as_str()),
-            ("TMPDIR", workspace.as_str()),
+            ("HOME", scratch.as_str()),
+            ("TMPDIR", scratch.as_str()),
         ] {
             if !env.iter().any(|(k, _)| k == name) {
                 env.push((name.into(), default.into()));
@@ -124,8 +152,14 @@ impl Turn {
             .collect();
         read.push(bbp.parent().ok_or("bbp binary has no directory")?.into());
         read.push(replies);
+        read.extend(self.repo.as_ref().map(Repo::git_dir));
         read.extend(sandbox.read.iter().map(PathBuf::from));
-        let mut write = vec![self.workspace.clone(), requests, PathBuf::from("/dev/null")];
+        let mut write = vec![
+            self.workspace.clone(),
+            self.scratch.clone(),
+            requests,
+            PathBuf::from("/dev/null"),
+        ];
         write.extend(sandbox.write.iter().map(PathBuf::from));
         let cpu = cfg
             .max_wall
@@ -183,6 +217,14 @@ impl Turn {
         command
             .spawn()
             .map_err(|e| format!("starting the MCP broker: {e}"))
+    }
+
+    /// Remove the turn's worktree, if it has one: its edits reached the task
+    /// through MCP, and the object store keeps nothing of them.
+    pub fn finish(&self) -> Result<(), String> {
+        self.repo
+            .as_ref()
+            .map_or(Ok(()), |repo| repo.remove(&self.workspace))
     }
 
     /// Why the helper refused to run the harness, if it did.

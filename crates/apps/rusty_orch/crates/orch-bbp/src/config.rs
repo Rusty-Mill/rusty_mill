@@ -26,6 +26,10 @@ pub struct Sandbox {
     pub write: Vec<String>,
     #[rusty_serde(default)]
     pub env: Vec<String>,
+    /// Make the harness's workspace a git worktree of `repo`, sharing its
+    /// object store read-only.
+    #[rusty_serde(default)]
+    pub checkout: bool,
 }
 /// Explicit policy for one roster role. No role or provider is synthesized.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

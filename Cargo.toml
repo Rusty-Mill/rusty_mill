@@ -86,6 +86,7 @@ members = [
     "crates/libs/protocol/rusty_tonic",
     "crates/apps/rusty_bbp_host",
     "crates/libs/rusty_sandbox",
+    "crates/libs/rusty_worktree",
     "crates/libs/rusty_bot",
     "crates/libs/homelab/rusty_proxmox",
     "crates/libs/homelab/rusty_opnsense",
@@ -556,6 +557,7 @@ rusty_flatbuffers = { path = "crates/libs/protocol/rusty_flatbuffers" }
 rusty_protobuf = { path = "crates/libs/protocol/rusty_protobuf" }
 rusty_prost = { path = "crates/libs/protocol/rusty_prost" }
 rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
+rusty_worktree = { path = "crates/libs/rusty_worktree" }
 rusty_bot = { path = "crates/libs/rusty_bot" }
 rusty_oauth = { path = "crates/libs/net/rusty_oauth" }
 rusty_std = { path = "crates/foundation/rusty_std" }

@@ -349,6 +349,11 @@ impl Harness {
         let harness = kill_tree(&mut self.child);
         let broker = self.broker.as_mut().map_or(Ok(()), kill_tree);
         let hold = self.hold.as_mut().map_or(Ok(()), kill_tree);
+        // Nothing runs in the worktree any more; a leftover is replaced by
+        // the next turn of the same number, so failing to remove it is not fatal.
+        if let Some(Err(e)) = self.confined.as_ref().map(Turn::finish) {
+            eprintln!("bbp mod: turn {} worktree not removed: {e}", self.turn.0);
+        }
         harness.and(broker).and(hold)
     }
 }
@@ -933,7 +938,7 @@ fn spawn(
     let confined = l
         .sandbox
         .as_ref()
-        .map(|_| Turn::prepare(cfg, turn))
+        .map(|sandbox| Turn::prepare(cfg, sandbox, turn))
         .transpose()?;
     let mcp = match &confined {
         Some(t) => t.mcp_config.clone(),

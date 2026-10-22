@@ -10,6 +10,7 @@
 
 mod common;
 use common::Who;
+use rusty_bbp::Sha256;
 use rusty_bbp::*;
 use rusty_bbp_host::confine::HarnessSandbox;
 use rusty_bbp_host::moderator::{self, Config, Launcher, Launchers};
@@ -42,10 +43,18 @@ fn root(tag: &str) -> PathBuf {
     root
 }
 
-/// A task in `root/bbp` whose planner is the probe, `sandbox` or not.
-fn setup(root: &Path, sandbox: Option<HarnessSandbox>) -> Config {
-    let dir = root.join("bbp");
-    let task = TaskId("T1".into());
+/// Task `name` in `root/<name>`, whose planner is `script` run with `args`,
+/// confined by `sandbox` or not. Every task shares `root/repo` and
+/// `root/work`.
+fn setup(
+    root: &Path,
+    name: &str,
+    script: &str,
+    args: Vec<String>,
+    sandbox: Option<HarnessSandbox>,
+) -> Config {
+    let dir = root.join(name);
+    let task = TaskId(name.into());
     admin::open_task(
         &dir,
         &task,
@@ -69,12 +78,12 @@ fn setup(root: &Path, sandbox: Option<HarnessSandbox>) -> Config {
     // The script lives outside the task directory, where a sandbox may read it.
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).expect("mkdir");
-    let script = bin.join("planner.sh");
-    std::fs::write(&script, PROBE).expect("write");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let path = bin.join(format!("{name}.sh"));
+    std::fs::write(&path, script).expect("write");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let launcher = Launcher {
-        program: script.to_string_lossy().into_owned(),
-        args: vec!["{dir}".into()],
+        program: path.to_string_lossy().into_owned(),
+        args,
         builtin_tools: true,
         sandbox,
     };
@@ -94,9 +103,21 @@ fn setup(root: &Path, sandbox: Option<HarnessSandbox>) -> Config {
     }
 }
 
-/// Run the probe until the plan gate and return what it said.
-fn plan(root: &Path, sandbox: Option<HarnessSandbox>) -> String {
-    let cfg = setup(root, sandbox);
+/// The probe as task `T1`.
+fn probe(root: &Path, sandbox: Option<HarnessSandbox>) -> Config {
+    setup(root, "T1", PROBE, vec!["{dir}".into()], sandbox)
+}
+
+/// Read access to the scripts, and nothing else beyond the defaults.
+fn scripts(root: &Path) -> HarnessSandbox {
+    HarnessSandbox {
+        read: vec![root.join("bin").to_string_lossy().into_owned()],
+        ..HarnessSandbox::default()
+    }
+}
+
+/// Run `cfg` until the plan gate, cancel, and return what the planner said.
+fn plan(cfg: Config) -> String {
     let (dir, task) = (cfg.dir.clone(), cfg.task.clone());
     let moderator = std::thread::spawn(move || moderator::run(&cfg));
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -125,7 +146,7 @@ fn planner_log(dir: &Path, task: &TaskId) -> String {
 #[test]
 fn an_unconfined_harness_reaches_the_task_directory() {
     let root = root("open");
-    let said = plan(&root, None);
+    let said = plan(probe(&root, None));
     for line in ["master: read", "dir: listed", "log: read", "write: done"] {
         assert!(said.contains(line), "{line}:\n{said}");
     }
@@ -136,11 +157,7 @@ fn an_unconfined_harness_reaches_the_task_directory() {
 #[ignore = "requires enforced Linux sandbox; required acceptance job"]
 fn a_confined_harness_cannot_reach_the_task_directory_yet_plans_through_its_relay() {
     let root = root("confined");
-    let sandbox = HarnessSandbox {
-        read: vec![root.join("bin").to_string_lossy().into_owned()],
-        ..HarnessSandbox::default()
-    };
-    let said = plan(&root, Some(sandbox));
+    let said = plan(probe(&root, Some(scripts(&root))));
     println!("{said}");
     for line in [
         "master: denied",
@@ -150,7 +167,7 @@ fn a_confined_harness_cannot_reach_the_task_directory_yet_plans_through_its_rela
     ] {
         assert!(said.contains(line), "{line}:\n{said}");
     }
-    assert!(!root.join("bbp/forged").exists());
+    assert!(!root.join("T1/forged").exists());
     let _ = std::fs::remove_dir_all(&root);
     println!("BBP_ACCEPTANCE PASS bbp-confined");
 }
@@ -163,12 +180,92 @@ fn a_sandbox_that_would_expose_the_task_directory_is_refused() {
         read: vec![root.to_string_lossy().into_owned()],
         ..HarnessSandbox::default()
     };
-    let cfg = setup(&root, Some(sandbox));
+    let cfg = probe(&root, Some(sandbox));
     let error = moderator::run(&cfg).expect_err("the moderator refuses to launch");
     assert!(error.contains("would expose the task directory"), "{error}");
-    assert!(
-        !moderator::log_path(&cfg.dir, &cfg.task, TurnId(1)).exists()
-            || planner_log(&cfg.dir, &cfg.task).is_empty()
-    );
+    assert!(planner_log(&cfg.dir, &cfg.task).is_empty());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Waits for both tasks' worktrees, reports the object store it uses and
+/// the checkout it sees, tries to write each worktree and the object store,
+/// then plans.
+const NEIGHBOUR: &str = r##"#!/bin/sh
+repo="$1"; shift
+for w in "$@"; do while [ ! -d "$w" ]; do sleep 0.05; done; done
+echo "common: $(git rev-parse --path-format=absolute --git-common-dir)"
+echo "flag: $(cat flag.txt)"
+for w in "$@"; do
+  if echo x > "$w/from-$BBP_TASK" 2>/dev/null; then echo "wrote: $w"; else echo "denied: $w"; fi
+done
+if echo x > "$repo/.git/objects/forged" 2>/dev/null; then echo "objects: wrote"; else echo "objects: denied"; fi
+"$BBP_BIN" mcp >/dev/null <<'RPC'
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1 flag says ok."}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve the plan?","gate":true}}}
+RPC
+"##;
+
+fn git(repo: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(out.status.success(), "git {args:?}");
+}
+
+#[test]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn two_confined_tasks_share_one_object_store_but_not_their_worktrees() {
+    let root = root("worktrees");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("flag.txt"), "no\n").expect("write");
+    git(&repo, &["add", "."]);
+    let who = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+    git(&repo, &[&who[..], &["commit", "-qm", "base"]].concat());
+    let root = root.canonicalize().expect("canonical");
+    let worktree = |task: &str| {
+        root.join("work/turns")
+            .join(Sha256::of(task.as_bytes()).hex())
+            .join("turn-1")
+    };
+    let (one, two) = (worktree("T1"), worktree("T2"));
+    let args: Vec<String> = [root.join("repo"), one.clone(), two.clone()]
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let sandbox = HarnessSandbox {
+        checkout: true,
+        ..scripts(&root)
+    };
+    let runs: Vec<_> = ["T1", "T2"]
+        .into_iter()
+        .map(|name| {
+            let cfg = setup(&root, name, NEIGHBOUR, args.clone(), Some(sandbox.clone()));
+            std::thread::spawn(move || plan(cfg))
+        })
+        .collect();
+    let said: Vec<String> = runs.into_iter().map(|r| r.join().expect("join")).collect();
+    let store = root.join("repo/.git");
+    for (said, (own, other)) in said.iter().zip([(&one, &two), (&two, &one)]) {
+        println!("{said}");
+        for line in [
+            format!("common: {}", store.display()),
+            "flag: no".into(),
+            format!("wrote: {}", own.display()),
+            format!("denied: {}", other.display()),
+            "objects: denied".into(),
+        ] {
+            assert!(said.contains(&line), "{line}:\n{said}");
+        }
+    }
+    assert!(!store.join("objects/forged").exists());
+    // Each turn's worktree is removed when its harness stops.
+    assert!(!one.exists() && !two.exists());
+    let _ = std::fs::remove_dir_all(&root);
+    println!("BBP_ACCEPTANCE PASS shared-worktrees");
 }
