@@ -446,3 +446,102 @@ async fn a_request_stream_cut_short_fails_the_handlers_read() {
     assert!(status.message().contains("middle of a message"), "{status}");
     server.shutdown().await;
 }
+
+// ---- initial metadata when nothing is sent --------------------------------------------------
+
+/// The value of the response header `name`, in the first block or the trailers.
+fn response_header(r: &Raw, name: &str) -> Option<String> {
+    let blocks = [Some(&r.headers), r.trailers.as_ref()];
+    blocks.into_iter().flatten().find_map(|block| {
+        block
+            .iter()
+            .find(|h| h.name == name.as_bytes())
+            .map(|h| String::from_utf8_lossy(&h.value).into_owned())
+    })
+}
+
+#[rusty_tokio::test]
+async fn initial_metadata_set_by_a_stream_that_sends_nothing_goes_out_with_the_status() {
+    let router =
+        Router::new().server_streaming(PATH, |_r: Request<Blob>, mut out: Sink<Blob>| async move {
+            let mut initial = MetadataMap::new();
+            initial.insert("x-start", "s").unwrap();
+            out.set_metadata(initial);
+            Ok(())
+        });
+    let server = serve(router);
+    let r = raw(
+        server.local_addr(),
+        grpc_headers(PATH),
+        &[frame(&blob(1, 1).encode_to_vec().unwrap())],
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(r.trailers_only(), "nothing was sent");
+    assert_eq!(r.status().code(), Code::Ok);
+    assert_eq!(response_header(&r, "x-start").as_deref(), Some("s"));
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn initial_metadata_set_before_an_error_goes_out_with_it() {
+    let router = Router::new().bidirectional(
+        PATH,
+        |_r: Request<Incoming<Blob>>, mut out: Sink<Blob>| async move {
+            let mut initial = MetadataMap::new();
+            initial.insert("x-start", "s").unwrap();
+            out.set_metadata(initial);
+            let mut why = MetadataMap::new();
+            why.insert("x-why", "w").unwrap();
+            Err(Status::aborted("before the first message").with_metadata(why))
+        },
+    );
+    let server = serve(router);
+    let r = raw(
+        server.local_addr(),
+        grpc_headers(PATH),
+        &[frame(&blob(1, 1).encode_to_vec().unwrap())],
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(r.trailers_only());
+    assert_eq!(r.status().code(), Code::Aborted);
+    // Both: what the handler set as initial metadata, and the error's own.
+    assert_eq!(response_header(&r, "x-start").as_deref(), Some("s"));
+    assert_eq!(response_header(&r, "x-why").as_deref(), Some("w"));
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn initial_metadata_is_not_repeated_in_the_trailers_when_a_message_was_sent() {
+    let router =
+        Router::new().server_streaming(PATH, |_r: Request<Blob>, mut out: Sink<Blob>| async move {
+            let mut initial = MetadataMap::new();
+            initial.insert("x-start", "s").unwrap();
+            out.set_metadata(initial);
+            out.send(&blob(1, 1)).await?;
+            Ok(())
+        });
+    let server = serve(router);
+    let r = raw(
+        server.local_addr(),
+        grpc_headers(PATH),
+        &[frame(&blob(1, 1).encode_to_vec().unwrap())],
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(!r.trailers_only());
+    let in_headers = r.headers.iter().any(|h| h.name == b"x-start");
+    let in_trailers = r
+        .trailers
+        .as_ref()
+        .is_some_and(|t| t.iter().any(|h| h.name == b"x-start"));
+    assert!(
+        in_headers && !in_trailers,
+        "initial metadata is in the first block only"
+    );
+    server.shutdown().await;
+}

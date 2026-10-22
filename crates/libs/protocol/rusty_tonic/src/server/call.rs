@@ -219,20 +219,26 @@ impl Shared {
             // A write that fails means the client cancelled; there is no one to tell.
             let _ = send.send_trailers(fields(status.to_trailers())).await;
         } else if let Some(respond) = wire.respond.take() {
-            let _ = trailers_only(respond, &status).await;
+            // Nothing was sent, so the status rides in the first header block, and so does the
+            // initial metadata the handler set: there is no earlier block to carry it.
+            let initial = self.take_initial();
+            let _ = trailers_only(respond, &initial, &status).await;
         }
     }
 }
 
-/// A "trailers-only" response: the call is over in its first headers.
+/// A "trailers-only" response: the call is over in its first headers, which carry `initial`
+/// (the handler's initial metadata, if it set any) and then the status with its own metadata.
 pub(super) async fn trailers_only(
     respond: Respond,
+    initial: &MetadataMap,
     status: &Status,
 ) -> Result<SendStream, rusty_hyper::H2Error> {
     let mut headers = vec![
         (":status".to_string(), b"200".to_vec()),
         ("content-type".to_string(), b"application/grpc".to_vec()),
     ];
+    headers.extend(initial.to_headers());
     headers.extend(status.to_trailers());
     respond.send_response(fields(headers), true).await
 }

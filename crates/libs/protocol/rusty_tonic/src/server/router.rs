@@ -16,7 +16,7 @@ use rusty_tokio::io::TcpListener;
 use super::call::{trailers_only, RawIncoming, Shared};
 use super::{Incoming, Sink};
 use crate::client::{until, Interceptor, Request, Response};
-use crate::{RequestHead, Status, DEFAULT_MAX_RECV_MESSAGE_SIZE};
+use crate::{MetadataMap, RequestHead, Status, DEFAULT_MAX_RECV_MESSAGE_SIZE};
 
 type Done = Pin<Box<dyn Future<Output = Result<(), Status>> + Send>>;
 
@@ -270,5 +270,5 @@ fn request<T>(head: RequestHead, message: T) -> Request<T> {
 
 /// Ends a call that never reached its handler. A failure to write means the client is gone.
 async fn refuse(respond: Respond, status: &Status) {
-    let _ = trailers_only(respond, status).await;
+    let _ = trailers_only(respond, &MetadataMap::new(), status).await;
 }
