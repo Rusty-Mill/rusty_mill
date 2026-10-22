@@ -54,7 +54,7 @@ pub enum Reply {
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
 “rename buy milk to buy oat milk”, “move buy milk to friday at 3pm”, “make buy milk high priority”, \
-“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours”, “lists”, “habits”, “check in meditate” or “add habit meditate”.";
+“move buy milk to list Work”, “repeat water plants every week”, “remind me about dentist 1 hour before”, “snooze dentist for 2 hours”, “tag dentist with health”, “lists”, “habits”, “check in meditate” or “add habit meditate”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -167,6 +167,7 @@ fn command(text: &str, lower: &str) -> Option<Reply> {
         .or_else(|| remind_phrase(text, lower))
         .or_else(|| snooze_phrase(text, lower))
         .or_else(|| habit_phrase(text, lower))
+        .or_else(|| tag_phrase(text, lower))
     {
         return Some(reply);
     }
@@ -448,6 +449,66 @@ fn remind_call(query: &str, when: &str) -> Reply {
         return Reply::Text(REMIND_HELP.into());
     }
     update_call(query, "remind", when)
+}
+
+const TAG_HELP: &str = "Tag which task, and with what? Try “tag dentist with health” \
+or “remove tag health from dentist”.";
+
+/// "tag X with|as TAGS" and "remove tag TAGS from X" (or "remove the TAG tag
+/// from X"): an `update_task` call adding (`tag`) or removing (`untag`) the
+/// tags as said, which the browser splits and checks. The split is at the last
+/// separator outside quotes, so a quoted name may hold one. Checked before the
+/// task verbs, so "remove tag …" never deletes a task.
+fn tag_phrase(text: &str, lower: &str) -> Option<Reply> {
+    if ["tag", "remove tag", "untag"].contains(&lower) {
+        return Some(Reply::Text(TAG_HELP.into()));
+    }
+    if let Some(rest) = text
+        .get("tag ".len()..)
+        .filter(|_| lower.starts_with("tag "))
+    {
+        let at = [" with ", " as "]
+            .iter()
+            .filter_map(|sep| outside_quotes(rest, sep).last().map(|&at| (at, sep.len())))
+            .max();
+        return Some(match at {
+            Some((at, len)) => tag_call(unquote(&rest[..at]), "tag", rest[at + len..].trim()),
+            None => Reply::Text(TAG_HELP.into()),
+        });
+    }
+    let prefix = ["remove tag ", "remove tags ", "remove the ", "untag "]
+        .into_iter()
+        .find(|p| lower.starts_with(p))?;
+    let rest = &text[prefix.len()..];
+    let from = outside_quotes(rest, " from ").last().copied();
+    let said = from.map_or(rest.trim(), |at| rest[..at].trim());
+    let said = strip_suffix_ci(said, " from").unwrap_or(said);
+    let tags = match prefix {
+        // "remove the milk" is still a delete; only "remove the … tag(s)" is ours.
+        "remove the " => {
+            strip_suffix_ci(said, " tag").or_else(|| strip_suffix_ci(said, " tags"))?
+        }
+        _ => said,
+    };
+    Some(match from {
+        Some(at) => tag_call(unquote(&rest[at + " from ".len()..]), "untag", tags.trim()),
+        None => Reply::Text(TAG_HELP.into()),
+    })
+}
+
+/// `text` without `suffix`, matched ignoring ASCII case.
+fn strip_suffix_ci<'a>(text: &'a str, suffix: &str) -> Option<&'a str> {
+    let at = text.len().checked_sub(suffix.len())?;
+    text.get(at..)?
+        .eq_ignore_ascii_case(suffix)
+        .then(|| &text[..at])
+}
+
+fn tag_call(query: &str, field: &str, tags: &str) -> Reply {
+    if query.is_empty() || tags.is_empty() {
+        return Reply::Text(TAG_HELP.into());
+    }
+    update_call(query, field, tags)
 }
 
 const HABIT_LISTS: [&str; 6] = [
@@ -740,6 +801,14 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
                 Some(when) => format!("I'll remind you about “{title}” {when}."),
                 None => "Done.".into(),
             }
+        }
+        UPDATE_TASK if parsed.get("tagged").is_some() => {
+            let tags = parsed.get("tagged").and_then(Value::as_str).unwrap_or("");
+            format!("Tagged “{title}” {tags}.")
+        }
+        UPDATE_TASK if parsed.get("untagged").is_some() => {
+            let tags = parsed.get("untagged").and_then(Value::as_str).unwrap_or("");
+            format!("Removed {tags} from “{title}”.")
         }
         UPDATE_TASK if parsed.get("snooze").is_some() => {
             match parsed.get("snooze").and_then(Value::as_str) {
@@ -1094,6 +1163,75 @@ mod tests {
                 r#"{"title":"Buy milk","list":"Work"}"#
             ),
             Reply::Text("Moved “Buy milk” to Work.".into())
+        );
+    }
+
+    #[test]
+    fn turns_tag_phrases_into_update_task() {
+        let tag = |q: &str, t: &str| call(UPDATE_TASK, json!({"query": q, "tag": t}));
+        let untag = |q: &str, t: &str| call(UPDATE_TASK, json!({"query": q, "untag": t}));
+        assert_eq!(
+            decide(&input("tag dentist with health")),
+            tag("dentist", "health")
+        );
+        assert_eq!(
+            decide(&input("Tag pay rent as home, money")),
+            tag("pay rent", "home, money")
+        );
+        assert_eq!(
+            decide(&input("tag “cook with kids” with family")),
+            tag("cook with kids", "family")
+        );
+        assert_eq!(
+            decide(&input("tag dentist with #health and errands")),
+            tag("dentist", "#health and errands")
+        );
+        assert_eq!(
+            decide(&input("remove tag health from dentist")),
+            untag("dentist", "health")
+        );
+        assert_eq!(
+            decide(&input("remove the work tag from “email from bob”")),
+            untag("email from bob", "work")
+        );
+        assert_eq!(
+            decide(&input("untag work from email")),
+            untag("email", "work")
+        );
+        assert_eq!(
+            decide(&input("remove milk")),
+            call(DELETE_TASK, json!({"query": "milk"}))
+        );
+        assert_eq!(
+            decide(&input("remove the milk")),
+            call(DELETE_TASK, json!({"query": "the milk"}))
+        );
+        for missing in [
+            "tag",
+            "tag dentist",
+            "tag with health",
+            "tag dentist with",
+            "remove tag health from",
+            "remove tag from dentist",
+        ] {
+            assert!(
+                matches!(decide(&input(missing)), Reply::Text(t) if t.starts_with("Tag which task")),
+                "{missing}"
+            );
+        }
+        assert_eq!(
+            answered(
+                "tag dentist with health",
+                r##"{"title":"Dentist","tagged":"#health"}"##
+            ),
+            Reply::Text("Tagged “Dentist” #health.".into())
+        );
+        assert_eq!(
+            answered(
+                "remove tag health from dentist",
+                r##"{"title":"Dentist","untagged":"#health"}"##
+            ),
+            Reply::Text("Removed #health from “Dentist”.".into())
         );
     }
 

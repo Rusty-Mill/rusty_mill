@@ -291,19 +291,52 @@ function remindPatch(task: Task, r: Remind): { patch: TaskPatch; said: string } 
   return { patch: { reminders: [trigger] }, said: remindLabel(r, task.isAllDay) }
 }
 
+/** The server's tag limits (`src/service.rs`): tags per task, characters per tag. */
+const MAX_TAGS = 20
+const MAX_TAG_CHARS = 64
+
+/** The tags `text` names: "work", "#work, home and errands"; `undefined` if none or one is too long. */
+export function readTags(text: string): string[] | undefined {
+  const tags = text
+    .split(/\s*(?:,|\band\b)\s*/i)
+    .map((t) => t.trim().replace(/^#/, '').trim())
+    .filter(Boolean)
+  return tags.length > 0 && tags.every((t) => [...t].length <= MAX_TAG_CHARS) ? tags : undefined
+}
+
+const hashed = (names: readonly string[]): string => names.map((n) => `#${n}`).join(', ')
+
+/**
+ * The tags of `t` with `said` added, or with them removed (`remove`). An added
+ * tag that exists is referred to by its name; a new one goes as said, and the
+ * server creates it, as the tag picker's "create" does.
+ */
+function tagPatch(t: Task, said: string[], remove: boolean, known: readonly { name: string }[]): { patch: TaskPatch; changed: string[] } | { error: string } {
+  const names = [...new Set(said.map((s) => s.toLowerCase()))]
+  if (remove) {
+    const gone = names.filter((n) => t.tags.includes(n))
+    if (gone.length === 0) return { error: `“${t.title}” has no tag ${hashed(names)}.` }
+    return { patch: { tags: t.tags.filter((n) => !gone.includes(n)) }, changed: gone }
+  }
+  const fresh = names.filter((n) => !t.tags.includes(n))
+  if (t.tags.length + fresh.length > MAX_TAGS) return { error: `A task holds at most ${MAX_TAGS} tags.` }
+  const added = fresh.map((n) => (known.some((k) => k.name === n) ? n : said.find((s) => s.toLowerCase() === n)!))
+  return { patch: { tags: [...t.tags, ...added] }, changed: names }
+}
+
 /** Priority words, as the agent sends them, and the priority each sets. */
 const PRIORITY: Record<string, Priority> = { high: 5, medium: 3, med: 3, low: 1, none: 0, no: 0 }
 const PRIORITY_NAME: Record<Priority, string> = { 5: 'high', 3: 'medium', 1: 'low', 0: 'none' }
 
 /**
  * Rename the task `query` names, move it to the day `due` names or the
- * `list` named, `snooze` it, or set its `priority`, `repeat` or `remind`; every argument is checked
+ * `list` named, `snooze` it, `tag` or `untag` it, or set its `priority`, `repeat` or `remind`; every argument is checked
  * before the task is picked, so a bad one changes nothing.
  */
 async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: string]: string }): Promise<Answer> {
-  const { query = '', title, due, priority, list, repeat, remind, snooze } = args
-  if ([title, due, priority, list, repeat, remind, snooze].every((v) => v === undefined)) {
-    return { error: 'Say what to change: a new title, a day, a priority, a list, a repeat, a reminder or a snooze.' }
+  const { query = '', title, due, priority, list, repeat, remind, snooze, tag, untag } = args
+  if ([title, due, priority, list, repeat, remind, snooze, tag, untag].every((v) => v === undefined)) {
+    return { error: 'Say what to change: a new title, a day, a priority, a list, a repeat, a reminder, a snooze or tags.' }
   }
   if (title !== undefined && title.trim() === '') return { error: 'Say the new title.' }
   const when = due === undefined ? undefined : readWhen(due, c.now)
@@ -326,6 +359,9 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   if (snooze !== undefined && span === undefined) {
     return { error: `I can't read “${snooze.trim()}” as a snooze; try 30 minutes, 2 hours, a day, 1 week or until friday at 9.` }
   }
+  const tagText = tag ?? untag
+  const tags = tagText === undefined ? undefined : readTags(tagText)
+  if (tagText !== undefined && tags === undefined) return { error: `I can't read “${tagText.trim()}” as tags; try work, or #work and home (each up to ${MAX_TAG_CHARS} characters).` }
   const target = list === undefined ? undefined : pickList(c.entities.lists, list)
   if (target !== undefined && 'error' in target) return target
   const pick = pickTask(tasks, query, 'task')
@@ -334,6 +370,12 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   if (title !== undefined) {
     await c.update(task.id, { title: title.trim() })
     return { title: title.trim() }
+  }
+  if (tags !== undefined) {
+    const made = tagPatch(task, tags, untag !== undefined, c.entities.tags)
+    if ('error' in made) return made
+    await c.update(task.id, made.patch)
+    return untag !== undefined ? { title: task.title, untagged: hashed(made.changed) } : { title: task.title, tagged: hashed(made.changed) }
   }
   if (span !== undefined) {
     const patch = snoozeTo(task, span, c.now)
@@ -423,7 +465,7 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
     },
     {
       name: 'update_task',
-      description: 'Rename the one task this names, move it to another day or time (today, tomorrow, friday at 3pm, in 3 days, 2026-11-05 9:30, 3pm, all day, or none), set its priority, repeat or reminder, snooze it, or move it to another list.',
+      description: 'Rename the one task this names, move it to another day or time (today, tomorrow, friday at 3pm, in 3 days, 2026-11-05 9:30, 3pm, all day, or none), set its priority, repeat or reminder, snooze it, tag or untag it, or move it to another list.',
       parameters: {
         type: 'object',
         properties: {
@@ -435,6 +477,8 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
           repeat: { type: 'string', description: 'How often it repeats, as said (daily, every 2 weeks, on weekdays, never)' },
           remind: { type: 'string', description: 'When to remind, as said (at the time, 1 hour before, a day before, none)' },
           snooze: { type: 'string', description: 'How long to snooze it, as said (30 minutes, 2 hours, a day, 1 week, until friday at 9)' },
+          tag: { type: 'string', description: 'Tags to add, as said (work, or #work and home)' },
+          untag: { type: 'string', description: 'Tags to remove, as said' },
         },
         required: ['query'],
       },

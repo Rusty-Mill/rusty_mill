@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { List, Task } from '@/api/types'
 import { addDays, startOfDay } from '@/lib/date'
 import { nextOccurrence } from '@/lib/recurrence'
-import { moveTo, overdue, pickTask, readDay, readRemind, readRepeat, readSnooze, readWhen, remindTrigger, snoozeTo, taskTools, type ToolContext } from './tools'
+import { moveTo, overdue, pickTask, readDay, readRemind, readRepeat, readSnooze, readTags, readWhen, remindTrigger, snoozeTo, taskTools, type ToolContext } from './tools'
 
 const NOW = new Date(2026, 9, 22, 12).getTime()
 const task = (id: string, title: string, over: Partial<Task> = {}): Task =>
@@ -141,7 +141,7 @@ describe('update_task', () => {
     const { c, done } = context(tasks)
     expect(await run(c, 'update_task', { query: 'milk', due: 'soonish' })).toEqual({ error: expect.stringContaining("can't read “soonish”") })
     expect(await run(c, 'update_task', { query: 'milk', title: '  ' })).toEqual({ error: 'Say the new title.' })
-    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority, a list, a repeat, a reminder or a snooze.' })
+    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority, a list, a repeat, a reminder, a snooze or tags.' })
     expect(await run(c, 'update_task', { query: 'buy', due: 'today' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
     expect(await run(c, 'update_task', { query: ' ', due: 'today' })).toEqual({ error: 'Say which task.' })
     expect(done).toEqual([])
@@ -377,5 +377,33 @@ describe('snooze', () => {
     expect(done).toEqual([`update t ${JSON.stringify({ dueMs: at(22, 14), isAllDay: false })}`])
     expect(await run(c, 'update_task', { query: 'bins', snooze: 'a fortnight' })).toEqual({ error: expect.stringContaining("can't read") })
     expect(done).toHaveLength(1)
+  })
+})
+
+describe('tags', () => {
+  it('reads the tags people name', () => {
+    expect(readTags('work')).toEqual(['work'])
+    expect(readTags('#Work, home and  errands')).toEqual(['Work', 'home', 'errands'])
+    for (const text of ['', ' , ', '#', 'x'.repeat(65)]) expect(readTags(text), text).toBeUndefined()
+  })
+
+  it('adds new tags as said and known ones by name, and removes them', async () => {
+    const dentist = task('d', 'Dentist', { tags: ['health'] })
+    const { c, done } = context([dentist])
+    c.entities.tags = [{ name: 'work' } as (typeof c.entities.tags)[number]]
+    expect(await run(c, 'update_task', { query: 'dentist', tag: 'Work and #Errands, health' })).toEqual({ title: 'Dentist', tagged: '#work, #errands, #health' })
+    expect(await run(c, 'update_task', { query: 'dentist', untag: '#HEALTH, nope' })).toEqual({ title: 'Dentist', untagged: '#health' })
+    expect(done).toEqual(['update d {"tags":["health","work","Errands"]}', 'update d {"tags":[]}'])
+  })
+
+  it('changes nothing for tags it cannot read or a tag the task lacks', async () => {
+    const { c, done } = context([task('d', 'Dentist', { tags: ['health'] })])
+    expect(await run(c, 'update_task', { query: 'dentist', tag: ' # ' })).toEqual({ error: expect.stringContaining("can't read") })
+    expect(await run(c, 'update_task', { query: 'dentist', untag: 'work' })).toEqual({ error: '“Dentist” has no tag #work.' })
+    const full = task('f', 'Full', { tags: Array.from({ length: 20 }, (_, i) => `t${i}`) })
+    const many = context([full])
+    expect(await run(many.c, 'update_task', { query: 'full', tag: 'one more' })).toEqual({ error: 'A task holds at most 20 tags.' })
+    expect(await run(many.c, 'update_task', { query: 'full', tag: 't3' })).toEqual({ title: 'Full', tagged: '#t3' })
+    expect(done).toEqual([])
   })
 })
