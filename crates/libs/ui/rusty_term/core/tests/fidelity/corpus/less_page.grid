@@ -25,3 +25,4 @@ size 80x24 cursor 33,23 visible=true alt=true
 |Pattern not found  (press RETURN)
 styles:
 23:0-32 fg=- bg=- reverse
+trailers:

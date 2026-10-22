@@ -71,8 +71,9 @@ fn attrs(flags: u16) -> String {
 }
 
 /// The comparable state of a grid: one text line per row (trailing blanks
-/// trimmed, wide-glyph trailers skipped, grapheme clusters included), then one
-/// line per run of identically styled non-default cells.
+/// trimmed, wide-glyph trailers skipped, grapheme clusters included), one line
+/// per run of identically styled non-default cells, then the column of every
+/// wide-glyph trailer, which pins each glyph to its column.
 fn dump(grid: &Grid) -> String {
     let blank = Grid::new(1, 1).cells[0];
     let (default_fg, default_bg) = (blank.fg, blank.bg);
@@ -86,7 +87,15 @@ fn dump(grid: &Grid) -> String {
         grid.in_alt_screen()
     );
     let mut styles = String::new();
+    let mut trailers = String::new();
     for (y, row) in grid.cells.chunks(grid.cols).enumerate() {
+        let cols: Vec<String> = (0..row.len())
+            .filter(|&x| row[x].flags & WIDE_TRAILER != 0)
+            .map(|x| x.to_string())
+            .collect();
+        if !cols.is_empty() {
+            let _ = writeln!(trailers, "{y}:{}", cols.join(","));
+        }
         let mut text = String::new();
         let mut run: Option<(usize, usize, String)> = None;
         for (x, cell) in row.iter().enumerate() {
@@ -124,6 +133,8 @@ fn dump(grid: &Grid) -> String {
     }
     out.push_str("styles:\n");
     out.push_str(&styles);
+    out.push_str("trailers:\n");
+    out.push_str(&trailers);
     out
 }
 
@@ -194,4 +205,23 @@ fn line_diff(expected: &str, actual: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A wide glyph's trailer moved one column right must change the dump: the
+/// text line alone (trailers skipped) cannot tell these rows apart.
+#[test]
+fn dump_pins_wide_trailer_columns() {
+    let mut parser = AnsiParser::new();
+    let mut good = Grid::new(4, 1);
+    parser.advance(&mut good, "日A".as_bytes());
+    let mut moved = Grid::new(4, 1);
+    parser.advance(&mut moved, "日A".as_bytes());
+    // [日, trailer, A, ·] -> [日, A, trailer, ·]
+    moved.cells.swap(1, 2);
+    assert_ne!(
+        good.cells[1].flags & WIDE_TRAILER,
+        0,
+        "fixture: cell 1 is the trailer"
+    );
+    assert_ne!(dump(&good), dump(&moved));
 }

@@ -645,6 +645,10 @@ pub struct Grid {
     /// theme set via OSC 11 colors cleared regions, not just freshly written text.
     default_fg: u32,
     default_bg: u32,
+    /// Background color erases fill with (BCE): the parser's SGR background,
+    /// or `None` while that is the default, so the fill tracks OSC 11. Kept in
+    /// sync by the parser via [`Grid::set_erase_bg`].
+    erase_bg: Option<u32>,
     /// Cursor color (OSC 12 / the `cursor` config key), mirrored from the
     /// parser's palette like the defaults above. The windowed renderers paint
     /// the block cursor in it; the TUI host owns its own cursor.
@@ -1329,6 +1333,7 @@ impl Grid {
             insert_mode: false,
             default_fg: DEFAULT_FG,
             default_bg: DEFAULT_BG,
+            erase_bg: None,
             cursor_color: DEFAULT_FG,
             cursor_shape: CursorShape::default(),
             cursor_blink: false,
@@ -2820,14 +2825,29 @@ impl Grid {
         self.dirty.iter_mut().for_each(|d| *d = true);
     }
 
-    /// A blank cell painted in the current default colors — the fill used by
-    /// every erase / scroll-clear path, so a default background set via OSC 11
-    /// applies to cleared regions, not only to text.
+    /// The fill used by every erase / scroll-clear path: a blank in the
+    /// default foreground on the current SGR background (BCE, as xterm does),
+    /// falling back to the default background, so an OSC 11 theme also colors
+    /// cleared regions.
     fn erase_cell(&self) -> Cell {
+        let mut c = self.default_cell();
+        c.bg = self.erase_bg.unwrap_or(self.default_bg);
+        c
+    }
+
+    /// A blank cell in the default colors, for fills that are not erases
+    /// (resize, theme application, full reset).
+    fn default_cell(&self) -> Cell {
         let mut c = Cell::blank();
         c.fg = self.default_fg;
         c.bg = self.default_bg;
         c
+    }
+
+    /// Set the background erases fill with (see [`Grid::erase_cell`]):
+    /// `Some(rgb)` for an SGR background, `None` for the default.
+    pub(crate) fn set_erase_bg(&mut self, bg: Option<u32>) {
+        self.erase_bg = bg;
     }
 
     /// Update the default foreground/background/cursor colors (OSC 10/11/12).
@@ -2897,7 +2917,7 @@ impl Grid {
     /// refilling is exact, not lossy.
     pub fn apply_theme(&mut self, theme: &super::Theme) {
         self.set_default_colors(theme.fg, theme.bg, theme.cursor);
-        self.cells = vec![self.erase_cell(); self.cols * self.rows];
+        self.cells = vec![self.default_cell(); self.cols * self.rows];
         self.dirty = vec![true; self.rows];
     }
 
@@ -2926,6 +2946,9 @@ impl Grid {
         }
         map(&mut self.default_fg);
         map(&mut self.default_bg);
+        if let Some(bg) = &mut self.erase_bg {
+            map(bg);
+        }
         self.cursor_color = super::color::remap(self.cursor_color, old, new);
         self.dirty = vec![true; self.rows];
         self.epoch += 1;
@@ -2956,7 +2979,7 @@ impl Grid {
         self.images.clear(); // serials/reflow change; drop placed images
         let (old_cols, old_rows) = (self.cols, self.rows);
         let clamp = |(x, y): (usize, usize)| (x.min(cols - 1), y.min(rows - 1));
-        let blank = self.erase_cell();
+        let blank = self.default_cell(); // a resize is not an erase: no BCE
         // Preserve tab stops within the surviving width; default the new columns.
         let mut stops = default_tab_stops(cols);
         let keep = cols.min(old_cols);
@@ -3467,7 +3490,8 @@ impl Grid {
         self.report_color_scheme = false;
         self.notif99_pending.clear();
         self.primary = None; // leave the alternate screen if active
-        self.cells = vec![self.erase_cell(); self.cols * self.rows];
+        self.erase_bg = None; // RIS resets the SGR pen too
+        self.cells = vec![self.default_cell(); self.cols * self.rows];
         #[cfg(any(test, feature = "gui"))]
         self.images.clear();
         self.dirty = vec![true; self.rows];
@@ -3517,6 +3541,7 @@ impl Grid {
     /// or moving the active cursor — full-screen scroll region, saved cursor to
     /// home, cursor visible, autowrap on. The parser separately resets its pen.
     pub(crate) fn soft_reset(&mut self) {
+        self.erase_bg = None; // DECSTR resets the SGR pen too
         self.scroll_top = 0;
         self.scroll_bottom = self.rows.saturating_sub(1);
         self.saved_cursor = (0, 0);

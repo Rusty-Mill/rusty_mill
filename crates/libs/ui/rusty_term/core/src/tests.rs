@@ -6057,3 +6057,127 @@ fn arabic_row_shapes_joined_forms_through_bidi_row() {
     // paragraph (rule L1 sends the trailing blanks to the paragraph level).
     assert_eq!(&b.vis2log[6..10], &[3, 2, 1, 0], "{:?}", b.vis2log);
 }
+
+// ---- Background color erase (BCE), #854 ----
+//
+// Erases fill vacated cells with the current SGR background (default fg, no
+// attributes), as xterm, Ghostty and Alacritty do. rusty_term's terminfo
+// inherits `xterm-256color`, which advertises `bce`.
+
+/// Green, the 16-color SGR 42 background in the default palette.
+const BCE_BG: u32 = 0x008000;
+
+/// Assert every cell of row `y` in `xs` is a blank BCE cell.
+fn assert_bce(g: &Grid, y: usize, xs: std::ops::Range<usize>, what: &str) {
+    for x in xs {
+        let c = g.cells[y * g.cols + x];
+        assert_eq!(
+            (c.ch, c.bg, c.fg, c.flags),
+            (' ', BCE_BG, DEFAULT_FG, 0),
+            "{what}: cell ({x},{y})"
+        );
+    }
+}
+
+#[test]
+fn bce_erase_in_line_uses_sgr_background() {
+    assert_bce(&parse(b"ab\x1b[42m\x1b[K", 10, 2), 0, 2..10, "EL 0");
+    assert_bce(
+        &parse(b"abcd\x1b[42m\x1b[3G\x1b[1K", 10, 2),
+        0,
+        0..3,
+        "EL 1",
+    );
+    assert_bce(&parse(b"abcd\x1b[42m\x1b[2K", 10, 2), 0, 0..10, "EL 2");
+}
+
+#[test]
+fn bce_erase_in_display_uses_sgr_background() {
+    let g = parse(b"\x1b[42m\x1b[2J", 10, 3);
+    for y in 0..3 {
+        assert_bce(&g, y, 0..10, "ED 2");
+    }
+    let g = parse(b"x\r\ny\x1b[42m\x1b[J", 10, 3);
+    assert_bce(&g, 1, 1..10, "ED 0 cursor row");
+    assert_bce(&g, 2, 0..10, "ED 0 below");
+}
+
+#[test]
+fn bce_erase_insert_delete_chars_use_sgr_background() {
+    assert_bce(&parse(b"\x1b[42m\x1b[5X", 10, 2), 0, 0..5, "ECH");
+    assert_bce(
+        &parse(b"abcdef\x1b[42m\x1b[1G\x1b[2P", 10, 2),
+        0,
+        8..10,
+        "DCH",
+    );
+    assert_bce(
+        &parse(b"abcdef\x1b[42m\x1b[1G\x1b[2@", 10, 2),
+        0,
+        0..2,
+        "ICH",
+    );
+}
+
+#[test]
+fn bce_line_operations_and_scrolling_use_sgr_background() {
+    assert_bce(
+        &parse(b"a\r\nb\x1b[42m\x1b[1;1H\x1b[L", 10, 3),
+        0,
+        0..10,
+        "IL",
+    );
+    assert_bce(
+        &parse(b"a\r\nb\x1b[42m\x1b[1;1H\x1b[M", 10, 3),
+        2,
+        0..10,
+        "DL",
+    );
+    assert_bce(&parse(b"a\x1b[42m\x1b[S", 10, 3), 2, 0..10, "SU");
+    assert_bce(&parse(b"a\x1b[42m\x1b[T", 10, 3), 0, 0..10, "SD");
+    // A line feed at the bottom margin scrolls in a BCE line.
+    assert_bce(&parse(b"\x1b[3;1H\x1b[42m\n", 10, 3), 2, 0..10, "LF scroll");
+}
+
+#[test]
+fn bce_follows_sgr_reset_and_default_background() {
+    // SGR 0 / SGR 49 return erases to the default background.
+    for reset in [&b"\x1b[0m"[..], b"\x1b[49m", b"\x1b[m"] {
+        let mut input = b"\x1b[42m".to_vec();
+        input.extend_from_slice(reset);
+        input.extend_from_slice(b"\x1b[2J");
+        let g = parse(&input, 4, 1);
+        assert!(
+            g.cells.iter().all(|c| c.bg == DEFAULT_BG),
+            "after {reset:?}"
+        );
+    }
+    // RIS and DECSTR reset the pen, so later erases are default again.
+    for reset in [&b"\x1bc"[..], b"\x1b[!p"] {
+        let mut input = b"\x1b[42m".to_vec();
+        input.extend_from_slice(reset);
+        input.extend_from_slice(b"\x1b[2J");
+        let g = parse(&input, 4, 1);
+        assert!(
+            g.cells.iter().all(|c| c.bg == DEFAULT_BG),
+            "after {reset:?}"
+        );
+    }
+}
+
+#[test]
+fn bce_keeps_attributes_and_foreground_out_of_erased_cells() {
+    // Reverse, bold and a red foreground must not leak into blanks.
+    assert_bce(&parse(b"\x1b[1;7;31;42m\x1b[2K", 6, 1), 0, 0..6, "attrs");
+    // Truecolor and 256-color backgrounds erase with that exact color.
+    let g = parse(b"\x1b[48;2;1;2;3m\x1b[K", 4, 1);
+    assert!(g.cells.iter().all(|c| c.bg == 0x010203));
+}
+
+#[test]
+fn bce_does_not_apply_to_resize_fill() {
+    // Growing the grid is not an erase: new cells use the default background.
+    let mut g = parse(b"\x1b[42m", 4, 1);
+    g.resize(6, 2);
+    assert!(g.cells[4..].iter().all(|c| c.bg == DEFAULT_BG));
+}
