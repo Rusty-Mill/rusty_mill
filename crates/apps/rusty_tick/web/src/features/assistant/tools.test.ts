@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { List, Task } from '@/api/types'
 import { addDays, startOfDay } from '@/lib/date'
-import { moveTo, overdue, pickTask, readDay, readWhen, taskTools, type ToolContext } from './tools'
+import { moveTo, overdue, pickTask, readDay, readRepeat, readWhen, taskTools, type ToolContext } from './tools'
 
 const NOW = new Date(2026, 9, 22, 12).getTime()
 const task = (id: string, title: string, over: Partial<Task> = {}): Task =>
@@ -140,7 +140,7 @@ describe('update_task', () => {
     const { c, done } = context(tasks)
     expect(await run(c, 'update_task', { query: 'milk', due: 'soonish' })).toEqual({ error: expect.stringContaining("can't read “soonish”") })
     expect(await run(c, 'update_task', { query: 'milk', title: '  ' })).toEqual({ error: 'Say the new title.' })
-    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority or a list.' })
+    expect(await run(c, 'update_task', { query: 'milk' })).toEqual({ error: 'Say what to change: a new title, a day, a priority, a list or a repeat.' })
     expect(await run(c, 'update_task', { query: 'buy', due: 'today' })).toEqual({ matches: ['Buy milk', 'Buy oats'] })
     expect(await run(c, 'update_task', { query: ' ', due: 'today' })).toEqual({ error: 'Say which task.' })
     expect(done).toEqual([])
@@ -229,6 +229,47 @@ describe('update_task with a time', () => {
   it('changes nothing for a time it cannot read', async () => {
     const { c, done } = context([timed])
     expect(await run(c, 'update_task', { query: 'call mum', due: 'friday at 13pm' })).toEqual({ error: expect.stringContaining("can't read") })
+    expect(done).toEqual([])
+  })
+})
+
+describe('readRepeat', () => {
+  it('reads how often people say a task repeats', () => {
+    expect(readRepeat('daily')).toBe('RRULE:FREQ=DAILY')
+    expect(readRepeat('every week')).toBe('RRULE:FREQ=WEEKLY')
+    expect(readRepeat('Every 2 weeks')).toBe('RRULE:FREQ=WEEKLY;INTERVAL=2')
+    expect(readRepeat('annually')).toBe('RRULE:FREQ=YEARLY')
+    expect(readRepeat('every 3 months')).toBe('RRULE:FREQ=MONTHLY;INTERVAL=3')
+    expect(readRepeat('on weekdays')).toBe('RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR')
+    expect(readRepeat('every weekday')).toBe('RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR')
+    expect(readRepeat('every friday and monday')).toBe('RRULE:FREQ=WEEKLY;BYDAY=MO,FR')
+    expect(readRepeat('every mon, wed, fri')).toBe('RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR')
+    expect(readRepeat('never')).toBe('')
+  })
+
+  it('reads nothing it is not sure of', () => {
+    for (const text of ['every blue moon', 'every 0 days', 'every 100 days', 'every monday and someday', 'fortnightly', '']) expect(readRepeat(text), text).toBeUndefined()
+  })
+})
+
+describe('update_task with a repeat', () => {
+  it('sets the rule, gives an undated task today, and clears it for never', async () => {
+    const dated = task('d', 'Gym', { dueMs: new Date(2026, 9, 20).getTime(), isAllDay: true, repeatFlag: '' })
+    const undated = task('u', 'Water plants', { repeatFlag: '' })
+    const { c, done } = context([dated, undated])
+    expect(await run(c, 'update_task', { query: 'gym', repeat: 'every monday and friday' })).toEqual({ title: 'Gym', repeat: 'every week on Mon, Fri' })
+    expect(await run(c, 'update_task', { query: 'water', repeat: 'every 2 weeks' })).toEqual({ title: 'Water plants', repeat: 'every 2 weeks', due: expect.any(String) })
+    expect(await run(c, 'update_task', { query: 'gym', repeat: 'never' })).toEqual({ title: 'Gym', repeat: 'never' })
+    expect(done).toEqual([
+      'update d {"repeatFlag":"RRULE:FREQ=WEEKLY;BYDAY=MO,FR"}',
+      `update u ${JSON.stringify({ repeatFlag: 'RRULE:FREQ=WEEKLY;INTERVAL=2', dueMs: new Date(2026, 9, 22).getTime(), isAllDay: true })}`,
+      'update d {"repeatFlag":""}',
+    ])
+  })
+
+  it('changes nothing for a repeat it cannot read', async () => {
+    const { c, done } = context([task('d', 'Gym')])
+    expect(await run(c, 'update_task', { query: 'gym', repeat: 'every blue moon' })).toEqual({ error: expect.stringContaining("can't read") })
     expect(done).toEqual([])
   })
 })

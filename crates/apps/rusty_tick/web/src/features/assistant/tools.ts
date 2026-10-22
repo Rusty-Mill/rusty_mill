@@ -9,6 +9,7 @@ import type { List, NewTask, Priority, Task, TaskPatch } from '@/api/types'
 import { searchTasks } from '@/features/search/search'
 import { tasksForView, type Entities } from '@/features/tasks/organize'
 import { addDays, startOfDay } from '@/lib/date'
+import { describeRule, formatRule, parseRule, type Freq, type Rule } from '@/lib/recurrence'
 
 /** Most tasks one answer lists. */
 export const MAX_SHOWN = 20
@@ -79,6 +80,36 @@ export function readDay(text: string, now: number): number | null | undefined {
   const [y, m, d] = [Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])]
   const day = new Date(y, m, d)
   return day.getFullYear() === y && day.getMonth() === m && day.getDate() === d ? day.getTime() : undefined
+}
+
+const FREQ: Record<string, Freq> = { daily: 'DAILY', weekly: 'WEEKLY', monthly: 'MONTHLY', yearly: 'YEARLY', annually: 'YEARLY' }
+const UNIT: Record<string, Freq> = { day: 'DAILY', week: 'WEEKLY', month: 'MONTHLY', year: 'YEARLY' }
+const NEVER = ['never', 'none', 'no', 'not']
+
+/** The weekday (`Date#getDay()`) a word names: monday, mon, mondays. */
+const weekday = (word: string): number => WEEKDAYS.findIndex((w) => [w, `${w}s`, w.slice(0, 3)].includes(word))
+
+/**
+ * How often `text` says a task repeats, as the `RRULE` the app stores: daily,
+ * weekly, monthly, yearly (annually), every N days/weeks/months/years, on
+ * weekdays, or every monday[, wednesday and friday]. `''` for never;
+ * `undefined` when unreadable, so nothing is guessed.
+ */
+export function readRepeat(text: string): string | undefined {
+  const t = norm(text)
+  if (NEVER.includes(t)) return ''
+  const rule = (freq: Freq, interval = 1, byDay: number[] = []): string | undefined => {
+    const r: Rule = { freq, interval, byDay, byMonthDay: null, until: null }
+    return interval >= 1 && interval <= 99 && parseRule(formatRule(r)) ? formatRule(r) : undefined
+  }
+  if (FREQ[t]) return rule(FREQ[t]!)
+  if (/^(on |every )?weekdays?$/.test(t)) return rule('WEEKLY', 1, [1, 2, 3, 4, 5])
+  const every = /^every (?:(\d{1,3}) )?(day|week|month|year)s?$/.exec(t)
+  if (every) return rule(UNIT[every[2]!]!, Number(every[1] ?? 1))
+  const days = /^(?:every|on) (.+)$/.exec(t)?.[1]?.split(/\s*(?:,|\band\b)\s*/).filter(Boolean)
+  if (!days || days.length === 0) return undefined
+  const byDay = days.map(weekday)
+  return byDay.includes(-1) ? undefined : rule('WEEKLY', 1, [...new Set(byDay)].sort((a, b) => a - b))
 }
 
 /** A time of day, or none (`all-day`). */
@@ -172,12 +203,12 @@ const PRIORITY_NAME: Record<Priority, string> = { 5: 'high', 3: 'medium', 1: 'lo
 
 /**
  * Rename the task `query` names, move it to the day `due` names or the
- * `list` named, or set its `priority`; every argument is checked before the
- * task is picked, so a bad one changes nothing.
+ * `list` named, or set its `priority` or `repeat`; every argument is checked
+ * before the task is picked, so a bad one changes nothing.
  */
 async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: string]: string }): Promise<Answer> {
-  const { query = '', title, due, priority, list } = args
-  if ([title, due, priority, list].every((v) => v === undefined)) return { error: 'Say what to change: a new title, a day, a priority or a list.' }
+  const { query = '', title, due, priority, list, repeat } = args
+  if ([title, due, priority, list, repeat].every((v) => v === undefined)) return { error: 'Say what to change: a new title, a day, a priority, a list or a repeat.' }
   if (title !== undefined && title.trim() === '') return { error: 'Say the new title.' }
   const when = due === undefined ? undefined : readWhen(due, c.now)
   if (due !== undefined && when === undefined) {
@@ -187,6 +218,10 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   }
   const level = priority === undefined ? undefined : PRIORITY[norm(priority)]
   if (priority !== undefined && level === undefined) return { error: 'Priority is high, medium, low or none.' }
+  const rule = repeat === undefined ? undefined : readRepeat(repeat)
+  if (repeat !== undefined && rule === undefined) {
+    return { error: `I can't read “${repeat.trim()}” as a repeat; try daily, weekly, every 2 weeks, on weekdays, every monday and friday, monthly or never.` }
+  }
   const target = list === undefined ? undefined : pickList(c.entities.lists, list)
   if (target !== undefined && 'error' in target) return target
   const pick = pickTask(tasks, query, 'task')
@@ -195,6 +230,13 @@ async function updateOne(c: ToolContext, tasks: readonly Task[], args: { [key: s
   if (title !== undefined) {
     await c.update(task.id, { title: title.trim() })
     return { title: title.trim() }
+  }
+  if (rule !== undefined) {
+    // A repeat needs a date to count from: an undated task starts today, as in the date picker.
+    const patch: TaskPatch = rule !== '' && task.dueMs === null ? { repeatFlag: rule, dueMs: startOfDay(c.now), isAllDay: true } : { repeatFlag: rule }
+    await c.update(task.id, patch)
+    const said = rule === '' ? 'never' : describeRule(rule).replace(/^Every/, 'every')
+    return patch.dueMs === undefined ? { title: task.title, repeat: said } : { title: task.title, repeat: said, due: whenLabel(patch) }
   }
   if (target !== undefined) {
     await c.move(task.id, target.list.id)
@@ -273,6 +315,7 @@ export function taskTools(c: ToolContext): ActionDefinition<{ [key: string]: str
           due: { type: 'string', description: 'The new day and/or time, as said' },
           priority: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
           list: { type: 'string', description: 'The list to move it to, by name' },
+          repeat: { type: 'string', description: 'How often it repeats, as said (daily, every 2 weeks, on weekdays, never)' },
         },
         required: ['query'],
       },

@@ -46,7 +46,7 @@ pub enum Reply {
 const HELP: &str = "Try “add buy milk”, “find milk”, “what's due today?”, “what's overdue?”, \
 “due this week”, “complete buy milk”, “reopen buy milk”, “delete buy milk”, \
 “rename buy milk to buy oat milk”, “move buy milk to friday at 3pm”, “make buy milk high priority”, \
-“move buy milk to list Work” or “lists”.";
+“move buy milk to list Work”, “repeat water plants every week” or “lists”.";
 
 /// A command that names a task or a query: its words, the tool it runs, the
 /// argument the rest of the message becomes, and what to ask when it is missing.
@@ -153,7 +153,10 @@ pub fn decide(input: &RunAgentInput) -> Reply {
 
 /// The command `text` (lower-cased as `lower`) asks for, if any.
 fn command(text: &str, lower: &str) -> Option<Reply> {
-    if let Some(reply) = edit(text, lower).or_else(|| priority_phrase(text, lower)) {
+    if let Some(reply) = edit(text, lower)
+        .or_else(|| priority_phrase(text, lower))
+        .or_else(|| repeat_phrase(text, lower))
+    {
         return Some(reply);
     }
     for verb in &VERBS {
@@ -351,10 +354,16 @@ fn list_move(text: &str, prefix: &str) -> Option<Reply> {
     })
 }
 
-/// Byte offsets of each " to " in `text` outside quotes ("…" or “…”): the only
-/// places a command may be cut, so no quoted name is ever split. An unclosed
-/// quote runs to the end, so it offers no cut and the person is asked.
+/// Byte offsets of each " to " in `text` outside quotes: the only places a
+/// command may be cut (see `outside_quotes`).
 fn separators(text: &str) -> Vec<usize> {
+    outside_quotes(text, " to ")
+}
+
+/// Byte offsets of each `word` (ASCII, any case) in `text` outside quotes
+/// ("…" or “…”), so no quoted name is ever split. An unclosed quote runs to
+/// the end, so it offers no cut and the person is asked.
+fn outside_quotes(text: &str, word: &str) -> Vec<usize> {
     let mut quote: Option<char> = None;
     let mut out = Vec::new();
     for (at, ch) in text.char_indices() {
@@ -362,10 +371,10 @@ fn separators(text: &str) -> Vec<usize> {
             (None, '"') => quote = Some('"'),
             (None, '“') => quote = Some('”'),
             (Some(close), c) if c == close => quote = None,
-            (None, ' ')
+            (None, _)
                 if text
-                    .get(at..at + 4)
-                    .is_some_and(|w| w.eq_ignore_ascii_case(" to ")) =>
+                    .get(at..at + word.len())
+                    .is_some_and(|w| w.eq_ignore_ascii_case(word)) =>
             {
                 out.push(at)
             }
@@ -380,6 +389,79 @@ fn list_call(query: &str, list: &str) -> Reply {
         return Reply::Text(LIST_HELP.into());
     }
     update_call(query, "list", list)
+}
+
+const REPEAT_HELP: &str =
+    "Repeat which task, and how often? Try “repeat water plants every week” or “stop repeating standup”.";
+const STOP_REPEATING: [&str; 4] = [
+    "stop repeating ",
+    "don't repeat ",
+    "don’t repeat ",
+    "do not repeat ",
+];
+/// How-often words that end a "repeat X …" without an "every".
+const REPEAT_ENDINGS: [&str; 7] = [
+    " daily",
+    " weekly",
+    " monthly",
+    " yearly",
+    " annually",
+    " on weekdays",
+    " weekdays",
+];
+
+/// "repeat X every …" / "repeat X daily", "make|set X (to) repeat …", and "stop
+/// repeating X": an `update_task` call with the how-often as said (the browser
+/// reads it), or `never`. The name ends at the last " every " or " repeat "
+/// outside quotes, or at a fixed how-often word, so it is never cut inside.
+fn repeat_phrase(text: &str, lower: &str) -> Option<Reply> {
+    if let Some(stop) = STOP_REPEATING.iter().find(|s| lower.starts_with(*s)) {
+        return Some(repeat_call(unquote(&text[stop.len()..]), "never"));
+    }
+    if lower == "repeat" || STOP_REPEATING.iter().any(|s| lower == s.trim_end()) {
+        return Some(Reply::Text(REPEAT_HELP.into()));
+    }
+    if lower.starts_with("repeat ") {
+        let rest = text["repeat ".len()..].trim();
+        let ending = || {
+            let lower = rest.to_ascii_lowercase();
+            REPEAT_ENDINGS
+                .iter()
+                .find(|e| lower.ends_with(*e))
+                .map(|e| rest.len() - e.len())
+        };
+        return Some(
+            match outside_quotes(rest, " every ")
+                .last()
+                .copied()
+                .or_else(ending)
+            {
+                Some(at) => repeat_call(unquote(&rest[..at]), rest[at..].trim()),
+                None => Reply::Text(REPEAT_HELP.into()),
+            },
+        );
+    }
+    let prefix = ["make ", "set "]
+        .into_iter()
+        .find(|p| lower.starts_with(p))?;
+    let rest = text[prefix.len()..].trim();
+    let at = *outside_quotes(rest, " repeat ").last()?;
+    let name = rest[..at].trim_end();
+    let name = match name.get(name.len().saturating_sub(3)..) {
+        Some(tail) if tail.eq_ignore_ascii_case(" to") => &name[..name.len() - 3],
+        _ => name,
+    };
+    Some(repeat_call(
+        unquote(name),
+        rest[at + " repeat ".len()..].trim(),
+    ))
+}
+
+fn repeat_call(query: &str, rule: &str) -> Reply {
+    if query.is_empty() || rule.is_empty() {
+        return Reply::Text(REPEAT_HELP.into());
+    }
+    update_call(query, "repeat", rule)
 }
 
 const PRIORITY_HELP: &str = "Which task, and what priority? Try “make buy milk high priority”.";
@@ -451,6 +533,17 @@ fn report(call: Option<&FunctionCall>, result: &str) -> String {
         COMPLETE_TASK => format!("Completed “{title}”."),
         REOPEN_TASK => format!("Reopened “{title}”."),
         DELETE_TASK => format!("Moved “{title}” to the Trash."),
+        UPDATE_TASK if parsed.get("repeat").is_some() => {
+            match (
+                parsed.get("repeat").and_then(Value::as_str),
+                parsed.get("due").and_then(Value::as_str),
+            ) {
+                (Some("never"), _) => format!("“{title}” no longer repeats."),
+                (Some(rule), Some(due)) => format!("“{title}” now repeats {rule}, from {due}."),
+                (Some(rule), None) => format!("“{title}” now repeats {rule}."),
+                (None, _) => "Done.".into(),
+            }
+        }
         UPDATE_TASK => match (
             parsed
                 .get("due")
@@ -779,6 +872,76 @@ mod tests {
                 r#"{"title":"Buy milk","list":"Work"}"#
             ),
             Reply::Text("Moved “Buy milk” to Work.".into())
+        );
+    }
+
+    #[test]
+    fn turns_repeat_phrases_into_update_task() {
+        let repeat = |q: &str, r: &str| call(UPDATE_TASK, json!({"query": q, "repeat": r}));
+        assert_eq!(
+            decide(&input("repeat water plants every 2 weeks")),
+            repeat("water plants", "every 2 weeks")
+        );
+        assert_eq!(
+            decide(&input("Repeat standup every monday and friday")),
+            repeat("standup", "every monday and friday")
+        );
+        assert_eq!(
+            decide(&input("repeat “every other thing” weekly")),
+            repeat("every other thing", "weekly")
+        );
+        assert_eq!(
+            decide(&input("repeat pay rent monthly")),
+            repeat("pay rent", "monthly")
+        );
+        assert_eq!(
+            decide(&input("repeat gym on weekdays")),
+            repeat("gym", "on weekdays")
+        );
+        assert_eq!(
+            decide(&input("make take pills repeat daily")),
+            repeat("take pills", "daily")
+        );
+        assert_eq!(
+            decide(&input("set backup to repeat every week")),
+            repeat("backup", "every week")
+        );
+        assert_eq!(
+            decide(&input("stop repeating standup")),
+            repeat("standup", "never")
+        );
+        assert_eq!(
+            decide(&input("don't repeat “pay rent”")),
+            repeat("pay rent", "never")
+        );
+        for missing in [
+            "repeat",
+            "repeat every week",
+            "repeat gym",
+            "stop repeating ",
+        ] {
+            assert!(
+                matches!(decide(&input(missing)), Reply::Text(t) if t.starts_with("Repeat which task")),
+                "{missing}"
+            );
+        }
+        assert_eq!(
+            answered(
+                "repeat gym weekly",
+                r#"{"title":"Gym","repeat":"every week"}"#
+            ),
+            Reply::Text("“Gym” now repeats every week.".into())
+        );
+        assert_eq!(
+            answered(
+                "repeat gym weekly",
+                r#"{"title":"Gym","repeat":"every week","due":"Thu, 22 Oct"}"#
+            ),
+            Reply::Text("“Gym” now repeats every week, from Thu, 22 Oct.".into())
+        );
+        assert_eq!(
+            answered("stop repeating gym", r#"{"title":"Gym","repeat":"never"}"#),
+            Reply::Text("“Gym” no longer repeats.".into())
         );
     }
 

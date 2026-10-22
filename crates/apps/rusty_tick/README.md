@@ -102,7 +102,9 @@ names, run in the browser. It is rule-based, not a model: “add buy milk”,
 buy oat milk”, “move buy milk to friday” (also tomorrow, in 3 days, next week,
 2026-11-05, none, with a time: “friday at 3pm”, “tomorrow 9:30”; or a time alone:
 “3pm”, “at 9”, “all day”), “make buy milk high priority” (or medium, low, no), “move buy
-milk to list Work” (or “to the Work list”, “to inbox”) and “lists”. A task is named by its title; when several
+milk to list Work” (or “to the Work list”, “to inbox”), “repeat water plants
+every 2 weeks” (or daily, weekly, monthly, yearly, on weekdays, every monday and
+friday; “make … repeat …”; “stop repeating …”) and “lists”. A task is named by its title; when several
 match, it asks which. Quote a name that contains “to” (“rename "a to b" to c”). An
 unreadable day changes nothing.
 
