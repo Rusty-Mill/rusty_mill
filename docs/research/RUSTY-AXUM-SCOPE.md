@@ -84,7 +84,7 @@ non-test code counts as a runtime need; test-only use is listed apart.
 | `rusty_acp` (feature `server`) | src | 12 routes, params incl. `Path<(String, usize)>`, `with_state` | as `rusty_a2a`, plus `Extension`, own `FromRequest` (`AcpJson`) | `Json`, tuples, SSE with `KeepAlive` and event ids / names | `DefaultBodyLimit`, `from_fn` (trace span, inserts a request extension) | public API returns `axum::Router`; docs tell users to add their own middleware to it. Example uses `with_graceful_shutdown` |
 | `rp-server` | src | 16 paths, `get` / `post` / `patch` / `delete`, `{name}` params, `nest_service` of the MCP router, `with_state` | `State`, `ConnectInfo`, `HeaderMap`, `Path`, `Query`, `Json`, `Bytes`, `Request` | `Json`, tuples, `Retry-After` headers, SSE with `KeepAlive` (chat streaming) | `tower-http` `TraceLayer` and `CorsLayer` (permissive or an origin list), `DefaultBodyLimit`, `from_fn_with_state` (concurrency limit, MCP auth) | `axum::serve` with `into_make_service_with_connect_info` |
 | `remind_me_remote` | src | `route`, `merge`, `nest_service` of the MCP router, `layer` vs `route_layer` | `State`, `Query`, `Form`, `Json`, `Request`, `ConnectInfo` (read, see 6.4) | `Html`, `Json`, tuples | `from_fn_with_state` (secret gate, OAuth gate) | `axum::serve` |
-| `rk-app` (feature `gateway`, axum **0.7**) | src | 9 routes, `get` / `post`, generic `State<Arc<Gateway<M>>>` | `State`, `Query<HashMap>`, `HeaderMap`, `Json` | `Json`, tuples, SSE (no keep-alive) from a channel | `tower-http` `CorsLayer` (one exact origin) | `axum::serve`; tests call the router in-process (`tower::ServiceExt::oneshot`) |
+| `rk-app` (feature `gateway`, axum **0.7**) | src | 9 routes, `get` / `post`, generic `State<Arc<Gateway<M>>>` | `State`, `Query<HashMap>`, `HeaderMap`, `Json` | `Json`, tuples, SSE (event names and ids, no keep-alive) from a channel | `tower-http` `CorsLayer` (one exact origin) | `axum::serve`; tests call the router in-process (`tower::ServiceExt::oneshot`) |
 | `adk-mcp` (feature `http`) | src | `fallback`, `fallback_service` / `nest_service` of the MCP router | none | a 500 tuple | none | `axum::serve`; public `router() -> axum::Router` |
 | `rusty_mcp_axum` | src | `fallback` | `Request`, `OriginalUri`; `to_bytes` with a limit | `Body::from_stream` (streamed MCP replies), `spawn_blocking` into the blocking handler | none | none. Deleted by #875, not ported |
 | `agentgateway` | src | **not an axum app**: own router (`agentgateway-core`) | none | axum `Body` / `Response` / `IntoResponse` as its response type | `rusty-mcp`'s tower `LimitsLayer` and `McpMetricsLayer` | **`hyper-util` auto (h1 + h2) with `serve_connection_with_upgrades`, graceful shutdown, own TLS terminator**. axum's only real role: the MCP backend is a `rusty_mcp_axum` router |
@@ -101,14 +101,15 @@ hyper server and two test mocks).
 The union a `rusty_axum` must cover, by stage:
 
 - **Pilot (`rk-app`):** router with method routing, `State`, `Query`,
-  `HeaderMap`, `Json`, SSE from a channel, a CORS layer, `serve`, and calling
+  `HeaderMap`, `Json`, SSE from a channel with event names and ids
+  (`src/gateway.rs`, `stream`), a CORS layer, `serve`, and calling
   the router in-process without a socket (for its tests).
 - **Middleware + SSE (`rusty_a2a`, `rp-server`):** path parameters (single,
   several, tuple), `merge`, `nest_service` / `fallback`, `Path`, `Bytes`,
   `ConnectInfo`, `Extension`, user-defined extractors with rejection mapping,
   `from_fn` and `from_fn_with_state`, `layer` vs `route_layer`, a body limit,
-  a request trace span, CORS (permissive, list, exact), SSE keep-alive and
-  event ids, streamed bodies.
+  a request trace span, CORS (permissive, list, exact), SSE keep-alive,
+  streamed bodies.
 - **Rest:** `Form`, `Html`, `OriginalUri`, graceful shutdown.
 
 ### 6.2 Can `rusty_tokio` drive a server accept loop for many connections?
@@ -134,7 +135,8 @@ level-triggered epoll thread; that is a later throughput question, not a
 blocker. Limits of the probe: loopback, plain HTTP, no TLS, tiny bodies; it
 is a capability check, not a benchmark against tokio.
 
-The plan therefore continues. Much of stage 2's server driver already exists:
+So the accept loop does not stop the plan. Whether and how stage 2 starts
+is the owner's call (6.5). Much of a stage 2 server driver already exists:
 
 - `rusty_http`: sans-IO HTTP/1.1 with a `rusty_tokio` adapter
   (`AsyncTransport`: request heads, `Content-Length` / chunked / streamed
@@ -177,7 +179,7 @@ body limits, graceful shutdown) on those pieces.
    is a public-API change per crate; `rusty_acp`'s docs invite users to add
    tower middleware to the router it returns, which a non-tower router
    ends.
-4. **`rk-app` is confirmed as the pilot.** It is the smallest app consumer
+4. **`rk-app` is the proposed pilot** (pending the owner). It is the smallest app consumer
    and touches the core surface (router, `State`, `Query`, `Json`, SSE,
    CORS, in-process testing). It is still on axum 0.7 (`:param` syntax;
    it has no path parameters, so nothing depends on that).
@@ -187,11 +189,14 @@ body limits, graceful shutdown) on those pieces.
 `remind_me_remote`'s rate limiter reads the caller address from
 `ConnectInfo<SocketAddr>` (`src/auth.rs`), but `server.rs` calls
 `axum::serve(listener, router)` without `into_make_service_with_connect_info`,
-so the extension is never set. Every caller without the secret therefore
-shares the one bucket `ip:unknown` (`remind_me_core::rate_limit::resolve_key`):
-one noisy client throttles all unauthenticated callers. Behind a tunnel the
-peer would be the tunnel anyway, which limits the impact. Worth its own
-issue.
+so the extension is never set. The bucket is chosen before any credential
+is validated, and only the connector secret maps to `auth:known`
+(`remind_me_core::rate_limit::resolve_key`). Every other caller, including
+callers with a valid OAuth access token, therefore shares the one bucket
+`ip:unknown`: one noisy client throttles all of them. The gate's bypass
+paths (health, the configured allow paths and prefixes) are not limited.
+Behind a tunnel the peer would be the tunnel anyway, which limits the
+impact. Worth its own issue.
 
 ### 6.5 Questions for the owner before stage 2
 
