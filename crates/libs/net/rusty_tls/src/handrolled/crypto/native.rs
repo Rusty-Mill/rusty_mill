@@ -7,7 +7,8 @@
 //! as fixed-size arrays, randomness supplied by the caller), the difference is
 //! absorbed here so callers cannot tell which backend they have.
 //!
-//! The secret-handling primitives (AEAD, X25519, ECDH) carry their crates'
+//! The secret-handling primitives (HMAC and HKDF, which the key schedule keys
+//! with secrets; the AEADs; X25519 and ECDH) carry their crates'
 //! constant-time evidence, which is "no leak found by the listed methods on
 //! the listed toolchain", never proof (`CRYPTO-REPLACEMENT-PLAN.md` §4). This
 //! module adds no branch or index on secret data: tags are compared by
