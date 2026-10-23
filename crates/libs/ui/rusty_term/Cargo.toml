@@ -35,6 +35,11 @@ gui-gpu = ["gui", "dep:wgpu", "dep:bytemuck", "dep:pollster"]
 web-bridge = ["rusty_term_core/web-bridge", "tokio/io-util", "dep:rusty_sha1"]
 
 [[bin]]
+name = "bench_frame_time"
+path = "src/bin/bench_frame_time.rs"
+required-features = ["gui"]
+
+[[bin]]
 name = "rusty_term_web_bridge"
 path = "src/bin/web_bridge.rs"
 required-features = ["web-bridge"]
