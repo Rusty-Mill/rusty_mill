@@ -36,9 +36,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
 use rusty_term::core::{AnsiParser, Grid};
 use rusty_term::gui::bench::FrameBench;
+use rusty_term::sync::Mutex;
 
 const CHUNK: usize = 4096;
 const COLS: usize = 120;
