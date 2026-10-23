@@ -280,3 +280,96 @@ async fn stream_over_a_socket_on_rusty_tokio() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The `Access-Control-Allow-Origin` a normal request and a preflight from
+/// `origin` get under `RUSTYKEYS_GATEWAY_CORS_ORIGIN = configured`.
+async fn allowed_origin(configured: &str, origin: &str) -> [Option<String>; 2] {
+    let dir = tmp(&format!("cors-{}", configured.len()));
+    let app = router(
+        Gateway::new(config_at(&dir), FakeLanguageModel::new(vec![])).with_cors_origin(configured),
+    );
+    let normal = get("/health").with_header("origin", origin).unwrap();
+    let preflight = Request::new(Method::Options, "/chat")
+        .with_header("origin", origin)
+        .unwrap()
+        .with_header("access-control-request-method", "POST")
+        .unwrap();
+    let mut seen = [None, None];
+    for (slot, req) in seen.iter_mut().zip([normal, preflight]) {
+        let resp = app.call(req).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        *slot = resp
+            .headers
+            .get("access-control-allow-origin")
+            .map(str::to_string);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    seen
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cors_wildcard_exact_and_empty_origins() {
+    let site = "https://app.example";
+    let any = Some("*".to_string());
+    let echoed = Some(site.to_string());
+    assert_eq!(allowed_origin("*", site).await, [any.clone(), any]);
+    assert_eq!(allowed_origin(site, site).await, [echoed.clone(), echoed]);
+    assert_eq!(
+        allowed_origin(site, "https://evil.example").await,
+        [None, None]
+    );
+    assert_eq!(allowed_origin("", site).await, [None, None]);
+}
+
+/// Dropping `Gateway::serve`'s future (a timeout, a select, an abort) shuts
+/// the server down: the listener is released. On a runtime of its own, shut
+/// down with a bound, so that a regression fails instead of hanging the test
+/// on the runtime's wait for a still-serving blocking thread.
+#[test]
+fn cancelling_serve_releases_the_listener() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tmp("cancel");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+    let in_use = || std::net::TcpListener::bind(&addr).is_err();
+    let gw = Gateway::new(config_at(&dir), FakeLanguageModel::new(vec![]))
+        .with_secret(Some("s3cr3t".into()));
+
+    // Checked after the runtime is shut down with a bound: a panic inside
+    // `block_on` would unwind into the runtime's unbounded drop.
+    let outcome: Result<(), &str> = runtime.block_on(async {
+        let serving = tokio::spawn({
+            let addr = addr.clone();
+            async move { gw.serve(&addr).await }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !in_use() {
+            if std::time::Instant::now() > deadline {
+                return Err("never started listening");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        serving.abort();
+        if !serving.await.is_err_and(|e| e.is_cancelled()) {
+            return Err("serve ended other than by cancellation");
+        }
+        while in_use() {
+            if std::time::Instant::now() > deadline {
+                return Err("listener still bound after cancelling serve");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Ok(())
+    });
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+    outcome.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -121,6 +121,12 @@ where
         self
     }
 
+    /// Override the allowed CORS origin (used in tests).
+    pub fn with_cors_origin(mut self, origin: &str) -> Self {
+        self.cors_origin = origin.to_string();
+        self
+    }
+
     fn build_session(&self) -> anyhow::Result<Arc<Session<M>>> {
         // No interactive adapter answers the gateway's approval prompts, so
         // the channel receiver is intentionally dropped: `ApprovalGate`
@@ -207,12 +213,13 @@ where
     pub fn router(self: Arc<Self>, tokio: tokio::runtime::Handle) -> Router {
         // Methods/headers are scoped to what the gateway's routes actually
         // use, not `Any` (round-4 finding 1). An empty/unconfigured
-        // `cors_origin` allows no origin at all (same-origin default); the
-        // origin is compared exactly, so a malformed one matches nothing.
-        let origins = if self.cors_origin.is_empty() {
-            Vec::new()
-        } else {
-            vec![self.cors_origin.clone()]
+        // `cors_origin` allows no origin at all (same-origin default); `*`
+        // allows any; anything else is compared exactly, so a malformed
+        // origin matches nothing.
+        let origins = match self.cors_origin.as_str() {
+            "" => Allow::List(Vec::new()),
+            "*" => Allow::Any,
+            origin => Allow::List(vec![origin.to_string()]),
         };
         let cors = Cors::new()
             .allow_methods(Allow::List(vec![Method::Get, Method::Post]))
@@ -221,7 +228,7 @@ where
                 "content-type".into(),
                 "x-session-id".into(),
             ]))
-            .allow_origin(Allow::List(origins));
+            .allow_origin(origins);
         Router::new()
             .route("/health", get(health::<M>))
             .route("/ready", get(ready::<M>))
@@ -493,38 +500,61 @@ fn now_tag() -> u128 {
         .unwrap_or(0)
 }
 
-/// Serve the gateway on `addr` until shutdown. Refuses to start unless a
-/// bearer secret is configured: a gateway is network-exposed by definition,
-/// so silently disabling auth when `RUSTYKEYS_GATEWAY_SECRET` is unset is not
-/// a safe default (round-4 finding 1b).
+/// Serve the gateway on `addr` until shutdown, with settings from the
+/// environment. See [`Gateway::serve`].
 pub async fn serve<M>(config: Config, model: M, addr: &str) -> anyhow::Result<()>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
 {
-    let gw = Gateway::new(config, model);
-    if gw.secret.is_none() {
-        anyhow::bail!(
-            "refusing to start the gateway: RUSTYKEYS_GATEWAY_SECRET is not set. Set it to a \
-             bearer token callers must present, or the gateway would serve every request \
-             unauthenticated on the network."
-        );
-    }
-    let app = Arc::new(gw).router(tokio::runtime::Handle::current());
-    let addr = addr.to_string();
-    // The server needs a `rusty_tokio` runtime of its own; it blocks this
-    // blocking-pool thread for as long as it serves.
-    tokio::task::spawn_blocking(move || serve_on_rusty_tokio(app, &addr)).await?
+    Gateway::new(config, model).serve(addr).await
 }
 
-fn serve_on_rusty_tokio(app: Router, addr: &str) -> anyhow::Result<()> {
+impl<M> Gateway<M>
+where
+    M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
+{
+    /// Serve on `addr` until this future is dropped. Refuses to start unless
+    /// a bearer secret is configured: a gateway is network-exposed by
+    /// definition, so silently disabling auth when
+    /// `RUSTYKEYS_GATEWAY_SECRET` is unset is not a safe default (round-4
+    /// finding 1b).
+    pub async fn serve(self, addr: &str) -> anyhow::Result<()> {
+        if self.secret.is_none() {
+            anyhow::bail!(
+                "refusing to start the gateway: RUSTYKEYS_GATEWAY_SECRET is not set. Set it to \
+                 a bearer token callers must present, or the gateway would serve every \
+                 request unauthenticated on the network."
+            );
+        }
+        let app = Arc::new(self).router(tokio::runtime::Handle::current());
+        let addr = addr.to_string();
+        // Dropping this future drops `_stop`, which ends `stopped`: the
+        // server then shuts down and releases the listener, and the
+        // blocking-pool thread it occupies returns.
+        let (_stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        tokio::task::spawn_blocking(move || serve_on_rusty_tokio(app, &addr, stopped)).await?
+    }
+}
+
+/// Runs the server on a `rusty_tokio` runtime of its own until `stopped`
+/// completes.
+fn serve_on_rusty_tokio(
+    app: Router,
+    addr: &str,
+    stopped: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<()> {
     let runtime = rusty_tokio::Builder::new_multi_thread()
         .thread_name("rk-gateway")
         .build()?;
     runtime.block_on(async {
         let listener = rusty_tokio::io::TcpListener::bind_addrs(addr).await?;
         let server = rusty_axum::serve(listener, None, ServeOptions::default(), app)?;
-        // Like `axum::serve` before it: serve until the process exits.
-        server.shutdown_on(std::future::pending()).await;
+        // A oneshot needs no reactor, so it can be awaited on rusty_tokio.
+        server
+            .shutdown_on(async {
+                let _ = stopped.await;
+            })
+            .await;
         Ok(())
     })
 }
